@@ -5,7 +5,7 @@ import type { ToolViewFrameV1 } from "@infinite-os/types";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
-import { getTurnState, recordTurnView, resetTurnState } from "../app/turn-store.js";
+import { getTurnState, patchTurnState, recordTurnView, resetTurnState } from "../app/turn-store.js";
 import { displayWidth } from "../lib/display-width.js";
 import { renderInkInteractiveSessionToString, runInkInteractiveSession } from "./interactive-session.js";
 
@@ -27,7 +27,37 @@ afterEach(() => {
 });
 
 describe("the session draws the latest turn's answer views (CI-runnable)", () => {
-  it("a finished turn with views shows the answer left and the view right", () => {
+  it("a finished turn with views shows the answer left and the view right from 120 columns", () => {
+    resetTurnState();
+    recordTurnView(listFrame());
+    const out = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 120,
+      initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
+      onSubmitLine: async () => ({ messages: [] })
+    }));
+    expect(out).toContain("❯ which ads are on?");
+    expect(out).toContain("∞ Two are on.");
+    expect(out).toMatch(/│ {2}Ads running {2}✓ Ready/u);
+    expect(out.split("\n").every((line) => displayWidth(line) <= 120)).toBe(true);
+  });
+
+  it("the turn's Steps strip is drawn once, from the turn store's calls", () => {
+    resetTurnState();
+    recordTurnView(listFrame());
+    patchTurnState((state) => ({
+      ...state,
+      steps: [{ id: "c1", name: "list_meta_entities", label: "listing meta entities", status: "ok", startedAt: 0, endedAt: 500, result: "3 ads" }]
+    }));
+    const out = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 120,
+      initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
+      onSubmitLine: async () => ({ messages: [] })
+    }));
+    expect(out.split("─ Steps ").length - 1).toBe(1);
+    expect(out).toMatch(/^ {2}listing meta entities +━+ ✓ 3 ads$/mu);
+  });
+
+  it("under 120 columns the live turn is one column: the view under the answer", () => {
     resetTurnState();
     recordTurnView(listFrame());
     const out = stripAnsi(renderInkInteractiveSessionToString({
@@ -35,10 +65,9 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
       initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
       onSubmitLine: async () => ({ messages: [] })
     }));
-    expect(out).toContain("❯ which ads are on?");
     expect(out).toContain("∞ Two are on.");
-    expect(out).toMatch(/│ {2}Ads running {2}✓ Ready/u);
-    expect(out.split("\n").every((line) => displayWidth(line) <= 100)).toBe(true);
+    expect(out).toMatch(/^ {1}Ads running {2}✓ Ready/mu);
+    expect(out).not.toContain(" │ ");
   });
 
   it("stacks the view under the answer below 80 columns", () => {
@@ -73,7 +102,8 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
   it("a turn records its views in the turn store; the next submit commits and clears them", () => {
     expect(sessionSource).toMatch(/\}, signal, recordTurnView, recordCreativeDraft\);/u);
     const commit = sessionSource.slice(sessionSource.indexOf("const commitLatestTurn"), sessionSource.indexOf("const [exitRequested"));
-    expect(commit).toContain("renderLiveTurn({");
+    expect(commit).toContain("renderCommittedTurn({");
+    expect(commit).toContain("steps,");
     expect(commit).toContain("clearTurnViews();");
     expect(commit).toContain("setViewFocus(null);");
   });
@@ -88,12 +118,12 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(handler).toContain("copyThroughPbcopy(next.effect.text)");
   });
 
-  it("the live turn is drawn to the rows the live region gives it, and commits at that size", () => {
+  it("the live turn is drawn to the rows the live region gives it, and commits whole (every page, one column)", () => {
     const sizing = sessionSource.slice(sessionSource.indexOf("const turnRowsAt"), sessionSource.indexOf("const liveLayout = inkTranscriptLayout"));
     expect(sizing).toContain("inkLatestTurnRows({");
     expect(sizing).toContain("keyBarRowCount(keyHintsFor(");
     const commit = sessionSource.slice(sessionSource.indexOf("const commitLatestTurn"), sessionSource.indexOf("const [exitRequested"));
-    expect(commit).toContain("rows: liveTurnRowsRef.current");
+    expect(commit).not.toContain("rows:");
   });
 
   it("a long document's page fits the window: the top of the page is on screen", () => {
@@ -161,7 +191,7 @@ describe("views in a running session (fake TTY; skipped on CI like the other PTY
 
     await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
     await sendKeys(input, "which ads are on?\r");
-    await waitFor(() => /│ {2}Ads running {2}✓ Ready/u.test(stripAnsi(output.text())), 4_000, output.text);
+    await waitFor(() => / {1}Ads running {2}✓ Ready/u.test(stripAnsi(output.text())), 4_000, output.text);
     // The key bar offers only what works on the view: rows to move, tab to type.
     await waitFor(() => stripAnsi(output.text()).includes("j k  move"), 4_000, output.text);
     // j then k move the selection and type nothing; h starts a message and types.
@@ -173,6 +203,51 @@ describe("views in a running session (fake TTY; skipped on CI like the other PTY
     // The first turn went to scrollback in its two-pane layout, once.
     const text = stripAnsi(output.text());
     expect(text).toContain("❯ which ads are on?");
+    await sendKeys(input, "/exit\r");
+    await session;
+  });
+});
+
+describe("a running turn's views (r4 working frames)", () => {
+  it("the turn is drawn with its views while it runs, not only once it ends", () => {
+    const draw = sessionSource.slice(sessionSource.indexOf("const renderTurnAt"), sessionSource.indexOf("// A new head card (from any queue writer)"));
+    expect(draw).not.toMatch(/if \(busy \|\|/u);
+    expect(draw).toContain("workingTurnMessages(");
+    expect(draw).toContain("workingTurnSteps(");
+    expect(draw).toContain("besideWorkingTurn(");
+  });
+
+  it.skipIf(process.env.CI === "true")("at 160 a view that arrives mid-turn sits right of the arriving answer", { timeout: 30_000 }, async () => {
+    resetTurnState();
+    const input = ttyInput();
+    const output = ttyOutput(160);
+    let finish: () => void = () => {};
+    const session = runInkInteractiveSession({
+      errorOutput: ttyOutput(160),
+      input,
+      async onSubmitLine(line, onProgress, _signal, onView) {
+        if (line === "/exit") {
+          return { exit: true, messages: [] };
+        }
+        onView?.(listFrame());
+        onProgress?.({ type: "message.start", stage: "message", message: "" });
+        onProgress?.({ type: "message.delta", stage: "message", message: "", text: "Two are on; pausing **Cold brew car" });
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return { messages: [{ role: "assistant", text: "Two are on; paused **Cold brew carousel**." }] };
+      },
+      output,
+      title: "Infinite TUI"
+    });
+
+    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await sendKeys(input, "which ads are on?\r");
+    await waitFor(() => /∞ Two are on; pausing Cold brew car +│/u.test(stripAnsi(output.text())), 4_000, output.text);
+    expect(stripAnsi(output.text())).toMatch(/❯ which ads are on\? +│ +Ads running/u);
+    expect(stripAnsi(output.text())).not.toContain("**Cold");
+    finish();
+    await waitFor(() => /∞ Two are on; paused Cold brew +│/u.test(stripAnsi(output.text())), 4_000, output.text);
     await sendKeys(input, "/exit\r");
     await session;
   });

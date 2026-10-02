@@ -1,13 +1,29 @@
+// The transcript as terminal lines, in the r4 look (terminal-r4 `frame()`): one
+// column at the window's full width, no box and no gutter.
+//
+//   ❯ the question
+//
+//   ∞ the answer (markdown; while it streams, a span not closed yet prints
+//     as plain words)
+//
+//   ─ Steps ──────────────────────────────────────────
+//     checking your campaigns    ━━━━━━━━━━━━━━   ✓ 3 ads
+//
+// Each turn (a user message and what follows it) ends with its Steps strip:
+// one row per tool call, never the raw tool id or its arguments. The live
+// turn's strip comes from the turn store's steps (start and end per call);
+// a turn known only by its messages lays its trail end to end.
 import { renderMarkdown } from "../../formatting/markdown-render.js";
-import { formatElapsedSeconds } from "../../formatting/progress.js";
-import { renderAssistantResponsePanel, renderStatusFooter } from "../../formatting/renderer.js";
-import { ansi, resolveTheme, type Theme } from "../theme.js";
-import type { ActiveTool, Msg, SubagentNode, SubagentProgress, ThinkingMode, TodoItem } from "../types.js";
-import type { TurnState } from "./turn-store.js";
+import { renderStatusFooter } from "../../formatting/renderer.js";
+import { answerLines, noteLines, questionLines, type ColumnStyle } from "./answer-column.js";
+import { ansi, resolveTheme, type AnsiRole, type Theme } from "../theme.js";
+import type { Msg, SubagentNode, SubagentProgress, ThinkingMode, TodoItem } from "../types.js";
+import type { TurnState, TurnStep } from "./turn-store.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
 import { countPendingTodos, isTodoDone } from "../lib/live-progress.js";
 import { buildSubagentTree, formatSubagentSummary, subagentSparkline, treeTotals, widthByDepth } from "../lib/subagent-tree.js";
-import { compactPreview, parseToolTrailResultLine, splitToolDuration, thinkingPreview, toolTrailLabel } from "../lib/text.js";
+import { compactPreview, thinkingPreview } from "../lib/text.js";
+import { friendlyStepLabel, stepsFromTrail, stepStripLines } from "../views/steps.js";
 
 export interface InfiniteTranscriptInput {
   /**
@@ -28,43 +44,40 @@ export interface InfiniteTranscriptOptions {
   thinkingMode?: ThinkingMode;
 }
 
-interface RenderContext {
+interface RenderContext extends ColumnStyle {
   agentTitle?: string;
-  color: boolean;
   columns: number;
-  contentWidth: number;
   nowMs: number;
-  prefix: string;
-  theme: Theme;
   thinkingMode: ThinkingMode;
+  /** The widest a wider window redraws this column at (see `MarkdownRenderOptions.widenLimit`); absent = unbounded. */
+  widenLimit?: number;
 }
 
-type RenderRole = "error" | "muted" | "primary" | "primaryBright" | "success" | "text" | "warning";
+/** The narrowest the transcript draws at; there is no widest (the window decides). */
+const MIN_COLUMNS = 20;
 
 export function renderInfiniteTranscript(
   input: InfiniteTranscriptInput,
   options: InfiniteTranscriptOptions = {}
 ): string {
   const theme = options.theme ?? resolveTheme();
-  const columns = clampColumns(options.columns ?? 88);
   const ctx: RenderContext = {
     agentTitle: input.agentTitle,
     color: options.color ?? false,
-    columns,
-    contentWidth: Math.max(24, Math.min(100, columns - 4)),
+    columns: fluidColumns(options.columns ?? 88),
     nowMs: options.nowMs ?? Date.now(),
-    prefix: theme.brand.tool,
     theme,
     thinkingMode: options.thinkingMode ?? "truncated"
   };
+  const turns = splitTurns(input.messages ?? []);
   const lines: string[] = [];
 
-  for (const msg of input.messages ?? []) {
-    lines.push(...renderTranscriptMessage(msg, ctx));
-  }
-
-  if (input.state) {
-    lines.push(...renderTurnState(input.state, ctx));
+  turns.forEach((turn, index) => {
+    const live = index === turns.length - 1 ? input.state : undefined;
+    pushBlock(lines, renderTurn(turn, live, ctx));
+  });
+  if (!turns.length && input.state) {
+    pushBlock(lines, renderTurn([], input.state, ctx));
   }
 
   if (input.footer?.length) {
@@ -77,146 +90,232 @@ export function renderInfiniteTranscript(
   return trimBlankEdges(lines).join("\n");
 }
 
-function renderTurnState(state: TurnState, ctx: RenderContext): string[] {
+/** Messages split into turns: each user message starts one. */
+function splitTurns(messages: readonly Msg[]): Msg[][] {
+  const turns: Msg[][] = [];
+  for (const msg of messages) {
+    if (msg.role === "user" || !turns.length) {
+      turns.push([]);
+    }
+    turns.at(-1)!.push(msg);
+  }
+  return turns;
+}
+
+export interface TurnBodyOptions extends ColumnStyle {
+  /** The column's width (the whole window in one column, the answer pane when split). */
+  columns: number;
+  thinkingMode?: ThinkingMode;
+  /**
+   * The widest a wider window ever redraws this column at: absent (unbounded)
+   * for the live turn in one column, the pane's cap when split, `0` for a turn
+   * printed once into scrollback. Keeps a table's `widen by` hint true.
+   */
+  widenLimit?: number;
+}
+
+/**
+ * A turn's messages as the answer column draws them, without the Steps strip:
+ * the question, the answer with its project label, diffs, and the trail's
+ * thinking, todos, subagents and notes. The ONE per-message renderer: the
+ * transcript, the live turn beside its views and a turn committed to
+ * scrollback all draw through it, so none of them drops what the others show.
+ */
+export function renderTurnBody(messages: readonly Msg[], options: TurnBodyOptions): string[] {
+  return renderMessages(messages, {
+    color: options.color,
+    theme: options.theme,
+    columns: Math.max(1, Math.floor(options.columns)),
+    nowMs: 0,
+    thinkingMode: options.thinkingMode ?? "truncated",
+    widenLimit: options.widenLimit
+  }).lines;
+}
+
+/** Messages in order, one blank row between blocks; a new question starts a new answer (its `∞` mark). */
+function renderMessages(messages: readonly Msg[], ctx: RenderContext): { lines: string[]; answered: boolean } {
   const lines: string[] = [];
-
-  for (const msg of state.streamSegments) {
-    lines.push(...renderTranscriptMessage(msg, ctx));
+  let answered = false;
+  for (const msg of messages) {
+    if (msg.role === "user") {
+      answered = false;
+    }
+    const block = renderMessage(msg, ctx, answered);
+    answered ||= msg.role === "assistant" && Boolean(msg.text.trim());
+    pushBlock(lines, block);
   }
+  return { lines, answered };
+}
 
-  if (state.reasoning.trim() && !state.streamSegments.some((msg) => msg.thinking?.trim())) {
-    lines.push(...renderThinking(state.reasoning, state.reasoningTokens, ctx));
-  }
+/** One turn: its messages, then (for the live turn) what is arriving, then its Steps. */
+function renderTurn(messages: readonly Msg[], state: TurnState | undefined, ctx: RenderContext): string[] {
+  const all = state ? [...messages, ...state.streamSegments] : [...messages];
+  const { lines, answered } = renderMessages(all, ctx);
 
-  if (state.streamPendingTools.length) {
-    lines.push(...renderToolShelf(state.streamPendingTools, ctx));
-  } else if (state.turnTrail.length) {
-    lines.push(...renderToolShelf(state.turnTrail, ctx));
-  }
-
-  if (state.tools.length) {
-    lines.push(...renderActiveTools(state.tools, ctx));
-  }
-
-  if (state.todos.length) {
-    lines.push(...renderTodos(state.todos, ctx));
-  }
-
-  if (state.subagents.length) {
-    lines.push(...renderSubagents(state.subagents, ctx));
-  }
-
-  if (state.streaming.trim()) {
-    lines.push(renderAssistantResponsePanel(state.streaming, {
-      color: ctx.color,
-      columns: ctx.columns,
-      theme: ctx.theme,
-      title: ctx.agentTitle
-    }));
-  }
-
-  if (!state.streaming.trim() && state.activity.length) {
-    const last = state.activity.at(-1);
-    if (last) {
-      lines.push(formatTrailLine(`• ${last.text}`, last.tone === "error" ? "error" : last.tone === "warn" ? "warning" : "muted", ctx));
+  if (state) {
+    if (state.reasoning.trim() && !state.streamSegments.some((msg) => msg.thinking?.trim())) {
+      pushBlock(lines, renderThinking(state.reasoning, state.reasoningTokens, ctx));
+    }
+    if (state.todos.length) {
+      pushBlock(lines, renderTodos(state.todos, ctx));
+    }
+    if (state.subagents.length) {
+      pushBlock(lines, renderSubagents(state.subagents, ctx));
+    }
+    if (state.streaming.trim()) {
+      pushBlock(lines, answerLines(state.streaming, ctx.columns, ctx, {
+        partial: true,
+        mark: !answered,
+        label: answered ? undefined : agentLabel(ctx.agentTitle, ctx)
+      }));
+    } else if (state.activity.length) {
+      const last = state.activity.at(-1)!;
+      pushBlock(lines, noteLines(`• ${last.text}`, ctx.columns, ctx, last.tone === "error" ? "error" : last.tone === "warn" ? "warning" : "muted"));
     }
   }
 
+  pushBlock(lines, stepStripLines(turnSteps(all, state, ctx), {
+    width: ctx.columns,
+    color: ctx.color,
+    theme: ctx.theme,
+    nowMs: ctx.nowMs,
+    views: state?.views.map((frame) => frame.view)
+  }));
   return lines;
 }
 
-function renderTranscriptMessage(msg: Msg, ctx: RenderContext): string[] {
+/**
+ * A running turn's messages as its drawn layout shows them (the turn beside
+ * its views while it works, r4 "working"): what is already in the transcript,
+ * the finished segments, and the answer still arriving (held open: a span not
+ * closed yet prints as plain words), labelled with the live project.
+ */
+export function workingTurnMessages(messages: readonly Msg[], state: TurnState, agentTitle?: string): Msg[] {
+  const streaming = state.streaming.trim()
+    ? [{ role: "assistant" as const, text: state.streaming, partial: true, ...(agentTitle ? { title: agentTitle } : {}) }]
+    : [];
+  return [...messages, ...state.streamSegments, ...streaming];
+}
+
+/** A running turn's Steps as its drawn layout shows them: a running call's result is its latest progress. */
+export function workingTurnSteps(messages: readonly Msg[], state: TurnState, nowMs: number): TurnStep[] {
+  return turnSteps(messages, state, { nowMs });
+}
+
+/**
+ * The turn state the transcript keeps beside a running turn drawn with its
+ * views: what the drawn turn already shows (its segments, the answer arriving,
+ * its calls and Steps) is taken out, so nothing prints twice; thinking, todos,
+ * subagents and the latest activity stay under it.
+ */
+export function besideWorkingTurn(state: TurnState): TurnState {
+  const segmentsThink = state.streamSegments.some((msg) => msg.thinking?.trim());
+  return {
+    ...state,
+    steps: [],
+    streamSegments: [],
+    streaming: "",
+    streamPendingTools: [],
+    tools: [],
+    reasoning: segmentsThink ? "" : state.reasoning,
+    activity: state.streaming.trim() ? [] : state.activity
+  };
+}
+
+/**
+ * The turn's calls: the turn store's (one per call, with start and end; a
+ * running one shows its latest progress as its result) when it has any, else
+ * the tool trail laid end to end, with the calls still running after it. A
+ * running call says "running" until it reports progress.
+ */
+function turnSteps(messages: readonly Msg[], state: TurnState | undefined, ctx: Pick<RenderContext, "nowMs">): TurnStep[] {
+  if (state?.steps.length) {
+    return state.steps.map((step) => {
+      if (step.endedAt !== null) {
+        return step;
+      }
+      const now = state.tools.find((item) => item.id === step.id)?.latestPreview?.trim();
+      return { ...step, result: now ? compactPreview(now, 72) : step.result || "running" };
+    });
+  }
+  const pending: Msg[] = state?.streamPendingTools.length ? [{ kind: "trail", role: "system", text: "", tools: state.streamPendingTools }] : [];
+  const done = stepsFromTrail([...messages, ...pending]);
+  const end = done.reduce((latest, step) => Math.max(latest, step.endedAt ?? step.startedAt), 0);
+  const running: TurnStep[] = (state?.tools ?? []).map((tool) => ({
+    id: tool.id,
+    name: tool.name,
+    label: friendlyStepLabel(tool.name),
+    status: "run",
+    startedAt: end,
+    endedAt: end + (tool.startedAt === undefined ? 0 : Math.max(0, ctx.nowMs - tool.startedAt)),
+    result: tool.latestPreview?.trim() ? compactPreview(tool.latestPreview, 72) : "running"
+  }));
+  return [...done, ...running];
+}
+
+function renderMessage(msg: Msg, ctx: RenderContext, answered: boolean): string[] {
   if (msg.role === "assistant") {
-    return [renderAssistantResponsePanel(msg.text, {
-      color: ctx.color,
-      columns: ctx.columns,
-      theme: ctx.theme,
-      title: msg.title
-    })];
+    if (!msg.text.trim()) {
+      return [];
+    }
+    return answerLines(msg.text, ctx.columns, ctx, {
+      partial: msg.partial,
+      mark: !answered,
+      label: answered ? undefined : agentLabel(msg.title, ctx),
+      widenLimit: ctx.widenLimit
+    });
   }
 
   if (msg.role === "user") {
-    return [formatTrailLine(`${ctx.theme.brand.prompt} ${compactPreview(msg.text, ctx.contentWidth - 2)}`, "primaryBright", ctx)];
+    return msg.text.trim() ? questionLines(msg.text, ctx.columns, ctx) : [];
   }
 
   if (msg.kind === "trail") {
-    return [
-      ...renderThinking(msg.thinking ?? "", msg.thinkingTokens, ctx),
-      ...(msg.tools?.length ? renderToolShelf(msg.tools, ctx) : []),
-      ...(msg.todos?.length ? renderTodos(msg.todos, ctx, msg.todoCollapsedByDefault) : []),
-      ...(msg.subagents?.length ? renderSubagents(msg.subagents, ctx) : []),
-      ...(msg.text.trim() ? renderBodyLines(msg.text, "muted", ctx) : [])
-    ];
+    // The trail's tools are the Steps strip; the rest of the trail prints here.
+    const lines: string[] = [];
+    pushBlock(lines, renderThinking(msg.thinking ?? "", msg.thinkingTokens, ctx));
+    if (msg.todos?.length) pushBlock(lines, renderTodos(msg.todos, ctx, msg.todoCollapsedByDefault));
+    if (msg.subagents?.length) pushBlock(lines, renderSubagents(msg.subagents, ctx));
+    if (msg.text.trim()) pushBlock(lines, noteLines(msg.text, ctx.columns, ctx, "muted", { markdown: true, widenLimit: ctx.widenLimit }));
+    return lines;
   }
 
   if (msg.kind === "diff") {
     return renderDiff(msg.text, ctx);
   }
 
-  if (msg.text.trim()) {
-    // Tool output is shown as the tool returned it; only model-written text is markdown.
-    return msg.role === "tool"
-      ? renderBodyLines(msg.text, "muted", ctx, "", false)
-      : renderBodyLines(msg.text, "text", ctx);
+  if (!msg.text.trim()) {
+    return [];
   }
 
-  return [];
+  // Tool output is shown as the tool returned it; only model-written text is markdown.
+  if (msg.role === "tool") {
+    return noteLines(msg.text, ctx.columns, ctx);
+  }
+  const widenLimit = ctx.widenLimit === undefined ? undefined : Math.max(0, ctx.widenLimit - 2);
+  return renderMarkdown(msg.text, { width: Math.max(1, ctx.columns - 2), color: ctx.color, theme: ctx.theme, widenLimit }).map((line) =>
+    fit(`  ${line}`, ctx)
+  );
+}
+
+/** The answering project's label, when it says more than the brand name. */
+function agentLabel(title: string | undefined, ctx: RenderContext): string | undefined {
+  const label = title?.trim();
+  return label && label !== ctx.theme.brand.name ? label : undefined;
 }
 
 function renderThinking(reasoning: string, tokens: number | undefined, ctx: RenderContext): string[] {
   const preview = thinkingPreview(reasoning, ctx.thinkingMode);
-
   if (!preview) {
     return [];
   }
-
-  const tokenLabel = tokens ? ` ${tokens} tok` : "";
+  const tokenLabel = tokens ? ` · ${tokens} tok` : "";
   return [
-    formatTrailLine(`✦ thinking${tokenLabel}`, "primary", ctx),
-    ...renderBodyLines(preview, "muted", ctx, "  ")
+    fit(paint(`thinking${tokenLabel}`, "muted", ctx), ctx),
+    ...renderMarkdown(preview, { width: Math.max(1, ctx.columns - 2), color: false, theme: ctx.theme, plain: true }).map((line) =>
+      fit(`  ${paint(line, "muted", ctx)}`, ctx)
+    )
   ];
-}
-
-function renderToolShelf(tools: readonly string[], ctx: RenderContext): string[] {
-  if (!tools.length) {
-    return [];
-  }
-
-  return [
-    formatTrailLine(`⚡ tools ${tools.length}`, "primary", ctx),
-    ...tools.flatMap((tool) => renderToolTrail(tool, ctx))
-  ];
-}
-
-function renderActiveTools(tools: readonly ActiveTool[], ctx: RenderContext): string[] {
-  return [
-    formatTrailLine(`⚡ running ${tools.length}`, "primary", ctx),
-    ...tools.flatMap((tool) => renderActiveToolWidget(tool, ctx))
-  ];
-}
-
-function renderActiveToolWidget(tool: ActiveTool, ctx: RenderContext): string[] {
-  const label = toolTrailLabel(tool.name);
-  const elapsed = tool.startedAt !== undefined
-    ? formatElapsedSeconds(Math.max(0, ctx.nowMs - tool.startedAt))
-    : undefined;
-  const updateLabel = tool.progressCount
-    ? `${tool.progressCount} update${tool.progressCount === 1 ? "" : "s"}`
-    : "started";
-  const meta = [elapsed, updateLabel, compactPreview(tool.id, 18)].filter(Boolean).join(" · ");
-  const lines = [
-    formatTrailLine(`  ⚡ ${label}${meta ? ` · ${meta}` : ""}`, "primary", ctx)
-  ];
-
-  if (tool.context?.trim()) {
-    lines.push(formatTrailLine(`    input ${compactPreview(tool.context, Math.max(12, ctx.contentWidth - 12))}`, "muted", ctx));
-  }
-
-  if (tool.latestPreview?.trim() && tool.latestPreview.trim() !== tool.context?.trim()) {
-    lines.push(formatTrailLine(`    now   ${compactPreview(tool.latestPreview, Math.max(12, ctx.contentWidth - 12))}`, "primaryBright", ctx));
-  }
-
-  return lines;
 }
 
 function renderTodos(todos: readonly TodoItem[], ctx: RenderContext, collapsed = false): string[] {
@@ -225,12 +324,14 @@ function renderTodos(todos: readonly TodoItem[], ctx: RenderContext, collapsed =
   const label = done ? "todo complete" : `${pending} todo${pending === 1 ? "" : "s"} left`;
 
   if (collapsed && done) {
-    return [formatTrailLine(`✓ ${label}`, "success", ctx)];
+    return [fit(`${paint("✓", "success", ctx)} ${paint(label, "muted", ctx)}`, ctx)];
   }
 
   return [
-    formatTrailLine(`☑ ${label}`, done ? "success" : "primary", ctx),
-    ...todos.map((todo) => formatTrailLine(`  ${todoMark(todo.status)} ${todo.content}`, todoTone(todo.status), ctx))
+    fit(`${paint(done ? "✓" : "◑", done ? "success" : "primary", ctx)} ${paint(label, "muted", ctx)}`, ctx),
+    ...todos.map((todo) =>
+      fit(`  ${paint(todoMark(todo.status), todoTone(todo.status), ctx)} ${todo.status === "completed" ? paint(todo.content, "muted", ctx) : todo.content}`, ctx)
+    )
   ];
 }
 
@@ -245,16 +346,15 @@ function renderSubagents(subagents: readonly SubagentProgress[], ctx: RenderCont
   const summary = formatSubagentSummary(totals);
 
   return [
-    formatTrailLine(`◇ subagents ${summary}${spark ? ` ${spark}` : ""}`, totals.activeCount ? "primary" : "muted", ctx),
+    fit(paint(`◇ subagents ${summary}${spark ? ` ${spark}` : ""}`, totals.activeCount ? "primary" : "muted", ctx), ctx),
     ...tree.slice(0, 16).flatMap((node, index) => renderSubagentNode(node, "", index === tree.length - 1, ctx)),
-    ...(tree.length > 16 ? [formatTrailLine(`  └─ … ${tree.length - 16} more roots`, "muted", ctx)] : [])
+    ...(tree.length > 16 ? [fit(paint(`  └─ … ${tree.length - 16} more roots`, "muted", ctx), ctx)] : [])
   ];
 }
 
 function renderSubagentNode(node: SubagentNode, prefix: string, last: boolean, ctx: RenderContext): string[] {
   const item = node.item;
   const connector = last ? "└─" : "├─";
-  const status = subagentStatusGlyph(item.status);
   const label = compactPreview(item.summary || item.notes[0] || item.id, 56);
   const meta = [
     item.model,
@@ -262,19 +362,14 @@ function renderSubagentNode(node: SubagentNode, prefix: string, last: boolean, c
     node.aggregate.totalTools ? `${node.aggregate.totalTools} tool${node.aggregate.totalTools === 1 ? "" : "s"}` : undefined,
     node.aggregate.totalDuration ? `${Math.round(node.aggregate.totalDuration)}s` : undefined
   ].filter((part): part is string => Boolean(part));
-  const tone = item.status === "completed"
-    ? "success"
-    : item.status === "running" || item.status === "queued"
-      ? "primary"
-      : "error";
+  const { glyph, tone } = subagentStatus(item.status);
   const lines = [
-    formatTrailLine(`  ${prefix}${connector} ${status} ${label}${meta.length ? ` (${meta.join(", ")})` : ""}`, tone, ctx)
+    fit(`${paint(`  ${prefix}${connector}`, "line", ctx)} ${paint(glyph, tone, ctx)} ${label}${meta.length ? paint(` (${meta.join(", ")})`, "muted", ctx) : ""}`, ctx)
   ];
 
   for (const output of (item.outputTail ?? []).slice(-2)) {
-    const outputTone = output.isError ? "error" : "muted";
     const outputPrefix = `${prefix}${last ? "  " : "│ "}  `;
-    lines.push(formatTrailLine(`  ${outputPrefix}${output.tool}: ${compactPreview(output.preview, 72)}`, outputTone, ctx));
+    lines.push(fit(paint(`  ${outputPrefix}${output.tool}: ${compactPreview(output.preview, 72)}`, output.isError ? "error" : "muted", ctx), ctx));
   }
 
   const childPrefix = `${prefix}${last ? "  " : "│ "}`;
@@ -283,60 +378,38 @@ function renderSubagentNode(node: SubagentNode, prefix: string, last: boolean, c
   ));
 
   if (node.children.length > 8) {
-    lines.push(formatTrailLine(`  ${childPrefix}└─ … ${node.children.length - 8} more`, "muted", ctx));
+    lines.push(fit(paint(`  ${childPrefix}└─ … ${node.children.length - 8} more`, "muted", ctx), ctx));
   }
 
   return lines;
 }
 
-function subagentStatusGlyph(status: SubagentProgress["status"]): string {
-  if (status === "completed") {
-    return "✓";
-  }
-  if (status === "running") {
-    return "⚡";
-  }
-  if (status === "queued") {
-    return "…";
-  }
-  return "✗";
+function subagentStatus(status: SubagentProgress["status"]): { glyph: string; tone: AnsiRole } {
+  if (status === "completed") return { glyph: "✓", tone: "success" };
+  if (status === "running") return { glyph: "⠋", tone: "primary" };
+  if (status === "queued") return { glyph: "·", tone: "muted" };
+  return { glyph: "✗", tone: "error" };
 }
 
 function renderDiff(text: string, ctx: RenderContext): string[] {
   const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  const rendered = lines
-    .slice(0, 80)
-    .flatMap((line) => renderDiffLine(line, ctx));
-  const omitted = lines.length > 80 ? [formatTrailLine(`  … omitted ${lines.length - 80} diff lines`, "muted", ctx)] : [];
+  const rendered = lines.slice(0, 80).map((line) => renderDiffLine(line, ctx));
+  const omitted = lines.length > 80 ? [fit(paint(`  … omitted ${lines.length - 80} diff lines`, "muted", ctx), ctx)] : [];
 
-  return [
-    "",
-    formatTrailLine("Δ diff", "primary", ctx),
-    ...rendered,
-    ...omitted,
-    ""
-  ];
+  return [fit(paint("Δ diff", "primary", ctx), ctx), ...rendered, ...omitted];
 }
 
-function renderDiffLine(line: string, ctx: RenderContext): string[] {
+function renderDiffLine(line: string, ctx: RenderContext): string {
   if (!line) {
-    return [formatTrailLine("  │", "muted", ctx)];
+    return fit(paint("  │", "line", ctx), ctx);
   }
-
   const role = diffLineRole(line);
-  const prefix = role === "success"
-    ? "  + "
-    : role === "error"
-      ? "  - "
-      : line.startsWith("@@")
-        ? "  @ "
-        : "  │ ";
+  const prefix = role === "success" ? "  + " : role === "error" ? "  - " : line.startsWith("@@") ? "  @ " : "  │ ";
   const body = line.startsWith("+") || line.startsWith("-") ? line.slice(1) : line;
-
-  return [formatTrailLine(`${prefix}${body}`, role, ctx)];
+  return fit(paint(`${prefix}${body}`, role, ctx), ctx);
 }
 
-function diffLineRole(line: string): RenderRole {
+function diffLineRole(line: string): AnsiRole {
   if (line.startsWith("+++") || line.startsWith("---")) {
     return "primaryBright";
   }
@@ -350,16 +423,6 @@ function diffLineRole(line: string): RenderRole {
     return "primary";
   }
   return "muted";
-}
-
-function renderBodyLines(text: string, role: RenderRole, ctx: RenderContext, indent = "", markdown = true): string[] {
-  return renderMarkdown(text, {
-    width: Math.max(16, ctx.contentWidth - displayWidth(indent) - 2),
-    color: ctx.color,
-    theme: ctx.theme,
-    role,
-    plain: !markdown
-  }).map((line) => formatTrailLine(`${indent}${line}`, role, ctx));
 }
 
 function renderFooterRows(parts: readonly string[], ctx: RenderContext): string[] {
@@ -392,38 +455,13 @@ function groupFooterParts(parts: readonly string[], columns: number): string[][]
   return groups;
 }
 
-function renderToolTrail(line: string, ctx: RenderContext): string[] {
-  const parsed = parseToolTrailResultLine(line);
-
-  if (!parsed) {
-    return [formatTrailLine(`  ${line}`, "muted", ctx)];
-  }
-
-  const { duration, label } = splitToolDuration(parsed.call);
-  const lead = `${parsed.mark} ${label}${duration}`;
-  const tone = parsed.mark === "✗" ? "error" : "muted";
-
-  if (!parsed.detail) {
-    return [formatTrailLine(`  ${lead}`, tone, ctx)];
-  }
-
-  const inline = `  ${lead} · ${parsed.detail}`;
-  if (displayWidth(`${ctx.prefix} ${inline}`) <= ctx.columns) {
-    return [formatTrailLine(inline, tone, ctx)];
-  }
-
-  return [
-    formatTrailLine(`  ${lead}`, tone, ctx),
-    ...renderBodyLines(parsed.detail, tone, ctx, "    ", false)
-  ];
+function paint(text: string, role: AnsiRole, ctx: RenderContext): string {
+  return ctx.color && text ? ansi(ctx.theme, role, text) : text;
 }
 
-function formatTrailLine(
-  text: string,
-  role: RenderRole,
-  ctx: RenderContext
-): string {
-  return ansi(ctx.theme, role, truncateCells(`${ctx.prefix} ${text}`, ctx.columns), ctx.color);
+/** Every line fits the window (a last resort: the renderers lay out to the width first). */
+function fit(line: string, ctx: RenderContext): string {
+  return displayWidth(line) <= ctx.columns ? line : truncateCells(line, ctx.columns);
 }
 
 function todoMark(status: TodoItem["status"]): string {
@@ -431,22 +469,33 @@ function todoMark(status: TodoItem["status"]): string {
     return "✓";
   }
   if (status === "cancelled") {
-    return "×";
+    return "✕";
   }
   if (status === "in_progress") {
-    return "…";
+    return "◑";
   }
-  return "□";
+  return "·";
 }
 
-function todoTone(status: TodoItem["status"]) {
+function todoTone(status: TodoItem["status"]): AnsiRole {
   if (status === "completed") {
     return "success";
   }
-  if (status === "cancelled") {
-    return "warning";
+  if (status === "in_progress") {
+    return "primary";
   }
   return "muted";
+}
+
+/** Append a block, one blank row after whatever came before it. */
+function pushBlock(lines: string[], block: readonly string[]): void {
+  if (!block.length) {
+    return;
+  }
+  if (lines.length && lines.at(-1) !== "") {
+    lines.push("");
+  }
+  lines.push(...block);
 }
 
 function trimBlankEdges(lines: string[]) {
@@ -463,6 +512,7 @@ function trimBlankEdges(lines: string[]) {
   return next;
 }
 
-function clampColumns(columns: number): number {
-  return Math.max(40, Math.min(160, Number.isFinite(columns) ? Math.floor(columns) : 88));
+/** The transcript draws at the window's width: no cap (r4 uses the full width; eval M3). */
+export function fluidColumns(columns: number): number {
+  return Math.max(MIN_COLUMNS, Number.isFinite(columns) ? Math.floor(columns) : 88);
 }

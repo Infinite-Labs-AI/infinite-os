@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { displayWidth, stripAnsi } from "../tui/lib/display-width.js";
-import { ansiFg, resolveTheme } from "../tui/theme.js";
-import { looksNumeric, renderTable } from "./table.js";
+import { INFINITE_R4_THEME, resolveTheme } from "../tui/theme.js";
+import { r4Segments, seg } from "./r4-segments.test-util.js";
+import { looksNumeric, renderTable, type TableInput } from "./table.js";
 
 // infinite-os is public: every number and name below is synthetic.
 describe("renderTable", () => {
@@ -75,14 +76,26 @@ describe("renderTable", () => {
     expect(t.lines[1]).toContain("Keep");
   });
 
-  it("truncates a cell at half the width with an ellipsis", () => {
+  it("never cuts a cell: a column that does not fit drops whole and is named", () => {
     const t = renderTable(
-      { columns: [{ label: "Name" }, { label: "Spend" }], rows: [["Ad set with a very long synthetic name", "$1.00"]] },
+      { columns: [{ label: "Name" }, { label: "Spend" }, { label: "Note" }], rows: [["Ad set 01", "$1.00", "a long synthetic note that cannot fit"]] },
       { width: 30, color: false, theme: resolveTheme() }
     );
     expect(t.fallback).toBeNull();
-    expect(t.lines.join("\n")).toContain("…");
+    expect(t.hidden).toEqual(["Note"]);
+    expect(t.lines.join("\n")).not.toContain("…");
     expect(t.lines.every((l) => displayWidth(l) <= 30)).toBe(true);
+    expect(t.fullWidth).toBe(61);
+  });
+
+  it("shows a long cell whole when the width allows it (no half-width cap)", () => {
+    const note = "a long synthetic note that fits a wide window";
+    const t = renderTable(
+      { columns: [{ label: "Name" }, { label: "Note" }], rows: [["Ad set 01", note]] },
+      { width: 150, color: false, theme: resolveTheme() }
+    );
+    expect(t.hidden).toEqual([]);
+    expect(t.lines[3]).toContain(note);
   });
 
   it("honours an explicit align over the numeric guess", () => {
@@ -102,21 +115,71 @@ describe("renderTable", () => {
     const plain = renderTable(input, { width: 40, color: false, theme: resolveTheme() });
     const colored = renderTable(input, { width: 40, color: true, theme: resolveTheme() });
     expect(colored.lines.map(stripAnsi)).toEqual(plain.lines);
-    expect(colored.lines.join("")).toContain("\u001b[1m");
+    expect(colored.lines.join("")).toContain("\u001b[1;38;2;255;255;255m");
     expect(plain.lines.join("")).not.toMatch(/[\u001b‮]/);
   });
 
-  it("paints borders back to the caller's role instead of a full reset", () => {
-    const theme = resolveTheme();
+  it("paints each segment itself: body cells in the caller's role, never a full reset", () => {
+    const theme = INFINITE_R4_THEME;
     const input = { columns: [{ label: "Name" }, { label: "Spend" }], rows: [["Hook", "$1.00"]], total: ["Total", "$1.00"] };
     const text = renderTable(input, { width: 40, color: true, theme, role: "text" });
     expect(text.lines.every((l) => !l.includes("\u001b[0m"))).toBe(true);
-    expect(text.lines[1]).toContain(`│${ansiFg(theme, "text")}`);
+    expect(r4Segments(text.lines[3]!)).toEqual(seg(["│", "line"], [" Hook  ", ""], ["│", "line"], [" $1.00 ", ""], ["│", "line"]));
     const muted = renderTable(input, { width: 40, color: true, theme, role: "muted" });
-    expect(muted.lines[3]).toContain(`│${ansiFg(theme, "muted")} Hook`);
+    expect(r4Segments(muted.lines[3]!)).toEqual(seg(["│", "line"], [" ", ""], ["Hook", "dim"], ["  ", ""], ["│", "line"], [" ", ""], ["$1.00", "dim"], [" ", ""], ["│", "line"]));
     const record = renderTable(input, { width: 6, color: true, theme, role: "text" });
     expect(record.fallback).toBe("record");
     expect(record.lines.every((l) => !l.includes("\u001b[0m"))).toBe(true);
+  });
+});
+
+// terminal-r4 `table()`, from the synthetic goldens region-table-numbers-100 and
+// region-table-numbers-hidden-60 (infinite-os carries synthetic data only).
+describe("renderTable: the r4 look", () => {
+  const ads: TableInput = {
+    columns: [
+      { label: "Campaign", dropPriority: 0 }, { label: "Spend", dropPriority: 0 }, { label: "Impressions", dropPriority: 4 },
+      { label: "Clicks", dropPriority: 1 }, { label: "CTR", dropPriority: 0 }, { label: "CPC", dropPriority: 3 }, { label: "Conv", dropPriority: 2 }
+    ],
+    rows: [
+      ["Ad set 01", "$10.00", "3,000", "40", "1.33%", "$0.25", "0"],
+      ["Ad set 02", "$12.50", "2,000", "30", "1.50%", "$0.42", "0"],
+      ["Ad set 04", "$17.50", "4,000", "50", "1.25%", "$0.35", "0"]
+    ],
+    total: ["Total", "$40.00", "9,000", "120", "1.33%", "$0.33", "0"]
+  };
+  const B = (text: string): [string, string] => [text, "b"];
+  const L: [string, string] = ["│", "line"];
+
+  it("borders in line, header and Total bold white, numbers right-aligned (region-table-numbers-100)", () => {
+    const t = renderTable(ads, { width: 69, color: true, theme: INFINITE_R4_THEME });
+    expect(t.hidden).toEqual([]);
+    const lines = t.lines.map(r4Segments);
+    expect(lines[0]).toEqual(seg(["┌───────────┬────────┬─────────────┬────────┬───────┬───────┬──────┐", "line"]));
+    expect(lines[1]).toEqual(seg(L, [" ", ""], B("Campaign"), ["  ", ""], L, ["  ", ""], B("Spend"), [" ", ""], L, [" ", ""], B("Impressions"), [" ", ""], L,
+      [" ", ""], B("Clicks"), [" ", ""], L, ["   ", ""], B("CTR"), [" ", ""], L, ["   ", ""], B("CPC"), [" ", ""], L, [" ", ""], B("Conv"), [" ", ""], L));
+    expect(lines[2]).toEqual(seg(["├───────────┼────────┼─────────────┼────────┼───────┼───────┼──────┤", "line"]));
+    expect(lines[3]).toEqual(seg(L, [" Ad set 01 ", ""], L, [" $10.00 ", ""], L, ["       3,000 ", ""], L, ["     40 ", ""], L, [" 1.33% ", ""], L, [" $0.25 ", ""], L, ["    0 ", ""], L));
+    expect(lines[6]).toEqual(seg(["├───────────┼────────┼─────────────┼────────┼───────┼───────┼──────┤", "line"]));
+    expect(lines[7]).toEqual(seg(L, [" ", ""], B("Total"), ["     ", ""], L, [" ", ""], B("$40.00"), [" ", ""], L, ["       ", ""], B("9,000"), [" ", ""], L,
+      ["    ", ""], B("120"), [" ", ""], L, [" ", ""], B("1.33%"), [" ", ""], L, [" ", ""], B("$0.33"), [" ", ""], L, ["    ", ""], B("0"), [" ", ""], L));
+    expect(lines[8]).toEqual(seg(["└───────────┴────────┴─────────────┴────────┴───────┴───────┴──────┘", "line"]));
+  });
+
+  it("drops Impressions first at 60 columns and keeps the rest whole (region-table-numbers-hidden-60)", () => {
+    const t = renderTable(ads, { width: 60, color: false, theme: INFINITE_R4_THEME });
+    expect(t.hidden).toEqual(["Impressions"]);
+    expect(t.lines).toEqual([
+      "┌───────────┬────────┬────────┬───────┬───────┬──────┐",
+      "│ Campaign  │  Spend │ Clicks │   CTR │   CPC │ Conv │",
+      "├───────────┼────────┼────────┼───────┼───────┼──────┤",
+      "│ Ad set 01 │ $10.00 │     40 │ 1.33% │ $0.25 │    0 │",
+      "│ Ad set 02 │ $12.50 │     30 │ 1.50% │ $0.42 │    0 │",
+      "│ Ad set 04 │ $17.50 │     50 │ 1.25% │ $0.35 │    0 │",
+      "├───────────┼────────┼────────┼───────┼───────┼──────┤",
+      "│ Total     │ $40.00 │    120 │ 1.33% │ $0.33 │    0 │",
+      "└───────────┴────────┴────────┴───────┴───────┴──────┘"
+    ]);
   });
 });
 

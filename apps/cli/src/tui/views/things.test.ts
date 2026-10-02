@@ -409,9 +409,9 @@ describe("a document page fits the live region", () => {
   // The rows the session gives the latest turn: the live cap minus the top rule and one status row.
   const budgetAt = (rows: number) => liveBodyRows(rows, DEFAULT_COMPOSER_ROWS, DEFAULT_KEY_BAR_ROWS, 1, false);
 
-  // 60 columns stack the answer, a rule and the steps on top of the view; at
-  // 24 rows that chrome alone is taller than the live region, so it starts at 30.
-  for (const [width, rowsList] of [[100, [24, 30, 40]], [60, [30, 40]]] as const) {
+  // Under 120 columns the answer, a rule and the steps stack on top of the view;
+  // at 24 rows that chrome alone is taller than the live region, so they start at 30.
+  for (const [width, rowsList] of [[120, [24, 30, 40]], [100, [30, 40]], [60, [30, 40]]] as const) {
     for (const rows of rowsList) {
       it(`every page fits and every body line is reachable (${width} × ${rows})`, () => {
         const budget = budgetAt(rows);
@@ -463,7 +463,7 @@ describe("quiet in a turn", () => {
   });
 
   it("a quiet view next to a list adds no head line to the details pane", () => {
-    const lines = renderLiveTurn({ messages, views: [fixture("quiet-steps"), fixture("list-rows")], focus: null, width: 100, color: false, theme }).lines;
+    const lines = renderLiveTurn({ messages, views: [fixture("quiet-steps"), fixture("list-rows")], focus: null, width: 120, color: false, theme }).lines;
     const right = lines.filter((line) => line.includes(" │ ")).map((line) => line.slice(line.indexOf(" │ ") + 3));
     expect(right.some((line) => line.includes("Ready") && !line.includes("Ads running"))).toBe(false);
     expect(right.some((line) => line.includes("read the writing playbook"))).toBe(false);

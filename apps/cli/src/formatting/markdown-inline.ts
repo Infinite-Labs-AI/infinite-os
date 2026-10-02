@@ -532,3 +532,82 @@ function mergeSpans(spans: readonly Span[]): Span[] {
   }
   return out;
 }
+
+/**
+ * A partial answer (still streaming, or stopped mid-stream) with every marker
+ * that opened a span which has not closed yet taken out, so `**Cold brew car`
+ * draws as `Cold brew car` until its `**` arrives, and a stopped answer never
+ * keeps a literal `**` (eval M4). Only an OPENING marker is held: one after a
+ * space, punctuation or the start of a line, followed by text or nothing yet.
+ * Markers inside words (`snake_case`, `5*3`) and between spaces (`5 * 3`) are
+ * text and stay, and so does everything in a fenced code block still open.
+ * Only the last paragraph can hold an open marker; earlier ones are final.
+ */
+/** Characters after which a marker is part of a path, a key or a handle, not an opener. */
+const TEXT_BEFORE_MARKER = new Set(["/", ":", ".", "=", "@", "#"]);
+
+export function holdOpenMarkers(text: string): string {
+  const fences = text.split("\n").filter((line) => /^ {0,3}(```|~~~)/.test(line)).length;
+  if (fences % 2 === 1) {
+    return text;
+  }
+  const breakAt = text.lastIndexOf("\n\n");
+  const head = breakAt >= 0 ? text.slice(0, breakAt + 2) : "";
+  let tail = breakAt >= 0 ? text.slice(breakAt + 2) : text;
+
+  // A link or image still arriving: its label only (`[label](https://exa` → `label`).
+  tail = tail
+    .replace(/!?\[([^[\]\n]*)\]\([^()\s]*$/u, "$1")
+    .replace(/!?\[([^[\]\n]*)\]$/u, "$1")
+    .replace(/(^|[^\w\]\\])!?\[([^[\]\n]*)$/u, "$1$2");
+
+  const removals: [number, number][] = [];
+  const memo: CloserMemo = new Map();
+  // A URL is text to its end: `https://x.com/_foo` has no opener in it.
+  const urls = Array.from(tail.matchAll(/\S+:\/\/\S*/gu), (match) => [match.index!, match.index! + match[0].length] as const);
+  let index = 0;
+  while (index < tail.length) {
+    const char = tail[index]!;
+    const url = urls.find(([from, to]) => index >= from && index < to);
+    if (url) {
+      index = url[1];
+      continue;
+    }
+    if (char === "\\") {
+      index += 2;
+      continue;
+    }
+    if (char !== "`" && char !== "*" && char !== "_" && char !== "~") {
+      index += 1;
+      continue;
+    }
+    const run = runLength(tail, index, char);
+    const before = tail[index - 1];
+    const after = tail[index + run];
+    // After a path or key character (`a/_b`, `key=_v`, `user@_x`) a marker is text, as it is mid-word.
+    const opens = !isWordChar(before) && !TEXT_BEFORE_MARKER.has(before ?? "") && (after === undefined || !/\s/.test(after)) && (char !== "~" || run >= 2);
+    if (char === "`") {
+      const close = findCodeClose(tail, index + run, run);
+      if (close >= 0) {
+        index = close + run;
+        continue;
+      }
+    } else if (opens && after !== undefined) {
+      // The closer must be the opener's own size: `**a*` is still waiting for its `**`.
+      const size = char === "~" ? 2 : Math.min(run, 2);
+      const close = findDelimiterClose(tail, index + size, char, size, memo);
+      if (close >= 0) {
+        index = close + size;
+        continue;
+      }
+    }
+    if (opens) {
+      removals.push([index, index + run]);
+    }
+    index += run;
+  }
+  for (const [from, to] of removals.reverse()) {
+    tail = `${tail.slice(0, from)}${tail.slice(to)}`;
+  }
+  return `${head}${tail}`;
+}

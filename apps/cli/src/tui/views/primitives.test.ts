@@ -12,7 +12,7 @@ import { displayWidth } from "../lib/display-width.js";
 import { resolveTheme } from "../theme.js";
 import type { Msg } from "../types.js";
 import { HANDLED_KIND_KEYS, resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints } from "./focus.js";
-import { layoutTurn, paneWidths, renderLiveTurn, stepLines } from "./layout.js";
+import { layoutTurn, paneWidths, renderCommittedTurn, renderLiveTurn } from "./layout.js";
 import { cellText, FootnoteBook } from "./primitives.js";
 import { renderView } from "./registry.js";
 import { STATE_HEAD, stateHeadFor } from "./states.js";
@@ -225,15 +225,16 @@ describe("the view shell", () => {
 });
 
 describe("the r4 layout", () => {
-  it("stacks under 80 columns and splits at 80+", () => {
-    expect(layoutTurn(["a"], fakeRender, [], 79).some((l) => l.includes(" │ "))).toBe(false);
-    expect(layoutTurn(["a"], fakeRender, [], 100).some((l) => l.includes(" │ "))).toBe(true);
+  it("is one column under 120 columns and splits at 120+ (River, 2026-10-02)", () => {
+    expect(layoutTurn(["a"], fakeRender, [], 119).some((l) => l.includes(" │ "))).toBe(false);
+    expect(layoutTurn(["a"], fakeRender, [], 120).some((l) => l.includes(" │ "))).toBe(true);
+    expect(layoutTurn(["a"], fakeRender, [], 160, null, { split: false }).some((l) => l.includes(" │ "))).toBe(false);
   });
 
   it("the answer pane is 28% of the width, clamped to 26–40", () => {
-    expect(paneWidths(79).wide).toBe(false);
-    expect(paneWidths(80)).toEqual({ wide: true, left: 26, right: 51 });
+    expect(paneWidths(119).wide).toBe(false);
     expect(paneWidths(120)).toEqual({ wide: true, left: 33, right: 84 });
+    expect(paneWidths(160)).toEqual({ wide: true, left: 40, right: 117 });
     expect(paneWidths(200)).toEqual({ wide: true, left: 40, right: 157 });
   });
 
@@ -245,30 +246,42 @@ describe("the r4 layout", () => {
   });
 
   it("the answer sits left and the details right, head first", () => {
-    const lines = layoutTurn(["❯ question", "", "∞ answer"], fakeRender, [], 100);
+    const lines = layoutTurn(["❯ question", "", "∞ answer"], fakeRender, [], 120);
     expect(lines[0]).toMatch(/^❯ question\s+│ Ads running {2}✓ Ready$/u);
     expect(lines[1]).toMatch(/│ Demo source · up to Jan 15, 10:40$/u);
   });
 
-  it("the Steps strip comes from the turn's tool trail", () => {
+  it("the Steps strip comes from the turn's tool trail, laid end to end, one row per call", () => {
     const messages: Msg[] = [
       { role: "user", text: "q" },
       { kind: "trail", role: "system", text: "", tools: ["Read Items(\"week\") (0.6s) :: 3 items ✓", "Load Other :: timed out ✗"] },
       { role: "assistant", text: "a" }
     ];
-    // r4 column order: the label in a fixed column (min(28, 26% of the width)), then the glyph and the result.
-    const rows = [`  ${"Read Items(\"week\")".padEnd(26)} ✓ 3 items (0.6s)`, `  ${"Load Other".padEnd(26)} ✗ timed out`];
-    expect(stepLines(messages, 100)).toEqual(rows);
-    expect(stepLines(messages, 200)[0]).toBe(`  ${"Read Items(\"week\")".padEnd(28)} ✓ 3 items (0.6s)`);
+    // r4 columns at 100: label 26, bar 46, then the glyph and the result. No raw tool id, no arguments.
+    const rows = [
+      `  ${"reading items".padEnd(26)} ${"━".repeat(46)} ✓ 3 items`,
+      `  ${"loading other".padEnd(26)} ${" ".repeat(46)}━ ✗ timed out`
+    ];
     const lines = renderLiveTurn({ messages, views: [listViewFixture()], focus: null, width: 100, color: false, theme }).lines;
     const strip = lines.findIndex((line) => line.startsWith("─ Steps "));
     expect(strip).toBeGreaterThan(0);
+    expect(lines[strip]).toBe(`─ Steps ${"─".repeat(92)}`);
     expect(lines.slice(strip + 1)).toEqual(rows);
+  });
+
+  it("a committed turn is one column at any width, under a thin rule, with every page", () => {
+    const messages: Msg[] = [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }];
+    const lines = renderCommittedTurn({ messages, views: [listViewFixture()], focus: null, width: 160, color: false, theme });
+    expect(lines[0]).toBe("─".repeat(160));
+    expect(lines.some((line) => line.includes(" │ "))).toBe(false);
+    expect(lines[1]).toBe("❯ which ads are on?");
+    expect(lines).toContain("∞ Two are on.");
+    expect(lines.findIndex((line) => line.includes("Ads running"))).toBeGreaterThan(lines.indexOf("∞ Two are on."));
   });
 
   it("the live turn shows the question and the answer left of the view", () => {
     const messages: Msg[] = [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are **on**." }];
-    const text = renderLiveTurn({ messages, views: [listViewFixture()], focus: null, width: 100, color: false, theme }).lines.join("\n");
+    const text = renderLiveTurn({ messages, views: [listViewFixture()], focus: null, width: 120, color: false, theme }).lines.join("\n");
     expect(text).toContain("❯ which ads are on?");
     expect(text).toContain("∞ Two are on.");
     expect(text).toContain("│ Ads running  ✓ Ready");

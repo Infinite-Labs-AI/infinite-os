@@ -3,14 +3,16 @@ import { scrubTerminalControls } from "../desktop/confirm-in-session.js";
 import { formatElapsedSeconds, formatInteractiveProgress } from "./progress.js";
 import { turnController } from "../tui/app/turn-controller.js";
 import { renderInfiniteAppChrome, type InfiniteAppChromeInput } from "../tui/app/app-chrome.js";
-import { getTurnState, subscribeTurnState } from "../tui/app/turn-store.js";
+import { clearTurnSteps, getTurnState, subscribeTurnState } from "../tui/app/turn-store.js";
 import { LongRunToolCharmTicker } from "../tui/app/long-run-tool-charms.js";
 import { canUseInkProgressReporter, InkTranscriptProgressReporter } from "../tui/ink/progress-reporter.js";
 import { padEndCells } from "../tui/lib/display-width.js";
 import { compactPreview, toolTrailLabel } from "../tui/lib/text.js";
-import { ansi, resolveTheme, type Theme } from "../tui/theme.js";
+import { ansi, colorEnabled, resolveTheme, type Theme } from "../tui/theme.js";
 import type { Msg } from "../tui/types.js";
-import { readMarkdownTableBlock, renderMarkdownTableBlock } from "./markdown.js";
+import { readMarkdownTableBlock } from "./markdown.js";
+import { holdOpenMarkers } from "./markdown-inline.js";
+import { renderCodeLines, renderMarkdown } from "./markdown-render.js";
 
 const DEFAULT_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS = 120;
@@ -56,6 +58,8 @@ export function createInteractiveProgressReporter(
   } = {}
 ): InteractiveProgressReporter {
   const theme = options.theme ?? resolveTheme();
+  // A reporter is one turn: its Steps strip starts empty (the session's turns commit theirs first).
+  clearTurnSteps();
   if (options.renderSurface === "ink" && canUseInkProgressReporter(stream)) {
     return new InkTranscriptProgressReporter(stream, {
       ...options.transcript,
@@ -178,7 +182,7 @@ class LiveTranscriptFrame {
         transcript
       },
       {
-        color: Boolean(this.stream.isTTY && !process.env.NO_COLOR),
+        color: streamColor(this.stream, this.transcript?.theme),
         columns: this.stream.columns,
         theme: this.transcript?.theme
       }
@@ -312,7 +316,7 @@ class AlternateScreenTranscriptFrame {
         transcript
       },
       {
-        color: Boolean(this.stream.isTTY && !process.env.NO_COLOR),
+        color: streamColor(this.stream, this.transcript?.theme),
         columns: this.stream.columns,
         theme: this.transcript?.theme
       }
@@ -344,8 +348,14 @@ class AlternateScreenTranscriptFrame {
   }
 }
 
+/** The live frame uses the whole window (no cap: eval M3). */
 function frameWidth(stream: ProgressStream): number {
-  return Math.max(40, Math.min(160, stream.columns ?? 88));
+  return Math.max(20, stream.columns ?? 88);
+}
+
+/** Paint only on a terminal, and only what its colour tier paints (NO_COLOR keeps bold; dumb gets none). */
+function streamColor(stream: ProgressStream, theme: Theme | undefined): boolean {
+  return Boolean(stream.isTTY) && colorEnabled(theme ?? resolveTheme(process.env, stream));
 }
 
 export function shouldAnimateProgress(stream: ProgressStream, env: NodeJS.ProcessEnv = process.env): boolean {
@@ -474,23 +484,35 @@ class RawTerminalProgressReporter implements InteractiveProgressReporter {
   }
 }
 
+/**
+ * The answer as it streams on the plain one-shot path, in the r4 look: `∞` and
+ * the answer's lines hung under it, at the window's width, no box. Each line
+ * prints once it is complete, through the markdown renderer (so `**` never
+ * shows); a markdown table prints once its block is whole.
+ */
 class StreamingAssistantFrame {
   private readonly stream: ProgressStream;
   private readonly theme: Theme;
   private opened = false;
-  private atLineStart = true;
+  private first = true;
   private readonly color: boolean;
   private readonly contentWidth: number;
   private lineBuffer = "";
   private pendingLines: string[] = [];
-  private readonly width: number;
+  /**
+   * The open code fence while a code block streams (null outside one). Each
+   * line arrives alone, so markdown cannot see the block: a line inside it
+   * prints as code, never through the markdown renderer (which would take a
+   * `# comment` for a heading and `__init__` for bold).
+   */
+  private fence: CodeFence | null = null;
 
   constructor(stream: ProgressStream, theme: Theme) {
     this.stream = stream;
     this.theme = theme;
-    this.color = Boolean(stream.isTTY && !process.env.NO_COLOR);
-    this.width = Math.max(36, Math.min(100, (stream.columns ?? 88) - 2));
-    this.contentWidth = this.width - 4;
+    this.color = streamColor(stream, theme);
+    // r4 wraps at the width less one, with a two-column prefix.
+    this.contentWidth = Math.max(1, frameWidth(stream) - 3);
   }
 
   writeDelta(delta: string): void {
@@ -513,29 +535,20 @@ class StreamingAssistantFrame {
       return;
     }
     if (this.lineBuffer.length > 0) {
-      this.completeLine(this.lineBuffer);
+      // The answer ended without a newline: its last line may have a span it
+      // never closed (code keeps its markers: they are text there).
+      this.completeLine(this.fence ? this.lineBuffer : holdOpenMarkers(this.lineBuffer));
       this.lineBuffer = "";
     }
     this.flushPendingLines(true);
-    this.writeBorder(`╰${"─".repeat(this.width - 2)}╯\n`);
     this.opened = false;
-    this.atLineStart = true;
+    this.first = true;
     this.pendingLines = [];
+    this.fence = null;
   }
 
   private open(): void {
-    if (this.opened) {
-      return;
-    }
-    const title = ` ${this.theme.brand.name} `;
-    const top = `╭─${title}${"─".repeat(Math.max(0, this.width - title.length - 3))}╮`;
-    this.writeBorder(`${top}\n`);
     this.opened = true;
-    this.atLineStart = true;
-  }
-
-  private writeBorder(value: string): void {
-    this.stream.write(ansi(this.theme, "primary", value, this.color));
   }
 
   private completeLine(line: string): void {
@@ -545,31 +558,88 @@ class StreamingAssistantFrame {
 
   private flushPendingLines(final: boolean): void {
     while (this.pendingLines.length > 0) {
+      const next = this.pendingLines[0]!;
+      if (this.fence) {
+        // Inside a code block: the closing fence ends it; every other line is code.
+        if (closesFence(next, this.fence)) {
+          this.fence = null;
+        } else {
+          this.writeCodeLine(next);
+        }
+        this.pendingLines.shift();
+        continue;
+      }
+      const opened = openingFence(next);
+      if (opened) {
+        this.fence = opened;
+        this.pendingLines.shift();
+        continue;
+      }
       const block = readMarkdownTableBlock(this.pendingLines, { final });
       if (block === "hold") {
         return;
       }
       if (block) {
-        for (const renderedLine of renderMarkdownTableBlock(block, this.contentWidth)) {
-          this.writeContentLine(renderedLine);
-        }
+        // The whole table at once, through the answer's own table (r4 renderTable).
+        // Printed once: a wider window never redraws it, so a dropped column is just named.
+        const table = block.rawLines.map(scrubTerminalControls).join("\n");
+        this.writeRendered(renderMarkdown(table, { width: this.contentWidth, color: this.color, theme: this.theme, widenLimit: 0 }));
         this.pendingLines.splice(0, block.rawCount);
         continue;
       }
-      this.writeContentLine(this.pendingLines.shift() ?? "");
+      this.writeContentLine(this.pendingLines.shift() ?? "", true);
     }
   }
 
-  private writeContentLine(line: string): void {
-    if (this.atLineStart) {
-      this.writeBorder("│ ");
-      this.atLineStart = false;
-    }
-    // Model text goes straight to the TTY: strip control and bidi characters first.
-    this.stream.write(ansi(this.theme, "text", scrubTerminalControls(line), this.color));
-    this.stream.write("\n");
-    this.atLineStart = true;
+  /** One line of a code block, drawn as the answer draws code (cyan, indented, wrapped with ↩). */
+  private writeCodeLine(line: string): void {
+    this.writeRendered(renderCodeLines([line], { width: this.contentWidth, color: this.color, theme: this.theme }));
   }
+
+  private writeContentLine(line: string, markdown: boolean): void {
+    // Model text goes straight to the TTY: strip control and bidi characters first.
+    const clean = scrubTerminalControls(line);
+    const rendered = markdown && clean.trim()
+      ? renderMarkdown(clean, { width: this.contentWidth, color: this.color, theme: this.theme })
+      : [clean];
+    this.writeRendered(rendered);
+  }
+
+  private writeRendered(rendered: readonly string[]): void {
+    for (const text of rendered) {
+      const prefix = this.first && text.trim() ? `${ansi(this.theme, "primary", "∞", this.color)} ` : "  ";
+      if (text.trim()) {
+        this.first = false;
+      }
+      this.stream.write(`${prefix}${text}`.trimEnd());
+      this.stream.write("\n");
+    }
+  }
+}
+
+interface CodeFence {
+  char: "`" | "~";
+  size: number;
+}
+
+/** A line that opens a fenced code block (CommonMark: 3+ backticks or tildes, up to 3 spaces in). */
+function openingFence(line: string): CodeFence | null {
+  const match = /^ {0,3}(`{3,}|~{3,})/u.exec(line);
+  if (!match) {
+    return null;
+  }
+  const run = match[1]!;
+  // A backtick fence's info string has no backtick (else it is inline code).
+  if (run[0] === "`" && line.slice(match[0].length).includes("`")) {
+    return null;
+  }
+  return { char: run[0] as CodeFence["char"], size: run.length };
+}
+
+/** A line that closes `fence`: the same character, at least as many, nothing after but spaces. */
+function closesFence(line: string, fence: CodeFence): boolean {
+  const match = /^ {0,3}(`{3,}|~{3,})\s*$/u.exec(line);
+  return Boolean(match && match[1]![0] === fence.char && match[1]!.length >= fence.size);
 }
 
 function isMessageProgressEvent(event: ChatProgressEvent): event is Extract<ChatProgressEvent, { type: `message.${string}` }> {
