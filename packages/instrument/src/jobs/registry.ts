@@ -341,8 +341,9 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   }
 
   // 7 preview_guard (adopted inits with no host guard)
+  const unguarded = detectUnguardedAdoptedInits(scan.snapshot, facts.census)
   for (const tool of ["ga4", "posthog", "meta"] as const) {
-    const findings = detectUnguardedAdoptedInits(scan.snapshot, facts.census).filter((finding) => finding.tool === tool)
+    const findings = unguarded.filter((finding) => finding.tool === tool)
     if (findings.length === 0) continue
     out.push({
       jobId: "preview_guard",
