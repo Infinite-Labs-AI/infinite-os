@@ -313,7 +313,7 @@ describe("the plain installer's server-lane copy is byte-identical to before the
     const brief = renderServerLaneBrief({
       status: {
         kind: "target",
-        mode: "vercel-any",
+        mode: "vercel-middleware",
         label: "Vercel",
         created: ["middleware.js", "lib/infinite-server-lane.js"],
         manual: [],
