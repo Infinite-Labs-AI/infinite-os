@@ -139,7 +139,8 @@ async function completeWithCodex(
     ...(request.promptCacheKey ? { prompt_cache_key: request.promptCacheKey } : {}),
     instructions: request.systemPrompt,
     input: codexInput(request),
-    tools: request.tools.map(codexTool)
+    tools: request.tools.map(codexTool),
+    ...(request.toolChoice === "none" ? { tool_choice: "none" } : {})
   });
   let response = await fetchImpl(responseUrl, bearerRequest(credentials.token, responseBody));
   let appliedToken = credentials.token;
@@ -230,7 +231,8 @@ async function completeWithClaude(
     stream: true,
     system: request.systemPrompt,
     messages: [{ role: "user", content: claudeUserContent(request) }],
-    tools: request.tools.map(claudeTool)
+    tools: request.tools.map(claudeTool),
+    ...(request.toolChoice === "none" ? { tool_choice: { type: "none" } } : {})
   });
   let response = await fetchImpl(messagesUrl, {
     method: "POST",

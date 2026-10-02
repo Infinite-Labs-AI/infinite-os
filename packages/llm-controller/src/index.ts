@@ -349,6 +349,10 @@ export interface ModelRequest {
   // session's turns — so the large stable prefix is reused instead of
   // re-processed each turn. Optional: absent for non-chat/keyless callers.
   promptCacheKey?: string;
+  // "none" forbids tool calls for this request while keeping the tools declared: a history that
+  // already holds tool calls and results must still name its tools for the provider to accept it.
+  // Absent leaves the provider's default (the model may call any tool).
+  toolChoice?: "none";
 }
 
 export interface ModelUsage {
@@ -446,6 +450,34 @@ export interface LlmController {
   chat: (input: ChatInput) => Promise<ChatResponse>;
 }
 
+/** Tool rounds a turn gets when nothing names its brain. */
+export const DEFAULT_TOOL_ROUNDS = 8;
+/**
+ * Tool rounds per turn, by the brain running it. A round is one model call that asks for tools.
+ * A host may hand Codex only its common tools directly and reach the rest through a deferred
+ * search -> describe -> call trio, so every deferred tool costs three rounds where a direct tool
+ * costs one. Eight rounds left room for about two deferred lookups, and an analysis question that
+ * needed a deferred tool plus a retry ran out before it answered. Twelve covers three deferred
+ * lookups and three direct calls. Claude is served its tools directly, so it keeps eight.
+ */
+export const TOOL_ROUNDS_BY_PROVIDER: Readonly<Record<"codex" | "claude", number>> = { codex: 12, claude: 8 };
+
+export function toolRoundBudget(provider: "codex" | "claude" | undefined): number {
+  return provider ? TOOL_ROUNDS_BY_PROVIDER[provider] : DEFAULT_TOOL_ROUNDS;
+}
+
+const TOOL_ROUND_LIMIT_MESSAGE = "I reached the Infinite OS typed-action iteration limit before I could finish the answer.";
+// Appended to the system prompt of the one tool-free call made when the rounds run out.
+const FINAL_ANSWER_INSTRUCTIONS = [
+  "## Final answer: no more tool rounds",
+  "This turn has used all of its tool rounds. No more tools can run, so do not call one.",
+  "Answer the question now from the tool results already in this conversation:",
+  "- Say what was found, with the numbers the results carry.",
+  "- Give the sample size next to every figure whose result has one (sessions, rows, days or similar), and flag a figure that rests on a small sample. An average or rate without its sample size can mislead.",
+  "- Say plainly what is missing or was not checked, and what to look at next.",
+  "- Do not state a figure that no result contains."
+].join("\n");
+
 export function createLlmController(options: {
   registry: ActionRegistry;
   modelClient?: InfiniteOsModelClient;
@@ -467,7 +499,6 @@ export function createLlmController(options: {
   const modelClient = options.modelClient ?? createConfiguredModelClient();
   const sessionStore = options.sessionStore;
   const memoryManager = options.memoryManager;
-  const maxToolIterations = options.maxToolIterations ?? 8;
   const memoryReviewMode = options.memoryReview ?? "background";
   const now = options.now ?? (() => new Date());
   return {
@@ -669,10 +700,58 @@ export function createLlmController(options: {
         };
       }
       const tools = toolSchemas(actions);
+      // An explicit option is a blanket override (tests, embedders); otherwise the brain sets the budget.
+      const maxToolIterations = options.maxToolIterations ?? toolRoundBudget(input.modelProvider ?? modelMetadata?.provider);
       const actionCalls: ChatActionCall[] = [];
       const toolResults: ModelToolResult[] = [];
       // The advisor also reads each call's input: an app twin called with an argument is not the native it replaces.
       const advisorResults: QueryRefinementToolResult[] = [];
+      const assemblePrompt = (
+        refinementSections: ReturnType<typeof buildQueryRefinementSections>,
+        synthesisSections: ReturnType<typeof buildQuerySynthesisSections>
+      ) => assembleInfiniteOsPrompt({
+        actions,
+        workspaceId: input.workspaceId,
+        surface: input.surface,
+        currentDate: now().toISOString().slice(0, 10),
+        modelProvider: input.modelProvider ?? modelMetadata?.provider,
+        recentMessages: priorSession?.messages,
+        compactedSummaries: priorSession?.summaries,
+        recalledSessions,
+        curatedMemory: memoryContext,
+        advisories: [...(advisory?.promptSections ?? []), ...refinementSections, ...synthesisSections],
+        ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
+        ...(input.interactiveFeatures ? { interactiveFeatures: input.interactiveFeatures } : {}),
+        ...(input.turnOrigin ? { turnOrigin: input.turnOrigin } : {}),
+        // Only a union turn's prompt changes: it offers none of the engine's writes.
+        ...(scopedAppTools?.mode === "union" ? { scopedAppToolMode: "union" as const } : {})
+      });
+      const streamCallbacks = (
+        streamState: { messageStarted: boolean }
+      ): Pick<ModelRequest, "onMessageDelta" | "onProgress" | "onReasoningDelta"> => ({
+        onMessageDelta: async (delta) => {
+          if (!delta) {
+            return;
+          }
+          if (!streamState.messageStarted) {
+            streamState.messageStarted = true;
+            await emitAssistantMessageStart();
+          }
+          await emitAssistantMessageDelta(delta);
+        },
+        onProgress: async (event) => emitInfinite(event),
+        onReasoningDelta: async (delta) => {
+          if (!delta) {
+            return;
+          }
+          await emitInfinite({
+            type: "reasoning.delta",
+            stage: "thinking",
+            message: delta,
+            text: delta
+          });
+        }
+      });
       let usage: ModelResponse["usage"];
       try {
         for (let iteration = 0; iteration < maxToolIterations; iteration += 1) {
@@ -685,23 +764,7 @@ export function createLlmController(options: {
           if (iteration > 0 && refinementSections.length > 0) {
             await emitStatus("resolve", refinementProgressMessage(refinementSections));
           }
-          const prompt = assembleInfiniteOsPrompt({
-            actions,
-            workspaceId: input.workspaceId,
-            surface: input.surface,
-            currentDate: now().toISOString().slice(0, 10),
-            modelProvider: input.modelProvider ?? modelMetadata?.provider,
-            recentMessages: priorSession?.messages,
-            compactedSummaries: priorSession?.summaries,
-            recalledSessions,
-            curatedMemory: memoryContext,
-            advisories: [...(advisory?.promptSections ?? []), ...refinementSections, ...synthesisSections],
-            ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
-            ...(input.interactiveFeatures ? { interactiveFeatures: input.interactiveFeatures } : {}),
-            ...(input.turnOrigin ? { turnOrigin: input.turnOrigin } : {}),
-            // Only a union turn's prompt changes: it offers none of the engine's writes.
-            ...(scopedAppTools?.mode === "union" ? { scopedAppToolMode: "union" as const } : {})
-          });
+          const prompt = assemblePrompt(refinementSections, synthesisSections);
           const streamState = { messageStarted: false };
           const response = await modelClient.complete({
             model: input.model,
@@ -712,28 +775,7 @@ export function createLlmController(options: {
             // Stable across every turn of this session → lets the provider reuse its
             // cached prompt prefix instead of re-processing it each turn.
             promptCacheKey: sessionId,
-            onMessageDelta: async (delta) => {
-              if (!delta) {
-                return;
-              }
-              if (!streamState.messageStarted) {
-                streamState.messageStarted = true;
-                await emitAssistantMessageStart();
-              }
-              await emitAssistantMessageDelta(delta);
-            },
-            onProgress: async (event) => emitInfinite(event),
-            onReasoningDelta: async (delta) => {
-              if (!delta) {
-                return;
-              }
-              await emitInfinite({
-                type: "reasoning.delta",
-                stage: "thinking",
-                message: delta,
-                text: delta
-              });
-            }
+            ...streamCallbacks(streamState)
           });
           usage = iteration === 0 ? mergeUsage(response.usage) : mergeUsage(usage, response.usage);
           if (usage) await input.onUsage?.(usage);
@@ -832,7 +874,37 @@ export function createLlmController(options: {
             };
           }
         }
-        const message = "I reached the Infinite OS typed-action iteration limit before I could finish the answer.";
+        // The rounds ran out with the tool results still unread. One more call, with tools forbidden,
+        // turns what was gathered into an answer that says what it found, its sample sizes and what it
+        // did not check. Only if that call fails does the turn end on the plain limit sentence.
+        await emitStatus("status", "Writing the answer from the results gathered so far.");
+        const finalStreamState = { messageStarted: false };
+        let finalMessage: string | undefined;
+        try {
+          const finalResponse = await modelClient.complete({
+            model: input.model,
+            systemPrompt: `${assemblePrompt(
+              buildQueryRefinementSections(advisedQuestion, advisorResults, actions.map((action) => action.id)),
+              buildQuerySynthesisSections(advisedQuestion, advisorResults)
+            )}\n\n${FINAL_ANSWER_INSTRUCTIONS}`,
+            userMessage: effectiveMessage,
+            tools,
+            toolResults,
+            toolChoice: "none",
+            promptCacheKey: sessionId,
+            ...streamCallbacks(finalStreamState)
+          });
+          usage = mergeUsage(usage, finalResponse.usage);
+          if (usage) await input.onUsage?.(usage);
+          // Any tool call it asks for anyway is never run: the answer is its text or nothing.
+          finalMessage = finalResponse.message?.trim() ? finalResponse.message : undefined;
+        } catch (error) {
+          const failedUsage = (error as { usage?: ModelUsage } | null)?.usage;
+          if (failedUsage !== undefined) {
+            usage = mergeUsage(usage, failedUsage);
+          }
+        }
+        const message = finalMessage ?? TOOL_ROUND_LIMIT_MESSAGE;
         if (persistTurn) {
           await sessionStore?.appendMessage({
             sessionId,
@@ -842,7 +914,7 @@ export function createLlmController(options: {
           });
           await recordTokenUsage(sessionStore, sessionId, usage);
         }
-        await emitAssistantMessage(message, usage);
+        await emitAssistantMessage(message, usage, { alreadyStreamed: finalMessage !== undefined && finalStreamState.messageStarted });
         if (persistTurn) {
           await scheduleMemoryReview(message, actionCalls);
         }
