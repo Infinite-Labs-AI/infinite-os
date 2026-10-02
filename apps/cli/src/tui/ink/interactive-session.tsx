@@ -61,7 +61,7 @@ import {
 } from "./home-inventory.js";
 import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
-import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, type KeyAction, type KeyContext } from "../keys/keymap.js";
+import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, type KeyAction, type KeyContext } from "../keys/keymap.js";
 import { fallbackCardLines, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
@@ -726,8 +726,21 @@ export function InkInteractiveSessionApp({
   // that it is working and for how long, then any line queued behind it. No
   // status line and no session id (r4 has neither).
   // A turn that gives its own short reason says that instead of `working`.
+  // Without a reason of its own, the running view says why waiting is safe (r4):
+  // images being made, or a yes on its way (`the pause finishes either way`).
+  const viewReason = useMemo(() => {
+    const views = turnState.views.map((frame) => frame.view);
+    if (views.some((view) => view.kind === "images" && (view.state === "working" || view.state === "applying" || view.state === "background"))) {
+      return "the creatives finish either way";
+    }
+    const applying = views.find((view) => view.state === "applying" && isPlainRecord(view.approval));
+    const verb = applying && isPlainRecord(applying.approval) && typeof applying.approval.confirmLabel === "string"
+      ? shortOkVerb(applying.approval.confirmLabel)
+      : "";
+    return verb && verb !== "approve" ? `the ${verb} finishes either way` : null;
+  }, [turnState.views]);
   const busyReason = transcriptBusy
-    ? (typeof busyNote === "function" ? busyNote() : busyNote)?.trim() || null
+    ? (typeof busyNote === "function" ? busyNote() : busyNote)?.trim() || viewReason
     : null;
   const composerNote = [
     busyReason ?? (busy ? formatBusyNote({ nowMs: clock, state: turnState, turnStartedAt: busyStartedAt }) : null),

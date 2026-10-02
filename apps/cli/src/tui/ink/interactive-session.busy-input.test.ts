@@ -248,6 +248,29 @@ describe("Ink busy input handling", () => {
     expect(source).toContain("composerPlaceholderText(promptPlaceholder, composerNote)");
   });
 
+  it("with no note given, the running view says it: making creatives, or a yes on its way (run-2 N1)", () => {
+    const render = () => stripAnsi(renderInkInteractiveSessionToString({ columns: 100, onSubmitLine: async () => ({ messages: [] }) }));
+    const frame = (view: Record<string, unknown>) => ({ type: "tool.view", stage: "tool", message: "", viewId: "v1", name: "t", view }) as never;
+    const base = { v: 1, tool: "t", title: "T", asOf: null, scope: { workspaceName: "W", crossWorkspace: false }, caveats: [] };
+    try {
+      resetTurnState();
+      patchTurnState((state) => ({
+        ...state,
+        tools: [{ id: "t1", name: "generate", startedAt: Date.now() - 4_000 }],
+        views: [frame({ ...base, kind: "images", state: "working", body: { runId: "r", requested: 3, ready: 1, failed: 0, items: [], format: "png", aspectRatio: "4:5", model: "m", madeWith: "infinite" } })]
+      }));
+      expect(lastLineWith(render(), "Ask Infinite…")).toBe("❯ Ask Infinite… (the creatives finish either way)");
+      patchTurnState((state) => ({
+        ...state,
+        views: [frame({ ...base, kind: "change", state: "applying", approval: { kind: "card", title: "Pausing…", summary: null, confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [] },
+          body: { target: { kind: "ad", label: "Ad 01" }, rows: [], warnings: [] } })]
+      }));
+      expect(lastLineWith(render(), "Ask Infinite…")).toBe("❯ Ask Infinite… (the pause finishes either way)");
+    } finally {
+      resetTurnState();
+    }
+  });
+
   it("puts the running turn's own short reason in the composer note in place of 'working' (r4 busy)", () => {
     const render = (busyNote?: string | (() => string | undefined)) =>
       stripAnsi(renderInkInteractiveSessionToString({
