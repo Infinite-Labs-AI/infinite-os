@@ -240,6 +240,45 @@ export type BuiltinThemeName = keyof typeof BUILTIN_THEME_SKINS;
  * caller is drawing to a terminal; pass one to let a pipe select `plain`.
  */
 export function resolveTheme(env: NodeJS.ProcessEnv = process.env, stream: TierStream = { isTTY: true }): Theme {
+  // Renderers call this on every frame (`theme ?? resolveTheme()`): the same
+  // terminal must give the same object, or every memoised render recomputes.
+  const key = JSON.stringify([Boolean(stream.isTTY), ...THEME_ENV_KEYS.map((name) => env[name] ?? null)]);
+  const cached = THEME_CACHE.get(key);
+  if (cached) {
+    return cached;
+  }
+  if (THEME_CACHE.size >= 32) {
+    THEME_CACHE.clear();
+  }
+  const theme = computeTheme(env, stream);
+  THEME_CACHE.set(key, theme);
+  return theme;
+}
+
+/** Everything in the environment that decides the theme (the skin and the colour tier). */
+const THEME_ENV_KEYS = [
+  "INFINITE_CLI_SKIN",
+  "INFINITE_SKIN",
+  "INFINITE_THEME",
+  "INFINITE_SKIN_FILE",
+  "INFINITE_SKIN_DIR",
+  "GROWTH_OS_HOME",
+  "HOME",
+  "INFINITE_COLOR",
+  "INFINITE_PLAIN_OUTPUT",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "COLORFGBG",
+  "COLORTERM",
+  "TMUX",
+  "TERM",
+  "TERM_PROGRAM",
+  "TERM_PROGRAM_VERSION"
+] as const;
+
+const THEME_CACHE = new Map<string, Theme>();
+
+function computeTheme(env: NodeJS.ProcessEnv, stream: TierStream): Theme {
   const rawName = env.INFINITE_CLI_SKIN ?? env.INFINITE_SKIN ?? env.INFINITE_THEME;
   const requested = normalizeThemeName(rawName);
   const definition: ThemeDefinition = requested

@@ -147,3 +147,18 @@ describe("skins override the r4 hexes at the truecolor tier only", () => {
     expect(resolveTheme({ INFINITE_THEME: "light", INFINITE_COLOR: "truecolor" }).tier).toBe("truecolor");
   });
 });
+
+describe("resolveTheme is cheap and stable inside a render", () => {
+  it("returns the same theme object for the same terminal, so memoised renders stay memoised", () => {
+    expect(resolveTheme({ COLORTERM: "truecolor" })).toBe(resolveTheme({ COLORTERM: "truecolor" }));
+    expect(resolveTheme({ INFINITE_THEME: "neon", TERM: "xterm-256color" })).toBe(resolveTheme({ INFINITE_THEME: "neon", TERM: "xterm-256color" }));
+    expect(resolveTheme()).toBe(resolveTheme());
+  });
+
+  it("gives a different theme when anything that decides it changes", () => {
+    expect(resolveTheme({ COLORTERM: "truecolor" })).not.toBe(resolveTheme({ TERM: "xterm-256color" }));
+    expect(resolveTheme({ COLORTERM: "truecolor" })).not.toBe(resolveTheme({ COLORTERM: "truecolor", NO_COLOR: "1" }));
+    expect(resolveTheme({ COLORTERM: "truecolor" }, { isTTY: false })).not.toBe(resolveTheme({ COLORTERM: "truecolor" }));
+    expect(resolveTheme({ COLORTERM: "truecolor", INFINITE_THEME: "slate" })).not.toBe(resolveTheme({ COLORTERM: "truecolor" }));
+  });
+});
