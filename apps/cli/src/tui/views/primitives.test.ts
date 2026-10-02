@@ -161,6 +161,12 @@ describe("cells: a null is never 0", () => {
     expect(notes.lines()).toEqual(["¹ not synced yet"]);
   });
 
+  it("a text cell keeps its own spacing (r4 view-03 `0.41%  (account 1.10%)`); line breaks and controls still go", () => {
+    const notes = new FootnoteBook();
+    expect(cellText({ text: "0.41%  (account 1.10%)" }, "text", null, notes)).toBe("0.41%  (account 1.10%)");
+    expect(cellText({ text: "  a\nb\tc \u001b[31mred\u001b[0m  " }, "text", null, notes)).toBe("a b c red");
+  });
+
   it("words-mode reasons print in place", () =>
     expect(cellText({ value: null, reason: { code: "new", words: "New", show: "words" } }, "count", null, new FootnoteBook())).toBe("New"));
 

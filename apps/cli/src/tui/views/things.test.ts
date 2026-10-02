@@ -279,6 +279,12 @@ describe("list", () => {
 });
 
 describe("record", () => {
+  it("a field keeps its value's own spacing: `0.41%  (account 1.10%)` (r4 view-03, run-r2 NICE)", () => {
+    const v = view({ kind: "record", body: { fields: [{ label: "CTR 7d", value: { text: "0.41%  (account 1.10%)" } }] } });
+    expect(draw(v, { width: 80 }).detail).toContain("CTR 7d        0.41%  (account 1.10%)");
+  });
+
+
   it("prints its fields, a null as a dash with a footnote, and no picture", () => {
     const render = draw(fixture("record-ad"));
     const out = text(render);

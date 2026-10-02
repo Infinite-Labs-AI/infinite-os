@@ -12,7 +12,7 @@ import type {
 } from "@infinite-os/types";
 import wrapAnsi from "wrap-ansi";
 
-import { terminalText } from "../../desktop/terminal-text.js";
+import { scrubTerminalControls, terminalText } from "../../desktop/terminal-text.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
 import { sgrAttributes, style } from "../style/sgr.js";
 import type { Tone } from "../style/tokens.js";
@@ -23,6 +23,15 @@ import type { ViewRenderCtx } from "./types.js";
 /** One line of scrubbed view text: control, escape and bidi characters gone, whitespace collapsed. */
 export function viewText(value: unknown, fallback = ""): string {
   return typeof value === "string" ? terminalText(value, fallback) : fallback;
+}
+
+/**
+ * A text cell's words, scrubbed like `viewText` but keeping the spacing the
+ * host chose inside them (r4 view-03 `0.41%  (account 1.10%)`): line breaks,
+ * tabs and controls become one space each, and the ends are trimmed.
+ */
+export function cellWords(value: unknown): string {
+  return typeof value === "string" ? scrubTerminalControls(value).replace(/[^\S ]/gu, " ").trim() : "";
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -94,7 +103,7 @@ export function cellText(
     return nullText(cell.reason, notes);
   }
   if ("text" in cell && typeof cell.text === "string") {
-    return viewText(cell.text);
+    return cellWords(cell.text);
   }
   return nullText(cell.reason, notes);
 }
