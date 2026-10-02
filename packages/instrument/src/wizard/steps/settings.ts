@@ -263,7 +263,12 @@ export const step: WizardStep<"settings"> = {
       step: "settings",
       runId: ctx.runId ?? state?.runId ?? null,
       plan: state?.plan?.hash ?? null,
-      jobs: state?.steps.jobs?.inputHash ?? null
+      // Review I1 P3-1: only what settings reads from the jobs (the conversions whose T0 click test passed), never
+      // the jobs step's whole hash, which later steps' state changes move (so a resume re-sent every cloud write).
+      clickTested: (state?.jobs ?? [])
+        .filter((item) => item.jobId === "conversions_to_tools" && item.checks.some((check) => check.id === "click_test" && check.tier === "T0" && check.state === "pass"))
+        .map((item) => item.id)
+        .sort()
     })
   },
   run

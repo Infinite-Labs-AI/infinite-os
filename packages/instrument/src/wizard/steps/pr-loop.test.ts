@@ -1032,11 +1032,19 @@ describe("step `merge` (§3g.4 merge gate)", { timeout: 60_000 }, () => {
 })
 
 describe("input hashes", () => {
-  it("rehearsal hashes the head SHA (a new commit re-runs it)", async () => {
+  it("review I1 P3-1: the rehearsal hashes the tree the jobs produced, never the head SHA it moves itself", async () => {
     const w = await world()
     const before = rehearsalStep.inputHash(w.ctx)
     w.ctx.state.update((state) => {
       state.git!.headSha = "f".repeat(40)
+    })
+    // The step's own commit moves headSha: that alone never re-runs it on a resume.
+    expect(rehearsalStep.inputHash(w.ctx)).toBe(before)
+    // A new job edit (more agent work) does.
+    w.ctx.state.update((state) => {
+      state.jobs = [
+        { id: "duplicates_remove:ga4", jobId: "duplicates_remove", n: 6, title: "t", owner: "agent", trigger: { finding: "f", evidence: [] }, allow: { files: ["app/layout.tsx"], create: [] }, checks: [], state: "waiting_deploy", edits: [{ editId: "agent-9", file: "app/layout.tsx" }] }
+      ]
     })
     expect(rehearsalStep.inputHash(w.ctx)).not.toBe(before)
     expect(reviewStep.inputHash(w.ctx)).toMatch(/^sha256:[0-9a-f]{64}$/)

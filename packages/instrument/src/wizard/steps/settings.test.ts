@@ -325,3 +325,14 @@ describe("conversionDeclaration", () => {
     expect(conversionDeclaration("pricing_page_cta")).toEqual({ name: "pricing_page_cta", type: "custom", dedupe: "event", label: "Pricing page cta" })
   })
 })
+
+describe("settings inputHash (review I1 P3-1)", () => {
+  it("does not move when later steps change job states, only when a click-tested conversion appears", () => {
+    const item = (state: string, click: string) => ({ id: "conversions_to_tools:signup", jobId: "conversions_to_tools", checks: [{ id: "click_test", tier: "T0", state: click }], state })
+    const ctxWith = (jobs: unknown[], jobsHash: string) =>
+      ({ runId: "r", state: { get: () => ({ runId: "r", plan: { hash: "p" }, jobs, steps: { jobs: { inputHash: jobsHash } } }) } }) as never
+    const base = step.inputHash(ctxWith([item("done_in_code", "not_run")], "a"))
+    expect(step.inputHash(ctxWith([item("waiting_real_event", "not_run")], "b"))).toBe(base)
+    expect(step.inputHash(ctxWith([item("done_in_code", "pass")], "a"))).not.toBe(base)
+  })
+})

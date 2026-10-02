@@ -362,9 +362,17 @@ export const step: WizardStep<"rehearsal"> = {
   learn: meta.learn,
   requiredCapabilities: [...meta.requiredCapabilities],
   // §3d.1: the rehearsal hashes the head SHA (a new commit re-runs it).
+  // Review I1 P3-1: the rehearsal's inputs are the TREE the jobs produced (the branch, its base, the plan and every
+  // recorded job edit), never `git.headSha`, which this step itself moves when it commits: a resume of an
+  // unmerged run no longer re-runs the rehearsal (and its preview loads) when nothing changed.
   inputHash: (ctx) => {
-    const git = ctx.state?.get?.()?.git ?? null
-    return sha256(`rehearsal:${git?.branch ?? ""}:${git?.headSha ?? git?.baseSha ?? ""}`)
+    const state = ctx.state?.get?.()
+    const git = state?.git ?? null
+    const edits = (state?.jobs ?? [])
+      .filter((item) => item.jobId !== "review_comments")
+      .flatMap((item) => (item.edits ?? []).map((edit) => `${item.id}:${edit.editId}:${edit.file}`))
+      .sort()
+    return sha256(JSON.stringify(["rehearsal", git?.branch ?? "", git?.baseSha ?? "", state?.plan?.hash ?? null, edits]))
   },
   run
 }

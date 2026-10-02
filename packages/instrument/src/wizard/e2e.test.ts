@@ -731,6 +731,22 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
     expect(finalJobs(w).some((job) => job.id === "unusual_layout:next_config_rewrites")).toBe(true)
   })
 
+  it("review I1 P3-1: a parked, unmerged run re-run as is re-sends no cloud write and re-tests no preview", { timeout: 2 * RUN_TIMEOUT }, async () => {
+    const w = await world()
+    const answers = writeAnswers(w)
+    const parked = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond: (ask) => (ask.kind === "merge-ready" ? "later" : undefined), timeoutMs: RUN_TIMEOUT })
+    expect(stepOutcomes(parked).at(-1), trace(parked)).toBe("merge:parked:INF_WIZ_MERGE_PARKED")
+    const callsBefore = w.bridge.calls.length
+    const again = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond: (ask) => (ask.kind === "merge-ready" ? "later" : undefined), timeoutMs: RUN_TIMEOUT })
+    expect(stepOutcomes(again).at(-1), trace(again)).toBe("merge:parked:INF_WIZ_MERGE_PARKED")
+    for (const step of ["settings", "rehearsal"]) expect(stepOutcomes(again), trace(again)).toContain(`${step}:skipped`)
+    const verbs = w.bridge.calls.slice(callsBefore).map(label)
+    for (const verb of ["conversions", "server-lane.provision-env(skip)", "ga4-key-events", "runs.patch(clickTestedConversions)"]) expect(verbs.filter((entry) => entry.startsWith(verb))).toEqual([])
+    expect(verbs.filter((entry) => entry.startsWith("test.start"))).toEqual([])
+    // The review resumes from its saved round (no second review is posted).
+    expect(readGhState(w.ghState).prs).toHaveLength(1)
+  })
+
   it("review I1 P2-5: Ctrl+C mid-turn undoes the agent's edit and removes the snapshot before exit 130", { timeout: RUN_TIMEOUT }, async () => {
     const w = await world({ scenario: agentScenario({ round1: [{ tool: "job_list" }, ...duplicateRemovalSteps(), { hang: true }] }) })
     const layoutPath = join(w.site.repo, "app/layout.tsx")
