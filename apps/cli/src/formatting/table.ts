@@ -1,29 +1,40 @@
 import { terminalText } from "../desktop/confirm-in-session.js";
-import { displayWidth, padEndCells, truncateCells } from "../tui/lib/display-width.js";
-import { ansiFg, type AnsiRole, type Theme } from "../tui/theme.js";
+import { displayWidth, padEndCells } from "../tui/lib/display-width.js";
+import { ansi, type AnsiRole, type Theme, type ThemeStyle } from "../tui/theme.js";
 
 /**
  * The one table drawer for the terminal. Markdown tables (T3) and the numbers,
  * list and compare views draw through it, so every table in the CLI has the
  * same box, the same numeric alignment and the same column-dropping rule.
  *
- * Rules:
+ * Rules (terminal-r4 `table()`):
+ * - Borders in `line`, the header and the Total in `b` (bold white), body cells
+ *   in the caller's role; a `├┼┤` rule under the header and above the Total.
  * - A column aligns right when every non-empty body cell looks numeric, unless
  *   the column says otherwise.
  * - Too wide: columns drop in descending `dropPriority`, then unprioritized
  *   columns from the right. The first column and `dropPriority: 0` never drop.
+ *   A cell is never cut: a column that does not fit drops whole, and is named.
  * - Never fewer than 2 columns. When two cannot fit, the table becomes
  *   `label: value` record lines (`fallback: "record"`).
- * - Cells truncate at half the width with `…`, and every cell is scrubbed of
- *   terminal control and bidi characters before it is measured.
+ * - Every cell is scrubbed of terminal control and bidi characters before it
+ *   is measured. Each segment paints and ends itself (`line`, `b`, the role),
+ *   so a line never relies on a colour it did not open, and never ends in a
+ *   full reset.
  */
 
 export type TableAlign = "left" | "right";
 export interface TableColumn { label: string; align?: TableAlign; dropPriority?: number } // 0 = never drop; higher drops first
 export interface TableInput { columns: TableColumn[]; rows: string[][]; total?: string[] }
-/** `role` is the color the caller paints the line in (default `text`); borders switch back to it, never to a full reset. */
+/** `role` paints the body cells (default `text`: the terminal's own foreground); borders and bold cells paint themselves. */
 export interface TableOptions { width: number; color: boolean; theme: Theme; role?: AnsiRole }
-export interface TableRender { lines: string[]; hidden: string[]; fallback: "record" | null }
+export interface TableRender {
+  lines: string[];
+  hidden: string[];
+  fallback: "record" | null;
+  /** The width the table would take with every column shown (what a wider window needs). */
+  fullWidth: number;
+}
 
 const NUMBER = String.raw`[+\-−]?[$€£¥]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?[%kKMBx×]?`;
 const NUMERIC_RE = new RegExp(String.raw`^(?:${NUMBER}(?:\s?[–\-]\s?${NUMBER})?|[—–\-])[¹²³⁴⁵⁶⁷⁸⁹⁰*]*$`, "u");
@@ -36,24 +47,23 @@ export function looksNumeric(cell: string): boolean {
 
 export function renderTable(input: TableInput, opts: TableOptions): TableRender {
   const width = Math.max(1, Math.floor(opts.width));
-  const maxCell = Math.max(1, Math.floor(width / 2));
   const columnCount = input.columns.length;
   const labels = input.columns.map((column) => scrub(column.label));
   const rows = input.rows.map((row) => normalizeRow(row, columnCount));
   const total = input.total ? normalizeRow(input.total, columnCount) : undefined;
 
-  const fit = (value: string) => truncateCells(value, maxCell);
   const cellWidth = (index: number) =>
     Math.max(
-      displayWidth(fit(labels[index] ?? "")),
-      ...rows.map((row) => displayWidth(fit(row[index] ?? ""))),
-      total ? displayWidth(fit(total[index] ?? "")) : 0
+      displayWidth(labels[index] ?? ""),
+      ...rows.map((row) => displayWidth(row[index] ?? "")),
+      total ? displayWidth(total[index] ?? "") : 0
     );
   const widths = input.columns.map((_column, index) => cellWidth(index));
   const tableWidth = (keep: readonly number[]) =>
     keep.reduce((sum, index) => sum + (widths[index] ?? 0), 0) + 3 * keep.length + 1;
 
   let keep = input.columns.map((_column, index) => index);
+  const fullWidth = tableWidth(keep);
   const hidden: string[] = [];
   const dropOrder = dropCandidates(input.columns);
   for (const candidate of dropOrder) {
@@ -65,7 +75,7 @@ export function renderTable(input: TableInput, opts: TableOptions): TableRender 
   }
 
   if (columnCount === 0 || tableWidth(keep) > width) {
-    return { lines: renderRecords(labels, rows, total, width, opts), hidden: [], fallback: "record" };
+    return { lines: renderRecords(labels, rows, total, width, opts), hidden: [], fallback: "record", fullWidth };
   }
 
   const right = input.columns.map((column, index) => {
@@ -76,17 +86,15 @@ export function renderTable(input: TableInput, opts: TableOptions): TableRender 
     return body.length > 0 && body.every(looksNumeric);
   });
 
-  const border = (value: string) => paint(value, "muted", opts);
+  const border = (value: string) => paint(value, "line", opts);
   const rule = (left: string, middle: string, end: string) =>
     border(`${left}${keep.map((index) => "─".repeat((widths[index] ?? 0) + 2)).join(middle)}${end}`);
   const line = (cells: readonly string[], strong: boolean) => {
     const parts = keep.map((index) => {
-      const value = fit(cells[index] ?? "");
-      const cellW = widths[index] ?? 0;
-      const padded = right[index]
-        ? `${" ".repeat(Math.max(0, cellW - displayWidth(value)))}${value}`
-        : padEndCells(value, cellW);
-      return ` ${strong ? bold(padded, opts) : padded} `;
+      const value = cells[index] ?? "";
+      const pad = " ".repeat(Math.max(0, (widths[index] ?? 0) - displayWidth(value)));
+      const painted = strong ? paint(value, "b", opts) : paint(value, opts.role ?? "text", opts);
+      return right[index] ? ` ${pad}${painted} ` : ` ${painted}${pad} `;
     });
     return `${border("│")}${parts.join(border("│"))}${border("│")}`;
   };
@@ -97,7 +105,7 @@ export function renderTable(input: TableInput, opts: TableOptions): TableRender 
   }
   lines.push(rule("└", "┴", "┘"));
 
-  return { lines, hidden, fallback: null };
+  return { lines, hidden, fallback: null, fullWidth };
 }
 
 function dropCandidates(columns: readonly TableColumn[]): number[] {
@@ -132,11 +140,11 @@ function renderRecords(
       const value = record[index] ?? "";
       const wrapped = wrapPlain(`${head}${value}`, width);
       wrapped.forEach((text, lineIndex) => {
-        if (lineIndex === 0 && opts.color && text.startsWith(head)) {
-          lines.push(`${bold(label, opts)}${text.slice(label.length)}`);
+        if (lineIndex === 0 && text.startsWith(head)) {
+          lines.push(`${paint(label, "b", opts)}${paint(text.slice(label.length), opts.role ?? "text", opts)}`);
           return;
         }
-        lines.push(text);
+        lines.push(paint(text, opts.role ?? "text", opts));
       });
     });
   });
@@ -183,10 +191,7 @@ function scrub(value: string): string {
   return terminalText(value);
 }
 
-function paint(value: string, tone: AnsiRole, opts: TableOptions): string {
-  return opts.color ? `${ansiFg(opts.theme, tone)}${value}${ansiFg(opts.theme, opts.role ?? "text")}` : value;
-}
-
-function bold(value: string, opts: TableOptions): string {
-  return opts.color ? `\u001b[1m${value}\u001b[22m` : value;
+/** One self-contained span: opened and closed with its own escapes ("" when color is off or the tier paints none). */
+function paint(value: string, tone: ThemeStyle, opts: TableOptions): string {
+  return opts.color && value && tone !== "text" ? ansi(opts.theme, tone, value) : value;
 }

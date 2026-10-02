@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { displayWidth, stripAnsi } from "../tui/lib/display-width.js";
-import { ansiFg, resolveTheme } from "../tui/theme.js";
-import { parseInline, wrapSpans } from "./markdown-inline.js";
+import { ansiFg, INFINITE_R4_THEME, resolveTheme } from "../tui/theme.js";
+import { r4Segments, seg } from "./r4-segments.test-util.js";
+import { holdOpenMarkers, parseInline, wrapSpans } from "./markdown-inline.js";
 import { renderMarkdown } from "./markdown-render.js";
 import { stripInlineMarkup } from "./markdown.js";
 
@@ -68,14 +69,64 @@ describe("renderMarkdown", () => {
     expect(out.at(-1)).toBe("after");
   });
 
-  it("colors a level-1 heading with the primary color and keeps lower headings bold only", () => {
-    const out = renderMarkdown("# Top\n\n## Next", { width: 40, color: true, theme });
-    expect(out[0]).toContain("\u001b[1m");
-    expect(ansiFg(theme, "primary")).not.toBe("");
-    expect(out[0]).toContain(ansiFg(theme, "primary"));
-    expect(stripAnsi(out[0] ?? "")).toBe("Top");
-    expect(out[2]).toContain("\u001b[1m");
-    expect(out[2]).not.toContain(ansiFg(theme, "primary"));
+  it("draws headings in r4's b, code in cyan, links cyan underlined with ↗, bullets and the code wrap mark dim", () => {
+    const r4 = INFINITE_R4_THEME;
+    const [top, , next] = renderMarkdown("# Top\n\n## Next", { width: 40, color: true, theme: r4 });
+    expect(r4Segments(top!)).toEqual(seg(["Top", "b"]));
+    expect(r4Segments(next!)).toEqual(seg(["Next", "b"]));
+    expect(r4Segments(renderMarkdown("Run `npm test` or read [the docs](https://example.com/docs).", { width: 60, color: true, theme: r4 })[0]!)).toEqual(
+      seg(["Run ", ""], ["npm test", "cyan"], [" or read ", ""], ["the docs ↗", "cyan u"], [".", ""])
+    );
+    expect(r4Segments(renderMarkdown("- one\n  - two", { width: 40, color: true, theme: r4 })[1]!)).toEqual(seg(["  ", ""], ["◦", "dim"], [" two", ""]));
+    expect(r4Segments(renderMarkdown("> said\n\n---", { width: 6, color: true, theme: r4 })[0]!)).toEqual(seg(["│", "line"], [" said", ""]));
+    const code = renderMarkdown("```\n" + "x".repeat(20) + "\n```", { width: 12, color: true, theme: r4 });
+    expect(r4Segments(code[0]!)).toEqual(seg(["  ", ""], ["x".repeat(9), "cyan"], ["↩", "dim"]));
+  });
+
+  it("keeps the caller's colour after a styled span (a dim note stays dim)", () => {
+    const r4 = INFINITE_R4_THEME;
+    const [line] = renderMarkdown("see `x` now", { width: 40, color: true, theme: r4, role: "muted" });
+    expect(line).toContain(`\u001b[39m${ansiFg(r4, "muted")}`);
+  });
+
+  it("sets a last Total row apart: a rule above it and bold, like the views' tables (N9)", () => {
+    const out = renderMarkdown("| Ad | Spend |\n|---|--:|\n| Hook A | $1.00 |\n| Hook B | $2.00 |\n| Total | $3.00 |", { width: 40, color: false, theme });
+    expect(out).toEqual([
+      "┌────────┬───────┐",
+      "│ Ad     │ Spend │",
+      "├────────┼───────┤",
+      "│ Hook A │ $1.00 │",
+      "│ Hook B │ $2.00 │",
+      "├────────┼───────┤",
+      "│ Total  │ $3.00 │",
+      "└────────┴───────┘"
+    ]);
+    const colored = renderMarkdown("| Ad | Spend |\n|---|--:|\n| Hook A | $1.00 |\n| Total | $1.00 |", { width: 40, color: true, theme: INFINITE_R4_THEME });
+    expect(r4Segments(colored[5]!)).toEqual(seg(["│", "line"], [" ", ""], ["Total", "b"], ["  ", ""], ["│", "line"], [" ", ""], ["$1.00", "b"], [" ", ""], ["│", "line"]));
+  });
+
+  it("never promises a wider window it cannot name: a hidden column says how many more columns it needs (M3)", () => {
+    const out = renderMarkdown(
+      "| Name | One | Two | Three |\n|---|---|---|---|\n| Ad set 01 | 10 | 20 | 30 |",
+      { width: 24, color: false, theme }
+    );
+    expect(out.slice(-2)).toEqual(["+ Three, Two · widen by", "9 cols to see"]);
+    const wide = renderMarkdown(
+      "| Name | One | Two | Three |\n|---|---|---|---|\n| Ad set 01 | 10 | 20 | 30 |",
+      { width: 32, color: false, theme }
+    );
+    const wider = renderMarkdown(
+      "| Name | One | Two | Three |\n|---|---|---|---|\n| Ad set 01 | 10 | 20 | 30 |",
+      { width: 26, color: false, theme }
+    );
+    expect(wider.slice(-2)).toEqual(["+ Three · widen by 7 cols", "to see"]);
+    expect(wide.at(-1)).toBe("+ Three · widen by 1 col to see");
+    expect(wide.join("\n")).not.toContain("widen the window");
+    const roomy = renderMarkdown(
+      "| Name | One | Two | Three |\n|---|---|---|---|\n| Ad set 01 | 10 | 20 | 30 |",
+      { width: 160, color: false, theme }
+    );
+    expect(roomy.join("\n")).not.toContain("+ ");
   });
 
   it("scrubs terminal control and bidi characters out of every text node, code included", () => {
@@ -235,5 +286,33 @@ describe("pathological model text (wave-1 adversarial review)", () => {
     const out = renderMarkdown("a **b c **d e **f** g *h* _i_ ~~j~~", { width: 80, color: false, theme });
     // Pinned against the pre-memo implementation's output.
     expect(out).toEqual(["a b c **d e **f g h i j"]);
+  });
+});
+
+// Eval M4: a half-received span never prints its markers, while streaming or after a stop.
+describe("holdOpenMarkers", () => {
+  it.each([
+    ["**Cold brew car", "Cold brew car"],
+    ["Try **Cold brew car", "Try Cold brew car"],
+    ["Try **Cold brew carousel**", "Try **Cold brew carousel**"],
+    ["**Cold brew car*", "Cold brew car*"],
+    ["See `npm te", "See npm te"],
+    ["See `npm test` now", "See `npm test` now"],
+    ["an _italic wor", "an italic wor"],
+    ["snake_case and 5*3 and 5 * 3", "snake_case and 5*3 and 5 * 3"],
+    ["ends with **", "ends with "],
+    ["~~gone", "gone"],
+    ["Read [the docs](https://exa", "Read the docs"],
+    ["Read [the docs]", "Read the docs"],
+    ["Read [the do", "Read the do"],
+    ["done **one**.\n\n**Two is still", "done **one**.\n\nTwo is still"],
+    ["**early unclosed stays\n\nlater para", "**early unclosed stays\n\nlater para"],
+    ["```\nconst a = **b\n", "```\nconst a = **b\n"]
+  ])("%j → %j", (partial, held) => {
+    expect(holdOpenMarkers(partial)).toBe(held);
+  });
+
+  it("renders a held partial without a literal marker", () => {
+    expect(renderMarkdown(holdOpenMarkers("Try **Cold brew car"), { width: 60, color: false, theme })).toEqual(["Try Cold brew car"]);
   });
 });

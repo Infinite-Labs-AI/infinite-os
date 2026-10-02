@@ -1,6 +1,6 @@
 import { scrubTerminalControls } from "../desktop/confirm-in-session.js";
 import { displayWidth, truncateCells } from "../tui/lib/display-width.js";
-import { ansiFg, type AnsiRole, type Theme } from "../tui/theme.js";
+import { ansiFg, ansiSpan, type AnsiRole, type Theme, type ThemeStyle } from "../tui/theme.js";
 import { lexMarkdown, type MarkdownBlock } from "./markdown-blocks.js";
 import { NO_BREAK_SPACE, parseInline, wrapSpans, type Span } from "./markdown-inline.js";
 import { renderTable } from "./table.js";
@@ -12,7 +12,9 @@ import { renderTable } from "./table.js";
  * markers. Every line has `displayWidth <= width`.
  *
  * `role` is the color the caller paints the line in (default `text`). A span
- * that switches color (code, links, a level-1 heading) switches back to it.
+ * that switches color switches back to it. The r4 look (terminal-r4 §5):
+ * headings `b`, code `cyan`, links `cyan u` + ` ↗`, bullets `dim`, quote bars
+ * and rules `line`, a table's Total row set apart (rule above, bold).
  *
  * `plain` skips the markdown parse (see the option).
  */
@@ -34,9 +36,10 @@ const LINK_MARK = "↗";
 const SGR = {
   bold: ["\u001b[1m", "\u001b[22m"],
   italic: ["\u001b[3m", "\u001b[23m"],
-  strike: ["\u001b[9m", "\u001b[29m"],
-  underline: ["\u001b[4m", "\u001b[24m"]
+  strike: ["\u001b[9m", "\u001b[29m"]
 } as const;
+/** A last body row whose first cell says this is the table's Total (N9). */
+const TOTAL_LABEL = /^totals?:?$/i;
 
 /**
  * Quote nesting the renderer draws as bars. Deeper `>` print as text under the
@@ -97,10 +100,8 @@ function renderBlock(block: MarkdownBlock, opts: MarkdownRenderOptions, quoteDep
   switch (block.type) {
     case "blank":
       return [""];
-    case "heading": {
-      const tone: AnsiRole | undefined = block.level === 1 ? "primary" : undefined;
-      return layout(parseInline(block.text), opts).map((line) => styleLine(line, opts, { bold: true, tone }));
-    }
+    case "heading":
+      return layout(parseInline(block.text), opts).map((line) => styleLine(line, opts, { heading: true }));
     case "paragraph":
       return layout(parseInline(block.text), opts).map((line) => styleLine(line, opts));
     case "list_item":
@@ -116,11 +117,11 @@ function renderBlock(block: MarkdownBlock, opts: MarkdownRenderOptions, quoteDep
         return renderDocument(block.lines.join("\n"), innerOpts, depth);
       }
       const inner = renderDocument(block.lines.join("\n"), { ...innerOpts, width: opts.width - 2 }, depth);
-      const bar = paint("│", "muted", opts);
+      const bar = paint("│", "line", opts);
       return inner.map((line) => (line ? `${bar} ${line}` : bar));
     }
     case "rule":
-      return [paint("─".repeat(opts.width), "muted", opts)];
+      return [paint("─".repeat(opts.width), "line", opts)];
     case "table":
       return renderMarkdownTable(block, opts);
   }
@@ -137,7 +138,16 @@ function renderListItem(block: Extract<MarkdownBlock, { type: "list_item" }>, op
   if (displayWidth(first) >= opts.width) {
     first = rest = "";
   }
-  return layout(parseInline(block.text), opts, { first, rest }).map((line) => styleLine(line, opts));
+  const mark = displayWidth(first) ? `${indent}${paint(marker, block.ordered ? opts.role ?? "text" : "muted", opts)} ` : "";
+  return layout(parseInline(block.text), opts, { first, rest }).map((line, index) => {
+    const head = line[0];
+    // The bullet is drawn dim; the indent span may have merged with plain text after it.
+    if (index === 0 && mark && head && head.text.startsWith(first) && !head.bold && !head.italic && !head.strike && !head.code && !head.link) {
+      const after = head.text.slice(first.length);
+      return `${mark}${styleLine(after ? [{ ...head, text: after }, ...line.slice(1)] : line.slice(1), opts)}`;
+    }
+    return styleLine(line, opts);
+  });
 }
 
 function renderCode(source: readonly string[], opts: MarkdownRenderOptions): string[] {
@@ -147,38 +157,47 @@ function renderCode(source: readonly string[], opts: MarkdownRenderOptions): str
   for (const raw of source) {
     const line = raw.trimEnd();
     if (displayWidth(line) <= avail) {
-      out.push(`${indent}${paint(line, "primaryBright", opts)}`);
+      out.push(`${indent}${paint(line, "primary", opts)}`);
       continue;
     }
     if (avail < 2) {
       // No room for a character plus the ↩ mark.
-      out.push(paint(truncateCells(line, opts.width), "primaryBright", opts));
+      out.push(paint(truncateCells(line, opts.width), "primary", opts));
       continue;
     }
     let chunk = "";
     for (const char of Array.from(line)) {
       if (displayWidth(chunk + char) > avail - 1) {
-        out.push(`${indent}${paint(chunk, "primaryBright", opts)}${paint(CONTINUATION_MARK, "muted", opts)}`);
+        out.push(`${indent}${paint(chunk, "primary", opts)}${paint(CONTINUATION_MARK, "muted", opts)}`);
         chunk = "";
       }
       chunk += char;
     }
-    out.push(`${indent}${paint(chunk, "primaryBright", opts)}`);
+    out.push(`${indent}${paint(chunk, "primary", opts)}`);
   }
   return out;
 }
 
 function renderMarkdownTable(block: Extract<MarkdownBlock, { type: "table" }>, opts: MarkdownRenderOptions): string[] {
+  const rows = block.rows.map((row) => row.map(plainInline));
+  // A last row labelled Total is the table's total: a rule above it, in bold (N9).
+  const last = rows.at(-1);
+  const total = rows.length > 1 && last && TOTAL_LABEL.test((last[0] ?? "").trim()) ? last : undefined;
   const table = renderTable(
     {
       columns: block.header.map((label, index) => ({ label: plainInline(label), align: block.aligns[index] })),
-      rows: block.rows.map((row) => row.map(plainInline))
+      rows: total ? rows.slice(0, -1) : rows,
+      ...(total ? { total } : {})
     },
     { width: opts.width, color: opts.color, theme: opts.theme, role: opts.role }
   );
   const lines = [...table.lines];
   if (table.hidden.length) {
-    lines.push(paint(truncateCells(`+ ${table.hidden.join(", ")} hidden · widen the window to see`, opts.width), "muted", opts));
+    // An answer's table has no `→` key: say exactly how much wider the window
+    // must be. The live turn redraws at the new width, so the words always hold.
+    const more = Math.max(1, table.fullWidth - opts.width);
+    const hint = `+ ${table.hidden.join(", ")} · widen by ${more} ${more === 1 ? "col" : "cols"} to see`;
+    lines.push(...wrapSpans([{ text: hint }], opts.width).map((spans) => paint(spans.map((span) => span.text).join(""), "muted", opts)));
   }
   return lines;
 }
@@ -196,11 +215,7 @@ function layout(spans: Span[], opts: MarkdownRenderOptions, indent?: { first: st
   return wrapSpans(marked, opts.width, indent);
 }
 
-function styleLine(
-  line: readonly Span[],
-  opts: MarkdownRenderOptions,
-  extra: { bold?: boolean; tone?: AnsiRole } = {}
-): string {
+function styleLine(line: readonly Span[], opts: MarkdownRenderOptions, extra: { heading?: boolean } = {}): string {
   return line
     .map((span) => {
       const text = span.text.split(NO_BREAK_SPACE).join(" ");
@@ -209,7 +224,8 @@ function styleLine(
       }
       const open: string[] = [];
       const close: string[] = [];
-      if (span.bold || extra.bold) {
+      // Bold stays an attribute on the body colour; a heading is r4's `b` (bold white).
+      if (span.bold && !extra.heading) {
         open.push(SGR.bold[0]);
         close.push(SGR.bold[1]);
       }
@@ -221,23 +237,26 @@ function styleLine(
         open.push(SGR.strike[0]);
         close.push(SGR.strike[1]);
       }
-      if (span.link) {
-        open.push(SGR.underline[0]);
-        close.push(SGR.underline[1]);
-      }
-      const tone: AnsiRole | undefined = span.code ? "primaryBright" : span.link ? "primary" : extra.tone;
-      if (tone) {
-        open.push(ansiFg(opts.theme, tone));
-        close.push(ansiFg(opts.theme, opts.role ?? "text"));
+      const tokens: ThemeStyle | undefined = span.code ? "cyan" : span.link ? ["cyan", "u"] : extra.heading ? "b" : undefined;
+      if (tokens) {
+        const span = ansiSpan(opts.theme, tokens);
+        open.push(span.open);
+        close.unshift(span.close, roleForeground(opts));
       }
       return `${open.join("")}${text}${close.join("")}`;
     })
     .join("");
 }
 
-function paint(text: string, tone: AnsiRole, opts: MarkdownRenderOptions): string {
+/** The caller's colour again after a span closed its own (nothing for body text: the close already says 39). */
+function roleForeground(opts: MarkdownRenderOptions): string {
+  return opts.role && opts.role !== "text" ? ansiFg(opts.theme, opts.role) : "";
+}
+
+function paint(text: string, tone: ThemeStyle, opts: MarkdownRenderOptions): string {
   if (!opts.color || !text) {
     return text;
   }
-  return `${ansiFg(opts.theme, tone)}${text}${ansiFg(opts.theme, opts.role ?? "text")}`;
+  const span = ansiSpan(opts.theme, tone);
+  return `${span.open}${text}${span.close}${roleForeground(opts)}`;
 }
