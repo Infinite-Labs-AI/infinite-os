@@ -1,0 +1,46 @@
+{
+  "v": 1,
+  "kind": "launch",
+  "tool": "propose_send_sequence",
+  "title": "Send emails",
+  "state": "needs_yes",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "audience": {
+      "count": 200,
+      "basis": "re-counted now",
+      "excluded": []
+    },
+    "picturesInApp": false
+  },
+  "approval": {
+    "kind": "card",
+    "turnId": "turn_1",
+    "handle": "h_4",
+    "title": "Send this to 200 people?",
+    "summary": null,
+    "confirmLabel": "Send to 200 people",
+    "dismissLabel": "Dismiss",
+    "rows": [
+      {
+        "label": "to",
+        "value": "200 people"
+      }
+    ],
+    "finishInApp": {
+      "words": "The emails are too long to show here. Read them in the app.",
+      "appLink": {
+        "place": "email.campaign",
+        "label": "Open the campaign",
+        "params": {
+          "id": "cmp_1"
+        }
+      }
+    }
+  }
+}

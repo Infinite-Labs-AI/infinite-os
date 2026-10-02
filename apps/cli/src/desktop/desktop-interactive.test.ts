@@ -211,6 +211,14 @@ describe("adaptDesktopClientToTurnSource", () => {
     );
     expect(adapter.sessionCapable).toBe(false);
   });
+
+  it("delegates confirmFieldsCapable to the real client", () => {
+    const client = { sessionCapable: true, confirmFieldsCapable: false, turn: vi.fn() };
+    const adapter = adaptDesktopClientToTurnSource(client as any, "rev-1");
+    expect(adapter.confirmFieldsCapable).toBe(false);
+    client.confirmFieldsCapable = true;
+    expect(adapter.confirmFieldsCapable).toBe(true);
+  });
 });
 
 // ── createDesktopSessionTurnRunner (per-turn revalidation, Task 2.4) ─────────
@@ -586,8 +594,27 @@ describe("createDesktopSessionTurnRunner", () => {
       onProgress,
       signal,
       undefined,
-      onView
+      onView,
+      undefined
     ]);
+  });
+
+  it("runner.turn(…, onView, onCreativeDraft) forwards onCreativeDraft to the turn-source", async () => {
+    const runTurn = vi.fn(async () => ({}));
+    const client = {
+      sessionCapable: true,
+      status: vi.fn(async () => statusFor({ rev: "rev-1" })),
+      turn: vi.fn(),
+      confirm: vi.fn()
+    } as unknown as DesktopAppClient;
+    const runner = createDesktopSessionTurnRunner({
+      resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client }),
+      createTurnSource: () => ({ runTurn })
+    });
+    const onDraft = vi.fn();
+    const signal = new AbortController().signal;
+    await runner.turn("hello", undefined, signal, undefined, onDraft);
+    expect((runTurn.mock.calls[0] as unknown[])[6]).toBe(onDraft);
   });
 
   it("delivers a real client's tool.view frame to onView, and keeps a pending call's view", async () => {

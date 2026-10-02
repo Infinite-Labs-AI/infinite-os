@@ -1,4 +1,4 @@
-import type { ToolViewFrameV1 } from "@infinite-os/types";
+import type { CreativeDraftFrameV1, ToolViewFrameV1 } from "@infinite-os/types";
 
 import { isTodoDone } from "../lib/live-progress.js";
 import type { ActiveTool, ActivityItem, Msg, SubagentProgress, TodoItem } from "../types.js";
@@ -19,7 +19,8 @@ const buildTurnState = (): TurnState => ({
   toolTokens: 0,
   tools: [],
   turnTrail: [],
-  views: []
+  views: [],
+  drafts: []
 });
 
 let turnState = buildTurnState();
@@ -96,7 +97,26 @@ export const recordTurnView = (frame: ToolViewFrameV1) =>
   });
 
 export const clearTurnViews = () =>
-  patchTurnState((state) => (state.views.length ? { ...state, views: [] } : state));
+  patchTurnState((state) => (state.views.length || state.drafts.length ? { ...state, views: [], drafts: [] } : state));
+
+/** The most image-draft runs one turn tracks. */
+export const MAX_TURN_DRAFTS = 8;
+
+/**
+ * Record a `creative.draft` frame for the latest turn: one entry per `runId`,
+ * the newest frame of a run replacing the last. Cleared with the views when
+ * the turn commits (`clearTurnViews`).
+ */
+export const recordCreativeDraft = (frame: CreativeDraftFrameV1) =>
+  patchTurnState((state) => {
+    const index = state.drafts.findIndex((draft) => draft.runId === frame.runId);
+    if (index >= 0) {
+      const drafts = state.drafts.slice();
+      drafts[index] = frame;
+      return { ...state, drafts };
+    }
+    return state.drafts.length >= MAX_TURN_DRAFTS ? state : { ...state, drafts: [...state.drafts, frame] };
+  });
 
 export interface TurnState {
   activity: ActivityItem[];
@@ -116,4 +136,6 @@ export interface TurnState {
   turnTrail: string[];
   /** The latest turn's answer views (`tool.view` frames), in arrival order. */
   views: readonly ToolViewFrameV1[];
+  /** The latest turn's image drafts in progress (`creative.draft` frames), one per run. */
+  drafts: readonly CreativeDraftFrameV1[];
 }

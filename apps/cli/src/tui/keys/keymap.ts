@@ -29,6 +29,31 @@ export interface KeyContext {
   okLabel?: string;
   /** Whether `?` has an explanation to show; the bar offers `?` only when true. */
   explain?: boolean;
+  /** What else a card offers right now (the approval renderer says; absent = nothing). */
+  card?: CardKeys;
+}
+
+/**
+ * The card keys beyond OK, `n` and `?` (terminal-r4 "Send to 214 people": `v`
+ * shows every email, `1`–`3` switch between them, space pages a long body).
+ * Each key works, and is shown, only when its flag is set. None of them ever
+ * approves or declines.
+ */
+export interface CardKeys {
+  /** `v` opens the card's documents (and closes them again). */
+  view?: boolean;
+  /** The documents are open: `v` reads "close". */
+  viewOpen?: boolean;
+  /** `1`–`9` switch between this many documents. */
+  tabs?: number;
+  /** What the documents are, for the bar (`1-3 email`, terminal-r4); absent = "switch". */
+  tabNoun?: string;
+  /** Space pages the open document. */
+  page?: boolean;
+  /** `c` copies what the card shows. */
+  copy?: boolean;
+  /** `e` edits in the app. */
+  edit?: boolean;
 }
 
 export interface KeyHint { key: string; label: string }
@@ -92,8 +117,17 @@ export function resolveKey(input: string, key: Key, ctx: KeyContext): KeyAction 
   if (k === "r") return ctx.caps.retry ? { type: "retry" } : { type: "none" };
 
   if (ctx.focus === "card") {
+    // ONLY the named OK key approves and ONLY `n` dismisses. The OK key is
+    // never a reserved letter or a digit (`okKeyFor`), so v/e/c/1–9/space can
+    // never collide with it.
     if (k === "n") return { type: "dismiss" };
     if (ctx.okKey !== null && k === ctx.okKey) return { type: "ok" };
+    const card = ctx.card ?? {};
+    if (k === "v" && card.view) return { type: "view" };
+    if (/^[1-9]$/u.test(k) && Number(k) <= cardTabs(card)) return { type: "tab", index: Number(k) - 1 };
+    if (k === " " && card.page) return { type: "page" };
+    if (k === "e" && card.edit) return { type: "edit" };
+    if (k === "c" && card.copy) return { type: "copy" };
     return { type: "none" };
   }
 
@@ -128,15 +162,28 @@ export function keyBarHints(ctx: KeyContext): KeyHint[] {
     return [];
   }
   const hints: KeyHint[] = [];
+  const card = ctx.card ?? {};
+  if (card.view) hints.push({ key: "v", label: card.viewOpen ? "close" : "view" });
   if (ctx.okKey !== null) {
     hints.push({ key: ctx.okKey, label: ctx.okLabel ?? "approve" });
   }
   hints.push({ key: "n", label: "dismiss" });
+  const tabs = cardTabs(card);
+  if (tabs > 1) hints.push({ key: `1-${tabs}`, label: card.tabNoun || "switch" });
+  if (card.page) hints.push({ key: "space", label: "next page" });
+  if (card.edit) hints.push({ key: "e", label: "edit in the app" });
+  if (card.copy) hints.push({ key: "c", label: "copy" });
   if (ctx.caps.open) hints.push({ key: "o", label: "open in the app" });
   if (ctx.caps.watch) hints.push({ key: "w", label: "watch" });
   if (ctx.caps.retry) hints.push({ key: "r", label: "retry" });
   if (ctx.explain) hints.push({ key: "?", label: "what it does" });
   return hints;
+}
+
+/** How many documents `1`–`9` reach on a card (at most 9). */
+function cardTabs(card: CardKeys): number {
+  const tabs = typeof card.tabs === "number" && Number.isFinite(card.tabs) ? Math.floor(card.tabs) : 0;
+  return Math.max(0, Math.min(9, tabs));
 }
 
 /** The bar as one plain line; every label is scrubbed before it reaches the TTY. */

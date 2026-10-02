@@ -2,6 +2,7 @@ import {
   ANSWER_VIEW_KINDS,
   ANSWER_VIEW_STATES,
   type AnswerViewV1,
+  type CreativeDraftFrameV1,
   type ToolViewFrameV1
 } from "@infinite-os/types";
 
@@ -76,6 +77,62 @@ export function decodeToolViewFrame(data: unknown): ToolViewFrameV1 | null {
 /** True for any progress payload typed `tool.view`, whether or not it decodes. */
 export function isToolViewFrameData(data: unknown): boolean {
   return isRecord(data) && data.type === "tool.view";
+}
+
+/** True for any progress payload typed `creative.draft`, whether or not it decodes. */
+export function isCreativeDraftFrameData(data: unknown): boolean {
+  return isRecord(data) && data.type === "creative.draft";
+}
+
+const DRAFT_STATUSES = new Set(["running", "done", "error"]);
+/** The most pending entries a draft frame keeps (one per image being drawn). */
+const MAX_DRAFT_PENDING = 64;
+
+/**
+ * A `creative.draft` progress frame (Cmd+L's image drafts, Codex or Infinite),
+ * rebuilt from an allowlist: the contract's fields only, so a brief, a prompt
+ * or an image URL can never ride along into the terminal. `null` when it is
+ * not one or its required fields are missing.
+ */
+export function decodeCreativeDraftFrame(data: unknown): CreativeDraftFrameV1 | null {
+  if (
+    !isRecord(data) ||
+    data.type !== "creative.draft" ||
+    typeof data.runId !== "string" ||
+    !data.runId ||
+    typeof data.status !== "string" ||
+    !DRAFT_STATUSES.has(data.status) ||
+    !isFiniteNumber(data.count)
+  ) {
+    return null;
+  }
+  const pending = Array.isArray(data.pending)
+    ? data.pending
+        .filter(isRecord)
+        .filter((item) => isFiniteNumber(item.startedAtMs) && (item.etaMs === null || isFiniteNumber(item.etaMs)))
+        .slice(0, MAX_DRAFT_PENDING)
+        .map((item) => ({ startedAtMs: item.startedAtMs as number, etaMs: item.etaMs as number | null }))
+    : undefined;
+  const error = isRecord(data.error) && typeof data.error.code === "string" && typeof data.error.message === "string"
+    ? { code: data.error.code, message: data.error.message }
+    : undefined;
+  return {
+    type: "creative.draft",
+    runId: data.runId,
+    status: data.status as CreativeDraftFrameV1["status"],
+    count: data.count,
+    format: typeof data.format === "string" ? data.format : "",
+    aspectRatio: typeof data.aspectRatio === "string" ? data.aspectRatio : "",
+    quality: typeof data.quality === "string" ? data.quality : "",
+    ...(pending ? { pending } : {}),
+    ...(isFiniteNumber(data.estimatedPerImageUsd) ? { estimatedPerImageUsd: data.estimatedPerImageUsd } : {}),
+    ...(isFiniteNumber(data.perImageUsd) ? { perImageUsd: data.perImageUsd } : {}),
+    ...(error ? { error } : {})
+  };
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

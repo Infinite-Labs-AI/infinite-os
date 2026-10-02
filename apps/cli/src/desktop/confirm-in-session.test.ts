@@ -1,5 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
-import { handleInSessionConfirmation } from "./confirm-in-session.js";
+import type { AnswerViewV1 } from "@infinite-os/types";
+import {
+  handleInSessionConfirmation,
+  requeueConfirmation,
+  type InSessionConfirmationAction
+} from "./confirm-in-session.js";
+
+// Synthetic: a change card whose daily budget must be typed.
+function budgetView(finishWords?: string): AnswerViewV1 {
+  return {
+    v: 1, kind: "change", tool: "propose_set_budget", title: "Change daily budget", state: "needs_yes", asOf: null,
+    scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [],
+    body: { target: { kind: "adset", id: "as_1", label: "Ad set 01" }, rows: [], warnings: [] },
+    approval: {
+      kind: "card", turnId: "t1", handle: "h1", title: "Change the budget?", summary: null,
+      confirmLabel: "Lower to $30/day", dismissLabel: "Dismiss", rows: [],
+      fields: [{ key: "adSetBudget", label: "Daily budget", input: "money_per_day", required: true, currency: "USD", current: "40" }],
+      ...(finishWords ? { finishInApp: { words: finishWords } } : {})
+    }
+  } as unknown as AnswerViewV1;
+}
 
 describe("handleInSessionConfirmation", () => {
   it("approves → calls confirm → renders the result segment", async () => {
@@ -188,5 +208,51 @@ describe("handleInSessionConfirmation", () => {
       client
     );
     expect(out.join("")).toContain("✗ Couldn't reach the app — the card stays until it expires.\n");
+  });
+
+  it("a card with a required field is never approved here: y leaves it, n declines", async () => {
+    for (const [answer, calls] of [["y", 0], ["yes", 0], ["n", 1]] as const) {
+      const out: string[] = [];
+      const prompts: string[] = [];
+      const client = { confirm: vi.fn(async () => ({ ok: true })) };
+      await handleInSessionConfirmation(
+        { confirmationHandle: "h1", turnId: "t1", summary: "Lower budget", confirmationDetails: [], view: budgetView() },
+        { inputIsTTY: true, outputIsTTY: true, prompt: async (q: string) => { prompts.push(q); return answer; }, write: (s: string) => out.push(s) },
+        client
+      );
+      expect(out.join(""), answer).toContain("Answer this in the Infinite app or the chat session");
+      expect(prompts.join(""), answer).not.toMatch(/\[y\/n\]/u);
+      expect(client.confirm, answer).toHaveBeenCalledTimes(calls);
+      if (calls) {
+        expect(client.confirm).toHaveBeenCalledWith(expect.objectContaining({ decision: "decline" }));
+      }
+    }
+  });
+
+  it("a required-field card with finishInApp words prints those words instead", async () => {
+    const out: string[] = [];
+    await handleInSessionConfirmation(
+      { confirmationHandle: "h1", turnId: "t1", summary: "x", confirmationDetails: [], view: budgetView("Set the budget in Ads.") },
+      { inputIsTTY: true, outputIsTTY: true, prompt: async () => "y", write: (s: string) => out.push(s) },
+      { confirm: vi.fn() }
+    );
+    expect(out.join("")).toContain("Set the budget in Ads.");
+  });
+});
+
+describe("requeueConfirmation", () => {
+  const entry = (handle: string): InSessionConfirmationAction =>
+    ({ turnId: "t1", confirmationHandle: handle, summary: handle, confirmationDetails: [] });
+
+  it("a brought-back card goes behind the card the user is on, never ahead of it", () => {
+    const queue = [entry("b"), entry("c")];
+    expect(requeueConfirmation(queue, entry("a"), "behind_head").map((item) => item.confirmationHandle)).toEqual(["b", "a", "c"]);
+    expect(requeueConfirmation([], entry("a"), "behind_head").map((item) => item.confirmationHandle)).toEqual(["a"]);
+    // The head object is the same one, so its key state is kept.
+    expect(requeueConfirmation(queue, entry("a"), "behind_head")[0]).toBe(queue[0]);
+  });
+
+  it("a refused answer puts its card back in front, to fix it now", () => {
+    expect(requeueConfirmation([entry("b")], entry("a"), "front").map((item) => item.confirmationHandle)).toEqual(["a", "b"]);
   });
 });

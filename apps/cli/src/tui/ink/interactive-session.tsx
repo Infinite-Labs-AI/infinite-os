@@ -11,7 +11,7 @@ import wrapAnsi from "wrap-ansi";
 import { Box, Text, render, renderToString, useApp, useCursor, useInput, useStdin, useStdout } from "./renderer.js";
 
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
-import type { ToolViewFrameV1 } from "@infinite-os/types";
+import type { ApprovalFieldAnswerV1, CreativeDraftFrameV1, ToolViewFrameV1 } from "@infinite-os/types";
 import type { Key } from "ink";
 
 // Type-only import (erased at build, no runtime cycle): the in-chat /connect
@@ -30,6 +30,7 @@ import type {
 // The cloud-brain entry threads `pendingConfirmations` + `onConfirmAction` in;
 // the LOCAL interactive path never returns them, so this stays fully dormant.
 import {
+  requeueConfirmation,
   terminalText,
   type InSessionConfirmationAction
 } from "../../desktop/confirm-in-session.js";
@@ -39,6 +40,7 @@ import { turnController } from "../app/turn-controller.js";
 import {
   clearTurnViews,
   getTurnState,
+  recordCreativeDraft,
   recordTurnView,
   subscribeTurnState,
   type TurnState
@@ -56,7 +58,7 @@ import {
 } from "./home-inventory.js";
 import { isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
-import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, type KeyContext } from "../keys/keymap.js";
+import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, type KeyAction, type KeyContext } from "../keys/keymap.js";
 import { KeyBar } from "./key-bar.js";
 import {
   inkLatestTurnRows,
@@ -79,6 +81,19 @@ import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
 import { resolveViewKey, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
 import { renderLiveTurn, type LiveTurnRender } from "../views/layout.js";
+import {
+  approvalRender,
+  cancelCardField,
+  CARD_UI_START,
+  cardKeyStep,
+  cardUiStart,
+  commitCardField,
+  receiptDetailLines,
+  resendView,
+  type ApprovalRender,
+  type CardUiState
+} from "../views/approval.js";
+import { creativeDraftLine } from "../views/images.js";
 
 /**
  * The every-launch home inventory shown above the transcript on the empty home
@@ -242,18 +257,23 @@ export interface InkInteractiveSessionAppProps {
   initialInputValue?: string;
   initialInputHistory?: readonly string[];
   initialMessages?: readonly Msg[];
+  /** Write cards already waiting when the session opens (tests draw a card with it). */
+  initialPendingConfirmations?: readonly InSessionConfirmationAction[];
   onRememberInput?: (line: string) => void;
   /**
    * Run one submitted line. `signal` aborts when the user stops the turn (Esc,
    * or Ctrl-C while a turn runs); only honoured when `turnStoppable` is set.
    * `onView` takes each answer view (`tool.view` frame) the turn produces; the
    * finished turn then draws them beside its answer (terminal-r4 layout).
+   * `onCreativeDraft` takes each image-draft frame, drawn as one progress line
+   * per run ("Drawing 3 images · ~25 s"); never a picture or an image URL.
    */
   onSubmitLine(
     line: string,
     onProgress: (event: ChatProgressEvent) => void,
     signal: AbortSignal,
-    onView?: (frame: ToolViewFrameV1) => void
+    onView?: (frame: ToolViewFrameV1) => void,
+    onCreativeDraft?: (frame: CreativeDraftFrameV1) => void
   ): Promise<InkInteractiveLineResult>;
   /**
    * Resolve an in-session write confirmation surfaced by a turn's
@@ -261,8 +281,14 @@ export interface InkInteractiveSessionAppProps {
    * decision (approve or a real decline) and resolves with its raw result,
    * which the session prints as receipt lines (`confirmResultLines`). Only the cloud-brain entry wires this; the LOCAL interactive path
    * never returns `pendingConfirmations`, so it is never invoked there. (Plan 2)
+   * `fields` carries the card's answered fields (a daily budget), sent only to
+   * a Desktop that takes them (`confirmFieldsCapable` on the card).
    */
-  onConfirmAction?(action: InSessionConfirmationAction, decision: "approve" | "decline"): Promise<unknown>;
+  onConfirmAction?(
+    action: InSessionConfirmationAction,
+    decision: "approve" | "decline",
+    fields?: Record<string, ApprovalFieldAnswerV1>
+  ): Promise<unknown>;
   promptPlaceholder?: string;
   requiresConfirmation?: (line: string) => string | undefined;
   requiresSelection?: (line: string) => InkInteractiveSelectionPrompt | undefined;
@@ -404,6 +430,7 @@ export function InkInteractiveSessionApp({
   initialInputValue = "",
   initialInputHistory = [],
   initialMessages = [],
+  initialPendingConfirmations = [],
   onRememberInput,
   onSubmitLine,
   onConfirmAction,
@@ -460,9 +487,12 @@ export function InkInteractiveSessionApp({
   // Stays empty for the LOCAL path (which never surfaces `pendingConfirmations`).
   const [pendingConfirmActions, setPendingConfirmActions] = useState<
     readonly InSessionConfirmationAction[]
-  >([]);
+  >(initialPendingConfirmations);
   // `?` on the head card toggles its explanation (the terminal can't hover).
   const [explainOpen, setExplainOpen] = useState(false);
+  // A head card WITH an approval view keeps its own key state (views/approval.ts):
+  // `?`, the open document, its tab and page, and the field answers so far.
+  const [cardUi, setCardUi] = useState<CardUiState>(CARD_UI_START);
   // The latest finished turn's answer views keep their keys (j/k, 1–9, →, m, ?)
   // until the next line is submitted (views/focus.ts). The views themselves live
   // in the turn store (`turnState.views`), cleared when the turn commits.
@@ -676,9 +706,45 @@ export function InkInteractiveSessionApp({
   );
   // A new head card (from any queue writer) always opens with its explanation
   // closed: the explanation stays behind `?`.
+  // A card brought back opens with the answers it sent; a card whose answer
+  // the app refused opens with the app's words under its field.
   useEffect(() => {
     setExplainOpen(false);
+    setCardUi(cardUiStart(headConfirmAction));
   }, [headConfirmAction]);
+  // The head card drawn from its approval view (an old desktop sends none: the
+  // summary + details card and `y Confirm` stay). Its key context is the one the
+  // keymap resolves with, so the bar and the keys agree by construction.
+  const headCard = useMemo<ApprovalRender | null>(
+    () => headConfirmAction?.view && isPlainRecord(headConfirmAction.view.approval)
+      ? approvalRender(headConfirmAction.view, {
+          width: columns,
+          color: true,
+          theme: t,
+          selected: 0,
+          tab: cardUi.tab,
+          page: cardUi.page,
+          explainOpen: cardUi.explainOpen,
+          showHiddenColumns: false,
+          caps: NO_KEY_CAPS,
+          ui: cardUi,
+          fieldsCapable: headConfirmAction.confirmFieldsCapable === true,
+          ...(headConfirmAction.sentFields ? { sentFields: headConfirmAction.sentFields } : {}),
+          pageRows: rows ? Math.max(4, Math.floor(rows / 3)) : undefined
+        })
+      : null,
+    [cardUi, columns, headConfirmAction, rows, t]
+  );
+  const cardKeyCtx = headCard ? headCard.keyCtx : confirmKeys?.ctx ?? null;
+  // Image drafts in progress this turn, one line per run ("Drawing 3 images ·
+  // ~25 s"), above the card and the composer. Never a picture or a URL.
+  const draftLines = useMemo(
+    () => turnState.drafts.map((draft) => creativeDraftLine(draft, clock)),
+    [clock, turnState.drafts]
+  );
+  // While a card field is being typed, the composer takes the keys (Enter sets
+  // the value, Esc cancels it); the card itself takes none.
+  const cardFieldActive = Boolean(headCard && cardUi.fieldEntry);
   // With no card, the latest turn's views offer their keys while the composer is
   // empty (views/focus.ts: only what works on the focused view). Otherwise the
   // bar is the composer's: `esc stop` while a stoppable turn runs (the only key
@@ -688,11 +754,13 @@ export function InkInteractiveSessionApp({
       && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt
       ? viewKeyHints(viewFocus, turn.focused.facts, turn.focused.render.keys)
       : [];
-    return confirmKeys
-      ? keyBarHints(confirmKeys.ctx)
-      : viewHints.length
-        ? viewHints
-        : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
+    return headCard
+      ? headCard.keys
+      : confirmKeys
+        ? keyBarHints(confirmKeys.ctx)
+        : viewHints.length
+          ? viewHints
+          : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
   };
   // The home inventory shows ONCE, on the empty home screen (no transcript yet)
   // and only when the CLI supplied its data. The first submitted line commits it
@@ -802,7 +870,7 @@ export function InkInteractiveSessionApp({
           // through `progressResult` and gate on it like the branch below.
           appendMessages(stampAgentTitle(progressResult.finalMessages, getAgentTitle?.() ?? turnTitle));
         }
-      }, signal, recordTurnView);
+      }, signal, recordTurnView, recordCreativeDraft);
 
       if (result.exit) {
         requestExit();
@@ -1157,7 +1225,10 @@ export function InkInteractiveSessionApp({
   // is a real "no" that reaches the app's ledger, not a local note. Either way
   // the transcript gets receipt lines (the app's receipt sentence, scrubbed),
   // never JSON; a confirm that throws gets its error lines instead.
-  const resolveConfirmAction = useCallback((decision: "approve" | "decline") => {
+  const resolveConfirmAction = useCallback((
+    decision: "approve" | "decline",
+    fields?: Record<string, ApprovalFieldAnswerV1>
+  ) => {
     const head = pendingConfirmActions[0];
     if (!head) {
       return;
@@ -1165,15 +1236,91 @@ export function InkInteractiveSessionApp({
     setPendingConfirmActions((current) => current.slice(1));
     const appendLines = (lines: readonly ConfirmLine[]) =>
       appendMessages(lines.map((line) => ({ kind: "slash", role: "system", text: line.text }) as Msg));
+    // An answer the app refused before anything ran (`field_invalid`): the card
+    // comes back in front with the app's words, for a corrected value.
+    const refusedField = (outcome: unknown): boolean => {
+      const message = decision === "approve" ? fieldInvalidMessage(outcome) : null;
+      if (message === null) return false;
+      setPendingConfirmActions((current) => requeueConfirmation(current, withoutSent(head, message), "front"));
+      return true;
+    };
+    // Not sure it happened: when the app says a resend is safe (it dedupes) or
+    // nothing ran for certain (the handle is live again), the card comes back
+    // behind the card the user is on, offering OK again (`safe_resend`) or `r`
+    // (`retryable`) with exactly the answers this approve sent. Otherwise a
+    // receipt that is not all done shows its object (a launch's ✓/✗/? items).
+    const afterReceipt = (outcome: unknown) => {
+      const resend = decision === "approve" ? resendView(head.view, outcome) : null;
+      if (resend) {
+        const back: InSessionConfirmationAction = { ...withoutSent(head), view: resend, ...(fields ? { sentFields: fields } : {}) };
+        setPendingConfirmActions((current) => requeueConfirmation(current, back, "behind_head"));
+        return;
+      }
+      const detail = receiptDetailLines(outcome, {
+        width: Math.max(8, columns - 4),
+        color: false,
+        theme: t,
+        selected: 0,
+        tab: 0,
+        page: 0,
+        explainOpen: false,
+        showHiddenColumns: false,
+        caps: NO_KEY_CAPS
+      });
+      if (detail.length) {
+        appendMessages(detail.map((text) => ({ kind: "slash", role: "system", text: `  ${text}` }) as Msg));
+      }
+    };
     void (async () => {
       try {
-        const result = await onConfirmAction?.(head, decision);
+        const result = await onConfirmAction?.(head, decision, fields);
+        if (refusedField(result)) {
+          appendLines(confirmErrorLines(Object.assign(new Error(fieldInvalidMessage(result) ?? ""), { code: "field_invalid" })));
+          return;
+        }
         appendLines(confirmResultLines(result, decision));
+        afterReceipt(result);
       } catch (error) {
         appendLines(confirmErrorLines(error));
+        if (!refusedField(error)) afterReceipt(error);
       }
     })();
-  }, [appendMessages, onConfirmAction, pendingConfirmActions]);
+  }, [appendMessages, columns, onConfirmAction, pendingConfirmActions, t]);
+
+  // One key on the head card, already resolved by the keymap. With an approval
+  // view the card's own step decides (views/approval.ts); an old desktop's card
+  // knows only OK, `n` and `?`.
+  const handleCardAction = useCallback((action: KeyAction) => {
+    if (!headCard) {
+      if (action.type === "ok") {
+        resolveConfirmAction("approve");
+      } else if (action.type === "dismiss") {
+        resolveConfirmAction("decline");
+      } else if (action.type === "explain") {
+        setExplainOpen((open) => !open);
+      }
+      return;
+    }
+    const step = cardKeyStep(action, headCard, cardUi);
+    setCardUi(step.ui);
+    if (step.effect?.type === "confirm") {
+      resolveConfirmAction(step.effect.decision, step.effect.fields);
+    } else if (step.effect?.type === "close") {
+      // A card already answered (not sure it happened): `n` only closes it here.
+      // The app was told once; nothing more is sent.
+      setPendingConfirmActions((current) => current.slice(1));
+      appendMessages([{ kind: "slash", role: "system", text: "Closed — nothing more was sent." }]);
+    }
+  }, [appendMessages, cardUi, headCard, resolveConfirmAction]);
+
+  // Enter while a card field is open sets its value (never approves); a value
+  // that does not fit keeps the field open with a hint.
+  const commitCardFieldValue = useCallback((value: string) => {
+    setCardUi((ui) => commitCardField(ui, value).ui);
+    setInputValue("");
+    setInputCursor(0);
+    setInputSelection(null);
+  }, []);
 
   useEffect(() => {
     // Don't drain a queued line while a /connect wizard is active — its keystrokes
@@ -1201,6 +1348,11 @@ export function InkInteractiveSessionApp({
   }, [busy, pendingConfirmActions, pendingConnectConfirm, pendingFieldPrompt, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
 
   const submitLine = useCallback((rawLine: string) => {
+    if (cardFieldActive) {
+      // The line is the card field's value, not a message (and never history).
+      commitCardFieldValue(rawLine);
+      return;
+    }
     const line = rawLine.trim();
     setInputValue("");
     setInputCursor(0);
@@ -1221,7 +1373,7 @@ export function InkInteractiveSessionApp({
 
     rememberInputLine(line);
     runSubmittedLine(line);
-  }, [busy, queueBusyLine, rememberInputLine, requestExit, runSubmittedLine]);
+  }, [busy, cardFieldActive, commitCardFieldValue, queueBusyLine, rememberInputLine, requestExit, runSubmittedLine]);
 
   // The composer row shows the ACTIVE wizard field's value when a free-text field
   // is being collected: masked (bullets ×length) for secret fields, plain for the
@@ -1272,7 +1424,9 @@ export function InkInteractiveSessionApp({
     + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(composerText || connectPlaceholder, columns, t))
     + liveOverlayRows({
       confirmAction: pendingConfirmActions[0] ?? null,
+      confirmCardRows: headCard ? headCard.lines.length : null,
       confirmExplain: explainOpen ? confirmKeys?.explainText ?? null : null,
+      draftRows: draftLines.length,
       connectConfirm: Boolean(pendingConnectConfirm),
       field: fieldPromptActive && pendingFieldPrompt ? pendingFieldPrompt : null,
       selection: pendingSelection?.prompt ?? null,
@@ -1419,7 +1573,9 @@ export function InkInteractiveSessionApp({
         theme={t}
         width={columns}
       />
+      <CreativeDraftLines lines={draftLines} theme={t} width={columns} />
       <ConfirmActionMenu
+        card={headCard}
         explainText={explainOpen ? confirmKeys?.explainText ?? null : null}
         pending={headConfirmAction}
         theme={t}
@@ -1431,11 +1587,14 @@ export function InkInteractiveSessionApp({
         completionActive={completions.length > 0}
         completionRows={completions.length}
         cursor={inputCursor}
-        confirmActionActive={pendingConfirmActions.length > 0}
-        confirmKeys={confirmKeys?.ctx ?? null}
-        onConfirmActionApprove={() => resolveConfirmAction("approve")}
-        onConfirmActionDecline={() => resolveConfirmAction("decline")}
-        onConfirmActionExplain={() => setExplainOpen((open) => !open)}
+        cardFieldActive={cardFieldActive}
+        confirmActionActive={pendingConfirmActions.length > 0 && !cardFieldActive}
+        confirmKeys={cardKeyCtx}
+        onCardFieldCancel={() => setCardUi((ui) => cancelCardField(ui))}
+        onConfirmActionApprove={() => handleCardAction({ type: "ok" })}
+        onConfirmActionDecline={() => handleCardAction({ type: "dismiss" })}
+        onConfirmActionExplain={() => handleCardAction({ type: "explain" })}
+        onConfirmCardKey={handleCardAction}
         connectConfirmActive={Boolean(pendingConnectConfirm)}
         fieldPromptActive={fieldPromptActive}
         fieldChoiceActive={Boolean(currentConnectField?.choices)}
@@ -2304,9 +2463,12 @@ function InkLineInput({
   fieldPromptActive,
   livePaging,
   onChange,
+  cardFieldActive = false,
+  onCardFieldCancel,
   onConfirmActionApprove,
   onConfirmActionDecline,
   onConfirmActionExplain,
+  onConfirmCardKey,
   onChoiceCommit,
   onChoiceNext,
   onChoicePrevious,
@@ -2353,9 +2515,14 @@ function InkLineInput({
   /** Whether the live latest turn has hidden lines below / above (T4 paging). */
   livePaging: { next: boolean; previous: boolean };
   onChange(state: ComposerEditState): void;
+  /** A card field is being typed: the composer takes the keys, Enter sets it, Esc cancels it. */
+  cardFieldActive?: boolean;
+  onCardFieldCancel?(): void;
   onConfirmActionApprove(): void;
   onConfirmActionDecline(): void;
   onConfirmActionExplain(): void;
+  /** Any other card key the keymap resolved (v, 1–9, space, r, e, c); never approves or declines. */
+  onConfirmCardKey?(action: KeyAction): void;
   onChoiceCommit(): void;
   onChoiceNext(): void;
   onChoicePrevious(): void;
@@ -2420,6 +2587,12 @@ function InkLineInput({
       turnAbort.stop("esc");
       return;
     }
+    // Esc in a card's field closes the field (the card stays; nothing is sent).
+    // Enter sets the field through `onSubmit`; every other key types.
+    if (cardFieldActive && key.escape) {
+      onCardFieldCancel?.();
+      return;
+    }
     // Field-collection loop: every printable keystroke is routed to the wizard's
     // transient buffer (NEVER `inputValue`/the composer/submit), so a secret never
     // flows through any echoed/persisted path. Choice fields (the PostHog region
@@ -2481,6 +2654,7 @@ function InkLineInput({
       !busy &&
       value.length === 0 &&
       !confirmActionActive &&
+      !cardFieldActive &&
       !selectionActive &&
       !pendingConfirmation &&
       onViewKey(input, key)
@@ -2492,7 +2666,7 @@ function InkLineInput({
     // stays readable while its card waits; a paging key never approves or declines
     // anything, and space stays with an open card or picker (T7/T11 bind it there).
     const page = livePageKey(input, key, {
-      composerEmpty: value.length === 0 && !confirmActionActive && !selectionActive && !pendingConfirmation,
+      composerEmpty: value.length === 0 && !confirmActionActive && !cardFieldActive && !selectionActive && !pendingConfirmation,
       canPageNext: livePaging.next,
       canPagePrevious: livePaging.previous
     });
@@ -2515,6 +2689,8 @@ function InkLineInput({
         onConfirmActionDecline();
       } else if (action.type === "explain") {
         onConfirmActionExplain();
+      } else if (action.type !== "none") {
+        onConfirmCardKey?.(action);
       }
       return;
     }
@@ -2805,11 +2981,14 @@ function ConnectConfirmMenu({
 // the readline card's `renderConfirmationCard`), then the `?` explanation when it
 // is open. The keys (named OK key, `n dismiss`, `?`) live in the `KeyBar` below.
 function ConfirmActionMenu({
+  card,
   explainText,
   pending,
   theme,
   width
 }: {
+  /** The card drawn from its approval view (views/approval.ts), else null (an old desktop). */
+  card: ApprovalRender | null;
   /** The scrubbed `?` text when the explanation is open, else null. */
   explainText: string | null;
   pending: InSessionConfirmationAction | null;
@@ -2818,6 +2997,16 @@ function ConfirmActionMenu({
 }) {
   if (!pending) {
     return null;
+  }
+  if (card) {
+    // Every line is already scrubbed, coloured and laid out to `width`.
+    return (
+      <Box flexDirection="column" width={width}>
+        {card.lines.map((line, index) => (
+          <Text key={`card-${index}`} wrap="truncate-end">{line}</Text>
+        ))}
+      </Box>
+    );
   }
   return (
     <Box flexDirection="column" width={width}>
@@ -2834,6 +3023,38 @@ function ConfirmActionMenu({
       ) : null}
     </Box>
   );
+}
+
+// Image drafts in progress (`creative.draft`), one line per run. Text only.
+function CreativeDraftLines({ lines, theme, width }: { lines: readonly string[]; theme: Theme; width: number }) {
+  if (!lines.length) {
+    return null;
+  }
+  return (
+    <Box flexDirection="column" width={width}>
+      {lines.map((line, index) => (
+        <Text color={line.startsWith("✗") ? theme.color.error : theme.color.primary} key={`draft-${index}`} wrap="truncate-end">
+          {truncateCells(line, width)}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+/** The app's words when it refused a card's answer before anything ran (`field_invalid`). */
+function fieldInvalidMessage(outcome: unknown): string | null {
+  if (!isPlainRecord(outcome) || outcome.code !== "field_invalid") return null;
+  return typeof outcome.message === "string" ? outcome.message : "";
+}
+
+/** A queue entry with no carried answers; with `fieldError`, the app's words for the field. */
+function withoutSent(entry: InSessionConfirmationAction, fieldError?: string): InSessionConfirmationAction {
+  const { sentFields: _sent, fieldError: _error, ...rest } = entry;
+  return { ...rest, ...(fieldError ? { fieldError } : {}) };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function CompletionMenu({
@@ -2890,16 +3111,22 @@ function composerRowsFor(text: string, columns: number, theme: Theme): number {
  */
 function liveOverlayRows({
   confirmAction,
+  confirmCardRows,
   confirmExplain,
   connectConfirm,
+  draftRows,
   field,
   selection,
   width
 }: {
   confirmAction: InSessionConfirmationAction | null;
+  /** Rows of a card drawn from its approval view (head + frame), else null. */
+  confirmCardRows: number | null;
   /** The open `?` explanation under the write card, else null. */
   confirmExplain: string | null;
   connectConfirm: boolean;
+  /** Image-draft progress lines. */
+  draftRows: number;
   field: { descriptor: ConnectSetupDescriptor; index: number } | null;
   selection: InkInteractiveSelectionPrompt | null;
   width: number;
@@ -2918,7 +3145,10 @@ function liveOverlayRows({
   if (connectConfirm) {
     rows += 3;
   }
-  if (confirmAction) {
+  rows += draftRows;
+  if (confirmAction && confirmCardRows !== null) {
+    rows += confirmCardRows;
+  } else if (confirmAction) {
     // Summary + details; the key hints moved to the KeyBar (counted by the caller).
     rows += 1 + confirmAction.confirmationDetails.length;
     if (confirmExplain) {

@@ -218,7 +218,7 @@ describe("the session wires the live cap (CI-run)", () => {
   it("space pages only from the composer; a card or picker keeps the key", () => {
     const call = sessionSource.slice(sessionSource.indexOf("livePageKey(input, key, {"));
     expect(call.slice(0, call.indexOf("});"))).toMatch(
-      /composerEmpty: value\.length === 0 && !confirmActionActive && !selectionActive && !pendingConfirmation/
+      /composerEmpty: value\.length === 0 && !confirmActionActive && !cardFieldActive && !selectionActive && !pendingConfirmation/
     );
   });
 

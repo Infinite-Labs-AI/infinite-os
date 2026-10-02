@@ -4,8 +4,10 @@ import {
   askConfirmDecision,
   confirmErrorLines,
   confirmResultLines,
+  askDismissOnly,
   leftForLaterLine,
-  readConfirmAnswer
+  readConfirmAnswer,
+  receiptNextAsk
 } from "./confirm-result-lines.js";
 
 // Synthetic data only: infinite-os is public.
@@ -74,6 +76,27 @@ describe("confirmResultLines", () => {
     expect(confirmResultLines(undefined, "approve")).toEqual([{ tone: "ok", text: "✓ Done" }]);
     expect(confirmResultLines(undefined, "decline")).toEqual([{ tone: "muted", text: "✕ Dismissed — nothing was executed." }]);
   });
+
+  it("outcome_unknown prints its reconcile step, never retry words", () => {
+    const view = {
+      ...receiptView("outcome_unknown", "Not sure it happened", "warn"),
+      outcome: "unknown",
+      retry: "check_first",
+      reconcile: { label: "Check first\u001b[2J", ask: "did the pause of Hook B land?" }
+    };
+    const lines = confirmResultLines({ ok: false, view }, "approve");
+    expect(lines).toEqual([
+      { tone: "warn", text: "? Not sure it happened" },
+      { tone: "warn", text: "→ Check first" }
+    ]);
+    const words = lines.map((line) => line.text).join("\n");
+    expect(words).not.toMatch(/retry|try again/iu);
+    // The thrown path (a failed resolution carries the view) prints the same step.
+    expect(confirmErrorLines(Object.assign(new Error("x"), { code: "dispatch_uncertain", view }))).toEqual(lines);
+    expect(receiptNextAsk({ ok: false, view })).toBe("did the pause of Hook B land?");
+    expect(receiptNextAsk({ ok: true, view: receiptView("done", "Paused") })).toBeNull();
+    expect(receiptNextAsk(undefined)).toBeNull();
+  });
 });
 
 describe("confirmErrorLines", () => {
@@ -141,6 +164,14 @@ describe("confirmErrorLines", () => {
 });
 
 describe("typed answers (readline and one-shot)", () => {
+  it("a card that needs a typed value can only be dismissed: y never approves", async () => {
+    expect(await askDismissOnly(async () => "n", "q")).toBe("decline");
+    expect(await askDismissOnly(async () => "NO ", "q")).toBe("decline");
+    expect(await askDismissOnly(async () => "y", "q")).toBe("pending");
+    expect(await askDismissOnly(async () => "yes", "q")).toBe("pending");
+    expect(await askDismissOnly(async () => "", "q")).toBe("pending");
+  });
+
   it.each([["y", "approve"], ["Y", "approve"], ["yes", "approve"], [" YES ", "approve"],
     ["n", "decline"], ["N", "decline"], ["no", "decline"], ["No ", "decline"],
     ["", null], ["ok", null], ["nah", null], ["yep", null]] as const)("%j → %s", (answer, decision) =>

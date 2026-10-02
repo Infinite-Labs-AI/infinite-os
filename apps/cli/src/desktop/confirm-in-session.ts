@@ -34,6 +34,7 @@ import type { AnswerViewV1, ApprovalFieldAnswerV1 } from "@infinite-os/types";
 
 import {
   askConfirmDecision,
+  askDismissOnly,
   confirmErrorLines,
   confirmResultLines,
   leftForLaterLine,
@@ -67,6 +68,34 @@ export interface InSessionConfirmationAction {
    * NOT redacted or scrubbed here: renderers scrub every one before printing.
    */
   view?: AnswerViewV1;
+  /**
+   * The Desktop that minted this card takes field answers (`confirm.fields.v1`).
+   * False or absent: a card with a required field can only be dismissed here.
+   */
+  confirmFieldsCapable?: boolean;
+  /**
+   * A card brought back after an approve the app is not sure of: the answers
+   * that approve sent. OK again (`safe_resend`) and `r` (`retryable`) re-send
+   * exactly these, so the app's dedupe sees the same answer.
+   */
+  sentFields?: Record<string, ApprovalFieldAnswerV1>;
+  /** A card put back after the app refused its answer (`field_invalid`): the app's words. */
+  fieldError?: string;
+}
+
+/**
+ * A card coming back to the queue. A card brought back after an unsure
+ * approve goes behind the card the user is on now (`behind_head`), so that
+ * card and its key state stay put; a card whose answer the app refused goes
+ * in front, to fix it now.
+ */
+export function requeueConfirmation(
+  queue: readonly InSessionConfirmationAction[],
+  entry: InSessionConfirmationAction,
+  place: "front" | "behind_head"
+): InSessionConfirmationAction[] {
+  if (place === "front" || queue.length === 0) return [entry, ...queue];
+  return [queue[0]!, entry, ...queue.slice(1)];
 }
 
 /** The TTY seam: readiness flags, a line prompt, and a transcript writer. */
@@ -110,6 +139,19 @@ export async function handleInSessionConfirmation(
     return;
   }
 
+  // A card that needs a typed value (a daily budget) cannot be answered on this
+  // line prompt: it is never approved here, only dismissed or left.
+  if (needsTypedField(action.view)) {
+    io.write(`${typedFieldLine(action.view)}\n`);
+    const answer = await askDismissOnly((question) => io.prompt(question), DISMISS_ONLY_QUESTION);
+    if (answer === "pending") {
+      io.write(`${leftForLaterLine(action.view?.approval?.expiresAt)}\n`);
+      return;
+    }
+    await sendDecision(action, "decline", io, client, signal);
+    return;
+  }
+
   const promptSummary = boundedTerminalText(
     action.summary,
     MAX_CONFIRMATION_VALUE_CHARS,
@@ -124,6 +166,33 @@ export async function handleInSessionConfirmation(
     return;
   }
 
+  await sendDecision(action, decision, io, client, signal);
+}
+
+/** The words a line prompt asks with on a card it can only dismiss. */
+export const DISMISS_ONLY_QUESTION = "Type n to dismiss, or press Enter to leave it: ";
+const TYPED_FIELD_WORDS = "Answer this in the Infinite app or the chat session";
+
+/** The card asks for a value (a required field) that a y/n prompt cannot send. */
+export function needsTypedField(view: AnswerViewV1 | undefined): boolean {
+  const fields: unknown = view?.approval?.fields;
+  return Array.isArray(fields) && fields.some((field) =>
+    typeof field === "object" && field !== null && (field as { required?: unknown }).required === true);
+}
+
+/** Where to answer a card that needs a typed value: the app's finishInApp words, else ours. */
+export function typedFieldLine(view: AnswerViewV1 | undefined): string {
+  const words = view?.approval?.finishInApp?.words;
+  return (typeof words === "string" ? boundedTerminalText(words, MAX_CONFIRMATION_VALUE_CHARS) : "") || TYPED_FIELD_WORDS;
+}
+
+async function sendDecision(
+  action: InSessionConfirmationAction,
+  decision: "approve" | "decline",
+  io: InSessionConfirmationIo,
+  client: InSessionConfirmationClient,
+  signal?: AbortSignal
+): Promise<void> {
   let lines: ConfirmLine[];
   try {
     const result = await client.confirm({

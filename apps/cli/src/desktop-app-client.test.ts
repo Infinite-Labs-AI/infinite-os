@@ -2215,7 +2215,7 @@ describe("infinite app command", () => {
 
   describe("typed answers on the one-shot prompt", () => {
     const expiresAt = new Date(2026, 9, 1, 16, 45).toISOString();
-    function oneShotFetch(confirmBodies: unknown[]) {
+    function oneShotFetch(confirmBodies: unknown[], approvalExtra: Record<string, unknown> = {}) {
       return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
         if (url.endsWith("/v1/status")) return jsonResponse(status());
@@ -2243,7 +2243,7 @@ describe("infinite app command", () => {
                     v: 1, kind: "change", tool: "pause_ad", title: "Pause", state: "needs_yes", asOf: null,
                     scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
                     approval: { kind: "card", title: "Pause", summary: null, confirmLabel: "Pause",
-                      dismissLabel: "Dismiss", rows: [], expiresAt },
+                      dismissLabel: "Dismiss", rows: [], expiresAt, ...approvalExtra },
                     body: { target: { kind: "ad", label: "Ad 01" }, rows: [], warnings: [] }
                   }
                 }
@@ -2254,14 +2254,14 @@ describe("infinite app command", () => {
       }) as typeof fetch;
     }
 
-    async function runWithAnswers(answers: string[]) {
+    async function runWithAnswers(answers: string[], approvalExtra: Record<string, unknown> = {}) {
       const fixture = createBridgeHome();
       roots.push(fixture.root);
       const confirmBodies: unknown[] = [];
       const stdout: string[] = [];
       const asked: string[] = [];
       await runDesktopAppCommand(["pause", "it"], fixture.env, {
-        fetchImpl: oneShotFetch(confirmBodies),
+        fetchImpl: oneShotFetch(confirmBodies, approvalExtra),
         randomId: () => "request-1",
         promptAnswer: async (question) => {
           asked.push(question);
@@ -2300,6 +2300,19 @@ describe("infinite app command", () => {
       const run = await runWithAnswers(["", "n"]);
       expect(run.confirmBodies).toEqual([expect.objectContaining({ decision: "decline" })]);
       expect(run.stdout).toContain("✕ Dismissed — nothing was executed.\n");
+    });
+
+    it("a card with a required field is never approved here: y sends nothing, n declines", async () => {
+      const fields = [{ key: "adSetBudget", label: "Daily budget", input: "money_per_day", required: true, currency: "USD", current: "40" }];
+      const yes = await runWithAnswers(["y"], { fields });
+      expect(yes.confirmBodies).toEqual([]);
+      expect(yes.stdout).toContain("Answer this in the Infinite app or the chat session");
+      expect(yes.asked.join("")).not.toContain("[y/n]");
+      const no = await runWithAnswers(["n"], { fields });
+      expect(no.confirmBodies).toEqual([expect.objectContaining({ decision: "decline" })]);
+      // An optional field does not block a plain yes.
+      const optional = await runWithAnswers(["y"], { fields: [{ ...fields[0], required: false }] });
+      expect(optional.confirmBodies).toEqual([expect.objectContaining({ decision: "approve" })]);
     });
   });
 

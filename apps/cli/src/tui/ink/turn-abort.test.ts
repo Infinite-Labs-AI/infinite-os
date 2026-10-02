@@ -121,7 +121,7 @@ describe("turn abort wiring (structural, CI-run)", () => {
     expect(callStart).toBeGreaterThan(-1);
     const callEnd = session.indexOf("if (result.exit)", callStart);
     expect(callEnd).toBeGreaterThan(callStart);
-    expect(session.slice(callStart, callEnd).trimEnd()).toMatch(/\}, signal, recordTurnView\);$/);
+    expect(session.slice(callStart, callEnd).trimEnd()).toMatch(/\}, signal, recordTurnView, recordCreativeDraft\);$/);
     expect(session).toContain("turnStoppedLine(signal.aborted ? signal.reason : error)");
     expect(session).toContain("turnAbort.end(signal);");
     expect(session).toContain('"esc to stop"');

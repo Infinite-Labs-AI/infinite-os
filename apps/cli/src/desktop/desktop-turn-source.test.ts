@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
-import type { ToolViewFrameV1 } from "@infinite-os/types";
+import type { CreativeDraftFrameV1, ToolViewFrameV1 } from "@infinite-os/types";
 import {
   bridgeFrameToChatEvent,
   createDesktopTurnSource,
@@ -310,6 +310,97 @@ describe("createDesktopTurnSource", () => {
     ]);
   });
 
+  it("routes a creative.draft frame to onCreativeDraft, allowlisted, never as a ChatProgressEvent", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "progress",
+          data: {
+            type: "creative.draft",
+            runId: "run_1",
+            status: "running",
+            count: 3,
+            format: "png",
+            aspectRatio: "4:5",
+            quality: "high",
+            pending: [{ startedAtMs: 1000, etaMs: 25000, imageUrl: "https://cdn.example.com/a.png" }],
+            brief: "a private brief",
+            images: [{ url: "https://cdn.example.com/b.png" }],
+            estimatedPerImageUsd: 0.17
+          }
+        },
+        { kind: "done", message: "Drawing.", data: { turnId: "turn-7" }, actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const drafts: CreativeDraftFrameV1[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "make 3",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal,
+      undefined,
+      undefined,
+      (frame) => drafts.push(frame)
+    );
+    expect(drafts).toEqual([{
+      type: "creative.draft",
+      runId: "run_1",
+      status: "running",
+      count: 3,
+      format: "png",
+      aspectRatio: "4:5",
+      quality: "high",
+      pending: [{ startedAtMs: 1000, etaMs: 25000 }],
+      estimatedPerImageUsd: 0.17
+    }]);
+    expect(JSON.stringify(drafts)).not.toMatch(/http|brief/u);
+    expect(events.map((e) => (e as { type?: string }).type)).toEqual(["message.complete"]);
+  });
+
+  it("drops a creative.draft frame that does not decode, and one with no listener, without failing the turn", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        { kind: "progress", data: { type: "creative.draft", status: "running", count: 3 } },
+        { kind: "progress", data: { type: "creative.draft", runId: "r", status: "painting", count: 3 } },
+        { kind: "done", message: "ok", data: { turnId: "turn-8" }, actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const drafts: CreativeDraftFrameV1[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "make 3", undefined, (e) => events.push(e), new AbortController().signal, undefined, undefined,
+      (frame) => drafts.push(frame)
+    );
+    expect(drafts).toEqual([]);
+    expect(events.map((e) => (e as { type?: string }).type)).toEqual(["message.complete"]);
+    const quiet = fakeClient({
+      sessionCapable: true,
+      frames: [
+        { kind: "progress", data: { type: "creative.draft", runId: "r", status: "done", count: 1, format: "png", aspectRatio: "1:1", quality: "high" } },
+        { kind: "done", message: "ok", data: { turnId: "turn-9" }, actionCalls: [] }
+      ]
+    });
+    const quietEvents: ChatProgressEvent[] = [];
+    await createDesktopTurnSource(quiet).runTurn("x", undefined, (e) => quietEvents.push(e), new AbortController().signal);
+    expect(quietEvents.map((e) => (e as { type?: string }).type)).toEqual(["message.complete"]);
+  });
+
+  it("stamps each pending card with whether the desktop takes fields", async () => {
+    const frames: BridgeFrame[] = [{
+      kind: "done", message: "ok", data: { turnId: "turn-10" },
+      actionCalls: [{ status: "requires_confirmation", confirmationHandle: "h1", actionId: "set_budget", summary: "Set budget" }]
+    }];
+    const capable = { ...fakeClient({ sessionCapable: true, frames }), confirmFieldsCapable: true };
+    const old = fakeClient({ sessionCapable: true, frames });
+    const a = await createDesktopTurnSource(capable).runTurn("x", undefined, () => {}, new AbortController().signal);
+    const b = await createDesktopTurnSource(old).runTurn("x", undefined, () => {}, new AbortController().signal);
+    expect(a.pendingConfirmations![0]!.confirmFieldsCapable).toBe(true);
+    expect(b.pendingConfirmations![0]!.confirmFieldsCapable).toBe(false);
+  });
+
   it("a throwing onView drops the view and the turn still resolves with its answer and pending cards", async () => {
     const client = fakeClient({
       sessionCapable: true,
@@ -477,6 +568,9 @@ describe("bridgeFrameToChatEvent", () => {
         kind: "progress",
         data: { type: "tool.view", viewId: "v", name: "n", view: approvalView() }
       })
+    ).toBeNull();
+    expect(
+      bridgeFrameToChatEvent({ kind: "progress", data: { type: "creative.draft", runId: "r" } })
     ).toBeNull();
     expect(
       bridgeFrameToChatEvent({ kind: "progress", data: { type: "tool.view" } })

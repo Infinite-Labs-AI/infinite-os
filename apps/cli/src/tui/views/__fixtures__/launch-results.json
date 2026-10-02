@@ -1,0 +1,46 @@
+{
+  "v": 1,
+  "kind": "launch",
+  "tool": "propose_launch_ads",
+  "title": "Launch 3 ads",
+  "state": "partial",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "picturesInApp": true,
+    "results": [
+      {
+        "name": "Hook A",
+        "level": "ad",
+        "id": "ad_1",
+        "status": "done"
+      },
+      {
+        "name": "Hook B",
+        "level": "ad",
+        "status": "failed",
+        "error": "Rejected by review"
+      },
+      {
+        "name": "Hook C",
+        "level": "ad",
+        "status": "unknown"
+      }
+    ],
+    "counts": {
+      "done": 1,
+      "failed": 1,
+      "unknown": 1
+    }
+  },
+  "outcome": "partial",
+  "retry": "check_first",
+  "reconcile": {
+    "label": "Check what landed",
+    "ask": "check which of the 3 ads landed"
+  }
+}
