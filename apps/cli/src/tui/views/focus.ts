@@ -194,7 +194,8 @@ export function focusedViewCtx(
     page: state.page,
     explainOpen: state.explainOpen,
     showHiddenColumns: state.showHiddenColumns,
-    caps: state.caps
+    caps: state.caps,
+    engaged: state.engaged && state.focus !== "composer"
   };
 }
 

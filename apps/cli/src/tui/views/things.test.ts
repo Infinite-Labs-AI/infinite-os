@@ -13,7 +13,7 @@ import { DEFAULT_COMPOSER_ROWS, DEFAULT_KEY_BAR_ROWS, liveBodyRows } from "../in
 import type { Msg } from "../types.js";
 import { clipboardSequence, copyTargets } from "./clipboard.js";
 import { documentPageLines } from "./document.js";
-import { resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints, type ViewFocusState } from "./focus.js";
+import { focusedViewCtx, resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints, type ViewFocusState } from "./focus.js";
 import { renderLiveTurn } from "./layout.js";
 import { hasKindRenderer, renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
@@ -326,15 +326,20 @@ describe("document", () => {
 });
 
 describe("link", () => {
-  it("the minted URL renders on one line with `c copy`", () => {
-    const render = draw(fixture("link-minted"));
+  it("the minted URL renders on one line, with `c copy` beside it once the view is engaged", () => {
+    const fresh = draw(fixture("link-minted"));
+    const bare = fresh.detail.find((l) => l.includes("https://go.example.com/abc1"))!;
+    // Unengaged, `c` types (the first letter of a message), so the body offers no `c`.
+    expect(bare).not.toContain("c copy");
+    expect(fresh.copyText).toBe("https://go.example.com/abc1");
+    const render = draw(fixture("link-minted"), { engaged: true });
     const line = render.detail.find((l) => l.includes("https://go.example.com/abc1"))!;
     expect(line).toMatch(/https:\/\/go\.example\.com\/abc1\s+c copy$/u);
     expect(render.copyText).toBe("https://go.example.com/abc1");
     expect(text(render)).toMatch(/source\s+forum/u);
     expect(text(render)).toMatch(/to\s+https:\/\/example\.com\/landing/u);
     // Too narrow for both: the URL is cut, the copy key stays on the line, and c copies it whole.
-    const narrow = draw(fixture("link-minted"), { width: 30 });
+    const narrow = draw(fixture("link-minted"), { width: 30, engaged: true });
     const cut = narrow.detail.find((l) => l.includes("c copy"))!;
     expect(cut.length).toBeLessThanOrEqual(30);
     expect(cut).toContain("…");
@@ -354,6 +359,9 @@ describe("link", () => {
     expect(resolveViewKey("c", s0).handled).toBe(false);
     const engaged = resolveViewKey("", s0, { tab: true });
     expect(viewKeyHints(engaged)).toContainEqual({ key: "c", label: "copy" });
+    // The body's `c copy` follows the same rule as the key (focusedViewCtx carries it).
+    expect(focusedViewCtx(s0, { width: 80, color: false, theme }).engaged).toBe(false);
+    expect(focusedViewCtx(engaged, { width: 80, color: false, theme }).engaged).toBe(true);
     expect(resolveViewKey("c", engaged).effect).toEqual({ type: "copy", text: "https://go.example.com/abc1" });
   });
 

@@ -28,6 +28,12 @@ export interface ViewRenderCtx {
   /** IANA zone for times (`asOf`); the system zone when absent. Tests pin it. */
   timeZone?: string;
   /**
+   * The user has engaged the focused view (tab, or a view key that acted):
+   * only then do `m`, Enter and `c` act, so only then does a body offer them
+   * (`c copy`). Absent = not engaged (the transcript takes no keys).
+   */
+  engaged?: boolean;
+  /**
    * The most rows this view may take, when known: a document pages by width ×
    * rows. `renderLiveTurn` starts from the live region's budget and lowers it
    * until the whole turn fits.

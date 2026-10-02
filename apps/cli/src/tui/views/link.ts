@@ -1,6 +1,6 @@
 // The link view (terminal-r4 "Link"): a minted link is ONE line with `c copy`
-// beside it (a URL too long for the pane is cut on screen; `c` copies it
-// whole), then where it goes, its tags and its channel. Warnings print in
+// beside it once the view is engaged (a URL too long for the pane is cut on
+// screen; `c` copies it whole), then where it goes, its tags and its channel. Warnings print in
 // amber. An app place prints `↗ label`, with `(o)` only when the session can
 // open the app; a local file prints its name and path (and `c` copies the
 // path). A link not minted yet prints its address muted, with nothing to copy.
@@ -90,10 +90,17 @@ export const renderLink: KindRenderer<"link"> = (view, ctx) => {
   return copyText ? { ...render, copyText } : render;
 };
 
-/** `<text>  c copy` on one line: the text is cut to make room, never wrapped. */
+/**
+ * `<text>  c copy` on one line: the text is cut to make room, never wrapped.
+ * `c copy` shows only while the view is engaged (before that `c` types the
+ * first letter of a message), so the body never offers a key that types.
+ */
 function copyLine(text: string, ctx: ViewRenderCtx): string {
   const width = Math.max(1, Math.floor(ctx.width));
   const room = width - displayWidth(COPY_HINT) - 2;
+  if (ctx.engaged !== true) {
+    return paint(fitLine(text, width), "primary", ctx, { bold: true });
+  }
   if (room < 4) {
     return paint(fitLine(text, width), "primary", ctx);
   }
