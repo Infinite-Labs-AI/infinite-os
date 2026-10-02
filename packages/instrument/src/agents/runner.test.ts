@@ -11,7 +11,7 @@ import { agentArgvViolations, type RunJobsInput } from "../wizard/contracts/agen
 import type { AgentQuestion, Claim } from "../wizard/contracts/jobs.js"
 import { FenceTamperError } from "./fence.js"
 import { runScratchDir } from "./paths.js"
-import { reviewInDetachedWorktree, WORKER_KICKOFF, WORKER_RESUME_KICKOFF, type AgentRunResultWithExtras } from "./runner.js"
+import { reviewInDetachedWorktree, SYSTEM_PROMPT_HEADER, WORKER_KICKOFF, WORKER_RESUME_KICKOFF, type AgentRunResultWithExtras } from "./runner.js"
 import { assertReviewWorktree } from "./worktree-guard.js"
 
 beforeAll(() => assertBuilt())
@@ -101,7 +101,7 @@ describe("runJobs with Claude (fake)", () => {
     expect(run.env!.ANTHROPIC_BASE_URL).toBe("https://proxy.example")
     expect(run.env!.ENABLE_TOOL_SEARCH).toBe("false")
     expect(run.stdin).toBe(WORKER_KICKOFF)
-    expect(run.argv![run.argv!.indexOf("--append-system-prompt") + 1]).toBe("BRIEF: do the jobs")
+    expect(run.argv![run.argv!.indexOf("--append-system-prompt") + 1]).toBe(`${SYSTEM_PROMPT_HEADER}\n\nBRIEF: do the jobs`)
     expect(agentArgvViolations("claude_code", run.argv!)).toEqual([])
     // The token-bearing tag.mcp.json was 0600 in a 0700 dir under $HOME (never /tmp), and is gone once the turn ends.
     const config = records(fakes).find((entry) => entry.kind === "mcp-config")!

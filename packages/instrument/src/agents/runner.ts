@@ -78,6 +78,8 @@ export const WORKER_KICKOFF =
   "Do the jobs in your instructions. Start with job_list. Claim each job with job_claim when you think it is done, blocked or not needed; your claim is not the result, the wizard checks. Finish with the JSON your output schema asks for."
 export const WORKER_RESUME_KICKOFF =
   "Continue. The wizard ran its own checks; its notes and any answers from the user are at the end of your instructions. Fix what failed, then claim again with job_claim and finish with the JSON your output schema asks for."
+/** The first line of every Claude system prompt: the value after `--append-system-prompt` never starts with "-". */
+export const SYSTEM_PROMPT_HEADER = "Infinite tag wizard: your instructions for this run."
 export const REVIEWER_KICKOFF =
   "Review the pull request checked out in this folder against your checklist (R1 to R16). Read only. Answer only with the JSON your output schema asks for."
 
@@ -351,7 +353,7 @@ export class AgentRunnerImpl implements AgentRunner {
       const argv = buildClaudeWorkerArgv({
         sensitive,
         mcpConfigPath,
-        systemPrompt: input.brief,
+        systemPrompt: `${SYSTEM_PROMPT_HEADER}\n\n${input.brief}`,
         claimsSchema: JSON.stringify(CLAIMS_SCHEMA),
         maxTurns: input.budget.maxTurns,
         session: resume ? { mode: "resume", sessionId: resume } : { mode: "new", sessionId: state.sessionId },
@@ -539,7 +541,7 @@ export class AgentRunnerImpl implements AgentRunner {
     if (input.reviewer === "claude_code") {
       const argv = buildClaudeReviewerArgv({
         sensitive,
-        systemPrompt: input.brief,
+        systemPrompt: `${SYSTEM_PROMPT_HEADER}\n\n${input.brief}`,
         reviewSchema: JSON.stringify(REVIEW_SCHEMA),
         maxTurns: AGENT_LIMITS.reviewer.claudeMaxTurns,
         model
