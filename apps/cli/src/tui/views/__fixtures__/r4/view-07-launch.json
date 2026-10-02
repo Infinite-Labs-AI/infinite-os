@@ -1,0 +1,141 @@
+{
+  "screen": "view-07-launch",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "launch the 3 creatives into broad",
+    "answer": "Ready. All 3 land paused; nothing spends until you turn them on.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "launch",
+        "tool": "propose_launch_ads",
+        "title": "Launch 3 ads",
+        "state": "needs_yes",
+        "asOf": null,
+        "provenance": {
+          "source": "Meta · launch",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "meta_ads",
+          "label": "previews",
+          "params": {
+            "adset": "adset_broad"
+          }
+        },
+        "body": {
+          "tree": [
+            {
+              "level": "campaign",
+              "name": "Infinite trials",
+              "fields": [],
+              "status": "existing",
+              "children": [
+                {
+                  "level": "adset",
+                  "name": "Broad · US · 25–54",
+                  "fields": [],
+                  "status": "existing",
+                  "children": [
+                    {
+                      "level": "ad",
+                      "name": "Explained",
+                      "fields": [],
+                      "status": "new",
+                      "children": []
+                    },
+                    {
+                      "level": "ad",
+                      "name": "Your audit",
+                      "fields": [],
+                      "status": "new",
+                      "children": []
+                    },
+                    {
+                      "level": "ad",
+                      "name": "3 fixes",
+                      "fields": [],
+                      "status": "new",
+                      "children": []
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "picturesInApp": true
+        },
+        "approval": {
+          "kind": "card",
+          "turnId": "turn_r4",
+          "handle": "h_launch",
+          "title": "Launch 3 ads into “Broad · US · 25–54”?",
+          "summary": "Creates 3 paused ads in this ad set.",
+          "confirmLabel": "Launch 3 ads",
+          "dismissLabel": "Dismiss",
+          "effect": "Lands PAUSED on Meta — nothing spends until you activate it.",
+          "rows": [
+            {
+              "label": "Ad set",
+              "value": "Broad · US · 25–54"
+            }
+          ],
+          "expiresAt": "2026-10-01T10:59:00Z"
+        }
+      }
+    ],
+    "pending": 0,
+    "steps": [
+      {
+        "label": "checking the ad set",
+        "start": 0,
+        "end": 0.3,
+        "result": "Broad · US",
+        "status": "ok"
+      },
+      {
+        "label": "waiting for your OK",
+        "start": 0.3,
+        "end": 0.4,
+        "result": "3 ads",
+        "status": "wait"
+      }
+    ]
+  },
+  "gaps": [
+    "\"↗ See the Facebook previews in the app  (o)\" comes from picturesInApp + appLink."
+  ]
+}

@@ -1,0 +1,140 @@
+{
+  "screen": "flow-email-02-viewing-the-email",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "send the win-back email",
+    "answer": "Here is the first of 3 emails.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "launch",
+        "tool": "send_email_campaign",
+        "title": "Send win-back email",
+        "state": "needs_yes",
+        "asOf": null,
+        "provenance": {
+          "source": "Email · win-back",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "body": {
+          "audience": {
+            "count": 214,
+            "basis": "re-counted now",
+            "excluded": [
+              {
+                "reason": "left out",
+                "count": 9
+              }
+            ],
+            "fromLine": "Robin · Infinite"
+          },
+          "documents": [
+            {
+              "id": "e1",
+              "slot": "Email 1",
+              "subject": "Your trial ended. Here's what Infinite found",
+              "bodyText": "Hi {first name},\n\nBefore your trial ended, Infinite found 3 ads spending with no trials, and one that beat your goal by 40%.\n\nPick up where you left off: store.example/back"
+            },
+            {
+              "id": "e2",
+              "slot": "Email 2",
+              "subject": "Still here",
+              "bodyText": "The second email."
+            },
+            {
+              "id": "e3",
+              "slot": "Email 3",
+              "subject": "Last one",
+              "bodyText": "The third email."
+            }
+          ],
+          "picturesInApp": false
+        },
+        "approval": {
+          "kind": "card",
+          "turnId": "turn_r4",
+          "handle": "h_send",
+          "title": "Send this to 214 people?",
+          "summary": "Enrolls 214 people in the win-back campaign.",
+          "confirmLabel": "Send to 214 people",
+          "dismissLabel": "Dismiss",
+          "rows": [
+            {
+              "label": "subject",
+              "value": "Your trial ended. Here's what Infinite found"
+            },
+            {
+              "label": "to",
+              "value": "214 people · re-counted now · 9 left out"
+            },
+            {
+              "label": "from",
+              "value": "Robin · Infinite"
+            },
+            {
+              "label": "steps",
+              "value": "3 — View shows every one"
+            }
+          ],
+          "expiresAt": "2026-10-01T10:59:00Z"
+        }
+      }
+    ],
+    "pending": 0,
+    "steps": [
+      {
+        "label": "reading the draft",
+        "start": 0,
+        "end": 0.3,
+        "result": "3 emails",
+        "status": "ok"
+      },
+      {
+        "label": "waiting for your OK",
+        "start": 0.3,
+        "end": 0.4,
+        "result": "send to 214",
+        "status": "wait"
+      }
+    ],
+    "focus": {
+      "viewOpen": true
+    }
+  },
+  "gaps": [
+    "The card is open on its documents (v pressed): head adds \" · viewing\"; the body starts with \"Subject: …\"."
+  ]
+}

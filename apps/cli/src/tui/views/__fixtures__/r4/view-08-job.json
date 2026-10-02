@@ -1,0 +1,126 @@
+{
+  "screen": "view-08-job",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "write a post on what a trial should cost",
+    "answer": "Started. It runs on our servers and takes about 4 minutes.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "job",
+        "tool": "start_blog_post",
+        "title": "Blog post",
+        "state": "background",
+        "asOf": null,
+        "provenance": {
+          "source": "Blog post",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "body": {
+          "jobId": "job_r4",
+          "label": "What a trial should cost on Meta",
+          "phase": "running",
+          "steps": [
+            {
+              "id": "s1",
+              "label": "Research",
+              "state": "done",
+              "detail": "12 sources"
+            },
+            {
+              "id": "s2",
+              "label": "Outline",
+              "state": "done",
+              "detail": "7 sections"
+            },
+            {
+              "id": "s3",
+              "label": "Draft",
+              "state": "now",
+              "detail": "section 4 of 7"
+            },
+            {
+              "id": "s4",
+              "label": "Images",
+              "state": "todo"
+            },
+            {
+              "id": "s5",
+              "label": "Ready for you",
+              "state": "todo"
+            }
+          ],
+          "progress": {
+            "finished": 4,
+            "of": 7
+          },
+          "startedAt": "2026-10-01T10:41:57Z",
+          "etaMs": 240000,
+          "runsWhere": "cloud",
+          "outlivesTurn": true,
+          "landsAt": {
+            "place": "blog_production",
+            "label": "Blog & AEO › Production"
+          },
+          "noCompletionSignal": false,
+          "watch": {
+            "label": "watch",
+            "ask": "how is the blog post going?"
+          }
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "starting the post",
+        "start": 0,
+        "end": 0.1,
+        "result": "started",
+        "status": "ok"
+      },
+      {
+        "label": "writing the post",
+        "start": 0.1,
+        "end": 1,
+        "result": "step 3 of 5",
+        "status": "bg"
+      }
+    ]
+  },
+  "gaps": [
+    "\"2:03 so far\" = the fixed clock (10:44:00) minus startedAt."
+  ]
+}

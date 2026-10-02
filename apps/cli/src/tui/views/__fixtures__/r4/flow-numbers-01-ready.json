@@ -1,0 +1,231 @@
+{
+  "screen": "flow-numbers-01-ready",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "google ads since launch?",
+    "answer": "Ran Sep 29–30: $40.00, 120 clicks, 0 conversions.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "numbers",
+        "tool": "get_google_ads_performance",
+        "title": "Google Ads since launch",
+        "state": "ready",
+        "asOf": "2026-09-30",
+        "provenance": {
+          "source": "Google Ads",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "google_ads",
+          "label": "Open in Google Ads"
+        },
+        "body": {
+          "layout": "table",
+          "currency": "USD",
+          "columns": [
+            {
+              "key": "campaign",
+              "label": "Campaign",
+              "unit": "text",
+              "factGroup": "entity"
+            },
+            {
+              "key": "spend",
+              "label": "Spend",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "impressions",
+              "label": "Impressions",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "clicks",
+              "label": "Clicks",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "ctr",
+              "label": "CTR",
+              "unit": "percent",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "cpc",
+              "label": "CPC",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "conv",
+              "label": "Conv",
+              "unit": "count",
+              "factGroup": "conversions"
+            }
+          ],
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-09-29",
+                "to": "2026-09-30",
+                "tz": "UTC",
+                "label": "since launch"
+              },
+              "final": true,
+              "asOf": "2026-09-30",
+              "rows": [
+                {
+                  "id": "c1",
+                  "label": "Ad set 01",
+                  "cells": {
+                    "campaign": {
+                      "text": "Ad set 01"
+                    },
+                    "spend": {
+                      "value": 10
+                    },
+                    "impressions": {
+                      "value": 3000
+                    },
+                    "clicks": {
+                      "value": 40
+                    },
+                    "ctr": {
+                      "value": 1.33
+                    },
+                    "cpc": {
+                      "value": 0.25
+                    },
+                    "conv": {
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "id": "c2",
+                  "label": "Ad set 02",
+                  "cells": {
+                    "campaign": {
+                      "text": "Ad set 02"
+                    },
+                    "spend": {
+                      "value": 12.5
+                    },
+                    "impressions": {
+                      "value": 2000
+                    },
+                    "clicks": {
+                      "value": 30
+                    },
+                    "ctr": {
+                      "value": 1.5
+                    },
+                    "cpc": {
+                      "value": 0.42
+                    },
+                    "conv": {
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "id": "c4",
+                  "label": "Ad set 04",
+                  "cells": {
+                    "campaign": {
+                      "text": "Ad set 04"
+                    },
+                    "spend": {
+                      "value": 17.5
+                    },
+                    "impressions": {
+                      "value": 4000
+                    },
+                    "clicks": {
+                      "value": 50
+                    },
+                    "ctr": {
+                      "value": 1.25
+                    },
+                    "cpc": {
+                      "value": 0.35
+                    },
+                    "conv": {
+                      "value": 0
+                    }
+                  }
+                }
+              ],
+              "totals": {
+                "spend": {
+                  "value": 40
+                },
+                "impressions": {
+                  "value": 9000
+                },
+                "clicks": {
+                  "value": 120
+                },
+                "ctr": {
+                  "value": 1.33
+                },
+                "cpc": {
+                  "value": 0.33
+                },
+                "conv": {
+                  "value": 0
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking Google Ads",
+        "start": 0,
+        "end": 0.6,
+        "result": "3 campaigns",
+        "status": "ok"
+      }
+    ]
+  }
+}

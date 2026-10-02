@@ -108,6 +108,19 @@ function sliceCells(line: SegmentLine, col: number, width: number | null): Cell[
   return width === null ? cells.slice(col) : cells.slice(col, col + width);
 }
 
+/** For a region that is not on screen: the actual row sharing the longest prefix with what was wanted (a hint, not a match). */
+function closestRow(actual: readonly SegmentLine[], want: string): { text: string; column: number } {
+  const wanted = [...want];
+  let best = { text: "", column: 0 };
+  for (const line of actual) {
+    const chars = [...textOf(line)];
+    let k = 0;
+    while (k < wanted.length && chars[k] === wanted[k]) k += 1;
+    if (k > best.column) best = { text: chars.join(""), column: k };
+  }
+  return best;
+}
+
 /** Compare one golden region with the actual screen. */
 export function compareRegion(
   actual: readonly SegmentLine[],
@@ -121,7 +134,8 @@ export function compareRegion(
   if (!at) {
     result.verdict = "NOT_FOUND";
     const first = goldenRows.find((line) => textOf(line).trim() !== "") ?? goldenRows[0]!;
-    result.diffs.push({ row: 0, golden: textOf(first), actual: "", textEqual: false, column: 0 });
+    const { text, column } = closestRow(actual, textOf(first));
+    result.diffs.push({ row: 0, golden: textOf(first), actual: text, textEqual: false, column });
     return result;
   }
   result.locatedAt = at;
@@ -178,6 +192,7 @@ export function formatRegionResults(id: string, results: readonly RegionResult[]
     if (!first) continue;
     if (result.verdict === "NOT_FOUND") {
       lines.push(`${id} ${result.region}: NOT FOUND — no row reads`, `  golden: ${JSON.stringify(first.golden)}`);
+      if (first.actual) lines.push(`  closest: ${JSON.stringify(first.actual)}`, `${" ".repeat(first.column + 12)}^ text`);
       continue;
     }
     lines.push(`${id} ${result.region}: ${result.diffs.length} of ${result.goldenRows} rows differ; first at region row ${first.row}`);

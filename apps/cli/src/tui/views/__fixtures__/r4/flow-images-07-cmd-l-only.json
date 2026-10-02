@@ -1,0 +1,102 @@
+{
+  "screen": "flow-images-07-cmd-l-only",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "make 3 new ads from our best hook",
+    "answer": "Quick drafts only start in the app's chat. I can make priced ones here.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "images",
+        "tool": "generate_ad_images",
+        "title": "Make 3 creatives",
+        "state": "cmdl_only",
+        "asOf": null,
+        "provenance": {
+          "source": "Creatives",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "creative_library",
+          "label": "Open in Library",
+          "params": {
+            "run": "run_r4"
+          }
+        },
+        "body": {
+          "runId": "run_r4",
+          "requested": 3,
+          "ready": 0,
+          "failed": 0,
+          "items": [],
+          "format": "HD",
+          "aspectRatio": "4:5",
+          "model": "Infinite's image model",
+          "madeWith": "infinite"
+        },
+        "stateReason": {
+          "code": "quick_drafts_cmdl_only",
+          "words": "Quick drafts (paid, no price card) start only in Cmd+L. Here, images go through the priced card or your own Codex.",
+          "fix": {
+            "label": "open Cmd+L",
+            "appLink": {
+              "place": "cmdl",
+              "label": "Cmd+L"
+            }
+          }
+        },
+        "next": [
+          {
+            "label": "make 3 here (~$0.52)",
+            "ask": "make 3 ad images here"
+          }
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "label": "quick drafts",
+        "start": 0,
+        "end": 0.3,
+        "result": "Cmd+L only",
+        "status": "off"
+      }
+    ]
+  },
+  "gaps": [
+    "D3 (binding): the head is \"⌘ Do this in Cmd+L\", not the golden's \"⌘ Cmd+L only\" (decisions.ts patches the golden)."
+  ]
+}

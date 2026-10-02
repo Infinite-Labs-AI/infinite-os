@@ -1,0 +1,149 @@
+{
+  "screen": "view-09-compare",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "did the new homepage headline win?",
+    "answer": "Not yet. B is ahead, but the ranges overlap. Day 6 of 14.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "compare",
+        "tool": "get_site_test",
+        "title": "Homepage headline test",
+        "state": "ready",
+        "asOf": null,
+        "provenance": {
+          "source": "Website test · visit → signup",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "website_tests",
+          "label": "Open the test in Website"
+        },
+        "body": {
+          "window": {
+            "from": "2026-09-26",
+            "to": "2026-10-01",
+            "tz": "UTC",
+            "label": "Day 6 of 14"
+          },
+          "arms": [
+            {
+              "key": "a",
+              "label": "A Current",
+              "n": 412,
+              "days": 6,
+              "metrics": {
+                "visits": {
+                  "value": 412
+                },
+                "signups": {
+                  "value": 13
+                },
+                "rate": {
+                  "value": 3.2
+                }
+              }
+            },
+            {
+              "key": "b",
+              "label": "B New",
+              "n": 398,
+              "days": 6,
+              "metrics": {
+                "visits": {
+                  "value": 398
+                },
+                "signups": {
+                  "value": 16
+                },
+                "rate": {
+                  "value": 4
+                }
+              }
+            }
+          ],
+          "metricRows": [
+            {
+              "key": "visits",
+              "label": "Visits",
+              "unit": "count"
+            },
+            {
+              "key": "signups",
+              "label": "Signups",
+              "unit": "count"
+            },
+            {
+              "key": "rate",
+              "label": "Rate",
+              "unit": "percent"
+            }
+          ],
+          "differences": [],
+          "verdict": {
+            "sentence": "No winner yet",
+            "grade": "insufficient",
+            "unmet": [
+              "Day 6 of 14",
+              "check again Oct 9"
+            ],
+            "namesWinner": false
+          }
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "finding the test",
+        "start": 0,
+        "end": 0.2,
+        "result": "1 test",
+        "status": "ok"
+      },
+      {
+        "label": "comparing the two versions",
+        "start": 0.2,
+        "end": 1,
+        "result": "2 versions",
+        "status": "ok"
+      }
+    ]
+  },
+  "gaps": [
+    "Per-arm \"Likely range\" (1.7–5.3%, 2.3–6.4%) has no field: CompareBodyV1 carries intervals on differences only."
+  ]
+}

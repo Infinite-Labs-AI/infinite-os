@@ -1,0 +1,104 @@
+{
+  "screen": "flow-pause-05-nothing-to-change",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "pause hook b",
+    "answer": "Hook B is already paused, so I didn't propose anything.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "change",
+        "tool": "propose_pause_entity",
+        "title": "Pause Hook B",
+        "state": "no_change",
+        "asOf": null,
+        "provenance": {
+          "source": "Meta · ad",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "meta_ads",
+          "label": "open in Meta Ads",
+          "params": {
+            "ad": "ad_hook_b"
+          }
+        },
+        "body": {
+          "target": {
+            "kind": "ad",
+            "id": "ad_hook_b",
+            "label": "Hook B · founder POV"
+          },
+          "rows": [
+            {
+              "label": "status",
+              "before": "on",
+              "after": "PAUSED"
+            }
+          ],
+          "effect": "Stops spending",
+          "warnings": []
+        },
+        "stateReason": {
+          "code": "already_paused",
+          "words": "Our stored copy (as of 10:40) shows “Hook B” already paused, so nothing was proposed.",
+          "fix": {
+            "label": "Live refresh in Meta Ads",
+            "appLink": {
+              "place": "meta_ads",
+              "label": "open in Meta Ads",
+              "params": {
+                "ad": "ad_hook_b"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking your campaigns",
+        "start": 0,
+        "end": 0.5,
+        "result": "already paused",
+        "status": "ok"
+      }
+    ]
+  },
+  "gaps": [
+    "\"If it changed in Ads Manager since:\" prefixes the fix link."
+  ]
+}

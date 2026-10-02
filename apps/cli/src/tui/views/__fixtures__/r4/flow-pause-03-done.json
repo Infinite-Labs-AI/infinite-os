@@ -1,0 +1,127 @@
+{
+  "screen": "flow-pause-03-done",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "pause hook b",
+    "answer": "Paused. Hook B has stopped spending.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "change",
+        "tool": "propose_pause_entity",
+        "title": "Pause Hook B",
+        "state": "done",
+        "asOf": null,
+        "provenance": {
+          "source": "Meta · ad",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "meta_ads",
+          "label": "open in Meta Ads",
+          "params": {
+            "ad": "ad_hook_b"
+          }
+        },
+        "body": {
+          "target": {
+            "kind": "ad",
+            "id": "ad_hook_b",
+            "label": "Hook B · founder POV"
+          },
+          "rows": [
+            {
+              "label": "status",
+              "before": "on",
+              "after": "PAUSED"
+            }
+          ],
+          "effect": "Stops spending",
+          "warnings": []
+        },
+        "outcome": "applied",
+        "approval": {
+          "kind": "card",
+          "turnId": "turn_r4",
+          "handle": "h_pause",
+          "title": "Pause ad “Hook B · founder POV”?",
+          "summary": "Stops this ad's spend until you turn it back on.",
+          "confirmLabel": "Pause",
+          "dismissLabel": "Dismiss",
+          "doneTitle": "Paused ad “Hook B · founder POV”",
+          "rows": [
+            {
+              "label": "Ad",
+              "value": "Hook B · founder POV"
+            }
+          ],
+          "expiresAt": "2026-10-01T10:59:00Z"
+        },
+        "receipt": {
+          "sentence": "Stopped spending at 10:42",
+          "tone": "ok",
+          "revertible": true,
+          "provenanceLine": "Clears the matching Home card"
+        },
+        "next": [
+          {
+            "label": "turn back on",
+            "ask": "turn hook b back on"
+          }
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking your campaigns",
+        "start": 0,
+        "end": 0.5,
+        "result": "1 ad",
+        "status": "ok"
+      },
+      {
+        "label": "pausing on Meta",
+        "start": 0.5,
+        "end": 1,
+        "result": "paused",
+        "status": "ok"
+      }
+    ]
+  },
+  "gaps": [
+    "The done card title appends \" · Agent proposed · You approved\" to approval.doneTitle."
+  ]
+}

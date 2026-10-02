@@ -1,0 +1,136 @@
+{
+  "screen": "flow-numbers-06-nothing-found",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "google ads sep 24–28?",
+    "answer": "No Google Ads spend Sep 24–28.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "numbers",
+        "tool": "get_google_ads_performance",
+        "title": "Google Ads since launch",
+        "state": "nothing_found",
+        "asOf": "2026-09-30",
+        "provenance": {
+          "source": "Google Ads",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "google_ads",
+          "label": "Open in Google Ads"
+        },
+        "body": {
+          "layout": "table",
+          "currency": "USD",
+          "columns": [
+            {
+              "key": "campaign",
+              "label": "Campaign",
+              "unit": "text",
+              "factGroup": "entity"
+            },
+            {
+              "key": "spend",
+              "label": "Spend",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "impressions",
+              "label": "Impressions",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "clicks",
+              "label": "Clicks",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "ctr",
+              "label": "CTR",
+              "unit": "percent",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "cpc",
+              "label": "CPC",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "conv",
+              "label": "Conv",
+              "unit": "count",
+              "factGroup": "conversions"
+            }
+          ],
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-09-24",
+                "to": "2026-09-28",
+                "tz": "UTC",
+                "label": "Sep 24–28"
+              },
+              "final": true,
+              "asOf": "2026-09-30",
+              "rows": []
+            }
+          }
+        },
+        "stateReason": {
+          "code": "no_spend",
+          "words": "No spend Sep 24–28 · 3 campaigns checked"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking Google Ads",
+        "start": 0,
+        "end": 0.6,
+        "result": "no spend",
+        "status": "ok"
+      }
+    ]
+  },
+  "gaps": [
+    "D3: the head glyph is ∅ (Nothing found)."
+  ]
+}

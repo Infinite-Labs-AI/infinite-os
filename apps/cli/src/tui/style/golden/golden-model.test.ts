@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { ansiLineToCells, ansiToSegmentLines, applySgr, RESET_STATE, tokenOf } from "./ansi-to-segments.js";
 import { compareRegion, formatRegionResults, goldenRegionRows, locate, paintGoldenLines } from "./compare.js";
+import { firstProblem, GoldenEvaluator } from "./evaluate.js";
 import { goldenIds, loadGolden } from "./goldens.js";
 import { normalizeCells, textOf, type SegmentLine } from "./normalize.js";
 import { PALETTE, xterm256Hex } from "./palette.js";
@@ -125,5 +126,42 @@ describe("region location and diff", () => {
     expect(result.verdict).toBe("DIFF");
     expect(formatRegionResults(golden.id, [result])).toMatch(/token "line" vs "\?#5fbbd8"/u);
     expect(compareRegion(screen, [[{ text: "nowhere on screen", style: "" }]], "x").verdict).toBe("NOT_FOUND");
+  });
+});
+
+describe("the evaluator passes r4 itself (a renderer that prints the golden)", () => {
+  // The renderer stands in for a CLI that draws r4 exactly: it prints the
+  // golden of the screen it is asked for. Every frame and line-region golden
+  // must then match, except where a binding decision changes the golden.
+  const painted = new GoldenEvaluator((fixture, cols) => {
+    // r4's c100 details pane is the 69-col column the card regions are drawn in.
+    const golden = loadGolden(`${fixture.screen}--c${cols === 69 ? 100 : cols}`);
+    return paintGoldenLines(golden.lines, sgr("truecolor")).join("\n");
+  });
+  const DECIDED = new Set([
+    "flow-pause-02-working--c60", "flow-pause-02-working--c100", "flow-pause-02-working--c160",
+    "flow-images-02-making-them--c60", "flow-images-02-making-them--c100", "flow-images-02-making-them--c160",
+    "flow-images-06-with-your-codex--c60", "flow-images-06-with-your-codex--c100", "flow-images-06-with-your-codex--c160",
+    "flow-images-07-cmd-l-only--c60", "flow-images-07-cmd-l-only--c160", "region-keybar-busy",
+    // r4 defect, not a decision: the done card's title fills the box, so boxed() draws its top border 70 wide over
+    // 69-wide rows, and the c100 frame truncates that border with "…". The region and the frame disagree.
+    "region-card-done-green"
+  ]);
+
+  it("matches every frame and line-region golden; fails exactly the decided ones", () => {
+    const wrong: string[] = [];
+    for (const id of goldenIds()) {
+      const golden = loadGolden(id);
+      if (golden.data !== undefined) continue;
+      const result = painted.evaluate(golden, id);
+      if (result.pass === DECIDED.has(id)) wrong.push(`${id}: pass=${result.pass} ${firstProblem(result)}`);
+    }
+    expect(wrong).toEqual([]);
+  });
+
+  it("the 80–119 col body is skipped by the layout decision, and says so", () => {
+    const result = painted.evaluate(loadGolden("view-06-change--c100"));
+    expect(result.skipped).toEqual(["body (LAYOUT: one column below 120 cols; r4 splits at 80)"]);
+    expect(result.regions.map((region) => region.region)).not.toContain("body");
   });
 });
