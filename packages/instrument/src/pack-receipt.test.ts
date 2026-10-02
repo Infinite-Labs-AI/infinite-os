@@ -35,6 +35,15 @@ function validReceipt(overrides: Partial<PackReceipt> = {}): PackReceipt[] {
     "contracts/browser-collect-v1.fixture.json",
     "contracts/browser-collect-v1.schema.json",
     "contracts/server-lane-v1.vectors.json",
+    "contracts/host-deny-v1.json",
+    "contracts/tag-wizard-v1/bridge-descriptor.example.json",
+    "contracts/tag-wizard-v1/bridge-verbs.fixtures.json",
+    "contracts/tag-wizard-v1/claims.schema.json",
+    "contracts/tag-wizard-v1/receipts.fixtures.json",
+    "contracts/tag-wizard-v1/report-v2.example.json",
+    "contracts/tag-wizard-v1/review.schema.json",
+    "contracts/tag-wizard-v1/run-state.example.json",
+    "contracts/tag-wizard-v1/test-run.fixtures.json",
     "package.json"
   ]
   const paths = [
@@ -71,16 +80,28 @@ function runValidator(receipt: unknown, raw = false) {
 }
 
 describe("npm 11 pack receipt validator", () => {
-  it("accepts the expected synthetic 78-file receipt", () => {
+  it("accepts the expected synthetic 87-file receipt", () => {
     const result = runValidator(validReceipt())
 
     expect(result.status).toBe(0)
     expect(result.stdout.trim()).toBe("infinite-tag-0.11.0.tgz")
-    expect(result.stderr).toContain("78 files")
+    expect(result.stderr).toContain("87 files")
+  })
+
+  it("requires every wizard contract file (a missing one fails the pack)", () => {
+    const receipt = validReceipt()
+    const index = receipt[0]!.files.findIndex((file) => file.path === "contracts/tag-wizard-v1/review.schema.json")
+    receipt[0]!.files[index] = { path: "dist/src/stand-in.js", size: 1, mode: 0o644 }
+
+    const result = runValidator(receipt)
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("contracts/tag-wizard-v1/review.schema.json")
   })
 
   it.each([
     ["unexpected contract", "contracts/unexpected.json"],
+    ["unexpected wizard contract", "contracts/tag-wizard-v1/unexpected.json"],
     ["traversal", "dist/src/../unexpected.js"],
     ["backslash", "dist\\src\\unexpected.js"],
     ["absolute", "/dist/src/unexpected.js"],
@@ -121,7 +142,7 @@ describe("npm 11 pack receipt validator", () => {
     [
       "file count",
       {
-        files: Array.from({ length: 171 }, (_, index) => ({
+        files: Array.from({ length: 561 }, (_, index) => ({
           path: `dist/src/${index}.js`,
           size: 1,
           mode: 0o644

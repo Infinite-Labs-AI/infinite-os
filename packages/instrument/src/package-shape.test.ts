@@ -94,6 +94,22 @@ describe("package.json shape", () => {
   })
 })
 
+describe("LICENSE (npm always packs it)", () => {
+  const license = readFileSync(join(srcDir, "../LICENSE"), "utf8")
+
+  it("carries PostHog's full MIT notice for the PostHog-derived wizard patterns", () => {
+    expect(license).toContain("Copyright (c) 2025 PostHog")
+    expect(license).toContain("Permission is hereby granted, free of charge")
+    expect(license).toContain("PostHog wizard (v2.74.1")
+  })
+
+  it("still starts with infinite-tag's own MIT licence", () => {
+    expect(license.startsWith("MIT License\n\nCopyright (c) 2025-2026 Ultima AI, Inc\n")).toBe(true)
+    // Two notices, each with its permission text: the first is ours, the second PostHog's.
+    expect(license.split("Permission is hereby granted").length - 1).toBe(2)
+  })
+})
+
 describe("source self-containment", () => {
   it("every import in src/ is node:, relative, or vitest (test files only)", () => {
     const tsFiles = collectTsFiles(srcDir)
