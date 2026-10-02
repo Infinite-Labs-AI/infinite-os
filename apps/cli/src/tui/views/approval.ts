@@ -25,12 +25,24 @@ import type {
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { printableImagesView } from "../../desktop/image-url-cut.js";
 import { keyBarHints, okKeyFor, type KeyAction, type KeyContext, type KeyHint } from "../keys/keymap.js";
-import { displayWidth, padEndCells, truncateCells } from "../lib/display-width.js";
-import type { AnsiRole } from "../theme.js";
-import { changeLines, labelValueLines, warningLines } from "./change.js";
+import { displayWidth, truncateCells } from "../lib/display-width.js";
+import {
+  beforeAfter,
+  BOX_ROWS,
+  cardBody,
+  cardBox,
+  cardWidth,
+  chipRows,
+  DOCUMENT_MAX_WIDTH,
+  fieldRows,
+  fitPainted,
+  paragraphIn,
+  type CardTone
+} from "./card.js";
+import { changeLines, changeNotes, changeRows, labelValueLines, warningLines } from "./change.js";
 import { imagesLines } from "./images.js";
 import { jobLines } from "./job.js";
-import { launchLines } from "./launch.js";
+import { launchLines, launchWarningLines } from "./launch.js";
 import { offersResend, offersRetry, reconcileLines } from "./outcome.js";
 import {
   FootnoteBook,
@@ -39,9 +51,11 @@ import {
   headLine,
   isRecord,
   paint,
+  sourceLine,
   viewText,
   wrapText
 } from "./primitives.js";
+import { stateHeadFor } from "./states.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
 /** The card's own key state: what is open, which document, which page, and the answers so far. */
@@ -134,8 +148,6 @@ export type CardEffect =
   | { type: "copy" };
 
 const DEFAULT_PAGE_ROWS = 12;
-/** The card is never wider than this (terminal-r4 `card()`: `Math.min(w, 74)`). */
-const CARD_MAX_WIDTH = 74;
 const UPDATE_FOR_FIELDS = "Update the Infinite app to set a value here";
 const LIVE_STATES = new Set(["needs_yes", "needs_answer"]);
 
@@ -143,12 +155,18 @@ const LIVE_STATES = new Set(["needs_yes", "needs_answer"]);
  * Draw the card for an approval view at `ctx.width`, with the card's own key
  * context. Every string from the view is scrubbed; no line is wider than
  * `ctx.width`.
+ *
+ * The look is r4's: the head and source line, then an amber box (green once
+ * done) at most 74 wide, its title in the top border, the change as field
+ * rows (`status   on → PAUSED`), the key chips inside (the OK key on amber),
+ * and `?  what it does` last. With its documents open (`v`), the card gives
+ * way to the document: tabs, a ruled body, and the chips under it.
  */
 export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): ApprovalRender {
   // An images card never prints a URL, in its body or its approval words.
   const view = printableImagesView(given);
-  // r4 card(): at most 74 wide, so the key words sit near the content.
-  const width = Math.max(8, Math.min(CARD_MAX_WIDTH, Math.floor(ctx.width)));
+  const paneWidth = Math.max(8, Math.floor(ctx.width));
+  const width = cardWidth(paneWidth);
   const inner = width - 4;
   const approval: Record<string, unknown> = isRecord(view.approval) ? view.approval : {};
   const ui = ctx.ui;
@@ -163,6 +181,7 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   const finishInApp = isRecord(approval.finishInApp) ? approval.finishInApp : null;
   const documents = finishInApp ? [] : readDocuments(view);
   const summary = viewText(approval.summary) || viewText(view.explain);
+  const detailRows = readRows(approval.detailRows);
   const blockedByUpdate = live && !ctx.fieldsCapable && fields.some((field) => field.required);
   // `o` (and the body's "(o)") only when the desktop opens app links AND the card has one.
   const canOpen = ctx.caps.open && hasAppLink(view, finishInApp);
@@ -172,102 +191,126 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   const ok = cardOk(view, fields, ui.answers, ctx.fieldsCapable, sentFields);
   const fieldPrompt = ok?.type === "ask_field" ? ok.field : undefined;
   const documentOpen = ui.documentOpen && documents.length > 0;
+  // `?` shows what the card does: the app's summary, its detail rows, when it expires.
+  const explain = summary !== "" || detailRows.length > 0;
+  const expires = live ? formatAsOf(approval.expiresAt, ctx.timeZone) : null;
+  const docWidth = Math.max(8, Math.min(DOCUMENT_MAX_WIDTH, paneWidth));
 
-  // ── the body: a pinned top (an open document's tabs and subject), a middle
-  // that pages, and a pinned footer (what it does, fields, state, expiry) ──
+  // ── above the card: the head (· viewing while a document is open) and the source ──
+  const paneCtx: ViewRenderCtx = { ...ctx, width: paneWidth };
+  const head = headLine(view, paneCtx);
+  const source = sourceLine(view, paneCtx);
+  const prelude = [
+    documentOpen ? viewingHead(head, paneWidth, ctx) : head,
+    ...(source ? [source] : []),
+    ""
+  ];
+
+  // ── the body: a pinned top, a middle that pages, and a pinned footer ──
   const top: string[] = [];
   const middle: string[] = [];
   const footer: string[] = [];
   if (documentOpen) {
     const doc = documents[clampIndex(ui.tab, documents.length)]!;
-    const parts = documentParts(doc, documents, ui, innerCtx);
+    const parts = documentParts(doc, documents, ui, { ...innerCtx, width: docWidth });
     top.push(...parts.top);
     middle.push(...parts.body);
   } else {
-    const rows = readRows(approval.rows);
-    middle.push(...labelValueLines(rows, innerCtx));
-    const kindLines = kindBody(view, innerCtx, notes);
-    if (kindLines.length) {
-      if (middle.length) middle.push("");
-      middle.push(...kindLines);
-    }
-    const detailRows = readRows(approval.detailRows);
-    if (detailRows.length) {
-      middle.push("", ...labelValueLines(detailRows, innerCtx));
-    }
     const effect = viewText(approval.effect);
+    const object = cardObject(view, approval, innerCtx, notes);
     if (effect) {
-      footer.push(...wrapText(effect, inner).map((line) => paint(line, "warning", ctx)));
+      top.push(...paragraphIn(effect, inner, "dim", ctx), ...(object.length ? [""] : []));
+    }
+    middle.push(...object);
+    if (ui.explainOpen && explain) {
+      middle.push("", ...explainLines(summary, detailRows, expires, innerCtx));
     }
     if (finishInApp) {
       const words = viewText(finishInApp.words);
-      const link = isRecord(finishInApp.appLink) && canOpen ? " (o)" : "";
-      if (words) footer.push("", ...wrapText(`↗ ${words}${link}`, inner).map((line) => paint(line, "primary", ctx)));
+      if (words) footer.push("", ...arrowLines(words, canOpen, inner, ctx));
     }
     if (fields.length) {
       footer.push("", ...fieldLines(fields, ui, innerCtx));
     }
     if (blockedByUpdate) {
-      footer.push(...wrapText(UPDATE_FOR_FIELDS, inner).map((line) => paint(line, "warning", ctx)));
+      footer.push(...paragraphIn(UPDATE_FOR_FIELDS, inner, "amber", ctx));
     }
   }
   const reason = isRecord(view.stateReason) ? viewText(view.stateReason.words) : "";
   if (!live && reason) {
-    footer.push(...wrapText(reason, inner).map((line) => paint(line, "warning", ctx)));
+    // r4 "Still running": the state's glyph, then the app's words, in amber.
+    footer.push(...paragraphIn(`${stateHeadFor(view).glyph} ${reason}`, documentOpen ? docWidth : inner, "amber", ctx));
   }
-  footer.push(...reconcileLines(view, innerCtx));
-  const expires = live ? formatAsOf(approval.expiresAt, ctx.timeZone) : null;
-  if (expires && !documentOpen) {
-    footer.push(paint(`expires ${expires}`, "muted", ctx));
-  }
-  if (ui.explainOpen && summary) {
-    footer.push("", ...wrapText(`? ${summary}`, inner).map((line) => paint(line, "muted", ctx)));
+  footer.push(...reconcileLines(view, documentOpen ? { ...innerCtx, width: docWidth } : innerCtx));
+  if (documentOpen && ui.explainOpen && explain) {
+    footer.push("", ...explainLines(summary, detailRows, expires, { ...innerCtx, width: docWidth }));
   }
   if (notes.size) {
-    footer.push("", ...notes.lines().flatMap((line) => wrapText(line, inner)).map((line) => paint(line, "muted", ctx)));
+    footer.push("", ...notes.lines().flatMap((line) => paragraphIn(line, inner, "dim", ctx)));
   }
-  const paged = pageCardBody({
-    top,
-    middle,
-    footer,
-    page: ui.page,
-    // An open document pages at the session's page size even when it would fit.
-    pageRows: documentOpen ? ctx.pageRows ?? DEFAULT_PAGE_ROWS : undefined,
-    maxRows: ctx.maxRows,
-    ctx
-  });
-  const body = paged.lines;
-  const pages = paged.pages;
 
-  const title = viewText(approval.title) || viewText(view.title);
-  // r4: an amber frame while the card needs an OK, green once it is done.
-  const border: AnsiRole = live ? "warning" : view.state === "done" ? "success" : "muted";
-  const framed = frame(title, body, width, ctx, border);
-
-  // ── the keys ──
-  const keyCtx: KeyContext = {
-    focus: "card",
-    busy: false,
-    okKey: ok ? okKeyFor(confirmLabel) : null,
-    okLabel: offersResend(view) ? "check again" : okLabelFor(confirmLabel, fields, ui.answers),
-    caps: { open: canOpen, watch: false, retry: retryable },
-    explain: summary !== "",
-    card: {
-      view: documents.length > 0,
-      viewOpen: documentOpen,
-      tabs: documentOpen ? documents.length : 0,
-      ...(documentOpen ? tabNounOf(documents) : {}),
-      page: pages > 1
-    }
+  // ── the keys, drawn inside the card; the page chip only once the body pages ──
+  const okKey = ok ? okKeyFor(confirmLabel) : null;
+  const keysFor = (paging: boolean): { keyCtx: KeyContext; keys: KeyHint[] } => {
+    const keyCtx: KeyContext = {
+      focus: "card",
+      busy: false,
+      okKey,
+      okLabel: offersResend(view) ? "check again" : okLabelFor(confirmLabel, fields, ui.answers),
+      caps: { open: canOpen, watch: false, retry: retryable },
+      explain,
+      card: {
+        view: documents.length > 0,
+        viewOpen: documentOpen,
+        tabs: documentOpen ? documents.length : 0,
+        ...(documentOpen ? tabNounOf(documents) : {}),
+        page: paging
+      }
+    };
+    const keys: KeyHint[] = ui.fieldEntry
+      ? [{ key: "enter", label: "set" }, { key: "esc", label: "cancel" }]
+      : keyBarHints(keyCtx);
+    return { keyCtx, keys };
   };
-  const keys: KeyHint[] = ui.fieldEntry
-    ? [{ key: "enter", label: "set" }, { key: "esc", label: "cancel" }]
-    : keyBarHints(keyCtx);
-  const head = headLine(view, { ...ctx, width });
+  const openLabel = appLinkLabel(view, finishInApp);
+  const chromeRows = prelude.length + (documentOpen ? 0 : BOX_ROWS);
+  const draw = (paging: boolean) => {
+    const { keyCtx, keys } = keysFor(paging);
+    const chips = chipRows(
+      cardChips(keys, documentOpen, openLabel, ui.fieldEntry ? null : keyCtx.okKey),
+      ui.fieldEntry ? null : keyCtx.okKey,
+      documentOpen ? docWidth : inner,
+      ctx
+    );
+    const tail = cardBody([], chips, explain && !documentOpen && !ui.fieldEntry, ctx);
+    const paged = pageCardBody({
+      top,
+      middle,
+      footer: [...footer, ...tail],
+      page: ui.page,
+      // An open document pages at the session's page size even when it would fit.
+      pageRows: documentOpen ? ctx.pageRows ?? DEFAULT_PAGE_ROWS : undefined,
+      maxRows: typeof ctx.maxRows === "number" ? ctx.maxRows - chromeRows : undefined,
+      ctx
+    });
+    return { keyCtx, keys, paged };
+  };
+  let drawn = draw(false);
+  if (drawn.paged.pages > 1) {
+    drawn = draw(true);
+  }
+  const { keyCtx, keys, paged } = drawn;
+  const pages = paged.pages;
+  const tone: CardTone = view.state === "done" ? "green" : "amber";
+  const title = viewText(approval.title) || viewText(view.title);
+  const detail = documentOpen
+    ? paged.lines.map((line) => fitPainted(line, docWidth))
+    : cardBox(title, paged.lines, width, tone, ctx);
+
   return {
-    head,
+    head: prelude[0]!,
     source: null,
-    detail: framed,
+    detail,
     footnotes: [],
     keys,
     okKey: keyCtx.okKey,
@@ -276,7 +319,7 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
     ...(pages > 1 ? { pages } : {}),
     ...(fieldPrompt ? { fieldPrompt } : {}),
     keyCtx,
-    lines: [head, ...framed],
+    lines: [...prelude, ...detail],
     ok,
     dismiss: live || retryable ? "decline" : "close",
     ...(retryable && sentFields ? { resendFields: sentFields } : {})
@@ -518,23 +561,22 @@ function fieldLines(fields: readonly ApprovalFieldV1[], ui: CardUiState, ctx: Vi
     const answer = ui.answers[field.key];
     const current = field.current === null || field.current === undefined ? "" : fieldValue(field, field.current);
     const value = ui.fieldEntry?.key === field.key
-      ? `▸ type ${fieldHint(field).replace(/^Type:? /u, "")}, then Enter`
+      ? paint(`▸ type ${fieldHint(field).replace(/^Type:? /u, "")}, then Enter`, "cb", ctx)
       : answer
-        ? `${current ? `${current} → ` : ""}${answerValue(field, answer)}`
+        ? current ? beforeAfter(current, answerValue(field, answer), ctx) : paint(answerValue(field, answer), "b", ctx)
         : current
-          ? `now ${current}${field.required ? " · OK asks for a new value" : ""}`
-          : field.required ? "OK asks for a value" : "optional";
-    lines.push(...labelValueLines([{ label: viewText(field.label, field.key), value }], ctx));
+          ? `now ${current}${field.required ? paint(" · OK asks for a new value", "dim", ctx) : ""}`
+          : paint(field.required ? "OK asks for a value" : "optional", "dim", ctx);
+    lines.push(...fieldRows([{ label: viewText(field.label, field.key), value }], ctx.width, ctx));
     // A money field's options (the host's own words) under it: typing one answers it.
     if (field.input === "money_per_day" && !answer) {
       for (const option of fieldOptions(field)) {
-        lines.push(...wrapText(`  or: ${viewText(option.label, viewText(option.value))}`, ctx.width)
-          .map((line) => paint(line, "muted", ctx)));
+        lines.push(...paragraphIn(`  or: ${viewText(option.label, viewText(option.value))}`, ctx.width, "dim", ctx));
       }
     }
   }
   if (ui.fieldError) {
-    lines.push(...wrapText(ui.fieldError, ctx.width).map((line) => paint(line, "warning", ctx)));
+    lines.push(...paragraphIn(ui.fieldError, ctx.width, "amber", ctx));
   }
   return lines;
 }
@@ -614,41 +656,36 @@ function readDocuments(view: AnswerViewV1): CardDocument[] {
   }));
 }
 
-/** The open document: its tabs and subject (pinned), and its whole body (paged by the card). */
+/**
+ * The open document (r4 "Viewing the email"): the tabs (the open one in the
+ * brand chip, the others dim), then the subject and the body behind a ruled
+ * gutter (`│ `), wrapped inside it. The tabs and subject stay put; the body
+ * pages.
+ */
 function documentParts(
   doc: CardDocument,
   documents: readonly CardDocument[],
   ui: CardUiState,
   ctx: ViewRenderCtx
 ): { top: string[]; body: string[] } {
-  const width = ctx.width;
+  const width = Math.max(4, ctx.width);
   const tabs = documents.map((item, index) => {
     const label = ` ${index + 1} ${item.slot || `${index + 1}`} `;
-    const selected = index === clampIndex(ui.tab, documents.length);
-    if (ctx.color) return paint(label, selected ? "text" : "muted", ctx, { inverse: selected });
-    return selected ? `[${label.trim()}]` : label.trim();
+    return index === clampIndex(ui.tab, documents.length) ? paint(label, "inv", ctx) : paint(label, "dim", ctx);
   });
-  const tabLine = truncateCells(tabs.join(ctx.color ? " " : "  "), width);
+  const tabLine = fitPainted(tabs.join(" "), width);
+  // r4 wraps the ruled line, gutter included, inside the document width less two.
+  const gutter = (text: string): string[] => text
+    ? wrapText(text, Math.max(1, width - 4)).map((line) => `${paint("│", "line", ctx)} ${line}`)
+    : [paint("│", "line", ctx)];
   const body = doc.body
     .split(/\r?\n/u)
-    .flatMap((line) => {
-      const text = viewText(line);
-      return text ? wrapText(text, Math.max(1, width - 2)) : [""];
-    })
-    .map((line) => paint(line ? `│ ${line}` : "│", "text", ctx));
+    .flatMap((line) => gutter(viewText(line)));
   return {
-    top: [
-      tabLine,
-      "",
-      ...wrapText(`Subject: ${doc.subject || "—"}`, width).map((line) => paint(line, "text", ctx, { bold: true })),
-      ""
-    ],
+    top: [tabLine, "", ...gutter(`Subject: ${doc.subject || "—"}`), paint("│", "line", ctx)],
     body
   };
 }
-
-/** Rows the card draws around its framed body: the head line and the frame's top and bottom. */
-const CARD_CHROME_ROWS = 3;
 
 /**
  * The framed body, paged to fit. The middle pages when an open document asks
@@ -668,7 +705,7 @@ function pageCardBody(input: {
   ctx: ViewRenderCtx;
 }): { lines: string[]; pages: number } {
   const budget = typeof input.maxRows === "number" && Number.isFinite(input.maxRows)
-    ? Math.max(1, Math.floor(input.maxRows) - CARD_CHROME_ROWS)
+    ? Math.max(1, Math.floor(input.maxRows))
     : Number.POSITIVE_INFINITY;
   let top = [...input.top];
   let middle = [...input.middle];
@@ -699,7 +736,7 @@ function pageCardBody(input: {
     lines: [
       ...top,
       ...middle.slice(page * size, (page + 1) * size),
-      paint(`page ${page + 1} of ${pages} · space`, "muted", input.ctx),
+      paint(`page ${page + 1} of ${pages} · space`, "dim", input.ctx),
       ...footer
     ],
     pages
@@ -739,21 +776,104 @@ function linkCardLines(body: unknown, ctx: ViewRenderCtx): string[] {
   return [...labelValueLines(rows, ctx), ...warningLines(record.warnings, ctx)];
 }
 
-/** A box with the title in its top border: ┌─ Title ─┐ │ … │ └─┘. */
-function frame(title: string, body: readonly string[], width: number, ctx: ViewRenderCtx, border: AnsiRole): string[] {
-  const inner = width - 4;
-  const shownTitle = title ? truncateCells(title, Math.max(1, width - 6)) : "";
-  const titleCells = shownTitle ? displayWidth(shownTitle) + 2 : 0;
-  const rule = (text: string) => paint(text, border, ctx);
-  const top = shownTitle
-    ? `${rule("┌─")} ${paint(shownTitle, "text", ctx, { bold: true })} ${rule(`${"─".repeat(Math.max(0, width - 3 - titleCells))}┐`)}`
-    : rule(`┌${"─".repeat(width - 2)}┐`);
-  const lines = body.length ? body : [""];
+/**
+ * What the card shows of its object (r4): a change's rows as `before → after`
+ * (its warnings and a stale "before" with them), a launch's tree, a link's
+ * fields, a job's steps. A write the app describes only in its own words (a
+ * generic change, a send, an image set) shows `approval.rows`. The title
+ * already names the target, so the change's target line is not repeated.
+ */
+function cardObject(view: AnswerViewV1, approval: Record<string, unknown>, ctx: ViewRenderCtx, notes: FootnoteBook): string[] {
+  const rows = readRows(approval.rows);
+  const appRows = () => fieldRows(rows, ctx.width, ctx);
+  const body: Record<string, unknown> = isRecord(view.body) ? view.body : {};
+  switch (view.kind) {
+    case "change": {
+      const target = isRecord(body.target) ? body.target : {};
+      const changes = changeRows(body, ctx, notes);
+      if (target.kind === "pending_write" || !changes.length) {
+        return rows.length ? appRows() : changeLines(view.body, ctx, notes);
+      }
+      return [...fieldRows(changes, ctx.width, ctx), ...changeNotes(body, ctx)];
+    }
+    case "launch": {
+      const tree: unknown[] = Array.isArray(body.tree) ? body.tree : [];
+      if (tree.length || !rows.length) {
+        return launchLines(view.body, ctx, notes, view.appLink);
+      }
+      // A send without a tree: the app's rows (subject, to, from, steps); `v` opens the documents.
+      return [...appRows(), ...launchWarningLines(view.body, ctx)];
+    }
+    case "images":
+      return rows.length ? appRows() : imagesLines(view, ctx);
+    case "job":
+      return jobLines(view.body, ctx);
+    case "link":
+      return linkCardLines(view.body, ctx);
+    default:
+      return rows.length ? appRows() : [];
+  }
+}
+
+/** What `?` opens: the app's summary, its detail rows, and when the card expires. */
+function explainLines(
+  summary: string,
+  detailRows: readonly { label: string; value: string }[],
+  expires: string | null,
+  ctx: ViewRenderCtx
+): string[] {
   return [
-    top,
-    ...lines.map((line) => `${rule("│")} ${padEndCells(truncateCells(line, inner), inner)} ${rule("│")}`),
-    rule(`└${"─".repeat(width - 2)}┘`)
+    ...(summary ? wrapText(summary, ctx.width) : []),
+    ...(detailRows.length ? fieldRows(detailRows, ctx.width, ctx) : []),
+    ...(expires ? [paint(`expires ${expires}`, "dim", ctx)] : [])
   ];
+}
+
+/** `↗ words  (o)`: where the card is finished in the app; `(o)` only when `o` opens it. */
+function arrowLines(words: string, canOpen: boolean, width: number, ctx: ViewRenderCtx): string[] {
+  const lines = wrapText(words, Math.max(1, width - 2));
+  return lines.map((line, index) => {
+    const text = index === 0 ? `${paint("↗", "blue", ctx)} ${line}` : `  ${line}`;
+    return index === lines.length - 1 && canOpen ? fitPainted(`${text}  ${paint("(o)", "dim", ctx)}`, width) : text;
+  });
+}
+
+/** The head with ` · viewing` while a document is open, when it fits. */
+function viewingHead(head: string, width: number, ctx: ViewRenderCtx): string {
+  const viewing = paint(" · viewing", "dim", ctx);
+  return displayWidth(head) + displayWidth(viewing) <= width ? `${head}${viewing}` : head;
+}
+
+/** The words of the place `o` opens (`open in Meta Ads`), for its chip. */
+function appLinkLabel(view: AnswerViewV1, finishInApp: Record<string, unknown> | null): string {
+  const link = finishInApp && isRecord(finishInApp.appLink) ? finishInApp.appLink : isRecord(view.appLink) ? view.appLink : null;
+  return viewText(link?.label);
+}
+
+/**
+ * The chips the card draws: every key the bar offers but `?` (it has its own
+ * row), `o` named after the place it opens. With a document open the OK key
+ * leads, then the document keys, then `n` (r4 "Viewing the email").
+ */
+function cardChips(keys: readonly KeyHint[], documentOpen: boolean, openLabel: string, okKey: string | null): KeyHint[] {
+  const chips = keys
+    .filter((hint) => hint.key !== "?")
+    .map((hint) => (hint.key === "o" && openLabel ? { ...hint, label: openLabel } : hint));
+  if (!documentOpen) {
+    return chips;
+  }
+  const rank = (hint: KeyHint, index: number): number => {
+    if (okKey !== null && hint.key === okKey) return 0;
+    if (/^1-\d$/u.test(hint.key)) return 1;
+    if (hint.key === "n") return 2;
+    if (hint.key === "space") return 3;
+    if (hint.key === "v") return 100;
+    return 10 + index;
+  };
+  return chips
+    .map((hint, index) => ({ hint, rank: rank(hint, index) }))
+    .sort((left, right) => left.rank - right.rank)
+    .map((entry) => entry.hint);
 }
 
 function clampIndex(index: number, length: number): number {
