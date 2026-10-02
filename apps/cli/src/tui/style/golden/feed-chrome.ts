@@ -1,13 +1,15 @@
-// R1's feed (chrome): what the entry point gives the session besides the turn —
-// the top bar's workspace and connections, and the busy composer note.
+// The chrome feed: what the entry point gives the session besides the turn —
+// the top bar's workspace and connections (as a desktop's `/v1/status` sends
+// them), and the busy composer note.
 //
-// OWNED BY R1. R1 edits THIS file, not screen.ts, when it changes how the
-// session's chrome is fed, so lanes never collide in one file.
+// Edit THIS file, not screen.ts, when how the session's chrome is fed changes,
+// so lanes never collide in one file.
 //
 // `ENTRY_SESSION_PROPS` mirrors the props `index.ts` passes the interactive
 // session. Since the r4 restyle the entry point passes no placeholder: the
 // session's own `COMPOSER_PLACEHOLDER` (`Ask Infinite…`) is what users see, so
 // the composer goldens measure the session's default and not a harness string.
+import { decodeStatusConnections, desktopTopBarData } from "../../../desktop/status-connections.js";
 import type { HomeInventoryData, InkInteractiveSessionAppProps } from "../../ink/interactive-session.js";
 import type { TopBarData } from "../../ink/top-bar.js";
 import type { R4ScreenFixture } from "./fixtures.js";
@@ -28,13 +30,29 @@ export function inventoryConnections(fixture: R4ScreenFixture): HomeInventoryDat
   }));
 }
 
-/** The fixture's workspace and connections as the top bar takes them (D1): the session runs through the app. */
+/**
+ * The fixture's connections as a desktop sends them with `/v1/status`
+ * (`status.connections.v1`): the app's names in the app's order, each
+ * `connected`, `broken` or `off` (r4's amber mark: not connected).
+ */
+export function statusConnectionRows(fixture: R4ScreenFixture): { name: string; status: string }[] {
+  return fixture.session.connections.map((connection) => ({
+    name: connection.name,
+    status: connection.status === "missing" ? "off" : connection.status
+  }));
+}
+
+/**
+ * The top bar's data, built the way the desktop session builds it (D1): the
+ * status's workspace and its connections decoded off the wire, through the
+ * real decode and mapping. So a top bar golden that matches proves the dots
+ * came from the status payload.
+ */
 export function topBarData(fixture: R4ScreenFixture): TopBarData {
-  return {
-    workspace: fixture.session.workspace,
-    sources: fixture.session.connections.map((connection) => ({ label: connection.name, state: connection.status })),
-    throughApp: true
-  };
+  return desktopTopBarData({
+    workspace: { name: fixture.session.workspace },
+    connections: decodeStatusConnections(statusConnectionRows(fixture))
+  });
 }
 
 /**
