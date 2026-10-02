@@ -8,16 +8,26 @@ import type { WizardStoreView } from "../../src/tui/ui.js"
 
 /**
  * Stand-in for lane O3's `sanitizeUntrusted(text, max)` (src/agents/sanitize.ts is O3's file, not on this
- * lane's base). It strips ESC/C0/C1 controls and bidi overrides and caps the length, and records every call
- * so tests can prove the UI routed a string through the sanitiser.
+ * lane's base). It behaves like O3's in every way the UI can see: escape sequences, C0/C1 controls and bidi /
+ * zero-width characters stripped, tabs and newlines turned into spaces, whitespace runs COLLAPSED to one space
+ * and trimmed, the length capped with "…". (A stand-in that kept whitespace once hid a garbled report table.)
+ * It records every call so tests can prove the UI routed a string through the sanitiser.
  */
 export function makeTestSanitizer(): ((text: string, max: number) => string) & { calls: string[] } {
   const calls: string[] = []
   const fn = ((text: string, max: number) => {
     calls.push(text)
-    // eslint-disable-next-line no-control-regex
-    const clean = text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/g, "")
-    return Array.from(clean).slice(0, max).join("")
+    const clean = text
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
+      .replace(/[\t\n\r\v\f]/g, " ")
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+      .replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+    const points = Array.from(clean)
+    return points.length <= max ? clean : `${points.slice(0, max - 1).join("").trimEnd()}…`
   }) as ((text: string, max: number) => string) & { calls: string[] }
   fn.calls = calls
   return fn

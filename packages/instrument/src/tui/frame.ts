@@ -14,7 +14,7 @@
 import { EVENT_LIMITS } from "../wizard/contracts/events.js"
 import type { StoreStepRow, WizardStoreSnapshot } from "../wizard/contracts/state.js"
 import { WIZARD_STEP_IDS, WIZARD_STEP_META, type Who } from "../wizard/contracts/steps.js"
-import { SPINNER_FRAMES, fit, truncate, visibleWidth, wrapText, type Styles } from "./ansi.js"
+import { SPINNER_FRAMES, fit, layoutSafeLine, truncate, visibleWidth, wrapText, type Styles } from "./ansi.js"
 import { LEARN_CARDS, STEP_COPY, type LearnTone } from "./learn.js"
 import type { OverlayContext, OverlayView } from "./overlays/types.js"
 import type { UntrustedSanitizer } from "./ui.js"
@@ -213,7 +213,9 @@ function overlayBox(input: FrameInput, width: number, maxBodyLines: number): str
 
 function outroLines(input: FrameInput, width: number, outro: string): string[] {
   const s = input.styles
-  const lines = outro.split("\n").map((line) => truncate(input.sanitize(line, OUTRO_LINE_CAP), width))
+  // The outro is the wizard's own report table: keep its column padding (never the whitespace-collapsing
+  // untrusted-text sanitiser), only strip what could drive the terminal.
+  const lines = outro.split("\n").map((line) => truncate(layoutSafeLine(line, OUTRO_LINE_CAP), width))
   return [...lines, "", `${s.bold("ENTER")} close  ${s.dim("·")}  ${s.bold("Q")} quit`]
 }
 

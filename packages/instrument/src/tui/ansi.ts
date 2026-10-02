@@ -86,6 +86,26 @@ export function stripAnsi(text: string): string {
   return text.replace(ANSI_PATTERN, "")
 }
 
+// Every escape form a terminal acts on: CSI (7- and 8-bit), OSC, DCS/SOS/PM/APC, and single-char ESC sequences.
+// eslint-disable-next-line no-control-regex
+const TERMINAL_SEQUENCE = /\x1b\[[0-?]*[ -/]*[@-~]|\x9b[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x9d[^\x07\x1b\x9c]*(?:\x07|\x9c|\x1b\\)?|\x1b[PX^_][^\x1b]*(?:\x1b\\)?|[\x90\x98\x9e\x9f][^\x9c\x1b]*(?:\x9c|\x1b\\)?|\x1b[@-Z\\-_]|\x1b[ -/][0-~]?/g
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g
+const INVISIBLE_CHARS = /[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g
+
+/**
+ * One line of the wizard's OWN rendering (the before/after table from the report builder) made safe to print
+ * WITHOUT losing its layout: escape sequences, control characters and bidi/zero-width characters are removed,
+ * a tab becomes one space, and runs of spaces are KEPT (the table's columns are padding). Capped at `max` code
+ * points. Untrusted text (agent narration, comments, page text) still goes through O3's `sanitizeUntrusted`,
+ * which collapses whitespace on purpose.
+ */
+export function layoutSafeLine(line: string, max: number): string {
+  const clean = line.replace(TERMINAL_SEQUENCE, "").replace(/\t/g, " ").replace(CONTROL_CHARS, "").replace(INVISIBLE_CHARS, "").trimEnd()
+  const points = Array.from(clean)
+  return points.length <= max ? clean : `${points.slice(0, max - 1).join("")}…`
+}
+
 function isZeroWidth(code: number): boolean {
   return (
     (code >= 0x0300 && code <= 0x036f) ||

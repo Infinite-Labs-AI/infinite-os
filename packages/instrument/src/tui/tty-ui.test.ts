@@ -42,6 +42,18 @@ describe("TtyUi lifecycle", () => {
     expect(stdin.rawModes).toEqual([true, false])
   })
 
+  it("the exit line's PR URL and report path go through the sanitiser (negative: an escape never reaches scrollback)", () => {
+    const { stdout, ui, store, sanitize } = setup()
+    ui.start(store)
+    store.set({ exit: { exitCode: 0, prUrl: "https://github.com/acme/acme-store/pull/42\x1b]8;;https://evil.example\x07", reportPath: ".infinite/REPORT.md\u202e" } })
+    ui.stop()
+    const tail = stdout.chunks[stdout.chunks.length - 1] ?? ""
+    expect(stripAnsi(tail)).toContain("PR https://github.com/acme/acme-store/pull/42 · report .infinite/REPORT.md")
+    expect(tail).not.toContain("evil.example")
+    expect(tail).not.toContain("\u202e")
+    expect(sanitize.calls.some((text) => text.includes("evil.example"))).toBe(true)
+  })
+
   it("restores the raw mode it found (a terminal already in raw mode stays raw)", () => {
     const { stdin, ui, store } = setup()
     stdin.isRaw = true
@@ -68,12 +80,35 @@ describe("TtyUi lifecycle", () => {
     ui.stop()
   })
 
-  it("a read EIO is swallowed and raw mode is restored", () => {
-    const { stdin, ui, store } = setup()
+  it("a read EIO is swallowed, input keeps working, and raw mode is restored on stop", () => {
+    const store = new FakeStore(
+      makeSnapshot({
+        currentStep: "merge",
+        steps: stepRows({ merge: { state: "running" } }),
+        pendingAsk: { askId: "m1", kind: "merge-ready", payload: { prUrl: "https://github.com/acme/acme-store/pull/42", number: 42, summary: "Draft PR ready" } }
+      })
+    )
+    const { stdin, ui } = setup({ store })
     ui.start(store)
     expect(() => stdin.fail("EIO")).not.toThrow()
-    expect(stdin.rawModes).toEqual([true, false])
+    // Still raw, still listening: the pending ask can be answered.
+    expect(stdin.isRaw).toBe(true)
+    stdin.type("\r")
+    expect(store.answers).toHaveLength(1)
+    expect(store.answers[0]?.askId).toBe("m1")
     ui.stop()
+    expect(stdin.isRaw).toBe(false)
+    expect(stdin.rawModes[stdin.rawModes.length - 1]).toBe(false)
+  })
+
+  it("an EIO after a raw-mode teardown (tty hand-over) re-asserts raw mode while the UI is active", () => {
+    const { stdin, ui, store } = setup()
+    ui.start(store)
+    stdin.setRawMode(false)
+    stdin.fail("EIO")
+    expect(stdin.isRaw).toBe(true)
+    ui.stop()
+    expect(stdin.isRaw).toBe(false)
   })
 
   it("any other stdin error still surfaces (negative)", () => {
@@ -192,6 +227,32 @@ describe("TtyUi asks", () => {
     expect(dismissed).toHaveBeenCalled()
     ui.stop()
     expect(stdout.chunks[stdout.chunks.length - 1]).toContain("collects analytics properly now")
+  })
+
+  it("the before/after table keeps its columns in the frame and in scrollback, with O3's whitespace-collapsing sanitiser", async () => {
+    // Exactly how O1's renderTerminal lays a row out: padded cells joined by two spaces.
+    const pad = (text: string, width: number) => text.padEnd(width)
+    const header = [pad("", 26), pad("Live site today", 20), pad("In this pull request", 20), pad("Proven live", 20)].join("  ").trimEnd()
+    const row = [pad("Checks passing", 26), pad("6 pass · 5 problems", 20), pad("13 pass", 20), pad("12 pass", 20)].join("  ").trimEnd()
+    const outro = `Before and after · acme-store.com · run 7f3c2a91\n${header}\n${row}\x1b[31m\u202e`
+    const store = new FakeStore(midRunSnapshot())
+    const { stdout, ui } = setup({ store })
+    ui.start(store)
+    ui.setOutro(outro)
+    await flushMicrotasks()
+    const frameText = ui.lastFrame().map(stripAnsi)
+    const frameRow = frameText.find((line) => line.includes("Checks passing")) ?? ""
+    expect(frameRow.trim()).toBe(row.trim())
+    const live = frameRow.indexOf("6 pass")
+    const headerLine = frameText.find((line) => line.includes("Live site today")) ?? ""
+    expect(headerLine.indexOf("Live site today")).toBe(live)
+    ui.stop()
+    const tail = stdout.chunks[stdout.chunks.length - 1] ?? ""
+    expect(tail).toContain(`${row}\n`)
+    expect(tail).toContain(header)
+    // Escapes and bidi characters inside the outro are still stripped.
+    expect(tail).not.toContain("\u202e")
+    expect(tail).not.toContain("\x1b[31m")
   })
 
   it("waitForDismiss resolves at once with no outro", async () => {

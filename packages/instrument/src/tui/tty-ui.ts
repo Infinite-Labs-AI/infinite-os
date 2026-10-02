@@ -2,13 +2,14 @@
 // The TTY UI: an ANSI renderer in the terminal's alternate screen. It follows O1's store, redraws only the
 // lines that changed, drives one overlay per pending ask, and gives the terminal back cleanly: raw mode
 // restored, cursor shown, alt screen left, then the outro and ONE exit line printed into scrollback. It also
-// restores the terminal after Ctrl+C (then hands off to the engine's SIGINT path) and after a `read EIO`.
+// restores the terminal after Ctrl+C (then hands off to the engine's SIGINT path); a `read EIO` is swallowed
+// and input keeps working (raw mode re-asserted), so a later ask can still be answered.
 //
 // Alt-screen lifecycle, EIO swallow and the exit-line idea adapted from PostHog wizard v2.74.1
 // (`src/ui/tui/start-tui.ts`, `terminal.ts`, `exit-line.ts`), MIT, Copyright (c) 2025 PostHog.
 import type { AskKind } from "../wizard/contracts/asks.js"
 import type { WizardStoreSnapshot } from "../wizard/contracts/state.js"
-import { SEQ, SPINNER_FRAMES, colorEnabled, makeStyles, type Styles } from "./ansi.js"
+import { SEQ, SPINNER_FRAMES, colorEnabled, layoutSafeLine, makeStyles, type Styles } from "./ansi.js"
 import { exitLine } from "./exit-line.js"
 import { renderFrame } from "./frame.js"
 import { RawKeyboard, type Key, type KeyboardInput } from "./keys.js"
@@ -113,11 +114,17 @@ export class TtyUi implements WizardUi {
     if (!this.suspended) tail += SEQ.showCursor + SEQ.reset + SEQ.leaveAltScreen
     else tail += SEQ.showCursor + SEQ.reset
     const outro = this.currentOutro(snapshot)
-    if (outro) tail += outro.split("\n").map((line) => this.options.sanitize(line, 400)).join("\n") + "\n"
+    // The report table keeps its columns in scrollback too (see `layoutSafeLine`).
+    if (outro) tail += outro.split("\n").map((line) => layoutSafeLine(line, 400)).join("\n") + "\n"
     if (snapshot?.exit) {
       tail +=
         exitLine(
-          { displayId: snapshot.run.displayId, exitCode: snapshot.exit.exitCode, prUrl: snapshot.exit.prUrl, reportPath: snapshot.exit.reportPath },
+          {
+            displayId: this.options.sanitize(snapshot.run.displayId, 40),
+            exitCode: snapshot.exit.exitCode,
+            prUrl: snapshot.exit.prUrl === null ? null : this.options.sanitize(snapshot.exit.prUrl, 400),
+            reportPath: snapshot.exit.reportPath === null ? null : this.options.sanitize(snapshot.exit.reportPath, 400)
+          },
           this.styles
         ) + "\n"
     }

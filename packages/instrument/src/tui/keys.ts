@@ -1,8 +1,8 @@
 // Contains code adapted from PostHog wizard v2.74.1, MIT, Copyright (c) 2025 PostHog (notice: packages/instrument/LICENSE).
 // Raw keyboard input for the TTY UI: ENTER, ESC, ↑ ↓ ← →, SPACE, BACKSPACE, TAB, letters (E, Q, Y, N…),
 // Ctrl+C. The keyboard owns raw mode: it records the mode it found, and `stop()` always restores it, also
-// after Ctrl+C and after a `read EIO` (macOS raises one on stdin when raw mode is torn down with a read
-// pending; it is swallowed, as in PostHog wizard v2.74.1 `start-tui.ts`, MIT, Copyright (c) 2025 PostHog).
+// after Ctrl+C. A `read EIO` (macOS raises one on stdin when raw mode is torn down with a read pending) is
+// swallowed and reading continues, as in PostHog wizard v2.74.1 `start-tui.ts`, MIT, Copyright (c) 2025 PostHog.
 
 export type Key =
   | { name: "enter" }
@@ -117,9 +117,14 @@ export class RawKeyboard {
     }
   }
   private readonly onError = (error: NodeJS.ErrnoException) => {
-    // A pending read torn down by raw-mode changes surfaces as EIO: give the terminal back and carry on.
+    // A pending read torn down by a raw-mode change (e.g. around a tty hand-over) surfaces as EIO. It is not
+    // the end of input: swallow it and KEEP reading, as PostHog's wizard does, so the next ask can still be
+    // answered. Raw mode is re-asserted while active (the terminal is restored on stop, Ctrl+C and exit).
     if (error.code === "EIO") {
-      this.stop()
+      if (this.active) {
+        if (this.input.isTTY && typeof this.input.setRawMode === "function" && this.input.isRaw !== true) this.input.setRawMode(true)
+        this.input.resume?.()
+      }
       return
     }
     this.stop()
