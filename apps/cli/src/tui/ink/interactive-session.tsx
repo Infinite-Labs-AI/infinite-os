@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { stdin as defaultInput, stderr as defaultErrorOutput, stdout as defaultOutput } from "node:process";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 // The composer value renders in `<Text wrap="wrap">` (see InkLineInput), and Ink's
 // wrap="wrap" word-wraps via `wrapAnsi(text, width, { trim: false, hard: true })`
 // (ink/build/wrap-text.js). The native-cursor row prediction MUST use the SAME
@@ -743,7 +743,10 @@ export function InkInteractiveSessionApp({
   // closed: the explanation stays behind `?`.
   // A card brought back opens with the answers it sent; a card whose answer
   // the app refused opens with the app's words under its field.
-  useEffect(() => {
+  // A layout effect, so the reset lands in the same task as the frame that
+  // shows the card: a key pressed on the card the moment it appears (`v`)
+  // is never undone by a late reset.
+  useLayoutEffect(() => {
     setExplainOpen(false);
     setCardUi(cardUiStart(headConfirmAction));
   }, [headConfirmAction]);
@@ -2619,9 +2622,23 @@ function InkLineInput({
   const { stdout } = useStdout();
   const forwardDelete = useForwardDeleteSignal();
   const markCursorActivity = useActivityAwareCursorBlink(stdout);
-  useInput((input, key) => {
+  // The composer's edit state as of the last key, so keys that arrive before
+  // React re-renders compose (none is lost); each render resets it to the props.
+  const editRef = useRef<ComposerEditState>({ cursor, selection, value });
+  editRef.current = { cursor, selection, value };
+  const change = (next: ComposerEditState) => {
+    editRef.current = next;
+    onChange(next);
+  };
+  // One stable subscription that always runs THIS render's handler. Ink
+  // re-subscribes `useInput` in an effect, after the frame is already on
+  // screen, so a key pressed in between used to reach an older render's
+  // handler: `v` on a card that had just appeared typed into the composer.
+  const handleInputRef = useRef<(input: string, key: Key) => void>(() => {});
+  handleInputRef.current = (input, key) => {
     markCursorActivity();
-    const editState = { cursor, selection, value };
+    const editState = editRef.current;
+    const value = editState.value;
     // In-chat /connect wizard (#20): Ctrl-C cancels the WIZARD ONLY (zeroizing the
     // secret) and must be guarded BEFORE the session-wide `onExit()` below — a
     // bare Ctrl-C mid-wizard must not quit the whole session.
@@ -2770,16 +2787,16 @@ function InkLineInput({
       return;
     }
     if (key.ctrl && input === "j") {
-      onChange(applyComposerEdit(editState, { type: "insert-newline" }));
+      change(applyComposerEdit(editState, { type: "insert-newline" }));
       return;
     }
     const keyWithPosition = key as typeof key & { end?: boolean; home?: boolean };
     if (keyWithPosition.home || (key.ctrl && input === "a")) {
-      onChange(applyComposerEdit(editState, { type: "move-start" }));
+      change(applyComposerEdit(editState, { type: "move-start" }));
       return;
     }
     if (keyWithPosition.end || (key.ctrl && input === "e")) {
-      onChange(applyComposerEdit(editState, { type: "move-end" }));
+      change(applyComposerEdit(editState, { type: "move-end" }));
       return;
     }
     if (key.tab) {
@@ -2798,7 +2815,7 @@ function InkLineInput({
       }
       const next = applyComposerEdit(editState, { type: key.shift ? "move-line-up-select" : "move-line-up" });
       if (next.cursor !== editState.cursor) {
-        onChange(next);
+        change(next);
         return;
       }
       onHistoryOlder();
@@ -2810,7 +2827,7 @@ function InkLineInput({
       }
       const next = applyComposerEdit(editState, { type: key.shift ? "move-line-down-select" : "move-line-down" });
       if (next.cursor !== editState.cursor) {
-        onChange(next);
+        change(next);
         return;
       }
       onHistoryNewer();
@@ -2821,7 +2838,7 @@ function InkLineInput({
       const type = key.shift
         ? word ? "move-word-left-select" : "move-left-select"
         : word ? "move-word-left" : "move-left";
-      onChange(applyComposerEdit(editState, { type }));
+      change(applyComposerEdit(editState, { type }));
       return;
     }
     if (key.rightArrow || (key.ctrl && input === "f")) {
@@ -2829,32 +2846,33 @@ function InkLineInput({
       const type = key.shift
         ? word ? "move-word-right-select" : "move-right-select"
         : word ? "move-word-right" : "move-right";
-      onChange(applyComposerEdit(editState, { type }));
+      change(applyComposerEdit(editState, { type }));
       return;
     }
     if (key.meta && input === "b") {
-      onChange(applyComposerEdit(editState, { type: "move-word-left" }));
+      change(applyComposerEdit(editState, { type: "move-word-left" }));
       return;
     }
     if (key.meta && input === "f") {
-      onChange(applyComposerEdit(editState, { type: "move-word-right" }));
+      change(applyComposerEdit(editState, { type: "move-word-right" }));
       return;
     }
     if (key.backspace) {
-      onChange(applyComposerEdit(editState, { type: "backspace" }));
+      change(applyComposerEdit(editState, { type: "backspace" }));
       return;
     }
     if (key.delete) {
-      onChange(applyComposerEdit(editState, { type: forwardDelete.current ? "delete-forward" : "backspace" }));
+      change(applyComposerEdit(editState, { type: forwardDelete.current ? "delete-forward" : "backspace" }));
       return;
     }
     if (input && !key.ctrl && !key.meta) {
       const action = input.length > 1 || input.includes("\n") || input.includes("[200~") || input.includes("[201~")
         ? { text: input, type: "insert-paste" as const }
         : { text: input, type: "insert" as const };
-      onChange(applyComposerEdit(editState, action));
+      change(applyComposerEdit(editState, action));
     }
-  });
+  };
+  useInput(useCallback((input: string, key: Key) => handleInputRef.current(input, key), []));
 
   // In-chat /connect wizard (#20): a free-text field row uses a `?`-style prompt
   // and never the native cursor (the rendered `value` is already the masked bullets

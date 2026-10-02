@@ -68,7 +68,7 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // its open document, page or field answers. (A card brought back opens with
     // only the answers its own entry carries: cardUiStart(entry).)
     expect(source).toMatch(
-      /useEffect\(\(\) => \{\n\s+setExplainOpen\(false\);\n\s+setCardUi\(cardUiStart\(headConfirmAction\)\);\n\s+\}, \[headConfirmAction\]\);/u
+      /useLayoutEffect\(\(\) => \{\n\s+setExplainOpen\(false\);\n\s+setCardUi\(cardUiStart\(headConfirmAction\)\);\n\s+\}, \[headConfirmAction\]\);/u
     );
   });
 
