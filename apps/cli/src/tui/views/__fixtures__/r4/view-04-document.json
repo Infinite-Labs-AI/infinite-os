@@ -50,7 +50,7 @@
         },
         "caveats": [],
         "appLink": {
-          "place": "email_campaigns",
+          "place": "email.campaign",
           "label": "open in Email Campaigns"
         },
         "body": {

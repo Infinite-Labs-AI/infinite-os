@@ -50,7 +50,7 @@
         },
         "caveats": [],
         "appLink": {
-          "place": "meta_ads",
+          "place": "ads.meta",
           "label": "open in Meta Ads",
           "params": {
             "ad": "ad_hook_b"
@@ -78,7 +78,7 @@
           "fix": {
             "label": "Live refresh in Meta Ads",
             "appLink": {
-              "place": "meta_ads",
+              "place": "ads.meta",
               "label": "open in Meta Ads",
               "params": {
                 "ad": "ad_hook_b"

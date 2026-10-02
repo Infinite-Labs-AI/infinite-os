@@ -50,7 +50,7 @@
         },
         "caveats": [],
         "appLink": {
-          "place": "website_tests",
+          "place": "website.tests",
           "label": "Open the test in Website"
         },
         "body": {

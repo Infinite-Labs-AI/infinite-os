@@ -56,7 +56,7 @@
           }
         ],
         "appLink": {
-          "place": "meta_ads",
+          "place": "ads.meta",
           "label": "open in Meta Ads"
         },
         "body": {

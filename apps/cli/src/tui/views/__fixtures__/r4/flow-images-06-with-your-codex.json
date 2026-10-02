@@ -50,7 +50,7 @@
         },
         "caveats": [],
         "appLink": {
-          "place": "creative_library",
+          "place": "creative.library",
           "label": "Open in Library",
           "params": {
             "run": "run_r4"

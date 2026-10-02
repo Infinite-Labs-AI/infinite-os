@@ -50,7 +50,7 @@
         },
         "caveats": [],
         "appLink": {
-          "place": "meta_ads",
+          "place": "ads.meta",
           "label": "previews",
           "params": {
             "adset": "adset_broad"

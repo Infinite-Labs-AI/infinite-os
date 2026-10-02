@@ -92,7 +92,7 @@
           "runsWhere": "cloud",
           "outlivesTurn": true,
           "landsAt": {
-            "place": "blog_production",
+            "place": "content.posts",
             "label": "Blog & AEO › Production"
           },
           "noCompletionSignal": false,
