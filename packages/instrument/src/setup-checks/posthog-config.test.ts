@@ -72,4 +72,11 @@ describe("posthog config", () => {
     const proxyOnly = readPosthogConfigs(files({ "src/ph.ts": "posthog.init('phc_abcdefghijklmnop', { api_host: '/ingest' })" }))
     expect(posthogConfigDrift(before, proxyOnly)).toEqual([])
   })
+
+  it("groups the same finding across pages into one line", () => {
+    const html = (n: number) => `<html><head><script>posthog.init('phc_abcdefghijklmnop', { api_host: 'https://us.i.posthog.com' })</script></head><body>${n}</body></html>`
+    const result = checkPosthogConfig({ files: files({ "a.html": html(1), "b.html": html(2) }) })
+    expect(result.findings.map((finding) => finding.code)).toEqual(["INF_SETUP_POSTHOG_NOT_PROXIED"])
+    expect(result.findings[0]!.message).toContain("The same applies at b.html:1.")
+  })
 })

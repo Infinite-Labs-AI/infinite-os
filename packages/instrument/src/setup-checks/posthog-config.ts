@@ -14,7 +14,7 @@
 import { readPosthogOption } from "../inspect.js"
 import { posthogRegion } from "../checks/posthog-hosts.js"
 
-import { codeView, isHtmlFile, sourceUnits, unitLine } from "./code-view.js"
+import { codeView, groupFindings, isHtmlFile, sourceUnits, unitLine } from "./code-view.js"
 import {
   posthogNotProxiedMessage,
   posthogPrivacyChangedMessage,
@@ -178,7 +178,8 @@ export function checkPosthogConfig(input: PosthogConfigInput): SetupCheckResult 
       findings.push({ ...base, code: "INF_SETUP_POSTHOG_SPA_PAGEVIEWS", state: "info", confidence: "likely", message: posthogSpaPageviewsMessage(read) })
     }
   }
-  return { check: "posthog_config", state: worstState(findings), findings }
+  const grouped = groupFindings(findings, (finding) => finding.code)
+  return { check: "posthog_config", state: worstState(grouped), findings: grouped }
 }
 
 /**

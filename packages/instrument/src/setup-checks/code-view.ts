@@ -79,3 +79,24 @@ export function matchingBracket(text: string, open: number): number {
   }
   return -1
 }
+
+/**
+ * One finding per group instead of one per page: a multi-page site with the same snippet on 50 pages
+ * gets one line naming up to five more places, not 50 lines. The first finding keeps its file:line.
+ */
+export function groupFindings<T extends { file?: string; line?: number; message: string }>(
+  findings: readonly T[],
+  key: (finding: T) => string,
+  maxNamed = 5
+): T[] {
+  const groups = new Map<string, T[]>()
+  for (const finding of findings) groups.set(key(finding), [...(groups.get(key(finding)) ?? []), finding])
+  return [...groups.values()].map((group) => {
+    const first = group[0] as T
+    const others = [...new Set(group.slice(1).map((finding) => `${finding.file ?? "?"}${finding.line ? `:${finding.line}` : ""}`))]
+    if (others.length === 0) return first
+    const named = others.slice(0, maxNamed)
+    const more = others.length > named.length ? ` and ${others.length - named.length} more` : ""
+    return { ...first, message: `${first.message} The same applies at ${named.join(", ")}${more}.` }
+  })
+}

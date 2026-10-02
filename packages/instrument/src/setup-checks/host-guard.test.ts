@@ -48,7 +48,16 @@ describe("adopted init host guard", () => {
   })
 
   it("covers Meta's bootstrap init and ignores the _fbc capture", () => {
-    const reads = readAdoptedInitGuards(files({ "index.html": "<html><head><script>window.infiniteMetaClickId=function(){};fbq('init', '914812061724377');</script></head><body></body></html>" }))
+    const reads = readAdoptedInitGuards(files({ "index.html": "<html><head><script>window.infiniteMetaClickId=function(){};fbq('init', '111222333444555');</script></head><body></body></html>" }))
     expect(reads.map((read) => read.tool)).toEqual(["Meta pixel"])
+  })
+
+  it("groups a multi-page site into one line per tool (strict keeps one per init)", () => {
+    const page = (n: number) => `<html><head><script>gtag('config', 'G-ABC123')</script></head><body>${n}</body></html>`
+    const input = { files: files({ "a.html": page(1), "b.html": page(2), "c.html": page(3) }) }
+    const grouped = checkHostGuard(input).findings
+    expect(grouped).toHaveLength(1)
+    expect(grouped[0]!.message).toContain("The same applies at b.html:1, c.html:1.")
+    expect(checkHostGuard({ ...input, strict: true }).findings).toHaveLength(3)
   })
 })

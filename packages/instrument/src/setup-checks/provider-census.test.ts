@@ -69,9 +69,16 @@ describe("provider census", () => {
   })
 
   it("counts every Meta bootstrap init, but not the Advanced Matching re-init", () => {
-    const html = page("<script>fbq('init', '914812061724377');fbq('init', '914812061724377', {em: h});fbq('track','PageView');</script>")
+    const html = page("<script>fbq('init', '111222333444555');fbq('init', '111222333444555', {em: h});fbq('track','PageView');</script>")
     expect(checkProviderCensus({ files: files({ "index.html": html }) }).findings).toEqual([])
-    const twice = page("<script>fbq('init', '914812061724377');fbq('init', '914812061724377');</script>")
+    const twice = page("<script>fbq('init', '111222333444555');fbq('init', '111222333444555');</script>")
     expect(checkProviderCensus({ files: files({ "index.html": twice }) }).findings[0]?.code).toBe("INF_SETUP_PROVIDER_DUPLICATE_INIT")
+  })
+
+  it("one line for the same duplicate on many pages", () => {
+    const twice = page(GTAG("G-ABC123") + GTAG("G-ABC123"))
+    const result = checkProviderCensus({ files: files({ "a.html": twice, "b.html": twice, "c.html": twice }) })
+    expect(result.findings).toHaveLength(1)
+    expect(result.findings[0]!.message).toContain("The same applies at b.html:1, c.html:1.")
   })
 })

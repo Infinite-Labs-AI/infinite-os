@@ -21,7 +21,7 @@
 // `acme.vercel.app`) and does not appear in the guard's literals.
 import { HOST_DENY_V1, normalizeHost } from "../wizard/contracts/host-deny.js"
 
-import { codeView, matchingBracket, sourceUnits, unitLine } from "./code-view.js"
+import { codeView, groupFindings, matchingBracket, sourceUnits, unitLine } from "./code-view.js"
 import { hostGuardMissingMessage, hostGuardPresentMessage, hostGuardSilencesProductionMessage } from "./copy.js"
 import { worstState, type SetupCheckResult, type SetupFinding } from "./types.js"
 
@@ -116,6 +116,7 @@ export interface HostGuardInput {
 
 export function checkHostGuard(input: HostGuardInput): SetupCheckResult {
   const findings: SetupFinding[] = []
+  const toolOf = new Map<SetupFinding, string>()
   const production = (input.productionHosts ?? []).map(normalizeHost)
   for (const read of readAdoptedInitGuards(input.files)) {
     const base = { check: "host_guard" as const, file: read.file, line: read.line }
@@ -127,6 +128,7 @@ export function checkHostGuard(input: HostGuardInput): SetupCheckResult {
         confidence: input.strict ? "certain" : "likely",
         message: hostGuardMissingMessage({ ...read, strict: input.strict === true })
       })
+      toolOf.set(findings[findings.length - 1] as SetupFinding, read.tool)
       continue
     }
     const silenced = production.filter((host) => deniedByRules(host) && !read.literalHosts.includes(host))
@@ -138,9 +140,14 @@ export function checkHostGuard(input: HostGuardInput): SetupCheckResult {
         confidence: "certain",
         message: hostGuardSilencesProductionMessage({ ...read, hosts: silenced })
       })
+      toolOf.set(findings[findings.length - 1] as SetupFinding, read.tool)
       continue
     }
     findings.push({ ...base, code: "INF_SETUP_HOST_GUARD_PRESENT", state: "ok", confidence: "likely", message: hostGuardPresentMessage(read) })
+    toolOf.set(findings[findings.length - 1] as SetupFinding, read.tool)
   }
-  return { check: "host_guard", state: worstState(findings), findings }
+  // Job 7's proof keeps one finding per init (each is an item's target); the plan-line view groups
+  // by tool so a multi-page site reads as one line per tool.
+  const shown = input.strict ? findings : groupFindings(findings, (finding) => `${finding.code}\u0000${toolOf.get(finding) ?? ""}`)
+  return { check: "host_guard", state: worstState(shown), findings: shown }
 }

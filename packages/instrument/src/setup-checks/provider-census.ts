@@ -21,7 +21,7 @@
 import type { CensusEntry } from "../wizard/contracts/jobs.js"
 
 import { isSharedEntry } from "./click-id-capture.js"
-import { codeView, isHtmlFile, sourceUnits, unitLine } from "./code-view.js"
+import { codeView, groupFindings, isHtmlFile, sourceUnits, unitLine } from "./code-view.js"
 import {
   providerDuplicateInitMessage,
   providerGtmAndGtagMessage,
@@ -80,11 +80,14 @@ export function checkProviderCensus(input: ProviderCensusInput): SetupCheckResul
   // 1. The same id more than once in ONE file.
   const flagged = new Set<string>()
   const byFileAndId = groupBy(tools.filter((entry) => entry.id !== null), (entry) => `${entry.file}\u0000${entry.tool}\u0000${entry.id}`)
+  const sameFile: SetupFinding[] = []
+  const keyOf = new Map<SetupFinding, string>()
   for (const group of byFileAndId.values()) {
     if (group.length < 2) continue
     const first = group[0] as CensusEntry
-    flagged.add(`${first.tool}\u0000${first.id}`)
-    findings.push({
+    const key = `${first.tool}\u0000${first.id}`
+    flagged.add(key)
+    sameFile.push({
       check: "provider_census",
       code: "INF_SETUP_PROVIDER_DUPLICATE_INIT",
       state: "problem",
@@ -93,7 +96,10 @@ export function checkProviderCensus(input: ProviderCensusInput): SetupCheckResul
       line: first.line,
       message: providerDuplicateInitMessage({ tool: TOOL_LABEL[first.tool], id: first.id as string, places: group.slice(0, MAX_PLACES).map(place), sameFile: true })
     })
+    keyOf.set(sameFile[sameFile.length - 1] as SetupFinding, key)
   }
+  // The same duplicate on many pages (a shared template) is one line, naming the other pages.
+  findings.push(...groupFindings(sameFile, (finding) => keyOf.get(finding) ?? ""))
 
   // 2. A shared entry plus the same id in another (non-HTML) file.
   const byId = groupBy(tools.filter((entry) => entry.id !== null && !isHtmlFile(entry.file)), (entry) => `${entry.tool}\u0000${entry.id}`)

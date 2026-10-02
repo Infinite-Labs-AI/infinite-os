@@ -210,6 +210,15 @@ describe("doctor command", () => {
     expect(code).toBe(0)
   })
 
+  it("--json returns 1 on a problem and 3 when something could not be determined", async () => {
+    const root = repo({ "index.html": PAGE })
+    const base = ["--json", "--root", root, "--expect-ga4", GA4, "--expect-posthog", POSTHOG, "--posthog-api-host", "/ingest"]
+    expect(await runDoctorCommand([...base, "--url", `${SITE}/`, "--expect-meta", "999888777666555"], deps())).toBe(1)
+    expect(await runDoctorCommand([...base, "--expect-meta", PIXEL], deps())).toBe(3)
+    const reports = out.map((text) => JSON.parse(text) as DoctorReport)
+    expect(reports.map((report) => report.exitCode)).toEqual([1, 3])
+  })
+
   it("usage errors exit 2 (and --json still prints JSON)", async () => {
     expect(await runDoctorCommand(["--url", "http://acme.test/"])).toBe(2)
     expect(await runDoctorCommand(["--expect-meta", "1234"])).toBe(2)
