@@ -9,8 +9,10 @@ import {
   type InkInteractiveLineResult
 } from "./interactive-session.js";
 import type { InSessionConfirmationAction } from "../../desktop/confirm-in-session.js";
+import { resetTurnState } from "../app/turn-store.js";
 
 const source = readFileSync(fileURLToPath(new URL("./interactive-session.tsx", import.meta.url)), "utf8");
+const cardSource = readFileSync(fileURLToPath(new URL("./confirm-card.tsx", import.meta.url)), "utf8");
 
 // A representative (already-redacted) pending write confirmation, mirroring what
 // `desktop-turn-source.parsePendingConfirmations` surfaces from a `done` frame.
@@ -91,22 +93,26 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(handler).not.toContain('if (decision === "decline")');
   });
 
-  it("prints receipt lines, never the JSON result", () => {
+  it("prints receipt lines, never the JSON result; a settled receipt view goes on the turn instead", () => {
     const handler = source.slice(
       source.indexOf("const resolveConfirmAction"),
       source.indexOf("useEffect(() => {\n    // Don't drain")
     );
     expect(handler).toContain("confirmResultLines(result, decision)");
     expect(handler).toContain("confirmErrorLines(error)");
+    expect(handler).toContain("const receipt = receiptViewFrame(head, result);");
+    expect(handler).toContain("recordTurnView(receipt);");
     expect(handler).not.toContain("JSON.stringify");
   });
 
   it("scrubs the un-redacted summary through terminalText before rendering", () => {
-    // The overlay render runs the summary through terminalText (the details are
-    // redacted upstream → rendered verbatim); receipts are scrubbed by
-    // confirmResultLines.
-    expect(source).toContain("terminalText(pending.summary");
-    expect(source).toContain("detail.label}: ${detail.value}");
+    // The card (confirm-card.tsx) runs the summary through terminalText; the
+    // details are redacted upstream and scrubbed again as they become rows;
+    // receipts are scrubbed by confirmResultLines.
+    expect(source).toMatch(/import \{ ConfirmActionMenu, [^}]+ \} from "\.\/confirm-card\.js";/u);
+    expect(source).not.toContain("function ConfirmActionMenu(");
+    expect(cardSource).toContain("terminalText(pending.summary)");
+    expect(cardSource).toContain("label: terminalText(detail.label), value: terminalText(detail.value)");
   });
 
   it("blocks the queued-line drain while a confirmation is pending", () => {
@@ -115,6 +121,17 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
       source.indexOf("const submitLine = useCallback")
     );
     expect(drain).toContain("pendingConfirmActions.length > 0");
+    // A confirm still in flight holds the queue too: its receipt belongs to this turn.
+    expect(drain).toContain("confirmsInFlight > 0");
+  });
+
+  it("records a receipt view only on the turn its card came from", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction = useCallback"),
+      source.indexOf("const handleCardAction = useCallback")
+    );
+    expect(handler).toContain("const seqAtResolve = commitSeq.current;");
+    expect(handler).toContain("commitSeq.current === seqAtResolve");
   });
 
   it("keeps r4's ❯ prompt while a write card waits (its keys are in the key bar); an operator confirm shows `!`", () => {
@@ -172,10 +189,10 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
 
       await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "publish it\r");
-      // The overlay renders the summary + redacted details + affordance.
-      await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
-      expect(output.text()).toContain("Publish landing page to production");
+      // The card: the summary in its border, the redacted details as rows, the keys inside.
+      await waitFor(() => output.text().includes("Publish landing page to production"), 4_000, output.text);
       expect(output.text()).toContain("acme.example.com");
+      expect(output.text()).not.toContain("Approve this write?");
       // Old desktop (no approval view): the bar names y Confirm and n dismiss.
       expect(stripAnsi(output.text())).toContain(" y  Confirm    n  dismiss");
 
@@ -218,7 +235,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
 
       await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "publish it\r");
-      await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
+      await waitFor(() => output.text().includes("Publish landing page to production"), 4_000, output.text);
 
       await sendKeys(input, "n");
       await waitFor(() => output.text().includes("✕ Dismissed — nothing was executed."), 4_000, output.text);
@@ -256,7 +273,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
 
       await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "publish it\r");
-      await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
+      await waitFor(() => output.text().includes("Publish landing page to production"), 4_000, output.text);
 
       await sendKeys(input, "\r");
       await sendKeys(input, "\x1b");
@@ -326,6 +343,163 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
 
       await sendKeys(input, "/exit\r");
       await session;
+    }
+  );
+});
+
+describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
+  const RECEIPT_VIEW = {
+    v: 1, kind: "change", tool: "propose_pause_meta_entity", title: "Paused ad 01", state: "done", asOf: null,
+    scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+    body: { target: { kind: "ad", label: "Ad 01" }, rows: [{ label: "status", before: "on", after: "PAUSED" }], warnings: [] },
+    outcome: "applied", receipt: { sentence: "Stopped spending at 10:42", tone: "ok", revertible: true }
+  };
+  const CARD = {
+    ...PENDING,
+    view: {
+      ...RECEIPT_VIEW, title: "Pause ad", state: "needs_yes", outcome: undefined, receipt: undefined,
+      approval: { kind: "card", title: "Pause ad 01?", summary: "Stops spend.", confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [] }
+    }
+  } as unknown as InSessionConfirmationAction;
+
+  async function answer(key: string, result: unknown) {
+    const input = ttyInput();
+    const output = ttyOutput();
+    const session = runInkInteractiveSession({
+      columns: 80,
+      errorOutput: ttyOutput(),
+      input,
+      output,
+      title: "Infinite TUI",
+      onConfirmAction: async () => result,
+      async onSubmitLine(): Promise<InkInteractiveLineResult> {
+        return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+      }
+    });
+    await waitFor(() => output.text().includes("ready"));
+    await sendKeys(input, "pause it\r");
+    await waitFor(() => output.text().includes("Pause ad 01?"), 4_000, output.text);
+    const before = output.text().length;
+    await sendKeys(input, key);
+    return { input, output, session, before };
+  }
+
+  it.skipIf(process.env.CI === "true")(
+    "a done receipt view is drawn on the turn as the green card, not as a receipt line",
+    { timeout: 30_000 },
+    async () => {
+      const { input, output, session, before } = await answer("p", { ok: true, view: RECEIPT_VIEW });
+      await waitFor(() => output.text().slice(before).includes("Agent proposed · You approved"), 4_000, output.text);
+      expect(output.text().slice(before)).toContain("Stopped spending at 10:42");
+      expect(output.text()).not.toContain("✓ Stopped spending at 10:42");
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "a dismissal the app took reads ✕ Dismissed — nothing was executed., then Sent to the app",
+    { timeout: 30_000 },
+    async () => {
+      const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
+        receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
+      const { input, output, session, before } = await answer("n", { ok: true, view: dismissed });
+      await waitFor(() => output.text().slice(before).includes("Sent to the app"), 4_000, output.text);
+      expect(output.text().slice(before)).toContain("✕ Dismissed — nothing was executed.");
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+
+  // A receipt belongs to the turn its card came from: a line queued while that
+  // turn was busy waits for the confirm, and a line typed while the confirm is
+  // in flight starts a new turn that the receipt never lands on.
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  it.skipIf(process.env.CI === "true")(
+    "a line queued during the busy turn waits for the confirm, so the receipt lands on the card's turn",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput();
+      const firstTurn = deferred<InkInteractiveLineResult>();
+      const confirm = deferred<unknown>();
+      const asked: { line: string; at: number }[] = [];
+      const session = runInkInteractiveSession({
+        columns: 80,
+        errorOutput: ttyOutput(),
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: () => confirm.promise,
+        async onSubmitLine(line): Promise<InkInteractiveLineResult> {
+          asked.push({ line, at: output.text().length });
+          if (asked.length === 1) return firstTurn.promise;
+          return { messages: [{ role: "assistant", text: "Second answer." }] };
+        }
+      });
+      await waitFor(() => output.text().includes("ready"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => asked.length === 1);
+      // Typed while the first turn is busy: queued.
+      await sendKeys(input, "and the budget?\r");
+      firstTurn.resolve({ messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] });
+      await waitFor(() => output.text().includes("Pause ad 01?"), 4_000, output.text);
+      await sendKeys(input, "p");
+      // The card has left the queue but its confirm is still out: the queued line waits.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(asked.map((entry) => entry.line)).toEqual(["pause it"]);
+      confirm.resolve({ ok: true, view: RECEIPT_VIEW });
+      await waitFor(() => asked.length === 2, 4_000, output.text);
+      await waitFor(() => output.text().includes("Second answer."), 4_000, output.text);
+      // The green receipt card was drawn before the second question was asked, on turn A.
+      const second = asked[1]!;
+      expect(second.line).toBe("and the budget?");
+      expect(output.text().slice(0, second.at)).toContain("Agent proposed · You approved");
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "a line typed while the confirm is in flight starts a new turn; the receipt prints as lines, never as a card on it",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput();
+      const confirm = deferred<unknown>();
+      let calls = 0;
+      const session = runInkInteractiveSession({
+        columns: 80,
+        errorOutput: ttyOutput(),
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: () => confirm.promise,
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          calls += 1;
+          if (calls === 1) return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+          return { messages: [{ role: "assistant", text: "Second answer." }] };
+        }
+      });
+      await waitFor(() => output.text().includes("ready"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => output.text().includes("Pause ad 01?"), 4_000, output.text);
+      await sendKeys(input, "p");
+      await sendKeys(input, "and the budget?\r");
+      await waitFor(() => output.text().includes("Second answer."), 4_000, output.text);
+      const before = output.text().length;
+      confirm.resolve({ ok: true, view: RECEIPT_VIEW });
+      await waitFor(() => output.text().slice(before).includes("Stopped spending at 10:42"), 4_000, output.text);
+      expect(output.text()).not.toContain("Agent proposed · You approved");
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
     }
   );
 });

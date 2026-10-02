@@ -3,9 +3,16 @@
 // a send carries (slot · subject; `v` on the card opens the bodies), and after
 // the fact what landed: ✓ done, ✗ failed, ? not sure. Pictures never draw here;
 // a launch with pictures says they stay in the app.
-import type { AnswerViewEnvelopeV1 } from "@infinite-os/types";
+//
+// r4's look: level words plain and names bold white in one column, `NEW` in
+// bold green before what the launch creates, `↗` in blue for what stays in
+// the app; once done, the app's receipt sentence in bold green; once settled
+// without running, only the afterword (`outcome.ts`).
+import type { AnswerViewEnvelopeV1, AnswerViewV1 } from "@infinite-os/types";
 
+import { chipRows, paragraphIn } from "./card.js";
 import { labelValueLines, warningLines } from "./change.js";
+import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
 import { cellText, FootnoteBook, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
 
@@ -22,7 +29,7 @@ export function renderLaunch(view: AnswerViewEnvelopeV1<"launch">, ctx: ViewRend
   const body: Record<string, unknown> = isRecord(view.body) ? view.body : {};
   const results: unknown[] = Array.isArray(body.results) ? body.results : [];
   return {
-    detail: launchLines(view.body, ctx, notes),
+    detail: launchViewLines(view, ctx, notes),
     footnotes: notes.lines(),
     keys: [],
     okKey: null,
@@ -30,8 +37,33 @@ export function renderLaunch(view: AnswerViewEnvelopeV1<"launch">, ctx: ViewRend
   };
 }
 
-/** The launch body as lines (shared with the approval card). */
-export function launchLines(body: unknown, ctx: ViewRenderCtx, notes: FootnoteBook): string[] {
+function launchViewLines(view: AnswerViewV1, ctx: ViewRenderCtx, notes: FootnoteBook): string[] {
+  if (isSettledWithoutRunning(view)) {
+    return afterwordLines(view, ctx);
+  }
+  const receipt = isRecord(view.receipt) ? view.receipt : null;
+  const sentence = viewText(receipt?.sentence);
+  if (view.state === "done" && sentence) {
+    // r4 "Done": the app's receipt, word for word, in bold green; then what landed.
+    const body = isRecord(view.body) ? view.body : {};
+    const link = isRecord(view.appLink) ? view.appLink : null;
+    const chips = ctx.caps.open && link
+      ? chipRows([{ key: "o", label: viewText(link.label, "open in the app") }], null, ctx.width, ctx)
+      : [];
+    return [
+      ...paragraphIn(`✓ ${sentence}`, ctx.width, "gb", ctx),
+      ...resultLines(body, ctx),
+      ...(chips.length ? ["", ...chips] : [])
+    ];
+  }
+  return launchLines(view.body, ctx, notes, view.appLink);
+}
+
+/**
+ * The launch body as lines (shared with the approval card). `appLink` is the
+ * view's: with pictures in the app, `↗` says where they are and `(o)` opens it.
+ */
+export function launchLines(body: unknown, ctx: ViewRenderCtx, notes: FootnoteBook, appLink?: unknown): string[] {
   const record = isRecord(body) ? body : {};
   const lines: string[] = [];
 
@@ -46,17 +78,28 @@ export function launchLines(body: unknown, ctx: ViewRenderCtx, notes: FootnoteBo
   lines.push(...documentListLines(record.documents, ctx));
 
   if (record.picturesInApp === true) {
-    lines.push(paint("Pictures show in the app.", "muted", ctx));
+    const opens = ctx.caps.open && isRecord(appLink);
+    if (lines.length) lines.push("");
+    lines.push(`${paint("↗", "blue", ctx)} Pictures show in the app.${opens ? `  ${paint("(o)", "dim", ctx)}` : ""}`);
   }
 
+  lines.push(...resultLines(record, ctx));
+  return lines;
+}
+
+/** What landed, one line each (`✓ name`, `✗ name · why`, `? name`), then the counts in dim. */
+function resultLines(record: Record<string, unknown>, ctx: ViewRenderCtx): string[] {
+  const lines: string[] = [];
   const results: unknown[] = Array.isArray(record.results) ? record.results : [];
   for (const result of results.filter(isRecord)) {
-    const mark = result.status === "done" ? { glyph: "✓", role: "success" as const }
-      : result.status === "failed" ? { glyph: "✗", role: "error" as const }
-        : { glyph: "?", role: "warning" as const };
+    const mark = result.status === "done" ? { glyph: "✓", token: "green" as const }
+      : result.status === "failed" ? { glyph: "✗", token: "red" as const }
+        : { glyph: "?", token: "amber" as const };
     const extra = viewText(result.status === "failed" ? result.error : result.detail);
-    const words = `${mark.glyph} ${viewText(result.name, "—")}${extra ? ` · ${extra}` : ""}`;
-    lines.push(...wrapText(words, ctx.width).map((line, index) => index === 0 ? paint(line, mark.role, ctx) : line));
+    const wrapped = wrapText(`${viewText(result.name, "—")}${extra ? ` · ${extra}` : ""}`, Math.max(1, ctx.width - 2));
+    wrapped.forEach((line, index) => {
+      lines.push(index === 0 ? `${paint(mark.glyph, mark.token, ctx)} ${line}` : `  ${line}`);
+    });
   }
   const counts = isRecord(record.counts) ? record.counts : null;
   if (counts) {
@@ -66,7 +109,7 @@ export function launchLines(body: unknown, ctx: ViewRenderCtx, notes: FootnoteBo
       countWords(counts.unknown, "not sure")
     ].filter(Boolean);
     if (parts.length) {
-      lines.push(paint(parts.join(" · "), "muted", ctx));
+      lines.push(paint(parts.join(" · "), "dim", ctx));
     }
   }
   return lines;
@@ -98,11 +141,22 @@ function audienceLines(audience: Record<string, unknown>, ctx: ViewRenderCtx, no
   if (from) {
     rows.push({ label: "from", value: from });
   }
-  const lines = labelValueLines(rows, ctx);
-  if (audience.senderVerified === false || viewText(audience.senderHold)) {
-    lines.push(...warningLines([viewText(audience.senderHold, "The sender is not verified yet.")], ctx));
-  }
-  return lines;
+  return [...labelValueLines(rows, ctx), ...senderLines(audience, ctx)];
+}
+
+function senderLines(audience: Record<string, unknown>, ctx: ViewRenderCtx): string[] {
+  return audience.senderVerified === false || viewText(audience.senderHold)
+    ? warningLines([viewText(audience.senderHold, "The sender is not verified yet.")], ctx)
+    : [];
+}
+
+/**
+ * What a send card must say even when it shows the app's own rows instead of
+ * the audience: a sender that is not verified yet, or is held.
+ */
+export function launchWarningLines(body: unknown, ctx: ViewRenderCtx): string[] {
+  const record = isRecord(body) ? body : {};
+  return isRecord(record.audience) ? senderLines(record.audience, ctx) : [];
 }
 
 function treeLines(nodes: readonly unknown[], depth: number, ctx: ViewRenderCtx): string[] {
@@ -118,18 +172,20 @@ function treeLines(nodes: readonly unknown[], depth: number, ctx: ViewRenderCtx)
   const prefix = depth === 0 ? "" : `${"  ".repeat(depth - 1)}└ `;
   if (foldable) {
     const words = LEVEL_WORDS[String(leaves[0]?.level)]?.many ?? "Items";
-    lines.push(...nodeLine(prefix, words, leaves.map((node) => viewText(node.name, "—")).join(" · "), ctx));
+    const allNew = leaves.every(isNew);
+    const names = leaves.map((node) => `${!allNew && isNew(node) ? "NEW " : ""}${viewText(node.name, "—")}`).join(" · ");
+    lines.push(...nodeLine(prefix, words, names, allNew, ctx));
     return lines;
   }
   for (const node of records) {
     const words = LEVEL_WORDS[String(node.level)]?.one ?? "Item";
-    lines.push(...nodeLine(prefix, words, viewText(node.name, "—"), ctx));
+    lines.push(...nodeLine(prefix, words, viewText(node.name, "—"), isNew(node), ctx));
     const fields: unknown[] = Array.isArray(node.fields) ? node.fields : [];
     const indent = " ".repeat(prefix.length + 2);
     for (const field of fields.filter(isRecord)) {
       const text = `${viewText(field.label)}  ${viewText(field.value)}`.trim();
       if (text) {
-        lines.push(...wrapText(text, Math.max(1, ctx.width - indent.length)).map((line) => paint(`${indent}${line}`, "muted", ctx)));
+        lines.push(...wrapText(text, Math.max(1, ctx.width - indent.length)).map((line) => `${indent}${paint(line, "dim", ctx)}`));
       }
     }
     lines.push(...treeLines(Array.isArray(node.children) ? node.children : [], depth + 1, ctx));
@@ -137,18 +193,24 @@ function treeLines(nodes: readonly unknown[], depth: number, ctx: ViewRenderCtx)
   return lines;
 }
 
-function nodeLine(prefix: string, level: string, name: string, ctx: ViewRenderCtx): string[] {
+function nodeLine(prefix: string, level: string, name: string, created: boolean, ctx: ViewRenderCtx): string[] {
   // The level words pad to one column ("Ad set" is the longest), as r4 draws.
   const head = `${prefix}${level.padEnd(Math.max(level.length + 2, "Ad set".length))}`;
-  const room = Math.max(1, ctx.width - head.length);
+  const mark = created ? "NEW " : "";
+  const room = Math.max(1, ctx.width - head.length - mark.length);
   const names = wrapText(name, room);
   return names.map((line, index) => index === 0
-    ? `${paint(head, "muted", ctx)}${paint(line, "text", ctx, { bold: true })}`
-    : `${" ".repeat(head.length)}${paint(line, "text", ctx, { bold: true })}`);
+    ? `${head}${mark ? paint(mark, "gb", ctx) : ""}${paint(line, "b", ctx)}`
+    : `${" ".repeat(head.length + mark.length)}${paint(line, "b", ctx)}`);
 }
 
 function hasChildren(node: Record<string, unknown>): boolean {
   return Array.isArray(node.children) && node.children.length > 0;
+}
+
+/** A node this launch creates (`status: "new"`). */
+function isNew(node: Record<string, unknown>): boolean {
+  return node.status === "new";
 }
 
 function countWords(value: unknown, words: string): string {

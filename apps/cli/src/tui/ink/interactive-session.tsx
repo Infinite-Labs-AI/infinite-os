@@ -61,6 +61,7 @@ import {
 import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
 import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, type KeyAction, type KeyContext } from "../keys/keymap.js";
+import { ConfirmActionMenu, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
 import { ruleLine, type TopBarData } from "./top-bar.js";
@@ -514,6 +515,9 @@ export function InkInteractiveSessionApp({
   const [committed, setCommitted] = useState<readonly CommittedEntry[]>([]);
   const [homeCommitted, setHomeCommitted] = useState(false);
   const turnSeq = useRef(0);
+  // Counts every commit of the live turn (turnSeq counts only those with content),
+  // so a confirm that comes back knows whether its turn is still the live one.
+  const commitSeq = useRef(0);
   // First visible line of a paged live turn; null = follow the tail.
   const [liveOffset, setLiveOffset] = useState<number | null>(null);
   const [pendingOperatorLine, setPendingOperatorLine] = useState<string | null>(null);
@@ -525,6 +529,9 @@ export function InkInteractiveSessionApp({
   const [pendingConfirmActions, setPendingConfirmActions] = useState<
     readonly InSessionConfirmationAction[]
   >(initialPendingConfirmations);
+  // Confirms sent to the app and not yet answered. They hold the queued-line drain
+  // like an open card does, so the receipt lands on the turn its card came from.
+  const [confirmsInFlight, setConfirmsInFlight] = useState(0);
   // `?` on the head card toggles its explanation (the terminal can't hover).
   const [explainOpen, setExplainOpen] = useState(false);
   // A head card WITH an approval view keeps its own key state (views/approval.ts):
@@ -615,6 +622,7 @@ export function InkInteractiveSessionApp({
     if (!line.trim()) {
       return;
     }
+    commitSeq.current += 1;
     const turn = historyRef.current;
     const { views, steps } = getTurnState();
     // Scrollback is ONE column at any width (River, 2026-10-02): the question,
@@ -1322,6 +1330,11 @@ export function InkInteractiveSessionApp({
       return;
     }
     setPendingConfirmActions((current) => current.slice(1));
+    // The receipt belongs to this turn. If a new line has committed it by the time
+    // the app answers, the receipt prints as lines (in order) instead of landing as
+    // a card on the next question's views.
+    const seqAtResolve = commitSeq.current;
+    const onCardTurn = () => commitSeq.current === seqAtResolve;
     const appendLines = (lines: readonly ConfirmLine[]) =>
       appendMessages(lines.map((line) => ({ kind: "slash", role: "system", text: line.text }) as Msg));
     // An answer the app refused before anything ran (`field_invalid`): the card
@@ -1359,6 +1372,7 @@ export function InkInteractiveSessionApp({
         appendMessages(detail.map((text) => ({ kind: "slash", role: "system", text: `  ${text}` }) as Msg));
       }
     };
+    setConfirmsInFlight((count) => count + 1);
     void (async () => {
       try {
         const result = await onConfirmAction?.(head, decision, fields);
@@ -1366,11 +1380,24 @@ export function InkInteractiveSessionApp({
           appendLines(confirmErrorLines(Object.assign(new Error(fieldInvalidMessage(result) ?? ""), { code: "field_invalid" })));
           return;
         }
+        // A settled receipt view goes on the turn, drawn as r4 draws it (confirm-card.tsx).
+        const receipt = receiptViewFrame(head, result);
+        if (receipt && onCardTurn()) {
+          recordTurnView(receipt);
+          return;
+        }
         appendLines(confirmResultLines(result, decision));
         afterReceipt(result);
       } catch (error) {
+        const receipt = fieldInvalidMessage(error) === null ? receiptViewFrame(head, error) : null;
+        if (receipt && onCardTurn()) {
+          recordTurnView(receipt);
+          return;
+        }
         appendLines(confirmErrorLines(error));
         if (!refusedField(error)) afterReceipt(error);
+      } finally {
+        setConfirmsInFlight((count) => count - 1);
       }
     })();
   }, [appendMessages, columns, onConfirmAction, pendingConfirmActions, t]);
@@ -1420,6 +1447,7 @@ export function InkInteractiveSessionApp({
       pendingFieldPrompt ||
       pendingConnectConfirm ||
       pendingConfirmActions.length > 0 ||
+      confirmsInFlight > 0 ||
       queuedLines.length === 0
     ) {
       return;
@@ -1433,7 +1461,7 @@ export function InkInteractiveSessionApp({
 
     setQueuedLines(remainingLines);
     runSubmittedLine(nextLine);
-  }, [busy, pendingConfirmActions, pendingConnectConfirm, pendingFieldPrompt, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
+  }, [busy, confirmsInFlight, pendingConfirmActions, pendingConnectConfirm, pendingFieldPrompt, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
 
   const submitLine = useCallback((rawLine: string) => {
     if (cardFieldActive) {
@@ -3073,58 +3101,6 @@ function ConnectConfirmMenu({
   );
 }
 
-// The in-session write gate (cloud brain, Plan 2). Purely presentational — all
-// key handling stays in the single `useInput` owner. Renders the head pending
-// confirmation: the summary (scrubbed through `terminalText` — it is NOT covered
-// by the upstream redaction contract, and its `<Text>` child reaches the raw
-// terminal) then each already-redacted `label: value` detail VERBATIM (mirroring
-// the readline card's `renderConfirmationCard`), then the `?` explanation when it
-// is open. The keys (named OK key, `n dismiss`, `?`) live in the `KeyBar` below.
-function ConfirmActionMenu({
-  card,
-  explainText,
-  pending,
-  theme,
-  width
-}: {
-  /** The card drawn from its approval view (views/approval.ts), else null (an old desktop). */
-  card: ApprovalRender | null;
-  /** The scrubbed `?` text when the explanation is open, else null. */
-  explainText: string | null;
-  pending: InSessionConfirmationAction | null;
-  theme: Theme;
-  width: number;
-}) {
-  if (!pending) {
-    return null;
-  }
-  if (card) {
-    // Every line is already scrubbed, coloured and laid out to `width`.
-    return (
-      <Box flexDirection="column" width={width}>
-        {card.lines.map((line, index) => (
-          <Text key={`card-${index}`} wrap="truncate-end">{line}</Text>
-        ))}
-      </Box>
-    );
-  }
-  return (
-    <Box flexDirection="column" width={width}>
-      <Text color={theme.color.warning}>
-        {truncateCells(`Approve this write? — ${terminalText(pending.summary, "action")}`, width)}
-      </Text>
-      {pending.confirmationDetails.map((detail, index) => (
-        <Text color={theme.color.muted} key={`${detail.label}-${index}`}>
-          {truncateCells(`  ${detail.label}: ${detail.value}`, width)}
-        </Text>
-      ))}
-      {explainText ? (
-        <Text color={theme.color.text} wrap="wrap">{`? ${explainText}`}</Text>
-      ) : null}
-    </Box>
-  );
-}
-
 // Image drafts in progress (`creative.draft`), one line per run. Text only.
 function CreativeDraftLines({ lines, theme, width }: { lines: readonly string[]; theme: Theme; width: number }) {
   if (!lines.length) {
@@ -3252,11 +3228,8 @@ function liveOverlayRows({
   if (confirmAction && confirmCardRows !== null) {
     rows += confirmCardRows;
   } else if (confirmAction) {
-    // Summary + details; the key hints moved to the KeyBar (counted by the caller).
-    rows += 1 + confirmAction.confirmationDetails.length;
-    if (confirmExplain) {
-      rows += wrapAnsi(`? ${confirmExplain}`, Math.max(1, width), { trim: false, hard: true }).split("\n").length;
-    }
+    // The r4 card drawn from the details (confirm-card.tsx), its `?` text inside it.
+    rows += fallbackCardRowCount(confirmAction, confirmExplain, width);
   }
   return rows;
 }

@@ -384,7 +384,8 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     });
     await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
     await sendKeys(input, "publish it\r");
-    await waitFor(() => output.text().includes("Approve this write?") && output.text().includes("more lines"), 4_000, output.text);
+    // The r4 card carries the summary in its border.
+    await waitFor(() => output.text().includes("Publish landing page to production") && output.text().includes("more lines"), 4_000, output.text);
     const before = maxLine(output.text(), "alpha");
     await sendKeys(input, " ");
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -400,7 +401,7 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     await waitFor(() => decisions.length === 1 && stripAnsi(output.text()).includes("Dismissed"), 4_000, output.text);
     const afterDecline = output.text().length;
     await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(output.text().slice(afterDecline)).not.toContain("Approve this write?");
+    expect(output.text().slice(afterDecline)).not.toContain("Publish landing page to production");
     await sendKeys(input, "/exit\r");
     await session;
     expect(decisions).toEqual(["decline"]);

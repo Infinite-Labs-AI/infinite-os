@@ -348,9 +348,9 @@ describe("images", () => {
     const out = text(render.detail);
     expect(out).toMatch(/✓ 1 {2}Explained +4:5/u);
     expect(out).toMatch(/✓ 3 {2}3 fixes +4:5/u);
-    expect(out).toContain("Open in Library (o)");
+    expect(out).toContain("Open in Library ↗  (o)");
     expect(text(renderView(fixture("images-done"), viewCtx()).detail)).not.toContain("(o)");
-    expect(out).toContain("~$0.50");
+    expect(out).toContain("About $0.50 for 3, on image-model-1");
     expect(out).not.toMatch(/http/iu);
   });
 
@@ -398,7 +398,7 @@ describe("images", () => {
   it("madeWith your_codex prints $0 to Infinite, from cost.whoPays", () => {
     const out = text(renderView(fixture("images-codex"), viewCtx()).detail);
     expect(out).toContain("$0 to Infinite");
-    expect(out).toMatch(/◑ 2 {2}Hook B/u);
+    expect(out).toMatch(/⠋ 2 {2}Hook B/u);
     expect(out).toMatch(/· 3 {2}Hook C/u);
     const paidByInfinite = { ...fixture("images-codex"), cost: { usd: 0.5, estimate: true, whoPays: "infinite" } } as AnswerViewV1;
     expect(text(renderView(paidByInfinite, viewCtx()).detail)).not.toContain("$0 to Infinite");
@@ -429,7 +429,8 @@ describe("launch", () => {
     const campaign = out.findIndex((line) => /Campaign {2}Campaign 01/u.test(line));
     expect(campaign).toBeGreaterThanOrEqual(0);
     expect(out[campaign + 1]).toMatch(/└ Ad set {2}Ad set 01/u);
-    expect(out[campaign + 2]).toMatch(/ {2}└ Ads {3}Hook A · Hook B · Hook C/u);
+    // r4: what the launch creates is marked NEW.
+    expect(out[campaign + 2]).toMatch(/ {2}└ Ads {3}NEW Hook A · Hook B · Hook C/u);
     expect(render.okKey).toBe("l");
   });
 
@@ -445,16 +446,20 @@ describe("launch", () => {
 describe("send card with email bodies", () => {
   const send = () => fixture("launch-send-card");
 
-  it("lists each document's slot and subject, and the key bar shows v view", () => {
+  it("shows the app's rows (r4: Cmd+L's exact card), the key bar shows v view, and v opens the documents", () => {
     const render = approvalRender(send(), cardCtx());
     const out = text(render.lines);
-    expect(out).toContain("Email 1 · Your trial ended");
-    expect(out).toContain("Email 2 · Three things we found");
-    expect(out).toContain("Email 3 · Last note");
-    expect(out).toContain("200 people · re-counted now");
-    expect(out).toContain("10 left out · unsubscribed");
+    expect(out).toContain("│ subject  Your trial ended");
+    expect(out).toContain("│ to       200 people");
     expect(formatKeyBar(render.keys).startsWith("v view   s Send to 200 people   n dismiss")).toBe(true);
+    expect(out).toContain("[v] view   [s] Send to 200 people   [n] dismiss");
     expect(out).not.toContain("Line 1 of the first email.");
+    // With no rows from the app, the body speaks: who it reaches and each document's slot and subject.
+    const noRows = { ...send(), approval: { ...send().approval!, rows: [] } } as AnswerViewV1;
+    const body = text(approvalRender(noRows, cardCtx()).lines);
+    expect(body).toContain("Email 1 · Your trial ended");
+    expect(body).toContain("200 people · re-counted now");
+    expect(body).toContain("10 left out · unsubscribed");
   });
 
   it("v opens the selected document's full body; 1–3 switch; space pages a long body", () => {
@@ -485,8 +490,7 @@ describe("send card with email bodies", () => {
       ui = { ...ui, page };
     }
     // Wrapped body lines rejoin into the whole body: nothing is cut between pages.
-    const inside = seen.filter((line) => line.startsWith("│ ")).map((line) => line.slice(2, -2).trimEnd());
-    const body = inside.filter((line) => line.startsWith("│")).map((line) => line.replace(/^│ ?/u, "")).join(" ");
+    const body = seen.filter((line) => line.startsWith("│")).map((line) => line.replace(/^│ ?/u, "")).join(" ");
     expect(body).toContain("Line 1 of the first email.");
     expect(body).toContain("Line 40 of the first email.");
     expect(body).toContain("See you soon.");
@@ -546,10 +550,10 @@ describe("job", () => {
   it("steps tick off in place and say where the result lands", () => {
     const out = text(renderView(fixture("job-running"), viewCtx({ caps: ALL_CAPS })).detail);
     expect(out).toMatch(/✓ Outline/u);
-    expect(out).toMatch(/◑ Draft · section 2/u);
+    // r4: the running step carries the progress bar (1 of 3), then its detail.
+    expect(out).toMatch(/⠋ Draft +█{8}▋░{17} {2}section 2/u);
     expect(out).toMatch(/· Publish/u);
-    expect(out).toContain("1 of 3");
-    expect(out).toContain("Lands in Posts (o)");
+    expect(out).toContain("Lands in: Posts ↗  (o)");
   });
 });
 
@@ -654,11 +658,13 @@ describe("the card frame (r4 card(): at most 74 wide, amber while it needs an OK
     expect(Math.max(...narrow.map(displayWidth))).toBe(50);
   });
 
-  it("the border is amber (warning) while the card needs an OK, green (success) once done", () => {
-    const top = (view: AnswerViewV1) => approvalRender(view, cardCtx({ color: true })).lines[1]!;
+  it("the border is amber (warning) while the card is open, green (success) once done", () => {
+    const top = (view: AnswerViewV1) => approvalRender(view, cardCtx({ color: true })).lines
+      .find((line) => line.replace(/\u001b\[[0-9;]*m/gu, "").startsWith("┌"))!;
     expect(top(fixture("change-pause-card")).startsWith(ansiFg(theme, "warning"))).toBe(true);
     expect(top({ ...fixture("change-pause-card"), state: "done" } as AnswerViewV1).startsWith(ansiFg(theme, "success"))).toBe(true);
-    expect(top({ ...fixture("change-pause-card"), state: "failed" } as AnswerViewV1).startsWith(ansiFg(theme, "muted"))).toBe(true);
+    // A card brought back (not sure, or failed and live again) is still open: amber.
+    expect(top({ ...fixture("change-pause-card"), state: "failed", retry: "retryable" } as AnswerViewV1).startsWith(ansiFg(theme, "warning"))).toBe(true);
   });
 });
 
@@ -722,7 +728,10 @@ describe("a tall card fits its row budget", () => {
       width: 80, maxRows: 14, pageRows: 40, ui: { ...CARD_UI_START, documentOpen: true }
     }));
     expect(render.lines.length).toBeLessThanOrEqual(14);
-    expect(text(render.lines)).toContain("Send this to 200 people?");
+    // r4 "Viewing the email": the head says so, and the document replaces the card.
+    expect(text(render.lines)).toContain("Send emails");
+    expect(text(render.lines)).toContain("· viewing");
+    expect(text(render.lines)).toContain("[1 Email 1]");
     expect(render.pages).toBeGreaterThan(1);
   });
 });

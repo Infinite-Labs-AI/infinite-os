@@ -5,16 +5,68 @@
 // ran; the app's only retryable shape, since `outcome_unknown` + `retryable`
 // contradicts itself and the app's view cleaner rejects it). The words of the
 // step are the app's (`reconcile.label`); the arrow is chrome.
+//
+// It also says what a settled write left behind (terminal-r4 receipts): a
+// view that ended without running anything draws no object, only its
+// sentence and one dim afterword ("Nothing ran.", "Sent to the app",
+// "Nothing was proposed.").
 import type { AnswerViewV1 } from "@infinite-os/types";
 
-import { isRecord, paint, viewText, wrapText } from "./primitives.js";
+import { isRecord, paint, toneRole, viewText, wrapText } from "./primitives.js";
+import { stateHeadFor } from "./states.js";
 import type { ViewRenderCtx } from "./types.js";
 
 /** The reconcile step as a line (`→ Check Ads for the result`), when the view carries one. */
 export function reconcileLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[] {
   const reconcile = isRecord(view.reconcile) ? view.reconcile : null;
   const label = viewText(reconcile?.label);
-  return label ? wrapText(`→ ${label}`, ctx.width).map((line) => paint(line, "warning", ctx)) : [];
+  return label ? wrapText(`→ ${label}`, ctx.width).map((line) => paint(line, "amber", ctx)) : [];
+}
+
+/** States where the write ended and nothing ran: no object is drawn, only what was said. */
+const SETTLED_WITHOUT_RUNNING = new Set([
+  "no_change", "expired", "cancelled", "blocked", "hit_limit", "cmdl_only", "nothing_found", "not_connected"
+]);
+
+/**
+ * Whether a write view ended without running anything: dismissed, expired,
+ * blocked, out of budget, already so, or failed with nothing sent.
+ * Its object (the change's rows, the tree, the images) is not drawn: there is
+ * nothing to show that happened.
+ */
+export function isSettledWithoutRunning(view: AnswerViewV1): boolean {
+  if (SETTLED_WITHOUT_RUNNING.has(view.state)) {
+    return true;
+  }
+  // A failed write that may have left (no `not_sent`) still shows what it knows (a launch's per-item results).
+  return view.state === "failed" && view.outcome === "not_sent";
+}
+
+/**
+ * The lines a settled write prints under its sentence (r4 receipts):
+ * - the app's receipt sentence with the state's glyph, in its tone, when the
+ *   view carries no state reason (the shell prints a reason itself);
+ * - `Sent to the app` under a dismissal the app took;
+ * - `Nothing ran.` when nothing was sent and there is no fix to point at;
+ * - `Nothing was proposed.` when a limit stopped it before any card.
+ */
+export function afterwordLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[] {
+  const lines: string[] = [];
+  const reason = isRecord(view.stateReason) ? view.stateReason : null;
+  const receipt = isRecord(view.receipt) ? view.receipt : null;
+  const sentence = viewText(receipt?.sentence);
+  if (!reason && sentence) {
+    const head = stateHeadFor(view);
+    lines.push(...wrapText(`${head.glyph} ${sentence}`, ctx.width).map((line) => paint(line, toneRole(head.tone), ctx)));
+  }
+  if (view.state === "cancelled" && (receipt || reason?.code === "dismissed")) {
+    lines.push(paint("Sent to the app", "dim", ctx));
+  } else if (view.outcome === "not_sent" && !(reason && isRecord(reason.fix))) {
+    lines.push(paint("Nothing ran.", "dim", ctx));
+  } else if (view.state === "hit_limit" && view.outcome === undefined && !receipt) {
+    lines.push(paint("Nothing was proposed.", "dim", ctx));
+  }
+  return lines;
 }
 
 /** The reconcile ask (a NEW user turn), when the view carries one. */

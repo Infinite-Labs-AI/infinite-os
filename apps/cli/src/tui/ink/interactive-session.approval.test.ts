@@ -43,13 +43,24 @@ describe("the write card draws its approval view (CI-runnable)", () => {
       onSubmitLine: async () => ({ messages: [] })
     }));
     expect(out).toContain("Pause ad “Hook A”?");
-    expect(out).toContain("status  on → paused");
-    // The key bar: chips (` p `), the OK key first; then always tab and / (terminal-r4).
-    expect(out).toContain(" p  Pause    n  dismiss");
+    expect(out).toContain("│ status   on → paused");
+    // The keys as chips inside the card (the key bar's own drawing is R1's).
+    expect(out).toContain("│  p  Pause    n  dismiss");
     // The old card's summary line is not drawn when the view is.
     expect(out).not.toContain("Approve this write?");
     expect(out).not.toContain("Stops this ad's spend");
     expect(out.split("\n").every((line) => displayWidth(line) <= 80)).toBe(true);
+  });
+
+  it("the composer under a card does not repeat its keys (the card and the bar already show them)", () => {
+    const out = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 80,
+      initialPendingConfirmations: [card("change-pause-card")],
+      onSubmitLine: async () => ({ messages: [] })
+    }));
+    expect(out).not.toContain("press p to Pause");
+    expect(out).not.toContain("n to dismiss");
+    expect(out).toContain("│  p  Pause    n  dismiss");
   });
 
   it("keeps the confirmationDetails card for an old desktop (no view)", () => {
@@ -58,9 +69,11 @@ describe("the write card draws its approval view (CI-runnable)", () => {
       initialPendingConfirmations: [card("change-pause-card", { view: undefined })],
       onSubmitLine: async () => ({ messages: [] })
     }));
-    expect(out).toContain("Approve this write? — Pause ad Hook A");
-    expect(out).toContain("Ad: Hook A");
-    expect(out).toContain(" y  Confirm    n  dismiss");
+    // The same r4 card, from the details: the summary in the border, the rows, the keys inside.
+    expect(out).toContain("┌─ Pause ad Hook A ─");
+    expect(out).toContain("│ Ad       Hook A");
+    expect(out).toContain("│  y  Confirm    n  dismiss");
+    expect(out).not.toContain("Approve this write? —");
   });
 
   it("a send card offers v view; a card whose desktop can't take fields asks to update", () => {

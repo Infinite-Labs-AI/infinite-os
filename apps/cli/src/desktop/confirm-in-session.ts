@@ -61,6 +61,12 @@ export interface InSessionConfirmationAction {
   turnId: string;
   confirmationHandle: string;
   summary: string;
+  /**
+   * The app sent no summary, so `summary` is the tool's name spelled out
+   * ("mcp infinite app propose pause meta entity"): a card never titles itself
+   * with it.
+   */
+  summaryFromTool?: true;
   confirmationDetails: InSessionConfirmationDetail[];
   /**
    * The decoded approval view (`done.actionCalls[i].view`), present only when
