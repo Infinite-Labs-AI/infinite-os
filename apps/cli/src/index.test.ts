@@ -1751,7 +1751,7 @@ describe("cli smoke", () => {
     });
     const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(composer).toContain("(working · 2s)");
+    expect(composer).toContain("Ask Infinite… (2s)");
     expect(rendered).not.toContain("session cli");
     expect(rendered).not.toContain("querying…");
   });
@@ -1770,7 +1770,7 @@ describe("cli smoke", () => {
     });
     const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(composer).toContain("(working · 1s)");
+    expect(composer).toContain("Ask Infinite… (1s)");
   });
 
   it("says the turn is working at submit, before transcript progress events arrive", () => {
@@ -1785,7 +1785,7 @@ describe("cli smoke", () => {
     });
     const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(composer).toContain("(working · 1s)");
+    expect(composer).toContain("Ask Infinite… (1s)");
   });
 
   it("renders nested subagent trees in Hermes transcript snapshots", () => {
@@ -2764,7 +2764,8 @@ describe("cli smoke", () => {
     const output = chunks.join("");
     expect(output).toContain("Revenue is up.");
     // The turn's elapsed time rides in the composer's note (r4: no status line).
-    expect(output).toContain("working · 1s");
+    expect(output).toContain("Type a message. (1s)");
+    expect(output).not.toContain("(working");
     expect(output).not.toContain("session session-1");
   });
 

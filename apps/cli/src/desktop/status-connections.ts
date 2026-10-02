@@ -73,7 +73,9 @@ function connectionName(value: unknown): string {
 /**
  * The connections as the top bar draws them (terminal-r4 row 0): `connected`
  * is the green `●`, `broken` the red `⊘`, `off` (not connected) the amber
- * `⊘`. The bar itself puts the amber and red ones first.
+ * `⊘`. The bar itself puts the amber and red ones first, and draws an amber
+ * one only while it fits beside every connected and broken source: a source
+ * that was never connected does not push a connected one off the bar.
  */
 export function topBarSourcesFromConnections(connections: readonly DesktopConnection[]): TopBarSource[] {
   return connections.map((connection) => ({

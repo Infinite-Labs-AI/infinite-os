@@ -14,7 +14,8 @@
 //   (`step.words.v1`), else generic words made from the tool's name. Never a
 //   raw tool id, and never its JSON arguments.
 // - A call that waits for the person's OK is `▣` (amber), never `✓`; with no
-//   result of its own it says `waiting for your OK`.
+//   result of its own it says `waiting for your OK` (`waiting for an answer`
+//   when it asked a question instead).
 // - A failed (✗) or unknown (?) call whose reason was cut to the result column
 //   prints the whole reason on dim rows under it, indented 4.
 import type { AnswerViewState, AnswerViewV1 } from "@infinite-os/types";
@@ -48,6 +49,8 @@ const GLYPHS: Readonly<Record<StepStatus, { glyph: string; tone: ThemeStyle }>> 
 
 /** What a waiting step says when the call gave no result of its own (r4's own step label for it). */
 export const WAITING_WORDS = "waiting for your OK";
+/** What a step says when it waits for an answer to a question, not for an OK. */
+export const WAITING_ANSWER_WORDS = "waiting for an answer";
 
 /** The label column: min(28, W − 34) under 80 cols, else min(28, 26% of W). Never under 4. */
 export function stepLabelWidth(width: number): number {
@@ -194,6 +197,8 @@ function resultWords(value: string | undefined): string {
  * (`step.words.v1`) the result is the app's, or nothing when it sent none:
  * the transport's raw summary never stands in for it. A failure with no
  * worded result keeps the transport's reason, so why it failed stays readable.
+ * A call that asked a question (`needs_clarification`) and has no result of
+ * its own says it waits for an answer: a question is not an approval.
  */
 export function toolOutcome(input: {
   status?: string;
@@ -203,10 +208,11 @@ export function toolOutcome(input: {
 }): { status: StepStatus; result: string } {
   const status = input.error ? "fail" : stepStatusOf(input.status);
   const reason = resultWords(input.error || (status === "fail" ? input.summary : undefined));
+  const asked = input.status === "needs_clarification" && status === "wait" ? WAITING_ANSWER_WORDS : "";
   if (input.words) {
-    return { status, result: input.words.result ?? (status === "fail" ? reason : "") };
+    return { status, result: input.words.result ?? (status === "fail" ? reason : asked) };
   }
-  return { status, result: reason || resultWords(input.summary) };
+  return { status, result: reason || resultWords(input.summary) || asked };
 }
 
 /** A running call's latest progress, when it reads as words (`1 of 3`); "" for JSON, an id or nothing. */
@@ -298,21 +304,45 @@ export function stepStatusForView(view: Pick<AnswerViewV1, "state">): StepStatus
 }
 
 /**
- * A finished call's status, refined by the one view it drew (matched by bare
- * tool name): a call whose view is partial is ◐, out of date ⧗, and so on. A
- * call that waits for the person's OK follows its card the same way: working
- * (⠋) once the yes is sent, then done, dismissed (·) or failed. A call with
- * no view, or with two views of the same tool, keeps its own status.
+ * A finished call's status, refined by the view it drew (matched by bare tool
+ * name): a call whose view is partial is ◐, out of date ⧗, and so on. A call
+ * that waits for the person's OK follows its card the same way: working (⠋)
+ * once the yes is sent, then done, dismissed (·) or failed.
+ *
+ * Several calls of one tool (`pause these 2`) each follow their own view,
+ * paired in order: the turn's nth such call drew the nth view of that tool.
+ * That holds only when there are as many such calls as views; with `steps`
+ * absent, or the counts apart, there is no telling which view is whose and
+ * the call keeps its own status. A call with no view keeps its own status.
  */
-export function refineStepStatus(step: TurnStep, views: readonly AnswerViewV1[]): StepStatus {
-  if (step.status !== "ok" && step.status !== "wait") return step.status;
-  const bare = bareToolName(step.name);
-  // A step read back from the tool trail has lost its tool id: its friendly label stands for it.
-  const matches = views.filter((view) => bareToolName(view.tool) === bare || friendlyStepLabel(view.tool) === step.label);
-  if (matches.length !== 1) return step.status;
-  const state = matches[0]!.state;
+export function refineStepStatus(
+  step: TurnStep,
+  views: readonly AnswerViewV1[],
+  steps: readonly TurnStep[] = [step]
+): StepStatus {
+  if (!canFollowView(step)) return step.status;
+  const matches = views.filter((view) => drewView(step, view));
+  if (!matches.length) return step.status;
+  // The calls that could have drawn these views: a failed or stopped call drew none.
+  const calls = steps.filter((other) => canFollowView(other) && matches.some((view) => drewView(other, view)));
+  const view = calls.length === matches.length ? matches[calls.indexOf(step)] : undefined;
+  if (!view) return step.status;
+  const state = view.state;
   if (step.status === "wait" && (state === "applying" || state === "working")) return "run";
   return STATE_STATUS[state] ?? "ok";
+}
+
+/** Only a call that finished, or waits for the person, has a view to follow. */
+function canFollowView(step: TurnStep): boolean {
+  return step.status === "ok" || step.status === "wait";
+}
+
+/**
+ * Whether the view is of the step's tool. A step read back from the tool trail
+ * has lost its tool id: there its friendly label stands for it.
+ */
+function drewView(step: TurnStep, view: Pick<AnswerViewV1, "tool">): boolean {
+  return bareToolName(view.tool) === bareToolName(step.name) || friendlyStepLabel(view.tool) === step.label;
 }
 
 // ── drawing ──
@@ -354,7 +384,7 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
   const paint = (text: string, tone: ThemeStyle) => (options.color && text ? ansi(options.theme, tone, text) : text);
 
   const rows = steps.flatMap((step) => {
-    const status = refineStepStatus(step, options.views ?? []);
+    const status = refineStepStatus(step, options.views ?? [], steps);
     const a = Math.round(((step.startedAt - t0) / span) * gantt);
     const b = Math.max(1, Math.round(((endOf(step) - step.startedAt) / span) * gantt));
     const running = status === "run" || status === "bg";
@@ -364,7 +394,9 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
     const mark = status === "run" ? SPINNER[Math.floor(Math.max(0, now - step.startedAt) / SPINNER_MS) % SPINNER.length]! : glyph;
     const label = padEndCells(cut(viewText(step.label), labelWidth), labelWidth);
     // A step still waiting says so (unless its label already does); once its card moved on, the words go with it.
-    const result = viewText(step.result) || (status === "wait" && viewText(step.label) !== WAITING_WORDS ? WAITING_WORDS : "");
+    const said = viewText(step.result);
+    const own = said === WAITING_ANSWER_WORDS && status !== "wait" ? "" : said;
+    const result = own || (status === "wait" && viewText(step.label) !== WAITING_WORDS ? WAITING_WORDS : "");
     const segments: (readonly [string, ThemeStyle])[] = [
       [`  ${label} ${" ".repeat(a)}`, "text"],
       [bar, barTone],

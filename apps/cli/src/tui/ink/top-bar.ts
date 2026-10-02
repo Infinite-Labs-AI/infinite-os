@@ -53,6 +53,11 @@ const SOURCE_ORDER: Readonly<Record<TopBarSourceState, number>> = { missing: 0, 
  * dot per source, missing and broken ones first. `through the Infinite app`
  * sits on the right only when the whole line fits; otherwise the line is cut
  * at the width (`…` on the segment that does not fit, later ones dropped).
+ *
+ * A missing (not connected) mark never costs a connected or a broken one its
+ * place: the missing ones are drawn, in their order, only while they fit whole
+ * beside every other source. A workspace with many sources never connected
+ * still shows what IS connected.
  */
 export function topBarSegments(data: TopBarData | undefined, width: number): StyledSegment[] {
   const workspace = data?.workspace ? terminalText(data.workspace) : "";
@@ -61,14 +66,20 @@ export function topBarSegments(data: TopBarData | undefined, width: number): Sty
     .map((source, index) => ({ ...source, label: terminalText(source.label), index }))
     .filter((source) => source.label)
     .sort((a, b) => SOURCE_ORDER[a.state] - SOURCE_ORDER[b.state] || a.index - b.index);
-  for (const source of sources) {
-    left.push(
-      source.state === "connected"
-        ? ["green", `● ${source.label} `]
-        : [source.state === "missing" ? "amber" : "red", `⊘ ${source.label} `]
-    );
-  }
   const total = Math.max(1, Math.floor(width));
+  const segment = (source: { label: string; state: TopBarSourceState }): StyledSegment =>
+    source.state === "connected"
+      ? ["green", `● ${source.label} `]
+      : [source.state === "missing" ? "amber" : "red", `⊘ ${source.label} `];
+  const kept = sources.filter((source) => source.state !== "missing").map(segment);
+  let room = total - segmentsWidth(left) - segmentsWidth(kept);
+  for (const source of sources.filter((item) => item.state === "missing")) {
+    const mark = segment(source);
+    room -= segmentsWidth([mark]);
+    if (room < 0) break;
+    left.push(mark);
+  }
+  left.push(...kept);
   if (data?.throughApp && segmentsWidth(left) + segmentsWidth([THROUGH_APP]) <= total) {
     return [...padSegments(left, total - segmentsWidth([THROUGH_APP])), THROUGH_APP];
   }

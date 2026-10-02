@@ -160,6 +160,14 @@ describe("a step that waits for the person's OK is pending, not finished", () =>
     expect(stripText()).not.toContain("✓");
   });
 
+  it("a call that waits for an answer says so, not that it waits for an OK", () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+    controller.recordProgressEvent(complete("call-1", PROPOSE, { status: "needs_clarification" }));
+    expect(rows()).toEqual([{ label: "proposing pause sample item", status: "wait", result: "waiting for an answer" }]);
+    expect(stripText()).toMatch(/▣ waiting for an answer$/mu);
+    expect(stripText()).not.toContain("waiting for your OK");
+  });
+
   it("its trail line carries the pending mark, and reads back as waiting", () => {
     const controller = new InfiniteTurnController(() => 1_000);
     controller.recordProgressEvent(complete("call-1", PROPOSE, { status: "requires_confirmation" }));

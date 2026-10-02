@@ -122,6 +122,32 @@ describe("the desktop session's top bar from /v1/status", () => {
     expectGolden(bar(WIRE_ONE_OFF, 100), GOLDEN.topbarNotConnected);
   });
 
+  it("off marks never push a connected dot off the bar: only the ones that fit beside every dot are drawn", () => {
+    const rows = [
+      { name: "Catalog", status: "connected" },
+      { name: "Orders", status: "connected" },
+      { name: "Payments", status: "connected" },
+      ...["Ad Network", "Storefront", "Mailer", "Search Console", "Video Channel", "Help Desk", "Warehouse"]
+        .map((name) => ({ name, status: "off" }))
+    ];
+    for (const width of [70, 80, 100]) {
+      const line = stripAnsi(bar(rows, width));
+      expect(line, `${width} columns`).toContain("● Catalog ● Orders ● Payments");
+      expect(line, `${width} columns`).not.toContain("…");
+      // What is drawn of the off marks leads, in the app's order, and each one is whole.
+      const marks = line.match(/⊘ [A-Za-z ]+?(?= ⊘| ●)/gu) ?? [];
+      expect(marks.map((mark) => mark.slice(2))).toEqual(
+        ["Ad Network", "Storefront", "Mailer", "Search Console", "Video Channel", "Help Desk", "Warehouse"].slice(0, marks.length)
+      );
+    }
+    expect(stripAnsi(bar(rows, 70))).not.toContain("⊘");
+    expect(stripAnsi(bar(rows, 80))).toContain("⊘ Ad Network ● Catalog");
+    expect(stripAnsi(bar(rows, 100))).toContain("⊘ Ad Network ");
+    // A broken source is never dropped for room: it is the one thing to fix.
+    const broken = [{ name: "Ledger", status: "broken" }, ...rows];
+    expect(stripAnsi(bar(broken, 80))).toContain("⊘ Ledger ● Catalog ● Orders ● Payments");
+  });
+
   it("dots that do not fit a narrow window are dropped (region-topbar-narrow-60)", () => {
     expectGolden(bar(WIRE_OK, 60), GOLDEN.topbarNarrow60);
   });

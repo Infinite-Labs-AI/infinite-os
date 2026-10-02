@@ -110,7 +110,7 @@ describe("Ink busy input handling", () => {
     // the composer keeps `Ask Infinite…` with its busy note and never repeats it.
     await waitFor(() => lastLineWith(output.text(), "switch side").startsWith(" esc  stop    tab  switch side"), 4_000, output.text);
     expect(lastLineWith(output.text(), "switch side").match(/esc/gu)).toHaveLength(1);
-    expect(lastLineWith(output.text(), "Ask Infinite…")).toMatch(/^❯ Ask Infinite… \(working · \d+s\)/u);
+    expect(lastLineWith(output.text(), "Ask Infinite…")).toMatch(/^❯ Ask Infinite… \(\d+s\)/u);
     const beforeEsc = output.text().length;
     await sendRaw(input, "\x1b");
     await waitFor(() => output.text().includes("■ Stopped."), 4_000, output.text);
@@ -227,9 +227,9 @@ describe("Ink busy input handling", () => {
     expect(formatQueuedStatus(["hello world", "next"])).toEqual(['queued: "hello world" (+1)']);
   });
 
-  it("says in the composer's note that the turn is working and for how long; no status line, no session id (r4)", () => {
-    expect(formatBusyNote({ nowMs: 5_300, state: getTurnState(), turnStartedAt: 1_000 })).toBe("working · 4s");
-    expect(formatBusyNote({ nowMs: 5_300, state: getTurnState() })).toBe("working");
+  it("says in the composer's note how long the turn has run (the working line says it is working); no status line, no session id (r4)", () => {
+    expect(formatBusyNote({ nowMs: 5_300, state: getTurnState(), turnStartedAt: 1_000 })).toBe("4s");
+    expect(formatBusyNote({ nowMs: 5_300, state: getTurnState() })).toBe("");
     expect(formatWholeElapsed(59_999)).toBe("59s");
     expect(formatWholeElapsed(123_000)).toBe("2:03");
     const rendered = stripAnsi(renderInkTranscriptToString({
@@ -239,7 +239,8 @@ describe("Ink busy input handling", () => {
       prompt: { placeholder: "Ask Infinite…" },
       turnStartedAt: 1_000
     }, { columns: 80 }));
-    expect(rendered).toContain("❯ Ask Infinite… (working · 4s)");
+    expect(rendered).toContain("❯ Ask Infinite… (4s)");
+    expect(rendered).not.toMatch(/\(working/u);
     expect(rendered).not.toContain("session");
     expect(rendered).not.toMatch(/\bready\b|\bbusy\b/u);
     // The session puts the queued line in the same note, and the card's keys

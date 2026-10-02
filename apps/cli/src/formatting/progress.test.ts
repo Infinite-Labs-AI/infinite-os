@@ -34,6 +34,13 @@ describe("one-shot progress lines", () => {
       .toBe("  waiting for your OK ▣");
   });
 
+  it("a step waiting for the person's answer says so, not that it waits for an OK", () => {
+    expect(formatInteractiveProgress(event("tool.complete", { status: "needs_clarification" }), 0))
+      .toBe("  listing sample rows ▣ waiting for an answer");
+    expect(formatInteractiveProgress(event("tool.complete", { status: "needs_clarification", words: { label: "asking which item" } }), 0))
+      .toBe("  asking which item ▣ waiting for an answer");
+  });
+
   it("a running call prints the app's words, or generic words; never JSON arguments", () => {
     expect(formatInteractiveProgress(event("tool.start", { context: '{"level":"row"}', words: { label: "checking the catalog" } }), 1200))
       .toBe("  ⠋ checking the catalog  1.2s");

@@ -221,7 +221,12 @@ describe("a call's outcome from its complete frame", () => {
     expect(toolOutcome({ status: "error", summary: "refused" })).toEqual({ status: "fail", result: "refused" });
     expect(toolOutcome({ error: "not allowed" })).toEqual({ status: "fail", result: "not allowed" });
     expect(toolOutcome({ status: "requires_confirmation" })).toEqual({ status: "wait", result: "" });
-    expect(toolOutcome({ status: "needs_clarification" })).toEqual({ status: "wait", result: "" });
+    // A question is not an approval: the row says which of the two it waits for.
+    expect(toolOutcome({ status: "needs_clarification" })).toEqual({ status: "wait", result: "waiting for an answer" });
+    expect(toolOutcome({ status: "needs_clarification", words: { label: "asking which item" } }))
+      .toEqual({ status: "wait", result: "waiting for an answer" });
+    expect(toolOutcome({ status: "needs_clarification", words: { label: "asking which item", result: "2 choices" } }))
+      .toEqual({ status: "wait", result: "2 choices" });
   });
 
   it("the app's words win: its result, or none; a failure with no worded result keeps its reason", () => {
@@ -271,8 +276,36 @@ describe("a step that waits (r4 ▣)", () => {
     expect(refineStepStatus(waiting, [view("propose_change", "expired")])).toBe("off");
     expect(refineStepStatus(waiting, [view("propose_change", "failed")])).toBe("fail");
     expect(refineStepStatus(waiting, [view("propose_change", "outcome_unknown")])).toBe("unk");
-    // Two cards of one tool: no telling which one this call made.
+    // Two cards of one tool and this call alone: no telling which one it made.
     expect(refineStepStatus(waiting, [view("propose_change", "done"), view("propose_change", "needs_yes")])).toBe("wait");
+  });
+
+  it("two calls of one tool follow their own cards, paired in order", () => {
+    const first = step({ id: "c1", status: "wait", name: "mcp__app__propose_change", label: "pausing sample A", result: "" });
+    const second = step({ id: "c2", status: "wait", name: "mcp__app__propose_change", label: "pausing sample B", result: "" });
+    const other = step({ id: "c0", status: "ok", name: "mcp__app__list_sample_rows", label: "listing sample rows", result: "3 rows" });
+    const failed = step({ id: "c3", status: "fail", name: "mcp__app__propose_change", label: "pausing sample C", result: "refused" });
+    const steps = [other, first, failed, second];
+    const views = [view("propose_change", "done"), view("list_sample_rows", "ready"), view("propose_change", "cancelled")];
+    expect(refineStepStatus(first, views, steps)).toBe("ok");
+    expect(refineStepStatus(second, views, steps)).toBe("off");
+    const rows = stepStripLines(steps, { width: 100, color: false, theme, nowMs: 1000, views }).slice(1);
+    expect(rows[1]).toMatch(/pausing sample A.*✓$/u);
+    expect(rows[2]).toMatch(/pausing sample C.*✗ refused$/u);
+    expect(rows[3]).toMatch(/pausing sample B.*·$/u);
+    expect(rows.join("\n")).not.toContain("waiting");
+    // More calls than cards (or fewer): no telling which is whose, each keeps its own status.
+    expect(refineStepStatus(first, [view("propose_change", "done")], steps)).toBe("wait");
+    expect(refineStepStatus(second, [...views, view("propose_change", "done")], steps)).toBe("wait");
+  });
+
+  it("a step waiting for an answer says so, and stops saying it once its card moved on", () => {
+    const asking = step({ status: "wait", name: "mcp__app__ask_which", label: "asking which item", result: "waiting for an answer" });
+    const row = (views: AnswerViewV1[]) => stepStripLines([asking], { width: 100, color: false, theme, nowMs: 1000, views })[1]!;
+    expect(row([])).toMatch(/▣ waiting for an answer$/u);
+    expect(row([view("ask_which", "needs_answer")])).toMatch(/▣ waiting for an answer$/u);
+    expect(row([view("ask_which", "done")])).toMatch(/✓$/u);
+    expect(row([view("ask_which", "done")])).not.toContain("waiting");
   });
 
   it("a waiting row that moved on no longer says it is waiting", () => {
