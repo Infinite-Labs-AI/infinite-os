@@ -116,6 +116,42 @@ export interface FakeGitOptions {
   isRepo?: boolean
   dirtyPaths?: string[]
   createBranchError?: Error
+  /**
+   * O4's resume extras (`switchTo`, `currentBranch`, `mergeBase`, `remoteBranchSha`): present only when given.
+   * `switchFails` makes `switchTo` throw; `mergeBase: null` = no common commit.
+   */
+  resumeOps?: { checkedOut: { branch: string | null }; switchFails?: boolean; remoteBase?: string | null; mergeBase?: string | null }
+}
+
+function resumeOps(log: CallLog, ops: NonNullable<FakeGitOptions["resumeOps"]>) {
+  return {
+    async statusEntries() {
+      return []
+    },
+    async showFile() {
+      return null
+    },
+    async unstage() {},
+    async stagedDiff() {
+      return ""
+    },
+    async switchTo(branch: string) {
+      log.push(`git.switchTo(${branch})`)
+      if (ops.switchFails) throw new Error("error: Your local changes would be overwritten")
+      ops.checkedOut.branch = branch
+    },
+    async currentBranch() {
+      return ops.checkedOut.branch
+    },
+    async remoteBranchSha(branch: string) {
+      log.push(`git.remoteBranchSha(${branch})`)
+      return ops.remoteBase ?? null
+    },
+    async mergeBase(a: string, b: string) {
+      log.push(`git.mergeBase(${a},${b})`)
+      return ops.mergeBase ?? null
+    }
+  }
 }
 
 export function fakeGit(log: CallLog, options: FakeGitOptions = {}) {
@@ -135,7 +171,8 @@ export function fakeGit(log: CallLog, options: FakeGitOptions = {}) {
       if (options.createBranchError) throw options.createBranchError
       branches.push({ base, branch })
       return { baseSha: "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d" }
-    }
+    },
+    ...(options.resumeOps ? resumeOps(log, options.resumeOps) : {})
   })
   return { git, branches }
 }

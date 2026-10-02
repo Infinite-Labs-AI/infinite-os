@@ -71,6 +71,7 @@ export async function recordGitignoreFence(ctx: WizardContext, deps: WizardDeps)
   const before = await git.showFile("HEAD", ".gitignore")
   if (before === after) return false
   const runId = ctx.state.get().runId
+  if (runId === null) return false
   await deps.installer.recordEdits([makeEditRecord({ file: ".gitignore", before, after, jobId: null, planLineId: GITIGNORE_FENCE_LINE_ID, by: "wizard", runId })])
   return true
 }

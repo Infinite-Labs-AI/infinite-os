@@ -21,6 +21,7 @@ import type { ReportV2 } from "./contracts/report.js"
 import type { WizardRunState } from "./contracts/state.js"
 import { createWizardAsks, readAnswersFile, type AnswersFile, type TtyPrompter } from "./asks.js"
 import { openDevTtyPrompter } from "./dev-tty.js"
+import { rebuildFromPrMarker } from "./fresh-machine.js"
 import { EngineInvariantError, runWizard } from "./engine.js"
 import { WizardEventEmitter } from "./events.js"
 import { nodeWizardFs, systemClock } from "./fs.js"
@@ -385,7 +386,6 @@ async function runLocked(input: LockedRun): Promise<number> {
       if (loaded.kind === "ok") {
         await setStateAside(root, asideSuffix(loaded.state, loaded.state.steps.done?.outcome === "ok" ? "done" : `set-aside-${Date.now()}`))
       }
-      if (options.resume) io.stderr.write("There is no unfinished run to resume here; starting a fresh one.\n")
       state = newState()
     }
 
@@ -402,6 +402,17 @@ async function runLocked(input: LockedRun): Promise<number> {
         state: () => runState?.get() ?? forState
       })
     deps = await createDeps(state)
+
+    // §3d.6 / §3z.5 (B25): no state file here (a fresh clone, a teammate's machine) → an OPEN wizard PR's
+    // marker names the run; the minimal state is rebuilt from it and `link` checks the run with `runs.get`.
+    if (loaded.kind === "none" && !fresh && !options.nested) {
+      const rebuilt = await rebuildFromPrMarker(state, deps.host)
+      if (rebuilt) {
+        resuming = true
+        io.stderr.write(`Resuming the run of pull request #${rebuilt.prNumber} (${rebuilt.branch}) from its marker. To start over instead: npx infinite-tag --fresh\n`)
+      }
+    }
+    if (!resuming && options.resume) io.stderr.write("There is no unfinished run to resume here; starting a fresh one.\n")
 
     // §3d.6: a resumed run whose pull request was CLOSED (not merged) cannot go on; offer a fresh run.
     // (A merged PR resumes at `merge`, which records the merge commit and hands over to `prove`.)

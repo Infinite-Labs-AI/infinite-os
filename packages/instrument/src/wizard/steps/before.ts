@@ -43,6 +43,7 @@ import type { BaselineResponseFields, ReportColumnSnapshot } from "../contracts/
 import type { BaseSource } from "../contracts/state.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { wizardBranchName } from "../contracts/git-host.js"
+import { wizardGitExtras } from "../../git/index.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import {
   TEST_LIMITS,
@@ -333,8 +334,22 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         const existing = ctx.state.get().git
         if (existing?.branch) {
           // A resumed run must be ON its branch: otherwise the scan reads (and later steps edit) whatever
-          // the user switched to (review P2-7). GitOps has no switch verb, so the wizard stops and says so.
-          const current = await readCurrentBranch(deps, ctx.root)
+          // the user switched to (review P2-7). The tree is clean (checked above), so the wizard switches
+          // back itself (O4's `switchTo`); when it cannot, it stops and says what to run.
+          let current = await readCurrentBranch(deps, ctx.root)
+          let switched = false
+          if (current !== existing.branch) {
+            const ops = "switchTo" in deps.git ? wizardGitExtras(deps.git) : null
+            if (ops) {
+              try {
+                await ops.switchTo(existing.branch)
+                current = await ops.currentBranch()
+                switched = current === existing.branch
+              } catch {
+                // Reported below as BRANCH_FAILED with the command to run.
+              }
+            }
+          }
           if (current !== existing.branch) {
             return {
               kind: "failed",
@@ -343,7 +358,20 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
               next: "halt"
             }
           }
-          sub(`On branch ${existing.branch} (from ${existing.base})`, "ok")
+          // B25: a run rebuilt from its PR marker on a fresh machine knows its branch and base, not its base SHA.
+          if (existing.baseSha === "") {
+            const ops = "mergeBase" in deps.git ? wizardGitExtras(deps.git) : null
+            const remoteBase = await deps.git.remoteBranchSha(existing.base)
+            const baseSha = ops?.mergeBase && remoteBase ? await ops.mergeBase(remoteBase, "HEAD") : null
+            if (!baseSha) {
+              return { kind: "failed", code: "INF_WIZ_BRANCH_FAILED", message: `Could not find where ${existing.branch} branched from origin/${existing.base}. Run npx infinite-tag --fresh.`, next: "halt" }
+            }
+            ctx.state.update((state) => {
+              state.git = { ...existing, baseSha }
+            })
+            await ctx.state.save()
+          }
+          sub(`${switched ? "Switched back to" : "On"} branch ${existing.branch} (from ${existing.base})`, "ok")
         } else {
           const base = await resolveBase(deps, hosting, ctx.root)
           if (!base) {

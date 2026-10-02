@@ -492,8 +492,12 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           script.run = next
           return ok({ run: script.run })
         }
-        case "runs.get":
+        case "runs.get": {
+          // A run this workspace never started (another workspace's run id) is a 404, as C1 answers.
+          const id = decodeURIComponent(url.pathname.split("/").pop() ?? "")
+          if (id !== script.run.runId) return fail(res, record, requestId, "not_found")
           return ok({ run: script.run })
+        }
         case "receipts":
           return ok(script.receipts ? { ...structuredClone(script.receipts) } : strip(fixtureResponse("receipts")))
         case "report": {

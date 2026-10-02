@@ -235,6 +235,11 @@ export function createGitOps(options: CreateGitOpsOptions): WizardGitOps {
     async currentBranch() {
       const result = await git(["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFail: true })
       return result.status === 0 ? result.stdout.trim() || null : null
+    },
+    async mergeBase(a, b) {
+      for (const rev of [a, b]) if (rev.startsWith("-") || !/^[A-Za-z0-9._/@^~-]+$/.test(rev)) throw new Error(`unsafe revision ${JSON.stringify(rev)}`)
+      const result = await git(["merge-base", a, b], { allowFail: true })
+      return result.status === 0 ? result.stdout.trim() || null : null
     }
   }
   return ops

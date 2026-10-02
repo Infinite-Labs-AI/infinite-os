@@ -261,6 +261,20 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
       }
     }
 
+    // B25: a resumed run (it has a run id) asks the cloud for that run ONCE. A Link carries no workspace
+    // id by design, so a 404 is how a run started in another workspace (or a deleted one) is caught.
+    const resumedRunId = ctx.state.get().runId
+    if (resumedRunId !== null && deps.bridge.has("tag.runs.v1")) {
+      try {
+        await deps.bridge.getRun(resumedRunId, { signal: ctx.signal })
+      } catch (error) {
+        if (isBridgeError(error) && error.code === "not_found") {
+          return { kind: "failed", code: "INF_WIZ_LINK_DECLINED", message: RUN_NOT_IN_WORKSPACE, next: "halt" }
+        }
+        throw error
+      }
+    }
+
     return { kind: "ok", status: `Linked: ${site.repoLabel} → workspace ${link.workspace.name}` }
   } catch (error) {
     if (isBridgeError(error)) {
@@ -270,6 +284,9 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     throw error
   }
 }
+
+/** B25: the halt line when the linked workspace does not know this run. */
+export const RUN_NOT_IN_WORKSPACE = "This run belongs to another workspace; run npx infinite-tag --fresh."
 
 export const step: WizardStep<"link"> = {
   id: "link",

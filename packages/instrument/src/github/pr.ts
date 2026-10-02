@@ -20,6 +20,7 @@ interface RawPr {
   mergeStateStatus?: string | null
   reviewDecision?: string | null
   body?: string
+  baseRefName?: string
   isCrossRepository?: boolean
 }
 
@@ -83,7 +84,7 @@ export function prMarkerRunId(body: string): string | null {
  * §3d.6 fresh-machine resume: the author's PRs, filtered client-side to the `infinite/tag/` prefix AND the body
  * marker (gh's `--head` takes no `owner:branch`). Each comes with the run id its marker carries.
  */
-export async function findWizardPrs(gh: GhClient): Promise<Array<{ pr: PrSummary; runId: string; branch: string }>> {
+export async function findWizardPrs(gh: GhClient): Promise<Array<{ pr: PrSummary; runId: string; branch: string; base: string | null }>> {
   const rows = await gh.json<RawPr[]>([
     "pr",
     "list",
@@ -94,14 +95,14 @@ export async function findWizardPrs(gh: GhClient): Promise<Array<{ pr: PrSummary
     "--limit",
     String(PR_LOOP_LIMITS.prListLimit),
     "--json",
-    `${PR_FIELDS},body`
+    `${PR_FIELDS},body,baseRefName`
   ])
-  const out: Array<{ pr: PrSummary; runId: string; branch: string }> = []
+  const out: Array<{ pr: PrSummary; runId: string; branch: string; base: string | null }> = []
   for (const row of rows) {
     if (typeof row.headRefName !== "string" || !row.headRefName.startsWith(WIZARD_BRANCH_PREFIX)) continue
     const runId = prMarkerRunId(row.body ?? "")
     if (!runId) continue
-    out.push({ pr: toPrSummary(row), runId, branch: row.headRefName })
+    out.push({ pr: toPrSummary(row), runId, branch: row.headRefName, base: typeof row.baseRefName === "string" && row.baseRefName !== "" ? row.baseRefName : null })
   }
   return out
 }

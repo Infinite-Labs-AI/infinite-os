@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { startFakeBridge, type FakeBridge, type FakeBridgeScript } from "../../../test/wizard/fake-bridge.js"
 import { freshState, makeContext, makeDeps, type HarnessOptions } from "../../../test/wizard/step-harness.js"
 import { openTagBridge } from "../../bridge/client.js"
-import { step } from "./link.js"
+import { RUN_NOT_IN_WORKSPACE, step } from "./link.js"
 
 let root: string
 const bridges: FakeBridge[] = []
@@ -166,6 +166,31 @@ describe("step link", () => {
     const { client, harness, deps } = await setup({ link: "remembered" }, { state })
     expect((await step.run(harness.ctx, deps)).kind).toBe("ok")
     expect(client.currentLinkId()).toBe("lk_FAKElinkAcmeStore00000")
+  })
+
+  it("B25: a resumed run asks runs.get once; a run this workspace does not know (404) halts LINK_DECLINED with --fresh", async () => {
+    const state = freshState("", {
+      runId: "0b9e8d7c-6a5b-4c3d-9e2f-1a0b9c8d7e6f",
+      link: { linkId: "lk_FAKEoldLinkAcmeStore000", workspaceName: "Acme", approvedAt: "2026-10-01T09:01:00.000Z", runtimeVariant: "prod" }
+    })
+    const { bridge, harness, deps } = await setup({ link: "remembered" }, { state })
+    const outcome = await step.run(harness.ctx, deps)
+    expect(outcome).toEqual({ kind: "failed", code: "INF_WIZ_LINK_DECLINED", message: RUN_NOT_IN_WORKSPACE, next: "halt" })
+    expect(RUN_NOT_IN_WORKSPACE).toContain("npx infinite-tag --fresh")
+    expect(bridge.callsFor("runs.get")).toHaveLength(1)
+  })
+
+  it("B25 negative: a run the workspace knows goes on, and a fresh run (no run id) never asks runs.get", async () => {
+    const resumed = freshState("", {
+      runId: "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      link: { linkId: "lk_FAKEoldLinkAcmeStore000", workspaceName: "Acme", approvedAt: "2026-10-01T09:01:00.000Z", runtimeVariant: "prod" }
+    })
+    const first = await setup({ link: "remembered" }, { state: resumed })
+    expect((await step.run(first.harness.ctx, first.deps)).kind).toBe("ok")
+    expect(first.bridge.callsFor("runs.get")).toHaveLength(1)
+    const fresh = await setup({ link: "remembered" })
+    expect((await step.run(fresh.harness.ctx, fresh.deps)).kind).toBe("ok")
+    expect(fresh.bridge.callsFor("runs.get")).toHaveLength(0)
   })
 
   it("ESC on the code → cancelled (declined), polling stops", async () => {

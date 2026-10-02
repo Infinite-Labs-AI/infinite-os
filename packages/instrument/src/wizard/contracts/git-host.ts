@@ -164,6 +164,8 @@ export interface WizardGitOps extends GitOps {
   switchTo(branch: string): Promise<void>
   /** The current branch name, or null when detached. */
   currentBranch(): Promise<string | null>
+  /** `git merge-base <a> <b>`, or null (no common commit). B25: a run rebuilt from its PR marker re-derives its base SHA. */
+  mergeBase?(a: string, b: string): Promise<string | null>
   /** GitLab: push with merge-request push options (§3g.2). */
   pushWithOptions(branch: string, pushOptions: readonly string[]): Promise<void>
   /** True once the user owns the terminal (SSH may then prompt for a passphrase). */

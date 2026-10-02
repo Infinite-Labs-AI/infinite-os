@@ -271,6 +271,37 @@ describe("step before: preconditions and the branch", () => {
     expect(await worktree.run()).toMatchObject({ kind: "ok" })
   })
 
+  it("O8 resume: on another branch with a clean tree, the wizard switches back itself (O4 switchTo)", async () => {
+    const git = { base: "main", baseSource: "vercel" as const, branch: "infinite/tag/2026-10-02-7f3c2a", baseSha: "0a".repeat(20), headSha: null }
+    const checkedOut = { branch: "main" as string | null }
+    const s = setup({ state: { git }, fsFiles: { "/repo/.git/HEAD": "ref: refs/heads/main\n" }, git: { resumeOps: { checkedOut } } })
+    expect(await s.run()).toMatchObject({ kind: "ok" })
+    expect(s.log).toContain("git.switchTo(infinite/tag/2026-10-02-7f3c2a)")
+    expect(checkedOut.branch).toBe("infinite/tag/2026-10-02-7f3c2a")
+    expect(s.events.some((event) => JSON.stringify(event).includes("Switched back to branch infinite/tag/2026-10-02-7f3c2a"))).toBe(true)
+  })
+
+  it("O8 resume NEGATIVE: a switch git refuses → BRANCH_FAILED with the command to run, before any scan", async () => {
+    const git = { base: "main", baseSource: "vercel" as const, branch: "infinite/tag/2026-10-02-7f3c2a", baseSha: "0a".repeat(20), headSha: null }
+    const s = setup({ state: { git }, fsFiles: { "/repo/.git/HEAD": "ref: refs/heads/main\n" }, git: { resumeOps: { checkedOut: { branch: "main" }, switchFails: true } } })
+    const outcome = await s.run()
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_BRANCH_FAILED", next: "halt" })
+    expect((outcome as { message: string }).message).toContain("git switch infinite/tag/2026-10-02-7f3c2a")
+    expect(s.log.some((entry) => entry.startsWith("installer.scan") || entry.startsWith("bridge.keys"))).toBe(false)
+  })
+
+  it("B25: a run rebuilt from its PR marker (no base SHA) re-derives it as merge-base(origin/<base>, HEAD); none → BRANCH_FAILED", async () => {
+    const git = { base: "main", baseSource: "default_branch" as const, branch: "infinite/tag/2026-10-02-7f3c2a", baseSha: "", headSha: null }
+    const head = { "/repo/.git/HEAD": "ref: refs/heads/infinite/tag/2026-10-02-7f3c2a\n" }
+    const checkedOut = { branch: "infinite/tag/2026-10-02-7f3c2a" as string | null }
+    const s = setup({ state: { git }, fsFiles: head, git: { resumeOps: { checkedOut, remoteBase: "1b".repeat(20), mergeBase: "2c".repeat(20) } } })
+    expect(await s.run()).toMatchObject({ kind: "ok" })
+    expect(s.state.git).toMatchObject({ branch: "infinite/tag/2026-10-02-7f3c2a", baseSha: "2c".repeat(20) })
+    expect(s.log).toContain(`git.mergeBase(${"1b".repeat(20)},HEAD)`)
+    const none = setup({ state: { git }, fsFiles: head, git: { resumeOps: { checkedOut, remoteBase: "1b".repeat(20), mergeBase: null } } })
+    expect(await none.run()).toMatchObject({ kind: "failed", code: "INF_WIZ_BRANCH_FAILED" })
+  })
+
   it("a signed-out GitHub CLI falls back to origin/HEAD instead of stopping (review P3-3)", async () => {
     const none: HostingResponse = { protocolVersion: 1, requestId: "r", provider: "none", vercel: null }
     const s = setup({ hosting: none, defaultBranch: "THROW", fsFiles: { "/repo/.git/refs/remotes/origin/HEAD": "ref: refs/remotes/origin/trunk\n" } })
