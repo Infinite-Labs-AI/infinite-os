@@ -5,6 +5,20 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
+### Setup wizard: the I1/I2 follow-up
+
+- The env-target read asks Infinite only about public build-time names (`NEXT_PUBLIC_`, `VITE_`, `PUBLIC_`; at
+  most 10). A server-side name is never sent and its check reads unknown; a refused or failed read leaves the
+  check unknown instead of stopping the run.
+- A site linked to Infinite's own workspace stops with one plain line ("Link it to its own workspace") and exit 4;
+  when Infinite cannot tell its own workspace apart yet, the run parks with a plain line (exit 3).
+- Sensitive pages (decision 17) now reach the plan: the login, checkout and similar routes the detector finds
+  give the "no session replay and no autocapture there" line for a new PostHog, and for an existing one.
+- A build the installer could not run is "not checked", never "already red" and never a rolled-back install.
+- The before/after table says "Checks passing" with cells counted out of all 14 ("4 pass · 8 problems · 2 not
+  testable of 14"), and a raw count below 50 page views is footnoted once as shown, never as "—".
+- A form whose handler calls `postInfiniteOutcome` is no longer reported as silent.
+
 ### Setup wizard: review I1 fixes
 
 - A site whose home page redirects (apex → www, `/` → `/en`) is proved and reported; a check's free text never

@@ -10,6 +10,7 @@
 import { execFileSync, spawn } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import vm from "node:vm"
 
 import { afterEach, beforeAll, describe, expect, it } from "vitest"
 
@@ -83,6 +84,46 @@ async function world(input: { scenario?: unknown; bridge?: Record<string, unknow
   bareGit(made.site.bare, "config", "core.logAllRefUpdates", "always")
   worlds.push(made)
   return made
+}
+
+/**
+ * Runs a managed module's bootstrap (the script the module appends) in node:vm with a stub DOM at `host`
+ * + `path`: the script srcs it loads and the options each PostHog init was queued with. No network.
+ */
+function runBootstrap(source: string, host: string, path: string): { loaded: string[]; posthogInits: Array<Record<string, unknown>> } {
+  const loaded: string[] = []
+  const element = (): Record<string, unknown> => ({ setAttribute() {}, parentNode: { insertBefore: (node: { src?: string }) => loaded.push(String(node.src)) } })
+  const document = {
+    head: { appendChild: (node: { src?: string }) => loaded.push(String(node.src)) },
+    createElement: element,
+    getElementsByTagName: () => [element()],
+    cookie: "",
+    referrer: "",
+    readyState: "complete",
+    visibilityState: "visible",
+    addEventListener() {}
+  }
+  const global: Record<string, unknown> = {
+    document,
+    location: { hostname: host, pathname: path, href: `https://${host}${path}`, search: "", protocol: "https:" },
+    navigator: { userAgent: "e2e" },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener() {},
+    setTimeout,
+    clearTimeout
+  }
+  global.window = global
+  vm.createContext(global)
+  vm.runInContext(source, global)
+  const queued = ((global.posthog as { _i?: unknown[][] } | undefined)?._i ?? []) as unknown[][]
+  return { loaded, posthogInits: queued.map((entry) => entry[1] as Record<string, unknown>) }
+}
+
+/** Commits the world's repo as it is now and pushes it, so the wizard starts from that production. */
+function commitAndPush(w: E2eWorld, message: string): void {
+  git(w.site.repo, "add", "-A")
+  git(w.site.repo, "commit", "-q", "-m", message)
+  git(w.site.repo, "push", "-q", "origin", "main")
 }
 
 function writeAnswers(w: E2eWorld, answers: Record<string, unknown> = answersFile()): string {
@@ -745,6 +786,81 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
     expect(verbs.filter((entry) => entry.startsWith("test.start"))).toEqual([])
     // The review resumes from its saved round (no second review is posted).
     expect(readGhState(w.ghState).prs).toHaveLength(1)
+  })
+
+  it("review I2 P1-2: a server-side env name (POSTHOG_KEY) is never sent to hosting; its env check is unknown and the run goes on", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world({ env: { E2E_NO_AGENTS: "1" } })
+    const providers = join(w.site.repo, "app/providers.tsx")
+    writeFileSync(providers, readFileSync(providers, "utf8").replace('posthog.init("phc_FAKEtestProjectKeyNotReal000",', "posthog.init(process.env.POSTHOG_KEY!,"))
+    commitAndPush(w, "PostHog key from the server env")
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
+    expect(stepOutcomes(run), trace(run)).toContain("before:ok")
+    expect(run.code, trace(run)).toBe(0)
+    // The fake desktop refuses a non-public name (as the real one does since I2); the tag never asked.
+    const hosting = w.bridge.calls.filter((call) => call.verb === "hosting")
+    expect(hosting.length).toBeGreaterThan(0)
+    for (const call of hosting) {
+      expect(call.path).not.toContain("envNames")
+      expect(call.status).toBe(200)
+    }
+    const envTargets = run.ofType("check.result").filter((event) => event.checkId === "env_targets")
+    expect(envTargets.map((event) => event.state)).toEqual(["undetermined"])
+    expect(String(envTargets[0]!.reason)).toContain("POSTHOG_KEY is not a public build-time name")
+  })
+
+  it("review I2 P2-2: keys refuses Infinite's own workspace (409 infinite_workspace) → a clean stop at link, exit 4, one plain line", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world({ bridge: { errors: { keys: { code: "foreign_site_hosts", state: "infinite_workspace" } } } })
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], timeoutMs: RUN_TIMEOUT })
+    expect(run.code, trace(run)).toBe(4)
+    expect(stepOutcomes(run)).toEqual(["link:failed:INF_WIZ_LINK_DECLINED"])
+    expect(JSON.stringify(run.events)).toContain("This site is linked to Infinite's own workspace. Link it to its own workspace and run npx infinite-tag again.")
+    expect(w.bridge.calls.map(label)).toEqual(["status", "link.request", "link.poll", "keys"])
+    expect(remoteBranches(w)).toEqual(["main"])
+    expect(agentRuns(w, "claude")).toEqual([])
+    expect(agentRuns(w, "codex")).toEqual([])
+  })
+
+  it("§3z.12 item 4: newly managed GA4 and PostHog ship with the preview guard and the sensitive-path options in the emitted bytes", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world({ env: { E2E_NO_AGENTS: "1" } })
+    // The site has no GA4 and no PostHog yet (the Meta pixel stays adopted): both become NEW managed installs.
+    writeFileSync(join(w.site.repo, "app/layout.tsx"), fixtureFile("app/layout.tsx").replace(/ {8}<Script id="consent-default"[\s\S]*?<Script id="meta-pixel"/, '        <Script id="meta-pixel"'))
+    writeFileSync(join(w.site.repo, "app/providers.tsx"), 'export function Providers({ children }: { children: React.ReactNode }) {\n  return <>{children}</>\n}\n')
+    commitAndPush(w, "no GA4, no PostHog yet")
+    expect(readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8")).not.toContain("googletagmanager")
+    const answers = answersFile()
+    const plan = answers.plan as { approved: string[]; declined: string[] }
+    const NEW_MANAGED_LINES = ["install_provider:ga4:G-FAKE00001", "install_provider:posthog:phc_FAKEtestProjectKeyNotReal000", "preview_guard_managed", "sensitive_pages:posthog:managed"]
+    const approved = [...plan.approved.filter((id) => !id.includes(":ga4:") && !id.includes(":posthog:")), ...NEW_MANAGED_LINES]
+    const run = await runWizard({
+      cwd: w.site.repo,
+      env: w.env,
+      args: ["--json", "--answers", writeAnswers(w, { ...answers, plan: { approved, declined: plan.declined } })],
+      respond: mergeThenOpen(w),
+      timeoutMs: RUN_TIMEOUT
+    })
+    expect(stepOutcomes(run), trace(run)).toContain("install:ok")
+    expect(run.code, trace(run)).toBe(0)
+    const lines = (run.ofType("ask.open").find((event) => event.kind === "plan")?.payload as { lines?: Array<{ id: string }> } | undefined)?.lines?.map((line) => line.id) ?? []
+    for (const id of NEW_MANAGED_LINES) expect(lines, id).toContain(id)
+    // The PR's emitted bytes, EXECUTED (node:vm, a stub DOM): the managed module's bootstrap starts GA4 and
+    // PostHog on production only (the deny-list guard silences a Vercel preview and localhost), and PostHog
+    // turns session replay and autocapture off on the detector's sensitive path (/login) only.
+    const head = headOfBranch(w)!
+    const managed = bareShow(w.site.bare, head.head, "lib/infinite-analytics.ts")
+    const literal = /^const bootstrapSource = (".*")$/m.exec(managed)
+    expect(literal, "the managed module carries its bootstrap").not.toBeNull()
+    const bootstrap = JSON.parse(literal![1]!) as string
+    const production = runBootstrap(bootstrap, PRODUCTION_HOST, "/")
+    expect(production.loaded).toEqual(["https://www.googletagmanager.com/gtag/js?id=G-FAKE00001", "/ingest/static/array.js"])
+    expect(production.posthogInits).toEqual([expect.objectContaining({ api_host: "/ingest" })])
+    expect(production.posthogInits[0]).not.toHaveProperty("disable_session_recording")
+    const login = runBootstrap(bootstrap, `www.${PRODUCTION_HOST}`, "/login")
+    expect(login.posthogInits).toEqual([expect.objectContaining({ disable_session_recording: true, autocapture: false })])
+    for (const host of ["acme-store-git-infinite-tag-acme.vercel.app", "localhost"]) {
+      const silenced = runBootstrap(bootstrap, host, "/")
+      expect(silenced.loaded, host).toEqual([])
+      expect(silenced.posthogInits, host).toEqual([])
+    }
   })
 
   it("review I1 P2-5: Ctrl+C mid-turn undoes the agent's edit and removes the snapshot before exit 130", { timeout: RUN_TIMEOUT }, async () => {

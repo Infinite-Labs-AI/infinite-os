@@ -448,8 +448,17 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           return ok({ revoked: true })
         case "keys":
           return ok({ ...structuredClone(script.keys) })
-        case "hosting":
+        case "hosting": {
+          // As the desktop decodes it since review I2 P1-2 (§3b): at most 10 public build-time names, else 400.
+          const envNames = url.searchParams.get("envNames")
+          if (envNames !== null) {
+            const names = envNames.split(",")
+            if (names.length > 10 || names.some((name) => !/^(NEXT_PUBLIC|VITE|PUBLIC)_[A-Z0-9_]{1,64}$/.test(name))) {
+              return fail(res, record, requestId, "invalid_request", { field: "envNames" })
+            }
+          }
           return ok({ ...structuredClone(script.hosting) })
+        }
         case "hosting.deploy": {
           const state = script.deploy[Math.min(deployIndex, script.deploy.length - 1)]
           deployIndex += 1
