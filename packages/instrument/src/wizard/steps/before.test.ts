@@ -280,13 +280,18 @@ describe("step before: preconditions and the branch", () => {
 
   it("402 from the keys verb → blocked SUBSCRIPTION_REQUIRED (exit 4)", async () => {
     const s = setup({ keys: new FakeBridgeError(402, "subscription_required") })
-    expect(await s.run()).toEqual({ kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED", reason: "Infinite needs an active subscription for this site" })
+    expect(await s.run()).toMatchObject({ kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED" })
     expect(s.bridge.sentTests).toEqual([])
   })
 
-  it("other bridge errors are not swallowed", async () => {
+  it("a cloud failure on a read it cannot do without parks INFINITE_UNAVAILABLE (§3z.4), never 'open the app'", async () => {
     const s = setup({ keys: new FakeBridgeError(502, "cloud_error", true) })
-    await expect(s.run()).rejects.toThrow(/502 cloud_error/)
+    expect(await s.run()).toMatchObject({ kind: "parked", code: "INF_WIZ_INFINITE_UNAVAILABLE" })
+  })
+
+  it("negative: a bridge failure the table does not map (a 400) is not swallowed", async () => {
+    const s = setup({ keys: new FakeBridgeError(400, "invalid_request") })
+    await expect(s.run()).rejects.toThrow(/400 invalid_request/)
   })
 })
 

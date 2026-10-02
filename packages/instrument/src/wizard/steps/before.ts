@@ -22,6 +22,7 @@
 // §3g.1) → branch → keys → baseline build → scan + census + setup checks → dry_live → T1 → baseline
 // reads → Before facts → seedCandidates. The branch is created before any other verb and before any
 // repo read.
+import { bridgeFailureOutcome, isTransientBridgeFailure } from "../../bridge/outcomes.js"
 import { gradeContextFrom } from "../../checks/grade-context.js"
 import { BEFORE_FACTS_SCHEMA, writeBeforeFactsFile, type BeforeFactsFile } from "../handoff/before-facts.js"
 import { createHash } from "node:crypto"
@@ -83,25 +84,13 @@ export function bridgeErrorCode(error: unknown): BridgeErrorCode | null {
   return typeof code === "string" && (BRIDGE_ERROR_CODES as readonly string[]).includes(code) ? (code as BridgeErrorCode) : null
 }
 
-/** Bridge errors that stop the run because the Infinite app cannot serve it (exit 4). */
+/** Bridge failures that stop `before`: the §3z.4 table (one place, `bridge/outcomes.ts`). */
 function appBlockedOutcome(error: unknown): StepOutcome | null {
-  const code = bridgeErrorCode(error)
-  const map: Partial<Record<BridgeErrorCode, WizardCode>> = {
-    subscription_required: "INF_WIZ_SUBSCRIPTION_REQUIRED",
-    signed_out: "INF_WIZ_SIGNED_OUT",
-    unauthorized: "INF_WIZ_SIGNED_OUT"
-  }
-  const wizardCode = code ? map[code] : undefined
-  if (!wizardCode) return null
-  return {
-    kind: "blocked",
-    code: wizardCode,
-    reason: wizardCode === "INF_WIZ_SUBSCRIPTION_REQUIRED" ? "Infinite needs an active subscription for this site" : "Sign in to the Infinite app, then run npx infinite-tag again"
-  }
+  return bridgeFailureOutcome(error)
 }
 
-/** Bridge errors that leave a measurement unknown instead of stopping the run. */
-const DEGRADABLE: ReadonlySet<BridgeErrorCode> = new Set(["busy", "rate_limited", "cloud_error", "upstream_timeout", "capability_unavailable"])
+/** Bridge errors that leave a measurement unknown instead of stopping the run (busy, timeouts, 5xx; §3z.4). */
+const DEGRADABLE: ReadonlySet<BridgeErrorCode> = new Set(["busy", "rate_limited", "cloud_error", "upstream_timeout", "capability_unavailable", "internal_error"])
 /** The test engine runs one test at a time (§3a.8): a busy engine is retried, then the load is unknown. */
 const RETRYABLE: ReadonlySet<BridgeErrorCode> = new Set(["busy", "rate_limited"])
 export const DRY_LIVE_START_ATTEMPTS = 4
@@ -109,7 +98,10 @@ export const DRY_LIVE_RETRY_BASE_MS = 2_000
 
 function isDegradable(error: unknown): boolean {
   const code = bridgeErrorCode(error)
-  return code !== null && DEGRADABLE.has(code)
+  if (code === null) return false
+  // A damaged link store (internal_error, not retryable) is never "unknown": it stops the run.
+  if (code === "internal_error") return isTransientBridgeFailure(error)
+  return DEGRADABLE.has(code)
 }
 
 function withoutEnvelope<T extends { protocolVersion: 1; requestId: string }>(response: T): Omit<T, "protocolVersion" | "requestId"> {
@@ -245,7 +237,7 @@ async function runDryLive(
       started = await deps.bridge.startTest(body, { signal: ctx.signal })
     } catch (error) {
       const code = bridgeErrorCode(error)
-      if (code === null || !DEGRADABLE.has(code)) throw error
+      if (code === null || !isDegradable(error)) throw error
       if (!RETRYABLE.has(code) || attempt >= DRY_LIVE_START_ATTEMPTS) return { result: null, error: code === "busy" ? "the Infinite app is busy with another test" : code }
       await deps.clock.sleep(DRY_LIVE_RETRY_BASE_MS * 2 ** (attempt - 1), ctx.signal)
     }

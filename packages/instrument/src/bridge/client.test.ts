@@ -271,7 +271,10 @@ describe("strict decoding (fixture-driven transport)", () => {
     "%s maps to BridgeError {status, code, retryable}",
     async (_label, row) => {
       const envelope = row.response as { error: { code: string; retryable: boolean; state?: string; field?: string; upstreamStatus?: number } }
-      const client = createTagBridgeClient(descriptor, { tagVersion: "x", transport: replay(row.status, row.response, { "retry-after": "7" }) })
+      let calls = 0
+      const inner = replay(row.status, row.response, { "retry-after": "7" })
+      const counting: BridgeTransport = (request) => ((calls += 1), inner(request))
+      const client = createTagBridgeClient(descriptor, { tagVersion: "x", transport: counting, maxRateLimitWaitMs: 0 })
       client.setLinkId("lk_FAKElinkAcmeStore00000")
       const error = await caught(callFor(client, row.verb as BridgeVerbId, row.request))
       expect(error.status).toBe(row.status)
@@ -281,6 +284,8 @@ describe("strict decoding (fixture-driven transport)", () => {
       if (envelope.error.field) expect(error.field).toBe(envelope.error.field)
       if (envelope.error.upstreamStatus) expect(error.upstreamStatus).toBe(envelope.error.upstreamStatus)
       expect(error.retryAfterSeconds).toBe(7)
+      // §3z.4: a 429 is retried ONCE after its Retry-After; nothing else is replayed on an error answer.
+      expect(calls).toBe(envelope.error.code === "rate_limited" ? 2 : 1)
     }
   )
 

@@ -1,6 +1,8 @@
 // Shared plumbing for lane O4's three steps (`rehearsal`, `review`, `merge`): the run's public facts (keys and
 // hosting, read through the bridge), the scanner built from them, the allowlist union, the managed files from
 // the edit receipt, and small emit helpers. Nothing here spends a prompt or calls the cloud directly.
+import { bridgeFailureCode, hardStopOutcome } from "../bridge/outcomes.js"
+import type { WizardCode } from "../wizard/contracts/codes.js"
 import { join } from "node:path"
 
 import type { TagHosting, TagKeys } from "../wizard/contracts/bridge.js"
@@ -64,29 +66,18 @@ export async function loadRunFacts(deps: WizardDeps): Promise<RunFacts> {
  * not a bridge error. Duck-typed, so this lane does not import O2's client.
  */
 export function bridgeErrorCode(error: unknown): string | null {
-  if (typeof error !== "object" || error === null) return null
-  const candidate = error as { name?: unknown; code?: unknown; status?: unknown }
-  if (candidate.name !== "BridgeError" || typeof candidate.code !== "string") return null
-  return candidate.code
+  return bridgeFailureCode(error)
 }
 
-/** The bridge errors that stop the run with "needs the Infinite app" (exit 4), whatever the step was doing. */
-export function bridgeStopCode(error: unknown): "INF_WIZ_SUBSCRIPTION_REQUIRED" | "INF_WIZ_SIGNED_OUT" | null {
-  const code = bridgeErrorCode(error)
-  if (code === "subscription_required") return "INF_WIZ_SUBSCRIPTION_REQUIRED"
-  if (code === "signed_out") return "INF_WIZ_SIGNED_OUT"
-  return null
+/** The HARD bridge failures that stop the run whatever the step was doing (§3z.4, `bridge/outcomes.ts`). */
+export function bridgeStopCode(error: unknown): WizardCode | null {
+  const outcome = hardStopOutcome(error)
+  return outcome && outcome.kind !== "ok" && outcome.kind !== "skipped" ? outcome.code : null
 }
 
-/** A step's bridge failure as its outcome: 402 → SUBSCRIPTION_REQUIRED, signed out → SIGNED_OUT; anything else rethrows. */
+/** A step's hard bridge failure as its outcome (§3z.4); anything else rethrows or degrades. */
 export function bridgeStop(error: unknown): StepOutcome | null {
-  const code = bridgeStopCode(error)
-  if (code === null) return null
-  const message =
-    code === "INF_WIZ_SUBSCRIPTION_REQUIRED"
-      ? "Your Infinite subscription is not active. Renew it in the Infinite app, then run `npx infinite-tag` again; the pull request stays as it is."
-      : "The Infinite app is signed out. Sign in, then run `npx infinite-tag` again; the pull request stays as it is."
-  return { kind: "failed", code, message, next: "halt" }
+  return hardStopOutcome(error)
 }
 
 /**

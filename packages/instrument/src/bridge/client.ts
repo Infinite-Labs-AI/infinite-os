@@ -174,6 +174,8 @@ export interface TagBridgeClientOptions {
   /** Per call; defaults to 35 s (§3a.2). */
   timeoutMs?: number
   newRequestId?: () => string
+  /** The longest a 429's `Retry-After` is waited before the one retry (default RATE_LIMIT_MAX_WAIT_MS). */
+  maxRateLimitWaitMs?: number
 }
 
 interface CallInput {
@@ -354,6 +356,13 @@ export class DescriptorTagBridgeClient implements TagBridgeClient {
     try {
       return await this.callOnce<T>(verb, input)
     } catch (error) {
+      // §3z.4: a 429 waits ONCE for `Retry-After` (capped), then the error goes on to the outcome table.
+      // A 429 is refused before any effect, so even a state-changing verb is safe to send again.
+      if (isBridgeError(error) && error.code === "rate_limited" && !input.signal?.aborted) {
+        const cap = this.options.maxRateLimitWaitMs ?? RATE_LIMIT_MAX_WAIT_MS
+        await waitMs(Math.min(cap, Math.max(0, (error.retryAfterSeconds ?? 1) * 1000)), input.signal)
+        return this.callOnce<T>(verb, input)
+      }
       // The app restarted (new port + token): re-discover once and retry the same request, but only when a
       // replay cannot double an effect: a read (GET), or a request that never reached the app (connection
       // refused). A POST/PATCH whose connection broke after sending (e.g. a proof claim the cloud may already
@@ -435,6 +444,22 @@ export class DescriptorTagBridgeClient implements TagBridgeClient {
     }
     throw decodeError(verb, response)
   }
+}
+
+/** The longest a 429's `Retry-After` is honoured before the call fails (§3z.4: one wait). */
+export const RATE_LIMIT_MAX_WAIT_MS = 30_000
+
+function waitMs(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (ms <= 0 || signal?.aborted) return resolve()
+    const timer = setTimeout(done, ms)
+    function done() {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", done)
+      resolve()
+    }
+    signal?.addEventListener("abort", done, { once: true })
+  })
 }
 
 function waitParam(waitSeconds: number): string {

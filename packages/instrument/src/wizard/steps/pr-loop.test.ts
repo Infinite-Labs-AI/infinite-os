@@ -451,7 +451,8 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
       throw bridgeError("subscription_required", 402)
     }
     const outcome = await rehearsalStep.run(w.ctx, w.deps)
-    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_SUBSCRIPTION_REQUIRED", next: "halt" })
+    // §3z.4: blocked SUBSCRIPTION_REQUIRED (a blocked outcome halts the run; B3)
+    expect(outcome).toMatchObject({ kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED" })
     expect(exitCodeFor("INF_WIZ_SUBSCRIPTION_REQUIRED")).toBe(4)
   })
 

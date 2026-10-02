@@ -269,7 +269,7 @@ describe("step settings: Meta relay pixel", () => {
     expect(harness.subs()).toContain("! Meta server events: no Meta pixel was chosen for this site, so nothing was switched on")
   })
 
-  it("a cloud error mid-step → blocked with a retry hint, not a crash", async () => {
+  it("a cloud timeout mid-step → parked INFINITE_UNAVAILABLE (§3z.4), never 'open the app', not a crash", async () => {
     const { harness, deps } = await setup({
       conversions: ["signup"],
       lines: ALL_APPROVED,
@@ -277,7 +277,7 @@ describe("step settings: Meta relay pixel", () => {
       clickTested: [],
       script: { errors: { conversions: { code: "upstream_timeout" } } }
     })
-    expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "blocked", code: "INF_WIZ_NO_APP" })
+    expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_INFINITE_UNAVAILABLE" })
   })
 })
 

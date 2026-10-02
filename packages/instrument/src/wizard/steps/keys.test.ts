@@ -274,10 +274,17 @@ describe("step keys", () => {
     expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "blocked", code: "INF_WIZ_NO_APP" })
   })
 
-  it("a cloud 502 on keys → blocked with a retry hint, not a crash", async () => {
+  it("a cloud 502 on keys → parked INFINITE_UNAVAILABLE with a retry hint (§3z.4), not a crash", async () => {
     const { harness, deps } = await setup(baseKeys(), {}, { errors: { keys: { code: "cloud_error", upstreamStatus: 502 } } })
     const outcome = await step.run(harness.ctx, deps)
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_INFINITE_UNAVAILABLE" })
+    expect((outcome as { resumeHint: string }).resumeHint).toContain("in a minute")
+  })
+
+  it("negative: a damaged link store (internal_error, not retryable) blocks NO_APP with the Linked sites hint", async () => {
+    const { harness, deps } = await setup(baseKeys(), {}, { errors: { keys: { code: "internal_error", retryable: false } } })
+    const outcome = await step.run(harness.ctx, deps)
     expect(outcome).toMatchObject({ kind: "blocked", code: "INF_WIZ_NO_APP" })
-    expect((outcome as { reason: string }).reason).toContain("Try again in a minute")
+    expect((outcome as { reason: string }).reason).toContain("Linked sites")
   })
 })

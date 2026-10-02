@@ -6,6 +6,7 @@
 // Defaults (BUILD-PLAN §1.4): Claude Code works and Codex reviews when both are there; with one agent the
 // wizard prints a review brief instead; with none the code jobs still run and the agent jobs are listed for
 // the user. The wizard never installs an agent and never switches the user to Infinite-paid inference.
+import { bridgeFailureOutcome } from "../../bridge/outcomes.js"
 import { createHash } from "node:crypto"
 
 import { AGENT_LABEL } from "../../agents/narration.js"
@@ -125,19 +126,7 @@ function statusLine(worker: AgentInfo | null, reviewerInfo: AgentInfo | null, re
   return `${work} · ${review}`
 }
 
-/** The bridge errors this step can turn into a WizardCode; anything else is thrown to the engine. */
+/** The bridge failures this step turns into an outcome (§3z.4, one table); anything else is thrown to the engine. */
 function bridgeOutcome(error: unknown): StepOutcome | null {
-  const code = bridgeErrorCode(error)
-  if (code === "subscription_required") {
-    return { kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED", reason: "The Infinite subscription for this workspace is not active." }
-  }
-  if (code === "signed_out") return { kind: "blocked", code: "INF_WIZ_SIGNED_OUT", reason: "Sign in to the Infinite app, then run npx infinite-tag again." }
-  return null
-}
-
-function bridgeErrorCode(error: unknown): string | null {
-  if (typeof error !== "object" || error === null) return null
-  const record = error as { code?: unknown; error?: { code?: unknown }; body?: { error?: { code?: unknown } } }
-  for (const candidate of [record.code, record.error?.code, record.body?.error?.code]) if (typeof candidate === "string") return candidate
-  return null
+  return bridgeFailureOutcome(error)
 }
