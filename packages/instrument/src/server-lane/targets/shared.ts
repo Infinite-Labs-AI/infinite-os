@@ -926,6 +926,8 @@ export function adMatchFromRequest(request${t(": InfiniteVisitKeyRequest")}, has
 const INFINITE_NO_REPORT${t(": InfiniteOutcomeReport")} = { accepted: false, duplicate: false, metaEventId: null, metaEventName: null }
 const INFINITE_CAMPAIGN_PROVENANCE = ["tab", "cookie", "none"]
 const INFINITE_BROWSER_CONTEXT = ["facebook_app", "instagram_app", "other_in_app", "browser", "unknown"]
+/** Infinite accepts at most this many properties on one event (more and the whole event is refused). */
+const INFINITE_MAX_PROPERTIES = 16
 
 /** The 202 body, read strictly: anything unreadable is "not accepted, nothing to mirror". */
 function infiniteReadReport(body${t(": unknown")})${t(": InfiniteOutcomeReport")} {
@@ -957,13 +959,6 @@ async function infiniteSendOutcome(input${t(": InfiniteOutcomeInput")}, eventId$
     const nowMs = input.occurredAt ? input.occurredAt.getTime() : Date.now()
     const properties${t(": Record<string, string | number | boolean>")} = { ...(input.properties ?? {}) }
     if (input.path) properties.path = input.path
-    const campaign = input.campaign
-    if (campaign && INFINITE_CAMPAIGN_PROVENANCE.includes(String(campaign.campaignProvenance))) {
-      properties.campaign_provenance = String(campaign.campaignProvenance)
-    }
-    if (campaign && INFINITE_BROWSER_CONTEXT.includes(String(campaign.browserContext))) {
-      properties.browser_context = String(campaign.browserContext)
-    }
     // Skip our own derivation when the caller already carried a visitKey (the webhook path); drop
     // nothing when there is neither. One shared recipe with the exported infiniteVisitKey, so a key
     // computed at checkout and one derived here for the same request are byte-identical.
@@ -975,6 +970,15 @@ async function infiniteSendOutcome(input${t(": InfiniteOutcomeInput")}, eventId$
         nowMs,
         secret
       })
+    }
+    // The campaign context rides along only while the event stays within Infinite's 16-property limit:
+    // a 17th property would make Infinite refuse the WHOLE outcome, and the outcome matters more.
+    const campaign = input.campaign
+    if (campaign && INFINITE_CAMPAIGN_PROVENANCE.includes(String(campaign.campaignProvenance)) && Object.keys(properties).length < INFINITE_MAX_PROPERTIES) {
+      properties.campaign_provenance = String(campaign.campaignProvenance)
+    }
+    if (campaign && INFINITE_BROWSER_CONTEXT.includes(String(campaign.browserContext)) && Object.keys(properties).length < INFINITE_MAX_PROPERTIES) {
+      properties.browser_context = String(campaign.browserContext)
     }
 
     const body = JSON.stringify({

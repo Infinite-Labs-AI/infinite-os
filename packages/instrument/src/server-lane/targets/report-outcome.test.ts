@@ -131,6 +131,59 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     expect(bodies[1].properties).not.toHaveProperty("campaign_provenance")
     expect(bodies[1].properties).not.toHaveProperty("browser_context")
   })
+
+  // P3-5: Infinite refuses an event with more than 16 properties, whole. The campaign context is a
+  // nice-to-have; it must never cost the outcome.
+  it("adds the campaign context only while the event stays within 16 properties", async () => {
+    fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
+    vi.stubGlobal("fetch", fetchMock)
+    const outcome = await helper(form)
+    const campaign = { campaignProvenance: "tab", browserContext: "browser" }
+    const fourteen = Object.fromEntries(Array.from({ length: 14 }, (_, index) => [`p${index}`, index]))
+    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e5", path: "/signup", properties: fourteen, campaign })
+    const fifteen = Object.fromEntries(Array.from({ length: 15 }, (_, index) => [`p${index}`, index]))
+    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e6", path: "/signup", properties: fifteen, campaign })
+    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call as [string, RequestInit])[1].body)))
+    // 14 + path = 15: room for one campaign key only.
+    expect(Object.keys(bodies[0].properties)).toHaveLength(16)
+    expect(bodies[0].properties).toHaveProperty("campaign_provenance", "tab")
+    expect(bodies[0].properties).not.toHaveProperty("browser_context")
+    // 15 + path = 16: no room; the outcome itself is unchanged.
+    expect(Object.keys(bodies[1].properties)).toHaveLength(16)
+    expect(bodies[1].properties).not.toHaveProperty("campaign_provenance")
+  })
+
+  // P3-6: the wizard's webhook recipe imports these three from the outcome helper, in every form.
+  it("exports adMatchFromRequest, infiniteVisitKey and postInfiniteOutcome, and signs the adMatch block in", async () => {
+    fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
+    vi.stubGlobal("fetch", fetchMock)
+    const outcome = (await helper(form)) as unknown as Helper & {
+      adMatchFromRequest: (request: unknown, hashed?: Record<string, string>) => Record<string, string>
+      infiniteVisitKey: unknown
+    }
+    expect(typeof outcome.adMatchFromRequest).toBe("function")
+    expect(typeof outcome.infiniteVisitKey).toBe("function")
+    const buyer = new Request("https://acme.com/checkout", {
+      headers: {
+        cookie: "_fbc=fb.1.1700000000000.OLD; _fbc=fb.1.1800000000000.NEW; _fbp=fb.1.1700000000000.123456",
+        "user-agent": "Mozilla/5.0 Buyer",
+        "x-forwarded-for": "203.0.113.9"
+      }
+    })
+    const adMatch = outcome.adMatchFromRequest(buyer, { em: "a".repeat(64) })
+    expect(adMatch).toEqual({
+      em: "a".repeat(64),
+      fbc: "fb.1.1800000000000.NEW",
+      fbp: "fb.1.1700000000000.123456",
+      client_ip_address: "203.0.113.9",
+      client_user_agent: "Mozilla/5.0 Buyer"
+    })
+    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e7", adMatch })
+    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e8" })
+    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call as [string, RequestInit])[1].body)))
+    expect(bodies[0].adMatch).toEqual(adMatch)
+    expect(bodies[1]).not.toHaveProperty("adMatch")
+  })
 })
 
 describe("the mixed-case external_id vector, across both legs", () => {

@@ -137,7 +137,9 @@ export async function sendInfiniteServerEvent(event) {
       eventName: event.eventName,
       occurredAt: event.occurredAt ?? new Date().toISOString(),
       ...(event.accountKey ? { accountKey: event.accountKey } : {}),
-      properties: event.properties ?? {}
+      properties: event.properties ?? {},
+      // Signed with everything else, so a match block cannot be injected by a third party.
+      ...(event.adMatch ? { adMatch: event.adMatch } : {})
     })
     const response = await fetch(INFINITE_SERVER_EVENTS_URL, {
       method: "POST",
@@ -172,7 +174,9 @@ export async function reportInfiniteServerEvent(event) {
       eventName: event.eventName,
       occurredAt: event.occurredAt ?? new Date().toISOString(),
       ...(event.accountKey ? { accountKey: event.accountKey } : {}),
-      properties: event.properties ?? {}
+      properties: event.properties ?? {},
+      // Signed with everything else, so a match block cannot be injected by a third party.
+      ...(event.adMatch ? { adMatch: event.adMatch } : {})
     })
     const response = await fetch(INFINITE_SERVER_EVENTS_URL, {
       method: "POST",
@@ -321,34 +325,98 @@ function infiniteVisitKeyInputsOf(input) {
  * eventId       stable per outcome (order id, signup id) so retries dedupe
  * accountKey    opaque account or order id; Infinite hashes it at rest
  * visitKeyInputs a Node/WHATWG request OR { clientIp, userAgent }, for same-lane attribution
+ * adMatch       adMatchFromRequest(buyerRequest, { em }) — what lets Infinite send the Meta server event
  */
 const INFINITE_CAMPAIGN_PROVENANCE = ["tab", "cookie", "none"]
 const INFINITE_BROWSER_CONTEXT = ["facebook_app", "instagram_app", "other_in_app", "browser", "unknown"]
 
-function infiniteSendOutcome({ type, path, eventId, accountKey, occurredAt, properties, visitKeyInputs, campaign }) {
+/** Infinite accepts at most this many properties on one event (more and the whole event is refused). */
+const INFINITE_MAX_PROPERTIES = 16
+
+function infiniteSendOutcome({ type, path, eventId, accountKey, occurredAt, properties, visitKeyInputs, campaign, adMatch }) {
   // One clock for the whole call: the event time and the visit-key bucket must agree.
   const nowMs = occurredAt ? occurredAt.getTime() : Date.now()
   const merged = { ...(properties ?? {}) }
   if (path) merged.path = path
-  if (campaign && INFINITE_CAMPAIGN_PROVENANCE.includes(String(campaign.campaignProvenance))) {
-    merged.campaign_provenance = String(campaign.campaignProvenance)
-  }
-  if (campaign && INFINITE_BROWSER_CONTEXT.includes(String(campaign.browserContext))) {
-    merged.browser_context = String(campaign.browserContext)
-  }
   const visitInputs = infiniteVisitKeyInputsOf(visitKeyInputs)
   if (visitInputs && merged.visitKey === undefined) {
     const visitKey = infiniteVisitKey({ clientIp: visitInputs.clientIp, userAgent: visitInputs.userAgent, nowMs })
     if (visitKey) merged.visitKey = visitKey
+  }
+  // The campaign context rides along only while the event stays within the 16-property limit.
+  if (campaign && INFINITE_CAMPAIGN_PROVENANCE.includes(String(campaign.campaignProvenance)) && Object.keys(merged).length < INFINITE_MAX_PROPERTIES) {
+    merged.campaign_provenance = String(campaign.campaignProvenance)
+  }
+  if (campaign && INFINITE_BROWSER_CONTEXT.includes(String(campaign.browserContext)) && Object.keys(merged).length < INFINITE_MAX_PROPERTIES) {
+    merged.browser_context = String(campaign.browserContext)
   }
   return reportInfiniteServerEvent({
     eventId,
     eventName: type,
     occurredAt: new Date(nowMs).toISOString(),
     accountKey,
-    properties: merged
+    properties: merged,
+    ...(adMatch ? { adMatch } : {})
   })
 }
+
+const INFINITE_FB_COOKIE = /^fb\.[0-9]{1,2}\.[0-9]{1,20}\.[A-Za-z0-9_%.-]{1,512}$/
+
+/** EVERY value the Cookie header carries for this name, in the order the browser listed them. */
+function infiniteCookieValues(header, name) {
+  const values = []
+  if (!header) return values
+  for (const part of header.split(";")) {
+    const index = part.indexOf("=")
+    if (index === -1) continue
+    if (part.slice(0, index).trim() !== name) continue
+    values.push(part.slice(index + 1).trim())
+  }
+  return values
+}
+
+/** The NEWEST ad click among every _fbc the browser sent (two can coexist: host-only and domain). */
+function infiniteNewestFbc(header) {
+  let newest = ""
+  for (const value of infiniteCookieValues(header, "_fbc")) {
+    if (!INFINITE_FB_COOKIE.test(value)) continue
+    if (!newest || Number(value.split(".")[2]) > Number(newest.split(".")[2])) newest = value
+  }
+  return newest || undefined
+}
+
+/** _fbp is a browser id, not a click: the first-listed value, kept only when it has Meta's shape. */
+function infiniteFbp(header) {
+  const first = infiniteCookieValues(header, "_fbp")[0]
+  return first && INFINITE_FB_COOKIE.test(first) ? first : undefined
+}
+
+/**
+ * Build an adMatch block from the BUYER'S OWN request (a Node req with a plain-object .headers, or a
+ * WHATWG Request) — the same block the edge helper builds. In a webhook the request is the PROVIDER'S:
+ * build it at checkout, store it with the order, and pass it from the webhook. You supply em /
+ * external_id yourself, already hashed (em trimmed AND lowercased; external_id trimmed only). Never a
+ * phone number.
+ */
+export function adMatchFromRequest(request, hashed = {}) {
+  const headers = request.headers
+  const cookie = infiniteHeaderValue(headers, "cookie")
+  const clientIp = infiniteClientIpFrom(headers)
+  const userAgent = infiniteHeaderValue(headers, "user-agent")
+  const fbc = infiniteNewestFbc(cookie)
+  const fbp = infiniteFbp(cookie)
+  return {
+    ...(hashed.em ? { em: hashed.em } : {}),
+    ...(hashed.external_id ? { external_id: hashed.external_id } : {}),
+    ...(fbc ? { fbc } : {}),
+    ...(fbp ? { fbp } : {}),
+    ...(clientIp ? { client_ip_address: clientIp } : {}),
+    ...(userAgent ? { client_user_agent: userAgent } : {})
+  }
+}
+
+// Checkout code computes the visit key from the buyer's request and carries it to the webhook.
+export { infiniteVisitKey }
 
 /** Resolves true when Infinite accepted the outcome (the 202's accepted); never throws. */
 export async function postInfiniteOutcome(input) {
