@@ -12,7 +12,7 @@ import { ansi, colorEnabled, resolveTheme, type Theme } from "../tui/theme.js";
 import type { Msg } from "../tui/types.js";
 import { readMarkdownTableBlock, renderMarkdownTableBlock } from "./markdown.js";
 import { holdOpenMarkers } from "./markdown-inline.js";
-import { renderMarkdown } from "./markdown-render.js";
+import { renderCodeLines, renderMarkdown } from "./markdown-render.js";
 
 const DEFAULT_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TICK_MS = 120;
@@ -499,6 +499,13 @@ class StreamingAssistantFrame {
   private readonly contentWidth: number;
   private lineBuffer = "";
   private pendingLines: string[] = [];
+  /**
+   * The open code fence while a code block streams (null outside one). Each
+   * line arrives alone, so markdown cannot see the block: a line inside it
+   * prints as code, never through the markdown renderer (which would take a
+   * `# comment` for a heading and `__init__` for bold).
+   */
+  private fence: CodeFence | null = null;
 
   constructor(stream: ProgressStream, theme: Theme) {
     this.stream = stream;
@@ -528,14 +535,16 @@ class StreamingAssistantFrame {
       return;
     }
     if (this.lineBuffer.length > 0) {
-      // The answer ended without a newline: its last line may have a span it never closed.
-      this.completeLine(holdOpenMarkers(this.lineBuffer));
+      // The answer ended without a newline: its last line may have a span it
+      // never closed (code keeps its markers: they are text there).
+      this.completeLine(this.fence ? this.lineBuffer : holdOpenMarkers(this.lineBuffer));
       this.lineBuffer = "";
     }
     this.flushPendingLines(true);
     this.opened = false;
     this.first = true;
     this.pendingLines = [];
+    this.fence = null;
   }
 
   private open(): void {
@@ -549,6 +558,23 @@ class StreamingAssistantFrame {
 
   private flushPendingLines(final: boolean): void {
     while (this.pendingLines.length > 0) {
+      const next = this.pendingLines[0]!;
+      if (this.fence) {
+        // Inside a code block: the closing fence ends it; every other line is code.
+        if (closesFence(next, this.fence)) {
+          this.fence = null;
+        } else {
+          this.writeCodeLine(next);
+        }
+        this.pendingLines.shift();
+        continue;
+      }
+      const opened = openingFence(next);
+      if (opened) {
+        this.fence = opened;
+        this.pendingLines.shift();
+        continue;
+      }
       const block = readMarkdownTableBlock(this.pendingLines, { final });
       if (block === "hold") {
         return;
@@ -564,12 +590,21 @@ class StreamingAssistantFrame {
     }
   }
 
+  /** One line of a code block, drawn as the answer draws code (cyan, indented, wrapped with ↩). */
+  private writeCodeLine(line: string): void {
+    this.writeRendered(renderCodeLines([line], { width: this.contentWidth, color: this.color, theme: this.theme }));
+  }
+
   private writeContentLine(line: string, markdown: boolean): void {
     // Model text goes straight to the TTY: strip control and bidi characters first.
     const clean = scrubTerminalControls(line);
     const rendered = markdown && clean.trim()
       ? renderMarkdown(clean, { width: this.contentWidth, color: this.color, theme: this.theme })
       : [clean];
+    this.writeRendered(rendered);
+  }
+
+  private writeRendered(rendered: readonly string[]): void {
     for (const text of rendered) {
       const prefix = this.first && text.trim() ? `${ansi(this.theme, "primary", "∞", this.color)} ` : "  ";
       if (text.trim()) {
@@ -579,6 +614,31 @@ class StreamingAssistantFrame {
       this.stream.write("\n");
     }
   }
+}
+
+interface CodeFence {
+  char: "`" | "~";
+  size: number;
+}
+
+/** A line that opens a fenced code block (CommonMark: 3+ backticks or tildes, up to 3 spaces in). */
+function openingFence(line: string): CodeFence | null {
+  const match = /^ {0,3}(`{3,}|~{3,})/u.exec(line);
+  if (!match) {
+    return null;
+  }
+  const run = match[1]!;
+  // A backtick fence's info string has no backtick (else it is inline code).
+  if (run[0] === "`" && line.slice(match[0].length).includes("`")) {
+    return null;
+  }
+  return { char: run[0] as CodeFence["char"], size: run.length };
+}
+
+/** A line that closes `fence`: the same character, at least as many, nothing after but spaces. */
+function closesFence(line: string, fence: CodeFence): boolean {
+  const match = /^ {0,3}(`{3,}|~{3,})\s*$/u.exec(line);
+  return Boolean(match && match[1]![0] === fence.char && match[1]!.length >= fence.size);
 }
 
 function isMessageProgressEvent(event: ChatProgressEvent): event is Extract<ChatProgressEvent, { type: `message.${string}` }> {

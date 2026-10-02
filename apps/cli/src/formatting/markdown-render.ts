@@ -158,6 +158,15 @@ function renderListItem(block: Extract<MarkdownBlock, { type: "list_item" }>, op
   });
 }
 
+/**
+ * Lines of a code block as the answer draws them (cyan, indented, a long line
+ * wrapped with ↩), for a caller that already knows they are code: the one-shot
+ * stream, which sees a block one line at a time. Each line is scrubbed.
+ */
+export function renderCodeLines(source: readonly string[], opts: MarkdownRenderOptions): string[] {
+  return renderCode(source.map((line) => scrubTerminalControls(line.replace(/\t/g, "    "))), { ...opts, width: Math.max(1, Math.floor(opts.width)) });
+}
+
 function renderCode(source: readonly string[], opts: MarkdownRenderOptions): string[] {
   const indent = opts.width > 4 ? "  " : "";
   const avail = opts.width - indent.length;
