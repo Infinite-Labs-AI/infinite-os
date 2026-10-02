@@ -30,7 +30,9 @@ export type ViewKeyEffect =
   /** Send this as a NEW user turn (never a direct tool call). */
   | { type: "ask"; text: string }
   /** Page the live region down (a tall turn without a `more` ask). */
-  | { type: "page_live" };
+  | { type: "page_live" }
+  /** Put this (scrubbed) text on the clipboard (`c`: a link, an id, an email). */
+  | { type: "copy"; text: string };
 
 /** What the focused view offers right now (from its current render). */
 export interface ViewKeyFacts {
@@ -46,6 +48,10 @@ export interface ViewKeyFacts {
   fixAsk: string | null;
   /** The live region has more lines below (`m` pages it when there is no `more` ask). */
   livePageNext: boolean;
+  /** What `c` copies on each selectable row (null = nothing on that row). */
+  rowCopies: readonly (string | null)[];
+  /** What `c` copies for the whole view, when the selected row has nothing. */
+  copy: string | null;
 }
 
 export interface ViewFocusState {
@@ -74,7 +80,8 @@ export interface ViewFocusState {
 export const NO_VIEW_CAPS: KeyContext["caps"] = { open: false, watch: false, retry: false };
 
 const EMPTY_FACTS: ViewKeyFacts = {
-  rowCount: 0, rowAsks: [], tabs: 0, pages: 0, hiddenColumns: 0, explain: false, more: null, fixAsk: null, livePageNext: false
+  rowCount: 0, rowAsks: [], tabs: 0, pages: 0, hiddenColumns: 0, explain: false, more: null, fixAsk: null, livePageNext: false,
+  rowCopies: [], copy: null
 };
 
 /** The view the keys act on: the last one that is not quiet (steps only), else the last. */
@@ -101,7 +108,9 @@ export function viewKeyFacts(view: AnswerViewV1 | undefined, render: ViewRender,
     explain: viewText(view.explain) !== "",
     more: truncatedMoreAsk(view),
     fixAsk: viewText(render.fixAsk) || null,
-    livePageNext
+    livePageNext,
+    rowCopies: (render.rowCopies ?? []).map((text) => viewText(text) || null),
+    copy: viewText(render.copyText) || null
   };
 }
 
@@ -114,7 +123,14 @@ export function hasViewKeys(facts: ViewKeyFacts): boolean {
     || facts.hiddenColumns > 0
     || facts.explain
     || facts.more !== null
-    || facts.fixAsk !== null;
+    || facts.fixAsk !== null
+    || facts.copy !== null
+    || facts.rowCopies.some((text) => text !== null);
+}
+
+/** What `c` copies at this selection: the row's own text, else the view's. */
+export function copyTextAt(facts: ViewKeyFacts, selected: number): string | null {
+  return facts.rowCopies[selected] ?? facts.copy;
 }
 
 /**
@@ -150,7 +166,7 @@ export function viewFocusAfterTurnDone(
 /** The render context for the focused view, carrying its selection, tab, page and toggles. */
 export function focusedViewCtx(
   state: ViewFocusState,
-  base: { width: number; color: boolean; theme: Theme; timeZone?: string }
+  base: { width: number; color: boolean; theme: Theme; timeZone?: string; rows?: number }
 ): ViewRenderCtx {
   return {
     ...base,
@@ -208,7 +224,9 @@ export function resolveViewKey(
 /**
  * The kind keys (`render.keys`) whose action `applyViewAction` carries out. A
  * kind hint is shown only for these, so the bar never offers a key that types.
- * A lane that adds a reducer case for c/v/e/o/w/r adds its key here with it.
+ * A lane that adds a reducer case for v/e/o/w/r adds its key here with it.
+ * `c` is not a kind key: its hint comes from the facts (`copyTextAt`), so a
+ * kind says what to copy (`rowCopies`, `copyText`) and never lists `c` itself.
  */
 export const HANDLED_KIND_KEYS: ReadonlySet<string> = new Set<string>();
 
@@ -250,10 +268,18 @@ function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKe
       return facts.livePageNext ? handled({ effect: { type: "page_live" } }) : state;
     case "explain":
       return facts.explain ? handled({ explainOpen: !state.explainOpen }) : state;
+    case "copy": {
+      // Unengaged, `c` is the first letter of a message ("change…", "can…").
+      if (!state.engaged) {
+        return state;
+      }
+      const text = copyTextAt(facts, state.selected);
+      return text ? handled({ effect: { type: "copy", text } }) : state;
+    }
     case "switch_pane":
       return { ...state, focus: "composer", engaged: false, handled: true };
     default:
-      // ok/dismiss belong to approval cards; open/watch/retry/copy/edit/view
+      // ok/dismiss belong to approval cards; open/watch/retry/edit/view
       // arrive with the renderers and capabilities that give them meaning.
       return state;
   }
@@ -293,6 +319,7 @@ export function viewKeyHints(
     hints.push({ key: "→", label: "columns" });
   }
   if (state.engaged && (facts.more || facts.livePageNext)) hints.push({ key: "m", label: "more" });
+  if (state.engaged && copyTextAt(facts, state.selected)) hints.push({ key: "c", label: "copy" });
   hints.push(...kindKeys.filter((hint) => HANDLED_KIND_KEYS.has(hint.key)));
   if (facts.explain) hints.push({ key: "?", label: "what it does" });
   hints.push({ key: "tab", label: "switch side" });

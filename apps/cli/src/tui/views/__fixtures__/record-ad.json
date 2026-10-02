@@ -1,0 +1,25 @@
+{
+  "v": 1,
+  "kind": "record",
+  "tool": "read_item",
+  "title": "Ad · Hook B",
+  "state": "ready",
+  "asOf": "2026-01-15T10:40:00Z",
+  "provenance": { "source": "Demo source", "via": "our_db" },
+  "scope": { "workspaceName": "Demo", "crossWorkspace": false },
+  "caveats": [],
+  "next": [{ "label": "Pause it", "ask": "pause hook b" }],
+  "body": {
+    "fields": [
+      { "label": "Campaign", "value": { "text": "Demo trials" } },
+      { "label": "Status", "value": { "text": "on" } },
+      { "label": "Spend 7d", "value": { "value": 100 }, "unit": "money" },
+      { "label": "Trials 7d", "value": { "value": null, "reason": { "code": "not_synced", "words": "not synced yet", "show": "dash" } }, "unit": "count" }
+    ],
+    "creativeRef": { "archiveAssetId": "asset_1" },
+    "history": [
+      { "at": "2026-01-10T09:12:00Z", "from": null, "to": "on", "who": "Sam", "source": "the app" },
+      { "at": "2026-01-12T09:12:00Z", "from": "on", "to": "paused", "who": null }
+    ]
+  }
+}

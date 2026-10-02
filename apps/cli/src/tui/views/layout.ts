@@ -198,6 +198,8 @@ export interface LiveTurnInput {
   theme: Theme;
   caps?: KeyContext["caps"];
   timeZone?: string;
+  /** The terminal's rows, when known (a document pages by width × rows). */
+  rows?: number;
   /** The live region has more lines below (lets `m` page it). */
   livePageNext?: boolean;
 }
@@ -213,7 +215,10 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
   const width = Math.max(1, Math.floor(input.width));
   const { wide, left, right } = paneWidths(width);
   const caps = input.focus?.caps ?? input.caps ?? NO_VIEW_CAPS;
-  const base = { width: wide ? right : width, color: input.color, theme: input.theme, timeZone: input.timeZone };
+  const base = {
+    width: wide ? right : width, color: input.color, theme: input.theme, timeZone: input.timeZone,
+    ...(input.rows === undefined ? {} : { rows: input.rows })
+  };
   const plainCtx: ViewRenderCtx = {
     ...base, selected: 0, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false, caps
   };

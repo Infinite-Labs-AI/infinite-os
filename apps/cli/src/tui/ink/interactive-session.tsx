@@ -75,6 +75,7 @@ import {
 } from "./transcript-static.js";
 import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
 import { resolveViewKey, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
+import { clipboardSequence } from "../views/clipboard.js";
 import { renderLiveTurn } from "../views/layout.js";
 
 /**
@@ -414,6 +415,7 @@ export function InkInteractiveSessionApp({
   turnStoppable = false
 }: InkInteractiveSessionAppProps) {
   const app = useApp();
+  const { stdout: sessionStdout } = useStdout();
   const t = theme ?? resolveTheme();
   // One turn-abort per session: each turn arms a fresh signal (Esc / Ctrl-C
   // stop it) and disarms it when the turn settles.
@@ -619,9 +621,10 @@ export function InkInteractiveSessionApp({
         focus: viewFocus,
         width: transcriptColumns(columns),
         color: true,
-        theme: t
+        theme: t,
+        rows
       })
-    : null, [busy, columns, history, t, turnViews, viewFocus]);
+    : null, [busy, columns, history, rows, t, turnViews, viewFocus]);
   const liveLatest = useMemo<CommittedEntry | null>(
     () => liveTurn ? { id: "live-turn", lines: liveTurn.lines } : null,
     [liveTurn]
@@ -1291,6 +1294,9 @@ export function InkInteractiveSessionApp({
       submitLine(next.effect.text);
     } else if (next.effect?.type === "page_live") {
       pageLive("next");
+    } else if (next.effect?.type === "copy" && sessionStdout?.isTTY) {
+      // `c`: an OSC 52 clipboard write (zero width, so Ink's frame is untouched).
+      sessionStdout.write(clipboardSequence(next.effect.text));
     }
     return next.handled;
   };

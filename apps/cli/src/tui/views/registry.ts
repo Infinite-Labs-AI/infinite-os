@@ -29,6 +29,11 @@ import type { KindRender, KindRenderer, ViewRender, ViewRenderCtx } from "./type
 // T9 (measures): numbers, compare, health
 
 // T10 (things): list, record, document, link, quiet
+import { renderDocument } from "./document.js";
+import { renderLink } from "./link.js";
+import { renderList } from "./list.js";
+import { renderQuiet } from "./quiet.js";
+import { renderRecord } from "./record.js";
 
 // T11 (actions): change, launch, images, job
 
@@ -38,6 +43,11 @@ const KIND_RENDERERS: KindRendererMap = {
   // T9 (measures)
 
   // T10 (things)
+  list: renderList,
+  record: renderRecord,
+  document: renderDocument,
+  link: renderLink,
+  quiet: renderQuiet,
 
   // T11 (actions)
 
@@ -72,6 +82,8 @@ export function renderView(view: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
     ...(body?.tabs ? { tabs: body.tabs } : {}),
     ...(body?.pages ? { pages: body.pages } : {}),
     ...(body?.hiddenColumns ? { hiddenColumns: body.hiddenColumns } : {}),
+    ...(body?.rowCopies ? { rowCopies: body.rowCopies } : {}),
+    ...(body?.copyText ? { copyText: body.copyText } : {}),
     ...(fixAsk ? { fixAsk } : {})
   };
 }

@@ -27,6 +27,8 @@ export interface ViewRenderCtx {
   caps: KeyContext["caps"];
   /** IANA zone for times (`asOf`); the system zone when absent. Tests pin it. */
   timeZone?: string;
+  /** The terminal's rows, when known: a document pages by width × rows. */
+  rows?: number;
 }
 
 /** One view, drawn. `layout.ts` stacks head, source, detail, then footnotes. */
@@ -57,6 +59,10 @@ export interface ViewRender {
    * Set by the shell only when no row has an ask of its own.
    */
   fixAsk?: string;
+  /** What `c` copies on each selectable row (a row's `copy`, else its URL); null = nothing. */
+  rowCopies?: readonly (string | null)[];
+  /** What `c` copies for the view as a whole (a minted link); used when the row has nothing. */
+  copyText?: string;
 }
 
 /**
