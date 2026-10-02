@@ -610,7 +610,8 @@ describe("images (r4 Images, Make creatives)", () => {
 
   it("view-05: the count bold, rows ✓ in green with the ratio dim, the link cyan underlined, the cost dim", () => {
     expect(detail({}, { caps: OPEN })).toEqual([
-      [["b", "3 of 3 ready"], ["", "  "], ["dim", "· 4:5"]],
+      // All of them ready: r4's words, and where they were saved (the view's link is the Library).
+      [["b", "3 creatives ready"], ["", "  "], ["dim", "· 4:5 · saved to your Library"]],
       [],
       [["green", "✓"], ["", " 1  Explained     "], ["dim", "4:5"]],
       [["green", "✓"], ["", " 2  Your audit    "], ["dim", "4:5"]],
@@ -633,7 +634,7 @@ describe("images (r4 Images, Make creatives)", () => {
       ], eta: { startedAtMs: 0, etaMs: 25000 } }
     });
     expect(out).toEqual([
-      [["cyan", "⠋ Making 3 images · ~25 s left"]],
+      [["cyan", "⠋ Making 3 creatives · ~25 s left"]],
       [],
       [["green", "✓"], ["", " 1  Explained"]],
       [["cyan", "⠋"], ["", " 2  Your audit"]],
@@ -660,7 +661,7 @@ describe("images (r4 Images, Make creatives)", () => {
       state: "working", cost: { usd: 0, estimate: false, whoPays: "your_chatgpt_plan" },
       body: { ...IMAGES.body, ready: 1, model: "your ChatGPT", madeWith: "your_codex", items: [{ id: "i1", label: "Fire the agency", status: "done" }] }
     });
-    expect(out[0]).toEqual([["cyan", "⠋ Making 3 images with your ChatGPT · $0 to Infinite"]]);
+    expect(out[0]).toEqual([["cyan", "⠋ Making 3 creatives with your ChatGPT · $0 to Infinite"]]);
   });
 
   it("a Codex run shows where they land while it runs (flow-images-06)", () => {
@@ -668,7 +669,7 @@ describe("images (r4 Images, Make creatives)", () => {
       state: "working", cost: { usd: 0, estimate: false, whoPays: "your_chatgpt_plan" },
       body: { ...IMAGES.body, ready: 1, model: "your ChatGPT", madeWith: "your_codex", items: [{ id: "i1", label: "Fire the agency", status: "done" }] }
     });
-    expect(out[out.length - 1]).toEqual([["cyan u", "Open in Library ↗"]]);
+    expect(out[out.length - 1]).toEqual([["dim", "They land in your Library:"], ["", " "], ["cyan u", "Open in Library ↗"]]);
   });
 
   it("partial (flow-images-03): the rows, ✗ red with its reason dim, then the link", () => {
@@ -683,11 +684,14 @@ describe("images (r4 Images, Make creatives)", () => {
     }, { caps: OPEN });
     expect(out).toContainEqual([["red", "✗"], ["", " 3  3 fixes  "], ["dim", "· blocked by the safety check"]]);
     expect(out.at(-1)).toEqual([["cyan u", "Open the 2 in Library ↗"], ["", "  "], ["dim", "(o)"]]);
+    // r4: the rows follow the state's sentence directly, no blank between (run-2 M9).
+    expect(out[0]).toEqual([["amber", "◐ 2 of 3 creatives"]]);
+    expect(out[1]).toEqual([["green", "✓"], ["", " 1  Explained"]]);
   });
 
   it("done with the app's receipt (flow-images-04): its sentence in bold green, then the link", () => {
     const out = detail({ receipt: { sentence: "3 creatives ready", tone: "ok", revertible: false } });
-    expect(out).toEqual([[["gb", "✓ 3 creatives ready"]], [], [["cyan u", "Open in Library ↗"]]]);
+    expect(out).toEqual([[["gb", "✓ 3 creatives ready"], ["", "  "], ["dim", "· saved to your Library"]], [], [["cyan u", "Open in Library ↗"]]]);
   });
 
   it("hit a limit (flow-images-05): no rows, and `Nothing was proposed.` in dim", () => {

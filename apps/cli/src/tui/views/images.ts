@@ -26,7 +26,13 @@ export function renderImages(view: AnswerViewEnvelopeV1<"images">, ctx: ViewRend
   const detail = isSettledWithoutRunning(view) ? afterwordLines(view, ctx) : imagesLines(view, ctx);
   const keys = view.appLink && ctx.caps.open ? [{ key: "o", label: "open" }] : [];
   const items: unknown[] = isRecord(view.body) && Array.isArray(view.body.items) ? view.body.items : [];
-  return { detail, footnotes: [], keys, okKey: null, rowCount: items.length };
+  // r4 "Partial": the rows follow the state's sentence (`◐ 2 of 3 creatives`) directly.
+  return { detail, footnotes: [], keys, okKey: null, rowCount: items.length, ...(view.state === "partial" ? { joinsReason: true } : {}) };
+}
+
+/** The view's link goes to the Library (where made images are saved). */
+function savedToLibrary(appLink: unknown): boolean {
+  return isRecord(appLink) && /library/iu.test(`${viewText(appLink.place)} ${viewText(appLink.label)}`);
 }
 
 type ImagesViewLike = Pick<AnswerViewV1, "body"> & Partial<Pick<AnswerViewV1, "state" | "cost" | "appLink" | "receipt">>;
@@ -34,10 +40,11 @@ type ImagesViewLike = Pick<AnswerViewV1, "body"> & Partial<Pick<AnswerViewV1, "s
 /**
  * The images body, cost and link as lines (shared with the approval card), by
  * state (r4 "Make creatives"):
- * - running: `⠋ Making 3 images · ~25 s left` in cyan, then one row per image;
+ * - running: `⠋ Making 3 creatives · ~25 s left` in cyan, then one row per image;
  * - partial: the rows (the shell prints how many landed), then the link;
  * - done with the app's receipt: its sentence in bold green, then the link;
- * - otherwise: `3 of 3 ready · 4:5`, the rows with their ratio, the link, and
+ * - otherwise: `3 creatives ready · 4:5 · saved to your Library` (or `2 of 3
+ *   ready` while some are missing), the rows with their ratio, the link, and
  *   what it costs.
  */
 export function imagesLines(view: ImagesViewLike, ctx: ViewRenderCtx): string[] {
@@ -56,8 +63,11 @@ export function imagesLines(view: ImagesViewLike, ctx: ViewRenderCtx): string[] 
   if (running) {
     lines.push(...paragraphIn(runningWords(body, view.cost, requested, ready + failed), ctx.width, "cyan", ctx));
     if (items.length) lines.push("", ...itemLines(items, "", ctx, true));
-    // On Infinite's model they land when made; a Codex run already shows where they go.
-    if (link.length && body.madeWith === "your_codex") lines.push("", ...link);
+    // On Infinite's model they land when made; a Codex run already shows where they go (r4: `They land in your Library:`).
+    if (link.length && body.madeWith === "your_codex") {
+      const lead = savedToLibrary(view.appLink) ? `${paint("They land in your Library:", "dim", ctx)} ` : "";
+      lines.push("", ...link.map((line, index) => (index === 0 ? `${lead}${line}` : line)));
+    }
     return lines;
   }
   if (view.state === "partial") {
@@ -65,14 +75,21 @@ export function imagesLines(view: ImagesViewLike, ctx: ViewRenderCtx): string[] 
     if (link.length) lines.push("", ...link);
     return lines;
   }
+  const saved = view.state === "done" && savedToLibrary(view.appLink) ? "saved to your Library" : "";
   if (view.state === "done" && receipt) {
-    lines.push(...paragraphIn(`✓ ${imageText(receipt)}`, ctx.width, "gb", ctx));
+    const sentence = `✓ ${imageText(receipt)}`;
+    const fits = saved && displayWidth(`${sentence}  · ${saved}`) <= ctx.width;
+    lines.push(...(fits
+      ? [`${paint(sentence, "gb", ctx)}  ${paint(`· ${saved}`, "dim", ctx)}`]
+      : paragraphIn(sentence, ctx.width, "gb", ctx)));
     if (link.length) lines.push("", ...link);
     return lines;
   }
 
-  const summary = requested > 0 ? `${ready} of ${requested} ready` : "";
-  const facts = [failed > 0 ? `${failed} failed` : "", aspect].filter(Boolean).join(" · ");
+  // r4: all of them ready reads `3 creatives ready`; otherwise how many of how many.
+  const allReady = requested > 0 && ready === requested && failed === 0;
+  const summary = requested > 0 ? (allReady ? `${requested} ${requested === 1 ? "creative" : "creatives"} ready` : `${ready} of ${requested} ready`) : "";
+  const facts = [failed > 0 ? `${failed} failed` : "", aspect, saved].filter(Boolean).join(" · ");
   if (summary || facts) {
     const head = summary ? paint(summary, "b", ctx) : "";
     const tail = facts ? paint(summary ? `· ${facts}` : facts, "dim", ctx) : "";
@@ -123,9 +140,9 @@ function itemLines(items: readonly Record<string, unknown>[], aspect: string, ct
   });
 }
 
-/** `⠋ Making 3 images · ~25 s left`, with your own plan: `· $0 to Infinite`. */
+/** `⠋ Making 3 creatives · ~25 s left`, with your own plan: `· $0 to Infinite`. */
 function runningWords(body: Record<string, unknown>, cost: unknown, requested: number, finished: number): string {
-  const noun = requested === 1 ? "image" : "images";
+  const noun = requested === 1 ? "creative" : "creatives";
   const own = body.madeWith === "your_codex";
   const model = imageText(body.model);
   const making = `⠋ Making ${requested > 0 ? `${requested} ` : ""}${noun}${own ? ` with ${model || "your Codex"}` : ""}`;

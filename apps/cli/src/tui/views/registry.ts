@@ -100,7 +100,7 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
       ...explainLines(view, shellCtx),
       ...managedSummaryLines(managed, shellCtx),
       // A settled write's afterword ("Nothing ran.") follows its sentence on the next row (r4 receipts).
-      ...(AFTERWORD_KINDS.has(view.kind) && isSettledWithoutRunning(view)
+      ...(body?.joinsReason || (AFTERWORD_KINDS.has(view.kind) && isSettledWithoutRunning(view))
         ? [...stateReasonLines(view, shellCtx, fixAsk !== null), ...(body?.detail ?? [])]
         : blankBetween(stateReasonLines(view, shellCtx, fixAsk !== null), body?.detail ?? [])),
       ...(managed ? managedApprovalLines(managed, shellCtx) : []),

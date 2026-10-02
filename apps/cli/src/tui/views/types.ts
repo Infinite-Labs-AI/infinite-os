@@ -93,6 +93,9 @@ export interface ViewRender {
  * source line, the state reason, the explanation, truncation and caveats, so no
  * kind can drop or reword them.
  */
-export type KindRender = Omit<ViewRender, "head" | "source" | "fixAsk" | "quiet">;
+export type KindRender = Omit<ViewRender, "head" | "source" | "fixAsk" | "quiet"> & {
+  /** The body follows the state's sentence on the next row, with no blank between them (r4 receipts, partial images). */
+  joinsReason?: boolean;
+};
 
 export type KindRenderer<K extends AnswerViewKind> = (view: AnswerViewEnvelopeV1<K>, ctx: ViewRenderCtx) => KindRender;
