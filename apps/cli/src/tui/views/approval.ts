@@ -484,16 +484,18 @@ function answeredFields(answers: CardUiState["answers"]): Record<string, Approva
 }
 
 /**
- * The OK label once a money value is typed: the app's verb with the user's
- * value ("Lower to $45.00/day"), never the frozen amount the card came with.
+ * The OK label once a money value is typed: the app's own verb with the
+ * typed value beside it ("Create ad set · $30.00/day"). The terminal never
+ * rewrites the app's words: a verb that carries its own amount ("Lower to
+ * $30/day") could state the wrong amount or direction for the typed value, so
+ * it gives way to the generic "approve · $60.00/day".
  */
 function okLabelFor(confirmLabel: string, fields: readonly ApprovalFieldV1[], answers: CardUiState["answers"]): string {
   const field = fields.find((item) => item.input === "money_per_day" && answers[item.key] && "text" in answers[item.key]!);
   const answer = field ? answers[field.key] : undefined;
   if (!field || !answer || !("text" in answer)) return confirmLabel;
   const value = fieldValue(field, answer.text);
-  const cut = confirmLabel.indexOf(" to ");
-  return cut > 0 ? `${confirmLabel.slice(0, cut)} to ${value}` : `${confirmLabel} (${value})`;
+  return /\d/u.test(confirmLabel) ? `approve · ${value}` : `${confirmLabel} · ${value}`;
 }
 
 /** The card has a place in the app to open: its finishInApp link, its own link, or where a job lands. */

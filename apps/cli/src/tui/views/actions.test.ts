@@ -121,15 +121,23 @@ describe("money field", () => {
     expect(second.effects).toEqual([{ type: "confirm", decision: "approve", fields: { adSetBudget: { text: "30" } } }]);
   });
 
-  it("once a value is typed, the OK label shows it instead of the frozen one", () => {
+  it("once a value is typed, the OK label shows it beside the app's verb, never a made-up verb", () => {
     const view = fixture("change-budget-field");
     expect(formatKeyBar(approvalRender(view, cardCtx()).keys)).toContain("l Lower to $30/day");
     const asked = drive(view, [press("l")]);
-    const ui = commitCardField(asked.ui, "45").ui;
+    // 60 is a raise: the app's "Lower to $30/day" no longer says what OK does,
+    // and the terminal never rewrites it into "Lower to $60.00/day".
+    const ui = commitCardField(asked.ui, "60").ui;
     const render = approvalRender(view, cardCtx({ ui }));
     expect(render.okKey).toBe("l");
-    expect(formatKeyBar(render.keys)).toContain("l Lower to $45.00/day");
+    expect(formatKeyBar(render.keys)).toContain("l approve · $60.00/day");
     expect(formatKeyBar(render.keys)).not.toContain("$30");
+    expect(formatKeyBar(render.keys)).not.toContain("Lower");
+    expect(text(render.lines)).toContain("$40.00/day → $60.00/day");
+    // A verb with no amount of its own keeps its words, with the typed value beside it.
+    const create = fixture("launch-create-adset-field");
+    const typed = commitCardField(drive(create, [press("y")]).ui, "30").ui;
+    expect(formatKeyBar(approvalRender(create, cardCtx({ ui: typed })).keys)).toContain("y Create ad set · $30.00/day");
   });
 
   it("rejects a value that is not money and keeps the field open", () => {
