@@ -1544,10 +1544,10 @@ const UNSUPPORTED_PRODUCT_PLATFORM =
 // Printed once, on the first-ever run (D4): every later session opens straight
 // into its frame. The "Use Infinite wherever you prefer" block is also in
 // `infinite --help`.
+// It says "ready" ONCE: the Desktop line is the ready line, the block follows it.
 const DESKTOP_READY_LINE = "✓ Infinite Desktop is ready\n\n";
 const DESKTOP_READY_HANDOFF =
   DESKTOP_READY_LINE +
-  "∞ Infinite is ready\n\n" +
   `${USE_INFINITE_ANYWHERE.join("\n")}\n\n`;
 
 /**

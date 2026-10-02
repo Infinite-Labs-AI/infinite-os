@@ -23,11 +23,6 @@ function textWidth(width: number): number {
   return Math.max(1, Math.floor(width) - 3);
 }
 
-/** A column's widen limit (see `MarkdownRenderOptions.widenLimit`) as the room its words get. */
-function textWidenLimit(limit: number | undefined): number | undefined {
-  return limit === undefined ? undefined : Math.max(0, limit - 3);
-}
-
 /** `❯ question`: the mark in cyan, the words in b, hung under the first word. */
 export function questionLines(text: string, width: number, style: ColumnStyle): string[] {
   return wrapText(viewText(text), textWidth(width)).map((line, index) =>
@@ -46,13 +41,12 @@ export function answerLines(
   text: string,
   width: number,
   style: ColumnStyle,
-  options: { partial?: boolean; label?: string; mark?: boolean; widenLimit?: number } = {}
+  options: { partial?: boolean; label?: string; mark?: boolean } = {}
 ): string[] {
   const body = renderMarkdown(options.partial ? holdOpenMarkers(text) : text, {
     width: textWidth(width),
     color: style.color,
-    theme: style.theme,
-    widenLimit: textWidenLimit(options.widenLimit)
+    theme: style.theme
   });
   const mark = options.mark === false ? "  " : `${paint("∞", "primary", style)} `;
   const label = options.label ? viewText(options.label) : "";
@@ -70,13 +64,12 @@ export function noteLines(
   width: number,
   style: ColumnStyle,
   tone: AnsiRole = "muted",
-  options: { markdown?: boolean; widenLimit?: number } = {}
+  options: { markdown?: boolean } = {}
 ): string[] {
   if (options.markdown) {
     // The renderer switches back to `tone` after each span it styles, so the whole line can sit in it.
     const span = ansiSpan(style.theme, tone);
-    const widenLimit = textWidenLimit(options.widenLimit);
-    return renderMarkdown(text, { width: textWidth(width), color: style.color, theme: style.theme, role: tone, widenLimit }).map((line) =>
+    return renderMarkdown(text, { width: textWidth(width), color: style.color, theme: style.theme, role: tone }).map((line) =>
       fitLine(`  ${style.color && line ? `${span.open}${line}${span.close}` : line}`, width)
     );
   }

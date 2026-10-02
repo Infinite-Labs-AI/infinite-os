@@ -510,10 +510,12 @@ describe.runIf(workspaceBuilt && process.platform === "darwin" && hasPtyDriver)(
         bridgeReady = true;
         writeDesktopState(fixture.growthHome, "ready");
         await waitUntil(
-          () => run.output().includes("Infinite is ready") || run.isClosed(),
+          () => run.output().includes("Infinite Desktop is ready") || run.isClosed(),
           () => run.output()
         );
-        expect(run.output()).toContain("Infinite is ready");
+        expect(run.output()).toContain("Infinite Desktop is ready");
+        // The first run says "ready" once.
+        expect(run.output()).not.toContain("∞ Infinite is ready");
         run.child.stdin.write("/exit\r");
         const result = await run.closed;
         expect(result).toEqual({ code: 0, signal: null });

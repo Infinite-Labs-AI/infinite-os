@@ -150,10 +150,9 @@ export function renderAnswerColumn(
   messages: readonly Msg[],
   width: number,
   theme: Theme,
-  color: boolean,
-  options: { widenLimit?: number } = {}
+  color: boolean
 ): string[] {
-  return renderTurnBody(messages, { columns: width, color, theme, widenLimit: options.widenLimit });
+  return renderTurnBody(messages, { columns: width, color, theme });
 }
 
 export interface LiveTurnInput {
@@ -340,11 +339,7 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   });
   const takesPane = drawn.some(inDetailsPane) || card.length > 0;
   const sideBySide = wide && takesPane;
-  // How wide a wider window redraws the answer: never for a committed turn
-  // (printed once); at most the pane's cap when split; below 120 with details,
-  // at most 119 (past it the turn splits and the answer gets narrower).
-  const widenLimit = !split ? 0 : sideBySide ? ANSWER_PANE_MAX : takesPane ? SPLIT_MIN_COLUMNS - 1 : undefined;
-  const answer = renderAnswerColumn(input.messages, sideBySide ? panes.left : width, input.theme, input.color, { widenLimit });
+  const answer = renderAnswerColumn(input.messages, sideBySide ? panes.left : width, input.theme, input.color);
   const lines = layoutTurn(answer, [...drawn, ...card], stepRows, width, { color: input.color, theme: input.theme }, { split: wide, steps: withSteps });
   const detailRows = [...drawn, ...card].filter(inDetailsPane)
     .reduce((sum, render, index) => sum + (index > 0 ? 1 : 0) + viewLines(render, sideBySide ? panes.right : width).length, 0);

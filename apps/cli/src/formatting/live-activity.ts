@@ -581,9 +581,8 @@ class StreamingAssistantFrame {
       }
       if (block) {
         // The whole table at once, through the answer's own table (r4 renderTable).
-        // Printed once: a wider window never redraws it, so a dropped column is just named.
         const table = block.rawLines.map(scrubTerminalControls).join("\n");
-        this.writeRendered(renderMarkdown(table, { width: this.contentWidth, color: this.color, theme: this.theme, widenLimit: 0 }));
+        this.writeRendered(renderMarkdown(table, { width: this.contentWidth, color: this.color, theme: this.theme }));
         this.pendingLines.splice(0, block.rawCount);
         continue;
       }

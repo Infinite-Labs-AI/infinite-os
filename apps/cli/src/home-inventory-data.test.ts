@@ -202,8 +202,9 @@ describe("the Desktop session's opening (D4)", () => {
     const env = { HOME: home, GROWTH_OS_HOME: home } as CliEnv;
     const first = desktopSessionOpening(env, { afterOnboarding: false });
     expect(first.firstRun).toBe(true);
-    expect(first.text.startsWith("✓ Infinite Desktop is ready\n\n")).toBe(true);
-    expect(first.text).toContain("Use Infinite wherever you prefer:");
+    expect(first.text.startsWith("✓ Infinite Desktop is ready\n\nUse Infinite wherever you prefer:")).toBe(true);
+    // The first run says "ready" once: the Desktop line, then the block.
+    expect(first.text.match(/\bready\b/gu)).toHaveLength(1);
     expect(existsSync(join(home, "welcome-seen"))).toBe(true);
     expect(desktopSessionOpening(env, { afterOnboarding: false })).toEqual({ firstRun: false, text: "" });
   });

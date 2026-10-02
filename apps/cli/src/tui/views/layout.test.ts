@@ -120,7 +120,7 @@ describe("a committed turn keeps every message the transcript draws (one rendere
   });
 });
 
-describe("an answer table never promises a widen that cannot happen", () => {
+describe("an answer table that drops columns says so in one wording, live or in scrollback", () => {
   const rows = (note: string) => [
     "| Campaign | Spend | Clicks | Note | CTR |",
     "| --- | ---: | ---: | --- | ---: |",
@@ -133,30 +133,26 @@ describe("an answer table never promises a widen that cannot happen", () => {
   const wider = turn("Ran longer than planned this week because the budget was raised twice and then once more");
   const fits = turn("Ran longer than planned this week because the budget was raised twice");
   const card = ["┌─ card ─┐"];
+  const hint = /^ {2}\+ .+ hidden · needs \d+ more cols?$/u;
 
   it.each([160, 200])("at %i a turn with a card and a table answer is one column, so every column shows and there is no hint", (width) => {
     const lines = renderLiveTurn({ messages: wide, views: [], focus: null, width, color: false, theme, details: card }).lines;
-    expect(lines.some((line) => /hidden|widen by/u.test(line))).toBe(false);
+    expect(lines.some((line) => /hidden|widen|needs/u.test(line))).toBe(false);
     expect(lines.some((line) => /│ Campaign │\s+Spend │\s+Clicks │ Note\s+│\s+CTR │/u.test(line))).toBe(true);
   });
 
-  it("one column under 120 with details: widening past 119 splits the turn, so only a table that fits below it says widen", () => {
-    const named = renderLiveTurn({ messages: wider, views: [], focus: null, width: 100, color: false, theme, details: card }).lines;
-    expect(named.some((line) => /widen by/u.test(line))).toBe(false);
-    expect(named.some((line) => /hidden/u.test(line))).toBe(true);
-    const widen = renderLiveTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme, details: card }).lines;
-    expect(widen).toContain("  + CTR, Note · widen by 12 cols to see");
-  });
-
-  it("one column with no details: the live turn redraws wider, so the hint says how far", () => {
-    const lines = renderLiveTurn({ messages: wider, views: [], focus: null, width: 100, color: false, theme }).lines;
-    expect(lines.some((line) => /widen by \d+ cols? to see/u.test(line))).toBe(true);
-  });
-
-  it("a committed turn is printed once: no widen hint", () => {
-    const lines = renderCommittedTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme });
-    expect(lines.some((line) => /widen by/u.test(line))).toBe(false);
-    expect(lines.some((line) => /hidden/u.test(line))).toBe(true);
+  it("the live turn, with or without details, and the committed turn print the same line for the same table", () => {
+    const withCard = renderLiveTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme, details: card }).lines;
+    const alone = renderLiveTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme }).lines;
+    const committed = renderCommittedTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme });
+    for (const lines of [withCard, alone, committed]) {
+      expect(lines).toContain("  + CTR, Note hidden · needs 12 more cols");
+      expect(lines.filter((line) => hint.test(line))).toHaveLength(1);
+      expect(lines.some((line) => /widen|to see/u.test(line))).toBe(false);
+    }
+    // A table that needs even more says how many, in the same words.
+    const far = renderLiveTurn({ messages: wider, views: [], focus: null, width: 100, color: false, theme, details: card }).lines;
+    expect(far.filter((line) => hint.test(line))).toHaveLength(1);
   });
 });
 
