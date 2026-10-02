@@ -109,6 +109,19 @@ export const STRIPE_DELTA_MAX_REFETCH_PER_RUN = 200;
  */
 export const STRIPE_DELTA_PARSER_VERSION = "stripe-delta-events-v3";
 
+/**
+ * Every parser version whose windows kept PAYMENT evidence. A reader asking "since when are
+ * payments stored" must match this SET, never one version: an exact match on the version it was
+ * written against goes blind the moment a newer parser stamps every new segment — a source
+ * connected after that bump would never show coverage. 1bu-1's `STRIPE_PAYMENT_COVERAGE_SQL`
+ * (src/lib/cloud-reads/stripe-payments.ts) pins v2 and must take this set before this bundle is
+ * vendored. Append the new version here on every bump that still keeps payment evidence.
+ */
+export const STRIPE_PAYMENT_EVIDENCE_PARSER_VERSIONS: readonly string[] = [
+  "stripe-delta-events-v2",
+  "stripe-delta-events-v3",
+];
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Second-align a millisecond instant DOWN — Stripe `created` filters are whole seconds. */

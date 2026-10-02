@@ -233,6 +233,7 @@ export type StripeCheckoutSessionListStep =
 
 /**
  * What THIS run lists:
+ *   • the key lacks the permission  -> nothing on a DELTA run; the FULL run retries;
  *   • the crawl is unfinished       -> its next bounded step (any lane);
  *   • an incremental window is open -> resume it verbatim (any lane);
  *   • a FULL run with the crawl done -> a fresh window `[listed_through - overlap, now)`;
@@ -240,6 +241,10 @@ export type StripeCheckoutSessionListStep =
  *
  * Bounds are whole seconds — Stripe's `created` filters are integer seconds, and the persisted
  * state must describe exactly the interval Stripe was asked for.
+ *
+ * A key recorded as `missing_permission` is re-tried on the FULL lane only (daily). Re-trying on
+ * every 15-minute delta tick would spend ~2,900 reads a month on a known 403 out of Stripe's
+ * 10,000/month floor; the gap stays typed and visible in the meantime.
  */
 export function planStripeCheckoutSessionListStep(input: {
   state: StripeCheckoutSessionSyncStateRow | null;
@@ -249,6 +254,8 @@ export function planStripeCheckoutSessionListStep(input: {
   const { state, lane, cursorEndMs } = input;
   if (!Number.isFinite(cursorEndMs)) throw new Error("Stripe Checkout session cursor end is invalid");
   const nowBoundaryMs = stripeEventSecondBoundary(cursorEndMs);
+
+  if (lane !== "full" && state?.capability_state === "missing_permission") return { kind: "none" };
 
   if (!state || state.backfill_state !== "complete") {
     const persistedAnchorMs = stripeTimestampMs(state?.backfill_anchor ?? null);
@@ -381,9 +388,14 @@ export function stripeCheckoutSessionCheckpointForStep(input: {
 }
 
 /**
- * Can a CLOSED delta window advance the coverage claim? Only when the crawl is complete, no list
- * window is open (that window owns the next advance), and the window's NORMAL start reaches back to
- * or before the claim — so every completion event from the claim onward was observed.
+ * Can a CLOSED delta window advance the coverage claim? Only when the key can read Checkout
+ * sessions, the crawl is complete, no list window is open (that window owns the next advance), and
+ * the window's NORMAL start reaches back to or before the claim — so every completion event from
+ * the claim onward was observed.
+ *
+ * Never while the permission is missing: whether Stripe returns `checkout.session.*` events to a
+ * key without Checkout read access is not something this claim may rest on. Holding the claim
+ * makes the first FULL window after the grant re-list the whole gap from `listed_through`.
  */
 export function stripeCheckoutSessionDeltaAdvance(input: {
   state: StripeCheckoutSessionSyncStateRow | null;
@@ -391,7 +403,8 @@ export function stripeCheckoutSessionDeltaAdvance(input: {
   segmentToExclusive: string;
 }): string | null {
   const { state, fanoutFromMs, segmentToExclusive } = input;
-  if (!state || state.backfill_state !== "complete") return null;
+  if (!state || state.capability_state !== "available") return null;
+  if (state.backfill_state !== "complete") return null;
   if (stripeTimestampMs(state.window_from) !== null) return null;
   const listedThroughMs = stripeTimestampMs(state.listed_through);
   if (listedThroughMs === null || fanoutFromMs > listedThroughMs) return null;

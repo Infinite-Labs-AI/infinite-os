@@ -242,6 +242,33 @@ describe("Stripe Checkout session list-step planning", () => {
     }
   });
 
+  it("re-tries a key MISSING the permission on the FULL lane only, never every delta tick", () => {
+    const missing = (over: Parameters<typeof state>[0] = {}) => state({
+      capability_state: "missing_permission",
+      missing_permission: "Checkout Sessions: Read",
+      ...over,
+    });
+    // The crawl never started, a crawl and a window were left mid-way, a crawl completed before
+    // the key was swapped: a DELTA run reads nothing in every case.
+    for (const gap of [
+      missing({ backfill_state: "pending", backfill_anchor: null, listed_through: null }),
+      missing({ backfill_state: "in_progress", backfill_starting_after: "cs_x", listed_through: null }),
+      missing({ window_from: "2026-09-29T10:00:00.000Z", window_to: "2026-10-01T12:00:00.000Z" }),
+      missing(),
+    ]) {
+      expect(planStripeCheckoutSessionListStep({ state: gap, lane: "delta", cursorEndMs: NOW_MS }))
+        .toEqual({ kind: "none" });
+    }
+    // The daily FULL run is the retry.
+    expect(planStripeCheckoutSessionListStep({
+      state: missing({ backfill_state: "pending", backfill_anchor: null, listed_through: null }),
+      lane: "full",
+      cursorEndMs: NOW_MS,
+    })).toMatchObject({ kind: "backfill", anchorMs: NOW_MS });
+    expect(planStripeCheckoutSessionListStep({ state: missing(), lane: "full", cursorEndMs: NOW_MS }))
+      .toMatchObject({ kind: "window", toMs: NOW_MS });
+  });
+
   it("refuses to invent a lower bound when a completed crawl has no cutoff", () => {
     expect(() => planStripeCheckoutSessionListStep({
       state: state({ listed_through: null }),
@@ -340,5 +367,12 @@ describe("Stripe Checkout session checkpoints", () => {
       state: state({ window_from: "2026-10-01T00:00:00.000Z", window_to: NOW }), fanoutFromMs: claimMs, segmentToExclusive,
     })).toBeNull();
     expect(stripeCheckoutSessionDeltaAdvance({ state: null, fanoutFromMs: claimMs, segmentToExclusive })).toBeNull();
+    // The key lost Checkout read access after the crawl: the claim holds, so the first FULL window
+    // after the grant re-lists the gap instead of the view calling it measured.
+    expect(stripeCheckoutSessionDeltaAdvance({
+      state: state({ capability_state: "missing_permission", missing_permission: "Checkout Sessions: Read" }),
+      fanoutFromMs: claimMs - 1,
+      segmentToExclusive,
+    })).toBeNull();
   });
 });

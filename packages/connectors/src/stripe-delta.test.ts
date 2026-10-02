@@ -26,8 +26,10 @@ import {
   STRIPE_EVENT_OVERLAP_MS,
   STRIPE_EVENT_SAFETY_LAG_MS,
   STRIPE_FULL_REFRESH_INTERVAL_MS,
+  STRIPE_DELTA_PARSER_VERSION,
   STRIPE_INVOICE_PREVIEW_OBJECT_KIND,
   STRIPE_PAYMENT_EVIDENCE_EVENT_TYPES,
+  STRIPE_PAYMENT_EVIDENCE_PARSER_VERSIONS,
   StripeRequestTelemetry,
   planStripeDeltaSegment,
   selectStripeSyncLane,
@@ -642,6 +644,14 @@ describe("Stripe delta event fan-out", () => {
 // ---------------------------------------------------------------------------------------------
 
 describe("Stripe payment evidence (evidence only, minimised)", () => {
+  it("lists the CURRENT parser among the payment-keeping versions, so a coverage reader never goes blind", () => {
+    // A reader that matched only the version it was written against reports "never stored" for
+    // every source whose first closed window carries a newer stamp.
+    expect(STRIPE_PAYMENT_EVIDENCE_PARSER_VERSIONS).toContain(STRIPE_DELTA_PARSER_VERSION);
+    expect(STRIPE_PAYMENT_EVIDENCE_PARSER_VERSIONS[0]).toBe("stripe-delta-events-v2");
+    expect(STRIPE_PAYMENT_EVIDENCE_PARSER_VERSIONS).not.toContain("stripe-delta-events-v1");
+  });
+
   it("classifies exactly the kept payment types, and never as a re-fetch family", () => {
     const kept: Array<[string, string]> = [
       ["charge.succeeded", "charge"],
@@ -4202,8 +4212,26 @@ describe("Stripe delta lane against real PGlite", () => {
       covered_through: null,
     });
 
-    // The user ticks the box: the next run lists, and the gap clears.
-    await runSyncAt(workspaceId, sourceId, CURSOR_END_MS + 15 * 60 * 1000, checkoutRouter(
+    // The next DELTA tick does not re-try a known 403: 96 a day would spend ~30% of Stripe's
+    // monthly read floor on it. The gap stays typed until the full lane re-checks.
+    const deltaAtMs = CURSOR_END_MS + 15 * 60 * 1000;
+    expect(await laneAt(workspaceId, sourceId, deltaAtMs)).toMatchObject({ lane: "delta" });
+    const deltaCalls: URL[] = [];
+    await runSyncAt(workspaceId, sourceId, deltaAtMs, checkoutRouter((url) => {
+      deltaCalls.push(url);
+      return forbidden();
+    }, deltaRouter({ events: [] })));
+    expect(deltaCalls).toEqual([]);
+    expect(await readCheckoutState(workspaceId, sourceId)).toMatchObject({
+      capability_state: "missing_permission",
+      backfill_state: "pending",
+    });
+
+    // The user ticks the box: the next FULL run lists, and the gap clears.
+    const fullAtMs = deltaAtMs + 15 * 60 * 1000;
+    await forceFullDue(workspaceId, sourceId, fullAtMs);
+    expect(await laneAt(workspaceId, sourceId, fullAtMs)).toMatchObject({ lane: "full" });
+    await runSyncAt(workspaceId, sourceId, fullAtMs, checkoutRouter(
       () => ({ object: "list", data: [checkoutSessionApi("cs_after_grant")], has_more: false }),
     ));
     expect(await readCheckoutState(workspaceId, sourceId)).toMatchObject({
