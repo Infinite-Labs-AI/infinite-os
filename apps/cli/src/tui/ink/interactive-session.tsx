@@ -61,7 +61,7 @@ import {
 import { isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
 import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, type KeyAction, type KeyContext } from "../keys/keymap.js";
-import { ConfirmActionMenu, fallbackCardRowCount } from "./confirm-card.js";
+import { ConfirmActionMenu, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import {
   inkLatestTurnRows,
@@ -1322,9 +1322,20 @@ export function InkInteractiveSessionApp({
           appendLines(confirmErrorLines(Object.assign(new Error(fieldInvalidMessage(result) ?? ""), { code: "field_invalid" })));
           return;
         }
+        // A settled receipt view goes on the turn, drawn as r4 draws it (confirm-card.tsx).
+        const receipt = receiptViewFrame(head, result);
+        if (receipt) {
+          recordTurnView(receipt);
+          return;
+        }
         appendLines(confirmResultLines(result, decision));
         afterReceipt(result);
       } catch (error) {
+        const receipt = fieldInvalidMessage(error) === null ? receiptViewFrame(head, error) : null;
+        if (receipt) {
+          recordTurnView(receipt);
+          return;
+        }
         appendLines(confirmErrorLines(error));
         if (!refusedField(error)) afterReceipt(error);
       }

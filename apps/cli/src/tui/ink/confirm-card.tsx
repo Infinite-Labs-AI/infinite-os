@@ -13,8 +13,15 @@
 //
 // Every line goes through the ANSI bridge (`AnsiLine`), so the chips'
 // backgrounds and the bold labels reach the screen.
+//
+// Once answered, a card whose app sent a settled receipt view leaves that view
+// on its turn (`receiptViewFrame`), where the views draw it as r4 does: a done
+// change as the green card, a dismissal as its dim sentence and "Sent to the
+// app". Anything else keeps the receipt lines.
+import type { ToolViewFrameV1 } from "@infinite-os/types";
 import React from "react";
 
+import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { terminalText, type InSessionConfirmationAction } from "../../desktop/confirm-in-session.js";
 import { confirmCardKeys, keyBarHints } from "../keys/keymap.js";
 import { colorEnabled, DEFAULT_THEME, type Theme } from "../theme.js";
@@ -28,6 +35,41 @@ import { AnsiLine } from "./transcript-app.js";
 const UNNAMED_WRITE = "Approve this write?";
 /** No view, so nothing to open, watch or retry. */
 const NO_CAPS = { open: false, watch: false, retry: false } as const;
+
+/** The kinds whose views draw their own receipt (views/change, launch, images, job). */
+const RECEIPT_KINDS: ReadonlySet<string> = new Set(["change", "launch", "images", "job"]);
+/** Receipts that are final: nothing to check, retry or bring back. */
+const SETTLED_STATES: ReadonlySet<string> = new Set(["done", "cancelled", "expired", "no_change", "blocked", "hit_limit"]);
+
+/**
+ * The receipt a resolved card leaves on its turn: the confirm's (or its
+ * error's) receipt view, as a turn view, when it is settled (done, dismissed,
+ * expired, already so, blocked, out of budget, or failed with nothing sent and
+ * nothing to retry), its kind draws receipts, and it has words to say. Null
+ * otherwise: the session prints the receipt lines, and a card that is not sure
+ * or can be retried keeps its reconcile step and comes back.
+ */
+export function receiptViewFrame(head: InSessionConfirmationAction, outcome: unknown): ToolViewFrameV1 | null {
+  const view = typeof outcome === "object" && outcome !== null ? decodeAnswerView((outcome as { view?: unknown }).view) : null;
+  if (!view || !RECEIPT_KINDS.has(view.kind)) {
+    return null;
+  }
+  const settled = SETTLED_STATES.has(view.state)
+    || (view.state === "failed" && view.outcome === "not_sent" && view.retry !== "retryable");
+  const words = terminalText(typeof view.receipt?.sentence === "string" ? view.receipt.sentence : "")
+    || terminalText(typeof view.stateReason?.words === "string" ? view.stateReason.words : "");
+  if (!settled || !words) {
+    return null;
+  }
+  return {
+    type: "tool.view",
+    stage: "tool",
+    message: terminalText(view.title),
+    viewId: `receipt:${head.confirmationHandle}`,
+    name: view.tool,
+    view
+  };
+}
 
 /** The lines of the r4 card for a pending write that came without an approval view. */
 export function fallbackCardLines(

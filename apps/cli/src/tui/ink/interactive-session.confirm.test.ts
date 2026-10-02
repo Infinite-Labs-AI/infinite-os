@@ -87,13 +87,15 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(handler).not.toContain('if (decision === "decline")');
   });
 
-  it("prints receipt lines, never the JSON result", () => {
+  it("prints receipt lines, never the JSON result; a settled receipt view goes on the turn instead", () => {
     const handler = source.slice(
       source.indexOf("const resolveConfirmAction"),
       source.indexOf("useEffect(() => {\n    // Don't drain")
     );
     expect(handler).toContain("confirmResultLines(result, decision)");
     expect(handler).toContain("confirmErrorLines(error)");
+    expect(handler).toContain("const receipt = receiptViewFrame(head, result);");
+    expect(handler).toContain("recordTurnView(receipt);");
     expect(handler).not.toContain("JSON.stringify");
   });
 
@@ -101,7 +103,7 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // The card (confirm-card.tsx) runs the summary through terminalText; the
     // details are redacted upstream and scrubbed again as they become rows;
     // receipts are scrubbed by confirmResultLines.
-    expect(source).toContain('import { ConfirmActionMenu, fallbackCardRowCount } from "./confirm-card.js";');
+    expect(source).toMatch(/import \{ ConfirmActionMenu, [^}]+ \} from "\.\/confirm-card\.js";/u);
     expect(source).not.toContain("function ConfirmActionMenu(");
     expect(cardSource).toContain("terminalText(pending.summary)");
     expect(cardSource).toContain("label: terminalText(detail.label), value: terminalText(detail.value)");
@@ -320,6 +322,71 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
       await waitFor(() => output.text().includes("✓ Paused ad 01"), 4_000, output.text);
       expect(confirmed).toEqual(["approve"]);
 
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+});
+
+describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
+  const RECEIPT_VIEW = {
+    v: 1, kind: "change", tool: "propose_pause_meta_entity", title: "Paused ad 01", state: "done", asOf: null,
+    scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+    body: { target: { kind: "ad", label: "Ad 01" }, rows: [{ label: "status", before: "on", after: "PAUSED" }], warnings: [] },
+    outcome: "applied", receipt: { sentence: "Stopped spending at 10:42", tone: "ok", revertible: true }
+  };
+  const CARD = {
+    ...PENDING,
+    view: {
+      ...RECEIPT_VIEW, title: "Pause ad", state: "needs_yes", outcome: undefined, receipt: undefined,
+      approval: { kind: "card", title: "Pause ad 01?", summary: "Stops spend.", confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [] }
+    }
+  } as unknown as InSessionConfirmationAction;
+
+  async function answer(key: string, result: unknown) {
+    const input = ttyInput();
+    const output = ttyOutput();
+    const session = runInkInteractiveSession({
+      columns: 80,
+      errorOutput: ttyOutput(),
+      input,
+      output,
+      title: "Infinite TUI",
+      onConfirmAction: async () => result,
+      async onSubmitLine(): Promise<InkInteractiveLineResult> {
+        return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+      }
+    });
+    await waitFor(() => output.text().includes("ready"));
+    await sendKeys(input, "pause it\r");
+    await waitFor(() => output.text().includes("Pause ad 01?"), 4_000, output.text);
+    const before = output.text().length;
+    await sendKeys(input, key);
+    return { input, output, session, before };
+  }
+
+  it.skipIf(process.env.CI === "true")(
+    "a done receipt view is drawn on the turn as the green card, not as a receipt line",
+    { timeout: 30_000 },
+    async () => {
+      const { input, output, session, before } = await answer("p", { ok: true, view: RECEIPT_VIEW });
+      await waitFor(() => output.text().slice(before).includes("Agent proposed · You approved"), 4_000, output.text);
+      expect(output.text().slice(before)).toContain("Stopped spending at 10:42");
+      expect(output.text()).not.toContain("✓ Stopped spending at 10:42");
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "a dismissal the app took reads ✕ Dismissed — nothing was executed., then Sent to the app",
+    { timeout: 30_000 },
+    async () => {
+      const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
+        receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
+      const { input, output, session, before } = await answer("n", { ok: true, view: dismissed });
+      await waitFor(() => output.text().slice(before).includes("Sent to the app"), 4_000, output.text);
+      expect(output.text().slice(before)).toContain("✕ Dismissed — nothing was executed.");
       await sendKeys(input, "/exit\r");
       await session;
     }

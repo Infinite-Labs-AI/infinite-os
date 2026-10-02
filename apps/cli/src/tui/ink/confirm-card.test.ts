@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { InSessionConfirmationAction } from "../../desktop/confirm-in-session.js";
 import { displayWidth } from "../lib/display-width.js";
 import { DEFAULT_THEME } from "../theme.js";
-import { ConfirmActionMenu, fallbackCardLines, fallbackCardRowCount } from "./confirm-card.js";
+import { ConfirmActionMenu, fallbackCardLines, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
 import { renderToString } from "./renderer.js";
 
 const ESC = String.fromCharCode(27);
@@ -82,5 +82,38 @@ describe("the write card for a desktop that sends no approval view (r4 card)", (
     expect(renderToString(React.createElement(ConfirmActionMenu, {
       card: null, explainText: null, pending: null, theme: DEFAULT_THEME, width: 80
     }))).toBe("");
+  });
+});
+
+describe("the receipt a resolved card leaves on its turn", () => {
+  const receipt = (over: Record<string, unknown>) => ({
+    ok: true,
+    view: {
+      v: 1, kind: "change", tool: "propose_pause_entity", title: "Paused ad “Hook A”", state: "done", asOf: null,
+      scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+      body: { target: { kind: "ad", label: "Hook A" }, rows: [{ label: "status", before: "on", after: "PAUSED" }], warnings: [] },
+      outcome: "applied", receipt: { sentence: "Paused.", tone: "ok", revertible: true },
+      ...over
+    }
+  });
+
+  it("a settled receipt view becomes a turn view keyed to the card", () => {
+    const frame = receiptViewFrame(pending(), receipt({}));
+    expect(frame).toMatchObject({ type: "tool.view", stage: "tool", viewId: "receipt:h_1", name: "propose_pause_entity" });
+    expect(frame?.view.state).toBe("done");
+    expect(receiptViewFrame(pending(), receipt({ state: "cancelled", outcome: undefined, receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } }))?.view.state)
+      .toBe("cancelled");
+    // A failed confirm's error carries its view the same way.
+    expect(receiptViewFrame(pending(), Object.assign(new Error("x"), receipt({ state: "expired", outcome: undefined, receipt: undefined, stateReason: { code: "expired", words: "This approval expired." } }))))
+      .not.toBeNull();
+  });
+
+  it("an unsure, partial or retryable receipt, a kind that draws none, or no view keeps the receipt lines", () => {
+    expect(receiptViewFrame(pending(), receipt({ state: "outcome_unknown", outcome: "unknown", retry: "check_first" }))).toBeNull();
+    expect(receiptViewFrame(pending(), receipt({ state: "partial", outcome: "partial" }))).toBeNull();
+    expect(receiptViewFrame(pending(), receipt({ state: "failed", outcome: "not_sent", retry: "retryable", receipt: undefined, stateReason: { code: "x", words: "Not sent." } }))).toBeNull();
+    expect(receiptViewFrame(pending(), receipt({ kind: "record", body: { fields: [] } }))).toBeNull();
+    expect(receiptViewFrame(pending(), { ok: true, receipt: "Page published" })).toBeNull();
+    expect(receiptViewFrame(pending(), receipt({ receipt: undefined }))).toBeNull();
   });
 });
