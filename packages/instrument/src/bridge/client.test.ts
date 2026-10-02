@@ -119,6 +119,37 @@ describe("TagBridgeClient against the fake bridge", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
+  it("a state-changing POST is NEVER replayed after an app restart when the first app may have acted on it (no double proof claim)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "infinite-tag-restart-"))
+    const first = await startFakeBridge({ home, script: { link: "remembered", hangUpAfter: ["runs.proof-claim"] } })
+    const client = openTagBridge({ env: first.env, platform: "darwin", tagVersion: "x" })
+    const request = await client.requestLink({ code: "1234", site: SITE, client: { tagVersion: "x" } })
+    client.setLinkId(request.link?.linkId ?? null)
+    // The app restarts while the claim is in flight: a new descriptor (new boot, same variant) is on disk.
+    const second = await fake({ home, script: { link: "remembered" } })
+    const error = await caught(client.claimProof("7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80", "tag"))
+    expect(error.code).toBe("network_error")
+    expect(first.script.run.proofState).toBe("proving")
+    expect(second.callsFor("runs.proof-claim")).toHaveLength(0)
+    await first.close()
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  it("a refused connection (nothing reached the app) IS re-sent to the restarted app, also for a POST", async () => {
+    const home = mkdtempSync(join(tmpdir(), "infinite-tag-restart-"))
+    const first = await startFakeBridge({ home, script: { link: "remembered" } })
+    const client = openTagBridge({ env: first.env, platform: "darwin", tagVersion: "x" })
+    const request = await client.requestLink({ code: "1234", site: SITE, client: { tagVersion: "x" } })
+    client.setLinkId(request.link?.linkId ?? null)
+    await first.close()
+    const second = await fake({ home, script: { link: "remembered" } })
+    // The new app does not know the old link (404), which proves the request reached it.
+    const error = await caught(client.claimProof("7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80", "tag"))
+    expect(error.code).toBe("link_not_found")
+    expect(second.callsFor("runs.proof-claim")).toHaveLength(1)
+    rmSync(home, { recursive: true, force: true })
+  })
+
   it("a restarted app under another runtime variant is never followed", async () => {
     const home = mkdtempSync(join(tmpdir(), "infinite-tag-restart-"))
     const first = await startFakeBridge({ home })

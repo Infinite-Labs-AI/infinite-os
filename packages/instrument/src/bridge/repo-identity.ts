@@ -19,8 +19,9 @@ export function normalizeRemote(url: string): string | null {
   const trimmed = url.trim()
   if (!trimmed) return null
 
-  // scp-like: [user@]host:path (no scheme, no "//").
-  const scp = /^(?:[^@/\s]+@)?([^:/\s]+):(?!\/\/)(.+)$/.exec(trimmed)
+  // scp-like: [userinfo@]host:path (no scheme, no "//"). The userinfo runs to the LAST "@" before the host,
+  // and the host can never hold an "@", so no part of a credential reaches the label or the fingerprint.
+  const scp = /^(?:[^/\s]*@)?([^@:/\s]+):(?!\/\/)(.+)$/.exec(trimmed)
   if (scp && !/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
     const host = scp[1]!.toLowerCase()
     const path = cleanPath(scp[2]!)

@@ -5,7 +5,17 @@
 // Host refusal before the bearer check, bearer, strict body decoding, 64 KB bodies, link-scoped verbs need an
 // approved `X-Infinite-Link-Id`, paid verbs 402 when unsubscribed) and scripting hooks: link approve /
 // decline / expire / remembered / pending, 402, scripted errors per verb, test results per mode, receipts,
-// proof claim won / lost, deploy states (incl. a canceled merge build and a later serving SHA), the Meta relay.
+// proof claim won / lost, deploy states (incl. a canceled merge build and a later serving SHA), the Meta relay,
+// and a connection that hangs up after the verb took effect (an app dying mid-response).
+//
+// It refuses what the real desktop (D2) and cloud (C1) refuse, so an offline end-to-end run cannot pass with a
+// regression the real stack would catch:
+// - `test.start`: the §3h.1 mode rules (`testRequestModeErrors`: `real_visit` with `fakeClickId` / `clicks` /
+//   `spaNavigation` / `targets.length ≠ 1`, `dry_live` with clicks or the fake click id against production)
+//   → 400 `invalid_request`; a `real_visit` without the tag's granted proof claim → 409 `claimed_by_other`;
+// - `runs.proof-claim`: one claim (`pending|pending_desktop → proving`); any other state → 409 with `state`;
+// - `runs.patch`: `phase` only moves forward (400), `mergeSha` is set once (400), `proofState` only while
+//   `proving` (409 `claimed_by_other`; the same result again is a no-op).
 //
 // It records every call in order (`calls`) and writes a descriptor (0700 dir, 0600 file) into a temp
 // `GROWTH_OS_HOME`. Every response it sends is checked against the verb's exact response shape, so the fake
@@ -44,7 +54,8 @@ import {
 } from "../../src/wizard/contracts/bridge.js"
 import { shapeErrors } from "../../src/wizard/contracts/shape.js"
 import type { ReceiptsResponseFields } from "../../src/wizard/contracts/receipts.js"
-import type { TestMode, TestResult, TestRunFixtureCase } from "../../src/wizard/contracts/test-engine.js"
+import { testRequestModeErrors, type TestMode, type TestResult, type TestRunFixtureCase, type TestRunRequest } from "../../src/wizard/contracts/test-engine.js"
+import { normalizeHost } from "../../src/wizard/contracts/host-deny.js"
 
 const CONTRACTS_DIR = new URL("../../contracts/tag-wizard-v1/", import.meta.url)
 
@@ -123,6 +134,8 @@ export interface FakeBridgeScript {
   receipts: ReceiptsResponseFields | null
   metaRelay: Omit<MetaRelayStatusResponse, "protocolVersion" | "requestId">
   errors: Partial<Record<BridgeVerbId, ScriptedError>>
+  /** Verbs whose connection is destroyed AFTER the verb took effect, instead of answering (once each). */
+  hangUpAfter: BridgeVerbId[]
 }
 
 export interface FakeBridgeCall {
@@ -177,7 +190,23 @@ function defaultScript(): FakeBridgeScript {
     capabilities: [...TAG_CAPABILITIES],
     keys: keys as unknown as TagKeys,
     hosting: hosting as unknown as TagHosting,
-    run: { ...structuredClone(run), approvedConversions: [], clickTestedConversions: [], proofState: "pending", proofClaimedBy: null },
+    // A FRESH run (the fixture's run is a finished one): phase before, nothing merged, deployed or claimed.
+    run: {
+      ...structuredClone(run),
+      phase: "before",
+      prUrl: null,
+      prNumber: null,
+      prHeadSha: null,
+      mergeSha: null,
+      mergedAt: null,
+      deployedSha: null,
+      deployedAt: null,
+      approvedConversions: [],
+      clickTestedConversions: [],
+      proofState: "pending",
+      proofClaimedBy: null,
+      checkinDueAt: null
+    },
     proofClaim: "won",
     deploy: deployRows.map((row) => {
       const response = row.response as DeployStatusResponse
@@ -187,7 +216,27 @@ function defaultScript(): FakeBridgeScript {
     testPollsBeforeDone: 0,
     receipts: null,
     metaRelay: relay as unknown as FakeBridgeScript["metaRelay"],
-    errors: {}
+    errors: {},
+    hangUpAfter: []
+  }
+}
+
+/** The run phases in order (§3b: `phase` only moves forward; `abandoned` from any unfinished phase). */
+const PHASE_RANK: Record<WizardRunPublic["phase"], number> = { before: 0, in_pr: 1, merged: 2, proven: 3, abandoned: 4 }
+
+/** C1's rule (`runs.ts nextPhase`): the same phase is a no-op; otherwise forward only, never out of a finished run. */
+export function phaseMoveAllowed(current: WizardRunPublic["phase"], wanted: WizardRunPublic["phase"]): boolean {
+  if (wanted === current) return true
+  const finished = current === "proven" || current === "abandoned"
+  return wanted === "abandoned" ? !finished : !finished && PHASE_RANK[wanted] > PHASE_RANK[current]
+}
+
+/** The production host or a subdomain of it (or of its apex, for a `www.` production host). */
+function productionOrSibling(productionHost: string): (host: string) => boolean {
+  const apex = normalizeHost(productionHost).replace(/^www\./, "")
+  return (host) => {
+    const candidate = normalizeHost(host)
+    return candidate === apex || candidate.endsWith(`.${apex}`)
   }
 }
 
@@ -230,6 +279,14 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
   let port = 0
 
   const send = (res: ServerResponse, record: FakeBridgeCall, status: number, body: unknown, headers: Record<string, string> = {}) => {
+    const hangUp = record.verb !== null ? script.hangUpAfter.indexOf(record.verb) : -1
+    if (hangUp >= 0) {
+      // The app "dies" mid-response: the effect happened, the caller never hears about it.
+      script.hangUpAfter.splice(hangUp, 1)
+      record.status = -1
+      res.socket?.destroy()
+      return
+    }
     record.status = status
     res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers })
     res.end(JSON.stringify(body))
@@ -390,10 +447,23 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           return ok({ runId: RUN_ID, startedAt: "2026-10-02T09:02:00.000Z" })
         case "runs.proof-claim":
           if (script.proofClaim === "lost") return fail(res, record, requestId, "claimed_by_other", { state: "proving" })
+          // ONE claim: only `pending | pending_desktop → proving` (C1's atomic conditional update).
+          if (script.run.proofState !== "pending" && script.run.proofState !== "pending_desktop") {
+            return fail(res, record, requestId, "claimed_by_other", { state: script.run.proofState })
+          }
           script.run = { ...script.run, proofState: "proving", proofClaimedBy: reqBody.producer as "tag" | "desktop" }
           return ok({ granted: true, proofState: "proving" })
         case "runs.patch": {
           const patch = (reqBody.patch ?? {}) as Partial<WizardRunPublic> & { clickTestedConversions?: string[] }
+          if (patch.phase !== undefined && !phaseMoveAllowed(script.run.phase, patch.phase)) {
+            return fail(res, record, requestId, "invalid_request", { field: "patch.phase", message: `phase only moves forward (the run is ${script.run.phase}).` })
+          }
+          if (patch.mergeSha !== undefined && script.run.mergeSha !== null && script.run.mergeSha !== patch.mergeSha) {
+            return fail(res, record, requestId, "invalid_request", { field: "patch.mergeSha", message: "mergeSha is already set for this run." })
+          }
+          if (patch.proofState !== undefined && script.run.proofState !== "proving" && script.run.proofState !== patch.proofState) {
+            return fail(res, record, requestId, "claimed_by_other", { state: script.run.proofState, message: "This run is not being proven; claim it first." })
+          }
           const next = { ...script.run }
           for (const [key, value] of Object.entries(patch)) {
             if (key === "clickTestedConversions") {
@@ -463,7 +533,14 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
         case "uninstall.disable-site-source":
           return ok({ disabled: true })
         case "test.start": {
-          const mode = reqBody.mode as TestMode
+          const request = reqBody as unknown as TestRunRequest
+          const modeErrors = testRequestModeErrors(request, productionOrSibling(request.productionHost))
+          if (modeErrors.length > 0) return fail(res, record, requestId, "invalid_request", { message: modeErrors.join("; ") })
+          // §3h.1: the one real visit only after the tag's granted proof claim (D2's route check).
+          if (request.mode === "real_visit" && (script.run.proofState !== "proving" || script.run.proofClaimedBy !== "tag")) {
+            return fail(res, record, requestId, "claimed_by_other", { state: script.run.proofState, message: "real_visit needs a granted proof claim." })
+          }
+          const mode = request.mode
           const testRunId = TEST_RUN_IDS[mode]
           testRuns.set(testRunId, { mode, polls: 0 })
           return ok({ testRunId, state: "queued" })

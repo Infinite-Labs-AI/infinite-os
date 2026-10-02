@@ -6,7 +6,12 @@
 // - 409 `signed_out` → `blocked` SIGNED_OUT;
 // - the link went away mid-run (`link_revoked`, `link_not_found`, `link_invalid`) → `failed` (halt)
 //   LINK_DECLINED: the run needs a fresh link (exit 4, "needs the Infinite app");
-// - anything else is not an outcome: the step rethrows and the engine reports it.
+// - the app stopped answering mid-run (a refused or broken connection, a call timeout) → `blocked` NO_APP
+//   ("open Infinite, then run npx infinite-tag again"; a resume continues the run);
+// - the cloud behind the app failed for now (`cloud_error`, `upstream_timeout`, `busy`, `rate_limited`) →
+//   `blocked` NO_APP with "try again in a minute"; `cloud_auth_failed` → `blocked` SIGNED_OUT;
+// - a CANCELLED call (the run's own signal, e.g. Ctrl+C) is not an outcome: the engine handles the interrupt;
+// - anything else is not an outcome: the step rethrows and the engine reports it (a bug).
 import type { TagBridgeClient, TagCapability } from "../wizard/contracts/bridge.js"
 import type { StepOutcome } from "../wizard/contracts/deps.js"
 import { BridgeDiscoveryError, BridgeError, isBridgeDiscoveryError, isBridgeError } from "./errors.js"
@@ -67,7 +72,30 @@ export function bridgeErrorOutcome(error: BridgeError): StepOutcome | null {
             : "This site's link to Infinite was removed (Settings › Linked sites). Run npx infinite-tag again to link it.",
         next: "halt"
       }
+    case "network_error":
+      // Not retryable = the call was cancelled by the run's own signal: the engine's interrupt, not an outcome.
+      if (!error.retryable) return null
+      return { kind: "blocked", code: "INF_WIZ_NO_APP", reason: APP_GONE_MESSAGE }
+    case "timeout":
+      return { kind: "blocked", code: "INF_WIZ_NO_APP", reason: APP_GONE_MESSAGE }
+    case "cloud_auth_failed":
+      return {
+        kind: "blocked",
+        code: "INF_WIZ_SIGNED_OUT",
+        reason: "The Infinite app could not sign in to Infinite's cloud. Sign in again in the Infinite app, then run npx infinite-tag again."
+      }
+    case "cloud_error":
+    case "upstream_timeout":
+    case "busy":
+    case "rate_limited":
+      return {
+        kind: "blocked",
+        code: "INF_WIZ_NO_APP",
+        reason: `Infinite could not finish this right now (${error.code}${error.upstreamStatus !== undefined ? ` ${error.upstreamStatus}` : ""}). Try again in a minute: run npx infinite-tag again to continue.`
+      }
     default:
       return null
   }
 }
+
+export const APP_GONE_MESSAGE = "The Infinite app stopped answering (it may have quit or restarted). Open Infinite, then run npx infinite-tag again to continue."

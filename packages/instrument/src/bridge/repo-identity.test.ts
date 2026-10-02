@@ -52,6 +52,16 @@ describe("linkSiteFor", () => {
   })
 })
 
+describe("normalizeRemote: no part of a credential in the host (scp form)", () => {
+  it("a password holding '@' in an scp-like remote never leaks into the label", () => {
+    expect(normalizeRemote("user:p@ss@github.com:a/b.git")).toBe("github.com/a/b")
+    expect(normalizeRemote("a@b@github.com:acme/site.git")).toBe("github.com/acme/site")
+    // An '@' in the PATH is kept (it is not userinfo).
+    expect(normalizeRemote("git@github.com:org/re@po.git")).toBe("github.com/org/re@po")
+    expect(normalizeRemote("git@github.com:acme/acme-store.git")).toBe("github.com/acme/acme-store")
+  })
+})
+
 describe("labels", () => {
   it("shortens the home prefix only", () => {
     expect(folderLabel("/Users/founder/Github/acme", "/Users/founder")).toBe("~/Github/acme")

@@ -26,6 +26,8 @@ export interface BridgeErrorInit {
   retryAfterSeconds?: number
   requestId?: string
   verb?: string
+  /** `network_error` only: the socket error code (`ECONNREFUSED` = the request never reached the app). */
+  errno?: string
 }
 
 export class BridgeError extends Error {
@@ -38,6 +40,7 @@ export class BridgeError extends Error {
   readonly retryAfterSeconds?: number
   readonly requestId?: string
   readonly verb?: string
+  readonly errno?: string
 
   constructor(init: BridgeErrorInit) {
     super(init.message)
@@ -51,6 +54,7 @@ export class BridgeError extends Error {
     if (init.retryAfterSeconds !== undefined) this.retryAfterSeconds = init.retryAfterSeconds
     if (init.requestId !== undefined) this.requestId = init.requestId
     if (init.verb !== undefined) this.verb = init.verb
+    if (init.errno !== undefined) this.errno = init.errno
   }
 }
 

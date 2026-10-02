@@ -130,7 +130,8 @@ export const nodeHttpTransport: BridgeTransport = (input) =>
             status: 0,
             code: "network_error",
             message: `Could not reach the Infinite app (${error.code ?? "network error"}).`,
-            retryable: true
+            retryable: true,
+            ...(error.code !== undefined ? { errno: error.code } : {})
           })
         )
       )
@@ -341,8 +342,11 @@ export class DescriptorTagBridgeClient implements TagBridgeClient {
     try {
       return await this.callOnce<T>(verb, input)
     } catch (error) {
-      // The app restarted (new port + token): re-discover once and retry the same request.
-      if (isBridgeError(error) && error.code === "network_error" && error.retryable && this.onNetworkError?.(error)) {
+      // The app restarted (new port + token): re-discover once and retry the same request, but only when a
+      // replay cannot double an effect: a read (GET), or a request that never reached the app (connection
+      // refused). A POST/PATCH whose connection broke after sending (e.g. a proof claim the cloud may already
+      // have granted) is never re-sent; the caller sees the error.
+      if (isBridgeError(error) && error.code === "network_error" && error.retryable && safeToReplay(verb, error) && this.onNetworkError?.(error)) {
         return this.callOnce<T>(verb, input)
       }
       throw error
@@ -490,6 +494,11 @@ function decodeError(verb: BridgeVerbId, response: BridgeTransportResponse): Bri
     ...(retryAfter !== undefined ? { retryAfterSeconds: retryAfter } : {}),
     verb
   })
+}
+
+/** True when re-sending `verb` after `error` cannot repeat an effect (see `call`). */
+export function safeToReplay(verb: BridgeVerbId, error: BridgeError): boolean {
+  return BRIDGE_VERBS[verb].method === "GET" || error.errno === "ECONNREFUSED"
 }
 
 /** A client bound to a descriptor already read. */

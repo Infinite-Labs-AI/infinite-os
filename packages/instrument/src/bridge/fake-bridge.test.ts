@@ -6,7 +6,8 @@ import { join } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
 
-import { deployCanceledThenServing, startFakeBridge, type FakeBridge } from "../../test/wizard/fake-bridge.js"
+import { deployCanceledThenServing, loadTestRunCases, phaseMoveAllowed, startFakeBridge, type FakeBridge } from "../../test/wizard/fake-bridge.js"
+import type { TestRunRequest } from "../wizard/contracts/test-engine.js"
 import { FAKE_BRIDGE_TOKEN } from "../wizard/contracts/bridge.js"
 import { openTagBridge } from "./client.js"
 import { readBridgeDescriptor } from "./descriptor.js"
@@ -147,5 +148,103 @@ describe("fake bridge", () => {
     await expect(client.hosting()).rejects.toBeInstanceOf(BridgeError)
     expect(bridge.callsFor("hosting")[0]?.status).toBe(402)
     expect(bridge.callsFor("link.request")[0]?.status).toBe(200)
+  })
+})
+
+/** A fixture request of a mode, without its envelope (the client adds it). */
+function requestOf(id: string): Omit<TestRunRequest, "protocolVersion" | "requestId"> {
+  const found = loadTestRunCases().find((candidate) => candidate.id === id)
+  if (!found) throw new Error(`no fixture ${id}`)
+  const { protocolVersion: _v, requestId: _r, ...rest } = structuredClone(found.request) as TestRunRequest
+  return rest
+}
+
+const RUN = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+
+describe("fake bridge refuses what D2 and C1 refuse", () => {
+  it("real_visit: a fake click id, clicks, an SPA navigation or two targets → 400 (decision 12), even with a claim", async () => {
+    const bridge = await fake()
+    const client = await linkedClient(bridge)
+    await client.claimProof(RUN, "tag")
+    const real = requestOf("real_visit_delivering")
+    for (const bad of [
+      { ...real, fakeClickId: true },
+      { ...real, clicks: [{ selector: "a", label: "a" }] },
+      { ...real, spaNavigation: { path: "/pricing" } },
+      { ...real, targets: [...real.targets, { url: "https://acme-store.com/pricing", label: "pricing" }] }
+    ]) {
+      await expect(client.startTest(bad)).rejects.toMatchObject({ status: 400, code: "invalid_request" })
+    }
+    expect(bridge.callsFor("test.start").every((call) => call.status === 400)).toBe(true)
+  })
+
+  it("real_visit only after the tag's granted proof claim: none → 409; claimed → started", async () => {
+    const bridge = await fake()
+    const client = await linkedClient(bridge)
+    const real = requestOf("real_visit_delivering")
+    await expect(client.startTest(real)).rejects.toMatchObject({ status: 409, code: "claimed_by_other", state: "pending" })
+    await client.claimProof(RUN, "tag")
+    expect((await client.startTest(real)).state).toBe("queued")
+  })
+
+  it("dry_live: a fake click id or clicks against production → 400; against the preview's own URL → allowed", async () => {
+    const bridge = await fake()
+    const client = await linkedClient(bridge)
+    const dry = requestOf("dry_live_all_once")
+    await expect(client.startTest({ ...dry, fakeClickId: true })).rejects.toMatchObject({ status: 400, code: "invalid_request" })
+    await expect(client.startTest({ ...dry, clicks: [{ selector: "a", label: "a" }] })).rejects.toMatchObject({ status: 400 })
+    const preview = requestOf("dry_live_preview_self_beacon")
+    expect((await client.startTest({ ...preview, fakeClickId: true })).state).toBe("queued")
+    // Every fixture request is accepted as it stands (the rules match the contract's own cases).
+    for (const testCase of loadTestRunCases()) {
+      if (testCase.request.mode === "real_visit") continue
+      const { protocolVersion: _v, requestId: _r, ...body } = testCase.request as TestRunRequest
+      expect((await client.startTest(body)).state, testCase.id).toBe("queued")
+    }
+  })
+
+  it("ONE proof claim: a second claim (or a claim on a finished run) → 409 claimed_by_other with the state", async () => {
+    const bridge = await fake()
+    const client = await linkedClient(bridge)
+    expect(await client.claimProof(RUN, "tag")).toMatchObject({ granted: true })
+    await expect(client.claimProof(RUN, "desktop")).rejects.toMatchObject({ code: "claimed_by_other", state: "proving" })
+    await client.patchRun(RUN, { proofState: "proven" })
+    await expect(client.claimProof(RUN, "tag")).rejects.toMatchObject({ code: "claimed_by_other", state: "proven" })
+  })
+
+  it("PATCH: proofState only while proving (409), the same result again is a no-op; phase forward only (400); mergeSha once (400)", async () => {
+    const bridge = await fake()
+    const client = await linkedClient(bridge)
+    await expect(client.patchRun(RUN, { proofState: "proven" })).rejects.toMatchObject({ status: 409, code: "claimed_by_other", state: "pending" })
+    await client.claimProof(RUN, "tag")
+    expect((await client.patchRun(RUN, { proofState: "proven" })).run.proofState).toBe("proven")
+    expect((await client.patchRun(RUN, { proofState: "proven" })).run.proofState).toBe("proven")
+    await expect(client.patchRun(RUN, { proofState: "problem" })).rejects.toMatchObject({ status: 409, code: "claimed_by_other" })
+
+    expect((await client.patchRun(RUN, { phase: "merged" })).run.phase).toBe("merged")
+    await expect(client.patchRun(RUN, { phase: "in_pr" })).rejects.toMatchObject({ status: 400, code: "invalid_request", field: "patch.phase" })
+    expect((await client.patchRun(RUN, { phase: "merged" })).run.phase).toBe("merged")
+
+    const sha = "9f1e2d3c4b5a69788796a5b4c3d2e1f0a9b8c7d6"
+    await client.patchRun(RUN, { mergeSha: sha })
+    await expect(client.patchRun(RUN, { mergeSha: "0".repeat(40) })).rejects.toMatchObject({ status: 400, field: "patch.mergeSha" })
+  })
+
+  it("phaseMoveAllowed mirrors C1: forward only, abandoned from an unfinished phase, nothing out of a finished run", () => {
+    expect(phaseMoveAllowed("before", "in_pr")).toBe(true)
+    expect(phaseMoveAllowed("merged", "in_pr")).toBe(false)
+    expect(phaseMoveAllowed("in_pr", "abandoned")).toBe(true)
+    expect(phaseMoveAllowed("proven", "abandoned")).toBe(false)
+    expect(phaseMoveAllowed("abandoned", "proven")).toBe(false)
+    expect(phaseMoveAllowed("proven", "proven")).toBe(true)
+  })
+
+  it("hangUpAfter: the verb takes effect, then the connection drops (an app dying mid-response)", async () => {
+    const bridge = await fake({ script: { hangUpAfter: ["runs.proof-claim"] } })
+    const client = await linkedClient(bridge)
+    await expect(client.claimProof(RUN, "tag")).rejects.toMatchObject({ code: "network_error" })
+    expect(bridge.script.run.proofState).toBe("proving")
+    // Once only.
+    await expect(client.claimProof(RUN, "tag")).rejects.toMatchObject({ code: "claimed_by_other" })
   })
 })
