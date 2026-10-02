@@ -15,7 +15,7 @@ import type { AnswerViewEnvelopeV1, AnswerViewV1 } from "@infinite-os/types";
 
 import { beforeAfter, cardBody, cardBox, cardWidth, chipRows, fieldRows, paragraphIn, setTo, type CardTone, type FieldRow } from "./card.js";
 import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
-import { cellText, FootnoteBook, isRecord, paint, viewText } from "./primitives.js";
+import { cellText, FootnoteBook, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
 
 /** The words a done change's card adds after its title: who proposed it and who said yes. */
@@ -49,7 +49,10 @@ function changeViewLines(view: AnswerViewV1, ctx: ViewRenderCtx, notes: Footnote
   }
   if (OPEN_CARD_STATES.has(view.state) && (approval || view.state === "applying")) {
     const title = viewText(approval?.title) || viewText(view.title);
-    const working = view.state === "applying" ? ["", paint("◑ Working…", "cyan", ctx)] : [];
+    // r4's hint is static (no clock): the app says when it is still running after 20 s.
+    const working = view.state === "applying"
+      ? ["", `${paint("◑ Working…", "cyan", ctx)}  ${paint("· after 20 s it says it's still running", "dim", ctx)}`]
+      : [];
     return changeCard(view, title, "amber", [...cardRows(body, approval, ctx, notes), ...working], ctx);
   }
   return changeLines(view.body, ctx, notes);
@@ -62,7 +65,25 @@ function changeCard(view: AnswerViewV1, title: string, tone: CardTone, content: 
   const chips = ctx.caps.open && link
     ? chipRows([{ key: "o", label: viewText(link.label, "open in the app") }], null, inner, ctx)
     : [];
-  return cardBox(title, cardBody(content, chips, viewText(view.explain) !== "", ctx), ctx.width, tone, ctx);
+  // A view's own explain is printed by the shell under the view; the approval's
+  // summary (the `?` text Cmd+L shows) has no other place, so it opens inside.
+  const own = viewText(view.explain);
+  const summary = own ? "" : changeCardSummary(view);
+  const opened = ctx.explainOpen && summary ? ["", ...wrapText(summary, inner)] : [];
+  return cardBox(title, cardBody([...content, ...opened], chips, own !== "" || summary !== "", ctx), ctx.width, tone, ctx);
+}
+
+/**
+ * The approval's summary a change card offers behind `?`, when the view is
+ * drawn as a card (done, or still open with a card approval); else "".
+ */
+export function changeCardSummary(view: AnswerViewV1): string {
+  if (view.kind !== "change" || isSettledWithoutRunning(view)) {
+    return "";
+  }
+  const approval = isRecord(view.approval) && view.approval.kind === "card" ? view.approval : null;
+  const drawnAsCard = view.state === "done" || (OPEN_CARD_STATES.has(view.state) && (approval !== null || view.state === "applying"));
+  return drawnAsCard ? viewText(approval?.summary) : "";
 }
 
 /** The width inside a card drawn at `ctx.width`. */

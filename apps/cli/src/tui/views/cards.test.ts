@@ -16,6 +16,7 @@ import type { Token } from "../style/tokens.js";
 import { DEFAULT_THEME } from "../theme.js";
 import { approvalRender, CARD_UI_START, cardKeyStep, type ApprovalRenderCtx, type CardUiState } from "./approval.js";
 import { cardBox, chipRows, fieldRows, beforeAfter } from "./card.js";
+import { viewKeyFacts } from "./focus.js";
 import { renderView } from "./registry.js";
 import type { ViewRenderCtx } from "./types.js";
 
@@ -455,7 +456,38 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     const rows = cardRows(detail(view)).map(segs);
     expect(rows[0]![2]).toEqual(["b", "Pausing ad “Hook B · founder POV”…"]);
     expect(rows[0]![0]).toEqual(["amber", "┌─"]);
-    expect(rows).toContainEqual(row(74, "amber", ["cyan", "◑ Working…"]));
+    expect(rows).toContainEqual(row(74, "amber", ["cyan", "◑ Working…"], ["", "  "], ["dim", "· after 20 s it says it's still running"]));
+    // flow-pause-02: the working card still ends with `? what it does` (the approval's summary).
+    expect(rows[rows.length - 2]).toEqual(row(74, "amber", ["key", " ? "], ["", " "], ["dim", "what it does"]));
+  });
+
+  it("done without view.explain (flow-pause-03): `? what it does` comes from the approval's summary, and ? opens it inside", () => {
+    const view = pause({
+      state: "done", outcome: "applied",
+      receipt: { sentence: "Stopped spending at 10:42", tone: "ok", revertible: true }
+    });
+    const closed = cardRows(detail(view)).map(segs);
+    expect(closed[closed.length - 2]).toEqual(row(74, "green", ["key", " ? "], ["", " "], ["dim", "what it does"]));
+    const open = cardRows(detail(view, { explainOpen: true })).map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
+    expect(open.join("\n")).toContain("│ Stops this ad's spend until you turn it back on.");
+    expect(open.length).toBe(closed.length + 2);
+    // ? works on the turn view: the focus facts offer it.
+    expect(viewKeyFacts(view, renderView(view, viewCtx())).explain).toBe(true);
+  });
+
+  it("a view's own explain is not drawn twice: the shell prints it, the card only offers ?", () => {
+    const view = pause({
+      state: "done", outcome: "applied", explain: "Paused on Meta from here.",
+      receipt: { sentence: "Stopped spending at 10:42", tone: "ok", revertible: true }
+    });
+    const open = renderView(view, viewCtx({ explainOpen: true })).detail.join("\n").replace(/\u001b\[[0-9;]*m/gu, "");
+    expect(open.split("Paused on Meta from here.").length - 1).toBe(1);
+  });
+
+  it("a receipt with no approval and no explain offers no ?", () => {
+    const view = receiptView({ title: "Paused ad", state: "done", outcome: "applied", receipt: { sentence: "Paused.", tone: "ok", revertible: false } });
+    expect(cardRows(detail(view)).join("\n")).not.toContain("what it does");
+    expect(viewKeyFacts(view, renderView(view, viewCtx())).explain).toBe(false);
   });
 
   it("dismissed (flow-pause-09): the sentence, then `Sent to the app` in dim, and no rows", () => {

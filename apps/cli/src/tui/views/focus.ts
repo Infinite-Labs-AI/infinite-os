@@ -24,6 +24,7 @@ import type { Key } from "ink";
 import { printableImagesView } from "../../desktop/image-url-cut.js";
 import { resolveKey, type FocusKind, type KeyAction, type KeyContext, type KeyHint } from "../keys/keymap.js";
 import { DEFAULT_THEME, type Theme } from "../theme.js";
+import { changeCardSummary } from "./change.js";
 import { managedApproval } from "./managed.js";
 import { truncatedMoreAsk, turnAsk, viewText } from "./primitives.js";
 import { renderView } from "./registry.js";
@@ -128,7 +129,7 @@ export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender
     tabs: count(render.tabs),
     pages: count(render.pages),
     hiddenColumns: count(render.hiddenColumns),
-    explain: viewText(view.explain) !== "" || (managedApproval(view)?.summary ?? "") !== "",
+    explain: viewText(view.explain) !== "" || (managedApproval(view)?.summary ?? "") !== "" || changeCardSummary(view) !== "",
     more: turnAsk(truncatedMoreAsk(view)),
     fixAsk: turnAsk(render.fixAsk),
     livePageNext,
