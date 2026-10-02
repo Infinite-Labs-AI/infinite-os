@@ -1,0 +1,109 @@
+{
+  "screen": "flow-images-06-with-your-codex",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "make 3 new ads from our best hook",
+    "answer": "Making 3 with your ChatGPT image generation. Free to Infinite; it uses your plan.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "images",
+        "tool": "generate_ad_images",
+        "title": "Make 3 creatives",
+        "state": "working",
+        "asOf": null,
+        "provenance": {
+          "source": "Creatives",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "creative.library",
+          "label": "Open in Library",
+          "params": {
+            "run": "run_r4"
+          }
+        },
+        "body": {
+          "runId": "run_r4",
+          "requested": 3,
+          "ready": 1,
+          "failed": 0,
+          "items": [
+            {
+              "id": "i1",
+              "label": "Fire the agency",
+              "status": "done"
+            },
+            {
+              "id": "i2",
+              "label": "Decisions, backed",
+              "status": "drawing"
+            },
+            {
+              "id": "i3",
+              "label": "First 100 customers",
+              "status": "queued"
+            }
+          ],
+          "format": "HD",
+          "aspectRatio": "4:5",
+          "model": "your ChatGPT",
+          "madeWith": "your_codex"
+        },
+        "cost": {
+          "usd": 0,
+          "estimate": false,
+          "whoPays": "your_chatgpt_plan"
+        },
+        "stateReason": {
+          "code": "images_running",
+          "words": "Working",
+          "short": "Working"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "making 3 creatives (Codex)",
+        "start": 0,
+        "end": 1,
+        "result": "1 of 3",
+        "status": "run"
+      }
+    ],
+    "busy": "the creatives finish either way"
+  }
+}

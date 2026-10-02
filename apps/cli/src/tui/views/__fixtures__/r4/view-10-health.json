@@ -1,0 +1,112 @@
+{
+  "screen": "view-10-health",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "is everything connected?",
+    "answer": "5 of 6 are fine. Shopify's sign-in expired 2 days ago.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "health",
+        "tool": "get_connections",
+        "title": "Connections",
+        "state": "ready",
+        "asOf": null,
+        "provenance": {
+          "source": "Connections",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "body": {
+          "items": [
+            {
+              "id": "ga4",
+              "name": "GA4",
+              "state": "ok",
+              "dataThrough": "2026-09-30"
+            },
+            {
+              "id": "stripe",
+              "name": "Stripe",
+              "state": "ok",
+              "lastSuccessAt": "2026-10-01T10:32:00Z"
+            },
+            {
+              "id": "gads",
+              "name": "Google Ads",
+              "state": "ok",
+              "dataThrough": "2026-09-30"
+            },
+            {
+              "id": "meta",
+              "name": "Meta",
+              "state": "ok",
+              "dataThrough": "2026-09-30"
+            },
+            {
+              "id": "posthog",
+              "name": "PostHog",
+              "state": "ok",
+              "dataThrough": "2026-09-30"
+            },
+            {
+              "id": "shopify",
+              "name": "Shopify",
+              "state": "needs_you",
+              "blocker": "sign-in expired",
+              "lastSuccessAt": "2026-09-29T10:44:00Z",
+              "fix": {
+                "label": "Reconnect Shopify",
+                "appLink": {
+                  "place": "connections",
+                  "label": "Connections, in the app"
+                }
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking connections",
+        "start": 0,
+        "end": 0.2,
+        "result": "6 sources",
+        "status": "ok"
+      }
+    ]
+  }
+}

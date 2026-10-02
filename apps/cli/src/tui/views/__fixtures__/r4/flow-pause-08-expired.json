@@ -1,0 +1,84 @@
+{
+  "screen": "flow-pause-08-expired",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "pause hook b",
+    "answer": "That approval timed out.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "change",
+        "tool": "propose_pause_entity",
+        "title": "Pause Hook B",
+        "state": "expired",
+        "asOf": null,
+        "provenance": {
+          "source": "Meta · ad",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "body": {
+          "target": {
+            "kind": "ad",
+            "id": "ad_hook_b",
+            "label": "Hook B · founder POV"
+          },
+          "rows": [
+            {
+              "label": "status",
+              "before": "on",
+              "after": "PAUSED"
+            }
+          ],
+          "effect": "Stops spending",
+          "warnings": []
+        },
+        "stateReason": {
+          "code": "expired",
+          "words": "This approval expired — nothing was executed. Ask again to get a fresh one."
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "waiting for your OK",
+        "start": 0,
+        "end": 1,
+        "result": "expired",
+        "status": "off"
+      }
+    ]
+  }
+}

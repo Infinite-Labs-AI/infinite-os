@@ -1,0 +1,86 @@
+{
+  "screen": "flow-images-05-hit-a-limit",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "make 3 new ads from our best hook",
+    "answer": "Today's image limit is used up.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "images",
+        "tool": "generate_ad_images",
+        "title": "Make 3 creatives",
+        "state": "hit_limit",
+        "asOf": null,
+        "provenance": {
+          "source": "Creatives",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "creative.library",
+          "label": "Open in Library",
+          "params": {
+            "run": "run_r4"
+          }
+        },
+        "body": {
+          "runId": "run_r4",
+          "requested": 3,
+          "ready": 0,
+          "failed": 0,
+          "items": [],
+          "format": "HD",
+          "aspectRatio": "4:5",
+          "model": "Infinite's image model",
+          "madeWith": "infinite"
+        },
+        "stateReason": {
+          "code": "daily_image_cap",
+          "words": "This workspace has generated 20 of its 20 ad images today (UTC). None are left today; try again tomorrow."
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "pricing 3 images",
+        "start": 0,
+        "end": 0.4,
+        "result": "limit",
+        "status": "fail"
+      }
+    ]
+  }
+}

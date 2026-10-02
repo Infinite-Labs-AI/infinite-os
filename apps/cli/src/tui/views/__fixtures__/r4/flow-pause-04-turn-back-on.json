@@ -1,0 +1,98 @@
+{
+  "screen": "flow-pause-04-turn-back-on",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "pause hook b",
+    "answer": "This turns spending back on, so it needs its own OK.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "change",
+        "tool": "propose_activate_entity",
+        "title": "Pause Hook B",
+        "state": "needs_yes",
+        "asOf": null,
+        "provenance": {
+          "source": "Meta · ad",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "body": {
+          "target": {
+            "kind": "ad",
+            "id": "ad_hook_b",
+            "label": "Hook B · founder POV"
+          },
+          "rows": [
+            {
+              "label": "status",
+              "before": "PAUSED",
+              "after": "on"
+            }
+          ],
+          "effect": "Starts spending",
+          "warnings": []
+        },
+        "approval": {
+          "kind": "card",
+          "turnId": "turn_r4",
+          "handle": "h_activate",
+          "title": "Activate ad “Hook B · founder POV”?",
+          "summary": "Turns this ad back on; it starts spending again.",
+          "confirmLabel": "Activate",
+          "dismissLabel": "Dismiss",
+          "doneTitle": "Paused ad “Hook B · founder POV”",
+          "rows": [
+            {
+              "label": "Ad",
+              "value": "Hook B · founder POV"
+            }
+          ],
+          "expiresAt": "2026-10-01T10:59:00Z"
+        }
+      }
+    ],
+    "pending": 0,
+    "steps": [
+      {
+        "label": "waiting for your OK",
+        "start": 0,
+        "end": 1,
+        "result": "activate 1 ad",
+        "status": "wait"
+      }
+    ]
+  }
+}

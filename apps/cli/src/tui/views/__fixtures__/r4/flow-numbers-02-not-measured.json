@@ -1,0 +1,174 @@
+{
+  "screen": "flow-numbers-02-not-measured",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "google ads since launch?",
+    "answer": "Spend and clicks are in; conversion value isn't tracked.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "numbers",
+        "tool": "get_google_ads_performance",
+        "title": "Google Ads since launch",
+        "state": "not_measured",
+        "asOf": "2026-09-30",
+        "provenance": {
+          "source": "Google Ads",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "ads.google",
+          "label": "Open in Google Ads"
+        },
+        "body": {
+          "layout": "table",
+          "currency": "USD",
+          "columns": [
+            {
+              "key": "spend",
+              "label": "Spend",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "clicks",
+              "label": "Clicks",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "value",
+              "label": "Value",
+              "unit": "money",
+              "factGroup": "conversions"
+            }
+          ],
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-09-29",
+                "to": "2026-09-30",
+                "tz": "UTC",
+                "label": "since launch"
+              },
+              "final": true,
+              "asOf": "2026-09-30",
+              "rows": [
+                {
+                  "id": "c1",
+                  "label": "Ad set 01",
+                  "cells": {
+                    "spend": {
+                      "value": 10
+                    },
+                    "clicks": {
+                      "value": 40
+                    },
+                    "value": {
+                      "value": null,
+                      "reason": {
+                        "code": "not_tracked",
+                        "words": "not measured: no conversion value is tracked for these campaigns",
+                        "show": "dash"
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": "c2",
+                  "label": "Ad set 02",
+                  "cells": {
+                    "spend": {
+                      "value": 12.5
+                    },
+                    "clicks": {
+                      "value": 30
+                    },
+                    "value": {
+                      "value": null,
+                      "reason": {
+                        "code": "not_tracked",
+                        "words": "not measured: no conversion value is tracked for these campaigns",
+                        "show": "dash"
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": "c4",
+                  "label": "Ad set 04",
+                  "cells": {
+                    "spend": {
+                      "value": 17.5
+                    },
+                    "clicks": {
+                      "value": 50
+                    },
+                    "value": {
+                      "value": null,
+                      "reason": {
+                        "code": "not_tracked",
+                        "words": "not measured: no conversion value is tracked for these campaigns",
+                        "show": "dash"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "stateReason": {
+          "code": "not_measured",
+          "words": "1 not measured",
+          "short": "1 not measured"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking Google Ads",
+        "start": 0,
+        "end": 0.6,
+        "result": "3 campaigns",
+        "status": "ok"
+      }
+    ]
+  },
+  "gaps": [
+    "D3: the head reads \"— 1 not measured\" (stateReason.short)."
+  ]
+}

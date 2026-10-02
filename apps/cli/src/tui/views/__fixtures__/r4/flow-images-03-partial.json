@@ -1,0 +1,109 @@
+{
+  "screen": "flow-images-03-partial",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "make 3 new ads from our best hook",
+    "answer": "2 of 3 came out. One was blocked by the safety check.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "images",
+        "tool": "generate_ad_images",
+        "title": "Make 3 creatives",
+        "state": "partial",
+        "asOf": null,
+        "provenance": {
+          "source": "Creatives",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "creative.library",
+          "label": "Open the 2 in Library",
+          "params": {
+            "run": "run_r4"
+          }
+        },
+        "body": {
+          "runId": "run_r4",
+          "requested": 3,
+          "ready": 2,
+          "failed": 1,
+          "items": [
+            {
+              "id": "i1",
+              "label": "Explained",
+              "status": "done"
+            },
+            {
+              "id": "i2",
+              "label": "Your audit",
+              "status": "done"
+            },
+            {
+              "id": "i3",
+              "label": "3 fixes",
+              "status": "failed",
+              "failureWords": "blocked by the safety check"
+            }
+          ],
+          "format": "HD",
+          "aspectRatio": "4:5",
+          "model": "Infinite's image model",
+          "madeWith": "infinite"
+        },
+        "stateReason": {
+          "code": "partial",
+          "words": "2 of 3 creatives"
+        },
+        "next": [
+          {
+            "label": "redo the 3rd (~$0.17)",
+            "ask": "redo the 3rd image"
+          }
+        ]
+      }
+    ],
+    "steps": [
+      {
+        "label": "making 3 creatives",
+        "start": 0,
+        "end": 1,
+        "result": "2 of 3",
+        "status": "part"
+      }
+    ]
+  }
+}

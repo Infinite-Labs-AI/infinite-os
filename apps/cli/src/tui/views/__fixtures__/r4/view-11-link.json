@@ -1,0 +1,97 @@
+{
+  "screen": "view-11-link",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "make a tracked link for the reddit post",
+    "answer": "Ready to save. Check the tags.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "link",
+        "tool": "create_tracked_link",
+        "title": "Tracked link",
+        "state": "needs_yes",
+        "asOf": null,
+        "provenance": {
+          "source": "Tracked link",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "body": {
+          "target": "url",
+          "minted": false,
+          "opened": false,
+          "url": "store.example",
+          "shortUrl": "go.store.example/rdt-cpa",
+          "utm": {
+            "source": "reddit",
+            "medium": "social",
+            "campaign": "cpa-thread"
+          },
+          "warnings": []
+        },
+        "approval": {
+          "kind": "card",
+          "turnId": "turn_r4",
+          "handle": "h_link",
+          "title": "New tracked link",
+          "summary": "Saves a short link with these tags.",
+          "confirmLabel": "Confirm",
+          "dismissLabel": "Dismiss",
+          "rows": [
+            {
+              "label": "to",
+              "value": "store.example"
+            }
+          ],
+          "expiresAt": "2026-10-01T10:59:00Z"
+        }
+      }
+    ],
+    "pending": 0,
+    "steps": [
+      {
+        "label": "preparing the link",
+        "start": 0,
+        "end": 0.4,
+        "result": "1 link",
+        "status": "wait"
+      }
+    ]
+  },
+  "gaps": [
+    "\"e edit in the app\" has no field (an edit place for the link)."
+  ]
+}
