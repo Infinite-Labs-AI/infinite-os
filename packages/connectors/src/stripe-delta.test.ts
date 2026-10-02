@@ -1042,6 +1042,8 @@ describe("Stripe request telemetry", () => {
     expect(stripeEndpointClass("/v1/invoices")).toBe("/v1/invoices");
     expect(stripeEndpointClass("/v1/invoices/in_1/lines")).toBe("/v1/invoices/{id}/{id}");
     expect(stripeEndpointClass("/v1/events")).toBe("/v1/events");
+    expect(stripeEndpointClass("/v1/checkout/sessions")).toBe("/v1/checkout/sessions");
+    expect(stripeEndpointClass("/v1/checkout/sessions/cs_live_1")).toBe("/v1/checkout/sessions/{id}");
   });
 
   it("produces a stable jsonb-shaped snapshot", () => {

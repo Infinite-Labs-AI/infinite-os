@@ -135,6 +135,11 @@ select
   state.last_successful_sync_at
 from stripe_checkout_session_sync_state state;
 
+-- Caveat contract (not a `queryable_views` row, like the 0057 trial views): readable back with
+-- obj_description().
+comment on view queryable.vw_stripe_checkout_session_coverage is
+  'missing_permission_is_unavailable_not_zero;source_without_a_row_has_never_listed_checkout_sessions;covered_range_is_half_open;coverage_is_by_completion_time;later_async_payment_settlement_rides_the_event_chain;revenue_reads_select_mode_payment_without_invoice';
+
 grant select, insert, update on stripe_checkout_sessions to growth_os_worker;
 grant select, insert, update on stripe_checkout_session_sync_state to growth_os_worker;
 grant select on stripe_checkout_sessions, stripe_checkout_session_sync_state

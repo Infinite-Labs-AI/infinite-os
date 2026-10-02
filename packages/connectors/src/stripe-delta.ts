@@ -192,8 +192,13 @@ export interface StripeRequestTelemetrySnapshot {
  */
 export function stripeEndpointClass(path: string): string {
   const segments = path.split("/").filter((segment) => segment !== "");
-  return `/${segments.map((segment, index) => (index >= 2 ? "{id}" : segment)).join("/")}`;
+  // A NAMESPACED collection (`/v1/checkout/sessions`) is two segments long, so its ids start one
+  // segment later; without this every Checkout list read would be booked as `/v1/checkout/{id}`.
+  const firstIdIndex = STRIPE_NAMESPACED_COLLECTIONS.has(segments[1] ?? "") ? 3 : 2;
+  return `/${segments.map((segment, index) => (index >= firstIdIndex ? "{id}" : segment)).join("/")}`;
 }
+
+const STRIPE_NAMESPACED_COLLECTIONS: ReadonlySet<string> = new Set(["checkout"]);
 
 /**
  * Per-run Stripe request accounting. Every method is a total counter mutation: telemetry must
