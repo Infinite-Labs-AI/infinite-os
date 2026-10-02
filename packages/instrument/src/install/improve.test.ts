@@ -1,0 +1,199 @@
+// Decision 4 (improve existing tags in place), executed — the edited pages are RUN in node:vm with
+// stubbed browser globals, never grepped. Negatives run the original page and show the difference.
+import { runInNewContext } from "node:vm"
+
+import { afterEach, describe, expect, it } from "vitest"
+
+import { ADOPTED_META_HTML, ADOPTED_POSTHOG_HTML, cleanupSites, exists, fakeKeys, IDS, makeSite, notConnectedKeys, read } from "../../test/wizard/o7-fakes.js"
+import { detectProvidersWithEvidence } from "../harness/inspect.js"
+import { checkMetaAutoConfigOptOut } from "../providers/meta-browser/autoconfig.js"
+import { reverseTextEdits } from "../server-lane/text-edits.js"
+
+import { applyImproveEdit, CAPTURE_BLOCK_MARKER, detectAdoptedFacts, improveLinesFor, withSensitivePaths } from "./improve.js"
+
+afterEach(cleanupSites)
+
+/** Runs every inline <script> of a page in order, as a browser would, recording cookies and the fbq queue. */
+function runPage(html: string, options: { search?: string; hostname?: string } = {}) {
+  const cookies: string[] = []
+  const cookieWrites: Array<{ value: string; fbqDefined: boolean }> = []
+  const window: Record<string, unknown> = {}
+  const storage = new Map<string, string>()
+  const document = {
+    get cookie() {
+      return cookies.join("; ")
+    },
+    set cookie(value: string) {
+      cookieWrites.push({ value, fbqDefined: typeof window.fbq === "function" })
+      cookies.push(value.split(";")[0]!)
+    },
+    createElement: () => ({ async: false, src: "" }),
+    getElementsByTagName: () => [{ parentNode: { insertBefore: () => undefined } }]
+  }
+  const storageApi = { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) }
+  Object.assign(window, {
+    addEventListener: () => undefined,
+    document,
+    location: { search: options.search ?? "", hostname: options.hostname ?? "acme-store.com", protocol: "https:" },
+    navigator: {},
+    localStorage: storageApi,
+    sessionStorage: storageApi,
+    setTimeout: (callback: () => void) => callback(),
+    URLSearchParams,
+    Date,
+    String,
+    Number,
+    posthog: { init: (...args: unknown[]) => ((window.posthogInits as unknown[][]) ??= []).push(args) }
+  })
+  window.window = window
+  for (const match of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) runInNewContext(match[1]!, window)
+  const fbq = window.fbq as { queue?: unknown[][] } | undefined
+  return {
+    window,
+    cookieWrites,
+    queue: () => JSON.parse(JSON.stringify(Array.from(fbq?.queue ?? [], (entry) => Array.from(entry)))) as unknown[][]
+  }
+}
+
+function linesFor(files: Record<string, string>, framework = "static-html", keys = fakeKeys(), sensitivePaths: string[] = []) {
+  const root = makeSite(files)
+  const detected = detectProvidersWithEvidence(root)
+  const facts = detectAdoptedFacts(root, detected)
+  return { root, facts, lines: improveLinesFor(facts, { framework, keys, sensitivePaths }) }
+}
+
+describe("improve lines for adopted tags (decision 4: optimise in place, never reinstall)", () => {
+  it("adopted PostHog → proxy and defaults-bump lines (a separate line each), a preview-guard line, never an install", () => {
+    const { lines } = linesFor({ "index.html": ADOPTED_POSTHOG_HTML })
+    expect(lines.map((line) => line.id)).toEqual([
+      "improve_additive:posthog:proxy",
+      "posthog_defaults_bump_adopted:posthog:defaults",
+      "preview_guard_adopted:posthog:init"
+    ])
+    expect(lines.find((line) => line.target === "proxy")).toMatchObject({ owner: "code", provider: "posthog", evidence: { file: "index.html" } })
+    // A reduction is never an improve line (R2-10): no "one init", no removal.
+    for (const line of lines) expect(line.text).not.toMatch(/one init|remove|delete/i)
+  })
+
+  it("adopted PostHog without history page views → a capture_pageview:'history_change' line", () => {
+    const html = ADOPTED_POSTHOG_HTML.replace(", defaults: '2025-05-24'", "")
+    const { lines } = linesFor({ "index.html": html })
+    expect(lines.map((line) => line.id)).toContain("improve_additive:posthog:history_change")
+    expect(lines.find((line) => line.target === "history_change")?.text).toContain("capture_pageview: 'history_change'")
+  })
+
+  it("NEGATIVE: an adopted PostHog already on /ingest with history page views and current defaults gets no improve line", () => {
+    const html = ADOPTED_POSTHOG_HTML.replace("api_host: 'https://us.i.posthog.com', defaults: '2025-05-24'", "api_host: '/ingest', defaults: '2026-01-30'").replace(
+      "<script>",
+      "<script>\n      if (location.hostname === 'acme-store.com')"
+    )
+    const { lines } = linesFor({ "index.html": html })
+    expect(lines).toEqual([])
+  })
+
+  it("adopted Meta pixel → capture (code), automatic events off (code) and a Meta preview-guard line", () => {
+    const { lines } = linesFor({ "index.html": ADOPTED_META_HTML })
+    expect(lines.map((line) => [line.id, line.owner])).toEqual([
+      ["capture_beside_adopted_pixel:meta:capture", "code"],
+      ["autoconfig_off_adopted:meta:autoconfig", "code"],
+      ["preview_guard_adopted:meta:init", "agent"]
+    ])
+    expect(lines[2]!.text).toMatch(/^Meta: keep preview sites silent/)
+  })
+
+  it("a pixel in a React component: the capture is the agent's job (code edits only touch HTML)", () => {
+    const component = `export function Pixel() {\n  useEffect(() => { fbq('init', '${IDS.meta}'); fbq('track', 'PageView') }, [])\n  return null\n}\n`
+    const { lines } = linesFor({ "index.html": "<!doctype html><html><head></head><body></body></html>", "src/pixel.tsx": component })
+    expect(lines.find((line) => line.kind === "capture_beside_adopted_pixel")?.owner).toBe("agent")
+  })
+
+  it("GA4 adopted with an id that is not the connection's → an id line; the matching id gets none", () => {
+    const gtag = (id: string) =>
+      `<!doctype html><html><head><script async src="https://www.googletagmanager.com/gtag/js?id=${id}"></script><script>window.dataLayer=[];function gtag(){dataLayer.push(arguments)}gtag('js', new Date());gtag('config', '${id}');</script></head><body></body></html>`
+    expect(linesFor({ "index.html": gtag(IDS.ga4Other) }).lines.map((line) => line.id)).toContain("improve_additive:ga4:id")
+    expect(linesFor({ "index.html": gtag(IDS.ga4) }).lines.map((line) => line.id)).not.toContain("improve_additive:ga4:id")
+  })
+})
+
+describe("applyImproveEdit: the deterministic code edits (approved lines only)", () => {
+  it("the capture-only block beside an adopted pixel: writes _fbc from the landing fbclid BEFORE the pixel exists, pixel untouched", () => {
+    const { root, lines } = linesFor({ "index.html": ADOPTED_META_HTML })
+    const line = lines.find((entry) => entry.kind === "capture_beside_adopted_pixel")!
+    const result = applyImproveEdit({ root, appRoot: ".", framework: "static-html", line, keys: fakeKeys(), consentMode: "not_required", runId: IDS.run })
+    expect(result.ok).toBe(true)
+    const after = read(root, "index.html")
+    expect(after).toContain(CAPTURE_BLOCK_MARKER)
+
+    const page = runPage(after, { search: "?fbclid=AbC123" })
+    expect(typeof page.window.infiniteMetaClickId).toBe("function")
+    const fbcWrite = page.cookieWrites.find((write) => write.value.startsWith("_fbc="))
+    expect(fbcWrite?.value).toMatch(/^_fbc=fb\.1\.\d+\.AbC123/)
+    expect(fbcWrite?.fbqDefined).toBe(false)
+    expect(page.queue()).toEqual([["init", IDS.meta], ["track", "PageView"]])
+
+    // NEGATIVE: the original page captures nothing.
+    const original = runPage(ADOPTED_META_HTML, { search: "?fbclid=AbC123" })
+    expect(original.window.infiniteMetaClickId).toBeUndefined()
+    expect(original.cookieWrites).toEqual([])
+
+    // The record reverses to the exact original bytes.
+    expect(result.ok && result.record && reverseTextEdits(after, result.record.textEdits)).toBe(ADOPTED_META_HTML)
+  })
+
+  it("the capture follows a recorded 'no' under consent_mode=required (the optional hook, never a banner)", () => {
+    const { root, lines } = linesFor({ "index.html": ADOPTED_META_HTML })
+    const line = lines.find((entry) => entry.kind === "capture_beside_adopted_pixel")!
+    applyImproveEdit({ root, appRoot: ".", framework: "static-html", line, keys: fakeKeys(), consentMode: "required", runId: IDS.run })
+    const page = runPage(read(root, "index.html"), { search: "?fbclid=AbC123" })
+    expect(page.cookieWrites.filter((write) => write.value.startsWith("_fbc="))).toEqual([])
+  })
+
+  it("D10: one literal autoConfig opt-out before the adopted init — automatic events are off, in order", () => {
+    const { root, lines } = linesFor({ "index.html": ADOPTED_META_HTML })
+    const line = lines.find((entry) => entry.kind === "autoconfig_off_adopted")!
+    const result = applyImproveEdit({ root, appRoot: ".", framework: "static-html", line, keys: fakeKeys(), consentMode: "not_required", runId: IDS.run })
+    expect(result.ok && result.record?.planLineId).toBe("autoconfig_off_adopted:meta:autoconfig")
+    const after = read(root, "index.html")
+    expect(runPage(after).queue()).toEqual([["set", "autoConfig", false, IDS.meta], ["init", IDS.meta], ["track", "PageView"]])
+    expect(checkMetaAutoConfigOptOut(after, IDS.meta, "adopted").reason).toBe("opted_out_before_init")
+    // NEGATIVE: the original page queues no opt-out.
+    expect(runPage(ADOPTED_META_HTML).queue()[0]).toEqual(["init", IDS.meta])
+    // Applying it twice changes nothing more.
+    expect(applyImproveEdit({ root, appRoot: ".", framework: "static-html", line, keys: fakeKeys(), consentMode: "not_required", runId: IDS.run })).toEqual({ ok: true, record: null })
+  })
+
+  it("the PostHog /ingest rewrite in vercel.json, region from the connection; reversal removes the file it created", () => {
+    const { root, lines } = linesFor({ "index.html": ADOPTED_POSTHOG_HTML })
+    const line = lines.find((entry) => entry.target === "proxy")!
+    const eu = fakeKeys({
+      posthog: { status: "connected", projectKey: IDS.posthog, apiHost: "https://eu.i.posthog.com", ingestHost: "https://eu.i.posthog.com", uiHost: "https://eu.posthog.com", region: "eu" }
+    })
+    const result = applyImproveEdit({ root, appRoot: ".", framework: "static-html", line, keys: eu, consentMode: "not_required", runId: IDS.run })
+    expect(result.ok).toBe(true)
+    const rewrites = JSON.parse(read(root, "vercel.json")).rewrites as Array<{ source: string; destination: string }>
+    expect(rewrites.map((rewrite) => rewrite.destination)).toEqual(expect.arrayContaining([expect.stringContaining("https://eu-assets.i.posthog.com"), expect.stringContaining("https://eu.i.posthog.com")]))
+    expect(result.ok && result.record?.beforeHash).toBeNull()
+    expect(result.ok && result.record && reverseTextEdits(read(root, "vercel.json"), result.record.textEdits)).toBe("")
+  })
+
+  it("NEGATIVE: no connection and an api_host that names no region → the proxy is refused, never guessed", () => {
+    const html = ADOPTED_POSTHOG_HTML.replace("https://us.i.posthog.com", "https://analytics.acme.example")
+    const { root, lines } = linesFor({ "index.html": html }, "static-html", notConnectedKeys())
+    const line = lines.find((entry) => entry.target === "proxy")!
+    const result = applyImproveEdit({ root, appRoot: ".", framework: "static-html", line, keys: notConnectedKeys(), consentMode: "not_required", runId: IDS.run })
+    expect(result).toMatchObject({ ok: false, reason: expect.stringMatching(/region is unknown/) })
+    expect(exists(root, "vercel.json")).toBe(false)
+  })
+
+  it("NEGATIVE: an agent-owned line is never applied by code", () => {
+    const { root, lines } = linesFor({ "index.html": ADOPTED_META_HTML })
+    const guard = lines.find((entry) => entry.kind === "preview_guard_adopted")!
+    expect(applyImproveEdit({ root, appRoot: ".", framework: "static-html", line: guard, keys: fakeKeys(), consentMode: "not_required", runId: IDS.run })).toMatchObject({ ok: false })
+    expect(read(root, "index.html")).toBe(ADOPTED_META_HTML)
+  })
+
+  it("D17 on a managed PostHog is an artifact option, and only when PostHog is installed", () => {
+    expect(withSensitivePaths({ posthog: { projectKey: IDS.posthog, apiHost: "/ingest" } }, ["/account"]).posthog).toMatchObject({ sensitivePaths: ["/account"] })
+    expect(withSensitivePaths({}, ["/account"])).toEqual({})
+  })
+})

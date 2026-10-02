@@ -300,6 +300,11 @@ export class WizardInstaller implements Installer {
       const lineForTool = installLine(tool)
       if (lineForTool && approved.has(lineForTool.id) && all[tool]) (artifacts as Record<string, unknown>)[tool] = all[tool]
     }
+    // A static / Vite site served by Vercel (the hosting verb says so) gets Infinite's same-origin
+    // collect path through vercel.json — the "proven same-origin proxy" the static adapters require.
+    if (artifacts.infinite && internals.before.hosting.provider === "vercel" && (scan.framework === "static-html" || scan.framework === "vite-react")) {
+      artifacts.infinite = { ...artifacts.infinite, staticProxy: "vercel" }
+    }
     if (model.guard.emit && approved.has("preview_guard_managed")) {
       artifacts.hostGuard = { mode: "deny", exempt: [...model.guard.exempt], deny: [...model.guard.deny] }
     }

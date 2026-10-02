@@ -470,7 +470,12 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
 
   // ---- adopted providers: improve lines, linked to the candidates that need them ----
   const improveLines = scan.improve.filter((entry) => entry.kind !== "preview_guard_adopted" || guard.emit)
-  const linked = new Map<string, PlanLine>()
+  /** Lines a candidate can link to, by kind + provider + target. */
+  const linked: Array<{ kind: PlanLineKind; provider: ProviderId | null; target: string; line: PlanLine }> = []
+  const findLinked = (kind: PlanLineKind, provider: ProviderId | null, target: string): PlanLine | undefined => {
+    const sameKind = linked.filter((entry) => entry.kind === kind && (provider === null || entry.provider === provider))
+    return (sameKind.find((entry) => entry.target === target || target.startsWith(`${entry.target}`) || entry.target.startsWith(target)) ?? sameKind[0])?.line
+  }
   const share = previewShare(before.baseline)
   const automatic = automaticMetaEventsPerVisit(before)
   for (const entry of improveLines) {
@@ -496,7 +501,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       ...(measured ? { measured } : {})
     })
     lines.push(planLine)
-    linked.set(`${entry.kind}:${entry.provider}`, planLine)
+    linked.push({ kind: entry.kind, provider: entry.provider, target: entry.target, line: planLine })
   }
 
   // Duplicates and conflicts, from the census and the no-send load.
@@ -504,7 +509,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     if (finding.kind === "duplicate") {
       const planLine = line({ id: finding.id, kind: "remove_duplicate", text: finding.text, requires: "approval", ownership: "adopted" })
       lines.push(planLine)
-      linked.set(`remove_duplicate:${finding.provider}`, planLine)
+      linked.push({ kind: "remove_duplicate", provider: finding.provider, target: finding.id, line: planLine })
     } else {
       lines.push(line({ id: finding.id, kind: "user_action", text: finding.text, requires: "user_action" }))
     }
@@ -517,18 +522,18 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     if (kind === null || kind === "conversion_names" || kind === "privacy_text") continue
     if (kind === "preview_guard_adopted" && !guard.emit) continue
     const provider = candidateProvider(item)
-    const key = `${kind}:${provider ?? "any"}`
-    let target = linked.get(key) ?? (provider ? undefined : [...linked.entries()].find(([k]) => k.startsWith(`${kind}:`))?.[1])
+    const targetName = itemTarget(item) || item.jobId
+    let target = findLinked(kind, provider, targetName)
     if (!target) {
       target = line({
-        id: `${kind}:${provider ?? "site"}:${itemTarget(item) || item.jobId}`,
+        id: `${kind}:${provider ?? "site"}:${targetName}`,
         kind,
         text: item.trigger.finding,
         requires: "approval",
         ownership: "adopted"
       })
       lines.push(target)
-      linked.set(key, target)
+      linked.push({ kind, provider, target: targetName, line: target })
     }
     target.jobIds = [...new Set([...(target.jobIds ?? []), item.id])]
   }
