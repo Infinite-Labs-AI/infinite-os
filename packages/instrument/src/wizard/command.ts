@@ -332,6 +332,17 @@ async function runLocked(input: LockedRun): Promise<number> {
   let deps: WizardDeps | null = null
   /** True when this process created the state file (not a loaded or rebuilt run). */
   let freshState = false
+  /**
+   * Final verify F21: why a crashed run stopped. Written only once the UI has given the terminal back: written
+   * while the TTY UI still held the alternate screen, it vanished with that screen and the user kept only
+   * "failed" (the reason is the last thing they need).
+   */
+  let crashReason: string | null = null
+  const writeCrashReason = () => {
+    if (crashReason === null) return
+    io.stderr.write(crashReason)
+    crashReason = null
+  }
 
   // Every way out releases the lock exactly once, and only AFTER the agent tree is killed and the fence
   // snapshot is restored: `finish` is the sequence's lock-release stage, never called before it.
@@ -372,6 +383,7 @@ async function runLocked(input: LockedRun): Promise<number> {
         ])
       }
       ui.stop()
+      writeCrashReason()
       removeHandlers()
       ttyPrompter?.close()
       await lock.release()
@@ -531,10 +543,16 @@ async function runLocked(input: LockedRun): Promise<number> {
   } catch (error) {
     if (interrupt) return end(WIZARD_EXIT.interrupted)
     const prefix = error instanceof EngineInvariantError ? "Internal error (the wizard stopped itself)" : "Internal error"
-    io.stderr.write(`${prefix}: ${error instanceof Error ? error.message : String(error)}\n`)
+    crashReason = `${prefix}: ${error instanceof Error ? error.message : String(error)}\n`
     // A crash may leave an agent child mid-turn (an invariant fires exactly while one is alive): kill it
-    // and restore the snapshot BEFORE the lock is released, as on Ctrl+C.
-    await stopAndFinish(WIZARD_EXIT.failed, () => {})
+    // and restore the snapshot BEFORE the lock is released, as on Ctrl+C. `finish` writes the reason right
+    // after the UI left the full screen; if it never got there (it was already done), write it now.
+    try {
+      await stopAndFinish(WIZARD_EXIT.failed, () => {})
+    } finally {
+      ui.stop()
+      writeCrashReason()
+    }
     return WIZARD_EXIT.failed
   }
 }

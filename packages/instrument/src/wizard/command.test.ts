@@ -460,6 +460,37 @@ describe("every non-normal exit kills the agents and restores the fence BEFORE t
     expect(existsSync(lockPath(root))).toBe(false)
   })
 
+  it("F21: a crash's reason is written AFTER the UI gave the terminal back (inside the full screen it was lost), once", async () => {
+    const root = tempDir("wizard-cmd-")
+    const { io, err } = fakeIo(root)
+    const spy = fakeWiring({
+      jobs: async () => {
+        throw new Error("Infinite's cloud refused the request as invalid.")
+      }
+    })
+    const base = spy.wiring.createUi.bind(spy.wiring)
+    spy.wiring.createUi = (kind, store, uiIo) => {
+      const ui = base(kind, store, uiIo)
+      let stopped = false
+      return {
+        start: (started) => ui.start(started),
+        stop() {
+          // The TTY UI leaves the alternate screen here; anything written before it is gone with that screen.
+          if (!stopped) err.push("<the full screen is left>\n")
+          stopped = true
+          ui.stop()
+        }
+      }
+    }
+    expect(await runWizardCommand(["--json"], { io, wiring: spy.wiring, signals: fakeSignals() })).toBe(1)
+    const text = err.join("")
+    const left = text.indexOf("<the full screen is left>")
+    const reason = text.indexOf("Internal error: Infinite's cloud refused the request as invalid.")
+    expect(left).toBeGreaterThanOrEqual(0)
+    expect(reason, text).toBeGreaterThan(left)
+    expect(text.split("Internal error").length - 1).toBe(1)
+  })
+
   it("SIGINT mid-step: abort → killAll → fence abort → run.end → lock released → exit 130, in that order", async () => {
     const root = tempDir("wizard-cmd-")
     const order: string[] = []
