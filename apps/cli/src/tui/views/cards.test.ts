@@ -408,7 +408,7 @@ describe("the send card (r4 Send an email)", () => {
       [["line", "│"]],
       [["line", "│"], ["", " Pick up where you left off: store.example/back"]],
       [],
-      [["pk", " s "], ["", " "], ["b", "Send to 214 people"], ["", "   "], ["key", " 1-3 "], ["", " email   "], ["key", " n "], ["", " dismiss   "], ["key", " v "], ["", " close"]]
+      [["pk", " s "], ["", " "], ["b", "Send to 214 people"], ["", "   "], ["key", " 1-3 "], ["", " email   "], ["key", " n "], ["", " dismiss"]]
     ]);
   });
 });

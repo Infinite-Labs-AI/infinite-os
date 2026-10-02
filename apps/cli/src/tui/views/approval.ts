@@ -853,7 +853,8 @@ function appLinkLabel(view: AnswerViewV1, finishInApp: Record<string, unknown> |
 /**
  * The chips the card draws: every key the bar offers but `?` (it has its own
  * row), `o` named after the place it opens. With a document open the OK key
- * leads, then the document keys, then `n` (r4 "Viewing the email").
+ * leads, then the document keys, then `n` (r4 "Viewing the email"); `v close`
+ * stays in the key bar only, so the chips keep to one row under the page.
  */
 function cardChips(keys: readonly KeyHint[], documentOpen: boolean, openLabel: string, okKey: string | null): KeyHint[] {
   const chips = keys
@@ -867,10 +868,10 @@ function cardChips(keys: readonly KeyHint[], documentOpen: boolean, openLabel: s
     if (/^1-\d$/u.test(hint.key)) return 1;
     if (hint.key === "n") return 2;
     if (hint.key === "space") return 3;
-    if (hint.key === "v") return 100;
     return 10 + index;
   };
   return chips
+    .filter((hint) => hint.key !== "v")
     .map((hint, index) => ({ hint, rank: rank(hint, index) }))
     .sort((left, right) => left.rank - right.rank)
     .map((entry) => entry.hint);
