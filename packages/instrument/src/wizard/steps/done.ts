@@ -1,11 +1,18 @@
-// Step 12 `done` (§3d.1): "What happened". Build the before/after report from the run's three column
-// snapshots, post it to Infinite (one phase per column), comment it on the PR, PATCH the run (`proven`,
-// `checkinOptIn`), and leave the report where the outro and the exit line can find it.
+// Step 12 `done` (§3d.1): "What happened". In this order:
+// 1. PATCH `checkinOptIn` first: the 7-day check-in never depends on a later post or comment succeeding,
+//    and its due date is the cloud read the "keeps being checked" finish-line cell needs;
+// 2. build the before/after report from the run's three column snapshots and post it to Infinite (one
+//    phase per column; the echo must be this run's);
+// 3. PATCH `proven` (only after Infinite accepted the report, and only when the column proves it);
+// 4. write the report where the outro and the exit line find it, then comment it on the PR (a comment
+//    failure is reported, never fatal: everything else is already saved).
 //
 // Nothing here computes a cell: every cell was built by a column builder from typed sources; the report
 // builder re-checks each one (§3i.3, §3i.7) before anything is posted.
 import { createHash } from "node:crypto"
 import { basename, join } from "node:path"
+
+import { withFinishLineReadings } from "../report.js"
 
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { REPORT_COLUMN_IDS, REPORT_SCHEMA, SAMPLE_FLOOR_PAGE_VIEWS, type ReportColumnId, type ReportV2 } from "../contracts/report.js"
@@ -65,9 +72,28 @@ function shortDate(iso: string): string {
 }
 
 async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
-  const state = ctx.state.get()
-  const runId = state.runId
+  const runId = ctx.state.get().runId
   if (!runId) return { kind: "skipped", reason: "No Infinite run was created, so there is no report to send." }
+
+  // 1. The check-in first; its due date is the "keeps being checked" reading for the proven column.
+  const optedIn = await deps.bridge.patchRun(runId, { checkinOptIn: DEFAULT_CHECKIN_OPT_IN })
+  const due = optedIn.run.checkinDueAt
+  const proven = ctx.state.get().report.proven_live
+  if (proven) {
+    const at = deps.clock.now().toISOString()
+    const withCheckin = withFinishLineReadings(
+      "proven_live",
+      proven,
+      "keeps_being_checked",
+      [{ input: "run.checkin_due_at", state: due ? "pass" : "pending", display: due ? `7-day check-in on ${shortDate(due)}` : "7-day check-in after the deploy", at }],
+      runId
+    )
+    ctx.state.update((draft) => {
+      draft.report.proven_live = withCheckin
+    })
+    await ctx.state.save()
+  }
+  const state = ctx.state.get()
 
   const keys = deps.bridge.has("tag.keys.v1") ? await deps.bridge.keys() : null
   const site = {
@@ -114,22 +140,32 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
     ctx.emit.emit("report", { phase, report: payload })
   }
 
+  // 3. `proven` only once Infinite holds this run's report.
+  if (state.report.proven_live && proofStateFrom(state.report.proven_live) === "proven") {
+    await deps.bridge.patchRun(runId, { phase: "proven" })
+  }
+
+  // 4. The files, then the PR comment (last: a failure there loses nothing).
   const markdown = deps.report.renderMarkdown(report)
   await deps.fs.writeTextAtomic(join(ctx.root, WIZARD_REPORT_PATHS.json), `${JSON.stringify(payload, null, 2)}\n`, 0o600)
   await deps.fs.writeTextAtomic(join(ctx.root, WIZARD_REPORT_PATHS.markdown), `${markdown}\n`, 0o600)
+  ctx.emit.emit("step.sub", { step: "done", text: "✓ Report sent", tone: "ok" })
 
   const prNumber = state.pr?.number ?? null
   if (prNumber !== null && deps.host.kind === "github") {
-    const commented = await deps.host.comment(prNumber, `${markdown}\n\n<!-- infinite-tag:report v1 run=${runId} -->`)
-    if (commented && typeof commented === "object" && "unsupported" in commented) {
-      ctx.emit.emit("step.sub", { step: "done", text: "The report is in .infinite/wizard/report.md (this host has no comment API).", tone: "info" })
+    try {
+      const commented = await deps.host.comment(prNumber, `${markdown}\n\n<!-- infinite-tag:report v1 run=${runId} -->`)
+      if (commented && typeof commented === "object" && "unsupported" in commented) {
+        ctx.emit.emit("step.sub", { step: "done", text: "The report is in .infinite/wizard/report.md (this host has no comment API).", tone: "info" })
+      }
+    } catch (error) {
+      ctx.emit.emit("step.sub", {
+        step: "done",
+        text: `Could not comment the report on the PR (${error instanceof Error ? error.message : String(error)}); it is in .infinite/wizard/report.md.`,
+        tone: "warn"
+      })
     }
   }
-
-  const proven = state.report.proven_live ? proofStateFrom(state.report.proven_live) === "proven" : false
-  const run = await deps.bridge.patchRun(runId, { checkinOptIn: DEFAULT_CHECKIN_OPT_IN, ...(proven ? { phase: "proven" } : {}) })
-  const due = run.run.checkinDueAt
-  ctx.emit.emit("step.sub", { step: "done", text: "✓ Report sent", tone: "ok" })
   return {
     kind: "ok",
     status: `Report in Site Settings · 7-day check-in ${due ? `on ${shortDate(due)}` : "after the deploy"}`

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { MERGE_SHA, RUN_ID, fakeContext, fakeDeps, keysFixture, realVisitResult, receiptsAll } from "../../../test/wizard/runtime-fakes.js"
+import { MERGE_SHA, RUN_ID, fakeContext, fakeDeps, keysFixture, realVisitResult, receiptsAll, runPublic } from "../../../test/wizard/runtime-fakes.js"
 import type { ReportV2 } from "../contracts/report.js"
 import { createRunState } from "../run-state.js"
 import { buildColumn } from "../report.js"
@@ -43,7 +43,7 @@ function finishedState() {
 }
 
 describe("done", () => {
-  it("posts the report once per column phase, then PATCHes checkinOptIn (and `proven`), and says when the check-in is", async () => {
+  it("PATCHes checkinOptIn first, posts the report once per column phase, then PATCHes `proven`, and says when the check-in is", async () => {
     const bundle = fakeDeps()
     const ctx = fakeContext(finishedState(), {}, bundle.clock)
     const outcome = await step.run(ctx, bundle.deps)
@@ -53,9 +53,8 @@ describe("done", () => {
     const report = posts[0]!.args[2] as ReportV2
     expect(report).toMatchObject({ schema: "infinite-tag.report.v2", runId: RUN_ID, site: { repoLabel: "github.com/Acme/acme-store", productionHost: "www.acme-store.com" } })
     expect(report.notes).toContain(REAL_VISIT_DISCLOSURE)
-    const names = bundle.log.names("bridge")
-    expect(names.indexOf("bridge.patchRun")).toBeGreaterThan(names.lastIndexOf("bridge.postReport"))
-    expect(bundle.log.calls.find((call) => call.what === "patchRun")!.args[1]).toEqual({ checkinOptIn: true, phase: "proven" })
+    const order = bundle.log.calls.filter((call) => call.what === "patchRun" || call.what === "postReport").map((call) => (call.what === "patchRun" ? call.args[1] : `post ${call.args[1] as string}`))
+    expect(order).toEqual([{ checkinOptIn: true }, "post live_today", "post in_pr", "post proven_live", { phase: "proven" }])
     expect(ctx.events.filter((event) => event.type === "report")).toHaveLength(3)
   })
 
@@ -71,11 +70,39 @@ describe("done", () => {
     expect(files.get(`/repo/${WIZARD_REPORT_PATHS.markdown}`)).toContain("Before and after")
   })
 
-  it("negative: a stored report echoed under another run is not accepted (PROOF_INCOMPLETE) and the run is not PATCHed", async () => {
+  it("negative: a stored report echoed under another run is not accepted (PROOF_INCOMPLETE) and the run is never PATCHed as proven", async () => {
     const bundle = fakeDeps({ bridge: { reportEcho: () => ({ schema: "infinite-tag.report.v2", runId: "00000000-0000-4000-8000-000000000000" }) } })
     const outcome = await step.run(fakeContext(finishedState(), {}, bundle.clock), bundle.deps)
     expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_PROOF_INCOMPLETE" })
-    expect(bundle.log.names("bridge")).not.toContain("bridge.patchRun")
+    expect(bundle.log.calls.filter((call) => call.what === "patchRun").map((call) => call.args[1])).toEqual([{ checkinOptIn: true }])
+  })
+
+  it("a failed PR comment (gh down) is reported, never fatal: the check-in and the report are already saved (O1-15)", async () => {
+    const bundle = fakeDeps()
+    bundle.deps.host.comment = async () => {
+      throw new Error("gh: HTTP 502")
+    }
+    const ctx = fakeContext(finishedState(), {}, bundle.clock)
+    const outcome = await step.run(ctx, bundle.deps)
+    expect(outcome.kind).toBe("ok")
+    expect(bundle.log.calls.find((call) => call.what === "patchRun")!.args[1]).toEqual({ checkinOptIn: true })
+    const subs = ctx.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
+    expect(subs.some((text) => text.startsWith("Could not comment the report on the PR (gh: HTTP 502)"))).toBe(true)
+  })
+
+  it("the proven column's 'keeps being checked' reads the run's check-in date (O1-16); negative: no date yet → pending, never pass", async () => {
+    const scheduled = fakeDeps()
+    const ctx = fakeContext(finishedState(), {}, scheduled.clock)
+    await step.run(ctx, scheduled.deps)
+    const cell = ctx.current().report.proven_live!.finishLine.keeps_being_checked!
+    expect(cell).toMatchObject({ state: "pass", display: "7-day check-in on 9 Oct", provenance: { source: "cloud_read" } })
+    const posted = scheduled.log.calls.find((call) => call.what === "postReport" && call.args[1] === "proven_live")!.args[2] as ReportV2
+    expect(JSON.stringify(posted)).toContain("7-day check-in on 9 Oct")
+
+    const unscheduled = fakeDeps({ bridge: { patchRun: () => runPublic({ checkinOptIn: true, checkinDueAt: null }) } })
+    const later = fakeContext(finishedState(), {}, unscheduled.clock)
+    await step.run(later, unscheduled.deps)
+    expect(later.current().report.proven_live!.finishLine.keeps_being_checked!.state).toBe("pending")
   })
 
   it("an unproven run is never PATCHed as proven; with no proven column the report says the deploy is pending", async () => {
@@ -83,7 +110,7 @@ describe("done", () => {
     const state = finishedState()
     state.report.proven_live = null
     await step.run(fakeContext(state, {}, bundle.clock), bundle.deps)
-    expect(bundle.log.calls.find((call) => call.what === "patchRun")!.args[1]).toEqual({ checkinOptIn: true })
+    expect(bundle.log.calls.filter((call) => call.what === "patchRun").map((call) => call.args[1])).toEqual([{ checkinOptIn: true }])
     const report = bundle.log.calls.find((call) => call.what === "postReport")!.args[2] as ReportV2
     expect(report.columns.proven_live.pending).toBe("deploy")
     expect(bundle.log.calls.filter((call) => call.what === "postReport").map((call) => call.args[1])).toEqual(["live_today", "in_pr"])
