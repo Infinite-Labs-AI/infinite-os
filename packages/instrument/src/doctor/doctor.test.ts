@@ -8,6 +8,8 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { createServer, type IncomingMessage } from "node:http"
+import type { AddressInfo, Socket } from "node:net"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { FIXED_NOW, fixtureFetch, loopbackSite, type LoopbackSite } from "../../test/wizard/fixture-fetch.js"
@@ -219,6 +221,33 @@ describe("doctor command", () => {
     expect(await runDoctorCommand([...base, "--expect-meta", PIXEL], deps())).toBe(3)
     const reports = out.map((text) => JSON.parse(text) as DoctorReport)
     expect(reports.map((report) => report.exitCode)).toEqual([1, 3])
+  })
+
+  it("with no fetch override the live probes go through HTTPS_PROXY (a refusing proxy sees the CONNECT; nothing reaches the site)", async () => {
+    const connects: string[] = []
+    const proxy = createServer()
+    proxy.on("connect", (request: IncomingMessage, socket: Socket) => {
+      connects.push(String(request.url))
+      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n")
+    })
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve))
+    const saved = { https: process.env.HTTPS_PROXY, no: process.env.NO_PROXY }
+    process.env.HTTPS_PROXY = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`
+    delete process.env.NO_PROXY
+    try {
+      const root = repo({ "index.html": PAGE })
+      const { fetch: _unused, ...noFetch } = deps()
+      const code = await runDoctorCommand(["--json", "--root", root, "--url", "https://acme-store.com/", "--expect-ga4", GA4], noFetch)
+      expect(connects.length).toBeGreaterThan(0)
+      expect(connects.every((target) => target === "acme-store.com:443")).toBe(true)
+      // negative: an unreachable site is never a pass — the live cells read undetermined (exit 3)
+      expect(code).toBe(3)
+    } finally {
+      if (saved.https === undefined) delete process.env.HTTPS_PROXY
+      else process.env.HTTPS_PROXY = saved.https
+      if (saved.no !== undefined) process.env.NO_PROXY = saved.no
+      await new Promise<void>((resolve) => proxy.close(() => resolve()))
+    }
   })
 
   it("usage errors exit 2 (and --json still prints JSON)", async () => {

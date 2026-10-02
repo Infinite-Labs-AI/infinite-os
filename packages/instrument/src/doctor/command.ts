@@ -9,6 +9,7 @@ import { validateGa4MeasurementId, validatePosthogProjectKey } from "../provider
 import { INSTRUMENT_VERSION } from "../package-manager.js"
 import { DOCTOR_EXIT_CODES } from "../wizard/contracts/codes.js"
 
+import { envProxyFetch } from "../checks/live/env-proxy-fetch.js"
 import { DOCTOR_REPORT_SCHEMA, DoctorUsageError, renderDoctorText, runDoctor, type DoctorDeps, type DoctorIds, type DoctorOptions } from "./run.js"
 
 export const DOCTOR_USAGE = [
@@ -144,6 +145,8 @@ export async function runDoctorCommand(argv: readonly string[], deps: Partial<Do
       version: INSTRUMENT_VERSION,
       now: () => new Date(),
       env: process.env,
+      // The live probes honour HTTP(S)_PROXY / NO_PROXY like the wizard's (Node's fetch ignores them).
+      fetch: envProxyFetch(process.env),
       ...deps
     })
     console.log(parsed.json ? JSON.stringify(report, null, 2) : renderDoctorText(report))
