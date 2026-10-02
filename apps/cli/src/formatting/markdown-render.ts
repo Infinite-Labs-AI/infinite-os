@@ -28,6 +28,14 @@ export interface MarkdownRenderOptions {
    * For tool output, which must read exactly as the tool returned it.
    */
   plain?: boolean;
+  /**
+   * The widest this text is ever redrawn at when the window widens: unbounded
+   * (the default) for the live answer in one column; the pane's cap when the
+   * answer sits beside its details; `0` for text printed once (scrollback, a
+   * one-shot print), which a wider window never redraws. A table whose dropped
+   * columns need more than this names them `hidden`, never `widen by`.
+   */
+  widenLimit?: number;
 }
 
 const BULLETS = ["•", "◦", "▪"] as const;
@@ -193,10 +201,13 @@ function renderMarkdownTable(block: Extract<MarkdownBlock, { type: "table" }>, o
   );
   const lines = [...table.lines];
   if (table.hidden.length) {
-    // An answer's table has no `→` key: say exactly how much wider the window
-    // must be. The live turn redraws at the new width, so the words always hold.
+    // An answer's table has no `→` key: say how much wider the window must be,
+    // but only when a wider window redraws this text that wide (`widenLimit`).
     const more = Math.max(1, table.fullWidth - opts.width);
-    const hint = `+ ${table.hidden.join(", ")} · widen by ${more} ${more === 1 ? "col" : "cols"} to see`;
+    const widenable = table.fullWidth <= (opts.widenLimit ?? Number.POSITIVE_INFINITY);
+    const hint = widenable
+      ? `+ ${table.hidden.join(", ")} · widen by ${more} ${more === 1 ? "col" : "cols"} to see`
+      : `+ ${table.hidden.join(", ")} hidden`;
     lines.push(...wrapSpans([{ text: hint }], opts.width).map((spans) => paint(spans.map((span) => span.text).join(""), "muted", opts)));
   }
   return lines;

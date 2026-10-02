@@ -33,6 +33,8 @@ export { stepLabelWidth } from "./steps.js";
 /** At this width and up, the current turn's answer and details sit side by side (River, 2026-10-02). */
 export const SPLIT_MIN_COLUMNS = 120;
 export const PANE_SEPARATOR = " │ ";
+/** The answer pane's widest (28% of the window, clamped to 26–40). */
+export const ANSWER_PANE_MAX = 40;
 
 /** The answer pane is 28% of the width, clamped to 26–40 columns; the details get the rest. */
 export function paneWidths(width: number): { wide: boolean; left: number; right: number } {
@@ -40,7 +42,7 @@ export function paneWidths(width: number): { wide: boolean; left: number; right:
   if (total < SPLIT_MIN_COLUMNS) {
     return { wide: false, left: total, right: total };
   }
-  const left = Math.max(26, Math.min(40, Math.floor(total * 0.28)));
+  const left = Math.max(26, Math.min(ANSWER_PANE_MAX, Math.floor(total * 0.28)));
   return { wide: true, left, right: total - left - PANE_SEPARATOR.length };
 }
 
@@ -134,9 +136,10 @@ export function renderAnswerColumn(
   messages: readonly Msg[],
   width: number,
   theme: Theme,
-  color: boolean
+  color: boolean,
+  options: { widenLimit?: number } = {}
 ): string[] {
-  return renderTurnBody(messages, { columns: width, color, theme });
+  return renderTurnBody(messages, { columns: width, color, theme, widenLimit: options.widenLimit });
 }
 
 export interface LiveTurnInput {
@@ -255,8 +258,13 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     : [];
   const steps = input.steps?.length ? input.steps : stepsFromTrail(input.messages);
   const stepRows = stepRowLines(steps, { width, color: input.color, theme: input.theme, nowMs: input.nowMs, views: input.views });
-  const sideBySide = wide && (renders.some(inDetailsPane) || card.length > 0);
-  const answer = renderAnswerColumn(input.messages, sideBySide ? panes.left : width, input.theme, input.color);
+  const takesPane = renders.some(inDetailsPane) || card.length > 0;
+  const sideBySide = wide && takesPane;
+  // How wide a wider window redraws the answer: never for a committed turn
+  // (printed once); at most the pane's cap when split; below 120 with details,
+  // at most 119 (past it the turn splits and the answer gets narrower).
+  const widenLimit = !split ? 0 : sideBySide ? ANSWER_PANE_MAX : takesPane ? SPLIT_MIN_COLUMNS - 1 : undefined;
+  const answer = renderAnswerColumn(input.messages, sideBySide ? panes.left : width, input.theme, input.color, { widenLimit });
   const lines = layoutTurn(answer, [...renders, ...card], stepRows, width, { color: input.color, theme: input.theme }, { split });
   return { renders, lines, focusIndex, rows };
 }

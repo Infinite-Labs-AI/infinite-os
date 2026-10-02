@@ -53,8 +53,10 @@ export function renderAssistantResponsePanel(
   const theme = options.theme ?? resolveTheme();
   const columns = clampColumns(options.columns ?? 88);
   const title = options.title?.trim();
+  // Printed once: a wider window never redraws it, so a dropped column is just named.
   return answerLines(message.trim() || "No answer was produced.", columns, { color: Boolean(options.color), theme }, {
-    label: title && title !== theme.brand.name ? title : undefined
+    label: title && title !== theme.brand.name ? title : undefined,
+    widenLimit: 0
   }).join("\n");
 }
 

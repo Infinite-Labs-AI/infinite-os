@@ -85,3 +85,43 @@ describe("a committed turn keeps every message the transcript draws (one rendere
     expect(lines.some((line) => line.includes("Infinite — Acme"))).toBe(true);
   });
 });
+
+describe("an answer table never promises a widen that cannot happen", () => {
+  const rows = (note: string) => [
+    "| Campaign | Spend | Clicks | Note | CTR |",
+    "| --- | ---: | ---: | --- | ---: |",
+    `| Spring | $1,200 | 3,400 | ${note} | 2.1% |`,
+    "| Autumn | $800 | 1,900 | Steady | 1.4% |"
+  ].join("\n");
+  const turn = (note: string): Msg[] => [{ role: "user", text: "how are they doing?" }, { role: "assistant", text: rows(note) }];
+  const wide = turn("Ran longer");
+  // A Note so long the table needs more than 119 columns.
+  const wider = turn("Ran longer than planned this week because the budget was raised twice and then once more");
+  const fits = turn("Ran longer than planned this week because the budget was raised twice");
+  const card = ["┌─ card ─┐"];
+
+  it.each([160, 200])("split at %i: the answer pane never widens past 40, so a dropped column is just named", (width) => {
+    const lines = renderLiveTurn({ messages: wide, views: [], focus: null, width, color: false, theme, details: card }).lines;
+    expect(lines.some((line) => /hidden/u.test(line))).toBe(true);
+    expect(lines.some((line) => /widen by/u.test(line))).toBe(false);
+  });
+
+  it("one column under 120 with details: widening past 119 splits the turn, so only a table that fits below it says widen", () => {
+    const named = renderLiveTurn({ messages: wider, views: [], focus: null, width: 100, color: false, theme, details: card }).lines;
+    expect(named.some((line) => /widen by/u.test(line))).toBe(false);
+    expect(named.some((line) => /hidden/u.test(line))).toBe(true);
+    const widen = renderLiveTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme, details: card }).lines;
+    expect(widen).toContain("  + CTR, Note · widen by 12 cols to see");
+  });
+
+  it("one column with no details: the live turn redraws wider, so the hint says how far", () => {
+    const lines = renderLiveTurn({ messages: wider, views: [], focus: null, width: 100, color: false, theme }).lines;
+    expect(lines.some((line) => /widen by \d+ cols? to see/u.test(line))).toBe(true);
+  });
+
+  it("a committed turn is printed once: no widen hint", () => {
+    const lines = renderCommittedTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme });
+    expect(lines.some((line) => /widen by/u.test(line))).toBe(false);
+    expect(lines.some((line) => /hidden/u.test(line))).toBe(true);
+  });
+});
