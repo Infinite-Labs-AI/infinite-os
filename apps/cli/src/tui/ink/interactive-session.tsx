@@ -270,6 +270,13 @@ export interface InkInteractiveSessionAppProps {
   initialMessages?: readonly Msg[];
   /** Write cards already waiting when the session opens (tests draw a card with it). */
   initialPendingConfirmations?: readonly InSessionConfirmationAction[];
+  /**
+   * The key focus the session opens in, over views and a card already there
+   * (a restored screen; the r4 goldens draw `view-02` on its flagged row and
+   * `flow-email-02` with the emails open): the selected row, and the head
+   * card's documents open. Absent = the defaults.
+   */
+  initialFocus?: { selected?: number; documentOpen?: boolean };
   onRememberInput?: (line: string) => void;
   /**
    * Run one submitted line. `signal` aborts when the user stops the turn (Esc,
@@ -469,6 +476,7 @@ export function InkInteractiveSessionApp({
   initialInputHistory = [],
   initialMessages = [],
   initialPendingConfirmations = [],
+  initialFocus,
   onRememberInput,
   onSubmitLine,
   onConfirmAction,
@@ -536,11 +544,21 @@ export function InkInteractiveSessionApp({
   const [explainOpen, setExplainOpen] = useState(false);
   // A head card WITH an approval view keeps its own key state (views/approval.ts):
   // `?`, the open document, its tab and page, and the field answers so far.
-  const [cardUi, setCardUi] = useState<CardUiState>(CARD_UI_START);
+  const [cardUi, setCardUi] = useState<CardUiState>(() =>
+    initialFocus?.documentOpen && initialPendingConfirmations.length ? { ...CARD_UI_START, documentOpen: true } : CARD_UI_START);
+  // The opening focus applies to the first head card only.
+  const initialDocumentOpen = useRef(initialFocus?.documentOpen === true);
   // The latest finished turn's answer views keep their keys (j/k, 1–9, →, m, ?)
   // until the next line is submitted (views/focus.ts). The views themselves live
   // in the turn store (`turnState.views`), cleared when the turn commits.
-  const [viewFocus, setViewFocus] = useState<ViewFocusState | null>(null);
+  // Views already on the turn when the session opens take their keys, like a
+  // finished turn's (on the opening selection, when given).
+  const [viewFocus, setViewFocus] = useState<ViewFocusState | null>(() => {
+    const views = getTurnState().views;
+    if (!views.length) return null;
+    const focus = viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS);
+    return typeof initialFocus?.selected === "number" ? { ...focus, selected: initialFocus.selected } : focus;
+  });
   const viewFocusRef = useRef(viewFocus);
   viewFocusRef.current = viewFocus;
   // The rows the live turn was last drawn to, so the turn commits to scrollback
@@ -770,6 +788,13 @@ export function InkInteractiveSessionApp({
   useLayoutEffect(() => {
     setExplainOpen(false);
     setCardUi(cardUiStart(headConfirmAction));
+  }, [headConfirmAction]);
+  // The opening focus (`initialFocus.documentOpen`) opens the first head card's documents, once.
+  useLayoutEffect(() => {
+    if (initialDocumentOpen.current && headConfirmAction) {
+      setCardUi((ui) => ({ ...ui, documentOpen: true }));
+    }
+    initialDocumentOpen.current = false;
   }, [headConfirmAction]);
   // The head card drawn from its approval view (an old desktop sends none: the
   // summary + details card and `y Confirm` stay). Its key context is the one the

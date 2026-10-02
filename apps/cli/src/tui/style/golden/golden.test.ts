@@ -42,6 +42,7 @@ import { decodeAnswerView } from "../../../desktop/answer-view-decode.js";
 import { homeInventoryData } from "../../../index.js";
 import { resolveTheme } from "../../theme.js";
 import { transcriptColumns } from "../../ink/transcript-app.js";
+import { viewFocusAfterTurnDone } from "../../views/focus.js";
 import { renderLiveTurn } from "../../views/layout.js";
 import { ansiToSegmentLines } from "./ansi-to-segments.js";
 import { firstProblem, GoldenEvaluator, REGION_SCREENS, type Evaluation, type EvaluatorTier } from "./evaluate.js";
@@ -185,10 +186,15 @@ describe("Ink bridge: the session prints renderLiveTurn's rows unchanged", () =>
     it(id, () => {
       const fixture = loadR4Fixture(id.slice("bridge/".length));
       const turn = fixture.turn!;
+      // The session opens on the fixture's selection (feed-focus.ts): draw the pure turn on it too.
+      const views = recordedViews(turn);
+      const opening = typeof turn.focus?.selected === "number" && views.length
+        ? { ...viewFocusAfterTurnDone(views), selected: turn.focus.selected }
+        : null;
       const pure = ansiToSegmentLines(renderLiveTurn({
         messages: turnMessages(turn),
-        views: recordedViews(turn),
-        focus: null,
+        views,
+        focus: opening,
         width: transcriptColumns(BRIDGE_COLS),
         color: true,
         theme: resolveTheme()
