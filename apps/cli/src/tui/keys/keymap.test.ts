@@ -176,7 +176,7 @@ describe("keyBarHints", () => {
 
   it("a card shows its named OK key with the card's verb, then n dismiss", () => {
     expect(keyBarHints(card({ okLabel: "Pause" }))).toEqual([
-      { key: "p", label: "Pause" },
+      { key: "p", label: "Pause", ok: true },
       { key: "n", label: "dismiss" }
     ]);
   });
@@ -206,14 +206,14 @@ describe("keyBarHints", () => {
 
   it("a send card offers v view before its OK key; an open document offers its tabs and pages", () => {
     expect(formatKeyBar(keyBarHints(card({ okKey: "s", okLabel: "Send to 200 people", card: { view: true } }))))
-      .toBe("v view   s Send to 200 people   n dismiss");
+      .toBe(" v  view    s  Send to 200 people    n  dismiss    tab  switch side    /  commands");
     expect(formatKeyBar(keyBarHints(card({
       okKey: "s", okLabel: "Send to 200 people", card: { view: true, viewOpen: true, tabs: 3, page: true }
-    })))).toBe("v close   s Send to 200 people   n dismiss   1-3 switch   space next page");
+    })))).toBe(" v  close    s  Send to 200 people    n  dismiss    1-3  switch    space  next page    tab  switch side    /  commands");
     // terminal-r4 names what the tabs are: `1-3 email`.
     expect(formatKeyBar(keyBarHints(card({
       okKey: "s", okLabel: "Send to 200 people", card: { view: true, viewOpen: true, tabs: 3, tabNoun: "email" }
-    })))).toBe("v close   s Send to 200 people   n dismiss   1-3 email");
+    })))).toBe(" v  close    s  Send to 200 people    n  dismiss    1-3  email    tab  switch side    /  commands");
   });
 
   it("e and c show only when the card says they work", () => {
@@ -221,31 +221,32 @@ describe("keyBarHints", () => {
     expect(keyBarHints(card()).map((h) => h.key)).not.toContain("c");
     const keys = keyBarHints(card({ okKey: "y", okLabel: "Confirm", card: { edit: true, copy: true } }));
     expect(keys).toEqual([
-      { key: "y", label: "Confirm" },
+      { key: "y", label: "Confirm", ok: true },
       { key: "n", label: "dismiss" },
       { key: "e", label: "edit in the app" },
       { key: "c", label: "copy" }
     ]);
   });
 
-  it("a running turn shows esc stop, the one key that works in the composer then", () => {
+  it("a running turn shows esc stop first, once, then the keys the bar always ends with (D6)", () => {
     expect(keyBarHints({ focus: "composer", busy: true, okKey: null, caps: NO_CAPS }))
       .toEqual([{ key: "esc", label: "stop" }]);
     expect(formatKeyBar(keyBarHints({ focus: "composer", busy: true, okKey: null, caps: NO_CAPS })))
-      .toBe("esc stop");
+      .toBe(" esc  stop    tab  switch side    /  commands");
   });
 
-  it("the idle composer shows no bar", () => {
+  it("the idle composer has no keys of its own; the bar still ends with tab and /", () => {
     expect(keyBarHints({ focus: "composer", busy: false, okKey: null, caps: NO_CAPS })).toEqual([]);
+    expect(formatKeyBar([])).toBe(" tab  switch side    /  commands");
   });
 
-  it("formats, scrubs and counts the bar rows at the given width", () => {
+  it("formats and scrubs the bar, which is one row at every width (cut, never wrapped)", () => {
     const hints = keyBarHints(card({ okLabel: "Pause\u001b[2J‮", explain: true }));
     const line = formatKeyBar(hints);
-    expect(line).toBe("p Pause   n dismiss   ? what it does");
+    expect(line).toBe(" p  Pause    n  dismiss    ?  what it does    tab  switch side    /  commands");
     expect(keyBarRowCount(hints, 80)).toBe(1);
-    expect(keyBarRowCount([], 80)).toBe(0);
-    expect(keyBarRowCount(hints, 10)).toBeGreaterThan(1);
+    expect(keyBarRowCount([], 80)).toBe(1);
+    expect(keyBarRowCount(hints, 10)).toBe(1);
   });
 });
 

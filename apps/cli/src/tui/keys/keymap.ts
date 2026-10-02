@@ -9,9 +9,10 @@
 // in lowercase only (a capital letter starts a message). Enter and Esc never
 // approve or decline (Esc stops a running turn, nothing else).
 import type { Key } from "ink";
-import wrapAnsi from "wrap-ansi";
 
 import { terminalText } from "../../desktop/terminal-text.js";
+import { paintSegments, truncSegments, type StyledSegment } from "../lib/styled-segments.js";
+import type { Theme } from "../theme.js";
 
 export type FocusKind = "composer" | "card" | "rows" | "document";
 
@@ -57,7 +58,21 @@ export interface CardKeys {
   edit?: boolean;
 }
 
-export interface KeyHint { key: string; label: string }
+export interface KeyHint {
+  key: string;
+  label: string;
+  /** The card's OK key: an amber chip and a bold label (terminal-r4 `PK`), always first among the card's decisions. */
+  ok?: boolean;
+}
+
+/**
+ * The keys the bar always ends with (terminal-r4): `tab` switches between the
+ * answer and its details, `/` starts a command.
+ */
+export const ALWAYS_KEY_HINTS: readonly KeyHint[] = [
+  { key: "tab", label: "switch side" },
+  { key: "/", label: "commands" }
+];
 
 /** Keys with one meaning everywhere, so a card's verb can never claim them. */
 export const RESERVED_KEYS: ReadonlySet<string> = new Set([
@@ -153,13 +168,15 @@ export function resolveKey(input: string, key: Key, ctx: KeyContext): KeyAction 
 }
 
 /**
- * The key bar: only what works right now. A card offers its named OK key with
- * the card's own verb, then `n dismiss`, then `o`/`w`/`r` when their capability
- * is present, then `?` when there is an explanation. The composer shows
- * `esc stop` while a turn runs (`busy` means a STOPPABLE turn: Esc resolves to
- * stop exactly then) and no bar when idle. The rows and document hints of a
- * finished turn's views come from `views/focus.ts` (`viewKeyHints`), from the
- * same facts its key resolver uses.
+ * The state's keys for the bar: only what works right now. A card offers its
+ * named OK key with the card's own verb, then `n dismiss`, then `o`/`w`/`r`
+ * when their capability is present, then `?` when there is an explanation.
+ * The composer offers `esc stop` while a turn runs (`busy` means a STOPPABLE
+ * turn: Esc resolves to stop exactly then), first and once, and nothing of
+ * its own when idle. The rows and document hints of a finished turn's views
+ * come from `views/focus.ts` (`viewKeyHints`), from the same facts its key
+ * resolver uses. The bar itself always ends with `tab switch side` and
+ * `/ commands` (`keyBarSegments`).
  */
 export function keyBarHints(ctx: KeyContext): KeyHint[] {
   if (ctx.focus === "composer") {
@@ -172,7 +189,7 @@ export function keyBarHints(ctx: KeyContext): KeyHint[] {
   const card = ctx.card ?? {};
   if (card.view) hints.push({ key: "v", label: card.viewOpen ? "close" : "view" });
   if (ctx.okKey !== null) {
-    hints.push({ key: ctx.okKey, label: ctx.okLabel ?? "approve" });
+    hints.push({ key: ctx.okKey, label: ctx.okLabel ?? "approve", ok: true });
   }
   hints.push({ key: "n", label: "dismiss" });
   const tabs = cardTabs(card);
@@ -193,18 +210,62 @@ function cardTabs(card: CardKeys): number {
   return Math.max(0, Math.min(9, tabs));
 }
 
-/** The bar as one plain line; every label is scrubbed before it reaches the TTY. */
-export function formatKeyBar(hints: readonly KeyHint[]): string {
-  return hints.map((hint) => `${hint.key} ${terminalText(hint.label)}`).join("   ");
+/**
+ * The hints the bar draws, in order: the state's own keys (each key once, the
+ * first meaning wins), then always `tab switch side` and `/ commands`.
+ */
+export function keyBarShownHints(hints: readonly KeyHint[]): KeyHint[] {
+  const always = new Set(ALWAYS_KEY_HINTS.map((hint) => hint.key));
+  const seen = new Set<string>();
+  const shown: KeyHint[] = [];
+  for (const hint of hints) {
+    if (always.has(hint.key) || seen.has(hint.key)) {
+      continue;
+    }
+    seen.add(hint.key);
+    shown.push(hint);
+  }
+  return [...shown, ...ALWAYS_KEY_HINTS];
 }
 
-/** Rows the bar takes at `width`, wrapped the way Ink's `wrap="wrap"` does. */
-export function keyBarRowCount(hints: readonly KeyHint[], width: number): number {
-  if (hints.length === 0) {
-    return 0;
-  }
-  return wrapAnsi(formatKeyBar(hints), Math.max(1, width), { trim: false, hard: true }).split("\n").length;
+/**
+ * The bar as styled segments (terminal-r4 `K()` / `PK()`): each key a chip
+ * (` k ` on the key grey; the OK key amber, its label bold), one space, the
+ * label, three spaces to the next key. Every label is scrubbed before it
+ * reaches the TTY. Not cut to a width.
+ */
+export function keyBarSegments(hints: readonly KeyHint[]): StyledSegment[] {
+  const shown = keyBarShownHints(hints);
+  return shown.flatMap((hint, index): StyledSegment[] => {
+    const key = terminalText(hint.key);
+    const label = terminalText(hint.label);
+    const gap = index < shown.length - 1 ? "   " : "";
+    return hint.ok
+      ? [["pk", ` ${key} `], ["", " "], ["b", label], ["", gap]]
+      : [["key", ` ${key} `], ["", ` ${label}${gap}`]];
+  });
 }
+
+/** The bar's text with no colour (chips keep their padding): what a reader or a test sees. */
+export function formatKeyBar(hints: readonly KeyHint[]): string {
+  return keyBarSegments(hints).map(([, text]) => text).join("");
+}
+
+/**
+ * The key bar, the session's LAST row: one row, cut to `width` with `…` on
+ * the key that does not fit (later keys dropped), painted at the theme's tier.
+ */
+export function keyBarLine(hints: readonly KeyHint[], width: number, theme: Theme): string {
+  return paintSegments(truncSegments(keyBarSegments(hints), Math.max(1, Math.floor(width))), theme);
+}
+
+/** Rows the bar takes: always one (it is cut to the width, never wrapped). */
+export function keyBarRowCount(_hints: readonly KeyHint[], _width: number): number {
+  return KEY_BAR_ROWS;
+}
+
+/** The key bar is one row at every width. */
+export const KEY_BAR_ROWS = 1;
 
 /** The structural slice of a pending confirmation the keymap reads. */
 export interface PendingCardKeySource {
