@@ -76,12 +76,15 @@ describe("package.json shape", () => {
     expect(scripts["prepack"]).toContain("tsconfig.build.json")
   })
 
-  it("postinstall explains that package install is not instrumentation yet", () => {
+  it("postinstall explains that package install is not instrumentation yet, and points at the wizard", () => {
     const pkg = readJson(packageJsonPath)
     const scripts = pkg["scripts"] as Record<string, string>
     expect(scripts["postinstall"]).toEqual(expect.any(String))
     expect(scripts["postinstall"]).toContain("infinite-tag installed")
-    expect(scripts["postinstall"]).toContain("npx infinite-tag install")
+    expect(scripts["postinstall"]).toContain("Next: run npx infinite-tag in your website repo.")
+    expect(scripts["postinstall"]).toContain("Package install alone does not wire analytics.")
+    // The wizard needs no workspace id: the old `install --workspace <workspace-id>` pointer is gone.
+    expect(scripts["postinstall"]).not.toContain("--workspace")
   })
 
   it('exports["."] starts with "./dist/"', () => {
