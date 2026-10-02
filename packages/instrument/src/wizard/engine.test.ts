@@ -169,6 +169,32 @@ describe("runWizard: resume", () => {
     expect(ran).toEqual(["rehearsal", "merge", "prove", "done"])
     expect(ran).not.toContain("jobs")
   })
+
+  it("§3d.6: a MERGED pull request resumes at merge — link re-attaches, nothing before merge re-runs even with a changed hash or a failed review", async () => {
+    const root = tempRoot()
+    const first = await setup({ root })
+    await first.run(
+      fakeSteps(
+        {
+          review: async () => ({ kind: "failed", code: "INF_WIZ_REVIEW_UNPARSEABLE", message: "unreadable", next: "continue" }),
+          merge: async () => ({ kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: "waiting", resumeHint: "merge" })
+        },
+        []
+      )
+    )
+    const second = await setup({ root })
+    const ran: WizardStepId[] = []
+    const result = await second.run(fakeSteps({}, ran, { link: "per-process", keys: "new", rehearsal: "new-head-sha" }), { resumeAt: "merge" })
+    expect(ran).toEqual(["link", "merge", "prove", "done"])
+    expect(result.exitCode).toBe(0)
+    expect(result.events.filter((event) => event.resumedSkip).map((event) => event.step)).toEqual(["agent", "before", "keys", "plan", "install", "jobs", "settings", "rehearsal", "review"])
+    expect(result.events.find((event) => event.step === "review")?.outcome).toEqual({ kind: "skipped", reason: "The pull request is already merged." })
+    // negative: without resumeAt the changed hashes and the failed review run again
+    const third = await setup({ root })
+    const again: WizardStepId[] = []
+    await third.run(fakeSteps({}, again, { link: "per-process-2", keys: "newer", rehearsal: "newer-head" }))
+    expect(again).toEqual(expect.arrayContaining(["link", "keys", "rehearsal", "review"]))
+  })
 })
 
 describe("runWizard: the engine invariant (§3a.9.4)", () => {

@@ -172,6 +172,12 @@ export interface EngineOptions {
   /** The step a resume starts from (for `run.start`). */
   resumedFrom?: WizardStepId | null
   /**
+   * §3d.6: a resumed run whose pull request is already MERGED jumps to this step (`merge`, which records the
+   * merge commit and hands over to `prove`). Every earlier step that ran before is skipped, except `link`
+   * (every process re-attaches its link): nothing re-commits, re-opens a pull request or re-reviews it.
+   */
+  resumeAt?: WizardStepId | null
+  /**
    * The fence's snapshot restore (lane O3). After a budget overrun the engine kills the agents, waits for
    * the step to settle (at most `settleMs`), then restores the snapshot, so the run never moves on (or
    * releases its lock) while an overrun step is still writing.
@@ -301,8 +307,13 @@ export async function runWizard(ctx: WizardContext, rawDeps: WizardDeps, options
     const hash = step.inputHash(ctx)
     const previous = ctx.state.get().steps[id]
 
-    if (previous?.outcome === "ok" && previous.inputHash === hash) {
-      const outcome: StepOutcome = { kind: "skipped", reason: "Done in an earlier run; its inputs are unchanged." }
+    const beforeResumePoint =
+      options.resumeAt != null && id !== "link" && previous !== undefined && WIZARD_STEP_IDS.indexOf(id) < WIZARD_STEP_IDS.indexOf(options.resumeAt)
+    if ((previous?.outcome === "ok" && previous.inputHash === hash) || beforeResumePoint) {
+      const outcome: StepOutcome = {
+        kind: "skipped",
+        reason: previous?.outcome === "ok" && previous.inputHash === hash ? "Done in an earlier run; its inputs are unchanged." : "The pull request is already merged."
+      }
       ctx.emit.emit("step.start", { step: id })
       ctx.emit.emit("step.done", { step: id, outcome: "skipped", reason: outcome.reason })
       const event = { step: id, outcome, resumedSkip: true }

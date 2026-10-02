@@ -19,6 +19,7 @@ import { WIZARD_EXIT, exitCodeFor } from "./contracts/codes.js"
 import type { RunStateAccessor, WizardContext, WizardDeps, WizardOptions } from "./contracts/deps.js"
 import type { ReportV2 } from "./contracts/report.js"
 import type { WizardRunState } from "./contracts/state.js"
+import type { WizardStepId } from "./contracts/steps.js"
 import { createWizardAsks, readAnswersFile, type AnswersFile, type TtyPrompter } from "./asks.js"
 import { openDevTtyPrompter } from "./dev-tty.js"
 import { rebuildFromPrMarker } from "./fresh-machine.js"
@@ -415,9 +416,11 @@ async function runLocked(input: LockedRun): Promise<number> {
     if (!resuming && options.resume) io.stderr.write("There is no unfinished run to resume here; starting a fresh one.\n")
 
     // §3d.6: a resumed run whose pull request was CLOSED (not merged) cannot go on; offer a fresh run.
-    // (A merged PR resumes at `merge`, which records the merge commit and hands over to `prove`.)
+    // A merged PR resumes at `merge`, which records the merge commit and hands over to `prove`.
+    let resumeAt: WizardStepId | null = null
     if (resuming && state.pr?.number !== undefined && state.pr.number !== null) {
       const pr = await deps.host.readPr(state.pr.number)
+      if (!("unsupported" in pr) && pr.state === "MERGED") resumeAt = "merge"
       if (!("unsupported" in pr) && pr.state === "CLOSED") {
         const yes = await asks.askUserOnly("confirm", {
           question: `The pull request #${pr.number} of this run was closed without merging. Start a fresh run? The closed run is kept aside.`,
@@ -462,7 +465,8 @@ async function runLocked(input: LockedRun): Promise<number> {
     const result = await runWizard(ctx, deps, {
       ...(wiring.engine ?? {}),
       ...(wiring.fenceAbort ? { fenceAbort: () => wiring.fenceAbort!() } : {}),
-      resumedFrom: resuming ? firstOpenStep(state) : null
+      resumedFrom: resumeAt ?? (resuming ? firstOpenStep(state) : null),
+      resumeAt
     })
     return await end(result.exitCode)
   } catch (error) {
