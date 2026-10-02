@@ -9,7 +9,7 @@
 //
 // Every path in a snapshot is REPO-ROOT relative and POSIX (`apps/web/app/layout.tsx`), so allowlists
 // are monorepo-safe (§3e.2). The snapshot never holds `.env*` files: nothing here reads them.
-import { readFileSync, readdirSync, statSync } from "node:fs"
+import { lstatSync, readFileSync, readdirSync } from "node:fs"
 import { join, posix } from "node:path"
 
 import { SCAN_MAX_FILE_BYTES, SCAN_MAX_FILES, SCAN_SKIPPED_DIRECTORIES, walkSourceFiles } from "../harness/scan.js"
@@ -58,10 +58,11 @@ export function repoPath(appRoot: string, appRelativePath: string): string {
   return appRoot === "." || appRoot === "" ? appRelativePath : posix.join(appRoot, appRelativePath)
 }
 
+/** A regular file only: `lstat`, so a symbolic link (to anywhere, inside the repo or not) is never read. */
 function readSmallFile(absolutePath: string): string | null {
   try {
-    const stats = statSync(absolutePath)
-    if (!stats.isFile() || stats.size > SCAN_MAX_FILE_BYTES) return null
+    const stats = lstatSync(absolutePath)
+    if (stats.isSymbolicLink() || !stats.isFile() || stats.size > SCAN_MAX_FILE_BYTES) return null
     return readFileSync(absolutePath, "utf8")
   } catch {
     return null

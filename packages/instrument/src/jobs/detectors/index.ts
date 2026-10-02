@@ -14,11 +14,13 @@ import { detectLayout, type LayoutFinding } from "./layout.js"
 import { detectConversionElements, detectOutcomes, type ConversionElementFinding, type OutcomeFinding } from "./outcomes.js"
 import { detectPrivacyPages, type PrivacyPageFinding } from "./privacy-page.js"
 import { detectRedirects, type RedirectFinding } from "./redirects.js"
-import { detectServerMount, type ServerMountFinding } from "./server-mount.js"
+import { detectMiddlewareFiles, detectServerMount, type ServerMountFinding } from "./server-mount.js"
 import { isNonProductPath, routePathOf, type Finding } from "./shared.js"
 
 export interface StaticDetections {
   serverMount: ServerMountFinding[]
+  /** The request middleware / proxy files (wired or not). */
+  middleware: string[]
   layout: LayoutFinding[]
   outcomes: OutcomeFinding[]
   conversionElements: ConversionElementFinding[]
@@ -40,12 +42,22 @@ export interface JobScan extends ScanResult {
 
 const PAGE_PRIORITY = [/^\/pricing$/, /^\/(?:sign-?up|register|get-started|start)$/, /^\/(?:demo|book|contact)/, /^\/(?:checkout|download)/, /^\/(?:features|product|about)/]
 
+/** An HTML file the site serves as a page: anything on a static-HTML site, else only `public/` and the root entry. */
+function isServedHtml(path: string, appRoot: string, framework: string | null): boolean {
+  if (framework === null || framework === "static-html") return true
+  const relative = appRoot === "." ? path : path.slice(appRoot.length + 1)
+  const withoutSrc = relative.startsWith("src/") ? relative.slice(4) : relative
+  return withoutSrc.startsWith("public/") || withoutSrc === "index.html"
+}
+
 /** Static, file-routed pages, most conversion-relevant first, then by path. */
-export function detectPages(snapshot: RepoSnapshot): string[] {
+export function detectPages(snapshot: RepoSnapshot, framework: string | null = null): string[] {
   const routes = new Set<string>()
   for (const path of snapshot.files.keys()) {
     if (isNonProductPath(path)) continue
-    if (/(?:^|\/)route\.[cm]?[jt]s$/.test(path) || /(?:^|\/)pages\/api\//.test(path)) continue
+    if (/\.html?$/i.test(path) && !isServedHtml(path, snapshot.appRoot, framework)) continue
+    // Route handlers (any extension) and API routes are not pages: the dry load never GETs them.
+    if (/(?:^|\/)route\.[cm]?[jt]sx?$/.test(path) || /(?:^|\/)pages\/api\//.test(path)) continue
     const route = routePathOf(path, snapshot.appRoot)
     if (route === null || route.includes("[") || route.startsWith("/api/") || route === "/api") continue
     routes.add(route)
@@ -63,6 +75,7 @@ export function detectStatic(snapshot: RepoSnapshot, framework: string): StaticD
   const countedPaths = outcomes.map((finding) => finding.route).filter((route): route is string => route !== null)
   return {
     serverMount: detectServerMount(snapshot),
+    middleware: detectMiddlewareFiles(snapshot),
     layout: detectLayout(snapshot, framework),
     outcomes,
     conversionElements: detectConversionElements(snapshot),
@@ -73,7 +86,7 @@ export function detectStatic(snapshot: RepoSnapshot, framework: string): StaticD
     fbcWriters: detectFbcWriters(snapshot),
     metaBrowserStandardEvents: detectMetaBrowserStandardEvents(snapshot),
     cmp: detectCmp(snapshot),
-    pages: detectPages(snapshot)
+    pages: detectPages(snapshot, framework)
   }
 }
 
@@ -90,10 +103,8 @@ export function scanForJobs(scan: ScanResult): JobScan {
   return jobScanFrom(scan, loadRepoSnapshot(scan.root, scan.appRoot))
 }
 
-/** A JobScan carries `snapshot` + `detections`; a bare ScanResult does not (a programming error). */
-export function assertJobScan(scan: ScanResult): asserts scan is JobScan {
+/** True when the scan already carries the snapshot and the detections. */
+export function isJobScan(scan: ScanResult): scan is JobScan {
   const candidate = scan as Partial<JobScan>
-  if (!candidate.snapshot || !candidate.detections) {
-    throw new Error("JobRegistry needs a JobScan (ScanResult + snapshot + detections); build it with scanForJobs(scan)")
-  }
+  return Boolean(candidate.snapshot && candidate.detections)
 }

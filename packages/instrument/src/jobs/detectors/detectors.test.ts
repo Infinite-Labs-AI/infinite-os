@@ -59,18 +59,23 @@ describe("shared helpers", () => {
 })
 
 describe("server-mount (job 1)", () => {
-  it("finds an Express entry and an unwired Next middleware", () => {
-    const found = detectServerMount(
-      snap({
-        "server.js": "import express from 'express'\nconst app = express()\napp.get('/', h)\napp.listen(3000)\n",
-        "middleware.ts": "import { NextResponse } from 'next/server'\nexport function middleware(req) {\n  return NextResponse.next()\n}\n"
-      })
-    )
+  const PLAIN_MIDDLEWARE = "import { NextResponse } from 'next/server'\nexport function middleware(req) {\n  return NextResponse.next()\n}\n"
+  const NARROW_MIDDLEWARE = "import { NextResponse } from 'next/server'\nexport function middleware(req) {\n  return NextResponse.next()\n}\nexport const config = { matcher: ['/dashboard/:path*'] }\n"
+
+  it("finds an Express entry and a middleware the installer's patcher refuses (narrow matcher)", () => {
+    const found = detectServerMount(snap({ "server.js": "import express from 'express'\nconst app = express()\napp.get('/', h)\napp.listen(3000)\n", "middleware.ts": NARROW_MIDDLEWARE }))
     expect(found.map((finding) => [finding.file, finding.kind, finding.runtime])).toEqual([
       ["middleware.ts", "existing_middleware", "next_middleware"],
       ["server.js", "node_server_entry", "express"]
     ])
     expect(found.find((finding) => finding.file === "server.js")?.line).toBe(2)
+    expect(found.find((finding) => finding.file === "middleware.ts")?.unpatchableReason).toMatch(/matcher/)
+  })
+
+  it("never sends the agent into a middleware the installer patches itself (negative: a plain patchable middleware)", () => {
+    expect(detectServerMount(snap({ "middleware.ts": PLAIN_MIDDLEWARE }))).toEqual([])
+    // It is still a middleware file (job 13 may move counted paths into it).
+    expect(detectStatic(snap({ "middleware.ts": PLAIN_MIDDLEWARE }), "next-app-router").middleware).toEqual(["middleware.ts"])
   })
 
   it("ignores a middleware that already carries the server-lane fence, and an express() in a test", () => {
@@ -255,6 +260,13 @@ describe("privacy-page (job 14)", () => {
     ])
   })
 
+  it("counts only tool-specific phrases as naming a tool (review P3-4)", () => {
+    const [vague] = detectPrivacyPages(snap({ "app/privacy/page.tsx": "<p>Our feed uses infinite scroll. Follow us on Facebook.</p>" }))
+    expect([vague!.names.infinite, vague!.names.meta]).toEqual([false, false])
+    const [named] = detectPrivacyPages(snap({ "app/privacy/page.tsx": "<p>We use Infinite analytics and the Meta Pixel.</p>" }))
+    expect([named!.names.infinite, named!.names.meta]).toEqual([true, true])
+  })
+
   it("ignores a privacy-named component that is not a page", () => {
     expect(detectPrivacyPages(snap({ "components/privacy-toggle.tsx": "export function T() {}", "app/terms/page.tsx": "terms" }))).toEqual([])
   })
@@ -361,6 +373,16 @@ describe("adopted tags (jobs 3, 5, 7)", () => {
     ])
   })
 
+  it("a localhost-only host check is not a preview guard; a preview-suffix or production-host check is (review P2-9)", () => {
+    const ga = (guard: string) =>
+      detectUnguardedAdoptedInits(snap({ "app/ga.tsx": `export function GA() {\n  ${guard}\n  gtag('config', 'G-1')\n}\n` }), census([{ tool: "ga4", kind: "gtag_config", id: "G-1", file: "app/ga.tsx", line: 3 }])).length
+    expect(ga("if (window.location.hostname === 'localhost') return null")).toBe(1)
+    expect(ga("if (location.host === '127.0.0.1:3000') return")).toBe(1)
+    expect(ga("if (location.hostname.endsWith('.vercel.app')) return null")).toBe(0)
+    expect(ga("if (window.location.hostname !== 'www.acme-store.com') return null")).toBe(0)
+    expect(ga("if (process.env.NEXT_PUBLIC_VERCEL_ENV !== 'production') return null")).toBe(0)
+  })
+
   it("does not report an init whose file it cannot read, nor a managed init", () => {
     const managed = census([{ tool: "ga4", kind: "gtag_config", id: "G-1", file: "app/layout.tsx", line: 2, owner: "managed" }])
     expect(detectUnguardedAdoptedInits(snap(files), managed)).toEqual([])
@@ -385,5 +407,12 @@ describe("static detection pass", () => {
     const files = { "app/pricing/page.tsx": "<a href='/signup'>Go</a>", "app/page.tsx": "", "app/api/signup/route.ts": "await supabase.auth.signUp({})", "app/blog/[slug]/page.tsx": "" }
     expect(detectStatic(snap(files), "next-app-router")).toEqual(detectStatic(snap({ ...files }), "next-app-router"))
     expect(detectPages(snap(files))).toEqual(["/pricing", "/"])
+  })
+
+  it("never dry-loads a route handler or an HTML file the app does not serve (review P3-5)", () => {
+    const files = { "app/page.tsx": "", "app/feed/route.tsx": "export function GET() {}", "app/og/route.jsx": "export function GET() {}", "emails/welcome.html": "<html></html>", "public/landing.html": "<html></html>" }
+    expect(detectPages(snap(files), "next-app-router")).toEqual(["/", "/landing"])
+    // A static-HTML site serves its HTML files as pages.
+    expect(detectPages(snap({ "index.html": "", "about/index.html": "" }), "static-html")).toEqual(["/about", "/"])
   })
 })

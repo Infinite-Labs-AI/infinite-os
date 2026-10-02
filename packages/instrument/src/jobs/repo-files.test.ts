@@ -66,6 +66,14 @@ describe("loadRepoSnapshot", () => {
     expect(paths.join("\n")).not.toMatch(/\.env|node_modules|\.next|dist\//)
   })
 
+  it("never follows a symlinked host config or manifest out of the repo (review P3-1, probe P-S)", () => {
+    const outside = repo({ "vercel.json": JSON.stringify({ redirects: [{ source: "/a", destination: "/b" }] }), "package.json": "{}" })
+    const root = repo({ "app/page.tsx": "export default function P() {}\n" })
+    symlinkSync(join(outside, "vercel.json"), join(root, "vercel.json"))
+    symlinkSync(join(outside, "package.json"), join(root, "package.json"))
+    expect([...loadRepoSnapshot(root, ".").files.keys()]).toEqual(["app/page.tsx"])
+  })
+
   it("feeds the detectors through scanForJobs", () => {
     const root = repo({ "app/api/signup/route.ts": "export async function POST() {\n  await supabase.auth.signUp({ email })\n}\n" })
     const scan = scanForJobs({ root, appRoot: ".", framework: "next-app-router", packageManager: "npm", fileCount: 1, truncated: false })

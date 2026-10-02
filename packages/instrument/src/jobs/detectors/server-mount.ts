@@ -3,9 +3,12 @@
 //
 // - A Node server entry (Express, Fastify, Koa, Hono's `serve`, `http.createServer`) has no safe,
 //   reversible place to patch: the lane must be mounted BEFORE the routes and the static handler.
-// - An existing Next.js / Vercel middleware (or Next 16 `proxy.ts`) that does not carry the
-//   `infinite-tag:server-lane` fence needs `withInfiniteServerLane` wired in so every HTML document
-//   passes. A fenced one is already wired and is NOT a finding.
+// - An existing Next.js / Vercel middleware (or Next 16 `proxy.ts`) is a finding ONLY when the
+//   installer's own patcher refuses it (`patchExistingMiddleware` → `unpatchable`: a narrow or
+//   unreadable matcher, a re-export, an unrecognised export shape, a partial install). A middleware the
+//   installer patches itself (code job) and one that already carries the `infinite-tag:server-lane`
+//   fence are NOT findings: the agent is never sent into a file the installer wires (R2 review P1-4).
+import { patchExistingMiddleware } from "../../server-lane/middleware-patch.js"
 import type { RepoSnapshot } from "../repo-files.js"
 import { codeMatches, isCodeFile, isNonProductPath, sortFindings, type Finding } from "./shared.js"
 
@@ -17,6 +20,8 @@ export type ServerRuntime = "express" | "fastify" | "koa" | "hono" | "node_http"
 export interface ServerMountFinding extends Finding {
   kind: ServerMountKind
   runtime: ServerRuntime
+  /** `existing_middleware` only: why the installer's patcher refused the file. */
+  unpatchableReason?: string
 }
 
 const SERVER_ENTRY_PATTERNS: Array<{ runtime: ServerRuntime; pattern: RegExp; requires?: RegExp }> = [
@@ -35,6 +40,19 @@ function middlewareRuntime(path: string, appRoot: string): ServerRuntime | null 
   return null
 }
 
+/** Pure: the app's request middleware / Next 16 proxy files (job 13 moves counted paths into it). */
+export function detectMiddlewareFiles(snapshot: RepoSnapshot): string[] {
+  const out: string[] = []
+  for (const [path, text] of snapshot.files) {
+    if (isNonProductPath(path) || !isCodeFile(path)) continue
+    const runtime = middlewareRuntime(path, snapshot.appRoot)
+    if (runtime === "next_middleware" || (runtime === "next_proxy" && PROXY_HANDLER.test(text))) out.push(path)
+  }
+  return out.sort()
+}
+
+const PROXY_HANDLER = /export\s+(?:async\s+)?function\s+proxy\b|export\s+const\s+config\b|from\s+["']next\/server["']/
+
 /** Pure: the mount points the server lane would need by hand. */
 export function detectServerMount(snapshot: RepoSnapshot): ServerMountFinding[] {
   const findings: ServerMountFinding[] = []
@@ -43,10 +61,20 @@ export function detectServerMount(snapshot: RepoSnapshot): ServerMountFinding[] 
     const runtime = middlewareRuntime(path, snapshot.appRoot)
     if (runtime) {
       // Next 16's `proxy.ts` is only the request proxy when it exports one (a plain `proxy.ts` helper is not).
-      const isRequestHandler = runtime === "next_middleware" || /export\s+(?:async\s+)?function\s+proxy\b|export\s+const\s+config\b|from\s+["']next\/server["']/.test(text)
+      const isRequestHandler = runtime === "next_middleware" || PROXY_HANDLER.test(text)
       if (isRequestHandler && !text.includes(SERVER_LANE_FENCE_START)) {
+        // The installer patches this file itself unless its patcher refuses: only a refusal is a job.
+        const verdict = patchExistingMiddleware(text, { moduleImportPath: "./lib/infinite-server-lane" })
+        if (verdict.kind !== "unpatchable") continue
         const exported = codeMatches(text, /export\s+(?:default\s+)?(?:async\s+)?function\b|export\s+default\b|export\s+const\s+(?:middleware|proxy)\b/g)[0]
-        findings.push({ file: path, line: exported?.line ?? 1, detail: `${runtime === "next_proxy" ? "proxy" : "middleware"} without the server-lane wiring`, kind: "existing_middleware", runtime })
+        findings.push({
+          file: path,
+          line: exported?.line ?? 1,
+          detail: `${runtime === "next_proxy" ? "proxy" : "middleware"} the installer cannot wire by itself`,
+          kind: "existing_middleware",
+          runtime,
+          unpatchableReason: verdict.reason
+        })
       }
       continue
     }

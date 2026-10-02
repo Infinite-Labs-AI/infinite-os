@@ -31,12 +31,15 @@ import type { TestTool } from "../wizard/contracts/test-engine.js"
 import { buildAllow, unionAllow, type AllowSpec } from "./allow.js"
 import { buildBrief, type BriefFacts } from "./briefs.js"
 import {
+  capturesPageviewManually,
   detectAdoptedPosthogConfig,
-  detectUnguardedAdoptedInits
+  detectUnguardedAdoptedInits,
+  posthogCountsNavigations
 } from "./detectors/adopted-tags.js"
 import { detectDuplicates } from "./detectors/duplicates.js"
-import { assertJobScan, type JobScan } from "./detectors/index.js"
-import { repoPath } from "./repo-files.js"
+import { isJobScan, scanForJobs, type JobScan } from "./detectors/index.js"
+import { approvedConversionNames, approvedPrivacyText, boundConversionNames } from "./plan-data.js"
+import { repoPath, type RepoSnapshot } from "./repo-files.js"
 import { applyResults } from "./state-machine.js"
 
 // ---------------------------------------------------------------------------------------------
@@ -63,10 +66,13 @@ export function itemTarget(item: Pick<ChecklistItem, "id">): string {
  * The plan line kind a candidate needs before it is seeded, or null when it needs none (it is still
  * dropped if a line naming it is declined). Job 5's line depends on the target: the mirror wiring is an
  * `improve_additive` line, retiring a host-only `_fbc` writer is `retire_fbc_writer`, and the capture
- * beside an adopted pixel is `capture_beside_adopted_pixel` (§3e.1 job 5 "e.g.").
+ * beside an adopted pixel is `capture_beside_adopted_pixel` (§3e.1 job 5 "e.g."). Job 1 mounts the
+ * server lane, so it needs the approved `server_lane` line: declining the lane drops it (review P1-4).
  */
 export function requiredLineKind(item: Pick<ChecklistItem, "id" | "jobId">): PlanLineKind | null {
   switch (item.jobId) {
+    case "server_lane_mount":
+      return "server_lane"
     case "posthog_improve":
     case "ga4_improve":
       return "improve_additive"
@@ -102,11 +108,38 @@ const SPA_FRAMEWORKS: ReadonlySet<string> = new Set(["next-app-router", "next-pa
 /** Third-party hosts a tag needs through the CSP. */
 const TAG_HOSTS = /(?:^|\.)(?:googletagmanager\.com|google-analytics\.com|analytics\.google\.com|posthog\.com|facebook\.net|facebook\.com|doubleclick\.net)$/i
 
-function checksFromTable(jobId: JobId, framework: string): ChecklistItem["checks"] {
+/**
+ * The checks that verify ONE item. JOB_TABLE lists every check a job's items may need; an item carries
+ * only the ones about its own target, so no item waits forever on a check that is never run for it
+ * (`preview_guard:ga4` on Meta's host matrix) or fails on someone else's work (review P2-4).
+ */
+const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) => readonly string[] | null>> = {
+  posthog_improve: (target, framework) =>
+    target === "proxy"
+      ? ["S:posthog_config", ...(framework.startsWith("next") ? ["S:next_rewrites_exact"] : []), "RH:posthog_via_proxy_once", "PV:posthog_distinct_id_receipt"]
+      : ["S:posthog_config", "PV:posthog_distinct_id_receipt"],
+  ga4_improve: (target) => (target === "id" ? ["T1:ga4_loader_id", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"] : ["RH:ga4_one_page_view", "PV:ga4_seen_leaving"]),
+  meta_improve: (target) =>
+    target === "retire_fbc_writer"
+      ? ["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"]
+      : ["S:meta_event_id_from_helper", "T1:meta_traffic_permissions", "RH:meta_pixel_once", "PV:meta_seen_leaving"],
+  duplicates_remove: (target) => {
+    const tool = target.startsWith("ga4") ? "ga4" : target.startsWith("posthog") ? "posthog" : target.startsWith("meta") ? "meta" : null
+    const census = tool === "ga4" ? "S:census_ga4_config_once" : tool === "posthog" ? "S:census_posthog_init_once" : tool === "meta" ? "S:census_meta_init_once" : null
+    return ["S:census_one_per_tool", ...(census ? [census] : []), "RH:one_beacon_per_tool", "PV:one_beacon_per_tool"]
+  },
+  preview_guard: (target) =>
+    target === "meta"
+      ? ["S:adopted_init_guarded", "T0:host_matrix", "RH:preview_self_silent", "T1:meta_host_matrix"]
+      : ["S:adopted_init_guarded", "T0:host_matrix", "RH:preview_self_silent"]
+}
+
+function checksFor(jobId: JobId, target: string, framework: string): ChecklistItem["checks"] {
   const clickTier: CheckTier = T0_CLICK_FRAMEWORKS.has(framework) ? "T0" : "RH"
-  return JOB_TABLE[jobId].checks
-    .filter((spec) => spec.checkId !== "click_test" || spec.tier === clickTier)
-    .map((spec) => ({ id: spec.checkId, tier: spec.tier, state: "not_run" as const }))
+  const table = JOB_TABLE[jobId].checks.filter((spec) => spec.checkId !== "click_test" || spec.tier === clickTier)
+  const chosen = TARGET_CHECKS[jobId]?.(target, framework)
+  const specs = chosen ? table.filter((spec) => chosen.includes(`${spec.tier}:${spec.checkId}`)) : table
+  return specs.map((spec) => ({ id: spec.checkId, tier: spec.tier, state: "not_run" as const }))
 }
 
 interface CandidateInput {
@@ -130,7 +163,7 @@ function makeItem(input: CandidateInput, framework: string): ChecklistItem {
     owner: "agent",
     trigger: { finding: input.finding, evidence: dedupeEvidence(input.evidence) },
     allow: input.allow,
-    checks: checksFromTable(input.jobId, framework),
+    checks: checksFor(input.jobId, input.target, framework),
     state: blockedReason ? "blocked" : "pending"
   }
   if (blockedReason) item.blockedReason = blockedReason
@@ -216,7 +249,10 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
     out.push({
       jobId: "server_lane_mount",
       target: pathSlug(finding.file),
-      finding: finding.kind === "existing_middleware" ? `Your ${finding.detail}` : `A ${finding.detail} needs the server lane mounted by hand`,
+      finding:
+        finding.kind === "existing_middleware"
+          ? `Your ${finding.detail}: ${finding.unpatchableReason ?? "the installer refused to patch it"}`
+          : `A ${finding.detail} needs the server lane mounted by hand`,
       evidence: fileEvidence([finding]),
       allow: allow([finding.file, ...serverLaneModulePaths(scan)])
     })
@@ -257,7 +293,8 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
         allow: allow(posthogFiles)
       })
     }
-    const notHistory = posthogConfigs.filter((config) => config.capturePageview !== "history_change")
+    const manualPageview = capturesPageviewManually(scan.snapshot)
+    const notHistory = posthogConfigs.filter((config) => !posthogCountsNavigations(config, manualPageview))
     if (SPA_FRAMEWORKS.has(framework) && notHistory.length > 0) {
       out.push({
         jobId: "posthog_improve",
@@ -336,7 +373,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
       target: duplicate.target,
       finding: duplicate.detail,
       evidence: duplicate.evidence,
-      allow: allow(duplicate.evidence.flatMap((entry) => ("file" in entry ? [entry.file] : [])))
+      allow: allow(duplicate.editFiles)
     })
   }
 
@@ -458,7 +495,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
       target: "counted_paths",
       finding: "A host-level redirect answers before the server lane on a counted path",
       evidence: fileEvidence(covering),
-      allow: allow([...filesOf(covering), ...filesOf(d.serverMount.filter((finding) => finding.kind === "existing_middleware"))])
+      allow: allow([...filesOf(covering), ...d.middleware])
     })
   }
 
@@ -485,10 +522,26 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
 // Approvals
 // ---------------------------------------------------------------------------------------------
 
-/** §3e.7 `applyApprovals`, as a pure function. */
+/**
+ * Plan-wide decision lines: one line covers every candidate of its kind, so a line of that kind with NO
+ * `jobIds` still governs them (O7's `server_lane` line names no items; declining it must still drop job 1).
+ * A line that does list `jobIds` governs only those.
+ */
+const PLAN_WIDE_KINDS: ReadonlySet<PlanLineKind> = new Set(["server_lane", "conversion_names", "privacy_text"])
+
+/**
+ * §3e.7 `applyApprovals`, as a pure function.
+ * - A candidate named by a declined line is dropped.
+ * - A candidate whose job needs a line kind is kept only under a line of that kind: unanswered →
+ *   `blocked:needs_you`; no such line → never seeded.
+ * - Jobs 8 and 10 are kept only for a conversion type the user approved a NAME for (review P1-5): a type
+ *   with no bound approved name is dropped, whatever the line says. Job 14 needs the approved paragraph.
+ */
 export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: PlanModel, approvals: PlanApprovals): ChecklistItem[] {
   const declined = new Set(approvals.declined)
   const approved = new Set(approvals.approved)
+  const conversionNames = approvedConversionNames(plan, approvals)
+  const privacyText = approvedPrivacyText(plan, approvals)
   const out: ChecklistItem[] = []
   for (const candidate of candidates) {
     const lines = plan.lines.filter((line) => line.jobIds?.includes(candidate.id))
@@ -496,11 +549,17 @@ export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: Pla
     const kind = requiredLineKind(candidate)
     const item = JSON.parse(JSON.stringify(candidate)) as ChecklistItem
     if (kind !== null) {
-      const relevant = lines.filter((line) => line.kind === kind)
+      let relevant = lines.filter((line) => line.kind === kind)
+      if (relevant.length === 0 && PLAN_WIDE_KINDS.has(kind)) relevant = plan.lines.filter((line) => line.kind === kind && (line.jobIds?.length ?? 0) === 0)
       if (relevant.length === 0) continue
+      if (relevant.some((line) => declined.has(line.id))) continue
       if (!relevant.some((line) => approved.has(line.id))) {
         item.state = "blocked"
         item.blockedReason = "needs_you"
+      } else if (kind === "conversion_names" && boundConversionNames(itemTarget(candidate), conversionNames).length === 0) {
+        continue
+      } else if (kind === "privacy_text" && privacyText === null) {
+        continue
       }
     }
     out.push(item)
@@ -513,15 +572,37 @@ export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: Pla
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The wizard's own detector for one item, against a FRESH JobScan of the edited tree. It agrees with
- * `not_needed` only when the trigger is gone. A job whose trigger is live or check-based (CSP,
- * redirects, setup checks, builds, review comments, the census-based provider jobs) cannot be
- * re-checked statically, so the wizard never agrees there: the item stays open with its evidence.
+ * The files of this item the agent's turn changed: a recorded edit on the item (lane O3's fence), or an
+ * allowlisted file whose text differs from the tree the item was seeded from.
  */
-export function reverifyNotNeededIn(item: ChecklistItem, scan: JobScan): { agrees: boolean; evidence: Evidence[] } {
+function changedItemFiles(item: ChecklistItem, scan: JobScan, seed: RepoSnapshot | null): string[] {
+  const allowed = new Set([...item.allow.files, ...item.allow.create])
+  const changed = new Set<string>((item.edits ?? []).map((edit) => edit.file))
+  if (seed) {
+    for (const file of allowed) {
+      if (seed.files.get(file) !== scan.snapshot.files.get(file)) changed.add(file)
+    }
+  }
+  return [...changed].sort()
+}
+
+/**
+ * The wizard's own detector for one item, against a FRESH JobScan of the edited tree. It agrees with
+ * `not_needed` only when the trigger is gone AND the agent did not change this item's own files: a
+ * trigger the agent deleted is work, and goes through `claimed` and the checks (review P2-3). A job whose
+ * trigger is live or check-based (CSP, redirects, setup checks, builds, review comments, the census-based
+ * provider jobs) cannot be re-checked statically, so the wizard never agrees there: the item stays open
+ * with its evidence.
+ */
+export function reverifyNotNeededIn(item: ChecklistItem, scan: JobScan, seed: RepoSnapshot | null = null): { agrees: boolean; evidence: Evidence[] } {
   const d = scan.detections
   const target = itemTarget(item)
-  const fresh = (evidence: Evidence[]) => ({ agrees: evidence.length === 0, evidence })
+  const changed = changedItemFiles(item, scan, seed)
+  const fresh = (evidence: Evidence[]) => {
+    if (evidence.length > 0) return { agrees: false, evidence }
+    if (changed.length > 0) return { agrees: false, evidence: changed.map((file) => ({ file, line: 1 })) }
+    return { agrees: true, evidence }
+  }
   switch (item.jobId) {
     case "server_lane_mount":
       return fresh(fileEvidence(d.serverMount.filter((finding) => pathSlug(finding.file) === target)))
@@ -553,29 +634,55 @@ export interface JobRegistryOptions {
    * run id is a programming error, so the registry throws instead of writing one.
    */
   briefFacts(): BriefFacts | null
+  /**
+   * The merge / deploy-ready time of this run's PR, once known (null before). A production reading (T1,
+   * PV) taken before it never proves an item (review P2-2). Absent = only the item's claim bounds it.
+   */
+  liveSince?(): string | null
 }
 
 /** The union of the run's agent allowlists (jobs 15 and 16 work inside it; widening = ASK). */
-export function unionAllowedFiles(items: readonly ChecklistItem[]): AllowSpec {
+export function unionAllowedFiles(items: readonly ChecklistItem[], cmpFiles: readonly string[]): AllowSpec {
   return unionAllow(
     items.filter((item) => item.owner === "agent").map((item) => item.allow),
-    []
+    cmpFiles
   )
 }
 
-/** Lane O8's `JobRegistry`. */
-export function createJobRegistry(options: JobRegistryOptions): JobRegistry {
+/** A JobScan as is, or built from a bare ScanResult by reading the tree (bounded, read-only). */
+export function toJobScan(scan: ScanResult): JobScan {
+  return isJobScan(scan) ? scan : scanForJobs(scan)
+}
+
+/** Lane O8's `JobRegistry`, plus the CMP files the run's allowlists are filtered against. */
+export interface O8JobRegistry extends JobRegistry {
+  /** The CMP / banner files of the latest scan this registry saw (never an agent's to touch). */
+  cmpFiles(): string[]
+}
+
+/**
+ * Lane O8's `JobRegistry`. `seedCandidates` and `reverifyNotNeeded` take F0's ScanResult: a JobScan is
+ * used as is, a bare ScanResult is scanned (review P1-3). The registry remembers, in memory, the tree it
+ * seeded from (to tell a deleted trigger from a vanished one) and the CMP files (so every re-filter keeps
+ * them out, review P3-2). A resumed process re-learns the CMP files on its first scan; `item.edits`
+ * stands in for the seed tree there.
+ */
+export function createJobRegistry(options: JobRegistryOptions): O8JobRegistry {
+  let seedSnapshot: RepoSnapshot | null = null
+  let cmpFiles: string[] = []
   return {
     seedCandidates(scan: ScanResult, beforeFacts: BeforeFacts): ChecklistItem[] {
-      assertJobScan(scan)
-      return seedCandidatesFrom(scan, beforeFacts)
+      const jobScan = toJobScan(scan)
+      seedSnapshot = jobScan.snapshot
+      cmpFiles = [...jobScan.detections.cmp.files]
+      return seedCandidatesFrom(jobScan, beforeFacts)
     },
     applyApprovals(candidates, plan, approvals) {
       return applyApprovalsTo(candidates, plan, approvals)
     },
     allowedFiles(item) {
-      // Re-filtered through the global deny every time: a stored list can never widen past it.
-      return buildAllow(item.allow.files, item.allow.create, [])
+      // Re-filtered through the global deny and the CMP files every time: a stored list can never widen past them.
+      return buildAllow(item.allow.files, item.allow.create, cmpFiles)
     },
     brief(items) {
       const facts = options.briefFacts()
@@ -586,11 +693,16 @@ export function createJobRegistry(options: JobRegistryOptions): JobRegistry {
       return item.checks.filter((check) => check.tier === tier).map((check) => ({ tier: check.tier, checkId: check.id }))
     },
     apply(items, results, runId) {
-      return items.map((item) => applyResults(item, results, runId, { budgetLeft: true }).item)
+      const liveSince = options.liveSince?.() ?? null
+      return items.map((item) => applyResults(item, results, runId, { budgetLeft: true, liveSince }).item)
     },
     reverifyNotNeeded(item, scan) {
-      assertJobScan(scan)
-      return reverifyNotNeededIn(item, scan)
+      const jobScan = toJobScan(scan)
+      for (const file of jobScan.detections.cmp.files) if (!cmpFiles.includes(file)) cmpFiles.push(file)
+      return reverifyNotNeededIn(item, jobScan, seedSnapshot)
+    },
+    cmpFiles() {
+      return [...cmpFiles]
     }
   }
 }

@@ -21,8 +21,17 @@ export interface DuplicateFinding {
   /** The item target (`ga4_gtag`, `posthog_init`, `meta_init:<id>`, …). */
   target: string
   evidence: Evidence[]
+  /**
+   * The files the job may edit: the owner that GOES only. GTM + gtag → the hand-written gtag's files
+   * (never the Tag Manager snippet; GTM edits are never the agent's job); managed + adopted → the site's
+   * own copy (never Infinite's managed block); a repeated init → every file holding it.
+   */
+  editFiles: string[]
   detail: string
 }
+
+const filesOf = (entries: readonly CensusEntry[]): string[] => [...new Set(entries.map((entry) => entry.file))].sort()
+const at = (entries: readonly CensusEntry[]): string => evidenceOf(entries).map((entry) => ("file" in entry ? `${entry.file}:${entry.line}` : "")).join(", ")
 
 const INIT_KINDS: ReadonlySet<CensusEntry["kind"]> = new Set(["gtag_config", "posthog_init", "fbq_init", "next_google_analytics", "react_ga", "managed_block"])
 const SHORT_KIND: Record<TestTool, string> = { ga4: "ga4_config", posthog: "posthog_init", meta: "meta_init", infinite: "infinite_init" }
@@ -83,7 +92,8 @@ export function detectDuplicates(census: CensusResult, dryLive: TestResult | nul
         id,
         target: `${SHORT_KIND[tool]}:${id}`,
         evidence: evidenceOf(group),
-        detail: `${id} is set up ${group.length} times`
+        editFiles: filesOf(group),
+        detail: `${id} is set up ${group.length} times (${at(group)})`
       })
     }
     // managed_and_adopted.
@@ -96,7 +106,8 @@ export function detectDuplicates(census: CensusResult, dryLive: TestResult | nul
         id: null,
         target: `${tool}_managed_adopted`,
         evidence: evidenceOf([...managed, ...adopted]),
-        detail: `${tool} is installed by Infinite and by the site`
+        editFiles: filesOf(adopted),
+        detail: `${tool} is installed by Infinite (${at(managed)}) and by the site (${at(adopted)}); remove the site's copy, keep Infinite's`
       })
     }
   }
@@ -108,13 +119,15 @@ export function detectDuplicates(census: CensusResult, dryLive: TestResult | nul
     for (const id of ids) {
       if (maxPageViewsPerLoad(dryLive, id) < 2) continue
       const load = dryLive.loads[0]
+      const gtags = handGtags.filter((entry) => entry.id === id)
       findings.push({
         kind: "gtm_and_gtag",
         tool: "ga4",
         id,
         target: ids.length === 1 ? "ga4_gtag" : `ga4_gtag:${id}`,
-        evidence: [...evidenceOf([...gtm, ...handGtags.filter((entry) => entry.id === id)]), ...(load ? [{ url: load.url }] : [])],
-        detail: `Tag Manager and a hand-written gtag both send ${id} (2 page views per visit in the live test)`
+        evidence: [...evidenceOf([...gtm, ...gtags]), ...(load ? [{ url: load.url }] : [])],
+        editFiles: filesOf(gtags),
+        detail: `Tag Manager (${at(gtm)}) and a hand-written gtag (${at(gtags)}) both send ${id} (2 page views per visit in the live test); remove the hand-written gtag, keep Tag Manager`
       })
     }
   }

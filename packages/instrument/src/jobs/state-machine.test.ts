@@ -23,6 +23,9 @@ function item(jobId: JobId, state: ChecklistItem["state"] = "pending"): Checklis
   }
 }
 
+const CLAIM_AT = "2026-10-02T08:45:00.000Z"
+const claimedAt = (base: ChecklistItem, at: string): ChecklistItem => ({ ...base, claim: { status: "done", note: "", at } })
+
 const result = (checkId: string, tier: CheckTier, state: CheckResult["state"], runId: string | null = RUN): CheckResult => ({ checkId, tier, state, at: AT, runId })
 const never = () => {
   throw new Error("reverify must not run for this claim")
@@ -81,7 +84,7 @@ describe("checks decide (§3e.5)", () => {
   })
 
   it("proven requires every live check to pass with THIS run's id", () => {
-    const waiting = item("posthog_improve", "waiting_deploy")
+    const waiting = claimedAt(item("posthog_improve", "waiting_deploy"), CLAIM_AT)
     const ours = applyResults(waiting, [result("posthog_via_proxy_once", "RH", "pass"), result("posthog_distinct_id_receipt", "PV", "pass")], RUN, { budgetLeft: true })
     expect(ours.item.state).toBe("proven")
     // Negative: another run's receipt (and a run-less result) never proves.
@@ -90,6 +93,51 @@ describe("checks decide (§3e.5)", () => {
     expect(theirs.item.checks.find((check) => check.id === "posthog_distinct_id_receipt")?.state).toBe("not_run")
     const runless = applyResults(waiting, [result("posthog_via_proxy_once", "RH", "pass", null), result("posthog_distinct_id_receipt", "PV", "pass", null)], RUN, { budgetLeft: true })
     expect(runless.item.state).toBe("waiting_deploy")
+  })
+
+  it("a stored pass from an older run never proves a resumed item (review P2-2, probe P-H)", () => {
+    const resumed = claimedAt(item("posthog_improve", "waiting_deploy"), CLAIM_AT)
+    resumed.checks = resumed.checks.map((check) => ({ ...check, state: "pass" as const, at: AT, runId: OTHER_RUN }))
+    expect(applyResults(resumed, [], RUN, { budgetLeft: true }).item.state).toBe("waiting_deploy")
+    // Positive: the same checks passed in THIS run do prove it.
+    const ours = { ...resumed, checks: resumed.checks.map((check) => ({ ...check, runId: RUN })) }
+    expect(applyResults(ours, [], RUN, { budgetLeft: true }).item.state).toBe("proven")
+  })
+
+  it("a production reading taken before the change could be live never proves it (review P2-2, probe P-G)", () => {
+    const claimed = { ...claimedAt(item("redirect_utms", "claimed"), CLAIM_AT), edits: [{ editId: "edit_1", file: "vercel.json" }] }
+    // `before`'s own redirect walk ran at 08:30, before the claim at 08:45.
+    const early = applyResults(claimed, [{ ...result("redirect_walk", "T1", "pass"), at: "2026-10-02T08:30:00.000Z" }], RUN, { budgetLeft: true })
+    expect(early.item.state).toBe("waiting_deploy")
+    expect(early.item.checks[0]!.state).toBe("not_run")
+    // After the claim but before the deploy (liveSince): still not counted.
+    const preDeploy = applyResults(early.item, [result("redirect_walk", "T1", "pass")], RUN, { budgetLeft: true, liveSince: "2026-10-02T10:00:00.000Z" })
+    expect(preDeploy.item.state).toBe("waiting_deploy")
+    // After the deploy: proven.
+    const after = applyResults(early.item, [{ ...result("redirect_walk", "T1", "pass"), at: "2026-10-02T10:05:00.000Z" }], RUN, { budgetLeft: true, liveSince: "2026-10-02T10:00:00.000Z" })
+    expect(after.item.state).toBe("proven")
+    // No claim and no deploy time: no lower bound, so a production reading never counts.
+    const unclaimed = item("redirect_utms", "waiting_deploy")
+    expect(applyResults(unclaimed, [result("redirect_walk", "T1", "pass")], RUN, { budgetLeft: true }).item.state).toBe("waiting_deploy")
+  })
+
+  it("job 10 waits for a real event only after its click test passes; a failing click test sends it back (review P2-1)", () => {
+    const claimed = claimedAt(item("conversions_to_tools", "claimed"), CLAIM_AT)
+    expect(claimed.checks.map((check) => `${check.tier}:${check.id}`)).toEqual(["RH:click_test", "S:no_fbq_standard_on_click"])
+    const local = applyResults(claimed, [result("no_fbq_standard_on_click", "S", "pass")], RUN, { budgetLeft: true })
+    // Negative: the click test has not run, so it is not "waiting for a real event".
+    expect(local.item.state).toBe("done_in_code")
+    const failed = applyResults(local.item, [result("click_test", "RH", "problem")], RUN, { budgetLeft: true })
+    expect(failed.item.state).toBe("pending")
+    expect(failed.note).toContain("RH:click_test")
+    expect(applyResults(local.item, [result("click_test", "RH", "problem")], RUN, { budgetLeft: false }).item.state).toBe("failed")
+    const passed = applyResults(local.item, [result("click_test", "RH", "pass")], RUN, { budgetLeft: true })
+    expect(passed.item.state).toBe("waiting_real_event")
+  })
+
+  it("a failing rehearsal check on a deploy-bound item sends it back too", () => {
+    const waiting = claimedAt(item("posthog_improve", "waiting_deploy"), CLAIM_AT)
+    expect(applyResults(waiting, [result("posthog_via_proxy_once", "RH", "problem")], RUN, { budgetLeft: true }).item.state).toBe("pending")
   })
 
   it("jobs 8 and 9 wait for a real event after the code is done", () => {

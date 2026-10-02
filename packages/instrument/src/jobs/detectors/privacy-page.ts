@@ -15,11 +15,15 @@ export interface PrivacyPageFinding extends Finding {
 const PRIVACY_PATH = /(?:^|\/|[-_(])(?:privacy(?:-policy)?|datenschutz|confidentialite|cookie-policy|cookies-policy)(?:[-_.)/]|$)/i
 const PAGE_FILE = /\.(?:[cm]?[jt]sx?|mdx?|html?|astro|vue|svelte)$/i
 
+/**
+ * Tool-specific phrases only: "infinite scroll" does not disclose Infinite's analytics, and a "Follow us
+ * on Facebook" link does not disclose the Meta pixel (review P3-4).
+ */
 const TOOL_NAMES: Record<TestTool, RegExp> = {
   ga4: /google analytics|\bga4\b|googletagmanager/i,
   posthog: /posthog/i,
-  meta: /\bmeta pixel\b|facebook pixel|\bmeta platforms\b|\bfacebook\b/i,
-  infinite: /\binfinite\b/i
+  meta: /\bmeta pixel\b|facebook pixel|\bmeta platforms\b|\bmeta conversions api\b|facebook conversions api/i,
+  infinite: /\binfinite (?:analytics|tag)\b|\binfinite-tag\b|\binfinite\.(?:fast|inc)\b/i
 }
 
 /** Pure: privacy pages (routed pages, HTML and Markdown), first line of each. */

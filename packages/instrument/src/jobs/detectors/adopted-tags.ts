@@ -27,8 +27,30 @@ const GUARDABLE_KINDS: Record<GuardableTool, ReadonlyArray<CensusEntry["kind"]>>
   meta: ["fbq_init"]
 }
 
-const GUARD_EVIDENCE =
-  /\blocation\s*\.\s*(?:hostname|host)\b|\bdocument\s*\.\s*location\s*\.\s*host|infiniteHostGuard|__infiniteHostAllowed|data-infinite-host-guard|\bVERCEL_ENV\b\s*[!=]==?\s*["'`]production["'`]|["'`]production["'`]\s*[!=]==?\s*[\w.]*VERCEL_ENV\b|\bisProductionHost\s*\(/
+/**
+ * A guard is evidence that PREVIEWS are excluded, not merely that the code looks at the host: the
+ * wizard's own guard markers, a production-only env gate, or a host check that names a preview host
+ * suffix (host-deny-v1) or compares the host with a real (dotted, non-local) production host. A
+ * `location.hostname === 'localhost'` check alone keeps previews firing, so it is NOT a guard
+ * (review P2-9).
+ */
+const GUARD_MARKERS =
+  /infiniteHostGuard|__infiniteHostAllowed|data-infinite-host-guard|(?:\b|_)VERCEL_ENV\b\s*[!=]==?\s*["'`]production["'`]|["'`]production["'`]\s*[!=]==?\s*[\w.]*VERCEL_ENV\b|\bisProductionHost\s*\(/
+const HOST_READ = /\blocation\s*\.\s*(?:hostname|host)\b/
+/** host-deny-v1's preview suffixes (`contracts/host-deny-v1.json`). */
+const PREVIEW_SUFFIX = /\.vercel\.app|\.netlify\.app|\.pages\.dev/
+const LOCAL_HOST = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[?::1\]?)$|\.(?:localhost|local)$/i
+const QUOTED_HOST = /["'`]((?:[a-z0-9-]+\.)+[a-z]{2,})["'`]/gi
+
+function hostCheckExcludesPreviews(window: string): boolean {
+  if (!HOST_READ.test(window)) return false
+  if (PREVIEW_SUFFIX.test(window)) return true
+  for (const match of window.matchAll(QUOTED_HOST)) {
+    const host = match[1]!.toLowerCase()
+    if (!LOCAL_HOST.test(host) && !/\.(?:js|ts|tsx|jsx|mjs|json|html|css)$/.test(host)) return true
+  }
+  return false
+}
 
 /** How many lines above an init a guard may sit (the enclosing `if` / early return). */
 export const GUARD_WINDOW_LINES = 15
@@ -37,7 +59,7 @@ function isGuarded(text: string, line: number): boolean {
   const lines = text.split("\n")
   const from = Math.max(0, line - 1 - GUARD_WINDOW_LINES)
   const window = lines.slice(from, line).join("\n")
-  return GUARD_EVIDENCE.test(window)
+  return GUARD_MARKERS.test(window) || hostCheckExcludesPreviews(window)
 }
 
 /** Pure: adopted inits with no host guard, one per (tool, file). */
@@ -64,6 +86,31 @@ export interface AdoptedPosthogConfig extends Finding {
   uiHost: string | null
   /** `api_host` points at PostHog's own host (or is unset), so ad blockers drop the requests. */
   sendsDirect: boolean
+  /** `defaults: '<date>'` (a defaults date of 2025-05-24 or later already captures history changes). */
+  defaults: string | null
+}
+
+/** PostHog's `defaults` date from which `capture_pageview` follows history changes. */
+export const POSTHOG_HISTORY_DEFAULTS_FROM = "2025-05-24"
+
+/** True when the site captures `$pageview` by hand (PostHog's own Next.js app-router recipe). */
+export function capturesPageviewManually(snapshot: RepoSnapshot): boolean {
+  for (const [path, text] of snapshot.files) {
+    if (isNonProductPath(path) || !text.includes("$pageview")) continue
+    if (codeMatches(text, /\bcapture\s*\(\s*["'`]\$pageview["'`]/g).length > 0) return true
+  }
+  return false
+}
+
+/**
+ * True when PostHog already counts single-page navigations: `capture_pageview: 'history_change'`, a
+ * `defaults` date of 2025-05-24 or later, or a hand-written `$pageview` capture (switching
+ * history_change on there would count every navigation twice; review P2-8).
+ */
+export function posthogCountsNavigations(config: AdoptedPosthogConfig, manualPageview: boolean): boolean {
+  if (config.capturePageview === "history_change") return true
+  if (manualPageview) return true
+  return config.defaults !== null && /^\d{4}-\d{2}-\d{2}$/.test(config.defaults) && config.defaults >= POSTHOG_HISTORY_DEFAULTS_FROM
 }
 
 /** Pure: each adopted `posthog.init` file's routing options. */
@@ -84,7 +131,8 @@ export function detectAdoptedPosthogConfig(snapshot: RepoSnapshot, census: Censu
       apiHost,
       capturePageview: readPosthogOption(text, "capture_pageview") ?? null,
       uiHost: readPosthogOption(text, "ui_host") ?? null,
-      sendsDirect
+      sendsDirect,
+      defaults: readPosthogOption(text, "defaults") ?? null
     })
   }
   return sortFindings(out)

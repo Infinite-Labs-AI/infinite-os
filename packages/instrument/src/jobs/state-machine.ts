@@ -11,7 +11,15 @@
 //   claim blocked ──▶ blocked(agent_blocked)
 //
 // Honesty: a check result counts ONLY when its `runId` equals this run's id (another run's receipt never
-// proves), `undetermined` never counts as pass, and a claim never moves an item past `claimed`.
+// proves, and a stored check from an older run never passes either), `undetermined` never counts as pass,
+// and a claim never moves an item past `claimed`. A live reading of PRODUCTION (T1, PV) counts only when
+// it was taken after the change could be live: after the item's claim, and after `liveSince` (the merge /
+// deploy-ready time) when the caller knows it (review P2-2). A rehearsal (RH) reads the PR's preview, so
+// the claim bounds it.
+//
+// Live checks before the deploy (review P2-1): an item whose path waits for a real event (job 10's click
+// test) reaches `waiting_real_event` only once its live checks pass, and a failing rehearsal check sends
+// an item back to `pending` with the failure (budget left) or to `failed` (budget spent), like a local one.
 import {
   JOB_TABLE,
   type BlockedReason,
@@ -28,6 +36,14 @@ import {
 export const LOCAL_TIERS: readonly CheckTier[] = ["S", "B", "T0"]
 export const LIVE_TIERS: readonly CheckTier[] = ["T1", "RH", "PV"]
 export const PASSIVE_TIERS: readonly CheckTier[] = ["P"]
+/** Readings of production: they must postdate the change. */
+const PRODUCTION_TIERS: readonly CheckTier[] = ["T1", "PV"]
+
+export interface ApplyOptions {
+  budgetLeft: boolean
+  /** The merge / deploy-ready time: a production reading (T1, PV) taken before it never counts. */
+  liveSince?: string | null
+}
 
 export interface Transition {
   item: ChecklistItem
@@ -48,7 +64,20 @@ function checksIn(item: ChecklistItem, tiers: readonly CheckTier[]): ChecklistIt
   return item.checks.filter((check) => tiers.includes(check.tier))
 }
 
-const allPass = (checks: readonly ChecklistItemCheck[]): boolean => checks.every((check) => check.state === "pass")
+/** Every check passed IN THIS RUN (a stored pass from another run counts as not run). */
+const allPass = (checks: readonly ChecklistItemCheck[], runId: string): boolean => checks.every((check) => check.state === "pass" && check.runId === runId)
+const failingIn = (checks: readonly ChecklistItemCheck[], runId: string): ChecklistItemCheck[] => checks.filter((check) => check.state === "problem" && check.runId === runId)
+
+function failureText(failing: readonly ChecklistItemCheck[]): string {
+  return failing.map((check) => `${check.tier}:${check.id}${check.reason ? ` (${check.reason})` : ""}`).join("; ")
+}
+
+/** The earliest moment a production reading may come from (the claim, and the deploy when known). */
+function productionFloor(item: ChecklistItem, liveSince: string | null | undefined): number | null {
+  const bounds = [item.claim?.at, liveSince ?? undefined].filter((value): value is string => typeof value === "string").map((value) => Date.parse(value))
+  if (bounds.some((value) => Number.isNaN(value))) return Number.POSITIVE_INFINITY
+  return bounds.length === 0 ? null : Math.max(...bounds)
+}
 
 function evidenceText(evidence: readonly Evidence[]): string {
   if (evidence.length === 0) return "no evidence"
@@ -106,12 +135,19 @@ export function blockItem(item: ChecklistItem, reason: BlockedReason, note?: str
  * Merges this run's check results into an item and advances it as far as the results allow. A result
  * from another run (or with no run id) is ignored, so it can never pass a check.
  */
-export function applyResults(item: ChecklistItem, results: readonly CheckResult[], runId: string, options: { budgetLeft: boolean }): Transition {
+export function applyResults(item: ChecklistItem, results: readonly CheckResult[], runId: string, options: ApplyOptions): Transition {
   const next = clone(item)
   let merged = false
+  const floor = productionFloor(item, options.liveSince)
   for (const check of next.checks) {
     const result = results.find((candidate) => candidate.checkId === check.id && candidate.tier === check.tier && candidate.runId === runId)
     if (!result) continue
+    if (PRODUCTION_TIERS.includes(check.tier) || check.tier === "RH") {
+      // A reading from before the change existed (e.g. `before`'s own T1 checks) never counts for it.
+      const taken = Date.parse(result.at)
+      const bound = check.tier === "RH" ? productionFloor(item, null) : floor
+      if (bound === null || Number.isNaN(taken) || taken < bound) continue
+    }
     check.state = result.state
     check.at = result.at
     check.runId = runId
@@ -119,40 +155,54 @@ export function applyResults(item: ChecklistItem, results: readonly CheckResult[
     else delete check.reason
     merged = true
   }
-  const advanced = advance(next, options)
+  const advanced = advance(next, runId, options)
   return { item: advanced.item, changed: merged || advanced.item.state !== item.state, by: "wizard", ...(advanced.note ? { note: advanced.note } : {}) }
 }
 
-function advance(item: ChecklistItem, options: { budgetLeft: boolean }): { item: ChecklistItem; note?: string } {
+function sendBack(item: ChecklistItem, failing: readonly ChecklistItemCheck[], options: ApplyOptions): string {
+  item.state = options.budgetLeft ? "pending" : "failed"
+  return options.budgetLeft ? `check failed: ${failureText(failing)}` : `check failed and the budget is spent: ${failureText(failing)}`
+}
+
+function advance(item: ChecklistItem, runId: string, options: ApplyOptions): { item: ChecklistItem; note?: string } {
   let note: string | undefined
   const path = donePathOf(item)
   for (let guard = 0; guard < 5; guard += 1) {
     const before = item.state
     if (item.state === "claimed") {
       const local = checksIn(item, LOCAL_TIERS)
-      const failing = local.filter((check) => check.state === "problem")
+      const failing = failingIn(local, runId)
       if (failing.length > 0) {
-        const reasons = failing.map((check) => `${check.tier}:${check.id}${check.reason ? ` (${check.reason})` : ""}`).join("; ")
-        item.state = options.budgetLeft ? "pending" : "failed"
-        note = options.budgetLeft ? `check failed: ${reasons}` : `check failed and the budget is spent: ${reasons}`
+        note = sendBack(item, failing, options)
         break
       }
       // With no local check the wizard has nothing to verify in code but the recorded, in-scope diff.
-      const verified = local.length > 0 ? allPass(local) : (item.edits?.length ?? 0) > 0
+      const verified = local.length > 0 ? allPass(local, runId) : (item.edits?.length ?? 0) > 0
       if (verified) item.state = "done_in_code"
-    } else if (item.state === "done_in_code") {
-      const after = path[path.indexOf("done_in_code") + 1]
-      if (after === "waiting_deploy" || after === "waiting_real_event") item.state = after
-      else if (after === "proven") {
-        const live = checksIn(item, [...LIVE_TIERS, ...PASSIVE_TIERS])
-        if (live.length > 0 && allPass(live)) item.state = "proven"
+    } else if (item.state === "done_in_code" || item.state === "waiting_deploy") {
+      const rehearsalFailing = failingIn(checksIn(item, ["RH"]), runId)
+      if (rehearsalFailing.length > 0) {
+        note = sendBack(item, rehearsalFailing, options)
+        break
       }
-    } else if (item.state === "waiting_deploy") {
-      const live = checksIn(item, LIVE_TIERS)
-      if (live.length > 0 && allPass(live)) item.state = "proven"
+      if (item.state === "done_in_code") {
+        const after = path[path.indexOf("done_in_code") + 1]
+        const live = checksIn(item, LIVE_TIERS)
+        if (after === "waiting_deploy") item.state = after
+        else if (after === "waiting_real_event") {
+          // e.g. job 10: the click test must have passed before the item waits for a real conversion.
+          if (allPass(live, runId)) item.state = after
+        } else if (after === "proven") {
+          const proof = checksIn(item, [...LIVE_TIERS, ...PASSIVE_TIERS])
+          if (proof.length > 0 && allPass(proof, runId)) item.state = "proven"
+        }
+      } else {
+        const live = checksIn(item, LIVE_TIERS)
+        if (live.length > 0 && allPass(live, runId)) item.state = "proven"
+      }
     } else if (item.state === "waiting_real_event") {
       const passive = checksIn(item, PASSIVE_TIERS)
-      if (passive.length > 0 && allPass(passive)) item.state = "proven"
+      if (passive.length > 0 && allPass(passive, runId)) item.state = "proven"
     }
     if (item.state === before) break
   }
