@@ -1,0 +1,129 @@
+{
+  "screen": "view-03-record",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "tell me about hook b",
+    "answer": "Hook B is on: $12.40 in 7 days, 0 trials. The weakest of the three.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "record",
+        "tool": "get_meta_entity",
+        "title": "Ad · Hook B",
+        "state": "ready",
+        "asOf": "2026-10-01T10:40:00Z",
+        "provenance": {
+          "source": "Meta · ad",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "next": [
+          {
+            "label": "pause it",
+            "ask": "pause hook b"
+          }
+        ],
+        "appLink": {
+          "place": "ads.meta",
+          "label": "open in Meta Ads"
+        },
+        "body": {
+          "fields": [
+            {
+              "label": "campaign",
+              "value": {
+                "text": "Infinite trials"
+              }
+            },
+            {
+              "label": "ad set",
+              "value": {
+                "text": "Broad · US · 25–54"
+              }
+            },
+            {
+              "label": "status",
+              "value": {
+                "text": "on"
+              }
+            },
+            {
+              "label": "spend 7d",
+              "value": {
+                "value": 12.4
+              },
+              "unit": "money"
+            },
+            {
+              "label": "trials 7d",
+              "value": {
+                "value": 0
+              },
+              "unit": "count"
+            },
+            {
+              "label": "CTR 7d",
+              "value": {
+                "text": "0.41%  (account 1.10%)"
+              }
+            }
+          ],
+          "history": [
+            {
+              "at": "2026-09-24T09:12:00Z",
+              "from": null,
+              "to": "on",
+              "who": "Robin",
+              "source": "in the app"
+            }
+          ]
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "reading the ad",
+        "start": 0,
+        "end": 0.3,
+        "result": "1 ad",
+        "status": "ok"
+      }
+    ]
+  },
+  "gaps": [
+    "The bold heading \"Ad “Hook B · founder POV”\" has no RecordBodyV1 field.",
+    "asOf with a time reads \"as of 10:40\"; a date reads \"up to Sep 30\"."
+  ]
+}

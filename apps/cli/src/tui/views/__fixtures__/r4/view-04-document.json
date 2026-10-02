@@ -1,0 +1,117 @@
+{
+  "screen": "view-04-document",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "show me the win-back email",
+    "answer": "Here is the draft: 3 emails. The first is below.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "document",
+        "tool": "read_email_draft",
+        "title": "Win-back email",
+        "state": "ready",
+        "asOf": null,
+        "provenance": {
+          "source": "Email draft · in review",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "email.campaign",
+          "label": "open in Email Campaigns"
+        },
+        "body": {
+          "meta": [
+            {
+              "label": "Subject",
+              "value": "Your trial ended. Here's what Infinite found"
+            },
+            {
+              "label": "Preview",
+              "value": "3 things it spotted in your ad account"
+            }
+          ],
+          "sections": [
+            {
+              "text": "Hi {first name},\n\nBefore your trial ended, Infinite found 3 ads spending with no trials, and one that beat your goal by 40%.\n\nPick up where you left off: store.example/back\n\nRobin",
+              "format": "plain"
+            },
+            {
+              "text": "The second email.",
+              "format": "plain"
+            },
+            {
+              "text": "The third email.",
+              "format": "plain"
+            }
+          ],
+          "versions": [
+            {
+              "id": "e1",
+              "label": "Email 1",
+              "sectionIndexes": [
+                0
+              ]
+            },
+            {
+              "id": "e2",
+              "label": "Email 2",
+              "sectionIndexes": [
+                1
+              ]
+            },
+            {
+              "id": "e3",
+              "label": "Email 3",
+              "sectionIndexes": [
+                2
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "reading the draft",
+        "start": 0,
+        "end": 0.3,
+        "result": "3 emails",
+        "status": "ok"
+      }
+    ]
+  }
+}

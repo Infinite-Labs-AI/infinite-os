@@ -1,0 +1,184 @@
+{
+  "screen": "view-02-list",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "which meta ads are running?",
+    "answer": "3 ads are on in Infinite trials. Hook B has spent $12.40 with no trials.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "list",
+        "tool": "list_meta_entities",
+        "title": "Meta ads running",
+        "state": "ready",
+        "asOf": null,
+        "provenance": {
+          "source": "Meta ads · Infinite trials · 3 of 3 · last 7 days",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "ads.meta",
+          "label": "open in Meta Ads"
+        },
+        "body": {
+          "layout": "rows",
+          "columns": [
+            {
+              "key": "spend",
+              "label": "Spend 7d",
+              "unit": "money"
+            },
+            {
+              "key": "ctr",
+              "label": "CTR",
+              "unit": "percent"
+            },
+            {
+              "key": "trials",
+              "label": "Trials",
+              "unit": "count"
+            }
+          ],
+          "rows": [
+            {
+              "id": "ad_hook_a",
+              "title": "Hook A · demo loop",
+              "status": {
+                "word": "on",
+                "tone": "ok"
+              },
+              "cells": {
+                "spend": {
+                  "value": 18.2
+                },
+                "ctr": {
+                  "value": 1.32
+                },
+                "trials": {
+                  "value": 3
+                }
+              },
+              "appLink": {
+                "place": "ads.meta",
+                "label": "open in Meta Ads",
+                "params": {
+                  "ad": "ad_hook_a"
+                }
+              }
+            },
+            {
+              "id": "ad_hook_c",
+              "title": "Hook C · pricing",
+              "status": {
+                "word": "on",
+                "tone": "ok"
+              },
+              "cells": {
+                "spend": {
+                  "value": 15.75
+                },
+                "ctr": {
+                  "value": 1.05
+                },
+                "trials": {
+                  "value": 1
+                }
+              },
+              "appLink": {
+                "place": "ads.meta",
+                "label": "open in Meta Ads",
+                "params": {
+                  "ad": "ad_hook_c"
+                }
+              }
+            },
+            {
+              "id": "ad_hook_b",
+              "title": "Hook B · founder POV",
+              "status": {
+                "word": "on",
+                "tone": "ok"
+              },
+              "cells": {
+                "spend": {
+                  "value": 12.4
+                },
+                "ctr": {
+                  "value": 0.41
+                },
+                "trials": {
+                  "value": 0
+                }
+              },
+              "detail": [
+                {
+                  "label": "since",
+                  "value": {
+                    "text": "Hook B · since Sep 24 · Broad · US · 25–54"
+                  }
+                }
+              ],
+              "appLink": {
+                "place": "ads.meta",
+                "label": "open in Meta Ads",
+                "params": {
+                  "ad": "ad_hook_b"
+                }
+              }
+            }
+          ],
+          "total": 3,
+          "shown": 3
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking your campaigns",
+        "start": 0,
+        "end": 0.5,
+        "result": "3 ads",
+        "status": "ok"
+      }
+    ],
+    "focus": {
+      "selected": 2
+    }
+  },
+  "gaps": [
+    "The selected row is Hook B (focus.selected = 2); \"0 trials\" is amber because it is the bad metric (no field marks it)."
+  ]
+}

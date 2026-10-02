@@ -1,0 +1,134 @@
+{
+  "screen": "flow-numbers-05-not-connected",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Google Ads",
+        "status": "missing"
+      },
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "google ads since launch?",
+    "answer": "Google Ads isn't connected for this workspace.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "numbers",
+        "tool": "get_google_ads_performance",
+        "title": "Google Ads since launch",
+        "state": "not_connected",
+        "asOf": "2026-09-30",
+        "provenance": {
+          "source": "Google Ads",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "ads.google",
+          "label": "Open in Google Ads"
+        },
+        "body": {
+          "layout": "table",
+          "currency": "USD",
+          "columns": [
+            {
+              "key": "spend",
+              "label": "Spend",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "impressions",
+              "label": "Impressions",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "clicks",
+              "label": "Clicks",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "ctr",
+              "label": "CTR",
+              "unit": "percent",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "cpc",
+              "label": "CPC",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "conv",
+              "label": "Conv",
+              "unit": "count",
+              "factGroup": "conversions"
+            }
+          ],
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-09-29",
+                "to": "2026-09-30",
+                "tz": "UTC",
+                "label": "since launch"
+              },
+              "final": true,
+              "asOf": null,
+              "rows": []
+            }
+          }
+        },
+        "stateReason": {
+          "code": "not_connected",
+          "words": "Google Ads isn't connected",
+          "fix": {
+            "label": "Connect it in the app",
+            "appLink": {
+              "place": "connections",
+              "label": "Connections"
+            }
+          }
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking Google Ads",
+        "start": 0,
+        "end": 0.3,
+        "result": "not connected",
+        "status": "off"
+      }
+    ]
+  }
+}

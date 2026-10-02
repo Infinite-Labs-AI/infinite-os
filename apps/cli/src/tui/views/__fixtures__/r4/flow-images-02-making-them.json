@@ -1,0 +1,118 @@
+{
+  "screen": "flow-images-02-making-them",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "make 3 new ads from our best hook",
+    "answer": "Making them now.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "images",
+        "tool": "generate_ad_images",
+        "title": "Make 3 creatives",
+        "state": "working",
+        "asOf": null,
+        "provenance": {
+          "source": "Creatives",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "creative.library",
+          "label": "Open in Library",
+          "params": {
+            "run": "run_r4"
+          }
+        },
+        "body": {
+          "runId": "run_r4",
+          "requested": 3,
+          "ready": 1,
+          "failed": 0,
+          "items": [
+            {
+              "id": "i1",
+              "label": "Explained",
+              "status": "done"
+            },
+            {
+              "id": "i2",
+              "label": "Your audit",
+              "status": "drawing"
+            },
+            {
+              "id": "i3",
+              "label": "3 fixes",
+              "status": "queued"
+            }
+          ],
+          "format": "HD",
+          "aspectRatio": "4:5",
+          "model": "Infinite's image model",
+          "madeWith": "infinite",
+          "eta": {
+            "startedAtMs": 1790851015000,
+            "etaMs": 25000
+          }
+        },
+        "stateReason": {
+          "code": "images_running",
+          "words": "Working",
+          "short": "Working"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "pricing 3 images",
+        "start": 0,
+        "end": 2,
+        "result": "OK",
+        "status": "ok"
+      },
+      {
+        "label": "making 3 creatives",
+        "start": 2,
+        "end": 44,
+        "result": "1 of 3",
+        "status": "run"
+      }
+    ],
+    "busy": "the creatives finish either way"
+  },
+  "gaps": [
+    "D3: the images head is \"⠋ Working\" (a braille spinner), the pause head \"◑ Working\"."
+  ]
+}
