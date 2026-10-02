@@ -105,7 +105,8 @@ const stringArray = (value: unknown): boolean => Array.isArray(value) && value.e
 function isManifestIdsShape(value: unknown): boolean {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false
   const ids = value as Record<string, unknown>
-  if (Object.keys(ids).sort().join(",") !== "ga4,infinite,meta,posthog") return false
+  // The four §3e.6 tools must be there; a newer tag's extra fields are tolerated (never "corrupt").
+  if (!["ga4", "infinite", "meta", "posthog"].every((key) => key in ids)) return false
   const posthog = ids.posthog as Record<string, unknown> | null
   const infinite = ids.infinite as Record<string, unknown> | null
   return (
@@ -113,11 +114,10 @@ function isManifestIdsShape(value: unknown): boolean {
     stringArray(ids.meta) &&
     (posthog === null ||
       (typeof posthog === "object" &&
-        Object.keys(posthog).sort().join(",") === "apiHost,projectKey" &&
         typeof posthog.projectKey === "string" &&
         typeof posthog.apiHost === "string")) &&
     (infinite === null ||
-      (typeof infinite === "object" && Object.keys(infinite).join(",") === "siteSourceKey" && typeof infinite.siteSourceKey === "string"))
+      (typeof infinite === "object" && typeof infinite.siteSourceKey === "string"))
   )
 }
 

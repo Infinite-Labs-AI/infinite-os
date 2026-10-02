@@ -39,8 +39,19 @@ describe("install.json edits + ids (§3e.6)", () => {
     expect(readInstallManifest(root)).toMatchObject({ edits: [edit], ids })
   })
 
+  it("a NEWER tag's extra fields on an edit or on ids are tolerated, never 'corrupt' (P3-22)", () => {
+    const root = makeSite({ "index.html": STATIC_HTML })
+    const edit = makeEditRecord({ file: "index.html", before: "a", after: "b", jobId: null, planLineId: null, by: "agent", runId: IDS.run })
+    mkdirSync(join(root, ".infinite"), { recursive: true })
+    writeFileSync(join(root, ".infinite/install.json"), JSON.stringify(manifestWith({ edits: [{ ...edit, reviewedBy: "codex" } as never], ids: { ...ids, x: [] } as never })))
+    expect(readInstallManifest(root)?.edits?.[0]?.id).toBe(edit.id)
+  })
+
   it.each([
-    ["an extra key on an edit", (edit: Record<string, unknown>) => ({ ...edit, extra: true })],
+    ["an edit missing its id", (edit: Record<string, unknown>) => {
+      const { id: _drop, ...rest } = edit
+      return rest
+    }],
     ["a bare hex hash", (edit: Record<string, unknown>) => ({ ...edit, afterHash: "ab".repeat(32) })],
     ["an edit with no textEdits", (edit: Record<string, unknown>) => {
       const { textEdits: _drop, ...rest } = edit
@@ -55,10 +66,11 @@ describe("install.json edits + ids (§3e.6)", () => {
     expect(() => readInstallManifest(root)).toThrow(/Corrupt/)
   })
 
-  it("NEGATIVE: ids with an extra key, or an edit pointing outside the repo, are refused", () => {
+  it("NEGATIVE: ids missing a tool, or an edit pointing outside the repo, are refused", () => {
     const root = makeSite({ "index.html": STATIC_HTML })
     mkdirSync(join(root, ".infinite"), { recursive: true })
-    writeFileSync(join(root, ".infinite/install.json"), JSON.stringify(manifestWith({ ids: { ...ids, x: [] } as never })))
+    const { meta: _meta, ...withoutMeta } = ids
+    writeFileSync(join(root, ".infinite/install.json"), JSON.stringify(manifestWith({ ids: withoutMeta as never })))
     expect(() => readInstallManifest(root)).toThrow(/Corrupt/)
     const escape = makeEditRecord({ file: "../outside.html", before: "a", after: "b", jobId: null, planLineId: null, by: "agent", runId: IDS.run })
     writeFileSync(join(root, ".infinite/install.json"), JSON.stringify(manifestWith({ edits: [escape] })))

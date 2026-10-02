@@ -19,9 +19,38 @@ describe("textEditsBetween (exact, minimal, reversible)", () => {
     expect(reverseTextEdits(after, edits)).toBe(before)
   })
 
-  it("is empty for equal texts and one hunk otherwise", () => {
+  it("is empty for equal texts and one hunk for one changed region", () => {
     expect(textEditsBetween("x", "x")).toEqual([])
     expect(textEditsBetween("abc", "aXc")).toEqual([{ offset: 1, removed: "b", inserted: "X" }])
+  })
+
+  it("a lockfile changed near its top and its bottom records small hunks, never the whole file (P2-13)", () => {
+    const body = Array.from({ length: 20_000 }, (_, index) => `  /pkg-${index}@1.0.${index}:\n    resolution: {integrity: sha512-${index}}\n`).join("")
+    const before = `lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      next: 16.0.0\n${body}snapshots:\n  next@16.0.0: {}\n`
+    const after = before
+      .replace("      next: 16.0.0\n", "      next: 16.0.0\n      '@vercel/functions': 3.1.0\n")
+      .replace("snapshots:\n  next@16.0.0: {}\n", "snapshots:\n  '@vercel/functions@3.1.0': {}\n  next@16.0.0: {}\n")
+    const edits = textEditsBetween(before, after)
+    expect(edits).toHaveLength(2)
+    expect(JSON.stringify(edits).length).toBeLessThan(400)
+    expect(applyTextEdits(before, edits)).toBe(after)
+    expect(reverseTextEdits(after, edits)).toBe(before)
+    // NEGATIVE: the old single first-to-last hunk carried the whole file between the two changes.
+    expect(JSON.stringify(edits).length).toBeLessThan(before.length / 1000)
+  })
+
+  it("round-trips interleaved changes, a missing final newline and pure deletions", () => {
+    const pairs: Array<[string, string]> = [
+      ["a\nb\nc\nd\ne\n", "a\nB\nc\nD\ne\nf"],
+      ["one\ntwo\nthree", "one\nthree"],
+      ["x\ny\n", ""],
+      ["keep\n", "new\nkeep\nnew\n"]
+    ]
+    for (const [before, after] of pairs) {
+      const edits = textEditsBetween(before, after)
+      expect(applyTextEdits(before, edits)).toBe(after)
+      expect(reverseTextEdits(after, edits)).toBe(before)
+    }
   })
 })
 
