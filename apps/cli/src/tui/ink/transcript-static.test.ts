@@ -16,6 +16,7 @@ import {
 import { inkTranscriptLayout, inkTranscriptRowCount, renderInkTranscriptToString } from "./transcript-app.js";
 import {
   CLEAR_SCREEN_AND_SCROLLBACK,
+  commitLatest,
   commitOnSubmit,
   DEFAULT_COMPOSER_ROWS,
   liveRegionCap,
@@ -131,6 +132,11 @@ describe("transcript-static pure helpers", () => {
     expect(commitOnSubmit(blank, "   ")).toBe(blank);
     const none = { committed, latest: null };
     expect(commitOnSubmit(none, "next")).toBe(none);
+    // A finished turn too tall for the live region commits with no line at all.
+    const tall = commitLatest({ committed, latest: { id: "t2", lines: ["a"] } });
+    expect(tall.committed.map((e) => e.id)).toEqual(["home", "t2"]);
+    expect(tall.latest).toBeNull();
+    expect(commitLatest(none)).toBe(none);
   });
 
   it("liveRegionCap leaves the composer, the key bar and two rows of margin", () => {

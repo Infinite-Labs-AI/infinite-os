@@ -76,7 +76,7 @@ import {
 } from "./transcript-app.js";
 import {
   CLEAR_SCREEN_AND_SCROLLBACK,
-  commitOnSubmit,
+  commitLatest,
   DEFAULT_COMPOSER_ROWS,
   DEFAULT_KEY_BAR_ROWS,
   livePageKey,
@@ -684,7 +684,7 @@ export function InkInteractiveSessionApp({
     const home: CommittedEntry | null = why === "submit" && homeInventory && !homeCommitted && turn.length === 0
       ? { id: "home", lines: [], node: drawHome(columns), redraw: (width) => ({ lines: [], node: drawHome(width) }) }
       : null;
-    setCommitted((current) => commitOnSubmit({ committed: home ? [...current, home] : current, latest }, why).committed);
+    setCommitted((current) => commitLatest({ committed: home ? [...current, home] : current, latest }).committed);
     setHomeCommitted(true);
     historyRef.current = [];
     setHistory([]);

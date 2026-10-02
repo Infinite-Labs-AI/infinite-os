@@ -63,19 +63,28 @@ export interface TranscriptCommitState {
 }
 
 /**
- * The latest turn moves to `committed` only when a non-blank next line is
- * submitted. A blank line, or no latest turn, leaves the state untouched (the
- * same object is returned). Never mutates its input; `committed` only grows,
- * which `<Static>` relies on (it prints `items.slice(printedCount)`).
+ * The latest turn moves to `committed`. No latest turn leaves the state
+ * untouched (the same object is returned). Never mutates its input;
+ * `committed` only grows, which `<Static>` relies on (it prints
+ * `items.slice(printedCount)`). Two things commit a turn: the next line
+ * (`commitOnSubmit`), and a finished turn too tall for the live region, which
+ * goes up the moment it finishes.
  */
+export function commitLatest<S extends TranscriptCommitState>(
+  state: S
+): Omit<S, keyof TranscriptCommitState> & TranscriptCommitState {
+  if (!state.latest) {
+    return state;
+  }
+  return { ...state, committed: [...state.committed, state.latest], latest: null };
+}
+
+/** `commitLatest` when a non-blank next line is submitted; a blank line leaves the state untouched. */
 export function commitOnSubmit<S extends TranscriptCommitState>(
   state: S,
   line: string
 ): Omit<S, keyof TranscriptCommitState> & TranscriptCommitState {
-  if (!line.trim() || !state.latest) {
-    return state;
-  }
-  return { ...state, committed: [...state.committed, state.latest], latest: null };
+  return line.trim() ? commitLatest(state) : state;
 }
 
 /** Rows reserved by default for the composer (it may wrap) and overlays. */
