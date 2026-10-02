@@ -118,7 +118,7 @@ describe("the Steps strip from the turn store", () => {
       "  seo queue draft | ✗ rejected",
       "  seo queue draft | ✗ rejected again",
       "  proposing pause entity | ▣ pause 1 ad",
-      "  listing meta entities | ■ stopped"
+      "  listing Meta entities | ■ stopped"
     ]);
     expect(rows.join("\n")).not.toMatch(/mcp|Mcp|\{"id"/u);
     controller.reset();
@@ -132,6 +132,40 @@ describe("the Steps strip from the turn store", () => {
     controller.reset();
     const [step] = getTurnState().steps;
     expect(step).toMatchObject({ id: "c1", label: "getting report", status: "unk", endedAt: 500 });
+    resetTurnState();
+  });
+});
+
+describe("a running call says how far it is (run-2 M5c)", () => {
+  const images = (ready: number) => ({
+    v: 1, kind: "images", tool: "generate_ad_images", title: "Making 3 creatives", state: "working", asOf: null,
+    scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [],
+    body: { runId: "r1", requested: 3, ready, failed: 0, items: [], format: "png", aspectRatio: "4:5", model: "m", madeWith: "infinite" }
+  });
+  const job = {
+    v: 1, kind: "job", tool: "write_blog_post", title: "Blog post", state: "background", asOf: null,
+    scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [],
+    body: {
+      jobId: "j1", label: "Blog post", phase: "running", startedAt: null, runsWhere: "cloud", outlivesTurn: true, noCompletionSignal: false,
+      steps: [{ id: "a", label: "Research", state: "done" }, { id: "b", label: "Outline", state: "done" }, { id: "c", label: "Draft", state: "now" },
+        { id: "d", label: "Images", state: "todo" }, { id: "e", label: "Ready", state: "todo" }]
+    }
+  };
+  const running = (name: string, frames: unknown[]): TurnState => {
+    resetTurnState();
+    const state = getTurnState();
+    return {
+      ...state,
+      tools: [{ id: "c1", name, startedAt: 0 }],
+      steps: [{ id: "c1", name, label: "making 3 creatives", status: "run", startedAt: 0, endedAt: null, result: "" }],
+      views: frames.map((view, index) => ({ type: "tool.view", stage: "tool", message: "", viewId: `v${index}`, name, view })) as TurnState["views"]
+    };
+  };
+
+  it("the latest view of the call gives its progress (1 of 3, step 3 of 5), never a bare \"running\"", () => {
+    expect(workingTurnSteps([], running("mcp__app__generate_ad_images", [images(0), images(1)]), 1_000)[0]!.result).toBe("1 of 3");
+    expect(workingTurnSteps([], running("write_blog_post", [job]), 1_000)[0]!.result).toBe("step 3 of 5");
+    expect(workingTurnSteps([], running("other_tool", [images(1)]), 1_000)[0]!.result).toBe("running");
     resetTurnState();
   });
 });

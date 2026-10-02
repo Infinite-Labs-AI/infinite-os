@@ -23,7 +23,7 @@ import { displayWidth, truncateCells } from "../lib/display-width.js";
 import { countPendingTodos, isTodoDone } from "../lib/live-progress.js";
 import { buildSubagentTree, formatSubagentSummary, subagentSparkline, treeTotals, widthByDepth } from "../lib/subagent-tree.js";
 import { compactPreview, thinkingPreview } from "../lib/text.js";
-import { friendlyStepLabel, stepsFromTrail, stepStripLines } from "../views/steps.js";
+import { bareToolName, friendlyStepLabel, stepsFromTrail, stepStripLines } from "../views/steps.js";
 
 export interface InfiniteTranscriptInput {
   /**
@@ -235,7 +235,7 @@ function turnSteps(messages: readonly Msg[], state: TurnState | undefined, ctx: 
         return step;
       }
       const now = state.tools.find((item) => item.id === step.id)?.latestPreview?.trim();
-      return { ...step, result: now ? compactPreview(now, 72) : step.result || "running" };
+      return { ...step, result: now ? compactPreview(now, 72) : step.result || viewProgress(step.name, state.views) || "running" };
     });
   }
   const pending: Msg[] = state?.streamPendingTools.length ? [{ kind: "trail", role: "system", text: "", tools: state.streamPendingTools }] : [];
@@ -251,6 +251,34 @@ function turnSteps(messages: readonly Msg[], state: TurnState | undefined, ctx: 
     result: tool.latestPreview?.trim() ? compactPreview(tool.latestPreview, 72) : "running"
   }));
   return [...done, ...running];
+}
+
+/**
+ * How far a running call is, from the latest view it drew (matched by bare
+ * tool name): an images run's `1 of 3`, a job's `step 3 of 5`. The view's own
+ * numbers, read as they are; null when it has none.
+ */
+function viewProgress(name: string, frames: TurnState["views"]): string | null {
+  const bare = bareToolName(name);
+  const view = [...frames].reverse().find((frame) => bareToolName(frame.view.tool) === bare)?.view;
+  if (!view) return null;
+  const body = view.body as unknown as Record<string, unknown>;
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null);
+  if (view.kind === "images") {
+    const ready = count(body.ready);
+    const requested = count(body.requested);
+    return ready !== null && requested ? `${ready} of ${requested}` : null;
+  }
+  if (view.kind === "job") {
+    const steps = Array.isArray(body.steps) ? body.steps : [];
+    const at = steps.findIndex((item) => typeof item === "object" && item !== null && (item as { state?: unknown }).state === "now");
+    if (at >= 0) return `step ${at + 1} of ${steps.length}`;
+    const progress = typeof body.progress === "object" && body.progress !== null ? body.progress as Record<string, unknown> : null;
+    const finished = count(progress?.finished);
+    const of = count(progress?.of);
+    return finished !== null && of ? `${finished} of ${of}` : null;
+  }
+  return null;
 }
 
 function renderMessage(msg: Msg, ctx: RenderContext, answered: boolean): string[] {

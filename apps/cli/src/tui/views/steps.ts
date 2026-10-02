@@ -83,20 +83,45 @@ const VERBS = new Set([
   "validate", "import", "export", "upload", "download", "connect", "disconnect", "approve", "decline", "estimate"
 ]);
 
+/** Names a step keeps capitalised once its tool id is lower-cased (terminal-r4: `checking Google Ads`, `waiting for your OK`). */
+const PROPER_NOUNS: Readonly<Record<string, string>> = {
+  meta: "Meta", ga4: "GA4", posthog: "PostHog", stripe: "Stripe", shopify: "Shopify", ok: "OK", x: "X", i: "I",
+  google: "Google", facebook: "Facebook", instagram: "Instagram", tiktok: "TikTok", youtube: "YouTube",
+  linkedin: "LinkedIn", reddit: "Reddit", gsc: "GSC", codex: "Codex", chatgpt: "ChatGPT", cmd: "Cmd"
+};
+
+/** `google ads` is one name: Ads keeps its capital after Google. */
+function properNouns(words: string[]): string[] {
+  return words.map((word, index) => {
+    if (word === "ads" && words[index - 1] === "google") return "Ads";
+    return PROPER_NOUNS[word] ?? word;
+  });
+}
+
+/** A label that is already words ("checking Google Ads"), not a tool id: spaces and no underscores. */
+function isWords(text: string): boolean {
+  return /\s/u.test(text) && !/_/u.test(text);
+}
+
 /**
- * A friendly step label from a tool name: the MCP prefix off, words split
- * (snake, kebab, dots, camelCase), lower case, and a leading verb as its -ing
- * form: `mcp__infinite_app__list_meta_entities` → `listing meta entities`.
+ * A friendly step label. A label that is already words stays exactly as
+ * written (`checking Google Ads`, `waiting for your OK`). A tool id is
+ * humanised: the MCP prefix off, words split (snake, kebab, dots, camelCase),
+ * lower case except the names that keep a capital (Google Ads, Meta, GA4,
+ * PostHog, Stripe, Shopify, OK, X, I), and a leading verb as its -ing form:
+ * `mcp__infinite_app__list_meta_entities` → `listing Meta entities`.
  */
 export function friendlyStepLabel(name: string): string {
-  const words = bareToolName(viewText(name))
+  const text = viewText(name).trim();
+  if (isWords(text)) return text;
+  const words = bareToolName(text)
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .split(/[\s_.:/-]+/u)
     .filter(Boolean)
     .map((word) => word.toLowerCase());
   if (!words.length) return "tool";
   if (VERBS.has(words[0]!)) words[0] = gerund(words[0]!);
-  return words.join(" ");
+  return properNouns(words).join(" ");
 }
 
 // ── steps from the trail (when the turn store has none: old transports, the one-shot path) ──
@@ -133,12 +158,18 @@ export function stepsFromTrail(messages: readonly Msg[]): TurnStep[] {
 
 /**
  * A trail line's call (`List Meta Entities("…")`) as a friendly label: no
- * arguments, lower case. An MCP tool's trail label has lost where its server
- * name ends (`Mcp Infinite App List Meta Entities`), so it starts at the first
- * verb when there is one.
+ * arguments. The trail capitalises every word of a tool id, so a call whose
+ * words are not ALL capitalised was already words (`Waiting for your OK`):
+ * it keeps them, only its first letter lowered back. A tool id is humanised;
+ * an MCP tool's trail label has lost where its server name ends (`Mcp
+ * Infinite App List Meta Entities`), so it starts at the first verb when
+ * there is one.
  */
 function trailLabel(call: string): string {
-  const name = viewText(call).replace(/\(.*\)$/u, "").trim();
+  const name = viewText(call).replace(/\("(?:[^"\\]|\\.)*"\)$/u, "").trim();
+  if (/\s/u.test(name) && name.split(/\s+/u).some((word) => /^[a-z]/u.test(word))) {
+    return `${name.charAt(0).toLowerCase()}${name.slice(1)}`;
+  }
   let words = name.split(/\s+/u).filter(Boolean);
   if (words[0] === "Mcp") {
     const verb = words.findIndex((word, index) => index > 0 && VERBS.has(word.toLowerCase()));
@@ -166,6 +197,11 @@ const STATE_STATUS: Partial<Record<AnswerViewState, StepStatus>> = {
   cancelled: "off",
   cmdl_only: "off"
 };
+
+/** The Steps status a view's state stands for (needs_yes → ▣, partial → ◐, …); null = the call's own. */
+export function stepStatusForView(view: Pick<AnswerViewV1, "state">): StepStatus | null {
+  return STATE_STATUS[view.state] ?? null;
+}
 
 /**
  * A finished call's status, refined by the one view it drew (matched by bare

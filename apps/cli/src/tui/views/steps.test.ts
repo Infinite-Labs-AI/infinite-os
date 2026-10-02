@@ -114,14 +114,38 @@ describe("the Steps strip (region-steps)", () => {
 
 describe("step labels and statuses", () => {
   it.each([
-    ["mcp__infinite_app__list_meta_entities", "listing meta entities"],
-    ["mcp__infinite_app__get_meta_performance", "getting meta performance"],
+    ["mcp__infinite_app__list_meta_entities", "listing Meta entities"],
+    ["mcp__infinite_app__get_meta_performance", "getting Meta performance"],
     ["propose_pause_entity", "proposing pause entity"],
     ["run_breakdown_query", "running breakdown query"],
     ["readFile", "reading file"],
-    ["seo_queue_draft", "seo queue draft"]
-  ])("%s → %s", (name, label) => {
+    ["seo_queue_draft", "seo queue draft"],
+    ["get_google_ads_performance", "getting Google Ads performance"],
+    ["check_ga4_sync", "checking GA4 sync"],
+    ["list_posthog_events", "listing PostHog events"],
+    ["read_x_playbook", "reading X playbook"],
+    ["sync_stripe_and_shopify", "syncing Stripe and Shopify"]
+  ])("a tool id is humanised, proper nouns kept: %s → %s", (name, label) => {
     expect(friendlyStepLabel(name)).toBe(label);
+  });
+
+  it.each([
+    "checking Google Ads",
+    "pausing on Meta",
+    "waiting for your OK",
+    "reading the X playbook",
+    "checking what I can do",
+    "making 3 creatives (Codex)"
+  ])("a label that is already words stays as written (run-2 M5): %s", (label) => {
+    expect(friendlyStepLabel(label)).toBe(label);
+  });
+
+  it("a trail line whose call is already words keeps it; a title-cased tool id is still humanised", () => {
+    const messages: Msg[] = [{
+      kind: "trail", role: "system", text: "",
+      tools: ["checking Google Ads (0.6s) :: 3 campaigns ✓", "Mcp Infinite App Get Meta Performance(\"x\") (0.5s) :: 1 ad ✓"]
+    }];
+    expect(stepsFromTrail(messages).map((item) => item.label)).toEqual(["checking Google Ads", "getting Meta performance"]);
   });
 
   it("strips the MCP server prefix only", () => {
@@ -139,7 +163,7 @@ describe("step labels and statuses", () => {
       ]
     }];
     expect(stepsFromTrail(messages).map(({ label, status, startedAt, endedAt, result }) => ({ label, status, startedAt, endedAt, result }))).toEqual([
-      { label: "listing meta entities", status: "ok", startedAt: 0, endedAt: 500, result: "3 ads" },
+      { label: "listing Meta entities", status: "ok", startedAt: 0, endedAt: 500, result: "3 ads" },
       { label: "pausing entity", status: "fail", startedAt: 500, endedAt: 1500, result: "refused" },
       { label: "sending email", status: "stopped", startedAt: 1500, endedAt: 1500, result: "stopped" }
     ]);
