@@ -349,6 +349,11 @@ export interface ModelRequest {
   // session's turns — so the large stable prefix is reused instead of
   // re-processed each turn. Optional: absent for non-chat/keyless callers.
   promptCacheKey?: string;
+  // "none" forbids tool calls for this request. The tools stay declared so the request matches the
+  // earlier rounds' cached prompt prefix (tools come first in both providers' cache order); dropping
+  // them would re-process a large prompt from scratch. Absent leaves the provider's default (the model
+  // may call any tool).
+  toolChoice?: "none";
 }
 
 export interface ModelUsage {
@@ -412,10 +417,6 @@ export interface ChatActionCall {
 
 const RECENT_SYNC_LOOKUP_LIMIT = 20;
 const FAMILY_PROVIDERS: Partial<Record<QueryFamily, string[]>> = {
-  best_post: ["x"],
-  follower_count: ["x"],
-  comment_count: ["x"],
-  post_count: ["x"],
   recognized_revenue: ["stripe"],
   revenue_source: ["stripe"],
   site_visitors: ["google_analytics_4"],
@@ -428,10 +429,6 @@ const FAMILY_PROVIDERS: Partial<Record<QueryFamily, string[]>> = {
   conversion_channel_breakdown: ["google_analytics_4"]
 };
 const PLANNED_PROGRESS_LABELS: Partial<Record<QueryFamily, string>> = {
-  best_post: "Running engagement breakdown.",
-  follower_count: "Running follower lookup.",
-  comment_count: "Running authored comment count.",
-  post_count: "Running authored post count.",
   revenue_source: "Running revenue-by-source breakdown.",
   recognized_revenue: "Running revenue total lookup.",
   source_status: "Running source status check.",
@@ -445,6 +442,42 @@ const PLANNED_PROGRESS_LABELS: Partial<Record<QueryFamily, string>> = {
 export interface LlmController {
   chat: (input: ChatInput) => Promise<ChatResponse>;
 }
+
+/** Tool rounds a turn gets when nothing names its brain. */
+export const DEFAULT_TOOL_ROUNDS = 8;
+/**
+ * Tool rounds per union (chat) turn, by the brain running it. A round is one model call that asks for
+ * tools. In a union turn a host may hand Codex only its common tools directly and reach the rest
+ * through a deferred search -> describe -> call trio, so every deferred tool costs three rounds where
+ * a direct tool costs one. Eight rounds left room for about two deferred lookups, and an analysis
+ * question that needed a deferred tool plus a retry ran out before it answered. Twelve covers three
+ * deferred lookups and three direct calls. Claude is served its tools directly, so it keeps eight.
+ *
+ * Only union turns get this table. A plain turn sees the native actions directly, and an exclusive
+ * turn (the automatic, scheduled and remote-message lanes) gets no deferred tools and runs under a
+ * host wall-clock budget, where four more model calls would only make a timeout likelier. Both keep
+ * DEFAULT_TOOL_ROUNDS.
+ */
+export const TOOL_ROUNDS_BY_PROVIDER: Readonly<Record<"codex" | "claude", number>> = { codex: 12, claude: 8 };
+
+export function toolRoundBudget(
+  provider: "codex" | "claude" | undefined,
+  scopedMode: ScopedAppTools["mode"] | undefined
+): number {
+  return provider && scopedMode === "union" ? TOOL_ROUNDS_BY_PROVIDER[provider] : DEFAULT_TOOL_ROUNDS;
+}
+
+const TOOL_ROUND_LIMIT_MESSAGE = "I reached the Infinite OS typed-action iteration limit before I could finish the answer.";
+// Appended to the system prompt of the one tool-free call made when the rounds run out.
+const FINAL_ANSWER_INSTRUCTIONS = [
+  "## Final answer: no more tool rounds",
+  "This turn has used all of its tool rounds. No more tools can run, so do not call one.",
+  "Answer the question now from the tool results already in this conversation:",
+  "- Say what was found, with the numbers the results carry.",
+  "- Give the sample size next to every figure whose result has one (sessions, rows, days or similar), and flag a figure that rests on a small sample. An average or rate without its sample size can mislead.",
+  "- Say plainly what is missing or was not checked, and what to look at next.",
+  "- Do not state a figure that no result contains."
+].join("\n");
 
 export function createLlmController(options: {
   registry: ActionRegistry;
@@ -467,7 +500,6 @@ export function createLlmController(options: {
   const modelClient = options.modelClient ?? createConfiguredModelClient();
   const sessionStore = options.sessionStore;
   const memoryManager = options.memoryManager;
-  const maxToolIterations = options.maxToolIterations ?? 8;
   const memoryReviewMode = options.memoryReview ?? "background";
   const now = options.now ?? (() => new Date());
   return {
@@ -669,10 +701,61 @@ export function createLlmController(options: {
         };
       }
       const tools = toolSchemas(actions);
+      // An explicit option is a blanket override (tests, embedders); otherwise the brain sets the budget.
+      const maxToolIterations = options.maxToolIterations ?? toolRoundBudget(
+        input.modelProvider ?? modelMetadata?.provider,
+        scopedAppTools?.mode
+      );
       const actionCalls: ChatActionCall[] = [];
       const toolResults: ModelToolResult[] = [];
       // The advisor also reads each call's input: an app twin called with an argument is not the native it replaces.
       const advisorResults: QueryRefinementToolResult[] = [];
+      const assemblePrompt = (
+        refinementSections: ReturnType<typeof buildQueryRefinementSections>,
+        synthesisSections: ReturnType<typeof buildQuerySynthesisSections>
+      ) => assembleInfiniteOsPrompt({
+        actions,
+        workspaceId: input.workspaceId,
+        surface: input.surface,
+        currentDate: now().toISOString().slice(0, 10),
+        modelProvider: input.modelProvider ?? modelMetadata?.provider,
+        recentMessages: priorSession?.messages,
+        compactedSummaries: priorSession?.summaries,
+        recalledSessions,
+        curatedMemory: memoryContext,
+        advisories: [...(advisory?.promptSections ?? []), ...refinementSections, ...synthesisSections],
+        ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
+        ...(input.interactiveFeatures ? { interactiveFeatures: input.interactiveFeatures } : {}),
+        ...(input.turnOrigin ? { turnOrigin: input.turnOrigin } : {}),
+        // Only a union turn's prompt changes: it offers none of the engine's writes.
+        ...(scopedAppTools?.mode === "union" ? { scopedAppToolMode: "union" as const } : {})
+      });
+      const streamCallbacks = (
+        streamState: { messageStarted: boolean }
+      ): Pick<ModelRequest, "onMessageDelta" | "onProgress" | "onReasoningDelta"> => ({
+        onMessageDelta: async (delta) => {
+          if (!delta) {
+            return;
+          }
+          if (!streamState.messageStarted) {
+            streamState.messageStarted = true;
+            await emitAssistantMessageStart();
+          }
+          await emitAssistantMessageDelta(delta);
+        },
+        onProgress: async (event) => emitInfinite(event),
+        onReasoningDelta: async (delta) => {
+          if (!delta) {
+            return;
+          }
+          await emitInfinite({
+            type: "reasoning.delta",
+            stage: "thinking",
+            message: delta,
+            text: delta
+          });
+        }
+      });
       let usage: ModelResponse["usage"];
       try {
         for (let iteration = 0; iteration < maxToolIterations; iteration += 1) {
@@ -685,23 +768,7 @@ export function createLlmController(options: {
           if (iteration > 0 && refinementSections.length > 0) {
             await emitStatus("resolve", refinementProgressMessage(refinementSections));
           }
-          const prompt = assembleInfiniteOsPrompt({
-            actions,
-            workspaceId: input.workspaceId,
-            surface: input.surface,
-            currentDate: now().toISOString().slice(0, 10),
-            modelProvider: input.modelProvider ?? modelMetadata?.provider,
-            recentMessages: priorSession?.messages,
-            compactedSummaries: priorSession?.summaries,
-            recalledSessions,
-            curatedMemory: memoryContext,
-            advisories: [...(advisory?.promptSections ?? []), ...refinementSections, ...synthesisSections],
-            ...(input.agentProfile ? { agentProfile: input.agentProfile } : {}),
-            ...(input.interactiveFeatures ? { interactiveFeatures: input.interactiveFeatures } : {}),
-            ...(input.turnOrigin ? { turnOrigin: input.turnOrigin } : {}),
-            // Only a union turn's prompt changes: it offers none of the engine's writes.
-            ...(scopedAppTools?.mode === "union" ? { scopedAppToolMode: "union" as const } : {})
-          });
+          const prompt = assemblePrompt(refinementSections, synthesisSections);
           const streamState = { messageStarted: false };
           const response = await modelClient.complete({
             model: input.model,
@@ -712,28 +779,7 @@ export function createLlmController(options: {
             // Stable across every turn of this session → lets the provider reuse its
             // cached prompt prefix instead of re-processing it each turn.
             promptCacheKey: sessionId,
-            onMessageDelta: async (delta) => {
-              if (!delta) {
-                return;
-              }
-              if (!streamState.messageStarted) {
-                streamState.messageStarted = true;
-                await emitAssistantMessageStart();
-              }
-              await emitAssistantMessageDelta(delta);
-            },
-            onProgress: async (event) => emitInfinite(event),
-            onReasoningDelta: async (delta) => {
-              if (!delta) {
-                return;
-              }
-              await emitInfinite({
-                type: "reasoning.delta",
-                stage: "thinking",
-                message: delta,
-                text: delta
-              });
-            }
+            ...streamCallbacks(streamState)
           });
           usage = iteration === 0 ? mergeUsage(response.usage) : mergeUsage(usage, response.usage);
           if (usage) await input.onUsage?.(usage);
@@ -832,7 +878,62 @@ export function createLlmController(options: {
             };
           }
         }
-        const message = "I reached the Infinite OS typed-action iteration limit before I could finish the answer.";
+        // The rounds ran out with the tool results still unread. One more call, with tools forbidden,
+        // turns what was gathered into an answer that says what it found, its sample sizes and what it
+        // did not check. Only if that call fails does the turn end on the plain limit sentence.
+        await emitStatus("status", "Writing the answer from the results gathered so far.");
+        const finalStreamState = { messageStarted: false, text: "" };
+        const finalCallbacks = streamCallbacks(finalStreamState);
+        let finalMessage: string | undefined;
+        let fallbackReason: string | undefined;
+        try {
+          const finalResponse = await modelClient.complete({
+            model: input.model,
+            systemPrompt: `${assemblePrompt(
+              buildQueryRefinementSections(advisedQuestion, advisorResults, actions.map((action) => action.id)),
+              buildQuerySynthesisSections(advisedQuestion, advisorResults)
+            )}\n\n${FINAL_ANSWER_INSTRUCTIONS}`,
+            userMessage: effectiveMessage,
+            tools,
+            toolResults,
+            toolChoice: "none",
+            promptCacheKey: sessionId,
+            ...finalCallbacks,
+            onMessageDelta: async (delta) => {
+              finalStreamState.text += delta;
+              await finalCallbacks.onMessageDelta?.(delta);
+            }
+          });
+          usage = mergeUsage(usage, finalResponse.usage);
+          if (usage) await input.onUsage?.(usage);
+          // Any tool call it asks for anyway is never run: the answer is its text or nothing.
+          finalMessage = finalResponse.message?.trim() ? finalResponse.message : undefined;
+          if (finalMessage === undefined) {
+            fallbackReason = "it returned no text";
+          }
+        } catch (error) {
+          const failedUsage = (error as { usage?: ModelUsage } | null)?.usage;
+          if (failedUsage !== undefined) {
+            usage = mergeUsage(usage, failedUsage);
+          }
+          fallbackReason = error instanceof Error ? error.message : String(error);
+        }
+        let message: string;
+        let alreadyStreamed = finalStreamState.messageStarted;
+        if (finalMessage !== undefined) {
+          message = finalMessage;
+        } else {
+          // Say why the turn ends on the limit sentence, so a fallback can be diagnosed without a repro.
+          await emitStatus("status", `No final answer (${fallbackReason}); ending on the round limit.`, "warn");
+          // If part of the answer already streamed, end that same message with the limit sentence, so what
+          // is stored is what was shown and the screen gets no second message.
+          const shown = finalStreamState.text.trim() ? finalStreamState.text : "";
+          message = shown ? `${shown}\n\n${TOOL_ROUND_LIMIT_MESSAGE}` : TOOL_ROUND_LIMIT_MESSAGE;
+          if (finalStreamState.messageStarted) {
+            await emitAssistantMessageDelta(message.slice(shown.length));
+            alreadyStreamed = true;
+          }
+        }
         if (persistTurn) {
           await sessionStore?.appendMessage({
             sessionId,
@@ -842,7 +943,7 @@ export function createLlmController(options: {
           });
           await recordTokenUsage(sessionStore, sessionId, usage);
         }
-        await emitAssistantMessage(message, usage);
+        await emitAssistantMessage(message, usage, { alreadyStreamed });
         if (persistTurn) {
           await scheduleMemoryReview(message, actionCalls);
         }
@@ -852,7 +953,8 @@ export function createLlmController(options: {
           message,
           provenance: unique(actionCalls.flatMap((call) => call.envelope?.provenance ?? [])),
           actionCalls,
-          ...responseMetadata(usage)
+          ...responseMetadata(usage),
+          ...(fallbackReason !== undefined ? { roundLimitFallbackReason: fallbackReason } : {})
         };
       } catch (error) {
         // Preserve measured work from completed model invocations when a later round fails.
@@ -1710,10 +1812,6 @@ function toolCallProgressMessage(
   if (actionId === "list_sources" || actionId === "get_recent_sync_runs") {
     return autoDiagnoseProgressMessage(message, actionId);
   }
-  const xBreakdownProgress = xBreakdownProgressMessage(message, actionId, call);
-  if (xBreakdownProgress) {
-    return xBreakdownProgress;
-  }
   const metricFamily = metricFamilyFromToolCall(call);
   if (metricFamily) {
     return PLANNED_PROGRESS_LABELS[metricFamily] ?? `Running ${actionId}.`;
@@ -1818,83 +1916,13 @@ function refinementProgressMessage(refinementSections: string[]): string {
   if (joined.includes("Open-ended analysis refinement guidance:")) {
     return "Refining open-ended analysis with more comparison context.";
   }
-  if (joined.includes("Timing-analysis refinement guidance:")) {
-    return "Refining timing analysis with posting-volume context.";
-  }
-  if (joined.includes("X negative-strategy refinement guidance:")) {
-    return "Refining X strategy answer with a richer cautionary post sample.";
-  }
-  if (joined.includes("X strategy refinement guidance:")) {
-    return "Refining X strategy answer with a richer post sample.";
-  }
-  if (joined.includes("X pattern-analysis refinement guidance:")) {
-    return "Refining X pattern analysis with a richer post sample.";
-  }
-  if (joined.includes("Best-post refinement guidance:")) {
-    return "Refining best-post answer with a richer breakdown.";
-  }
   return "Refining answer with a better-targeted follow-up query.";
-}
-
-function xBreakdownProgressMessage(message: string, actionId: string, call: ModelToolCall): string | undefined {
-  if (actionId !== "run_breakdown_query") {
-    return undefined;
-  }
-  const metricFamily = metricFamilyFromToolCall(call);
-  if (metricFamily !== "best_post" && metricFamily !== "post_count") {
-    return undefined;
-  }
-  if (isXTimingProgressQuestion(message)) {
-    return "Running X timing breakdown.";
-  }
-  if (isXNegativeStrategyProgressQuestion(message)) {
-    return "Running X strategy post-sample breakdown.";
-  }
-  if (isXStrategyProgressQuestion(message)) {
-    return "Running top-post strategy breakdown.";
-  }
-  if (isXPatternProgressQuestion(message)) {
-    return "Running top-post pattern breakdown.";
-  }
-  return undefined;
-}
-
-function isXTimingProgressQuestion(message: string): boolean {
-  return /\b(best|worst)\s+times?\b/i.test(message) && /\b(tweet|tweets|post|posts)\b/i.test(message);
-}
-
-function isXPatternProgressQuestion(message: string): boolean {
-  return /\b(had in common|have in common|what do .* have in common|analyse|analyze)\b/i.test(message)
-    && /\b(tweet|tweets|post|posts)\b/i.test(message)
-    && /\b(best|top|performing|performance)\b/i.test(message);
-}
-
-function isXStrategyProgressQuestion(message: string): boolean {
-  return /\bwhat should i (post|tweet|write) more of\b/i.test(message)
-    || (/\b(post|tweet|write)\b/i.test(message) && /\bmore of\b/i.test(message) && /\b(x|twitter|tweet|tweets|post|posts)\b/i.test(message));
-}
-
-function isXNegativeStrategyProgressQuestion(message: string): boolean {
-  return /\bwhat should i stop (posting|tweeting|writing)\b/i.test(message)
-    || (/\bstop posting\b/i.test(message) && /\b(x|twitter)\b/i.test(message));
 }
 
 function metricFamilyFromToolCall(call: ModelToolCall): QueryFamily | undefined {
   const metric = metricIdFromToolCall(call);
   if (!metric) {
     return undefined;
-  }
-  if (metric === "x_public_engagement") {
-    return "best_post";
-  }
-  if (metric === "x_follower_count") {
-    return "follower_count";
-  }
-  if (metric === "x_comment_count") {
-    return "comment_count";
-  }
-  if (metric === "x_post_count") {
-    return "post_count";
   }
   if (metric === "recognized_revenue") {
     return call.name === "run_breakdown_query" ? "revenue_source" : "recognized_revenue";

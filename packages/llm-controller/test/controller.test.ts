@@ -11,6 +11,7 @@ import {
   createLlmController,
   filterCuratedMemoryCandidates,
   mergeUsage,
+  toolRoundBudget,
   type ChatProgressEvent,
   type ModelRequest
 } from "../src/index.js";
@@ -941,6 +942,204 @@ describe("Infinite OS LLM controller", () => {
     expect(result.message).toBe("Finished after seven grounding rounds.");
     expect(result.actionCalls).toHaveLength(7);
     expect(callCount).toBe(8);
+  });
+
+  describe("when the tool rounds run out", () => {
+    const CANNED = "I reached the Infinite OS typed-action iteration limit before I could finish the answer.";
+    function sessionsRegistry() {
+      return createInfiniteOsRegistry({
+        list_metrics: (_input, context) =>
+          createEnvelope({
+            actionId: "list_metrics",
+            authority: context.authority,
+            data: { rows: [{ ad: "ad_1", avg_session_duration: 120, sample_size: 14 }] },
+            provenance: ["metric_definitions"]
+          })
+      });
+    }
+    async function runTurn(
+      complete: (request: ModelRequest) => Promise<{ message?: string; toolCalls?: { id: string; name: string; input: unknown }[] }>,
+      options: { maxToolIterations?: number; provider?: "codex" | "claude"; scopedMode?: "exclusive" | "union" } = {}
+    ) {
+      const requests: ModelRequest[] = [];
+      const progress: ChatProgressEvent[] = [];
+      const controller = createLlmController({
+        registry: sessionsRegistry(),
+        ...(options.maxToolIterations !== undefined ? { maxToolIterations: options.maxToolIterations } : {}),
+        modelClient: {
+          complete: async (request) => {
+            requests.push(request);
+            return complete(request);
+          },
+          ...(options.provider ? { modelMetadata: () => ({ provider: options.provider, model: "m" }) } : {})
+        }
+      });
+      const result = await controller.chat({
+        message: "Which ads had the longest view length on my landing page?",
+        sessionId: `session-rounds-${randomSuffix()}`,
+        workspaceId: "workspace-1",
+        actorId: "operator-1",
+        surface: "api",
+        progressMode: "rich",
+        onProgress: (event) => {
+          progress.push(event);
+        },
+        ...(options.scopedMode
+          ? {
+              scopedAppTools: {
+                serverName: "infinite_app",
+                mode: options.scopedMode,
+                allowedTools: ["mcp__infinite_app__capability_search"],
+                tools: [{ name: "capability_search", description: "Find a deferred tool.", inputSchema: { type: "object" } }],
+                callTool: async () => ({ ok: true })
+              }
+            }
+          : {})
+      });
+      return { result, requests, progress };
+    }
+    let suffix = 0;
+    function randomSuffix() {
+      suffix += 1;
+      return String(suffix);
+    }
+    const alwaysCallTool = (request: ModelRequest) => request.toolChoice === "none"
+      ? Promise.resolve({ message: "Ad 1 kept visitors longest: 120 s average over 14 sessions. Not checked: placements." })
+      : Promise.resolve({ toolCalls: [{ id: `call_${request.toolResults.length + 1}`, name: "list_metrics", input: {} }] });
+
+    it("makes exactly one more call with tools disabled and answers from the results already gathered", async () => {
+      const { result, requests, progress } = await runTurn(alwaysCallTool, { maxToolIterations: 2 });
+
+      expect(requests).toHaveLength(3);
+      expect(requests.slice(0, 2).every((request) => request.toolChoice === undefined)).toBe(true);
+      const finalRequest = requests[2];
+      expect(finalRequest.toolChoice).toBe("none");
+      // It reads every tool result the rounds gathered, and is told what the answer must carry.
+      expect(finalRequest.toolResults).toHaveLength(2);
+      expect(finalRequest.systemPrompt).toContain("No more tools can run");
+      expect(finalRequest.systemPrompt).toContain("sample size");
+      expect(finalRequest.systemPrompt).toContain("not checked");
+      expect(finalRequest.systemPrompt).toContain("Do not state a figure that no result contains");
+      expect(finalRequest.systemPrompt).toContain("flag a figure that rests on a small sample");
+      expect(result.ok).toBe(true);
+      expect(result.message).toBe("Ad 1 kept visitors longest: 120 s average over 14 sessions. Not checked: placements.");
+      expect(result.actionCalls).toHaveLength(2);
+      const complete = progress.filter((event) => "type" in event && event.type === "message.complete");
+      expect(complete).toHaveLength(1);
+      expect(complete[0]).toMatchObject({ text: result.message });
+    });
+
+    it("falls back to the iteration-limit sentence when the final call fails, and says why", async () => {
+      const { result, requests, progress } = await runTurn(
+        (request) => request.toolChoice === "none" ? Promise.reject(new Error("provider down")) : alwaysCallTool(request),
+        { maxToolIterations: 2 }
+      );
+
+      expect(requests).toHaveLength(3);
+      expect(result.ok).toBe(true);
+      expect(result.message).toBe(CANNED);
+      expect(result.actionCalls).toHaveLength(2);
+      // The fallback is visible: a warning names the failure, and the response carries the reason.
+      expect(result.roundLimitFallbackReason).toBe("provider down");
+      const warnings = progress.filter((event) => "type" in event && event.type === "status.update" && event.kind === "warn");
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toMatchObject({ text: expect.stringContaining("provider down") });
+    });
+
+    it("does not set a fallback reason when the final call answers", async () => {
+      const { result } = await runTurn(alwaysCallTool, { maxToolIterations: 1 });
+      expect(result.roundLimitFallbackReason).toBeUndefined();
+    });
+
+    it("keeps one message when the final call fails after it began streaming", async () => {
+      const { result, progress } = await runTurn(
+        async (request) => {
+          if (request.toolChoice !== "none") return alwaysCallTool(request);
+          await request.onMessageDelta?.("Ad 1 kept visitors ");
+          throw new Error("stream cut");
+        },
+        { maxToolIterations: 1 }
+      );
+
+      const events = progress.filter((event): event is Extract<ChatProgressEvent, { type: string }> => "type" in event);
+      expect(events.filter((event) => event.type === "message.start")).toHaveLength(1);
+      const shown = events.filter((event) => event.type === "message.delta").map((event) => (event as { text: string }).text).join("");
+      // What was shown is what the turn answers and stores: the partial text, then the limit sentence.
+      expect(result.message).toBe(`Ad 1 kept visitors \n\n${CANNED}`);
+      expect(shown).toBe(result.message);
+      const complete = events.filter((event) => event.type === "message.complete");
+      expect(complete).toHaveLength(1);
+      expect(complete[0]).toMatchObject({ text: result.message });
+      expect(result.roundLimitFallbackReason).toBe("stream cut");
+    });
+
+    it("keeps one message when the final call streamed only whitespace", async () => {
+      const { result, progress } = await runTurn(
+        async (request) => {
+          if (request.toolChoice !== "none") return alwaysCallTool(request);
+          await request.onMessageDelta?.("  ");
+          return { message: "  " };
+        },
+        { maxToolIterations: 1 }
+      );
+
+      const events = progress.filter((event): event is Extract<ChatProgressEvent, { type: string }> => "type" in event);
+      expect(events.filter((event) => event.type === "message.start")).toHaveLength(1);
+      expect(result.message).toBe(CANNED);
+      const complete = events.filter((event) => event.type === "message.complete");
+      expect(complete).toHaveLength(1);
+      expect(complete[0]).toMatchObject({ text: CANNED });
+    });
+
+    it("falls back to the iteration-limit sentence when the final call returns no text", async () => {
+      const { result, requests } = await runTurn(
+        (request) => request.toolChoice === "none"
+          ? Promise.resolve({ message: "  ", toolCalls: [{ id: "late", name: "list_metrics", input: {} }] })
+          : alwaysCallTool(request),
+        { maxToolIterations: 2 }
+      );
+
+      expect(requests).toHaveLength(3);
+      expect(result.message).toBe(CANNED);
+      // A tool call the final answer was told not to make never runs.
+      expect(result.actionCalls).toHaveLength(2);
+    });
+
+    it("gives a Codex chat (union) turn twelve tool rounds and Claude eight before the final answer", async () => {
+      const codex = await runTurn(alwaysCallTool, { provider: "codex", scopedMode: "union" });
+      expect(codex.result.actionCalls).toHaveLength(12);
+      expect(codex.requests).toHaveLength(13);
+      expect(codex.requests[12].toolChoice).toBe("none");
+
+      const claude = await runTurn(alwaysCallTool, { provider: "claude", scopedMode: "union" });
+      expect(claude.result.actionCalls).toHaveLength(8);
+      expect(claude.requests).toHaveLength(9);
+
+      const unknown = await runTurn(alwaysCallTool, { scopedMode: "union" });
+      expect(unknown.result.actionCalls).toHaveLength(8);
+    });
+
+    it("keeps Codex at eight rounds outside the union chat lane", async () => {
+      // Exclusive lanes (automatic, scheduled, iMessage) run under wall-clock budgets and get no deferred tools.
+      const exclusive = await runTurn(alwaysCallTool, { provider: "codex", scopedMode: "exclusive" });
+      expect(exclusive.requests).toHaveLength(9);
+      const plain = await runTurn(alwaysCallTool, { provider: "codex" });
+      expect(plain.result.actionCalls).toHaveLength(8);
+      expect(plain.requests).toHaveLength(9);
+    });
+
+    it("lets an explicit maxToolIterations override every provider's budget", async () => {
+      const { result } = await runTurn(alwaysCallTool, { provider: "codex", maxToolIterations: 3 });
+      expect(result.actionCalls).toHaveLength(3);
+    });
+
+    it("exposes the per-provider budget", () => {
+      expect(toolRoundBudget("codex", "union")).toBe(12);
+      expect(toolRoundBudget("claude", "union")).toBe(8);
+      expect(toolRoundBudget(undefined, "union")).toBe(8);
+      expect(toolRoundBudget("codex", "exclusive")).toBe(8);
+      expect(toolRoundBudget("codex", undefined)).toBe(8);
+    });
   });
 
   it.skip("pre-runs revenue total and answers directly", async () => {
@@ -2316,8 +2515,8 @@ describe("Infinite OS LLM controller", () => {
 
     expect(prompts[0]).toContain("Workspace snapshot prompt guidance:");
     expect(prompts[0]).toContain("at least one business signal");
-    expect(prompts[0]).toContain("Use compatible metric/view pairs:");
-    expect(prompts[0]).toContain("`x_post_count` and `x_comment_count` belong on `queryable.vw_x_authored_activity`");
+    expect(prompts[0]).not.toContain("x_post_count");
+    expect(prompts[0]).not.toContain("vw_x_");
     expect(prompts[0]).toContain("Do not let one noisy metric dominate");
   });
 
@@ -3997,80 +4196,6 @@ describe("Infinite OS LLM controller", () => {
     expect(prompts[0]).not.toContain("query recipe for this turn");
   });
 
-  it("builds refinement guidance after a weak best-post breakdown result", async () => {
-    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
-    const sections = buildQueryRefinementSections("my best tweet", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              {
-                x_post_id: "post_1",
-                post_url: "https://x.com/example/status/1",
-                body_text: "https://x.com/example/status/1",
-                x_public_engagement: "7"
-              }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Best-post refinement guidance:");
-    expect(sections.join("\n")).toContain("too thin for a strong final answer");
-  });
-
-  it("builds timing-analysis refinement guidance when engagement buckets exist without posting-volume buckets", async () => {
-    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
-    const sections = buildQueryRefinementSections("what are the best times for me to tweet", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [{ published_hour_utc: 2, x_public_engagement: "33" }],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Timing-analysis refinement guidance:");
-    expect(sections.join("\n")).toContain("fetch `x_post_count` over the same time buckets");
-  });
-
-  it("builds X metric/view mismatch recovery guidance after invalid X query errors", async () => {
-    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
-    const sections = buildQueryRefinementSections("When we increase spend on X or Meta Ads, are we getting proportionate gains?", [
-      {
-        name: "run_metric_query",
-        result: {
-          status: "error",
-          actionId: "run_metric_query",
-          input: { metric: "x_post_count", view: "queryable.vw_x_post_public_metrics" },
-          error: {
-            code: "action_execution_failed",
-            message: "unsupported_view_for_metric:x_post_count:queryable.vw_x_post_public_metrics"
-          }
-        }
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X metric/view recovery guidance:");
-    expect(sections.join("\n")).toContain("`x_post_count` belongs on `queryable.vw_x_authored_activity`");
-    expect(sections.join("\n")).toContain("describe_metric");
-    expect(sections.join("\n")).toContain("Do not retry `x_post_count` on `queryable.vw_x_post_public_metrics`");
-  });
-
   it("builds failed-sync freshness guidance for current X answers", async () => {
     const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
     const sections = buildQueryRefinementSections("what are my best tweets today?", [
@@ -4139,51 +4264,6 @@ describe("Infinite OS LLM controller", () => {
     ]);
 
     expect(sections.join("\n")).not.toContain("X freshness failure guidance:");
-  });
-
-  it("builds pattern-analysis refinement guidance when the top-post set is too thin", async () => {
-    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
-    const sections = buildQueryRefinementSections("analyse what my best performing tweets had in common", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [{ x_post_id: "1", body_text: "https://x.com/example/status/1", x_public_engagement: "7" }],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X pattern-analysis refinement guidance:");
-    expect(sections.join("\n")).toContain("too thin for a strong comparison answer");
-  });
-
-  it("builds negative-strategy refinement guidance when the post sample is too thin", async () => {
-    const { buildQueryRefinementSections } = await import("../src/query-advisor.js");
-    const sections = buildQueryRefinementSections("what should i stop posting on x", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [{ x_post_id: "1", body_text: "https://x.com/example/status/1", x_public_engagement: "7" }],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X negative-strategy refinement guidance:");
-    expect(sections.join("\n")).toContain("too thin for a strong stop-posting recommendation");
-    expect(sections.join("\n")).toContain("grounded caution from one-sided winner data");
   });
 
   it("builds open-ended refinement guidance when a generic ranked result is too thin", async () => {
@@ -4714,115 +4794,6 @@ describe("Infinite OS LLM controller", () => {
     expect(progressMessages).toContain("Re-running engagement breakdown with richer post detail.");
   });
 
-  it("emits timing-specific refinement progress when timing evidence needs another pass", async () => {
-    const events: Array<{ stage: string; message: string }> = [];
-    const controller = createLlmController({
-      registry: createInfiniteOsRegistry({
-        run_breakdown_query: (_input, context) =>
-          createEnvelope({
-            actionId: "run_breakdown_query",
-            authority: context.authority,
-            data: {
-              rows: [{ published_hour_utc: 2, x_public_engagement: "33" }],
-              metric: "x_public_engagement",
-              view: "queryable.vw_x_post_public_metrics"
-            },
-            provenance: ["queryable.vw_x_post_public_metrics"]
-          })
-      }),
-      modelClient: {
-        complete: async (request) => {
-          if (request.toolResults.length === 0) {
-            return {
-              toolCalls: [
-                {
-                  id: "call_timing_breakdown",
-                  name: "run_breakdown_query",
-                  input: {
-                    metric: "x_public_engagement",
-                    view: "queryable.vw_x_post_public_metrics",
-                    groupBy: ["published_hour_utc"]
-                  }
-                }
-              ]
-            };
-          }
-          return { message: "Timing answer." };
-        }
-      }
-    });
-
-    await controller.chat({
-      message: "what are the best times for me to tweet",
-      sessionId: "session-timing-refinement-progress",
-      workspaceId: "workspace-1",
-      actorId: "operator-1",
-      surface: "api",
-      onProgress(event) {
-        events.push(event);
-      }
-    });
-
-    expect(events).toContainEqual({
-      stage: "resolve",
-      message: "Refining timing analysis with posting-volume context."
-    });
-  });
-
-  it("emits strategy-specific refinement progress when recommendation evidence is too thin", async () => {
-    const events: Array<{ stage: string; message: string }> = [];
-    const controller = createLlmController({
-      registry: createInfiniteOsRegistry({
-        run_breakdown_query: (_input, context) =>
-          createEnvelope({
-            actionId: "run_breakdown_query",
-            authority: context.authority,
-            data: {
-              rows: [{ x_post_id: "1", body_text: "https://x.com/example/status/1", x_public_engagement: "7" }],
-              metric: "x_public_engagement",
-              view: "queryable.vw_x_post_public_metrics"
-            },
-            provenance: ["queryable.vw_x_post_public_metrics"]
-          })
-      }),
-      modelClient: {
-        complete: async (request) => {
-          if (request.toolResults.length === 0) {
-            return {
-              toolCalls: [
-                {
-                  id: "call_strategy_breakdown",
-                  name: "run_breakdown_query",
-                  input: {
-                    metric: "x_public_engagement",
-                    view: "queryable.vw_x_post_public_metrics"
-                  }
-                }
-              ]
-            };
-          }
-          return { message: "Strategy answer." };
-        }
-      }
-    });
-
-    await controller.chat({
-      message: "what should i post more of on x",
-      sessionId: "session-strategy-refinement-progress",
-      workspaceId: "workspace-1",
-      actorId: "operator-1",
-      surface: "api",
-      onProgress(event) {
-        events.push(event);
-      }
-    });
-
-    expect(events).toContainEqual({
-      stage: "resolve",
-      message: "Refining X strategy answer with a richer post sample."
-    });
-  });
-
   it("emits open-ended-analysis refinement progress when broad evidence needs more context", async () => {
     const events: Array<{ stage: string; message: string }> = [];
     const controller = createLlmController({
@@ -4985,61 +4956,10 @@ describe("Infinite OS LLM controller", () => {
     });
   });
 
-  it("builds best-post final synthesis guidance after a strong ranked breakdown", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("my best tweet", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { x_post_id: "1", body_text: "First strong post", x_public_engagement: "19" },
-              { x_post_id: "2", body_text: "Second strong post", x_public_engagement: "13" },
-              { x_post_id: "3", body_text: "Third strong post", x_public_engagement: "8" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Best-post final synthesis guidance:");
-    expect(sections.join("\n")).toContain("Lead with the winning post text");
-    expect(sections.join("\n")).toContain("Mention at least two runner-ups");
-    expect(sections.join("\n")).toContain("Prefer a conversational ranked list or bullets");
-  });
-
   it("does not classify tweet timing questions as best-post ranking questions", async () => {
     const { classifyQueryFamily, buildQueryRefinementSections } = await import("../src/query-advisor.js");
     expect(classifyQueryFamily("what are the best times for me to tweet")).toBe("other");
     expect(buildQueryRefinementSections("what are the best times for me to tweet", [])).toEqual([]);
-  });
-
-  it("builds direct metric synthesis guidance for follower-count questions after metric results return", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("how many followers i have", [
-      {
-        name: "run_metric_query",
-        result: createEnvelope({
-          actionId: "run_metric_query",
-          authority: "tool_agent",
-          data: {
-            rows: [{ x_follower_count: "31" }],
-            metric: "x_follower_count",
-            view: "queryable.vw_x_profile_public_metrics"
-          },
-          provenance: ["queryable.vw_x_profile_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Follower-count final synthesis guidance:");
-    expect(sections.join("\n")).toContain("latest public X profile metrics snapshot");
-    expect(sections.join("\n")).toContain("avoid table-heavy formatting");
   });
 
   it("builds generic breakdown synthesis guidance for non-family questions after ranked rows return", async () => {
@@ -5099,133 +5019,6 @@ describe("Infinite OS LLM controller", () => {
     expect(sections.join("\n")).toContain("runner-ups");
   });
 
-  it("builds timing-analysis synthesis guidance for X time-bucket breakdowns", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("what are the best times for me to tweet", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { published_hour_utc: 2, x_public_engagement: "33" },
-              { published_hour_utc: 22, x_public_engagement: "20" },
-              { published_hour_utc: 18, x_public_engagement: "14" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Timing-analysis synthesis guidance:");
-    expect(sections.join("\n")).toContain("Top hour buckets:");
-    expect(sections.join("\n")).toContain("directional");
-    expect(sections.join("\n")).toContain("posting-volume buckets");
-  });
-
-  it("builds combined timing-analysis guidance when engagement and posting-volume buckets are both present", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("what are the best times for me to tweet", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { published_hour_utc: 2, x_public_engagement: "33" },
-              { published_weekday_utc: 2, x_public_engagement: "66" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      },
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { published_hour_utc: 2, x_post_count: "5" },
-              { published_weekday_utc: 2, x_post_count: "7" }
-            ],
-            metric: "x_post_count",
-            view: "queryable.vw_x_authored_activity"
-          },
-          provenance: ["queryable.vw_x_authored_activity"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("Timing-analysis synthesis guidance:");
-    expect(sections.join("\n")).toContain("Highest engagement hour bucket:");
-    expect(sections.join("\n")).toContain("Highest posting-volume hour bucket:");
-    expect(sections.join("\n")).toContain("Compare engagement buckets against posting-volume buckets");
-    expect(sections.join("\n")).toContain("signal may partly reflect frequency");
-  });
-
-  it("builds dedicated X pattern-analysis synthesis guidance for top-post comparison prompts", async () => {
-    const { buildQuerySynthesisSections, classifyQueryFamily } = await import("../src/query-advisor.js");
-    expect(classifyQueryFamily("analyse what my best performing tweets had in common")).toBe("best_post");
-    const sections = buildQuerySynthesisSections("analyse what my best performing tweets had in common", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { x_post_id: "1", body_text: "Hot take one", x_public_engagement: "33" },
-              { x_post_id: "2", body_text: "Hot take two", x_public_engagement: "19" },
-              { x_post_id: "3", body_text: "Founder post", x_public_engagement: "10" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X pattern-analysis synthesis guidance:");
-    expect(sections.join("\n")).toContain("Top posts include:");
-    expect(sections.join("\n")).toContain("Compare the top posts for recurring themes");
-  });
-
-  it("builds dedicated X strategy synthesis guidance for top-post recommendation prompts", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("what should i post more of on x", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { x_post_id: "1", body_text: "Hot take one", x_public_engagement: "33" },
-              { x_post_id: "2", body_text: "Hot take two", x_public_engagement: "19" },
-              { x_post_id: "3", body_text: "Founder post", x_public_engagement: "10" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X strategy synthesis guidance:");
-    expect(sections.join("\n")).toContain("recommend what the user should post more of");
-    expect(sections.join("\n")).toContain("2-3 concrete content recommendations");
-  });
-
   it("keeps X strategy guidance scoped to X rows when a later non-X breakdown exists", async () => {
     const { buildQueryRefinementSections, buildQuerySynthesisSections } = await import("../src/query-advisor.js");
     const toolResults = [
@@ -5270,34 +5063,6 @@ describe("Infinite OS LLM controller", () => {
     expect(synthesis).toContain("Hot take one");
     expect(synthesis).not.toContain("/pricing");
     expect(synthesis).not.toContain("/blog");
-  });
-
-  it("builds dedicated X negative-strategy synthesis guidance for stop-posting prompts", async () => {
-    const { buildQuerySynthesisSections } = await import("../src/query-advisor.js");
-    const sections = buildQuerySynthesisSections("what should i stop posting on x", [
-      {
-        name: "run_breakdown_query",
-        result: createEnvelope({
-          actionId: "run_breakdown_query",
-          authority: "tool_agent",
-          data: {
-            rows: [
-              { x_post_id: "1", body_text: "Hot take one", x_public_engagement: "33" },
-              { x_post_id: "2", body_text: "Hot take two", x_public_engagement: "19" },
-              { x_post_id: "3", body_text: "Founder post", x_public_engagement: "10" }
-            ],
-            metric: "x_public_engagement",
-            view: "queryable.vw_x_post_public_metrics"
-          },
-          provenance: ["queryable.vw_x_post_public_metrics"]
-        })
-      }
-    ]);
-
-    expect(sections.join("\n")).toContain("X negative-strategy synthesis guidance:");
-    expect(sections.join("\n")).toContain("do not claim that the data directly proves what to stop posting");
-    expect(sections.join("\n")).toContain("grounded observations about what performs well");
-    expect(sections.join("\n")).toContain("cautious hypotheses");
   });
 
   it("builds generic metric synthesis guidance for non-family questions after scalar results return", async () => {
@@ -5925,9 +5690,9 @@ describe("Infinite OS LLM controller", () => {
             actionId: "run_metric_query",
             authority: context.authority,
             data: {
-              rows: [{ x_follower_count: "31" }],
-              metric: "x_follower_count",
-              view: "queryable.vw_x_profile_public_metrics"
+              rows: [{ recognized_revenue: "3100" }],
+              metric: "recognized_revenue",
+              view: "queryable.vw_revenue_by_source"
             },
             provenance: ["metric_definitions"]
           })
@@ -5949,24 +5714,24 @@ describe("Infinite OS LLM controller", () => {
             return {
               toolCalls: [
                 {
-                  id: "call_followers",
+                  id: "call_revenue",
                   name: "run_metric_query",
                   input: {
-                    metric: "x_follower_count",
-                    view: "queryable.vw_x_profile_public_metrics"
+                    metric: "recognized_revenue",
+                    view: "queryable.vw_revenue_by_source"
                   }
                 }
               ]
             };
           }
-          return { message: "You have 31 followers." };
+          return { message: "Revenue is 31.00." };
         }
       }
     });
 
     await controller.chat({
-      message: "how many followers i have",
-      sessionId: "session-x-progress",
+      message: "how much revenue did we make all time",
+      sessionId: "session-progress",
       workspaceId: "workspace-1",
       actorId: "operator-1",
       surface: "api",
@@ -5978,7 +5743,7 @@ describe("Infinite OS LLM controller", () => {
     expect(events).toEqual([
       { stage: "resolve", message: "Checking saved workspace context." },
       { stage: "resolve", message: "Resolved workspace context." },
-      { stage: "tool", message: "Running follower lookup." }
+      { stage: "tool", message: "Running revenue total lookup." }
     ]);
   });
 
@@ -6223,119 +5988,6 @@ describe("Infinite OS LLM controller", () => {
     expect(events).not.toContainEqual({
       stage: "tool",
       message: "Checking metric definition."
-    });
-  });
-
-  it("humanizes timing progress labels for model-selected X timing breakdowns", async () => {
-    const events: Array<{ stage: string; message: string }> = [];
-    const controller = createLlmController({
-      registry: createInfiniteOsRegistry({
-        run_breakdown_query: (_input, context) =>
-          createEnvelope({
-            actionId: "run_breakdown_query",
-            authority: context.authority,
-            data: {
-              rows: [{ published_hour_utc: 2, x_public_engagement: "33" }],
-              metric: "x_public_engagement",
-              view: "queryable.vw_x_post_public_metrics"
-            },
-            provenance: ["queryable.vw_x_post_public_metrics"]
-          })
-      }),
-      modelClient: {
-        complete: async (request) =>
-          request.toolResults.length === 0
-            ? {
-                toolCalls: [
-                  {
-                    id: "call_timing_breakdown",
-                    name: "run_breakdown_query",
-                    input: {
-                      metric: "x_public_engagement",
-                      view: "queryable.vw_x_post_public_metrics",
-                      groupBy: ["published_hour_utc"]
-                    }
-                  }
-                ]
-              }
-            : { message: "Timing answer." }
-      }
-    });
-
-    await controller.chat({
-      message: "what are the best times for me to tweet",
-      sessionId: "session-model-timing-progress-humanized",
-      workspaceId: "workspace-1",
-      actorId: "operator-1",
-      surface: "api",
-      onProgress(event) {
-        events.push(event);
-      }
-    });
-
-    expect(events).toContainEqual({
-      stage: "tool",
-      message: "Running X timing breakdown."
-    });
-    expect(events).not.toContainEqual({
-      stage: "tool",
-      message: "Running engagement breakdown."
-    });
-  });
-
-  it("humanizes strategy progress labels for model-selected X strategy breakdowns", async () => {
-    const events: Array<{ stage: string; message: string }> = [];
-    const controller = createLlmController({
-      registry: createInfiniteOsRegistry({
-        run_breakdown_query: (_input, context) =>
-          createEnvelope({
-            actionId: "run_breakdown_query",
-            authority: context.authority,
-            data: {
-              rows: [{ x_post_id: "1", body_text: "Hot take one", x_public_engagement: "33" }],
-              metric: "x_public_engagement",
-              view: "queryable.vw_x_post_public_metrics"
-            },
-            provenance: ["queryable.vw_x_post_public_metrics"]
-          })
-      }),
-      modelClient: {
-        complete: async (request) =>
-          request.toolResults.length === 0
-            ? {
-                toolCalls: [
-                  {
-                    id: "call_strategy_breakdown",
-                    name: "run_breakdown_query",
-                    input: {
-                      metric: "x_public_engagement",
-                      view: "queryable.vw_x_post_public_metrics"
-                    }
-                  }
-                ]
-              }
-            : { message: "Strategy answer." }
-      }
-    });
-
-    await controller.chat({
-      message: "what should i post more of on x",
-      sessionId: "session-model-strategy-progress-humanized",
-      workspaceId: "workspace-1",
-      actorId: "operator-1",
-      surface: "api",
-      onProgress(event) {
-        events.push(event);
-      }
-    });
-
-    expect(events).toContainEqual({
-      stage: "tool",
-      message: "Running top-post strategy breakdown."
-    });
-    expect(events).not.toContainEqual({
-      stage: "tool",
-      message: "Running engagement breakdown."
     });
   });
 
@@ -9007,75 +8659,6 @@ describe("Infinite OS LLM controller", () => {
       expect(bodyText).toContain("site_visitors ranked rows: #1 site_visitors=1200 google / cpc / brand");
       expect(bodyText).toContain("#2 site_visitors=700 twitter / social / launch");
       expect(bodyText).toContain("Pattern: top rows are relatively close");
-    } finally {
-      rmSync(growthHome, { recursive: true, force: true });
-    }
-  });
-
-  it("labels X engagement breakdowns as top posts in the digest", async () => {
-    const growthHome = mkdtempSync(join(tmpdir(), "growth-os-claude-x-breakdown-digest-"));
-    const requests: Array<{ url: string; body: Record<string, unknown>; headers: Headers }> = [];
-    try {
-      const env = {
-        GROWTH_OS_HOME: growthHome
-      };
-      writeInfiniteOsModelSelection({ provider: "claude", model: "claude-sonnet-4-5" }, env);
-      writeInfiniteOsAuthRecord(
-        {
-          provider: "claude",
-          source: "claude-code",
-          authMode: "reuse",
-          token: "claude-access-token"
-        },
-        env
-      );
-      const client = createConfiguredModelClient({
-        env,
-        fetch: async (url, init) => {
-          requests.push({
-            url: String(url),
-            body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
-            headers: new Headers(init?.headers)
-          });
-          return new Response(
-            JSON.stringify({
-              usage: { input_tokens: 9, output_tokens: 4 },
-              content: [{ type: "text", text: "Done." }]
-            }),
-            { status: 200 }
-          );
-        }
-      });
-
-      await client.complete({
-        systemPrompt: "Use typed Infinite OS actions.",
-        userMessage: "What should I post more of on X?",
-        tools: [],
-        toolResults: [
-          {
-            id: "x_breakdown_1",
-            name: "run_breakdown_query",
-            result: createEnvelope({
-              actionId: "run_breakdown_query",
-              authority: "tool_agent",
-              data: {
-                rows: [
-                  { x_post_id: "1", body_text: "Hot take one", x_public_engagement: "33" },
-                  { x_post_id: "2", body_text: "Hot take two", x_public_engagement: "19" }
-                ],
-                metric: "x_public_engagement",
-                view: "queryable.vw_x_post_public_metrics"
-              },
-              provenance: ["queryable.vw_x_post_public_metrics"]
-            })
-          }
-        ]
-      });
-
-      const bodyText = JSON.stringify(requests[0].body);
-      expect(bodyText).toContain("top X posts by engagement");
-      expect(bodyText).toContain("Hot take one");
-      expect(bodyText).toContain("Hot take two");
     } finally {
       rmSync(growthHome, { recursive: true, force: true });
     }

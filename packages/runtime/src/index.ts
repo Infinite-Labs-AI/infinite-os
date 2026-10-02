@@ -182,9 +182,6 @@ export const FIRST_PHASE_QUERYABLE_VIEWS = [
   "queryable.vw_posthog_events",
   "queryable.vw_revenue_by_source",
   "queryable.vw_recent_sync_status",
-  "queryable.vw_x_post_public_metrics",
-  "queryable.vw_x_authored_activity",
-  "queryable.vw_x_profile_public_metrics",
   "queryable.vw_shopify_orders",
   "queryable.vw_shopify_products",
   "queryable.vw_meta_ads_campaign_daily",
@@ -236,10 +233,6 @@ export const FIRST_PHASE_METRICS = [
   "site_conversion_rate",
   "posthog_event_count",
   "recognized_revenue",
-  "x_public_engagement",
-  "x_post_count",
-  "x_comment_count",
-  "x_follower_count",
   "shopify_gross_sales",
   "shopify_order_count",
   "meta_ads_spend",
@@ -286,7 +279,7 @@ export const FIRST_PHASE_METRICS = [
 ] as const;
 
 // Compact {metric id -> common aliases} hint, mirrored by hand from the `aliases` column of the
-// metric_definitions seeds (migrations 0005/0011/0014/0016/0022/0024/0025/0029/0033/0034/0048/0078). The
+// metric_definitions seeds (migrations 0005/0016/0022/0024/0025/0029/0033/0034/0048/0078). The
 // authoritative source is still the DB (list_metrics/describe_metric hydrate the live aliases);
 // this map is only a prompt-time hint so common phrasings like "cost per lead" or "cpl" resolve
 // to cost_per_result WITHOUT a discovery round-trip. Keep it in sync with the seeds when aliases
@@ -297,10 +290,6 @@ export const FIRST_PHASE_METRIC_ALIASES: Record<string, readonly string[]> = {
   site_conversion_rate: ["conversion percentage", "conversion rate"],
   posthog_event_count: ["events", "event count", "event counts", "posthog events"],
   recognized_revenue: ["revenue"],
-  x_public_engagement: ["best tweet", "best post", "most popular tweet", "tweet engagement", "post engagement"],
-  x_post_count: ["tweets made", "tweet count", "posts made", "how many tweets have i made"],
-  x_comment_count: ["comments made", "replies made", "comments authored"],
-  x_follower_count: ["followers", "follower count"],
   shopify_gross_sales: ["shopify revenue", "shop sales", "gross merchandise value", "gmv"],
   shopify_order_count: ["orders", "shopify orders"],
   meta_ads_spend: ["facebook ads spend", "instagram ads spend", "meta spend"],
@@ -656,7 +645,7 @@ function metadataFor(id: InfiniteOsActionId): {
     run_metric_query: {
       title: "Run metric query",
       summary:
-        "Execute a read-only metric query against the queryable schema. DATE WINDOWS (over-time metrics — revenue, spend, event/post counts, and every other summed-over-days metric): when the question references ANY time window (today, yesterday, this/last week or month, last N days, a named range), you MUST pass occurred_on (or published_at for X posts) gte/lte filters for that window. Omitting the date range on an over-time metric returns an ALL-TIME total — the response is stamped an `unbounded_date_range` caveat; never present an all-time total as if it answered a windowed question. Exception — snapshot/current-count metrics (x_follower_count, stripe_current_paid_subscribers, stripe_trialing_subscribers) are point-in-time reads: they answer 'as of now', take no date window, and are never stamped unbounded_date_range (x_follower_count's view has no published_at column — a published_at/date filter there is rejected as unsupported_dimension). For trend questions (week-over-week, month-over-month, year-over-year), set compareTo='prior_period' (immediately preceding equal-length range) or 'prior_year' (same range one year earlier) together with occurred_on (published_at for X posts) gte/lte date filters; the response then carries a `comparison` block (current/previous/absoluteDelta/percentDelta/direction) — phrase the answer as 'up/down X% vs prior period'. X compatibility: x_public_engagement -> queryable.vw_x_post_public_metrics; x_post_count and x_comment_count -> queryable.vw_x_authored_activity; x_follower_count -> queryable.vw_x_profile_public_metrics.",
+        "Execute a read-only metric query against the queryable schema. DATE WINDOWS (over-time metrics — revenue, spend, event/post counts, and every other summed-over-days metric): when the question references ANY time window (today, yesterday, this/last week or month, last N days, a named range), you MUST pass occurred_on gte/lte filters for that window. Omitting the date range on an over-time metric returns an ALL-TIME total — the response is stamped an `unbounded_date_range` caveat; never present an all-time total as if it answered a windowed question. Exception — snapshot/current-count metrics (stripe_current_paid_subscribers, stripe_trialing_subscribers) are point-in-time reads: they answer 'as of now', take no date window, and are never stamped unbounded_date_range. For trend questions (week-over-week, month-over-month, year-over-year), set compareTo='prior_period' (immediately preceding equal-length range) or 'prior_year' (same range one year earlier) together with occurred_on gte/lte date filters; the response then carries a `comparison` block (current/previous/absoluteDelta/percentDelta/direction) — phrase the answer as 'up/down X% vs prior period'.",
       category: "questions",
       recommendedNextActions: [
         "explain_answer",
@@ -668,7 +657,7 @@ function metadataFor(id: InfiniteOsActionId): {
     run_breakdown_query: {
       title: "Run breakdown query",
       summary:
-        "Execute a read-only grouped metric query against allowed dimensions, with optional bounded ordering. X compatibility: x_public_engagement -> queryable.vw_x_post_public_metrics; x_post_count and x_comment_count -> queryable.vw_x_authored_activity; x_follower_count -> queryable.vw_x_profile_public_metrics.",
+        "Execute a read-only grouped metric query against allowed dimensions, with optional bounded ordering.",
       category: "questions",
       recommendedNextActions: [
         "explain_answer",
@@ -1037,7 +1026,7 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
       metric: {
         enum: FIRST_PHASE_METRICS,
         description:
-          "Metric to explain. For X, use the metric's compatible source view when running follow-up queries: x_public_engagement -> queryable.vw_x_post_public_metrics; x_post_count/x_comment_count -> queryable.vw_x_authored_activity; x_follower_count -> queryable.vw_x_profile_public_metrics."
+          "Metric to explain."
       },
       priorResultMetric: { enum: FIRST_PHASE_METRICS }
     }),
@@ -1438,12 +1427,12 @@ function analyticalQuerySchema(
       metric: {
         enum: FIRST_PHASE_METRICS,
         description:
-          "Metric to query. For X, choose a compatible view: x_public_engagement -> queryable.vw_x_post_public_metrics; x_post_count/x_comment_count -> queryable.vw_x_authored_activity; x_follower_count -> queryable.vw_x_profile_public_metrics."
+          "Metric to query."
       },
       view: {
         enum: FIRST_PHASE_QUERYABLE_VIEWS,
         description:
-          "Use a view compatible with the metric. For X: x_public_engagement uses queryable.vw_x_post_public_metrics; x_post_count and x_comment_count use queryable.vw_x_authored_activity; x_follower_count uses queryable.vw_x_profile_public_metrics."
+          "Use a view compatible with the metric."
       },
       site: {
         type: "string",
@@ -1477,7 +1466,7 @@ function analyticalQuerySchema(
       compareTo: {
         enum: ["prior_period", "prior_year"],
         description:
-          "Optional comparison for trend answers (week-over-week, month-over-month, year-over-year). Set 'prior_period' to compare the result against the immediately preceding equal-length date range (e.g. the prior 7 days for a 7-day query — WoW/MoM), or 'prior_year' for the same range one calendar year earlier (YoY). REQUIRES occurred_on (or published_at for X) gte/lte date filters; without a bounded date range the comparison is skipped and a 'comparison_requires_date_range' caveat is added. The response gains a `comparison` block { mode, current, previous, absoluteDelta, percentDelta, direction, range } — phrase results as 'up/down X% vs prior period'. Comparison applies to run_metric_query only (it is ignored by run_breakdown_query)."
+          "Optional comparison for trend answers (week-over-week, month-over-month, year-over-year). Set 'prior_period' to compare the result against the immediately preceding equal-length date range (e.g. the prior 7 days for a 7-day query — WoW/MoM), or 'prior_year' for the same range one calendar year earlier (YoY). REQUIRES occurred_on gte/lte date filters; without a bounded date range the comparison is skipped and a 'comparison_requires_date_range' caveat is added. The response gains a `comparison` block { mode, current, previous, absoluteDelta, percentDelta, direction, range } — phrase results as 'up/down X% vs prior period'. Comparison applies to run_metric_query only (it is ignored by run_breakdown_query)."
       }
     },
     options.groupByRequired ? ["metric", "groupBy"] : ["metric"]

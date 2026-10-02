@@ -358,12 +358,12 @@ describe("cli smoke", () => {
     const rendered = renderCliResult({
       ok: true,
       sessionId: "cli-session",
-      message: "You have 31 followers.",
-      provenance: ["queryable.vw_x_profile_public_metrics"],
+      message: "You have 31 paid subscribers.",
+      provenance: ["queryable.vw_stripe_paid_subscribers"],
       actionCalls: []
     });
 
-    expect(rendered).toBe("You have 31 followers.");
+    expect(rendered).toBe("You have 31 paid subscribers.");
     expect(rendered).not.toContain('"sessionId"');
     expect(rendered).not.toContain('"provenance"');
   });

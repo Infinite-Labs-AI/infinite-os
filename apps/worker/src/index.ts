@@ -364,11 +364,11 @@ async function runSavedReport(db: InfiniteOsDb, workspaceId: string, reportId: s
   // worker copies were a SUBSET of the engine — they routed EVERY metric that was not
   // GA4-traffic|recognized_revenue to vw_site_conversion_rate with the generic caveat set.
   // saved_reports.tool_plan is persisted by the engine's createSavedReport with NO metric
-  // validation, so any FIRST_PHASE_METRICS value (posthog_event_count, shopify_*, meta_ads_*,
-  // x_*) is worker-reachable. The old subset produced BROKEN SQL for those (e.g.
+  // validation, so any FIRST_PHASE_METRICS value (posthog_event_count, shopify_*, meta_ads_*)
+  // is worker-reachable. The old subset produced BROKEN SQL for those (e.g.
   // `sum(posthog_event_count)` against vw_site_conversion_rate references a non-existent
   // column -> runtime error). Importing the engine routes them to their real views
-  // (vw_posthog_events, vw_shopify_orders, vw_meta_ads_campaign_daily, vw_x_*) with
+  // (vw_posthog_events, vw_shopify_orders, vw_meta_ads_campaign_daily) with
   // metric-specific caveats. This is a latent-bug FIX, not a regression: the only behavior
   // that changes is the previously-erroring non-GA4 path now emitting correct SQL/caveats.
   //

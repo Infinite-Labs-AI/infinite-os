@@ -95,7 +95,9 @@ describe("Infinite OS migration stack", () => {
       "0078_trialing_metric_aliases.sql",
       "0079_meta_ads_adset_learning_observations.sql",
       "0080_meta_ads_adset_breakdown_windows.sql",
-      "0081_meta_ads_window_total_dimension.sql"
+      "0081_meta_ads_window_total_dimension.sql",
+      "0082_stripe_checkout_sessions.sql",
+      "0083_remove_dead_x_metrics.sql"
     ]);
   });
 
@@ -794,7 +796,6 @@ describe("Infinite OS migration stack", () => {
     expect(sql).toContain("queryable.vw_site_conversion_rate");
     expect(sql).toContain("queryable.vw_revenue_by_source");
     expect(sql).toContain("queryable.vw_recent_sync_status");
-    expect(sql).toContain("queryable.vw_x_post_public_metrics");
     expect(sql).toContain("queryable.vw_shopify_orders");
     expect(sql).toContain("queryable.vw_shopify_products");
     expect(sql).toContain("queryable.vw_meta_ads_campaign_daily");
@@ -811,7 +812,6 @@ describe("Infinite OS migration stack", () => {
     expect(sql).toContain("'signup_count'");
     expect(sql).toContain("'site_conversion_rate'");
     expect(sql).toContain("'recognized_revenue'");
-    expect(sql).toContain("'x_public_engagement'");
     expect(sql).toContain("'shopify_gross_sales'");
     expect(sql).toContain("'shopify_order_count'");
     expect(sql).toContain("'meta_ads_spend'");
@@ -1106,7 +1106,9 @@ describe("Infinite OS migration stack", () => {
       "0078_trialing_metric_aliases.sql",
       "0079_meta_ads_adset_learning_observations.sql",
       "0080_meta_ads_adset_breakdown_windows.sql",
-      "0081_meta_ads_window_total_dimension.sql"
+      "0081_meta_ads_window_total_dimension.sql",
+      "0082_stripe_checkout_sessions.sql",
+      "0083_remove_dead_x_metrics.sql"
     ]);
   });
 
@@ -1255,6 +1257,41 @@ describe("Infinite OS migration stack", () => {
     expect(sql).not.toContain("drop table");
     expect(sql).not.toContain("drop column");
     expect(sql).not.toContain("delete ");
+  });
+
+  it("stops advertising the dead X metrics and views, and keeps the X tables (0083)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0083_remove_dead_x_metrics.sql");
+    const sql = migration?.sql ?? "";
+    for (const metric of ["x_public_engagement", "x_post_count", "x_comment_count", "x_follower_count"]) {
+      expect(sql).toContain(`'${metric}'`);
+    }
+    expect(sql).toMatch(/delete from metric_definitions\s+where id in/);
+    expect(sql).toMatch(/delete from queryable_views\s+where id in/);
+    for (const view of ["vw_x_post_public_metrics", "vw_x_authored_activity", "vw_x_profile_public_metrics"]) {
+      expect(sql).toContain(`'queryable.${view}'`);
+      expect(sql).toContain(`drop view if exists queryable.${view};`);
+    }
+    // Stop advertising only: no table is dropped or emptied, and no drop cascades.
+    expect(sql).not.toMatch(/drop table|truncate|cascade;/i);
+    expect(sql).not.toMatch(/delete from x_/i);
+  });
+
+  it("stores minimised Stripe Checkout sessions plus a typed capability/coverage state, idempotently (0082)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0082_stripe_checkout_sessions.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    expect(sql).toContain("create table if not exists stripe_checkout_sessions (");
+    expect(sql).toContain("create table if not exists stripe_checkout_session_sync_state (");
+    expect(sql).toContain("unique (source_id, stripe_checkout_session_id)");
+    expect(sql).toContain("check (capability_state in ('unknown', 'available', 'missing_permission'))");
+    expect(sql).toContain("check ((capability_state = 'missing_permission') = (missing_permission is not null))");
+    expect(sql).toContain("create or replace view queryable.vw_stripe_checkout_session_coverage as");
+    // Minimised: no buyer identity or address column exists to be filled.
+    for (const forbidden of ["email", "customer_details", "shipping", "phone", "address", "metadata"]) {
+      expect(sql).not.toContain(forbidden);
+    }
+    expect(sql).not.toContain("drop ");
+    expect(sql).not.toContain("delete ");
+    expect(sql).not.toContain("alter ");
   });
 
   it("adds the nullable Meta posting Page column beside the pixel (0068)", () => {

@@ -139,7 +139,8 @@ async function completeWithCodex(
     ...(request.promptCacheKey ? { prompt_cache_key: request.promptCacheKey } : {}),
     instructions: request.systemPrompt,
     input: codexInput(request),
-    tools: request.tools.map(codexTool)
+    tools: request.tools.map(codexTool),
+    ...(request.toolChoice === "none" ? { tool_choice: "none" } : {})
   });
   let response = await fetchImpl(responseUrl, bearerRequest(credentials.token, responseBody));
   let appliedToken = credentials.token;
@@ -230,7 +231,8 @@ async function completeWithClaude(
     stream: true,
     system: request.systemPrompt,
     messages: [{ role: "user", content: claudeUserContent(request) }],
-    tools: request.tools.map(claudeTool)
+    tools: request.tools.map(claudeTool),
+    ...(request.toolChoice === "none" ? { tool_choice: { type: "none" } } : {})
   });
   let response = await fetchImpl(messagesUrl, {
     method: "POST",
@@ -683,12 +685,7 @@ function summarizeActionData(name: string, data: Record<string, unknown> | undef
     const metric = stringValue(data.metric);
     const topRows = rows.slice(0, 3).map((row, index) => describeBreakdownRow(row, index, metric));
     const pattern = breakdownPatternHint(rows, metric);
-    const lead =
-      metric === "x_public_engagement" && rows.some((row) => stringValue(row.body_text) || stringValue(row.post_url) || stringValue(row.x_post_id))
-        ? "top X posts by engagement"
-        : metric
-          ? `${metric} ranked rows`
-          : "top breakdown rows";
+    const lead = metric ? `${metric} ranked rows` : "top breakdown rows";
     return `${lead}: ${topRows.join(" | ")}.${pattern ? ` Pattern: ${pattern}.` : ""}`;
   }
   if (name === "explain_answer") {
