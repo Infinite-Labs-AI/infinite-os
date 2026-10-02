@@ -107,12 +107,23 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   const unmanagedProviders = detectUnmanagedProviders(appRootAbsolute)
   const adopted: AdoptedProvider[] = []
   const providers: ProviderId[] = []
+  // Meta `captureOnly` is an approved plan line for an ADOPTED pixel (wf5-PORT-PLAN row 5, D8/D15): the
+  // `_fbc` landing capture is added beside it and the pixel itself is left exactly as it is.
+  const metaCaptureOnly = (options.artifacts.meta as { captureOnly?: unknown } | undefined)?.captureOnly === true
+  let adoptedMetaCapture = false
   for (const providerId of requestedProviders) {
     const existing = unmanagedProviders.find((entry) => entry.provider === providerId)
     if (existing) {
       adopted.push(existing)
       assumptions.push(
         `Existing ${providerLabels[providerId]} found in ${existing.file} (${adoptedViaLabel(existing.via)}); left untouched. infinite-tag will not install a second copy.`
+      )
+      if (providerId === "meta" && metaCaptureOnly) adoptedMetaCapture = true
+    } else if (providerId === "meta" && metaCaptureOnly) {
+      // Capture-only exists for a pixel the site already has. Without one it would claim a pixel that
+      // is not there, and the visitor would get a click-id cookie with no pixel to read it.
+      blockers.push(
+        "Meta click-id capture only (captureOnly) needs the site's existing Meta pixel, and none was found in this repo. Install the pixel instead (drop captureOnly), or point infinite-tag at the code that loads it."
       )
     } else {
       providers.push(providerId)
@@ -127,7 +138,10 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   // block: they serve ADOPTED tools too, so an all-adopted plan that asked for them still writes it.
   const helpersWanted = conversionHelpersWanted(options.artifacts)
   const pixelWanted =
-    providers.length > 0 || helpersWanted || (!options.serverLane && adopted.length === 0)
+    providers.length > 0 ||
+    helpersWanted ||
+    adoptedMetaCapture ||
+    (!options.serverLane && adopted.length === 0)
   const frameworkAdapter = getFrameworkAdapter(inspectResult.framework)
   const infiniteProxy = infiniteProxySpec(options.artifacts.infinite)
   const previousManifest = readInstallManifest(options.root)
@@ -169,6 +183,16 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   // First in the block, so the globals exist before any provider bootstrap runs.
   if (helpersWanted && frameworkDraft) {
     instructions.push(conversionHelpersInstruction(inspectResult.framework, options.artifacts))
+  }
+  // The adopted pixel's capture-only instruction (the adapter's `captureOnly` branch); `meta` stays in
+  // `adopted`, never in `providers`, so the manifest never claims the customer's pixel as managed.
+  if (adoptedMetaCapture && frameworkDraft) {
+    const capturePlan = getProviderAdapter("meta").plan(inspectResult.framework, options.artifacts.meta, {
+      artifacts: options.artifacts
+    })
+    assumptions.push(...capturePlan.assumptions)
+    blockers.push(...capturePlan.blockers)
+    instructions.push(...capturePlan.instructions)
   }
   for (const providerId of providers) {
     const adapter = getProviderAdapter(providerId)

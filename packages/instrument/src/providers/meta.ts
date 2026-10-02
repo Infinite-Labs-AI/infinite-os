@@ -135,7 +135,7 @@ export const metaProviderAdapter: ProviderAdapter = {
       })
       return {
         assumptions: [
-          `Meta click-id capture only: your existing pixel ${pixelId} is left exactly as it is; the managed block adds the _fbc landing capture beside it, so an ad click is saved even when the pixel is blocked. It sends nothing.`
+          "Meta click-id capture only: your existing Meta pixel is left exactly as it is; the managed block adds the _fbc landing capture beside it, so an ad click is saved even when the pixel is blocked. It sends nothing."
         ],
         blockers: [],
         instructions: [
