@@ -74,6 +74,8 @@ export const GOLDEN = {
     s(" ".repeat(46)),
     s("through the Infinite app", "dim")
   ],
+  /** boot--c160 rows 2-17: the empty answer pane and the split's separator (the wide layout, 120 cols and up). */
+  bootPane160: [s(" ".repeat(41)), s("│", "line")],
   /** region-rule (100 cols). */
   rule100: [s("─".repeat(100), "line")],
   /** The boot frame's Steps rule (boot--c100 row 10). */

@@ -96,6 +96,19 @@ describe("the boot frame's body (D4)", () => {
     expect(stepsRuleLine(100, TRUECOLOR)).toBe(body[8]);
   });
 
+  it("draws the split's empty answer pane and its separator at 120 columns and up (boot--c160)", () => {
+    const body = bootBodyLines(160, TRUECOLOR);
+    expect(body).toHaveLength(9);
+    for (const line of body.slice(0, 8)) {
+      expect(renderedCells(line)).toEqual(goldenCells(GOLDEN.bootPane160, "truecolor"));
+    }
+    expect(body[8]).toBe(stepsRuleLine(160, TRUECOLOR));
+    // Under the split (one column) the answer area stays blank rows.
+    expect(bootBodyLines(119, TRUECOLOR).slice(0, 8).every((line) => line === " ")).toBe(true);
+    // The pane follows the layout's 28%, clamped to 26–40 columns.
+    expect(stripAnsi(bootBodyLines(120, TRUECOLOR)[0]!)).toBe(`${" ".repeat(34)}│`);
+  });
+
   it("shrinks its answer area to the rows it has, keeping the Steps rule", () => {
     expect(bootBodyLines(100, TRUECOLOR, 3)).toHaveLength(3);
     expect(bootBodyLines(100, TRUECOLOR, 1)).toEqual([stepsRuleLine(100, TRUECOLOR)]);

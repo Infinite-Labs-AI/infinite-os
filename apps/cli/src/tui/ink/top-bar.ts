@@ -98,5 +98,27 @@ export function stepsRuleLine(width: number, theme: Theme): string {
  */
 export function bootBodyLines(width: number, theme: Theme, rows: number = BOOT_BODY_ROWS): string[] {
   const answerRows = Math.max(0, Math.min(BOOT_ANSWER_ROWS, Math.floor(rows) - 1));
-  return [...Array.from({ length: answerRows }, () => " "), stepsRuleLine(width, theme)];
+  const row = bootAnswerRow(width, theme);
+  return [...Array.from({ length: answerRows }, () => row), stepsRuleLine(width, theme)];
+}
+
+/**
+ * The split layout's threshold (River, 2026-10-02: the answer and its details
+ * sit side by side at 120 columns and up). Mirrors R2's `SPLIT_MIN_COLUMNS` in
+ * views/layout.ts; use that one once both lanes are merged.
+ */
+const BOOT_SPLIT_MIN_COLUMNS = 120;
+
+/**
+ * One row of the boot frame's empty answer area. In the split layout it is the
+ * empty answer pane (28% of the width, clamped to 26–40 columns, as the
+ * layout's `paneWidths`) and the separator's `│`; one column, a blank row.
+ */
+function bootAnswerRow(width: number, theme: Theme): string {
+  const total = Math.max(1, Math.floor(width));
+  if (total < BOOT_SPLIT_MIN_COLUMNS) {
+    return " ";
+  }
+  const answerWidth = Math.max(26, Math.min(40, Math.floor(total * 0.28)));
+  return paintSegments([["", " ".repeat(answerWidth + 1)], ["line", "│"]], theme);
 }
