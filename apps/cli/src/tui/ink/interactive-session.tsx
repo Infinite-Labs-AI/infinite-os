@@ -1453,9 +1453,8 @@ export function InkInteractiveSessionApp({
     ? activeFieldComposer.secret
       ? "type the secret (hidden), Enter to continue, Ctrl-C to cancel"
       : "type a value, Enter to continue, Ctrl-C to cancel"
-    : confirmKeys
-      ? `press ${confirmKeys.ctx.okKey} to ${confirmKeys.ctx.okLabel}, n to dismiss`
-      : pendingConnectConfirm
+    // A write card shows its keys inside the card and in the bar: the composer never repeats them.
+    : pendingConnectConfirm
         ? "choose with up/down, Enter to select"
         : pendingSelection
           ? "choose with up/down, Enter to select"

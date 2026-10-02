@@ -51,6 +51,17 @@ describe("the write card draws its approval view (CI-runnable)", () => {
     expect(out.split("\n").every((line) => displayWidth(line) <= 80)).toBe(true);
   });
 
+  it("the composer under a card does not repeat its keys (the card and the bar already show them)", () => {
+    const out = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 80,
+      initialPendingConfirmations: [card("change-pause-card")],
+      onSubmitLine: async () => ({ messages: [] })
+    }));
+    expect(out).not.toContain("press p to Pause");
+    expect(out).not.toContain("n to dismiss");
+    expect(out).toContain("p Pause   n dismiss");
+  });
+
   it("keeps the confirmationDetails card for an old desktop (no view)", () => {
     const out = stripAnsi(renderInkInteractiveSessionToString({
       columns: 80,
