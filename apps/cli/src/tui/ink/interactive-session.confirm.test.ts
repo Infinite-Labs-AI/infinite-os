@@ -9,6 +9,7 @@ import {
   type InkInteractiveLineResult
 } from "./interactive-session.js";
 import type { InSessionConfirmationAction } from "../../desktop/confirm-in-session.js";
+import { resetTurnState } from "../app/turn-store.js";
 
 const source = readFileSync(fileURLToPath(new URL("./interactive-session.tsx", import.meta.url)), "utf8");
 const cardSource = readFileSync(fileURLToPath(new URL("./confirm-card.tsx", import.meta.url)), "utf8");
@@ -115,6 +116,17 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
       source.indexOf("const submitLine = useCallback")
     );
     expect(drain).toContain("pendingConfirmActions.length > 0");
+    // A confirm still in flight holds the queue too: its receipt belongs to this turn.
+    expect(drain).toContain("confirmsInFlight > 0");
+  });
+
+  it("records a receipt view only on the turn its card came from", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction = useCallback"),
+      source.indexOf("const handleCardAction = useCallback")
+    );
+    expect(handler).toContain("const seqAtResolve = commitSeq.current;");
+    expect(handler).toContain("commitSeq.current === seqAtResolve");
   });
 
   it("shows the `!` write-gate glyph (not the `?` picker glyph) while pending", () => {
@@ -389,6 +401,98 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
       expect(output.text().slice(before)).toContain("✕ Dismissed — nothing was executed.");
       await sendKeys(input, "/exit\r");
       await session;
+    }
+  );
+
+  // A receipt belongs to the turn its card came from: a line queued while that
+  // turn was busy waits for the confirm, and a line typed while the confirm is
+  // in flight starts a new turn that the receipt never lands on.
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  it.skipIf(process.env.CI === "true")(
+    "a line queued during the busy turn waits for the confirm, so the receipt lands on the card's turn",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput();
+      const firstTurn = deferred<InkInteractiveLineResult>();
+      const confirm = deferred<unknown>();
+      const asked: { line: string; at: number }[] = [];
+      const session = runInkInteractiveSession({
+        columns: 80,
+        errorOutput: ttyOutput(),
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: () => confirm.promise,
+        async onSubmitLine(line): Promise<InkInteractiveLineResult> {
+          asked.push({ line, at: output.text().length });
+          if (asked.length === 1) return firstTurn.promise;
+          return { messages: [{ role: "assistant", text: "Second answer." }] };
+        }
+      });
+      await waitFor(() => output.text().includes("ready"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => asked.length === 1);
+      // Typed while the first turn is busy: queued.
+      await sendKeys(input, "and the budget?\r");
+      firstTurn.resolve({ messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] });
+      await waitFor(() => output.text().includes("Pause ad 01?"), 4_000, output.text);
+      await sendKeys(input, "p");
+      // The card has left the queue but its confirm is still out: the queued line waits.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(asked.map((entry) => entry.line)).toEqual(["pause it"]);
+      confirm.resolve({ ok: true, view: RECEIPT_VIEW });
+      await waitFor(() => asked.length === 2, 4_000, output.text);
+      await waitFor(() => output.text().includes("Second answer."), 4_000, output.text);
+      // The green receipt card was drawn before the second question was asked, on turn A.
+      const second = asked[1]!;
+      expect(second.line).toBe("and the budget?");
+      expect(output.text().slice(0, second.at)).toContain("Agent proposed · You approved");
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "a line typed while the confirm is in flight starts a new turn; the receipt prints as lines, never as a card on it",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput();
+      const confirm = deferred<unknown>();
+      let calls = 0;
+      const session = runInkInteractiveSession({
+        columns: 80,
+        errorOutput: ttyOutput(),
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: () => confirm.promise,
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          calls += 1;
+          if (calls === 1) return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+          return { messages: [{ role: "assistant", text: "Second answer." }] };
+        }
+      });
+      await waitFor(() => output.text().includes("ready"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => output.text().includes("Pause ad 01?"), 4_000, output.text);
+      await sendKeys(input, "p");
+      await sendKeys(input, "and the budget?\r");
+      await waitFor(() => output.text().includes("Second answer."), 4_000, output.text);
+      const before = output.text().length;
+      confirm.resolve({ ok: true, view: RECEIPT_VIEW });
+      await waitFor(() => output.text().slice(before).includes("Stopped spending at 10:42"), 4_000, output.text);
+      expect(output.text()).not.toContain("Agent proposed · You approved");
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
     }
   );
 });
