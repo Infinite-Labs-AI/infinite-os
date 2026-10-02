@@ -38,7 +38,14 @@ import {
   needsTypedField,
   typedFieldLine
 } from "./desktop/confirm-in-session.js";
+import {
+  STATUS_CONNECTIONS_CAPABILITY,
+  decodeStatusConnections,
+  type DesktopConnection
+} from "./desktop/status-connections.js";
+import { STEP_WORDS_CAPABILITY } from "./desktop/step-words.js";
 import { negotiateInteractiveWorkspace } from "./desktop/interactive-protocol.js";
+import { plainToolProgressLine } from "./formatting/progress.js";
 import {
   boundedTerminalText,
   terminalOutputText,
@@ -126,6 +133,12 @@ export interface DesktopStatus {
   workspace?: { id?: string; name: string };
   error?: { code: string; message: string };
   interactive?: InteractiveWorkspaceStatusV1;
+  /**
+   * The workspace's sources as the app names them, in the app's order. Present
+   * only when the descriptor and this status both advertise
+   * `status.connections.v1` and the status carries a list.
+   */
+  connections?: DesktopConnection[];
 }
 
 export interface DesktopProgressFrame {
@@ -170,6 +183,13 @@ export interface DesktopAppClient {
    * until `status()` resolves; an old Desktop never gets `accept`.
    */
   readonly viewsCapable: boolean;
+  /**
+   * Whether the Desktop negotiated `step.words.v1` (descriptor ∧ status). When
+   * true, `turn()` adds it to `accept`, so the turn's `tool.start` and
+   * `tool.complete` frames carry the app's own words for each step. False
+   * until `status()` resolves; an old Desktop is never asked.
+   */
+  readonly stepWordsCapable: boolean;
   /** Whether the Desktop negotiated `confirm.fields.v1` (descriptor ∧ status). */
   readonly confirmFieldsCapable: boolean;
   /** Negotiated only when descriptor and status both advertise the v1 contract. */
@@ -389,6 +409,7 @@ function createClientFromDescriptor(
   let confirmationReplaySafe = false;
   let sessionCapable = false;
   let viewsCapable = false;
+  let stepWordsCapable = false;
   let confirmFieldsCapable = false;
   let interactiveWorkspace: InteractiveWorkspaceStatusV1 | undefined;
   let statusCapabilities: string[] = [];
@@ -399,6 +420,9 @@ function createClientFromDescriptor(
     },
     get viewsCapable() {
       return viewsCapable;
+    },
+    get stepWordsCapable() {
+      return stepWordsCapable;
     },
     get confirmFieldsCapable() {
       return confirmFieldsCapable;
@@ -411,6 +435,7 @@ function createClientFromDescriptor(
       confirmationReplaySafe = false;
       sessionCapable = false;
       viewsCapable = false;
+      stepWordsCapable = false;
       confirmFieldsCapable = false;
       interactiveWorkspace = undefined;
       statusCapabilities = [];
@@ -439,6 +464,9 @@ function createClientFromDescriptor(
         viewsCapable =
           descriptor.capabilities.includes(RESULT_VIEW_CAPABILITY) &&
           status.capabilities.includes(RESULT_VIEW_CAPABILITY);
+        stepWordsCapable =
+          descriptor.capabilities.includes(STEP_WORDS_CAPABILITY) &&
+          status.capabilities.includes(STEP_WORDS_CAPABILITY);
         confirmFieldsCapable =
           descriptor.capabilities.includes(CONFIRM_FIELDS_CAPABILITY) &&
           status.capabilities.includes(CONFIRM_FIELDS_CAPABILITY);
@@ -491,6 +519,13 @@ function createClientFromDescriptor(
           );
         }
       }
+      // Opt-ins are per turn: only what this Desktop advertised (descriptor ∧
+      // status) is asked for. A bridge refuses an `accept` entry it does not
+      // advertise, and an old Desktop sees the exact legacy body (no `accept`).
+      const accept = [
+        ...(viewsCapable ? [RESULT_VIEW_CAPABILITY] : []),
+        ...(stepWordsCapable ? [STEP_WORDS_CAPABILITY] : [])
+      ];
       const deadline = createRequestDeadline(input.signal, requestTimeoutMs);
       try {
         const response = await authenticatedFetch(
@@ -513,10 +548,7 @@ function createClientFromDescriptor(
                 ? { sessionId: nonEmptyString(input.sessionId) }
                 : {}),
               ...(input.interactive ? { interactive: input.interactive } : {}),
-              // Views are opt-in per turn: only a Desktop that advertised
-              // result.view.v1 gets `accept`, so an old Desktop sees the
-              // exact legacy body.
-              ...(viewsCapable ? { accept: [RESULT_VIEW_CAPABILITY] } : {})
+              ...(accept.length ? { accept } : {})
             })
           },
           deadline
@@ -683,7 +715,7 @@ export async function runDesktopAppCommand(
       expectedContextRevision: desktopStatus.contextRevision,
       signal: options.signal
     },
-    (frame) => renderProgress(frame.data, io)
+    (frame) => renderProgress(frame.data, io, client.stepWordsCapable)
   );
   io.writeOut(
     `${terminalOutputText(result.message, "Desktop returned an empty answer.")}\n`
@@ -831,6 +863,14 @@ function parseStatus(
   const workspace = parseWorkspace(value.workspace);
   const error = parseRemoteError(value.error);
   const interactive = parseInteractiveWorkspaceStatus(value.interactive);
+  // Additive and capability-gated: an old Desktop sends none, and a list that
+  // does not decode is left out (the top bar then draws no dots) rather than
+  // failing the status.
+  const connections =
+    descriptor.capabilities.includes(STATUS_CONNECTIONS_CAPABILITY) &&
+    capabilities.includes(STATUS_CONNECTIONS_CAPABILITY)
+      ? decodeStatusConnections(value.connections)
+      : undefined;
   return {
     service: DESKTOP_SERVICE,
     bootId: descriptor.bootId,
@@ -841,7 +881,8 @@ function parseStatus(
     ...(provider ? { provider } : {}),
     ...(workspace ? { workspace } : {}),
     ...(error ? { error } : {}),
-    ...(interactive ? { interactive } : {})
+    ...(interactive ? { interactive } : {}),
+    ...(connections ? { connections } : {})
   };
 }
 
@@ -1372,11 +1413,20 @@ function renderStatus(status: DesktopStatus, io: DesktopAppIo): void {
   }
 }
 
-function renderProgress(value: unknown, io: DesktopAppIo): void {
+function renderProgress(value: unknown, io: DesktopAppIo, stepWords = false): void {
   if (!isRecord(value)) return;
   // This command draws no views: a `tool.view` frame is not a progress line.
   if (isToolViewFrameData(value)) return;
   const type = nonEmptyString(value.type);
+  // A tool frame prints the step in words: the app's own when the turn asked
+  // for them, else generic words from the tool's name. Never the raw tool id.
+  if (type?.startsWith("tool.")) {
+    const line = plainToolProgressLine(value, stepWords);
+    if (line) {
+      io.writeErr(`${boundedTerminalText(line, MAX_CONFIRMATION_VALUE_CHARS)}\n`);
+    }
+    return;
+  }
   if (
     type === "message.delta" ||
     type === "reasoning.delta" ||
@@ -1387,8 +1437,7 @@ function renderProgress(value: unknown, io: DesktopAppIo): void {
   const text =
     nonEmptyString(value.message) ??
     nonEmptyString(value.text) ??
-    nonEmptyString(value.summary) ??
-    (type?.startsWith("tool.") ? nonEmptyString(value.name) : undefined);
+    nonEmptyString(value.summary);
   if (text) {
     io.writeErr(`${boundedTerminalText(text, MAX_CONFIRMATION_VALUE_CHARS)}\n`);
   }

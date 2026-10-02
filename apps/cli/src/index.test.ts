@@ -1392,7 +1392,8 @@ describe("cli smoke", () => {
       status: "ok",
     }, 1000);
     expect(line).not.toContain("NaN");
-    expect(line).toBe("  getting x inspiration playbook ✓");
+    // `X` is a name: the step label keeps its capital (steps.test.ts `reading X playbook`).
+    expect(line).toBe("  getting X inspiration playbook ✓");
     // r4 Steps rows carry no durations, timed or not.
     expect(formatInteractiveProgress({
       type: "tool.complete",
@@ -1465,8 +1466,9 @@ describe("cli smoke", () => {
       name: "run_metric_query"
     });
 
-    expect(getTurnState().turnTrail).toEqual(["drafting Run Metric Query…"]);
-    expect(getTurnState().activity.at(-1)?.text).toBe("drafting Run Metric Query");
+    // Plain words from the tool's name, never a title-cased tool id.
+    expect(getTurnState().turnTrail).toEqual(["drafting run metric query…"]);
+    expect(getTurnState().activity.at(-1)?.text).toBe("drafting run metric query");
 
     controller.recordProgressEvent({
       type: "tool.start",
@@ -1749,7 +1751,7 @@ describe("cli smoke", () => {
     });
     const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(composer).toContain("(working · 2s)");
+    expect(composer).toContain("Ask Infinite… (2s)");
     expect(rendered).not.toContain("session cli");
     expect(rendered).not.toContain("querying…");
   });
@@ -1768,7 +1770,7 @@ describe("cli smoke", () => {
     });
     const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(composer).toContain("(working · 1s)");
+    expect(composer).toContain("Ask Infinite… (1s)");
   });
 
   it("says the turn is working at submit, before transcript progress events arrive", () => {
@@ -1783,7 +1785,7 @@ describe("cli smoke", () => {
     });
     const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(composer).toContain("(working · 1s)");
+    expect(composer).toContain("Ask Infinite… (1s)");
   });
 
   it("renders nested subagent trees in Hermes transcript snapshots", () => {
@@ -2471,7 +2473,8 @@ describe("cli smoke", () => {
     );
 
     expect(activities).toHaveLength(1);
-    expect(activities[0]).toMatch(/\(Run Metric Query · 8s\)$/);
+    // The call's label as the Steps strip words it, never a title-cased tool id.
+    expect(activities[0]).toMatch(/\(running metric query · 8s\)$/);
   });
 
   it("keeps progress durable for non-TTY output", () => {
@@ -2763,7 +2766,8 @@ describe("cli smoke", () => {
     const output = chunks.join("");
     expect(output).toContain("Revenue is up.");
     // The turn's elapsed time rides in the composer's note (r4: no status line).
-    expect(output).toContain("working · 1s");
+    expect(output).toContain("Type a message. (1s)");
+    expect(output).not.toContain("(working");
     expect(output).not.toContain("session session-1");
   });
 
@@ -2963,7 +2967,9 @@ describe("cli smoke", () => {
     progress.stop();
 
     const rendered = chunks.join("");
-    expect(rendered).toContain("\r  ⠋ Run Breakdown Query · Running run_breakdown_query.  0.0s");
+    // The running row is the step's label in plain words: no title-cased tool id, no raw id after it.
+    expect(rendered).toContain("\r  ⠋ running breakdown query  0.0s");
+    expect(rendered).not.toContain("run_breakdown_query");
     expect(rendered).toMatch(/\r {40,}\r/);
     expect(rendered).toContain("  running breakdown query ✓\n");
   });

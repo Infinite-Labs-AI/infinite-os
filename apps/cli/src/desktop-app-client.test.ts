@@ -1404,6 +1404,155 @@ describe("answer view negotiation (result.view.v1, confirm.fields.v1)", () => {
   });
 });
 
+describe("step words and connection dots (step.words.v1, status.connections.v1)", () => {
+  const STEP_WORDS = "step.words.v1";
+  const CONNECTIONS = "status.connections.v1";
+
+  function harness(capabilities: { descriptor: string[]; status: string[] }, statusExtra: Record<string, unknown> = {}) {
+    const fixture = createBridgeHome(descriptor({ capabilities: capabilities.descriptor }));
+    roots.push(fixture.root);
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith("/v1/status")) {
+        return jsonResponse(status({ capabilities: capabilities.status, ...statusExtra }));
+      }
+      bodies.push(JSON.parse(String(init?.body)));
+      return ndjsonResponse([
+        JSON.stringify({
+          protocolVersion: 1,
+          requestId: "words-turn",
+          sequence: 1,
+          kind: "done",
+          data: { turnId: "turn-1", message: "ok", actionCalls: [] }
+        })
+      ]);
+    }) as typeof fetch;
+    const client = createDesktopAppClient(fixture.env, { fetchImpl, randomId: () => "words-turn" });
+    return { client, bodies };
+  }
+
+  const CONNECTION_ROWS = [
+    { name: "Catalog", status: "broken" },
+    { name: "Orders", status: "connected" },
+    { name: "Ad Network", status: "off" }
+  ];
+
+  it("an old desktop is asked for nothing and its status has no connections", async () => {
+    const { client, bodies } = harness({ descriptor: CAPABILITIES, status: CAPABILITIES }, { connections: CONNECTION_ROWS });
+    const desktopStatus = await client.status();
+    expect(client.stepWordsCapable).toBe(false);
+    expect(desktopStatus).not.toHaveProperty("connections");
+
+    await client.turn({ message: "hi", expectedContextRevision: "context-1" });
+
+    expect(bodies[0]).not.toHaveProperty("accept");
+  });
+
+  it.each([
+    ["only the descriptor", [...CAPABILITIES, STEP_WORDS], CAPABILITIES, false],
+    ["only the status", CAPABILITIES, [...CAPABILITIES, STEP_WORDS], false],
+    ["both descriptor and status", [...CAPABILITIES, STEP_WORDS], [...CAPABILITIES, STEP_WORDS], true]
+  ])("asks for step words only when %s advertise step.words.v1", async (_label, descriptorCapabilities, statusCapabilities, capable) => {
+    const { client, bodies } = harness({ descriptor: descriptorCapabilities, status: statusCapabilities });
+    await client.status();
+    expect(client.stepWordsCapable).toBe(capable);
+
+    await client.turn({ message: "hi", expectedContextRevision: "context-1" });
+
+    if (capable) {
+      expect(bodies[0]?.accept).toEqual([STEP_WORDS]);
+    } else {
+      expect(bodies[0]).not.toHaveProperty("accept");
+    }
+  });
+
+  it("asks for views and step words together, views first", async () => {
+    const both = [...CAPABILITIES, RESULT_VIEW_CAPABILITY, STEP_WORDS];
+    const { client, bodies } = harness({ descriptor: both, status: both });
+    await client.status();
+
+    await client.turn({ message: "hi", expectedContextRevision: "context-1" });
+
+    expect(bodies[0]?.accept).toEqual([RESULT_VIEW_CAPABILITY, STEP_WORDS]);
+  });
+
+  it("stops asking for step words when a later status stops advertising them", async () => {
+    const capable = [...CAPABILITIES, STEP_WORDS];
+    const fixture = createBridgeHome(descriptor({ capabilities: capable }));
+    roots.push(fixture.root);
+    const statuses = [capable, CAPABILITIES];
+    const client = createDesktopAppClient(fixture.env, {
+      fetchImpl: (async () => jsonResponse(status({ capabilities: statuses.shift() ?? CAPABILITIES }))) as typeof fetch
+    });
+
+    await client.status();
+    expect(client.stepWordsCapable).toBe(true);
+    await client.status();
+    expect(client.stepWordsCapable).toBe(false);
+  });
+
+  it.each([
+    ["only the descriptor", [...CAPABILITIES, CONNECTIONS], CAPABILITIES, false],
+    ["only the status", CAPABILITIES, [...CAPABILITIES, CONNECTIONS], false],
+    ["both descriptor and status", [...CAPABILITIES, CONNECTIONS], [...CAPABILITIES, CONNECTIONS], true]
+  ])("reads connections only when %s advertise status.connections.v1", async (_label, descriptorCapabilities, statusCapabilities, capable) => {
+    const { client } = harness({ descriptor: descriptorCapabilities, status: statusCapabilities }, { connections: CONNECTION_ROWS });
+
+    const desktopStatus = await client.status();
+
+    if (capable) {
+      expect(desktopStatus.connections).toEqual(CONNECTION_ROWS);
+    } else {
+      expect(desktopStatus).not.toHaveProperty("connections");
+    }
+  });
+
+  it("the one-shot command prints each step in words, never the raw tool id", async () => {
+    const RAW = "mcp__sample_app__list_sample_rows";
+    const frame = (sequence: number, data: Record<string, unknown>) =>
+      JSON.stringify({ protocolVersion: 1, requestId: "request-1", sequence, kind: "progress", data });
+    const run = async (capabilities: string[]) => {
+      const fixture = createBridgeHome(descriptor({ capabilities }));
+      roots.push(fixture.root);
+      const stderr: string[] = [];
+      const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+        if (String(input).endsWith("/v1/status")) return jsonResponse(status({ capabilities }));
+        return ndjsonResponse([
+          frame(1, { type: "tool.start", stage: "tool", message: RAW, toolId: "c1", name: RAW, context: '{"level":"row"}', words: { label: "checking the catalog" } }),
+          frame(2, { type: "tool.complete", stage: "tool", message: RAW, toolId: "c1", name: RAW, status: "ok", words: { label: "checking the catalog", result: "3 rows" } }),
+          frame(3, { type: "tool.complete", stage: "tool", message: RAW, toolId: "c2", name: "mcp__sample_app__propose_pause_sample_item", status: "requires_confirmation" }),
+          JSON.stringify({ protocolVersion: 1, requestId: "request-1", sequence: 4, kind: "done", data: { turnId: "turn-1", message: "Done.", actionCalls: [] } })
+        ]);
+      }) as typeof fetch;
+      await runDesktopAppCommand(["how", "are", "the", "rows"], fixture.env, {
+        fetchImpl,
+        randomId: () => "request-1",
+        io: { inputIsTTY: false, outputIsTTY: false, writeOut: () => undefined, writeErr: (text) => stderr.push(text) }
+      });
+      return stderr.join("");
+    };
+
+    const worded = await run([...CAPABILITIES, STEP_WORDS]);
+    expect(worded).toBe("checking the catalog\nchecking the catalog ✓ 3 rows\nproposing pause sample item ▣ waiting for your OK\n");
+
+    // An old desktop never negotiated words: generic words from the tool's name, and still no raw id.
+    const plain = await run(CAPABILITIES);
+    expect(plain).toBe("listing sample rows\nlisting sample rows ✓\nproposing pause sample item ▣ waiting for your OK\n");
+    expect(`${worded}${plain}`).not.toMatch(/mcp__|sample_app|level/u);
+  });
+
+  it("a capable desktop that sends no connections, or a broken list, still gives a status", async () => {
+    const capable = [...CAPABILITIES, CONNECTIONS];
+    const absent = harness({ descriptor: capable, status: capable });
+    expect(await absent.client.status()).not.toHaveProperty("connections");
+
+    const broken = harness({ descriptor: capable, status: capable }, {
+      connections: [{ name: "robin@example.test", status: "connected" }, { name: "Orders", status: "nope" }, { name: "Catalog", status: "connected" }]
+    });
+    expect((await broken.client.status()).connections).toEqual([{ name: "Catalog", status: "connected" }]);
+  });
+});
+
 describe("infinite app command", () => {
   it("prints no progress line for a tool.view frame", async () => {
     const capabilities = [...CAPABILITIES, RESULT_VIEW_CAPABILITY];

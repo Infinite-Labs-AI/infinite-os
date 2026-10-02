@@ -212,6 +212,14 @@ describe("adaptDesktopClientToTurnSource", () => {
     expect(adapter.sessionCapable).toBe(false);
   });
 
+  it("delegates stepWordsCapable to the real client (absent = false)", () => {
+    const client: { sessionCapable: boolean; stepWordsCapable?: boolean; turn: unknown } = { sessionCapable: true, turn: vi.fn() };
+    const adapter = adaptDesktopClientToTurnSource(client as any, "rev-1");
+    expect(adapter.stepWordsCapable).toBe(false);
+    client.stepWordsCapable = true;
+    expect(adapter.stepWordsCapable).toBe(true);
+  });
+
   it("delegates confirmFieldsCapable to the real client", () => {
     const client = { sessionCapable: true, confirmFieldsCapable: false, turn: vi.fn() };
     const adapter = adaptDesktopClientToTurnSource(client as any, "rev-1");
@@ -306,6 +314,39 @@ function makeTurnSource(
 }
 
 describe("createDesktopSessionTurnRunner", () => {
+  it("hands each ready status a turn ran against to onStatus (the top bar's connections follow the app)", async () => {
+    const statuses = [
+      { ...statusFor({ rev: "rev-1" }), connections: [{ name: "Orders", status: "connected" as const }] },
+      { ...statusFor({ rev: "rev-1" }), connections: [{ name: "Orders", status: "broken" as const }] },
+      statusFor({ rev: "rev-1", ready: false, error: { code: "desktop_not_ready", message: "Not ready." } })
+    ];
+    let next = 0;
+    const seen: DesktopStatus[] = [];
+    const client = {
+      sessionCapable: true,
+      async status() {
+        return statuses[Math.min(next++, statuses.length - 1)]!;
+      },
+      async turn() {
+        return { message: "ok", actionCalls: [], sessionId: "session-1" };
+      }
+    } as unknown as DesktopAppClient;
+    const runner = createDesktopSessionTurnRunner({
+      resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client }),
+      onStatus: (status) => seen.push(status)
+    });
+
+    await runner.turn("one");
+    await runner.turn("two");
+    await expect(runner.turn("three")).rejects.toMatchObject({ code: "desktop_not_ready" });
+
+    // A status that is not ready is an error for the turn, never the bar's new truth.
+    expect(seen.map((status) => status.connections)).toEqual([
+      [{ name: "Orders", status: "connected" }],
+      [{ name: "Orders", status: "broken" }]
+    ]);
+  });
+
   it("sends general profile and startup cwd only for an explicitly configured caller", async () => {
     const turn = vi.fn(async () => ({
       message: "ok",

@@ -216,6 +216,9 @@ export function adaptDesktopClientToTurnSource(
     get confirmFieldsCapable() {
       return client.confirmFieldsCapable === true;
     },
+    get stepWordsCapable() {
+      return client.stepWordsCapable === true;
+    },
     async turn(
       input: DesktopTurnSourceInput,
       onFrame: (frame: BridgeFrame) => void
@@ -271,6 +274,13 @@ export interface DesktopSessionTurnDeps {
     client: DesktopAppClient,
     contextRevision: string
   ) => DesktopInteractiveTurnSource;
+  /**
+   * Called with each READY status a turn ran against (the per-turn preflight),
+   * so the session's top bar follows the app: its workspace and, from a
+   * Desktop that sends them, its connections. A status that is not ready
+   * fails the turn and is not handed on.
+   */
+  onStatus?: (status: DesktopStatus) => void;
   /** Explicit caller opt-in. Omitted keeps the legacy compatible turn shape. */
   interactiveWorkspace?: {
     profile: InteractiveAgentProfile;
@@ -381,6 +391,7 @@ export function createDesktopSessionTurnRunner(
             status.error?.message ?? "Infinite Desktop Cmd+L is not ready."
           );
         }
+        deps.onStatus?.(status);
         const interactive = deps.interactiveWorkspace
           ? {
               profile: deps.interactiveWorkspace.profile,

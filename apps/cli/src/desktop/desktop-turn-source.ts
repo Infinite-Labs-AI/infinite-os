@@ -15,6 +15,7 @@ import type {
   InSessionConfirmationAction,
   InSessionConfirmationDetail
 } from "./confirm-in-session.js";
+import { decodeStepWords } from "./step-words.js";
 
 /**
  * A normalized bridge frame emitted by the Desktop Cmd+L turn stream.
@@ -85,6 +86,12 @@ export interface DesktopTurnSourceClient {
    * Desktop cannot receive. Absent = false.
    */
   readonly confirmFieldsCapable?: boolean;
+  /**
+   * Negotiated `step.words.v1`: the turn asked for the app's own words on its
+   * `tool.start` / `tool.complete` frames. Absent = false: words on a frame
+   * are then never read, and every step keeps its generic label.
+   */
+  readonly stepWordsCapable?: boolean;
   turn(
     input: DesktopTurnSourceInput,
     onFrame: (frame: BridgeFrame) => void
@@ -118,7 +125,8 @@ export interface DesktopTurnSource {
  * an empty Claude delta).
  */
 export function bridgeFrameToChatEvent(
-  frame: BridgeFrame
+  frame: BridgeFrame,
+  options: { stepWords?: boolean } = {}
 ): ChatProgressEvent | null {
   switch (frame.kind) {
     case "progress": {
@@ -130,7 +138,7 @@ export function bridgeFrameToChatEvent(
       // Codex: `data` is already a typed ChatProgressEvent — pass it through
       // untouched so no shape drifts on the way to the shell.
       if (isTypedEvent(frame.data)) {
-        return frame.data as unknown as ChatProgressEvent;
+        return withStepWords(frame.data as Record<string, unknown>, options.stepWords === true) as unknown as ChatProgressEvent;
       }
       // Claude: streamed text arrives as a delta chunk (or a bare message).
       const text = firstString(
@@ -240,7 +248,7 @@ export function createDesktopTurnSource(
               client.confirmFieldsCapable === true
             );
           }
-          const event = bridgeFrameToChatEvent(frame);
+          const event = bridgeFrameToChatEvent(frame, { stepWords: client.stepWordsCapable === true });
           if (!event) return;
           if ("type" in event && event.type === "message.complete") {
             if (completionEmitted) return;
@@ -257,6 +265,21 @@ export function createDesktopTurnSource(
       };
     }
   };
+}
+
+/**
+ * A typed event with its `words` (step.words.v1) read: on a `tool.start` or
+ * `tool.complete` of a turn that asked for them, `words` becomes the decoded,
+ * scrubbed `{ label, result? }`; otherwise (not asked for, not a tool frame's
+ * place for words, or not display text) the field is left off. An event with
+ * no `words` is returned as it came, so an old desktop's frames never change.
+ */
+function withStepWords(data: Record<string, unknown>, negotiated: boolean): Record<string, unknown> {
+  if (!("words" in data)) return data;
+  const { words: raw, ...rest } = data;
+  const carriesWords = data.type === "tool.start" || data.type === "tool.complete";
+  const words = negotiated && carriesWords ? decodeStepWords(raw) : null;
+  return words ? { ...rest, words } : rest;
 }
 
 function readSessionId(frame: BridgeFrame): string | undefined {

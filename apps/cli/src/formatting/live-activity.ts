@@ -7,7 +7,9 @@ import { clearTurnSteps, getTurnState, subscribeTurnState } from "../tui/app/tur
 import { LongRunToolCharmTicker } from "../tui/app/long-run-tool-charms.js";
 import { canUseInkProgressReporter, InkTranscriptProgressReporter } from "../tui/ink/progress-reporter.js";
 import { padEndCells } from "../tui/lib/display-width.js";
-import { compactPreview, toolTrailLabel } from "../tui/lib/text.js";
+import { stepWordsOf } from "../desktop/step-words.js";
+import { compactPreview } from "../tui/lib/text.js";
+import { friendlyStepLabel, plainToolWords, stepProgressWords } from "../tui/views/steps.js";
 import { ansi, colorEnabled, resolveTheme, type Theme } from "../tui/theme.js";
 import type { Msg } from "../tui/types.js";
 import { readMarkdownTableBlock } from "./markdown.js";
@@ -461,8 +463,10 @@ class RawTerminalProgressReporter implements InteractiveProgressReporter {
     const activeTool = state.tools.at(-1);
 
     if (activeTool) {
-      const label = toolTrailLabel(activeTool.name);
-      const context = compactPreview(activeTool.latestPreview ?? activeTool.context ?? "", 72);
+      // The call's own label (the app's words, else generic words), and how far
+      // it is only when that reads as words: never the raw tool id or its arguments.
+      const label = activeTool.label ?? friendlyStepLabel(activeTool.name);
+      const context = stepProgressWords(activeTool.latestPreview ?? activeTool.context);
       return context ? `${label} · ${context}` : label;
     }
 
@@ -652,13 +656,13 @@ function isMessageCompleteResult(value: unknown): value is { finalMessages: read
 function liveMessage(event: ChatProgressEvent): string {
   if ("type" in event) {
     if (event.type === "tool.generating") {
-      return `drafting ${event.name}...`;
+      return `drafting ${plainToolWords(event.name)}…`;
     }
     if (event.type === "tool.start") {
-      return event.context || event.message;
+      return stepWordsOf(event)?.label ?? (stepProgressWords(event.context) || friendlyStepLabel(event.name));
     }
     if (event.type === "tool.progress") {
-      return event.preview || event.message;
+      return stepProgressWords(event.preview) || friendlyStepLabel(event.name);
     }
     if (event.type === "thinking.delta" || event.type === "reasoning.delta") {
       return event.text.replace(/\s+/g, " ").trim() || "thinking";

@@ -646,3 +646,80 @@ describe("bridgeFrameToChatEvent", () => {
     ).toBeNull();
   });
 });
+
+describe("step words on tool frames (step.words.v1)", () => {
+  const toolFrames = (words: { start?: unknown; complete?: unknown }): BridgeFrame[] => [
+    {
+      kind: "progress",
+      data: {
+        type: "tool.start", stage: "tool", message: "mcp__sample_app__list_sample_rows", toolId: "call-1",
+        name: "mcp__sample_app__list_sample_rows", context: "", ...(words.start !== undefined ? { words: words.start } : {})
+      }
+    },
+    {
+      kind: "progress",
+      data: {
+        type: "tool.complete", stage: "tool", message: "mcp__sample_app__list_sample_rows", toolId: "call-1",
+        name: "mcp__sample_app__list_sample_rows", status: "ok", ...(words.complete !== undefined ? { words: words.complete } : {})
+      }
+    },
+    { kind: "done", message: "Done.", actionCalls: [] }
+  ];
+
+  async function toolEvents(client: DesktopTurnSourceClient): Promise<Record<string, unknown>[]> {
+    const events: ChatProgressEvent[] = [];
+    await createDesktopTurnSource(client).runTurn("q", undefined, (event) => events.push(event), new AbortController().signal);
+    return events.filter((event) => "type" in event && event.type.startsWith("tool.")) as unknown as Record<string, unknown>[];
+  }
+
+  it("a desktop that negotiated them: the events carry the app's words, scrubbed", async () => {
+    const client = {
+      ...fakeClient({
+        sessionCapable: true,
+        frames: toolFrames({
+          start: { label: "checking\u001b[31m the catalog" },
+          complete: { label: "checking the catalog", result: "3 rows" }
+        })
+      }),
+      stepWordsCapable: true
+    };
+    const [start, complete] = await toolEvents(client);
+    expect(start!.words).toEqual({ label: "checking the catalog" });
+    expect(complete!.words).toEqual({ label: "checking the catalog", result: "3 rows" });
+    // Every existing field stays as it was sent.
+    expect(start).toMatchObject({ type: "tool.start", toolId: "call-1", name: "mcp__sample_app__list_sample_rows" });
+    expect(complete).toMatchObject({ type: "tool.complete", toolId: "call-1", status: "ok" });
+  });
+
+  it("words that are a tool id or JSON are dropped, so the step keeps its generic label", async () => {
+    const client = {
+      ...fakeClient({
+        sessionCapable: true,
+        frames: toolFrames({ start: { label: "mcp__sample_app__list_sample_rows" }, complete: { label: '{"rows":3}' } })
+      }),
+      stepWordsCapable: true
+    };
+    const [start, complete] = await toolEvents(client);
+    expect(start).not.toHaveProperty("words");
+    expect(complete).not.toHaveProperty("words");
+  });
+
+  it("a desktop that did not negotiate them: words on a frame are never read", async () => {
+    const frames = toolFrames({ start: { label: "checking the catalog" }, complete: { label: "checking the catalog", result: "3 rows" } });
+    for (const client of [
+      fakeClient({ sessionCapable: true, frames }),
+      { ...fakeClient({ sessionCapable: true, frames }), stepWordsCapable: false }
+    ]) {
+      const [start, complete] = await toolEvents(client);
+      expect(start).not.toHaveProperty("words");
+      expect(complete).not.toHaveProperty("words");
+    }
+  });
+
+  it("an old desktop's frames (no words) pass through untouched", async () => {
+    const frames = toolFrames({});
+    const [start, complete] = await toolEvents({ ...fakeClient({ sessionCapable: true, frames }), stepWordsCapable: true });
+    expect(start).toEqual(frames[0]!.data);
+    expect(complete).toEqual(frames[1]!.data);
+  });
+});
