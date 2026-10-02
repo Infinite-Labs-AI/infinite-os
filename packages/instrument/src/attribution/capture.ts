@@ -24,10 +24,12 @@
 //     non-printable or click-id-contaminated UTMs) never occupies the first-touch cookie slot.
 //
 // GENERALISED FOR CUSTOMER SITES:
-//   - The tab copy is FILTERED AT WRITE TIME with the same contamination filter plus the scrubber
+//   - BOTH copies are FILTERED AT WRITE TIME with the same contamination filter plus the scrubber
 //     (`../conversions/scrub.ts`): a UTM or landing path that could carry a click id, an email, a URL or
 //     a phone number is stored as "". infinite.fast wrote its tab copy unfiltered (skeptic G11) and only
-//     filtered later, at each reader; a customer site has readers infinite-tag never sees.
+//     filtered later, at each reader; a customer site has readers infinite-tag never sees, and a cookie
+//     goes to the site's server (and its logs) on every request for days. The cookie's "usable" test runs
+//     AFTER the scrub, so a landing whose only campaign value was personal writes no cookie.
 //   - The capture follows the site's consent hook (`providers/meta-browser/consent.ts`), the same gate
 //     as the `_fbc` capture: infinite.fast captures campaign labels regardless of consent because its own
 //     banner governs its own site; on a customer's site, writing a first-party record for a visitor who
@@ -290,7 +292,9 @@ export function buildLandingAttributionScript(options: LandingAttributionOptions
     "    // already-populated tab storage must not prevent campaign recovery.",
     "    try {",
     "      if (cookieRaw() === null) {",
-    "        var cookieRecord = cookieProjection(payload, params, 1);",
+    "        // The cookie is scrubbed exactly like the tab copy (an email or phone number in a UTM is",
+    "        // blanked), THEN projected, so a landing whose only campaign value was personal claims no slot.",
+    "        var cookieRecord = cookieProjection(tabProjection(payload, infiniteUnsafeText), params, 1);",
     "        var encoded = encodeURIComponent(JSON.stringify(cookieRecord));",
     "        // Only usable, sanitized campaign evidence may claim the first-touch cookie slot. Oversize",
     "        // records are skipped whole; a field is never truncated and a cookie never renewed.",

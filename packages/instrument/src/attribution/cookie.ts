@@ -14,19 +14,40 @@
 //
 // GENERALISED: infinite.fast allows only its verified production hosts (L10). A customer's site gets the
 // preview guard instead (`../host-guard.ts`, deny mode): production and unknown hosts set the cookie,
-// previews and loopback do not.
+// previews and loopback do not. Two more customer-site rules: the record is SCRUBBED like the browser
+// copies (an email or phone number in a UTM is blanked before the "usable" test), and the cookie follows
+// the site's consent mode (`CampaignCookieConsent`), stricter than the browser because it cannot see a
+// recorded grant.
 //
 // A customer's server cannot import infinite-tag, so `campaignCookieModuleSource` emits the same logic as
 // a self-contained ES module for the server lane to mount; `attribution.test.ts` runs both and requires
 // byte-identical headers.
+import { infiniteUnsafeText, UNSAFE_TEXT_SOURCE } from "../conversions/scrub.js"
 import { buildHostGuardExpression, hostGuardAllows, normalizeHostGuardSpec } from "../host-guard.js"
-import { campaignMetadata, projectCampaignCookie } from "./capture.js"
+import { campaignMetadata, filterTabRecord, projectCampaignCookie } from "./capture.js"
 import { CAMPAIGN_COOKIE_VALUE_MAX_BYTES, CAMPAIGN_KEY, SERVER_CAMPAIGN_COOKIE_MAX_AGE } from "./patterns.js"
 
 /** The deny-mode preview guard the server cookie follows (the same lists the browser guard uses). */
 export interface CampaignCookieGuard {
   exempt: string[]
   deny: string[]
+}
+
+/**
+ * The site's Infinite consent mode, for the server cookie. The server cannot see the visitor's recorded
+ * decision (it lives in the browser), so it is STRICTER than the browser capture, never looser:
+ *   - `required`: it never writes (a grant is invisible to it; the browser capture still writes after one);
+ *   - `not_required`: it skips a request that carries `Sec-GPC: 1` or `DNT: 1` (the browser capture skips
+ *     those visitors until they grant on the site).
+ */
+export interface CampaignCookieConsent {
+  consentMode: "required" | "not_required"
+}
+
+/** True when the server may write the campaign cookie for this request under the site's consent mode. */
+export function campaignCookieConsentAllows(request: CampaignCookieRequest, consent: CampaignCookieConsent): boolean {
+  if (consent.consentMode !== "not_required") return false
+  return request.headers.get("sec-gpc") !== "1" && request.headers.get("dnt") !== "1"
 }
 
 export interface CampaignCookieRequest {
@@ -39,10 +60,12 @@ export interface CampaignCookieRequest {
 export function campaignCookieHeader(
   request: CampaignCookieRequest,
   guard: CampaignCookieGuard,
-  now: number = Date.now()
+  now: number,
+  consent: CampaignCookieConsent
 ): string | null {
   const url = new URL(request.url)
   if (request.method !== "GET" || url.protocol !== "https:") return null
+  if (!campaignCookieConsentAllows(request, consent)) return null
   if (!hostGuardAllows(url.hostname, { mode: "deny", exempt: guard.exempt, deny: guard.deny })) return null
   if ((request.headers.get("cookie") || "").split(";").some((part) => part.trim().startsWith(CAMPAIGN_KEY + "="))) {
     return null
@@ -55,7 +78,8 @@ export function campaignCookieHeader(
   for (const key of ["gclid", "fbclid", "msclkid", "ttclid"]) payload["has_" + key] = Boolean(params.get(key))
   payload.landing_path = url.pathname || "/"
   Object.assign(payload, campaignMetadata(url.search, request.headers.get("referer") || "", guard.exempt, now))
-  const record = projectCampaignCookie(payload, params, 2)
+  // Scrubbed exactly like the browser copies (an email or phone number in a UTM is blanked), then projected.
+  const record = projectCampaignCookie(filterTabRecord(payload, infiniteUnsafeText), params, 2)
   if (!record) return null
   const encoded = encodeURIComponent(JSON.stringify(record))
   if (encoded.length > CAMPAIGN_COOKIE_VALUE_MAX_BYTES) return null
@@ -64,6 +88,7 @@ export function campaignCookieHeader(
 
 export interface WithCampaignCookieOptions {
   guard: CampaignCookieGuard
+  consent: CampaignCookieConsent
   isDocument(request: CampaignCookieRequest): boolean
   now?: () => number
 }
@@ -79,7 +104,7 @@ export function withCampaignCookie<R extends CampaignCookieRequest>(
       if (response.status < 200 || response.status >= 300 || !options.isDocument(request)) return response
       const contentType = response.headers.get("content-type")
       if (contentType && !contentType.toLowerCase().includes("text/html")) return response
-      const cookie = campaignCookieHeader(request, options.guard, (options.now ?? Date.now)())
+      const cookie = campaignCookieHeader(request, options.guard, (options.now ?? Date.now)(), options.consent)
       if (!cookie) return response
       const headers = new Headers(response.headers)
       headers.append("Set-Cookie", cookie)
@@ -97,7 +122,7 @@ export function withCampaignCookie<R extends CampaignCookieRequest>(
  * The guard lists are baked in as literals. Free of backticks and `${`, so it can sit inside the
  * generated-source templates.
  */
-export function campaignCookieModuleSource(guard: CampaignCookieGuard): string {
+export function campaignCookieModuleSource(guard: CampaignCookieGuard, consent: CampaignCookieConsent): string {
   const spec = normalizeHostGuardSpec({ mode: "deny", exempt: guard.exempt, deny: guard.deny })
   const exempt = spec.mode === "deny" ? spec.exempt : []
   return [
@@ -106,14 +131,20 @@ export function campaignCookieModuleSource(guard: CampaignCookieGuard): string {
     `const INFINITE_CAMPAIGN_MAX_AGE = ${SERVER_CAMPAIGN_COOKIE_MAX_AGE}`,
     `const INFINITE_CAMPAIGN_MAX_BYTES = ${CAMPAIGN_COOKIE_VALUE_MAX_BYTES}`,
     `const INFINITE_OWN_HOSTS = ${JSON.stringify(exempt)}`,
+    "// The site's Infinite consent mode. The server cannot see a recorded grant: under required mode it never",
+    "// writes, and otherwise it skips a request sending Sec-GPC: 1 or DNT: 1.",
+    `const INFINITE_CONSENT_NOT_REQUIRED = ${consent.consentMode === "not_required" ? "true" : "false"}`,
     `const infiniteCampaignMetadata = ${campaignMetadata.toString()}`,
     `const infiniteProjectCampaignCookie = ${projectCampaignCookie.toString()}`,
+    `const infiniteScrubCampaign = ${filterTabRecord.toString()}`,
+    UNSAFE_TEXT_SOURCE,
     "function infiniteCampaignHostAllowed(host) {",
     `  return ${buildHostGuardExpression(spec, { hostExpression: "host" })}`,
     "}",
     "export function infiniteCampaignCookieHeader(request, now) {",
     "  const url = new URL(request.url)",
     '  if (request.method !== "GET" || url.protocol !== "https:") return null',
+    '  if (!INFINITE_CONSENT_NOT_REQUIRED || request.headers.get("sec-gpc") === "1" || request.headers.get("dnt") === "1") return null',
     "  if (!infiniteCampaignHostAllowed(url.hostname)) return null",
     '  if ((request.headers.get("cookie") || "").split(";").some((part) => part.trim().startsWith(INFINITE_CAMPAIGN_KEY + "="))) return null',
     "  const params = url.searchParams",
@@ -124,7 +155,7 @@ export function campaignCookieModuleSource(guard: CampaignCookieGuard): string {
     '  for (const key of ["gclid", "fbclid", "msclkid", "ttclid"]) payload["has_" + key] = Boolean(params.get(key))',
     '  payload.landing_path = url.pathname || "/"',
     '  Object.assign(payload, infiniteCampaignMetadata(url.search, request.headers.get("referer") || "", INFINITE_OWN_HOSTS, now === undefined ? Date.now() : now))',
-    "  const record = infiniteProjectCampaignCookie(payload, params, 2)",
+    "  const record = infiniteProjectCampaignCookie(infiniteScrubCampaign(payload, infiniteUnsafeText), params, 2)",
     "  if (!record) return null",
     "  const encoded = encodeURIComponent(JSON.stringify(record))",
     "  if (encoded.length > INFINITE_CAMPAIGN_MAX_BYTES) return null",

@@ -42,6 +42,7 @@ import {
 
 const KEY = CAMPAIGN_KEY
 const GUARD = { exempt: ["acme.com"], deny: [] as string[] }
+const CONSENT = { consentMode: "not_required" as const }
 
 interface LandingOptions {
   pathname?: string
@@ -305,6 +306,20 @@ describe("infiniteCampaign()", () => {
   })
 })
 
+describe("the browser cookie is scrubbed like the tab copy (P2-1)", () => {
+  it("blanks an email or phone number in a UTM before writing the 7-day cookie", () => {
+    const page = land({ search: "?utm_source=newsletter&utm_term=jane.doe%40example.com&utm_content=%2B1%20555%20123%204567" })
+    expect(page.record()).toMatchObject({ utm_source: "newsletter", utm_term: "", utm_content: "" })
+    expect(decodeURIComponent(page.cookie()!)).not.toMatch(/jane|555/)
+    expect(page.attribution()).toMatchObject({ utm_term: "", utm_content: "" })
+  })
+
+  it("negative: a landing whose ONLY campaign value was personal claims no first-touch cookie slot", () => {
+    const page = land({ search: "?utm_source=jane.doe%40example.com" })
+    expect(page.cookie()).toBeNull()
+  })
+})
+
 describe("the server cookie", () => {
   const fixed = Date.parse("2026-09-27T09:12:59.123Z")
   const request = (url: string, headers: Record<string, string> = {}, method = "GET") =>
@@ -314,7 +329,7 @@ describe("the server cookie", () => {
     const search = "?utm_source=facebook&ad_id=123&utm_placement=feed&utm_term=foo%20gclid%3DSECRET"
     const referrer = "https://facebook.com./path?secret=value"
     const browser = land({ search, referrer, pathname: "/audit/", now: fixed })
-    const header = campaignCookieHeader(request("https://acme.com/audit/" + search, { referer: referrer }), GUARD, fixed)!
+    const header = campaignCookieHeader(request("https://acme.com/audit/" + search, { referer: referrer }), GUARD, fixed, CONSENT)!
     const server = JSON.parse(decodeURIComponent(header.split(";")[0]!.split("=")[1]!)) as Record<string, unknown>
     expect(server).toEqual({ ...browser.record(), v: 2 })
     expect(browser.record().v).toBe(1)
@@ -324,14 +339,14 @@ describe("the server cookie", () => {
 
   it("never overwrites, and skips unusable landings", () => {
     for (const cookie of [KEY + "=old-without-time", KEY + "=", KEY + "=%broken"]) {
-      expect(campaignCookieHeader(request("https://acme.com/?utm_source=new", { cookie }), GUARD, fixed)).toBeNull()
+      expect(campaignCookieHeader(request("https://acme.com/?utm_source=new", { cookie }), GUARD, fixed, CONSENT)).toBeNull()
     }
     for (const url of ["https://acme.com/", "https://acme.com/?utm_source=%20", "https://acme.com/?utm_term=foo%20gclid%3DSECRET"]) {
-      expect(campaignCookieHeader(request(url), GUARD, fixed)).toBeNull()
+      expect(campaignCookieHeader(request(url), GUARD, fixed, CONSENT)).toBeNull()
     }
-    expect(campaignCookieHeader(request("https://acme.com/?utm_source=x", {}, "POST"), GUARD, fixed)).toBeNull()
-    expect(campaignCookieHeader(request("http://acme.com/?utm_source=x"), GUARD, fixed)).toBeNull()
-    const header = campaignCookieHeader(request("https://acme.com/?utm_source=paid&utm_term=%2Ffbclid%3DSECRET"), GUARD, fixed)!
+    expect(campaignCookieHeader(request("https://acme.com/?utm_source=x", {}, "POST"), GUARD, fixed, CONSENT)).toBeNull()
+    expect(campaignCookieHeader(request("http://acme.com/?utm_source=x"), GUARD, fixed, CONSENT)).toBeNull()
+    const header = campaignCookieHeader(request("https://acme.com/?utm_source=paid&utm_term=%2Ffbclid%3DSECRET"), GUARD, fixed, CONSENT)!
     expect(JSON.parse(decodeURIComponent(header.split(";")[0]!.split("=")[1]!)).utm_term).toBe("")
   })
 
@@ -344,15 +359,39 @@ describe("the server cookie", () => {
       ["localhost", false],
       ["x.netlify.app", false]
     ] as const) {
-      expect(campaignCookieHeader(request(`https://${host}/?utm_source=paid`), GUARD, fixed) !== null).toBe(sets)
+      expect(campaignCookieHeader(request(`https://${host}/?utm_source=paid`), GUARD, fixed, CONSENT) !== null).toBe(sets)
     }
   })
 
+  // P2-1: the cookie goes to the site's server (and its logs) on every request for 180 days, so it is
+  // scrubbed like the tab copy, and it follows the consent mode (it cannot see a recorded grant).
+  it("blanks an email or phone number in a UTM; a landing whose only campaign value was personal writes nothing", () => {
+    const header = campaignCookieHeader(
+      request("https://acme.com/?utm_source=newsletter&utm_term=jane.doe%40example.com&utm_content=%2B1%20555%20123%204567"),
+      GUARD,
+      fixed,
+      CONSENT
+    )!
+    const record = JSON.parse(decodeURIComponent(header.split(";")[0]!.split("=")[1]!)) as Record<string, unknown>
+    expect(record).toMatchObject({ utm_source: "newsletter", utm_term: "", utm_content: "" })
+    expect(decodeURIComponent(header.split(";")[0]!)).not.toMatch(/jane|555/)
+    expect(campaignCookieHeader(request("https://acme.com/?utm_source=jane.doe%40example.com"), GUARD, fixed, CONSENT)).toBeNull()
+  })
+
+  it("never writes under required consent mode, and skips Sec-GPC / DNT requests otherwise", () => {
+    const url = "https://acme.com/?utm_source=paid"
+    expect(campaignCookieHeader(request(url), GUARD, fixed, { consentMode: "required" })).toBeNull()
+    expect(campaignCookieHeader(request(url, { "sec-gpc": "1" }), GUARD, fixed, CONSENT)).toBeNull()
+    expect(campaignCookieHeader(request(url, { dnt: "1" }), GUARD, fixed, CONSENT)).toBeNull()
+    // Negative: the same landing with no signal under not_required writes.
+    expect(campaignCookieHeader(request(url), GUARD, fixed, CONSENT)).not.toBeNull()
+  })
+
   it("3800 encoded bytes is an inclusive ceiling", () => {
-    const seed = campaignCookieHeader(request("https://acme.com/?utm_source=paid"), GUARD, fixed)!
+    const seed = campaignCookieHeader(request("https://acme.com/?utm_source=paid"), GUARD, fixed, CONSENT)!
     const padding = 3800 - seed.split(";")[0]!.split("=")[1]!.length
-    expect(campaignCookieHeader(request("https://acme.com/" + "a".repeat(padding) + "?utm_source=paid"), GUARD, fixed)).not.toBeNull()
-    expect(campaignCookieHeader(request("https://acme.com/" + "a".repeat(padding + 1) + "?utm_source=paid"), GUARD, fixed)).toBeNull()
+    expect(campaignCookieHeader(request("https://acme.com/" + "a".repeat(padding) + "?utm_source=paid"), GUARD, fixed, CONSENT)).not.toBeNull()
+    expect(campaignCookieHeader(request("https://acme.com/" + "a".repeat(padding + 1) + "?utm_source=paid"), GUARD, fixed, CONSENT)).toBeNull()
   })
 
   it("withCampaignCookie decorates the final response and changes nothing else", async () => {
@@ -362,7 +401,7 @@ describe("the server cookie", () => {
         status: 200,
         headers: { "content-type": "text/html", "cache-control": "private, no-store", "set-cookie": "existing=1; Path=/" }
       })
-    const decorated = withCampaignCookie(base, { guard: GUARD, isDocument: () => true, now: () => fixed })
+    const decorated = withCampaignCookie(base, { guard: GUARD, consent: CONSENT, isDocument: () => true, now: () => fixed })
     const before = await base()
     const after = await decorated(req)
     expect(after.status).toBe(before.status)
@@ -372,9 +411,9 @@ describe("the server cookie", () => {
     expect(after.headers.getSetCookie()).toHaveLength(before.headers.getSetCookie().length + 1)
     // Not a document, not HTML, or not 2xx: untouched.
     for (const response of [
-      withCampaignCookie(base, { guard: GUARD, isDocument: () => false }),
-      withCampaignCookie(async () => new Response("{}", { headers: { "content-type": "application/json" } }), { guard: GUARD, isDocument: () => true }),
-      withCampaignCookie(async () => new Response("no", { status: 404, headers: { "content-type": "text/html" } }), { guard: GUARD, isDocument: () => true })
+      withCampaignCookie(base, { guard: GUARD, consent: CONSENT, isDocument: () => false }),
+      withCampaignCookie(async () => new Response("{}", { headers: { "content-type": "application/json" } }), { guard: GUARD, consent: CONSENT, isDocument: () => true }),
+      withCampaignCookie(async () => new Response("no", { status: 404, headers: { "content-type": "text/html" } }), { guard: GUARD, consent: CONSENT, isDocument: () => true })
     ]) {
       const result = await response(req)
       expect(result.headers.getSetCookie().filter((value) => value.startsWith(KEY))).toEqual([])
@@ -388,7 +427,7 @@ describe("the emitted server-cookie module", () => {
   const fixed = Date.parse("2026-09-27T09:12:59.123Z")
 
   it("produces byte-identical headers to the TS twin, and has no backtick or ${", async () => {
-    const source = campaignCookieModuleSource(GUARD)
+    const source = campaignCookieModuleSource(GUARD, CONSENT)
     expect(source).not.toMatch(/`|\$\{/)
     const file = join(dir, "campaign-cookie.mjs")
     writeFileSync(file, source)
@@ -401,11 +440,19 @@ describe("the emitted server-cookie module", () => {
       "https://ACME.com./?utm_source=paid",
       "https://acme-abc123.vercel.app/?utm_source=paid",
       "https://acme.com/?fbclid=only",
-      "http://acme.com/?utm_source=paid"
+      "http://acme.com/?utm_source=paid",
+      "https://acme.com/?utm_source=newsletter&utm_term=jane.doe%40example.com",
+      "https://acme.com/?utm_source=jane.doe%40example.com"
     ]) {
-      const req = new Request(url, { headers: { referer: "https://facebook.com/" } })
-      expect(emitted.infiniteCampaignCookieHeader(req, fixed)).toBe(campaignCookieHeader(req, GUARD, fixed))
+      for (const headers of [{ referer: "https://facebook.com/" }, { referer: "https://facebook.com/", "sec-gpc": "1" }]) {
+        const req = new Request(url, { headers })
+        expect(emitted.infiniteCampaignCookieHeader(req, fixed)).toBe(campaignCookieHeader(req, GUARD, fixed, CONSENT))
+      }
     }
+    const requiredFile = join(dir, "campaign-cookie-required.mjs")
+    writeFileSync(requiredFile, campaignCookieModuleSource(GUARD, { consentMode: "required" }))
+    const required = (await import(pathToFileURL(requiredFile).href)) as typeof emitted
+    expect(required.infiniteCampaignCookieHeader(new Request("https://acme.com/?utm_source=paid"), fixed)).toBeNull()
     const wrapped = emitted.withInfiniteCampaignCookie(async () => new Response("x", { headers: { "content-type": "text/html" } }), {
       isDocument: () => true,
       now: () => fixed
