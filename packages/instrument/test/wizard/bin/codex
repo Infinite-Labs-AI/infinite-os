@@ -11,7 +11,7 @@ import { readdirSync, writeFileSync } from "node:fs"
 import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps } from "./fake-agent-lib.mjs"
 
 const argv = process.argv.slice(2)
-const scenario = loadScenario()
+const scenario = loadScenario("codex")
 
 if (argv[0] === "--version") {
   process.stdout.write(`${scenario.version ?? "codex-cli 0.159.2"}\n`)

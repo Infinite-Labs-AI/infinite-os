@@ -32,10 +32,15 @@ const RECORDED_ENV = [
   "CLAUDE_CONFIG_DIR"
 ]
 
-export function loadScenario() {
+/**
+ * The scenario for one fake CLI. A file may hold one scenario for both (the runner tests), or one per CLI
+ * under `claude` / `codex` (the offline E2E, where the wizard spawns both from one environment).
+ */
+export function loadScenario(agent) {
   const path = process.env.FAKE_AGENT_SCENARIO
   if (!path) return {}
-  return JSON.parse(readFileSync(path, "utf8"))
+  const scenario = JSON.parse(readFileSync(path, "utf8"))
+  return agent && scenario[agent] && typeof scenario[agent] === "object" ? scenario[agent] : scenario
 }
 
 export function record(entry) {
@@ -158,6 +163,23 @@ export async function runSteps(steps, ctx) {
       const path = join(ctx.cwd, step.append.path)
       appendFileSync(path, step.append.text)
       ctx.onEdit?.(step.append.path)
+    } else if (step.replace) {
+      // An Edit on the file as it is NOW (the installer may have changed it): exactly one occurrence, or the
+      // last one when asked; a missing text is a scenario bug and fails the turn loudly.
+      const { path: rel, find, replace, occurrence } = step.replace
+      const path = join(ctx.cwd, rel)
+      const text = readFileSync(path, "utf8")
+      const at = occurrence === "last" ? text.lastIndexOf(find) : text.indexOf(find)
+      if (at < 0 || (occurrence !== "last" && text.indexOf(find, at + find.length) >= 0)) {
+        process.stderr.write(`fake agent: ${rel} does not hold ${JSON.stringify(find.slice(0, 80))} exactly once\n`)
+        process.exit(70)
+      }
+      writeFileSync(path, text.slice(0, at) + replace + text.slice(at + find.length))
+      ctx.onEdit?.(rel)
+    } else if (step.prepend) {
+      const path = join(ctx.cwd, step.prepend.path)
+      writeFileSync(path, step.prepend.text + readFileSync(path, "utf8"))
+      ctx.onEdit?.(step.prepend.path)
     } else if (step.delete) {
       rmSync(join(ctx.cwd, step.delete), { force: true })
     } else if (step.tool) {

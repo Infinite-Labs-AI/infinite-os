@@ -9,7 +9,7 @@ import { dirname } from "node:path"
 import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps } from "./fake-agent-lib.mjs"
 
 const argv = process.argv.slice(2)
-const scenario = loadScenario()
+const scenario = loadScenario("claude")
 
 if (argv[0] === "--version") {
   process.stdout.write(`${scenario.version ?? "2.1.287 (Claude Code)"}\n`)

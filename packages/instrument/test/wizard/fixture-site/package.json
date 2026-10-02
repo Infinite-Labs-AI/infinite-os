@@ -1,0 +1,14 @@
+{
+  "name": "acme-store",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/fake-build.mjs"
+  },
+  "dependencies": {
+    "next": "15.0.0",
+    "posthog-js": "1.200.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  }
+}

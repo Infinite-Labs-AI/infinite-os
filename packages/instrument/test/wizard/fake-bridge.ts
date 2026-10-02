@@ -129,6 +129,11 @@ export interface FakeBridgeScript {
   /** Consumed one per deploy-status call; the last one repeats. */
   deploy: FakeDeployState[]
   testResults: Partial<Record<TestMode, TestResult>>
+  /**
+   * Picks a result per REQUEST (e.g. the preview's own `dry_live` vs production's); undefined falls back
+   * to `testResults[mode]`, then the fixture.
+   */
+  testResultFor?: (request: TestRunRequest) => TestResult | undefined
   testPollsBeforeDone: number
   /** The receipts answer (default: the fixture's verified run). */
   receipts: ReceiptsResponseFields | null
@@ -243,7 +248,9 @@ function productionOrSibling(productionHost: string): (host: string) => boolean 
   }
 }
 
-function testResultFor(mode: TestMode, script: FakeBridgeScript): TestResult {
+function testResultFor(mode: TestMode, script: FakeBridgeScript, request: TestRunRequest | null = null): TestResult {
+  const picked = request && script.testResultFor ? script.testResultFor(request) : undefined
+  if (picked) return picked
   const scripted = script.testResults[mode]
   if (scripted) return scripted
   const fixture = loadTestRunCases().find((candidate) => candidate.request.mode === mode)
@@ -277,7 +284,7 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
   const ownsHome = options.home === undefined
   const linkRequests = new Map<string, { polls: number; site: { repoLabel: string; appRoot: string } }>()
   const approvedLinks = new Set<string>()
-  const testRuns = new Map<string, { mode: TestMode; polls: number }>()
+  const testRuns = new Map<string, { mode: TestMode; polls: number; request: TestRunRequest }>()
   let deployIndex = 0
   let port = 0
 
@@ -568,7 +575,7 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           }
           const mode = request.mode
           const testRunId = TEST_RUN_IDS[mode]
-          testRuns.set(testRunId, { mode, polls: 0 })
+          testRuns.set(testRunId, { mode, polls: 0, request })
           return ok({ testRunId, state: "queued" })
         }
         case "test.poll": {
@@ -578,7 +585,7 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           run.polls += 1
           const progress = [{ at: "2026-10-02T09:10:00.000Z", text: "Loading the site (nothing sent)" }]
           if (run.polls <= script.testPollsBeforeDone) return ok({ state: "running", progress })
-          return ok({ state: "done", progress, result: testResultFor(run.mode, script) })
+          return ok({ state: "done", progress, result: testResultFor(run.mode, script, run.request) })
         }
         case "test.cancel": {
           const id = url.pathname.split("/").slice(-2)[0] ?? ""

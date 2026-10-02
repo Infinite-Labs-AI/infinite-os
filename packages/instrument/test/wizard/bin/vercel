@@ -1,0 +1,6 @@
+#!/bin/sh
+# Fake `vercel` for the wizard's offline E2E: a spy. The wizard must NEVER run the Vercel CLI (§1.2 "never
+# `vercel --prod` in PR mode"), so any call is recorded to $FAKE_SPY_RECORD and fails loudly.
+if [ -n "$FAKE_SPY_RECORD" ]; then printf 'vercel %s\n' "$*" >> "$FAKE_SPY_RECORD"; fi
+echo "fake vercel: the wizard must never run the Vercel CLI" >&2
+exit 1

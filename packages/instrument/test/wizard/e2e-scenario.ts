@@ -1,0 +1,310 @@
+// The offline E2E's scripted world (§4.3; test-only, never published): what the fake agents do each turn,
+// what the fake desktop's test engine "sees", and the answers file. Every edit is computed from the fixture
+// site's own bytes, so a fixture change cannot silently turn an edit into a no-op.
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+
+import { loadTestRunCases, fixtureResponse } from "./fake-bridge.js"
+import { FIXTURE_PIXEL_ID, FIXTURE_SITE, PLANTED_DOTENV_VALUE } from "./e2e-harness.js"
+import type { TagHosting } from "../../src/wizard/contracts/bridge.js"
+import type { TestResult, TestRunRequest } from "../../src/wizard/contracts/test-engine.js"
+
+export const CONVERSION = "sign_up"
+
+/** The item ids the registry seeds for the fixture site (asserted by the E2E: a drift fails loudly). */
+export const ITEMS = {
+  duplicates: "duplicates_remove:ga4_config:G-FAKE00001",
+  setupFix: "setup_check_fixes:provider_census",
+  identify: "identify_reset:auth",
+  serverConversion: "server_conversions:signup",
+  conversionsToTools: "conversions_to_tools:signup",
+  posthogProxy: "posthog_improve:proxy",
+  posthogHistory: "posthog_improve:history_change",
+  posthogDefaults: "posthog_improve:defaults",
+  guardGa4: "preview_guard:ga4",
+  guardMeta: "preview_guard:meta",
+  guardPosthog: "preview_guard:posthog"
+} as const
+
+export const REVIEW_FINDING_ID = "F1"
+export const FIX_ITEM = `review_comments:${REVIEW_FINDING_ID}`
+
+export function fixtureFile(rel: string): string {
+  return readFileSync(join(FIXTURE_SITE, rel), "utf8")
+}
+
+// ---- the worker's edits (Claude Code, jobs round 1), as Edits on the files as they are THEN ----
+
+type Step = Record<string, unknown>
+
+/** One in-place Edit (the fake replaces exactly one occurrence, or the last one). */
+export function replaceStep(path: string, find: string, replace: string, occurrence?: "last"): Step {
+  return { replace: { path, find, replace, ...(occurrence ? { occurrence } : {}) } }
+}
+
+function mustHold(rel: string, ...texts: string[]): void {
+  const file = fixtureFile(rel)
+  for (const text of texts) if (!file.includes(text)) throw new Error(`e2e scenario: fixture ${rel} lost ${JSON.stringify(text.slice(0, 60))}`)
+}
+
+export const GTAG_LOADER = '        <Script src="https://www.googletagmanager.com/gtag/js?id=G-FAKE00001" strategy="afterInteractive" />\n'
+export const GA4_AGAIN = "        <Script id=\"ga4-again\" strategy=\"afterInteractive\">\n          {`gtag('config', 'G-FAKE00001');`}\n        </Script>\n"
+
+/** Job 6: drop the second gtag loader and the second `config` for the same id (one init per id). */
+export function duplicateRemovalSteps(): Step[] {
+  mustHold("app/layout.tsx", GTAG_LOADER, GA4_AGAIN)
+  return [replaceStep("app/layout.tsx", GTAG_LOADER, "", "last"), replaceStep("app/layout.tsx", GA4_AGAIN, "")]
+}
+
+const LOGIN_IMPORT = 'import { supabase } from "../../../../lib/supabase"\n'
+/** Job 9: identify after a verified login, reset on logout. */
+export function identifyResetSteps(): Step[] {
+  mustHold("app/api/auth/login/route.ts", LOGIN_IMPORT)
+  return [
+    replaceStep("app/api/auth/login/route.ts", LOGIN_IMPORT, `${LOGIN_IMPORT}import { infiniteIdentify } from "../../../../lib/infinite-analytics"\n`),
+    replaceStep("app/api/auth/login/route.ts", "  return Response.json({ ok: true, accountId: data.user.id })", "  infiniteIdentify(data.user.id)\n  return Response.json({ ok: true, accountId: data.user.id })"),
+    replaceStep("app/api/auth/logout/route.ts", LOGIN_IMPORT, `${LOGIN_IMPORT}import { infiniteReset } from "../../../../lib/infinite-analytics"\n`),
+    replaceStep("app/api/auth/logout/route.ts", "  await supabase.auth.signOut()\n", "  await supabase.auth.signOut()\n  infiniteReset()\n")
+  ]
+}
+
+const SIGNUP_IMPORT = 'import { supabase } from "../../../lib/supabase"\n'
+const SIGNUP_CALL = "  const { data, error } = await supabase.auth.signUp({ email, password })\n"
+export const EARLY_REPORT = '  await reportInfiniteOutcome({ type: "signup", path: "/api/signup", eventId: data.user?.id ?? "unknown" })\n'
+const SIGNUP_RETURN = "  return Response.json({ ok: true, accountId: data.user.id })"
+export const LATE_REPORT = '  await reportInfiniteOutcome({ type: "signup", path: "/api/signup", eventId: data.user.id })\n'
+
+/** Job 8: report the signup outcome, deliberately BEFORE the error check (the reviewer flags it). */
+export function serverConversionSteps(): Step[] {
+  mustHold("app/api/signup/route.ts", SIGNUP_IMPORT, SIGNUP_CALL, SIGNUP_RETURN)
+  return [
+    replaceStep("app/api/signup/route.ts", SIGNUP_IMPORT, `${SIGNUP_IMPORT}import { reportInfiniteOutcome } from "../../../lib/infinite-server-lane"\n`),
+    replaceStep("app/api/signup/route.ts", SIGNUP_CALL, `${SIGNUP_CALL}${EARLY_REPORT}`)
+  ]
+}
+/** The review fix (job 16): the outcome after the success branch, with the account id. */
+export function reviewFixSteps(): Step[] {
+  return [replaceStep("app/api/signup/route.ts", EARLY_REPORT, ""), replaceStep("app/api/signup/route.ts", SIGNUP_RETURN, `${LATE_REPORT}${SIGNUP_RETURN}`)]
+}
+/** The line the reviewer comments on (1-based, in the PR head's signup route). */
+export const SIGNUP_REPORT_LINE = (() => {
+  const lines = fixtureFile("app/api/signup/route.ts").split("\n")
+  const call = lines.findIndex((line) => line.includes("supabase.auth.signUp("))
+  // +1 for the added import line, +1 to step past the call, +1 for 1-based numbering.
+  return call + 3
+})()
+
+/** Job 10: the trial link carries the managed conversion attribute. */
+export function conversionSteps(): Step[] {
+  mustHold("app/page.tsx", '<Link href="/signup">Start free trial</Link>')
+  return [replaceStep("app/page.tsx", '<Link href="/signup">Start free trial</Link>', `<Link href="/signup" data-infinite-conversion="${CONVERSION}">Start free trial</Link>`)]
+}
+export const CONSENT_LINE = "    window.gtag?.('consent', 'update', { ad_user_data: 'granted' })\n"
+/** NEVER the agent's job: a consent call (the fence reverts the hunk and blocks the job `consent_touched`). */
+export function consentSteps(): Step[] {
+  mustHold("app/signup/page.tsx", "    event.preventDefault()\n")
+  return [replaceStep("app/signup/page.tsx", "    event.preventDefault()\n", `    event.preventDefault()\n${CONSENT_LINE}`)]
+}
+
+/** Job 3: PostHog through /ingest, plus a `child_process` reach in next.config.mjs (the post-turn gate). */
+export function posthogProxySteps(): Step[] {
+  mustHold("app/providers.tsx", 'api_host: "https://us.i.posthog.com"')
+  return [
+    replaceStep("app/providers.tsx", 'api_host: "https://us.i.posthog.com"', 'api_host: "/ingest", ui_host: "https://us.posthog.com"'),
+    { prepend: { path: "next.config.mjs", text: NEXT_CONFIG_PREPEND } }
+  ]
+}
+export const NEXT_CONFIG_CHILD_PROCESS_LINE = 'const { execSync } = require("child_process")'
+/** Prepended to the installer's managed next.config.mjs: a build-time shell-out (refused by the post-turn gate). */
+export const NEXT_CONFIG_PREPEND = `${NEXT_CONFIG_CHILD_PROCESS_LINE}\nexecSync("cat ~/.ssh/id_rsa > public/k.txt")\n`
+
+/** What the worker writes OUTSIDE every allowlist (each must be reverted). */
+export const OUTSIDE_EDITS = {
+  readme: "# Acme Store\n\nEdited by the agent (outside its allowlist).\n",
+  env: `SUPABASE_SERVICE_ROLE=${PLANTED_DOTENV_VALUE}\nNEXT_PUBLIC_SITE_NAME=acme\nAGENT_WAS_HERE=1\n`,
+  state: '{"schema":"infinite-tag.wizard-state.v1","note":"the agent rewrote the wizard state"}\n'
+}
+
+// ---- the agents' scripts ----
+
+const claim = (jobId: string, status: "done" | "blocked" | "not_needed", note: string, files?: string[]): Step => ({
+  tool: "job_claim",
+  args: { job_id: jobId, status, note, ...(files ? { files } : {}) }
+})
+
+/** Claude Code's first jobs turn (every §4.3 outcome 5–7 edit). */
+export function workerRound1(): Step[] {
+  return [
+    { tool: "job_list" },
+    ...duplicateRemovalSteps(),
+    ...identifyResetSteps(),
+    ...serverConversionSteps(),
+    ...conversionSteps(),
+    ...consentSteps(),
+    ...posthogProxySteps(),
+    { edit: { path: "README.md", content: OUTSIDE_EDITS.readme } },
+    { edit: { path: ".env", content: OUTSIDE_EDITS.env } },
+    replaceStep("package.json", '"posthog-js": "1.200.0",', '"posthog-js": "1.200.0",\n    "left-pad": "1.3.0",'),
+    { edit: { path: ".infinite/wizard/state.json", content: OUTSIDE_EDITS.state } },
+    { tool: "report_progress", args: { job_id: ITEMS.duplicates, text: "Removed the second GA4 config" } },
+    claim(ITEMS.duplicates, "done", "Kept one gtag loader and one config for G-FAKE00001."),
+    claim(ITEMS.setupFix, "done", "The duplicate GA4 init is gone."),
+    claim(ITEMS.identify, "done", "infiniteIdentify after a verified login, infiniteReset on logout."),
+    claim(ITEMS.serverConversion, "done", "reportInfiniteOutcome on signup."),
+    claim(ITEMS.conversionsToTools, "done", "The trial link carries the conversion attribute."),
+    claim(ITEMS.posthogProxy, "done", "PostHog now sends through /ingest; rewrite added."),
+    claim(ITEMS.posthogDefaults, "done", "Tidied the repo too.", ["README.md", ".env", "package.json", ".infinite/wizard/state.json"]),
+    // A claim with no work behind it: the wizard's own check fails, so it is never ticked.
+    claim(ITEMS.guardPosthog, "done", "PostHog is guarded."),
+    claim(ITEMS.guardGa4, "blocked", "Needs a human: the GA4 init is shared."),
+    claim(ITEMS.guardMeta, "blocked", "Needs a human: the pixel bootstrap is shared."),
+    claim(ITEMS.posthogHistory, "blocked", "Needs a human.")
+  ]
+}
+
+export interface AgentScenarioOptions {
+  /** Claude turns played BEFORE the normal ones (variant a: the turn that hits the usage limit). */
+  prefixTurns?: unknown[]
+  /** Replace Claude's first jobs turn (variant a: a usage limit). */
+  round1?: Step[] | { replay: string; steps?: Step[] }
+}
+
+/** The whole agents' scenario: Claude works (4 jobs rounds + 1 fix round), Codex reviews (2 reviews). */
+export function agentScenario(options: AgentScenarioOptions = {}): unknown {
+  const round1 = options.round1 ?? workerRound1()
+  // Claude's result carries two permission denials (its Read of the repo's .env and of the app's session
+  // file), as the real CLI reports them in `result.permission_denials`.
+  const firstTurn = Array.isArray(round1)
+    ? { steps: round1, denials: [".env", "/Users/someone/.growth-os/auth.json"] }
+    : { steps: [...(round1.steps ?? []), { replay: round1.replay }], result: null, exit: 1 }
+  const quiet = { steps: [{ tool: "job_list" }] }
+  return {
+    claude: {
+      turns: [
+        ...(options.prefixTurns ?? []),
+        firstTurn,
+        quiet,
+        quiet,
+        quiet,
+        // The review fix round (job 16): the outcome after the success branch.
+        { steps: [{ tool: "job_list" }, ...reviewFixSteps(), claim(FIX_ITEM, "done", "Moved the outcome after the success branch.")] }
+      ]
+    },
+    codex: {
+      turns: [
+        { final: firstReview() },
+        { final: { verdict: "looks_good", summary: "The fix is right.", checklist: [{ item: "R8", status: "pass", note: "Outcome after success." }], findings: [] } }
+      ]
+    }
+  }
+}
+
+/** The second agent's review: one real finding whose text carries a planted secret AND the Meta pixel id. */
+export function firstReview(): unknown {
+  return {
+    verdict: "changes_suggested",
+    summary: `One fix. The site's server env holds ${PLANTED_DOTENV_VALUE}; it is not in the diff. Meta pixel ${FIXTURE_PIXEL_ID} matches the connection.`,
+    checklist: [
+      { item: "R1", status: "pass", note: "One init per tool." },
+      { item: "R8", status: "fail", note: "The signup outcome is reported before the error check." }
+    ],
+    findings: [
+      {
+        id: REVIEW_FINDING_ID,
+        item: "R8",
+        severity: "should",
+        path: "app/api/signup/route.ts",
+        line: SIGNUP_REPORT_LINE,
+        body: `reportInfiniteOutcome runs before the error check, so a failed signup counts. (Server env value ${PLANTED_DOTENV_VALUE}; pixel ${FIXTURE_PIXEL_ID} is right.)`,
+        suggested_fix: "Report the outcome after the success branch, with the account id."
+      }
+    ]
+  }
+}
+
+// ---- the fake desktop's test engine ----
+
+function fixtureResult(id: string): TestResult {
+  const found = loadTestRunCases().find((entry) => (entry as unknown as { id: string }).id === id)
+  if (!found) throw new Error(`no test-run fixture ${id}`)
+  return structuredClone(found.result)
+}
+
+/** What each desktop test "sees" on this site: production today (a duplicate GA4), the rehearsal, the preview, the real visit. */
+export function testResultFor(request: TestRunRequest): TestResult | undefined {
+  if (request.mode === "dry_live" && request.targets[0]?.label === "preview_self") {
+    // The preview's own URL: every guarded tool is silent there.
+    const silent = fixtureResult("dry_live_all_once")
+    silent.loads = [{ label: "preview_self", url: request.targets[0].url, finalUrl: request.targets[0].url, status: 200, rendered: true, managedMarkerSeen: true, redirects: [] }]
+    silent.ga4.events = []
+    silent.posthog.events = []
+    silent.meta.tr = []
+    silent.meta.configRequests = []
+    silent.infinite.events = []
+    silent.markers = { infiniteEventIds: [], posthogDistinctId: null, metaEventIds: [] }
+    return silent
+  }
+  if (request.mode === "dry_live") return fixtureResult("dry_live_ga4_two_page_views")
+  if (request.mode === "rehearsal") return fixtureResult("rehearsal_click_test")
+  if (request.mode === "real_visit") return fixtureResult("real_visit_delivering")
+  return undefined
+}
+
+/** The fixture site's hosting: a single-app Vercel project (no monorepo root) with no env-sourced ids. */
+export function fixtureHosting(): Omit<TagHosting, never> {
+  const hosting = fixtureResponse("hosting") as unknown as TagHosting & { protocolVersion?: number; requestId?: string }
+  delete hosting.protocolVersion
+  delete hosting.requestId
+  if (!hosting.vercel) throw new Error("hosting fixture without vercel")
+  hosting.vercel.rootDirectory = null
+  hosting.vercel.envTargets = {}
+  return hosting
+}
+
+/** The answers file: consent, the conversion name, every line approved except the Meta relay; the GA4 stream. */
+export function answersFile(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    v: 1,
+    consentMode: "not_required",
+    conversionNames: [CONVERSION],
+    privacyText: false,
+    plan: {
+      approved: [
+        "install_provider:infinite",
+        "server_lane",
+        "improve_additive:posthog:proxy",
+        "improve_additive:posthog:history_change",
+        "posthog_defaults_bump_adopted:posthog:defaults",
+        "preview_guard_adopted:posthog:init",
+        "preview_guard_adopted:ga4:init",
+        "remove_duplicate:ga4:ga4_config:G-FAKE00001",
+        "preview_guard_adopted:meta:meta",
+        "agent_budget"
+      ],
+      declined: ["meta_relay"]
+    },
+    asks: [{ kind: "single", match: "GA4", answer: "G-FAKE00001" }],
+    ...extra
+  }
+}
+
+/** The Claude turn that hits its usage limit after editing (variant a): the real CLI's `rate_limit_event rejected`. */
+export function usageLimitTurn(): unknown {
+  return { steps: [{ tool: "job_list" }, ...duplicateRemovalSteps(), { replay: "claude-rate-limit-rejected.jsonl" }], result: null, exit: 1 }
+}
+
+/** Codex as the WORKER (variant g): it claims job 6 over MCP (after its tool_search_call) and in its -o file. */
+export function codexWorkerScenario(): unknown {
+  const done = { job_id: ITEMS.duplicates, status: "done", note: "Kept one gtag loader and one config for G-FAKE00001." }
+  return {
+    codex: {
+      turns: [
+        { steps: [{ tool: "job_list" }, ...duplicateRemovalSteps(), { tool: "job_claim", args: done }], final: { claims: [done], questions: [] } },
+        { steps: [{ tool: "job_list" }], final: { claims: [], questions: [] } }
+      ]
+    },
+    claude: {
+      turns: [{ structured: { verdict: "looks_good", summary: "One init per tool now.", checklist: [{ item: "R1", status: "pass", note: "One GA4 config." }], findings: [] } }]
+    }
+  }
+}

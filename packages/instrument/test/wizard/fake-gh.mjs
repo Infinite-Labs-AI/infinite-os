@@ -8,7 +8,7 @@
 // unknown command fail loudly. No network, ever.
 import { execFileSync } from "node:child_process"
 import { readFileSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { isAbsolute, join } from "node:path"
 
 const statePath = process.env.FAKE_GH_STATE
 if (!statePath) {
@@ -132,7 +132,8 @@ if (group === "pr") {
     }
     const head = flag("--head")
     const bodyFile = flag("--body-file")
-    const body = bodyFile === "-" ? stdin : readFileSync(join(process.cwd(), bodyFile), "utf8")
+    // Like the real gh: "-" is stdin, a relative path is from the cwd, an absolute one is used as is.
+    const body = bodyFile === "-" ? stdin : readFileSync(isAbsolute(bodyFile) ? bodyFile : join(process.cwd(), bodyFile), "utf8")
     const number = state.nextPrNumber
     state.nextPrNumber += 1
     const repo = state.repo?.nameWithOwner ?? "acme/acme-store"
