@@ -88,6 +88,15 @@ export interface ApprovalRenderCtx extends ViewRenderCtx {
   /** Body rows per page while a document is open (the session sizes it to the window). */
   pageRows?: number;
   /**
+   * The most rows the whole card (head + frame) may take: the window less the
+   * composer, the key bar, the drafts and the live region's floor. A card
+   * taller than this pages its middle (rows, the kind's object, details)
+   * inside the frame, keeping the head, the title and the footer pinned, so
+   * Ink's frame never reaches the window height (no fullscreen redraw, the
+   * user's scrollback stays). Absent = no limit.
+   */
+  maxRows?: number;
+  /**
    * A card brought back after an unsure approve: the answers that approve
    * sent. OK again and `r` re-send exactly these.
    */
@@ -157,57 +166,71 @@ export function approvalRender(view: AnswerViewV1, ctx: ApprovalRenderCtx): Appr
   const fieldPrompt = ok?.type === "ask_field" ? ok.field : undefined;
   const documentOpen = ui.documentOpen && documents.length > 0;
 
-  // ── the body ──
-  const body: string[] = [];
-  let pages = 0;
+  // ── the body: a pinned top (an open document's tabs and subject), a middle
+  // that pages, and a pinned footer (what it does, fields, state, expiry) ──
+  const top: string[] = [];
+  const middle: string[] = [];
+  const footer: string[] = [];
   if (documentOpen) {
     const doc = documents[clampIndex(ui.tab, documents.length)]!;
-    const page = documentPage(doc, documents, ui, innerCtx, ctx.pageRows ?? DEFAULT_PAGE_ROWS);
-    body.push(...page.lines);
-    pages = page.pages;
+    const parts = documentParts(doc, documents, ui, innerCtx);
+    top.push(...parts.top);
+    middle.push(...parts.body);
   } else {
     const rows = readRows(approval.rows);
-    body.push(...labelValueLines(rows, innerCtx));
+    middle.push(...labelValueLines(rows, innerCtx));
     const kindLines = kindBody(view, innerCtx, notes);
     if (kindLines.length) {
-      if (body.length) body.push("");
-      body.push(...kindLines);
+      if (middle.length) middle.push("");
+      middle.push(...kindLines);
     }
     const detailRows = readRows(approval.detailRows);
     if (detailRows.length) {
-      body.push("", ...labelValueLines(detailRows, innerCtx));
+      middle.push("", ...labelValueLines(detailRows, innerCtx));
     }
     const effect = viewText(approval.effect);
     if (effect) {
-      body.push(...wrapText(effect, inner).map((line) => paint(line, "warning", ctx)));
+      footer.push(...wrapText(effect, inner).map((line) => paint(line, "warning", ctx)));
     }
     if (finishInApp) {
       const words = viewText(finishInApp.words);
       const link = isRecord(finishInApp.appLink) && canOpen ? " (o)" : "";
-      if (words) body.push("", ...wrapText(`↗ ${words}${link}`, inner).map((line) => paint(line, "primary", ctx)));
+      if (words) footer.push("", ...wrapText(`↗ ${words}${link}`, inner).map((line) => paint(line, "primary", ctx)));
     }
     if (fields.length) {
-      body.push("", ...fieldLines(fields, ui, innerCtx));
+      footer.push("", ...fieldLines(fields, ui, innerCtx));
     }
     if (blockedByUpdate) {
-      body.push(...wrapText(UPDATE_FOR_FIELDS, inner).map((line) => paint(line, "warning", ctx)));
+      footer.push(...wrapText(UPDATE_FOR_FIELDS, inner).map((line) => paint(line, "warning", ctx)));
     }
   }
   const reason = isRecord(view.stateReason) ? viewText(view.stateReason.words) : "";
   if (!live && reason) {
-    body.push(...wrapText(reason, inner).map((line) => paint(line, "warning", ctx)));
+    footer.push(...wrapText(reason, inner).map((line) => paint(line, "warning", ctx)));
   }
-  body.push(...reconcileLines(view, innerCtx));
+  footer.push(...reconcileLines(view, innerCtx));
   const expires = live ? formatAsOf(approval.expiresAt, ctx.timeZone) : null;
   if (expires && !documentOpen) {
-    body.push(paint(`expires ${expires}`, "muted", ctx));
+    footer.push(paint(`expires ${expires}`, "muted", ctx));
   }
   if (ui.explainOpen && summary) {
-    body.push("", ...wrapText(`? ${summary}`, inner).map((line) => paint(line, "muted", ctx)));
+    footer.push("", ...wrapText(`? ${summary}`, inner).map((line) => paint(line, "muted", ctx)));
   }
   if (notes.size) {
-    body.push("", ...notes.lines().flatMap((line) => wrapText(line, inner)).map((line) => paint(line, "muted", ctx)));
+    footer.push("", ...notes.lines().flatMap((line) => wrapText(line, inner)).map((line) => paint(line, "muted", ctx)));
   }
+  const paged = pageCardBody({
+    top,
+    middle,
+    footer,
+    page: ui.page,
+    // An open document pages at the session's page size even when it would fit.
+    pageRows: documentOpen ? ctx.pageRows ?? DEFAULT_PAGE_ROWS : undefined,
+    maxRows: ctx.maxRows,
+    ctx
+  });
+  const body = paged.lines;
+  const pages = paged.pages;
 
   const title = viewText(approval.title) || viewText(view.title);
   const framed = frame(title, body, width, ctx);
@@ -225,7 +248,7 @@ export function approvalRender(view: AnswerViewV1, ctx: ApprovalRenderCtx): Appr
       viewOpen: documentOpen,
       tabs: documentOpen ? documents.length : 0,
       ...(documentOpen ? tabNounOf(documents) : {}),
-      page: documentOpen && pages > 1
+      page: pages > 1
     }
   };
   const keys: KeyHint[] = ui.fieldEntry
@@ -530,14 +553,13 @@ function readDocuments(view: AnswerViewV1): CardDocument[] {
   }));
 }
 
-/** The open document: its tabs, subject and one page of its body. */
-function documentPage(
+/** The open document: its tabs and subject (pinned), and its whole body (paged by the card). */
+function documentParts(
   doc: CardDocument,
   documents: readonly CardDocument[],
   ui: CardUiState,
-  ctx: ViewRenderCtx,
-  pageRows: number
-): { lines: string[]; pages: number } {
+  ctx: ViewRenderCtx
+): { top: string[]; body: string[] } {
   const width = ctx.width;
   const tabs = documents.map((item, index) => {
     const label = ` ${index + 1} ${item.slot || `${index + 1}`} `;
@@ -546,27 +568,81 @@ function documentPage(
     return selected ? `[${label.trim()}]` : label.trim();
   });
   const tabLine = truncateCells(tabs.join(ctx.color ? " " : "  "), width);
-  const bodyLines = doc.body
+  const body = doc.body
     .split(/\r?\n/u)
     .flatMap((line) => {
       const text = viewText(line);
       return text ? wrapText(text, Math.max(1, width - 2)) : [""];
     })
     .map((line) => paint(line ? `│ ${line}` : "│", "text", ctx));
-  const rows = Math.max(1, Math.floor(pageRows));
-  const pages = Math.max(1, Math.ceil(bodyLines.length / rows));
-  const page = Math.min(Math.max(0, ui.page), pages - 1);
-  const lines = [
-    tabLine,
-    "",
-    ...wrapText(`Subject: ${doc.subject || "—"}`, width).map((line) => paint(line, "text", ctx, { bold: true })),
-    "",
-    ...bodyLines.slice(page * rows, (page + 1) * rows)
-  ];
-  if (pages > 1) {
-    lines.push(paint(`page ${page + 1} of ${pages}`, "muted", ctx));
+  return {
+    top: [
+      tabLine,
+      "",
+      ...wrapText(`Subject: ${doc.subject || "—"}`, width).map((line) => paint(line, "text", ctx, { bold: true })),
+      ""
+    ],
+    body
+  };
+}
+
+/** Rows the card draws around its framed body: the head line and the frame's top and bottom. */
+const CARD_CHROME_ROWS = 3;
+
+/**
+ * The framed body, paged to fit. The middle pages when an open document asks
+ * for a page size (`pageRows`) or the whole card would pass `maxRows`; the
+ * top and footer stay on every page, and a muted `page i of n · space` line
+ * closes the middle. A footer too tall to pin pages with the middle (and then
+ * the top too), so the card never passes the budget while the budget allows
+ * one body row.
+ */
+function pageCardBody(input: {
+  top: readonly string[];
+  middle: readonly string[];
+  footer: readonly string[];
+  page: number;
+  pageRows: number | undefined;
+  maxRows: number | undefined;
+  ctx: ViewRenderCtx;
+}): { lines: string[]; pages: number } {
+  const budget = typeof input.maxRows === "number" && Number.isFinite(input.maxRows)
+    ? Math.max(1, Math.floor(input.maxRows) - CARD_CHROME_ROWS)
+    : Number.POSITIVE_INFINITY;
+  let top = [...input.top];
+  let middle = [...input.middle];
+  let footer = [...input.footer];
+  const whole = top.length + middle.length + footer.length;
+  if (input.pageRows === undefined && whole <= budget) {
+    return { lines: whole ? [...top, ...middle, ...footer] : [], pages: 1 };
   }
-  return { lines, pages };
+  // One row for the page line.
+  let room = budget - top.length - footer.length - 1;
+  if (room < 1) {
+    middle = [...middle, ...(middle.length ? [""] : []), ...footer];
+    footer = [];
+    room = budget - top.length - 1;
+  }
+  if (room < 1) {
+    middle = [...top, ...middle];
+    top = [];
+    room = budget - 1;
+  }
+  const size = Math.max(1, Math.min(room, Math.floor(input.pageRows ?? room)));
+  const pages = Math.max(1, Math.ceil(middle.length / size));
+  if (pages === 1) {
+    return { lines: [...top, ...middle, ...footer], pages: 1 };
+  }
+  const page = Math.min(Math.max(0, Math.floor(input.page)), pages - 1);
+  return {
+    lines: [
+      ...top,
+      ...middle.slice(page * size, (page + 1) * size),
+      paint(`page ${page + 1} of ${pages} · space`, "muted", input.ctx),
+      ...footer
+    ],
+    pages
+  };
 }
 
 /** The kind's object inside the card. */

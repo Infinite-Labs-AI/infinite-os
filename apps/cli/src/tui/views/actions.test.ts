@@ -497,3 +497,68 @@ describe("scrub and width", () => {
     }
   });
 });
+
+describe("a tall card fits its row budget", () => {
+  /** A launch of `sets` ad sets with 3 ads each (the launch-tree shape, synthetic names). */
+  function tallLaunch(sets: number): AnswerViewV1 {
+    const view = fixture("launch-tree");
+    const body = JSON.parse(JSON.stringify(view.body)) as { tree: { children: unknown[] }[] };
+    const adSet = JSON.parse(JSON.stringify(body.tree[0]!.children[0])) as { name: string };
+    body.tree[0]!.children = Array.from({ length: sets }, (_, index) => ({ ...adSet, name: `Ad set ${index + 1}` }));
+    return {
+      ...view,
+      title: `Launch ${sets * 3} ads`,
+      body,
+      approval: { ...view.approval!, title: `Launch ${sets * 3} ads?`, confirmLabel: `Launch ${sets * 3} ads` }
+    } as AnswerViewV1;
+  }
+
+  it("a launch of 10 ad sets × 3 ads at width 80 and maxRows 18 pages its body and keeps the head, title and effect", () => {
+    const view = tallLaunch(10);
+    const render = approvalRender(view, cardCtx({ width: 80, maxRows: 18 }));
+    expect(render.lines.length).toBeLessThanOrEqual(18);
+    const out = text(render.lines);
+    expect(out).toContain("Needs your OK");
+    expect(out).toContain("Launch 30 ads?");
+    expect(out).toContain("Lands paused");
+    expect(out).toMatch(/page 1 of \d+ · space/u);
+    expect(render.pages).toBeGreaterThan(1);
+    expect(render.keyCtx.card?.page).toBe(true);
+    expect(formatKeyBar(render.keys)).toContain("space next page");
+
+    // Space pages the body; every page fits, and every ad set is reachable.
+    const seen = new Set<string>();
+    let ui = CARD_UI_START;
+    for (let page = 0; page < render.pages!; page += 1) {
+      const current = approvalRender(view, cardCtx({ width: 80, maxRows: 18, ui }));
+      expect(current.lines.length).toBeLessThanOrEqual(18);
+      expect(text(current.lines)).toContain("Launch 30 ads?");
+      expect(text(current.lines)).toContain("Lands paused");
+      for (const match of text(current.lines).matchAll(/Ad set (\d+)/gu)) seen.add(match[1]!);
+      const step = cardKeyStep(resolveKey(" ", {} as Key, current.keyCtx), current, ui);
+      expect(step.effect).toBeNull();
+      ui = step.ui;
+    }
+    expect(seen.size).toBe(10);
+    expect(ui.page).toBe(0);
+    // Space never decides, and the OK key still approves from any page.
+    expect(drive(view, [press(" "), press("l")], { width: 80, maxRows: 18 }).effects)
+      .toEqual([{ type: "confirm", decision: "approve" }]);
+  });
+
+  it("a card that fits draws whole, with no page line", () => {
+    const render = approvalRender(fixture("launch-tree"), cardCtx({ width: 80, maxRows: 18 }));
+    expect(render.pages).toBeUndefined();
+    expect(text(render.lines)).not.toMatch(/page \d+ of/u);
+    expect(render.keyCtx.card?.page).toBe(false);
+  });
+
+  it("an open document fits the budget too", () => {
+    const render = approvalRender(fixture("launch-send-card"), cardCtx({
+      width: 80, maxRows: 14, pageRows: 40, ui: { ...CARD_UI_START, documentOpen: true }
+    }));
+    expect(render.lines.length).toBeLessThanOrEqual(14);
+    expect(text(render.lines)).toContain("Send this to 200 people?");
+    expect(render.pages).toBeGreaterThan(1);
+  });
+});

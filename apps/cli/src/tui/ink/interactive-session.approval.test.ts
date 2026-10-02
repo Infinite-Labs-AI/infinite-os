@@ -281,6 +281,53 @@ describe("the view card in a running session (fake TTY; skipped on CI like the o
   );
 });
 
+describe("a tall card in a running session (fake TTY; skipped on CI like the other PTY tests)", () => {
+  /** A launch of `sets` ad sets with 3 ads each (synthetic names). */
+  function tallLaunch(sets: number): InSessionConfirmationAction {
+    const base = card("launch-tree");
+    const view = JSON.parse(JSON.stringify(base.view)) as {
+      body: { tree: { children: Record<string, unknown>[] }[] };
+      approval: Record<string, unknown>;
+    };
+    const tree = view.body.tree[0]!;
+    const adSet = tree.children[0]!;
+    tree.children = Array.from({ length: sets }, (_, index) => ({ ...adSet, name: `Ad set ${index + 1}` }));
+    view.approval = { ...view.approval, title: `Launch ${sets * 3} ads?`, confirmLabel: `Launch ${sets * 3} ads` };
+    return { ...base, summary: `Launch ${sets * 3} ads`, view: decodeAnswerView(view)! };
+  }
+
+  it.skipIf(process.env.CI === "true")(
+    "a launch of 10 ad sets at 80×24 never clears the screen, and its head, title and OK key stay on screen",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput(80, 24);
+      const session = runInkInteractiveSession({
+        columns: 80,
+        errorOutput: ttyOutput(),
+        initialPendingConfirmations: [tallLaunch(10)],
+        input,
+        output,
+        title: "Infinite TUI",
+        onSubmitLine: async () => ({ messages: [] })
+      });
+      await waitFor(() => stripAnsi(output.text()).includes("l Launch 30 ads"), 4_000, output.text);
+      // A few clock ticks: every redraw stays below the window height.
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      await sendKeys(input, " ");
+      await waitFor(() => /page 2 of \d+ · space/u.test(stripAnsi(output.text())), 4_000, output.text);
+      const last = stripAnsi(output.lastFrame());
+      expect(last).toContain("Needs your OK");
+      expect(last).toContain("Launch 30 ads?");
+      expect(last).toContain("l Launch 30 ads");
+      expect(output.text()).not.toContain(`${ESC}[2J`);
+      expect(output.text()).not.toContain(`${ESC}[3J`);
+      input.write("\u0003");
+      await session;
+    }
+  );
+});
+
 function ttyInput() {
   const stream = new PassThrough() as PassThrough & NodeJS.ReadStream & {
     isTTY: boolean;
@@ -295,19 +342,22 @@ function ttyInput() {
   return stream;
 }
 
-function ttyOutput() {
+function ttyOutput(columns = 80, rows = 40) {
   const chunks: string[] = [];
   const stream = new PassThrough() as PassThrough & NodeJS.WriteStream & {
     columns: number;
     isTTY: boolean;
     rows: number;
     text: () => string;
+    lastFrame: () => string;
   };
-  stream.columns = 80;
-  stream.rows = 40;
+  stream.columns = columns;
+  stream.rows = rows;
   stream.isTTY = true;
   stream.on("data", (chunk) => chunks.push(String(chunk)));
   stream.text = () => chunks.join("");
+  // The last full frame Ink drew (log-update erases the previous frame, then writes the next whole).
+  stream.lastFrame = () => [...chunks].reverse().find((chunk) => chunk.includes("Needs your OK") || chunk.length > 200) ?? "";
   return stream;
 }
 

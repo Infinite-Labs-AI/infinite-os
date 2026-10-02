@@ -73,6 +73,7 @@ import {
   DEFAULT_COMPOSER_ROWS,
   DEFAULT_KEY_BAR_ROWS,
   livePageKey,
+  MIN_LIVE_REGION_ROWS,
   pageLiveWindow,
   type CommittedEntry,
   type LivePageDirection
@@ -715,33 +716,61 @@ export function InkInteractiveSessionApp({
   // The head card drawn from its approval view (an old desktop sends none: the
   // summary + details card and `y Confirm` stay). Its key context is the one the
   // keymap resolves with, so the bar and the keys agree by construction.
-  const headCard = useMemo<ApprovalRender | null>(
-    () => headConfirmAction?.view && isPlainRecord(headConfirmAction.view.approval)
-      ? approvalRender(headConfirmAction.view, {
-          width: columns,
-          color: true,
-          theme: t,
-          selected: 0,
-          tab: cardUi.tab,
-          page: cardUi.page,
-          explainOpen: cardUi.explainOpen,
-          showHiddenColumns: false,
-          caps: NO_KEY_CAPS,
-          ui: cardUi,
-          fieldsCapable: headConfirmAction.confirmFieldsCapable === true,
-          ...(headConfirmAction.sentFields ? { sentFields: headConfirmAction.sentFields } : {}),
-          pageRows: rows ? Math.max(4, Math.floor(rows / 3)) : undefined
-        })
-      : null,
-    [cardUi, columns, headConfirmAction, rows, t]
-  );
-  const cardKeyCtx = headCard ? headCard.keyCtx : confirmKeys?.ctx ?? null;
   // Image drafts in progress this turn, one line per run ("Drawing 3 images ·
   // ~25 s"), above the card and the composer. Never a picture or a URL.
   const draftLines = useMemo(
     () => turnState.drafts.map((draft) => creativeDraftLine(draft, clock)),
     [clock, turnState.drafts]
   );
+  // The home inventory shows ONCE, on the empty home screen (no transcript yet)
+  // and only when the CLI supplied its data. The first submitted line commits it
+  // into scrollback with the first turn (`commitLatestTurn`), so it never repeats.
+  const showHomeInventory = Boolean(homeInventory) && !homeCommitted && history.length === 0;
+  // The card's row budget: the window less everything else the frame draws
+  // (the home inventory, the composer, the drafts, the key bar, the live
+  // region's floor and the 2-row margin `liveRegionCap` keeps). A taller card
+  // pages its middle, so the frame never reaches the window height and Ink
+  // never takes its fullscreen path (which clears the user's scrollback).
+  const cardRowsAround = rows
+    ? (showHomeInventory ? homeInventoryRowCount(columns) : 0)
+      + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(inputValue, columns, t))
+      + draftLines.length
+      + 2
+      + MIN_LIVE_REGION_ROWS
+    : null;
+  const headCard = useMemo<ApprovalRender | null>(() => {
+    if (!headConfirmAction?.view || !isPlainRecord(headConfirmAction.view.approval)) {
+      return null;
+    }
+    const view = headConfirmAction.view;
+    const drawAt = (keyBarRows: number) => approvalRender(view, {
+      width: columns,
+      color: true,
+      theme: t,
+      selected: 0,
+      tab: cardUi.tab,
+      page: cardUi.page,
+      explainOpen: cardUi.explainOpen,
+      showHiddenColumns: false,
+      caps: NO_KEY_CAPS,
+      ui: cardUi,
+      fieldsCapable: headConfirmAction.confirmFieldsCapable === true,
+      ...(headConfirmAction.sentFields ? { sentFields: headConfirmAction.sentFields } : {}),
+      pageRows: rows ? Math.max(4, Math.floor(rows / 3)) : undefined,
+      ...(rows && cardRowsAround !== null
+        ? { maxRows: Math.max(CARD_MIN_ROWS, rows - cardRowsAround - keyBarRows) }
+        : {})
+    });
+    // The bar's hints come from the drawn card ("space next page"), so draw,
+    // count the bar, and draw again when its height differs from the guess.
+    let drawn = drawAt(DEFAULT_KEY_BAR_ROWS);
+    const barRows = keyBarRowCount(drawn.keys, columns);
+    if (barRows > DEFAULT_KEY_BAR_ROWS) {
+      drawn = drawAt(barRows);
+    }
+    return drawn;
+  }, [cardRowsAround, cardUi, columns, headConfirmAction, rows, t]);
+  const cardKeyCtx = headCard ? headCard.keyCtx : confirmKeys?.ctx ?? null;
   // While a card field is being typed, the composer takes the keys (Enter sets
   // the value, Esc cancels it); the card itself takes none.
   const cardFieldActive = Boolean(headCard && cardUi.fieldEntry);
@@ -765,7 +794,6 @@ export function InkInteractiveSessionApp({
   // The home inventory shows ONCE, on the empty home screen (no transcript yet)
   // and only when the CLI supplied its data. The first submitted line commits it
   // into scrollback with the first turn (`commitLatestTurn`), so it never repeats.
-  const showHomeInventory = Boolean(homeInventory) && !homeCommitted && history.length === 0;
   const completions = useMemo(
     () => getCompletions?.(inputValue).slice(0, 6) ?? [],
     [getCompletions, inputValue]
@@ -3102,6 +3130,9 @@ function composerRowsFor(text: string, columns: number, theme: Theme): number {
   const labelWidth = Math.max(displayWidth(`${theme.brand.prompt} `), displayWidth("! "));
   return composerCursorLayout(text, text.length, Math.max(1, columns - labelWidth)).line + 1;
 }
+
+/** A card never pages below this many rows, however small the window. */
+const CARD_MIN_ROWS = 6;
 
 /**
  * Rows the overlays between the transcript and the composer draw right now
