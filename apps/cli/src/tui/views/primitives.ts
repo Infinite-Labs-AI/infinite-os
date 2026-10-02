@@ -290,9 +290,10 @@ function paragraph(text: string, role: AnsiRole, ctx: ViewRenderCtx): string[] {
 // ── the shell: lines every view gets, whatever its kind ──
 
 /**
- * The head, as r4 draws it: the title as an inverse chip (` Title `), one
- * space, then the state head. Without colour the chip cannot show, so the
- * title prints bare with two spaces before the state. One line.
+ * The head, as r4 draws it: the title in a tag chip (` Title `), one space,
+ * then the state head (glyph + `stateReason.short` or the generic words) in
+ * its tone; a needs-you head is bold amber. Without colour the chip prints as
+ * same-width brackets (`[Title]`). One line.
  */
 export function headLine(view: AnswerViewV1, ctx: ViewRenderCtx): string {
   const head = stateHeadFor(view);
@@ -302,14 +303,37 @@ export function headLine(view: AnswerViewV1, ctx: ViewRenderCtx): string {
   if (!title) {
     return paint(fitLine(state, width), toneRole(head.tone), ctx);
   }
-  const chipPad = ctx.color ? 2 : 0;
-  const room = width - displayWidth(state) - 2 - chipPad;
+  // The chip's padding (2) and the space after it (1).
+  const room = width - displayWidth(state) - 3;
   if (room < 4) {
     return fitLine(`${title}  ${state}`, width);
   }
   const shown = fitLine(title, room);
-  const chip = ctx.color ? paint(` ${shown} `, "text", ctx, { bold: true, inverse: true }) : shown;
-  return `${chip}${ctx.color ? " " : "  "}${paint(state, toneRole(head.tone), ctx)}`;
+  return `${paint(` ${shown} `, "tag", ctx)} ${paint(state, toneRole(head.tone), ctx)}`;
+}
+
+/**
+ * A link, as r4 draws every one: the words and ` ↗`, cyan and underlined,
+ * then (dim) what the key or place is: `Reconnect Shopify ↗  (o) · Connections`.
+ * Cut to `width`.
+ */
+export function linkLine(label: string, ctx: ViewRenderCtx, after = ""): string {
+  const width = Math.max(1, Math.floor(ctx.width));
+  const words = `${label} ↗`;
+  if (displayWidth(words) >= width) {
+    return paint(fitLine(words, width), LINK, ctx);
+  }
+  const tail = after ? fitLine(`  ${after}`, width - displayWidth(words)) : "";
+  return `${paint(words, LINK, ctx)}${tail ? paint(tail, "muted", ctx) : ""}`;
+}
+
+/** r4's link style: cyan, underlined. */
+export const LINK = ["cyan", "u"] as const;
+
+/** `(o) · <place>`: the key that opens an app place, and the place. */
+export function openHint(appLink: unknown): string {
+  const place = isRecord(appLink) ? viewText(appLink.label) : "";
+  return place ? `(o) · ${place}` : "(o)";
 }
 
 /** `<provenance.source> · up to <asOf>`, or null when the view says neither. */
@@ -327,24 +351,41 @@ export function explainLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[] {
 }
 
 /**
- * The state's specifics, in the head's tone, and how to fix it when a key can
- * act on the fix: `o` opens its app link (when the session can open the app),
- * or Enter sends its ask (`fixAskBound`: the view has no row asks). A fix no
- * key can act on is not printed, so it never reads like an action.
+ * The state's specifics, as r4 prints them: the state's glyph and the
+ * sentence, in the head's tone (a needs-you sentence is amber, not bold).
+ * Then, after a blank row, how to fix it when a key can act on the fix: a
+ * link `o` opens (when the session can open the app), or `→ label` that
+ * Enter sends (`fixAskBound`: the view has no row asks). A fix no key can act
+ * on is not printed, so it never reads like an action.
  */
 export function stateReasonLines(view: AnswerViewV1, ctx: ViewRenderCtx, fixAskBound = false): string[] {
   const reason = isRecord(view.stateReason) ? view.stateReason : null;
   if (!reason) {
     return [];
   }
-  const lines = paragraph(viewText(reason.words), toneRole(stateHeadFor(view).tone), ctx);
+  const head = stateHeadFor(view);
+  const words = viewText(reason.words);
+  const sentence = !words || words.startsWith(`${head.glyph} `) ? words : `${head.glyph} ${words}`;
+  const lines = paragraph(sentence, sentenceRole(head.tone), ctx);
   const fix = isRecord(reason.fix) ? reason.fix : null;
   const label = viewText(fix?.label);
   const opens = ctx.caps.open && isRecord(fix?.appLink);
-  if (label && (opens || (fixAskBound && stateFixAsk(view) !== null))) {
-    lines.push(...paragraph(`→ ${label}${opens ? " (o)" : ""}`, "muted", ctx));
+  const fixLines = !label
+    ? []
+    : opens
+      ? [linkLine(label, ctx, openHint(fix?.appLink))]
+      : fixAskBound && stateFixAsk(view) !== null
+        ? paragraph(`→ ${label}`, "muted", ctx)
+        : [];
+  if (fixLines.length) {
+    lines.push(...(lines.length ? [""] : []), ...fixLines);
   }
   return lines;
+}
+
+/** A state's sentence tone: the head's, but never bold (only the head is bold amber). */
+export function sentenceRole(tone: StateTone): AnsiRole {
+  return tone === "ask" ? "warning" : toneRole(tone);
 }
 
 /** The state's fix ask (a NEW user turn), when the view offers one. */

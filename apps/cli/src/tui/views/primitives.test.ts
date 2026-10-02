@@ -9,6 +9,7 @@ import { getTurnState, recordTurnView, clearTurnViews, resetTurnState } from "..
 import { inkTranscriptRowCount } from "../ink/transcript-app.js";
 import { liveRegionCap } from "../ink/transcript-static.js";
 import { displayWidth } from "../lib/display-width.js";
+import { sgrOpen } from "../style/sgr.js";
 import { resolveTheme } from "../theme.js";
 import type { Msg } from "../types.js";
 import { HANDLED_KIND_KEYS, resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints } from "./focus.js";
@@ -184,8 +185,8 @@ describe("the view shell", () => {
       stateReason: { code: "role", words: "Only an owner or admin can do this." },
       body: { picturesInApp: false }
     }), ctx());
-    expect(render.head).toBe("Item  ⊗ Blocked");
-    expect(render.detail).toEqual(["Only an owner or admin can do this."]);
+    expect(render.head).toBe("[Item] ⊗ Blocked");
+    expect(render.detail).toEqual(["⊗ Only an owner or admin can do this."]);
   });
 
   it("the source line reads provenance · up to asOf", () => {
@@ -201,11 +202,11 @@ describe("the view shell", () => {
     expect(render.detail).toContain("40 of 100 · First 40 by spend · m for more");
   });
 
-  it("the head draws the title as an inverse chip, then the state (r4 head)", () => {
+  it("the head draws the title as a tag chip, then the state (r4 head)", () => {
     const head = renderView(envelope({}), ctx({ color: true })).head;
-    expect(head).toContain("\u001b[7m Item ");
+    expect(head).toContain(`${sgrOpen("tag", theme.tier)} Item `);
     expect(head.replace(/\u001b\[[0-9;]*m/gu, "")).toBe(" Item  ✓ Ready");
-    expect(renderView(envelope({}), ctx()).head).toBe("Item  ✓ Ready");
+    expect(renderView(envelope({}), ctx()).head).toBe("[Item] ✓ Ready");
   });
 
   it("a state's fix prints only when a key can act on it", () => {
@@ -216,19 +217,19 @@ describe("the view shell", () => {
     const appLink = { route: "connections" };
     // An ask with no row asks is bound to Enter.
     const asks = renderView(reason({ label: "Connect Meta", ask: "connect meta" }), ctx());
-    expect(asks.detail).toEqual(["Meta is not connected.", "→ Connect Meta"]);
+    expect(asks.detail).toEqual(["⊘ Meta is not connected.", "", "→ Connect Meta"]);
     expect(asks.fixAsk).toBe("connect meta");
     // A link opens with o only when the session can open the app.
     expect(renderView(reason({ label: "Connect Meta", appLink }), ctx({ caps: { open: true, watch: false, retry: false } })).detail)
-      .toEqual(["Meta is not connected.", "→ Connect Meta (o)"]);
+      .toEqual(["⊘ Meta is not connected.", "", "Connect Meta ↗  (o)"]);
     // Nothing can act: the line is not printed.
-    expect(renderView(reason({ label: "Connect Meta", appLink }), ctx()).detail).toEqual(["Meta is not connected."]);
-    expect(renderView(reason({ label: "Connect Meta" }), ctx()).detail).toEqual(["Meta is not connected."]);
+    expect(renderView(reason({ label: "Connect Meta", appLink }), ctx()).detail).toEqual(["⊘ Meta is not connected."]);
+    expect(renderView(reason({ label: "Connect Meta" }), ctx()).detail).toEqual(["⊘ Meta is not connected."]);
     expect(renderView(reason({ label: "Connect Meta" }), ctx()).fixAsk).toBeUndefined();
   });
 
   it("a failed write that was not sent heads as Not sent", () =>
-    expect(renderView(envelope({ state: "failed", outcome: "not_sent" }), ctx()).head).toBe("Item  ✗ Not sent"));
+    expect(renderView(envelope({ state: "failed", outcome: "not_sent" }), ctx()).head).toBe("[Item] ✗ Not sent"));
 
   it("the explanation stays behind ? until it is opened", () => {
     const view = envelope({ explain: "Reads the item from our copy." });
@@ -244,7 +245,7 @@ describe("the view shell", () => {
     }), ctx());
     const all = [render.head, render.source ?? "", ...render.detail].join("\n");
     expect(all).not.toMatch(/[\u001b\u0000‮⁦]/u);
-    expect(render.head).toBe("Item one  ✓ Ready");
+    expect(render.head).toBe("[Item one] ✓ Ready");
   });
 
   it("malformed envelope fields degrade instead of throwing", () => {
@@ -309,7 +310,7 @@ describe("the r4 layout", () => {
     const text = renderLiveTurn({ messages, views: [listViewFixture()], focus: null, width: 100, color: false, theme }).lines.join("\n");
     expect(text).toContain("❯ which ads are on?");
     expect(text).toContain("∞ Two are on.");
-    expect(text).toContain("│ Ads running  ✓ Ready");
+    expect(text).toContain("│ [Ads running] ✓ Ready");
     expect(text).not.toContain("**");
   });
 
