@@ -41,7 +41,8 @@ describe("a live turn's working line and Steps (fake TTY; skipped on CI like the
       }
     });
 
-    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
+    // The boot key bar is `/ commands` alone (no side to switch to yet).
+    await waitFor(() => lastLineWith(output.text(), "commands") !== "", 4_000, output.text);
     await sendKeys(input, "how are the sample rows?\r");
 
     // Nothing has come back yet: the answer's place says the turn is working.
@@ -71,7 +72,7 @@ describe("a live turn's working line and Steps (fake TTY; skipped on CI like the
     finish({ messages: [{ role: "assistant", text: "Three rows changed." }] });
     await waitFor(() => stripAnsi(output.text()).includes("∞ Three rows changed."), 4_000, output.text);
     // The turn answered: the working line is gone from the frame that follows.
-    await waitFor(() => !lastLineWith(output.text(), "switch side").includes("esc"), 4_000, output.text);
+    await waitFor(() => !lastLineWith(output.text(), "commands").includes("esc"), 4_000, output.text);
     const after = stripAnsi(output.text()).slice(stripAnsi(output.text()).lastIndexOf("∞ Three rows changed."));
     expect(after).not.toContain("Working…");
 

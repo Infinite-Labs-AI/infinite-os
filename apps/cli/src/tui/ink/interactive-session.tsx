@@ -312,7 +312,7 @@ export interface InkInteractiveSessionAppProps {
   ): Promise<unknown>;
   /**
    * The running turn's own short reason, said in the composer's note in place
-   * of the generic `working · 4s` (terminal-r4 `❯ Ask Infinite… (the pause
+   * of the generic timer `4s` (terminal-r4 `❯ Ask Infinite… (the pause
    * finishes either way)`). Read on every render; shown only while a turn runs.
    */
   busyNote?: string | (() => string | undefined);
