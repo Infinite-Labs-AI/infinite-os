@@ -2,6 +2,7 @@ import type { ChatProgressEvent } from "@infinite-os/llm-controller";
 import {
   type InteractiveAgentProfile,
   type InteractiveWorkspaceRequestV1,
+  type ToolViewFrameV1,
 } from "@infinite-os/types";
 import {
   DesktopAppClientError,
@@ -64,7 +65,9 @@ export interface DesktopInteractiveTurnSource {
     sessionId: string | undefined,
     onEvent: (event: ChatProgressEvent) => void,
     signal: AbortSignal,
-    interactive?: InteractiveWorkspaceRequestV1
+    interactive?: InteractiveWorkspaceRequestV1,
+    /** Decoded `tool.view` frames; never delivered as `ChatProgressEvent`s. */
+    onView?: (frame: ToolViewFrameV1) => void
   ): Promise<DesktopInteractiveTurnResult>;
 }
 
@@ -281,15 +284,25 @@ export type DesktopSessionTurnOutcome =
   | ({ busy?: false } & DesktopInteractiveTurnResult);
 
 export interface DesktopSessionTurnRunner {
-  /** Run one turn with a full status preflight. See {@link DesktopSessionTurnOutcome}. */
+  /**
+   * Run one turn with a full status preflight. See {@link DesktopSessionTurnOutcome}.
+   * `onView` receives each decoded `tool.view` frame of the turn (only a
+   * Desktop that negotiated `result.view.v1` sends them).
+   */
   turn(
     message: string,
     onEvent?: (event: ChatProgressEvent) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onView?: (frame: ToolViewFrameV1) => void
   ): Promise<DesktopSessionTurnOutcome>;
   /** The session threading across turns (reset on any scope change). */
   sessionId(): string | undefined;
-  /** Confirm against the client that ran the LAST turn (handles are per-boot). */
+  /**
+   * Confirm against the client that ran the LAST turn (handles are per-boot).
+   * `fields` passes through to the client, which refuses them on a Desktop
+   * without `confirm.fields.v1`. Resolves with the client's raw `/v1/confirm`
+   * JSON (its `view` already decoded in place) — no wrapper.
+   */
   confirm: InSessionConfirmationClient["confirm"];
 }
 
@@ -340,7 +353,7 @@ export function createDesktopSessionTurnRunner(
       return lastClient.confirm(input);
     },
 
-    async turn(message, onEvent, signal) {
+    async turn(message, onEvent, signal, onView) {
       if (inFlight) {
         return { busy: true };
       }
@@ -398,6 +411,7 @@ export function createDesktopSessionTurnRunner(
           onEvent ?? (() => {}),
           signal ?? NEVER_ABORT,
           interactive,
+          onView,
         );
         if (result.sessionId) {
           sessionId = result.sessionId;

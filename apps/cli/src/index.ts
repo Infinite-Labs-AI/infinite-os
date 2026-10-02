@@ -77,6 +77,7 @@ import {
   type InkInteractiveSelectionPrompt
 } from "./tui/ink/interactive-session.js";
 import { runInfiniteWelcome } from "./tui/ink/infinite-welcome.js";
+import { linkAbortSignals } from "./tui/ink/turn-abort.js";
 import { appendPersistentInputHistory, loadPersistentInputHistory } from "./tui/ink/input-history.js";
 import { resolveCliRenderSurface, usesTranscriptRenderSurface } from "./tui/runtime/render-surface.js";
 import { resolveTheme, type Theme } from "./tui/theme.js";
@@ -1675,7 +1676,6 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
   if (shouldUseInkInteractiveSession(input, output, env)) {
     const homeInventoryConnections = await fetchHomeInventoryConnections(env);
     await runInkInteractiveSession({
-      columns: output.columns,
       errorOutput,
       homeInventory: homeInventoryData(status.workspace?.name, homeInventoryConnections),
       input,
@@ -1693,7 +1693,11 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
           decision,
           signal: turnAbort.signal
         }),
-      async onSubmitLine(line, onProgress) {
+      // Esc stops the running turn and Ctrl-C stops it instead of quitting:
+      // aborting the turn's signal drops the `/v1/turn` request, and the
+      // bridge stops the app turn on disconnect.
+      turnStoppable: true,
+      async onSubmitLine(line, onProgress, signal) {
         const trimmed = line.trim();
         if (trimmed === "/help") {
           return { messages: [desktopHelpMessage()] };
@@ -1701,7 +1705,14 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
         // The streamed answer renders through the shell's turnController via
         // `onProgress`; the terminal message.complete commits it. The runner
         // threads the session forward (Desktop owns its own active workspace).
-        const outcome = await runner.turn(trimmed, onProgress, turnAbort.signal);
+        // Not `AbortSignal.any`: it needs Node 20.3 and the engines allow 20.0.
+        const linked = linkAbortSignals([turnAbort.signal, signal]);
+        let outcome: Awaited<ReturnType<typeof runner.turn>>;
+        try {
+          outcome = await runner.turn(trimmed, onProgress, linked.signal);
+        } finally {
+          linked.dispose();
+        }
         if (outcome.busy) {
           return { messages: [desktopBusyMessage()] };
         }
@@ -7611,7 +7622,6 @@ async function interactiveSession(env: CliEnv): Promise<void> {
     const homeInventoryConnections = await fetchHomeInventoryConnections(env);
     try {
       await runInkInteractiveSession({
-        columns: output.columns,
         errorOutput,
         getAgentTitle: () =>
           activeProjectLabel ? `${theme.brand.name} — ${activeProjectLabel}` : undefined,

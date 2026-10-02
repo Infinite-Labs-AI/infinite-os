@@ -1,7 +1,7 @@
 import { ansi, resolveTheme, type Theme } from "../tui/theme.js";
 import { displayWidth, padEndCells, truncateCells } from "../tui/lib/display-width.js";
 import { resolveCliRenderSurface } from "../tui/runtime/render-surface.js";
-import { formatMarkdownForTerminal, styleInlineMarkdown } from "./markdown.js";
+import { renderMarkdown } from "./markdown-render.js";
 
 interface RenderStream {
   columns?: number;
@@ -55,9 +55,13 @@ export function renderAssistantResponsePanel(
   const text = (value: string) => ansi(theme, "text", value, options.color);
   const top = `${border("╭─")}${titleText(title)}${border(`${"─".repeat(Math.max(0, width - titleWidth - 3))}╮`)}`;
   const bottom = border(`╰${"─".repeat(width - 2)}╯`);
-  const body = formatMarkdownForTerminal(message.trim() || "No answer was produced.", inner).map((line) =>
-    styleInlineMarkdown(line, Boolean(options.color))
-  );
+  // Styled before wrapping: renderMarkdown lays out visible text, then paints it.
+  const body = renderMarkdown(message.trim() || "No answer was produced.", {
+    width: inner,
+    color: Boolean(options.color),
+    theme,
+    role: "text"
+  });
 
   return [
     top,
@@ -76,9 +80,22 @@ export function renderStatusFooter(
 ): string {
   const theme = options.theme ?? resolveTheme();
   const width = clampStatusColumns(options.columns ?? 88);
-  const visible = truncateCells(parts.filter(Boolean).join("  |  "), width).replace(/\s+\|\s*…$/, " …");
+  const visible = dropDanglingSeparator(truncateCells(parts.filter(Boolean).join("  |  "), width));
 
   return ansi(theme, "muted", padEndCells(visible, width), options.color);
+}
+
+// "x  |  …" → "x …": a separator cut off right before the ellipsis. Scans by hand rather
+// than with /\s+\|\s*…$/, which backtracks polynomially on long runs of spaces.
+function dropDanglingSeparator(value: string): string {
+  if (!value.endsWith("…")) return value;
+  let end = value.length - 1;
+  while (end > 0 && /\s/.test(value[end - 1]!)) end -= 1;
+  if (end === 0 || value[end - 1] !== "|") return value;
+  const pipe = end - 1;
+  let start = pipe;
+  while (start > 0 && /\s/.test(value[start - 1]!)) start -= 1;
+  return start < pipe ? `${value.slice(0, start)} …` : value;
 }
 
 export function shouldUseInteractiveRenderer(stream: RenderStream, env: NodeJS.ProcessEnv = process.env): boolean {

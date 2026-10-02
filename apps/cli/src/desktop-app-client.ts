@@ -13,12 +13,25 @@ import { stdin, stdout, stderr } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { infiniteOsHome } from "@infinite-os/config";
 import {
+  CONFIRM_FIELDS_CAPABILITY,
   GENERAL_MARKETING_PROFILE,
   INTERACTIVE_WORKSPACE_CAPABILITY,
   LEGACY_GROWTH_OPERATOR_PROFILE,
+  RESULT_VIEW_CAPABILITY,
+  type AnswerViewV1,
+  type ApprovalFieldAnswerV1,
   type InteractiveWorkspaceRequestV1,
   type InteractiveWorkspaceStatusV1,
 } from "@infinite-os/types";
+import {
+  decodeAnswerView,
+  isToolViewFrameData
+} from "./desktop/answer-view-decode.js";
+import {
+  askConfirmDecision,
+  confirmResultLines,
+  leftForLaterLine
+} from "./desktop/confirm-result-lines.js";
 import { negotiateInteractiveWorkspace } from "./desktop/interactive-protocol.js";
 
 const PROTOCOL_VERSION = 1;
@@ -51,7 +64,13 @@ const URI_OBFUSCATING_CHAR_RE_GLOBAL = /(?:[^\S ]|\p{Cc}|\p{Cf})/gu;
 export class DesktopAppClientError extends Error {
   constructor(
     public readonly code: string,
-    message: string
+    message: string,
+    /**
+     * The decoded receipt view a failed `/v1/confirm` answer carried (an
+     * expired card, a write that was not sent, one that may have happened).
+     * Only `confirm()` sets it, and only when the view decoded.
+     */
+    public readonly view?: AnswerViewV1
   ) {
     super(message);
     this.name = "DesktopAppClientError";
@@ -115,6 +134,17 @@ export interface DesktopTurnResult {
   sessionId?: string;
 }
 
+/**
+ * The `/v1/confirm` JSON exactly as Desktop sent it (top-level `ok`,
+ * `receipt`, …), with `view` replaced in place by the decoded receipt view.
+ * A `view` that does not decode is removed, so `view` is then `undefined`.
+ * There is no wrapper: callers read the same fields an old Desktop sends.
+ */
+export type DesktopConfirmResult = Record<string, unknown> & {
+  ok: true;
+  view?: AnswerViewV1;
+};
+
 export interface DesktopAppClient {
   /**
    * Whether the Desktop negotiated `turn.session.v1` (descriptor ∧ status
@@ -123,6 +153,15 @@ export interface DesktopAppClient {
    * a single-turn degrade, NOT a typed error.
    */
   readonly sessionCapable: boolean;
+  /**
+   * Whether the Desktop negotiated `result.view.v1` (descriptor ∧ status).
+   * When true, `turn()` sends `accept: ["result.view.v1"]`, so the stream
+   * carries `tool.view` frames and pending action calls carry `view`. False
+   * until `status()` resolves; an old Desktop never gets `accept`.
+   */
+  readonly viewsCapable: boolean;
+  /** Whether the Desktop negotiated `confirm.fields.v1` (descriptor ∧ status). */
+  readonly confirmFieldsCapable: boolean;
   /** Negotiated only when descriptor and status both advertise the v1 contract. */
   readonly interactiveWorkspace: InteractiveWorkspaceStatusV1 | undefined;
   status(): Promise<DesktopStatus>;
@@ -137,12 +176,18 @@ export interface DesktopAppClient {
     },
     onProgress?: (frame: DesktopProgressFrame) => void
   ): Promise<DesktopTurnResult>;
+  /**
+   * Resolve a pending card. `fields` answers the card's `approval.fields`;
+   * against a Desktop without `confirm.fields.v1` it throws
+   * `desktop_update_required` before anything is sent.
+   */
   confirm(input: {
     turnId: string;
     confirmationHandle: string;
     decision: "approve" | "decline";
+    fields?: Record<string, ApprovalFieldAnswerV1>;
     signal?: AbortSignal;
-  }): Promise<unknown>;
+  }): Promise<DesktopConfirmResult>;
 }
 
 interface DesktopAppEnv {
@@ -166,9 +211,12 @@ interface DesktopAppIo {
 
 interface RunDesktopAppCommandOptions extends DesktopAppClientOptions {
   io?: DesktopAppIo;
+  /** Decide a card directly ("pending" leaves it unanswered). Overrides `promptAnswer`. */
   promptConfirmation?: (
     action: PendingConfirmation
-  ) => Promise<"approve" | "decline">;
+  ) => Promise<"approve" | "decline" | "pending">;
+  /** Ask one question on the TTY (defaults to a readline prompt on stdin). */
+  promptAnswer?: (question: string) => Promise<string>;
   signal?: AbortSignal;
 }
 
@@ -177,6 +225,8 @@ interface PendingConfirmation {
   confirmationHandle: string;
   summary: string;
   confirmationDetails: ConfirmationDetail[];
+  /** The approval view's expiry, when the app sent a view. */
+  expiresAt?: string;
 }
 
 interface ConfirmationDetail {
@@ -322,12 +372,20 @@ function createClientFromDescriptor(
   );
   let confirmationReplaySafe = false;
   let sessionCapable = false;
+  let viewsCapable = false;
+  let confirmFieldsCapable = false;
   let interactiveWorkspace: InteractiveWorkspaceStatusV1 | undefined;
   let statusCapabilities: string[] = [];
 
   return {
     get sessionCapable() {
       return sessionCapable;
+    },
+    get viewsCapable() {
+      return viewsCapable;
+    },
+    get confirmFieldsCapable() {
+      return confirmFieldsCapable;
     },
     get interactiveWorkspace() {
       return interactiveWorkspace;
@@ -336,6 +394,8 @@ function createClientFromDescriptor(
     async status() {
       confirmationReplaySafe = false;
       sessionCapable = false;
+      viewsCapable = false;
+      confirmFieldsCapable = false;
       interactiveWorkspace = undefined;
       statusCapabilities = [];
       const deadline = createRequestDeadline(undefined, requestTimeoutMs);
@@ -360,6 +420,12 @@ function createClientFromDescriptor(
         sessionCapable =
           descriptor.capabilities.includes(TURN_SESSION_CAPABILITY) &&
           status.capabilities.includes(TURN_SESSION_CAPABILITY);
+        viewsCapable =
+          descriptor.capabilities.includes(RESULT_VIEW_CAPABILITY) &&
+          status.capabilities.includes(RESULT_VIEW_CAPABILITY);
+        confirmFieldsCapable =
+          descriptor.capabilities.includes(CONFIRM_FIELDS_CAPABILITY) &&
+          status.capabilities.includes(CONFIRM_FIELDS_CAPABILITY);
         if (
           status.ready &&
           descriptor.capabilities.includes(INTERACTIVE_WORKSPACE_CAPABILITY) &&
@@ -430,7 +496,11 @@ function createClientFromDescriptor(
               ...(nonEmptyString(input.sessionId)
                 ? { sessionId: nonEmptyString(input.sessionId) }
                 : {}),
-              ...(input.interactive ? { interactive: input.interactive } : {})
+              ...(input.interactive ? { interactive: input.interactive } : {}),
+              // Views are opt-in per turn: only a Desktop that advertised
+              // result.view.v1 gets `accept`, so an old Desktop sees the
+              // exact legacy body.
+              ...(viewsCapable ? { accept: [RESULT_VIEW_CAPABILITY] } : {})
             })
           },
           deadline
@@ -454,6 +524,18 @@ function createClientFromDescriptor(
           "Desktop returned an invalid confirmation reference."
         );
       }
+      const fields =
+        input.fields && Object.keys(input.fields).length > 0
+          ? input.fields
+          : undefined;
+      if (fields && !confirmFieldsCapable) {
+        // Never drop the answers and send a bare yes: an old Desktop would
+        // run the card with its frozen values instead of the user's.
+        throw new DesktopAppClientError(
+          "desktop_update_required",
+          "This answer needs a newer Infinite Desktop. Update Desktop and try again."
+        );
+      }
       const requestId = randomId();
       const sendConfirmation = async () => {
         const deadline = createRequestDeadline(input.signal, requestTimeoutMs);
@@ -475,7 +557,8 @@ function createClientFromDescriptor(
                 requestId,
                 turnId: input.turnId,
                 confirmationHandle: input.confirmationHandle,
-                decision: input.decision
+                decision: input.decision,
+                ...(fields ? { fields } : {})
               })
             },
             deadline
@@ -507,22 +590,30 @@ function createClientFromDescriptor(
         }
       }
       const payload = selectConfirmationEnvelope(rawPayload);
+      // A failed resolution keeps rejecting with its typed code, and carries
+      // the receipt view (expired, not sent, not sure it happened) so a
+      // renderer prints the same receipt Cmd+L shows.
+      const failureView = isRecord(payload)
+        ? decodeAnswerView(payload.view) ?? undefined
+        : undefined;
       if (!isRecord(payload) || payload.ok !== true) {
-        throw remotePayloadError(
+        const error = remotePayloadError(
           payload,
           "desktop_confirmation_failed",
           "Desktop could not resolve the confirmation."
         );
+        throw new DesktopAppClientError(error.code, error.message, failureView);
       }
       const executionFailure = findNestedExecutionFailure(payload);
       if (executionFailure) {
         throw new DesktopAppClientError(
           executionFailure.code ?? "desktop_confirmation_execution_failed",
           executionFailure.message ??
-            "Desktop accepted the confirmation but could not execute the action."
+            "Desktop accepted the confirmation but could not execute the action.",
+          failureView
         );
       }
-      return payload;
+      return decodeConfirmView(payload as DesktopConfirmResult);
     }
   };
 }
@@ -606,18 +697,25 @@ export async function runDesktopAppCommand(
   }
 
   for (const action of pending) {
+    // Only y/yes approves and only n/no declines. Bare Enter or any other
+    // answer re-prompts once, then leaves the card pending: nothing is sent.
     const decision = options.promptConfirmation
       ? await options.promptConfirmation(action)
-      : await promptForConfirmation(action);
-    await client.confirm({
+      : await promptForConfirmation(action, options.promptAnswer);
+    if (decision === "pending") {
+      io.writeOut(`${leftForLaterLine(action.expiresAt)}\n`);
+      continue;
+    }
+    // A failed confirm keeps rejecting with its typed code (non-zero exit).
+    const confirmed = await client.confirm({
       turnId: result.turnId,
       confirmationHandle: action.confirmationHandle,
       decision,
       signal: options.signal
     });
-    io.writeOut(
-      `Confirmation ${decision === "approve" ? "approved" : "declined"}: ${terminalText(action.summary, "action")}\n`
-    );
+    for (const line of confirmResultLines(confirmed, decision)) {
+      io.writeOut(`${line.text}\n`);
+    }
   }
 }
 
@@ -1069,11 +1167,13 @@ function parsePendingConfirmations(
       suppliedDetails.length > 0
         ? suppliedDetails
         : buildGenericConfirmationDetails(value.input);
+    const expiresAt = decodeAnswerView(value.view)?.approval?.expiresAt;
     pending.push({
       actionId,
       confirmationHandle,
       summary,
-      confirmationDetails
+      confirmationDetails,
+      ...(typeof expiresAt === "string" ? { expiresAt } : {})
     });
   }
   return pending;
@@ -1246,6 +1346,8 @@ function renderStatus(status: DesktopStatus, io: DesktopAppIo): void {
 
 function renderProgress(value: unknown, io: DesktopAppIo): void {
   if (!isRecord(value)) return;
+  // This command draws no views: a `tool.view` frame is not a progress line.
+  if (isToolViewFrameData(value)) return;
   const type = nonEmptyString(value.type);
   if (
     type === "message.delta" ||
@@ -1265,18 +1367,16 @@ function renderProgress(value: unknown, io: DesktopAppIo): void {
 }
 
 async function promptForConfirmation(
-  action: PendingConfirmation
-): Promise<"approve" | "decline"> {
+  action: PendingConfirmation,
+  promptAnswer?: (question: string) => Promise<string>
+): Promise<"approve" | "decline" | "pending"> {
+  const question = `Approve "${boundedTerminalText(action.summary, MAX_CONFIRMATION_VALUE_CHARS, "action")}"? [y/n] `;
+  if (promptAnswer) {
+    return askConfirmDecision(promptAnswer, question);
+  }
   const prompt = createInterface({ input: stdin, output: stdout });
   try {
-    const answer = (
-      await prompt.question(
-        `Approve "${boundedTerminalText(action.summary, MAX_CONFIRMATION_VALUE_CHARS, "action")}"? [y/N] `
-      )
-    )
-      .trim()
-      .toLowerCase();
-    return answer === "y" || answer === "yes" ? "approve" : "decline";
+    return await askConfirmDecision((text) => prompt.question(text), question);
   } finally {
     prompt.close();
   }
@@ -1826,6 +1926,14 @@ function parseLooseRemoteError(
   return code || message
     ? { ...(code ? { code } : {}), ...(message ? { message } : {}) }
     : undefined;
+}
+
+/** Replace `view` in place by its decoded form; drop a `view` that does not decode. */
+function decodeConfirmView(payload: DesktopConfirmResult): DesktopConfirmResult {
+  if (!("view" in payload)) return payload;
+  const { view: rawView, ...rest } = payload;
+  const view = decodeAnswerView(rawView);
+  return (view ? { ...rest, view } : rest) as DesktopConfirmResult;
 }
 
 function selectConfirmationEnvelope(value: unknown): unknown {

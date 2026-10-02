@@ -277,6 +277,13 @@ export const buildToolTrailLine = (
   return `${formatToolCall(neutralizeControlSequences(name), neutralizeControlSequences(context))}${took}${detail ? ` :: ${detail}` : ""} ${error ? "✗" : "✓"}`;
 };
 
+/**
+ * The trail row for a tool still running when the user stopped the turn. It
+ * carries no result mark (neither ✓ nor ✗): the app may still finish it.
+ */
+export const buildStoppedToolTrailLine = (name: string, context: string) =>
+  `■ ${formatToolCall(neutralizeControlSequences(name), neutralizeControlSequences(context))} · stopped`;
+
 export const isToolTrailResultLine = (line: string) => line.endsWith(" ✓") || line.endsWith(" ✗");
 
 export const parseToolTrailResultLine = (line: string) => {
