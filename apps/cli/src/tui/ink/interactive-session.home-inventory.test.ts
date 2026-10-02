@@ -69,7 +69,8 @@ describe("the boot frame (D4: terminal-r4's frame, nothing else)", () => {
       `─ Steps ${"─".repeat(92)}`,
       "─".repeat(100),
       "❯ Ask Infinite…",
-      " tab  switch side    /  commands"
+      // No turn yet, so no side to switch to: Tab completes in the composer here.
+      " /  commands"
     ]);
   });
 

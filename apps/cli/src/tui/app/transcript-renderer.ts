@@ -49,8 +49,6 @@ interface RenderContext extends ColumnStyle {
   columns: number;
   nowMs: number;
   thinkingMode: ThinkingMode;
-  /** The widest a wider window redraws this column at (see `MarkdownRenderOptions.widenLimit`); absent = unbounded. */
-  widenLimit?: number;
 }
 
 /** The narrowest the transcript draws at; there is no widest (the window decides). */
@@ -106,12 +104,6 @@ export interface TurnBodyOptions extends ColumnStyle {
   /** The column's width (the whole window in one column, the answer pane when split). */
   columns: number;
   thinkingMode?: ThinkingMode;
-  /**
-   * The widest a wider window ever redraws this column at: absent (unbounded)
-   * for the live turn in one column, the pane's cap when split, `0` for a turn
-   * printed once into scrollback. Keeps a table's `widen by` hint true.
-   */
-  widenLimit?: number;
 }
 
 /**
@@ -127,8 +119,7 @@ export function renderTurnBody(messages: readonly Msg[], options: TurnBodyOption
     theme: options.theme,
     columns: Math.max(1, Math.floor(options.columns)),
     nowMs: 0,
-    thinkingMode: options.thinkingMode ?? "truncated",
-    widenLimit: options.widenLimit
+    thinkingMode: options.thinkingMode ?? "truncated"
   }).lines;
 }
 
@@ -289,8 +280,7 @@ function renderMessage(msg: Msg, ctx: RenderContext, answered: boolean): string[
     return answerLines(msg.text, ctx.columns, ctx, {
       partial: msg.partial,
       mark: !answered,
-      label: answered ? undefined : agentLabel(msg.title, ctx),
-      widenLimit: ctx.widenLimit
+      label: answered ? undefined : agentLabel(msg.title, ctx)
     });
   }
 
@@ -304,7 +294,7 @@ function renderMessage(msg: Msg, ctx: RenderContext, answered: boolean): string[
     pushBlock(lines, renderThinking(msg.thinking ?? "", msg.thinkingTokens, ctx));
     if (msg.todos?.length) pushBlock(lines, renderTodos(msg.todos, ctx, msg.todoCollapsedByDefault));
     if (msg.subagents?.length) pushBlock(lines, renderSubagents(msg.subagents, ctx));
-    if (msg.text.trim()) pushBlock(lines, noteLines(msg.text, ctx.columns, ctx, "muted", { markdown: true, widenLimit: ctx.widenLimit }));
+    if (msg.text.trim()) pushBlock(lines, noteLines(msg.text, ctx.columns, ctx, "muted", { markdown: true }));
     return lines;
   }
 
@@ -320,8 +310,7 @@ function renderMessage(msg: Msg, ctx: RenderContext, answered: boolean): string[
   if (msg.role === "tool") {
     return noteLines(msg.text, ctx.columns, ctx);
   }
-  const widenLimit = ctx.widenLimit === undefined ? undefined : Math.max(0, ctx.widenLimit - 2);
-  return renderMarkdown(msg.text, { width: Math.max(1, ctx.columns - 2), color: ctx.color, theme: ctx.theme, widenLimit }).map((line) =>
+  return renderMarkdown(msg.text, { width: Math.max(1, ctx.columns - 2), color: ctx.color, theme: ctx.theme }).map((line) =>
     fit(`  ${line}`, ctx)
   );
 }

@@ -95,13 +95,25 @@ export function shortOkVerb(label: string): string {
 }
 
 /**
- * The keys the bar always ends with (terminal-r4): `tab` switches between the
- * answer and its details, `/` starts a command.
+ * The keys the bar ends with (terminal-r4): `tab` switches between the answer
+ * and its details, `/` starts a command. `/ commands` is always there; `tab
+ * switch side` only while the turn on screen has details to switch to (a view
+ * or a card: the right pane from 120 columns, under the answer below that).
  */
 export const ALWAYS_KEY_HINTS: readonly KeyHint[] = [
   { key: "tab", label: "switch side" },
   { key: "/", label: "commands" }
 ];
+
+/** What the bar's closing keys depend on. */
+export interface KeyBarOptions {
+  /**
+   * The turn on screen has a details view or card, so `tab switch side` has a
+   * side to switch to. Default true (r4's bar). False drops the hint: the boot
+   * frame, a plain answer, a turn that went to scrollback.
+   */
+  sides?: boolean;
+}
 
 /** Keys with one meaning everywhere, so a card's verb can never claim them. */
 export const RESERVED_KEYS: ReadonlySet<string> = new Set([
@@ -204,8 +216,8 @@ export function resolveKey(input: string, key: Key, ctx: KeyContext): KeyAction 
  * turn: Esc resolves to stop exactly then), first and once, and nothing of
  * its own when idle. The rows and document hints of a finished turn's views
  * come from `views/focus.ts` (`viewKeyHints`), from the same facts its key
- * resolver uses. The bar itself always ends with `tab switch side` and
- * `/ commands` (`keyBarSegments`).
+ * resolver uses. The bar itself ends with `tab switch side` (while the turn
+ * has details) and `/ commands` (`keyBarSegments`).
  */
 export function keyBarHints(ctx: KeyContext): KeyHint[] {
   if (ctx.focus === "composer") {
@@ -245,11 +257,12 @@ function cardTabs(card: CardKeys): number {
 
 /**
  * The hints the bar draws, in order: the state's own keys (each key once, the
- * first meaning wins, each in its bar words), then always `tab switch side`
- * and `/ commands`. `?` is never on the bar: a card, and a view with an
- * explanation, draw `? what it does` inside themselves (terminal-r4).
+ * first meaning wins, each in its bar words), then `tab switch side` while
+ * there is a side to switch to (`options.sides`), then always `/ commands`.
+ * `?` is never on the bar: a card, and a view with an explanation, draw
+ * `? what it does` inside themselves (terminal-r4).
  */
-export function keyBarShownHints(hints: readonly KeyHint[]): KeyHint[] {
+export function keyBarShownHints(hints: readonly KeyHint[], options: KeyBarOptions = {}): KeyHint[] {
   const always = new Set(ALWAYS_KEY_HINTS.map((hint) => hint.key));
   const seen = new Set<string>();
   const shown: KeyHint[] = [];
@@ -260,7 +273,7 @@ export function keyBarShownHints(hints: readonly KeyHint[]): KeyHint[] {
     seen.add(hint.key);
     shown.push(hint.barLabel ? { key: hint.key, label: hint.barLabel, ...(hint.ok ? { ok: true } : {}) } : hint);
   }
-  return [...shown, ...ALWAYS_KEY_HINTS];
+  return [...shown, ...ALWAYS_KEY_HINTS.filter((hint) => hint.key !== "tab" || options.sides !== false)];
 }
 
 /**
@@ -269,8 +282,8 @@ export function keyBarShownHints(hints: readonly KeyHint[]): KeyHint[] {
  * label, three spaces to the next key. Every label is scrubbed before it
  * reaches the TTY. Not cut to a width.
  */
-export function keyBarSegments(hints: readonly KeyHint[]): StyledSegment[] {
-  const shown = keyBarShownHints(hints);
+export function keyBarSegments(hints: readonly KeyHint[], options: KeyBarOptions = {}): StyledSegment[] {
+  const shown = keyBarShownHints(hints, options);
   return shown.flatMap((hint, index): StyledSegment[] => {
     const key = terminalText(hint.key);
     const label = terminalText(hint.label);
@@ -292,18 +305,19 @@ export function formatKeyBar(hints: readonly KeyHint[]): string {
 
 /**
  * The drawn bar's text with no colour, uncut: chips keep their padding and the
- * bar ends with `tab switch side` and `/ commands` (` p  Pause    n  dismiss    tab  …`).
+ * bar ends with `tab switch side` (unless `sides` is false) and `/ commands`
+ * (` p  Pause    n  dismiss    tab  …`).
  */
-export function keyBarText(hints: readonly KeyHint[]): string {
-  return keyBarSegments(hints).map(([, text]) => text).join("");
+export function keyBarText(hints: readonly KeyHint[], options: KeyBarOptions = {}): string {
+  return keyBarSegments(hints, options).map(([, text]) => text).join("");
 }
 
 /**
  * The key bar, the session's LAST row: one row, cut to `width` with `…` on
  * the key that does not fit (later keys dropped), painted at the theme's tier.
  */
-export function keyBarLine(hints: readonly KeyHint[], width: number, theme: Theme): string {
-  return paintSegments(truncSegments(keyBarSegments(hints), Math.max(1, Math.floor(width))), theme);
+export function keyBarLine(hints: readonly KeyHint[], width: number, theme: Theme, options: KeyBarOptions = {}): string {
+  return paintSegments(truncSegments(keyBarSegments(hints, options), Math.max(1, Math.floor(width))), theme);
 }
 
 /** Rows the bar takes: always one (it is cut to the width, never wrapped). */

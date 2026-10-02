@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
@@ -5,7 +7,7 @@ import { r4Segments, seg } from "../../formatting/r4-segments.test-util.js";
 import { INFINITE_R4_THEME } from "../theme.js";
 import type { Msg } from "../types.js";
 import { viewFocusAfterTurnDone } from "./focus.js";
-import { detailsPaneWidth, layoutTurn, renderCommittedTurn, renderLiveTurn } from "./layout.js";
+import { answerCarriesTable, detailsPaneWidth, layoutTurn, renderCommittedTurn, renderLiveTurn, turnMaySplit } from "./layout.js";
 import type { ViewRender } from "./types.js";
 
 // The r4 frame body (terminal-r4 `frame()` + River's layout decision): side by
@@ -120,7 +122,7 @@ describe("a committed turn keeps every message the transcript draws (one rendere
   });
 });
 
-describe("an answer table never promises a widen that cannot happen", () => {
+describe("an answer table that drops columns says so in one wording, live or in scrollback", () => {
   const rows = (note: string) => [
     "| Campaign | Spend | Clicks | Note | CTR |",
     "| --- | ---: | ---: | --- | ---: |",
@@ -133,30 +135,105 @@ describe("an answer table never promises a widen that cannot happen", () => {
   const wider = turn("Ran longer than planned this week because the budget was raised twice and then once more");
   const fits = turn("Ran longer than planned this week because the budget was raised twice");
   const card = ["┌─ card ─┐"];
+  const hint = /^ {2}\+ .+ hidden · needs \d+ more cols?$/u;
 
-  it.each([160, 200])("split at %i: the answer pane never widens past 40, so a dropped column is just named", (width) => {
+  it.each([160, 200])("at %i a turn with a card and a table answer is one column, so every column shows and there is no hint", (width) => {
     const lines = renderLiveTurn({ messages: wide, views: [], focus: null, width, color: false, theme, details: card }).lines;
-    expect(lines.some((line) => /hidden/u.test(line))).toBe(true);
-    expect(lines.some((line) => /widen by/u.test(line))).toBe(false);
+    expect(lines.some((line) => /hidden|widen|needs/u.test(line))).toBe(false);
+    expect(lines.some((line) => /│ Campaign │\s+Spend │\s+Clicks │ Note\s+│\s+CTR │/u.test(line))).toBe(true);
   });
 
-  it("one column under 120 with details: widening past 119 splits the turn, so only a table that fits below it says widen", () => {
-    const named = renderLiveTurn({ messages: wider, views: [], focus: null, width: 100, color: false, theme, details: card }).lines;
-    expect(named.some((line) => /widen by/u.test(line))).toBe(false);
-    expect(named.some((line) => /hidden/u.test(line))).toBe(true);
-    const widen = renderLiveTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme, details: card }).lines;
-    expect(widen).toContain("  + CTR, Note · widen by 12 cols to see");
+  it("the live turn, with or without details, and the committed turn print the same line for the same table", () => {
+    const withCard = renderLiveTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme, details: card }).lines;
+    const alone = renderLiveTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme }).lines;
+    const committed = renderCommittedTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme });
+    for (const lines of [withCard, alone, committed]) {
+      expect(lines).toContain("  + CTR, Note hidden · needs 12 more cols");
+      expect(lines.filter((line) => hint.test(line))).toHaveLength(1);
+      expect(lines.some((line) => /widen|to see/u.test(line))).toBe(false);
+    }
+    // A table that needs even more says how many, in the same words.
+    const far = renderLiveTurn({ messages: wider, views: [], focus: null, width: 100, color: false, theme, details: card }).lines;
+    expect(far.filter((line) => hint.test(line))).toHaveLength(1);
+  });
+});
+
+describe("an answer with a table of its own takes the whole width (the split is for a view or a card)", () => {
+  // Six columns, as a model writes them: about 100 columns wide as a bordered table.
+  const table = [
+    "| Ad | Spend | Purchases | ROAS | CPA | Note |",
+    "| --- | ---: | ---: | ---: | ---: | --- |",
+    "| Spring demo, hook 3 | $1,284.50 | 42 | 3.41 | $30.58 | Strongest hook; watch for fatigue next week |",
+    "| Founder story, 30s | $612.00 | 1 | 0.29 | $612.00 | One purchase so far: the pause candidate |",
+    "| Cold brew carousel | $938.25 | 19 | 2.12 | $49.38 | Steady |"
+  ].join("\n");
+  const withTable: Msg[] = [
+    { role: "user", text: "how did the ads do?" },
+    { role: "assistant", text: `Spend is up on the week.\n\n${table}\n\nTwo ads carry most of it.` }
+  ];
+  const prose: Msg[] = [{ role: "user", text: "how did the ads do?" }, { role: "assistant", text: "Spend is up on the week. Two ads carry most of it." }];
+  const card = ["┌─ Pause ad? ─┐", "│ status      │", "└─────────────┘"];
+  const header = /│ Ad\s+│\s+Spend │\s+Purchases │\s+ROAS │\s+CPA │ Note\s+│/u;
+
+  it.each([120, 140, 159])("at %i the table stays a bordered table with every column, and the card follows under the answer", (width) => {
+    const lines = renderLiveTurn({ messages: withTable, views: [], focus: null, width, color: false, theme, details: card }).lines;
+    // One column: no pane separator beside the answer, the card under a rule.
+    expect(lines[0]).toBe("❯ how did the ads do?");
+    expect(lines.some((line) => line.includes(" │ ┌─ Pause ad? ─┐"))).toBe(false);
+    const rule = lines.indexOf("─".repeat(width));
+    expect(rule).toBeGreaterThan(0);
+    expect(lines.slice(rule + 1, rule + 4)).toEqual(card);
+    // A bordered table, all six columns on one header row; never `label: value` stacks, nothing dropped.
+    expect(lines.some((line) => header.test(line))).toBe(true);
+    expect(lines.filter((line) => /^ {2}┌[─┬]+┐$/u.test(line))).toHaveLength(1);
+    expect(lines.some((line) => /^\s*(Ad|Spend|Purchases|ROAS|CPA|Note): /u.test(line))).toBe(false);
+    expect(lines.some((line) => /^\s*\+ .*(hidden|widen|needs)/u.test(line))).toBe(false);
+    expect(lines.every((line) => line.length <= width)).toBe(true);
   });
 
-  it("one column with no details: the live turn redraws wider, so the hint says how far", () => {
-    const lines = renderLiveTurn({ messages: wider, views: [], focus: null, width: 100, color: false, theme }).lines;
-    expect(lines.some((line) => /widen by \d+ cols? to see/u.test(line))).toBe(true);
+  it.each([120, 140, 159])("at %i an answer with no table still sits left of its card", (width) => {
+    const lines = renderLiveTurn({ messages: prose, views: [], focus: null, width, color: false, theme, details: card }).lines;
+    expect(lines[0]).toMatch(/^❯ how did the ads do\? + │ ┌─ Pause ad\? ─┐$/u);
+    expect(lines.includes("─".repeat(width))).toBe(false);
   });
 
-  it("a committed turn is printed once: no widen hint", () => {
-    const lines = renderCommittedTurn({ messages: fits, views: [], focus: null, width: 100, color: false, theme });
-    expect(lines.some((line) => /widen by/u.test(line))).toBe(false);
-    expect(lines.some((line) => /hidden/u.test(line))).toBe(true);
+  it.each([120, 140, 159])("at %i a table answer with nothing for the right pane is the whole width too", (width) => {
+    const lines = renderLiveTurn({ messages: withTable, views: [], focus: null, width, color: false, theme }).lines;
+    expect(lines.some((line) => header.test(line))).toBe(true);
+    expect(lines.some((line) => line.includes(" │ ") && !line.trimStart().startsWith("│"))).toBe(false);
+  });
+
+  it("a view takes the whole width under a table answer, at the width a one-column turn gives it", () => {
+    const body = { sections: [{ text: "The draft.", format: "plain" }] };
+    const doc = decodeAnswerView({
+      v: 1, kind: "document", tool: "read_draft", title: "Win-back sequence", state: "ready", asOf: null,
+      scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [], body
+    });
+    if (!doc) throw new Error("document fixture does not decode");
+    const lines = renderLiveTurn({ messages: withTable, views: [doc], focus: null, width: 140, color: false, theme }).lines;
+    const rule = lines.indexOf("─".repeat(140));
+    expect(lines.some((line) => header.test(line))).toBe(true);
+    expect(lines.findIndex((line) => line.includes("Win-back sequence"))).toBeGreaterThan(rule);
+    expect(turnMaySplit(withTable, 140)).toBe(false);
+    expect(detailsPaneWidth(140, turnMaySplit(withTable, 140))).toBe(140);
+    expect(turnMaySplit(prose, 140)).toBe(true);
+    expect(turnMaySplit(prose, 119)).toBe(false);
+  });
+
+  it("only the answer's own markdown counts: the question, a tool's output and a diff never do; a table still arriving does", () => {
+    const user: Msg[] = [{ role: "user", text: table }, { role: "assistant", text: "Noted." }];
+    const tool: Msg[] = [{ role: "user", text: "q" }, { role: "tool", text: table }, { role: "system", kind: "diff", text: table }];
+    expect(answerCarriesTable(user)).toBe(false);
+    expect(answerCarriesTable(tool)).toBe(false);
+    expect(answerCarriesTable(withTable)).toBe(true);
+    // Arriving: it counts from the row the renderer first draws as a table (the same lexer decides both).
+    expect(answerCarriesTable([{ role: "assistant", text: "Here:\n\nAd | Spend", partial: true }])).toBe(false);
+    expect(answerCarriesTable([{ role: "assistant", text: "Here:\n\nAd | Spend\n--- | ---:\nSpring | $1", partial: true }])).toBe(true);
+    expect(answerCarriesTable([{ role: "assistant", text: "Here:\n\n| Ad | Spend |\n| --- | ---: |\n| Spring | $1", partial: true }])).toBe(true);
+    // A table inside a quote is drawn as a table too.
+    expect(answerCarriesTable([{ role: "assistant", text: "> | Ad | Spend |\n> | --- | ---: |\n> | Spring | $1 |" }])).toBe(true);
+    // A pipe in prose or code is not a table.
+    expect(answerCarriesTable([{ role: "assistant", text: "Run `a | b` then:\n\n```\n| not | a table |\n| --- | --- |\n```" }])).toBe(false);
   });
 });
 
@@ -178,5 +255,119 @@ describe("a committed document carries every page", () => {
       expect(lines.some((line) => line.includes(`Line ${i} of the body.`))).toBe(true);
     }
     expect(lines.some((line) => /page \d+ of \d+/u.test(line))).toBe(false);
+  });
+
+  it("prints every version of a document, in order, under one head (scrollback has no key to switch them)", () => {
+    const versions = decodeAnswerView({
+      v: 1, kind: "document", tool: "read_draft", title: "Win-back sequence", state: "ready", asOf: null,
+      scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [],
+      body: {
+        sections: [{ text: "The first email.", format: "plain" }, { text: "The second email.", format: "plain" }, { text: "The third email.", format: "plain" }],
+        versions: [
+          { id: "e1", label: "Email 1", sectionIndexes: [0] },
+          { id: "e2", label: "Email 2", sectionIndexes: [1] },
+          { id: "e3", label: "Email 3", sectionIndexes: [2] }
+        ]
+      }
+    });
+    if (!versions) throw new Error("document fixture does not decode");
+    // Live, one version is open at a time (its tab key switches).
+    const live = renderLiveTurn({ messages, views: [versions], focus: viewFocusAfterTurnDone([versions]), width: 100, color: false, theme, rows: 40 }).lines;
+    expect(live.some((line) => line.includes("The first email."))).toBe(true);
+    expect(live.some((line) => line.includes("The second email."))).toBe(false);
+    // Committed, with the second one open: all three print, first to last, and the head once.
+    const focus = { ...viewFocusAfterTurnDone([versions]), tab: 1 };
+    const lines = renderCommittedTurn({ messages, views: [versions], focus, width: 100, color: false, theme });
+    const at = (text: string) => lines.findIndex((line) => line.includes(text));
+    expect(at("The first email.")).toBeGreaterThan(0);
+    expect(at("The second email.")).toBeGreaterThan(at("The first email."));
+    expect(at("The third email.")).toBeGreaterThan(at("The second email."));
+    expect(lines.filter((line) => line.includes("Win-back sequence"))).toHaveLength(1);
+    // Each version is under its own tab bar, the open tab bracketed.
+    expect(lines.filter((line) => line.includes("[1 Email 1]"))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("[2 Email 2]"))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("[3 Email 3]"))).toHaveLength(1);
+  });
+});
+
+describe("a committed turn hides nothing behind a key (scrollback has none)", () => {
+  const fixture = (name: string) => {
+    const view = decodeAnswerView(JSON.parse(readFileSync(fileURLToPath(new URL(`./__fixtures__/${name}.json`, import.meta.url)), "utf8")));
+    if (!view) throw new Error(`${name} fixture does not decode`);
+    return view;
+  };
+  const keyWords = /→ to see|m for more/u;
+
+  it("a numbers view that drops a column at 60: live it names the key, committed it prints every column", () => {
+    const ads = fixture("numbers-ads");
+    const live = renderLiveTurn({ messages, views: [ads], focus: null, width: 60, color: false, theme }).lines;
+    expect(live).toContain("+ Impressions · → to see");
+    expect(live.some((line) => /Impressions: \d/u.test(line))).toBe(false);
+    const lines = renderCommittedTurn({ messages, views: [ads], focus: null, width: 60, color: false, theme });
+    expect(lines.some((line) => keyWords.test(line))).toBe(false);
+    // Every row's Impressions, with its value, beside the columns the table kept.
+    expect(lines.filter((line) => /Impressions: [\d,]+/u.test(line)).map((line) => line.trim())).toEqual([
+      "Impressions: 4,000", "Impressions: 3,000", "Impressions: 2,000", "Impressions: 9,000"
+    ]);
+    for (const kept of ["Spend", "Clicks", "CTR", "Conv", "CPC", "Ad set 01", "Ad set 03", "$40.00"]) {
+      expect(lines.some((line) => line.includes(kept))).toBe(true);
+    }
+    expect(lines.every((line) => line.length <= 60)).toBe(true);
+  });
+
+  it("at a width where every column fits, the committed table is the live table", () => {
+    const ads = fixture("numbers-ads");
+    const lines = renderCommittedTurn({ messages, views: [ads], focus: null, width: 100, color: false, theme });
+    expect(lines.some((line) => /│\s+Impressions │/u.test(line))).toBe(true);
+    expect(lines.some((line) => keyWords.test(line))).toBe(false);
+  });
+
+  it.each([60, 80])("a truncated view at %i says what it shows, never `m for more`", (width) => {
+    const tall = fixture("numbers-tall");
+    const live = renderLiveTurn({ messages, views: [tall], focus: null, width, color: false, theme }).lines;
+    expect(live).toContain("40 of 100 · First 40 by spend · m for more");
+    const lines = renderCommittedTurn({ messages, views: [tall], focus: null, width, color: false, theme });
+    expect(lines).toContain("40 of 100 · First 40 by spend");
+    expect(lines.some((line) => keyWords.test(line))).toBe(false);
+  });
+
+  it("a compare view's dropped columns print too", () => {
+    const lines = renderCommittedTurn({ messages, views: [fixture("compare-test")], focus: null, width: 40, color: false, theme });
+    expect(lines.some((line) => keyWords.test(line))).toBe(false);
+    expect(lines.some((line) => line.trim() === "Relative: +33.33%")).toBe(true);
+    expect(lines.some((line) => line.trim() === "vs: A Current")).toBe(true);
+  });
+
+  it("each printed document version has no tab key line under it", () => {
+    const versions = fixture("document-versions");
+    const live = renderLiveTurn({ messages, views: [versions], focus: viewFocusAfterTurnDone([versions]), width: 60, color: false, theme, rows: 40 }).lines;
+    expect(live).toContain("[1-2] email");
+    const lines = renderCommittedTurn({ messages, views: [versions], focus: null, width: 60, color: false, theme });
+    expect(lines.some((line) => line.includes("[1-2]"))).toBe(false);
+    expect(lines.some((line) => line.includes("Your trial ended"))).toBe(true);
+    expect(lines.some((line) => line.includes("Still there?"))).toBe(true);
+  });
+});
+
+describe("a table that draws whole in the answer pane keeps the split", () => {
+  const small: Msg[] = [
+    { role: "user", text: "which won?" },
+    { role: "assistant", text: "Two ran.\n\n| Ad | Spend |\n| --- | ---: |\n| Spring | $120 |\n| Autumn | $80 |" }
+  ];
+  const card = ["┌─ card ─┐"];
+
+  it.each([160, 200])("at %i a two-column table sits in the answer pane, bordered, left of the card", (width) => {
+    expect(turnMaySplit(small, width)).toBe(true);
+    const lines = renderLiveTurn({ messages: small, views: [], focus: null, width, color: false, theme, details: card }).lines;
+    expect(lines[0]).toMatch(/^❯ which won\? + │ ┌─ card ─┐$/u);
+    expect(lines.some((line) => /│ Ad\s+│\s+Spend │/u.test(line))).toBe(true);
+    expect(lines.some((line) => /hidden|needs|Ad: /u.test(line))).toBe(false);
+    expect(lines.includes("─".repeat(width))).toBe(false);
+  });
+
+  it("a table too wide for the pane keeps the whole width, quoted or not", () => {
+    const wideTable = "| Ad | Spend | Purchases | ROAS | CPA |\n| --- | ---: | ---: | ---: | ---: |\n| Spring demo, hook 3 | $1,284.50 | 42 | 3.41 | $30.58 |";
+    expect(turnMaySplit([{ role: "assistant", text: wideTable }], 160)).toBe(false);
+    expect(turnMaySplit([{ role: "assistant", text: wideTable.split("\n").map((line) => `> ${line}`).join("\n") }], 160)).toBe(false);
   });
 });

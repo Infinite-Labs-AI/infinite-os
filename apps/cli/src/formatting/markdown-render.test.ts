@@ -1,9 +1,11 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { displayWidth, stripAnsi } from "../tui/lib/display-width.js";
 import { ansiFg, INFINITE_R4_THEME, resolveTheme } from "../tui/theme.js";
 import { r4Segments, seg } from "./r4-segments.test-util.js";
 import { holdOpenMarkers, parseInline, wrapSpans } from "./markdown-inline.js";
-import { renderMarkdown } from "./markdown-render.js";
+import { hiddenColumnsHint, markdownHasTable, renderMarkdown } from "./markdown-render.js";
 import { stripInlineMarkup } from "./markdown.js";
 
 const theme = resolveTheme({});
@@ -114,28 +116,36 @@ describe("renderMarkdown", () => {
     expect(r4Segments(colored[5]!)).toEqual(seg(["│", "line"], [" ", ""], ["Total", "b"], ["  ", ""], ["│", "line"], [" ", ""], ["$1.00", "b"], [" ", ""], ["│", "line"]));
   });
 
-  it("never promises a wider window it cannot name: a hidden column says how many more columns it needs (M3)", () => {
-    const out = renderMarkdown(
-      "| Name | One | Two | Three |\n|---|---|---|---|\n| Ad set 01 | 10 | 20 | 30 |",
-      { width: 24, color: false, theme }
-    );
-    expect(out.slice(-2)).toEqual(["+ Three, Two · widen by", "9 cols to see"]);
-    const wide = renderMarkdown(
-      "| Name | One | Two | Three |\n|---|---|---|---|\n| Ad set 01 | 10 | 20 | 30 |",
-      { width: 32, color: false, theme }
-    );
-    const wider = renderMarkdown(
-      "| Name | One | Two | Three |\n|---|---|---|---|\n| Ad set 01 | 10 | 20 | 30 |",
-      { width: 26, color: false, theme }
-    );
-    expect(wider.slice(-2)).toEqual(["+ Three · widen by 7 cols", "to see"]);
-    expect(wide.at(-1)).toBe("+ Three · widen by 1 col to see");
-    expect(wide.join("\n")).not.toContain("widen the window");
+  it("a table that dropped columns says so in ONE wording: what is hidden and how many more columns it needs (M3)", () => {
+    const table = "| Name | One | Two | Three |\n|---|---|---|---|\n| Ad set 01 | 10 | 20 | 30 |";
+    const out = renderMarkdown(table, { width: 24, color: false, theme });
+    expect(out.slice(-2)).toEqual(["+ Three, Two hidden ·", "needs 9 more cols"]);
+    const wide = renderMarkdown(table, { width: 32, color: false, theme });
+    const wider = renderMarkdown(table, { width: 26, color: false, theme });
+    expect(wider.slice(-2)).toEqual(["+ Three hidden · needs 7", "more cols"]);
+    expect(wide.slice(-2).join(" ")).toBe("+ Three hidden · needs 1 more col");
+    // A fact, never a promise or a key: the same words wherever the table prints.
+    expect([...out, ...wide, ...wider].join("\n")).not.toMatch(/widen|to see|→/u);
+    expect(hiddenColumnsHint(["Note", "CPA"], 86)).toBe("+ Note, CPA hidden · needs 86 more cols");
+    expect(hiddenColumnsHint(["Note"], 0)).toBe("+ Note hidden · needs 1 more col");
+    // One call site: the wording lives in `hiddenColumnsHint` and nowhere else in the CLI's source.
+    const source = readFileSync(fileURLToPath(new URL("./markdown-render.ts", import.meta.url)), "utf8");
+    expect(source.match(/hidden · needs/gu)).toHaveLength(1);
+    expect(source).not.toMatch(/widen by|widenLimit/u);
     const roomy = renderMarkdown(
       "| Name | One | Two | Three |\n|---|---|---|---|\n| Ad set 01 | 10 | 20 | 30 |",
       { width: 160, color: false, theme }
     );
     expect(roomy.join("\n")).not.toContain("+ ");
+  });
+
+  it("markdownHasTable says what renderMarkdown draws as a table", () => {
+    expect(markdownHasTable("| A | B |\n|---|---|\n| 1 | 2 |")).toBe(true);
+    expect(markdownHasTable("A | B\n---|---\n1 | 2")).toBe(true);
+    expect(markdownHasTable("> | A | B |\n> |---|---|\n> | 1 | 2 |")).toBe(true);
+    expect(markdownHasTable("Plain words, with `a | b` in code.")).toBe(false);
+    expect(markdownHasTable("```\n| A | B |\n|---|---|\n```")).toBe(false);
+    expect(markdownHasTable("No pipes here.")).toBe(false);
   });
 
   it("scrubs terminal control and bidi characters out of every text node, code included", () => {

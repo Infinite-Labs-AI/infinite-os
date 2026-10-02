@@ -161,7 +161,9 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     "flow-pause-02-working--c60", "flow-pause-02-working--c100", "flow-pause-02-working--c160",
     "flow-images-02-making-them--c60", "flow-images-02-making-them--c100", "flow-images-02-making-them--c160",
     "flow-images-06-with-your-codex--c60", "flow-images-06-with-your-codex--c100", "flow-images-06-with-your-codex--c160",
-    "flow-images-07-cmd-l-only--c60", "flow-images-07-cmd-l-only--c100", "flow-images-07-cmd-l-only--c160", "region-keybar-busy"
+    "flow-images-07-cmd-l-only--c60", "flow-images-07-cmd-l-only--c100", "flow-images-07-cmd-l-only--c160", "region-keybar-busy",
+    // TAB: the boot frame has no side to switch to, so its bar is `/ commands` alone.
+    "boot--c60", "boot--c100", "boot--c160"
   ]);
 
   it("matches every frame and line-region golden; fails exactly the decided ones", () => {
@@ -186,7 +188,8 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     for (const id of ["boot--c100", "boot--c160", "boot--c60"]) {
       const result = extra.evaluate(loadGolden(id), id);
       expect(result.pass, id).toBe(false);
-      expect(result.regions.filter((region) => region.region === "extra").map((region) => region.diffs[0]?.actual)).toEqual(["INFINITE", "Tools   connect · sync"]);
+      // The two rows above the frame are extra (and, under TAB, so is r4's own boot bar, which this renderer prints as drawn).
+      expect(result.regions.filter((region) => region.region === "extra").map((region) => region.diffs[0]?.actual).slice(0, 2)).toEqual(["INFINITE", "Tools   connect · sync"]);
     }
   });
 

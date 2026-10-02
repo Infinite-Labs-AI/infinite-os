@@ -1,6 +1,6 @@
 import { scrubTerminalControls } from "../desktop/confirm-in-session.js";
 import { displayWidth, truncateCells } from "../tui/lib/display-width.js";
-import { ansiFg, ansiSpan, type AnsiRole, type Theme, type ThemeStyle } from "../tui/theme.js";
+import { ansiFg, ansiSpan, DEFAULT_THEME, type AnsiRole, type Theme, type ThemeStyle } from "../tui/theme.js";
 import { lexMarkdown, type MarkdownBlock } from "./markdown-blocks.js";
 import { NO_BREAK_SPACE, parseInline, wrapSpans, type Span } from "./markdown-inline.js";
 import { renderTable } from "./table.js";
@@ -28,14 +28,6 @@ export interface MarkdownRenderOptions {
    * For tool output, which must read exactly as the tool returned it.
    */
   plain?: boolean;
-  /**
-   * The widest this text is ever redrawn at when the window widens: unbounded
-   * (the default) for the live answer in one column; the pane's cap when the
-   * answer sits beside its details; `0` for text printed once (scrollback, a
-   * one-shot print), which a wider window never redraws. A table whose dropped
-   * columns need more than this names them `hidden`, never `widen by`.
-   */
-  widenLimit?: number;
 }
 
 const BULLETS = ["•", "◦", "▪"] as const;
@@ -58,6 +50,46 @@ const MAX_QUOTE_DEPTH = 8;
 
 export function renderMarkdown(text: string, opts: MarkdownRenderOptions): string[] {
   return renderDocument(text, opts, 0);
+}
+
+/**
+ * Whether this markdown draws a table (at the top level or inside a quote),
+ * read the way `renderMarkdown` reads it. A turn whose answer has one keeps
+ * the whole width for it (views/layout.ts).
+ */
+export function markdownHasTable(text: string, quoteDepth = 0): boolean {
+  if (!text.includes("|")) {
+    return false;
+  }
+  const source = text.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n").map(scrubTerminalControls).join("\n");
+  return lexMarkdown(source).some((block) =>
+    block.type === "table"
+    || (block.type === "quote" && quoteDepth + 1 < MAX_QUOTE_DEPTH && markdownHasTable(block.lines.join("\n"), quoteDepth + 1)));
+}
+
+/**
+ * Whether every table this markdown draws stays whole at `width`: a bordered
+ * table with all of its columns (none dropped, never `label: value` records).
+ * True when it draws no table. Walks the blocks as `renderMarkdown` does, a
+ * quote's table two columns narrower per level. A turn splits side by side
+ * only while its answer's tables fit the answer pane (views/layout.ts).
+ */
+export function markdownTablesFit(text: string, width: number, quoteDepth = 0): boolean {
+  if (!text.includes("|")) {
+    return true;
+  }
+  const columns = Math.max(1, Math.floor(width));
+  const source = text.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").split("\n").map(scrubTerminalControls).join("\n");
+  return lexMarkdown(source).every((block) => {
+    if (block.type === "table") {
+      const table = drawTable(block, { width: columns, color: false, theme: DEFAULT_THEME });
+      return table.fallback === null && table.hidden.length === 0;
+    }
+    if (block.type === "quote" && quoteDepth + 1 < MAX_QUOTE_DEPTH) {
+      return markdownTablesFit(block.lines.join("\n"), columns < 4 ? columns : columns - 2, quoteDepth + 1);
+    }
+    return true;
+  });
 }
 
 function renderDocument(text: string, opts: MarkdownRenderOptions, quoteDepth: number): string[] {
@@ -196,11 +228,22 @@ function renderCode(source: readonly string[], opts: MarkdownRenderOptions): str
 }
 
 function renderMarkdownTable(block: Extract<MarkdownBlock, { type: "table" }>, opts: MarkdownRenderOptions): string[] {
+  const table = drawTable(block, opts);
+  const lines = [...table.lines];
+  if (table.hidden.length) {
+    lines.push(...wrapSpans([{ text: hiddenColumnsHint(table.hidden, table.fullWidth - opts.width) }], opts.width)
+      .map((spans) => paint(spans.map((span) => span.text).join(""), "muted", opts)));
+  }
+  return lines;
+}
+
+/** One markdown table through the table drawer (the one call, so a fit check reads what is drawn). */
+function drawTable(block: Extract<MarkdownBlock, { type: "table" }>, opts: MarkdownRenderOptions) {
   const rows = block.rows.map((row) => row.map(plainInline));
   // A last row labelled Total is the table's total: a rule above it, in bold (N9).
   const last = rows.at(-1);
   const total = rows.length > 1 && last && TOTAL_LABEL.test((last[0] ?? "").trim()) ? last : undefined;
-  const table = renderTable(
+  return renderTable(
     {
       columns: block.header.map((label, index) => ({ label: plainInline(label), align: block.aligns[index] })),
       rows: total ? rows.slice(0, -1) : rows,
@@ -208,18 +251,18 @@ function renderMarkdownTable(block: Extract<MarkdownBlock, { type: "table" }>, o
     },
     { width: opts.width, color: opts.color, theme: opts.theme, role: opts.role }
   );
-  const lines = [...table.lines];
-  if (table.hidden.length) {
-    // An answer's table has no `→` key: say how much wider the window must be,
-    // but only when a wider window redraws this text that wide (`widenLimit`).
-    const more = Math.max(1, table.fullWidth - opts.width);
-    const widenable = table.fullWidth <= (opts.widenLimit ?? Number.POSITIVE_INFINITY);
-    const hint = widenable
-      ? `+ ${table.hidden.join(", ")} · widen by ${more} ${more === 1 ? "col" : "cols"} to see`
-      : `+ ${table.hidden.join(", ")} hidden`;
-    lines.push(...wrapSpans([{ text: hint }], opts.width).map((spans) => paint(spans.map((span) => span.text).join(""), "muted", opts)));
-  }
-  return lines;
+}
+
+/**
+ * The ONE line under a markdown table that dropped columns (r4's `+ X · …`
+ * shape): which columns are hidden and how many more columns the table needs
+ * to show them. An answer's table has no `→` key, so it never says a key; and
+ * it states a fact, never a promise, so the same words are true wherever the
+ * table is printed (the live answer, scrollback, a one-shot print).
+ */
+export function hiddenColumnsHint(hidden: readonly string[], missingColumns: number): string {
+  const more = Math.max(1, Math.floor(missingColumns));
+  return `+ ${hidden.join(", ")} hidden · needs ${more} more ${more === 1 ? "col" : "cols"}`;
 }
 
 /** Inline markdown flattened to its visible text (for table cells). */

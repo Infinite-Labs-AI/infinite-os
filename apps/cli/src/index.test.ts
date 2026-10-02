@@ -2075,7 +2075,9 @@ describe("cli smoke", () => {
     expect(rendered).not.toContain("session cli_123");
     expect(rendered).not.toMatch(/\bready\b/u);
     expect(rendered).toContain("Ask Infinite.");
-    expect(rendered).toContain("switch side");
+    // A plain answer has no details to switch to: the bar is `/ commands` alone.
+    expect(rendered).toContain("/  commands");
+    expect(rendered).not.toContain("switch side");
   });
 
   it("matches slash command completions for the Ink composer", () => {
