@@ -10,7 +10,7 @@ import { createHash } from "node:crypto"
 import type { WizardApplyResult } from "../../install/installer.js"
 import { DECISION_LINE_IDS } from "../../install/plan-model.js"
 import { bridgeErrorCode, keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates } from "../../install/step-inputs.js"
-import { bridgeFailureLine, bridgeFailureOutcome, bridgeFailureState } from "../../bridge/outcomes.js"
+import { bridgeFailureLine, bridgeFailureOutcome, bridgeFailureState, hardStopOutcome } from "../../bridge/outcomes.js"
 import { productionHostHint } from "./link.js"
 import { makeEditRecord } from "../../install/edits.js"
 import { GITIGNORE_FENCE_START } from "../../harness/outputs.js"
@@ -189,6 +189,9 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
       } catch (error) {
         const code = bridgeErrorCode(error)
         const state = bridgeFailureState(error)
+        // A hard stop first (review I2 P2-2: Infinite's own workspace is a 409 `foreign_site_hosts` too, and halts).
+        const hard = hardStopOutcome(error)
+        if (hard) return hard
         if (code === "foreign_site_hosts" || (code === "invalid_request" && state === "unverified_host")) {
           // §3z.7 (A28): another site's source, or a host the workspace has not proven: no Infinite pixel is
           // installed (its key is never written into this site), one user line, and the other tools go on.

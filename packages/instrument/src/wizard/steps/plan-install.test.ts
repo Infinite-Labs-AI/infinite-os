@@ -284,6 +284,20 @@ describe("§3z.7 / §3z.4 site-source refusals (I1)", () => {
   it("negative: an invalid_request with no known state is not swallowed", async () => {
     await expect(run({ code: "invalid_request" })).rejects.toThrow(/invalid_request/)
   })
+
+  it("review I2 P2-2: Infinite's own workspace (409 infinite_workspace) halts LINK_DECLINED and installs nothing", async () => {
+    const { ctx, outcome } = await run({ code: "foreign_site_hosts", state: "infinite_workspace" })
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_LINK_DECLINED", next: "halt" })
+    expect((outcome as { message: string }).message).toBe("This site is linked to Infinite's own workspace. Link it to its own workspace and run npx infinite-tag again.")
+    // Not a "collects for another site" line with GA4 / PostHog installed anyway.
+    expect(read(ctx.root, "index.html")).toBe(STATIC_HTML)
+  })
+
+  it("negative: another site's hosts (409 foreign_site_hosts, no state) stays a line and the other tools go on", async () => {
+    const { ctx, outcome } = await run({ code: "foreign_site_hosts" })
+    expect(outcome.kind).toBe("ok")
+    expect(readInstallManifest(ctx.root)!.ids?.infinite).toBeNull()
+  })
 })
 
 describe("B24: the wizard's .gitignore fence is a receipted edit", () => {

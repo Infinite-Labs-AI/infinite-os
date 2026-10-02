@@ -14,6 +14,10 @@
 // | `site_setup_locked` on `site-source`                                        | parked SITE_LOCKED               |
 // | `site_setup_locked` on conversions / an uninstall piece; `role_required`    | a user line; the step continues  |
 // | `claimed_by_other` on proof-claim or a real_visit start                     | the lost-claim path              |
+// | 409 `foreign_site_hosts` `infinite_workspace` (any verb; keys refuses the   | failed halt LINK_DECLINED        |
+// | whole of Infinite's own workspace, review I2 P2-2)                          | (link the site to its own one)   |
+// | 503 `capability_unavailable` `internal_workspace_unconfigured`              | parked INFINITE_UNAVAILABLE      |
+// |                                                                             | (plain line; nothing changed)    |
 //
 // The client waits ONCE for `Retry-After` on a 429 before the error reaches this table (`client.ts`).
 // Steps that already degrade honestly (`before`'s dry_live, the rehearsal tests, the baseline read) keep
@@ -51,6 +55,11 @@ export const SUBSCRIPTION_MESSAGE =
 export const APP_GONE_MESSAGE = "The Infinite app stopped answering (it may have quit or restarted). Open Infinite, then run npx infinite-tag again to continue."
 export const INFINITE_UNAVAILABLE_MESSAGE = "Infinite did not answer; run npx infinite-tag again in a minute."
 export const SITE_LOCKED_MESSAGE = "A website test is running on this site in Infinite, so its setup is locked."
+/** Review I2 P2-2: Infinite's own workspace is never a wizard target (R2-01, §3z.6); the user re-links. */
+export const INFINITE_WORKSPACE_MESSAGE = "This site is linked to Infinite's own workspace. Link it to its own workspace and run npx infinite-tag again."
+/** §3z.6: Infinite's cloud cannot tell which workspace is its own, so it refuses every wizard read and write for now. */
+export const INTERNAL_WORKSPACE_UNCONFIGURED_MESSAGE =
+  "Infinite cannot set up sites right now (a setting is missing on Infinite's side). Nothing was changed."
 export const LINKED_SITES_MESSAGE = "The Infinite app's list of linked sites is damaged. Open Infinite › Settings › Linked sites (Start over), then run npx infinite-tag again."
 
 /** The §3a.2 fields a bridge failure carries (the real `BridgeError` and every test fake). */
@@ -139,7 +148,15 @@ export function hardStopOutcome(error: unknown): StepOutcome | null {
       }
     case "capability_missing":
       return { kind: "failed", code: "INF_WIZ_BRIDGE_PROTOCOL", message: `${failure.message ?? "A bridge capability is missing."} Update the Infinite app, then run npx infinite-tag again.`, next: "halt" }
+    case "foreign_site_hosts":
+      // Review I2 P2-2: Infinite's own workspace stops the run on ANY verb (keys refuses it first); every other
+      // state (another site's hosts, …) is a refusal the step words itself as a line.
+      return failure.state === "infinite_workspace" ? { kind: "failed", code: "INF_WIZ_LINK_DECLINED", message: INFINITE_WORKSPACE_MESSAGE, next: "halt" } : null
     case "capability_unavailable":
+      // §3z.6: the cloud fails closed for every wizard verb until Infinite's own workspace is configured.
+      if (failure.state === "internal_workspace_unconfigured") {
+        return { kind: "parked", code: "INF_WIZ_INFINITE_UNAVAILABLE", reason: INTERNAL_WORKSPACE_UNCONFIGURED_MESSAGE, resumeHint: "Run npx infinite-tag again later." }
+      }
       // With a state it is a known refusal the step words itself (§3z.3); without one, the app lacks the verb.
       if (failure.state) return null
       return { kind: "failed", code: "INF_WIZ_BRIDGE_PROTOCOL", message: "Your Infinite app cannot do this yet. Update the Infinite app, then run npx infinite-tag again.", next: "halt" }
@@ -180,7 +197,6 @@ export function bridgeFailureOutcome(error: unknown, context: { verb?: string } 
     }
     return null
   }
-  if (failure.code === "capability_unavailable" && failure.state === "internal_workspace_unconfigured") return unavailableOutcome(error)
   return null
 }
 
@@ -196,6 +212,8 @@ export function bridgeErrorOutcome(error: unknown): StepOutcome | null {
 export function bridgeFailureLine(error: unknown, piece: string): string | null {
   const failure = asBridgeFailure(error)
   if (!failure) return null
+  // A hard stop is never worded as a line the step carries on from (review I2 P2-2: Infinite's own workspace).
+  if (hardStopOutcome(error) !== null) return null
   switch (failure.code) {
     case "role_required":
       return `${piece}: a workspace owner or admin must do this in Infinite; it was not changed`
@@ -206,7 +224,6 @@ export function bridgeFailureLine(error: unknown, piece: string): string | null 
       if (failure.state === "unverified_host") return `${piece}: prove the domain in Infinite first; Infinite's tag is not installed this run`
       return null
     case "foreign_site_hosts":
-      if (failure.state === "infinite_workspace") return `${piece}: this is Infinite's own workspace; nothing was changed`
       if (failure.state === "no_hosting_connection") return `${piece}: connect the site's Vercel project in Infinite first; nothing was changed`
       if (failure.state === "disabled_source_other_hosts") return `${piece}: this workspace's old site source belongs to another site; nothing was changed`
       return `${piece}: this workspace collects for another site; nothing was changed`

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { startFakeBridge, type FakeBridge, type FakeBridgeScript } from "../../../test/wizard/fake-bridge.js"
 import { freshState, makeContext, makeDeps, type HarnessOptions } from "../../../test/wizard/step-harness.js"
 import { openTagBridge } from "../../bridge/client.js"
+import { exitCodeFor } from "../contracts/codes.js"
 import { RUN_NOT_IN_WORKSPACE, step } from "./link.js"
 
 let root: string
@@ -279,6 +280,31 @@ describe("step link", () => {
     const { bridge, harness, deps } = await setup({ capabilities: ["tag.status.v1"] })
     expect(await step.run(harness.ctx, deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_BRIDGE_PROTOCOL" })
     expect(bridge.calls).toHaveLength(0)
+  })
+
+  it("review I2 P2-2: keys 409 foreign_site_hosts/infinite_workspace → a clean stop (LINK_DECLINED, exit 4) with one plain line", async () => {
+    const { bridge, harness, deps } = await setup({ link: "remembered", errors: { keys: { code: "foreign_site_hosts", state: "infinite_workspace" } } })
+    const outcome = await step.run(harness.ctx, deps)
+    expect(outcome).toEqual({
+      kind: "failed",
+      code: "INF_WIZ_LINK_DECLINED",
+      message: "This site is linked to Infinite's own workspace. Link it to its own workspace and run npx infinite-tag again.",
+      next: "halt"
+    })
+    expect(exitCodeFor("INF_WIZ_LINK_DECLINED")).toBe(4)
+    expect(bridge.calls.map((call) => call.verb)).toEqual(["status", "link.request", "keys"])
+  })
+
+  it("review I2 P2-2: keys 503 capability_unavailable/internal_workspace_unconfigured → parked (exit 3) with a plain line, never 'did not answer'", async () => {
+    const { harness, deps } = await setup({ link: "remembered", errors: { keys: { code: "capability_unavailable", state: "internal_workspace_unconfigured" } } })
+    const outcome = await step.run(harness.ctx, deps)
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_INFINITE_UNAVAILABLE", reason: "Infinite cannot set up sites right now (a setting is missing on Infinite's side). Nothing was changed." })
+    expect(exitCodeFor("INF_WIZ_INFINITE_UNAVAILABLE")).toBe(3)
+  })
+
+  it("negative: keys 409 foreign_site_hosts with another state is not a link-declined stop", async () => {
+    const { harness, deps } = await setup({ link: "remembered", errors: { keys: { code: "foreign_site_hosts", state: "disabled_source_other_hosts" } } })
+    await expect(step.run(harness.ctx, deps)).rejects.toMatchObject({ code: "foreign_site_hosts" })
   })
 
   it("a signed-out app (409 signed_out) → blocked SIGNED_OUT", async () => {
