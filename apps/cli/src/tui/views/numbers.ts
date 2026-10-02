@@ -6,7 +6,10 @@
 //   blocks; the today leg says `not final · as of HH:MM`. A Total row prints
 //   only from `legs.settled.totals`: the renderer never adds anything up.
 // - A null is a dash with a footnote (or its words, in place), never 0.
-// - Funnel steps print `n of m` (both counts measured), never a %.
+// - A today leg with no rows shows its OWN totals in its own block (still never
+//   summed into the settled leg); a today leg with rows never prints a Total.
+// - Funnel steps print `n of m` (both counts measured), never a %. A leg's
+//   steps draw after its rows or totals, never instead of them.
 // - Leaders print one line per measure; nothing here ever names a winner.
 // - The coverage strip never draws a not-measured day as `·` (zero).
 //
@@ -317,39 +320,46 @@ function legLines(
   const lines = title ? wrapText(title, ctx.width).map((line) => paint(line, "text", ctx, { bold: true })) : [];
 
   const rows = asList(leg.rows).filter(isRecord);
-  // Only the settled leg's own totals: a Total row is never computed, and never spans legs.
-  const totals = !isToday && isRecord(leg.totals) ? leg.totals : null;
+  const legTotals = isRecord(leg.totals) ? leg.totals : null;
+  // A Total row comes only from the settled leg's own totals: never computed, never across legs.
+  // A today leg with no rows shows its OWN totals as its values (still its own block, never summed).
+  const totals = !isToday ? legTotals : rows.length ? null : legTotals;
   // j/k select the settled leg's rows (the today leg's rows are the same things, not final).
   const selected = !isToday && !nested ? ctx.selected : null;
   const steps = asList(leg.steps).filter(isRecord);
 
-  if (layout === "steps" || (steps.length && !rows.length)) {
+  if (layout === "steps") {
     lines.push(...stepLines(steps, ctx, draw.notes));
     return lines;
   }
-  if (layout === "kpis") {
-    lines.push(...kpiLines(rows, totals, columns, currency, ctx, draw.notes));
-    return lines;
+  const values: string[] = [];
+  if (layout === "kpis" || (!rows.length && totals)) {
+    // Totals with no rows print as `Label  value` pairs (no `Total` label, never an empty table).
+    values.push(...kpiLines(rows, totals, columns, currency, ctx, draw.notes));
+  } else if (rows.length) {
+    const hasStatus = rows.some((row) => isRecord(row.status) && viewText(row.status.word) !== "");
+    const tableColumns: CellTableColumn[] = [
+      ...(hasStatus ? [{ label: "Status", unit: "text" as const }] : []),
+      ...columns
+    ];
+    const cellsOf = (cells: Record<string, unknown>, status: unknown): TableCell[] => [
+      ...(hasStatus ? [isRecord(status) ? viewText(status.word) : ""] : []),
+      ...columns.map((column) => cells[column.key] as TableCell)
+    ];
+    values.push(...cellTableLines({
+      columns: tableColumns,
+      rows: rows.map((row) => ({ label: viewText(row.label), cells: cellsOf(asRecord(row.cells), row.status) })),
+      total: totals ? { label: "Total", cells: cellsOf(totals, null) } : null,
+      currency,
+      selected
+    }, ctx, draw));
   }
-  if (!rows.length && !totals) {
-    return lines;
+  lines.push(...values);
+  if (steps.length) {
+    // The funnel follows the leg's numbers; neither replaces the other.
+    if (values.length) lines.push("");
+    lines.push(...stepLines(steps, ctx, draw.notes));
   }
-  const hasStatus = rows.some((row) => isRecord(row.status) && viewText(row.status.word) !== "");
-  const tableColumns: CellTableColumn[] = [
-    ...(hasStatus ? [{ label: "Status", unit: "text" as const }] : []),
-    ...columns
-  ];
-  const cellsOf = (cells: Record<string, unknown>, status: unknown): TableCell[] => [
-    ...(hasStatus ? [isRecord(status) ? viewText(status.word) : ""] : []),
-    ...columns.map((column) => cells[column.key] as TableCell)
-  ];
-  lines.push(...cellTableLines({
-    columns: tableColumns,
-    rows: rows.map((row) => ({ label: viewText(row.label), cells: cellsOf(asRecord(row.cells), row.status) })),
-    total: totals ? { label: "Total", cells: cellsOf(totals, null) } : null,
-    currency,
-    selected
-  }, ctx, draw));
   return lines;
 }
 
@@ -431,6 +441,10 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx): strin
   const settled = asRecord(legs.settled);
   const today = isRecord(legs.today) ? legs.today : null;
   const coverage = asRecord(settled.coverage);
+  // Today's ◌ only extends the settled leg's strip: alone it tells the reader nothing.
+  if (!asList(coverage.days).some(isRecord)) {
+    return [];
+  }
   const todayDates = new Set<string>();
   if (today) {
     const todayDays = asList(asRecord(today.coverage).days).filter(isRecord);
@@ -581,8 +595,7 @@ function selectableRows(body: Record<string, unknown>): number {
   const legs = asRecord(body.legs);
   const settled = asRecord(legs.settled);
   const rows = asList(settled.rows).filter(isRecord);
-  const steps = asList(settled.steps).filter(isRecord);
-  if (body.layout === "steps" || body.layout === "kpis" || (steps.length && !rows.length)) {
+  if (body.layout === "steps" || body.layout === "kpis") {
     return 0;
   }
   return rows.length > 1 ? rows.length : 0;

@@ -123,8 +123,9 @@ export function healthBodyLines(
   const resume = asRecord(body.resume);
   const resumeLabel = isRecord(resume.appLink) ? viewText(resume.appLink.label) : "";
   if (resumeLabel) {
-    // `o` opens the resume place only when no item fix holds it.
-    const opens = !nested && ctx.caps.open && openLabel === null;
+    // `o` opens the resume place only when no item fix holds it and no row is
+    // selectable (with j/k, `o` belongs to the selected row, even one with no fix).
+    const opens = !nested && ctx.caps.open && !selectable && openLabel === null;
     if (opens) openLabel = resumeLabel;
     extra.push(wrapText(`→ ${resumeLabel}${opens ? " (o)" : ""}`, ctx.width).map((line) => paint(line, "muted", ctx)));
   }

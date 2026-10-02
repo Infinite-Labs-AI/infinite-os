@@ -80,8 +80,33 @@ describe("numbers: legs", () => {
     // The settled + today sums never appear (100 + 8 spend, 51 + 5 clicks).
     expect(text(render)).not.toContain("$108.00");
     expect(text(render)).not.toMatch(/\b56\b/u);
-    // The today leg's own totals never print either.
+    // A today leg WITH rows never prints its own totals either (no today Total row).
     expect(render.detail.slice(render.detail.indexOf("Today · not final · as of 18:30")).join("\n")).not.toContain("$8.00");
+  });
+
+  it("a today leg with no rows shows its own totals under its title, never summed into the settled leg", () => {
+    // The contract shape: settled rows [] + totals, today rows [] + totals.
+    const render = draw(edited("numbers-week-today", (body) => {
+      body.columns = body.columns.slice(0, 2);
+      body.legs.settled.rows = [];
+      body.legs.settled.totals = { spend: { value: 100 }, clicks: { value: 50 } };
+      body.legs.today.rows = [];
+      body.legs.today.totals = { spend: { value: 5 }, clicks: { value: 3 } };
+      body.leaders = [];
+    }));
+    const today = render.detail.indexOf("Today · not final · as of 18:30");
+    expect(today).toBeGreaterThan(0);
+    const settled = render.detail.slice(0, today).join("\n");
+    const todayBlock = render.detail.slice(today).join("\n");
+    expect(render.detail[today + 1]).toMatch(/^Spend +\$5\.00$/u);
+    expect(render.detail[today + 2]).toMatch(/^Clicks +3$/u);
+    expect(settled).toMatch(/^Spend +\$100\.00$/mu);
+    expect(todayBlock).not.toContain("$100.00");
+    expect(text(render)).not.toMatch(/Total/u);
+    expect(text(render)).not.toContain("$105.00");
+    expect(text(render)).not.toMatch(/\b53\b/u);
+    // Totals with no rows print as pairs, never as an empty table.
+    expect(text(render)).not.toMatch(/[┌├└]/u);
   });
 
   it("no settled totals, no Total row (the renderer never adds one up)", () => {
@@ -149,6 +174,62 @@ describe("numbers: steps", () => {
   });
 });
 
+describe("numbers: steps beside rows and totals", () => {
+  const funnel = () => JSON.parse(JSON.stringify((fixture("numbers-steps").body as any).legs.settled.steps));
+
+  it("kpis: a settled leg with totals, no rows and steps prints both the totals and the steps", () => {
+    const render = draw(edited("numbers-week-today", (body) => {
+      body.layout = "kpis";
+      body.legs.settled.rows = [];
+      body.legs.settled.steps = funnel();
+      delete body.legs.today;
+    }));
+    const detail = render.detail;
+    const spend = detail.findIndex((line) => /^Spend +\$100\.00$/u.test(line));
+    const signup = detail.findIndex((line) => /^App signup +127 of 176$/u.test(line));
+    expect(spend).toBeGreaterThan(0);
+    expect(signup).toBeGreaterThan(spend);
+    expect(detail.slice(spend, signup)).toContain("");
+    expect(text(render)).not.toMatch(/%/u);
+  });
+
+  it("table: a settled leg with totals, no rows and steps draws the totals as pairs, then the steps", () => {
+    const render = draw(edited("numbers-week-today", (body) => {
+      body.legs.settled.rows = [];
+      body.legs.settled.steps = funnel();
+      delete body.legs.today;
+    }));
+    const out = render.detail.join("\n");
+    expect(out).toMatch(/^Spend +\$100\.00$/mu);
+    expect(out).toMatch(/^App signup +127 of 176$/mu);
+    expect(out).not.toMatch(/[┌├└]/u);
+    expect(render.rowCount).toBe(0);
+    expect(text(render)).not.toMatch(/%/u);
+  });
+
+  it("table: rows and steps both print (the table, then the steps)", () => {
+    const render = draw(edited("numbers-week-today", (body) => {
+      body.legs.settled.steps = funnel();
+    }));
+    const detail = render.detail;
+    const hookA = detail.findIndex((line) => line.includes("Hook A"));
+    const signup = detail.findIndex((line) => /^App signup +127 of 176$/u.test(line));
+    expect(hookA).toBeGreaterThan(0);
+    expect(signup).toBeGreaterThan(hookA);
+    expect(detail.filter((line) => /Total/u.test(line))).toHaveLength(1);
+    expect(render.rowCount).toBe(3);
+    expect(text(render)).not.toMatch(/%/u);
+  });
+
+  it("layout steps stays steps-only", () => {
+    const render = draw(edited("numbers-steps", (body) => {
+      body.columns = [{ key: "spend", label: "Spend", unit: "money" }];
+      body.legs.settled.totals = { spend: { value: 100 } };
+    }));
+    expect(text(render)).not.toContain("$100.00");
+  });
+});
+
 describe("numbers: leaders", () => {
   it("print one line per measure, and never a winner", () => {
     const render = draw(fixture("numbers-week-today"));
@@ -181,6 +262,12 @@ describe("numbers: the coverage strip", () => {
     expect(detail).toContain("█ measured");
     expect(detail).not.toContain("◌ today");
     expect(draw(fixture("numbers-week-today")).detail.join("\n")).toContain("◌ today");
+  });
+
+  it("no settled coverage, no strip (a lone today mark says nothing)", () => {
+    const render = draw(edited("numbers-week-today", (body) => { delete body.legs.settled.coverage; }));
+    expect(render.detail.some((line) => line.startsWith("Days"))).toBe(false);
+    expect(text(render)).not.toContain("◌ today");
   });
 
   it("a long strip wraps inside the pane", () => {
@@ -350,6 +437,27 @@ describe("health", () => {
     expect(last.detail).toContain("    → Sign in to email (o)");
     expect(last.keys).toEqual([{ key: "o", label: "Sign in to email" }]);
     expect(last.detail.find((line) => line.includes("Email"))).toMatch(/^▸ /u);
+  });
+
+  it("with fixes to select, the resume place never claims o (o stays with the selected row)", () => {
+    const view = edited("health-connections", (body) => {
+      body.items[3].fix = { label: "Sign in to email", appLink: { place: "connections", label: "Connections" } };
+      body.resume = { appLink: { place: "onboarding", label: "Resume setup" } };
+    });
+    const onOk = draw(view, { caps: OPEN, selected: 1 });
+    expect(onOk.keys).toEqual([]);
+    expect(onOk.detail).toContain("→ Resume setup");
+    expect(text(onOk)).not.toContain("(o)");
+    const onFix = draw(view, { caps: OPEN, selected: 2 });
+    expect(onFix.keys).toEqual([{ key: "o", label: "Connect the store" }]);
+    expect(onFix.detail).toContain("→ Resume setup");
+    // Nothing to select and no fix: the resume place takes o.
+    const resumeOnly = draw(edited("health-connections", (body) => {
+      delete body.items[2].fix;
+      body.resume = { appLink: { place: "onboarding", label: "Resume setup" } };
+    }), { caps: OPEN });
+    expect(resumeOnly.detail).toContain("→ Resume setup (o)");
+    expect(resumeOnly.keys).toEqual([{ key: "o", label: "Resume setup" }]);
   });
 
   it("one fix or none: nothing to select", () => expect(draw(fixture("health-connections")).rowCount).toBe(0));
