@@ -295,3 +295,26 @@ describe("candidates and the adopted-provider rule through the installer", () =>
     expect(plan.lines.some((line) => line.id.startsWith("install_provider:posthog"))).toBe(false)
   })
 })
+
+describe("the receipt in a fresh process (O3 records agent edits, O4 refreshes after hooks)", () => {
+  it("recordEdits works without a prior scan when the installer knows its root", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML })
+    const after = STATIC_HTML.replace("<h1>Acme</h1>", "<h1>Acme!</h1>")
+    writeFileSync(join(root, "index.html"), after)
+    await installer({ root }).recordEdits([makeEditRecord({ file: "index.html", before: STATIC_HTML, after, jobId: "csp", planLineId: null, by: "agent", runId: IDS.run })])
+    expect(readInstallManifest(root)!.edits).toHaveLength(1)
+    // NEGATIVE: without a root or a scan it refuses rather than guessing a repo.
+    await expect(installer().recordEdits([makeEditRecord({ file: "index.html", before: "a", after: "b", jobId: null, planLineId: null, by: "agent", runId: IDS.run })])).rejects.toThrow(/needs a scan/)
+  })
+
+  it("NEGATIVE: an install where every line was declined writes no receipt at all", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML })
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    const declineAll = { approved: ["consent_mode"], declined: plan.lines.filter((line) => line.requires === "approval" && line.id !== "consent_mode").map((line) => line.id), edits: { consent_mode: "not_required" } }
+    expect((await subject.apply(plan, declineAll)).ok).toBe(true)
+    expect(exists(root, ".infinite/install.json")).toBe(false)
+    expect(read(root, "index.html")).toBe(STATIC_HTML)
+  })
+})

@@ -58,7 +58,7 @@ import type {
 import { beforeTextOf, refreshFromHead } from "./edits.js"
 import { applyImproveEdit, detectAdoptedFacts, improveLinesFor, withSensitivePaths, type AdoptedFacts } from "./improve.js"
 import { artifactsFromKeys, manifestIdsFor, wizardInstallWorkspaceId, type WizardInstallArtifacts } from "./keys-adapter.js"
-import { findLockfile, NPM_JOB_ID, runNpmJob } from "./npm.js"
+import { findLockfile, runNpmJob } from "./npm.js"
 import {
   buildPlanModel,
   DECISION_LINE_IDS,
@@ -93,6 +93,8 @@ export interface WizardScanResult extends ScanResult {
 }
 
 export interface InstallerOptions {
+  /** The repo root. Lets `recordEdits` / `refreshEditReceiptFromHead` work in a fresh process (they scan it first). */
+  root?: string
   /** `sha256:<64 hex>` of the normalised remote + app root (§3a.3, computed by the `link` step). */
   repoFingerprint: string
   /** The cloud run id (records carry it); null before the `agent` step. */
@@ -489,8 +491,7 @@ export class WizardInstaller implements Installer {
   }
 
   async npmInstall(pkgs: readonly string[]): Promise<{ ok: boolean; edits: WizardEditRecord[]; reason?: string }> {
-    const scan = this.lastScan
-    if (!scan) throw new Error("npmInstall needs a scan first.")
+    const scan = await this.ensureScan("npmInstall")
     const result = await runNpmJob({
       root: scan.root,
       appRoot: scan.appRoot,
@@ -508,9 +509,8 @@ export class WizardInstaller implements Installer {
 
   /** Appends edits (O3's agent edits, O4's hook refreshes) to `.infinite/install.json` `edits`. */
   async recordEdits(edits: readonly WizardEditRecord[]): Promise<void> {
-    const scan = this.lastScan
-    if (!scan) throw new Error("recordEdits needs a scan first.")
     if (edits.length === 0) return
+    const scan = await this.ensureScan("recordEdits")
     this.writeReceipt(scan.root, scan, wizardInstallWorkspaceId(this.options.repoFingerprint), [...edits], null)
   }
 
@@ -520,9 +520,7 @@ export class WizardInstaller implements Installer {
    * O4 commits it once (`infinite-tag: refresh edit receipt after hooks`).
    */
   async refreshEditReceiptFromHead(): Promise<{ refreshed: boolean }> {
-    const scan = this.lastScan
-    if (!scan) throw new Error("refreshEditReceiptFromHead needs a scan first.")
-    const root = scan.root
+    const root = (await this.ensureScan("refreshEditReceiptFromHead")).root
     const manifest = readInstallManifest(root)
     if (!manifest) return { refreshed: false }
     const readBlob = this.options.readBlob ?? gitShow
@@ -586,6 +584,8 @@ export class WizardInstaller implements Installer {
       } satisfies InstallManifest)
     const known = new Set((base.edits ?? []).map((edit) => edit.id))
     const fresh = edits.filter((edit) => !known.has(edit.id))
+    // Nothing installed and nothing edited: no receipt is created for an install that changed nothing.
+    if (!current && fresh.length === 0) return
     cacheEditBefores(root, fresh)
     const merged = [...(base.edits ?? []), ...fresh]
     if (merged.length === 0 && ids === null && current) return
@@ -599,6 +599,13 @@ export class WizardInstaller implements Installer {
 
   private failed(artifacts: WizardInstallArtifacts, warnings: string[], reason: string, rolledBack: boolean): WizardApplyResult {
     return { ok: false, rolledBack, edits: [], openJobs: [], changedFiles: [], warnings, reason, npmInstalled: false, build: "not_run", artifacts }
+  }
+
+  /** The last scan, or a fresh one of `options.root` (a resumed process has not scanned yet). */
+  private async ensureScan(caller: string): Promise<WizardScanResult> {
+    if (this.lastScan) return this.lastScan
+    if (!this.options.root) throw new Error(`${caller} needs a scan first (or the installer's root).`)
+    return this.scan({ root: this.options.root })
   }
 
   private requireRunId(): string {

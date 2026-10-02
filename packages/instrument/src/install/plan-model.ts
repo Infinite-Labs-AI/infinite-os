@@ -15,7 +15,6 @@
 //   • nothing here is computed from agent output.
 import { createHash } from "node:crypto"
 
-import { buildPrivacyDisclosureNotice } from "../harness/run.js"
 import type { ImproveLine, ImproveLineKind, ProviderId } from "../types.js"
 import type { AgentKind, WhoPays } from "../wizard/contracts/agents.js"
 import { AGENT_LIMITS } from "../wizard/contracts/agents.js"
@@ -856,5 +855,3 @@ export function planAskPayload(plan: PlanModel): { lines: PlanLine[]; decisions:
     decisions: { ...plan.decisions, conversionNames: [...plan.decisions.conversionNames] }
   }
 }
-
-export { buildPrivacyDisclosureNotice }
