@@ -5,9 +5,9 @@
 // every code point is one cell (all r4 glyphs are narrow, spec §4), and every
 // cell's SGR state maps BACK to r4 tokens through the palette (`tokenOf`, a port
 // of golden_compare.py's `token_of`). Anything that is not an r4 token prints as
-// itself (`?#00d5ff`, `?ansi:36`, `faint`, `bold`, `italic`), so a diff names
-// what the CLI actually painted.
-import { BG_BASE, BODY_FG, BOLD_OF, FG_BASE, xterm256Hex } from "./palette.js";
+// itself (`?#00d5ff`, `?ansi:36`, `faint`, `bold`, `italic`, a chip's wrong
+// `?chipfg…`/`?chipbold`), so a diff names what the CLI actually painted.
+import { BG_BASE, BODY_FG, BOLD_OF, FG_BASE, PALETTE, xterm256Hex } from "./palette.js";
 import { normalizeCells, type Cell, type SegmentLine } from "./normalize.js";
 
 /** One cell's raw SGR state. Colours are `#rrggbb`, or `ansi:<n>` for the 16 named colours. */
@@ -71,8 +71,23 @@ export function applySgr(state: SgrState, params: string): SgrState {
   return next;
 }
 
-/** One cell state → the canonical r4 token string (sorted, space-separated). */
-export function tokenOf(state: SgrState): string {
+const CHIPS: ReadonlySet<string> = new Set(["key", "tag", "pk", "inv"]);
+
+/** True when `fg` is the chip's own foreground (its truecolor value or its 256-tier hex). */
+function isChipFg(chip: string, fg: string): boolean {
+  const token = PALETTE.tokens[chip];
+  return fg !== "" && (fg === token?.fg?.toLowerCase() || fg === token?.fg_256?.hex.toLowerCase());
+}
+
+/**
+ * One cell state → the canonical r4 token string (sorted, space-separated).
+ * `ch` is the cell's character, when known: a chip's foreground and weight are
+ * part of the chip token, so they must be the palette's (`key`/`tag` white,
+ * `pk`/`inv` #0a0d11 bold, `tag` bold); a different one is named next to the
+ * chip (`?chipfg#a0a0a0`, `?chipfgdefault`, `?chipbold`). A blank cell shows no
+ * foreground or weight, so only its background counts.
+ */
+export function tokenOf(state: SgrState, ch?: string): string {
   const tokens = new Set<string>();
   let fg = (state.fg ?? "").toLowerCase();
   const bg = (state.bg ?? "").toLowerCase();
@@ -80,8 +95,11 @@ export function tokenOf(state: SgrState): string {
   if (bg) {
     const chip = BG_BASE.get(bg);
     tokens.add(chip ?? `?bg${bg}`);
-    // A chip's own foreground and weight are part of the chip token.
-    if (chip === "key" || chip === "tag" || chip === "pk" || chip === "inv") {
+    if (chip && CHIPS.has(chip)) {
+      if (ch === undefined || !/\s/u.test(ch)) {
+        if (!isChipFg(chip, fg)) tokens.add(`?chipfg${fg || "default"}`);
+        if (bold !== Boolean(PALETTE.tokens[chip]?.bold)) tokens.add("?chipbold");
+      }
       fg = "";
       bold = false;
     }
@@ -131,7 +149,7 @@ export function ansiLineToCells(line: string, start: SgrState = RESET_STATE): { 
     }
     if (ch === "\r") continue;
     if (/[\u0000-\u0008\u000b-\u001f\u007f]/u.test(ch)) continue;
-    cells.push({ ch, style: tokenOf(state) });
+    cells.push({ ch, style: tokenOf(state, ch) });
   }
   return { cells, end: state };
 }

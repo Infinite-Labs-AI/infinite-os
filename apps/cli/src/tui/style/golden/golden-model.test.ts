@@ -34,11 +34,23 @@ describe("SGR → r4 tokens", () => {
     expect(cells(`${ESC}[36mx`)[0]?.style).toBe("?ansi:6");
   });
 
-  it("a nested token inside a chip keeps the chip; specific resets end only their attribute", () => {
-    const state = applySgr(applySgr(RESET_STATE, "38;2;255;255;255;48;2;42;52;64"), "39");
-    expect(tokenOf(state)).toBe("key");
+  it("a nested reset inside a chip keeps the chip; specific resets end only their attribute", () => {
+    expect(tokenOf(applySgr(applySgr(RESET_STATE, "4;1;38;2;10;13;17;48;2;233;180;76"), "24"))).toBe("pk");
     expect(tokenOf(applySgr(applySgr(RESET_STATE, "4;38;2;86;200;232"), "24"))).toBe("cyan");
     expect(tokenOf(applySgr(applySgr(RESET_STATE, "1;38;2;233;180;76"), "22"))).toBe("amber");
+  });
+
+  it("a chip's foreground and weight are the palette's, or the diff names them", () => {
+    // key and tag: #ffffff (tag bold); pk and inv: #0a0d11 bold. 256-tier equivalents count.
+    expect(cells(`${ESC}[38;2;255;255;255;48;2;42;52;64mx`)[0]?.style).toBe("key");
+    expect(cells(`${ESC}[38;5;231;48;5;237mx`)[0]?.style).toBe("key");
+    expect(cells(`${ESC}[38;2;160;160;160;48;2;42;52;64mx`)[0]?.style).toBe("?chipfg#a0a0a0 key");
+    expect(cells(`${ESC}[48;2;42;52;64mx`)[0]?.style).toBe("?chipfgdefault key");
+    expect(cells(`${ESC}[1;38;2;255;255;255;48;2;86;200;232mx`)[0]?.style).toBe("?chipfg#ffffff inv");
+    expect(cells(`${ESC}[38;2;10;13;17;48;2;233;180;76mx`)[0]?.style).toBe("?chipbold pk");
+    expect(cells(`${ESC}[38;2;255;255;255;48;2;34;48;59mx`)[0]?.style).toBe("?chipbold tag");
+    // A blank cell shows no foreground or weight: only its background counts.
+    expect(cells(`${ESC}[48;2;42;52;64m ${ESC}[38;2;255;255;255mp${ESC}[39m `).map((cell) => cell.style)).toEqual(["key", "key", "key"]);
   });
 
   it("drops cursor and OSC sequences; carries the pen across rows", () => {
