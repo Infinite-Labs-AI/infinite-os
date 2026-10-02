@@ -30,8 +30,8 @@ describe("resolveTier", () => {
     expect(resolveTier({ NO_COLOR: "", COLORTERM: "truecolor" }, tty)).toBe("truecolor");
   });
 
-  it("follows FORCE_COLOR 0–3", () => {
-    expect(resolveTier({ FORCE_COLOR: "0", COLORTERM: "truecolor" }, tty)).toBe("mono");
+  it("follows FORCE_COLOR 0–3, with 0 meaning no escapes at all (plain, so chips bracket)", () => {
+    expect(resolveTier({ FORCE_COLOR: "0", COLORTERM: "truecolor" }, tty)).toBe("plain");
     expect(resolveTier({ FORCE_COLOR: "1", COLORTERM: "truecolor" }, tty)).toBe("16");
     expect(resolveTier({ FORCE_COLOR: "2" }, tty)).toBe("256");
     expect(resolveTier({ FORCE_COLOR: "3", TERM: "xterm" }, tty)).toBe("truecolor");

@@ -25,7 +25,9 @@ const TRUECOLOR_PROGRAMS = new Set(["vscode", "WezTerm", "ghostty"]);
  * 2. Not a TTY, `TERM=dumb` or `INFINITE_PLAIN_OUTPUT` → `plain`. No escape
  *    code of any kind reaches a pipe or a dumb terminal, NO_COLOR or not.
  * 3. `NO_COLOR` set and non-empty → `mono` (bold, underline, inverse only).
- * 4. `FORCE_COLOR=0|1|2|3` → mono / 16 / 256 / truecolor.
+ * 4. `FORCE_COLOR=0|1|2|3` → plain / 16 / 256 / truecolor. `0` turns chalk (and
+ *    so stock Ink) to level 0, which drops bold and inverse too, so `mono` chips
+ *    would vanish; `plain` keeps them readable as `[k]` brackets.
  * 5. A light background (`COLORFGBG`) → `16`, so the user's palette keeps contrast.
  * 6. `COLORTERM=truecolor|24bit` → truecolor.
  * 7. `TMUX` (without step 6) → `256`: tmux drops truecolor backgrounds unless configured.
@@ -46,7 +48,7 @@ export function resolveTier(env: NodeJS.ProcessEnv, stream: TierStream): Tier {
   }
   const forced = env.FORCE_COLOR?.trim();
   if (forced === "0") {
-    return "mono";
+    return "plain";
   }
   if (forced === "1") {
     return "16";
