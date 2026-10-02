@@ -43,6 +43,7 @@ import {
   type WizardRunPublic
 } from "../../src/wizard/contracts/bridge.js"
 import { shapeErrors } from "../../src/wizard/contracts/shape.js"
+import type { ReceiptsResponseFields } from "../../src/wizard/contracts/receipts.js"
 import type { TestMode, TestResult, TestRunFixtureCase } from "../../src/wizard/contracts/test-engine.js"
 
 const CONTRACTS_DIR = new URL("../../contracts/tag-wizard-v1/", import.meta.url)
@@ -85,6 +86,22 @@ export interface FakeDeployState {
   serving: DeployStatusResponse["serving"]
 }
 
+/**
+ * A deploy sequence for `prove`: the merge's own production build is canceled (or skipped), and a LATER
+ * deployment is serving production (`servingSha`, which may or may not descend from the merge).
+ */
+export function deployCanceledThenServing(servingSha: string, polls = 1): FakeDeployState[] {
+  const building: FakeDeployState = {
+    mergeDeployment: { state: "building", readyAt: null },
+    serving: { sha: "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d", readyAt: "2026-10-02T07:20:00.000Z", createdAt: "2026-10-02T07:18:00.000Z", ref: "main" }
+  }
+  const canceled: FakeDeployState = {
+    mergeDeployment: { state: "canceled", readyAt: null },
+    serving: { sha: servingSha, readyAt: "2026-10-02T09:45:00.000Z", createdAt: "2026-10-02T09:43:00.000Z", ref: "main" }
+  }
+  return [...Array.from({ length: polls }, () => building), canceled]
+}
+
 export interface FakeBridgeScript {
   link: LinkMode
   /** Polls answered `pending` before the scripted outcome. */
@@ -102,6 +119,8 @@ export interface FakeBridgeScript {
   deploy: FakeDeployState[]
   testResults: Partial<Record<TestMode, TestResult>>
   testPollsBeforeDone: number
+  /** The receipts answer (default: the fixture's verified run). */
+  receipts: ReceiptsResponseFields | null
   metaRelay: Omit<MetaRelayStatusResponse, "protocolVersion" | "requestId">
   errors: Partial<Record<BridgeVerbId, ScriptedError>>
 }
@@ -166,6 +185,7 @@ function defaultScript(): FakeBridgeScript {
     }),
     testResults: {},
     testPollsBeforeDone: 0,
+    receipts: null,
     metaRelay: relay as unknown as FakeBridgeScript["metaRelay"],
     errors: {}
   }
@@ -388,7 +408,7 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
         case "runs.get":
           return ok({ run: script.run })
         case "receipts":
-          return ok(strip(fixtureResponse("receipts")))
+          return ok(script.receipts ? { ...structuredClone(script.receipts) } : strip(fixtureResponse("receipts")))
         case "report": {
           const report = reqBody.report as { schema: string; runId: string }
           return ok({ id: randomUUID(), phase: reqBody.phase, storedAt: "2026-10-02T09:46:00.000Z", echo: { schema: report.schema, runId: report.runId } })
