@@ -734,7 +734,9 @@ export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender =>
     footnotes: draw.notes.lines().flatMap((line) => wrapText(line, ctx.width).map((part) => paint(part, "muted", ctx))),
     keys: [],
     okKey: null,
-    rowCount: selectableRows(asRecord(view.body)),
+    // r4: a ready table is browsed by row (`j k row`); one that carries a state
+    // (not measured, partial, out of date…) is read, not browsed (flow-numbers-02: no keys).
+    rowCount: view.state === "ready" ? selectableRows(asRecord(view.body)) : 0,
     ...(draw.hidden ? { hiddenColumns: draw.hidden } : {})
   };
 };

@@ -61,6 +61,12 @@ export interface CardKeys {
   copy?: boolean;
   /** `e` edits in the app. */
   edit?: boolean;
+  /**
+   * The yes already went out (a still-running card, r4 flow-pause-07): only
+   * the OK key ("check again") is offered. `n` still closes the card, but
+   * there is nothing left to decline, so the card and the bar never offer it.
+   */
+  decided?: boolean;
 }
 
 export interface KeyHint {
@@ -218,7 +224,7 @@ export function keyBarHints(ctx: KeyContext): KeyHint[] {
     const label = ctx.okLabel ?? "approve";
     hints.push({ key: ctx.okKey, label, ok: true, barLabel: terminalText(ctx.okVerb ?? "") || shortOkVerb(label) });
   }
-  hints.push({ key: "n", label: "dismiss", ...(reading ? { chipOnly: true } : {}) });
+  if (!card.decided) hints.push({ key: "n", label: "dismiss", ...(reading ? { chipOnly: true } : {}) });
   const tabs = cardTabs(card);
   if (tabs > 1) hints.push({ key: `1-${tabs}`, label: card.tabNoun || "switch" });
   if (card.page) hints.push({ key: "space", label: "next page" });
@@ -240,16 +246,15 @@ function cardTabs(card: CardKeys): number {
 /**
  * The hints the bar draws, in order: the state's own keys (each key once, the
  * first meaning wins, each in its bar words), then always `tab switch side`
- * and `/ commands`. A card's `?` stays off the bar: the card draws
- * `? what it does` inside itself (terminal-r4).
+ * and `/ commands`. `?` is never on the bar: a card, and a view with an
+ * explanation, draw `? what it does` inside themselves (terminal-r4).
  */
 export function keyBarShownHints(hints: readonly KeyHint[]): KeyHint[] {
   const always = new Set(ALWAYS_KEY_HINTS.map((hint) => hint.key));
-  const card = hints.some((hint) => hint.ok || hint.key === "n");
   const seen = new Set<string>();
   const shown: KeyHint[] = [];
   for (const hint of hints) {
-    if (always.has(hint.key) || seen.has(hint.key) || hint.chipOnly || (card && hint.key === "?")) {
+    if (always.has(hint.key) || seen.has(hint.key) || hint.chipOnly || hint.key === "?") {
       continue;
     }
     seen.add(hint.key);

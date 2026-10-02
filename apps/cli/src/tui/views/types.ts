@@ -96,6 +96,8 @@ export interface ViewRender {
 export type KindRender = Omit<ViewRender, "head" | "source" | "fixAsk" | "quiet"> & {
   /** The body follows the state's sentence on the next row, with no blank between them (r4 receipts, partial images). */
   joinsReason?: boolean;
+  /** The body draws `? what it does` itself (a card), so the shell does not add it. */
+  offersExplain?: boolean;
 };
 
 export type KindRenderer<K extends AnswerViewKind> = (view: AnswerViewEnvelopeV1<K>, ctx: ViewRenderCtx) => KindRender;

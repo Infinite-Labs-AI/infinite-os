@@ -44,13 +44,13 @@ const RUNS_WHERE: Record<string, string> = {
 
 export function renderJob(view: AnswerViewEnvelopeV1<"job">, ctx: ViewRenderCtx): KindRender {
   const body: Record<string, unknown> = isRecord(view.body) ? view.body : {};
-  const steps: unknown[] = Array.isArray(body.steps) ? body.steps : [];
   return {
     detail: isSettledWithoutRunning(view) ? afterwordLines(view, ctx) : jobLines(view.body, ctx),
     footnotes: [],
     keys: jobKeys(body, ctx),
     okKey: null,
-    rowCount: steps.length
+    // The steps tick off on their own; nothing follows a selection, so j/k select nothing (r4: no `j k`).
+    rowCount: 0
   };
 }
 

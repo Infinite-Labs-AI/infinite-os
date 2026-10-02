@@ -267,6 +267,8 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
       card: {
         view: documents.length > 0,
         viewOpen: documentOpen,
+        // The yes already went out: `n` only closes the card, so it is not offered (r4 flow-pause-07).
+        ...(!live && !retryable ? { decided: true } : {}),
         tabs: documentOpen ? documents.length : 0,
         ...(documentOpen ? tabNounOf(documents) : {}),
         page: paging

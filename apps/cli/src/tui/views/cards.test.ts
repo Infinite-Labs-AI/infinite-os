@@ -326,6 +326,22 @@ describe("the approval card, as r4 draws it", () => {
     expect(step("P")).toBeNull();
   });
 
+  it("flow-pause-07 still running: the yes already went out, so the card offers only `p check again`, never `n dismiss` (run-r2 MUST 2)", () => {
+    const view = pause({
+      state: "outcome_unknown", outcome: "unknown", retry: "safe_resend",
+      stateReason: { code: "still_running", words: "Meta hasn't confirmed the pause yet.", short: "Still running" },
+      approval: { ...PAUSE_APPROVAL, confirmLabel: "check again (won't pause twice)" }
+    });
+    const render = approvalRender(view, cardCtx());
+    // `?` stays (the card says what it does, inside); `n` is gone.
+    expect(render.keys.map((hint) => hint.key)).toEqual(["p", "?"]);
+    const plain = render.lines.map((line) => line.replace(/\u001b\[[0-9;]*m/gu, "")).join("\n");
+    expect(plain).toContain(" p  check again (won't pause twice)");
+    expect(plain).not.toContain("dismiss");
+    // `n` still closes the card (nothing is declined: the yes is out), so the user is never stuck on it.
+    expect(cardKeyStep(resolveKey("n", {} as Key, render.keyCtx), render, CARD_UI_START).effect).toEqual({ type: "close" });
+  });
+
   it("view-07-launch: the effect in dim first, the tree (NEW in bold green, names bold), then the chips", () => {
     const view = decode({
       kind: "launch", tool: "propose_launch_ads", title: "Launch 3 ads", state: "needs_yes",

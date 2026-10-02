@@ -27,7 +27,15 @@ const OPEN_CARD_STATES = new Set(["needs_yes", "needs_answer", "applying", "outc
 export function renderChange(view: AnswerViewEnvelopeV1<"change">, ctx: ViewRenderCtx): KindRender {
   const notes = new FootnoteBook();
   const detail = changeViewLines(view, ctx, notes);
-  return { detail, footnotes: notes.lines(), keys: [], okKey: null, rowCount: 0 };
+  // A card ends with its own `? what it does` (r4 `card()`), the view's explanation included.
+  return { detail, footnotes: notes.lines(), keys: [], okKey: null, rowCount: 0, ...(drawnAsCard(view) ? { offersExplain: true } : {}) };
+}
+
+/** Whether the change is drawn as a card: done, or still open with a card approval (or running its yes). */
+function drawnAsCard(view: AnswerViewV1): boolean {
+  if (isSettledWithoutRunning(view)) return false;
+  const approval = isRecord(view.approval) && view.approval.kind === "card" ? view.approval : null;
+  return view.state === "done" || (OPEN_CARD_STATES.has(view.state) && (approval !== null || view.state === "applying"));
 }
 
 function changeViewLines(view: AnswerViewV1, ctx: ViewRenderCtx, notes: FootnoteBook): string[] {
@@ -94,12 +102,11 @@ function changeCard(view: AnswerViewV1, title: string, tone: CardTone, content: 
  * drawn as a card (done, or still open with a card approval); else "".
  */
 export function changeCardSummary(view: AnswerViewV1): string {
-  if (view.kind !== "change" || isSettledWithoutRunning(view)) {
+  if (view.kind !== "change" || !drawnAsCard(view)) {
     return "";
   }
   const approval = isRecord(view.approval) && view.approval.kind === "card" ? view.approval : null;
-  const drawnAsCard = view.state === "done" || (OPEN_CARD_STATES.has(view.state) && (approval !== null || view.state === "applying"));
-  return drawnAsCard ? viewText(approval?.summary) : "";
+  return viewText(approval?.summary);
 }
 
 /** The width inside a card drawn at `ctx.width`. */

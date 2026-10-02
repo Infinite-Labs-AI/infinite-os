@@ -25,9 +25,9 @@ const RUNNING_STATES = new Set(["working", "applying", "background"]);
 export function renderImages(view: AnswerViewEnvelopeV1<"images">, ctx: ViewRenderCtx): KindRender {
   const detail = isSettledWithoutRunning(view) ? afterwordLines(view, ctx) : imagesLines(view, ctx);
   const keys = view.appLink && ctx.caps.open ? [{ key: "o", label: "open" }] : [];
-  const items: unknown[] = isRecord(view.body) && Array.isArray(view.body.items) ? view.body.items : [];
   // r4 "Partial": the rows follow the state's sentence (`◐ 2 of 3 creatives`) directly.
-  return { detail, footnotes: [], keys, okKey: null, rowCount: items.length, ...(view.state === "partial" ? { joinsReason: true } : {}) };
+  // The rows only report progress (nothing follows a selection), so j/k select nothing (r4: no `j k`).
+  return { detail, footnotes: [], keys, okKey: null, rowCount: 0, ...(view.state === "partial" ? { joinsReason: true } : {}) };
 }
 
 /** The view's link goes to the Library (where made images are saved). */

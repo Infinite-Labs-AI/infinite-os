@@ -565,6 +565,26 @@ describe("view focus: the latest turn keeps its keys until the next submit", () 
     expect(viewKeyHints(viewFocusAfterTurnDone(envelope({})))).toEqual([]);
   });
 
+  it("`j k` only where moving shows something: never on images or a job, nor on a table that is not ready (run-r2 MUST 2)", () => {
+    // r4 view-05 / view-08 / flow-images-*: the rows only report progress; nothing follows the selection.
+    for (const name of ["images-done", "images-codex", "job-running", "job-no-signal"]) {
+      const state = viewFocusAfterTurnDone(fixture(name));
+      expect(state.facts.rowCount, name).toBe(0);
+      expect(viewKeyHints(state).map((h) => h.key), name).not.toContain("j k");
+    }
+    // r4 flow-numbers-02: a not-measured table is read, not browsed (keys: none); a ready one keeps `j k row`.
+    const notMeasured = { ...numbersFixture(), state: "not_measured", stateReason: { code: "not_measured", words: "1 not measured", short: "1 not measured" } } as AnswerViewV1;
+    expect(viewKeyHints(viewFocusAfterTurnDone(notMeasured)).map((h) => h.key)).not.toContain("j k");
+    expect(viewKeyHints(viewFocusAfterTurnDone(numbersFixture()))[0]).toEqual({ key: "j k", label: "row" });
+  });
+
+  it("a view's own explanation offers `? what it does` inside the view, once; the bar never carries ? (run-r2 MUST 2)", () => {
+    const explained = envelope({ explain: "What it does." });
+    const drawn = renderView(explained, ctx());
+    expect(drawn.detail.filter((line) => line.includes("what it does"))).toEqual(["[?] what it does"]);
+    expect(renderView(envelope({}), ctx()).detail.join("\n")).not.toContain("what it does");
+  });
+
   it("r4's words in the bar: a table's rows are `j k row`, a document's tabs name what they are (run-2 M4)", () => {
     const numbers = viewFocusAfterTurnDone(numbersFixture());
     expect(viewKeyHints(numbers)[0]).toEqual({ key: "j k", label: "row" });

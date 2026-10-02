@@ -197,6 +197,20 @@ describe("keyBarHints", () => {
     expect(formatKeyBar(hints)).toBe("p pause   n dismiss");
   });
 
+  it("the bar never carries ? at all: a view or a done card offers `? what it does` inside itself (run-r2 MUST 2)", () => {
+    const viewHints = [{ key: "j k", label: "row" }, { key: "?", label: "what it does" }, { key: "tab", label: "switch side" }];
+    expect(keyBarText(viewHints)).toBe(" j k  row    tab  switch side    /  commands");
+    expect(keyBarText([{ key: "?", label: "what it does" }, { key: "tab", label: "switch side" }])).toBe(" tab  switch side    /  commands");
+  });
+
+  it("a card whose yes already went out offers only its OK key: no `n dismiss` (r4 flow-pause-07, run-r2 MUST 2)", () => {
+    const sent = card({ okLabel: "check again (won't pause twice)", okVerb: "check again", card: { decided: true } });
+    expect(keyBarHints(sent).map((h) => h.key)).toEqual(["p"]);
+    expect(keyBarText(keyBarHints(sent))).toBe(" p  check again    tab  switch side    /  commands");
+    // `n` still closes the card (never a decline: nothing is left to decline), so the user is never stuck on it.
+    expect(resolveKey("n", {} as Key, sent)).toEqual({ type: "dismiss" });
+  });
+
   it("shows ? only when there is an explanation, and o/w/r only with their capability", () => {
     const hints = keyBarHints(card({ okLabel: "Pause", explain: true, caps: { open: true, watch: true, retry: true } }));
     expect(hints.map((h) => h.key)).toEqual(["p", "n", "o", "w", "r", "?"]);

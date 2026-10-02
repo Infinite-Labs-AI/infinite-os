@@ -23,6 +23,7 @@ import {
   truncationLines,
   viewText
 } from "./primitives.js";
+import { explainChip } from "./card.js";
 import { managedApproval, managedApprovalLines, managedSummaryLines } from "./managed.js";
 import type { KindRender, KindRenderer, ViewRender, ViewRenderCtx } from "./types.js";
 
@@ -106,7 +107,9 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
       ...(managed ? managedApprovalLines(managed, shellCtx) : []),
       ...reconcileLines(view, shellCtx),
       ...truncationLines(view, shellCtx),
-      ...caveatLines(view, shellCtx)
+      ...caveatLines(view, shellCtx),
+      // `?` lives inside the view, never on the key bar (r4: every `? what it does` is in the thing it explains).
+      ...(!body?.offersExplain && (viewText(view.explain) !== "" || (managed?.summary ?? "") !== "") ? ["", explainChip(shellCtx)] : [])
     ],
     footnotes: body?.footnotes ?? [],
     keys: body?.keys ?? [],
