@@ -22,9 +22,11 @@ import type { Key } from "ink";
 import { printableImagesView } from "../../desktop/image-url-cut.js";
 import { resolveKey, type FocusKind, type KeyAction, type KeyContext, type KeyHint } from "../keys/keymap.js";
 import { DEFAULT_THEME, type Theme } from "../theme.js";
-import { truncatedMoreAsk, viewText } from "./primitives.js";
+import { truncatedMoreAsk, turnAsk, viewText } from "./primitives.js";
 import { renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
+
+export { turnAsk };
 
 /** What a key asks the session to do beyond redrawing. */
 export type ViewKeyEffect =
@@ -103,13 +105,13 @@ export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender
   const view = printableImagesView(given);
   return {
     rowCount: count(render.rowCount),
-    rowAsks: (render.rowAsks ?? []).map((ask) => viewText(ask) || null),
+    rowAsks: (render.rowAsks ?? []).map((ask) => turnAsk(ask)),
     tabs: count(render.tabs),
     pages: count(render.pages),
     hiddenColumns: count(render.hiddenColumns),
     explain: viewText(view.explain) !== "",
-    more: truncatedMoreAsk(view),
-    fixAsk: viewText(render.fixAsk) || null,
+    more: turnAsk(truncatedMoreAsk(view)),
+    fixAsk: turnAsk(render.fixAsk),
     livePageNext,
     rowCopies: (render.rowCopies ?? []).map((text) => viewText(text) || null),
     copy: viewText(render.copyText) || null

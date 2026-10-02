@@ -329,7 +329,17 @@ export function stateReasonLines(view: AnswerViewV1, ctx: ViewRenderCtx, fixAskB
 export function stateFixAsk(view: AnswerViewV1): string | null {
   const reason = isRecord(view.stateReason) ? view.stateReason : null;
   const fix = reason && isRecord(reason.fix) ? reason.fix : null;
-  return viewText(fix?.ask) || null;
+  return turnAsk(fix?.ask);
+}
+
+/**
+ * An ask a view key may send: a NEW user turn, never a command. An ask is
+ * host data (part of it can come from tool results), so one that starts with
+ * `/` (`/exit`, `/connect …`) is dropped rather than run as a slash command.
+ */
+export function turnAsk(value: unknown): string | null {
+  const text = viewText(value).trim();
+  return text && !text.startsWith("/") ? text : null;
 }
 
 /** `shown of total · reason · m for more`, for the kinds whose bodies page (numbers, list). */

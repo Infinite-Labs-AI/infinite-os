@@ -79,7 +79,7 @@ import {
   type LivePageDirection
 } from "./transcript-static.js";
 import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
-import { resolveViewKey, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
+import { resolveViewKey, turnAsk, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
 import { renderLiveTurn, type LiveTurnRender } from "../views/layout.js";
 import {
@@ -1533,8 +1533,10 @@ export function InkInteractiveSessionApp({
     const next = resolveViewKey(input, viewFocus, key, facts);
     setViewFocus(next);
     if (next.effect?.type === "ask") {
-      // `next` and `more` are NEW user turns, never direct tool calls.
-      submitLine(next.effect.text);
+      // `next` and `more` are NEW user turns, never direct tool calls and never
+      // slash commands (`turnAsk` drops an ask that starts with `/`).
+      const ask = turnAsk(next.effect.text);
+      if (ask) submitLine(ask);
     } else if (next.effect?.type === "page_live") {
       pageLive("next");
     } else if (next.effect?.type === "copy") {

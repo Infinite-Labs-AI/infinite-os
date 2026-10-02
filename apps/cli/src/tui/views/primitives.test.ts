@@ -11,7 +11,7 @@ import { liveRegionCap } from "../ink/transcript-static.js";
 import { displayWidth } from "../lib/display-width.js";
 import { resolveTheme } from "../theme.js";
 import type { Msg } from "../types.js";
-import { HANDLED_KIND_KEYS, resolveViewKey, viewFocusAfterTurnDone, viewKeyHints } from "./focus.js";
+import { HANDLED_KIND_KEYS, resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints } from "./focus.js";
 import { layoutTurn, paneWidths, renderLiveTurn, stepLines } from "./layout.js";
 import { cellText, FootnoteBook } from "./primitives.js";
 import { renderView } from "./registry.js";
@@ -422,6 +422,24 @@ describe("view focus: the latest turn keeps its keys until the next submit", () 
     const engaged = resolveViewKey("", s0, { tab: true });
     expect(viewKeyHints(engaged).map((h) => h.key)).toEqual(["enter", "tab"]);
     expect(resolveViewKey("", engaged, { return: true }).effect).toEqual({ type: "ask", text: "connect meta" });
+  });
+
+  it("a view's ask is a new user turn, never a command: an ask starting with / is dropped", () => {
+    const view = envelope({
+      state: "not_connected",
+      stateReason: { code: "nc", words: "Meta is not connected.", fix: { label: "Quit", ask: "  /exit" } }
+    });
+    const s0 = viewFocusAfterTurnDone(view);
+    expect(s0.facts.fixAsk).toBeNull();
+    const engaged = resolveViewKey("", s0, { tab: true });
+    expect(resolveViewKey("", engaged, { return: true }).effect).toBeNull();
+    const list = listViewFixture();
+    const withSlash = { ...list, next: [{ label: "Quit", ask: "/quit" }, { label: "Pause", ask: "pause Hook A" }] } as AnswerViewV1;
+    const facts = viewKeyFacts(withSlash, renderView(withSlash, ctx()));
+    expect(facts.rowAsks).not.toContain("/quit");
+    expect(facts.rowAsks).toContain("pause Hook A");
+    const more = { ...list, body: { ...(list.body as unknown as Record<string, unknown>), truncated: { shown: 3, total: 9, more: { label: "more", ask: "/exit" } } } } as AnswerViewV1;
+    expect(viewKeyFacts(more, renderView(more, ctx())).more).toBeNull();
   });
 
   it("? toggles the explanation only when there is one", () => {
