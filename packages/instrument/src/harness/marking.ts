@@ -12,7 +12,7 @@ import { basename, join } from "node:path"
 
 import { assertWriteTargetInsideRoot, writeFileAtomic } from "../frameworks/shared.js"
 
-import { GITIGNORE_FENCE_END, GITIGNORE_FENCE_START, recordGitignoreBlock, recordHarnessFile } from "./outputs.js"
+import { ensureGitignoreFence, recordHarnessFile, type GitignoreFenceChange } from "./outputs.js"
 import { readSourceFile, splitLines, walkSourceFiles } from "./scan.js"
 
 export const PROPOSED_CONVERSIONS_RELATIVE_PATH = ".infinite/conversions.proposed.json"
@@ -437,26 +437,21 @@ export function writeProposal(root: string, proposal: ConversionProposal): strin
 }
 
 /**
- * The proposal quotes DOM text and hrefs, so it must never be committed: append a fenced
- * ignore block to .gitignore (creating the file when absent). Returns what happened.
+ * The proposal quotes DOM text and hrefs, so it must never be committed: make .gitignore carry the
+ * fenced ignore block (creating the file when absent). The block also covers the wizard's own run
+ * directory, the harness report and its brief (`GITIGNORE_FENCE_PATHS`); an old one-line fence is
+ * rewritten to the full block, never left as is. Returns what happened.
  */
-export function ensureProposedIgnored(root: string): "present" | "appended" | "created" {
-  const absolutePath = join(root, ".gitignore")
-  const block = [GITIGNORE_FENCE_START, PROPOSED_CONVERSIONS_RELATIVE_PATH, GITIGNORE_FENCE_END].join("\n")
-  if (!existsSync(absolutePath)) {
-    assertWriteTargetInsideRoot(root, absolutePath)
-    writeFileAtomic(absolutePath, `${block}\n`)
-    recordGitignoreBlock(root, block, true)
-    return "created"
-  }
-  const current = readFileSync(absolutePath, "utf8")
-  if (current.split(/\r?\n/).some((line) => line.trim() === PROPOSED_CONVERSIONS_RELATIVE_PATH)) {
-    return "present"
-  }
-  const separator = current === "" || current.endsWith("\n") ? "" : "\n"
-  writeFileAtomic(absolutePath, `${current}${separator}${block}\n`)
-  recordGitignoreBlock(root, block, false)
-  return "appended"
+export function ensureProposedIgnored(root: string): GitignoreFenceChange {
+  return ensureGitignoreFence(root)
+}
+
+/**
+ * The wizard's fence: the same block, written AFTER `before`'s branch switch so it lands on the wizard's
+ * branch (the clean-tree check exempts `.gitignore`).
+ */
+export function ensureWizardGitignoreFence(root: string): GitignoreFenceChange {
+  return ensureGitignoreFence(root)
 }
 
 // ---------------------------------------------------------------------------------------------
