@@ -11,6 +11,7 @@ import {
 import type { InSessionConfirmationAction } from "../../desktop/confirm-in-session.js";
 
 const source = readFileSync(fileURLToPath(new URL("./interactive-session.tsx", import.meta.url)), "utf8");
+const cardSource = readFileSync(fileURLToPath(new URL("./confirm-card.tsx", import.meta.url)), "utf8");
 
 // A representative (already-redacted) pending write confirmation, mirroring what
 // `desktop-turn-source.parsePendingConfirmations` surfaces from a `done` frame.
@@ -97,11 +98,13 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
   });
 
   it("scrubs the un-redacted summary through terminalText before rendering", () => {
-    // The overlay render runs the summary through terminalText (the details are
-    // redacted upstream → rendered verbatim); receipts are scrubbed by
-    // confirmResultLines.
-    expect(source).toContain("terminalText(pending.summary");
-    expect(source).toContain("detail.label}: ${detail.value}");
+    // The card (confirm-card.tsx) runs the summary through terminalText; the
+    // details are redacted upstream and scrubbed again as they become rows;
+    // receipts are scrubbed by confirmResultLines.
+    expect(source).toContain('import { ConfirmActionMenu, fallbackCardRowCount } from "./confirm-card.js";');
+    expect(source).not.toContain("function ConfirmActionMenu(");
+    expect(cardSource).toContain("terminalText(pending.summary)");
+    expect(cardSource).toContain("label: terminalText(detail.label), value: terminalText(detail.value)");
   });
 
   it("blocks the queued-line drain while a confirmation is pending", () => {
@@ -165,10 +168,10 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
 
       await waitFor(() => output.text().includes("ready"));
       await sendKeys(input, "publish it\r");
-      // The overlay renders the summary + redacted details + affordance.
-      await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
-      expect(output.text()).toContain("Publish landing page to production");
+      // The card: the summary in its border, the redacted details as rows, the keys inside.
+      await waitFor(() => output.text().includes("Publish landing page to production"), 4_000, output.text);
       expect(output.text()).toContain("acme.example.com");
+      expect(output.text()).not.toContain("Approve this write?");
       // Old desktop (no approval view): the bar names y Confirm and n dismiss.
       expect(output.text()).toContain("y Confirm   n dismiss");
 
@@ -211,7 +214,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
 
       await waitFor(() => output.text().includes("ready"));
       await sendKeys(input, "publish it\r");
-      await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
+      await waitFor(() => output.text().includes("Publish landing page to production"), 4_000, output.text);
 
       await sendKeys(input, "n");
       await waitFor(() => output.text().includes("✕ Dismissed — nothing was executed."), 4_000, output.text);
@@ -249,7 +252,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
 
       await waitFor(() => output.text().includes("ready"));
       await sendKeys(input, "publish it\r");
-      await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
+      await waitFor(() => output.text().includes("Publish landing page to production"), 4_000, output.text);
 
       await sendKeys(input, "\r");
       await sendKeys(input, "\x1b");

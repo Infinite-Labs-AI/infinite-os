@@ -61,6 +61,7 @@ import {
 import { isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
 import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, type KeyAction, type KeyContext } from "../keys/keymap.js";
+import { ConfirmActionMenu, fallbackCardRowCount } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import {
   inkLatestTurnRows,
@@ -3024,58 +3025,6 @@ function ConnectConfirmMenu({
   );
 }
 
-// The in-session write gate (cloud brain, Plan 2). Purely presentational — all
-// key handling stays in the single `useInput` owner. Renders the head pending
-// confirmation: the summary (scrubbed through `terminalText` — it is NOT covered
-// by the upstream redaction contract, and its `<Text>` child reaches the raw
-// terminal) then each already-redacted `label: value` detail VERBATIM (mirroring
-// the readline card's `renderConfirmationCard`), then the `?` explanation when it
-// is open. The keys (named OK key, `n dismiss`, `?`) live in the `KeyBar` below.
-function ConfirmActionMenu({
-  card,
-  explainText,
-  pending,
-  theme,
-  width
-}: {
-  /** The card drawn from its approval view (views/approval.ts), else null (an old desktop). */
-  card: ApprovalRender | null;
-  /** The scrubbed `?` text when the explanation is open, else null. */
-  explainText: string | null;
-  pending: InSessionConfirmationAction | null;
-  theme: Theme;
-  width: number;
-}) {
-  if (!pending) {
-    return null;
-  }
-  if (card) {
-    // Every line is already scrubbed, coloured and laid out to `width`.
-    return (
-      <Box flexDirection="column" width={width}>
-        {card.lines.map((line, index) => (
-          <Text key={`card-${index}`} wrap="truncate-end">{line}</Text>
-        ))}
-      </Box>
-    );
-  }
-  return (
-    <Box flexDirection="column" width={width}>
-      <Text color={theme.color.warning}>
-        {truncateCells(`Approve this write? — ${terminalText(pending.summary, "action")}`, width)}
-      </Text>
-      {pending.confirmationDetails.map((detail, index) => (
-        <Text color={theme.color.muted} key={`${detail.label}-${index}`}>
-          {truncateCells(`  ${detail.label}: ${detail.value}`, width)}
-        </Text>
-      ))}
-      {explainText ? (
-        <Text color={theme.color.text} wrap="wrap">{`? ${explainText}`}</Text>
-      ) : null}
-    </Box>
-  );
-}
-
 // Image drafts in progress (`creative.draft`), one line per run. Text only.
 function CreativeDraftLines({ lines, theme, width }: { lines: readonly string[]; theme: Theme; width: number }) {
   if (!lines.length) {
@@ -3203,11 +3152,8 @@ function liveOverlayRows({
   if (confirmAction && confirmCardRows !== null) {
     rows += confirmCardRows;
   } else if (confirmAction) {
-    // Summary + details; the key hints moved to the KeyBar (counted by the caller).
-    rows += 1 + confirmAction.confirmationDetails.length;
-    if (confirmExplain) {
-      rows += wrapAnsi(`? ${confirmExplain}`, Math.max(1, width), { trim: false, hard: true }).split("\n").length;
-    }
+    // The r4 card drawn from the details (confirm-card.tsx), its `?` text inside it.
+    rows += fallbackCardRowCount(confirmAction, confirmExplain, width);
   }
   return rows;
 }

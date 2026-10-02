@@ -354,9 +354,10 @@ function parsePendingConfirmations(
       MAX_CONFIRMATION_LABEL_CHARS,
       "action"
     );
+    const appSummary = nonEmptyString(value.summary);
     const summary = boundedTerminalText(
       redactSensitiveTerminalText(
-        nonEmptyString(value.summary) ?? actionId.replaceAll("_", " ")
+        appSummary ?? actionId.replaceAll("_", " ")
       ),
       MAX_CONFIRMATION_VALUE_CHARS,
       "action"
@@ -376,6 +377,8 @@ function parsePendingConfirmations(
       turnId: turnId ?? "",
       confirmationHandle,
       summary,
+      // No summary from the app: the words above are the tool's name, which a card never shows as its title.
+      ...(appSummary ? {} : { summaryFromTool: true as const }),
       confirmationDetails,
       confirmFieldsCapable,
       ...(view ? { view } : {})

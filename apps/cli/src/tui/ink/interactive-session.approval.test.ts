@@ -43,7 +43,7 @@ describe("the write card draws its approval view (CI-runnable)", () => {
       onSubmitLine: async () => ({ messages: [] })
     }));
     expect(out).toContain("Pause ad “Hook A”?");
-    expect(out).toContain("status  on → paused");
+    expect(out).toContain("│ status   on → paused");
     expect(out).toContain("p Pause   n dismiss");
     // The old card's summary line is not drawn when the view is.
     expect(out).not.toContain("Approve this write?");
@@ -57,9 +57,12 @@ describe("the write card draws its approval view (CI-runnable)", () => {
       initialPendingConfirmations: [card("change-pause-card", { view: undefined })],
       onSubmitLine: async () => ({ messages: [] })
     }));
-    expect(out).toContain("Approve this write? — Pause ad Hook A");
-    expect(out).toContain("Ad: Hook A");
+    // The same r4 card, from the details: the summary in the border, the rows, the keys inside.
+    expect(out).toContain("┌─ Pause ad Hook A ─");
+    expect(out).toContain("│ Ad       Hook A");
+    expect(out).toContain("│  y  Confirm    n  dismiss");
     expect(out).toContain("y Confirm   n dismiss");
+    expect(out).not.toContain("Approve this write? —");
   });
 
   it("a send card offers v view; a card whose desktop can't take fields asks to update", () => {

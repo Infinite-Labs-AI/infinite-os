@@ -189,6 +189,29 @@ describe("createDesktopTurnSource", () => {
     ]);
   });
 
+  it("marks a summary made from the tool's name, so the card never titles itself with it", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "queued",
+          data: { turnId: "turn-9" },
+          actionCalls: [
+            { status: "requires_confirmation", confirmationHandle: "h1", actionId: "mcp__infinite_app__propose_pause_meta_entity" },
+            { status: "requires_confirmation", confirmationHandle: "h2", actionId: "propose_pause", summary: "Pause ad Hook B" }
+          ]
+        }
+      ]
+    });
+    const r = await createDesktopTurnSource(client).runTurn("pause it", undefined, () => {}, new AbortController().signal);
+    const [fromTool, fromApp] = r.pendingConfirmations!;
+    expect(fromTool!.summary).toBe("mcp infinite app propose pause meta entity");
+    expect(fromTool!.summaryFromTool).toBe(true);
+    expect(fromApp!.summary).toBe("Pause ad Hook B");
+    expect(fromApp!.summaryFromTool).toBeUndefined();
+  });
+
   it("derives redacted confirmation details from raw action input when none supplied", async () => {
     const client = fakeClient({
       sessionCapable: true,
