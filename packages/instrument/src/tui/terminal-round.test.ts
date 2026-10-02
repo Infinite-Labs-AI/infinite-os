@@ -262,6 +262,11 @@ describe("QA #12: the Learn cards name what the run knows", () => {
     expect(frame({ snapshot }).map(stripAnsi).join("\n")).toMatch(/Reviewer ·+ Codex \(read-only\)/)
   })
 
+  it("every Learn value that can sit beside its label does (a value pushed to a second row loses its dot leader)", () => {
+    const text = frame({ snapshot: makeSnapshot({ currentStep: "keys", learn: "keys", steps: stepRows({ keys: { state: "running" } }) }) }).map(stripAnsi).join("\n")
+    for (const label of ["PostHog project key", "GA4 measurement ID", "Meta pixel"]) expect(text).toMatch(new RegExp(`${label} ·+ your connection`))
+  })
+
   it("a workspace name is outside text: it goes through the sanitiser", () => {
     const sanitize = makeTestSanitizer()
     const snapshot = makeSnapshot({ currentStep: "link", learn: "link", learnFacts: { workspace: "Acme\x1b[2J" }, steps: stepRows({ link: { state: "running" } }) })

@@ -57,9 +57,9 @@ export const LEARN_CARDS: { readonly [Id in LearnId]: LearnCard } = {
     title: "Keys from Infinite",
     sub: "Public IDs only.",
     rows: [
-      ["PostHog project key", "from your connection", "g"],
-      ["GA4 measurement ID", "from your connection", "g"],
-      ["Meta pixel", "from your connection", "g"],
+      ["PostHog project key", "your connection", "g"],
+      ["GA4 measurement ID", "your connection", "g"],
+      ["Meta pixel", "your connection", "g"],
       ["Server-lane secret", "saved on Vercel", "i"]
     ]
   },
