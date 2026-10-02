@@ -329,6 +329,22 @@ describe("review (read-only, detached worktree)", () => {
     expect(run.argv!.join(" ")).not.toContain("mcp_servers")
   })
 
+  it("review I1 P1-4: a Claude review made while denied the PR's own files is never returned as a review", async () => {
+    const { head, git, repo } = reviewRepo()
+    const fakes = fakeAgents({ turns: [{ structured: REVIEW, denials: ["app/page.tsx"] }] })
+    dirs.push(fakes.home)
+    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "b" })
+    expect(result).not.toEqual(REVIEW)
+    expect(result).toHaveProperty("error")
+  })
+
+  it("negative: a denial of a repo secret it is denied on purpose (.env) still returns the review", async () => {
+    const { head, git, repo } = reviewRepo()
+    const fakes = fakeAgents({ turns: [{ structured: REVIEW, denials: [".env.local"] }] })
+    dirs.push(fakes.home)
+    expect(await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "b" })).toEqual(REVIEW)
+  })
+
   it("returns unparseable for output that breaks review.schema.json (negative)", async () => {
     const { head, git, repo } = reviewRepo()
     const fakes = fakeAgents({ turns: [{ structured: { ...REVIEW, verdict: "approve" } }] })

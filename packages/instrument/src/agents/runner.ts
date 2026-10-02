@@ -44,6 +44,8 @@ import type { GitOps } from "../wizard/contracts/git-host.js"
 import type { AgentQuestion, CheckRunner, ChecklistItem, Claim } from "../wizard/contracts/jobs.js"
 import {
   buildClaudeReviewerArgv,
+  reviewerDenyCoveringCwd,
+  reviewerWasBlind,
   buildClaudeWorkerArgv,
   claudeMcpConfig,
   claudeModelRejected,
@@ -598,6 +600,9 @@ export class AgentRunnerImpl implements AgentRunner {
     let child: ReturnType<AgentProcessRegistry["spawn"]>
     let outputPath: string | null = null
     if (input.reviewer === "claude_code") {
+      // Review I1 P1-4: a reviewer whose own worktree is under one of its Read denies would review nothing.
+      const cwd = await resolveRealpath(input.worktreeDir)
+      if (reviewerDenyCoveringCwd(sensitive, cwd) !== null) return { outcome: "error", review: null, modelRejected: false }
       const argv = buildClaudeReviewerArgv({
         sensitive,
         systemPrompt: `${SYSTEM_PROMPT_HEADER}\n\n${input.brief}`,
@@ -624,6 +629,8 @@ export class AgentRunnerImpl implements AgentRunner {
           if (event.kind === "rate_limit" && claudeUsageSignals(event.event).some((signal) => signal.kind === "rejected")) return stop("out_of_usage")
           if (event.kind === "result") {
             if (event.apiErrorStatus === 429) return stop("out_of_usage")
+            // A review made while denied the PR's own files is not a review: never posted (review I1 P1-4).
+            if (reviewerWasBlind(event.permissionDenials, cwd)) return stop("error")
             structured = event.structuredOutput
           }
         }

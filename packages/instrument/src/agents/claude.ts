@@ -61,6 +61,32 @@ export function sensitiveDenies(paths: readonly SensitivePath[], tools: readonly
   return out
 }
 
+/**
+ * The sensitive path whose `Read(//…)` deny would cover the reviewer's own cwd, or null (review I1 P1-4: a
+ * reviewer denied its own worktree reviews nothing). Both sides are realpaths.
+ */
+export function reviewerDenyCoveringCwd(paths: readonly SensitivePath[], cwd: string): string | null {
+  for (const entry of paths) {
+    if (cwd === entry.path || (entry.kind === "dir" && cwd.startsWith(entry.path.endsWith("/") ? entry.path : `${entry.path}/`))) return entry.path
+  }
+  return null
+}
+
+/** Repo-secret file names a reviewer is denied on purpose (B20); a denial of anything else in its worktree means it was blind. */
+const EXPECTED_REVIEWER_DENIALS = /(?:^|\/)(?:\.env[^/]*|\.npmrc|\.netrc)$/
+
+/**
+ * True when a Claude reviewer's `permission_denials` hit its own worktree on a file it needed (anything but
+ * the repo secrets it is denied on purpose): the review it returns was made blind and is not posted.
+ */
+export function reviewerWasBlind(denials: ReadonlyArray<{ toolName: string; path: string | null }>, worktree: string): boolean {
+  return denials.some((denial) => {
+    if (denial.path === null) return false
+    const inside = !denial.path.startsWith("/") || denial.path === worktree || denial.path.startsWith(`${worktree}/`)
+    return inside && !EXPECTED_REVIEWER_DENIALS.test(denial.path)
+  })
+}
+
 function modelArgs(model: ModelChoice): string[] {
   return [...(model.model ? ["--model", model.model] : []), "--effort", model.effort]
 }

@@ -35,7 +35,7 @@ export interface CreateGitOpsOptions {
   cwd: string
   env: Readonly<Record<string, string | undefined>>
   runner?: ProcessRunner
-  /** Where reviewer worktrees go; default `~/Library/Caches/infinite-tag/<runKey>/worktrees`. */
+  /** Where reviewer worktrees go; default `~/Library/Caches/infinite-tag-review/<runKey>/worktrees` (outside the denied wizard cache). */
   worktreeRoot?: string
   runKey?: string
   gitBin?: string

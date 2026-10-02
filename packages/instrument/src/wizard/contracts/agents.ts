@@ -391,6 +391,14 @@ export function agentArgvViolations(kind: AgentKind, argv: readonly string[]): s
  */
 export const WIZARD_TOKEN_SCRATCH_HOME_RELATIVE = "Library/Caches/infinite-tag" as const
 
+/**
+ * The reviewer's detached worktrees (review I1 P1-4): under `$HOME` (so the Codex profile's HOME deny still
+ * covers them for every other agent role) but OUTSIDE the wizard's cache root, which is a sensitive path every
+ * Claude agent is denied: a reviewer whose own cwd sits under a `Read(//…/**)` deny reads nothing.
+ * `<home>/Library/Caches/infinite-tag-review/<runKey>/worktrees`.
+ */
+export const WIZARD_REVIEW_WORKTREE_HOME_RELATIVE = "Library/Caches/infinite-tag-review" as const
+
 /** Claude tools: the worker's set and the reviewer's set. Never Bash or Web tools. */
 export const CLAUDE_WORKER_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep"] as const
 export const CLAUDE_REVIEWER_TOOLS = ["Read", "Glob", "Grep"] as const
