@@ -657,7 +657,7 @@ describe("job (r4 Job)", () => {
       [["dim", "· Ready for you"]],
       []
     ]);
-    expect(out[8]).toEqual([["dim", "usually about 4 min · Runs in the cloud · keeps going after this turn"]]);
+    expect(out[8]).toEqual([["dim", "usually about 4 min · keeps going while you chat"]]);
     expect(out[9]).toEqual([["dim", "Lands in:"], ["", " "], ["cyan u", "Blog & AEO › Production ↗"]]);
   });
 });

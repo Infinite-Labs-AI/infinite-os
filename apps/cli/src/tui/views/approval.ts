@@ -239,7 +239,7 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   const reason = isRecord(view.stateReason) ? viewText(view.stateReason.words) : "";
   if (!live && reason) {
     // r4 "Still running": the state's glyph, then the app's words, in amber.
-    footer.push(...paragraphIn(`${stateHeadFor(view).glyph} ${reason}`, documentOpen ? docWidth : inner, "amber", ctx));
+    footer.push("", ...paragraphIn(`${stateHeadFor(view).glyph} ${reason}`, documentOpen ? docWidth : inner, "amber", ctx));
   }
   footer.push(...reconcileLines(view, documentOpen ? { ...innerCtx, width: docWidth } : innerCtx));
   if (documentOpen && ui.explainOpen && explain) {
