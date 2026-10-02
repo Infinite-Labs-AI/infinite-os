@@ -1648,8 +1648,14 @@ export function InkInteractiveSessionApp({
   // terminal-r4's frame, top to bottom (D1): [first-run inventory] · top bar ·
   // rule · the latest turn (or the boot frame) · the card and other overlays ·
   // rule · composer · completions · the key bar, LAST.
+  //
+  // The frame is the TERMINAL's width and clips whatever is wider (run-2 M2).
+  // On a narrowing resize Ink redraws at once, before `columns` follows the
+  // resize, so that one frame still holds rows drawn for the old width. Unclipped,
+  // the terminal wraps each of them into several rows, more than Ink counts and
+  // erases next time, and torn rows of the old answer stay on screen.
   return (
-    <Box flexDirection="column" width={columns}>
+    <Box flexDirection="column" overflowX="hidden" width="100%">
       {showHomeInventory && homeInventory ? (
         <HomeInventory
           columns={columns}
