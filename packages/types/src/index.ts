@@ -341,6 +341,11 @@ export interface ChatResponse {
   modelProvider?: "codex" | "claude";
   modelName?: string;
   modelAuthSource?: string;
+  /**
+   * Set only when the tool rounds ran out and the one tool-free answer call failed or returned no
+   * text, so the turn ended on the round-limit sentence. Carries why that call failed.
+   */
+  roundLimitFallbackReason?: string;
 }
 
 /**

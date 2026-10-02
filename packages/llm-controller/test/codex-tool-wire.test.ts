@@ -118,6 +118,33 @@ describe("model tool wire shape", () => {
     expect(requests[0].body.tools).toEqual([]);
   });
 
+  it("keeps the tools but forbids calling them when a request sets toolChoice none (Codex)", async () => {
+    const requests: CapturedRequest[] = [];
+    const client = createConfiguredModelClient({ env: codexEnv(), fetch: capturingFetch(requests, CODEX_RESPONSE) });
+
+    await client.complete({ systemPrompt: "s", userMessage: "u", tools: tools(), toolResults: [], toolChoice: "none" });
+    await client.complete({ systemPrompt: "s", userMessage: "u", tools: tools(), toolResults: [] });
+
+    expect(requests[0].body.tool_choice).toBe("none");
+    expect(requests[0].body.tools).toHaveLength(2);
+    expect(requests[1].body).not.toHaveProperty("tool_choice");
+  });
+
+  it("keeps the tools but forbids calling them when a request sets toolChoice none (Claude)", async () => {
+    const env = { GROWTH_OS_HOME: growthHome, HOME: emptyHome, ANTHROPIC_API_KEY: "test-anthropic-key" };
+    writeInfiniteOsModelSelection({ provider: "claude", model: "claude-test" }, env);
+    const requests: CapturedRequest[] = [];
+    const client = createConfiguredModelClient({ env, fetch: capturingFetch(requests, CLAUDE_RESPONSE) });
+
+    await client.complete({ systemPrompt: "s", userMessage: "u", tools: tools(), toolResults: [], toolChoice: "none" });
+    await client.complete({ systemPrompt: "s", userMessage: "u", tools: tools(), toolResults: [] });
+
+    // The tools stay declared so the request matches the earlier rounds' cached prefix; "none" forbids calling them.
+    expect(requests[0].body.tool_choice).toEqual({ type: "none" });
+    expect(requests[0].body.tools).toHaveLength(2);
+    expect(requests[1].body).not.toHaveProperty("tool_choice");
+  });
+
   it("leaves the Claude tool wire unchanged: no strict key, input_schema byte-identical", async () => {
     const env = { GROWTH_OS_HOME: growthHome, HOME: emptyHome, ANTHROPIC_API_KEY: "test-anthropic-key" };
     writeInfiniteOsModelSelection({ provider: "claude", model: "claude-test" }, env);
