@@ -34,6 +34,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
+import { buildVerdict } from "../../checks/build.js"
 import { disposeSeal, Fence, heavyDirWritesDuring, NestedBranchMovedError, sealFinalTree, verifySeal, type FenceBlock, type TreeSeal } from "../../agents/fence.js"
 import { matchesAnyGlob, normalizeRelPath } from "../../agents/glob.js"
 import { finalSealPath, snapshotDir, wizardCacheRoot } from "../../agents/paths.js"
@@ -714,18 +715,10 @@ class JobsIo {
   private buildVerdict(): Promise<CheckResult> {
     if (!this.buildPromise) {
       this.buildPromise = (async () => {
-        const build = await this.deps.checks.build()
         // A build that could not run (no sandbox inside another sandbox, a spawn failure) or was skipped for
-        // an ambiguous lockfile proves nothing either way: undetermined, never a pass (B26).
-        const couldNotRun = (build as { error?: string | null }).error
-        if (!build.ok && couldNotRun) return this.result("build", "B", "undetermined", `test_error — the build could not run: ${couldNotRun}`)
-        if (build.ok) return this.result("build", "B", "pass")
-        if (build.failureSignature.length === 0) return this.result("build", "B", "undetermined", "test_error — the build did not run to a verdict")
-        this.baseline ??= this.deps.checks.buildBaseline()
-        const baseline = await this.baseline
-        const fresh = build.failureSignature.filter((failure) => !baseline.failureSignature.includes(failure))
-        if (fresh.length === 0) return this.result("build", "B", "pass", "red before this run too; no new failures")
-        return this.result("build", "B", "problem", `new build failures: ${fresh.slice(0, 3).join("; ")}`)
+        // an ambiguous lockfile proves nothing either way: undetermined, never a pass (B26, one rule: `buildVerdict`).
+        const verdict = await buildVerdict(await this.deps.checks.build(), () => (this.baseline ??= this.deps.checks.buildBaseline()))
+        return this.result("build", "B", verdict.state, verdict.reason)
       })()
     }
     return this.buildPromise

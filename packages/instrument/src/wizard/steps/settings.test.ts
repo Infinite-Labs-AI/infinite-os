@@ -10,7 +10,7 @@ import { freshState, makeContext, makeDeps, nodeWizardFs } from "../../../test/w
 import { openTagBridge } from "../../bridge/client.js"
 import type { WizardRunState } from "../contracts/state.js"
 import { KEYS_RESULT_SCHEMA, writeKeysResult } from "../handoff/keys-result.js"
-import { conversionDeclaration, step } from "./settings.js"
+import { conversionDeclaration, PROTOCOL_1_DEDUPES, step } from "./settings.js"
 
 // Every way to start a process, spied: the settings step must never start one (no `vercel`, ever).
 vi.mock("node:child_process", async (importOriginal) => {
@@ -307,10 +307,20 @@ describe("step settings: Meta relay pixel", () => {
 })
 
 describe("conversionDeclaration", () => {
+  it("§3z.7 (A27): no protocol-1 declaration carries visitor_ttl (the cloud refuses it), downloads included", () => {
+    const names = ["download", "app_download", "file_download", "signup", "lead", "booking", "purchase", "start_trial", "subscribe", "pricing_page_cta"]
+    for (const name of names) {
+      const declaration = conversionDeclaration(name)
+      expect(declaration.dedupe, name).not.toBe("visitor_ttl")
+      expect(PROTOCOL_1_DEDUPES).toContain(declaration.dedupe)
+    }
+    expect(PROTOCOL_1_DEDUPES).not.toContain("visitor_ttl")
+  })
+
   it("maps names to the cloud's CONVERSION_TYPES (Subscribe = custom + label)", () => {
     expect(conversionDeclaration("start_trial")).toEqual({ name: "start_trial", type: "trial", dedupe: "account" })
     expect(conversionDeclaration("purchase")).toEqual({ name: "purchase", type: "purchase", dedupe: "event" })
-    expect(conversionDeclaration("download")).toEqual({ name: "download", type: "download", dedupe: "visitor_ttl" })
+    expect(conversionDeclaration("download")).toEqual({ name: "download", type: "download", dedupe: "event" })
     expect(conversionDeclaration("subscribe")).toEqual({ name: "subscribe", type: "custom", dedupe: "account", label: "Subscribe" })
     expect(conversionDeclaration("pricing_page_cta")).toEqual({ name: "pricing_page_cta", type: "custom", dedupe: "event", label: "Pricing page cta" })
   })

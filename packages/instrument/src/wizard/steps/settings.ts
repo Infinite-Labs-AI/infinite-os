@@ -23,15 +23,28 @@ import { readKeysResult } from "../handoff/keys-result.js"
 
 const META = WIZARD_STEP_META.settings
 
-/** How a conversion name is declared (§3b `conversions`; Subscribe = custom + label "Subscribe", §3j.5). */
+/**
+ * How a conversion name is declared (§3b `conversions`; Subscribe = custom + label "Subscribe", §3j.5).
+ * §3z.7 (A27): protocol 1 never declares `visitor_ttl` (it needs a TTL the protocol has no field for, and the
+ * cloud refuses it as `visitor_ttl_needs_ttl_minutes`), so a download counts once per event.
+ */
 export function conversionDeclaration(name: string): ConversionDeclaration {
+  const declaration = declarationOf(name)
+  if (!PROTOCOL_1_DEDUPES.includes(declaration.dedupe)) throw new Error(`conversion "${name}" would be declared with dedupe "${declaration.dedupe}", which protocol 1 never sends`)
+  return declaration
+}
+
+/** §3z.7 (A27): the dedupe values protocol 1 declares (`visitor_ttl` needs a TTL field protocol 1 does not have). */
+export const PROTOCOL_1_DEDUPES: readonly ConversionDedupe[] = ["event", "session", "account"]
+
+function declarationOf(name: string): ConversionDeclaration {
   const table: Array<{ names: string[]; type: ConversionType; dedupe: ConversionDedupe; label?: string }> = [
     { names: ["signup", "sign_up", "signed_up", "registration", "complete_registration", "account_created"], type: "signup", dedupe: "account" },
     { names: ["lead", "contact", "contact_form", "form_submit", "demo_request", "request_demo", "waitlist"], type: "lead", dedupe: "event" },
     { names: ["booking", "book_demo", "booked", "book_call", "schedule"], type: "booking", dedupe: "event" },
     { names: ["purchase", "order", "order_completed", "checkout_complete", "checkout_completed"], type: "purchase", dedupe: "event" },
     { names: ["start_trial", "trial_started", "trial_start", "trial"], type: "trial", dedupe: "account" },
-    { names: ["download", "app_download", "file_download"], type: "download", dedupe: "visitor_ttl" },
+    { names: ["download", "app_download", "file_download"], type: "download", dedupe: "event" },
     { names: ["subscribe", "subscription_started", "subscribed"], type: "custom", dedupe: "account", label: "Subscribe" }
   ]
   const row = table.find((candidate) => candidate.names.includes(name))

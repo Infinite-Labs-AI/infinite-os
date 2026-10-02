@@ -240,3 +240,23 @@ export function gradeBuild(checkId: string, current: BuildResult, baseline: Buil
   }
   return make("pass", null, "the build fails exactly as it did before this run (the baseline was already red); nothing new broke")
 }
+
+/**
+ * The B verdict the jobs step and a review fix round share (B26): a build that could not run (an `error`, e.g.
+ * no sandbox inside another sandbox or a spawn failure) or that ended red with no failure signature proves
+ * nothing, so it is UNDETERMINED (`test_error`), never a pass; red counts as a pass only when every failure is
+ * already in the baseline's. `baseline` is read only when it is needed.
+ */
+export async function buildVerdict(
+  build: BuildResult,
+  baseline: () => Promise<Pick<BuildResult, "failureSignature">>
+): Promise<{ state: "pass" | "problem" | "undetermined"; reason?: string }> {
+  const couldNotRun = (build as { error?: string | null }).error
+  if (!build.ok && couldNotRun) return { state: "undetermined", reason: `test_error — the build could not run: ${couldNotRun}` }
+  if (build.ok) return { state: "pass" }
+  if (build.failureSignature.length === 0) return { state: "undetermined", reason: "test_error — the build did not run to a verdict" }
+  const known = (await baseline()).failureSignature
+  const fresh = build.failureSignature.filter((failure) => !known.includes(failure))
+  if (fresh.length === 0) return { state: "pass", reason: "red before this run too; no new failures" }
+  return { state: "problem", reason: `new build failures: ${fresh.slice(0, 3).join("; ")}` }
+}

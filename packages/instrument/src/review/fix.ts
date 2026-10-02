@@ -11,6 +11,7 @@ import { AGENT_LIMITS, type AgentKind, type AgentRunResult } from "../wizard/con
 import type { WizardContext, WizardDeps } from "../wizard/contracts/deps.js"
 import { JOB_TABLE, type ChecklistItem, type CheckResult, type JobId } from "../wizard/contracts/jobs.js"
 import type { WizardStepId } from "../wizard/contracts/steps.js"
+import { buildVerdict } from "../checks/build.js"
 import { sub } from "./context.js"
 import { stripControl } from "./post.js"
 import type { Scanner } from "./scan.js"
@@ -194,15 +195,12 @@ export async function verifyFix(
   input: { runId: string; items: readonly ChecklistItem[]; editedFiles: readonly string[] }
 ): Promise<{ items: ChecklistItem[]; buildOk: boolean }> {
   const at = ctx.now().toISOString()
-  const build = await deps.checks.build()
-  let buildOk = build.ok
-  if (!build.ok) {
-    const baseline = await deps.checks.buildBaseline()
-    const known = new Set(baseline.failureSignature)
-    buildOk = build.failureSignature.every((signature) => known.has(signature))
-  }
+  // B26 (one rule with the jobs step): a build that could not run, or ended red with no failure signature, is
+  // UNDETERMINED and the round is not ok; never a vacuous pass over an empty signature.
+  const verdict = await buildVerdict(await deps.checks.build(), () => deps.checks.buildBaseline())
+  let buildOk = verdict.state === "pass"
   const results: CheckResult[] = [
-    { checkId: "build", tier: "B", state: buildOk ? "pass" : "problem", ...(buildOk ? {} : { reason: "new build failures" }), at, runId: input.runId }
+    { checkId: "build", tier: "B", state: verdict.state, ...(verdict.reason && verdict.state !== "pass" ? { reason: verdict.reason } : {}), at, runId: input.runId }
   ]
   // B29 / §3g.4 step 5: a fix commit re-runs the offline (T0) checks the run's jobs already passed, on the
   // install's own artifacts (rebuilt from the connection's keys and the plan's answers, as the jobs step does).
