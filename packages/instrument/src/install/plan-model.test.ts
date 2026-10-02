@@ -103,7 +103,7 @@ describe("the plan model asks ONLY the four decisions", () => {
 
   it("the agent budget line says who pays; no agent → an info line, never an approval", () => {
     const withAgent = buildPlanModel(input({ candidates: [candidate("identify_reset", "auth")] }))
-    expect(withAgent.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "approval", text: "Claude Code: 1 job · up to 30 turns or 10 min · your Claude plan pays" })
+    expect(withAgent.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "approval", text: "Claude Code: 1 job · Opus 4.8 at xhigh effort · up to 30 turns or 10 min · your Claude plan pays" })
     const none = buildPlanModel(input({ candidates: [candidate("identify_reset", "auth")], agent: null }))
     expect(none.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "info" })
   })

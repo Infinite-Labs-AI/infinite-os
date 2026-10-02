@@ -61,7 +61,12 @@ describe("step agent", () => {
       worker: "claude_code",
       reviewer: "codex",
       workerSession: null,
-      whoPays: { worker: { payer: "plan", label: "your Claude plan (max) pays" }, reviewer: { payer: "plan", label: "your ChatGPT plan pays" } }
+      whoPays: { worker: { payer: "plan", label: "your Claude plan (max) pays" }, reviewer: { payer: "plan", label: "your ChatGPT plan pays" } },
+      // B22: the pinned models and efforts the run uses (River, 10-02), recorded in the run state
+      models: {
+        worker: { model: "claude-opus-4-8", effort: "xhigh", fallback: false },
+        reviewer: { model: "gpt-6.1-sol", effort: "xhigh", fallback: false }
+      }
     })
     const subs = recorded.events.filter((event) => event.type === "step.sub").map((event) => event.fields.text)
     expect(subs).toContain("✓ Claude Code 2.1.287 · logged in · your Claude plan (max) pays")

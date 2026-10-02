@@ -90,7 +90,12 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
       reviewer: reviewer === "none" ? null : reviewer,
       // A session survives only for the same worker (a resume after a usage limit).
       workerSession: previous && previous.worker === (worker?.kind ?? null) ? previous.workerSession : null,
-      whoPays: { worker: worker?.whoPays ?? null, reviewer: reviewerInfo?.whoPays ?? null }
+      whoPays: { worker: worker?.whoPays ?? null, reviewer: reviewerInfo?.whoPays ?? null },
+      // B22: the model and effort each role runs with (a fallback to the user's default is recorded later).
+      models: {
+        worker: worker ? (previous?.models?.worker && previous.worker === worker.kind ? previous.models.worker : { model: AGENT_MODELS[worker.kind].model, effort: AGENT_MODELS[worker.kind].effort, fallback: false }) : null,
+        reviewer: reviewerInfo ? { model: AGENT_MODELS[reviewerInfo.kind].model, effort: AGENT_MODELS[reviewerInfo.kind].effort, fallback: false } : null
+      }
     }
   })
 

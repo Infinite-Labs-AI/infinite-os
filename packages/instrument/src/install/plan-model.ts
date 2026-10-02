@@ -18,7 +18,7 @@ import { createHash } from "node:crypto"
 
 import type { ImproveLine, ImproveLineKind, ProviderId } from "../types.js"
 import type { AgentKind, WhoPays } from "../wizard/contracts/agents.js"
-import { AGENT_LIMITS } from "../wizard/contracts/agents.js"
+import { AGENT_LIMITS, AGENT_MODELS } from "../wizard/contracts/agents.js"
 import type { AskAnswers, PlanLine, PlanLineKind } from "../wizard/contracts/asks.js"
 import type { BaselineResponseFields } from "../wizard/contracts/report.js"
 import type { TagHosting, TagKeys } from "../wizard/contracts/bridge.js"
@@ -661,7 +661,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         id: "agent_budget",
         kind: "agent_budget",
         text: name
-          ? `${name}: ${agentJobs} job${agentJobs === 1 ? "" : "s"} · up to ${AGENT_LIMITS.jobs.maxTurns} turns or ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min · ${input.agent?.whoPays?.label ?? "who pays: unknown"}`
+          ? `${name}: ${agentJobs} job${agentJobs === 1 ? "" : "s"} · ${AGENT_MODELS[input.agent!.worker!].label} at ${AGENT_MODELS[input.agent!.worker!].effort} effort · up to ${AGENT_LIMITS.jobs.maxTurns} turns or ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min · ${input.agent?.whoPays?.label ?? "who pays: unknown"}`
           : `No agent found: the ${agentJobs} agent job${agentJobs === 1 ? "" : "s"} are listed for you to do by hand.`,
         requires: name ? "approval" : "info"
       })

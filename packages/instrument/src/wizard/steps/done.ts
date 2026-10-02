@@ -57,6 +57,12 @@ function notesFor(ctx: WizardContext, report: Pick<ReportV2, "rows">): string[] 
   )
   if (hasSmallShare) notes.push(SAMPLE_FLOOR_NOTE)
   if (state.markers.prove.probePath || (state.markers.prove.infiniteEventIds?.length ?? 0) > 0) notes.push(REAL_VISIT_DISCLOSURE)
+  // B22: the model and effort the agents ran with (a fallback to the user's default model is said plainly).
+  const models = state.agent?.models
+  if (state.agent?.worker && models?.worker) {
+    const label = state.agent.worker === "codex" ? "Codex" : "Claude Code"
+    notes.push(models.worker.fallback ? `${label} ran on your default model (the pinned model is not on your plan), effort ${models.worker.effort}.` : `${label} ran ${models.worker.model} at ${models.worker.effort} effort.`)
+  }
   return notes
 }
 

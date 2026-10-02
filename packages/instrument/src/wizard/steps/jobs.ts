@@ -188,6 +188,12 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
       throw error
     }
     const extras = runExtras(result, open)
+    if (extras.modelFallback) {
+      // B22: the pinned model was refused; the user's default model ran (recorded for the run and the report).
+      ctx.state.update((runState) => {
+        if (runState.agent?.models?.worker) runState.agent.models.worker = { ...runState.agent.models.worker, model: null, fallback: true }
+      })
+    }
     if (sessionId(result.session) !== "") {
       session = result.session
       io.setSession(result.session)
