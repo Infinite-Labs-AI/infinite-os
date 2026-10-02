@@ -95,7 +95,8 @@ describe("Infinite OS migration stack", () => {
       "0078_trialing_metric_aliases.sql",
       "0079_meta_ads_adset_learning_observations.sql",
       "0080_meta_ads_adset_breakdown_windows.sql",
-      "0081_meta_ads_window_total_dimension.sql"
+      "0081_meta_ads_window_total_dimension.sql",
+      "0082_stripe_checkout_sessions.sql"
     ]);
   });
 
@@ -1106,7 +1107,8 @@ describe("Infinite OS migration stack", () => {
       "0078_trialing_metric_aliases.sql",
       "0079_meta_ads_adset_learning_observations.sql",
       "0080_meta_ads_adset_breakdown_windows.sql",
-      "0081_meta_ads_window_total_dimension.sql"
+      "0081_meta_ads_window_total_dimension.sql",
+      "0082_stripe_checkout_sessions.sql"
     ]);
   });
 
@@ -1255,6 +1257,24 @@ describe("Infinite OS migration stack", () => {
     expect(sql).not.toContain("drop table");
     expect(sql).not.toContain("drop column");
     expect(sql).not.toContain("delete ");
+  });
+
+  it("stores minimised Stripe Checkout sessions plus a typed capability/coverage state, idempotently (0082)", () => {
+    const migration = loadMigrations().find((candidate) => candidate.id === "0082_stripe_checkout_sessions.sql");
+    const sql = (migration?.sql ?? "").toLowerCase().replace(/--[^\n]*/g, "").replace(/\s+/g, " ").trim();
+    expect(sql).toContain("create table if not exists stripe_checkout_sessions (");
+    expect(sql).toContain("create table if not exists stripe_checkout_session_sync_state (");
+    expect(sql).toContain("unique (source_id, stripe_checkout_session_id)");
+    expect(sql).toContain("check (capability_state in ('unknown', 'available', 'missing_permission'))");
+    expect(sql).toContain("check ((capability_state = 'missing_permission') = (missing_permission is not null))");
+    expect(sql).toContain("create or replace view queryable.vw_stripe_checkout_session_coverage as");
+    // Minimised: no buyer identity or address column exists to be filled.
+    for (const forbidden of ["email", "customer_details", "shipping", "phone", "address", "metadata"]) {
+      expect(sql).not.toContain(forbidden);
+    }
+    expect(sql).not.toContain("drop ");
+    expect(sql).not.toContain("delete ");
+    expect(sql).not.toContain("alter ");
   });
 
   it("adds the nullable Meta posting Page column beside the pixel (0068)", () => {

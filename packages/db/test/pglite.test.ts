@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 81 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(81);
-    expect(firstRun).toHaveLength(81);
+  it("applied ALL 82 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(82);
+    expect(firstRun).toHaveLength(82);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -137,6 +137,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0079_meta_ads_adset_learning_observations.sql");
     expect(firstRun).toContain("0080_meta_ads_adset_breakdown_windows.sql");
     expect(firstRun).toContain("0081_meta_ads_window_total_dimension.sql");
+    expect(firstRun).toContain("0082_stripe_checkout_sessions.sql");
 
     // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
     // gate, makes this true on PGlite).
@@ -144,13 +145,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 81 rows", async () => {
+  it("created the schema_migrations ledger with all 82 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(81);
+    expect(ledger).toHaveLength(82);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0081_meta_ads_window_total_dimension.sql");
+    expect(ledger.at(-1)?.id).toBe("0082_stripe_checkout_sessions.sql");
   });
 
   it("0063 serves both PostHog views from per-(workspace, source, day) rollups — refresh, is_internal, idempotency, grain key, grants", async () => {
@@ -4517,6 +4518,69 @@ describe("0079 + 0080 + 0081 re-applied (the cloud engine's one-call execute_sql
       await pg.exec("insert into meta_ads_breakdown_coverage (workspace_id, source_id, ad_account_id, window_since, window_until, dimension, row_count) values ('w', 's', 'act_1', '2026-09-21', '2026-09-27', 'none', 1)");
       await expect(pg.exec("insert into meta_ads_breakdown_coverage (workspace_id, source_id, ad_account_id, window_since, window_until, dimension, row_count) values ('w', 's', 'act_1', '2026-09-21', '2026-09-27', 'platform_position', 1)"))
         .rejects.toThrow(/dimension_check/);
+    } finally {
+      await pg.close();
+    }
+  });
+});
+
+describe("0082 re-applied (the cloud engine's one-call execute_sql recipe can run a file twice)", () => {
+  it("creates the Checkout tables and coverage view once, and the view names every history state", async () => {
+    const { PGlite } = (await import("@electric-sql/pglite")) as unknown as {
+      PGlite: new () => { exec(sql: string): Promise<unknown>; query<T>(sql: string): Promise<{ rows: T[] }>; close(): Promise<void> };
+    };
+    const pg = new PGlite();
+    try {
+      await pg.exec(
+        "create schema queryable; create table workspaces (id text primary key);"
+          + " create table sources (id text primary key); create table raw_records (id text primary key);"
+          + " create role growth_os_worker; create role growth_os_tool_agent; create role growth_os_app;"
+          + " create role growth_os_read_api;"
+      );
+      const sql = loadMigrations().find((m) => m.id === "0082_stripe_checkout_sessions.sql")?.sql ?? "";
+      expect(sql).not.toBe("");
+      await pg.exec(sql);
+      await pg.exec(sql);
+
+      await pg.exec("insert into workspaces values ('w'); insert into sources values ('s1'), ('s2'), ('s3'), ('s4');");
+      const state = (source: string, columns: string, values: string) =>
+        `insert into stripe_checkout_session_sync_state (id, workspace_id, source_id${columns}) values ('st_${source}', 'w', '${source}'${values})`;
+      await pg.exec(state("s1", "", ""));
+      await pg.exec(state("s2", ", capability_state, missing_permission", ", 'missing_permission', 'Checkout Sessions: Read'"));
+      await pg.exec(state(
+        "s3",
+        ", capability_state, backfill_state, backfill_anchor, backfill_reached_created_at",
+        ", 'available', 'in_progress', '2026-10-02T00:00:00Z', '2026-03-01T10:00:00Z'"
+      ));
+      await pg.exec(state(
+        "s4",
+        ", capability_state, backfill_state, backfill_anchor, listed_through",
+        ", 'available', 'complete', '2026-10-01T00:00:00Z', '2026-10-02T11:55:00Z'"
+      ));
+      // A missing permission must name the permission; a granted one must not carry a stale name.
+      await expect(pg.exec(state("s1x", ", capability_state", ", 'missing_permission'"))).rejects.toThrow();
+
+      const { rows } = await pg.query<{
+        source_id: string; history_state: string; covers_all_history: boolean;
+        covered_from: Date | null; covered_through: Date | null;
+      }>(
+        "select source_id, history_state, covers_all_history, covered_from, covered_through"
+          + " from queryable.vw_stripe_checkout_session_coverage order by source_id"
+      );
+      const iso = (value: Date | null) => (value ? new Date(value).toISOString() : null);
+      expect(rows.map((row) => ({ ...row, covered_from: iso(row.covered_from), covered_through: iso(row.covered_through) })))
+        .toEqual([
+          { source_id: "s1", history_state: "not_started", covers_all_history: false, covered_from: null, covered_through: null },
+          { source_id: "s2", history_state: "missing_permission", covers_all_history: false, covered_from: null, covered_through: null },
+          {
+            source_id: "s3", history_state: "backfilling", covers_all_history: false,
+            covered_from: "2026-03-01T10:00:01.000Z", covered_through: "2026-10-02T00:00:00.000Z"
+          },
+          {
+            source_id: "s4", history_state: "complete", covers_all_history: true,
+            covered_from: null, covered_through: "2026-10-02T11:55:00.000Z"
+          }
+        ]);
     } finally {
       await pg.close();
     }

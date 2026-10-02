@@ -161,6 +161,22 @@ import {
   type StripeReconciliationRemoteState,
 } from "./stripe-reconcile.js";
 import { classifyStripeTrialEvents } from "./stripe-trial-spells.js";
+import {
+  STRIPE_CHECKOUT_SESSION_MAX_PAGES,
+  STRIPE_CHECKOUT_SESSIONS_PATH,
+  STRIPE_CHECKOUT_SESSIONS_PERMISSION,
+  planStripeCheckoutSessionListStep,
+  readStripeCheckoutSessionSyncState,
+  stripeCheckoutSessionCheckpointForStep,
+  stripeCheckoutSessionDeltaAdvance,
+  stripeCheckoutSessionRow,
+  stripeCheckoutSessionRowsDeduped,
+  stripeCheckoutSessionRowsFromEvents,
+  writeStripeCheckoutSessionCheckpoint,
+  writeStripeCheckoutSessionTruth,
+  type StripeCheckoutSessionCheckpoint,
+  type StripeCheckoutSessionRow,
+} from "./stripe-checkout-sessions.js";
 
 export interface MetaAdsFreshMedia {
   accountId:string;creativeId:string;slotKey:string;kind:"image"|"thumbnail";
@@ -262,6 +278,9 @@ export interface SyncPlan {
   // plus a 404 on the retrieve of the same id. Applied at CLOSE (never during extraction, which
   // must stay read-only) so the removal rolls back with everything else if the close fails.
   stripeDeletedInvoiceIds?: string[];
+  // Stripe-only. What this run's Checkout-session lane learned (capability, crawl/window progress,
+  // coverage advance) — persisted at CLOSE beside the other Stripe checkpoints.
+  stripeCheckoutSessionCheckpoint?: StripeCheckoutSessionCheckpoint;
   // Per-run provider request accounting, persisted to sync_runs.request_telemetry at CLOSE.
   requestTelemetry?: StripeRequestTelemetry;
   // Meta's equivalent request/page/retry/usage receipt. Separate from Stripe's rich telemetry type
@@ -440,6 +459,17 @@ export interface ConnectionTestResult {
   accountExternalId?: string;
   accountCurrency?: string;
   accountTimeZone?: string;
+  // OPTIONAL capabilities the credential cannot serve. The connection is still good — every
+  // endpoint the sync REQUIRES answered — but these features will read as unavailable until the
+  // user grants the named permission. Absent when there is no gap.
+  capabilityGaps?: ConnectorCapabilityGap[];
+}
+
+export interface ConnectorCapabilityGap {
+  capability: "stripe_checkout_sessions";
+  reason: "missing_permission";
+  // The provider's own permission name, worded as the Dashboard checkbox ("Checkout Sessions: Read").
+  permission: string;
 }
 
 export type SetupProviderId = "ga4" | "posthog" | "x";
@@ -1577,7 +1607,8 @@ type StripeSyncRow =
   | StripeInvoiceRow
   | StripeSubscriptionRow
   | StripeSubscriptionEventRow
-  | StripeCustomerRow;
+  | StripeCustomerRow
+  | StripeCheckoutSessionRow;
 
 const STRIPE_SUBSCRIPTION_LIST_EXPANDS = [
   "data.customer",
@@ -1616,6 +1647,19 @@ const STRIPE_SYNC_ENDPOINTS = [
   { path: "/v1/subscriptions", permission: "Subscriptions: Read" }
 ] as const;
 
+// OPTIONAL endpoints: read by the sync, but a key without them still syncs everything else. The
+// connect probe reads them too, and a missing permission is returned as a typed capability gap
+// instead of refusing the key — refusing would block subscriptions, invoices and MRR over a
+// feature the user may not even use. Anything other than a missing permission still fails the
+// probe exactly like a required endpoint.
+const STRIPE_OPTIONAL_SYNC_ENDPOINTS = [
+  {
+    path: STRIPE_CHECKOUT_SESSIONS_PATH,
+    permission: STRIPE_CHECKOUT_SESSIONS_PERMISSION,
+    capability: "stripe_checkout_sessions"
+  }
+] as const;
+
 // Stripe's own code for "this restricted key lacks a permission this endpoint requires". It is a
 // 403, which `fetchJson` has already turned into a non-retryable provider_auth_failed carrying the
 // provider body — so the body is matched textually here rather than re-plumbed through the
@@ -1648,12 +1692,19 @@ function stripeMissingPermission(error: unknown, known: string): string | null {
 async function assertStripeKeyCoversSyncEndpoints(
   credential: StripeCredential,
   secretKey: string
-): Promise<void> {
-  const results = await Promise.allSettled(
-    STRIPE_SYNC_ENDPOINTS.map((endpoint) =>
-      stripeGet<{ data: unknown[] }>(credential, secretKey, endpoint.path, { limit: "1" })
+): Promise<ConnectorCapabilityGap[]> {
+  const [results, optionalResults] = await Promise.all([
+    Promise.allSettled(
+      STRIPE_SYNC_ENDPOINTS.map((endpoint) =>
+        stripeGet<{ data: unknown[] }>(credential, secretKey, endpoint.path, { limit: "1" })
+      )
+    ),
+    Promise.allSettled(
+      STRIPE_OPTIONAL_SYNC_ENDPOINTS.map((endpoint) =>
+        stripeGet<{ data: unknown[] }>(credential, secretKey, endpoint.path, { limit: "1" })
+      )
     )
-  );
+  ]);
 
   const missing: string[] = [];
   let otherFailure: unknown;
@@ -1684,6 +1735,20 @@ async function assertStripeKeyCoversSyncEndpoints(
   if (otherFailure !== undefined) {
     throw otherFailure;
   }
+
+  const gaps: ConnectorCapabilityGap[] = [];
+  optionalResults.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      return;
+    }
+    const endpoint = STRIPE_OPTIONAL_SYNC_ENDPOINTS[index];
+    const permission = stripeMissingPermission(result.reason, endpoint.permission);
+    if (!permission) {
+      throw result.reason;
+    }
+    gaps.push({ capability: endpoint.capability, reason: "missing_permission", permission });
+  });
+  return gaps;
 }
 
 const stripeConnector = createConnector<StripeCredential, StripeSyncRow>({
@@ -1700,8 +1765,13 @@ const stripeConnector = createConnector<StripeCredential, StripeSyncRow>({
       );
       return { ok: true, mode: "live", provider: "stripe" };
     }
-    await assertStripeKeyCoversSyncEndpoints(credential, secretKey);
-    return { ok: true, mode: "live", provider: "stripe" };
+    const capabilityGaps = await assertStripeKeyCoversSyncEndpoints(credential, secretKey);
+    return {
+      ok: true,
+      mode: "live",
+      provider: "stripe",
+      ...(capabilityGaps.length > 0 ? { capabilityGaps } : {})
+    };
   },
   async planLive(db, request, credential) {
     const plan = await defaultPlan(
@@ -1789,13 +1859,17 @@ const stripeConnector = createConnector<StripeCredential, StripeSyncRow>({
         ? "stripe_subscription"
         : row.kind === "customer"
           ? "stripe_customer"
-          : "stripe_subscription_event",
+          : row.kind === "checkout_session"
+            ? "stripe_checkout_session"
+            : "stripe_subscription_event",
     payloadVersion: plan.mode === "fixture" ? "fixture-v1" : "live-v1",
     sourceUpdatedAt: plan.mode === "fixture"
       ? null
       : row.kind === "subscription_event"
         ? row.eventCreatedAt
-        : plan.cursorEnd,
+        : row.kind === "checkout_session"
+          ? row.observedAt
+          : plan.cursorEnd,
     payload: row
   })
 });
@@ -1905,7 +1979,7 @@ async function stripeExtractFullRefresh(
   lane: StripeLaneDecision
 ): Promise<StripeSyncRow[]> {
   const telemetry = plan.requestTelemetry;
-  const [invoices, subscriptions, subscriptionEvents] = await Promise.all([
+  const [invoices, subscriptions, subscriptionEvents, checkoutSessions] = await Promise.all([
     stripeReconcilePaidInvoices(db, request, plan, credential, secretKey),
     stripeList<StripeSubscriptionApi>(credential, secretKey, "/v1/subscriptions", {
       limit: "100",
@@ -1915,6 +1989,7 @@ async function stripeExtractFullRefresh(
       .then((listed) => stripeSubscriptionsWithCompleteItems(credential, secretKey, listed, telemetry))
       .then((listed) => stripeSubscriptionsWithConditionalPrices(credential, secretKey, listed, telemetry)),
     stripeReconcileSubscriptionEvents(db, request, plan, credential, secretKey),
+    stripeListCheckoutSessions(db, request, plan, credential, secretKey, "full"),
   ]);
   const rows: StripeSyncRow[] = [];
   const invoiceRows: StripeInvoiceRow[] = [];
@@ -1954,6 +2029,7 @@ async function stripeExtractFullRefresh(
       event.type as (typeof STRIPE_SUBSCRIPTION_EVENT_TYPES)[number],
     ))
     .map((event) => stripeSubscriptionEventRow(event, trialCheckpoint)));
+  rows.push(...checkoutSessions.rows);
 
   plan.stripeLaneCheckpoint = {
     lane: "full",
@@ -2115,6 +2191,16 @@ async function stripeExtractDelta(
     return [];
   }
 
+  // CHECKOUT SESSIONS. Every session event in the page upserts its row (zero extra reads), and an
+  // unfinished history crawl or open list window takes its next bounded step.
+  const checkoutEvents = stripeCheckoutSessionRowsFromEvents(events, {
+    fanoutFromMs: segment.fanoutFromMs,
+  });
+  telemetry?.recordUnparseableReachBackEvents(checkoutEvents.unparseableReachBackEventTypes);
+  const checkoutList = await stripeListCheckoutSessions(
+    db, request, plan, credential, secretKey, "delta"
+  );
+
   // OBSERVED DELETIONS. Deleting a DRAFT invoice is a routine dashboard action, and a refetch 404
   // for an invoice named by an `invoice.deleted` event in THIS window is an observed deletion, not
   // an outage.
@@ -2196,6 +2282,8 @@ async function stripeExtractDelta(
   const coupons = await stripeCouponsForSubscriptions(credential, secretKey, subscriptions, telemetry);
   rows.push(...subscriptions.map((sub) => stripeSubscriptionRow(sub, coupons)));
   rows.push(...customerApis.map((customer) => stripeCustomerRow(customer)));
+  // Event rows first, listed rows after: on an equal `observed_at` the later one wins the de-dupe.
+  rows.push(...stripeCheckoutSessionRowsDeduped([...checkoutEvents.rows, ...checkoutList.rows]));
   telemetry?.recordObjectsRefetched(
     invoiceApis.length + subscriptions.length + customerApis.length
   );
@@ -2248,6 +2336,19 @@ async function stripeExtractDelta(
           trialCheckpoint
         )));
     }
+    // A closed window that contains the Checkout coverage claim observed every session completion
+    // from the claim through its end. Never while a list step ran this run: that step owns the
+    // next advance, and its own checkpoint is what CLOSE applies.
+    const checkoutAdvance = checkoutList.step === "none"
+      ? stripeCheckoutSessionDeltaAdvance({
+        state: checkoutList.state,
+        fanoutFromMs: segment.fanoutFromMs,
+        segmentToExclusive: segment.segmentToExclusive,
+      })
+      : null;
+    if (checkoutAdvance !== null) {
+      plan.stripeCheckoutSessionCheckpoint = { listedThrough: checkoutAdvance };
+    }
     if (
       invoiceState?.backfill_state === "complete"
       && invoiceCutoffMs !== null
@@ -2282,6 +2383,66 @@ async function stripeExtractDelta(
   };
   plan.stripeLaneCheckpoint = deltaCheckpoint;
   return rows;
+}
+
+/**
+ * One bounded step of the Checkout-session LIST lane (see ./stripe-checkout-sessions.ts): the
+ * history crawl while it is unfinished, else a resumed or (full lane only) fresh incremental
+ * window. Sets `plan.stripeCheckoutSessionCheckpoint` for CLOSE.
+ *
+ * A key without `Checkout Sessions: Read` is a CAPABILITY GAP, not a sync failure: the 403 is
+ * recorded as `missing_permission` and the rest of the Stripe sync runs on. Every other failure
+ * propagates, exactly as it would from any required endpoint.
+ */
+async function stripeListCheckoutSessions(
+  db: InfiniteOsDb,
+  request: SyncRequest,
+  plan: SyncPlan,
+  credential: StripeCredential,
+  secretKey: string,
+  lane: "full" | "delta"
+): Promise<{
+  rows: StripeCheckoutSessionRow[];
+  step: "backfill" | "window" | "none";
+  state: Awaited<ReturnType<typeof readStripeCheckoutSessionSyncState>>;
+}> {
+  const state = await readStripeCheckoutSessionSyncState(db, request);
+  const step = planStripeCheckoutSessionListStep({
+    state,
+    lane,
+    cursorEndMs: new Date(plan.cursorEnd).getTime(),
+  });
+  if (step.kind === "none") return { rows: [], step: "none", state };
+
+  let page: StripeBoundedList<Record<string, unknown> & { id: string }>;
+  try {
+    page = await stripeListBounded<Record<string, unknown> & { id: string }>(
+      credential,
+      secretKey,
+      STRIPE_CHECKOUT_SESSIONS_PATH,
+      step.params,
+      step.startingAfter,
+      STRIPE_CHECKOUT_SESSION_MAX_PAGES,
+      plan.requestTelemetry
+    );
+  } catch (error) {
+    const permission = stripeMissingPermission(error, STRIPE_CHECKOUT_SESSIONS_PERMISSION);
+    if (!permission) throw error;
+    plan.stripeCheckoutSessionCheckpoint = {
+      capability: { state: "missing_permission", permission },
+    };
+    return { rows: [], step: step.kind, state };
+  }
+  const rows = page.items.map((session) => stripeCheckoutSessionRow(session, plan.cursorEnd, "list"));
+  plan.stripeCheckoutSessionCheckpoint = stripeCheckoutSessionCheckpointForStep({
+    step,
+    page,
+    rows,
+    priorReachedCreatedAt: state?.backfill_state === "in_progress"
+      ? state.backfill_reached_created_at
+      : null,
+  });
+  return { rows, step: step.kind, state };
 }
 
 const xConnector = createConnector<XCredential, XPostRow>({
@@ -4847,6 +5008,10 @@ async function writeStripeTruth(
     }
     if (row.kind === "customer") {
       await writeStripeCustomerTruth(tx, request, row, rawIds[index]);
+      continue;
+    }
+    if (row.kind === "checkout_session") {
+      await writeStripeCheckoutSessionTruth(tx, request, row, rawIds[index]);
       continue;
     }
     const invoice = row;
@@ -7593,6 +7758,9 @@ async function writeStripeCloseSuccess(
   // Invoice completeness is one bootstrap predicate, so land its durable checkpoint first. Both
   // operations remain inside the same outer CLOSE transaction and roll back together.
   await writeStripeInvoiceCheckpoint(tx, request, plan);
+  if (plan.stripeCheckoutSessionCheckpoint) {
+    await writeStripeCheckoutSessionCheckpoint(tx, request, plan.stripeCheckoutSessionCheckpoint);
+  }
   // The SAME CLOSE-time classifiers run for BOTH lanes. They read canonical state from our own
   // tables (not from the batch), so a delta run that touched three subscriptions still classifies
   // against the complete current subscription set — exactly as a full run does.

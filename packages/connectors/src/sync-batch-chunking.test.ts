@@ -141,6 +141,9 @@ describe("chunked syncExtractedBatch against real PGlite", () => {
           : lifecycleEventPage(url);
       } else if (url.pathname === "/v1/invoices") {
         body = invoicePage(url);
+      } else if (url.pathname === "/v1/checkout/sessions") {
+        // An account with no Checkout sales: the history crawl completes on its first page.
+        body = { data: [], has_more: false };
       } else if (url.pathname.startsWith("/v1/invoices/")) {
         // Per-invoice retrieval issued for each id discovered from an invoice.paid event.
         const invoiceId = decodeURIComponent(url.pathname.slice("/v1/invoices/".length));
