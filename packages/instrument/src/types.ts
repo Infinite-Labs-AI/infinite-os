@@ -266,9 +266,11 @@ export interface PosthogPublicArtifact {
   /** When present, the framework adapter injects the reverse-proxy rewrites. */
   proxy?: PosthogProxySpec
   /**
-   * PostHog's `defaults` bundle. ABSENT = "2026-01-30" (every new managed install, infinite.fast's
-   * value). The plan pins "2025-05-24" for a managed install made before it until the user approves the
-   * bump, because a new bundle changes what is measured ("measurement changed", never growth).
+   * PostHog's `defaults` bundle. ABSENT = keep what the site's managed PostHog already carries (read from
+   * the managed files the previous manifest lists; "2025-05-24" for every install made before 0.12), or
+   * "2026-01-30" on a fresh install (infinite.fast's value). Moving an existing install to a new bundle
+   * changes what is measured, so it happens only when this is set explicitly (an approved plan line), and
+   * the plan then says "measurement changed".
    */
   defaults?: "2025-05-24" | "2026-01-30"
   /**
@@ -528,6 +530,10 @@ export interface ProviderAdapter {
   plan(
     framework: SupportedFramework,
     artifact: WorkspaceInstallArtifacts[ProviderId] | undefined,
-    context?: { artifacts: WorkspaceInstallArtifacts }
+    context?: {
+      artifacts: WorkspaceInstallArtifacts
+      /** The `defaults` value the site's current MANAGED PostHog carries (absent = no managed PostHog yet). */
+      managedPosthogDefaults?: string
+    }
   ): ProviderPlanDraft
 }

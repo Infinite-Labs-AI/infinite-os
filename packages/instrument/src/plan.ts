@@ -4,6 +4,7 @@ import { conversionHelpersInstruction, conversionHelpersWanted } from "./convers
 import { getFrameworkAdapter, isSupportedFramework } from "./frameworks/index.js"
 import { normalizeAppRelativePath } from "./frameworks/shared.js"
 import { getProviderAdapter } from "./providers/index.js"
+import { managedPosthogDefaults } from "./providers/posthog.js"
 import { detectUnmanagedProviders, inspectWorkspace } from "./inspect.js"
 import { infiniteProxySpec } from "./workspace-artifacts.js"
 import { readInstallManifest } from "./manifest.js"
@@ -194,10 +195,12 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
     blockers.push(...capturePlan.blockers)
     instructions.push(...capturePlan.instructions)
   }
+  const posthogDefaultsOnDisk = managedPosthogDefaults(options.root, previousManifest)
   for (const providerId of providers) {
     const adapter = getProviderAdapter(providerId)
     const providerPlan = adapter.plan(inspectResult.framework, options.artifacts[providerId], {
-      artifacts: options.artifacts
+      artifacts: options.artifacts,
+      ...(posthogDefaultsOnDisk !== undefined ? { managedPosthogDefaults: posthogDefaultsOnDisk } : {})
     })
     assumptions.push(...providerPlan.assumptions)
     blockers.push(...providerPlan.blockers)

@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+
 import { resolveArtifactHostGuard, wrapGuardedSnippet, type HostGuardSpec } from "../host-guard.js"
 import type { InstallInstruction, ProviderAdapter, SupportedFramework } from "../types.js"
 import { isHtmlInjectedFramework } from "../types.js"
@@ -59,11 +62,28 @@ export const posthogProviderAdapter: ProviderAdapter = {
     }
 
     const options = artifact && typeof artifact === "object" ? (artifact as PosthogSnippetArtifactOptions) : {}
-    const requestedDefaults = options.defaults === undefined ? POSTHOG_DEFAULTS : options.defaults
+    // A re-install keeps the bundle the managed snippet already carries: moving it changes what PostHog
+    // measures, so only an explicit `defaults` (an approved plan line) moves it. Fresh installs get the
+    // current bundle.
+    const managedDefaults = context?.managedPosthogDefaults
+    const requestedDefaults = options.defaults === undefined ? (managedDefaults ?? POSTHOG_DEFAULTS) : options.defaults
     const defaults =
       requestedDefaults === POSTHOG_PREVIOUS_DEFAULTS ? POSTHOG_PREVIOUS_DEFAULTS : POSTHOG_DEFAULTS
+    const defaultsLines: string[] = []
     if (requestedDefaults !== POSTHOG_DEFAULTS && requestedDefaults !== POSTHOG_PREVIOUS_DEFAULTS) {
-      blockers.push(`PostHog defaults must be "${POSTHOG_DEFAULTS}" or "${POSTHOG_PREVIOUS_DEFAULTS}".`)
+      blockers.push(
+        options.defaults === undefined
+          ? `Your managed PostHog carries defaults "${String(requestedDefaults)}", which infinite-tag does not know. Set defaults to "${POSTHOG_DEFAULTS}" or "${POSTHOG_PREVIOUS_DEFAULTS}" explicitly.`
+          : `PostHog defaults must be "${POSTHOG_DEFAULTS}" or "${POSTHOG_PREVIOUS_DEFAULTS}".`
+      )
+    } else if (managedDefaults !== undefined && managedDefaults !== defaults) {
+      defaultsLines.push(
+        `Measurement changed: PostHog's defaults bundle moves from "${managedDefaults}" to "${defaults}" (PostHog's own pageview and capture settings change with it). Compare before and after across this date, not as growth.`
+      )
+    } else if (managedDefaults !== undefined && options.defaults === undefined && defaults !== POSTHOG_DEFAULTS) {
+      defaultsLines.push(
+        `PostHog keeps its defaults bundle "${defaults}" (what your managed install already has). Moving to "${POSTHOG_DEFAULTS}" changes what PostHog measures, so it is its own plan line.`
+      )
     }
     const sensitive = normalizeSensitivePaths(options.sensitivePaths)
     if ("error" in sensitive) blockers.push(sensitive.error)
@@ -80,6 +100,7 @@ export const posthogProviderAdapter: ProviderAdapter = {
       assumptions: ready
         ? [
             "PostHog wiring will use only the public projectKey and apiHost artifacts.",
+            ...defaultsLines,
             ...(guard.spec
               ? [
                   "PostHog starts only on your production hosts and any host that is not a preview or a laptop: previews (*.vercel.app, *.netlify.app, *.pages.dev) and localhost send nothing."
@@ -154,9 +175,33 @@ function posthogQueueOnlyStub(): string {
   ].join("\n")
 }
 
+/**
+ * The `defaults` value the site's MANAGED PostHog snippet carries today, read from the managed files the
+ * previous manifest lists. Undefined when the manifest has no managed PostHog. A managed PostHog whose
+ * files no longer show a value is treated as the bundle every published install before 0.12 carried.
+ */
+export function managedPosthogDefaults(
+  root: string,
+  previous: { providers: readonly string[]; files: readonly string[] } | null | undefined
+): string | undefined {
+  if (!previous || !previous.providers.includes("posthog")) return undefined
+  for (const file of previous.files) {
+    let contents: string
+    try {
+      contents = readFileSync(join(root, file), "utf8")
+    } catch {
+      continue
+    }
+    if (!contents.includes("posthog.init")) continue
+    const match = /defaults: '([0-9]{4}-[0-9]{2}-[0-9]{2})'/.exec(contents)
+    if (match) return match[1]
+  }
+  return POSTHOG_PREVIOUS_DEFAULTS
+}
+
 /** PostHog's `defaults` bundle for every new managed install (infinite.fast's value, inject L349). */
 export const POSTHOG_DEFAULTS = "2026-01-30"
-/** The bundle managed installs carried before; kept only while the user has not approved the bump. */
+/** The bundle managed installs carried before 0.12; a re-install keeps it until the user approves the move. */
 export const POSTHOG_PREVIOUS_DEFAULTS = "2025-05-24"
 
 interface PosthogSnippetArtifactOptions {
@@ -204,8 +249,9 @@ export function buildPostHogBootstrapSnippet(
   // session recording, persistence and opt-in state are PostHog's, exactly as if the founder had pasted
   // PostHog's own snippet — and a provider is never reduced WITHOUT a plan line the user approved
   // (decision 17's sensitive pages are exactly such a line). `defaults` opts into PostHog's default
-  // bundle (history-change pageviews included): '2026-01-30' for every new install, the previous
-  // '2025-05-24' only where the plan pinned it. The Infinite runtime forwards nothing into PostHog and
+  // bundle (history-change pageviews included): '2026-01-30' for every new install; a re-install keeps the
+  // bundle its managed snippet already carries (`managedPosthogDefaults`, '2025-05-24' before 0.12) until an
+  // approved plan line moves it. The Infinite runtime forwards nothing into PostHog and
   // never calls set_config / opt_in / opt_out on it; conversions reach PostHog because the site's own
   // code calls the managed helpers (decisions 9 and 13).
   //
