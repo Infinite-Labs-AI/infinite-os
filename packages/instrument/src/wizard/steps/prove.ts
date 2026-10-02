@@ -19,7 +19,7 @@ import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../cont
 import type { CheckResult } from "../contracts/jobs.js"
 import { RECEIPT_LIMITS, type LaneReceipt, type ReceiptLane, type ReceiptMarkers, type ReceiptsResponseFields } from "../contracts/receipts.js"
 import { REASONS, type Reason, type ReportColumnSnapshot } from "../contracts/report.js"
-import { WIZARD_PATHS } from "../contracts/state.js"
+import { WIZARD_PATHS, type WizardRunState } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import {
   TEST_LIMITS,
@@ -415,6 +415,21 @@ export interface ProveVisitRecord {
   visit: { result: TestResult; grades: Record<TestTool, CheckResult> } | null
 }
 
+type SavedMarkers = WizardRunState["markers"]["prove"]
+
+function savedProveMarkers(saved: SavedMarkers): boolean {
+  return (saved.infiniteEventIds?.length ?? 0) > 0 || !!saved.posthogDistinctId || !!saved.probePath || (saved.metaEventIds?.length ?? 0) > 0
+}
+
+function markersFromState(saved: SavedMarkers): ReceiptMarkers {
+  const markers: ReceiptMarkers = {}
+  if (saved.infiniteEventIds?.length) markers.infinite = { eventIds: saved.infiniteEventIds.slice(0, RECEIPT_LIMITS.maxInfiniteEventIds) }
+  if (saved.posthogDistinctId) markers.posthog = { distinctId: saved.posthogDistinctId }
+  if (saved.probePath) markers.serverLane = { probePath: saved.probePath }
+  if (saved.metaEventIds?.length) markers.metaCapi = { metaEventIds: saved.metaEventIds }
+  return markers
+}
+
 async function readOwnClaim(ctx: WizardContext, deps: WizardDeps, runId: string, mergeSha: string): Promise<ProveVisitRecord | null> {
   const text = await deps.fs.readText(join(ctx.root, PROVE_VISIT_PATH))
   if (text === null) return null
@@ -491,6 +506,11 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     if (bridgeErrorCode(error) !== "claimed_by_other") throw error
     const proofState = bridgeErrorState(error)
     ownClaim = await readOwnClaim(ctx, deps, runId, mergeSha)
+    // The run state's prove markers are written only by THIS run's winning visit: they prove the claim
+    // was ours even when the record is gone (its receipts are then read with those markers).
+    if (!ownClaim && savedProveMarkers(state.markers.prove)) {
+      ownClaim = { schema: PROVE_VISIT_SCHEMA, runId, mergeSha, claimedAt: "", visit: null }
+    }
     // Still `proving` under this run's own claim: the PATCH never landed, so this run sends it now.
     patchProofState = ownClaim !== null && (proofState === "proving" || proofState === null)
     claimNote = ownClaim
@@ -508,6 +528,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     if (ownClaim.visit) {
       visit = ownClaim.visit
       markers = receiptMarkersFrom(ownClaim.visit.result, expect)
+    } else if (savedProveMarkers(state.markers.prove)) {
+      markers = markersFromState(state.markers.prove)
     } else {
       visitError = "the real visit was interrupted before its results were saved (no second visit is made)"
     }
@@ -540,11 +562,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     }
   } else {
     ctx.emit.emit("step.sub", { step: "prove", text: `No second visit: ${claimNote}; reading its receipts.`, tone: "info" })
-    const saved = state.markers.prove
-    if (saved.infiniteEventIds?.length) markers.infinite = { eventIds: saved.infiniteEventIds.slice(0, RECEIPT_LIMITS.maxInfiniteEventIds) }
-    if (saved.posthogDistinctId) markers.posthog = { distinctId: saved.posthogDistinctId }
-    if (saved.probePath) markers.serverLane = { probePath: saved.probePath }
-    if (saved.metaEventIds?.length) markers.metaCapi = { metaEventIds: saved.metaEventIds }
+    markers = markersFromState(state.markers.prove)
   }
 
   const receipts = await readReceipts(ctx, deps, runId, markers)

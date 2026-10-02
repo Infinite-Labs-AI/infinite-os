@@ -279,6 +279,17 @@ describe("prove: a resume finishes its OWN claim (O1-06)", () => {
     expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_PROOF_INCOMPLETE", next: "continue" })
   })
 
+  it("the run state's own prove markers (written only by this run's visit) also mark the claim as ours: receipts by those markers, then the PATCH", async () => {
+    const bundle = fakeDeps({ bridge: { claim: { code: "claimed_by_other", state: "proving" } } })
+    const state = mergedState()
+    state.markers.prove = { infiniteEventIds: ["evt_FAKE0301"], posthogDistinctId: "0192-fake-distinct-4c03", probePath: "/__infinite_probe/7f3c2a91b0de", metaEventIds: [] }
+    const outcome = await step.run(fakeContext(state, {}, bundle.clock), bundle.deps)
+    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
+    expect(bundle.log.calls.filter((call) => call.what === "patchRun")).toHaveLength(1)
+    expect((bundle.log.calls.find((call) => call.what === "postReceipts")!.args[1] as { markers: unknown }).markers).toMatchObject({ infinite: { eventIds: ["evt_FAKE0301"] } })
+    expect((outcome as { status: string }).status).not.toContain("Infinite app")
+  })
+
   it("negative: a saved claim of ANOTHER run (or merge) is not this run's; the 409 stays someone else's and nothing is PATCHed", async () => {
     const first = fakeDeps({
       bridge: {
