@@ -107,13 +107,19 @@ export function hostGuardAllows(host: string, spec: HostGuardSpec): boolean {
  * (O7) refuses to emit a deny guard while this is non-empty: production must never go dark because its
  * only domain is, say, `acme.vercel.app` (§3h.9).
  */
-export function productionDeniedConflict(observedHosts: readonly string[], exempt: readonly string[]): string[] {
+export function productionDeniedConflict(
+  observedHosts: readonly string[],
+  exempt: readonly string[],
+  deny: readonly string[] = []
+): string[] {
   const exemptSet = new Set(exempt.map(normalizeHost))
+  // The guard's own extra deny literals silence a host exactly like a contract rule does.
+  const denySet = new Set(deny.map(normalizeHost))
   const conflicts = new Set<string>()
   for (const raw of observedHosts) {
     const host = normalizeHost(raw)
     if (host.length === 0 || exemptSet.has(host)) continue
-    if (deniedByContract(host)) conflicts.add(host)
+    if (denySet.has(host) || deniedByContract(host)) conflicts.add(host)
   }
   return [...conflicts].sort()
 }
@@ -173,6 +179,7 @@ export function buildHostGuardExpression(spec: HostGuardSpec, options: HostGuard
  */
 export function resolveArtifactHostGuard(artifacts: {
   productionHosts?: string[]
+  infinite?: { productionHosts?: string[] }
   hostGuard?: { mode: "deny"; exempt: string[]; deny: string[] }
 }): { spec?: HostGuardSpec; error?: string } {
   const guard = artifacts.hostGuard
@@ -186,7 +193,9 @@ export function resolveArtifactHostGuard(artifacts: {
   } catch (error) {
     return { error: (error as Error).message }
   }
-  const conflicts = productionDeniedConflict(artifacts.productionHosts ?? [], guard.exempt)
+  // Every production host the plan knows: the site's own list and the Infinite source's verified hosts.
+  const production = [...(artifacts.productionHosts ?? []), ...(artifacts.infinite?.productionHosts ?? [])]
+  const conflicts = productionDeniedConflict(production, guard.exempt, guard.deny)
   if (conflicts.length > 0) {
     return {
       error: `The preview guard would silence production host(s) ${conflicts.join(", ")}: add them to the exempt list.`

@@ -15,6 +15,7 @@ import {
   normalizeHost,
   normalizeHostGuardSpec,
   productionDeniedConflict,
+  resolveArtifactHostGuard,
   wrapGuardedSnippet,
   type HostGuardSpec
 } from "./host-guard.js"
@@ -159,6 +160,21 @@ describe("one normaliser", () => {
 })
 
 describe("productionDeniedConflict", () => {
+  it("P3-1: a production host in the guard's own deny list is a conflict too (negative: without it, none)", () => {
+    expect(productionDeniedConflict(["shop.acme.com"], [], ["shop.acme.com"])).toEqual(["shop.acme.com"])
+    expect(productionDeniedConflict(["shop.acme.com"], [])).toEqual([])
+    expect(productionDeniedConflict(["shop.acme.com"], ["shop.acme.com"], ["shop.acme.com"])).toEqual([])
+  })
+
+  it("P3-1: resolveArtifactHostGuard refuses a deny literal on a production host, from either production list", () => {
+    const guard = { mode: "deny" as const, exempt: [] as string[], deny: ["shop.acme.com"] }
+    expect(resolveArtifactHostGuard({ productionHosts: ["shop.acme.com"], hostGuard: guard }).error).toMatch(/shop\.acme\.com/)
+    expect(
+      resolveArtifactHostGuard({ infinite: { productionHosts: ["acme.vercel.app"] }, hostGuard: { ...guard, deny: [] } }).error
+    ).toMatch(/acme\.vercel\.app/)
+    expect(resolveArtifactHostGuard({ productionHosts: ["acme.com"], hostGuard: guard }).spec).toBeDefined()
+  })
+
   it("names the observed production host a deny rule would silence", () => {
     expect(productionDeniedConflict(["acme.vercel.app"], [])).toEqual(["acme.vercel.app"])
     expect(productionDeniedConflict(["acme.vercel.app"], ["acme.vercel.app"])).toEqual([])
