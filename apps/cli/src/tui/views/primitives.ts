@@ -14,6 +14,7 @@ import wrapAnsi from "wrap-ansi";
 
 import { terminalText } from "../../desktop/terminal-text.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
+import { sgrAttributes } from "../style/sgr.js";
 import type { Tone } from "../style/tokens.js";
 import { ansi, ansiSpan, colorEnabled, type AnsiRole, type Theme, type ThemeStyle } from "../theme.js";
 import { stateHeadFor, type StateTone } from "./states.js";
@@ -258,9 +259,8 @@ export function paint(
     return ansi(ctx.theme, role, text);
   }
   const span = ansiSpan(ctx.theme, role);
-  const on = `${options.bold ? "\u001b[1m" : ""}${options.inverse ? "\u001b[7m" : ""}`;
-  const off = [options.bold ? "22" : "", options.inverse ? "27" : ""].filter(Boolean).join(";");
-  return `${span.open}${on}${text}\u001b[${off}m${span.close}`;
+  const extra = sgrAttributes(options, ctx.theme.tier);
+  return `${span.open}${extra.open}${text}${extra.close}${span.close}`;
 }
 
 /** Fit one line to `width` cells (a safety net: renderers lay out to width first). */

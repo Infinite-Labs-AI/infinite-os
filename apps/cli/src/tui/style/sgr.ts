@@ -150,6 +150,22 @@ export function style(text: string, tokens: TokenStyle, tier: Tier, overrides?: 
   return open ? `${open}${text}${sgrClose(tokens, tier)}` : text;
 }
 
+/**
+ * Escapes that add bold, underline or inverse on top of whatever is already
+ * painted, and end exactly those (22, 24, 27). Nothing under `plain`.
+ */
+export function sgrAttributes(attrs: { bold?: boolean; underline?: boolean; inverse?: boolean }, tier: Tier): { open: string; close: string } {
+  if (tier === "plain") {
+    return { open: "", close: "" };
+  }
+  const on = [attrs.bold ? "1" : "", attrs.underline ? "4" : "", attrs.inverse ? "7" : ""].filter(Boolean);
+  const off = [attrs.bold ? "22" : "", attrs.underline ? "24" : "", attrs.inverse ? "27" : ""].filter(Boolean);
+  return {
+    open: on.map((code) => `${ESC}${code}m`).join(""),
+    close: off.length ? `${ESC}${off.join(";")}m` : ""
+  };
+}
+
 /** A key chip: `" k "` on the key background, or the OK key's amber (`ok`). `"[k]"` when plain. */
 export function chip(key: string, tier: Tier, ok = false): string {
   return style(` ${key} `, ok ? "pk" : "key", tier);

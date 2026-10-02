@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import { chip, inkStyle, sgrClose, sgrForeground, sgrOpen, sgrParams, style } from "./sgr.js";
+import { chip, inkStyle, sgrAttributes, sgrClose, sgrForeground, sgrOpen, sgrParams, style } from "./sgr.js";
 import { resolveTier } from "./tier.js";
 import { R4_CANVAS, R4_TOKENS, TIERS, TONE_TOKENS, type Tier, type Token } from "./tokens.js";
 
@@ -188,5 +188,14 @@ describe("inkStyle()", () => {
   it("spells named colours the vendored Ink's way when it draws", () => {
     expect(inkStyle("key", "16", { form: "infinite" })).toEqual({ color: "ansi:whiteBright", backgroundColor: "ansi:blackBright" });
     expect(inkStyle("dim", "256", { form: "infinite" })).toEqual({ color: "ansi256(243)" });
+  });
+});
+
+describe("sgrAttributes()", () => {
+  it("adds bold, underline and inverse one escape each, and ends exactly those", () => {
+    expect(sgrAttributes({ bold: true, inverse: true }, "truecolor")).toEqual({ open: `${ESC}[1m${ESC}[7m`, close: `${ESC}[22;27m` });
+    expect(sgrAttributes({ underline: true }, "mono")).toEqual({ open: `${ESC}[4m`, close: `${ESC}[24m` });
+    expect(sgrAttributes({ bold: true }, "plain")).toEqual({ open: "", close: "" });
+    expect(sgrAttributes({}, "256")).toEqual({ open: "", close: "" });
   });
 });

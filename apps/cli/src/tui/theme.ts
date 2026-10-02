@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { resolveInkRenderer } from "./ink/renderer-choice.js";
 import {
   inkStyle,
+  parseHex,
   sgrClose,
   sgrForeground,
   sgrOpen,
@@ -507,16 +508,4 @@ function copyHex<K extends keyof ThemeColors>(target: Partial<ThemeColors>, key:
   if (typeof value === "string") {
     target[key] = value as ThemeColors[K];
   }
-}
-
-function parseHex(value: string): [number, number, number] | null {
-  const match = /^#?([0-9a-f]{6})$/i.exec(value);
-
-  if (!match) {
-    return null;
-  }
-
-  const numeric = Number.parseInt(match[1]!, 16);
-
-  return [(numeric >> 16) & 0xff, (numeric >> 8) & 0xff, numeric & 0xff];
 }
