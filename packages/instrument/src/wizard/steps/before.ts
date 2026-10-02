@@ -10,7 +10,7 @@
 // Honesty rules this step keeps:
 // - `expect` ids come from the keys verb only, never from the repo or a `.env` (R2-16);
 // - nothing is graded here: the desktop returns facts, `checks.gradeTestRun` (lane O6) grades them;
-// - no report cell is computed here: the facts go to `.infinite/wizard/before-facts.json` (the ONE
+// - no report cell is computed here: the facts go to `.infinite/wizard/before.json` (the ONE
 //   hand-off file lanes O7 and O2 read), and the live_today column is built by lane O1's column builder
 //   from the typed readings `liveTodayColumnInput` maps (injected as `buildLiveTodayColumn`); the step
 //   status only COUNTS the wizard's own check states;
@@ -23,6 +23,7 @@
 // reads → Before facts → seedCandidates. The branch is created before any other verb and before any
 // repo read.
 import { gradeContextFrom } from "../../checks/grade-context.js"
+import { BEFORE_FACTS_SCHEMA, writeBeforeFactsFile, type BeforeFactsFile } from "../handoff/before-facts.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 
@@ -56,60 +57,15 @@ import {
 // The Before facts handed to the report builder
 // ---------------------------------------------------------------------------------------------
 
-export const BEFORE_FACTS_SCHEMA = "infinite-tag.before-facts.v1" as const
-/**
- * THE `before` hand-off file (review P1-1): the path and shape lane O7 (`install/before-facts.ts`) reads,
- * `{schema, runId, facts}` with the baseline and the baseline build INSIDE `facts`. Lane O2's `keys` step
- * reads the same path (its reader's schema constant must be this one; recorded for I1). Gitignored
- * (inside `.infinite/wizard/`), mode 0600. Public IDs and facts only: never a secret.
- */
-export const BEFORE_FACTS_PATH = `${WIZARD_PATHS.dir}/before-facts.json` as const
-
-/** `BeforeFacts` plus the cloud's baseline reads and the production build's baseline (O7 `WizardBeforeFacts`). */
-export interface BeforeFactsWithBaseline extends BeforeFacts {
-  /** The cloud's baseline reads (null when the read failed: never 0). */
-  baseline: BaselineResponseFields | null
-  baselineBuild: BuildResult
-}
-
-/** Everything `before` measured, as typed FACTS (no cell is computed here). */
-export interface BeforeFactsFile {
-  schema: typeof BEFORE_FACTS_SCHEMA
-  runId: string
-  writtenAt: string
-  measuredAt: string
-  productionHost: string | null
-  scan: { framework: string; packageManager: string | null; appRoot: string; fileCount: number; truncated: boolean }
-  facts: BeforeFactsWithBaseline
-  /** `checks.gradeTestRun` of the dry load, per tool (null when no dry load ran). */
-  grades: Partial<Record<TestTool, CheckResult>> | null
-  /** The checks by moment, so the builder can map each to its FINISH_LINE_SOURCES input. */
-  setupChecks: CheckResult[]
-  envTargetChecks: CheckResult[]
-  liveChecks: CheckResult[]
-  /** The static CMP detector's answer (the grader's `cmpDetected` input when the window saw none). */
-  cmpDetected: TestResult["environment"]["cmpDetected"]
-  /** A login exists (auth detector): job 9 and the identity row apply. */
-  loginFound: boolean
-}
-
-export async function writeBeforeFactsFile(fs: WizardFs, root: string, file: BeforeFactsFile): Promise<void> {
-  await fs.mkdirp(join(root, WIZARD_PATHS.dir), 0o700)
-  await fs.writeTextAtomic(join(root, BEFORE_FACTS_PATH), `${JSON.stringify(file, null, 2)}\n`, 0o600)
-}
-
-/** The facts file of THIS run, or null (absent, unreadable, another schema or another run's). */
-export async function readBeforeFactsFile(fs: WizardFs, root: string, runId: string): Promise<BeforeFactsFile | null> {
-  const text = await fs.readText(join(root, BEFORE_FACTS_PATH))
-  if (text === null) return null
-  try {
-    const parsed = JSON.parse(text) as Partial<BeforeFactsFile>
-    if (parsed.schema !== BEFORE_FACTS_SCHEMA || parsed.runId !== runId || !parsed.facts) return null
-    return parsed as BeforeFactsFile
-  } catch {
-    return null
-  }
-}
+// The hand-off file lives in ONE module (B1); `before` writes it, `keys` and `plan` / `install` read it.
+export {
+  BEFORE_FACTS_PATH,
+  BEFORE_FACTS_SCHEMA,
+  readBeforeFactsFile,
+  writeBeforeFactsFile,
+  type BeforeFactsFile,
+  type BeforeFactsWithBaseline
+} from "../handoff/before-facts.js"
 
 // ---------------------------------------------------------------------------------------------
 // Helpers

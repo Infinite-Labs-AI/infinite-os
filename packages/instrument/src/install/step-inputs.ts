@@ -74,7 +74,7 @@ export interface PlanInputs {
  */
 export async function loadPlanInputs(ctx: WizardContext, deps: WizardDeps): Promise<PlanInputs | { missingCapability: string }> {
   // The `keys` step's GA4 stream / Meta pixel choice narrows the connection's keys (P1-9).
-  const choices = await readKeysChoices(deps.fs, ctx.root)
+  const choices = await readKeysChoices(deps.fs, ctx.root, ctx.runId)
   const saved = await readBeforeFacts(deps.fs, ctx.root, ctx.runId)
   if (saved) {
     const keys = narrowKeysToChoices(keysOnly(saved.keys), choices)

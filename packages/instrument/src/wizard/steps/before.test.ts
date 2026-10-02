@@ -108,7 +108,7 @@ describe("step before: call order", () => {
       "checks.csp",
       "checks.metaDomains",
       "bridge.baseline",
-      "fs.write(/repo/.infinite/wizard/before-facts.json)",
+      "fs.write(/repo/.infinite/wizard/before.json)",
       "registry.seedCandidates"
     ].map((prefix) => indexOf(s.log, prefix))
     expect(order.every((index) => index >= 0)).toBe(true)

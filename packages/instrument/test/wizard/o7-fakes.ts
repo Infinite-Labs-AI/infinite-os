@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
-import { BEFORE_FACTS_RELATIVE_PATH, BEFORE_FACTS_SCHEMA, KEYS_RESULT_RELATIVE_PATH, KEYS_RESULT_SCHEMA } from "../../src/install/before-facts.js"
+import { BEFORE_FACTS_SCHEMA, writeBeforeFactsFile } from "../../src/wizard/handoff/before-facts.js"
+import { KEYS_RESULT_SCHEMA, writeKeysResult } from "../../src/wizard/handoff/keys-result.js"
 import type { WizardBeforeFacts } from "../../src/install/plan-model.js"
 import type { AskAnswer, AskKind, AskPayloads } from "../../src/wizard/contracts/asks.js"
 import type { TagBridgeClient, TagHosting, TagKeys } from "../../src/wizard/contracts/bridge.js"
@@ -346,27 +347,42 @@ export function fakeRegistry(): JobRegistry {
 
 // ---- the hand-off files other lanes write (O8's before.json, O2's keys.json), in their shapes ----
 
-/** What lane O8's `before` writes to `.infinite/wizard/before.json` (only the fields this lane reads, plus the identity). */
+/** What lane O8's `before` writes to `.infinite/wizard/before.json`, through the ONE hand-off module (B1). */
 export async function writeBeforeFacts(fs: WizardFs, root: string, runId: string, facts: WizardBeforeFacts): Promise<void> {
   const { baseline, baselineBuild, ...rest } = facts
-  const file = {
+  await writeBeforeFactsFile(fs, root, {
     schema: BEFORE_FACTS_SCHEMA,
     runId,
+    writtenAt: "2026-10-02T10:01:00.000Z",
     measuredAt: "2026-10-02T10:01:00.000Z",
     productionHost: rest.observedProductionHost,
-    facts: rest,
-    baselineBuild: baselineBuild ?? { ok: true, failureSignature: [], durationMs: 1 },
-    baseline: baseline ?? null
-  }
-  await fs.writeTextAtomic(join(root, BEFORE_FACTS_RELATIVE_PATH), `${JSON.stringify(file, null, 2)}\n`, 0o600)
+    scan: { framework: "next-app-router", packageManager: "pnpm", appRoot: ".", fileCount: 12, truncated: false },
+    facts: { ...rest, baseline: baseline ?? null, baselineBuild: baselineBuild ?? { ok: true, failureSignature: [], durationMs: 1 } },
+    grades: null,
+    setupChecks: [],
+    envTargetChecks: [],
+    liveChecks: [],
+    cmpDetected: null,
+    loginFound: false
+  })
 }
 
-/** What lane O2's `keys` step writes to `.infinite/wizard/keys.json` (its choices among the connection's ids). */
+/** What lane O2's `keys` step writes to `.infinite/wizard/keys.json` (its choices among the connection's ids), via O2's writer. */
 export async function writeKeysChoices(
   fs: WizardFs,
   root: string,
-  choices: { ga4MeasurementId: string | null; metaPixel: { pixelId: string; sourceRef: string } | null }
+  choices: { ga4MeasurementId: string | null; metaPixel: { pixelId: string; sourceRef: string } | null },
+  runId: string = IDS.run
 ): Promise<void> {
-  const file = { schema: KEYS_RESULT_SCHEMA, at: "2026-10-02T10:02:00.000Z", linkId: null, keysDigest: `sha256:${"0".repeat(64)}`, choices, comparisons: [], lines: [], metaInstall: true }
-  await fs.writeTextAtomic(join(root, KEYS_RESULT_RELATIVE_PATH), `${JSON.stringify(file, null, 2)}\n`, 0o600)
+  await writeKeysResult(fs, root, {
+    schema: KEYS_RESULT_SCHEMA,
+    runId,
+    at: "2026-10-02T10:02:00.000Z",
+    linkId: null,
+    keysDigest: `sha256:${"0".repeat(64)}`,
+    choices,
+    comparisons: [],
+    lines: [],
+    metaInstall: true
+  })
 }

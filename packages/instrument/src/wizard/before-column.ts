@@ -48,7 +48,7 @@ export interface LiveTodayColumnInput {
   rows: Partial<Record<Exclude<ReportRowId, "checks_passing" | "day7_checkin">, LiveTodayRow>>
 }
 
-/** What the mapping reads (all of it is in `.infinite/wizard/before-facts.json`). */
+/** What the mapping reads (all of it is in `.infinite/wizard/before.json`). */
 export interface LiveTodaySource {
   runId: string
   measuredAt: string
