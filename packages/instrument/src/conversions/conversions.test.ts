@@ -176,16 +176,26 @@ describe("infiniteTrack", () => {
     expect(plain(p.posthogCalls)).toEqual([["capture", "first", {}]])
   })
 
-  it("asks the runtime's own consent check first when the runtime exposes it", () => {
+  it("asks the runtime's own consent check first when the runtime exposes it (without the DNT/GPC default)", () => {
     const p = page({ posthog: true })
-    p.vm.window.__infiniteConsentAllowed = () => false
+    const asked: unknown[] = []
+    p.vm.window.__infiniteConsentAllowed = (options: unknown) => {
+      asked.push(options)
+      return false
+    }
     expect(p.call("infiniteTrack('cta_clicked')")).toBe(false)
     p.vm.window.__infiniteConsentAllowed = () => true
     expect(p.call("infiniteTrack('cta_clicked')")).toBe(true)
+    expect(plain(asked)).toEqual([{ privacySignal: false }])
   })
 
-  it("DNT/GPC without a grant means no; required mode waits for a recorded grant", () => {
-    expect(page({ posthog: true, gpc: true }).call("infiniteTrack('x')")).toBe(false)
+  // P2-4: GA4's and PostHog's own page views do not follow DNT/GPC, so a helper that did would drop a GPC
+  // browser's conversions while its page views still counted (Brave sends GPC by default): a
+  // conversion-rate skew by browser. The visitor's recorded "no" and required mode still stop it.
+  it("DNT/GPC alone does not drop a conversion; a recorded no does, and required mode waits for a grant", () => {
+    expect(page({ posthog: true, gpc: true }).call("infiniteTrack('x')")).toBe(true)
+    expect(page({ posthog: true, dnt: "1" }).call("infiniteTrack('x')")).toBe(true)
+    expect(page({ posthog: true, gpc: true, localStorage: { infinite_analytics_consent: "denied" } }).call("infiniteTrack('x')")).toBe(false)
     expect(page({ posthog: true, consentMode: "required" }).call("infiniteTrack('x')")).toBe(false)
     expect(
       page({ posthog: true, consentMode: "required", localStorage: { infinite_analytics_consent: "granted" } }).call(
@@ -433,6 +443,17 @@ describe("infiniteTrackThenNavigate", () => {
     p.call("infiniteTrackThenNavigate(window.__event, '/download', 'download_clicked')")
     expect(event.defaultPrevented).toBe(true)
     expect(p.vm.assigned).toEqual(["https://acme.com/download"])
+  })
+})
+
+describe("the Meta side keeps DNT/GPC as a no (P2-4 changes only the GA4/PostHog helpers)", () => {
+  it("negative: on a GPC browser infiniteTrack sends, the mirror and the campaign capture do not", async () => {
+    const p = page({ posthog: true, gpc: true, url: "https://acme.com/?utm_source=newsletter" })
+    expect(p.call("infiniteTrack('x')")).toBe(true)
+    await p.vm.evaluate<Promise<void>>("infiniteMetaMirror('Lead', 'evt-gpc')")
+    expect(p.fbqCalls).toEqual([])
+    expect(p.vm.sessionValues.size).toBe(0)
+    expect(plain(p.call("infiniteCampaign()"))).toMatchObject({ campaignProvenance: "none" })
   })
 })
 

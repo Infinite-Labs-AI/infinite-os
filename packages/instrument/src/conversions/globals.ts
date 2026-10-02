@@ -14,8 +14,10 @@
 //
 // Each is defined only if absent, so a second managed block (or an upgrade racing an old one) is inert.
 // Consent: every helper follows the Infinite hook for the site's consent mode (the runtime's own check
-// where the runtime runs), plus the optional per-call `gate`. Nothing here adds, changes or reads a
-// cookie banner.
+// where the runtime runs), plus the optional per-call `gate`. The GA4/PostHog helpers (track, navigate,
+// identify) follow the recorded decision and the consent mode but NOT the DNT/GPC default, matching the
+// providers' own page views; the Meta mirror and the campaign capture keep DNT/GPC as a no. Nothing here
+// adds, changes or reads a cookie banner.
 import { buildLandingAttributionScript } from "../attribution/capture.js"
 import type { MetaBrowserGate } from "../providers/meta-browser/consent.js"
 import { consentAllowsSource } from "../providers/meta-browser/consent.js"
@@ -53,14 +55,16 @@ function indent(source: string): string {
 
 /** The helper script as plain browser source (no `<script>` wrapper). */
 export function buildConversionHelpersScript(options: ConversionHelpersOptions = {}): string {
-  const gate: MetaBrowserGate = {
-    kind: "infinite-consent",
-    mode: options.consentMode === "required" ? "required" : "not_required"
-  }
+  const mode = options.consentMode === "required" ? "required" : "not_required"
+  // Meta's mirror and the campaign capture: DNT/GPC without a grant means no.
+  const gate: MetaBrowserGate = { kind: "infinite-consent", mode }
+  // GA4/PostHog conversions: the recorded decision and the consent mode only, exactly the visitors whose
+  // native page views those providers already count (P2-4).
+  const conversionGate: MetaBrowserGate = { kind: "infinite-consent", mode, privacySignal: "ignored" }
   return [
     "(function () {",
     '  if (typeof window.infiniteTrack === "function") return;',
-    indent(consentAllowsSource(gate)),
+    indent(consentAllowsSource(conversionGate)),
     indent(UNSAFE_TEXT_SOURCE),
     indent(helperCoreSource()),
     indent(trackSource()),

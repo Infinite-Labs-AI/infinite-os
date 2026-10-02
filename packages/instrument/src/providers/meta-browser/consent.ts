@@ -6,6 +6,11 @@
 // helpers take instead is an OPTIONAL hook: by default they run whenever the pixel itself runs, and
 // the one built-in hook reads the decision the Infinite runtime already records.
 //
+// TWO STRENGTHS (`privacySignal`): the Meta helpers and the campaign capture treat DNT/GPC without a
+// grant as no; the GA4/PostHog conversion helpers do not, because GA4's and PostHog's own page views do
+// not either, and a conversion dropped for a GPC browser whose page view still counted would read as a
+// funnel problem. Both honour the visitor's recorded decision and required mode.
+//
 // THE RUNTIME'S OWN CHECK FIRST. `runtime/infinite-browser.ts` decides consent in `hasConsent()` and,
 // on a verified production host, exposes it as `window.__infiniteConsentAllowed()` (the Phase-1
 // open question, closed by the wizard build). When that accessor exists the hook asks it, so the
@@ -24,8 +29,14 @@
 export type MetaBrowserGate =
   /** Runs whenever the pixel runs. The pixel itself is not consent-gated by infinite-tag. */
   | { kind: "none" }
-  /** Follows the Infinite runtime's recorded consent decision for this consent mode. */
-  | { kind: "infinite-consent"; mode: "required" | "not_required" }
+  /**
+   * Follows the Infinite runtime's recorded consent decision for this consent mode. `privacySignal`:
+   * "blocks" (default) = DNT/GPC without a grant means no (the Meta helpers, the campaign capture);
+   * "ignored" = only the recorded decision and the consent mode decide (the GA4/PostHog conversion
+   * helpers, whose providers' own page views do not follow DNT/GPC either — a stricter helper would
+   * skew conversion rates by browser).
+   */
+  | { kind: "infinite-consent"; mode: "required" | "not_required"; privacySignal?: "blocks" | "ignored" }
 
 /** The localStorage key the runtime writes its decision under, in both consent modes. */
 export const INFINITE_CONSENT_STORAGE_KEY = "infinite_analytics_consent"
@@ -50,18 +61,23 @@ export function consentAllowsSource(gate: MetaBrowserGate): string {
     return "function infiniteConsentAllows() { return true; }"
   }
   const fallback = gate.mode === "not_required" ? "true" : "false"
+  const ignoreSignal = gate.privacySignal === "ignored"
   return [
     "function infiniteConsentAllows() {",
     "  try {",
-    `    if (typeof window.${INFINITE_CONSENT_ACCESSOR} === "function") return window.${INFINITE_CONSENT_ACCESSOR}() === true;`,
+    `    if (typeof window.${INFINITE_CONSENT_ACCESSOR} === "function") return window.${INFINITE_CONSENT_ACCESSOR}(${ignoreSignal ? "{ privacySignal: false }" : ""}) === true;`,
     "  } catch (_error) { return false; }",
     "  var decision = null;",
     `  try { decision = localStorage.getItem("${INFINITE_CONSENT_STORAGE_KEY}"); } catch (_error) { decision = null; }`,
     '  if (decision === "granted") return true;',
     '  if (decision === "denied") return false;',
-    "  try {",
-    '    if (navigator.doNotTrack === "1" || navigator.globalPrivacyControl === true) return false;',
-    "  } catch (_error) { return false; }",
+    ...(ignoreSignal
+      ? []
+      : [
+          "  try {",
+          '    if (navigator.doNotTrack === "1" || navigator.globalPrivacyControl === true) return false;',
+          "  } catch (_error) { return false; }"
+        ]),
     `  return ${fallback};`,
     "}"
   ].join("\n")

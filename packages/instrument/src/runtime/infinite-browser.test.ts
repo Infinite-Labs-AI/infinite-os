@@ -683,6 +683,19 @@ describe("renderInfiniteBrowserTag", () => {
     expect(other.requests).toEqual([])
   })
 
+  it("the exposed consent check: GPC is a no by default, and { privacySignal: false } leaves only the recorded decision and the mode (P2-4)", () => {
+    type Accessor = (options?: { privacySignal?: boolean }) => boolean
+    const gpc = executeTag({ siteSourceKey: "site_public_123", gpc: true, consentMode: "not_required" })
+    const allowed = (gpc.window as { __infiniteConsentAllowed: Accessor }).__infiniteConsentAllowed
+    expect(allowed()).toBe(false)
+    expect(allowed({ privacySignal: false })).toBe(true)
+    // A recorded "no" still wins without the signal, and required mode still waits for a grant.
+    const denied = executeTag({ siteSourceKey: "site_public_123", gpc: true, consent: "denied", consentMode: "not_required" })
+    expect((denied.window as { __infiniteConsentAllowed: Accessor }).__infiniteConsentAllowed({ privacySignal: false })).toBe(false)
+    const required = executeTag({ siteSourceKey: "site_public_123", consentMode: "required" })
+    expect((required.window as { __infiniteConsentAllowed: Accessor }).__infiniteConsentAllowed({ privacySignal: false })).toBe(false)
+  })
+
   it("stamps nav:\"navigate\" on the initial view and nav:\"history\" on History-API route changes (bounded enum), keeping the path-change dedupe", () => {
     const runtime = executeTag({
       siteSourceKey: "site_public_123",

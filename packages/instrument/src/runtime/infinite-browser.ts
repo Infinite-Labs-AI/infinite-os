@@ -79,7 +79,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   type RuntimeWindow = Window & {
     __infiniteAnalyticsRuntime?: boolean
     __infiniteHandoffContext?: () => InfiniteHandoffContext | null
-    __infiniteConsentAllowed?: () => boolean
+    __infiniteConsentAllowed?: (options?: { privacySignal?: boolean }) => boolean
   }
 
   const runtimeWindow = window as RuntimeWindow
@@ -449,7 +449,17 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   // required mode, DNT/GPC as the default. A live check on every call, never a frozen value, and only
   // on a verified production host (the returns above); elsewhere the helpers use their stricter
   // fallback over the persisted decision (`providers/meta-browser/consent.ts`).
-  runtimeWindow.__infiniteConsentAllowed = () => hasConsent()
+  // `{ privacySignal: false }` asks the same question WITHOUT the DNT/GPC default: the conversion
+  // helpers that feed GA4/PostHog use it, so a GPC browser's conversions are not dropped while its
+  // native page views still count (the recorded decision and required mode still apply).
+  runtimeWindow.__infiniteConsentAllowed = (options?: { privacySignal?: boolean }) => {
+    if (options && options.privacySignal === false) {
+      const decision = consentOverride !== undefined ? consentOverride : storedConsentDecision()
+      if (decision !== undefined) return decision
+      return config.consent.mode === "not_required"
+    }
+    return hasConsent()
+  }
 
   function sendInfinite(payload: Record<string, unknown>): void {
     if (!config.siteSourceKey) return
