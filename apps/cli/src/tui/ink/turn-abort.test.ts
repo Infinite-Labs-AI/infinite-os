@@ -124,7 +124,9 @@ describe("turn abort wiring (structural, CI-run)", () => {
     expect(session.slice(callStart, callEnd).trimEnd()).toMatch(/\}, signal, recordTurnView, recordCreativeDraft\);$/);
     expect(session).toContain("turnStoppedLine(signal.aborted ? signal.reason : error)");
     expect(session).toContain("turnAbort.end(signal);");
-    expect(session).toContain('"esc to stop"');
+    // D6: `esc stop` is said once, first in the key bar; the composer never repeats it.
+    expect(session).not.toContain('"esc to stop"');
+    expect(session).toContain('keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS })');
   });
 
   it("a stopped turn keeps its partial answer and tool trail: committed before the stop line and before reset", () => {

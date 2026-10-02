@@ -99,15 +99,22 @@ describe("HomeInventory", () => {
     expect(out).toContain("/exit");
   });
 
-  it("degrades gracefully when connections are unavailable (daemon not reachable)", () => {
-    const out = render({ connections: undefined });
+  it("says why the sources could not be read, in a muted note", () => {
+    const out = render({ connections: undefined, connectionsNote: "daemon not reachable" });
     // Still renders the inventory — just a muted note instead of the live line.
     expect(out).toContain("Tools");
     expect(out).toContain("Commands");
     expect(out).toContain("Connected");
-    expect(out).toContain("daemon not reachable");
+    expect(out).toContain("— daemon not reachable —");
     // No false "connected" ticks when the fetch failed.
     expect(out).not.toContain("✓");
+  });
+
+  it("leaves the Connected row out when the sources were not read and there is nothing to say (they live in the app)", () => {
+    const out = render({ connections: undefined });
+    expect(out).toContain("Tools");
+    expect(out).not.toContain("Connected");
+    expect(out).not.toContain("daemon not reachable");
   });
 
   it("shows a 'nothing connected' nudge when the daemon answers with no sources", () => {
@@ -132,9 +139,12 @@ describe("HomeInventory", () => {
     // Narrow: compact wordmark (1 row) + the same fixed body rows.
     expect(renderWithSentinel({}, 40)).toBe(homeInventoryRowCount(40));
 
-    // The row count must NOT change whether the live line, the muted note, or the
-    // empty nudge renders — the Connected row is always exactly one row.
-    expect(renderWithSentinel({ connections: undefined })).toBe(homeInventoryRowCount(88));
+    // The live line, the muted note and the empty nudge are each exactly one
+    // row; with nothing to say the row is left out, and the count says so.
+    expect(renderWithSentinel({ connections: undefined, connectionsNote: "daemon not reachable" }))
+      .toBe(homeInventoryRowCount(88, { connectionsNote: "daemon not reachable" }));
     expect(renderWithSentinel({ connections: [] })).toBe(homeInventoryRowCount(88));
+    expect(renderWithSentinel({ connections: undefined })).toBe(homeInventoryRowCount(88, {}));
+    expect(homeInventoryRowCount(88, {})).toBe(homeInventoryRowCount(88) - 1);
   });
 });

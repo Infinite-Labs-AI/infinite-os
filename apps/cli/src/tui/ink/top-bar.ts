@@ -91,8 +91,12 @@ export function stepsRuleLine(width: number, theme: Theme): string {
   return paintSegments([["line", "─"], ["", " "], ["b", "Steps"], ["", " "], ["line", "─".repeat(total - 8)]], theme);
 }
 
-/** The boot frame's body (D4): an empty answer area, then the Steps rule, at most `rows` rows. */
+/**
+ * The boot frame's body (D4): an empty answer area, then the Steps rule, at
+ * most `rows` rows. An empty row is a single space: Ink draws an empty text
+ * as no row at all.
+ */
 export function bootBodyLines(width: number, theme: Theme, rows: number = BOOT_BODY_ROWS): string[] {
   const answerRows = Math.max(0, Math.min(BOOT_ANSWER_ROWS, Math.floor(rows) - 1));
-  return [...Array.from({ length: answerRows }, () => ""), stepsRuleLine(width, theme)];
+  return [...Array.from({ length: answerRows }, () => " "), stepsRuleLine(width, theme)];
 }

@@ -120,14 +120,16 @@ describe("composer cursor row matches Ink word-wrap (Bug A)", () => {
   });
 });
 
-describe("top-rule height prediction matches the render (Bug B)", () => {
-  // The composer row (showComposer:false prediction) must equal the index of the
-  // composer line in the real render, so the native cursor lands on it. The top rule
-  // must stay one row even when its label measures wider under Ink's string-width.
+describe("top bar height prediction matches the render (Bug B)", () => {
+  // The composer row (the showComposer:false prediction plus the rule over the
+  // composer) must equal the index of the composer line in the real render, so
+  // the native cursor lands on it. The top bar must stay one row whatever the
+  // theme's icon or the session's title (neither is drawn: the chip is fixed).
   function predictedVsActual(theme: Theme, title: string | undefined): { predicted: number; composerIndex: number } {
     const transcript = { messages: [], state: undefined as never };
-    const base = { busy: false, columns: 88, status: ["ready"], theme, title, transcript, nowMs: 5_000 };
-    const predicted = inkTranscriptRowCount({ ...base, showComposer: false });
+    const base = { busy: false, columns: 88, theme, title, transcript, nowMs: 5_000 };
+    // + 1: the rule over the composer.
+    const predicted = inkTranscriptRowCount({ ...base, showComposer: false }) + 1;
     const renderedTotal = renderInkTranscriptToString({ ...base, showComposer: true }, { columns: 88 })
       .replace(/\n+$/, "")
       .split("\n").length;
@@ -181,7 +183,8 @@ describe("native cursor under ink's fullscreen write branch (the /sync-tall regr
     const source = readFileSync(fileURLToPath(new URL("./interactive-session.tsx", import.meta.url)), "utf8");
     expect(source).toContain("wouldTriggerInkFullscreen");
     expect(source).toContain("terminalRows: stdout?.rows");
-    expect(source).toContain("rowsBelowComposer: completionRows"); // open completion menu counts toward ink's height
+    expect(source).toContain("rowsBelowComposer: rowsBelow"); // an open completion menu and the key bar count toward ink's height
+    expect(source).toContain("rowsBelow={completions.length + keyBarRows}");
     expect(source).toMatch(/&&\s*!inkFullscreen/);
   });
 

@@ -1,18 +1,16 @@
 import React from "react";
 import { Box, Text } from "./renderer.js";
 
-import { INFINITE_ART, MIN_BIG_COLUMNS } from "./infinite-wordmark.js";
-import { GROWTH_TAGLINE } from "./rocket-banner.js";
-import { DITHER, RETRO } from "./retro-style.js";
+import { resolveTheme, themeInkStyle, type Theme } from "../theme.js";
+import { GROWTH_TAGLINE, INFINITE_ART, MIN_BIG_COLUMNS } from "./infinite-wordmark.js";
+import { DITHER } from "./retro-style.js";
 
 /**
- * Every-launch home inventory: the big INFINITE wordmark + a compact capability
- * inventory (Tools / Commands / Connected) and the welcome line, modelled on
- * Hermes's startup screen. Rendered ONCE, above the transcript, in the
- * empty-transcript home state of the interactive session — NOT per message.
- *
- * The big-art (first-run) `InfiniteWelcome` is a separate, gated screen; this is
- * the home screen the session lands on after it.
+ * The first-run inventory: the big INFINITE wordmark + a compact capability
+ * inventory (Tools / Commands / Connected) and the welcome line. Shown ONCE,
+ * above the boot frame, on the first-ever run only (D4: every later boot is
+ * terminal-r4's frame alone; `infinite --help` carries the same wordmark and
+ * inventory). Painted in r4 tokens at the session's colour tier.
  */
 
 /** A friendly curated capability — what the OS can DO, not raw action ids. */
@@ -41,113 +39,103 @@ export interface HomeInventoryProps {
   /** Curated subset of the most useful slash commands. */
   commands: readonly HomeInventoryCommand[];
   /**
-   * Live connected sources. `undefined` = the fetch was skipped or the daemon
-   * was unreachable → the Connected row degrades to a muted note (or is hidden
-   * when `hideConnectedWhenEmpty`). An empty array = reached the daemon, nothing
-   * connected yet.
+   * Live connected sources, when the terminal read them (an empty array =
+   * read, nothing connected yet). Undefined = not read: the Connected row
+   * then shows `connectionsNote`, or is left out when there is none (the
+   * sources live in the Infinite app, which the terminal cannot list).
    */
   connections?: readonly HomeInventoryConnection[];
+  /** Why the sources could not be read, in a few words (`daemon not reachable`). */
+  connectionsNote?: string;
   /** Product version (e.g. "0.1.1"). */
   version?: string;
   /** Active workspace / project label. */
   workspace?: string;
-  /** Force animation gate off in tests (only affects nothing here today — kept for symmetry). */
   columns?: number;
+  theme?: Theme;
 }
 
-// The Connected row always renders (so the home screen is stable height): when
-// `connections` is undefined we show a muted "daemon not reachable" note rather
-// than dropping the row. This keeps the inventory's row count deterministic,
-// which the composer's native-cursor row prediction depends on.
-const CONNECTED_UNAVAILABLE_NOTE = "— daemon not reachable —";
-
-// Fixed per-row labels (left gutter) so the three inventory rows align.
+// Fixed per-row labels (left gutter) so the inventory rows align.
 const LABEL_WIDTH = 11;
 
 function padLabel(label: string): string {
   return label.padEnd(LABEL_WIDTH, " ");
 }
 
-// Per-art-row greyscale gradient (top-bright → bottom-dim), matching the welcome
-// wordmark's static look but WITHOUT the animated scan line — the home inventory
-// is a calm, persistent screen, not an animated splash.
-const ART_LEVELS = [0, 1, 2, 3, 4, 5] as const;
+/** Whether the Connected row is drawn: the sources were read, or there is a reason they were not. */
+function showsConnectedRow(props: Pick<HomeInventoryProps, "connections" | "connectionsNote">): boolean {
+  return props.connections !== undefined || Boolean(props.connectionsNote);
+}
 
-function bigArtRow(line: string, rowIndex: number): React.ReactNode {
-  const level = Math.max(0, Math.min(DITHER.length - 1, ART_LEVELS[rowIndex] ?? DITHER.length - 1));
-  const { glyph, color } = DITHER[level]!;
+function bigArtRow(line: string, rowIndex: number, theme: Theme): React.ReactNode {
+  const level = Math.max(0, Math.min(DITHER.length - 1, rowIndex));
+  const { glyph, token } = DITHER[level]!;
   return (
-    <Text color={color} key={`art:${rowIndex}`} wrap="truncate-end">
+    <Text {...themeInkStyle(theme, token)} key={`art:${rowIndex}`} wrap="truncate-end">
       {line.replace(/█/g, glyph)}
     </Text>
   );
 }
 
 /**
- * The number of terminal rows `HomeInventory` renders for a given width — used by
- * the interactive session to add this panel's height to the composer's
- * native-cursor row prediction (the PR #27 invariant: the predicted composer row
- * must equal the live rendered row count, or the native cursor parks a row off).
+ * The number of terminal rows `HomeInventory` renders for a given width (and
+ * Connected row) — used by the interactive session to add this panel's height
+ * to the composer's native-cursor row prediction (the PR #27 invariant: the
+ * predicted composer row must equal the live rendered row count).
  *
  * Layout (top to bottom):
  *   - wordmark: 6 art rows (big) or 1 compact row (narrow)
  *   - 1 tagline/version/workspace row
  *   - 1 blank spacer row
- *   - 3 inventory rows (Tools / Commands / Connected — Connected always renders)
+ *   - 2 inventory rows (Tools / Commands), plus Connected when it is drawn
  *   - 1 blank spacer row
  *   - 1 welcome row
- *   - 1 trailing blank spacer row (separates the panel from the transcript rule)
+ *   - 1 trailing blank spacer row (separates the panel from the top bar)
  */
-export function homeInventoryRowCount(columns = 88): number {
+export function homeInventoryRowCount(
+  columns = 88,
+  connected: Pick<HomeInventoryProps, "connections" | "connectionsNote"> = { connections: [] }
+): number {
   const wordmarkRows = columns >= MIN_BIG_COLUMNS ? INFINITE_ART.length : 1;
-  return wordmarkRows + 1 + 1 + 3 + 1 + 1 + 1;
+  return wordmarkRows + 1 + 1 + 2 + (showsConnectedRow(connected) ? 1 : 0) + 1 + 1 + 1;
 }
 
-function ToolsRow({ tools }: { tools: readonly HomeInventoryTool[] }) {
-  return (
-    <Text wrap="truncate-end">
-      <Text color={RETRO.grey}>{padLabel("Tools")}</Text>
-      <Text color={RETRO.light}>{tools.map((tool) => tool.label).join("  ·  ")}</Text>
-    </Text>
-  );
-}
-
-function CommandsRow({ commands }: { commands: readonly HomeInventoryCommand[] }) {
-  return (
-    <Text wrap="truncate-end">
-      <Text color={RETRO.grey}>{padLabel("Commands")}</Text>
-      <Text color={RETRO.light}>{commands.map((command) => command.value).join("   ")}</Text>
-    </Text>
-  );
-}
-
-function ConnectedRow({ connections }: { connections?: readonly HomeInventoryConnection[] }) {
+function ConnectedRow({
+  connections,
+  connectionsNote,
+  theme
+}: {
+  connections?: readonly HomeInventoryConnection[];
+  connectionsNote?: string;
+  theme: Theme;
+}) {
+  const label = <Text {...themeInkStyle(theme, "dim")}>{padLabel("Connected")}</Text>;
   if (connections === undefined) {
     return (
       <Text wrap="truncate-end">
-        <Text color={RETRO.grey}>{padLabel("Connected")}</Text>
-        <Text color={RETRO.dim}>{CONNECTED_UNAVAILABLE_NOTE}</Text>
+        {label}
+        <Text {...themeInkStyle(theme, "dim")}>{`— ${connectionsNote ?? ""} —`}</Text>
       </Text>
     );
   }
   if (connections.length === 0) {
     return (
       <Text wrap="truncate-end">
-        <Text color={RETRO.grey}>{padLabel("Connected")}</Text>
-        <Text color={RETRO.dim}>nothing connected yet — try /connect</Text>
+        {label}
+        <Text {...themeInkStyle(theme, "dim")}>nothing connected yet — try /connect</Text>
       </Text>
     );
   }
   return (
     <Text wrap="truncate-end">
-      <Text color={RETRO.grey}>{padLabel("Connected")}</Text>
+      {label}
       {connections.map((connection, index) => (
         <Text key={`conn:${index}`}>
-          <Text color={connection.degraded ? RETRO.mid : RETRO.white}>
+          <Text {...themeInkStyle(theme, connection.degraded ? "amber" : "green")}>
             {connection.degraded ? "◐" : "✓"}
           </Text>
-          <Text color={RETRO.light}>{` ${connection.label}`}</Text>
-          {index < connections.length - 1 ? <Text color={RETRO.grey}>{"   "}</Text> : null}
+          <Text>{` ${connection.label}`}</Text>
+          {index < connections.length - 1 ? <Text>{"   "}</Text> : null}
         </Text>
       ))}
     </Text>
@@ -158,38 +146,50 @@ export function HomeInventory({
   tools,
   commands,
   connections,
+  connectionsNote,
   version,
   workspace,
-  columns = 88
+  columns = 88,
+  theme
 }: HomeInventoryProps) {
+  const t = theme ?? resolveTheme();
   const big = columns >= MIN_BIG_COLUMNS;
   const metaParts = [
     GROWTH_TAGLINE,
     version ? `v${version}` : undefined,
     workspace ? `workspace: ${workspace}` : undefined
   ].filter((part): part is string => Boolean(part));
+  const dim = themeInkStyle(t, "dim");
 
   return (
     <Box flexDirection="column" width={columns}>
       {big ? (
-        INFINITE_ART.map((row, index) => bigArtRow(row, index))
+        INFINITE_ART.map((row, index) => bigArtRow(row, index, t))
       ) : (
         <Text wrap="truncate-end">
-          <Text color={RETRO.white}>{"∞  "}</Text>
-          <Text bold color={RETRO.light}>INFINITE</Text>
+          <Text {...themeInkStyle(t, "cyan")}>{"∞  "}</Text>
+          <Text {...themeInkStyle(t, "b")}>INFINITE</Text>
         </Text>
       )}
       <Text wrap="truncate-end">
-        <Text color={RETRO.grey}>{metaParts.join("  ·  ")}</Text>
+        <Text {...dim}>{metaParts.join("  ·  ")}</Text>
       </Text>
       <Text wrap="truncate-end">{" "}</Text>
-      <ToolsRow tools={tools} />
-      <CommandsRow commands={commands} />
-      <ConnectedRow connections={connections} />
+      <Text wrap="truncate-end">
+        <Text {...dim}>{padLabel("Tools")}</Text>
+        <Text>{tools.map((tool) => tool.label).join("  ·  ")}</Text>
+      </Text>
+      <Text wrap="truncate-end">
+        <Text {...dim}>{padLabel("Commands")}</Text>
+        <Text>{commands.map((command) => command.value).join("   ")}</Text>
+      </Text>
+      {showsConnectedRow({ connections, connectionsNote }) ? (
+        <ConnectedRow connections={connections} connectionsNote={connectionsNote} theme={t} />
+      ) : null}
       <Text wrap="truncate-end">{" "}</Text>
       <Text wrap="truncate-end">
-        <Text color={RETRO.light}>Welcome to Infinite</Text>
-        <Text color={RETRO.grey}> — type a message, /help, or /exit.</Text>
+        <Text>Welcome to Infinite</Text>
+        <Text {...dim}> — type a message, /help, or /exit.</Text>
       </Text>
       <Text wrap="truncate-end">{" "}</Text>
     </Box>

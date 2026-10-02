@@ -90,7 +90,8 @@ describe("the boot frame's body (D4)", () => {
   it("is an empty answer area and the Steps rule", () => {
     const body = bootBodyLines(100, TRUECOLOR);
     expect(body).toHaveLength(9);
-    expect(body.slice(0, 8).every((line) => line === "")).toBe(true);
+    // Blank rows are one space each: Ink draws an empty text as no row at all.
+    expect(body.slice(0, 8).every((line) => line === " ")).toBe(true);
     expectGolden(body[8]!, GOLDEN.steps100);
     expect(stepsRuleLine(100, TRUECOLOR)).toBe(body[8]);
   });

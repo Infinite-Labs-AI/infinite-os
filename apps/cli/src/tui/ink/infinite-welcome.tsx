@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, render, useApp, useInput } from "./renderer.js";
 
-import { INFINITE_ART, MIN_BIG_COLUMNS } from "./infinite-wordmark.js";
-import { GROWTH_TAGLINE } from "./rocket-banner.js";
-import { DITHER, RETRO } from "./retro-style.js";
+import { resolveTheme, themeInkStyle, type Theme } from "../theme.js";
+import { GROWTH_TAGLINE, INFINITE_ART, MIN_BIG_COLUMNS } from "./infinite-wordmark.js";
+import { DITHER } from "./retro-style.js";
 
 const SHIMMER_TICK_MS = 120;
 // Fixed top-bright → bottom-dim greyscale gradient per row; a scan line drifts
@@ -17,37 +17,41 @@ function animationEnabled(env: NodeJS.ProcessEnv): boolean {
 
 // Shade one art row: the downward scan line lifts the row at `scanRow` two
 // levels brighter; the rest follow the fixed gradient. Returns one <Text> with
-// █ swapped for the level's block glyph (█/▓/▒) and coloured its grey.
-function ditherRow(line: string, rowIndex: number, tick: number): React.ReactNode {
+// █ swapped for the level's block glyph (█/▓/▒) in its token, at the theme's tier.
+function ditherRow(line: string, rowIndex: number, tick: number, theme: Theme): React.ReactNode {
   const scanRow = Math.floor(tick / SCAN_EVERY_TICKS) % INFINITE_ART.length;
   const level = Math.max(
     0,
     Math.min(DITHER.length - 1, BASE_LEVELS[rowIndex] - (rowIndex === scanRow ? 2 : 0))
   );
-  const { glyph, color } = DITHER[level];
+  const { glyph, token } = DITHER[level];
   return (
-    <Text color={color} key={rowIndex} wrap="truncate-end">
+    <Text {...themeInkStyle(theme, token)} key={rowIndex} wrap="truncate-end">
       {line.replace(/█/g, glyph)}
     </Text>
   );
 }
 
 /**
- * First-run welcome: a big dithered greyscale INFINITE wordmark (3D block-shadow,
- * pure black & white — no hue), the brand tagline, and a "press ENTER to launch"
- * CTA that hands off into the session (which lands on the rocket home banner).
- * Enter / Esc / Ctrl-C all dismiss. Its own Ink app, before the session starts.
+ * First-run welcome: a big dithered INFINITE wordmark (3D block-shadow, black &
+ * white — no hue), the brand tagline, and a "press ENTER to launch" CTA that
+ * hands off into the session (which opens on the first-run inventory and the
+ * boot frame). Enter / Esc / Ctrl-C all dismiss. Its own Ink app, before the
+ * session starts. Painted in r4 tokens at the session's colour tier.
  */
 export function InfiniteWelcome({
   columns = 88,
   animate,
-  onLaunch
+  onLaunch,
+  theme
 }: {
   columns?: number;
   animate?: boolean;
   /** Called when the user dismisses (Enter/Esc/Ctrl-C). Defaults to app.exit(). */
   onLaunch?: () => void;
+  theme?: Theme;
 }) {
+  const t = theme ?? resolveTheme();
   const animated = animate ?? animationEnabled(process.env);
   const app = useApp();
   const [tick, setTick] = useState(0);
@@ -68,28 +72,29 @@ export function InfiniteWelcome({
   });
 
   const big = columns >= MIN_BIG_COLUMNS;
-  // The CTA's "ENTER" pulses white↔grey roughly every ~600ms.
-  const ctaColor = Math.floor(tick / 5) % 2 === 0 ? RETRO.white : RETRO.mid;
+  // The CTA's "ENTER" pulses bright↔dim roughly every ~600ms.
+  const cta = themeInkStyle(t, Math.floor(tick / 5) % 2 === 0 ? "b" : "dim");
+  const dim = themeInkStyle(t, "dim");
 
   return (
     <Box alignItems="center" flexDirection="column" paddingY={1} width={columns}>
       {big ? (
-        INFINITE_ART.map((row, index) => ditherRow(row, index, tick))
+        INFINITE_ART.map((row, index) => ditherRow(row, index, tick, t))
       ) : (
         <Text wrap="truncate-end">
-          <Text color={RETRO.white}>{"∞  "}</Text>
-          <Text bold color={RETRO.light}>INFINITE</Text>
+          <Text {...themeInkStyle(t, "cyan")}>{"∞  "}</Text>
+          <Text {...themeInkStyle(t, "b")}>INFINITE</Text>
         </Text>
       )}
       <Box marginTop={1}>
-        <Text color={RETRO.light}>∞ </Text>
-        <Text color={RETRO.grey}>{GROWTH_TAGLINE.toUpperCase()}</Text>
-        <Text color={RETRO.light}> ∞</Text>
+        <Text {...themeInkStyle(t, "cyan")}>∞ </Text>
+        <Text {...dim}>{GROWTH_TAGLINE.toUpperCase()}</Text>
+        <Text {...themeInkStyle(t, "cyan")}> ∞</Text>
       </Box>
       <Box marginTop={1}>
-        <Text color={RETRO.grey}>press </Text>
-        <Text bold color={ctaColor}>ENTER ↵</Text>
-        <Text color={RETRO.grey}> to launch</Text>
+        <Text {...dim}>press </Text>
+        <Text {...cta}>ENTER ↵</Text>
+        <Text {...dim}> to launch</Text>
       </Box>
     </Box>
   );
@@ -104,12 +109,14 @@ export async function runInfiniteWelcome(options: {
   input?: NodeJS.ReadStream;
   output?: NodeJS.WriteStream;
   errorOutput?: NodeJS.WriteStream;
+  theme?: Theme;
 }): Promise<void> {
   await new Promise<void>((resolve) => {
     const instance = render(
       <InfiniteWelcome
         columns={options.columns ?? options.output?.columns}
         onLaunch={() => instance.unmount()}
+        theme={options.theme}
       />,
       {
         exitOnCtrlC: true,

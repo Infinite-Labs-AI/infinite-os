@@ -24,6 +24,8 @@ const PENDING: InSessionConfirmationAction = {
   ]
 };
 
+const stripAnsi = (value: string) => value.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[A-Za-z]`, "g"), "");
+
 describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-runnable)", () => {
   it("gates the card inside the SINGLE useInput owner through the keymap", () => {
     // The write gate must live in the one useInput owner, before the plain
@@ -44,15 +46,18 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(block).not.toContain("key.escape");
   });
 
-  it("names the OK key from the approval view, renders the key bar above the composer, and counts its rows", () => {
+  it("names the OK key from the approval view, draws the key bar LAST (under the composer), and counts its row", () => {
     expect(source).toContain("confirmCardKeys(headConfirmAction, NO_KEY_CAPS)");
-    // The bar's real rows feed the live-region cap's key-bar slot and the composer-row prediction.
+    // The bar's row feeds the live-region cap's key-bar slot; it is under the
+    // composer, so never in the composer-row prediction (the rule over it is).
     expect(source).toContain("const keyBarRows = keyBarRowCount(keyHints, columns);");
     expect(source.match(/^\s+keyBarRows,$/gm)?.length).toBe(1);
     expect(source).toContain("keyBarRows={keyBarRows}");
-    expect(source).toContain("const composerRow = homeInventoryRows + keyBarRows + liveLayout.rowCount;");
-    expect(source.indexOf("<KeyBar hints={keyHints}")).toBeLessThan(source.indexOf("<InkLineInput"));
-    expect(source.indexOf("<KeyBar hints={keyHints}")).toBeGreaterThan(source.indexOf("<ConfirmActionMenu"));
+    expect(source).toContain("const composerRow = homeInventoryRows + liveLayout.rowCount + draftLines.length + COMPOSER_RULE_ROWS;");
+    expect(source.indexOf("<KeyBar hints={keyHints}")).toBeGreaterThan(source.indexOf("<InkLineInput"));
+    expect(source.indexOf("<KeyBar hints={keyHints}")).toBeGreaterThan(source.indexOf("<CompletionMenu"));
+    expect(source.indexOf("<AnsiLine line={ruleLine(columns, t)} />")).toBeGreaterThan(source.indexOf("<ConfirmActionMenu"));
+    expect(source.indexOf("<AnsiLine line={ruleLine(columns, t)} />")).toBeLessThan(source.indexOf("<InkLineInput"));
     // The old fixed affordance is gone: the bar shows only what works now.
     expect(source).not.toContain("[y] approve");
   });
@@ -112,9 +117,11 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(drain).toContain("pendingConfirmActions.length > 0");
   });
 
-  it("shows the `!` write-gate glyph (not the `?` picker glyph) while pending", () => {
-    expect(source).toContain("pendingConfirmation || confirmActionActive ? \"!\"");
-    expect(source).toContain("|| confirmActionActive;"); // folded into overlayActive
+  it("keeps r4's ❯ prompt while a write card waits (its keys are in the key bar); an operator confirm shows `!`", () => {
+    expect(source).toContain('const label = pendingConfirmation ? "!" : pickerActive ? "?" : theme.brand.prompt;');
+    expect(source).toContain("|| confirmActionActive;"); // folded into overlayActive (native cursor off)
+    // D6 and r4: the card's keys are said once, in the key bar, never in the placeholder.
+    expect(source).not.toContain("`press ${confirmKeys.ctx.okKey} to");
   });
 
   it("renders the confirmation summary + redacted details via initial messages (no PTY)", () => {
@@ -163,14 +170,14 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
         }
       });
 
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "publish it\r");
       // The overlay renders the summary + redacted details + affordance.
       await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
       expect(output.text()).toContain("Publish landing page to production");
       expect(output.text()).toContain("acme.example.com");
       // Old desktop (no approval view): the bar names y Confirm and n dismiss.
-      expect(output.text()).toContain("y Confirm   n dismiss");
+      expect(stripAnsi(output.text())).toContain(" y  Confirm    n  dismiss");
 
       await sendKeys(input, "y");
       await waitFor(() => confirmed.length === 1, 4_000, output.text);
@@ -209,7 +216,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
         }
       });
 
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "publish it\r");
       await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
 
@@ -247,7 +254,7 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
         }
       });
 
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "publish it\r");
       await waitFor(() => output.text().includes("Approve this write?"), 4_000, output.text);
 
@@ -300,9 +307,9 @@ describe("Ink in-session write confirmation (Plan 2) — live PTY flow (skipped 
         }
       });
 
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "pause it\r");
-      await waitFor(() => output.text().includes("p Pause   n dismiss   ? what it does"), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes(" p  Pause    n  dismiss    ?  what it does"), 4_000, output.text);
       expect(output.text()).not.toContain("Stops spend on Ad 01");
 
       await sendKeys(input, "y");
