@@ -14,17 +14,20 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-vi.hoisted(() => {
+const pinnedEnv = vi.hoisted(() => {
   // Pin what the session reads from the environment: truecolor through Ink
-  // (chalk reads FORCE_COLOR when it loads), UTC times, no NO_COLOR.
-  process.env.FORCE_COLOR = "3";
-  process.env.COLORTERM = "truecolor";
-  process.env.TERM = "xterm-256color";
-  process.env.TZ = "UTC";
-  process.env.INFINITE_COLOR = "truecolor";
-  delete process.env.NO_COLOR;
-  delete process.env.INFINITE_THEME;
-  delete process.env.INFINITE_PLAIN_OUTPUT;
+  // (chalk reads FORCE_COLOR when it loads), UTC times, no NO_COLOR. Restored
+  // after the file, so nothing leaks into a worker's next test file.
+  const pins: Record<string, string | undefined> = {
+    FORCE_COLOR: "3", COLORTERM: "truecolor", TERM: "xterm-256color", TZ: "UTC", INFINITE_COLOR: "truecolor",
+    NO_COLOR: undefined, INFINITE_THEME: undefined, INFINITE_PLAIN_OUTPUT: undefined
+  };
+  const saved = Object.fromEntries(Object.keys(pins).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(pins)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  return saved;
 });
 
 import { decodeAnswerView } from "../../../desktop/answer-view-decode.js";
@@ -65,6 +68,10 @@ beforeAll(() => {
 
 afterAll(() => {
   vi.useRealTimers();
+  for (const [key, value] of Object.entries(pinnedEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   const passing = ids.filter((id) => results.get(id)?.pass);
   const bridges = bridgeIds.filter((id) => bridgePass.get(id));
   const newly = [...passing, ...bridges].filter((id) => id in ratchet);
