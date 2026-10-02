@@ -47,8 +47,12 @@
 // and before anything is staged, because a process the agent left running (a `setsid` grandchild escapes
 // the process-group kill) can still write after the turn.
 //
-// Nested mode (§3d.7) uses `mode: "report"`: edits outside the allowlists are left in place (unstaged by
-// O4) and reported, while consent hunks and gate hits are still reverted and block their job.
+// Nested mode (§3d.7, §3z.12 B8 — the ONE nested implementation) uses `mode: "report"`: on `--resume` EVERY
+// rejected edit (outside the seeded allowlists, a global-deny path, a deletion, a consent hunk, a gate hit)
+// is reverted to its snapshot bytes BEFORE any check, the parent agent's own bytes are kept under
+// `<snapshot>/nested/rejected/<path>` (0600, outside the repo) and reported. Report mode never resets refs or
+// the index (the parent agent may have pulled or committed on purpose); a HEAD that no longer descends from
+// the hand-off's HEAD throws `NestedBranchMovedError` (→ INF_WIZ_BRANCH_FAILED).
 import { createHash } from "node:crypto"
 import { execFile } from "node:child_process"
 import { chmod, lstat, mkdir, readFile, readdir, readlink, rm, rmdir, symlink, unlink, writeFile } from "node:fs/promises"
@@ -123,8 +127,10 @@ export interface FenceEndResult {
   edits: WizardEditRecord[]
   /** The gate's results on this turn (problems already acted on). */
   gate: CheckResult[]
-  /** Report mode only: paths changed outside the allowlists, left in place (never staged). */
+  /** Report mode only: rejected paths (reverted; the parent agent's bytes kept under `rejectedDir`). */
   reportedOutside: string[]
+  /** Report mode only: where the parent agent's bytes of every reverted path were kept. */
+  rejectedDir?: string
   /** The settled tree, for `verifySeal` right before the build/T0 and before anything is staged. */
   seal: TreeSeal
 }
@@ -142,6 +148,24 @@ export interface TreeSeal {
   heavyInodes: HeavyInode[]
   /** A file written when the seal was taken: a heavy-dir entry changed after it = a write after the turn. */
   marker: string
+}
+
+/** Report mode: the parent agent moved HEAD off the hand-off's line (§3z.12 §3d.7 → INF_WIZ_BRANCH_FAILED). */
+/** The wizard's own run dir (repo-relative), skipped by a report-mode settle. */
+const WIZARD_RUN_DIR = ".infinite/wizard"
+
+/** The report-mode subdir that keeps the parent agent's rejected bytes (`<snapshot>/nested/rejected/<path>`). */
+export const REJECTED_SUBDIR = "rejected"
+
+export class NestedBranchMovedError extends Error {
+  readonly code = "INF_WIZ_BRANCH_FAILED" as const
+  constructor(
+    readonly handoffHead: string,
+    readonly head: string | null
+  ) {
+    super(`HEAD (${head?.slice(0, 12) ?? "none"}) no longer descends from the commit the jobs were handed off at (${handoffHead.slice(0, 12)}); switch back to the wizard's branch, then run npx infinite-tag --resume --json.`)
+    this.name = "NestedBranchMovedError"
+  }
 }
 
 export class FenceTamperError extends Error {
@@ -428,7 +452,8 @@ export class Fence {
     const report = manifest.mode === "report"
     // Git first, with plain file I/O, so no agent-planted config runs in the fence's own git calls.
     const gitFiles = await this.restoreGitInternals()
-    const gitState = await this.restoreGitState()
+    // Report mode (nested, B8) never resets refs or the index; it only refuses a HEAD off the hand-off's line.
+    const gitState = report ? await this.checkHeadDescends() : await this.restoreGitState()
     const touched = await this.touched()
     if (touched.tamper.length > 0) {
       for (const rel of touched.paths) await this.restore(rel)
@@ -449,9 +474,21 @@ export class Fence {
         }
       }
     }
+    const rejectedDir = join(this.dir, REJECTED_SUBDIR)
+    /** Report mode: keep the parent agent's bytes of a path before it is put back (never inside the repo). */
+    const keepRejected = async (rel: string) => {
+      if (!report) return
+      const bytes = await readFile(join(root, rel)).catch(() => null)
+      if (bytes === null) return
+      const copy = join(rejectedDir, rel)
+      await mkdir(dirname(copy), { recursive: true, mode: 0o700 })
+      await writeFile(copy, bytes, { mode: 0o600 })
+    }
     const revert = async (rel: string, reason: FenceBlockReason, note: string) => {
+      await keepRejected(rel)
       await this.restore(rel)
       reverted.add(rel)
+      if (report) reportedOutside.push(rel)
       block(rel, reason, note)
     }
     // Git internals, refs and the index are undone in BOTH modes: an agent never runs git (§3f "Do not").
@@ -475,6 +512,9 @@ export class Fence {
     }
     const candidates: Candidate[] = []
     for (const rel of touched.paths) {
+      // Report mode spans two wizard runs: the wizard's own run files (state.json, run.lock, the hand-offs)
+      // change between the hand-off and the resume by the wizard itself, never by the parent agent's job.
+      if (report && rel.startsWith(`${WIZARD_RUN_DIR}/`)) continue
       const absolute = join(root, rel)
       const beforeBytes = await this.originalBytes(rel)
       const nowInfo = await lstatOrNull(absolute)
@@ -491,7 +531,12 @@ export class Fence {
       else if (!created && !allowedFile && !allowedCreate) outside = "a file outside the job's allowed files"
       if (outside === null && this.entry(rel)?.symlink != null) outside = "a symlink"
       if (outside !== null) {
+        // Both modes revert BEFORE any check (B8). Report mode keeps the parent agent's bytes aside and
+        // reports the path; it blocks no job (no job owns that file, and the rest proceeds: §4.3 (e)).
         if (report) {
+          await keepRejected(rel)
+          await this.restore(rel)
+          reverted.add(rel)
           reportedOutside.push(rel)
           continue
         }
@@ -579,6 +624,8 @@ export class Fence {
       const keptHunks = candidate.hunks.filter((_, index) => candidate.keep[index])
       if (anyDropped) {
         reverted.add(candidate.rel)
+        await keepRejected(candidate.rel)
+        if (report && !reportedOutside.includes(candidate.rel)) reportedOutside.push(candidate.rel)
         if (keptHunks.length === 0) {
           await this.restore(candidate.rel)
           continue
@@ -604,7 +651,15 @@ export class Fence {
     }
     const seal = await takeSeal(root, manifest.heavyDirs, join(dirname(this.dir), `${basename(this.dir)}.seal`))
     await this.dispose()
-    return { reverted: [...reverted].sort(), blocked: [...blocks.values()], edits, gate, reportedOutside: reportedOutside.sort(), seal }
+    return {
+      reverted: [...reverted].sort(),
+      blocked: [...blocks.values()],
+      edits,
+      gate,
+      reportedOutside: [...new Set(reportedOutside)].sort(),
+      seal,
+      ...(report ? { rejectedDir } : {})
+    }
   }
 
   /**
@@ -613,7 +668,10 @@ export class Fence {
    */
   private async restoreGitInternals(): Promise<string[]> {
     const changed: string[] = []
+    // Report mode (B8) never moves HEAD: a switch is checked by `checkHeadDescends` instead.
+    const keepHead = this.manifest.mode === "report"
     for (const rel of this.manifest.gitInternal) {
+      if (keepHead && rel === ".git/HEAD") continue
       const entry = this.entry(rel)
       if (!entry) continue
       if ((await currentHash(join(this.manifest.root, rel))) === entry.sha256) continue
@@ -627,6 +685,17 @@ export class Fence {
       changed.push(rel)
     }
     return changed.sort()
+  }
+
+  /** Report mode: refs and the index stay as the parent agent left them; HEAD must still descend from the hand-off. */
+  private async checkHeadDescends(): Promise<string[]> {
+    const before = this.manifest.git
+    if (!before?.head) return []
+    const now = await captureGit(this.manifest.root)
+    if (now.head === before.head) return []
+    const ancestor = now.head ? await git(this.manifest.root, ["merge-base", "--is-ancestor", before.head, now.head]) : null
+    if (!ancestor || ancestor.code !== 0) throw new NestedBranchMovedError(before.head, now.head)
+    return []
   }
 
   /** Branch/tag refs, HEAD and the index back to the snapshot (git is safe again by now). */
@@ -660,7 +729,15 @@ export class Fence {
   /** Deletes the snapshot (it holds `.env` copies). */
   async dispose(): Promise<void> {
     this.settled = true
-    await rm(this.dir, { recursive: true, force: true })
+    if (this.manifest.mode !== "report") {
+      await rm(this.dir, { recursive: true, force: true })
+      return
+    }
+    // Report mode keeps the parent agent's rejected bytes (reported to the user); everything else (the
+    // snapshot copies, `.env` included) is deleted.
+    for (const name of await readdir(this.dir).catch(() => [] as string[])) {
+      if (name !== REJECTED_SUBDIR) await rm(join(this.dir, name), { recursive: true, force: true })
+    }
   }
 
   private assertOpen(): void {

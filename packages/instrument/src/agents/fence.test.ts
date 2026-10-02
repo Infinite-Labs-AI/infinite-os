@@ -250,15 +250,39 @@ describe("fence abort, load and report mode", () => {
     await expect(reopened.end()).rejects.toThrow(/already settled/)
   })
 
-  it("report mode leaves outside edits in place and reports them, but still reverts consent hunks", async () => {
-    const { read, root, fence } = await setup({ mode: "report" })
+  it("report mode (nested, B8) reverts outside edits BEFORE any check, keeps the parent's bytes aside, and blocks no job for them; consent hunks still block", async () => {
+    const { read, root, fence, dir } = await setup({ mode: "report" })
     write(root, "lib/stray.ts", "export const x = 1\n")
     write(root, "app/page.tsx", "export default function Page() {\n  gtag('consent', 'update', {})\n  return null\n}\n")
     const result = await fence.end()
-    expect(read("lib/stray.ts")).toBe("export const x = 1\n")
-    expect(result.reportedOutside).toEqual(["lib/stray.ts"])
+    // reverted (the file was new, so it is gone), the parent agent's bytes kept under <snapshot>/rejected
+    expect(existsSync(join(root, "lib/stray.ts"))).toBe(false)
+    expect(result.rejectedDir).toBe(join(dir, "rejected"))
+    expect(readFileSync(join(dir, "rejected", "lib/stray.ts"), "utf8")).toBe("export const x = 1\n")
+    expect(result.reportedOutside).toEqual(["app/page.tsx", "lib/stray.ts"])
     expect(read("app/page.tsx")).not.toContain("gtag('consent'")
+    expect(readFileSync(join(dir, "rejected", "app/page.tsx"), "utf8")).toContain("gtag('consent'")
+    // the outside edit blocks no job (no job owns it); the consent hunk blocks its own
     expect(blockedFor(result, "meta_improve:landing")).toEqual(["consent_touched"])
+    expect(blockedFor(result, "privacy_paragraph:page")).toEqual([])
+    // only the rejected bytes survive the settle (the snapshot copies are deleted)
+    expect(readdirSync(dir)).toEqual(["rejected"])
+  })
+
+  it("report mode never resets refs or the index: a parent agent's own commit on the line is kept; HEAD off the line → BRANCH_FAILED", async () => {
+    const kept = await setup({ mode: "report" })
+    write(kept.root, "notes.txt", "mine\n")
+    runGit(kept.root, ["add", "notes.txt"])
+    runGit(kept.root, ["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "-m", "parent agent commit"])
+    const head = runGit(kept.root, ["rev-parse", "HEAD"]).trim()
+    await kept.fence.end()
+    expect(runGit(kept.root, ["rev-parse", "HEAD"]).trim()).toBe(head)
+
+    // negative: HEAD moved to a commit that does not descend from the hand-off
+    const moved = await setup({ mode: "report" })
+    runGit(moved.root, ["checkout", "-q", "--orphan", "elsewhere"])
+    runGit(moved.root, ["-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "unrelated"])
+    await expect(moved.fence.end()).rejects.toMatchObject({ code: "INF_WIZ_BRANCH_FAILED" })
   })
 
   it("writes manifest and copies 0600", async () => {

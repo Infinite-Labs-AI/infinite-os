@@ -11,6 +11,7 @@ import type { WizardOptions } from "./contracts/deps.js"
 import type { ChecklistItem } from "./contracts/jobs.js"
 import type { WizardStepId } from "./contracts/steps.js"
 import { acquireRunLock } from "./lock.js"
+import { step as jobsStep } from "./steps/jobs.js"
 import { NESTED_CONSENT_FLAG_MESSAGE, NOT_A_TTY_MESSAGE, WIZARD_NOT_BUILT_MESSAGE, parseWizardArgs, routeWizard, runWizardCommand, runWizardUninstall } from "./command.js"
 import { createRunState } from "./run-state.js"
 import type { SignalSource } from "./signals.js"
@@ -258,6 +259,9 @@ const LAYOUT_ITEM: ChecklistItem = {
   allow: { files: ["app/layout.tsx"], create: [] }
 }
 
+/** The REAL jobs step (its nested branch is the one nested implementation, B8). */
+const realJobs: StepBehaviour = (ctx, deps) => jobsStep.run(ctx, deps)
+
 /** `before` seeds two agent jobs into the state, as lane O8's does. */
 const seedJobs: StepBehaviour = async (ctx) => {
   ctx.state.update((state) => {
@@ -267,13 +271,14 @@ const seedJobs: StepBehaviour = async (ctx) => {
   return { kind: "ok", status: "seeded" }
 }
 
-describe("nested-agent mode (§3d.7)", () => {
+// The real jobs step snapshots and fences a real git repo: the 5 s default is too tight under a loaded run.
+describe("nested-agent mode (§3d.7)", { timeout: 30_000 }, () => {
   it("spawns no agent, hands the jobs out as job.seeded with a brief and parks (exit 3); --resume fences the parent agent's edits", async () => {
     const root = gitRepo()
     const home = tempDir("wizard-home-")
     const env = { CLAUDECODE: "1", HOME: home }
     const first = fakeIo(root, { env })
-    const spy = fakeWiring({ before: seedJobs })
+    const spy = fakeWiring({ before: seedJobs, jobs: realJobs })
     spy.bundle.deps.env = env
     spy.bundle.deps.fs = (await import("./fs.js")).nodeWizardFs
     expect(await runWizardCommand(["--json"], { io: first.io, wiring: spy.wiring })).toBe(3)
@@ -281,7 +286,7 @@ describe("nested-agent mode (§3d.7)", () => {
     expect(spy.bundle.log.names("agents")).not.toContain("agents.runJobs")
     const seeded = first.events().filter((event) => event.t === "job.seeded")
     expect(seeded.map((event) => (event.item as ChecklistItem).id)).toEqual([SIGNUP_ITEM.id, LAYOUT_ITEM.id])
-    expect(readFileSync(join(root, ".infinite/wizard/nested-brief.md"), "utf8")).toContain("server_conversions:signup")
+    expect(readFileSync(join(root, ".infinite/wizard/agent-brief.md"), "utf8")).toContain("server_conversions:signup")
     const state = JSON.parse(readFileSync(join(root, ".infinite/wizard/state.json"), "utf8"))
     expect(state.snapshot.dir.startsWith(join(home, "Library/Caches/infinite-tag/snapshots"))).toBe(true)
     expect(state.snapshot.dir.startsWith(root)).toBe(false)
@@ -292,28 +297,28 @@ describe("nested-agent mode (§3d.7)", () => {
     writeFileSync(join(root, "app/layout.tsx"), "export default function Layout({ children }) {\n  gtag('consent', 'update', { analytics_storage: 'granted' })\n  return children\n}\n")
 
     const second = fakeIo(root, { env })
-    const resumed = fakeWiring({ before: seedJobs })
+    const resumed = fakeWiring({ before: seedJobs, jobs: realJobs })
     resumed.bundle.deps.env = env
     resumed.bundle.deps.fs = spy.bundle.deps.fs
     // Same deps behaviour, but stage through real git so the index is what we assert.
     resumed.bundle.deps.git = { ...resumed.bundle.deps.git, stage: async (paths) => void git(root, "add", "--", ...paths) }
     expect(await runWizardCommand(["--resume", "--json"], { io: second.io, wiring: resumed.wiring })).toBe(0)
 
-    const staged = git(root, "diff", "--cached", "--name-only").trim().split("\n")
-    expect(staged).toEqual(["app/api/signup/route.ts"])
+    // Only the allowlisted edit is left in the tree (staging is the rehearsal's job, never the jobs step's).
+    expect(git(root, "diff", "--name-only").trim()).toBe("app/api/signup/route.ts")
     // The rejected edits (outside the allowlist; a consent call) are undone before any check, and the
-    // parent agent's bytes are kept aside under the snapshot dir.
-    expect(git(root, "diff", "--name-only").trim()).toBe("")
+    // parent agent's bytes are kept aside under the snapshot dir (B8), never in the repo.
     expect(readFileSync(join(root, "README.md"), "utf8")).toBe("# Acme\n")
+    expect(readFileSync(join(root, "app/layout.tsx"), "utf8")).not.toContain("gtag('consent'")
     const rejected = join(state.snapshot.dir, "rejected")
     expect(readFileSync(join(rejected, "README.md"), "utf8")).toContain("analytics by infinite")
     expect(readFileSync(join(rejected, "app/layout.tsx"), "utf8")).toContain("gtag('consent'")
     const subs = second.events().filter((event) => event.t === "step.sub").map((event) => event.text as string)
-    const statusText = second.events().filter((event) => event.t === "step.status" && event.step === "jobs").map((event) => event.text as string).join(" ")
-    expect(statusText).toContain("2 edit(s) undone (kept in ")
-    expect(subs.length).toBeGreaterThan(0)
+    expect(subs.some((text) => text.includes("2 edit(s) undone: "))).toBe(true)
+    // The jobs step's states come from the one state machine: the signup job is done in code (its recorded
+    // edit) and then waits for a real event (job 8's done path); the consent edit blocks its job.
     const jobStates = Object.fromEntries(second.events().filter((event) => event.t === "job.state").map((event) => [event.itemId, event.state]))
-    expect(jobStates).toEqual({ [SIGNUP_ITEM.id]: "done_in_code", [LAYOUT_ITEM.id]: "blocked" })
+    expect(jobStates).toEqual({ [SIGNUP_ITEM.id]: "waiting_real_event", [LAYOUT_ITEM.id]: "blocked" })
     const final = JSON.parse(readFileSync(join(root, ".infinite/wizard/state.json"), "utf8"))
     expect(final.jobs.find((item: ChecklistItem) => item.id === LAYOUT_ITEM.id).blockedReason).toBe("consent_touched")
     expect(resumed.bundle.log.names("checks")).toContain("checks.turnGate")
@@ -325,7 +330,7 @@ describe("nested-agent mode (§3d.7)", () => {
     const home = tempDir("wizard-home-")
     const env = { CLAUDECODE: "1", HOME: home }
     const first = fakeIo(root, { env })
-    const spy = fakeWiring({ before: seedJobs })
+    const spy = fakeWiring({ before: seedJobs, jobs: realJobs })
     spy.bundle.deps.env = env
     spy.bundle.deps.fs = (await import("./fs.js")).nodeWizardFs
     expect(await runWizardCommand(["--json"], { io: first.io, wiring: spy.wiring })).toBe(3)
@@ -336,7 +341,7 @@ describe("nested-agent mode (§3d.7)", () => {
     writeFileSync(join(root, "app/api/signup/route.ts"), "export async function POST() {\n  await reportInfiniteOutcome({ type: 'signup', path: '/signup', eventId: 'acct' })\n  return Response.json({ ok: true })\n}\n")
 
     const second = fakeIo(root, { env })
-    const resumed = fakeWiring({ before: seedJobs })
+    const resumed = fakeWiring({ before: seedJobs, jobs: realJobs })
     resumed.bundle.deps.env = env
     resumed.bundle.deps.fs = spy.bundle.deps.fs
     resumed.bundle.deps.git = { ...resumed.bundle.deps.git, stage: async (paths) => void git(root, "add", "--", ...paths) }
@@ -357,7 +362,7 @@ describe("nested-agent mode (§3d.7)", () => {
     expect(seenByChecks.length).toBeGreaterThan(0)
     expect(seenByChecks.every((text) => !text.includes("execSync"))).toBe(true)
     expect(readFileSync(join(root, "app/layout.tsx"), "utf8")).not.toContain("execSync")
-    expect(git(root, "diff", "--cached", "--name-only").trim()).toBe("app/api/signup/route.ts")
+    expect(git(root, "diff", "--name-only").trim()).toBe("app/api/signup/route.ts")
     const jobStates = Object.fromEntries(second.events().filter((event) => event.t === "job.state").map((event) => [event.itemId, event.state]))
     expect(jobStates[LAYOUT_ITEM.id]).toBe("blocked")
   })

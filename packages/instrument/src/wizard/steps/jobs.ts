@@ -34,7 +34,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
-import { disposeSeal, Fence, verifySeal, type FenceBlock, type TreeSeal } from "../../agents/fence.js"
+import { disposeSeal, Fence, NestedBranchMovedError, verifySeal, type FenceBlock, type TreeSeal } from "../../agents/fence.js"
 import { matchesAnyGlob, normalizeRelPath } from "../../agents/glob.js"
 import { snapshotDir } from "../../agents/paths.js"
 import { runExtras } from "../../agents/runner.js"
@@ -68,8 +68,8 @@ const OPEN_STATES: readonly JobItemState[] = ["pending", "claimed"]
 const KEEP_EDIT_STATES: readonly JobItemState[] = ["claimed", "pending", "done_in_code", "waiting_deploy", "waiting_real_event", "proven"]
 export const NOTHING_CHECKABLE_NOTE = "Nothing the wizard can check before deploy; later tests decide."
 export const CHECKED_NOTE = "Checked by the wizard, not the agent."
-/** The brief a nested parent agent reads (gitignored with the rest of `.infinite/wizard/`). */
-export const NESTED_BRIEF_PATH = `${WIZARD_PATHS.dir}/agent-brief.md`
+/** The brief a nested parent agent reads (gitignored with the rest of `.infinite/wizard/`; §3z.12 §3d.7). */
+export const NESTED_BRIEF_PATH = WIZARD_PATHS.agentBrief
 
 export const step: WizardStep<"jobs"> = {
   id: "jobs",
@@ -350,6 +350,10 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     // F6: a write in a dependency/build folder (a `next build` by the parent agent) ends the step blocked;
     // the run is never wedged on a snapshot the fence already deleted.
     await clearSnapshot()
+    if (error instanceof NestedBranchMovedError) {
+      // B8: report mode never resets refs; a HEAD off the hand-off's line stops the run instead.
+      return { kind: "failed", code: "INF_WIZ_BRANCH_FAILED", message: error.message, next: "halt" }
+    }
     if (isTamper(error)) {
       blockOpen("The agent wrote inside a dependency or build folder.")
       await io.save()
@@ -358,8 +362,13 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     throw error
   }
   await clearSnapshot()
-  const outside = settled.reportedOutside.filter((path) => !path.startsWith(`${WIZARD_PATHS.dir}/`))
-  if (outside.length > 0) io.sub(`! Left unstaged (outside every job's files): ${outside.slice(0, 4).join(", ")}${outside.length > 4 ? ", …" : ""}`, "warn")
+  // B8: every rejected edit was put back BEFORE any check; the parent agent's bytes are kept aside.
+  const rejected = settled.reportedOutside.filter((path) => !path.startsWith(`${WIZARD_PATHS.dir}/`))
+  const keptIn = settled.rejectedDir ? displayHome(settled.rejectedDir, io.home()) : null
+  if (rejected.length > 0) {
+    io.sub(`! ${rejected.length} edit(s) undone: ${rejected.slice(0, 4).join(", ")}${rejected.length > 4 ? ", …" : ""}`, "warn")
+    io.sub(`Your agent's versions are kept in ${keptIn ?? "the wizard's snapshot"}`, "info")
+  }
   io.bufferEdits(settled.edits)
   applyBlocks(io, settled.blocked)
   // No claims in nested mode: every still-open seeded job goes through the wizard's own checks.
@@ -389,6 +398,10 @@ function applyBlocks(io: JobsIo, blocks: readonly FenceBlock[]): void {
     if (!item) continue
     io.put(blockItem(item, block.reason, block.note))
   }
+}
+
+function displayHome(path: string, home: string): string {
+  return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path
 }
 
 function composeBrief(brief: string, feedback: readonly string[]): string {

@@ -280,10 +280,10 @@ describe("runWizard: capabilities, budgets, nested mode and the fence", () => {
     expect(order).toEqual(["step cleaned up", "fence abort (killAll before: true)", "engine returned"])
   })
 
-  it("nested mode spawns no agent: runJobs throws inside a step, and the jobs step is replaced by the handoff", async () => {
+  it("nested mode spawns no agent: runJobs throws inside a step, and the jobs step itself runs (its own nested branch, B8)", async () => {
     const { run, log } = await setup({ nested: true })
     let threw: unknown = null
-    const handoffRan: string[] = []
+    const jobsRan: boolean[] = []
     await run(
       fakeSteps(
         {
@@ -294,15 +294,16 @@ describe("runWizard: capabilities, budgets, nested mode and the fence", () => {
               threw = error
             }
             return { kind: "ok", status: "nested" }
-          }
+          },
+          jobs: async (ctx) => (jobsRan.push(ctx.options.nested), { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "jobs handed off", resumeHint: "--resume" })
         },
         []
-      ),
-      { nestedJobs: async () => (handoffRan.push("handoff"), { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "jobs handed off", resumeHint: "--resume" }) }
+      )
     )
     expect(threw).toBeInstanceOf(EngineInvariantError)
     expect(log.names("agents")).not.toContain("agents.runJobs")
-    expect(handoffRan).toEqual(["handoff"])
+    // no engine-level substitution: the jobs step ran, and it saw nested mode
+    expect(jobsRan).toEqual([true])
   })
 
   it("the default after-step writes the gitignore fence after `before` is ok, not before it", async () => {

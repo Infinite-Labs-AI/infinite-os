@@ -226,8 +226,10 @@ describe("step jobs: nested mode (§3d.7)", () => {
     t.ctx.options.resume = true
     const resumed = await step.run(t.ctx, t.deps)
     expect(resumed.kind).toBe("ok")
-    expect(readFileSync(join(t.root, "lib/stray.ts"), "utf8")).toBe("export const stray = 1\n")
-    expect(t.recorded.events.some((event) => String(event.fields.text ?? "").includes("Left unstaged (outside every job's files): lib/stray.ts"))).toBe(true)
+    // B8: the rejected edit is reverted BEFORE any check; the parent's bytes are kept aside and reported.
+    expect(existsSync(join(t.root, "lib/stray.ts"))).toBe(false)
+    expect(readFileSync(join(dir, "rejected", "lib/stray.ts"), "utf8")).toBe("export const stray = 1\n")
+    expect(t.recorded.events.some((event) => /edit\(s\) undone: .*lib\/stray\.ts/.test(String(event.fields.text ?? "")))).toBe(true)
     expect(readFileSync(join(t.root, "app/layout.tsx"), "utf8")).toBe(POST_INSTALL_LAYOUT)
     expect(stateOf(t.current().jobs, "meta_improve:landing")).toBe("blocked:consent_touched")
     expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")

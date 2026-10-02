@@ -19,7 +19,6 @@ import { WIZARD_EXIT, runExitCode, type WizardCode } from "./contracts/codes.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep, WizardStepRecord } from "./contracts/deps.js"
 import { WIZARD_STEP_IDS, type WizardStepId } from "./contracts/steps.js"
 import { ensureWizardGitignoreFence } from "../harness/marking.js"
-import { runNestedJobsHandoff } from "./nested.js"
 import { WIZARD_STEPS } from "./steps/index.js"
 
 // ---------------------------------------------------------------------------------------------
@@ -170,8 +169,6 @@ export interface EngineOptions {
    * (so it lands on the wizard's branch, after `before`'s branch switch).
    */
   afterStep?: (event: EngineStepEvent, ctx: WizardContext, deps: WizardDeps) => Promise<void>
-  /** Nested mode's replacement for the `jobs` step (default `runNestedJobsHandoff`). */
-  nestedJobs?: (ctx: WizardContext, deps: WizardDeps) => Promise<StepOutcome>
   /** The step a resume starts from (for `run.start`). */
   resumedFrom?: WizardStepId | null
   /**
@@ -283,7 +280,6 @@ export async function runWizard(ctx: WizardContext, rawDeps: WizardDeps, options
   const steps = options.steps ?? WIZARD_STEPS
   const budgets = options.budgets ?? DEFAULT_STEP_BUDGETS
   const afterStep = options.afterStep ?? defaultAfterStep
-  const nestedJobs = options.nestedJobs ?? runNestedJobsHandoff
   const events: EngineStepEvent[] = []
   const haltingCodes: WizardCode[] = []
 
@@ -327,15 +323,13 @@ export async function runWizard(ctx: WizardContext, rawDeps: WizardDeps, options
       }
     } else {
       try {
-        if (ctx.options.nested && id === "jobs") outcome = await nestedJobs(ctx, deps)
-        else {
-          outcome = (
-            await runWithBudget(step, ctx, deps, budgets[id], {
-              ...(options.fenceAbort ? { fenceAbort: options.fenceAbort } : {}),
-              settleMs: options.settleMs ?? STEP_SETTLE_MS
-            })
-          ).outcome
-        }
+        // Nested mode (§3d.7) has ONE implementation: the `jobs` step's own nested branch (B8).
+        outcome = (
+          await runWithBudget(step, ctx, deps, budgets[id], {
+            ...(options.fenceAbort ? { fenceAbort: options.fenceAbort } : {}),
+            settleMs: options.settleMs ?? STEP_SETTLE_MS
+          })
+        ).outcome
       } catch (error) {
         if (error instanceof EngineInvariantError) throw error
         if (isAbort(error, ctx.signal)) return interrupted()
