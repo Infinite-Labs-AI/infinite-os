@@ -46,6 +46,18 @@ export async function checkPosthogProxy(
     if (response.status === 0) return [result("undetermined", `the proxy could not be reached (${response.detail})`, url)]
     return [result("problem", `${path} answered ${response.detail}, so PostHog's library never loads through the proxy`, url)]
   }
+  // A catch-all route answers 200 with the site's own page — which, on an instrumented site, carries the
+  // PostHog snippet and so the word "posthog". An HTML answer is never the library.
+  const contentType = response.headers.get("content-type") ?? ""
+  if (/text\/html|application\/xhtml/i.test(contentType) || /^\s*</.test(response.text) || /<html[\s>]|<!doctype\s+html/i.test(response.text.slice(0, 2048))) {
+    return [
+      result(
+        "problem",
+        `${path} answered ${response.status} with an HTML page, not the PostHog library — a catch-all route serves it, so the proxy sends every event nowhere`,
+        url
+      )
+    ]
+  }
   if (!/posthog/i.test(response.text)) {
     return [
       result(

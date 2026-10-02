@@ -18,7 +18,7 @@ import { checkMetaAutoConfigOptOut } from "../../providers/meta-browser/autoconf
 import { META_CLICK_ID_ACCESSOR } from "../../providers/meta-browser/click-id.js"
 import type { CheckContext, CheckResult } from "../../wizard/contracts/jobs.js"
 import type { TestExpect } from "../../wizard/contracts/test-engine.js"
-import { compareApiHost, isRelativePath } from "../posthog-hosts.js"
+import { compareApiHost } from "../posthog-hosts.js"
 import { checkResult, maskIdentifier } from "../result.js"
 
 import { readPageBytes, unitsFor, type PageBytes, type PageUnit } from "./page-bytes.js"
@@ -73,8 +73,10 @@ export async function checkLiveBytes(input: LiveBytesInput, deps: LiveProbeDeps,
       } else {
         pageResults = checkPage(read.page, input.expect, mode, ctx)
         // The proxy is probed once per origin, at the path the page really uses (else the expected one).
+        // A direct PostHog host still gets its `posthog_proxy` line (info: not proxied, no request), so
+        // the "survives ad blockers" cell always has an input.
         const apiHost = observedPosthogApiHost(read.page) ?? input.expect.posthog?.apiHost
-        if (apiHost && isRelativePath(apiHost)) proxied.set(new URL(read.page.finalUrl).origin, apiHost)
+        if (apiHost) proxied.set(new URL(read.page.finalUrl).origin, apiHost)
       }
     } catch (error) {
       pageResults = unreadablePage(url, `test error: ${error instanceof Error ? error.message : String(error)}`, input.expect, mode, ctx)
@@ -105,8 +107,18 @@ export function checkPage(page: PageBytes, expect: TestExpect, mode: "wizard" | 
     ...checkPosthog(page, expect, mode, ctx),
     ...checkMeta(page, expect, mode, ctx),
     ...checkInfinite(page, expect, mode, ctx),
-    censusResult(page, ctx)
+    censusResult(page, expect, ctx)
   ]
+}
+
+/**
+ * Why "not on the page" cannot be said: same-origin scripts that were not read (a failed fetch, past
+ * the cap) may hold the init. Undefined when every script was read.
+ */
+function unreadScripts(page: PageBytes): string | undefined {
+  return page.bundlesSkipped > 0
+    ? `${page.bundlesSkipped} same-origin script(s) could not be read, so it may sit in one of them`
+    : undefined
 }
 
 function at(page: PageBytes): { evidence: Array<{ url: string }> } {
@@ -151,6 +163,8 @@ function checkGa4(page: PageBytes, expect: TestExpect, mode: "wizard" | "doctor"
     if (GTM_CONTAINER.test(page.html)) {
       return result("undetermined", "via_tag_manager: GA4 may be served by the Tag Manager container, which is not read here")
     }
+    const unread = unreadScripts(page)
+    if (unread) return result("undetermined", `no GA4 loader or gtag('config') was read; ${unread}`)
     return result("problem", `no GA4 loader or gtag('config') on the page; expected ${expected.map(maskIdentifier).join(" or ")}`)
   }
   const matchedLoader = loaderIds.filter((value) => expected.includes(value))
@@ -201,6 +215,8 @@ function checkPosthog(page: PageBytes, expect: TestExpect, mode: "wizard" | "doc
     if (rawBytes(page).includes(expected.projectKey)) {
       return result("undetermined", `the page's scripts carry ${maskIdentifier(expected.projectKey)} but no posthog.init could be read`)
     }
+    const unread = unreadScripts(page)
+    if (unread) return result("undetermined", `no posthog.init was read; ${unread}`)
     return result("problem", `no posthog.init on the page; expected ${maskIdentifier(expected.projectKey)}`)
   }
   const wrong = tokens.filter((token) => token !== expected.projectKey)
@@ -236,6 +252,9 @@ function checkMeta(page: PageBytes, expect: TestExpect, mode: "wizard" | "doctor
     } else if (seenIds.length === 0 && GTM_CONTAINER.test(page.html)) {
       state = "undetermined"
       reason = "via_tag_manager: the pixel may be served by the Tag Manager container, which is not read here"
+    } else if (unreadScripts(page)) {
+      state = "undetermined"
+      reason = `expected pixel ${expected.map(maskIdentifier).join(" or ")} was not read on this page; ${unreadScripts(page)}`
     }
     out.push(checkResult(id, state, "T1", ctx, { reason, ...at(page) }))
   } else {
@@ -320,6 +339,8 @@ function checkInfinite(page: PageBytes, expect: TestExpect, mode: "wizard" | "do
     if (rawBytes(page).includes(expected.siteSourceKey)) {
       return result("undetermined", `the page's scripts carry ${maskIdentifier(expected.siteSourceKey)} but no Infinite runtime could be read`)
     }
+    const unread = unreadScripts(page)
+    if (unread) return result("undetermined", `no Infinite managed runtime was read; ${unread}`)
     return result("problem", "no Infinite managed runtime on the page")
   }
   const bytes = readableBytes(page)
@@ -339,7 +360,7 @@ function checkInfinite(page: PageBytes, expect: TestExpect, mode: "wizard" | "do
 
 // ---- Census (job 2's T1 `byte_census`) --------------------------------------------------------
 
-function censusResult(page: PageBytes, ctx: Ctx): CheckResult {
+function censusResult(page: PageBytes, expect: TestExpect, ctx: Ctx): CheckResult {
   const tally = (pattern: RegExp): Map<string, number> => {
     const counts = new Map<string, number>()
     for (const value of matchAll(unitsFor(page, pattern), pattern)) counts.set(value, (counts.get(value) ?? 0) + 1)
@@ -363,11 +384,34 @@ function censusResult(page: PageBytes, ctx: Ctx): CheckResult {
   ]
   const counts = `GA4 configs ${[...ga4.values()].reduce((a, b) => a + b, 0)}, PostHog inits ${posthog}, Meta inits ${[...meta.values()].reduce((a, b) => a + b, 0)}, Infinite runtimes ${runtimes}`
   const skipped = page.bundlesSkipped > 0 ? `; ${page.bundlesSkipped} script(s) not read` : ""
-  return checkResult(LIVE_BYTES_CHECK_IDS.census, duplicates.length > 0 ? "problem" : "pass", "T1", ctx, {
-    reason:
-      duplicates.length > 0
-        ? `duplicate tags on one page: ${duplicates.join("; ")} — each one double-counts every page view${skipped}`
-        : `one of each tag at most (${counts})${skipped}`,
+  if (duplicates.length > 0) {
+    return checkResult(LIVE_BYTES_CHECK_IDS.census, "problem", "T1", ctx, {
+      reason: `duplicate tags on one page: ${duplicates.join("; ")} — each one double-counts every page view${skipped}`,
+      ...at(page)
+    })
+  }
+  // "At most one of each" computed from nothing is not a pass: a tool whose id is in the bytes but whose
+  // init could not be read (a compiled `o.Ay.init("phc_…")`), or a script that was not read, may hold a
+  // second init.
+  const raw = rawBytes(page)
+  const unreadable = [
+    ...(expect.ga4?.some((value) => raw.includes(value)) && ga4.size === 0 ? ["GA4"] : []),
+    ...(expect.posthog && raw.includes(expect.posthog.projectKey) && posthog === 0 ? ["PostHog"] : []),
+    ...(expect.meta?.some((value) => raw.includes(value)) && [...meta.values()].reduce((a, b) => a + b, 0) === 0 ? ["Meta"] : []),
+    ...(expect.infinite && raw.includes(expect.infinite.siteSourceKey) && runtimes === 0 ? ["Infinite"] : [])
+  ]
+  if (unreadable.length > 0 || page.bundlesSkipped > 0) {
+    const why = [
+      ...(unreadable.length > 0 ? [`${unreadable.join(", ")} ${unreadable.length === 1 ? "is" : "are"} in the page's bytes but no init call could be read`] : []),
+      ...(page.bundlesSkipped > 0 ? [`${page.bundlesSkipped} same-origin script(s) were not read`] : [])
+    ]
+    return checkResult(LIVE_BYTES_CHECK_IDS.census, "undetermined", "T1", ctx, {
+      reason: `could not count every tag: ${why.join("; ")} (${counts})`,
+      ...at(page)
+    })
+  }
+  return checkResult(LIVE_BYTES_CHECK_IDS.census, "pass", "T1", ctx, {
+    reason: `one of each tag at most (${counts})`,
     ...at(page)
   })
 }

@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest"
 
 import { FIXED_NOW, fixtureFetch } from "../../../test/wizard/fixture-fetch.js"
+import { buildPostHogBootstrapSnippet } from "../../providers/posthog.js"
 
 import { checkPosthogProxy } from "./proxy.js"
 
@@ -25,6 +26,17 @@ describe("PostHog proxy", () => {
   it("is a problem on a 404 or on bytes that are not PostHog (negative of the pass above)", async () => {
     expect((await run({ "https://acme.test/ingest/static/array.js": { status: 404 } })).result.state).toBe("problem")
     expect((await run({ "https://acme.test/ingest/static/array.js": { body: "<!doctype html>" } })).result.state).toBe("problem")
+  })
+
+  it("is a problem when a catch-all route serves the site's own INSTRUMENTED page (review P1-6)", async () => {
+    const page = `<!doctype html><html><head><script>${buildPostHogBootstrapSnippet("phc_acmeAcmeAcmeAcme0001", "/ingest")}</script></head><body>Acme</body></html>`
+    const served = await run({ "https://acme.test/ingest/static/array.js": { body: page, headers: { "content-type": "text/html; charset=utf-8" } } })
+    expect(served.result.state).toBe("problem")
+    expect(served.result.reason).toContain("HTML page")
+    // Even without a content type, HTML bytes are never the library.
+    expect((await run({ "https://acme.test/ingest/static/array.js": { body: page } })).result.state).toBe("problem")
+    // Negative: the real library with a JavaScript content type.
+    expect((await run({ "https://acme.test/ingest/static/array.js": { body: "!function(){var posthog={}}()", headers: { "content-type": "application/javascript" } } })).result.state).toBe("pass")
   })
 
   it("is undetermined when the site cannot be reached, and info when PostHog is not proxied at all", async () => {

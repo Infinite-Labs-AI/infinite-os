@@ -191,3 +191,40 @@ describe("live bytes: shapes that need care", () => {
     expect(byId(doctor.results, LIVE_BYTES_CHECK_IDS.ga4).map((result) => result.state)).toEqual(["info"])
   })
 })
+
+describe("live bytes: never a pass or a 'not on the page' from bytes that were not read (review P2-4, P2-5, P3-6)", () => {
+  it("byte_census is undetermined when an expected init is in the bytes but unreadable (two compiled PostHog inits)", async () => {
+    const chunk = `var o={Ay:{init:function(){}}};o.Ay.init("${POSTHOG}",{api_host:"/ingest"});o.Ay.init("${POSTHOG}",{api_host:"/ingest"});`
+    const html = `<html><head><script src="/assets/app.js"></script></head><body></body></html>`
+    const { results } = await run({ [`${SITE}/`]: { body: html }, [`${SITE}/assets/app.js`]: { body: chunk }, [`${SITE}/ingest/static/array.js`]: POSTHOG_LIB }, { posthog: FULL_EXPECT.posthog! })
+    const census = byId(results, LIVE_BYTES_CHECK_IDS.census)[0]!
+    expect(census.state).toBe("undetermined")
+    expect(census.reason).toContain("PostHog is in the page's bytes but no init call could be read")
+  })
+
+  it("byte_census is undetermined when a same-origin script was not read (negative: all read → pass)", async () => {
+    const html = managedPage([posthogSnippet(POSTHOG, "/ingest")]).replace("</head>", `<script src="/assets/app.js"></script></head>`)
+    const failed = await run({ [`${SITE}/`]: { body: html }, [`${SITE}/assets/app.js`]: { status: 404 }, [`${SITE}/ingest/static/array.js`]: POSTHOG_LIB }, { posthog: FULL_EXPECT.posthog! })
+    expect(byId(failed.results, LIVE_BYTES_CHECK_IDS.census)[0]!.state).toBe("undetermined")
+    const read = await run({ [`${SITE}/`]: { body: html }, [`${SITE}/assets/app.js`]: { body: "console.log(1)" }, [`${SITE}/ingest/static/array.js`]: POSTHOG_LIB }, { posthog: FULL_EXPECT.posthog! })
+    expect(byId(read.results, LIVE_BYTES_CHECK_IDS.census)[0]!.state).toBe("pass")
+  })
+
+  it("an expected tool not found while same-origin scripts failed is undetermined, not a problem", async () => {
+    const html = `<html><head><script src="/_next/static/chunks/layout.js"></script></head><body></body></html>`
+    const { results } = await run({ [`${SITE}/`]: { body: html }, [`${SITE}/_next/static/chunks/layout.js`]: { status: 404 } }, FULL_EXPECT)
+    for (const checkId of [LIVE_BYTES_CHECK_IDS.ga4, LIVE_BYTES_CHECK_IDS.posthog, LIVE_BYTES_CHECK_IDS.meta, LIVE_BYTES_CHECK_IDS.infinite]) {
+      expect(byId(results, checkId).map((result) => result.state)).toEqual(["undetermined"])
+    }
+    // Negative: every script read and still nothing → a problem.
+    const readAll = await run({ [`${SITE}/`]: { body: html }, [`${SITE}/_next/static/chunks/layout.js`]: { body: "console.log(1)" } }, { meta: [PIXEL] })
+    expect(byId(readAll.results, LIVE_BYTES_CHECK_IDS.meta).map((result) => result.state)).toEqual(["problem"])
+  })
+
+  it("a direct (not proxied) PostHog still gets its posthog_proxy line, as info and with no request", async () => {
+    const html = managedPage([posthogSnippet(POSTHOG, "https://us.i.posthog.com")])
+    const { results, requests } = await run({ [`${SITE}/`]: { body: html } }, { posthog: { projectKey: POSTHOG, apiHost: "https://us.i.posthog.com" } })
+    expect(byId(results, "posthog_proxy").map((result) => result.state)).toEqual(["info"])
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual(["/"])
+  })
+})

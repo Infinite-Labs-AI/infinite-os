@@ -8,7 +8,7 @@
 //
 // `Accept: text/html` (the lane counts documents), the monitor user agent (classed as automation), no
 // cookies, and never loaded in a window (that would spend a second page view).
-import { liveProbeUserAgent, type LiveProbeDeps } from "./probe.js"
+import { LIVE_PROBE_TIMEOUT_MS, liveProbeUserAgent, type LiveProbeDeps } from "./probe.js"
 
 export const SERVER_LANE_PROBE_PREFIX = "/__infinite_probe/" as const
 
@@ -35,16 +35,22 @@ export async function sendServerLaneProbe(
   const fetchImpl = deps.fetch ?? globalThis.fetch
   const url = `https://${productionHost}${path}`
   const sentAt = deps.now().toISOString()
+  // A stalled site must not stall doctor: the one request has the same deadline as every live probe.
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), deps.timeoutMs ?? LIVE_PROBE_TIMEOUT_MS)
   try {
     const response = await fetchImpl(url, {
       method: "GET",
       redirect: "manual",
       credentials: "omit",
-      headers: { Accept: "text/html", "User-Agent": liveProbeUserAgent(deps.version), "Cache-Control": "no-cache" }
+      headers: { Accept: "text/html", "User-Agent": liveProbeUserAgent(deps.version), "Cache-Control": "no-cache" },
+      signal: controller.signal
     })
     await response.body?.cancel().catch(() => undefined)
     return { path, status: response.status, sentAt, detail: null }
   } catch (error) {
     return { path, status: 0, sentAt, detail: error instanceof Error ? error.message : String(error) }
+  } finally {
+    clearTimeout(timer)
   }
 }
