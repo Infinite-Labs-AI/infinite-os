@@ -23,17 +23,11 @@ import React from "react";
 import * as inkStock from "ink";
 import * as infiniteInk from "@infinite-os/ink";
 
+import { resolveInkRenderer, type CliInkRenderer } from "./renderer-choice.js";
+
+export { resolveInkRenderer, type CliInkRenderer } from "./renderer-choice.js";
+
 type InkModule = typeof inkStock;
-
-export type CliInkRenderer = "stock" | "infinite";
-
-export function resolveInkRenderer(env: NodeJS.ProcessEnv = process.env): CliInkRenderer {
-  const requested = env.INFINITE_INK_RENDERER?.trim().toLowerCase();
-  // "infinite" is canonical; "hermes"/"hermes-ink" stay accepted as legacy aliases.
-  return requested === "infinite" || requested === "hermes" || requested === "hermes-ink"
-    ? "infinite"
-    : "stock";
-}
 
 function stripStockOnlyOptions(options: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!options) {

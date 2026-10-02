@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { displayWidth, stripAnsi } from "../tui/lib/display-width.js";
-import { resolveTheme } from "../tui/theme.js";
+import { ansiFg, resolveTheme } from "../tui/theme.js";
 import { parseInline, wrapSpans } from "./markdown-inline.js";
 import { renderMarkdown } from "./markdown-render.js";
 import { stripInlineMarkup } from "./markdown.js";
@@ -71,10 +71,11 @@ describe("renderMarkdown", () => {
   it("colors a level-1 heading with the primary color and keeps lower headings bold only", () => {
     const out = renderMarkdown("# Top\n\n## Next", { width: 40, color: true, theme });
     expect(out[0]).toContain("\u001b[1m");
-    expect(out[0]).toContain("\u001b[38;2;0;213;255m");
+    expect(ansiFg(theme, "primary")).not.toBe("");
+    expect(out[0]).toContain(ansiFg(theme, "primary"));
     expect(stripAnsi(out[0] ?? "")).toBe("Top");
     expect(out[2]).toContain("\u001b[1m");
-    expect(out[2]).not.toContain("\u001b[38;2;0;213;255m");
+    expect(out[2]).not.toContain(ansiFg(theme, "primary"));
   });
 
   it("scrubs terminal control and bidi characters out of every text node, code included", () => {

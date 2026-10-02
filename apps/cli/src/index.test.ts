@@ -414,7 +414,8 @@ describe("cli smoke", () => {
   it("resolves built-in Hermes-style CLI skins from the environment", () => {
     expect(resolveTheme({}).brand.name).toBe("Infinite");
     expect(resolveTheme({ INFINITE_CLI_SKIN: "mono" }).brand.name).toBe("Infinite Mono");
-    expect(resolveTheme({ INFINITE_THEME: "slate" }).color.primary).toBe("#54C6FF");
+    // A skin's hexes paint at the truecolor tier only.
+    expect(resolveTheme({ INFINITE_THEME: "slate", COLORTERM: "truecolor" }).color.primary).toBe("#54C6FF");
     expect(resolveTheme({ INFINITE_SKIN: "unknown" }).brand.name).toBe("Infinite");
   });
 
@@ -435,7 +436,7 @@ describe("cli smoke", () => {
         "tool_prefix: \"▏\""
       ].join("\n"));
 
-      const theme = resolveTheme({ INFINITE_SKIN_FILE: skinPath });
+      const theme = resolveTheme({ INFINITE_SKIN_FILE: skinPath, COLORTERM: "truecolor" });
       expect(theme.brand.name).toBe("Cyber Agent");
       expect(theme.brand.prompt).toBe("»");
       expect(theme.brand.tool).toBe("▏");
@@ -462,7 +463,7 @@ describe("cli smoke", () => {
         "  agent_name: \"Aurora\""
       ].join("\n"));
 
-      const theme = resolveTheme({ INFINITE_CLI_SKIN: "aurora", INFINITE_SKIN_DIR: skinDir });
+      const theme = resolveTheme({ INFINITE_CLI_SKIN: "aurora", INFINITE_SKIN_DIR: skinDir, COLORTERM: "truecolor" });
       expect(theme.brand.name).toBe("Aurora");
       expect(theme.color.primary).toBe("#44FFDD");
       expect(theme.color.error).toBe("#FF3366");

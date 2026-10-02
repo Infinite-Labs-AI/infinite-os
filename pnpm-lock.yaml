@@ -78,6 +78,9 @@ importers:
       '@infinite-os/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
+      chalk:
+        specifier: 5.6.2
+        version: 5.6.2
       infinite-tag:
         specifier: workspace:*
         version: link:../../packages/instrument
