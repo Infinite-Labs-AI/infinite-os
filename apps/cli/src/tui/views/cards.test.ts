@@ -483,7 +483,7 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     ]);
   });
 
-  it("an app receipt whose title carries its provenance (S4): a short head, the provenance once, in the card's title (run-2 N5)", () => {
+  it("an app receipt whose title carries its provenance (S4): a short head, the provenance once, in r4's short words (run-r2 NICE)", () => {
     const view = receiptView({
       title: "Paused ad “Ad 01” · Proposed by the agent · approved by You", state: "done", outcome: "applied",
       receipt: { sentence: "Paused “Ad 01”. Meta shows it PAUSED.", tone: "ok", revertible: false, provenanceLine: "Proposed by the agent · approved by You" }
@@ -491,9 +491,18 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     const render = renderView(view, viewCtx());
     expect(render.head.replace(/\u001b\[[0-9;]*m/gu, "")).toBe(" Paused ad “Ad 01”  ✓ Done");
     const all = [render.head, ...render.detail].map((line) => line.replace(/\u001b\[[0-9;]*m/gu, "")).join("\n");
-    expect(all.split("Proposed by the agent · approved by You").length - 1).toBe(1);
-    expect(all).toContain("┌─ Paused ad “Ad 01” · Proposed by the agent · approved by You ─");
+    // r4 flow-pause-03: `Agent proposed · You approved`, said once, in the card's title.
+    expect(all).not.toContain("Proposed by the agent");
+    expect(all.split("Agent proposed · You approved").length - 1).toBe(1);
+    expect(all).toContain("┌─ Paused ad “Ad 01” · Agent proposed · You approved ─");
     expect(all).toContain("Paused “Ad 01”. Meta shows it PAUSED.");
+    // Provenance in other words stays the app's own.
+    const other = receiptView({
+      title: "Paused ad “Ad 01” · Set by a rule", state: "done", outcome: "applied",
+      receipt: { sentence: "Paused.", tone: "ok", revertible: false, provenanceLine: "Set by a rule" }
+    });
+    const otherText = renderView(other, viewCtx()).detail.map((line) => line.replace(/\u001b\[[0-9;]*m/gu, "")).join("\n");
+    expect(otherText).toContain("┌─ Paused ad “Ad 01” · Set by a rule ─");
   });
 
   it("a receipt view from the app (no approval left, the done title as its title) gets the same green card", () => {

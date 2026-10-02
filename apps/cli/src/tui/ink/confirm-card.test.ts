@@ -120,6 +120,16 @@ describe("the receipt a resolved card leaves on its turn", () => {
       .not.toBeNull();
   });
 
+  it("a receipt with no approval of its own keeps the card's, so the done card still says what it did behind ? (S4, run-r2 NICE)", () => {
+    const approval = { kind: "card", title: "Pause ad “Hook A”?", summary: "Sets it PAUSED on Meta, so it stops spending.", confirmLabel: "Pause", dismissLabel: "Dismiss", doneTitle: "Paused ad “Hook A”", rows: [] };
+    const card = pending({ view: { ...receipt({}).view, title: "Pause ad “Hook A”?", state: "needs_yes", outcome: undefined, receipt: undefined, approval } as never });
+    expect(receiptViewFrame(card, receipt({}))?.view.approval?.summary).toBe("Sets it PAUSED on Meta, so it stops spending.");
+    // The app's own approval on the receipt wins; a card with no view adds nothing.
+    const own = { ...approval, summary: "The app's words." };
+    expect(receiptViewFrame(card, receipt({ approval: own }))?.view.approval?.summary).toBe("The app's words.");
+    expect(receiptViewFrame(pending(), receipt({}))?.view.approval).toBeUndefined();
+  });
+
   it("an unsure, partial or retryable receipt, a kind that draws none, or no view keeps the receipt lines", () => {
     expect(receiptViewFrame(pending(), receipt({ state: "outcome_unknown", outcome: "unknown", retry: "check_first" }))).toBeNull();
     expect(receiptViewFrame(pending(), receipt({ state: "partial", outcome: "partial" }))).toBeNull();

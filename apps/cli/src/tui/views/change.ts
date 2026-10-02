@@ -21,6 +21,18 @@ import type { KindRender, ViewRenderCtx } from "./types.js";
 /** The words a done change's card adds after its title: who proposed it and who said yes. */
 export const APPROVED_SUFFIX = "Agent proposed · You approved";
 
+/**
+ * The app's provenance in r4's short words: `Proposed by the agent · approved
+ * by You` reads `Agent proposed · You approved`. Words in any other shape stay
+ * the app's own.
+ */
+export function shortProvenance(words: string): string {
+  const match = /^proposed by (?:the )?(.+?) · approved by (.+)$/iu.exec(words);
+  if (!match) return words;
+  const capital = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+  return `${capital(match[1]!)} proposed · ${capital(match[2]!)} approved`;
+}
+
 /** States a write card is still open in (asking, running, or not sure yet). */
 const OPEN_CARD_STATES = new Set(["needs_yes", "needs_answer", "applying", "outcome_unknown", "partial"]);
 
@@ -47,15 +59,16 @@ function changeViewLines(view: AnswerViewV1, ctx: ViewRenderCtx, notes: Footnote
   const approval = isRecord(view.approval) && view.approval.kind === "card" ? view.approval : null;
   const receipt = isRecord(view.receipt) ? view.receipt : null;
   if (view.state === "done") {
-    // Who proposed and who said yes is said once, in the card's title: r4's
-    // words, or the app's own when its title already ends with its receipt's
-    // provenance (`… · Proposed by the agent · approved by You`), which is then
-    // not repeated in the card. Any other provenance line is a fact of the card.
+    // Who proposed and who said yes is said once, in the card's title, in r4's
+    // words: the app's own provenance when its title already ends with it
+    // (`… · Proposed by the agent · approved by You` reads `… · Agent proposed
+    // · You approved`), which is then not repeated in the card. Any other
+    // provenance line is a fact of the card.
     const provenance = receipt ? viewText(receipt.provenanceLine) : "";
     const rawTitle = viewText(approval?.doneTitle) || viewText(view.title);
     const titled = provenance !== "" && rawTitle.endsWith(` · ${provenance}`);
     const base = titled ? rawTitle.slice(0, -(provenance.length + 3)) : rawTitle;
-    const title = receipt ? [base, titled ? provenance : APPROVED_SUFFIX].filter(Boolean).join(" · ") : rawTitle;
+    const title = receipt ? [base, titled ? shortProvenance(provenance) : APPROVED_SUFFIX].filter(Boolean).join(" · ") : rawTitle;
     const facts = receipt ? [viewText(receipt.sentence), titled ? "" : provenance].filter(Boolean) : [];
     return changeCard(view, title, "green", [
       ...cardRows(body, approval, ctx, notes),

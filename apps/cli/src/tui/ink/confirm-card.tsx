@@ -61,13 +61,17 @@ export function receiptViewFrame(head: InSessionConfirmationAction, outcome: unk
   if (!settled || !words) {
     return null;
   }
+  // A receipt that brings no approval keeps the card's: the done card still
+  // says what it did behind `?` (r4 flow-pause-03; S4's app sends none).
+  const card = head.view?.approval;
+  const kept = !view.approval && card?.kind === "card" ? ({ ...view, approval: card } as typeof view) : view;
   return {
     type: "tool.view",
     stage: "tool",
     message: terminalText(view.title),
     viewId: `receipt:${head.confirmationHandle}`,
     name: view.tool,
-    view
+    view: kept
   };
 }
 
