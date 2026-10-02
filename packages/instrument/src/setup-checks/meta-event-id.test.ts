@@ -49,3 +49,29 @@ describe("standard conversion on a click", () => {
     expect(findStandardOnClick('<a onclick="fbq(\'track\', \'Lead\')">x</a>').map((hit) => hit.event)).toEqual(["Lead"])
   })
 })
+
+describe("Meta event id: fallbacks, named handlers and non-Meta eventIDs (review P1-5, P2-8, P3-8)", () => {
+  const codes = (code: string, file = "app/signup/page.tsx") => checkMetaEventId({ files: files({ [file]: code }) }).findings.map((finding) => finding.code)
+
+  it("a fallback around metaEventId is page-built (22d08d4: the page fires with its own id when the server sends null)", () => {
+    expect(codes("fbq('track', 'CompleteRegistration', {}, { eventID: res.metaEventId ?? crypto.randomUUID() })")).toEqual(["INF_SETUP_META_EVENT_ID_PAGE_BUILT"])
+    expect(codes("fbq('track', 'CompleteRegistration', {}, { eventID: metaEventId || `signup-${Date.now()}` })")).toEqual(["INF_SETUP_META_EVENT_ID_PAGE_BUILT"])
+    expect(codes("fbq('track', 'Lead', {}, { eventID: res.metaEventId ? res.metaEventId : makeId() })")).toEqual(["INF_SETUP_META_EVENT_ID_PAGE_BUILT"])
+    // Negatives: the server's id itself, in its usual spellings.
+    expect(codes("if (res?.metaEventId) fbq('track', 'Lead', {}, { eventID: res?.metaEventId })")).toEqual([])
+    expect(codes("if (data.outcome.metaEventId) fbq('track', 'Lead', {}, { eventID: data.outcome.metaEventId! })")).toEqual([])
+  })
+
+  it("a conversion in a same-file named click handler is flagged", () => {
+    expect(findStandardOnClick("function onBuy() {\n  fbq('track', 'Lead')\n}\nexport default () => <button onClick={onBuy}>Buy</button>").map((hit) => hit.event)).toEqual(["Lead"])
+    expect(findStandardOnClick("const onBuy = () => fbq('track', 'Purchase')\nbtn.addEventListener('click', onBuy)").map((hit) => hit.event)).toEqual(["Purchase"])
+    expect(findStandardOnClick("const go = async ({ id }) => {\n  await save(id)\n  fbq('track', 'Donate')\n}\n<button onClick={() => go({ id })}>Give</button>").map((hit) => hit.event)).toEqual(["Donate"])
+    // Negative: a named function that is never a click handler.
+    expect(findStandardOnClick("function onPaid() {\n  fbq('track', 'Purchase', {}, { eventID: metaEventId })\n}\nonPaid()")).toEqual([])
+  })
+
+  it("an eventID in a unit with no fbq call is not Meta's (a calendar event)", () => {
+    expect(codes("const opts = { eventID: calendarEvent.id }", "app/calendar.tsx")).toEqual([])
+    expect(codes("const opts = { eventID: 'cal-' + calendarEvent.id }", "app/calendar.tsx")).toEqual([])
+  })
+})

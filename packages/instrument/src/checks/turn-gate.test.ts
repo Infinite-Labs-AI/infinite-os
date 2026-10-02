@@ -4,9 +4,12 @@
 import { describe, expect, it } from "vitest"
 
 import { FIXED_NOW } from "../../test/wizard/fixture-fetch.js"
+import { renderInfiniteBrowserTag } from "../runtime/infinite-browser.js"
+import { buildServerLaneModuleSource } from "../server-lane/runtime-source.js"
+import { HOST_DENY_V1 } from "../wizard/contracts/host-deny.js"
 import type { TurnDiff } from "../wizard/contracts/jobs.js"
 
-import { scanTurnDiff, turnGate, TURN_GATE_RULES, type TurnGateRule } from "./turn-gate.js"
+import { hasLoopbackLiteral, isBuildTimeFile, scanTurnDiff, turnGate, TURN_GATE_RULES, type TurnGateRule } from "./turn-gate.js"
 
 const CONNECTION = ["G-ACME123", "phc_acmeAcmeAcmeAcme0001", "111222333444555"]
 
@@ -52,7 +55,27 @@ const CASES: Array<[TurnGateRule, string, string, string]> = [
   ["foreign_provider_id", "src/app/layout.tsx", "gtag('config', 'G-NOTOURS1')", "gtag('config', 'G-ACME123')"],
   ["foreign_provider_id", "src/app/providers.tsx", "posthog.init('phc_someoneElseKey000001', {})", "posthog.init('phc_acmeAcmeAcmeAcme0001', {})"],
   ["test_event_code", "src/app/api/lead/route.ts", "body.test_event_code = 'TEST123'", "body.event_name = 'Lead'"],
-  ["page_built_event_id", "src/app/signup.tsx", "fbq('track', 'CompleteRegistration', {}, { eventID: 'signup-' + id })", "fbq('track', 'CompleteRegistration', {}, { eventID: metaEventId })"]
+  ["page_built_event_id", "src/app/signup.tsx", "fbq('track', 'CompleteRegistration', {}, { eventID: 'signup-' + id })", "fbq('track', 'CompleteRegistration', {}, { eventID: metaEventId })"],
+  // Review fix round (O9): evasions the first gate missed.
+  ["child_process", "next.config.mjs", "const cp = await import(`node:child_process`)", "const cfg = await import('./config.mjs')"],
+  ["computed_require", "next.config.mjs", 'const m = await import("node:" + "child_process")', 'const m = await import("./local.mjs")'],
+  ["computed_require", "next.config.mjs", "const req = createRequire(import.meta.url)", "const url = import.meta.url"],
+  ["new_function", "next.config.mjs", 'const env = Function("return process")().env', "function config() { return {} }"],
+  ["new_function", "src/lib/x.ts", '(() => {}).constructor("return process")()', "class A { constructor() {} }"],
+  ["node_internals", "next.config.mjs", 'process.binding("spawn_sync")', "process.env.NODE_ENV"],
+  ["node_internals", "next.config.mjs", 'import vm from "node:vm"', 'import path from "node:path"'],
+  ["eval", "src/lib/x.ts", '(0, eval)("1")', "const evaluation = 1"],
+  ["eval", "src/lib/x.ts", 'globalThis.eval("1")', "const medieval = 1"],
+  ["build_time_fetch", "next.config.mjs", "await fetch(u)", "await fetch('/api/config')"],
+  ["build_time_fetch", "next.config.mjs", "const f = globalThis.fetch", "const rewrites = async () => []"],
+  ["build_time_fetch", "vite.config.ts", 'import { request } from "undici"', 'import react from "@vitejs/plugin-react"'],
+  ["computed_global", "next.config.mjs", 'globalThis["fet" + "ch"](u)', "const name = 'acme'"],
+  ["foreign_provider_id", "src/app/layout.tsx", "fbq('init', process.env.NEXT_PUBLIC_META_PIXEL_ID || '999999999999999')", "fbq('init', process.env.NEXT_PUBLIC_META_PIXEL_ID)"],
+  ["foreign_provider_id", "src/app/layout.tsx", 'const PIXEL = env.PIXEL ?? "999999999999999"', 'const PIXEL = env.PIXEL ?? "111222333444555"'],
+  ["page_built_event_id", "src/app/signup.tsx", "fbq('track', 'Lead', {}, { eventID: res.metaEventId ?? crypto.randomUUID() })", "fbq('track', 'Lead', {}, { eventID: res.metaEventId })"],
+  ["conversion_without_event_id", "src/app/thanks/page.tsx", "useEffect(() => fbq('track', 'Purchase'), [])", "useEffect(() => fbq('track', 'Purchase', {}, { eventID: metaEventId }), [])"],
+  ["loopback_literal", "src/lib/x.ts", "const bridge = `http://127.0.0.1:${port}`", 'const deny = ["localhost", "127.0.0.1"]'],
+  ["loopback_literal", "src/lib/x.ts", "const h = '127.0.0.1' + ':' + port", "if (host === '127.0.0.1') return"]
 ]
 
 describe("post-turn gate: one positive and one negative per rule", () => {
@@ -62,6 +85,12 @@ describe("post-turn gate: one positive and one negative per rule", () => {
       expect(rules(diff(file, good))).not.toContain(rule)
     })
   }
+
+  it("ph shorthand inside fbq / adMatch (review P1-4)", () => {
+    expect(rules(diff("src/app/signup.tsx", "fbq('init', '111222333444555', { em, ph })"))).toContain("ph_in_meta")
+    expect(rules(diff("src/app/api/lead/route.ts", "await reportInfiniteOutcome({ type: 'lead', eventId: lead.id, adMatch: { em, ph } })"))).toContain("ph_in_meta")
+    expect(rules(diff("src/app/signup.tsx", "fbq('init', '111222333444555', { em, external_id })"))).not.toContain("ph_in_meta")
+  })
 
   it("ph inside fbq / adMatch (negative: em only)", () => {
     expect(rules(diff("src/app/signup.tsx", ["fbq('init', '111222333444555', {", "  em: hashedEmail,", "  ph: hashedPhone", "})"]))).toContain("ph_in_meta")
@@ -73,6 +102,17 @@ describe("post-turn gate: one positive and one negative per rule", () => {
     const optOut = "fbq('set', 'autoConfig', false, '111222333444555')"
     expect(rules(diff("src/app/layout.tsx", ["fbq('init', '111222333444555')"], [optOut]))).toContain("autoconfig_opt_out_removed")
     expect(rules(diff("src/app/layout.tsx", [optOut, "fbq('init', '111222333444555')"], [optOut]))).not.toContain("autoconfig_opt_out_removed")
+  })
+
+  it("a removed autoConfig opt-out with a VARIABLE pixel (review P1-4; negative: added back)", () => {
+    const optOut = "fbq('set', 'autoConfig', false, PIXEL_ID)"
+    expect(rules(diff("src/app/layout.tsx", ["fbq('init', PIXEL_ID)"], [optOut]))).toContain("autoconfig_opt_out_removed")
+    expect(rules(diff("src/app/layout.tsx", ["fbq('set', 'autoConfig', false,  PIXEL_ID)", "fbq('init', PIXEL_ID)"], [optOut]))).not.toContain("autoconfig_opt_out_removed")
+  })
+
+  it("a conversion fired from a same-file named click handler (review P2-8)", () => {
+    const added = ["function onBuy() {", "  fbq('track', 'Lead', {}, { eventID: metaEventId })", "}", "const B = () => <button onClick={onBuy}>Buy</button>"]
+    expect(rules(diff("src/app/buy.tsx", added))).toContain("standard_on_click")
   })
 
   it("a standard conversion in a click handler — from the hunk, and from the whole file when the handler is not in the diff", () => {
@@ -88,7 +128,41 @@ describe("post-turn gate: one positive and one negative per rule", () => {
 
   it("comments do not trip code rules, but the secret-path and loopback literals count anywhere", () => {
     expect(rules(diff("src/lib/x.ts", "// eval( is never used here"))).toEqual([])
+    expect(rules(diff("src/lib/x.ts", ["/**", " * do not call eval( here", " */"]))).toEqual([])
     expect(rules(diff("src/lib/x.ts", "// see ~/.growth-os for details"))).toContain("secret_path_literal")
+    expect(rules(diff("src/lib/x.ts", "// the bridge is http://127.0.0.1:4242"))).toContain("loopback_literal")
+  })
+
+  it("a '//' inside a string hides nothing after it (review P1-2)", () => {
+    expect(rules(diff("next.config.mjs", 'const a = "a//"; const cp = require("child_process")'))).toContain("child_process")
+    expect(rules(diff("src/app/layout.tsx", "const a = \"x//\"; fbq('init', '999999999999999')"))).toContain("foreign_provider_id")
+    expect(rules(diff("next.config.mjs", "const a = 'x//'; eval(code)"))).toContain("eval")
+    // A comment that only LOOKS like code after a real statement still counts: the raw line is read.
+    expect(rules(diff("src/lib/x.ts", "const s = '//'; new Function('x')"))).toContain("new_function")
+  })
+
+  it("a require( split over two lines: a plain string is fine, a computed one is not (review P3-1)", () => {
+    expect(rules(diff("src/lib/x.ts", ["const m = require(", '  "./fixed"', ")"]))).not.toContain("computed_require")
+    expect(rules(diff("src/lib/x.ts", ["const m = require(", "  name", ")"]))).toContain("computed_require")
+  })
+
+  it("scripts/ is build-time only at the repo or app root (review P3-1)", () => {
+    expect(isBuildTimeFile("scripts/prebuild.js")).toBe(true)
+    expect(isBuildTimeFile("apps/web/scripts/prebuild.js")).toBe(true)
+    expect(isBuildTimeFile("public/scripts/widget.js")).toBe(false)
+    expect(isBuildTimeFile("src/scripts/thing.ts")).toBe(false)
+    expect(rules(diff("public/scripts/widget.js", "fetch('https://api.example.com/x')"))).toEqual([])
+  })
+
+  it("infinite-tag's own emitted bytes pass the loopback rule (review P1-1: jobs 7, 2 and 1)", () => {
+    // O5's preview-guard expression inlines the deny list, loopback included.
+    const guardLine = `if (!((function (h) { var n = h, i; var x = ["acme.com"], d = ${JSON.stringify(HOST_DENY_V1.deny.exact)}, s = ${JSON.stringify(HOST_DENY_V1.deny.suffix)}; for (i = 0; i < d.length; i += 1) if (d[i] === n) return false; return true; })(location.hostname))) return;`
+    expect(hasLoopbackLiteral(guardLine)).toBe(false)
+    expect(rules(diff("index.html", guardLine))).toEqual([])
+    const runtime = renderInfiniteBrowserTag({ siteSourceKey: "site_acme", collectPath: "/infinite/ledger", productionHosts: ["acme.com"], respectDnt: true, consent: { mode: "not_required" } })
+    expect(rules(diff("app/layout.tsx", runtime.split("\n"))).filter((rule) => rule === "loopback_literal")).toEqual([])
+    const lane = buildServerLaneModuleSource({ siteSourceKey: "site_acme", productionHosts: ["acme.com"] })
+    expect(rules(diff("lib/infinite-server-lane.ts", lane.split("\n"))).filter((rule) => rule === "loopback_literal")).toEqual([])
   })
 
   it("every rule has copy", () => {
