@@ -157,7 +157,7 @@ function turnSteps(messages: readonly Msg[], state: TurnState | undefined, ctx: 
         return step;
       }
       const now = state.tools.find((item) => item.id === step.id)?.latestPreview?.trim();
-      return { ...step, result: now ? compactPreview(now, 72) : "running" };
+      return { ...step, result: now ? compactPreview(now, 72) : step.result || "running" };
     });
   }
   const pending: Msg[] = state?.streamPendingTools.length ? [{ kind: "trail", role: "system", text: "", tools: state.streamPendingTools }] : [];
