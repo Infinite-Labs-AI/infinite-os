@@ -306,7 +306,10 @@ export function headLine(view: AnswerViewV1, ctx: ViewRenderCtx): string {
   // The chip's padding (2) and the space after it (1).
   const room = width - displayWidth(state) - 3;
   if (room < 4) {
-    return fitLine(`${title}  ${state}`, width);
+    // No room for the chip: the title plain (when 4+ cells are left), the state still in its tone.
+    const painted = paint(fitLine(state, width), toneRole(head.tone), ctx);
+    const titleRoom = width - displayWidth(state) - 2;
+    return titleRoom >= 4 ? `${fitLine(title, titleRoom)}  ${painted}` : painted;
   }
   const shown = fitLine(title, room);
   return `${paint(` ${shown} `, "tag", ctx)} ${paint(state, toneRole(head.tone), ctx)}`;

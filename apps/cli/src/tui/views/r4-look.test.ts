@@ -173,6 +173,11 @@ describe("the head and the source line (r4)", () => {
       .toBe("{tag} Make 3 creatives  {bb}⌘ Cmd+L only");
   });
 
+  it("a head too narrow for the chip keeps the state in its tone (it never turns plain)", () => {
+    const narrow = renderView(view({ kind: "link", title: "Tracked link", state: "needs_yes", body: { target: "url", minted: false, opened: false, warnings: [] } }), ctx({ width: 18 }));
+    expect(seg(narrow.head)).toBe("{ab}▣ Needs your OK");
+  });
+
   it("without colour the chip prints as same-width brackets", () => {
     expect(renderView(view({}), ctx({ color: false })).head).toBe("[Google Ads since launch] ✓ Ready");
   });

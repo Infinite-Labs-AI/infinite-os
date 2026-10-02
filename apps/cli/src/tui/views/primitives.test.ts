@@ -77,7 +77,7 @@ describe("state heads (the shared state-word table)", () => {
       working: "◑ Working", ready: "✓ Ready", nothing_found: "∅ Nothing found", not_measured: "— Not measured",
       partial: "◐ Partial", out_of_date: "⧗ Out of date", not_connected: "⊘ Not connected", blocked: "⊗ Blocked",
       finish_in_app: "↗ Finish in the app", needs_yes: "▣ Needs your OK", needs_answer: "▣ Needs an answer",
-      applying: "◑ Applying", done: "✓ Done", failed: "✗ Failed", cancelled: "✕ Dismissed", expired: "◷ Expired",
+      applying: "◑ Working", done: "✓ Done", failed: "✗ Failed", cancelled: "✕ Dismissed", expired: "◷ Expired",
       outcome_unknown: "◑ Not sure it happened", hit_limit: "$ Hit a limit", background: "⟳ Running",
       opened_in_app: "↗ Opened in the app", preview: "◇ Preview", no_change: "· Nothing to change",
       showing_defaults: "◇ Showing defaults", cmdl_only: "⌘ Do this in Cmd+L"
@@ -93,6 +93,26 @@ describe("state heads (the shared state-word table)", () => {
   it("a failed write that was never sent says Not sent", () => {
     expect(stateHeadFor({ state: "failed", outcome: "not_sent" })).toMatchObject({ glyph: "✗", words: "Not sent", tone: "bad" });
     expect(stateHeadFor({ state: "failed", outcome: "unknown" }).words).toBe("Failed");
+  });
+
+  // r4 "⧗ Changed on Meta" (amber): the write never left because the thing changed
+  // under it. Hosts may send it as failed + not_sent with code changed_on_meta.
+  it("a write not sent because it changed on the provider heads ⧗ amber, never ✗ red", () => {
+    const changed = (short?: string) => stateHeadFor({
+      state: "failed", outcome: "not_sent",
+      stateReason: { code: "changed_on_meta", words: "This changed since you looked.", ...(short ? { short } : {}) } as never
+    });
+    expect(changed("Changed on Meta")).toEqual({ glyph: "⧗", words: "Changed on Meta", tone: "warn" });
+    expect(changed()).toEqual({ glyph: "⧗", words: "Changed on Meta", tone: "warn" });
+    // Any other not-sent reason keeps the red ✗ Not sent.
+    expect(stateHeadFor({ state: "failed", outcome: "not_sent", stateReason: { code: "x", words: "w" } as never }))
+      .toEqual({ glyph: "✗", words: "Not sent", tone: "bad" });
+  });
+
+  it("a short longer than a head's room falls back to the generic words", () => {
+    const h = stateHeadFor({ state: "partial", stateReason: { code: "p", words: "w", short: "x".repeat(33) } as never });
+    expect(h.words).toBe("Partial");
+    expect(stateHeadFor({ state: "partial", stateReason: { code: "p", words: "w", short: "y".repeat(32) } as never }).words).toBe("y".repeat(32));
   });
 
   // D3 (River, 2026-10-02): the head is the glyph plus `stateReason.short ?? generic`, as round 4 draws it.
