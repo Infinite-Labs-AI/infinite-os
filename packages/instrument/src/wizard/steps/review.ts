@@ -149,6 +149,17 @@ async function postRound(session: Session, review: ReviewResult, reviewer: Agent
 }
 
 /**
+ * The review in a few words for the step's closing line (terminal QA #18: the round's own lines scroll out of the
+ * kept sub-statuses behind the rehearsal re-run, so the closing line says what was found and what was fixed).
+ */
+export function reviewTally(rounds: ReadonlyArray<{ fixSha: string | null; review?: { findings: readonly unknown[] } }>): string {
+  const comments = rounds.reduce((sum, round) => sum + (round.review?.findings.length ?? 0), 0)
+  if (comments === 0) return "no comments"
+  const fixRounds = rounds.filter((round) => round.fixSha !== null).length
+  return `${comments} comment${comments === 1 ? "" : "s"}${fixRounds > 0 ? `, fixed in ${fixRounds} new commit${fixRounds === 1 ? "" : "s"}` : ", none fixed"}`
+}
+
+/**
  * What the reviewer found, said so a later round never reads as "found nothing at all" (terminal QA #18: after
  * a fix, the re-review's "Codex: no comments" was the only line left on screen about the review).
  */
@@ -811,7 +822,8 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
   const once = final.report.in_pr?.finishLine.each_tool_once?.state
   const rehearsalText = once === "pass" ? "rehearsal passed on the latest commit" : once === "problem" ? "rehearsal found a problem" : "rehearsal undetermined"
   const who = session.reviewed ? `reviewed by ${agentReviewer ? AGENT_LABEL[agentReviewer] : "your agent (brief)"}` : "no second review"
-  const line = `${final.pr?.number ? `Pull request #${final.pr.number}` : "Branch"} · ${who} · ${rehearsalText}`
+  const found = session.reviewed ? reviewTally(session.ledger.rounds) : null
+  const line = [`${final.pr?.number ? `Pull request #${final.pr.number}` : "Branch"}`, who, ...(found ? [found] : []), rehearsalText].join(" · ")
   status(ctx, "review", line)
   return { kind: "ok", status: line }
 }

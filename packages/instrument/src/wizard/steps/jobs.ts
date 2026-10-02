@@ -552,14 +552,23 @@ const NOT_DONE_WORDS: Record<BlockedReason, string> = {
 /** At most this many not-done jobs are named (the feed keeps 8 lines); the rest are counted. */
 const NOT_DONE_NAMED = 6
 
-/** "! Not done: <job> (<why>)" for every agent job that ended blocked or failed; pure, so it is tested alone. */
+/**
+ * "! Not done: <job> (<why>)" for every agent job that ended blocked or failed; parts of one job that ended the
+ * same way are one line ("Improve the existing PostHog (2 parts): …"). Pure, so it is tested alone.
+ */
 export function notDoneLines(items: readonly ChecklistItem[]): string[] {
-  const open = items.filter((item) => item.owner === "agent" && (item.state === "blocked" || item.state === "failed"))
-  const lines = open.slice(0, NOT_DONE_NAMED).map((item) => {
+  const groups = new Map<string, { title: string; why: string; parts: number }>()
+  for (const item of items) {
+    if (item.owner !== "agent" || (item.state !== "blocked" && item.state !== "failed")) continue
     const why = item.state === "failed" ? "the wizard's check did not pass" : item.blockedReason ? NOT_DONE_WORDS[item.blockedReason] : "blocked"
-    return `! Not done: ${item.title} (${why})`
-  })
-  const rest = open.length - NOT_DONE_NAMED
+    const key = `${item.title}\u0000${why}`
+    const group = groups.get(key)
+    if (group) group.parts += 1
+    else groups.set(key, { title: item.title, why, parts: 1 })
+  }
+  const all = [...groups.values()]
+  const lines = all.slice(0, NOT_DONE_NAMED).map((group) => `! Not done: ${group.title}${group.parts > 1 ? ` (${group.parts} parts)` : ""}: ${group.why}`)
+  const rest = all.slice(NOT_DONE_NAMED).reduce((sum, group) => sum + group.parts, 0)
   if (rest > 0) lines.push(`! …and ${rest} more not done: the pull request lists every job`)
   return lines
 }

@@ -560,7 +560,9 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     seedThreads(w)
     const outcome = await reviewStep.run(w.ctx, w.deps)
     expectOk(outcome)
-    expect(outcome.status).toMatch(/reviewed by Codex · rehearsal passed on the latest commit/)
+    // Terminal QA #18: the closing line says what the review found and that it was fixed (3 comments in round 1,
+    // one fix commit, a clean round 2), so it never reads as "found nothing".
+    expect(outcome.status).toMatch(/reviewed by Codex · 3 comments, fixed in 1 new commit · rehearsal passed on the latest commit/)
 
     // Nothing secret reached gh (argv or stdin) or the terminal events.
     const traffic = w.gh.traffic()

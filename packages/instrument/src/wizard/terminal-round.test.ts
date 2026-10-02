@@ -15,7 +15,7 @@ import { createRunState } from "./run-state.js"
 import { beforeStatus } from "./steps/before.js"
 import { notDoneLines } from "./steps/jobs.js"
 import { mergeSummary } from "./steps/merge.js"
-import { reviewFoundLine } from "./steps/review.js"
+import { reviewFoundLine, reviewTally } from "./steps/review.js"
 import { WizardStore } from "./store.js"
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -160,10 +160,20 @@ describe("QA #20: the jobs that are not done are named", () => {
         item("A code job", "blocked", "needs_you", "code")
       ])
     ).toEqual([
-      "! Not done: Server-side sign-up event (needs your answer)",
-      "! Not done: Remove the second GA4 tag (the agent did not finish it)",
-      "! Not done: Join logged-in visitors (the wizard's check did not pass)"
+      "! Not done: Server-side sign-up event: needs your answer",
+      "! Not done: Remove the second GA4 tag: the agent did not finish it",
+      "! Not done: Join logged-in visitors: the wizard's check did not pass"
     ])
+  })
+
+  it("parts of one job that ended the same way are one line, with how many parts", () => {
+    expect(
+      notDoneLines([
+        { ...item("Keep previews silent (existing tags)", "blocked", "agent_blocked"), id: "preview_guard:ga4" },
+        { ...item("Keep previews silent (existing tags)", "blocked", "agent_blocked"), id: "preview_guard:posthog" },
+        { ...item("Keep previews silent (existing tags)", "failed"), id: "preview_guard:meta" }
+      ])
+    ).toEqual(["! Not done: Keep previews silent (existing tags) (2 parts): the agent did not finish it", "! Not done: Keep previews silent (existing tags): the wizard's check did not pass"])
   })
 
   it("more than six are counted, and a clean run adds nothing (negative)", () => {
@@ -181,6 +191,12 @@ describe("QA #18 and #19: the review says what was found, and who is working", (
     expect(reviewFoundLine("Codex", 0, 1)).toEqual({ text: "Codex reviewed the pull request: nothing to change", tone: "ok" })
     expect(reviewFoundLine("Codex", 2, 1)).toEqual({ text: "Codex left 2 comments", tone: "info" })
     expect(reviewFoundLine("Claude Code", 1, 2)).toEqual({ text: "Claude Code left 1 new comment", tone: "info" })
+  })
+
+  it("the closing line counts what the reviewer found and how it was fixed (the round's own lines scroll away)", () => {
+    expect(reviewTally([{ fixSha: "abc", review: { findings: [1] } }, { fixSha: null, review: { findings: [] } }])).toBe("1 comment, fixed in 1 new commit")
+    expect(reviewTally([{ fixSha: null, review: { findings: [1, 2] } }])).toBe("2 comments, none fixed")
+    expect(reviewTally([{ fixSha: null, review: { findings: [] } }])).toBe("no comments")
   })
 
   it("a new step starts with no agent line: the worker's last words never sit above the reviewer's step", () => {
