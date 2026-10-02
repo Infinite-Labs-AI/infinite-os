@@ -117,8 +117,16 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
       await io.settleEdits()
     }
   }
+  const claimed = agentItems.filter((item) => item.state === "claimed")
+  if (claimed.length > 0) {
+    await recheckClaimed(io, claimed)
+    if (agentItems.length === claimed.length) {
+      await io.settleEdits()
+      return { kind: "ok", status: io.summary() }
+    }
+  }
   try {
-    return await runWorker(io, agentItems)
+    return await runWorker(io, agentItems.filter((item) => item.state !== "claimed"))
   } finally {
     await io.settleEdits()
     // B5/B29: seal the tree the agent jobs left (after the failed jobs' edits were undone); the rehearsal
@@ -410,7 +418,37 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   if (round.changedAfterTurn) return sealBrokenOutcome(io, round.changedAfterTurn)
   await io.patchClickTested()
   await io.save()
+  // B26: inside the parent agent's own sandbox, T0 and the build cannot run; they read undetermined
+  // (test_error) and the jobs stay claimed until the user's own terminal runs the checks.
+  if (round.results.some(sandboxBlocked)) {
+    return {
+      kind: "parked",
+      code: "INF_WIZ_NEEDS_ANSWERS",
+      reason: "The build and the offline tests cannot run inside your agent's sandbox, so these jobs are not checked yet.",
+      resumeHint: NESTED_SANDBOX_HINT
+    }
+  }
   return { kind: "ok", status: io.summary() }
+}
+
+/** B26's park line. */
+export const NESTED_SANDBOX_HINT = "Run npx infinite-tag --resume in your own terminal to finish the checks."
+
+/** A T0 or build result that could not run because the sandbox could not be applied (a sandbox inside a sandbox). */
+function sandboxBlocked(result: CheckResult): boolean {
+  return result.state === "undetermined" && /^test_error\b/.test(result.reason ?? "") && /sandbox_unavailable|sandbox-exec could not apply/.test(result.reason ?? "")
+}
+
+/**
+ * B26: jobs a nested run left `claimed` (its checks could not run in the parent agent's sandbox) are checked
+ * here, in the user's own terminal, before any agent turn. They are never handed to an agent again.
+ */
+async function recheckClaimed(io: JobsIo, claimed: readonly ChecklistItem[]): Promise<void> {
+  const at = io.deps.clock.now().toISOString()
+  const claims: Claim[] = claimed.map((item) => ({ jobId: item.id, status: "done", note: "Checked in your own terminal.", at }))
+  await settleRound(io, claims, [], false, null)
+  await io.patchClickTested()
+  await io.save()
 }
 
 async function sealBrokenOutcome(io: JobsIo, changed: string[]): Promise<StepOutcome> {
@@ -656,7 +694,12 @@ class JobsIo {
     if (!this.buildPromise) {
       this.buildPromise = (async () => {
         const build = await this.deps.checks.build()
+        // A build that could not run (no sandbox inside another sandbox, a spawn failure) or was skipped for
+        // an ambiguous lockfile proves nothing either way: undetermined, never a pass (B26).
+        const couldNotRun = (build as { error?: string | null }).error
+        if (!build.ok && couldNotRun) return this.result("build", "B", "undetermined", `test_error — the build could not run: ${couldNotRun}`)
         if (build.ok) return this.result("build", "B", "pass")
+        if (build.failureSignature.length === 0) return this.result("build", "B", "undetermined", "test_error — the build did not run to a verdict")
         this.baseline ??= this.deps.checks.buildBaseline()
         const baseline = await this.baseline
         const fresh = build.failureSignature.filter((failure) => !baseline.failureSignature.includes(failure))

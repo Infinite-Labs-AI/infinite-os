@@ -10,7 +10,7 @@ import { agentItem, baseState, fakeBridge, fakeChecks, fakeInstaller, fakeRegist
 import type { AgentRunnerImpl } from "../../agents/runner.js"
 import type { WizardOptions } from "../contracts/deps.js"
 import type { CheckResult, ChecklistItem, CheckRunner } from "../contracts/jobs.js"
-import { NESTED_BRIEF_PATH, step } from "./jobs.js"
+import { NESTED_BRIEF_PATH, NESTED_SANDBOX_HINT, step } from "./jobs.js"
 
 // These spawn real node fakes, the built mcp-proxy and git for up to 4 rounds: the 5 s default is too
 // tight under a loaded full-suite run (review O3 F15).
@@ -256,5 +256,46 @@ describe("step jobs: nested mode (§3d.7)", () => {
     expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
     expect(t.current().snapshot).toBeNull()
     expect(t.recordedEdits.flat().map((edit) => edit.file)).toEqual(["app/page.tsx"])
+  })
+})
+
+describe("step jobs: nested inside another sandbox (§3z B26)", () => {
+  const NO_SANDBOX = "macOS sandbox-exec could not apply a profile (sandbox_apply: Operation not permitted); refusing to run site code unsandboxed."
+
+  it("the build cannot run → undetermined test_error (never a pass), the run parks with the own-terminal line; the user's terminal finishes the checks without an agent", async () => {
+    const t = setup({ scenario: {}, options: { nested: true, json: true }, checks: { build: [{ ok: false, failureSignature: [], durationMs: 1, error: NO_SANDBOX } as never, { ok: true, failureSignature: [], durationMs: 1 }] } })
+    // T0 inside the parent's sandbox: run.ts answers sandbox_unavailable, so every scenario reads test_error.
+    const realT0 = t.deps.checks.t0
+    let t0Calls = 0
+    t.deps.checks.t0 = async (scenarios, artifacts) => {
+      t0Calls += 1
+      if (t0Calls > 1) return realT0(scenarios, artifacts)
+      return scenarios.map((scenario) => ({ checkId: scenario.checkId, tier: "T0", state: "undetermined", reason: `test_error — sandbox_unavailable: ${NO_SANDBOX}`, at: "2026-10-02T10:00:00.000Z", runId: STEP_RUN_ID }))
+    }
+    expect((await step.run(t.ctx, t.deps)).kind).toBe("parked")
+    write(t.root, "app/page.tsx", PAGE_EDIT)
+    t.ctx.options.resume = true
+    const resumed = await step.run(t.ctx, t.deps)
+    expect(resumed).toEqual({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: expect.stringContaining("cannot run inside your agent's sandbox"), resumeHint: NESTED_SANDBOX_HINT })
+    expect(NESTED_SANDBOX_HINT).toBe("Run npx infinite-tag --resume in your own terminal to finish the checks.")
+    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("claimed")
+    const build = t.current().jobs.find((item) => item.id === "meta_improve:landing")!.checks.find((check) => check.tier === "B")!
+    expect(build).toMatchObject({ state: "undetermined", reason: expect.stringMatching(/^test_error — the build could not run: macOS sandbox-exec/) })
+    // The user's own terminal: no nesting; the claimed jobs are checked, never handed to an agent again.
+    t.ctx.options.nested = false
+    const finished = await step.run(t.ctx, t.deps)
+    expect(finished.kind).toBe("ok")
+    expect(runs(t.fakes)).toEqual([])
+    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
+    expect(stateOf(t.current().jobs, "meta_improve:landing")).not.toBe("claimed")
+  })
+
+  it("NEGATIVE: an ordinary red build with no new failures still reads as the baseline's, and a build that ran is never parked as a sandbox problem", async () => {
+    const t = setup({ scenario: {}, options: { nested: true, json: true }, checks: { build: [{ ok: false, failureSignature: ["tsc:TS2322"], durationMs: 1 }], baseline: { ok: false, failureSignature: ["tsc:TS2322"], durationMs: 1 } } })
+    await step.run(t.ctx, t.deps)
+    write(t.root, "app/page.tsx", PAGE_EDIT)
+    t.ctx.options.resume = true
+    expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
+    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
   })
 })
