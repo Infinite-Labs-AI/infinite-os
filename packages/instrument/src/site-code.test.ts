@@ -195,6 +195,16 @@ describe("plan blockers", () => {
   })
 })
 
+describe("the plan says how conversions reach the providers", () => {
+  const line = /Conversions reach GA4 and PostHog only when your own code calls the managed helpers/
+  it("with the helpers: the runtime forwards nothing, the site's code calls the helpers", () => {
+    expect(planFixture("static-html-basic", ARTIFACTS).assumptions.join("\n")).toMatch(line)
+  })
+  it("negative: without them the line is absent", () => {
+    expect(planFixture("static-html-basic", { ...ARTIFACTS, conversions: undefined }).assumptions.join("\n")).not.toMatch(line)
+  })
+})
+
 describe("the plain installer is unchanged when the wizard options are absent", () => {
   it("no helpers, no guard, no marker IIFE", () => {
     const html = installFixture("static-html-basic", {

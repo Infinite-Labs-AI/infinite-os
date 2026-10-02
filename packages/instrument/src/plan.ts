@@ -184,7 +184,9 @@ export function planInstallation(options: PlanInstallationOptions): InstallPlan 
   // 0.6.0: no dormant "mirror-only" Infinite runtime. Before mirror mode was removed, a GA4/PostHog
   // install without an Infinite source still embedded the Infinite runtime so it could forward
   // page views into those providers; the runtime now emits only to Infinite, so without a source
-  // key there is nothing for it to do and nothing is embedded — GA4/PostHog install natively.
+  // key there is nothing for it to do and nothing is embedded — GA4/PostHog install natively. The
+  // runtime forwards nothing; conversions reach GA4/PostHog through the managed helpers the site's
+  // own code calls (decisions 9 and 13), planned above when `conversions.helpers` is set.
 
   if (serverLaneDraft) {
     envKeys.push(...serverLaneDraft.envKeys)

@@ -28,9 +28,10 @@ export const infiniteProviderAdapter: ProviderAdapter = {
   plan(framework, artifact, context) {
     const infinite = artifact as InfinitePublicArtifact | undefined
     const consentMode = infinite?.consentMode
-    // 0.6.0: NO mirror mode. The Infinite runtime emits only to Infinite; GA4 / PostHog install as
-    // fully native, independent providers (their own page views, their own consent) — `context` is
-    // no longer consulted for provider coupling.
+    // 0.6.0: NO mirror mode. The Infinite runtime forwards nothing; GA4 / PostHog install as fully
+    // native, independent providers (their own page views, their own consent), never reduced WITHOUT
+    // a plan line the user approved. Conversions reach them because the site's code calls the managed
+    // helpers (decisions 9 and 13) — `context` is consulted only to say so.
 
     const blockers: string[] = []
     let collectPath: string = DEFAULT_INFINITE_COLLECT_PATH
@@ -111,6 +112,11 @@ export const infiniteProviderAdapter: ProviderAdapter = {
         ...(infinite && (context?.artifacts.ga4 || context?.artifacts.posthog)
           ? [
               "GA4 and PostHog run independently of Infinite: each installs its own native bootstrap with its own page views and its own consent handling. Infinite never forwards browser events into them and never changes their configuration."
+            ]
+          : []),
+        ...(infinite && context?.artifacts.conversions?.helpers === true
+          ? [
+              "Conversions reach GA4 and PostHog only when your own code calls the managed helpers (infiniteTrack and friends); the Infinite runtime itself forwards nothing."
             ]
           : [])
       ],
