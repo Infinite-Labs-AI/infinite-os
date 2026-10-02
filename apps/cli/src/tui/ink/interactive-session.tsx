@@ -694,8 +694,10 @@ export function InkInteractiveSessionApp({
       return drawn;
     };
   }, [busy, columns, history, t, turnSteps, turnViews, viewFocus]);
+  // Beside a drawn turn, the transcript carries only the idle turn state; its
+  // Steps are the drawn turn's own strip, so they are not drawn twice.
   const idleTranscript = useMemo(
-    () => ({ agentTitle, messages: [], state: turnState }),
+    () => ({ agentTitle, messages: [], state: { ...turnState, steps: [] } }),
     [agentTitle, turnState]
   );
   // Drive the transcript's animated clock here so the composer-cursor row

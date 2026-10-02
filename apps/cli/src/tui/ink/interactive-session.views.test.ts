@@ -5,7 +5,7 @@ import type { ToolViewFrameV1 } from "@infinite-os/types";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
-import { getTurnState, recordTurnView, resetTurnState } from "../app/turn-store.js";
+import { getTurnState, patchTurnState, recordTurnView, resetTurnState } from "../app/turn-store.js";
 import { displayWidth } from "../lib/display-width.js";
 import { renderInkInteractiveSessionToString, runInkInteractiveSession } from "./interactive-session.js";
 
@@ -39,6 +39,22 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(out).toContain("∞ Two are on.");
     expect(out).toMatch(/│ {2}Ads running {2}✓ Ready/u);
     expect(out.split("\n").every((line) => displayWidth(line) <= 120)).toBe(true);
+  });
+
+  it("the turn's Steps strip is drawn once, from the turn store's calls", () => {
+    resetTurnState();
+    recordTurnView(listFrame());
+    patchTurnState((state) => ({
+      ...state,
+      steps: [{ id: "c1", name: "list_meta_entities", label: "listing meta entities", status: "ok", startedAt: 0, endedAt: 500, result: "3 ads" }]
+    }));
+    const out = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 120,
+      initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
+      onSubmitLine: async () => ({ messages: [] })
+    }));
+    expect(out.split("─ Steps ").length - 1).toBe(1);
+    expect(out).toMatch(/^ {2}listing meta entities +━+ ✓ 3 ads$/mu);
   });
 
   it("under 120 columns the live turn is one column: the view under the answer", () => {
