@@ -5,6 +5,299 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
+### Setup wizard: one wired run
+
+- `npx infinite-tag` now runs the whole 13-step wizard (link, agent, before, keys, plan, install, jobs,
+  settings, rehearsal, review, merge, prove, done) on the real modules: the Infinite app bridge, your own
+  Claude Code or Codex, git and `gh`, the checks, the job registry, the installer and the report.
+  `npx infinite-tag --version` prints the version.
+- A failed bridge call ends a step the same way everywhere: Infinite unreachable, the site locked and a running
+  dev server park the run (exit 3), and an agent that fails ends it with `INF_WIZ_AGENT_FAILED` (exit 1).
+- Resume: after `link`, a resumed run asks Infinite for its run once; a run that belongs to another
+  workspace stops with "run npx infinite-tag --fresh". On a fresh clone, an open wizard pull request's
+  marker rebuilds the run, and `before` switches a resumed run back to its branch when the tree is clean.
+- Agents: Opus 4.8 or Sol 6.1 at extra-high effort, with one retry on the fallback model; the model, the
+  effort and any fallback are recorded in the run state, the plan's cost line and the report. Codex runs
+  under a permission profile (never `-s`), Claude Code with `--restricted`.
+- Nested mode has one implementation: on `--resume` every rejected edit is undone before any check, your
+  agent's versions are kept beside the snapshot, and refs are never reset. Inside another sandbox the
+  build and the offline tests read undetermined and the run asks you to finish the checks in your own
+  terminal.
+- A build that could not run is undetermined, never a pass. The plan reads one count of Meta's automatic
+  events (the grader's), shows that a 7-day check-in follows the deploy, and the wizard's `.gitignore`
+  fence is a receipted edit the uninstall reverses.
+- Live reads (the wizard's checks and `doctor`) honour `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`.
+
+### Setup wizard foundation
+
+- Bare `npx infinite-tag`, `npx infinite-tag wizard …` and any flag-first argv (other than `--help`, `-h`,
+  `--version`) now open the setup wizard; `doctor` and `uninstall --pr` get their own entry points. Every
+  classic command is unchanged.
+- The postinstall line now says: "Next: run npx infinite-tag in your website repo."
+- New public contracts under `contracts/`: `host-deny-v1.json` (the preview-guard deny list) and
+  `tag-wizard-v1/` (the desktop bridge descriptor, every bridge verb with an example of every error code,
+  test-engine grading cases, receipts, a report v2, a run state, and the review and claims JSON Schemas).
+- The packed LICENSE now carries PostHog's MIT notice for the wizard patterns adapted from the PostHog
+  wizard (v2.74.1).
+
+### Setup wizard runtime
+
+- The wizard runs its 13 steps in order and can be resumed: `npx infinite-tag` again picks up at the first
+  step that is not done, skipping finished steps whose inputs did not change. A run that needs you parks
+  with exit 3 and says what to do next.
+- One wizard run per repo at a time (`.infinite/wizard/run.lock`). Ctrl+C, a crash or a step that runs
+  out of time stops the agent and undoes its unsaved edits before the lock is released; Ctrl+C exits 130.
+- If the run's pull request was closed, the wizard offers a fresh run; `--fresh` sets an unfinished run
+  aside (it is kept) and starts over.
+- `--json` streams one event per line; without a terminal and without `--json` the wizard says how agents
+  and CI should run it and exits 2. When an agent starts the wizard, it hands the agent the jobs instead of
+  starting another agent, and asks you (never the agent) about consent, conversion names, privacy text and
+  changes to existing tags. An agent cannot pass `--consent-mode`; edits the agent made outside its jobs'
+  files are undone (and kept aside) before the wizard checks anything.
+- `--yes` approves only plan lines that add the wizard's own code; it never approves a change to an
+  existing tag, conversion names or the consent mode.
+- After the merge is deployed, the wizard makes ONE real test visit and reports per tool, with receipts from
+  that visit; it prints the PostHog visitor id to filter out. The before/after report (live site today, in
+  this pull request, proven live) goes to the terminal, the pull request and the Infinite app; an
+  unmeasured value shows "—", never 0.
+- `npx infinite-tag uninstall --pr` reverses the install on a new branch and opens a pull request; the
+  Infinite settings for the site are removed after that merge by default. On a machine with no saved link
+  it links first; the link is removed last, and a piece that failed is retried on the next run.
+- The `.gitignore` block now also ignores `.infinite/wizard/`, the harness report and its brief; an old
+  one-line block is upgraded in place.
+
+### Setup wizard: terminal UI, the Infinite app bridge, link / keys / settings
+
+- The wizard's terminal screen: the 13 steps with a Learn card beside them (dropped below 80 columns), a few
+  live updates per step, the agent's narration, one pop-up per question (link code, plan, choices, text, merge,
+  agent questions, teammate comments) and the before/after outro, whose table keeps its columns on screen and
+  in scrollback. It runs in the alternate screen and always gives the terminal back (also after Ctrl+C); a
+  `read EIO` no longer stops the keyboard. It leaves one line with the run id, the PR and the report path.
+  `NO_COLOR` / `FORCE_COLOR` are honoured. `--json` streams the events as NDJSON and reads `ask.answer` lines.
+- The Infinite app bridge client: finds the app's owner-only bridge file (`$GROWTH_OS_HOME/desktop-tag`),
+  refuses anything unsafe, speaks only to `127.0.0.1`, decodes every answer strictly, and follows an app
+  restart (never a different Infinite variant). After a restart it re-sends a request only when that cannot
+  repeat an effect (a read, or a request the old app never received). If the app quits or its cloud fails
+  mid-run, the step stops with "open Infinite" / "try again" instead of crashing.
+- Step `link`: a 4-digit code shown in the terminal and on the app's approval card; remembered links skip the
+  card; approval has one 5-minute window, and a retry with a new code fits inside it; a run linked through one
+  Infinite variant (or started in another workspace) never continues against another; an unsubscribed
+  workspace stops with a clear message. A credentialed git remote never leaves the machine.
+- Step `keys`: keys come only from your Infinite connections (never a flag, a file or `.env`); a GA4 property
+  with several web streams asks which one is this site; IDs the live site uses that differ from the
+  connection become a plan line, never an overwrite; "the live site uses the same IDs" is said only when the
+  live site was measured in this run; Infinite's own Meta dataset is never installed.
+- Step `settings`: declares the approved conversions, saves the server-lane settings on Vercel through
+  Infinite only when you approved that plan line (no redeploy; they go live with your merge; `vercel` is never
+  run), marks GA4 key events only for approved conversions whose offline click test passed, and switches on
+  Meta server events only when you approved it and Infinite has it available (a relay already on for another
+  pixel is flagged, not reported as on).
+
+### Setup wizard: your own agent, fenced
+
+- The wizard finds your own Claude Code or Codex, checks you are logged in and which plan or key pays, and
+  spends no prompt doing it. Claude Code does the work and Codex reviews when both are there; with one agent
+  the wizard prints a review brief; with none the code jobs still run and the agent jobs are listed for you.
+- The agent can only claim a job is done. It claims over a local checklist channel (`infinite_tag`, a
+  loopback-only MCP server with a per-run token); the wizard then runs its own checks before it ticks
+  anything, and a failed check goes back to the agent with the reason (at most 30 turns or 10 minutes).
+- Every agent turn is fenced: a snapshot is taken outside the repo first, and any change outside the job's
+  files, any deleted file, any edit to `.env*`, `.git`, `.infinite`, `.claude`, `.codex`, `package.json` or
+  a lockfile, and any change inside a consent call (a Consent Mode key on its own line included) is undone.
+  An agent that runs git (commits, branches, staging, git config or hooks) has that undone too, before the
+  wizard runs git itself. A write inside `node_modules`, `.next`, `dist`, `build` or `out`, or any change to
+  the files after the turn ended, stops the run before anything is built. Kept edits are recorded exactly so
+  uninstall can reverse them; the edits of a job whose check failed are undone instead of shipped.
+- A job counts as done in code only when at least one of the wizard's own checks ran and passed; a job with
+  nothing to check before deploy waits for the later tests. If the wizard is killed mid-turn, the next run
+  undoes that unfinished turn first.
+- Claude runs `--restricted` (files outside the repo cannot be read) with no shell and no web tools, and
+  cannot read the repo's `.env*`, `.git` or `.npmrc`/`.netrc`; Codex
+  runs under a read-confinement profile that denies your home folder, with browser, computer-use, image and
+  app features off. Neither can read `~/.growth-os` or the Infinite app's data.
+- Out of usage: the agent's edits are undone and the run parks; run `npx infinite-tag` again after the reset
+  to resume the same session. The wizard never switches you to Infinite-paid inference.
+
+### Setup wizard: the pull request, its rehearsal, the second review and your merge
+
+- The wizard ships its work as a draft pull request on `infinite/tag/<date>-<run>`, branched from your production
+  branch (Vercel's, else the repo's default branch, else `origin/HEAD`, the last two labelled "fallback"). It
+  commits only the files the plan covers, its own managed files, the npm job's `package.json` and lockfile, the
+  edit receipt and its `.gitignore` block, with an `Infinite-Tag-Run` trailer. It never force-pushes, amends,
+  rebases, skips hooks or signing, pushes to the base, or merges.
+- Every commit, pull request text, review, reply and agent note is scanned first: secrets, tokens, private paths
+  and personal data are redacted in posts and held back from commits.
+- The rehearsal loads the pull request's Vercel preview under your production hostname with nothing sent, plus the
+  preview's own link, and grades each tool. A protected preview, a non-Vercel host or no preview within 10 minutes
+  reads "undetermined", never pass.
+- A second agent (the other of Claude Code or Codex) reviews read-only; the wizard posts ONE comment review,
+  acts only on its own reviewer's and (with your OK) your teammates' comments, declines anything against a
+  standing ruling, asks you about conversion names, privacy text and anything outside the plan, fixes the rest in
+  at most 2 rounds, and readies the pull request with a final comment. With one agent it writes a review brief.
+- You merge. The wizard waits (ESC parks it; a re-run picks the pull request back up) and records the merge commit
+  for the live proof. GitLab gets a draft merge request by push options; Bitbucket and other hosts get the branch
+  and a link.
+
+### Site code for the setup wizard (ported from infinite.fast)
+
+- **Preview guard** (decision 3; decision 8 for Meta). With a `hostGuard` on the artifacts, the managed GA4,
+  PostHog and Meta bootstraps start only on production hosts (always exempt) and on hosts no rule denies;
+  loopback, `.local` and preview platforms (`*.vercel.app`, `*.netlify.app`, `*.pages.dev`, from
+  `contracts/host-deny-v1.json`) stay silent. Each guarded snippet is its own IIFE. On a silenced host the
+  site's own calls cannot throw: PostHog's methods are queue-only, `gtag`/`dataLayer` are a queue-only stub
+  and `fbq` is an inert, flagged stand-in (nothing loads, nothing is sent). The `_fbc` landing capture is
+  never guarded. A plan whose guard would silence a known production host (including one in the guard's
+  own deny list) is blocked.
+- **One host normaliser** (trim, lowercase, strip one trailing dot) in the browser runtime, the Next server
+  lane, the generated Vercel/Netlify/Cloudflare/Node lanes and the production-host artifact:
+  `ACME.com.` is `acme.com`.
+- **Per-provider isolation on Next.js**: each provider in the shared inline script runs in its own `try`, so
+  one that throws no longer stops the others.
+- **PostHog**: new installs get `defaults: '2026-01-30'`; a re-install keeps the bundle its managed snippet
+  already carries (`2025-05-24` before this release) until `defaults` is set explicitly, and the plan then
+  says "measurement changed". `sensitivePaths` turns session replay and autocapture off on listed pages
+  (decision 17), re-decided at every PostHog page view so single-page-app route changes are honoured;
+  `/x/*` covers a path and everything under it.
+- **Managed conversion helpers** (decisions 9 and 13), emitted only when `conversions.helpers` is set:
+  `infiniteTrack`, `infiniteTrackThenNavigate`, `infiniteIdentify`, `infiniteReset`, `infiniteMetaMirror`
+  and `infiniteCampaign`, as window globals in the managed block and as typed, no-op-safe exports of the
+  managed Next module. They are written even when every requested tool was adopted.
+  `infiniteTrackThenNavigate` navigates by itself whenever the browser would not (a button, a different
+  href, a prevented click, before hydration), and holds a click for GA4 at most 1 s. The GA4/PostHog helpers
+  follow the visitor's recorded consent decision and the consent mode, not the DNT/GPC default. The Meta
+  mirror fires only with the `metaEventId` the server returned, once per id, never for `Purchase`, and holds
+  the page at most 400 ms. First-touch campaign attribution is captured at landing (tab + 7-day cookie,
+  both scrubbed of emails, phone numbers, URLs and click ids at write time).
+- **`reportInfiniteOutcome`** in the generated outcome helper (TS, JS and Node): returns Infinite's 202
+  `{ accepted, duplicate, metaEventId, metaEventName }` and requires a stable `eventId`.
+  `postInfiniteOutcome` now resolves the 202's `accepted` (it resolved `response.ok`). Campaign context is
+  added only within the 16-property limit. The Node helper gains `adMatchFromRequest` and re-exports
+  `infiniteVisitKey`.
+- **Meta for adopted pixels**: a capture-only block (`captureOnly`, written beside a detected pixel; without
+  one it is a plan blocker) and the job-7 guard recipe (`ADOPTED_META_GUARD_RECIPE`).
+- The runtime exposes its own consent check (`window.__infiniteConsentAllowed`) on verified hosts; the
+  managed helpers ask it first.
+- `contracts/server-lane-v1.vectors.json` gains the 202 response cases and a mixed-case `external_id`.
+- The plain installer's output is unchanged when the wizard options are absent (except the GA4 lane marker
+  line, the silenced-host stand-ins inside a guard, and `defaults: '2026-01-30'` on a FRESH PostHog install);
+  `install --server-lane` copy is byte-identical.
+
+### Setup wizard: offline checks (T0), census, build check, the grader
+
+- **T0, the offline test engine.** The wizard runs the analytics bytes it installs (and any page code an
+  agent edited) in a throwaway browser model, never in its own process: a separate Node child with a
+  minimal environment and a temporary home, and on macOS inside the built-in `sandbox-exec` with no
+  network, no read access to the Infinite session, agent credentials, `~/.ssh`, `~/.aws`, `~/.npmrc`,
+  `~/.netrc` and common CLI credential stores, and no writes outside its temporary home. The child
+  refuses code generation from strings in its own realm and freezes its built-ins, so page code cannot
+  reach the child's process or tamper with what it records. Nothing is ever sent: every request is
+  recorded and cancelled. Scenarios: previews stay
+  silent while production fires, the consent rule, one `_fbc` holding the last click, attribution
+  surviving a storage wipe, the test click id never leaving, the Meta mirror firing only with the
+  server's id, the conversion request leaving before the page does, CTAs that still work with the tags
+  blocked, replay off on sensitive pages, one tag per page, and click tests. A crash or timeout is
+  "undetermined", never a pass.
+- **Census.** Every place the site starts GA4, PostHog, the Meta pixel or a tag manager, with file and
+  line and no dedupe, plus the provider ids read from environment variables.
+- **Build check.** The site's own build runs behind the same boundary (it may write only inside the repo,
+  never to `.git`, `.husky` or `.infinite`); a failure that was already there before the run is
+  reported, never blamed on the change. A timeout stops the whole build, including the processes it
+  started.
+- **The grader.** One place turns the desktop test engine's facts into pass, problem, undetermined or
+  info per tool. Consent holding a tool back is never a problem.
+- `inspect` now reports every PostHog init (with file and line), skips Infinite's own managed bytes, and
+  reads PostHog's `defaults`.
+
+### Setup wizard: the plan and the install
+
+- The wizard's **plan** step shows one plan screen. It asks only four things: the consent mode, the
+  conversion names, the privacy paragraph and the npm line. Everything else is a line you approve or
+  decline. A run without a consent answer stops at the plan (exit 3) and resumes with
+  `npx infinite-tag --resume` or `--consent-mode`.
+- The **install** step writes the tags for the tools connected in Infinite (ids come only from your
+  connections, never from a default), adds the preview guard, installs the server-lane package when you
+  approve that line, runs the build, and undoes everything if the build breaks on something new.
+- Tags you already have are **improved in place, never reinstalled**. Each improvement is its own plan
+  line, and none is applied without your approval (not even with `--yes`): the PostHog `/ingest` proxy,
+  page changes in single-page apps, the PostHog `defaults` date, the Meta ad-click capture beside an
+  existing pixel, turning off Meta automatic events, preview silence, and duplicate removal.
+- When your live site is served on a preview-style host that Infinite does not list (for example
+  `acme.vercel.app`), no preview guard is added. The plan says to add the host in Infinite first, so the
+  guard can never silence production.
+- `.infinite/install.json` now records every edit the wizard or your agent makes, with exact
+  before/after hashes and text edits, plus the public ids the install emitted. `uninstall` reverses those
+  edits newest first, and only when a file is still exactly as the wizard left it. A file that changed
+  since is left as it is, with a warning. A corrupt receipt is rebuilt from the managed markers, and the
+  wizard says what could not be recovered.
+- A page the installer cannot edit (for example a Vite `index.html` with no `</head>`) is now an open
+  job, never reported as installed. This also applies to `infinite-tag harness`.
+- Monorepos: the app root comes from your Vercel project's root directory, then from the workspace globs.
+  A scan that hits the 2,000-file cap now says so.
+- Re-running the wizard keeps what earlier runs did: their recorded edits stay in the receipt (and
+  `uninstall` still reverses them), and a tool whose "Update" line you decline keeps the tag and ids it
+  already had instead of being removed.
+- A static or Vite site that Vercel does not serve installs PostHog straight to its region (an `/ingest`
+  path there would have no rewrite behind it), and Infinite's tag becomes a line telling you what is
+  needed, so the other tools still install. Adopted tags in a static site's `public/` pages are found, so
+  they are never given a second managed copy.
+- The Meta ad-click capture is never inserted beside a pixel a consent manager holds, and the automatic
+  events opt-out is never added in front of a pixel start that runs under a condition: both become jobs
+  for your agent instead. The measured automatic-events count counts only Meta's own automatic events,
+  and shows "—" when the pixel did not fire.
+- Declining a duplicate-removal line, the server lane or the agent's cost line is always honoured: no job
+  of a declined line runs, the npm line runs only with the server lane, and the privacy paragraph
+  describes only the tools and lanes you approved.
+
+### Setup wizard: the checklist and "Check the live site"
+
+- The wizard's "Check the live site" step branches from your production branch first, reads your
+  Infinite connections for the IDs it expects (never your repo's `.env`), and loads your live site once in
+  the Infinite app's hidden window with every tag request cancelled (no clicks, no test click id), before
+  it counts what passes, what is a problem and what it could not tell.
+- The agent checklist (jobs 1–16): detectors find what each job needs (a server entry or middleware, an
+  unusual layout, signup / lead / download / payment / booking handlers beyond Stripe, logins and every
+  logout, the CSP and redirect owners, the privacy page, a hand-written host-only `_fbc` writer, duplicate
+  tags, adopted tags with no preview guard). A job is only suggested; your plan decides which run.
+- Agents only claim a job; the wizard's own checks decide its state, and proof needs this run's receipts.
+  Agents never touch `.env` files, lockfiles, `package.json`, build output or a cookie-banner / consent
+  manager file, and never a consent call.
+- The agent is handed your decisions, never asked to make them: each conversion job carries the conversion
+  name you approved (a type you removed from the plan gets no job), the privacy job carries your approved
+  paragraph word for word, and the preview-guard and improve jobs carry the guard expression and your
+  connections' public IDs. Text from your repo reaches the agent quoted, so a file name cannot pose as an
+  instruction.
+- The middleware job runs only where the installer cannot wire the server lane itself, and only when you
+  approved the server lane; the Tag Manager + gtag duplicate job may touch only the hand-written gtag.
+- A job is "waiting for a real event" only after its click test passed, and a live check counts only when
+  it was taken in this run, after the change could be live.
+- "Check the live site" keeps going when the Infinite app is busy with another test or your analytics
+  history cannot be read right now (those stay unknown), and a resumed run checks it is on its own branch.
+
+### Live checks, setup checks, the post-turn gate and `doctor`
+
+- **`infinite-tag doctor`** is built: the setup checks over your source plus, with `--url`, the live checks
+  (no browser). Ids come from `--expect-ga4` / `--expect-posthog` + `--posthog-api-host` / `--expect-meta`,
+  or from the `ids` block of `.infinite/install.json` — never a default; with no ids it exits 2. Exit codes:
+  0 clean, 1 a problem, 3 nothing wrong but something could not be determined, 2 usage. `--json` for CI.
+  `--probe-server-lane` sends one test request to the server lane, and only with this repo linked to the
+  Infinite app; otherwise an installed server lane reads "not probed".
+- **Live checks** (ported from infinite.fast's live guardrail): the tags and ids your pages serve (the
+  managed Next bootstrap is decoded out of the bundles), duplicate tags per page, the PostHog `/ingest`
+  proxy, campaign tags through every redirect hop, the Content-Security-Policy, Meta's Traffic Permissions
+  per domain (and for preview hosts), and provider ids set on Vercel Preview/Development. Every request
+  sends `Purpose: prefetch`, so a check is never counted as a visit. An expected pixel that is missing is a
+  problem, not a skip.
+- **New setup checks**: the same provider started twice on a page (or by infinite-tag and the site
+  together), the site's own PostHog config (proxy, SPA page views, region), tags that start on preview
+  hosts, PostHog replay on login/checkout/confirmation pages, and Meta event ids built in the page or
+  standard Meta conversions fired from a click. The silent-form check now recognises infinite-tag's
+  conversion helpers.
+- **Post-turn gate** for the wizard's agent jobs: every agent turn's added lines are checked for code
+  that would run something during the build or the offline test (child processes, sockets, `eval`, …)
+  and for the Meta never-list, before anything is executed.
+
+### Harness: setup-correctness checks
+
 Setup-correctness checks: the harness now catches wiring that was never going to fire, not only
 deliveries that failed.
 
