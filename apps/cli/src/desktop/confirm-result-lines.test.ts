@@ -53,11 +53,14 @@ describe("confirmResultLines", () => {
   it("a receipt view's state picks the glyph, and its provenance line follows", () => {
     const view = receiptView("outcome_unknown", "Sent, but the reply was lost", "warn", { provenanceLine: "via the app‮" });
     expect(confirmResultLines({ ok: true, view }, "approve")).toEqual([
-      { tone: "warn", text: "? Sent, but the reply was lost" },
+      { tone: "warn", text: "◑ Sent, but the reply was lost" },
       { tone: "muted", text: "  via the app" }
     ]);
     expect(confirmResultLines({ ok: true, view: receiptView("partial", "2 of 3 done", "warn") }, "approve")[0])
       .toEqual({ tone: "warn", text: "◐ 2 of 3 done" });
+    // The receipt's glyph and tone are the view head's (STATE_HEAD): a spending cap is amber, never red.
+    expect(confirmResultLines({ ok: true, view: receiptView("hit_limit", "Hit the $5 cap", "warn") }, "approve")[0])
+      .toEqual({ tone: "warn", text: "$ Hit the $5 cap" });
   });
 
   it("an undecodable view falls back to the neutral fields", () => {
@@ -86,7 +89,7 @@ describe("confirmResultLines", () => {
     };
     const lines = confirmResultLines({ ok: false, view }, "approve");
     expect(lines).toEqual([
-      { tone: "warn", text: "? Not sure it happened" },
+      { tone: "warn", text: "◑ Not sure it happened" },
       { tone: "warn", text: "→ Check first" }
     ]);
     const words = lines.map((line) => line.text).join("\n");
@@ -122,7 +125,7 @@ describe("confirmErrorLines", () => {
       code: "desktop_confirmation_outcome_unknown"
     });
     expect(confirmErrorLines(unknown)).toEqual([
-      { tone: "warn", text: "? Desktop may have resolved this confirmation." }
+      { tone: "warn", text: "◑ Desktop may have resolved this confirmation." }
     ]);
   });
 
@@ -131,10 +134,10 @@ describe("confirmErrorLines", () => {
       code: "desktop_turn_detached"
     });
     expect(confirmErrorLines(detached)).toEqual([
-      { tone: "warn", text: "? Stopped waiting for Infinite Desktop. Provider work may still continue." }
+      { tone: "warn", text: "◑ Stopped waiting for Infinite Desktop. Provider work may still continue." }
     ]);
     const bare = Object.assign(new Error(""), { code: "desktop_turn_detached" });
-    expect(confirmErrorLines(bare)).toEqual([{ tone: "warn", text: "? Not sure it happened." }]);
+    expect(confirmErrorLines(bare)).toEqual([{ tone: "warn", text: "◑ Not sure it happened." }]);
   });
 
   it("any other coded app answer prints its message, scrubbed, under a neutral warn mark", () => {
