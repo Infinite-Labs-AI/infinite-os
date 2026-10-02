@@ -10,7 +10,7 @@ import { padEndCells } from "../tui/lib/display-width.js";
 import { compactPreview, toolTrailLabel } from "../tui/lib/text.js";
 import { ansi, colorEnabled, resolveTheme, type Theme } from "../tui/theme.js";
 import type { Msg } from "../tui/types.js";
-import { readMarkdownTableBlock, renderMarkdownTableBlock } from "./markdown.js";
+import { readMarkdownTableBlock } from "./markdown.js";
 import { holdOpenMarkers } from "./markdown-inline.js";
 import { renderCodeLines, renderMarkdown } from "./markdown-render.js";
 
@@ -580,9 +580,10 @@ class StreamingAssistantFrame {
         return;
       }
       if (block) {
-        for (const renderedLine of renderMarkdownTableBlock(block, this.contentWidth)) {
-          this.writeContentLine(renderedLine, false);
-        }
+        // The whole table at once, through the answer's own table (r4 renderTable).
+        // Printed once: a wider window never redraws it, so a dropped column is just named.
+        const table = block.rawLines.map(scrubTerminalControls).join("\n");
+        this.writeRendered(renderMarkdown(table, { width: this.contentWidth, color: this.color, theme: this.theme, widenLimit: 0 }));
         this.pendingLines.splice(0, block.rawCount);
         continue;
       }
