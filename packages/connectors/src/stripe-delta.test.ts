@@ -4003,4 +4003,361 @@ describe("Stripe delta lane against real PGlite", () => {
     expect(new Date(watermark!.delta_data_as_of).toISOString()).toBe(iso(at(5)));
     expect(watermark?.pending_full_refresh_reason).toBeNull();
   }, 180_000);
+
+  // -------------------------------------------------------------------------------------------
+  // CHECKOUT SESSIONS (stripe-checkout-sessions.ts): the full history of Checkout / Payment Link
+  // sales — crawl, incremental windows, delta upserts, and the typed permission gap.
+  // -------------------------------------------------------------------------------------------
+
+  const CURSOR_END_S = CURSOR_END_MS / 1000;
+
+  function checkoutSessionApi(id: string, over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id,
+      object: "checkout.session",
+      mode: "payment",
+      status: "complete",
+      payment_status: "paid",
+      amount_total: 20000,
+      amount_subtotal: 20000,
+      currency: "usd",
+      customer: null,
+      customer_details: { email: "buyer@example.test", name: "Buyer Person" },
+      invoice: null,
+      payment_intent: `pi_${id}`,
+      subscription: null,
+      created: CURSOR_END_S - 3600,
+      livemode: true,
+      ...over,
+    };
+  }
+
+  /** `fullRouter` plus a Checkout handler; registered so the harness lets it see the sessions path. */
+  function checkoutRouter(
+    checkout: (url: URL) => unknown,
+    base: FetchHandler = fullRouter(),
+  ): FetchHandler {
+    return servesCheckoutSessions((url) => (
+      url.pathname === "/v1/checkout/sessions" ? checkout(url) : base(url)
+    ));
+  }
+
+  async function readCheckoutState(workspaceId: string, sourceId: string) {
+    return (await db.query<Record<string, unknown>>(
+      `select capability_state, missing_permission, backfill_state, backfill_anchor,
+              backfill_starting_after, backfill_reached_created_at, window_from, window_to,
+              window_starting_after, listed_through
+         from stripe_checkout_session_sync_state where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    ))[0];
+  }
+
+  async function readCheckoutCoverage(workspaceId: string, sourceId: string) {
+    return (await db.query<Record<string, unknown>>(
+      `select history_state, capability_state, missing_permission, covers_all_history,
+              covered_from, covered_through
+         from queryable.vw_stripe_checkout_session_coverage
+        where workspace_id = $1 and source_id = $2`,
+      [workspaceId, sourceId],
+    ))[0];
+  }
+
+  async function seedCheckoutState(
+    workspaceId: string,
+    sourceId: string,
+    over: { listedThrough: string; windowFrom?: string; windowTo?: string },
+  ): Promise<void> {
+    await db.query(
+      `insert into stripe_checkout_session_sync_state (
+         id, workspace_id, source_id, capability_state, backfill_state, backfill_anchor,
+         backfill_completed_at, backfill_reached_created_at, listed_through, window_from, window_to
+       ) values ($1,$2,$3,'available','complete',$4,$4,'2025-01-01T00:00:00Z',$4,$5,$6)`,
+      [`cs_state_${randomUUID()}`, workspaceId, sourceId, over.listedThrough,
+        over.windowFrom ?? null, over.windowTo ?? null],
+    );
+  }
+
+  const ms = (value: unknown) => (value === null || value === undefined ? null : new Date(value as string).getTime());
+
+  it("crawls the whole Checkout history across runs, then claims coverage through the anchor", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    // Seven pages of one session each, newest first: one run reads five, the next run the rest.
+    const history = Array.from({ length: 7 }, (_, index) => checkoutSessionApi(`cs_hist_${index}`, {
+      created: CURSOR_END_S - (index + 1) * 30 * 24 * 60 * 60,
+      amount_total: 1000 * (index + 1),
+      mode: index === 3 ? "subscription" : "payment",
+      subscription: index === 3 ? "sub_from_checkout" : null,
+      payment_intent: index === 3 ? null : `pi_hist_${index}`,
+    }));
+    const calls: URL[] = [];
+    const checkout = (url: URL) => {
+      calls.push(url);
+      const after = url.searchParams.get("starting_after");
+      const position = after === null ? 0 : history.findIndex((item) => item.id === after) + 1;
+      return { object: "list", data: [history[position]], has_more: position < history.length - 1 };
+    };
+
+    await runSync(workspaceId, sourceId, checkoutRouter(checkout));
+    expect(calls).toHaveLength(5);
+    for (const call of calls) {
+      expect(call.searchParams.get("status")).toBe("complete");
+      expect(call.searchParams.get("created[lt]")).toBe(String(CURSOR_END_S));
+      expect(call.searchParams.has("created[gte]")).toBe(false);
+    }
+    const midway = await readCheckoutState(workspaceId, sourceId);
+    expect(midway).toMatchObject({
+      capability_state: "available",
+      missing_permission: null,
+      backfill_state: "in_progress",
+      backfill_starting_after: "cs_hist_4",
+      listed_through: null,
+    });
+    expect(ms(midway?.backfill_reached_created_at)).toBe((CURSOR_END_S - 5 * 30 * 24 * 60 * 60) * 1000);
+    // Mid-crawl the read may claim exactly the listed span — never "all history", never "nothing".
+    const midwayCoverage = await readCheckoutCoverage(workspaceId, sourceId);
+    expect(midwayCoverage).toMatchObject({ history_state: "backfilling", covers_all_history: false });
+    expect(ms(midwayCoverage?.covered_from)).toBe((CURSOR_END_S - 5 * 30 * 24 * 60 * 60 + 1) * 1000);
+    expect(ms(midwayCoverage?.covered_through)).toBe(CURSOR_END_MS);
+
+    // The next run (15 minutes later, whichever lane it takes) resumes under the ORIGINAL anchor.
+    calls.length = 0;
+    await runSyncAt(workspaceId, sourceId, CURSOR_END_MS + 15 * 60 * 1000, checkoutRouter(checkout));
+    expect(calls.map((call) => call.searchParams.get("starting_after"))).toEqual(["cs_hist_4", "cs_hist_5"]);
+    expect(calls.every((call) => call.searchParams.get("created[lt]") === String(CURSOR_END_S))).toBe(true);
+
+    const done = await readCheckoutState(workspaceId, sourceId);
+    expect(done).toMatchObject({ backfill_state: "complete", backfill_starting_after: null });
+    expect(ms(done?.listed_through)).toBe(CURSOR_END_MS);
+    expect(await readCheckoutCoverage(workspaceId, sourceId)).toMatchObject({
+      history_state: "complete",
+      covers_all_history: true,
+      covered_from: null,
+    });
+
+    const stored = await db.query<{
+      stripe_checkout_session_id: string; mode: string; amount_total: string;
+      stripe_subscription_id: string | null; observed_via: string;
+    }>(
+      `select stripe_checkout_session_id, mode, amount_total::text, stripe_subscription_id, observed_via
+         from stripe_checkout_sessions where workspace_id = $1 and source_id = $2
+        order by session_created_at desc`,
+      [workspaceId, sourceId],
+    );
+    expect(stored.map((row) => row.stripe_checkout_session_id)).toEqual(history.map((item) => item.id));
+    // Every mode is stored; the revenue read is what selects `mode = 'payment'`.
+    expect(stored[3]).toMatchObject({ mode: "subscription", stripe_subscription_id: "sub_from_checkout" });
+    expect(stored.every((row) => row.observed_via === "list")).toBe(true);
+    const raw = await db.query<{ payload: unknown }>(
+      `select payload from raw_records
+        where workspace_id = $1 and object_type = 'stripe_checkout_session'`,
+      [workspaceId],
+    );
+    expect(raw.length).toBeGreaterThan(0);
+    expect(JSON.stringify(raw)).not.toContain("buyer@example.test");
+  }, 180_000);
+
+  it("a key without Checkout Sessions: Read keeps the sync running and records the TYPED gap", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const forbidden = () => new Response(JSON.stringify({
+      error: {
+        code: "more_permissions_required",
+        message: "Permission denied. The provided key does not have the required permissions for this "
+          + "endpoint. Enabling Checkout Sessions Read ('checkout_session_read') permissions on this "
+          + "key would allow this request to continue.",
+        type: "invalid_request_error",
+      },
+    }), { status: 403, headers: { "Content-Type": "application/json" } });
+
+    const syncRequest = await runSync(workspaceId, sourceId, checkoutRouter(forbidden));
+
+    // Everything else synced.
+    const runs = await db.query<{ status: string }>("select status from sync_runs where id = $1", [syncRequest.syncRunId]);
+    expect(runs[0]?.status).toBe("succeeded");
+    const subscriptions = await db.query<{ stripe_subscription_id: string }>(
+      "select stripe_subscription_id from stripe_subscriptions where workspace_id = $1",
+      [workspaceId],
+    );
+    expect(subscriptions.map((row) => row.stripe_subscription_id)).toEqual(["sub_delta"]);
+    const source = await db.query<{ status: string }>("select status from sources where id = $1", [sourceId]);
+    expect(source[0]?.status).toBe("connected");
+
+    // …and the gap is a typed, named state — not a silent skip, not $0.
+    expect(await readCheckoutState(workspaceId, sourceId)).toMatchObject({
+      capability_state: "missing_permission",
+      missing_permission: "Checkout Sessions: Read",
+      backfill_state: "pending",
+      listed_through: null,
+    });
+    expect(await readCheckoutCoverage(workspaceId, sourceId)).toMatchObject({
+      history_state: "missing_permission",
+      missing_permission: "Checkout Sessions: Read",
+      covers_all_history: false,
+      covered_from: null,
+      covered_through: null,
+    });
+
+    // The user ticks the box: the next run lists, and the gap clears.
+    await runSyncAt(workspaceId, sourceId, CURSOR_END_MS + 15 * 60 * 1000, checkoutRouter(
+      () => ({ object: "list", data: [checkoutSessionApi("cs_after_grant")], has_more: false }),
+    ));
+    expect(await readCheckoutState(workspaceId, sourceId)).toMatchObject({
+      capability_state: "available",
+      missing_permission: null,
+      backfill_state: "complete",
+    });
+    expect(await readCheckoutCoverage(workspaceId, sourceId)).toMatchObject({ history_state: "complete" });
+  }, 180_000);
+
+  it("fails the run on a NON-permission Checkout failure, exactly like any other endpoint", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    const broken = () => new Response(JSON.stringify({
+      error: { message: "Invalid status", type: "invalid_request_error" },
+    }), { status: 400, headers: { "Content-Type": "application/json" } });
+    await expect(runSync(workspaceId, sourceId, checkoutRouter(broken))).rejects.toThrow(/checkout\/sessions/);
+    expect(await readCheckoutState(workspaceId, sourceId)).toBeUndefined();
+  }, 180_000);
+
+  it("delta: upserts sessions from events, settles a delayed payment, never rolls it back, advances the claim", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await seedHealthyWatermark(workspaceId, sourceId);
+    const claim = iso(CURSOR_END_MS - 20 * 60 * 1000);
+    await seedCheckoutState(workspaceId, sourceId, { listedThrough: claim });
+
+    const segmentToS = Date.parse(SEGMENT_TO) / 1000;
+    const completedUnpaid = {
+      id: "evt_cs_completed",
+      type: "checkout.session.completed",
+      created: segmentToS - 600,
+      api_version: "2025-06-30.basil",
+      livemode: true,
+      data: { object: checkoutSessionApi("cs_ach", { payment_status: "unpaid", amount_total: 21725 }) },
+    };
+    const settled = {
+      ...completedUnpaid,
+      id: "evt_cs_settled",
+      type: "checkout.session.async_payment_succeeded",
+      created: segmentToS - 120,
+      data: { object: checkoutSessionApi("cs_ach", { payment_status: "paid", amount_total: 21725 }) },
+    };
+    const checkoutCalls: URL[] = [];
+    const listing = (url: URL) => {
+      checkoutCalls.push(url);
+      throw new Error("a steady-state delta run must not list Checkout sessions");
+    };
+    // Stripe lists events newest first.
+    await runSync(workspaceId, sourceId, checkoutRouter(listing, deltaRouter({ events: [settled, completedUnpaid] })));
+    expect(checkoutCalls).toEqual([]);
+
+    const readSession = async () => (await db.query<{
+      payment_status: string; amount_total: string; observed_via: string; observed_at: Date;
+    }>(
+      `select payment_status, amount_total::text, observed_via, observed_at from stripe_checkout_sessions
+        where workspace_id = $1 and stripe_checkout_session_id = 'cs_ach'`,
+      [workspaceId],
+    ))[0];
+    expect(await readSession()).toMatchObject({ payment_status: "paid", amount_total: "21725", observed_via: "event" });
+    expect(ms((await readSession())?.observed_at)).toBe((segmentToS - 120) * 1000);
+    // The window reached back to the claim, so the claim now stands at the window's end.
+    expect(ms((await readCheckoutState(workspaceId, sourceId))?.listed_through)).toBe(Date.parse(SEGMENT_TO));
+
+    // A replay of the OLDER `completed` (the deliberate overlap re-read) cannot roll `paid` back.
+    await runSyncAt(
+      workspaceId,
+      sourceId,
+      CURSOR_END_MS + 15 * 60 * 1000,
+      checkoutRouter(listing, deltaRouter({ events: [completedUnpaid] })),
+    );
+    expect(await readSession()).toMatchObject({ payment_status: "paid" });
+    expect(checkoutCalls).toEqual([]);
+  }, 180_000);
+
+  it("delta: does NOT advance the claim across a window that starts after it", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await seedHealthyWatermark(workspaceId, sourceId);
+    // The claim is a day old; this delta window starts 25 minutes back. Completions in between were
+    // never observed, so the next FULL run's window — not this one — owns the advance.
+    const staleClaim = iso(CURSOR_END_MS - 24 * 60 * 60 * 1000);
+    await seedCheckoutState(workspaceId, sourceId, { listedThrough: staleClaim });
+    await runSync(workspaceId, sourceId, deltaRouter({ events: [] }));
+    expect(ms((await readCheckoutState(workspaceId, sourceId))?.listed_through)).toBe(Date.parse(staleClaim));
+  }, 180_000);
+
+  it("full: relists [claim - 25h, now) after the crawl and advances the claim to the window's end", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    // Forces the FULL lane: the last full refresh is older than the daily interval.
+    await seedHealthyWatermark(workspaceId, sourceId, {
+      lastFullRefreshAt: iso(CURSOR_END_MS - STRIPE_FULL_REFRESH_INTERVAL_MS - 60_000),
+    });
+    const claimMs = CURSOR_END_MS - 2 * 60 * 60 * 1000;
+    await seedCheckoutState(workspaceId, sourceId, { listedThrough: iso(claimMs) });
+
+    const calls: URL[] = [];
+    await runSync(workspaceId, sourceId, checkoutRouter((url) => {
+      calls.push(url);
+      return {
+        object: "list",
+        // Created BEFORE the claim but completed after it: only the lifetime overlap lists it.
+        data: [checkoutSessionApi("cs_late_completion", { created: claimMs / 1000 - 20 * 60 * 60 })],
+        has_more: false,
+      };
+    }));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.searchParams.get("created[gte]")).toBe(String((claimMs - 25 * 60 * 60 * 1000) / 1000));
+    expect(calls[0]!.searchParams.get("created[lt]")).toBe(String(CURSOR_END_S));
+
+    const after = await readCheckoutState(workspaceId, sourceId);
+    expect(ms(after?.listed_through)).toBe(CURSOR_END_MS);
+    expect(after).toMatchObject({ window_from: null, window_to: null, window_starting_after: null });
+    const stored = await db.query<{ count: string }>(
+      `select count(*)::text as count from stripe_checkout_sessions
+        where workspace_id = $1 and stripe_checkout_session_id = 'cs_late_completion'`,
+      [workspaceId],
+    );
+    expect(stored[0]?.count).toBe("1");
+  }, 180_000);
+
+  it("resumes an unfinished window on the next DELTA run instead of waiting a day for the full lane", async () => {
+    const workspaceId = `ws_${randomUUID()}`;
+    const sourceId = `src_${randomUUID()}`;
+    await seedSource(workspaceId, sourceId);
+    await seedHealthyWatermark(workspaceId, sourceId);
+    const windowFrom = iso(CURSOR_END_MS - 30 * 60 * 60 * 1000);
+    const windowTo = iso(CURSOR_END_MS - 60 * 60 * 1000);
+    await seedCheckoutState(workspaceId, sourceId, {
+      listedThrough: iso(CURSOR_END_MS - 5 * 60 * 60 * 1000),
+      windowFrom,
+      windowTo,
+    });
+    await db.query(
+      `update stripe_checkout_session_sync_state set window_starting_after = 'cs_w_cursor'
+        where workspace_id = $1`,
+      [workspaceId],
+    );
+
+    const calls: URL[] = [];
+    await runSync(workspaceId, sourceId, checkoutRouter((url) => {
+      calls.push(url);
+      return { object: "list", data: [], has_more: false };
+    }, deltaRouter({ events: [] })));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.searchParams.get("starting_after")).toBe("cs_w_cursor");
+    expect(calls[0]!.searchParams.get("created[gte]")).toBe(String(Date.parse(windowFrom) / 1000));
+    expect(calls[0]!.searchParams.get("created[lt]")).toBe(String(Date.parse(windowTo) / 1000));
+    const after = await readCheckoutState(workspaceId, sourceId);
+    // The window owned the advance; it closed at its own end.
+    expect(ms(after?.listed_through)).toBe(Date.parse(windowTo));
+    expect(after).toMatchObject({ window_from: null, window_to: null });
+  }, 180_000);
 });
