@@ -23,6 +23,7 @@ import {
   truncationLines,
   viewText
 } from "./primitives.js";
+import { managedApproval, managedApprovalLines, managedSummaryLines } from "./managed.js";
 import type { KindRender, KindRenderer, ViewRender, ViewRenderCtx } from "./types.js";
 
 // ── kind renderers ──
@@ -87,13 +88,17 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
   }
   // Enter sends the state's fix ask only when no row has an ask of its own.
   const fixAsk = (body?.rowAsks ?? []).some((ask) => viewText(ask) !== "") ? null : stateFixAsk(view);
+  // A tool that asks twice: its approval waits on this view (never the confirm queue).
+  const managed = ctx.approvalClosed ? null : managedApproval(view);
   return {
     head: headLine(view, shellCtx),
     source: sourceLine(view, shellCtx),
     detail: [
       ...explainLines(view, shellCtx),
+      ...managedSummaryLines(managed, shellCtx),
       ...stateReasonLines(view, shellCtx, fixAsk !== null),
       ...(body?.detail ?? []),
+      ...(managed ? managedApprovalLines(managed, shellCtx) : []),
       ...reconcileLines(view, shellCtx),
       ...truncationLines(view, shellCtx),
       ...caveatLines(view, shellCtx)
@@ -108,7 +113,8 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     ...(body?.hiddenColumns ? { hiddenColumns: body.hiddenColumns } : {}),
     ...(body?.rowCopies ? { rowCopies: body.rowCopies } : {}),
     ...(body?.copyText ? { copyText: body.copyText } : {}),
-    ...(fixAsk ? { fixAsk } : {})
+    ...(fixAsk ? { fixAsk } : {}),
+    ...(managed ? { approvalAsk: { key: managed.key, label: managed.label, ask: managed.ask } } : {})
   };
 }
 

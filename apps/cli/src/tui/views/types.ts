@@ -33,6 +33,8 @@ export interface ViewRenderCtx {
    * (`c copy`). Absent = not engaged (the transcript takes no keys).
    */
   engaged?: boolean;
+  /** The view's operation_managed approval was answered or closed here: it is no longer drawn. */
+  approvalClosed?: boolean;
   /**
    * The most rows this view may take, when known: a document pages by width ×
    * rows. `renderLiveTurn` starts from the live region's budget and lowers it
@@ -73,6 +75,11 @@ export interface ViewRender {
   rowCopies?: readonly (string | null)[];
   /** What `c` copies for the view as a whole (a minted link); used when the row has nothing. */
   copyText?: string;
+  /**
+   * An operation_managed approval waiting on this view: its named OK key sends
+   * `ask` as a NEW user turn (never a confirm). Absent once closed.
+   */
+  approvalAsk?: { key: string; label: string; ask: string };
   /**
    * A quiet view (a playbook read, a capability check): only its step line, with
    * no head or source. The layout prints it with the Steps, never in the details

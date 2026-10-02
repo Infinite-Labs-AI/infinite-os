@@ -24,6 +24,7 @@ import type { Key } from "ink";
 import { printableImagesView } from "../../desktop/image-url-cut.js";
 import { resolveKey, type FocusKind, type KeyAction, type KeyContext, type KeyHint } from "../keys/keymap.js";
 import { DEFAULT_THEME, type Theme } from "../theme.js";
+import { managedApproval } from "./managed.js";
 import { truncatedMoreAsk, turnAsk, viewText } from "./primitives.js";
 import { renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
@@ -63,6 +64,8 @@ export interface ViewKeyFacts {
   rowCopies: readonly (string | null)[];
   /** What `c` copies for the whole view, when the selected row has nothing. */
   copy: string | null;
+  /** An operation_managed approval: its named OK key sends `ask` as a new user turn. */
+  approve: { key: string; label: string; ask: string } | null;
 }
 
 export interface ViewFocusState {
@@ -83,6 +86,8 @@ export interface ViewFocusState {
    * Until then `m` and Enter never send or page, and ↑/↓ recall history.
    */
   engaged: boolean;
+  /** The view's operation_managed approval was answered (OK) or closed (`n`) here. */
+  approvalClosed: boolean;
   /**
    * A printable key that acted on the view while it was not yet engaged (`j`,
    * `2`): if the very next key types, this is typed first. Any other next key
@@ -98,7 +103,7 @@ export const NO_VIEW_CAPS: KeyContext["caps"] = { open: false, watch: false, ret
 
 const EMPTY_FACTS: ViewKeyFacts = {
   rowCount: 0, rowAsks: [], tabs: 0, pages: 0, hiddenColumns: 0, explain: false, more: null, fixAsk: null, livePageNext: false,
-  rowCopies: [], copy: null
+  rowCopies: [], copy: null, approve: null
 };
 
 /** The view the keys act on: the last one that is not quiet (steps only), else the last. */
@@ -123,13 +128,19 @@ export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender
     tabs: count(render.tabs),
     pages: count(render.pages),
     hiddenColumns: count(render.hiddenColumns),
-    explain: viewText(view.explain) !== "",
+    explain: viewText(view.explain) !== "" || (managedApproval(view)?.summary ?? "") !== "",
     more: turnAsk(truncatedMoreAsk(view)),
     fixAsk: turnAsk(render.fixAsk),
     livePageNext,
     rowCopies: (render.rowCopies ?? []).map((text) => viewText(text) || null),
-    copy: viewText(render.copyText) || null
+    copy: viewText(render.copyText) || null,
+    approve: approveFact(render.approvalAsk)
   };
+}
+
+function approveFact(value: ViewRender["approvalAsk"]): ViewKeyFacts["approve"] {
+  const ask = turnAsk(value?.ask);
+  return value && ask && value.key ? { key: value.key, label: viewText(value.label, "Confirm"), ask } : null;
 }
 
 /** Whether the view has any key of its own (otherwise focus starts in the composer). */
@@ -143,7 +154,8 @@ export function hasViewKeys(facts: ViewKeyFacts): boolean {
     || facts.more !== null
     || facts.fixAsk !== null
     || facts.copy !== null
-    || facts.rowCopies.some((text) => text !== null);
+    || facts.rowCopies.some((text) => text !== null)
+    || facts.approve !== null;
 }
 
 /** What `c` copies at this selection: the row's own text, else the view's. */
@@ -176,6 +188,7 @@ export function viewFocusAfterTurnDone(
     caps,
     facts,
     engaged: false,
+    approvalClosed: false,
     typedAhead: "",
     handled: false,
     effect: null
@@ -195,7 +208,8 @@ export function focusedViewCtx(
     explainOpen: state.explainOpen,
     showHiddenColumns: state.showHiddenColumns,
     caps: state.caps,
-    engaged: state.engaged && state.focus !== "composer"
+    engaged: state.engaged && state.focus !== "composer",
+    ...(state.approvalClosed ? { approvalClosed: true } : {})
   };
 }
 
@@ -222,6 +236,18 @@ export function resolveViewKey(
   // `M` would otherwise ask for more and `K` would move).
   if (/^[A-Z]$/u.test(input) && !key.ctrl && !key.meta) {
     return { ...base, focus: "composer", engaged: false };
+  }
+  // An operation_managed approval, once the view is engaged: ONLY its named OK
+  // key (exact, lowercase) sends the ask as a new user turn, and ONLY `n`
+  // closes it here. Unengaged, both are the first letters of a message.
+  const approve = state.approvalClosed ? null : facts.approve;
+  if (approve && state.engaged && !key.ctrl && !key.meta) {
+    if (input === approve.key) {
+      return { ...base, approvalClosed: true, handled: true, effect: { type: "ask", text: approve.ask } };
+    }
+    if (input === "n") {
+      return { ...base, approvalClosed: true, handled: true };
+    }
   }
   // Before the view is engaged, tab engages it (the keys stay with the view)
   // and ↑/↓ stay the composer's history recall.
@@ -335,6 +361,9 @@ export function viewKeyHints(
     return [{ key: "tab", label: "switch side" }];
   }
   const hints: KeyHint[] = [];
+  if (state.engaged && facts.approve && !state.approvalClosed) {
+    hints.push({ key: facts.approve.key, label: facts.approve.label }, { key: "n", label: "dismiss" });
+  }
   if (facts.rowCount > 1) hints.push({ key: "j k", label: "move" });
   if (state.engaged) {
     if (facts.rowAsks.some((ask) => ask !== null)) {

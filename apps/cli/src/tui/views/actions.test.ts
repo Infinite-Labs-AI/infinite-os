@@ -21,7 +21,7 @@ import {
   type ApprovalRenderCtx,
   type CardUiState
 } from "./approval.js";
-import { viewKeyFacts } from "./focus.js";
+import { focusedViewCtx, resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints } from "./focus.js";
 import { creativeDraftLine } from "./images.js";
 import { renderView } from "./registry.js";
 import type { ViewRenderCtx } from "./types.js";
@@ -577,6 +577,59 @@ describe("scrub and width", () => {
         }
       }
     }
+  });
+});
+
+describe("an operation_managed approval on a view (the tool asks twice: OK sends approval.ask)", () => {
+  const managed = (over: Record<string, unknown> = {}) => ({
+    ...fixture("document-versions"),
+    state: "needs_yes",
+    approval: {
+      kind: "operation_managed", title: "Publish this article?", summary: "Posts it to the demo account now.",
+      confirmLabel: "Publish", dismissLabel: "Dismiss", rows: [{ label: "to", value: "@demo" }], ask: "Yes, publish it",
+      ...over
+    }
+  }) as unknown as AnswerViewV1;
+  const tab = { tab: true } as Partial<Key>;
+
+  it("draws the approval's title and rows, with its summary behind ?", () => {
+    const out = text(renderView(managed(), viewCtx()).detail);
+    expect(out).toContain("Publish this article?");
+    expect(out).toMatch(/to +@demo/u);
+    expect(out).not.toContain("Posts it to the demo account now.");
+    expect(text(renderView(managed(), viewCtx({ explainOpen: true })).detail)).toContain("Posts it to the demo account now.");
+    expect(viewFocusAfterTurnDone(managed()).facts.explain).toBe(true);
+  });
+
+  it("once the view is engaged, the named OK key sends approval.ask as a new user turn, once; n closes it here", () => {
+    const s0 = viewFocusAfterTurnDone(managed());
+    expect(s0.facts.approve).toEqual({ key: "p", label: "Publish", ask: "Yes, publish it" });
+    // Unengaged, p and n are the first letters of a message.
+    expect(resolveViewKey("p", s0).effect).toBeNull();
+    expect(resolveViewKey("p", s0).focus).toBe("composer");
+    const engaged = resolveViewKey("", s0, tab);
+    expect(viewKeyHints(engaged).slice(0, 2)).toEqual([{ key: "p", label: "Publish" }, { key: "n", label: "dismiss" }]);
+    // A capital never decides.
+    expect(resolveViewKey("P", engaged).effect).toBeNull();
+    const yes = resolveViewKey("p", engaged);
+    expect(yes.effect).toEqual({ type: "ask", text: "Yes, publish it" });
+    expect(yes.approvalClosed).toBe(true);
+    expect(resolveViewKey("p", yes).effect).toBeNull();
+    expect(viewKeyHints(yes).map((hint) => hint.key)).not.toContain("p");
+
+    const no = resolveViewKey("n", engaged);
+    expect(no.handled).toBe(true);
+    expect(no.effect).toBeNull();
+    expect(no.approvalClosed).toBe(true);
+    const closed = text(renderView(managed(), focusedViewCtx(no, { width: 72, color: false, theme })).detail);
+    expect(closed).not.toContain("Publish this article?");
+  });
+
+  it("a card approval, a settled state, or an ask that is a command offers no OK key on a view", () => {
+    expect(viewFocusAfterTurnDone(managed({ kind: "card" })).facts.approve).toBeNull();
+    expect(viewFocusAfterTurnDone({ ...managed(), state: "done" } as AnswerViewV1).facts.approve).toBeNull();
+    expect(viewFocusAfterTurnDone(managed({ ask: "/exit" })).facts.approve).toBeNull();
+    expect(text(renderView(managed({ kind: "card" }), viewCtx()).detail)).not.toContain("Publish this article?");
   });
 });
 
