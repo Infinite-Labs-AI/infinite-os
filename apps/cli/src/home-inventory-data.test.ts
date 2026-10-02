@@ -1,9 +1,22 @@
+import { mkdtempSync } from "node:fs";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  helpInventory,
   homeInventoryCommands,
   homeInventoryData,
-  homeInventoryProviderLabel
+  homeInventoryProviderLabel,
+  isFirstEverRun,
+  localSourcesNote,
+  productHelpText,
+  readLocalSources,
+  recordInfiniteWelcomeSeen,
+  topBarSources,
+  type CliEnv
 } from "./index.js";
 
 describe("homeInventoryData", () => {
@@ -73,5 +86,109 @@ describe("homeInventoryCommands", () => {
     for (const value of values) {
       expect(value.startsWith("/")).toBe(true);
     }
+  });
+});
+
+describe("the local engine's sources (top bar dots, first-run Connected row)", () => {
+  async function withServer(
+    handler: (req: IncomingMessage, res: ServerResponse) => void,
+    run: (url: string) => Promise<void>
+  ): Promise<void> {
+    const server = createServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      await run(`http://127.0.0.1:${port}`);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  function env(url: string): CliEnv {
+    const home = mkdtempSync(join(tmpdir(), "infinite-sources-"));
+    return {
+      HOME: home,
+      GROWTH_OS_HOME: home,
+      GROWTH_OS_API_URL: url,
+      GROWTH_OS_READ_TOKEN: "test-read-token",
+      GROWTH_OS_WORKSPACE_ID: "ws_test",
+      GROWTH_OS_READINESS_PROBE_TIMEOUT_MS: "1000"
+    } as CliEnv;
+  }
+
+  it("reads the connected sources, de-duplicated by provider", async () => {
+    await withServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ data: { sources: [
+        { provider: "google_analytics_4", status: "connected" },
+        { provider: "stripe", status: "degraded" },
+        { provider: "x", status: "disconnected" }
+      ] } }));
+    }, async (url) => {
+      const read = await readLocalSources(env(url));
+      expect(read).toEqual({ kind: "read", connections: [{ label: "GA4", degraded: false }, { label: "Stripe", degraded: true }] });
+      expect(localSourcesNote(read)).toBeUndefined();
+    });
+  });
+
+  it("a daemon that answers but refuses the read (no token for it, no workspace) is NOT 'daemon not reachable' (eval run 1)", async () => {
+    await withServer((_req, res) => {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: { code: "unauthorized" } }));
+    }, async (url) => {
+      const read = await readLocalSources(env(url));
+      expect(read).toEqual({ kind: "unreadable" });
+      expect(localSourcesNote(read)).toBe("could not read sources");
+    });
+  });
+
+  it("says 'daemon not reachable' only when no daemon answered", async () => {
+    let closedUrl = "";
+    await withServer(() => undefined, async (url) => {
+      closedUrl = url;
+    });
+    const read = await readLocalSources(env(closedUrl));
+    expect(read).toEqual({ kind: "unreachable" });
+    expect(localSourcesNote(read)).toBe("daemon not reachable");
+  });
+
+  it("turns read sources into top bar dots, and draws none when they were not read", () => {
+    expect(topBarSources([{ label: "GA4" }, { label: "Stripe", degraded: true }])).toEqual([
+      { label: "GA4", state: "connected" },
+      { label: "Stripe", state: "broken" }
+    ]);
+    expect(topBarSources(undefined)).toBeUndefined();
+  });
+
+  it("carries the reason into the first-run inventory only when the sources were not read", () => {
+    expect(homeInventoryData("Acme", undefined, "daemon not reachable").connectionsNote).toBe("daemon not reachable");
+    expect(homeInventoryData("Acme", [], "daemon not reachable").connectionsNote).toBeUndefined();
+    expect(homeInventoryData("Acme", undefined).connectionsNote).toBeUndefined();
+  });
+});
+
+describe("infinite --help carries the first-run wordmark, inventory and the App/Terminal block (D4)", () => {
+  it("prints the wordmark, the tools and commands, and 'Use Infinite wherever you prefer'", () => {
+    const help = productHelpText(helpInventory());
+    expect(help).toContain("███████╗");
+    expect(help).toContain("the growth engineer's OS");
+    expect(help).toMatch(/^Tools {6}connect {2}· {2}sync/mu);
+    expect(help).toMatch(/^Commands {3}\/connect/mu);
+    expect(help).toContain("Use Infinite wherever you prefer:");
+    expect(help).toContain("  APP       Press ⌘L");
+    expect(help).toContain("  TERMINAL  You’re already here");
+    expect(help).toContain("Same account. Same workspace. Same agent.");
+    expect(help).not.toMatch(/trial|infinite local|docker|self-host|local engine/i);
+  });
+});
+
+describe("the first-ever run (D4: the wordmark, inventory and App/Terminal block show once)", () => {
+  it("is the first run until the welcome has been shown once; INFINITE_FORCE_WELCOME replays it", () => {
+    const home = mkdtempSync(join(tmpdir(), "infinite-first-run-"));
+    const env = { HOME: home, GROWTH_OS_HOME: home } as CliEnv;
+    expect(isFirstEverRun(env)).toBe(true);
+    recordInfiniteWelcomeSeen(env);
+    expect(isFirstEverRun(env)).toBe(false);
+    expect(isFirstEverRun({ ...env, INFINITE_FORCE_WELCOME: "1" } as CliEnv)).toBe(true);
   });
 });

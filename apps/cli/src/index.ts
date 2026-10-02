@@ -34,7 +34,7 @@ import {
   type ProviderInventoryRow,
   type SetupProviderId
 } from "./setup-prompts.js";
-import { localHelpText, productHelpText, productUpdateText } from "./help-text.js";
+import { localHelpText, productHelpText, productUpdateText, USE_INFINITE_ANYWHERE, type HelpInventory } from "./help-text.js";
 import { runContactsCommand } from "./contacts/contacts-command.js";
 import { runAnalyticsCommand } from "./commands/analytics.js";
 import { reservedCommandNotice } from "./desktop/reserved-commands.js";
@@ -77,6 +77,7 @@ import {
   type InkInteractiveSelectionPrompt
 } from "./tui/ink/interactive-session.js";
 import { runInfiniteWelcome } from "./tui/ink/infinite-welcome.js";
+import type { TopBarData, TopBarSource } from "./tui/ink/top-bar.js";
 import { linkAbortSignals } from "./tui/ink/turn-abort.js";
 import { appendPersistentInputHistory, loadPersistentInputHistory } from "./tui/ink/input-history.js";
 import { resolveCliRenderSurface, usesTranscriptRenderSurface } from "./tui/runtime/render-surface.js";
@@ -736,7 +737,7 @@ const INTERACTIVE_COMMAND_COMPLETIONS: readonly CompletionSuggestion[] = [
   { value: "/quit", description: "Exit the interactive shell" }
 ];
 
-// ── Home inventory (every-launch startup screen) ──────────────────────────────
+// ── Home inventory (the first-run screen and `infinite --help`) ───────────────
 // A SHORT, friendly curated list of what the OS can DO — verb-phrases, NOT raw
 // action ids. Hand-curated on purpose (the action registry is large and its ids
 // are internal); keep it to the handful that read well as "here's what I can do".
@@ -799,7 +800,8 @@ export function homeInventoryCommands(): readonly { value: string }[] {
 
 export function homeInventoryData(
   workspace: string | undefined,
-  connections: HomeInventoryData["connections"]
+  connections: HomeInventoryData["connections"],
+  connectionsNote?: string
 ): HomeInventoryData {
   return {
     tools: HOME_INVENTORY_TOOLS,
@@ -812,6 +814,7 @@ export function homeInventoryData(
         "Unknown"
       )
     })),
+    ...(connections === undefined && connectionsNote ? { connectionsNote } : {}),
     version: cliVersion(),
     workspace: workspace
       ? boundedTerminalText(workspace, HOME_INVENTORY_LABEL_MAX_CHARS, "Unknown")
@@ -819,15 +822,54 @@ export function homeInventoryData(
   };
 }
 
-// Best-effort, BOUNDED fetch of the connected sources for the home screen. Uses
+/** What `infinite --help` lists under the wordmark (the first-run inventory's tools and commands). */
+export function helpInventory(): HelpInventory {
+  return { tools: HOME_INVENTORY_TOOLS, commands: homeInventoryCommands(), version: cliVersion() };
+}
+
+/**
+ * The top bar's dots for the sources the terminal read: `●` connected, `⊘`
+ * (red) degraded. Undefined when they were not read: the bar draws no dots
+ * rather than guess.
+ */
+export function topBarSources(
+  connections: HomeInventoryData["connections"]
+): TopBarSource[] | undefined {
+  return connections?.map((connection) => ({
+    label: boundedTerminalText(connection.label, HOME_INVENTORY_LABEL_MAX_CHARS, "Unknown"),
+    state: connection.degraded ? "broken" : "connected"
+  }));
+}
+
+/**
+ * The LOCAL engine's sources, read for the local session's top bar and its
+ * first-run inventory: the connected list, or why it could not be read.
+ * `unreachable` = no daemon answered (connection refused, timeout);
+ * `unreadable` = a daemon answered but refused or failed the read (no token
+ * for it, no workspace pinned, a server error). Only the first is "daemon not
+ * reachable": a healthy daemon that said no is never reported as down.
+ */
+export type LocalSourcesRead =
+  | { kind: "read"; connections: readonly { label: string; degraded?: boolean }[] }
+  | { kind: "unreachable" }
+  | { kind: "unreadable" };
+
+/** The few words the first-run inventory shows when the sources could not be read. */
+export function localSourcesNote(read: LocalSourcesRead): string | undefined {
+  return read.kind === "unreachable" ? "daemon not reachable" : read.kind === "unreadable" ? "could not read sources" : undefined;
+}
+
+/** Thrown by `apiRequest` when no daemon answered at all (the request never got a response). */
+class DaemonUnreachableError extends Error {}
+
+// Best-effort, BOUNDED read of the connected sources for the LOCAL session. Uses
 // the app-API `/sources` path (pin-tolerant — `apiRequest` omits the workspace
 // header on a no-pin session) with a SHORT abort cap so a missing/zombie daemon
-// fails fast. Returns `undefined` (NOT an empty array) on ANY failure so the home
-// screen renders the inventory WITHOUT a misleading "nothing connected" line — it
-// shows a muted "daemon not reachable" note instead. NEVER throws, never hangs.
-async function fetchHomeInventoryConnections(
-  env: CliEnv
-): Promise<readonly { label: string; degraded?: boolean }[] | undefined> {
+// fails fast. NEVER throws, never hangs. The cloud (Desktop) session never calls
+// this: its sources live in the Infinite app, and the app's embedded engine is
+// not this CLI's daemon (it has no token for it), so a read there could only
+// fail and be misreported (eval run 1: "daemon not reachable" on a healthy app).
+export async function readLocalSources(env: CliEnv): Promise<LocalSourcesRead> {
   // Reuse the readiness probe cap (default 1.5s) so the prompt is never delayed.
   const timeoutMs = readinessProbeTimeoutMs(env);
   try {
@@ -841,13 +883,15 @@ async function fetchHomeInventoryConnections(
       const existing = byProvider.get(connection.provider);
       byProvider.set(connection.provider, existing === false ? false : degraded);
     }
-    return [...byProvider.entries()].map(([provider, degraded]) => ({
-      label: homeInventoryProviderLabel(provider),
-      degraded
-    }));
-  } catch {
-    // Daemon unreachable / no pin resolvable / timeout → omit the live line.
-    return undefined;
+    return {
+      kind: "read",
+      connections: [...byProvider.entries()].map(([provider, degraded]) => ({
+        label: homeInventoryProviderLabel(provider),
+        degraded
+      }))
+    };
+  } catch (error) {
+    return { kind: error instanceof DaemonUnreachableError ? "unreachable" : "unreadable" };
   }
 }
 
@@ -1456,13 +1500,13 @@ export async function resolveProjectFlag(
 //   unsupported → non-mac product invocation, no command run
 const UNSUPPORTED_PRODUCT_PLATFORM =
   "Infinite Desktop and its Terminal companion require an Apple-silicon Mac with macOS 12 or newer. No command was run.\n";
+// Printed once, on the first-ever run (D4): every later session opens straight
+// into its frame. The "Use Infinite wherever you prefer" block is also in
+// `infinite --help`.
 const DESKTOP_READY_HANDOFF =
   "✓ Infinite Desktop is ready\n\n" +
   "∞ Infinite is ready\n\n" +
-  "Use Infinite wherever you prefer:\n\n" +
-  "  APP       Press ⌘L\n" +
-  "  TERMINAL  You’re already here\n\n" +
-  "Same account. Same workspace. Same agent.\n\n";
+  `${USE_INFINITE_ANYWHERE.join("\n")}\n\n`;
 
 type ProductReadyContinuation = () => Promise<void>;
 
@@ -1477,7 +1521,6 @@ export async function runInteractiveEntry(
   const deps = await buildModeDeps(env);
   const mode = resolveMode(env as NodeJS.ProcessEnv, io, deps);
   if (mode === "cloud") {
-    output.write(DESKTOP_READY_HANDOFF);
     await runDesktopInteractiveEntry(env);
     return;
   }
@@ -1502,7 +1545,6 @@ export async function runInteractiveEntry(
     if (result === "ready") {
       // Onboarding completes INTO the session (spec §6.2): once Desktop is
       // ready, continue straight into the proxied chat — never dead-end.
-      output.write(DESKTOP_READY_HANDOFF);
       await runDesktopInteractiveEntry(env);
       return;
     }
@@ -1672,17 +1714,28 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
       : {}),
   });
   const turnAbort = new AbortController();
+  // The first-ever run opens with the Desktop hand-off block and the
+  // inventory; every later run opens straight into the frame (D4).
+  const firstRun = isFirstEverRun(env);
+  if (firstRun) {
+    output.write(DESKTOP_READY_HANDOFF);
+    recordInfiniteWelcomeSeen(env);
+  }
 
   if (shouldUseInkInteractiveSession(input, output, env)) {
-    const homeInventoryConnections = await fetchHomeInventoryConnections(env);
+    // The workspace's sources live in the Infinite app, which the terminal
+    // cannot list: the top bar names the workspace and says the session runs
+    // through the app, and draws no dots (never a guess, never a false
+    // "daemon not reachable").
+    const workspace = status.workspace?.name
+      ? boundedTerminalText(status.workspace.name, HOME_INVENTORY_LABEL_MAX_CHARS, "Unknown")
+      : undefined;
     await runInkInteractiveSession({
       errorOutput,
-      homeInventory: homeInventoryData(status.workspace?.name, homeInventoryConnections),
+      ...(firstRun ? { homeInventory: homeInventoryData(status.workspace?.name, undefined) } : {}),
       input,
       output,
-      promptPlaceholder: "Type a message, /help, or /exit.",
-      title: "Infinite",
-      status: () => (runner.sessionId() ? [`session ${runner.sessionId()}`] : []),
+      topBar: { ...(workspace ? { workspace } : {}), throughApp: true },
       // Approve/decline a `requires_confirmation` write in-session. The runner
       // resolves the handle against the client that ran the originating turn
       // (handles are per-boot); `confirm` is single-use per handle.
@@ -1921,7 +1974,7 @@ export async function runCli(
   // updater, which lives at `infinite local update`.
   const command = normalizedArgs[0];
   if (command === "help" || command === "--help" || command === "-h") {
-    output.write(`${productHelpText()}\n`);
+    output.write(`${productHelpText(helpInventory())}\n`);
     return;
   }
   if (command === "version" || command === "--version" || command === "-v") {
@@ -6944,20 +6997,19 @@ function updateCheckCachePath(env: CliEnv): string {
   return join(infiniteHomeDir(env), "update-check.json");
 }
 
-// ~/.infinite/welcome-seen — written once the first-run welcome is dismissed.
+// ~/.infinite/welcome-seen — written once the first run's welcome is shown.
 function welcomeSeenPath(env: CliEnv): string {
   return join(infiniteHomeDir(env), "welcome-seen");
 }
 
-// Show the big-INFINITE welcome on first interactive launch only. `INFINITE_FORCE_WELCOME`
-// replays it (for previewing); `INFINITE_NO_ANIMATION` skips the splash entirely.
-function shouldShowInfiniteWelcome(env: CliEnv): boolean {
+// The first-ever interactive run: it opens with the welcome, the inventory and
+// the "Use Infinite wherever you prefer" block (D4); every later run opens
+// straight into the session's frame. `INFINITE_FORCE_WELCOME` replays it (for
+// previewing).
+export function isFirstEverRun(env: CliEnv): boolean {
   const flags = env as NodeJS.ProcessEnv;
   if (flags.INFINITE_FORCE_WELCOME === "1" || flags.INFINITE_FORCE_WELCOME === "true") {
     return true;
-  }
-  if (flags.INFINITE_NO_ANIMATION === "1" || flags.INFINITE_NO_ANIMATION === "true") {
-    return false;
   }
   try {
     return !existsSync(welcomeSeenPath(env));
@@ -6966,7 +7018,14 @@ function shouldShowInfiniteWelcome(env: CliEnv): boolean {
   }
 }
 
-function recordInfiniteWelcomeSeen(env: CliEnv): void {
+// `INFINITE_NO_ANIMATION` skips the first run's big-INFINITE splash (the
+// inventory still shows).
+function welcomeAnimationAllowed(env: CliEnv): boolean {
+  const flags = env as NodeJS.ProcessEnv;
+  return flags.INFINITE_NO_ANIMATION !== "1" && flags.INFINITE_NO_ANIMATION !== "true";
+}
+
+export function recordInfiniteWelcomeSeen(env: CliEnv): void {
   try {
     const path = welcomeSeenPath(env);
     mkdirSync(dirname(path), { recursive: true });
@@ -7573,13 +7632,17 @@ async function interactiveSession(env: CliEnv): Promise<void> {
   // First-run front door: the big INFINITE welcome, before readiness/preflight.
   // Only on an Ink-capable interactive TTY; "press Enter to launch" hands off
   // into the session (which lands on the rocket home banner).
-  if (shouldShowInfiniteWelcome(env) && shouldUseInkInteractiveSession(input, output, env)) {
-    await runInfiniteWelcome({
-      columns: output.columns,
-      errorOutput,
-      input,
-      output
-    });
+  const firstRun = shouldUseInkInteractiveSession(input, output, env) && isFirstEverRun(env);
+  if (firstRun) {
+    if (welcomeAnimationAllowed(env)) {
+      await runInfiniteWelcome({
+        columns: output.columns,
+        errorOutput,
+        input,
+        output,
+        theme: resolveTheme(env as NodeJS.ProcessEnv, output)
+      });
+    }
     recordInfiniteWelcomeSeen(env);
   }
 
@@ -7621,23 +7684,34 @@ async function interactiveSession(env: CliEnv): Promise<void> {
     await refreshActiveProjectLabel(env);
     await loadProjectListCache(env);
     const theme = resolveTheme(env as NodeJS.ProcessEnv);
-    // Home inventory (every-launch startup screen). Tools/Commands are static +
-    // registry-derived; the Connected line is LIVE but BOUNDED — the fetch is
-    // capped by `readinessProbeTimeoutMs` and returns `undefined` on any failure,
-    // so a missing/zombie daemon degrades to a muted note and never hangs startup.
-    const homeInventoryConnections = await fetchHomeInventoryConnections(env);
+    // The local engine's sources: the top bar's dots, and the first-run
+    // inventory's Connected row. LIVE but BOUNDED — capped by
+    // `readinessProbeTimeoutMs`, so a missing/zombie daemon never hangs startup.
+    const localSources = await readLocalSources(env);
+    const localConnections = localSources.kind === "read" ? localSources.connections : undefined;
     try {
       await runInkInteractiveSession({
         errorOutput,
         getAgentTitle: () =>
           activeProjectLabel ? `${theme.brand.name} — ${activeProjectLabel}` : undefined,
         getCompletions: (value) => completeInteractiveInputForCli(value, env),
-        homeInventory: homeInventoryData(activeProjectLabel, homeInventoryConnections),
+        ...(firstRun
+          ? { homeInventory: homeInventoryData(activeProjectLabel, localConnections, localSourcesNote(localSources)) }
+          : {}),
+        // Read on every render: `/project use` renames the workspace at once.
+        topBar: (): TopBarData => {
+          const sources = topBarSources(localConnections);
+          return {
+            ...(activeProjectLabel
+              ? { workspace: boundedTerminalText(activeProjectLabel, HOME_INVENTORY_LABEL_MAX_CHARS, "Unknown") }
+              : {}),
+            ...(sources ? { sources } : {})
+          };
+        },
         initialInputHistory: loadPersistentInputHistory(env as NodeJS.ProcessEnv),
         input,
         onRememberInput: (line) => appendPersistentInputHistory(line, env as NodeJS.ProcessEnv),
         output,
-        promptPlaceholder: "Type a message, /help, or /exit.",
         // In-chat /connect (#20): for token providers this returns a `wizard`
         // descriptor the TUI renders as a masked field loop (NOT the operator
         // confirm gate, NOT the LLM); for ga4/meta_ads/shopify it returns a `note`
@@ -7660,9 +7734,7 @@ async function interactiveSession(env: CliEnv): Promise<void> {
         requiresConfirmation: (line) =>
           requiresOperatorConfirmation(line) ? `${operatorConfirmationText(line)} Type confirm to continue.` : undefined,
         requiresSelection: syncWindowSelectionPrompt,
-        status: () => chatState.sessionId ? [`session ${chatState.sessionId}`] : [],
         theme,
-        title: "Infinite TUI",
         async onSubmitLine(line, onProgress) {
           // PR5 — pre-turn project selection. A pin-less session FAIL-CLOSES at
           // runtime construction (`infiniteOsWorkspaceId` throws `NoActiveProjectError`
@@ -12685,7 +12757,7 @@ async function apiRequest(path: string, env: CliEnv, options: ApiOptions = {}): 
     // descriptor ladder instead of hammering a dead address. Redact userinfo before
     // it can reach a thrown Error / transcript (a user:pass@host GROWTH_OS_API_URL).
     invalidateApiBaseUrl();
-    throw new Error(`API request to ${redactUrlUserinfo(baseUrl)}${path} failed: ${connectionErrorMessage(error)}`);
+    throw new DaemonUnreachableError(`API request to ${redactUrlUserinfo(baseUrl)}${path} failed: ${connectionErrorMessage(error)}`);
   }
   const payload = await response.json();
   if (!response.ok) {
