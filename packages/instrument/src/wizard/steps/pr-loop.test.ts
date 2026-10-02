@@ -21,6 +21,7 @@ import {
   scriptedAgents,
   testContext,
   testDeps,
+  testResult,
   type FakeBridge,
   type ScriptedAgents,
   type TestContext
@@ -242,6 +243,48 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expectOk(await rehearsalStep.run(w.ctx, w.deps))
     const head = w.fx.remoteSha(BRANCH)!
     expect(() => assertCommittedImportsDeclared(w.fx, head)).toThrow(/imports @vercel\/functions/)
+  })
+
+  it("marks GA4 key events only for clicks GA4 actually saw (negative: a click with no GA4 event is not marked)", async () => {
+    const w = await world()
+    w.deps.bridge = fakeBridge({
+      results: {
+        rehearsal: testResult("rehearsal", {
+          clicks: [{ label: "sign_up", selector: '[data-infinite-conversion="sign_up"]', found: true, events: { ga4: [], posthog: ["sign_up"], meta: [], infinite: [] }, nonGetCancelled: 1, navigatedAfterMs: null, navigationCancelled: false }]
+        })
+      }
+    })
+    w.bridge = w.deps.bridge as FakeBridge
+    expectOk(await rehearsalStep.run(w.ctx, w.deps))
+    const patch = w.bridge.calls.find((call) => call.verb === "runs.patch")!.body as { patch: Record<string, unknown> }
+    expect(patch.patch.clickTestedConversions).toEqual(["sign_up"])
+    expect(bridgeVerbs(w.bridge)).not.toContain("ga4-key-events")
+  })
+
+  it("a click that fires a Meta standard event never counts as click-tested (the never-list)", async () => {
+    const w = await world()
+    w.deps.bridge = fakeBridge({
+      results: {
+        rehearsal: testResult("rehearsal", {
+          clicks: [{ label: "sign_up", selector: '[data-infinite-conversion="sign_up"]', found: true, events: { ga4: ["sign_up"], posthog: [], meta: ["CompleteRegistration"], infinite: [] }, nonGetCancelled: 1, navigatedAfterMs: null, navigationCancelled: false }]
+        })
+      }
+    })
+    w.bridge = w.deps.bridge as FakeBridge
+    expectOk(await rehearsalStep.run(w.ctx, w.deps))
+    const patch = w.bridge.calls.find((call) => call.verb === "runs.patch")!.body as { patch: Record<string, unknown> }
+    expect(patch.patch.clickTestedConversions).toBeUndefined()
+    expect(bridgeVerbs(w.bridge)).not.toContain("ga4-key-events")
+  })
+
+  it("skips when nothing changed (no commit, no PR)", async () => {
+    const w = await world()
+    w.fx.git(["checkout", "-q", "--", "."])
+    w.fx.git(["clean", "-qfd", "-e", ".env.local"])
+    const outcome = await rehearsalStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "skipped" })
+    expect(w.gh.read().prs).toEqual([])
+    expect(w.fx.remoteSha(BRANCH)).toBeNull()
   })
 
   it("refuses when the user changed .gitignore (negative: nothing pushed)", async () => {
@@ -560,6 +603,47 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8")) as { declined: Array<{ key: string }> }
     expect(ledger.declined.map((entry) => entry.key)).toEqual(["app/layout.tsx|R16"])
     expect(w.agents.reviewCalls).toEqual([])
+  })
+
+  it("when the base moved, updates the branch with a merge commit (never a rebase) and fast-forwards", async () => {
+    const w = await opened({
+      reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null }]), review([])],
+      fix: fixLayout,
+      answers: { "teammate-comments": { actOn: [] } }
+    })
+    // Someone merges to main meanwhile; GitHub reports the PR BEHIND.
+    const other = join(w.fx.dir, "teammate-clone")
+    w.fx.git(["clone", "-q", w.fx.remote, other], w.fx.dir)
+    w.fx.write("../teammate-clone/docs.md", "docs\n")
+    w.fx.git(["add", "--", "docs.md"], other)
+    w.fx.git(["commit", "-q", "-m", "docs"], other)
+    w.fx.git(["push", "-q", "origin", "main"], other)
+    w.gh.update((state) => {
+      state.prs![0]!.mergeStateStatus = "BEHIND"
+    })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const updates = w.gh.read().calls.filter((call) => call.argv[0] === "pr" && call.argv[1] === "update-branch")
+    expect(updates.map((call) => call.argv)).toEqual([["pr", "update-branch", "42"]])
+    const head = w.fx.remoteSha(BRANCH)!
+    expect(w.fx.git(["log", "-1", "--format=%P", head]).trim().split(" ")).toHaveLength(2)
+    expect(await w.git.head()).toBe(head)
+    expect(w.ctx.state.get().git!.headSha).toBe(head)
+    // The rehearsal re-ran on the merged head.
+    expect(w.bridge.testRequests.filter((request) => request.mode === "rehearsal").at(-1)!.rehearsal!.headSha).toBe(head)
+    expect(w.git.calls.some((call) => call[0] === "rebase" || call[0] === "pull")).toBe(false)
+  })
+
+  it("off GitHub the review goes to .infinite/wizard/REVIEW.md, scanned; nothing is posted anywhere", async () => {
+    const w = await opened({
+      host: "other",
+      reviews: [review([{ id: "F1", item: "R16", severity: "should", path: "app/layout.tsx", line: 2, body: `Add a cookie banner; key ${STRIPE}`, suggested_fix: null }])]
+    })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const written = readFileSync(join(w.fx.root, ".infinite/wizard/REVIEW.md"), "utf8")
+    expect(written).toContain("infinite-tag:review v1")
+    expect(written).toContain(PR_MARKERS.final(RUN_ID))
+    expect(written).not.toContain(STRIPE)
+    expect(w.gh.read().calls).toEqual([])
   })
 
   it("parks when the reviewer is out of usage; the PR stays a draft", async () => {

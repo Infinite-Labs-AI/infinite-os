@@ -165,6 +165,20 @@ if (group === "pr") {
     out(`${pr.url}#issuecomment-1\n`)
   }
   if (sub === "update-branch") {
+    if (argv.includes("--rebase")) fail("fake gh: update-branch --rebase is never allowed")
+    // GitHub's default: merge the base into the PR branch with a merge commit (made on the bare remote).
+    const remote = process.env.FAKE_GH_REMOTE
+    if (remote && pr.mergeStateStatus === "BEHIND") {
+      const git = (args) => execFileSync("git", ["--git-dir", remote, ...args], {
+        encoding: "utf8",
+        env: { ...process.env, GIT_AUTHOR_NAME: "GitHub", GIT_AUTHOR_EMAIL: "noreply@github.com", GIT_COMMITTER_NAME: "GitHub", GIT_COMMITTER_EMAIL: "noreply@github.com" }
+      }).trim()
+      const head = git(["rev-parse", `refs/heads/${pr.headRefName}`])
+      const base = git(["rev-parse", `refs/heads/${pr.baseRefName}`])
+      const tree = git(["merge-tree", "--write-tree", head, base])
+      const merge = git(["commit-tree", tree.split("\n")[0], "-p", head, "-p", base, "-m", `Merge branch '${pr.baseRefName}' into ${pr.headRefName}`])
+      git(["update-ref", `refs/heads/${pr.headRefName}`, merge])
+    }
     pr.mergeStateStatus = "CLEAN"
     out("")
   }
