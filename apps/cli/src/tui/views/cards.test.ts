@@ -721,6 +721,17 @@ describe("images (r4 Images, Make creatives)", () => {
     expect(out).toEqual([[["gb", "✓ 3 creatives ready"], ["", "  "], ["dim", "· saved to your Library"]], [], [["cyan u", "Open in Library ↗"]]]);
   });
 
+  it("the card (flow-images-01): the app's one row is the card's sentence, with no label (run-2 M9)", () => {
+    const card = decode({
+      ...IMAGES, state: "needs_yes",
+      approval: { kind: "card", turnId: "t", handle: "h", title: "Generate 3 ad images", summary: null, confirmLabel: "Generate · ~$0.52", dismissLabel: "Dismiss",
+        rows: [{ label: "Images", value: "“Your ad account, explained” · 4:5 · HD" }] }
+    });
+    const lines = approvalRender(card, { ...viewCtx({ color: false }), ui: CARD_UI_START, fieldsCapable: true }).lines;
+    expect(lines.some((line) => line.includes("│ “Your ad account, explained” · 4:5 · HD"))).toBe(true);
+    expect(lines.some((line) => /│ Images +“/u.test(line))).toBe(false);
+  });
+
   it("hit a limit (flow-images-05): no rows, and `Nothing was proposed.` in dim", () => {
     const out = detail({
       state: "hit_limit", body: { ...IMAGES.body, ready: 0, items: [] },

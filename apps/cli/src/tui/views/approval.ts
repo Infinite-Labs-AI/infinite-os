@@ -821,6 +821,8 @@ function cardObject(view: AnswerViewV1, approval: Record<string, unknown>, ctx: 
       return [...appRows(), ...launchWarningLines(view.body, ctx)];
     }
     case "images":
+      // r4 "Generate 3 ad images": the app's one row is the card's sentence (the title already says images).
+      if (rows.length === 1 && rows[0]!.value) return paragraphIn(rows[0]!.value, ctx.width, "text", ctx);
       return rows.length ? appRows() : imagesLines(view, ctx);
     case "job":
       return jobLines(view.body, ctx);
