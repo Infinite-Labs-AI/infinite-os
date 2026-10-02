@@ -20,6 +20,10 @@ import {
 } from "./host-guard.js"
 import { HOST_DENY_V1 } from "./wizard/contracts/host-deny.js"
 
+const DENY_GUARD = {
+  exempt: ["acme.com", "www.acme.com", "acme-git-main-x.vercel.app"],
+  deny: [] as string[]
+}
 const GUARD: HostGuardSpec = {
   mode: "deny",
   exempt: ["acme.com", "www.acme.com", "acme-git-main-x.vercel.app"],
@@ -58,9 +62,9 @@ describe("the deny-mode guard (customer default), executed", () => {
   })
 
   it("labels staging.acme.com as 'allowed' (a known leak) and the preview as 'denied'", () => {
-    expect(classifyHost("staging.acme.com", GUARD as { exempt: string[]; deny: string[] })).toBe("allowed")
-    expect(classifyHost("acme-abc123.vercel.app", GUARD as { exempt: string[]; deny: string[] })).toBe("denied")
-    expect(classifyHost("ACME.com.", GUARD as { exempt: string[]; deny: string[] })).toBe("exempt")
+    expect(classifyHost("staging.acme.com", DENY_GUARD)).toBe("allowed")
+    expect(classifyHost("acme-abc123.vercel.app", DENY_GUARD)).toBe("denied")
+    expect(classifyHost("ACME.com.", DENY_GUARD)).toBe("exempt")
   })
 
   it("exempt wins over every deny rule: production is never silenced (decision 3)", () => {
