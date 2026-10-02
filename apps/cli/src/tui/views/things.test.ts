@@ -7,8 +7,9 @@ import type { AnswerViewV1 } from "@infinite-os/types";
 import { describe, expect, it } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
+import { r4Segments } from "../../formatting/r4-segments.test-util.js";
 import { stripAnsi } from "../lib/text.js";
-import { ansiFg, resolveTheme } from "../theme.js";
+import { ansiFg, INFINITE_R4_THEME, resolveTheme } from "../theme.js";
 import { DEFAULT_COMPOSER_ROWS, DEFAULT_KEY_BAR_ROWS, liveBodyRows } from "../ink/transcript-static.js";
 import type { Msg } from "../types.js";
 import { clipboardSequence, copyTargets } from "./clipboard.js";
@@ -440,36 +441,44 @@ describe("a document page fits the live region", () => {
   });
 });
 
-describe("quiet in a turn", () => {
+describe("quiet in a turn (r4 view-12 `steps only`, run-2 M7)", () => {
   const messages: Msg[] = [
     { role: "user", text: "write the trial email" },
     { role: "assistant", text: "Here is a draft: Paying forty dollars per trial is the line to beat this week." }
   ];
 
-  it("a turn whose only view is quiet keeps the answer full width and shows just the step line", () => {
+  it("a quiet view takes the details pane under a dim `steps only` head, never its title, source or state words", () => {
     const quiet = withBody("quiet-steps", {}, { title: "Read playbook", provenance: { source: "Playbooks", via: "our_db" } });
-    const lines = renderLiveTurn({ messages, views: [quiet], focus: null, width: 100, color: false, theme }).lines;
-    const out = lines.join("\n");
-    expect(lines.some((line) => line.includes(" │ "))).toBe(false);
-    expect(out).toContain("read the writing playbook");
-    expect(out).toContain("Paying forty dollars per trial is the line to beat this week.");
+    // Below 120: the answer, a blank and a rule, then `steps only`, a blank source row, a blank, the line.
+    const narrow = renderLiveTurn({ messages, views: [quiet], focus: null, width: 100, color: false, theme }).lines;
+    const answer = narrow.findIndex((line) => line.startsWith("∞ Here is a draft"));
+    expect(narrow.slice(answer + 1, answer + 6)).toEqual(["", "─".repeat(100), "steps only", "", ""]);
+    expect(narrow[answer + 6]).toBe("read the writing playbook");
+    // From 120: side by side, `steps only` on the question's row.
+    const wide = renderLiveTurn({ messages, views: [quiet], focus: null, width: 160, color: false, theme }).lines;
+    expect(wide[0]).toMatch(/^❯ write the trial email +│ steps only$/u);
+    expect(wide.some((line) => /│ read the writing playbook$/u.test(line))).toBe(true);
+    const out = [...narrow, ...wide].join("\n");
     expect(out).not.toContain("Ready");
     expect(out).not.toContain("Playbooks");
     expect(out).not.toContain("Read playbook");
-    // The view's own render carries no head and no source.
     const render = draw(quiet);
     expect(render.quiet).toBe(true);
-    expect(render.head).toBe("");
-    expect(render.source).toBeNull();
+    expect(render.head).toBe("steps only");
+    expect(render.source).toBe("");
   });
 
-  it("a quiet view next to a list adds no head line to the details pane", () => {
+  it("the head is dim", () => {
+    const render = draw(fixture("quiet-steps"), { color: true, theme: INFINITE_R4_THEME });
+    expect(r4Segments(render.head)).toEqual([{ text: "steps only", style: "dim" }]);
+  });
+
+  it("a quiet view next to a list keeps the list first in the details pane", () => {
     const lines = renderLiveTurn({ messages, views: [fixture("quiet-steps"), fixture("list-rows")], focus: null, width: 120, color: false, theme }).lines;
     const right = lines.filter((line) => line.includes(" │ ")).map((line) => line.slice(line.indexOf(" │ ") + 3));
-    expect(right.some((line) => line.includes("Ready") && !line.includes("Ads running"))).toBe(false);
-    expect(right.some((line) => line.includes("read the writing playbook"))).toBe(false);
-    expect(lines.join("\n")).toContain("read the writing playbook");
     expect(right[0]).toContain("Ads running");
+    expect(right.some((line) => line === "steps only")).toBe(true);
+    expect(right.findIndex((line) => line === "steps only")).toBeGreaterThan(0);
   });
 
   it("a quiet view never prints a caveat, an explanation or a state reason", () => {

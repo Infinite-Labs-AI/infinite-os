@@ -81,7 +81,8 @@ export function layoutTurn(
 ): string[] {
   const total = Math.max(1, Math.floor(width));
   const all: readonly ViewRender[] = view === null ? [] : isRenderList(view) ? view : [view];
-  const renders = all.filter(inDetailsPane);
+  // Steps-only views follow the turn's other views in the details pane.
+  const renders = [...all.filter((render) => inDetailsPane(render) && !render.quiet), ...all.filter((render) => inDetailsPane(render) && render.quiet)];
   const quietSteps = all.filter((render) => !inDetailsPane(render)).flatMap((render) => render.detail.map((line) => `  ${line}`));
   const rule = (line: string) => (style ? paint(line, "line", style) : line);
   const out: string[] = [];
@@ -273,16 +274,9 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const plainCtx: ViewRenderCtx = {
     ...base, selected: 0, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false, caps
   };
-  // A quiet view without a head prints with the Steps (full width), not in the details pane.
-  const stepCtx: ViewRenderCtx = { ...plainCtx, width: Math.max(1, width - 2) };
   const focusIndex = input.focus ? input.focus.viewIndex : focusedViewIndex(input.views);
-  const renders = input.views.map((view, index) => {
-    if (view.kind === "quiet") {
-      const pane = renderView(view, plainCtx);
-      return inDetailsPane(pane) ? pane : renderView(view, stepCtx);
-    }
-    return renderView(view, index === focusIndex && input.focus ? focusedViewCtx(input.focus, base) : plainCtx);
-  });
+  const renders = input.views.map((view, index) =>
+    renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus ? focusedViewCtx(input.focus, base) : plainCtx));
   const card: ViewRender[] = input.details?.length
     ? [{ head: "", source: null, detail: [...input.details], footnotes: [], keys: [], okKey: null, rowCount: 0 }]
     : [];

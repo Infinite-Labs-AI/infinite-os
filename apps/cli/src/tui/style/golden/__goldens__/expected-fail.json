@@ -222,13 +222,7 @@
   "view-11-link--c160": "R0 R1 R2 R3: frame (chrome, answer pane and Steps, details pane)",
   "view-11-link--c160@256": "R0: tier switch (the CLI paints truecolor SGR at the 256 tier; INFINITE_COLOR=256 has no reader yet)",
   "view-11-link--c60": "R0 R1 R2 R3: frame (chrome, answer pane and Steps, details pane)",
-  "view-11-link--c60@256": "R0: tier switch (the CLI paints truecolor SGR at the 256 tier; INFINITE_COLOR=256 has no reader yet)",
-  "view-12-quiet--c100": "R0 R1 R2 R3: frame (chrome, answer pane and Steps, details pane)",
-  "view-12-quiet--c100@256": "R0: tier switch (the CLI paints truecolor SGR at the 256 tier; INFINITE_COLOR=256 has no reader yet)",
-  "view-12-quiet--c160": "R0 R1 R2 R3: frame (chrome, answer pane and Steps, details pane)",
-  "view-12-quiet--c160@256": "R0: tier switch (the CLI paints truecolor SGR at the 256 tier; INFINITE_COLOR=256 has no reader yet)",
-  "view-12-quiet--c60": "R0 R1 R2 R3: frame (chrome, answer pane and Steps, details pane)",
-  "view-12-quiet--c60@256": "R0: tier switch (the CLI paints truecolor SGR at the 256 tier; INFINITE_COLOR=256 has no reader yet)"
+  "view-11-link--c60@256": "R0: tier switch (the CLI paints truecolor SGR at the 256 tier; INFINITE_COLOR=256 has no reader yet)"
  },
  "matchedEver": [
   "boot--c100",
@@ -321,6 +315,12 @@
   "region-topbar-not-connected",
   "region-topbar-not-connected@256",
   "region-topbar-ok",
-  "region-topbar-ok@256"
+  "region-topbar-ok@256",
+  "view-12-quiet--c100",
+  "view-12-quiet--c100@256",
+  "view-12-quiet--c160",
+  "view-12-quiet--c160@256",
+  "view-12-quiet--c60",
+  "view-12-quiet--c60@256"
  ]
 }
