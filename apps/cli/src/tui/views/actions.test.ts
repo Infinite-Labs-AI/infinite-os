@@ -8,7 +8,7 @@ import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { confirmResultLines } from "../../desktop/confirm-result-lines.js";
 import { formatKeyBar, resolveKey } from "../keys/keymap.js";
 import { displayWidth } from "../lib/display-width.js";
-import { resolveTheme } from "../theme.js";
+import { ansiFg, resolveTheme } from "../theme.js";
 import {
   approvalRender,
   CARD_UI_START,
@@ -577,6 +577,27 @@ describe("scrub and width", () => {
         }
       }
     }
+  });
+});
+
+describe("the card frame (r4 card(): at most 74 wide, amber while it needs an OK)", () => {
+  it("a card at 160 or 200 columns is at most 74 wide", () => {
+    for (const width of [74, 120, 160, 200]) {
+      for (const name of ["change-pause-card", "launch-send-card", "launch-tree"]) {
+        const lines = approvalRender(fixture(name), cardCtx({ width })).lines;
+        expect(Math.max(...lines.map(displayWidth)), `${name} @${width}`).toBeLessThanOrEqual(74);
+      }
+    }
+    // Narrower than 74, the card takes the width it has.
+    const narrow = approvalRender(fixture("change-pause-card"), cardCtx({ width: 50 })).lines;
+    expect(Math.max(...narrow.map(displayWidth))).toBe(50);
+  });
+
+  it("the border is amber (warning) while the card needs an OK, green (success) once done", () => {
+    const top = (view: AnswerViewV1) => approvalRender(view, cardCtx({ color: true })).lines[1]!;
+    expect(top(fixture("change-pause-card")).startsWith(ansiFg(theme, "warning"))).toBe(true);
+    expect(top({ ...fixture("change-pause-card"), state: "done" } as AnswerViewV1).startsWith(ansiFg(theme, "success"))).toBe(true);
+    expect(top({ ...fixture("change-pause-card"), state: "failed" } as AnswerViewV1).startsWith(ansiFg(theme, "muted"))).toBe(true);
   });
 });
 

@@ -26,6 +26,7 @@ import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { printableImagesView } from "../../desktop/image-url-cut.js";
 import { keyBarHints, okKeyFor, type KeyAction, type KeyContext, type KeyHint } from "../keys/keymap.js";
 import { displayWidth, padEndCells, truncateCells } from "../lib/display-width.js";
+import type { AnsiRole } from "../theme.js";
 import { changeLines, labelValueLines, warningLines } from "./change.js";
 import { imagesLines } from "./images.js";
 import { jobLines } from "./job.js";
@@ -133,6 +134,8 @@ export type CardEffect =
   | { type: "copy" };
 
 const DEFAULT_PAGE_ROWS = 12;
+/** The card is never wider than this (terminal-r4 `card()`: `Math.min(w, 74)`). */
+const CARD_MAX_WIDTH = 74;
 const UPDATE_FOR_FIELDS = "Update the Infinite app to set a value here";
 const LIVE_STATES = new Set(["needs_yes", "needs_answer"]);
 
@@ -144,7 +147,8 @@ const LIVE_STATES = new Set(["needs_yes", "needs_answer"]);
 export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): ApprovalRender {
   // An images card never prints a URL, in its body or its approval words.
   const view = printableImagesView(given);
-  const width = Math.max(8, Math.floor(ctx.width));
+  // r4 card(): at most 74 wide, so the key words sit near the content.
+  const width = Math.max(8, Math.min(CARD_MAX_WIDTH, Math.floor(ctx.width)));
   const inner = width - 4;
   const approval: Record<string, unknown> = isRecord(view.approval) ? view.approval : {};
   const ui = ctx.ui;
@@ -236,7 +240,9 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   const pages = paged.pages;
 
   const title = viewText(approval.title) || viewText(view.title);
-  const framed = frame(title, body, width, ctx);
+  // r4: an amber frame while the card needs an OK, green once it is done.
+  const border: AnsiRole = live ? "warning" : view.state === "done" ? "success" : "muted";
+  const framed = frame(title, body, width, ctx, border);
 
   // ── the keys ──
   const keyCtx: KeyContext = {
@@ -732,11 +738,11 @@ function linkCardLines(body: unknown, ctx: ViewRenderCtx): string[] {
 }
 
 /** A box with the title in its top border: ┌─ Title ─┐ │ … │ └─┘. */
-function frame(title: string, body: readonly string[], width: number, ctx: ViewRenderCtx): string[] {
+function frame(title: string, body: readonly string[], width: number, ctx: ViewRenderCtx, border: AnsiRole): string[] {
   const inner = width - 4;
   const shownTitle = title ? truncateCells(title, Math.max(1, width - 6)) : "";
   const titleCells = shownTitle ? displayWidth(shownTitle) + 2 : 0;
-  const rule = (text: string) => paint(text, "muted", ctx);
+  const rule = (text: string) => paint(text, border, ctx);
   const top = shownTitle
     ? `${rule("┌─")} ${paint(shownTitle, "text", ctx, { bold: true })} ${rule(`${"─".repeat(Math.max(0, width - 3 - titleCells))}┐`)}`
     : rule(`┌${"─".repeat(width - 2)}┐`);
