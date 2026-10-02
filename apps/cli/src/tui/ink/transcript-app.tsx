@@ -446,7 +446,8 @@ export function AnsiLine({ line }: { line: string }) {
               {segment.text}
             </Text>
           ))
-        : line}
+        : // An empty Text takes no row in Ink: a blank line is one space, so it keeps its row.
+          line || " "}
     </Text>
   );
 }
