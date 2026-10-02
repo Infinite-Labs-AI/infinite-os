@@ -114,6 +114,9 @@ describe("a finished turn that fits stays live (fake TTY; skipped on CI like the
 // composer), with the rows the composer really draws. The numbers-ads turn is
 // 24 rows: with the top bar and its rule, the rule over the composer, the
 // composer and the key bar that is a 29-row frame, and Ink needs 2 rows spare.
+// A finished turn that misses by a row or two is drawn without its blank rows
+// around the details (22 rows here: this turn has no Steps) before it is given
+// up to scrollback.
 describe("what fits is decided against the resting frame (fake TTY; skipped on CI like the other PTY tests)", () => {
   async function start(columns: number, rows: number) {
     resetTurnState();
@@ -194,8 +197,32 @@ describe("what fits is decided against the resting frame (fake TTY; skipped on C
     await session;
   });
 
-  it.skipIf(process.env.CI === "true")("at 100x30 it does not fit: the whole turn is in scrollback and only the frame is live", { timeout: 30_000 }, async () => {
+  it.skipIf(process.env.CI === "true")("at 100x30 it misses by a row: it stays live without the blank rows around its details, and j still selects a row", { timeout: 30_000 }, async () => {
     const { input, output, session } = await start(100, 30);
+    await waitFor(() => stripAnsi(lastFrame(output.text())).includes("j k  row"), 4_000, output.text);
+    expect(getTurnState().views).toHaveLength(1);
+    expect(liveQuestion(output.text())).toBe(true);
+    expect(stripAnsi(output.text())).not.toMatch(/more lines|lines above/u);
+    const rows = stripAnsi(lastFrame(output.text())).split("\n").map((row) => row.trimEnd());
+    // The rule sits right under the answer, and the table right under the source line (this turn made no calls: no Steps).
+    const answer = rows.findIndex((row) => row.includes("∞ Three ad sets spent this week."));
+    expect(rows[answer + 1]).toBe("─".repeat(100));
+    const head = rows.findIndex((row) => row.includes("✓ Ready"));
+    expect(head).toBe(answer + 2);
+    expect(rows.slice(head, head + 3).every((row) => row.trim() !== "")).toBe(true);
+    // The frame keeps its chrome: the top bar above the turn, the view's keys and `tab switch side` below.
+    expect(rows.filter((row) => row.trim()).at(-1)).toContain("j k  row    tab  switch side    /  commands");
+    const mark = output.text().length;
+    await sendKeys(input, "j");
+    await waitFor(() => selectedRows(lastFrame(output.text().slice(mark))).length === 1, 4_000, output.text);
+    await sendKeys(input, "\t/exit\r");
+    await session;
+    // Scrollback gets the turn in its usual spacing: a blank row between the answer and its details.
+    expect(getTurnState().views).toEqual([]);
+  });
+
+  it.skipIf(process.env.CI === "true")("at 100x27 it does not fit even so: the whole turn is in scrollback and only the frame is live", { timeout: 30_000 }, async () => {
+    const { input, output, session } = await start(100, 27);
     await waitFor(() => getTurnState().views.length === 0, 4_000, output.text);
     await waitFor(() => !liveQuestion(output.text()), 4_000, output.text);
     const text = stripAnsi(output.text());

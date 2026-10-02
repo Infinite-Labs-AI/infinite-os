@@ -962,9 +962,11 @@ export function InkInteractiveSessionApp({
     const steps = workingState
       ? workingTurnSteps(messages, workingState, workingClock)
       : turnSteps.some((step) => step.endedAt === null) ? workingTurnSteps(messages, getTurnState(), clock) : turnSteps;
-    const cache = new Map<number | undefined, LiveTurnRender>();
-    return (turnRows: number | undefined): LiveTurnRender => {
-      const hit = cache.get(turnRows);
+    const cache = new Map<string, LiveTurnRender>();
+    // `compact`: without the blank rows around the details (see `compactTurn` below).
+    return (turnRows: number | undefined, compact = false): LiveTurnRender => {
+      const cacheKey = `${turnRows ?? "all"}:${compact ? "compact" : "roomy"}`;
+      const hit = cache.get(cacheKey);
       if (hit) {
         return hit;
       }
@@ -977,11 +979,12 @@ export function InkInteractiveSessionApp({
         color: colorEnabled(t),
         theme: t,
         rows: turnRows,
+        compact,
         ...(headCardLines ? { details: headCardLines } : {}),
         ...(headConfirmAction?.view ? { statusViews: [headConfirmAction.view] } : {}),
         ...(workingState ? { nowMs: workingClock } : {})
       });
-      cache.set(turnRows, drawn);
+      cache.set(cacheKey, drawn);
       return drawn;
     };
   }, [agentTitle, clock, columns, headCardLines, headConfirmAction, history, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
@@ -1746,7 +1749,7 @@ export function InkInteractiveSessionApp({
   // live window pages with) less the key bar. The key bar's hints come from the
   // drawn turn (a document's `space next page`), so draw, count the bar, and
   // draw again when the bar's height differs from the guess.
-  const drawTurnWith = (reserved: number): { turn: LiveTurnRender | null; turnRows: number | undefined } => {
+  const drawTurnWith = (reserved: number, compact = false): { turn: LiveTurnRender | null; turnRows: number | undefined } => {
     let turn: LiveTurnRender | null = null;
     let turnRows: number | undefined;
     if (renderTurnAt) {
@@ -1764,7 +1767,7 @@ export function InkInteractiveSessionApp({
           transcript: idleTranscript,
           turnStartedAt: busyStartedAt
         });
-        turn = renderTurnAt(turnRows);
+        turn = renderTurnAt(turnRows, compact);
         const drawnBarRows = keyBarRowCount(keyHintsFor(turn), columns);
         if (drawnBarRows === barRows) {
           break;
@@ -1774,19 +1777,10 @@ export function InkInteractiveSessionApp({
     }
     return { turn, turnRows };
   };
-  const { turn: liveTurn, turnRows: liveTurnRows } = drawTurnWith(reservedRows);
-  liveTurnRowsRef.current = liveTurnRows;
-  const keyHints = keyHintsFor(liveTurn);
-  const keyBarRows = keyBarRowCount(keyHints, columns);
-  const liveLatest = useMemo<CommittedEntry | null>(
-    () => liveTurn ? { id: "live-turn", lines: liveTurn.lines } : null,
-    [liveTurn]
-  );
-  const turnTranscript = liveTurn ? idleTranscript : transcript;
   // The boot frame (D4) is the screen before the first turn only. After it, a
   // live region with nothing in it draws no row: the frame alone stays live.
   const frameProps = { bootFrame: !homeCommitted, emptyLive: "none" as const };
-  const layoutOf = (latest: CommittedEntry | null, shown: InfiniteTranscriptInput, reserved = reservedRows, barRows = keyBarRows) => inkTranscriptLayout({
+  const layoutAt = (latest: CommittedEntry | null, shown: InfiniteTranscriptInput, reserved: number, barRows: number) => inkTranscriptLayout({
     ...frameProps,
     busy,
     columns,
@@ -1802,6 +1796,37 @@ export function InkInteractiveSessionApp({
     transcript: shown,
     turnStartedAt: busyStartedAt
   });
+  const finished = !transcriptBusy && !exitRequested && (history.length > 0 || turnViews.length > 0);
+  // Whether the latest turn, drawn roomy or compact, is paged in the frame AT
+  // REST (an empty one-row composer, no menu or picker): see `finishedOverflow`.
+  const pagedAtRest = (compact: boolean): boolean => {
+    const resting = drawTurnWith(restingReservedRows, compact).turn;
+    return layoutAt(
+      resting ? { id: "live-turn", lines: resting.lines } : null,
+      resting ? idleTranscript : transcript,
+      restingReservedRows,
+      keyBarRowCount(keyHintsFor(resting), columns)
+    ).window.paged;
+  };
+  // A finished turn that misses the live region only by its blank rows (the
+  // ones around its details: over the rule, under the head, over the Steps) is
+  // drawn without them and stays live, under the top bar, with its Steps and
+  // its keys. Going to scrollback is for a turn that does not fit even so.
+  // Only a turn that is then WHOLE on screen: a long document that would still
+  // page inside itself reads better whole in scrollback, so it keeps the rule
+  // it had.
+  const wholeCompactAtRest = (): boolean => !pagedAtRest(true) && drawTurnWith(restingReservedRows, true).turn?.paged !== true;
+  const compactTurn = finished && renderTurnAt !== null && pagedAtRest(false) && wholeCompactAtRest();
+  const { turn: liveTurn, turnRows: liveTurnRows } = drawTurnWith(reservedRows, compactTurn);
+  liveTurnRowsRef.current = liveTurnRows;
+  const keyHints = keyHintsFor(liveTurn);
+  const keyBarRows = keyBarRowCount(keyHints, columns);
+  const liveLatest = useMemo<CommittedEntry | null>(
+    () => liveTurn ? { id: "live-turn", lines: liveTurn.lines } : null,
+    [liveTurn]
+  );
+  const turnTranscript = liveTurn ? idleTranscript : transcript;
+  const layoutOf = (latest: CommittedEntry | null, shown: InfiniteTranscriptInput) => layoutAt(latest, shown, reservedRows, keyBarRows);
   const turnLayout = layoutOf(liveLatest, turnTranscript);
   // A finished turn never pages (River: "it should just work like a normal
   // coding harness"). While a turn runs, a tall one shows its tail (`N lines
@@ -1816,17 +1841,9 @@ export function InkInteractiveSessionApp({
   // live region only for a while. Meanwhile a turn that fits at rest pages
   // (as any live turn does) and is whole again once the composer is empty; it
   // is never sent to scrollback by typing.
-  const finished = !transcriptBusy && !exitRequested && (history.length > 0 || turnViews.length > 0);
   let finishedOverflow = finished && turnLayout.window.paged;
   if (finishedOverflow && reservedRows !== restingReservedRows) {
-    const resting = drawTurnWith(restingReservedRows).turn;
-    const restingBarRows = keyBarRowCount(keyHintsFor(resting), columns);
-    finishedOverflow = layoutOf(
-      resting ? { id: "live-turn", lines: resting.lines } : null,
-      resting ? idleTranscript : transcript,
-      restingReservedRows,
-      restingBarRows
-    ).window.paged;
+    finishedOverflow = pagedAtRest(compactTurn);
   }
   useLayoutEffect(() => {
     if (finishedOverflow) {

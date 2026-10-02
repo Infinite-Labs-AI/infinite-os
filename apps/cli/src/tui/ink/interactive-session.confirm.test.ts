@@ -55,7 +55,8 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(source).toContain("const keyBarRows = keyBarRowCount(keyHints, columns);");
     // Twice: the turn's row budget and the live layout.
     expect(source.match(/^\s+keyBarRows: barRows,$/gm)?.length).toBe(2);
-    expect(source).toContain("reserved = reservedRows, barRows = keyBarRows) => inkTranscriptLayout({");
+    expect(source).toContain("reserved: number, barRows: number) => inkTranscriptLayout({");
+    expect(source).toContain("=> layoutAt(latest, shown, reservedRows, keyBarRows);");
     expect(source).toContain("keyBarRows={keyBarRows}");
     // The rule over the composer is counted only when it is drawn (`composerRuleRows`).
     expect(source).toContain("const composerRow = homeInventoryRows + liveLayout.rowCount + draftLines.length + composerRuleRows;");

@@ -260,7 +260,10 @@ describe("the session wires the live cap (CI-run)", () => {
     expect(rule).toContain("let finishedOverflow = finished && turnLayout.window.paged;");
     // Decided against the resting frame, so a draft or a menu never sends a turn up.
     expect(rule).toContain("if (finishedOverflow && reservedRows !== restingReservedRows) {");
-    expect(rule).toContain("drawTurnWith(restingReservedRows)");
+    expect(rule).toContain("finishedOverflow = pagedAtRest(compactTurn);");
+    // A finished turn that misses by its blank rows is drawn without them before it is given up.
+    expect(rule).toContain("const compactTurn = finished && renderTurnAt !== null && pagedAtRest(false) && wholeCompactAtRest();");
+    expect(rule).toContain("drawTurnWith(restingReservedRows, compact)");
     expect(rule).toContain('commitLiveTurn("overflow", pendingConfirmActions.length > 0)');
     expect(rule).toContain("const liveLatestShown = finishedOverflow ? null : liveLatest;");
   });

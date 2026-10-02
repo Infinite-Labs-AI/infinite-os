@@ -5,7 +5,7 @@ import type { ToolViewFrameV1 } from "@infinite-os/types";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
-import { getTurnState, patchTurnState, recordTurnView, resetTurnState } from "../app/turn-store.js";
+import { getTurnState, patchTurnState, recordStepEnd, recordTurnView, resetTurnState } from "../app/turn-store.js";
 import { displayWidth } from "../lib/display-width.js";
 import { renderInkInteractiveSessionToString, runInkInteractiveSession } from "./interactive-session.js";
 
@@ -176,6 +176,49 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
       onSubmitLine: async () => ({ messages: [] })
     })).split("\n");
     expect(barOf(plain)).toBe(" ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe ● PostHog ● Meta");
+  });
+
+  it("in an 80x24 window a finished turn that misses by its blank rows stays live, compact; a taller one still goes whole to scrollback", () => {
+    const r4 = (screen: string) => {
+      const fixture = JSON.parse(readFileSync(fileURLToPath(new URL(`../views/__fixtures__/r4/${screen}.json`, import.meta.url)), "utf8"));
+      const view = decodeAnswerView(fixture.turn.views[0]);
+      if (!view) throw new Error(`${screen} does not decode`);
+      return { fixture, frame: { type: "tool.view", stage: "tool", message: view.title, viewId: "v1", name: view.tool, view } as ToolViewFrameV1 };
+    };
+    const draw = (screen: string) => {
+      const { fixture, frame } = r4(screen);
+      resetTurnState();
+      recordTurnView(frame);
+      recordStepEnd({ id: "c1", name: frame.name, label: fixture.turn.steps[0].label, status: "ok", result: fixture.turn.steps[0].result, endedAt: 2_000, durationMs: 1_000 });
+      return stripAnsi(renderInkInteractiveSessionToString({
+        columns: 80, rows: 24,
+        initialMessages: [{ role: "user", text: fixture.turn.question }, { role: "assistant", text: fixture.turn.answer }],
+        onSubmitLine: async () => ({ messages: [] })
+      })).replace(/\n+$/u, "").split("\n").map((row) => row.trimEnd());
+    };
+
+    // The health view is 19 rows as r4 spaces it, two more than the window gives a turn: compact, it is 16.
+    const health = draw("view-10-health");
+    expect(health[0]).toContain("∞ Infinite");
+    expect(health[2]).toBe("❯ is everything connected?");
+    const answer = health.findIndex((row) => row.startsWith("∞ 5 of 6 are fine."));
+    expect(health[answer + 1]).toBe("─".repeat(80));
+    expect(health[answer + 2]).toMatch(/Connections\s+✓ Ready/u);
+    const strip = health.findIndex((row) => row.startsWith("─ Steps"));
+    expect(health[strip - 1]).toBe("Fix it: Reconnect Shopify");
+    expect(health[strip + 1]).toMatch(/checking connections\s+━+\s+✓ 6 sources/u);
+    expect(health.at(-1)).toBe(" tab  switch side    /  commands");
+    expect(health.length).toBeLessThanOrEqual(22);
+    expect(health.some((row) => /more lines|lines above/u.test(row))).toBe(false);
+
+    // The numbers view does not fit even compact: whole in scrollback, in r4's own spacing, the frame under it.
+    const numbers = draw("view-01-numbers");
+    expect(numbers[0]).toBe("❯ google ads since launch?");
+    const rule = numbers.findIndex((row) => row === "─".repeat(80));
+    expect(numbers[rule - 1]).toBe("");
+    expect(numbers.slice(-5, -1)).toEqual(["─".repeat(80), " ∞ Infinite", "─".repeat(80), "❯ Ask Infinite…"]);
+    expect(numbers.at(-1)).toBe(" /  commands");
+    expect(numbers.some((row) => row.startsWith("─ Steps"))).toBe(false);
   });
 
   it("the desktop entry forwards each tool.view and creative.draft frame to the session", () => {

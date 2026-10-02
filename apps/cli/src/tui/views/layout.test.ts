@@ -44,6 +44,35 @@ describe("the frame body", () => {
   });
 });
 
+// A finished turn that misses the live region by a row or two is drawn without
+// its blank rows around the details, so it stays live (its Steps and its keys
+// with it) where it would otherwise go to scrollback. The session asks for it.
+describe("the compact frame body (a finished turn that just misses the window)", () => {
+  it("one column: no blank over the rule, under the details' head or over the Steps; nothing else changes", () => {
+    const lines = layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 100, null, { compact: true });
+    expect(lines).toEqual(["❯ q", "", "∞ a", "─".repeat(100), " Ads running  ✓ Ready", "Demo · up to Sep 30", "row one", "row two", `─ Steps ${"─".repeat(92)}`, "  step"]);
+    // Three rows fewer than the r4 frame body.
+    expect(layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 100)).toHaveLength(lines.length + 3);
+  });
+
+  it("side by side: only the blank under the details' head goes", () => {
+    const wide = layoutTurn(["❯ q", "", "∞ a"], view(), [], 120, null, { compact: true });
+    expect(wide.map((line) => line.slice(33).trimEnd())).toEqual([" │  Ads running  ✓ Ready", " │ Demo · up to Sep 30", " │ row one", " │ row two"]);
+  });
+
+  it("renderLiveTurn draws it on request, with the same views, keys and Steps", () => {
+    const steps: TurnStep[] = [{ id: "c1", name: "list_sample_rows", label: "listing sample rows", status: "ok", startedAt: 0, endedAt: 500, result: "2 rows" }];
+    const input = { messages, views: [], focus: null, steps, width: 100, color: false, theme, details: ["┌─ card ─┐", "└────────┘"] };
+    const roomy = renderLiveTurn(input);
+    const tight = renderLiveTurn({ ...input, compact: true });
+    expect(tight.lines.filter((line) => line.trim())).toEqual(roomy.lines.filter((line) => line.trim()));
+    expect(roomy.lines.length - tight.lines.length).toBe(2);
+    expect(tight.details).toBe(true);
+    // The blank between the question and the answer is the answer column's own: it stays.
+    expect(tight.lines.slice(0, 3)).toEqual(["❯ which ads are on?", "", "∞ Two are on, and both are spending at their usual pace this week."]);
+  });
+});
+
 describe("what takes the details pane", () => {
   it("a pending card handed in sits right of the answer from 120, under it below", () => {
     const card = ["┌─ Pause ad? ─┐", "│ status      │", "└─────────────┘"];
@@ -303,6 +332,13 @@ describe("a committed document carries every page", () => {
       expect(lines.some((line) => line.includes(`Line ${i} of the body.`))).toBe(true);
     }
     expect(lines.some((line) => /page \d+ of \d+/u.test(line))).toBe(false);
+  });
+
+  it("the live turn says when a view pages inside itself: such a turn is not whole on screen", () => {
+    if (!doc) throw new Error("document fixture does not decode");
+    expect(renderLiveTurn({ messages, views: [doc], focus: null, width: 120, color: false, theme, rows: 30 }).paged).toBe(true);
+    expect(renderLiveTurn({ messages, views: [doc], focus: null, width: 120, color: false, theme, rows: 30, compact: true }).paged).toBe(true);
+    expect(renderLiveTurn({ messages, views: [], focus: null, width: 120, color: false, theme, rows: 30, details: ["card"] }).paged).toBe(false);
   });
 
   it("prints every version of a document, in order, under one head (scrollback has no key to switch them)", () => {
