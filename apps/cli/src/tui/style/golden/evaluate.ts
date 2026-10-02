@@ -1,7 +1,10 @@
 // Evaluate one synthetic golden against the real session (tier 1, spec §11d).
 //
 //   frame goldens (views, flows, boot): render the screen's fixture at the
-//     golden's cols, then compare every applicable region on its own.
+//     golden's cols, then compare every applicable region on its own; the
+//     rules sit next to their chrome, the chrome is drawn once (D1) and the
+//     screen holds nothing else (D4: an `extra` row is a DIFF), see
+//     `compareFrame`.
 //   line regions (top bar, rule, composer, key bars, steps, cards, table): the
 //     golden's rows must appear, exactly, inside the screen the region is drawn
 //     in (`REGION_SCREENS`), at any row and column.
@@ -9,7 +12,7 @@
 //     `-table-numbers-hidden-60`, `-bar-eighths`): their own assertion on
 //     `data`. A golden with no rows and no data assertion FAILS, never passes
 //     vacuously.
-import { compareRegion, FRAME_REGIONS, goldenRegionRows, locate, type GoldenFile, type RegionResult } from "./compare.js";
+import { compareRegion, FRAME_REGIONS, goldenRegionRows, isBlankPadRow, locate, maskText, type GoldenFile, type RegionName, type RegionResult } from "./compare.js";
 import { applicableRegions, applyDecisions } from "./decisions.js";
 import { loadR4Fixture, type R4ScreenFixture, type R4Step } from "./fixtures.js";
 import { ansiToSegmentLines } from "./ansi-to-segments.js";
@@ -76,13 +79,11 @@ export class GoldenEvaluator {
     const out: Evaluation = { id, pass: false, regions: [], skipped: [], decisions: applied, problems: [] };
 
     if (golden.view_kind !== "region") {
-      const screen = this.screen(loadR4Fixture(screenId), cols);
+      const fixture = loadR4Fixture(screenId);
+      const screen = this.screen(fixture, cols);
       const { compare, skipped } = applicableRegions(golden, FRAME_REGIONS);
       out.skipped = skipped;
-      for (const region of compare) {
-        const rows = goldenRegionRows(golden, region);
-        if (rows.length) out.regions.push(compareRegion(screen, rows, region));
-      }
+      out.regions = compareFrame(screen, golden, compare, fixture);
       out.pass = out.regions.length > 0 && out.regions.every((result) => result.verdict === "MATCH");
       return out;
     }
@@ -103,6 +104,91 @@ export class GoldenEvaluator {
     out.pass = out.regions.every((result) => result.verdict === "MATCH");
     return out;
   }
+}
+
+// ── frame goldens ───────────────────────────────────────────────────────────────────────────────
+
+/** Regions drawn once per screen: the chrome. A second copy is a D1 failure (no top bar, composer or key bar per turn). */
+const ONCE: readonly RegionName[] = ["topbar", "composer", "keybar"];
+
+/**
+ * Compare a frame golden with a whole screen. Each region is located on its own
+ * (T7, D1), the two rules are ANCHORED to their neighbours (rule_top right under
+ * the top bar, rule_bottom right above the composer: one rule row cannot stand
+ * for both), the chrome must appear exactly once (D1), and the screen must hold
+ * nothing else: every non-blank row no region covers is an `extra` DIFF (D4: no
+ * wordmark or inventory at boot; no stray spinner or per-turn rows). Blank pad
+ * rows (`│` only) are T6's padding and never count as extra.
+ */
+export function compareFrame(
+  screen: readonly SegmentLine[],
+  golden: GoldenFile,
+  regions: readonly RegionName[],
+  fixture: Pick<R4ScreenFixture, "turn">
+): RegionResult[] {
+  const byRegion = new Map<RegionName, RegionResult>();
+  for (const region of regions) {
+    if (region === "rule_top" || region === "rule_bottom") continue;
+    const rows = goldenRegionRows(golden, region);
+    if (rows.length) byRegion.set(region, compareRegion(screen, rows, region));
+  }
+  const anchors: Record<"rule_top" | "rule_bottom", { from: RegionName; offset: number }> = {
+    rule_top: { from: "topbar", offset: 1 },
+    rule_bottom: { from: "composer", offset: -1 }
+  };
+  for (const rule of ["rule_top", "rule_bottom"] as const) {
+    const rows = regions.includes(rule) ? goldenRegionRows(golden, rule) : [];
+    if (!rows.length) continue;
+    const neighbour = byRegion.get(anchors[rule].from)?.locatedAt;
+    const at = neighbour && neighbour.row + anchors[rule].offset >= 0 ? { row: neighbour.row + anchors[rule].offset, col: 0 } : null;
+    byRegion.set(rule, compareRegion(screen, rows, rule, { at }));
+  }
+  const results = regions.flatMap((region) => byRegion.get(region) ?? []);
+
+  // D1: the chrome is drawn once.
+  for (const region of ONCE) {
+    const first = goldenRegionRows(golden, region)[0];
+    if (!first || !byRegion.has(region)) continue;
+    const want = maskText(textOf(first));
+    const rows = screen.flatMap((line, row) => (maskText(textOf(line)) === want ? [row] : []));
+    if (rows.length > 1) {
+      results.push({
+        region: `D1: ${region} drawn ${rows.length} times`, verdict: "DIFF", goldenRows: 1, locatedAt: { row: rows[1]!, col: 0 },
+        diffs: [{ row: rows[1]!, golden: "", actual: textOf(screen[rows[1]!]!), textEqual: false, column: 0 }]
+      });
+    }
+  }
+
+  // Coverage: nothing on screen but the frame.
+  const covered = new Set<number>();
+  for (const result of byRegion.values()) {
+    if (!result.locatedAt) continue;
+    for (let row = result.locatedAt.row; row < result.locatedAt.row + result.goldenRows; row += 1) covered.add(row);
+  }
+  if (!regions.includes("body") && fixture.turn) {
+    // LAYOUT skips the body's cells at 80–119 cols, not its rows: from the question to the next located region.
+    // The question row: `❯ ` and the question's start (it wraps, and r4's two panes share the row).
+    const { question } = fixture.turn;
+    const start = screen.findIndex((line) => {
+      const text = textOf(line);
+      const asked = text.slice(2).split("│")[0]!.trim();
+      return text.startsWith("❯ ") && asked !== "" && question.startsWith(asked);
+    });
+    if (start >= 0) {
+      const next = [...byRegion.values()].flatMap((result) => (result.locatedAt && result.locatedAt.row > start ? [result.locatedAt.row] : []));
+      const end = next.length ? Math.min(...next) : screen.length;
+      for (let row = start; row < end; row += 1) covered.add(row);
+    }
+  }
+  screen.forEach((line, row) => {
+    const text = textOf(line);
+    if (covered.has(row) || !text.trim() || isBlankPadRow(line)) return;
+    results.push({
+      region: "extra", verdict: "DIFF", goldenRows: 0, locatedAt: { row, col: 0 },
+      diffs: [{ row, golden: "", actual: text, textEqual: false, column: 0 }]
+    });
+  });
+  return results;
 }
 
 // ── data goldens ────────────────────────────────────────────────────────────────────────────────
@@ -229,6 +315,7 @@ export function firstProblem(evaluation: Evaluation): string {
   if (!bad) return "no region compared";
   const diff = bad.diffs[0];
   if (!diff) return `${bad.region}: ${bad.verdict}`;
+  if (bad.region === "extra" || bad.region.startsWith("D1:")) return `${bad.region === "extra" ? "extra row" : bad.region} at screen row ${diff.row}: ${JSON.stringify(diff.actual)}`;
   return bad.verdict === "NOT_FOUND"
     ? `${bad.region}: not found: ${JSON.stringify(diff.golden)}${diff.actual ? ` (closest ${JSON.stringify(diff.actual)})` : ""}`
     : `${bad.region} row ${diff.row} col ${diff.column}: ${diff.textEqual ? `token ${diff.goldenStyle} vs ${diff.actualStyle}` : `${JSON.stringify(diff.golden)} vs ${JSON.stringify(diff.actual)}`}`;

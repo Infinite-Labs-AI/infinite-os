@@ -1,4 +1,4 @@
-// River's binding restyle decisions (2026-10-02) where they overrule a golden.
+// Binding restyle decisions (2026-10-02) where they overrule a golden.
 // The goldens are r4 as drawn; these are the ONLY edits made to them, each one
 // named after its decision, so a lane can see why a golden row reads otherwise.
 //
@@ -10,9 +10,10 @@
 //   D3      r4's exact heads: Cmd+L-only is "⌘ Do this in Cmd+L" (the golden
 //           reads "⌘ Cmd+L only").
 //   D6      While busy, `esc stop` is the FIRST key-bar hint, shown once.
-//   D1, D4, D5 need no golden edit: regions are located independently (D1),
-//           the boot goldens are already r4's frame only (D4), and body padding
-//           rows are never required (D5, tolerance T6).
+//   D1, D4, D5 need no golden edit: regions are located independently and the
+//           chrome must appear once (D1), the boot goldens are r4's frame only
+//           and nothing else may be on screen (D4, `compareFrame` coverage), and
+//           body padding rows are never required (D5, tolerance T6).
 import type { GoldenFile, RegionName } from "./compare.js";
 import { normalizeCells, type Cell, type SegmentLine } from "./normalize.js";
 

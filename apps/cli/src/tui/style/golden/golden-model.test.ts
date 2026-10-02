@@ -159,6 +159,45 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     expect(wrong).toEqual([]);
   });
 
+  // The frame must hold ONLY the r4 frame (D4: no wordmark or inventory at boot; D1: no top bar per turn; no
+  // stray spinner rows). A painted golden with anything else on screen must FAIL.
+  const paintedWith = (edit: (lines: string[]) => string[]) =>
+    new GoldenEvaluator((fixture, cols) => edit(paintGoldenLines(loadGolden(`${fixture.screen}--c${cols}`).lines, sgr("truecolor"))).join("\n"));
+  const plain = (text: string) => `${ESC}[0m${text}${ESC}[0m`;
+
+  it("fails a boot screen that still prints the wordmark and the inventory above the frame (D4)", () => {
+    const extra = paintedWith((lines) => [plain("INFINITE"), plain("Tools   connect · sync"), ...lines]);
+    for (const id of ["boot--c100", "boot--c160", "boot--c60"]) {
+      const result = extra.evaluate(loadGolden(id), id);
+      expect(result.pass, id).toBe(false);
+      expect(result.regions.filter((region) => region.region === "extra").map((region) => region.diffs[0]?.actual)).toEqual(["INFINITE", "Tools   connect · sync"]);
+    }
+  });
+
+  it("fails a frame that draws its top bar twice (D1: no top bar per turn)", () => {
+    const twice = paintedWith((lines) => [...lines.slice(0, 2), ...lines]);
+    for (const id of ["boot--c100", "view-06-change--c160", "view-06-change--c100"]) {
+      const result = twice.evaluate(loadGolden(id), id);
+      expect(result.pass, id).toBe(false);
+      expect(result.regions.some((region) => /^D1: topbar drawn 2 times$/u.test(region.region)), id).toBe(true);
+    }
+  });
+
+  it("fails a frame with a stray spinner row, at every width", () => {
+    const junk = paintedWith((lines) => [...lines.slice(0, -2), plain("⠀ (｡•́︿•̀｡) running…"), ...lines.slice(-2)]);
+    for (const id of ["boot--c100", "view-06-change--c160", "view-06-change--c100", "view-06-change--c60"]) {
+      expect(junk.evaluate(loadGolden(id), id).pass, id).toBe(false);
+    }
+  });
+
+  it("one rule row cannot stand for both rules: rule_bottom sits right above the composer", () => {
+    const noBottomRule = paintedWith((lines) => lines.filter((_, i) => i !== lines.length - 3));
+    const result = noBottomRule.evaluate(loadGolden("view-06-change--c160"));
+    expect(result.pass).toBe(false);
+    expect(result.regions.find((region) => region.region === "rule_bottom")?.verdict).toBe("DIFF");
+    expect(result.regions.find((region) => region.region === "rule_top")?.verdict).toBe("MATCH");
+  });
+
   it("the 80–119 col body is skipped by the layout decision, and says so", () => {
     const result = painted.evaluate(loadGolden("view-06-change--c100"));
     expect(result.skipped).toEqual(["body (LAYOUT: one column below 120 cols; r4 splits at 80)"]);

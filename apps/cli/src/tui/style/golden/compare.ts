@@ -67,7 +67,8 @@ function maskCells(cells: readonly Cell[]): Cell[] {
   return cells.map((cell) => ({ ch: /[\u2800-\u28ff]/u.test(cell.ch) ? "⠿" : cell.ch, style: cell.style }));
 }
 
-const isBlankPadRow = (line: SegmentLine) => /^\s*│?\s*$/u.test(textOf(line));
+/** A body pad row: blank, or blank but for the pane separator `│` (T6). */
+export const isBlankPadRow = (line: SegmentLine) => /^\s*│?\s*$/u.test(textOf(line));
 
 /** The golden rows of one region, with T6 (trailing pad rows of the body) applied. */
 export function goldenRegionRows(golden: GoldenFile, region: RegionName | "all"): SegmentLine[] {
