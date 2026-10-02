@@ -57,6 +57,8 @@ export function finite(value: unknown): number | null {
 export interface MeasureDraw {
   notes: FootnoteBook;
   hidden: number;
+  /** The view has a state reason, which already says how many days are in: the legend skips its N-of-M lead. */
+  reasonSaid?: boolean;
 }
 
 // ── tables of cells ──
@@ -449,7 +451,7 @@ const COVERAGE_MARKS: Record<string, CoverageMark> = {
   not_synced: { glyph: "░", words: "not synced", role: "hatch" },
   unknown: { glyph: "?", words: "unknown", role: "muted" }
 };
-const TODAY_MARK: CoverageMark = { glyph: "◌", words: "today", role: "warning" };
+const TODAY_MARK: CoverageMark = { glyph: "◌", words: "today, not synced yet", role: "warning" };
 
 function coverageMark(status: unknown) {
   return typeof status === "string" && Object.hasOwn(COVERAGE_MARKS, status) && status !== "unknown"
@@ -463,7 +465,7 @@ function coverageMark(status: unknown) {
  * strip too long for the pane wraps below its dates. Then the legend, naming
  * only the marks the strip uses.
  */
-function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx): string[] {
+function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx, reasonSaid = false): string[] {
   const settled = asRecord(legs.settled);
   const today = isRecord(legs.today) ? legs.today : null;
   const coverage = asRecord(settled.coverage);
@@ -513,7 +515,7 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx): strin
   const requested = finite(coverage.requestedDays);
   const measured = finite(coverage.measuredDays);
   const legend = [
-    ...(requested !== null && measured !== null ? [`${measured} of ${requested} days measured`] : []),
+    ...(!reasonSaid && requested !== null && measured !== null ? [`${measured} of ${requested} days measured`] : []),
     ...used.values()
   ].join("   ");
   lines.push(...wrapText(legend, Math.max(1, ctx.width - legendIndent.length)).map((line) => `${legendIndent}${paint(line, "muted", ctx)}`));
@@ -597,7 +599,7 @@ export function numbersBodyLines(body: Record<string, unknown>, ctx: ViewRenderC
     blocks.push(legLines(legs.today, true, nested, body, columns, ctx, draw));
   }
   if (legs) {
-    blocks.push(coverageLines(legs, ctx));
+    blocks.push(coverageLines(legs, ctx, draw.reasonSaid === true));
   }
 
   const leaders = asList(body.leaders).filter(isRecord).flatMap((leader) => {
@@ -633,7 +635,7 @@ function selectableRows(body: Record<string, unknown>): number {
 }
 
 export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender => {
-  const draw: MeasureDraw = { notes: new FootnoteBook(), hidden: 0 };
+  const draw: MeasureDraw = { notes: new FootnoteBook(), hidden: 0, reasonSaid: isRecord(view.stateReason) };
   const detail = numbersBodyLines(asRecord(view.body), ctx, draw);
   return {
     detail,

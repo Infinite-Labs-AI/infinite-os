@@ -95,7 +95,7 @@ function cellsOf(line: string): Cell[] {
   return cells;
 }
 
-/** One line as golden segments, printed `{style}text` (unstyled text bare). */
+/** One line as golden segments, printed `{style}text` (`{}text` for an unstyled run after a styled one). */
 function seg(line: string): string {
   const cells = cellsOf(line);
   const hasBg = (style: string) => style.split(" ").some((t) => BG_TOKENS.has(t) || t.startsWith("?bg") || t === "inverse");
@@ -124,7 +124,8 @@ function seg(line: string): string {
     if (trimmed) { last.ch = trimmed; break; }
     out.pop();
   }
-  return out.map((cell) => (cell.style ? `{${cell.style}}` : "") + cell.ch).join("");
+  // An unstyled run after a styled one prints `{}` (as the golden dump does), so a default value never reads as the style before it.
+  return out.map((cell, index) => (cell.style ? `{${cell.style}}` : index > 0 ? "{}" : "") + cell.ch).join("");
 }
 
 // ── fixtures ──
@@ -156,21 +157,21 @@ describe("the head and the source line (r4)", () => {
   it("the title is a tag chip, the state follows in its tone, the source is dim", () => {
     const render = renderView(view({}), ctx());
     expect(pane(render).slice(0, 2)).toEqual([
-      "{tag} Google Ads since launch  {green}✓ Ready",
+      "{tag} Google Ads since launch {} {green}✓ Ready",
       "{dim}Google Ads · up to Sep 30"
     ]);
   });
 
   it("needs-you heads are bold amber (view-11)", () => {
     const render = renderView(view({ kind: "link", title: "Tracked link", state: "needs_yes", body: { target: "url", minted: false, opened: false, warnings: [] } }), ctx());
-    expect(seg(render.head)).toBe("{tag} Tracked link  {ab}▣ Needs your OK");
+    expect(seg(render.head)).toBe("{tag} Tracked link {} {ab}▣ Needs your OK");
   });
 
   it("a state reason's short words head the view (flow-numbers-02, flow-images-07)", () => {
     expect(seg(renderView(view({ state: "not_measured", stateReason: { code: "nm", words: "Conversion value is not tracked.", short: "1 not measured" } }), ctx()).head))
-      .toBe("{tag} Google Ads since launch  {dim}— 1 not measured");
+      .toBe("{tag} Google Ads since launch {} {dim}— 1 not measured");
     expect(seg(renderView(view({ title: "Make 3 creatives", state: "cmdl_only", stateReason: { code: "q", words: "Quick drafts start only in Cmd+L.", short: "Cmd+L only" } }), ctx()).head))
-      .toBe("{tag} Make 3 creatives  {bb}⌘ Cmd+L only");
+      .toBe("{tag} Make 3 creatives {} {bb}⌘ Cmd+L only");
   });
 
   it("a head too narrow for the chip keeps the state in its tone (it never turns plain)", () => {
@@ -187,7 +188,7 @@ describe("the state reason (flow-numbers-03…06)", () => {
   it("the sentence leads with the state's glyph, in the state's tone", () => {
     const partial = renderView(view({ state: "partial", stateReason: { code: "p", words: "1 of 2 days in · Sep 30 not in yet" } }), ctx());
     expect(pane(partial)).toEqual([
-      "{tag} Google Ads since launch  {amber}◐ Partial",
+      "{tag} Google Ads since launch {} {amber}◐ Partial",
       "{dim}Google Ads · up to Sep 30",
       "",
       "{amber}◐ 1 of 2 days in · Sep 30 not in yet"
@@ -198,7 +199,7 @@ describe("the state reason (flow-numbers-03…06)", () => {
     ]);
     const none = renderView(view({ state: "nothing_found", stateReason: { code: "n", words: "No spend Sep 24–28 · 3 campaigns checked" } }), ctx());
     expect(pane(none)).toEqual([
-      "{tag} Google Ads since launch  {dim}∅ Nothing found",
+      "{tag} Google Ads since launch {} {dim}∅ Nothing found",
       "{dim}Google Ads · up to Sep 30",
       "",
       "{dim}∅ No spend Sep 24–28 · 3 campaigns checked"
@@ -213,7 +214,7 @@ describe("the state reason (flow-numbers-03…06)", () => {
     expect(pane(render).slice(3)).toEqual([
       "{amber}⊘ Google Ads isn't connected",
       "",
-      "{cyan u}Connect it in the app ↗  {dim}(o) · Connections"
+      "{cyan u}Connect it in the app ↗{}  {dim}(o) · Connections"
     ]);
   });
 
@@ -243,7 +244,7 @@ describe("list (view-02)", () => {
   it("status first in its tone; the selected row is ▸ on the selection background, its title bold, padded to the pane", () => {
     const render = renderView(list(), ctx({ selected: 1, width: 60 }));
     expect(render.detail.map(seg)).toEqual([
-      "  {green}● on  Ad set 01 · demo loop  18.20  1.32%  3 trials",
+      "  {green}● on{}  Ad set 01 · demo loop  18.20  1.32%  3 trials",
       `{cb sel}▸ {green sel}● on  {b sel}Ad set 02 · founder  {sel}  12.40  0.41%  0 trials${" ".repeat(7)}`,
       "",
       "{dim}Ad set 02 · since Sep 24 · Broad"
@@ -264,11 +265,11 @@ describe("record (view-03)", () => {
       history: [{ at: "2026-09-24T09:12:00Z", from: null, to: "on", who: "Robin" }]
     }), ctx());
     expect(render.detail.map(seg)).toEqual([
-      "{dim}campaign      Demo trials",
-      "{dim}spend 7d      12.40",
+      "{dim}campaign{}      Demo trials",
+      "{dim}spend 7d{}      12.40",
       "",
       "{b}History",
-      "{dim}Sep 24, 09:12  — → on · by Robin"
+      "{dim}Sep 24, 09:12{}  — → on · by Robin"
     ]);
     expect(render.detail[0]!.replace(/\u001b\[[0-9;]*m/gu, "").indexOf("Demo")).toBe(14);
   });
@@ -281,20 +282,21 @@ describe("record (view-03)", () => {
 
 describe("document (view-04)", () => {
   const doc = () => thing("document", {
-    meta: [{ label: "Subject", value: "Your trial ended" }],
+    meta: [{ label: "Subject", value: "Your trial ended" }, { label: "Preview", value: "Three things it spotted" }],
     sections: [{ text: "Hi {first name},\n\nBefore your trial ended.", format: "plain" }, { text: "Two", format: "plain" }],
     versions: [{ id: "1", label: "Email 1", sectionIndexes: [0] }, { id: "2", label: "Email 2", sectionIndexes: [1] }]
   });
 
   it("the open tab is the brand chip, the rest dim; the body hangs off a │ in the rule colour", () => {
     expect(renderView(doc(), ctx()).detail.map(seg)).toEqual([
-      "{inv} 1 Email 1   {dim}2 Email 2",
+      "{inv} 1 Email 1 {}  {dim}2 Email 2",
       "",
-      "{dim}Subject  Your trial ended",
+      "{dim}Subject{}  {b}Your trial ended",
+      "{dim}Preview{}  Three things it spotted",
       "",
-      "{line}│ Hi {first name},",
+      "{line}│{} Hi {first name},",
       "{line}│",
-      "{line}│ Before your trial ended."
+      "{line}│{} Before your trial ended."
     ]);
   });
 
@@ -306,9 +308,9 @@ describe("document (view-04)", () => {
 describe("link (view-11 body)", () => {
   it("a minted link is bold, with the c key chip once engaged; an app place is a cyan underlined link", () => {
     const minted = renderView(thing("link", { target: "url", minted: true, opened: false, warnings: [], shortUrl: "go.example.com/rdt" }), ctx({ engaged: true }));
-    expect(seg(minted.detail[0]!)).toBe("{b}go.example.com/rdt  {key} c  copy");
+    expect(seg(minted.detail[0]!)).toBe("{b}go.example.com/rdt{}  {key} c {} copy");
     const place = renderView(thing("link", { target: "app_place", minted: false, opened: false, warnings: [], appPlace: { place: "library", label: "Library" } }), ctx());
-    expect(seg(place.detail[0]!)).toBe("{cyan u}Library ↗  {dim}(o)");
+    expect(seg(place.detail[0]!)).toBe("{cyan u}Library ↗{}  {dim}(o)");
   });
 });
 
@@ -325,23 +327,36 @@ describe("health (view-10)", () => {
       ]
     }), ctx());
     expect(render.detail.map(seg)).toEqual([
-      "{green}✓ GA4         connected        {dim}up to Sep 30",
-      "{green}✓ Google Ads  connected        {dim}up to Sep 30",
-      "{amber}⊘ Shopify     {amber}sign-in expired  {dim}up to Sep 28",
+      "{green}✓{} GA4         connected        {dim}up to Sep 30",
+      "{green}✓{} Google Ads  connected        {dim}up to Sep 30",
+      "{amber}⊘{} Shopify     {amber}sign-in expired{}  {dim}up to Sep 28",
       "",
-      "{dim}Fix it: {cyan u}Reconnect Shopify ↗  {dim}(o) · Connections, in the app"
+      "{dim}Fix it:{} {cyan u}Reconnect Shopify ↗{}  {dim}(o) · Connections, in the app"
     ]);
   });
 });
 
 describe("compare (view-09)", () => {
-  it("the server's verdict: the grade glyph in tone, the sentence bold white, what is unmet dim", () => {
+  it("the server's verdict: the grade glyph in tone, the sentence bold white, the first unmet line dim on the same line", () => {
     const render = renderView(thing("compare", {
       window: { from: "2026-09-24", to: "2026-09-30", tz: "UTC", label: "" },
       arms: [], metricRows: [], differences: [],
       verdict: { sentence: "No winner yet", grade: "inconclusive", unmet: ["Day 6 of 14 · check again Oct 9"], namesWinner: false }
     }), ctx());
-    expect(render.detail.map(seg).slice(-2)).toEqual(["{amber}◌ {b}No winner yet", "{dim}Day 6 of 14 · check again Oct 9"]);
+    expect(render.detail.map(seg).slice(-1)).toEqual(["{amber}◌{} {b}No winner yet{}  {dim}· Day 6 of 14 · check again Oct 9"]);
+  });
+
+  it("an unmet line too wide for the verdict line, and any after the first, sit dim below it", () => {
+    const render = renderView(thing("compare", {
+      window: { from: "2026-09-24", to: "2026-09-30", tz: "UTC", label: "" },
+      arms: [], metricRows: [], differences: [],
+      verdict: { sentence: "No winner yet", grade: "inconclusive", unmet: ["Day 6 of 14 · check again Oct 9", "Needs 200 visits a side"], namesWinner: false }
+    }), ctx({ width: 40 }));
+    expect(render.detail.map(seg).slice(-3)).toEqual([
+      "{amber}◌{} {b}No winner yet",
+      "{dim}Day 6 of 14 · check again Oct 9",
+      "{dim}Needs 200 visits a side"
+    ]);
   });
 });
 
@@ -362,13 +377,22 @@ describe("numbers: the day strip (view-01, flow-numbers-03)", () => {
     const render = renderView(numbers(days(["zero", "zero", "zero", "zero", "zero", "measured", "measured"]), "2026-10-01"), ctx());
     const strip = render.detail.map(seg).filter((line) => line.startsWith("{b}Days") || line.startsWith("     "));
     expect(strip).toEqual([
-      "{b}Days {dim}Sep 24 ·····{cyan}██{amber}◌ {dim}Oct 1",
-      "     {dim}0 of 7 days measured   · zero   █ measured   ◌ today"
+      "{b}Days{} {dim}Sep 24 ·····{cyan}██{amber}◌{} {dim}Oct 1",
+      "     {dim}0 of 7 days measured   · zero   █ measured   ◌ today, not synced yet"
     ]);
+  });
+
+  it("a view whose state reason already says it drops the N-of-M lead from the legend", () => {
+    const said = view({
+      state: "partial", stateReason: { code: "p", words: "1 of 2 days in · Sep 30 not in yet" },
+      body: numbers(days(["measured", "not_synced"], 29), null).body
+    });
+    const legend = renderView(said, ctx()).detail.map(seg).filter((line) => line.startsWith("     "));
+    expect(legend).toEqual(["     {dim}█ measured   ░ not synced"]);
   });
 
   it("a day not synced yet is the hatch ░, never a zero (flow-numbers-03)", () => {
     const render = renderView(numbers(days(["measured", "not_synced"], 29), null), ctx());
-    expect(render.detail.map(seg)).toContain("{b}Days {dim}Sep 29 {cyan}█{hatch}░ {dim}Sep 30");
+    expect(render.detail.map(seg)).toContain("{b}Days{} {dim}Sep 29{} {cyan}█{hatch}░{} {dim}Sep 30");
   });
 });

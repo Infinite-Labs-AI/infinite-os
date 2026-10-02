@@ -68,9 +68,8 @@ export const renderDocument: KindRenderer<"document"> = (view, ctx) => {
     .filter((item) => item.label !== "" || item.value !== "");
   if (meta.length) {
     const labelWidth = labelColumnWidth(meta.map((item) => item.label), width);
-    for (const item of meta) {
-      lines.push(...labelValueLines(item.label, item.value, labelWidth, ctx));
-    }
+    // The first meta row is the subject: its value is bold (r4 `Subject  {b}…`); the rest stay default.
+    meta.forEach((item, index) => lines.push(...labelValueLines(item.label, item.value, labelWidth, ctx, index === 0 ? "b" : "text")));
     lines.push("");
   }
 

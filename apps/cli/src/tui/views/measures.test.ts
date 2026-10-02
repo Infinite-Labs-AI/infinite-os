@@ -403,8 +403,8 @@ describe("compare", () => {
 
   it("the verdict line comes only from verdict.sentence", () => {
     const render = draw(fixture("compare-test"));
-    expect(render.detail).toContain("◌ No clear difference yet: the likely ranges overlap.");
-    expect(render.detail).toContain("Needs 14 days; has 7.");
+    // The first unmet condition rides the verdict line (r4 view-09).
+    expect(render.detail).toContain("◌ No clear difference yet: the likely ranges overlap.  · Needs 14 days; has 7.");
     const silent = draw(edited("compare-test", (body) => { delete body.verdict.sentence; }));
     expect(text(silent)).not.toContain("No clear difference");
     expect(text(silent)).not.toMatch(/inconclusive|insufficient|supported/u);

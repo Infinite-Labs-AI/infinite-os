@@ -128,7 +128,7 @@ export function labelValueLines(
   value: string,
   labelWidth: number,
   ctx: ViewRenderCtx,
-  valueRole: "text" | "muted" | "warning" = "text"
+  valueRole: "text" | "b" | "muted" | "warning" = "text"
 ): string[] {
   const width = Math.max(1, Math.floor(ctx.width));
   const shownLabel = fitLine(label, labelWidth);

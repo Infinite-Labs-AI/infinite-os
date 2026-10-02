@@ -7,6 +7,7 @@
 // words: without a sentence there is no verdict line at all.
 import type { UnitV1 } from "@infinite-os/types";
 
+import { displayWidth } from "../lib/display-width.js";
 import {
   asList,
   asRecord,
@@ -133,13 +134,17 @@ function compareBodyLines(body: Record<string, unknown>, ctx: ViewRenderCtx, dra
   if (verdict) {
     const sentence = viewText(verdict.sentence);
     const grade = typeof verdict.grade === "string" && Object.hasOwn(GRADE_GLYPHS, verdict.grade) ? GRADE_GLYPHS[verdict.grade]! : GRADE_GLYPHS.inconclusive!;
-    blocks.push([
-      ...(sentence
-        ? wrapText(`${grade.glyph} ${sentence}`, ctx.width).map((line, index) =>
-            index === 0 ? `${paint(grade.glyph, grade.role, ctx)}${paint(line.slice(grade.glyph.length), "b", ctx)}` : paint(line, "b", ctx))
-        : []),
-      ...asList(verdict.unmet).flatMap((unmet) => wrapText(viewText(unmet), ctx.width).map((line) => paint(line, "muted", ctx)))
-    ]);
+    const wrapped = sentence ? wrapText(`${grade.glyph} ${sentence}`, ctx.width) : [];
+    const lines = wrapped.map((line, index) =>
+      index === 0 ? `${paint(grade.glyph, grade.role, ctx)}${paint(line.slice(grade.glyph.length), "b", ctx)}` : paint(line, "b", ctx));
+    const unmet = asList(verdict.unmet).map(viewText).filter(Boolean);
+    // r4: the first unmet condition rides the verdict's last line, dim (`◌ No winner yet  · Day 6 of 14`), when it fits.
+    const lastPlain = wrapped[wrapped.length - 1];
+    if (lastPlain !== undefined && unmet.length && displayWidth(lastPlain) + 4 + displayWidth(unmet[0]!) <= ctx.width) {
+      lines[lines.length - 1] = `${lines[lines.length - 1]}${paint(`  · ${unmet.shift()!}`, "muted", ctx)}`;
+    }
+    lines.push(...unmet.flatMap((line) => wrapText(line, ctx.width).map((part) => paint(part, "muted", ctx))));
+    blocks.push(lines);
   }
 
   const decomposition = isRecord(body.decomposition) ? body.decomposition : null;
