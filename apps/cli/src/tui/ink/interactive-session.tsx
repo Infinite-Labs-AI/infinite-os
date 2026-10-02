@@ -673,6 +673,14 @@ export function InkInteractiveSessionApp({
     busy: transcriptBusy,
     state: turnState
   });
+  const visibleStatusParts = formatInteractiveStatus(statusParts, busy, queuedLines);
+  // The head card's keys: its named OK key, `n`, and `?` (keymap.ts owns the rules).
+  // `o`/`w`/`r` stay off until app links, watch and retry land (T12, T11).
+  const headConfirmAction = pendingConfirmActions[0] ?? null;
+  const confirmKeys = useMemo(
+    () => headConfirmAction ? confirmCardKeys(headConfirmAction, NO_KEY_CAPS) : null,
+    [headConfirmAction]
+  );
   // The latest turn with answer views is drawn in the r4 layout (answer left,
   // details right from 120 columns, Steps below) as the live region's latest
   // lines, at the transcript's width; the transcript then carries only what
@@ -722,14 +730,6 @@ export function InkInteractiveSessionApp({
   const idleTranscript = useMemo(
     () => ({ agentTitle, messages: [], state: busy ? besideWorkingTurn(turnState) : { ...turnState, steps: [] } }),
     [agentTitle, busy, turnState]
-  );
-  const visibleStatusParts = formatInteractiveStatus(statusParts, busy, queuedLines);
-  // The head card's keys: its named OK key, `n`, and `?` (keymap.ts owns the rules).
-  // `o`/`w`/`r` stay off until app links, watch and retry land (T12, T11).
-  const headConfirmAction = pendingConfirmActions[0] ?? null;
-  const confirmKeys = useMemo(
-    () => headConfirmAction ? confirmCardKeys(headConfirmAction, NO_KEY_CAPS) : null,
-    [headConfirmAction]
   );
   // A new head card (from any queue writer) always opens with its explanation
   // closed: the explanation stays behind `?`.

@@ -210,7 +210,7 @@ describe("views in a running session (fake TTY; skipped on CI like the other PTY
 
 describe("a running turn's views (r4 working frames)", () => {
   it("the turn is drawn with its views while it runs, not only once it ends", () => {
-    const draw = sessionSource.slice(sessionSource.indexOf("const renderTurnAt"), sessionSource.indexOf("const visibleStatusParts"));
+    const draw = sessionSource.slice(sessionSource.indexOf("const renderTurnAt"), sessionSource.indexOf("// A new head card (from any queue writer)"));
     expect(draw).not.toMatch(/if \(busy \|\|/u);
     expect(draw).toContain("workingTurnMessages(");
     expect(draw).toContain("workingTurnSteps(");
