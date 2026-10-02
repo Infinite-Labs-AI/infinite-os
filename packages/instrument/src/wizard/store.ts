@@ -115,6 +115,8 @@ export class WizardStore {
   stepStart(step: WizardStepId): void {
     this.commit({
       currentStep: step,
+      // An agent's last line belongs to the step it was said in: a new step starts with none (terminal QA #19).
+      narration: [],
       learn: WIZARD_STEP_META[step].learn,
       steps: this.mapStep(step, (row) => ({ ...row, state: "running", status: null, code: null }))
     })
@@ -211,6 +213,13 @@ export class WizardStore {
   }
 
   // ---- end of run ----
+
+  /** What the Learn cards may name (the site, the workspace, the two agents); merged, never cleared by a step. */
+  setLearnFacts(patch: NonNullable<WizardStoreSnapshot["learnFacts"]>): void {
+    const next = { ...(this.snapshot.learnFacts ?? {}), ...patch }
+    const before = JSON.stringify(this.snapshot.learnFacts ?? {})
+    if (JSON.stringify(next) !== before) this.commit({ learnFacts: next })
+  }
 
   setOutro(text: string | null): void {
     this.commit({ outro: text })

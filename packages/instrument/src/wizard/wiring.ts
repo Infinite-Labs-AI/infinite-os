@@ -25,6 +25,11 @@ export interface WizardIo {
 export interface WizardUiLike {
   start(store: WizardStore): void
   stop(): void
+  /**
+   * Resolves once the user closed the closing screen (TTY: ENTER, Q, ESC or Ctrl+C). A UI without a closing
+   * screen leaves it out, and the command does not wait.
+   */
+  waitForDismiss?(): Promise<void>
 }
 
 export interface CreateDepsInput {

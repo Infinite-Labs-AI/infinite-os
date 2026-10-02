@@ -95,7 +95,7 @@ describe("step before: call order", () => {
   it("branches first, reads keys before the dry load, and seeds candidates last", async () => {
     const s = setup()
     const outcome = await s.run()
-    expect(outcome).toEqual({ kind: "ok", status: "Before: 9 pass · 0 problems · 0 unknown" })
+    expect(outcome).toEqual({ kind: "ok", status: "Before: 9 code and live checks run · 9 pass · 0 problems · 0 unknown" })
     const order = [
       "bridge.hosting",
       "git.createBranch",
@@ -203,7 +203,7 @@ describe("step before: consent", () => {
     const s = setup({ keys, checks: { grades: { meta: held, ga4: { ...held, checkId: "dry_live_ga4" } } } })
     const outcome = await s.run()
     expect(s.bridge.sentTests[0]!.consentSeed).toEqual({ kind: "infinite_runtime_grant", storageKey: "infinite_analytics_consent" })
-    expect(outcome).toEqual({ kind: "ok", status: "Before: 7 pass · 0 problems · 2 unknown" })
+    expect(outcome).toEqual({ kind: "ok", status: "Before: 9 code and live checks run · 7 pass · 0 problems · 2 unknown" })
     expect(s.events.filter((event) => event.type === "step.sub" && /^!/.test((event.fields as { text: string }).text))).toEqual([])
     expect(s.state.jobs.some((item) => item.trigger.finding.includes("consent"))).toBe(false)
   })
@@ -344,7 +344,7 @@ describe("step before: the dry load's own failures stay unknown", () => {
   it("a busy test engine is retried, then the load stays unknown; nothing crashes (review P2-6, probe P-I)", async () => {
     const busy = () => new FakeBridgeError(409, "busy", true)
     const once = setup({ startErrors: [busy()] })
-    expect(await once.run()).toMatchObject({ kind: "ok", status: "Before: 9 pass · 0 problems · 0 unknown" })
+    expect(await once.run()).toMatchObject({ kind: "ok", status: "Before: 9 code and live checks run · 9 pass · 0 problems · 0 unknown" })
     expect(once.bridge.sentTests).toHaveLength(1)
     const always = setup({ startErrors: [busy(), busy(), busy(), busy(), busy()] })
     const outcome = await always.run()
@@ -368,7 +368,7 @@ describe("step before: the dry load's own failures stay unknown", () => {
   it("a failed test run is undetermined (test_error), and the step continues", async () => {
     const s = setup({ bridgePolls: [{ protocolVersion: 1, requestId: "r", state: "failed", progress: [], error: { code: "load_failed", message: "the page did not load" } }] })
     const outcome = await s.run()
-    expect(outcome).toEqual({ kind: "ok", status: "Before: 5 pass · 0 problems · 1 unknown" })
+    expect(outcome).toEqual({ kind: "ok", status: "Before: 6 code and live checks run · 5 pass · 0 problems · 1 unknown" })
     expect(s.log.some((entry) => entry.startsWith("checks.gradeTestRun"))).toBe(false)
     expect(s.log).toContain("bridge.baseline(" + RUN_ID + ")")
   })
@@ -458,6 +458,33 @@ describe("step before: the hand-off", () => {
     expect(bare.state.report.live_today).toBeNull()
   })
 
+  it("final verify F4: the step's status is the report's own 'Checks passing' cell (one 'before' count, of 14)", async () => {
+    const s = setup({ buildLiveTodayColumn })
+    const outcome = (await s.run()) as { kind: string; status: string }
+    const cell = s.state.report.live_today!.cells.checks_passing!
+    expect(outcome.status).toBe(`Before: ${cell.display}`)
+    expect(outcome.status).toMatch(/ of 14$/)
+    // The same words reach the screen, and they are NOT the raw count of every check result (9 pass · 0 problems).
+    const statuses = s.events.filter((event) => event.type === "step.status").map((event) => (event.fields as { text: string }).text)
+    expect(statuses.at(-1)).toBe(outcome.status)
+    expect(outcome.status).not.toBe("Before: 9 pass · 0 problems · 0 unknown")
+  })
+
+  it("terminal QA #17: a real grade ('<code> — <detail>') is worded and counted by its code", async () => {
+    const twice: CheckResult = { checkId: "dry_live_ga4", tier: "T1", state: "problem", reason: "duplicate_page_view — 2 page views per visit", at: "2026-10-02T09:12:00.000Z", runId: RUN_ID }
+    const s = setup({ buildLiveTodayColumn, checks: { grades: { ga4: twice } } })
+    await s.run()
+    const subs = s.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
+    expect(subs).toContain("! GA4 counts every page twice")
+    expect(subs.some((text) => /a problem$/.test(text))).toBe(false)
+    // The column reads the same grade as a problem (it read `undetermined` while the whole string was compared).
+    expect(s.state.report.live_today!.finishLine.each_tool_once).toMatchObject({ state: "problem" })
+    // negative: the bare code (what the old tests fed) still reads the same.
+    const bare = setup({ buildLiveTodayColumn, checks: { grades: { ga4: { ...twice, reason: "duplicate_page_view" } } } })
+    await bare.run()
+    expect(bare.state.report.live_today!.finishLine.each_tool_once).toMatchObject({ state: "problem" })
+  })
+
   it("reads env targets only when the census found env-sourced ids", async () => {
     const s = setup({ checks: { census: census([], { envSourcedIds: [{ tool: "meta", envName: "NEXT_PUBLIC_META_PIXEL_ID", file: "app/layout.tsx", line: 4 }] }) } })
     await s.run()
@@ -515,7 +542,7 @@ describe("step before: the hand-off", () => {
   it("counts a graded problem as a problem and shows it as a live warning", async () => {
     const blocked: CheckResult = { checkId: "dry_live_meta", tier: "T1", state: "problem", reason: "traffic_permissions_blocked", at: "2026-10-02T09:12:00.000Z", runId: RUN_ID }
     const s = setup({ checks: { grades: { meta: blocked } } })
-    expect(await s.run()).toEqual({ kind: "ok", status: "Before: 8 pass · 1 problem · 0 unknown" })
+    expect(await s.run()).toEqual({ kind: "ok", status: "Before: 9 code and live checks run · 8 pass · 1 problem · 0 unknown" })
     const subs = s.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string; tone: string }))
     expect(subs).toContainEqual({ step: "before", text: "! Meta pixel blocked on www.acme-store.com", tone: "warn" })
     // Never a raw reason code in the live lines (review P3-5).

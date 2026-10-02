@@ -6,10 +6,11 @@
 // The consent mode is never assumed: when the plan has a consent line and no value was chosen, ENTER moves to
 // it and asks for a choice instead of answering.
 import { ASK_CANCELLED, type AskPayloads, type PlanLine } from "../../wizard/contracts/asks.js"
+import { wrapAnsi } from "../ansi.js"
 import type { Key } from "../keys.js"
 import { editBuffer, inputLine } from "./text.js"
 import type { KeyOutcome, Overlay, OverlayContext, OverlayView } from "./types.js"
-import { OVERLAY_TEXT_CAPS, windowAround } from "./types.js"
+import { OVERLAY_TEXT_CAPS } from "./types.js"
 
 export interface PlanState {
   cursor: number
@@ -53,10 +54,12 @@ function decisionsView(payload: PlanPayload, state: PlanState, ctx: OverlayConte
   const npm = payload.decisions.npmInstall ? ctx.sanitize(payload.decisions.npmInstall, OVERLAY_TEXT_CAPS.line) : "—"
   return [
     s.bold("Your decisions"),
-    `· Consent: ${consent ? (CONSENT_LABEL[consent] ?? consent) : s.you("— choose it (E on the consent line)")}`,
-    `· Conversions: ${conversions ? ctx.sanitize(conversions, OVERLAY_TEXT_CAPS.line) : "—"}`,
-    `· Privacy: ${privacyShown}`,
-    `· npm: ${npm}`
+    ...[
+      `· Consent: ${consent ? (CONSENT_LABEL[consent] ?? consent) : s.you("— choose it (E on the consent line)")}`,
+      `· Conversions: ${conversions ? ctx.sanitize(conversions, OVERLAY_TEXT_CAPS.line) : "—"}`,
+      `· Privacy: ${privacyShown}`,
+      `· npm: ${npm}`
+    ].flatMap((line) => wrapAnsi(line, ctx.width, 2))
   ]
 }
 
@@ -71,8 +74,42 @@ function lineText(line: PlanLine, state: PlanState, ctx: OverlayContext): string
   let text = ctx.sanitize(line.text, OVERLAY_TEXT_CAPS.line)
   if (line.measured) text += ctx.styles.dim(` (${ctx.sanitize(String(line.measured.value), 40)} · ${ctx.sanitize(line.measured.window, 40)})`)
   const edit = state.edits[line.id]
-  if (edit !== undefined && line.kind !== "privacy_text") text += ctx.styles.info(` → ${ctx.sanitize(edit, OVERLAY_TEXT_CAPS.label)}`)
+  // The consent line's edit is one of two values: the marker says it in words (never the stored value).
+  if (edit !== undefined && line.kind === "consent_mode") text += ctx.styles.info(` → chosen: ${CONSENT_LABEL[edit] ?? ctx.sanitize(edit, OVERLAY_TEXT_CAPS.label)}`)
+  else if (edit !== undefined && line.kind !== "privacy_text") text += ctx.styles.info(` → ${ctx.sanitize(edit, OVERLAY_TEXT_CAPS.label)}`)
   return text
+}
+
+/** "▸ [✓] " : the columns before a plan line's text; a wrapped line continues under the text. */
+const ROW_PREFIX_WIDTH = 6
+
+/**
+ * One plan line as screen rows: the FULL text, wrapped under a hanging indent (final verify F1: a plan line is
+ * never cut, because the user approves what the line says).
+ */
+function lineRows(line: PlanLine, index: number, state: PlanState, ctx: OverlayContext): string[] {
+  const s = ctx.styles
+  const pointer = index === state.cursor ? s.accent("▸") : " "
+  const body = `${pointer} ${lineMark(line, state, ctx)} ${lineText(line, state, ctx)}`
+  return wrapAnsi(index === state.cursor ? s.bold(body) : body, ctx.width, ROW_PREFIX_WIDTH)
+}
+
+/**
+ * The plan lines that fit `room` rows, as whole lines around the cursor (a line is shown in full or not at all,
+ * except a single line taller than the room). The cursor's line is always in the window.
+ */
+function windowRows(rows: readonly string[][], cursor: number, room: number): { start: number; end: number } {
+  const height = (from: number, to: number) => rows.slice(from, to).reduce((sum, row) => sum + row.length, 0)
+  if (height(0, rows.length) <= room) return { start: 0, end: rows.length }
+  let start = Math.max(0, Math.min(cursor, rows.length - 1))
+  let end = start + 1
+  // Grow down first (the next lines to read), then up, while whole lines still fit.
+  for (;;) {
+    if (end < rows.length && height(start, end + 1) <= room) end += 1
+    else if (start > 0 && height(start - 1, end) <= room) start -= 1
+    else break
+  }
+  return { start, end }
 }
 
 function render(payload: PlanPayload, state: PlanState, ctx: OverlayContext): OverlayView {
@@ -84,14 +121,18 @@ function render(payload: PlanPayload, state: PlanState, ctx: OverlayContext): Ov
     footer.push("", s.bold(`Editing: ${line ? ctx.sanitize(line.text, OVERLAY_TEXT_CAPS.label) : ""}`), inputLine(state.editing.buffer, ctx.width))
   }
   if (state.notice) footer.push("", s.you(state.notice))
-  const room = Math.max(1, ctx.maxBodyLines - decisions.length - 2 - footer.length)
-  const { start, end } = windowAround(payload.lines, state.cursor, room)
-  const rows = payload.lines.slice(start, end).map((line, offset) => {
-    const index = start + offset
-    const pointer = index === state.cursor ? s.accent("▸") : " "
-    const body = `${pointer} ${lineMark(line, state, ctx)} ${lineText(line, state, ctx)}`
-    return index === state.cursor ? s.bold(body) : body
-  })
+  const allRows = payload.lines.map((line, index) => lineRows(line, index, state, ctx))
+  // Two rows are kept for the "more above / more below" lines whenever the plan does not fit.
+  const fits = allRows.reduce((sum, row) => sum + row.length, 0) <= ctx.maxBodyLines - decisions.length - 2 - footer.length
+  const room = Math.max(1, ctx.maxBodyLines - decisions.length - 2 - footer.length - (fits ? 0 : 2))
+  const { start, end } = windowRows(allRows, state.cursor, room)
+  const more = (count: number, where: "above" | "below") =>
+    s.dim(`      ${where === "above" ? "↑" : "↓"} ${count} more line${count === 1 ? "" : "s"} ${where} (${where === "above" ? "↑" : "↓"} to read ${count === 1 ? "it" : "them"})`)
+  const rows = [
+    ...(start > 0 ? [more(start, "above")] : []),
+    ...allRows.slice(start, end).flatMap((row) => (row.length > room ? row.slice(0, room) : row)),
+    ...(end < payload.lines.length ? [more(payload.lines.length - end, "below")] : [])
+  ]
   const counts = countLines(payload)
   return {
     heading: "The plan (one screen)",

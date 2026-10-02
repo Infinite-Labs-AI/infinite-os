@@ -5,6 +5,24 @@ All notable changes to the `infinite-tag` npm package (`packages/instrument`). V
 
 ## Unreleased
 
+### Setup wizard: the terminal round
+
+- The plan screen shows the full text of every line you approve: a long line wraps under its own text instead of
+  ending in "…", the box uses the terminal's width, and on a short terminal the plan scrolls by whole lines and
+  says how many are above and below. After you choose the consent setting, its line says what you chose.
+- The before/after table never cuts a cell: from 140 columns it is a 3-column table whose cells wrap, below that
+  each row is stacked. It opens with one verdict line (what the live check supports, the run id, how long it took).
+- The closing screen stays up until you press a key (ENTER, Q, ESC or Ctrl+C). Never under `--json`, never
+  without a terminal. The table is still printed into your scrollback when it closes.
+- The merge prompt says each sentence once and shows the branch and how many files changed.
+- "Before:" in the step list is the same count as the table's "Checks passing" cell for the live site.
+- A problem the live test finds is said in words ("GA4 counts every page twice", not "GA4 a problem"), and the
+  table counts it as a problem instead of "unknown".
+- Agent jobs that were not done are named, with why. The review step says what the reviewer found, and the
+  headline names the agent that is working now. The job count is the same on every line.
+- The Learn cards name your site, your workspace and the two agents once the run knows them. Step descriptions
+  wrap instead of being cut. One run id is shown everywhere.
+
 ### Setup wizard: the I1/I2 follow-up
 
 - The env-target read asks Infinite only about public build-time names (`NEXT_PUBLIC_`, `VITE_`, `PUBLIC_`; at

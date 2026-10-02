@@ -214,9 +214,9 @@ describe("renderers", () => {
     expect(renderMarkdown(piped)).toContain("a \\| b")
   })
 
-  it("the terminal table fits the width: three columns at 120, stacked below 100", () => {
-    const wide = renderTerminal(report, 120)
-    for (const line of wide.split("\n")) expect(line.length).toBeLessThanOrEqual(120)
+  it("the terminal table fits the width: three columns at 160, stacked below 140", () => {
+    const wide = renderTerminal(report, 160)
+    for (const line of wide.split("\n")) expect(line.length).toBeLessThanOrEqual(160)
     expect(wide).toContain("Live site today")
     expect(wide.split("\n").find((line) => line.startsWith("GA4 page views per visit"))).toContain("2 (counts every visit twice)")
     const narrow = renderTerminal(report, 70)
@@ -228,7 +228,7 @@ describe("renderers", () => {
 
 describe("the before/after wording: one count of 14, footnotes that match what is shown", () => {
   const report = buildFrom(snapshotsOf(example))
-  const outputs = () => [renderMarkdown(report), renderTerminal(report, 120), renderTerminal(report, 70)]
+  const outputs = () => [renderMarkdown(report), renderTerminal(report, 160), renderTerminal(report, 120), renderTerminal(report, 70)]
 
   it("the row is 'Checks passing' and every cell counts all 14 (never '(of 14)' over 'of 12 determinable')", () => {
     const row = report.rows.find((entry) => entry.id === "checks_passing")!

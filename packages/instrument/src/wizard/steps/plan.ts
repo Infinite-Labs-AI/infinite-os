@@ -34,9 +34,11 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const scan = await deps.installer.scan({ root: ctx.root, ...(ctx.appRoot !== "." ? { appRoot: ctx.appRoot } : {}), hosting: inputs.hosting })
   const candidates = await planCandidates(ctx, deps)
   const plan = deps.installer.buildPlan(scan, keysOnly(inputs.keys), inputs.before, candidates)
-  const agentJobs = candidates.filter((item) => item.owner === "agent").length
+  // The same count as the plan's own agent line ("Claude Code: N jobs"): the detector candidates AND the plan's
+  // own seeds (terminal QA #13: this line said 10 where the plan line, the approval and "Job 1/11" said 11).
+  const agentJobs = [...candidates, ...((plan as Partial<WizardPlanModel>).seeds ?? [])].filter((item) => item.owner === "agent").length
   const decisions = plan.lines.filter((line) => line.editable).length
-  sub(ctx, `${agentJobs} job${agentJobs === 1 ? "" : "s"} · ${decisions} decision${decisions === 1 ? "" : "s"} need you`, "info")
+  sub(ctx, `${agentJobs} agent job${agentJobs === 1 ? "" : "s"} · ${decisions} decision${decisions === 1 ? "" : "s"} need${decisions === 1 ? "s" : ""} you`, "info")
 
   // A resume of the SAME plan with its consent already answered asks nothing again (the saved answer
   // carries the edits too: an edited privacy paragraph or conversion list survives the resume).
@@ -118,10 +120,11 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   }
 
   const approved = resolved.lines.filter((line) => line.approved === true).length
-  const blocked = items.filter((item) => item.state === "blocked").length
+  const agentItems = items.filter((item) => item.owner === "agent")
+  const blocked = agentItems.filter((item) => item.state === "blocked").length
   return {
     kind: "ok",
-    status: `Plan approved · ${approved} line${approved === 1 ? "" : "s"} · ${items.length} job${items.length === 1 ? "" : "s"}${blocked > 0 ? ` (${blocked} wait for you)` : ""}`
+    status: `Plan approved · ${approved} line${approved === 1 ? "" : "s"} · ${agentItems.length} agent job${agentItems.length === 1 ? "" : "s"}${blocked > 0 ? ` (${blocked} wait${blocked === 1 ? "s" : ""} for you)` : ""}`
   }
 }
 

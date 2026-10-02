@@ -83,9 +83,18 @@ const UNDETERMINED_REASON: Record<string, Reason> = {
   test_error: "not_exercised"
 }
 
+/**
+ * The code of a grade's reason. The grader (lane O6) writes `<code> — <detail>` ("duplicate_page_view — 2 page
+ * views per visit"); every comparison here is against the code alone. Comparing the whole string never matched,
+ * so a real grade read as "a problem" in words and as `undetermined` in the column (terminal QA #17).
+ */
+export function gradeReasonCode(check: Pick<CheckResult, "reason"> | undefined | null): string {
+  return (check?.reason ?? "").split(" — ")[0]!.trim()
+}
+
 /** Short, plain words for a grade's reason (the design's "blocked on www…", never a raw code). */
 export function gradeWords(check: CheckResult, host: string | null): string {
-  switch (check.reason) {
+  switch (gradeReasonCode(check)) {
     case "traffic_permissions_blocked":
       return host ? `blocked on ${host}` : "blocked by Traffic Permissions"
     case "meta_tr_rejected":
@@ -103,7 +112,8 @@ export function gradeWords(check: CheckResult, host: string | null): string {
     case "previews_send_data":
       return "fires on previews"
     default:
-      return check.state === "pass" ? "fires once" : check.state === "problem" ? "a problem" : "unknown"
+      // A problem whose code has no words above still says something a person can act on, never "a problem".
+      return check.state === "pass" ? "fires once" : check.state === "problem" ? "did not pass the live test" : "unknown"
   }
 }
 
@@ -140,11 +150,11 @@ export function liveTodayColumnInput(source: LiveTodaySource): LiveTodayColumnIn
     const grade = grades[tool]
     if (!grade) continue
     const state: LiveTodayFact["state"] =
-      grade.state === "pass" ? "pass" : grade.state === "info" ? "info" : grade.state === "problem" && ONCE_REASONS.has(grade.reason ?? "") ? "problem" : "undetermined"
-    const reason = grade.state === "undetermined" ? UNDETERMINED_REASON[grade.reason ?? ""] : undefined
+      grade.state === "pass" ? "pass" : grade.state === "info" ? "info" : grade.state === "problem" && ONCE_REASONS.has(gradeReasonCode(grade)) ? "problem" : "undetermined"
+    const reason = grade.state === "undetermined" ? UNDETERMINED_REASON[gradeReasonCode(grade)] : undefined
     facts.push({ input: "dry_live.graded", state, display: `${TOOL_LABEL[tool]}: ${gradeWords(grade, host)}`, at, checkId: grade.checkId, ...(reason ? { reason } : {}) })
     // 2 ids_match_connections (dry load half).
-    const ids: LiveTodayFact["state"] = grade.state === "pass" ? "pass" : grade.state === "problem" && grade.reason === "wrong_id" ? "problem" : "undetermined"
+    const ids: LiveTodayFact["state"] = grade.state === "pass" ? "pass" : grade.state === "problem" && gradeReasonCode(grade) === "wrong_id" ? "problem" : "undetermined"
     facts.push({ input: "dry_live.ids_vs_keys", state: ids, display: `${TOOL_LABEL[tool]}: ${ids === "pass" ? "your connection's ID" : ids === "problem" ? "an ID that is not your connection's" : "not determinable"}`, at, checkId: grade.checkId })
   }
   if (source.census.entries.length > 0) {
@@ -237,7 +247,7 @@ export function liveTodayColumnInput(source: LiveTodaySource): LiveTodayColumnIn
   // 12 no_pii.
   if (dry) {
     const piiCount = dry.pii.reduce((sum, entry) => sum + entry.count, 0)
-    const flagged = Object.values(grades).some((grade) => grade?.state === "problem" && grade.reason === "no_pii")
+    const flagged = Object.values(grades).some((grade) => grade?.state === "problem" && gradeReasonCode(grade) === "no_pii")
     facts.push({ input: "dry_live.pii", state: piiCount > 0 || flagged ? "problem" : "pass", display: piiCount > 0 || flagged ? "personal data seen in a request" : "no personal data in any request", at })
   }
 
@@ -268,7 +278,7 @@ function rowsFor(
   const heldOrUnknown = (tool: TestTool): LiveTodayRow | null => {
     const grade = grades[tool]
     if (grade?.state !== "undetermined") return null
-    return unmeasured("desktop_test", UNDETERMINED_REASON[grade.reason ?? ""] ?? "not_exercised", "undetermined")
+    return unmeasured("desktop_test", UNDETERMINED_REASON[gradeReasonCode(grade)] ?? "not_exercised", "undetermined")
   }
 
   // GA4 page views per visit.
@@ -304,7 +314,7 @@ function rowsFor(
   else {
     const grade = grades.meta
     const held = heldOrUnknown("meta")
-    rows.meta_pixel = held ?? { value: grade.state === "pass" ? "sending" : grade.reason ?? grade.state, display: grade.state === "pass" ? "loads (nothing sent)" : gradeWords(grade, host), state: grade.state, source: "desktop_test", at, checkId: grade.checkId }
+    rows.meta_pixel = held ?? { value: grade.state === "pass" ? "sending" : gradeReasonCode(grade) || grade.state, display: grade.state === "pass" ? "loads (nothing sent)" : gradeWords(grade, host), state: grade.state, source: "desktop_test", at, checkId: grade.checkId }
   }
 
   // Page views from preview links.

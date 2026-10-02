@@ -305,7 +305,7 @@ export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): 
         kind: "posthog_defaults_bump_adopted",
         provider: "posthog",
         target: "defaults",
-        text: `PostHog: move your existing setup to defaults '${POSTHOG_DEFAULTS_CURRENT}'. This changes how PostHog measures; the report marks it "measurement changed", never growth.`,
+        text: `PostHog: update your existing setup to PostHog's current recommended settings (defaults '${POSTHOG_DEFAULTS_CURRENT}'). This changes how PostHog measures; the report marks it "measurement changed", never growth.`,
         owner: "agent",
         evidence
       })

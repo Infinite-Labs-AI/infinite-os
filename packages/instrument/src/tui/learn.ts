@@ -9,6 +9,7 @@
 // - example values from the mock run ("acme-store.com", workspace "Acme", "Claude Code"/"Codex" in fixed
 //   roles, "connected" for every key) are replaced by what is true before the run knows: the agent and the
 //   workspace are named in the step's own status lines instead.
+import type { WizardStoreSnapshot } from "../wizard/contracts/state.js"
 import { STEP_COPY_OVERRIDES, type LearnId, type WizardStepId } from "../wizard/contracts/steps.js"
 
 /** `g` good, `i` info, `y` needs you, `` plain (the design's row tones). */
@@ -95,7 +96,7 @@ export const LEARN_CARDS: { readonly [Id in LearnId]: LearnCard } = {
     title: "Second-agent review",
     sub: "On GitHub, in the pull request.",
     rows: [
-      ["Reviewer", "the second agent (read-only)", "i"],
+      ["Reviewer", "second agent, read-only", "i"],
       ["Posted by", "the wizard", ""],
       ["Fix rounds", "up to 2", ""],
       ["Ships when", "you merge", "y"]
@@ -121,6 +122,31 @@ export const LEARN_CARDS: { readonly [Id in LearnId]: LearnCard } = {
       ["Undo code changes", "uninstall", ""]
     ]
   }
+}
+
+export type LearnFacts = NonNullable<WizardStoreSnapshot["learnFacts"]>
+
+const AGENT_NAME = { claude_code: "Claude Code", codex: "Codex" } as const
+
+/**
+ * The card as the run knows it NOW (terminal QA #12): once the link is approved the card names the site and the
+ * workspace, and once the agents are found it names them, as the design does. Until then it keeps the wording
+ * above, which is true without knowing. `clean` is the UI's sanitiser (a workspace name is outside text).
+ */
+export function learnCard(id: LearnId, facts: LearnFacts | undefined, clean: (text: string) => string = (text) => text): LearnCard {
+  const card = LEARN_CARDS[id]
+  if (!facts) return card
+  const worker = facts.worker ? AGENT_NAME[facts.worker] : null
+  const reviewer = facts.reviewer === "brief" ? "a printed brief" : facts.reviewer ? AGENT_NAME[facts.reviewer] : null
+  const swap: Record<string, string | null> =
+    id === "link"
+      ? { "This site": facts.site ? clean(facts.site) : null, Workspace: facts.workspace ? clean(facts.workspace) : null }
+      : id === "agent"
+        ? { "Does the work": worker, "Reviews it": reviewer && facts.reviewer !== "brief" ? `${reviewer}, read-only` : reviewer }
+        : id === "review"
+          ? { Reviewer: reviewer && facts.reviewer !== "brief" ? `${reviewer} (read-only)` : reviewer }
+          : {}
+  return { ...card, rows: card.rows.map(([label, value, tone]) => [label, swap[label] || value, tone] as const) }
 }
 
 /** Each step's "what it does" and "if it gets stuck" (the design's `what` / `stuck`, honest-copy edits applied). */

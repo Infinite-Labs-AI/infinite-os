@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`renderFrame > 70 columns: the Learn card is dropped and nothing wraps 1`] = `
+exports[`renderFrame > 70 columns: the Learn card is dropped and no line runs past the screen 1`] = `
 " Infinite setup · infinite-tag 0.12.0                     run r-7f3c
 
  Tasks
@@ -20,7 +20,9 @@ exports[`renderFrame > 70 columns: the Learn card is dropped and nothing wraps 1
 
  ━━━━━━━━━━━━━━━━━━────────────────────── 46% · step 6 of 12
 
- Claude Code › The sign-up route already creates the user, so I'm ad…
+ Claude Code › The sign-up route already creates the user, so I'm
+   adding the server-side sign-up event right after that.
+   · Job 1/7 · Server-side sign-up event
    · Job 2/7 · Improve the existing PostHog (proxy, page changes)
    · Job 3/7 · Remove the second GA4 tag
    ✓ Job 1 checked by the wizard
@@ -29,7 +31,7 @@ exports[`renderFrame > 70 columns: the Learn card is dropped and nothing wraps 1
  Ctrl+C stop"
 `;
 
-exports[`renderFrame > 120 columns: Learn card beside the 13-row step list, the narration and the last 5 subs 1`] = `
+exports[`renderFrame > 120 columns: Learn card beside the 13-row step list, the narration and the sub-statuses 1`] = `
 " Infinite setup · infinite-tag 0.12.0                                                                       run r-7f3c
 
  Learn                                    Tasks
@@ -49,7 +51,9 @@ exports[`renderFrame > 120 columns: Learn card beside the 13-row step list, the 
 
                                           ━━━━━━━━━━━━━━━━━━────────────────────── 46% · step 6 of 12
 
- Claude Code › The sign-up route already creates the user, so I'm adding the server-side sign-up event right after tha…
+ Claude Code › The sign-up route already creates the user, so I'm adding the server-side sign-up event right after
+   that.
+   · Job 1/7 · Server-side sign-up event
    · Job 2/7 · Improve the existing PostHog (proxy, page changes)
    · Job 3/7 · Remove the second GA4 tag
    ✓ Job 1 checked by the wizard
@@ -78,23 +82,23 @@ exports[`renderFrame > draws the pending ask as one overlay box in place of the 
 
                                           ━━━━━━━━━━━━──────────────────────────── 31% · step 4 of 12
 
- ╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
- │ ◆ Plan + your decisions                                                                          │
- │ The plan (one screen)                                                                            │
- │ Approve the plan: 2 lines to approve · 1 thing only you can do.                                  │
- │                                                                                                  │
- │ Your decisions                                                                                   │
- │ · Consent: — choose it (E on the consent line)                                                   │
- │ · Conversions: start_trial · signup                                                              │
- │ · Privacy: 2 drafted lines for your privacy page                                                 │
- │ · npm: npm install @vercel/functions                                                             │
- │                                                                                                  │
- │ The plan                                                                                         │
- │ ▸ [✓] Install the Infinite pixel and server lane                                                 │
- │   [✓] Consent setting                                                                            │
- │    →  Connect GA4 in Infinite                                                                    │
- │                                                                                                  │
- │ ENTER approve  ·  SPACE skip a line  ·  E edit a line  ·  ↑↓ move  ·  ESC later                  │
- ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ ◆ Plan + your decisions                                                                                            │
+ │ The plan (one screen)                                                                                              │
+ │ Approve the plan: 2 lines to approve · 1 thing only you can do.                                                    │
+ │                                                                                                                    │
+ │ Your decisions                                                                                                     │
+ │ · Consent: — choose it (E on the consent line)                                                                     │
+ │ · Conversions: start_trial · signup                                                                                │
+ │ · Privacy: 2 drafted lines for your privacy page                                                                   │
+ │ · npm: npm install @vercel/functions                                                                               │
+ │                                                                                                                    │
+ │ The plan                                                                                                           │
+ │ ▸ [✓] Install the Infinite pixel and server lane                                                                   │
+ │   [✓] Consent setting                                                                                              │
+ │    →  Connect GA4 in Infinite                                                                                      │
+ │                                                                                                                    │
+ │ ENTER approve  ·  SPACE skip a line  ·  E edit a line  ·  ↑↓ move  ·  ESC later                                    │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  Ctrl+C stop"
 `;

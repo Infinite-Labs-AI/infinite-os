@@ -576,8 +576,7 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         })
         await ctx.state.save()
 
-        const counts = summarize(checks)
-        const status = `Before: ${counts.pass} pass · ${counts.problem} problem${counts.problem === 1 ? "" : "s"} · ${counts.unknown} unknown`
+        const status = beforeStatus(liveToday, checks)
         ctx.emit.emit("step.status", { step: "before", text: status })
         return { kind: "ok", status }
       } catch (error) {
@@ -587,6 +586,19 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
       }
     }
   }
+}
+
+/**
+ * The step's closing line. It is the report's own "Checks passing" cell for the "Live site today" column, word
+ * for word, so the terminal never shows two different "before" counts in the same words (final verify F4: the
+ * step used to count every raw check result, the report counts the 14 finish-line checks). With no column
+ * (a wiring without the column builder, or a column with nothing determinable) the line names what it counts.
+ */
+export function beforeStatus(liveToday: ReportColumnSnapshot | null, checks: readonly CheckResult[]): string {
+  const cell = liveToday?.cells.checks_passing
+  if (cell && cell.value !== null) return `Before: ${cell.display}`
+  const counts = summarize(checks)
+  return `Before: ${checks.length} code and live check${checks.length === 1 ? "" : "s"} run · ${counts.pass} pass · ${counts.problem} problem${counts.problem === 1 ? "" : "s"} · ${counts.unknown} unknown`
 }
 
 /** Builds a JobScan from an already-loaded snapshot (for callers that hold one). */

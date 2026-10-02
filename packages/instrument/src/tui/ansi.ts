@@ -217,3 +217,102 @@ export function wrapText(text: string, width: number): string[] {
   }
   return lines
 }
+
+/** The SGR codes that close one of the styles `makeStyles` opens (22 closes bold and dim, 39 a colour, 27 inverse). */
+const SGR_CLOSERS: Record<string, (open: string) => boolean> = {
+  "22": (open) => open === "1" || open === "2",
+  "39": (open) => /^(3[0-7]|9[0-7])$/.test(open),
+  "27": (open) => open === "7"
+}
+
+/**
+ * Word-wrap text that may carry SGR styling to `width` columns. Every line after the first starts with
+ * `hangingIndent` spaces (the text lines up under the first line's text, past its marker). The styles open at a
+ * break are closed at the end of that line and re-opened on the next, so colour never bleeds into the box border.
+ * Nothing is cut: a word wider than the room is hard-split. Leading spaces of the text are kept (a marker column).
+ */
+export function wrapAnsi(text: string, width: number, hangingIndent = 0): string[] {
+  if (width <= 0) return []
+  if (visibleWidth(text) <= width) return [text]
+  const indent = Math.max(0, Math.min(hangingIndent, width - 1))
+  const lines: string[] = []
+  /** The SGR parameters open right now, in order. */
+  let open: string[] = []
+  let line = ""
+  let lineWidth = 0
+  /** Whether the current line holds anything visible besides its indent. */
+  let lineHasText = false
+  let word = ""
+  let wordWidth = 0
+  /** The style sequences inside the pending word: they change `open` only once the word is placed. */
+  let wordSequences: string[] = []
+  /** Spaces seen since the last word (kept only inside a line, and at the very start of the text). */
+  let gap = ""
+  let started = false
+
+  const reopen = () => open.map((code) => `${ESC}${code}m`).join("")
+  const breakLine = () => {
+    lines.push(open.length > 0 ? `${line}${SEQ.reset}` : line)
+    line = `${" ".repeat(indent)}${reopen()}`
+    lineWidth = indent
+    lineHasText = false
+  }
+  const track = (sequence: string) => {
+    const sgr = /^\x1b\[([0-9;]*)m$/.exec(sequence)
+    if (!sgr) return
+    for (const code of (sgr[1] || "0").split(";")) {
+      const closes = SGR_CLOSERS[code]
+      if (code === "0" || code === "") open = []
+      else if (closes) open = open.filter((candidate) => !closes(candidate))
+      else open.push(code)
+    }
+  }
+  const flushWord = () => {
+    if (!word) return
+    const gapWidth = lineHasText || !started ? gap.length : 0
+    if (lineHasText && lineWidth + gapWidth + wordWidth > width) {
+      breakLine()
+    } else if (gapWidth > 0) {
+      line += gap
+      lineWidth += gapWidth
+    }
+    line += word
+    lineWidth += wordWidth
+    if (wordWidth > 0) lineHasText = true
+    for (const sequence of wordSequences) track(sequence)
+    started = true
+    word = ""
+    wordWidth = 0
+    wordSequences = []
+    gap = ""
+  }
+
+  let index = 0
+  while (index < text.length) {
+    ANSI_PATTERN.lastIndex = index
+    const match = ANSI_PATTERN.exec(text)
+    if (match && match.index === index) {
+      // A style change travels with the word it sits in, so a break never separates them.
+      word += match[0]
+      wordSequences.push(match[0])
+      index += match[0].length
+      continue
+    }
+    const code = text.codePointAt(index) ?? 0
+    const char = String.fromCodePoint(code)
+    index += char.length
+    if (char === " " || char === "\n" || char === "\t") {
+      flushWord()
+      gap += " "
+      continue
+    }
+    const w = isZeroWidth(code) ? 0 : isWide(code) ? 2 : 1
+    // A word wider than a whole line is hard-split: what fits is placed, the rest starts the next line.
+    if (wordWidth + w > width - indent) flushWord()
+    word += char
+    wordWidth += w
+  }
+  flushWord()
+  lines.push(line)
+  return lines
+}

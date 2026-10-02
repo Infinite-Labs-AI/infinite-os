@@ -11,14 +11,14 @@
 // The run holds `.infinite/wizard/run.lock`; SIGINT/SIGTERM aborts, kills the agent tree, restores the
 // fence snapshot, releases the lock and exits 130.
 import { promises as fsp } from "node:fs"
-import { isAbsolute, join, relative, resolve } from "node:path"
+import { basename, isAbsolute, join, relative, resolve } from "node:path"
 
 import { INSTRUMENT_VERSION } from "../package-manager.js"
 import { NESTING_ENV_MARKERS } from "./contracts/agents.js"
 import { WIZARD_EXIT, exitCodeFor } from "./contracts/codes.js"
 import type { RunStateAccessor, WizardContext, WizardDeps, WizardOptions } from "./contracts/deps.js"
 import type { ReportV2 } from "./contracts/report.js"
-import type { WizardRunState } from "./contracts/state.js"
+import type { WizardRunState, WizardStoreSnapshot } from "./contracts/state.js"
 import type { WizardStepId } from "./contracts/steps.js"
 import { createWizardAsks, readAnswersFile, type AnswersFile, type TtyPrompter } from "./asks.js"
 import { openDevTtyPrompter } from "./dev-tty.js"
@@ -283,6 +283,30 @@ interface LockedRun {
   signals: SignalSource
 }
 
+/** Whether the closing screen waits for a key: an interactive terminal on both ends, and not `--json`. */
+export function closingScreenWaits(options: Pick<WizardOptions, "json">, io: Pick<WizardIo, "stdin" | "stdout">): boolean {
+  return !options.json && io.stdin.isTTY === true && io.stdout.isTTY === true
+}
+
+/**
+ * The width the closing text is laid out for: the frame keeps one column each side, so the text is two columns
+ * narrower than the terminal and no line of it is cut on screen. Unknown or 0 columns → the frame's 80.
+ */
+export function outroWidth(columns: number | undefined): number {
+  const usable = typeof columns === "number" && Number.isFinite(columns) && columns > 0 ? columns : 80
+  return Math.max(20, usable - 2)
+}
+
+/** What the Learn cards may name, from the run state: the repo folder, the linked workspace and the two agents. */
+export function learnFactsFrom(state: Readonly<WizardRunState>, root: string): NonNullable<WizardStoreSnapshot["learnFacts"]> {
+  return {
+    site: basename(root) || null,
+    workspace: state.link?.workspaceName ?? null,
+    worker: state.agent?.worker ?? null,
+    reviewer: state.agent?.reviewer ?? null
+  }
+}
+
 /** A suffix for a run set aside: its run id (or display id) plus why. */
 function asideSuffix(state: Pick<WizardRunState, "runId" | "displayId">, why: string): string {
   return `${state.runId ?? state.displayId}.${why}`
@@ -294,11 +318,18 @@ async function runLocked(input: LockedRun): Promise<number> {
   const loaded = await loadRunState(nodeWizardFs, root)
   const existing = loaded.kind === "ok" ? loaded.state : null
   const store = new WizardStore({ displayId: existing?.displayId ?? "r-····", tagVersion: INSTRUMENT_VERSION })
-  const emitter = new WizardEventEmitter({ store, ndjson: options.json ? (line) => io.stdout.write(`${line}\n`) : null })
+  let runState: RunStateFile | null = null
+  const emitter = new WizardEventEmitter({
+    store,
+    ndjson: options.json ? (line) => io.stdout.write(`${line}\n`) : null,
+    // After each step the Learn cards may name what the run now knows (the workspace, the two agents).
+    onEvent: (event) => {
+      if (event.t === "step.done" && runState) store.setLearnFacts(learnFactsFrom(runState.get(), root))
+    }
+  })
   const ui = wiring.createUi(options.json ? "json" : "tty", store, io)
   let ttyPrompter: TtyPrompter | null = null
   let deps: WizardDeps | null = null
-  let runState: RunStateFile | null = null
   /** True when this process created the state file (not a loaded or rebuilt run). */
   let freshState = false
 
@@ -317,8 +348,29 @@ async function runLocked(input: LockedRun): Promise<number> {
         ...(state?.pr?.url ? { prUrl: state.pr.url } : {}),
         reportPath
       })
-      if (report) store.setOutro(renderTerminal(report, io.stdout.columns ?? 100))
+      if (report) {
+        const startedAt = Date.parse(state?.createdAt ?? "")
+        store.setOutro(
+          renderTerminal(report, outroWidth(io.stdout.columns), {
+            displayId: state?.displayId ?? null,
+            durationMs: Number.isFinite(startedAt) ? Math.max(0, systemClock.now().getTime() - startedAt) : null
+          })
+        )
+      }
       emitter.dispose()
+      // Final verify F5: in a terminal the closing screen (the verdict and the before/after table) stays up until
+      // the user presses a key; it used to close in the same tick, so nobody saw it. Never under `--json`, never
+      // without a TTY, never after a signal. The run is over, so the lock goes first: a closing screen left open
+      // never blocks another run in this repo. A signal while it waits ends the wait (the abort), then the
+      // interrupt sequence carries on as usual.
+      const waitForDismiss = ui.waitForDismiss?.bind(ui)
+      if (report && waitForDismiss && closingScreenWaits(options, io) && !interrupt && exitCode !== WIZARD_EXIT.interrupted && !controller.signal.aborted) {
+        await lock.release()
+        await Promise.race([
+          waitForDismiss(),
+          new Promise<void>((resolve) => controller.signal.addEventListener("abort", () => resolve(), { once: true }))
+        ])
+      }
       ui.stop()
       removeHandlers()
       ttyPrompter?.close()

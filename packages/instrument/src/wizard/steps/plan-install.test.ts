@@ -157,6 +157,22 @@ describe("step plan", () => {
     expect(jobs.find((item) => item.id === "posthog_improve:history_change")).toMatchObject({ state: "blocked", blockedReason: "needs_you" })
     expect(jobs.find((item) => item.id === "identify_reset:auth")?.state).toBe("pending")
   })
+
+  it("terminal QA #13: the live line counts the agent jobs the plan's own agent line counts (the plan's seeds included)", async () => {
+    // No detector candidate for the PostHog improvements: the plan seeds those jobs itself.
+    const answer = { approved: ["consent_mode", "agent_budget"], declined: [], edits: { consent_mode: "not_required" } }
+    const h = await setup({ files: { "index.html": ADOPTED_POSTHOG_HTML.replace(", defaults: '2025-05-24'", "") }, answers: [answer], candidates: [candidate("identify_reset", "auth")] })
+    const outcome = await planStep.run(h.ctx, h.deps)
+    const payload = h.ctx.asks[0]!.payload as AskPayloads["plan"]
+    const budget = payload.lines.find((line) => line.kind === "agent_budget")!
+    const inPlan = Number(/(\d+) (?:agent )?jobs?/.exec(budget.text)![1])
+    expect(inPlan).toBeGreaterThan(1)
+    const subs = h.ctx.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
+    const live = subs.find((text) => /agent jobs? · \d+ decisions? needs? you/.test(text))!
+    expect(Number(/^(\d+) agent jobs?/.exec(live)![1])).toBe(inPlan)
+    // The closing status counts agent jobs too, in the same words.
+    expect((outcome as { status: string }).status).toMatch(/^Plan approved · \d+ lines? · \d+ agent jobs?/)
+  })
 })
 
 describe("step install", () => {

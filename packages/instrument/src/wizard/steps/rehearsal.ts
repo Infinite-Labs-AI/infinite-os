@@ -80,7 +80,7 @@ export async function recordClickTests(
   if (response === null) return
   const done: Awaited<ReturnType<WizardDeps["bridge"]["markGa4KeyEvents"]>> = response
   const marked = [...done.created, ...done.alreadyExisted]
-  if (marked.length > 0) sub(ctx, input.step, `GA4 key events: marked for ${marked.length} conversion(s) (click test passed)`, "ok")
+  if (marked.length > 0) sub(ctx, input.step, `GA4 key events: marked for ${marked.length} conversion${marked.length === 1 ? "" : "s"} (click test passed)`, "ok")
   for (const refusal of done.refused) sub(ctx, input.step, `GA4 key event not marked for ${refusal.name}: ${refusal.reason.replace(/_/g, " ")}`, "warn")
 }
 

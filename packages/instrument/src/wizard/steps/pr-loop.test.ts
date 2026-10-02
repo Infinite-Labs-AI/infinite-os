@@ -989,6 +989,15 @@ describe("step `merge` (§3g.4 merge gate)", { timeout: 60_000 }, () => {
     expect(patches.at(-1)).toEqual({ mergeSha: "d".repeat(40), mergedAt: "2026-10-02T11:00:00Z", phase: "merged" })
     expect(w.gh.read().calls.some((call) => call.argv[0] === "pr" && call.argv[1] === "merge")).toBe(false)
     expect(w.ctx.asks.map((ask) => ask.kind)).toEqual(["merge-ready"])
+    // Final verify F3: the summary never carries the overlay's own two sentences (they were said twice), and
+    // it names the branch and how many files the pull request changes (the design's two rows).
+    const asked = w.ctx.asks[0]!.payload as { number: number; summary: string }
+    const [sentence, branch, files] = asked.summary.split("\n")
+    expect(asked.summary).not.toMatch(/is ready|Merge it to ship/)
+    expect(sentence).toMatch(/ · rehearsal /)
+    const git = w.ctx.state.get().git!
+    expect(branch).toBe(`${git.branch} → ${git.base}`)
+    expect(files).toMatch(/^[1-9]\d* files? changed · /)
   })
 
   it("ESC parks the run (exit 3); a re-run after the user merged saves the merge without asking", async () => {

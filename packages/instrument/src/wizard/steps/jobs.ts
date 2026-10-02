@@ -134,7 +134,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     }
     if (agentItems.length === claimed.length) {
       await io.settleEdits()
-      return { kind: "ok", status: io.summary() }
+      return { kind: "ok", status: io.closing() }
     }
   }
   try {
@@ -272,7 +272,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     io.put(failure ? failItem(item, `Out of rounds: ${failure}`) : blockItem(item, "agent_blocked", "The agent did not finish this job within 30 turns or 10 minutes."))
   }
   await io.save()
-  return { kind: "ok", status: io.summary() }
+  return { kind: "ok", status: io.closing() }
 }
 
 /** Claims → states, the one batched ask, then the wizard's own pre-deploy checks (§3e.5, the state machine). */
@@ -453,7 +453,7 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
       resumeHint: NESTED_SANDBOX_HINT
     }
   }
-  return { kind: "ok", status: io.summary() }
+  return { kind: "ok", status: io.closing() }
 }
 
 /** The reason an S check this build cannot run carries (undetermined; the item stays claimed). */
@@ -540,6 +540,30 @@ function isTamper(error: unknown): boolean {
 }
 
 /** The step's view of the run state and its collaborators (one place that writes items and emits). */
+/** Why a job is not done, in the user's words (never a state code). */
+const NOT_DONE_WORDS: Record<BlockedReason, string> = {
+  needs_you: "needs your answer",
+  agent_blocked: "the agent did not finish it",
+  out_of_usage: "the agent ran out of usage",
+  consent_touched: "the change touched consent code, so it was undone",
+  outside_allowlist: "the change was outside the job's files, so it was undone",
+  toolless: "the agent could not use its tools"
+}
+/** At most this many not-done jobs are named (the feed keeps 8 lines); the rest are counted. */
+const NOT_DONE_NAMED = 6
+
+/** "! Not done: <job> (<why>)" for every agent job that ended blocked or failed; pure, so it is tested alone. */
+export function notDoneLines(items: readonly ChecklistItem[]): string[] {
+  const open = items.filter((item) => item.owner === "agent" && (item.state === "blocked" || item.state === "failed"))
+  const lines = open.slice(0, NOT_DONE_NAMED).map((item) => {
+    const why = item.state === "failed" ? "the wizard's check did not pass" : item.blockedReason ? NOT_DONE_WORDS[item.blockedReason] : "blocked"
+    return `! Not done: ${item.title} (${why})`
+  })
+  const rest = open.length - NOT_DONE_NAMED
+  if (rest > 0) lines.push(`! …and ${rest} more not done: the pull request lists every job`)
+  return lines
+}
+
 class JobsIo {
   /** Agent turns this step ran (a final seal is taken only when an agent touched the tree). */
   agentTurns = 0
@@ -846,6 +870,15 @@ class JobsIo {
 
   async save(): Promise<void> {
     await this.ctx.state.save()
+  }
+
+  /**
+   * The step's closing: names every agent job that is NOT done and why, in plain words (terminal QA #20: the
+   * count "7 blocked" used to be all the terminal said; the names were only in the pull request), then the summary.
+   */
+  closing(): string {
+    for (const line of notDoneLines(this.items())) this.sub(line, "warn")
+    return this.summary()
   }
 
   summary(): string {

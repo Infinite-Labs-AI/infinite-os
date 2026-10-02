@@ -160,6 +160,12 @@ export interface WizardStoreSnapshot {
   steps: StoreStepRow[]
   currentStep: WizardStepId | null
   learn: LearnId | null
+  /**
+   * What the run has learned so far, for the Learn cards (the design names the real site, workspace and agents;
+   * before the run knows them the cards say what is true without them). Additive and optional: a UI that does
+   * not read it loses nothing. Every value is outside text to a renderer (sanitise before drawing).
+   */
+  learnFacts?: { site?: string | null; workspace?: string | null; worker?: "claude_code" | "codex" | null; reviewer?: "claude_code" | "codex" | "brief" | null }
   narration: Array<{ agent: "claude_code" | "codex"; role: "worker" | "reviewer"; text: string; at: string }>
   /** At most one pending ask (a second throws). */
   pendingAsk: { askId: string; kind: AskKind; payload: unknown } | null

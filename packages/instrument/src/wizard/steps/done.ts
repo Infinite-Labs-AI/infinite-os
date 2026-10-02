@@ -18,7 +18,7 @@ import { PR_MARKERS } from "../contracts/git-host.js"
 import { createHash } from "node:crypto"
 import { basename, join } from "node:path"
 
-import { withFinishLineReadings } from "../report.js"
+import { durationWords, withFinishLineReadings } from "../report.js"
 
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { REPORT_COLUMN_IDS, REPORT_SCHEMA, SAMPLE_FLOOR_PAGE_VIEWS, type ReportColumnId, type ReportV2 } from "../contracts/report.js"
@@ -186,6 +186,11 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
         tone: "warn"
       })
     }
+  }
+  // The design's last line: how long the run took, from its start to the report (a resumed run counts the wait).
+  const startedAt = Date.parse(state.createdAt)
+  if (Number.isFinite(startedAt)) {
+    ctx.emit.emit("step.sub", { step: "done", text: `✓ Done in ${durationWords(Math.max(0, deps.clock.now().getTime() - startedAt))}`, tone: "ok" })
   }
   return {
     kind: "ok",

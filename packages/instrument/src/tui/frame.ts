@@ -14,8 +14,8 @@
 import { EVENT_LIMITS } from "../wizard/contracts/events.js"
 import type { StoreStepRow, WizardStoreSnapshot } from "../wizard/contracts/state.js"
 import { WIZARD_STEP_IDS, WIZARD_STEP_META, type Who } from "../wizard/contracts/steps.js"
-import { SPINNER_FRAMES, fit, layoutSafeLine, truncate, visibleWidth, wrapText, type Styles } from "./ansi.js"
-import { LEARN_CARDS, STEP_COPY, type LearnTone } from "./learn.js"
+import { SPINNER_FRAMES, fit, layoutSafeLine, truncate, visibleWidth, wrapAnsi, wrapText, type Styles } from "./ansi.js"
+import { STEP_COPY, learnCard, type LearnTone } from "./learn.js"
 import type { OverlayContext, OverlayView } from "./overlays/types.js"
 import type { UntrustedSanitizer } from "./ui.js"
 
@@ -23,8 +23,18 @@ import type { UntrustedSanitizer } from "./ui.js"
 export const LEARN_MIN_COLUMNS = 80
 export const LEARN_WIDTH = 38
 const COLUMN_GAP = 3
+/** Sub-statuses shown under the status line: 5 on a short terminal, up to all 8 the store keeps on a tall one. */
 const FEED_LINES = 5
-const OVERLAY_MAX_WIDTH = 100
+const FEED_LINES_MAX = 8
+/** The status line (or the step's description) wraps instead of being cut, up to this many rows. */
+const STATUS_ROWS_MAX = 3
+/** A sub-status wraps to at most this many rows (its text is capped at 120 characters). */
+const SUB_ROWS_MAX = 2
+/**
+ * The overlay box uses the terminal's width up to this (a line longer than ~150 columns is hard to read). The
+ * old cap of 100 left 20 columns unused at 120 and cut the plan's lines (final verify F1).
+ */
+const OVERLAY_MAX_WIDTH = 160
 const OUTRO_LINE_CAP = 400
 
 export interface FrameInput {
@@ -126,7 +136,7 @@ function taskLines(input: FrameInput, width: number): { rows: string[]; currentI
 function learnLines(input: FrameInput, width: number): string[] {
   const s = input.styles
   const learnId = input.snapshot.learn ?? (input.snapshot.currentStep ? WIZARD_STEP_META[input.snapshot.currentStep].learn : "link")
-  const card = LEARN_CARDS[learnId]
+  const card = learnCard(learnId, input.snapshot.learnFacts, (text) => input.sanitize(text, 60))
   const lines = [
     s.dim("Learn"),
     ...wrapText(card.title, width).map((line) => s.bold(line)),
@@ -146,7 +156,16 @@ function learnLines(input: FrameInput, width: number): string[] {
   return lines
 }
 
-function liveLines(input: FrameInput, width: number): string[] {
+/** Wraps one live line; a line that still does not fit its rows ends in "…" (never the case for capped store text at 60+ columns). */
+function wrapRows(line: string, width: number, hangingIndent: number, maxRows: number): string[] {
+  const rows = wrapAnsi(line, width, hangingIndent)
+  if (rows.length <= maxRows) return rows
+  const kept = rows.slice(0, maxRows)
+  kept[maxRows - 1] = truncate(`${kept[maxRows - 1]} …`, width)
+  return kept
+}
+
+function liveLines(input: FrameInput, width: number, feedLines: number = FEED_LINES): string[] {
   const { snapshot, styles: s, sanitize } = input
   const spinner = SPINNER_FRAMES[input.spinnerIndex % SPINNER_FRAMES.length] ?? "⠋"
   const lastStarted = [...snapshot.steps].reverse().find((row) => row.state !== "pending")
@@ -156,13 +175,13 @@ function liveLines(input: FrameInput, width: number): string[] {
   const lines: string[] = []
   const narration = snapshot.narration[snapshot.narration.length - 1]
   if (row.state === "running" && meta.who.includes("agent") && narration) {
-    lines.push(truncate(`${s.agent(`${AGENT_LABEL[narration.agent]} ›`)} ${sanitize(narration.text, EVENT_LIMITS.narrateTextMaxChars)}`, width))
+    lines.push(...wrapRows(`${s.agent(`${AGENT_LABEL[narration.agent]} ›`)} ${sanitize(narration.text, EVENT_LIMITS.narrateTextMaxChars)}`, width, 2, STATUS_ROWS_MAX))
   } else if (row.status) {
-    lines.push(truncate(`${s.accent("◆")} ${sanitize(row.status, EVENT_LIMITS.statusTextMaxChars)}`, width))
+    lines.push(...wrapRows(`${s.accent("◆")} ${sanitize(row.status, EVENT_LIMITS.statusTextMaxChars)}`, width, 2, STATUS_ROWS_MAX))
   } else {
-    lines.push(truncate(`${s.accent("◆")} ${s.dim(STEP_COPY[row.id].what)}`, width))
+    lines.push(...wrapRows(`${s.accent("◆")} ${s.dim(STEP_COPY[row.id].what)}`, width, 2, STATUS_ROWS_MAX))
   }
-  const subs = row.subs.slice(-FEED_LINES)
+  const subs = row.subs.slice(-feedLines)
   subs.forEach((sub, index) => {
     const parts = subParts(sanitize(sub.text, EVENT_LIMITS.subTextMaxChars), sub.tone)
     const isLast = index === subs.length - 1
@@ -174,7 +193,7 @@ function liveLines(input: FrameInput, width: number): string[] {
           : parts.tone === "pending" && isLast && row.state === "running"
             ? s.accent(spinner)
             : s.dim("·")
-    lines.push(truncate(`  ${glyph} ${parts.text}`, width))
+    lines.push(...wrapRows(`  ${glyph} ${parts.text}`, width, 4, SUB_ROWS_MAX))
   })
   return lines
 }
@@ -189,21 +208,13 @@ function overlayBox(input: FrameInput, width: number, maxBodyLines: number): str
   const step = input.snapshot.currentStep ? WIZARD_STEP_META[input.snapshot.currentStep].title : "infinite-tag"
   const content: string[] = [
     s.accent(`◆ ${step}`),
-    s.dim(view.heading),
+    // The box title is the step's title; an overlay whose heading says the same words does not say them twice.
+    ...(view.heading && view.heading !== step ? [s.dim(view.heading)] : []),
     ...wrapText(view.question, inner).map((line) => s.bold(line)),
     "",
-    ...view.body.flatMap((line) => (visibleWidth(line) > inner && !line.includes("\x1b") ? wrapText(line, inner) : [line])),
-    ...(view.keys.length > 0
-      ? [
-          "",
-          view.keys
-            .map((hint) => {
-              const [key, ...rest] = hint.split(" ")
-              return `${s.bold(key ?? "")} ${rest.join(" ")}`
-            })
-            .join(s.dim("  ·  "))
-        ]
-      : [])
+    // Nothing in a question box is cut: a body line wider than the box wraps (styled or not), under its own indent.
+    ...view.body.flatMap((line) => (visibleWidth(line) > inner ? wrapAnsi(line, inner, leadingSpaces(line)) : [line])),
+    ...(view.keys.length > 0 ? ["", ...keyRows(view.keys, inner, s)] : [])
   ]
   const top = s.dim(`╭${"─".repeat(boxWidth - 2)}╮`)
   const bottom = s.dim(`╰${"─".repeat(boxWidth - 2)}╯`)
@@ -211,12 +222,51 @@ function overlayBox(input: FrameInput, width: number, maxBodyLines: number): str
   return [top, ...content.map((line) => `${side} ${fit(line, inner)} ${side}`), bottom]
 }
 
-function outroLines(input: FrameInput, width: number, outro: string): string[] {
+function leadingSpaces(line: string): number {
+  // eslint-disable-next-line no-control-regex
+  const plain = line.replace(/\x1b\[[0-9;]*m/g, "")
+  return plain.length - plain.trimStart().length
+}
+
+/** The key hints, on as many rows as they need (a hint is never split or cut). */
+function keyRows(keys: readonly string[], width: number, s: Styles): string[] {
+  const separator = "  ·  "
+  const rows: string[] = []
+  let row = ""
+  let rowWidth = 0
+  for (const hint of keys) {
+    const [key, ...rest] = hint.split(" ")
+    const hintWidth = visibleWidth(hint)
+    if (row && rowWidth + separator.length + hintWidth > width) {
+      rows.push(row)
+      row = ""
+      rowWidth = 0
+    }
+    row += `${row ? s.dim(separator) : ""}${s.bold(key ?? "")} ${rest.join(" ")}`
+    rowWidth += (rowWidth > 0 ? separator.length : 0) + hintWidth
+  }
+  if (row) rows.push(row)
+  return rows
+}
+
+/**
+ * The closing screen: the verdict, the before/after text and the keys. The keys are always on screen: when the
+ * text is taller than the terminal, what fits is shown and one line says the rest follows when the view closes
+ * (`TtyUi.stop` prints the whole text into scrollback).
+ */
+function outroLines(input: FrameInput, width: number, maxLines: number, outro: string): string[] {
   const s = input.styles
   // The outro is the wizard's own report table: keep its column padding (never the whitespace-collapsing
-  // untrusted-text sanitiser), only strip what could drive the terminal.
-  const lines = outro.split("\n").map((line) => truncate(layoutSafeLine(line, OUTRO_LINE_CAP), width))
-  return [...lines, "", `${s.bold("ENTER")} close  ${s.dim("·")}  ${s.bold("Q")} quit`]
+  // untrusted-text sanitiser), only strip what could drive the terminal. A line wider than the screen wraps.
+  const lines = outro.split("\n").flatMap((line) => {
+    const safe = layoutSafeLine(line, OUTRO_LINE_CAP)
+    return visibleWidth(safe) > width ? wrapAnsi(safe, width, leadingSpaces(safe) + 2) : [safe]
+  })
+  const keys = `${s.bold("ENTER")} close  ${s.dim("·")}  ${s.bold("Q")} quit`
+  const room = Math.max(1, maxLines - 2)
+  if (lines.length <= room) return [...lines, "", keys]
+  const more = lines.length - (room - 1)
+  return [...lines.slice(0, room - 1), s.dim(`… ${more} more line${more === 1 ? "" : "s"}: the full table stays in your terminal when you close this`), "", keys]
 }
 
 /** The full frame: exactly `height` lines or fewer, each at most `width - 1` columns. */
@@ -228,7 +278,7 @@ export function renderFrame(input: FrameInput): string[] {
   const out: string[] = [header(input, width - 1), ""]
 
   if (input.outro !== null) {
-    for (const line of outroLines(input, inner, input.outro)) out.push(pad(line))
+    for (const line of outroLines(input, inner, height - out.length, input.outro)) out.push(pad(line))
     return out.slice(0, height)
   }
 
@@ -245,10 +295,13 @@ export function renderFrame(input: FrameInput): string[] {
   if (input.overlay) {
     const compactTasks = 4
     const chrome = 8
-    const maxBodyLines = Math.max(3, Math.min(24, height - out.length - 2 - compactTasks - chrome))
+    // A tall terminal gives the box its rows (the plan shows every line at once when they fit).
+    const maxBodyLines = Math.max(3, Math.min(60, height - out.length - 2 - compactTasks - chrome))
     lower = overlayBox(input, inner, maxBodyLines)
   } else {
-    lower = liveLines(input, inner)
+    // The full step list needs its rows first; what is left over (5 to 8) goes to the sub-statuses.
+    const spare = height - out.length - Math.max(taskColumn.length, learnColumn.length) - 2 - STATUS_ROWS_MAX
+    lower = liveLines(input, inner, Math.max(FEED_LINES, Math.min(FEED_LINES_MAX, spare)))
   }
   // Rows left for the step list after the header, a blank line, the live region / overlay and the footer.
   const room = height - out.length - 1 - lower.length - 1

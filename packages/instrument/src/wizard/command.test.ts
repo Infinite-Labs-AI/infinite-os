@@ -555,6 +555,110 @@ describe("the outro and run.end.reportPath show only THIS run's report (O1-05)",
   })
 })
 
+describe("final verify F5: the closing screen waits for a key in a terminal, and only there", () => {
+  const RUN_A = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+  const writeReport: StepBehaviour = async (ctx, deps) => {
+    const report = deps.report.build({
+      runId: ctx.state.get().runId!,
+      tagVersion: deps.tagVersion,
+      site: { repoLabel: "github.com/acme/acme-store", productionHost: "acme-store.com" },
+      columns: ctx.state.get().report,
+      provenLivePending: "deploy",
+      day7: null,
+      notes: []
+    })
+    mkdirSync(join(ctx.root, ".infinite/wizard"), { recursive: true })
+    writeFileSync(join(ctx.root, ".infinite/wizard/report.json"), JSON.stringify(deps.report.payload(report)))
+    return { kind: "ok", status: "report written" }
+  }
+  const setRunId: StepBehaviour = async (ctx) => {
+    ctx.state.update((state) => {
+      state.runId = RUN_A
+    })
+    return { kind: "ok", status: "run created" }
+  }
+
+  /** The fake wiring, with a UI that has a closing screen: `calls` records the order, `press()` is the key. */
+  function closingUi(steps: Partial<Record<WizardStepId, StepBehaviour>>) {
+    const spy = fakeWiring(steps)
+    const calls: string[] = []
+    let press: () => void = () => {}
+    let outro: string | null = null
+    const base = spy.wiring.createUi.bind(spy.wiring)
+    spy.wiring.createUi = (kind, store, io) => {
+      const ui = base(kind, store, io)
+      return {
+        start: (started) => ui.start(started),
+        stop() {
+          calls.push("stop")
+          ui.stop()
+        },
+        waitForDismiss() {
+          outro = store.getSnapshot().outro
+          calls.push("wait")
+          return new Promise<void>((resolve) => {
+            press = () => {
+              calls.push("key")
+              resolve()
+            }
+          })
+        }
+      }
+    }
+    return { wiring: spy.wiring, calls, press: () => press(), outro: () => outro }
+  }
+  const until = async (condition: () => boolean) => {
+    for (let tries = 0; tries < 400 && !condition(); tries += 1) await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+
+  it("TTY: the outro is set, the lock is released, and the UI stops only after the key", async () => {
+    const root = tempDir("wizard-cmd-")
+    const { io } = fakeIo(root, { tty: true })
+    const ui = closingUi({ agent: setRunId, done: writeReport })
+    let exit: number | null = null
+    const running = runWizardCommand([], { io, wiring: ui.wiring, signals: fakeSignals() }).then((code) => (exit = code))
+    await until(() => ui.calls.includes("wait"))
+    // The screen is up and nothing has closed it: the command has not returned and the UI has not stopped.
+    expect(ui.calls).toEqual(["wait"])
+    expect(exit).toBeNull()
+    // The closing text: the verdict (this run is not checked live yet), the run's ONE id and how long it took.
+    const displayId = JSON.parse(readFileSync(join(root, ".infinite/wizard/state.json"), "utf8")).displayId as string
+    expect(ui.outro()!.split("\n\n")[0]!.replace(/\s+/g, " ")).toBe(`◆ acme-store.com: set up in the pull request · not checked live yet (waiting for the deploy) · run ${displayId} · under a minute`)
+    expect(ui.outro()).not.toContain(RUN_A.slice(0, 8))
+    // A closing screen left open never blocks another run in this repo.
+    const lock = await acquireRunLock(root)
+    expect(lock.ok).toBe(true)
+    if (lock.ok) await lock.handle.release()
+    ui.press()
+    expect(await running).toBe(0)
+    expect(ui.calls).toEqual(["wait", "key", "stop"])
+  })
+
+  it("negative: --json never waits (same terminal), and a run with no report has no closing screen", async () => {
+    const jsonRoot = tempDir("wizard-cmd-")
+    const json = closingUi({ agent: setRunId, done: writeReport })
+    expect(await runWizardCommand(["--json"], { io: fakeIo(jsonRoot, { tty: true }).io, wiring: json.wiring, signals: fakeSignals() })).toBe(0)
+    expect(json.calls).toEqual(["stop"])
+
+    const parkedRoot = tempDir("wizard-cmd-")
+    const parked = closingUi({ plan: consentPlanStep })
+    expect(await runWizardCommand(["--yes"], { io: fakeIo(parkedRoot, { tty: true }).io, wiring: parked.wiring, signals: fakeSignals() })).toBe(3)
+    expect(parked.calls).toEqual(["stop"])
+  })
+
+  it("a signal while the closing screen is up ends the wait (the run never hangs on a key)", async () => {
+    const root = tempDir("wizard-cmd-")
+    const { io } = fakeIo(root, { tty: true })
+    const ui = closingUi({ agent: setRunId, done: writeReport })
+    const signals = fakeSignals()
+    const running = runWizardCommand([], { io, wiring: ui.wiring, signals })
+    await until(() => ui.calls.includes("wait"))
+    signals.fire()
+    await running
+    expect(ui.calls).toEqual(["wait", "stop"])
+  })
+})
+
 describe("nested mode refuses --consent-mode: consent is never the parent agent's answer (O1-02)", () => {
   it("nested + --consent-mode → exit 2 with the reason, and nothing runs", async () => {
     const root = tempDir("wizard-cmd-")

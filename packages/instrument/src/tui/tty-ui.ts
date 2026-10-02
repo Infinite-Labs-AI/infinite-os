@@ -74,7 +74,15 @@ export class TtyUi implements WizardUi {
     this.styles = makeStyles(colorEnabled(options.env, options.stdout.isTTY === true))
     this.keyboard = new RawKeyboard(options.stdin, {
       onKey: (key) => this.handleKey(key),
-      onInterrupt: () => (options.onInterrupt ?? defaultInterrupt)()
+      onInterrupt: () => {
+        // On the closing screen the run is already over: Ctrl+C closes the screen like Q, it does not interrupt.
+        if (this.dismissWaiters.length > 0) {
+          this.dismissed = true
+          this.resolveDismiss()
+          return
+        }
+        ;(options.onInterrupt ?? defaultInterrupt)()
+      }
     })
   }
 

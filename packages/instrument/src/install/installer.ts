@@ -269,7 +269,7 @@ export class WizardInstaller implements Installer {
         previousManifest: phase.manifest
       })
       if (draft.mode !== "brief" && draft.blockers.length === 0) {
-        serverLane = { targetLabel: draft.targetLabel ?? draft.mode, installPackages: [...(draft.installPackages ?? [])] }
+        serverLane = { targetLabel: draft.targetLabel ?? (draft.mode === "next-middleware" ? "Next.js middleware" : draft.mode), installPackages: [...(draft.installPackages ?? [])] }
       }
     }
     let npm: WizardScanResult["npm"] = null

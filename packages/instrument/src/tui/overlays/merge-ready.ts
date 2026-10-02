@@ -7,11 +7,15 @@ export const mergeReadyOverlay: Overlay<"merge-ready", Record<string, never>> = 
   kind: "merge-ready",
   init: () => ({}),
   render(payload, _state, ctx) {
+    // `summary`: the first line is the sentence, every further line a detail row (see `mergeSummary`).
+    const [sentence = "", ...details] = payload.summary.split("\n").map((line) => ctx.sanitize(line, OVERLAY_TEXT_CAPS.question)).filter(Boolean)
+    // A host with no pull request (number 0) has nothing "ready" to name: the sentence is the whole question.
+    const question = payload.number > 0 ? `Pull request #${payload.number} is ready. ${sentence} Merge it to ship.` : sentence
     return {
       heading: "Ready to ship",
-      question: `Pull request #${payload.number} is ready. ${ctx.sanitize(payload.summary, OVERLAY_TEXT_CAPS.question)} Merge it to ship.`,
-      body: [ctx.styles.info(ctx.sanitize(payload.prUrl, OVERLAY_TEXT_CAPS.line))],
-      keys: ["ENTER open on GitHub", "ESC later"]
+      question: question.replace(/\s+/g, " ").trim(),
+      body: [...details.map((line) => `· ${line}`), ctx.styles.info(ctx.sanitize(payload.prUrl, OVERLAY_TEXT_CAPS.line))],
+      keys: payload.number > 0 ? ["ENTER open on GitHub", "ESC later"] : ["ENTER got it", "ESC later"]
     }
   },
   onKey(_payload, state, key) {

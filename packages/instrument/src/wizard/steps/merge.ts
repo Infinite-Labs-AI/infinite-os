@@ -47,6 +47,27 @@ async function saveMerge(ctx: WizardContext, deps: WizardDeps, runId: string, me
   return { kind: "ok", status: line }
 }
 
+/**
+ * The `merge-ready` summary (§3d.3 `summary`, one string): its FIRST line is the sentence that goes between
+ * "Pull request #N is ready." and "Merge it to ship." (the overlay adds both, so they are never said here);
+ * every further line is a detail row shown under it (the design's "branch → base" and "N files changed").
+ */
+export function mergeSummary(input: { sentence: string; branch: string; base: string; filesChanged: number | null; checks: string }): string {
+  const files = input.filesChanged === null ? null : `${input.filesChanged} file${input.filesChanged === 1 ? "" : "s"} changed`
+  return [input.sentence, `${input.branch} → ${input.base}`, [files, input.checks].filter(Boolean).join(" · ")].filter(Boolean).join("\n")
+}
+
+/** How many files the pull request changes (base...head), or null when the diff cannot be read. */
+async function filesChanged(deps: WizardDeps, baseSha: string | null | undefined, headSha: string | null | undefined): Promise<number | null> {
+  if (!baseSha || !headSha) return null
+  try {
+    return ((await deps.git.diff(baseSha, headSha)).match(/^diff --git /gm) ?? []).length
+  } catch {
+    // A detail row only: the merge question is still asked without it.
+    return null
+  }
+}
+
 async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const runId = requireRunId(ctx)
   if (!runId) return { kind: "failed", code: "INF_WIZ_PR_CREATE_FAILED", message: "There is no run id yet.", next: "halt" }
@@ -80,7 +101,13 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const once = state.report.in_pr?.finishLine.each_tool_once?.state
   const reviewed = state.agent?.reviewer === "codex" ? "Reviewed by Codex" : state.agent?.reviewer === "claude_code" ? "Reviewed by Claude Code" : "No second review"
   const rehearsal = once === "pass" ? "rehearsal passed" : once === "problem" ? "rehearsal found a problem" : "rehearsal undetermined"
-  const summary = [`Pull request #${number} is ready. ${reviewed} · ${rehearsal}. Merge it to ship.`, requirement].filter(Boolean).join(" ")
+  const summary = mergeSummary({
+    sentence: [`${reviewed} · ${rehearsal}.`, requirement].filter(Boolean).join(" "),
+    branch: state.git.branch,
+    base: state.git.base,
+    filesChanged: await filesChanged(deps, state.git.baseSha, state.git.headSha),
+    checks: once === "pass" ? "rehearsal passed on the latest commit" : once === "problem" ? "the rehearsal found a problem" : "the rehearsal could not tell"
+  })
   sub(ctx, "merge", `Waiting for you to merge #${number}…`, "pending")
   const answer = await ctx.ask("merge-ready", { prUrl: pr.url, number, summary })
   if (answer !== "open") return parked(answer === "later" ? "You chose to merge later." : "The merge question was closed.", number)

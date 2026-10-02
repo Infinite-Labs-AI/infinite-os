@@ -558,36 +558,130 @@ function day7Text(report: ReportV2): string {
   return cell ? cellText(cell) : `${NULL_DISPLAY} (${REASON_TEXT.needs_7_days})`
 }
 
-function fit(text: string, width: number): string {
-  if (width <= 1) return text.slice(0, Math.max(0, width))
-  if (text.length <= width) return text.padEnd(width)
-  return `${text.slice(0, width - 1)}…`
+/** Plain word-wrap (the report's text has no styling): nothing is cut; a word wider than the room is hard-split. */
+function wrapPlain(text: string, width: number): string[] {
+  const room = Math.max(1, width)
+  const lines: string[] = []
+  let line = ""
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    let rest = word
+    while (rest.length > room) {
+      if (line) {
+        lines.push(line)
+        line = ""
+      }
+      lines.push(rest.slice(0, room))
+      rest = rest.slice(room)
+    }
+    if (!rest) continue
+    if (!line) line = rest
+    else if (line.length + 1 + rest.length <= room) line = `${line} ${rest}`
+    else {
+      lines.push(line)
+      line = rest
+    }
+  }
+  if (line || lines.length === 0) lines.push(line)
+  return lines
 }
 
-/** The terminal table. Below 100 columns each row is stacked (label, then one line per column). */
-export function renderTerminal(report: ReportV2, width: number): string {
+/** `first` + the wrapped text; the lines after the first start under the text (a hanging indent). */
+function hanging(first: string, text: string, width: number): string[] {
+  const indent = " ".repeat(first.length)
+  return wrapPlain(text, width - first.length).map((line, index) => `${index === 0 ? first : indent}${line}`.trimEnd())
+}
+
+export interface TerminalReportOptions {
+  /** The run's display id ("r-7f3c"): the ONE id the terminal shows (header bar, this title, the exit line). */
+  displayId?: string | null
+  /** From the run's start to now; shown as "9 min". Absent = not shown. */
+  durationMs?: number | null
+}
+
+/** "under a minute", "9 min", "3 h", "2 days": how long the run took, in the largest honest unit. */
+export function durationWords(ms: number): string {
+  const minutes = Math.round(ms / 60_000)
+  if (ms < 60_000) return "under a minute"
+  if (minutes < 120) return `${minutes} min`
+  const hours = Math.round(minutes / 60)
+  if (hours < 48) return `${hours} h`
+  return `${Math.round(hours / 24)} days`
+}
+
+/**
+ * The closing verdict, from the "Proven live" column only (the design's outro headline, said only when this run's
+ * report supports it). It never says "verified" or "proven" (§3i.3 rule 3 keeps those for cells with a receipt):
+ * - the column was not measured (not merged, not deployed, `--no-prove`) → "not checked live yet";
+ * - a finish-line check is a problem there → "N problems left on the live site";
+ * - no problem, and the real visit gave proof for every installed tool → "collects analytics properly now"
+ *   (+ how many checks still wait for real visitors or the 7-day check-in);
+ * - no problem but no such proof → "no problem found, but the live test could not confirm every tool".
+ */
+export function verdictLine(report: ReportV2): string {
+  const site = report.site.productionHost ?? report.site.repoLabel
+  const column = report.columns.proven_live
+  if (column.measuredAt === null || column.pending !== null) {
+    const why = column.pending === "deploy" ? " (waiting for the deploy)" : column.pending === null ? "" : " (open Infinite, or run npx infinite-tag again, to finish the live checks)"
+    return `${site}: set up in the pull request · not checked live yet${why}`
+  }
+  const cells = report.finishLine.map((line) => ({ id: line.id, cell: line.cells.proven_live }))
+  const problems = cells.filter((entry) => entry.cell.state === "problem").length
+  if (problems > 0) return `${site}: ${problems} problem${problems === 1 ? "" : "s"} left on the live site (the "${COLUMN_LABELS.proven_live}" column says which)`
+  const proof = cells.find((entry) => entry.id === "proof_from_real_visit")?.cell.state === "pass"
+  if (!proof) return `${site}: no problem found, but the live test could not confirm every tool`
+  const waiting = cells.filter((entry) => entry.cell.state === "pending" || entry.cell.state === "undetermined").length
+  return `${site} collects analytics properly now${waiting > 0 ? ` · ${waiting} check${waiting === 1 ? "" : "s"} still wait${waiting === 1 ? "s" : ""} for real visitors or the 7-day check-in` : ""}`
+}
+
+/**
+ * Below this many columns each row is stacked (label, then one line per column); from it, a 3-column table.
+ * 140 gives each column 34 characters, so most cells stay on one line; a 120-column terminal reads better stacked.
+ */
+export const TERMINAL_TABLE_MIN_COLUMNS = 140
+
+/**
+ * The terminal's closing text: the verdict line, then the before/after table. NOTHING is cut at any width (final
+ * verify F2: cells used to end in "…" at about 30 characters, which hid "of 14"): from 140 columns it is a
+ * 3-column table whose cells wrap inside their column; below that each row is stacked (the label, then one
+ * wrapped line per column). Notes and footnotes wrap too.
+ */
+export function renderTerminal(report: ReportV2, width: number, options: TerminalReportOptions = {}): string {
   const lines: string[] = []
+  const total = Math.max(20, Math.floor(width))
   const tableRows = report.rows.filter((row) => row.id !== "day7_checkin")
   const site = report.site.productionHost ?? report.site.repoLabel
-  lines.push(`Before and after · ${site} · run ${report.runId.slice(0, 8)}`)
-  if (width >= 100) {
-    const labelWidth = 26
-    const columnWidth = Math.max(16, Math.floor((width - labelWidth - 6) / 3))
-    lines.push([fit("", labelWidth), ...REPORT_COLUMN_IDS.map((column) => fit(COLUMN_LABELS[column], columnWidth))].join("  ").trimEnd())
+  // One id everywhere the user looks: the display id when the caller has it, else the run id's first 8.
+  const run = options.displayId ?? report.runId.slice(0, 8)
+  const took = options.durationMs === undefined || options.durationMs === null ? null : durationWords(options.durationMs)
+  lines.push(...hanging("◆ ", [verdictLine(report), `run ${run}`, ...(took ? [took] : [])].join(" · "), total))
+  lines.push("")
+  lines.push(...wrapPlain(`Before and after · ${site}`, total))
+  if (total >= TERMINAL_TABLE_MIN_COLUMNS) {
+    const gap = "  "
+    const labelWidth = Math.min(32, Math.max(...tableRows.map((row) => row.label.length)))
+    const columnWidth = Math.floor((total - labelWidth - gap.length * 3) / 3)
+    const tableLine = (cells: readonly string[][]) => {
+      const height = Math.max(...cells.map((cell) => cell.length))
+      for (let index = 0; index < height; index += 1) {
+        lines.push(cells.map((cell, column) => (cell[index] ?? "").padEnd(column === 0 ? labelWidth : columnWidth)).join(gap).trimEnd())
+      }
+    }
+    tableLine([[""], ...REPORT_COLUMN_IDS.map((column) => wrapPlain(COLUMN_LABELS[column], columnWidth))])
     for (const row of tableRows) {
-      lines.push([fit(row.label, labelWidth), ...REPORT_COLUMN_IDS.map((column) => fit(cellText(row.cells[column]), columnWidth))].join("  ").trimEnd())
+      tableLine([wrapPlain(row.label, labelWidth), ...REPORT_COLUMN_IDS.map((column) => wrapPlain(cellText(row.cells[column]), columnWidth))])
     }
   } else {
-    const inner = Math.max(10, width - 4)
+    // The values line up under each other when the screen has the room for it.
+    const labelPad = total >= 60 ? Math.max(...REPORT_COLUMN_IDS.map((column) => COLUMN_LABELS[column].length)) + 2 : 0
     for (const row of tableRows) {
-      lines.push(fit(row.label, width).trimEnd())
+      lines.push(...wrapPlain(row.label, total))
       for (const column of REPORT_COLUMN_IDS) {
-        lines.push(`  ${fit(`${COLUMN_LABELS[column]}: ${cellText(row.cells[column])}`, inner)}`.trimEnd())
+        lines.push(...hanging(`  ${`${COLUMN_LABELS[column]}:`.padEnd(labelPad)} `, cellText(row.cells[column]), total))
       }
     }
   }
-  lines.push(fit(`7 days later: ${day7Text(report)}`, width).trimEnd())
-  for (const note of notesAndFootnotes(report)) lines.push(fit(note, width).trimEnd())
+  lines.push(...hanging("7 days later: ", day7Text(report), total))
+  for (const note of notesAndFootnotes(report)) lines.push(...hanging("", note, total))
   return lines.join("\n")
 }
 

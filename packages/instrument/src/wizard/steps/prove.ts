@@ -32,7 +32,7 @@ import {
   type TestTool
 } from "../contracts/test-engine.js"
 import { bridgeErrorCode, bridgeErrorState } from "../bridge-errors.js"
-import { gradeWords } from "../before-column.js"
+import { gradeReasonCode, gradeWords } from "../before-column.js"
 import { buildColumn, type ColumnFact, type RowCellInput } from "../report.js"
 
 /** How often the deploy status is read, and how long `prove` waits before parking (the desktop watcher continues). */
@@ -258,7 +258,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
     for (const tool of tools) {
       const grade = visit.grades[tool]
       if (!grade) continue
-      const reason = grade.reason ?? ""
+      const reason = gradeReasonCode(grade)
       const once: ColumnFact["state"] =
         grade.state === "pass" ? "pass" : grade.state === "problem" ? (ONCE_REASONS.has(reason) ? "problem" : "undetermined") : grade.state === "info" ? "info" : "undetermined"
       // Fixed words only (never the grader's free-text reason): `gradeWords` is the live_today column's wording.
@@ -267,7 +267,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
         grade.state === "pass" ? "pass" : grade.state === "problem" && ID_REASONS.has(reason) ? "problem" : "undetermined"
       facts.push({ input: "real_visit.ids_vs_keys", state: ids, display: `${TOOL_LABELS[tool]}: ${ids === "pass" ? "the connected ID" : ids === "problem" ? "an ID that is not the connection's" : "not determinable"}`, at, checkId: grade.checkId })
     }
-    const piiFlagged = Object.values(visit.grades).some((grade) => grade.state === "problem" && grade.reason === "no_pii")
+    const piiFlagged = Object.values(visit.grades).some((grade) => grade.state === "problem" && gradeReasonCode(grade) === "no_pii")
     const piiCount = visit.result.pii.reduce((sum, item) => sum + item.count, 0)
     facts.push({
       input: "real_visit.pii",
@@ -372,7 +372,7 @@ function ga4PageViewsRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect:
   // A tool the grader could not grade (held by consent, a bot-flagged window, …) is UNKNOWN, never a
   // problem: what this visit did not see says nothing about the site.
   if (!grade || grade.state === "undetermined") {
-    return { value: null, state: "undetermined", source: "desktop_test", at, checkId: "ga4_seen_leaving", reason: reportReason(grade?.reason) }
+    return { value: null, state: "undetermined", source: "desktop_test", at, checkId: "ga4_seen_leaving", reason: reportReason(gradeReasonCode(grade)) }
   }
   const sent = views.some((event) => typeof event.status === "number" && event.status >= 200 && event.status < 300)
   return {
@@ -415,7 +415,7 @@ function posthogRouteRow(lane: LaneReceipt, visit: ProvenColumnInput["visit"], e
   const found = lane.state === "verified"
   // The visit saw no PostHog event: the route is unknown (never "direct").
   if (viaProxy === null) {
-    return { value: null, state: "undetermined", source: "cloud_receipt", at, checkId: "posthog_distinct_id_receipt", reason: reportReason(visit.grades.posthog?.reason) }
+    return { value: null, state: "undetermined", source: "cloud_receipt", at, checkId: "posthog_distinct_id_receipt", reason: reportReason(gradeReasonCode(visit.grades.posthog)) }
   }
   const route = viaProxy ? "ingest" : "direct"
   return {

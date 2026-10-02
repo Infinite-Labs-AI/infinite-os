@@ -157,7 +157,8 @@ describe("plan overlay", () => {
 
   it("renders decisions, measured values and the line marks", () => {
     const view = OVERLAYS.plan.render(payload(null), OVERLAYS.plan.init(payload(null)), ctx())
-    const text = stripAnsi([view.question, ...view.body].join("\n"))
+    // A plan line wider than the box wraps under its text, so the words are compared across rows.
+    const text = stripAnsi([view.question, ...view.body].join("\n")).replace(/\n {6}/g, " ")
     expect(text).toContain("Consent: — choose it")
     expect(text).toContain("Conversions: start_trial · signup")
     expect(text).toContain("(2 page views per visit · dry load)")

@@ -23,19 +23,22 @@ function frame(change: Partial<FrameInput> = {}): string[] {
 const plain = (lines: string[]) => lines.map((line) => stripAnsi(line).replace(/\s+$/, "")).join("\n")
 
 describe("renderFrame", () => {
-  it("120 columns: Learn card beside the 13-row step list, the narration and the last 5 subs", () => {
+  it("120 columns: Learn card beside the 13-row step list, the narration and the sub-statuses", () => {
     const lines = frame()
     expect(plain(lines)).toMatchSnapshot()
     const text = plain(lines)
     expect(text).toContain("The agent's checklist")
     expect(text).toContain("Claude Code › The sign-up route")
-    // The last 5 sub-statuses only (6 were emitted).
-    expect(text).not.toContain("Job 1/7")
-    expect(text).toContain("Job 2/7")
+    // A 40-row terminal has the room for every sub-status the store keeps (6 were emitted, 8 are kept).
+    expect(text).toContain("Job 1/7")
+    // A 24-row one keeps the last 5 only.
+    const short = plain(frame({ height: 24 }))
+    expect(short).not.toContain("Job 1/7")
+    expect(short).toContain("Job 2/7")
     for (const line of lines) expect(visibleWidth(line)).toBeLessThan(120)
   })
 
-  it("70 columns: the Learn card is dropped and nothing wraps", () => {
+  it("70 columns: the Learn card is dropped and no line runs past the screen", () => {
     const lines = frame({ width: 70 })
     expect(plain(lines)).toMatchSnapshot()
     expect(plain(lines)).not.toContain("The agent's checklist")

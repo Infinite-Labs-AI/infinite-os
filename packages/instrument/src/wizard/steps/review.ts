@@ -108,6 +108,9 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
       inputs
     })
     sub(ctx, "review", `${AGENT_LABEL[reviewer]} is reviewing (read-only)…`, "pending")
+    // The headline names who is working NOW (terminal QA #19: the worker's last line from the jobs or fix turn
+    // stayed above "Codex is reviewing").
+    ctx.emit.emit("narrate", { agent: reviewer, role: "reviewer", text: round > 1 ? "Reading the fix commit (read-only)" : "Reading the pull request (read-only)" })
     let result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief })
     if ("error" in result && result.error === "unparseable") {
       result = await deps.agents.review({
@@ -141,8 +144,19 @@ async function postRound(session: Session, review: ReviewResult, reviewer: Agent
     const located = threads.map((thread) => `- \`${thread.path}:${thread.line}\` ${thread.body.replace(/\n+/g, " ")}`).join("\n")
     await deps.fs.writeTextAtomic(path, `${previous}${previous ? "\n\n" : ""}${body}${located ? `\n\n${located}` : ""}\n`, 0o600)
   }
-  const n = review.findings.length
-  sub(ctx, "review", n === 0 ? `${AGENT_LABEL[reviewer]}: no comments` : `${AGENT_LABEL[reviewer]} left ${n} comment${n === 1 ? "" : "s"}`, n === 0 ? "ok" : "info")
+  const line = reviewFoundLine(AGENT_LABEL[reviewer], review.findings.length, round)
+  sub(ctx, "review", line.text, line.tone)
+}
+
+/**
+ * What the reviewer found, said so a later round never reads as "found nothing at all" (terminal QA #18: after
+ * a fix, the re-review's "Codex: no comments" was the only line left on screen about the review).
+ */
+export function reviewFoundLine(reviewer: string, findings: number, round: number): { text: string; tone: "ok" | "info" } {
+  if (findings === 0) {
+    return { text: round > 1 ? `${reviewer} re-checked the fix: no new comments` : `${reviewer} reviewed the pull request: nothing to change`, tone: "ok" }
+  }
+  return { text: `${reviewer} left ${findings} ${round > 1 ? "new " : ""}comment${findings === 1 ? "" : "s"}`, tone: "info" }
 }
 
 /** The review as the ledger keeps it: every reviewer string passed through the scan (paths included). */
@@ -233,7 +247,7 @@ async function gatherItems(session: Session, review: ReviewResult, round: number
   }
   for (const item of items) item.threadId = ownThreadByFinding.get(item.findingId ?? "") ?? null
   const strangers = session.untrusted.length
-  if (strangers > 0) sub(ctx, "review", `${strangers} comment(s) from people outside the repo are shown, not acted on`, "info")
+  if (strangers > 0) sub(ctx, "review", `${strangers} comment${strangers === 1 ? "" : "s"} from people outside the repo ${strangers === 1 ? "is" : "are"} shown, not acted on`, "info")
   if (teammateThreads.length > 0) {
     const answer = await ctx.ask("teammate-comments", {
       comments: teammateThreads.map(({ thread, text }) => ({
@@ -733,7 +747,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
           const synced = await syncHead(session, prevHead, commit.sha)
           if (!("head" in synced)) return synced
           fixSha = synced.head
-          sub(ctx, "review", `${AGENT_LABEL[worker]} fixed ${items.length} · new commit ${commit.sha.slice(0, 7)}`, "ok")
+          sub(ctx, "review", `${AGENT_LABEL[worker]} fixed ${items.length} comment${items.length === 1 ? "" : "s"} · new commit ${commit.sha.slice(0, 7)}`, "ok")
           const checksResult = await requiredChecksResult(session, prepared.runId)
           if (checksResult) finalItems = deps.registry.apply(finalItems, [checksResult], prepared.runId)
           for (const [index, decision] of fixes.entries()) {
