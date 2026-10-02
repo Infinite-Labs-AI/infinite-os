@@ -39,8 +39,8 @@ export const BOX_ROWS = 2;
  * A box with the title in its top border (r4 `boxed()`):
  * `┌─ Title ───┐`, `│ body │`, `└───┘`, the borders in `tone` and the title
  * bold white. A body line wider than the inside is cut (renderers wrap to
- * `width - 4` first). A title too long for the border is cut the way r4's
- * `trunc()` cuts a line: its last characters become `…` and the corner goes.
+ * `width - 4` first). A title too long for the border is cut to end in `…`,
+ * always leaving ` ─┐`, so the box is never open at its top right.
  */
 export function cardBox(
   title: string,
@@ -62,21 +62,15 @@ export function cardBox(
 
 function topBorder(title: string, outer: number, tone: CardTone, ctx: PaintCtx): string {
   const border = (text: string) => paint(text, tone, ctx);
-  if (!title) {
+  // ┌─ + " title " + at least one rule cell + ┐: the title gets the width less 6.
+  const room = outer - 6;
+  if (!title || room < 1) {
     return border(`┌${"─".repeat(outer - 2)}┐`);
   }
-  const titled = ` ${title} `;
-  const cells = displayWidth(titled);
-  if (cells <= outer - 4) {
-    // ┌─ + " title " + rule + ┐, exactly `outer` wide.
-    return `${border("┌─")} ${paint(title, "b", ctx)} ${border(`${"─".repeat(outer - 3 - cells)}┐`)}`;
-  }
-  // r4 trunc(): the segment that does not fit is cut to k−1 cells + "…", and nothing follows it.
-  if (cells === outer - 3) {
-    // The title fits but its rule does not: the rule's one cell becomes the "…".
-    return `${border("┌─")} ${paint(title, "b", ctx)} ${border("…")}`;
-  }
-  return `${border("┌─")} ${paint(`${cutCells(titled, outer - 3).slice(1)}…`, "b", ctx)}`;
+  // A title too long for the border is cut and ends in "…", so the box always
+  // closes (r4's trunc() would drop the corner, leaving the box open: run-r2 MUST 3).
+  const shown = displayWidth(title) <= room ? title : `${cutCells(title, room - 1)}…`;
+  return `${border("┌─")} ${paint(shown, "b", ctx)} ${border(`${"─".repeat(outer - 5 - displayWidth(shown))}┐`)}`;
 }
 
 /** The first `width` cells of plain text (no ellipsis). */

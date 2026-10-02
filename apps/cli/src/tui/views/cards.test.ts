@@ -194,19 +194,31 @@ describe("card parts (r4 boxed(), lbl(), K(), PK())", () => {
     expect(lines.every((line) => displayWidth(line) === 20)).toBe(true);
   });
 
-  it("a title too long for the border is cut the way r4's trunc() cuts it", () => {
+  it("a title too long for the border is cut so the box always closes: ` ─┐` stays (run-r2 MUST 3)", () => {
     const fits = cardBox("Paused ad “Hook B” · Agent proposed · You approved", [], 60, "green", { color: true, theme })[0]!;
     expect(segs(fits)).toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B” · Agent proposed · You approved"], ["", " "], ["green", "─────┐"]]);
     const long = "Paused ad “Hook B · founder POV” · Agent proposed · You approved";
-    // At 60: the title passes the border, so it is cut to fit and ends in "…" (golden flow-pause-03--c60).
+    // At 60 the title passes the border: it is cut to the card width less 6 and ends in "…", then ` ─┐`.
     expect(segs(cardBox(long, [], 60, "green", { color: true, theme })[0]!))
-      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B · founder POV” · Agent proposed · You …"]]);
-    // At 69 the title fits but its rule does not: the rule's one cell is the "…".
+      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B · founder POV” · Agent proposed · Y…"], ["", " "], ["green", "─┐"]]);
+    // At 69 the title fits but its rule would not: it is cut by one more cell, so the corner still shows.
     expect(segs(cardBox(long, [], 69, "green", { color: true, theme })[0]!))
-      .toEqual([["green", "┌─"], ["", " "], ["b", long], ["", " "], ["green", "…"]]);
+      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B · founder POV” · Agent proposed · You approv…"], ["", " "], ["green", "─┐"]]);
     for (const width of [20, 40, 60, 69, 74]) {
-      expect(displayWidth(cardBox(long, [], width, "green", { color: true, theme })[0]!)).toBe(width);
+      const top = cardBox(long, [], width, "green", { color: true, theme })[0]!;
+      expect(displayWidth(top)).toBe(width);
+      expect(top.replace(/\u001b\[[0-9;]*m/gu, "").endsWith("─┐"), `${width}`).toBe(true);
     }
+  });
+
+  it("a 90-char title on a 74-wide card still ends its top row with ┐ (live S4 receipt, run-r2 MUST 3)", () => {
+    const title = `Paused ad “${"Founder story, 30s · ".repeat(3)}” · Proposed by the agent · approved by You`.slice(0, 90);
+    expect([...title].length).toBe(90);
+    const [top, , bottom] = cardBox(title, ["x"], 74, "green", { color: false, theme });
+    expect(displayWidth(top!)).toBe(74);
+    expect(top!.endsWith(" ─┐")).toBe(true);
+    expect(top!.startsWith("┌─ Paused ad")).toBe(true);
+    expect(displayWidth(bottom!)).toBe(74);
   });
 
   it("field rows pad a dim label to 9, and before → after reads on, a dim arrow, PAUSED in bold", () => {
@@ -457,7 +469,8 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     const rows = cardRows(detail(view, { width: 69, caps: OPEN })).map(segs);
     const { blank, bottom } = box(69, "green");
     expect(rows).toEqual([
-      [["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B · founder POV” · Agent proposed · You approved"], ["", " "], ["green", "…"]],
+      // r4 overruns the 69-wide card by one cell here (N2); the CLI cuts the title so the box closes (run-r2 MUST 3).
+      [["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B · founder POV” · Agent proposed · You approv…"], ["", " "], ["green", "─┐"]],
       row(69, "green", ["dim", "status"], ["", "   on "], ["dim", "→"], ["", " "], ["b", "PAUSED"]),
       row(69, "green", ["dim", "Stopped spending at 10:42"]),
       row(69, "green", ["dim", "Clears the matching Home card"]),
