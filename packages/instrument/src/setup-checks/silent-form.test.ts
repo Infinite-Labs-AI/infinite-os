@@ -87,7 +87,7 @@ describe("a form that submits and emits nothing", () => {
   })
 
   it("recognises infinite-tag's own conversion helpers as analytics calls (lane O9)", () => {
-    for (const call of ["infiniteTrack('sign_up')", "infiniteTrackThenNavigate('sign_up', '/thanks')", "infiniteMetaMirror(res.metaEventId)", "await reportInfiniteOutcome({ type: 'lead' })"]) {
+    for (const call of ["infiniteTrack('sign_up')", "infiniteTrackThenNavigate('sign_up', '/thanks')", "infiniteMetaMirror(res.metaEventId)", "await reportInfiniteOutcome({ type: 'lead' })", "await postInfiniteOutcome({ type: 'lead' })"]) {
       const result = check("src/components/contact.tsx", `${LEAD_FORM}\nfunction onSubmit() { ${call} }`)
       expect(result.findings[0]!.code).toBe("INF_SETUP_FORM_UNDETERMINED")
     }
