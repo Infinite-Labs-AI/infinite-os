@@ -250,7 +250,7 @@ if (group === "api") {
   }
   const deployments = /^repos\/\{owner\}\/\{repo\}\/deployments\?sha=([0-9a-f]{40})/.exec(path)
   if (deployments) {
-    out(state.deployments.filter((row) => row.sha === deployments[1]).map((row) => ({ id: row.id, environment: row.environment, creator: { login: row.creator } })))
+    out(state.deployments.filter((row) => row.sha === "*" || row.sha === deployments[1]).map((row) => ({ id: row.id, environment: row.environment, creator: { login: row.creator } })))
   }
   const statuses = /^repos\/\{owner\}\/\{repo\}\/deployments\/(\d+)\/statuses/.exec(path)
   if (statuses) {

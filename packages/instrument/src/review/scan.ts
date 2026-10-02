@@ -216,9 +216,10 @@ export function collectEnvLiterals(dirs: readonly string[]): ScanLiteral[] {
       for (const line of text.split(/\r?\n/)) {
         const match = /^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*=\s*(.*)$/.exec(line)
         if (!match) continue
-        let value = match[1]!.trim()
-        if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1)
-        else value = value.replace(/\s+#.*$/, "")
+        const raw = match[1]!.trim()
+        // A quoted value ends at its closing quote (a `# comment` may follow); an unquoted one at ` #`.
+        const quoted = /^(["'])(.*?)\1/.exec(raw)
+        const value = quoted ? quoted[2]! : raw.replace(/\s+#.*$/, "")
         if (value.length < 8 || /^[a-z]+$/.test(value) || /^(true|false)$/i.test(value) || seen.has(value)) continue
         seen.add(value)
         out.push({ value, kind: "env_value" })
