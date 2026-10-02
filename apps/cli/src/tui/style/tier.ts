@@ -28,7 +28,8 @@ const TRUECOLOR_PROGRAMS = new Set(["vscode", "WezTerm", "ghostty"]);
  * 4. `FORCE_COLOR=0|1|2|3` → plain / 16 / 256 / truecolor. `0` turns chalk (and
  *    so stock Ink) to level 0, which drops bold and inverse too, so `mono` chips
  *    would vanish; `plain` keeps them readable as `[k]` brackets.
- * 5. A light background (`COLORFGBG`) → `16`, so the user's palette keeps contrast.
+ * 5. A light background (`INFINITE_BACKGROUND`, set by the OSC 11 probe or the
+ *    user, else `COLORFGBG`) → `16`, so the user's palette keeps contrast.
  * 6. `COLORTERM=truecolor|24bit` → truecolor.
  * 7. `TMUX` (without step 6) → `256`: tmux drops truecolor backgrounds unless configured.
  * 8. `TERM` kitty/ghostty/wezterm, `TERM_PROGRAM` iTerm.app ≥ 3, vscode, WezTerm, ghostty → truecolor.
@@ -103,6 +104,11 @@ export function tierHasColor(tier: Tier): boolean {
  * others. Background 7 or 9–15 is a light one.
  */
 function hasLightBackground(env: NodeJS.ProcessEnv): boolean {
+  // INFINITE_BACKGROUND: the OSC 11 probe's answer (style/background.ts), or the user's own.
+  const probed = env.INFINITE_BACKGROUND?.trim().toLowerCase();
+  if (probed === "light" || probed === "dark") {
+    return probed === "light";
+  }
   const parts = env.COLORFGBG?.split(";") ?? [];
   const bg = Number.parseInt(parts.at(-1) ?? "", 10);
   return parts.length >= 2 && (bg === 7 || (bg >= 9 && bg <= 15));

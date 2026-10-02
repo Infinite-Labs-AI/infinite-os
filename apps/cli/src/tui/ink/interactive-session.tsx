@@ -47,6 +47,7 @@ import {
 } from "../app/turn-store.js";
 import { TYPING_IDLE_MS } from "../config/timing.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
+import { detectTerminalBackground } from "../style/background.js";
 import { drawsToTerminal, syncInkColorLevel } from "../style/ink-level.js";
 import { colorEnabled, resolveTheme, type Theme } from "../theme.js";
 import type { Msg } from "../types.js";
@@ -320,9 +321,15 @@ export interface InkInteractiveSessionRunOptions extends InkInteractiveSessionAp
 export async function runInkInteractiveSession(options: InkInteractiveSessionRunOptions): Promise<void> {
   // No `columns` fallback to `output.columns` here: that froze the width at launch.
   // The app follows the live width itself; `options.columns` stays a test override.
-  // On a real terminal, Ink's chalk paints at our tier, not the level it sniffed.
+  const input = options.input ?? defaultInput;
   const output = options.output ?? defaultOutput;
-  const restoreColorLevel = drawsToTerminal(output) ? syncInkColorLevel((options.theme ?? resolveTheme()).tier) : () => {};
+  const onTerminal = drawsToTerminal(input) && drawsToTerminal(output);
+  // Before Ink mounts: a light profile gets the 16 tier (OSC 11 probe, SPEC §3.2).
+  if (onTerminal && !options.theme) {
+    await detectTerminalBackground(process.env, input, output);
+  }
+  // On a real terminal, Ink's chalk paints at our tier, not the level it sniffed.
+  const restoreColorLevel = onTerminal ? syncInkColorLevel((options.theme ?? resolveTheme()).tier) : () => {};
   try {
     const instance = render(
       <InkInteractiveSessionApp {...options} />,
@@ -330,7 +337,7 @@ export async function runInkInteractiveSession(options: InkInteractiveSessionRun
         exitOnCtrlC: false,
         patchConsole: false,
         stderr: options.errorOutput ?? defaultErrorOutput,
-        stdin: options.input ?? defaultInput,
+        stdin: input,
         stdout: output
       }
     );

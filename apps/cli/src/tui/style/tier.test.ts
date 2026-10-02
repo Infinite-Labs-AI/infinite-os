@@ -44,6 +44,13 @@ describe("resolveTier", () => {
     expect(resolveTier({ COLORFGBG: "0;15", FORCE_COLOR: "3" }, tty)).toBe("truecolor");
   });
 
+  it("takes the probed background (INFINITE_BACKGROUND) ahead of COLORFGBG", () => {
+    expect(resolveTier({ INFINITE_BACKGROUND: "light", COLORTERM: "truecolor" }, tty)).toBe("16");
+    expect(resolveTier({ INFINITE_BACKGROUND: "light", TERM_PROGRAM: "Apple_Terminal" }, tty)).toBe("16");
+    expect(resolveTier({ INFINITE_BACKGROUND: "dark", COLORFGBG: "0;15", COLORTERM: "truecolor" }, tty)).toBe("truecolor");
+    expect(resolveTier({ INFINITE_BACKGROUND: "light", FORCE_COLOR: "3" }, tty)).toBe("truecolor");
+  });
+
   it("finds truecolor from COLORTERM, TERM and TERM_PROGRAM", () => {
     expect(resolveTier({ COLORTERM: "truecolor" }, tty)).toBe("truecolor");
     expect(resolveTier({ COLORTERM: "24bit" }, tty)).toBe("truecolor");
