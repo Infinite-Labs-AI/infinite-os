@@ -55,8 +55,9 @@ export function imagesLines(view: ImagesViewLike, ctx: ViewRenderCtx): string[] 
 
   if (running) {
     lines.push(...paragraphIn(runningWords(body, view.cost, requested, ready + failed), ctx.width, "cyan", ctx));
-    if (items.length) lines.push("", ...itemLines(items, "", ctx));
-    if (link.length) lines.push("", ...link);
+    if (items.length) lines.push("", ...itemLines(items, "", ctx, true));
+    // On Infinite's model they land when made; a Codex run already shows where they go.
+    if (link.length && body.madeWith === "your_codex") lines.push("", ...link);
     return lines;
   }
   if (view.state === "partial") {
@@ -91,9 +92,13 @@ export function imagesLines(view: ImagesViewLike, ctx: ViewRenderCtx): string[] 
   return lines;
 }
 
-/** One row per image: `✓ 1  Explained` (its ratio after, in dim, once ready), a failure's reason after. */
-function itemLines(items: readonly Record<string, unknown>[], aspect: string, ctx: ViewRenderCtx): string[] {
+/**
+ * One row per image: `✓ 1  Explained` (its ratio after, in dim, once ready), a
+ * failure's reason after. While they are made, the first queued image says `· next`.
+ */
+function itemLines(items: readonly Record<string, unknown>[], aspect: string, ctx: ViewRenderCtx, making = false): string[] {
   const labels = items.map((item) => imageText(item.label, "—"));
+  const next = making ? items.findIndex((item) => item.status === "queued") : -1;
   const labelCells = Math.min(24, Math.max(12, ...labels.map(displayWidth)));
   const room = Math.max(1, ctx.width - 2);
   return items.flatMap((item, index) => {
@@ -101,7 +106,9 @@ function itemLines(items: readonly Record<string, unknown>[], aspect: string, ct
     const label = labels[index] ?? "—";
     const failure = item.status === "failed" ? imageText(item.failureWords) : "";
     const after = [aspect, failure ? `· ${failure}` : ""].filter(Boolean).join("  ");
-    const name = aspect ? padEndCells(`${index + 1}  ${label}`, labelCells + 5) : `${index + 1}  ${label}${after ? "  " : ""}`;
+    // r4: `· 3  3 fixes · next`, one space before the dot.
+    const shown = index === next ? `${label} · next` : label;
+    const name = aspect ? padEndCells(`${index + 1}  ${shown}`, labelCells + 5) : `${index + 1}  ${shown}${after ? "  " : ""}`;
     const glyph = paint(mark.glyph, mark.token, ctx);
     const queued = item.status === "queued";
     if (displayWidth(name) + displayWidth(after) <= room) {

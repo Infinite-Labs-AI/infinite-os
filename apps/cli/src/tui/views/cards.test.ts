@@ -612,13 +612,27 @@ describe("images (r4 Images, Make creatives)", () => {
         { id: "i3", label: "3 fixes", status: "queued" }
       ], eta: { startedAtMs: 0, etaMs: 25000 } }
     });
-    expect(out.slice(0, 5)).toEqual([
+    expect(out).toEqual([
       [["cyan", "⠋ Making 3 images · ~25 s left"]],
       [],
       [["green", "✓"], ["", " 1  Explained"]],
       [["cyan", "⠋"], ["", " 2  Your audit"]],
-      [["dim", "· 3  3 fixes"]]
+      // The first queued image is the next one drawn.
+      [["dim", "· 3  3 fixes · next"]]
+      // On Infinite's model the link waits until they are made (r4 draws it only for a Codex run).
     ]);
+  });
+
+  it("only the first queued image says next", () => {
+    const out = detail({
+      state: "working",
+      body: { ...IMAGES.body, ready: 0, items: [
+        { id: "i1", label: "Explained", status: "drawing" },
+        { id: "i2", label: "Your audit", status: "queued" },
+        { id: "i3", label: "3 fixes", status: "queued" }
+      ] }
+    });
+    expect(out.slice(3, 5)).toEqual([[["dim", "· 2  Your audit · next"]], [["dim", "· 3  3 fixes"]]]);
   });
 
   it("with your Codex (flow-images-06): $0 to Infinite on the running line", () => {
@@ -627,6 +641,14 @@ describe("images (r4 Images, Make creatives)", () => {
       body: { ...IMAGES.body, ready: 1, model: "your ChatGPT", madeWith: "your_codex", items: [{ id: "i1", label: "Fire the agency", status: "done" }] }
     });
     expect(out[0]).toEqual([["cyan", "⠋ Making 3 images with your ChatGPT · $0 to Infinite"]]);
+  });
+
+  it("a Codex run shows where they land while it runs (flow-images-06)", () => {
+    const out = detail({
+      state: "working", cost: { usd: 0, estimate: false, whoPays: "your_chatgpt_plan" },
+      body: { ...IMAGES.body, ready: 1, model: "your ChatGPT", madeWith: "your_codex", items: [{ id: "i1", label: "Fire the agency", status: "done" }] }
+    });
+    expect(out[out.length - 1]).toEqual([["cyan u", "Open in Library ↗"]]);
   });
 
   it("partial (flow-images-03): the rows, ✗ red with its reason dim, then the link", () => {
