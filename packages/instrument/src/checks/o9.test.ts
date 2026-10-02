@@ -1,5 +1,6 @@
 // Lane O9's registration on the `CheckRunner.register` seam, against a fake runner (lane O6's real
 // runner is a sibling branch; I1 wires the two).
+import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
@@ -19,6 +20,20 @@ function app(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), "o9-checks-"))
   roots.push(root)
   for (const [file, contents] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, file)), { recursive: true })
+    writeFileSync(join(root, file), contents)
+  }
+  return root
+}
+
+/** A git repo whose HEAD holds `base`, with `working` written over it (uncommitted, as during a job). */
+function repo(base: Record<string, string>, working: Record<string, string>): string {
+  const root = app(base)
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, "-c", "user.email=t@example.test", "-c", "user.name=t", "-c", "commit.gpgsign=false", ...args], { stdio: "ignore" })
+  git("init", "-q")
+  git("add", "-A")
+  git("commit", "-q", "-m", "base")
+  for (const [file, contents] of Object.entries(working)) {
     mkdirSync(dirname(join(root, file)), { recursive: true })
     writeFileSync(join(root, file), contents)
   }
@@ -80,8 +95,83 @@ describe("O9 registration", () => {
     const drift = (await fns.posthog_config!({ appRoot: root, before }, ctx)) as Array<{ reason?: string; state: string }>
     expect(drift.map((result) => result.state)).toEqual(["problem"])
     expect(drift[0]!.reason).toContain("INF_SETUP_POSTHOG_PRIVACY_CHANGED")
-    const clean = (await fns.posthog_config!({ appRoot: root }, ctx)) as Array<{ state: string }>
+    const clean = (await fns.posthog_config!({ appRoot: root, before: [] }, ctx)) as Array<{ state: string }>
     expect(clean.map((result) => result.state)).toEqual(["pass"])
+  })
+
+  it("posthog_config reads the BEFORE config at the base commit with O3's input shape (review P1-7)", async () => {
+    const base = "posthog.init('phc_abcdefghijklmnop', { api_host: '/ingest', defaults: '2026-01-30' })"
+    const edited = "posthog.init('phc_abcdefghijklmnop', { api_host: '/ingest', defaults: '2026-01-30', autocapture: false, disable_session_recording: true })"
+    const root = repo({ "src/ph.ts": base }, { "src/ph.ts": edited })
+    const item = { id: "posthog_improve:proxy", allow: { files: ["src/ph.ts"], create: [] }, trigger: { finding: "posthog_not_proxied", evidence: [] } }
+    const fns = o9CheckFunctions({ version: "t", root })
+    const drift = (await fns.posthog_config!({ item, root, appRoot: root, runId: "run-9" }, ctx)) as Array<{ state: string; reason?: string }>
+    expect(drift.map((result) => result.state)).toEqual(["problem", "problem"])
+    expect(drift[0]!.reason).toContain("INF_SETUP_POSTHOG_PRIVACY_CHANGED")
+    // Negative: nothing changed since the base commit.
+    const same = repo({ "src/ph.ts": base }, {})
+    const unchanged = (await o9CheckFunctions({ version: "t", root: same }).posthog_config!({ item, root: same, appRoot: same, runId: "run-9" }, ctx)) as Array<{ state: string }>
+    expect(unchanged.map((result) => result.state)).toEqual(["pass"])
+    // No base commit → the drift verdict is undetermined, never a pass.
+    const noGit = app({ "src/ph.ts": edited })
+    const unknown = (await o9CheckFunctions({ version: "t", root: noGit }).posthog_config!({ item, root: noGit, appRoot: noGit, runId: "run-9" }, ctx)) as Array<{ state: string }>
+    expect(unknown.map((result) => result.state)).toContain("undetermined")
+    expect(unknown.map((result) => result.state)).not.toContain("pass")
+  })
+
+  it("adopted_init_guarded takes the production hosts from the run (review P1-7)", async () => {
+    const guard = "(function () {\n  var host = location.hostname\n  if (host === 'localhost' || host.endsWith('.vercel.app')) return\n  posthog.init('phc_abcdefghijklmnop', {})\n})()"
+    const root = app({ "src/ph.ts": guard })
+    const item = { id: "preview_guard:posthog", allow: { files: ["src/ph.ts"], create: [] }, trigger: { finding: "INF_SETUP_HOST_GUARD_MISSING", evidence: [{ file: "src/ph.ts", line: 4 }] } }
+    const input = { item, root, appRoot: root, runId: "run-9" }
+    const silenced = (await o9CheckFunctions({ version: "t", root, run: () => ({ productionHosts: ["acme.vercel.app"] }) }).adopted_init_guarded!(input, ctx)) as Array<{ state: string; reason?: string }>
+    expect(silenced.map((result) => result.state)).toEqual(["problem"])
+    expect(silenced[0]!.reason).toContain("INF_SETUP_HOST_GUARD_SILENCES_PRODUCTION")
+    const fine = (await o9CheckFunctions({ version: "t", root, run: () => ({ productionHosts: ["acme.com"] }) }).adopted_init_guarded!(input, ctx)) as Array<{ state: string }>
+    expect(fine.map((result) => result.state)).toEqual(["pass"])
+    // Unknown production hosts: a found guard is undetermined, never a pass.
+    const unknown = (await o9CheckFunctions({ version: "t", root }).adopted_init_guarded!(input, ctx)) as Array<{ state: string }>
+    expect(unknown.map((result) => result.state)).toEqual(["undetermined"])
+  })
+
+  it("job-level checks grade only the item's files and tool (review P2-3)", async () => {
+    const root = app({
+      "app/contact.tsx": "<button onClick={() => fbq('track', 'Lead')}>Talk</button>",
+      "app/pricing.tsx": "<button onClick={() => { infiniteTrack('upgrade') }}>Upgrade</button>",
+      "src/ga.ts": "if (infiniteHostAllowed(['acme.com'])) {\n  gtag('config', 'G-ABC123')\n}",
+      "src/ph.ts": "posthog.init('phc_abcdefghijklmnop', {})"
+    })
+    const fns = o9CheckFunctions({ version: "t", root, run: () => ({ productionHosts: ["acme.com"] }) })
+    const item = (id: string, file: string) => ({ id, allow: { files: [file], create: [] }, trigger: { finding: "x", evidence: [] } })
+    // The item is pricing; the adopted onClick fbq on contact is not this item's.
+    const onClick = (await fns.no_fbq_standard_on_click!({ item: item("conversions_to_tools:upgrade", "app/pricing.tsx"), root, appRoot: root }, ctx)) as Array<{ state: string }>
+    expect(onClick.map((result) => result.state)).toEqual(["pass"])
+    const onClickContact = (await fns.no_fbq_standard_on_click!({ item: item("conversions_to_tools:lead", "app/contact.tsx"), root, appRoot: root }, ctx)) as Array<{ state: string }>
+    expect(onClickContact.map((result) => result.state)).toEqual(["problem"])
+    // preview_guard:ga4 is not failed by the PostHog init the user declined to guard.
+    const ga4 = (await fns.adopted_init_guarded!({ item: item("preview_guard:ga4", "src/ga.ts"), root, appRoot: root }, ctx)) as Array<{ state: string }>
+    expect(ga4.map((result) => result.state)).toEqual(["pass"])
+    // setup_rerun_clean on a site with no Meta pixel: the site-wide click-id "undetermined" is not the item's.
+    const rerun = (await fns.setup_rerun_clean!({ item: item("setup_check_fixes:pricing", "app/pricing.tsx"), root, appRoot: root }, ctx)) as Array<{ state: string }>
+    expect(rerun.map((result) => result.state)).toEqual(["pass"])
+  })
+
+  it("the post-turn gate fails CLOSED: a crash is a problem, never undetermined (review P2-1)", async () => {
+    const fns = o9CheckFunctions({ version: "t" })
+    const malformed = (await fns.turn_gate!({ diff: { files: [{ path: "a.ts", added: 7, removed: [] }] }, connectionIds: [] }, ctx)) as Array<{ state: string; reason?: string }>
+    expect(malformed.map((result) => result.state)).toEqual(["problem"])
+    expect(malformed[0]!.reason).toMatch(/^gate_error/)
+    expect(((await fns.turn_gate!(null, ctx)) as Array<{ state: string }>)[0]!.state).toBe("problem")
+  })
+
+  it("O6's csp(url) seam: id 'csp' with {url}, the expectation from the run (review P1-8)", async () => {
+    const { fetch } = fixtureFetch({ "https://acme.test/": { headers: { "content-security-policy": "default-src 'self'" }, body: "<html></html>" } })
+    const withRun = o9CheckFunctions({ version: "t", fetch, attempts: 1, run: () => ({ expect: { meta: ["111222333444555"] } }) })
+    const blocked = (await withRun.csp!({ url: "https://acme.test/" }, ctx)) as Array<{ checkId: string; state: string }>
+    expect(blocked.map((result) => [result.checkId, result.state])).toEqual([["csp", "problem"]])
+    // No expectation anywhere → undetermined (never a vacuous pass).
+    const without = (await o9CheckFunctions({ version: "t", fetch, attempts: 1 }).csp!({ url: "https://acme.test/" }, ctx)) as Array<{ state: string }>
+    expect(without.map((result) => result.state)).toEqual(["undetermined"])
   })
 
   it("turn_gate reads the file after the turn under the repo root, never outside it", async () => {
@@ -89,7 +179,10 @@ describe("O9 registration", () => {
     const fns = o9CheckFunctions({ version: "t", root })
     const diff = { files: [{ path: "src/contact.tsx", added: [{ line: 3, text: "  fbq('track', 'Lead')" }], removed: [] }] }
     const results = (await fns.turn_gate!({ diff, connectionIds: [] }, ctx)) as Array<{ reason?: string }>
-    expect(results.map((result) => result.reason)).toEqual(["standard_on_click: the edit fires a standard Meta conversion from a click handler"])
+    expect(results.map((result) => result.reason)).toEqual([
+      "standard_on_click: the edit fires a standard Meta conversion from a click handler",
+      "conversion_without_event_id: the edit fires a Meta conversion from the page without the server's metaEventId"
+    ])
     const escape = { files: [{ path: "../outside.ts", added: [{ line: 1, text: "ok()" }], removed: [] }] }
     expect(((await fns.turn_gate!({ diff: escape, connectionIds: [] }, ctx)) as Array<{ state: string }>)[0]!.state).toBe("pass")
   })

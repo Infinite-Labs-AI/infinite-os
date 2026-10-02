@@ -61,3 +61,33 @@ describe("adopted init host guard", () => {
     expect(checkHostGuard({ ...input, strict: true }).findings).toHaveLength(3)
   })
 })
+
+describe("adopted init host guard: only a governing guard with the right polarity counts (review P2-2)", () => {
+  const strict = (code: string, file = "src/x.ts") => checkHostGuard({ files: files({ [file]: code }), strict: true, productionHosts: ["acme.com"] }).findings.map((finding) => finding.code)
+
+  it("an inverted guard (fires ONLY on previews) is missing", () => {
+    expect(strict("if (location.hostname.endsWith('.vercel.app')) {\n  gtag('config', 'G-ABC123')\n}")).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
+  })
+
+  it("a host read with no if, or a localStorage read beside a hostname read, is missing", () => {
+    expect(strict("const debug = location.hostname === 'localhost'\ngtag('config', 'G-ABC123', { debug_mode: debug })")).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
+    expect(strict("const saved = localStorage.getItem('x')\nconst domain = location.hostname\nposthog.init('phc_abcdefghijklmnop', {})")).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
+    // `local` inside `localStorage` is not a deny-list host, even under an if.
+    expect(strict("if (localStorage.getItem('x') && location.hostname) {\n  posthog.init('phc_abcdefghijklmnop', {})\n}")).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
+  })
+
+  it("a negated deny test wrapping the init, an early-return predicate and the emitted guard are guarded (negatives)", () => {
+    expect(strict("const h = location.hostname\nif (h !== 'localhost' && !h.endsWith('.vercel.app')) {\n  gtag('config', 'G-ABC123')\n}")).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])
+    expect(strict("(function () {\n  if (!infiniteHostAllowed(['acme.com'])) return\n  posthog.init('phc_abcdefghijklmnop', {})\n})()")).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])
+    const emitted =
+      '(function () {\nif (!((function (h) { var n = (function (h) { h = String(h == null ? "" : h).replace(/^\\s+|\\s+$/g, "").toLowerCase(); return h.charAt(h.length - 1) === "." ? h.slice(0, -1) : h; })(h), i; var x = ["acme.com"], d = ["localhost","127.0.0.1","::1","[::1]","0.0.0.0"], s = [".localhost",".local",".vercel.app",".netlify.app",".pages.dev"]; for (i = 0; i < x.length; i += 1) if (x[i] === n) return true; for (i = 0; i < d.length; i += 1) if (d[i] === n) return false; for (i = 0; i < s.length; i += 1) if (n.length > s[i].length && n.slice(n.length - s[i].length) === s[i]) return false; return true; })(location.hostname))) return;\nfbq(\'init\', \'111222333444555\');\n})();'
+    expect(strict(`<html><head><script>${emitted}</script></head><body></body></html>`, "index.html")).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])
+    // The same expression with an onDenied beat before its return.
+    const withBeat = emitted.replace(")) return;", ")) {\nwindow.__denied = true;\nreturn;\n}")
+    expect(strict(`<html><head><script>${withBeat}</script></head><body></body></html>`, "index.html")).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])
+  })
+
+  it("an allow predicate that RETURNS is inverted", () => {
+    expect(strict("(function () {\n  if (infiniteHostAllowed(['acme.com'])) return\n  posthog.init('phc_abcdefghijklmnop', {})\n})()")).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
+  })
+})

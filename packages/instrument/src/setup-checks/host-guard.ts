@@ -10,11 +10,18 @@
 // static proof `adopted_init_guarded` (`strict: true`: an unguarded init is a `problem`).
 //
 // "Guarded" is read from source, heuristically, and biased so that a wrong answer can only make it
-// "missing": the init must sit after a host test — a call to a host-guard predicate
-// (`infiniteHostAllowed(...)`, `__infiniteHostAllowed(...)`, `hostAllowed(...)`), or a read of
-// `location.hostname` / `location.host` together with a deny-list literal (`.vercel.app`, `localhost`,
-// …) — within the preceding stretch of the same unit. Managed inits are not judged here (their guard
-// bytes are emitted and executed by T0's host matrix).
+// "missing". The host test must be the CONDITION of an `if` that governs the init, with the right
+// polarity:
+//   • `if (<deny test>) return` before the init, or `if (!(<allow test>)) return` — the emitted shape,
+//     `if (!(<infinite-tag guard expression>)) return;` — guards the rest of the function;
+//   • `if (<allow test>) { …init… }` / `if (<allow test>) init(…)` guards that block or statement.
+// An allow test is a host-guard predicate (`infiniteHostAllowed(...)`, `hostAllowed(...)`), infinite-tag's
+// emitted guard expression, or a deny test written negated (`host !== 'localhost' && !host.endsWith(…)`).
+// A deny test is a read of `location.hostname` / `location.host` (or a variable read from it) compared
+// with a WHOLE quoted deny-list host (`'localhost'`, `'.vercel.app'`, …; `localStorage` is not `local`).
+// An inverted guard (`if (host.endsWith('.vercel.app')) { gtag(…) }` fires ONLY on previews), a host
+// read with no `if`, or a test whose polarity cannot be read is "missing". Managed inits are not judged
+// here (their guard bytes are emitted and executed by T0's host matrix).
 //
 // With `productionHosts`, a guard that would silence production is a problem (decision 3: the
 // production host is ALWAYS exempt): a production host that is deny-shaped (e.g. a pre-launch
@@ -37,7 +44,15 @@ export const GUARD_WINDOW_CHARS = 1_200
 
 const GUARD_CALL = /\b(?:__)?(?:infinite)?[hH]ost(?:Allowed|Guard)\s*\(/
 const HOST_READ = /\blocation\s*\.\s*host(?:name)?\b/
-const DENY_LITERALS = [...HOST_DENY_V1.deny.exact, ...HOST_DENY_V1.deny.suffix.map((suffix) => suffix.slice(1))]
+/** infinite-tag's emitted guard expression (O5 `buildHostGuardExpression`): true when the bootstrap may start. */
+const EMITTED_GUARD = /\(function \(h\) \{ var n = [\s\S]*?return (?:true|false); \}\)\(/
+const DENY_HOSTS = [...HOST_DENY_V1.deny.exact, ...HOST_DENY_V1.deny.suffix, ...HOST_DENY_V1.deny.suffix.map((suffix) => suffix.slice(1))]
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+/** A WHOLE quoted deny-list host, or a regex literal naming one (`/\.vercel\.app$/`). */
+const DENY_LITERAL = new RegExp(
+  String.raw`["'\x60](?:${DENY_HOSTS.map(escapeRegExp).join("|")})["'\x60]|/[^/\n]*(?:vercel\\\.app|netlify\\\.app|pages\\\.dev|localhost)[^/\n]*/`,
+  "g"
+)
 
 export interface HostGuardRead {
   tool: "GA4" | "PostHog" | "Meta pixel"
@@ -58,8 +73,7 @@ export function readAdoptedInitGuards(files: ReadonlyMap<string, string>): HostG
         const at = match.index ?? 0
         const windowStart = Math.max(0, at - GUARD_WINDOW_CHARS)
         const window = code.slice(windowStart, at)
-        const guardAt = lastGuardOffset(window)
-        const guarded = guardAt !== -1 && guardStillOpen(code, windowStart + guardAt, at)
+        const guarded = governingGuard(code, windowStart, at)
         const literalHosts = [...window.matchAll(/["']([a-z0-9-]+(?:\.[a-z0-9-]+)+\.?)["']/gi)].map((hit) => normalizeHost(hit[1] as string))
         reads.push({ tool, file: unit.file, line: unitLine(unit, at), guarded, literalHosts })
       }
@@ -68,38 +82,92 @@ export function readAdoptedInitGuards(files: ReadonlyMap<string, string>): HostG
   return reads
 }
 
-/** Offset of the last host test in the window, or -1. */
-function lastGuardOffset(window: string): number {
-  let last = -1
-  for (const match of window.matchAll(new RegExp(GUARD_CALL.source, "g"))) last = match.index ?? last
-  if (DENY_LITERALS.some((literal) => window.includes(literal))) {
-    for (const match of window.matchAll(new RegExp(HOST_READ.source, "g"))) last = Math.max(last, match.index ?? -1)
+/** Does any `if (<host test>)` in the window govern the init at `initAt` with the right polarity? */
+function governingGuard(code: string, windowStart: number, initAt: number): boolean {
+  const window = code.slice(windowStart, initAt)
+  const readsHost = HOST_READ.test(window)
+  const candidates = new Set<number>()
+  for (const pattern of [GUARD_CALL, EMITTED_GUARD]) {
+    for (const match of window.matchAll(new RegExp(pattern.source, "g"))) candidates.add(windowStart + (match.index ?? 0))
   }
-  return last
+  if (readsHost) for (const match of window.matchAll(new RegExp(DENY_LITERAL.source, "g"))) candidates.add(windowStart + (match.index ?? 0))
+  for (const offset of [...candidates].sort((a, b) => b - a)) {
+    const condition = enclosingIfCondition(code, offset, initAt)
+    if (!condition) continue
+    const allowWhenTrue = conditionPolarity(code.slice(condition.open + 1, condition.close))
+    if (allowWhenTrue === null) continue
+    if (governs(code, condition.close, initAt, allowWhenTrue)) return true
+  }
+  return false
+}
+
+/** The `if (…)` whose condition contains `offset` (and closes before the init): its paren offsets. */
+function enclosingIfCondition(code: string, offset: number, initAt: number): { open: number; close: number } | null {
+  const searchFrom = Math.max(0, offset - GUARD_WINDOW_CHARS)
+  const ifs = [...code.slice(searchFrom, offset).matchAll(/\bif\s*\(/g)].reverse()
+  for (const match of ifs) {
+    const open = searchFrom + (match.index ?? 0) + match[0].length - 1
+    const close = matchingBracket(code, open)
+    if (close !== -1 && close > offset && close < initAt) return { open, close }
+  }
+  return null
 }
 
 /**
- * Does the host test at `guardAt` still govern the init at `initAt`? When the test is an `if (…)`
- * followed by a block, the init must sit inside that block; `if (…) return` guards the rest of the
- * function. Anything else (an `&&` chain, a ternary) is taken as governing.
+ * Is the condition TRUE when the host is allowed (`true`), TRUE when it is denied (`false`), or
+ * unreadable (`null`)? A leading `!` over the whole condition flips it.
  */
-function guardStillOpen(code: string, guardAt: number, initAt: number): boolean {
-  const before = code.slice(Math.max(0, guardAt - 200), guardAt)
-  const ifMatch = [...before.matchAll(/\bif\s*\(/g)].pop()
-  if (!ifMatch) return true
-  const open = Math.max(0, guardAt - 200) + (ifMatch.index ?? 0) + ifMatch[0].length - 1
-  const close = matchingBracket(code, open)
-  if (close === -1 || close > initAt) return close !== -1
+function conditionPolarity(condition: string): boolean | null {
+  let text = condition.trim()
+  let negated = false
+  while (text.startsWith("!") && !text.startsWith("!=")) {
+    const rest = text.slice(1).trim()
+    const whole = rest.startsWith("(") ? matchingBracket(rest, 0) === rest.length - 1 : /^[\w$.]+\s*\([^]*\)$/.test(rest) && matchingBracket(rest, rest.indexOf("(")) === rest.length - 1
+    if (!whole) break
+    negated = !negated
+    text = rest.startsWith("(") ? rest.slice(1, -1).trim() : rest
+  }
+  let allowWhenTrue: boolean
+  if (EMITTED_GUARD.test(text) || GUARD_CALL.test(text)) {
+    // A predicate negated inside a longer expression (`!hostAllowed() || x`) cannot be read.
+    if (/!\s*(?:\(|[\w$.]*[hH]ost(?:Allowed|Guard)\s*\()/.test(text)) return null
+    allowWhenTrue = true
+  } else if (new RegExp(DENY_LITERAL.source).test(text)) {
+    const negatedTests = /!==?|!\s*[\w$.]+\s*\.\s*(?:endsWith|includes|startsWith|test|match)\s*\(|indexOf\s*\([^)]*\)\s*(?:===?\s*-1|<\s*0)/.test(text)
+    const positiveTests = /[^!=]===?[^=]|(?<!!\s*[\w$.]*)\.\s*(?:endsWith|includes|startsWith|test|match)\s*\(|indexOf\s*\([^)]*\)\s*(?:!==?\s*-1|>=?\s*0)/.test(text)
+    if (negatedTests && positiveTests) return null
+    if (!negatedTests && !positiveTests) return null
+    allowWhenTrue = negatedTests
+  } else {
+    return null
+  }
+  return negated ? !allowWhenTrue : allowWhenTrue
+}
+
+/**
+ * Does the `if` whose condition closes at `close` keep the init at `initAt` off denied hosts?
+ * `if (denied) return` (allowWhenTrue false + return) guards the rest of the function;
+ * `if (allowed) { … }` / `if (allowed) init()` (allowWhenTrue true) guards that block or statement.
+ */
+function governs(code: string, close: number, initAt: number, allowWhenTrue: boolean): boolean {
   const after = code.slice(close + 1).trimStart()
+  const returns = /^(?:return\b|\{\s*return\b)/.test(after)
+  if (returns) return !allowWhenTrue
+  if (!allowWhenTrue) {
+    // `if (denied) { …; return; }` before the init (the emitted shape with an `onDenied` beat).
+    if (!after.startsWith("{")) return false
+    const braceAt = code.indexOf("{", close + 1)
+    const blockEnd = matchingBracket(code, braceAt)
+    return blockEnd !== -1 && blockEnd < initAt && /\breturn\b/.test(code.slice(braceAt, blockEnd))
+  }
   if (after.startsWith("{")) {
     const braceAt = code.indexOf("{", close + 1)
     const blockEnd = matchingBracket(code, braceAt)
     return blockEnd === -1 || initAt < blockEnd
   }
-  if (/^return\b/.test(after)) return true
-  // `if (cond) init(...)` on one statement.
-  const statementEnd = code.indexOf(";", close + 1)
-  return statementEnd === -1 || initAt < statementEnd
+  // `if (allowed) init(...)` on one statement.
+  const statementEnd = code.slice(close + 1).search(/;|\n/)
+  return statementEnd === -1 || initAt < close + 1 + statementEnd
 }
 
 function deniedByRules(host: string): boolean {

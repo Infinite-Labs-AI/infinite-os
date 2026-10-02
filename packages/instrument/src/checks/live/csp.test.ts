@@ -19,7 +19,7 @@ function check(headers: Record<string, string>, body = "<html><head></head></htm
 
 const ALLOWING =
   "default-src 'self'; script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://connect.facebook.net; " +
-  "connect-src 'self' *.google-analytics.com https://www.facebook.com; img-src 'self' https://www.facebook.com"
+  "connect-src 'self' *.google-analytics.com *.analytics.google.com https://www.facebook.com; img-src 'self' https://www.facebook.com"
 
 describe("live CSP", () => {
   it("no policy → pass", async () => {
@@ -51,6 +51,18 @@ describe("live CSP", () => {
   it("reads a <meta http-equiv> policy too", async () => {
     const { result } = await check({}, `<html><head><meta http-equiv="Content-Security-Policy" content="default-src 'self'"></head></html>`)
     expect(result.state).toBe("problem")
+  })
+
+  it("GA4's Google-signals host *.analytics.google.com is needed (review P3-2)", async () => {
+    const missing = await check({ "content-security-policy": ALLOWING.replace(" *.analytics.google.com", "") })
+    expect(missing.result.state).toBe("problem")
+    expect(missing.result.reason).toContain("connect-src does not allow region1.analytics.google.com (ga4)")
+  })
+
+  it("a host-list policy with nothing to check against is info, never a pass (review P1-8)", async () => {
+    const fixture = fixtureFetch({ "https://acme.test/": { headers: { "content-security-policy": ALLOWING }, body: "<html></html>" } })
+    const results = await checkCsp({ url: "https://acme.test/", expect: {} }, { version: "t", fetch: fixture.fetch, attempts: 1 }, ctx)
+    expect(results.map((result) => result.state)).toEqual(["info"])
   })
 
   it("an unreadable page is undetermined", async () => {

@@ -39,6 +39,8 @@ export function cspNeeds(expect: TestExpect, pageOrigin: string, observedPosthog
     add("ga4", "script-src", "https://www.googletagmanager.com/gtag/js")
     add("ga4", "connect-src", "https://www.google-analytics.com/g/collect")
     add("ga4", "connect-src", "https://region1.google-analytics.com/g/collect")
+    // With Google signals on, GA4 also sends to *.analytics.google.com (Google's GA4 CSP guide).
+    add("ga4", "connect-src", "https://region1.analytics.google.com/g/collect")
   }
   if (expect.posthog) {
     const apiHost = observedPosthogApiHost ?? expect.posthog.apiHost
@@ -222,7 +224,8 @@ export async function checkCsp(input: CspInput, deps: LiveProbeDeps, ctx: Pick<C
         `the policy uses nonces, hashes or 'strict-dynamic', so whether the tags run cannot be read from the header${missing.length > 0 ? ` (its host lists refuse: ${missing.join("; ")})` : ""}; the test visit's blocked-request count decides`
       )
     case "hosts": {
-      if (needs.length === 0) return result("pass", "a host-list policy is in place; no expected tool was given to check against it")
+      // Nothing to check against is not a pass: the policy was read, but no tool was measured.
+      if (needs.length === 0) return result("info", "a host-list policy is in place; no expected tool was given to check against it")
       const problems = [...missing, ...(analysis.inlineBlocked ? ["script-src does not allow inline scripts ('unsafe-inline'), so the inline tag snippets cannot run"] : [])]
       if (problems.length > 0) return result("problem", `the policy blocks the tags: ${problems.join("; ")}`)
       return result("pass", "the policy allows every host the tags need")
