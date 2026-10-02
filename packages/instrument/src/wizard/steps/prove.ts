@@ -528,9 +528,10 @@ export const step: WizardStep<"prove"> = {
   who: [...WIZARD_STEP_META.prove.who],
   learn: WIZARD_STEP_META.prove.learn,
   requiredCapabilities: [...WIZARD_STEP_META.prove.requiredCapabilities],
+  // F0's structural step test calls inputHash with an empty context, so a missing state hashes as nulls.
   inputHash: (ctx) => {
-    const state = ctx.state.get()
-    return hashOf(["prove", state.runId, state.pr?.mergeSha ?? null])
+    const state = ctx.state?.get()
+    return hashOf(["prove", state?.runId ?? null, state?.pr?.mergeSha ?? null])
   },
   run: runProve
 }

@@ -145,10 +145,11 @@ export const step: WizardStep<"done"> = {
   who: [...WIZARD_STEP_META.done.who],
   learn: WIZARD_STEP_META.done.learn,
   requiredCapabilities: [...WIZARD_STEP_META.done.requiredCapabilities],
+  // F0's structural step test calls inputHash with an empty context, so a missing state hashes as nulls.
   inputHash: (ctx) => {
-    const state = ctx.state.get()
-    const columns = REPORT_COLUMN_IDS.map((column) => state.report[column]?.meta ?? null)
-    return `sha256:${createHash("sha256").update(JSON.stringify(["done", state.runId, columns])).digest("hex")}`
+    const state = ctx.state?.get()
+    const columns = REPORT_COLUMN_IDS.map((column) => state?.report[column]?.meta ?? null)
+    return `sha256:${createHash("sha256").update(JSON.stringify(["done", state?.runId ?? null, columns])).digest("hex")}`
   },
   run: runDone
 }
