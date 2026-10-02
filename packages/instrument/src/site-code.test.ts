@@ -9,8 +9,9 @@
 //     is a SyntaxError that stops every provider in the shared Next script.
 //   - Only PostHog's `init` is guarded; on a silenced host its methods are queue-only, so site code
 //     calling `posthog.identify` cannot throw and nothing is sent.
-//   - The `_fbc` capture is NOT guarded (decision 15): it still writes on `x.vercel.app` while `fbq` stays
-//     undefined.
+//   - The `_fbc` capture is NOT guarded (decision 15): it still writes on `x.vercel.app` while the pixel
+//     stays silent. A silenced host gets a queue-only gtag + dataLayer and an inert, flagged fbq instead
+//     of nothing, so the site's own calls there cannot throw (P2-3); the helpers treat them as absent.
 //   - The Infinite runtime treats `ACME.com.` as the verified `acme.com` (the one normaliser).
 //   - The helper globals are in both managed forms, and the Next module's typed wrappers are no-op safe
 //     before hydration.
@@ -111,7 +112,12 @@ describe.each(["static", "vite", "next"] as const)("the %s managed bytes on the 
     expect(page.posthog).toBe(fires)
     expect(page.meta).toBe(fires)
     expect(page.vm.window.__infiniteGa4Lane !== undefined).toBe(fires)
-    expect(typeof page.vm.window.fbq === "function").toBe(fires)
+    // P2-3: a silenced host still gets a callable gtag / dataLayer and an inert, flagged fbq, so the
+    // site's own calls cannot throw there; nothing loads, so nothing is sent.
+    expect(typeof page.vm.window.gtag).toBe("function")
+    expect(Array.isArray(page.vm.window.dataLayer)).toBe(true)
+    expect(typeof page.vm.window.fbq).toBe("function")
+    expect((page.vm.window.fbq as { __infiniteSilenced?: boolean }).__infiniteSilenced === true).toBe(!fires)
     // Unguarded on purpose: X is not in decision 3's set. PostHog's methods exist everywhere (queue-only
     // on a silenced host), so the site's own posthog.identify(...) can never throw.
     expect(page.x).toBe(true)
@@ -132,9 +138,10 @@ describe.each(["static", "vite", "next"] as const)("the %s managed bytes on the 
     expect([page.ga4, page.posthog, page.meta]).toEqual([true, true, true])
   })
 
-  it("decision 15: the _fbc capture still writes on a preview while fbq stays undefined", () => {
+  it("decision 15: the _fbc capture still writes on a preview while the pixel stays silent (an inert fbq only)", () => {
     const page = load(form, bytes(form), "https://x.vercel.app/?fbclid=AbC_123")
-    expect(page.vm.window.fbq).toBeUndefined()
+    expect(page.meta).toBe(false)
+    expect((page.vm.window.fbq as { __infiniteSilenced?: boolean }).__infiniteSilenced).toBe(true)
     const written = page.vm.cookies.values("_fbc")
     expect(written).toHaveLength(1)
     expect(written[0]).toMatch(/^fb\.\d\.\d+\.AbC_123$/)
@@ -172,6 +179,38 @@ describe("the guard's IIFE in the shared Next script", () => {
     expect(page.vm.scriptErrors[0]!.name).toBe("SyntaxError")
     expect([page.ga4, page.posthog, page.meta, page.x]).toEqual([false, false, false, false])
     expect(page.vm.window.__infiniteAnalyticsRuntime).toBeUndefined()
+  })
+})
+
+describe("P2-3: the site's own tag calls on a silenced preview", () => {
+  const preview = "https://acme-pr-12.vercel.app/"
+  it.each(["static", "vite", "next"] as const)("%s: gtag, dataLayer.push, fbq and posthog calls do not throw, and nothing loads", (form) => {
+    const page = load(form, bytes(form), preview)
+    expect(page.vm.scriptErrors).toEqual([])
+    page.vm.evaluate("gtag('event', 'sign_up'); window.dataLayer.push({ event: 'x' }); fbq('track', 'Lead'); posthog.capture('x')")
+    expect(page.vm.loaded.filter((src) => !src.includes("ads-twitter"))).toEqual([])
+    // The helpers see no pixel and no GA4 lane there: the mirror fires nothing and no click is held.
+    expect(page.vm.window.__infiniteGa4Lane).toBeUndefined()
+  })
+
+  it("the mirror treats the inert fbq as no pixel", async () => {
+    const page = load("static", bytes("static"), preview)
+    const calls: unknown[] = []
+    const inert = page.vm.window.fbq as (...args: unknown[]) => void
+    page.vm.window.fbq = Object.assign((...args: unknown[]) => void calls.push(args), { __infiniteSilenced: true })
+    await page.vm.evaluate<Promise<void>>("infiniteMetaMirror('Lead', 'evt-1')")
+    expect(calls).toEqual([])
+    expect(typeof inert).toBe("function")
+  })
+
+  it("negative: without the stand-ins the same calls throw on the preview", () => {
+    const page = load("static", bytes("static"), preview)
+    page.vm.window.gtag = undefined
+    page.vm.window.dataLayer = undefined
+    page.vm.window.fbq = undefined
+    expect(() => page.vm.evaluate("gtag('event', 'sign_up')")).toThrow()
+    expect(() => page.vm.evaluate("window.dataLayer.push({})")).toThrow()
+    expect(() => page.vm.evaluate("fbq('track', 'Lead')")).toThrow()
   })
 })
 
@@ -333,7 +372,10 @@ describe("ADOPTED_META_GUARD_RECIPE and its T0 fixture", () => {
     vm.runHtml(readFileSync(FIXTURE_PATH, "utf8"))
     expect(vm.scriptErrors).toEqual([])
     expect(vm.loaded).toEqual([])
-    expect(vm.window.fbq).toBeUndefined()
+    expect((vm.window.fbq as { __infiniteSilenced?: boolean }).__infiniteSilenced).toBe(true)
+    // P2-3: the adopted page's own fbq call on the preview cannot throw (and sends nothing).
+    vm.evaluate("fbq('track', 'Lead')")
+    expect(vm.loaded).toEqual([])
     expect(vm.cookies.values("_fbc")).toHaveLength(1)
   })
 

@@ -92,8 +92,11 @@ function frameworkInstructionPath(framework: SupportedFramework): string {
 // code calls the managed helpers (decisions 9 and 13).
 //
 // THE PREVIEW GUARD (decision 3), when the plan carries one: the WHOLE snippet sits inside one IIFE
-// behind the guard, `window.gtag` definition included, exactly like infinite.fast (inject L375). A
-// defined-but-never-loaded gtag on a preview would make every helper think GA4 was there.
+// behind the guard, like infinite.fast (inject L375): no loader, no `config`, no lane marker off-host. On
+// a silenced host the guard still defines `window.dataLayer` and a queue-only `window.gtag`
+// (`GA4_SILENCED_STUB`), so the site's own `gtag('event', …)` or `dataLayer.push(…)` on a preview — the
+// draft PR's own preview included — cannot throw and strand a click. Nothing loads, so nothing is sent,
+// and with no lane marker no helper ever holds a click for it.
 //
 // THE LANE MARKER (`GA4_LANE_MARKER`) is set last, once `config` is queued: the one signal the
 // navigation helper trusts that GA4 actually started.
@@ -111,8 +114,14 @@ export function buildGa4BootstrapSnippet(measurementId: string, guard?: HostGuar
     `window.gtag('config', ${jsLiteral(measurementId)});`,
     `window.${GA4_LANE_MARKER} = { id: ${jsLiteral(measurementId)} };`
   ].join("\n")
-  return guard ? wrapGuardedSnippet(body, guard) : body
+  return guard ? wrapGuardedSnippet(body, guard, GA4_SILENCED_STUB) : body
 }
+
+/** What a silenced host gets instead of GA4: a dataLayer and a queue-only gtag. No loader, no marker. */
+export const GA4_SILENCED_STUB = [
+  "window.dataLayer = window.dataLayer || [];",
+  "window.gtag = window.gtag || function(){window.dataLayer.push(arguments);};"
+].join("\n")
 
 function buildHtmlSnippet(measurementId: string, guard?: HostGuardSpec): string {
   return ["<script>", buildGa4BootstrapSnippet(measurementId, guard), "</script>"].join("\n")

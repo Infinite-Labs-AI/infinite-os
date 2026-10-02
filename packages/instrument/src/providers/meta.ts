@@ -50,7 +50,9 @@ import { jsLiteral, validateMetaPixelId } from "./validate.js"
  * PREVIEW GUARD (decision 8, new installs): with a guard on the plan, the pixel BOOTSTRAP (fbevents load,
  * the autoConfig opt-out, `init`, `PageView`) sits in one IIFE behind it, so a preview or a laptop never
  * loads the pixel. The `_fbc` capture is NOT guarded (decision 15): it sends nothing, and previews must
- * still be able to test it. The matching accessor needs no guard: with no `fbq` it attaches nothing.
+ * still be able to test it. The matching accessor needs no guard: with no `fbq` it attaches nothing. On a
+ * silenced host an inert, flagged `fbq` stands in (`META_SILENCED_STUB`) so the site's own `fbq` calls
+ * cannot throw; the managed helpers treat it as no pixel.
  *
  * MANUAL ADVANCED MATCHING — `--meta-advanced-matching on`, DEFAULT OFF.
  *
@@ -234,7 +236,7 @@ export function buildMetaPixelSnippet(pixelId: string, options: MetaPixelSnippet
     // Capture BEFORE the bootstrap: Meta asks for the click id at landing, and the cookie must
     // already hold this click when fbevents reads it. Never inside the guard (decision 15).
     ...(options.clickIdCapture === false ? [] : [buildMetaClickIdCaptureScript({ gate })]),
-    options.guard ? wrapGuardedSnippet(bootstrap, options.guard) : bootstrap,
+    options.guard ? wrapGuardedSnippet(bootstrap, options.guard, META_SILENCED_STUB) : bootstrap,
     ...(options.advancedMatching === true ? [buildMetaAdvancedMatchingSnippet(pixelId, gate)] : [])
   ].join("\n")
 }
@@ -252,6 +254,17 @@ export function buildMetaCaptureOnlySnippet(options: { consentMode?: "required" 
   return buildMetaClickIdCaptureScript({ gate })
 }
 
+/** The flag on the inert `fbq` a silenced host gets; the managed Meta helpers treat such an fbq as absent. */
+export const META_SILENCED_FLAG = "__infiniteSilenced"
+
+/**
+ * What a silenced host gets instead of the pixel: an inert `fbq` that DROPS every call (it never queues,
+ * so a pixel loaded later by anything else cannot replay them), flagged so the mirror and the matching
+ * accessor treat it as no pixel. The site's own `fbq('track', …)` on a preview cannot throw and strand a
+ * click. One line, so the job-7 recipe can carry it on its guard line.
+ */
+export const META_SILENCED_STUB = `if (typeof window.fbq !== 'function') { window.fbq = function () {}; window.fbq.${META_SILENCED_FLAG} = true; }`
+
 /** The placeholder the adopted-guard recipe uses for the emitted guard expression. */
 export const GUARD_EXPRESSION_PLACEHOLDER = "<GUARD_EXPRESSION>"
 
@@ -265,11 +278,11 @@ export const GUARD_EXPRESSION_PLACEHOLDER = "<GUARD_EXPRESSION>"
  */
 export const ADOPTED_META_GUARD_RECIPE = [
   "(function () {",
-  `if (!(${GUARD_EXPRESSION_PLACEHOLDER})) return;`,
+  `if (!(${GUARD_EXPRESSION_PLACEHOLDER})) { ${META_SILENCED_STUB} return; }`,
   "<your existing Meta Pixel bootstrap, unchanged: the fbevents.js loader, fbq('set', 'autoConfig', …) if present, fbq('init', '<pixel id>'), and the first fbq('track', 'PageView')>",
   "})();",
   "",
-  "Rules: wrap ONLY that bootstrap. Leave any _fbc capture (window.infiniteMetaClickId, or a script that writes the _fbc cookie) OUTSIDE the wrapper and BEFORE it. Do not change the pixel id, do not add or remove fbq calls, and do not wrap other tags."
+  "Rules: wrap ONLY that bootstrap. Leave any _fbc capture (window.infiniteMetaClickId, or a script that writes the _fbc cookie) OUTSIDE the wrapper and BEFORE it. Keep the guard line exactly as given: on a preview it defines an inert fbq, so the site's own fbq calls there cannot throw. Do not change the pixel id, do not add or remove fbq calls, and do not wrap other tags."
 ].join("\n")
 
 /** The recipe with the real guard expression in place of the placeholder (what the brief shows). */
@@ -318,7 +331,7 @@ function buildMetaAdvancedMatchingSnippet(pixelId: string, gate: MetaBrowserGate
     "    return Promise.resolve().then(function () {",
     "      // Consent at CALL time, so a revocation a moment ago is honoured.",
     "      if (!infiniteConsentAllows()) return false;",
-    "      if (typeof window.fbq !== 'function') return false;",
+    `      if (typeof window.fbq !== 'function' || window.fbq.${META_SILENCED_FLAG} === true) return false;`,
     "      var source = identity || {};",
     "      var email = typeof source.email === 'string' ? source.email.trim().toLowerCase() : '';",
     "      var externalId = typeof source.externalId === 'string' ? source.externalId.trim() : '';",
