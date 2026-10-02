@@ -1710,41 +1710,54 @@ export function InkInteractiveSessionApp({
     selection: pendingSelection?.prompt ?? null,
     width: columns
   });
+  // While a turn runs, the composer keeps three rows reserved, so a second
+  // and third draft line never move the tail being read. A finished turn is
+  // measured against the rows the composer really draws: a turn that fits on
+  // screen stays live with its keys.
+  const composerRowsNow = composerRowsFor(composerText || connectPlaceholder, columns, t);
   const reservedRows = homeInventoryRows
     + COMPOSER_RULE_ROWS
-    + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(composerText || connectPlaceholder, columns, t))
+    + (transcriptBusy ? Math.max(DEFAULT_COMPOSER_ROWS, composerRowsNow) : composerRowsNow)
     + overlayRows
     + completions.length;
+  // The RESTING frame's reserve: an empty composer, no menu, picker or /connect
+  // step. Whether a finished turn fits is decided against it (see `finishedOverflow`).
+  const restingReservedRows = homeInventoryRows
+    + COMPOSER_RULE_ROWS
+    + composerRowsFor(composerPlaceholderText(promptPlaceholder, composerNote), columns, t);
   // The rows the latest turn may take: the live budget (the same count the
   // live window pages with) less the key bar. The key bar's hints come from the
   // drawn turn (a document's `space next page`), so draw, count the bar, and
   // draw again when the bar's height differs from the guess.
-  const turnRowsAt = (barRows: number) => inkLatestTurnRows({
-    busy,
-    columns,
-    composerRows: reservedRows,
-    keyBarRows: barRows,
-    nowMs: clock,
-    rows,
-    showComposer: false,
-    theme: t,
-    transcript: idleTranscript,
-    turnStartedAt: busyStartedAt
-  });
-  let liveTurn: LiveTurnRender | null = null;
-  let liveTurnRows: number | undefined;
-  if (renderTurnAt) {
-    let barRows = DEFAULT_KEY_BAR_ROWS;
-    for (let pass = 0; pass < 3; pass += 1) {
-      liveTurnRows = turnRowsAt(barRows);
-      liveTurn = renderTurnAt(liveTurnRows);
-      const drawnBarRows = keyBarRowCount(keyHintsFor(liveTurn), columns);
-      if (drawnBarRows === barRows) {
-        break;
+  const drawTurnWith = (reserved: number): { turn: LiveTurnRender | null; turnRows: number | undefined } => {
+    let turn: LiveTurnRender | null = null;
+    let turnRows: number | undefined;
+    if (renderTurnAt) {
+      let barRows = DEFAULT_KEY_BAR_ROWS;
+      for (let pass = 0; pass < 3; pass += 1) {
+        turnRows = inkLatestTurnRows({
+          busy,
+          columns,
+          composerRows: reserved,
+          keyBarRows: barRows,
+          nowMs: clock,
+          rows,
+          showComposer: false,
+          theme: t,
+          transcript: idleTranscript,
+          turnStartedAt: busyStartedAt
+        });
+        turn = renderTurnAt(turnRows);
+        const drawnBarRows = keyBarRowCount(keyHintsFor(turn), columns);
+        if (drawnBarRows === barRows) {
+          break;
+        }
+        barRows = drawnBarRows;
       }
-      barRows = drawnBarRows;
     }
-  }
+    return { turn, turnRows };
+  };
+  const { turn: liveTurn, turnRows: liveTurnRows } = drawTurnWith(reservedRows);
   liveTurnRowsRef.current = liveTurnRows;
   const keyHints = keyHintsFor(liveTurn);
   const keyBarRows = keyBarRowCount(keyHints, columns);
@@ -1756,12 +1769,12 @@ export function InkInteractiveSessionApp({
   // The boot frame (D4) is the screen before the first turn only. After it, a
   // live region with nothing in it draws no row: the frame alone stays live.
   const frameProps = { bootFrame: !homeCommitted, emptyLive: "none" as const };
-  const layoutOf = (latest: CommittedEntry | null, shown: InfiniteTranscriptInput) => inkTranscriptLayout({
+  const layoutOf = (latest: CommittedEntry | null, shown: InfiniteTranscriptInput, reserved = reservedRows, barRows = keyBarRows) => inkTranscriptLayout({
     ...frameProps,
     busy,
     columns,
-    composerRows: reservedRows,
-    keyBarRows,
+    composerRows: reserved,
+    keyBarRows: barRows,
     latest,
     livePage: liveOffset,
     nowMs: clock,
@@ -1781,9 +1794,23 @@ export function InkInteractiveSessionApp({
   // the next line, so its views keep their keys. A write card still waiting
   // for its answer stays live too: its question, answer and other views go up
   // and the card stays, paging inside itself as before.
-  const finishedOverflow = !transcriptBusy && !exitRequested
-    && (history.length > 0 || turnViews.length > 0)
-    && turnLayout.window.paged;
+  // "Fits" is decided against the RESTING frame, never the current one: a
+  // wrapped draft, the `/` menu, a picker or the /connect steps shrink the
+  // live region only for a while. Meanwhile a turn that fits at rest pages
+  // (as any live turn does) and is whole again once the composer is empty; it
+  // is never sent to scrollback by typing.
+  const finished = !transcriptBusy && !exitRequested && (history.length > 0 || turnViews.length > 0);
+  let finishedOverflow = finished && turnLayout.window.paged;
+  if (finishedOverflow && reservedRows !== restingReservedRows) {
+    const resting = drawTurnWith(restingReservedRows).turn;
+    const restingBarRows = keyBarRowCount(keyHintsFor(resting), columns);
+    finishedOverflow = layoutOf(
+      resting ? { id: "live-turn", lines: resting.lines } : null,
+      resting ? idleTranscript : transcript,
+      restingReservedRows,
+      restingBarRows
+    ).window.paged;
+  }
   useLayoutEffect(() => {
     if (finishedOverflow) {
       commitLiveTurn("overflow", pendingConfirmActions.length > 0);

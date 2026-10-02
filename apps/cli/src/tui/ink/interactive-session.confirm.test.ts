@@ -53,7 +53,9 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // The bar's row feeds the live-region cap's key-bar slot; it is under the
     // composer, so never in the composer-row prediction (the rule over it is).
     expect(source).toContain("const keyBarRows = keyBarRowCount(keyHints, columns);");
-    expect(source.match(/^\s+keyBarRows,$/gm)?.length).toBe(1);
+    // Twice: the turn's row budget and the live layout.
+    expect(source.match(/^\s+keyBarRows: barRows,$/gm)?.length).toBe(2);
+    expect(source).toContain("reserved = reservedRows, barRows = keyBarRows) => inkTranscriptLayout({");
     expect(source).toContain("keyBarRows={keyBarRows}");
     // The rule over the composer is counted only when it is drawn (`composerRuleRows`).
     expect(source).toContain("const composerRow = homeInventoryRows + liveLayout.rowCount + draftLines.length + composerRuleRows;");

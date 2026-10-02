@@ -255,9 +255,12 @@ describe("the session wires the live cap (CI-run)", () => {
   });
 
   it("the overflow commit runs only for a finished turn, keeps a waiting card, and never draws the paged turn", () => {
-    const rule = sessionSource.slice(sessionSource.indexOf("const finishedOverflow ="), sessionSource.indexOf("// With nothing live after the first turn"));
-    expect(rule).toMatch(/const finishedOverflow = !transcriptBusy && !exitRequested/u);
-    expect(rule).toContain("turnLayout.window.paged");
+    const rule = sessionSource.slice(sessionSource.indexOf("const finished ="), sessionSource.indexOf("// With nothing live after the first turn"));
+    expect(rule).toMatch(/const finished = !transcriptBusy && !exitRequested/u);
+    expect(rule).toContain("let finishedOverflow = finished && turnLayout.window.paged;");
+    // Decided against the resting frame, so a draft or a menu never sends a turn up.
+    expect(rule).toContain("if (finishedOverflow && reservedRows !== restingReservedRows) {");
+    expect(rule).toContain("drawTurnWith(restingReservedRows)");
     expect(rule).toContain('commitLiveTurn("overflow", pendingConfirmActions.length > 0)');
     expect(rule).toContain("const liveLatestShown = finishedOverflow ? null : liveLatest;");
   });

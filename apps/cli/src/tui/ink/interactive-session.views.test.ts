@@ -157,7 +157,7 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
   });
 
   it("the live turn is drawn to the rows the live region gives it, and commits whole (every page, one column)", () => {
-    const sizing = sessionSource.slice(sessionSource.indexOf("const turnRowsAt"), sessionSource.indexOf("const turnLayout = layoutOf("));
+    const sizing = sessionSource.slice(sessionSource.indexOf("const drawTurnWith"), sessionSource.indexOf("const turnLayout = layoutOf("));
     expect(sizing).toContain("inkLatestTurnRows({");
     expect(sizing).toContain("keyBarRowCount(keyHintsFor(");
     const commit = sessionSource.slice(sessionSource.indexOf("const commitLiveTurn"), sessionSource.indexOf("const [exitRequested"));

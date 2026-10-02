@@ -110,6 +110,104 @@ describe("a finished turn that fits stays live (fake TTY; skipped on CI like the
   });
 });
 
+// The fit is measured against the frame as it rests (an empty one-row
+// composer), with the rows the composer really draws. The numbers-ads turn is
+// 24 rows: with the top bar and its rule, the rule over the composer, the
+// composer and the key bar that is a 29-row frame, and Ink needs 2 rows spare.
+describe("what fits is decided against the resting frame (fake TTY; skipped on CI like the other PTY tests)", () => {
+  async function start(columns: number, rows: number) {
+    resetTurnState();
+    const input = ttyInput();
+    const output = ttyOutput(columns, rows);
+    const lines: string[] = [];
+    const session = runInkInteractiveSession({
+      errorOutput: ttyOutput(columns, rows),
+      input,
+      async onSubmitLine(line, _onProgress, _signal, onView) {
+        lines.push(line);
+        if (line === "/exit") return { exit: true, messages: [] };
+        onView?.(numbersFrame());
+        return { messages: [{ role: "assistant", text: "Three ad sets spent this week." }] };
+      },
+      output,
+      title: "Infinite TUI"
+    });
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
+    await sendKeys(input, "how are the ads?\r");
+    await waitFor(() => stripAnsi(output.text()).includes("❯ how are the ads?") && stripAnsi(output.text()).includes("Ad set 03"), 4_000, output.text);
+    return { input, output, lines, session };
+  }
+  /** Rows of the last frame, and whether the question is drawn live (under the top bar). */
+  const liveQuestion = (raw: string) => {
+    const rows = stripAnsi(lastFrame(raw)).split("\n");
+    const bar = rows.findIndex((row) => row.includes("∞ Infinite"));
+    return bar >= 0 && rows.findIndex((row) => row.includes("❯ how are the ads?")) > bar;
+  };
+
+  it.skipIf(process.env.CI === "true")("a long draft never sends a turn that fits to scrollback, and the turn is whole again once the draft is gone", { timeout: 30_000 }, async () => {
+    const { input, output, lines, session } = await start(100, 33);
+    await waitFor(() => stripAnsi(lastFrame(output.text())).includes("j k  row"), 4_000, output.text);
+    expect(getTurnState().views).toHaveLength(1);
+
+    // 350 characters wrap to four composer rows: the live region shrinks, the turn stays live.
+    input.write("w".repeat(350));
+    await waitFor(() => stripAnsi(output.text()).includes("w".repeat(90)), 4_000, output.text);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(getTurnState().views).toHaveLength(1);
+
+    // Draft deleted: the whole turn is back under the top bar, with its keys, and j still moves the row.
+    let mark = output.text().length;
+    for (let index = 0; index < 350; index += 1) {
+      input.write(String.fromCharCode(127));
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await waitFor(() => stripAnsi(lastFrame(output.text().slice(mark))).includes("❯ Ask Infinite…"), 4_000, output.text);
+    expect(liveQuestion(output.text())).toBe(true);
+    expect(stripAnsi(lastFrame(output.text()))).not.toMatch(/more lines|lines above/u);
+    expect(getTurnState().views).toHaveLength(1);
+    // Typing moved the keys to the composer; tab gives them back to the view.
+    mark = output.text().length;
+    await sendKeys(input, "\t");
+    await waitFor(() => stripAnsi(lastFrame(output.text().slice(mark))).includes("j k  row"), 4_000, output.text);
+    mark = output.text().length;
+    await sendKeys(input, "j");
+    await waitFor(() => selectedRows(lastFrame(output.text().slice(mark))).length === 1, 4_000, output.text);
+    // The question was printed once, live: never above the top bar.
+    const before = stripAnsi(output.text());
+    expect(before.indexOf("❯ how are the ads?")).toBeGreaterThan(before.indexOf("∞ Infinite"));
+    expect(lines).toEqual(["how are the ads?"]);
+
+    await sendKeys(input, "\t/exit\r");
+    await session;
+  });
+
+  it.skipIf(process.env.CI === "true")("at 100x31 the turn just fits: it stays live and j selects a row", { timeout: 30_000 }, async () => {
+    const { input, output, session } = await start(100, 31);
+    await waitFor(() => stripAnsi(lastFrame(output.text())).includes("j k  row"), 4_000, output.text);
+    expect(getTurnState().views).toHaveLength(1);
+    expect(liveQuestion(output.text())).toBe(true);
+    expect(stripAnsi(output.text())).not.toMatch(/more lines|lines above/u);
+    const mark = output.text().length;
+    await sendKeys(input, "j");
+    await waitFor(() => selectedRows(lastFrame(output.text().slice(mark))).length === 1, 4_000, output.text);
+    await sendKeys(input, "\t/exit\r");
+    await session;
+  });
+
+  it.skipIf(process.env.CI === "true")("at 100x30 it does not fit: the whole turn is in scrollback and only the frame is live", { timeout: 30_000 }, async () => {
+    const { input, output, session } = await start(100, 30);
+    await waitFor(() => getTurnState().views.length === 0, 4_000, output.text);
+    await waitFor(() => !liveQuestion(output.text()), 4_000, output.text);
+    const text = stripAnsi(output.text());
+    expect(text).not.toMatch(/more lines|lines above/u);
+    expect(text).toContain("Ad set 03");
+    const rows = stripAnsi(lastFrame(output.text())).split("\n").filter((row) => row.trim());
+    expect(rows.at(-1)!.trim()).toBe("/  commands");
+    await sendKeys(input, "/exit\r");
+    await session;
+  });
+});
+
 /** The last frame Ink wrote: what follows its last erase of the previous frame. */
 function lastFrame(raw: string): string {
   const erase = raw.lastIndexOf(`${ESC}[2K`);
