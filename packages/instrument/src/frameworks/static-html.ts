@@ -1,4 +1,4 @@
-import { readdirSync, type Dirent } from "node:fs"
+import { readFileSync, readdirSync, type Dirent } from "node:fs"
 import { join } from "node:path"
 
 import type { FrameworkAdapter, InstallInstruction } from "../types.js"
@@ -66,6 +66,7 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     } else {
       // Every page we intend to instrument must have a </head> to inject into.
       // A single missing tag anywhere blocks the whole plan so no page is silently skipped.
+      // (Domain-verification token files are not pages: findHtmlPages never lists them.)
       for (const page of pages) {
         if (!readRequiredFile(root, page).includes("</head>")) {
           blockers.push(missingHeadMessage(page))
@@ -87,14 +88,17 @@ export const staticHtmlAdapter: FrameworkAdapter = {
         "Infinite requires a proven same-origin proxy. Add vercel.json or pass --infinite-static-proxy vercel."
       )
     }
-    const pageAssumptions =
-      pages.length > 1
+    const verificationFiles = findVerificationFiles(root)
+    const pageAssumptions = [
+      ...(pages.length > 1
         ? [
             `Static HTML wiring injects the managed analytics block into every discovered page: ${pages.join(", ")}.`
           ]
         : [
             "Static HTML wiring uses direct public snippets rather than framework-specific runtime hooks."
-          ]
+          ]),
+      ...(verificationFiles.length > 0 ? [verificationFilesAssumption(verificationFiles)] : [])
+    ]
 
     // The HTML pages, then (once) vercel.json — never inside the per-page fan-out. isHtmlPath
     // keeps vercel.json out of the page loops in apply()/uninstall().
@@ -281,6 +285,56 @@ const ignoredDirNames = new Set([
  * remaining pages are sorted for deterministic plans, manifests, and output.
  */
 function findHtmlPages(appRoot: string): string[] {
+  return walkHtmlFiles(appRoot).filter(
+    (page) => page === "index.html" || !isVerificationTokenFile(join(appRoot, page))
+  )
+}
+
+/** The .html files under the app root that are domain-verification tokens, not pages. */
+function findVerificationFiles(appRoot: string): string[] {
+  return walkHtmlFiles(appRoot).filter(
+    (page) => page !== "index.html" && isVerificationTokenFile(join(appRoot, page))
+  )
+}
+
+function verificationFilesAssumption(files: string[]): string {
+  // Worded as what infinite-tag can actually tell from the bytes: the SHAPE of a verification
+  // token. A one-line placeholder ("Coming soon") has the same shape, so the plan never claims more.
+  const one = files.length === 1
+  return `Left untouched: ${files.join(", ")} ${one ? "looks" : "look"} like a verification token (one short line, no markup — the shape of Meta's and Google's domain-verification files). A provider checks such a file byte for byte, so no analytics is added and no <head> is ever added. If ${one ? "it is" : "one is"} meant to be a page, it needs real HTML with a </head>; then re-run.`
+}
+
+/**
+ * The longest bare line we treat as a verification token. Meta's domain-verification file is a
+ * ~30-character token; Google's `google<hash>.html` is one line of ~52 characters
+ * ("google-site-verification: google<hash>.html"). A real page is never this short and markup-free.
+ */
+const VERIFICATION_TOKEN_MAX_LENGTH = 256
+
+/**
+ * True when the file's CONTENT has the shape of a domain-verification token rather than a page:
+ * after a byte-order mark and surrounding whitespace, a single short line with no markup at all
+ * (no "<"). Meta's and Google's verification files are exactly this, and their filenames vary per
+ * customer, so the shape is recognised, never the name (infinite.fast excluded its own file by
+ * name: 849ccf1). An empty file, or anything with a "<" in it, is NOT a token: a genuinely broken
+ * page must still block the plan rather than ship without analytics.
+ */
+export function isVerificationTokenContent(content: string): boolean {
+  const body = content.replace(/^\uFEFF/, "").trim()
+  if (body.length === 0 || body.length > VERIFICATION_TOKEN_MAX_LENGTH) return false
+  if (body.includes("<")) return false
+  return !/[\r\n]/.test(body)
+}
+
+function isVerificationTokenFile(absolutePath: string): boolean {
+  try {
+    return isVerificationTokenContent(readFileSync(absolutePath, "utf8"))
+  } catch {
+    return false
+  }
+}
+
+function walkHtmlFiles(appRoot: string): string[] {
   const pages: string[] = []
 
   const walk = (absoluteDir: string, relativeDir: string): void => {

@@ -57,6 +57,111 @@ Meta Manual Advanced Matching, as a customer-controlled option that is OFF by de
   value that is not a digest never reaches `fbq`.
 - **The privacy disclosure notice names the lane** when, and only when, it was actually installed.
 
+Fixes ported from infinite.fast: ways a customer site silently collected the wrong data.
+
+- **The server lane now sends Meta the visitor's newest ad click, not their oldest.** A browser can
+  hold two `_fbc` click-id cookies (one per domain scope) and lists the older one first;
+  `adMatchFromRequest` used to forward whichever came first, so Meta credited an earlier ad than the
+  one the visitor last clicked. It now picks the newest click by the creation time inside Meta's
+  cookie format, skips values that do not have Meta's shape (so a broken first cookie can no longer
+  hide a good one), and reads a plain-object `req.headers` (Vercel Node functions, Express) as well
+  as `Headers`. `_fbp` is read as before (first listed), and dropped when it is not in Meta's shape.
+  Same rules as infinite.fast, fixed there on 29 Sep.
+- **One rule for hashing the account ID sent to Meta.** The server-lane setup guide told customers
+  to lowercase `external_id` before hashing, while the browser pixel's matching helper keeps the
+  id's case — so an id with capital letters reached Meta as two different people. The guide, the
+  generated helper's comments and the README now all say the same thing as infinite.fast: the email
+  is trimmed and lowercased; the account id is trimmed only. The guide's recipe also stopped
+  throwing inside a checkout route on a numeric id or a guest (`String(user.id).trim()`, and only
+  when the buyer has an account id). Both recipes, `hashInfiniteEmail` and the new
+  `hashInfiniteExternalId`, are now exported from the package, as their documentation already
+  said.
+- **Truthful Meta event-ID advice in the setup guide and README.** They told customers that the
+  `eventId` they pass (`"purchase:" + order.id`) is the event ID Meta receives, and to fire a
+  browser `fbq('track', 'Purchase', …, { eventID })` with the same value so Meta would deduplicate.
+  That is wrong whenever Infinite derives a different ID (conversions set to *Once per account*, or
+  *Once per visitor (TTL)* when a visit key is carried), and a page that builds its own Meta event
+  ID sends Meta conversions that never happened. The guide now says: `eventId` is Infinite's
+  idempotency key, so a retried webhook is counted once, and one purchase is reported under one
+  `eventId` wherever it is reported (`"purchase:" + session.id` in every example; two ids would
+  count it twice); Infinite decides the ID Meta receives; purchases are reported from the payment
+  webhook as server events only, with the match data and the visit key captured at checkout; and
+  the page never builds a Meta event ID or fires a Meta conversion on a click. The serverless route
+  example no longer attaches Meta match data to a purchase, and says to move the report to the
+  webhook (not add a second one) when purchases go to Meta.
+- **A domain-verification file no longer blocks a static-site install.** Meta's domain-verification
+  `.html` file (and Google's `google<hash>.html`) is a bare token with no markup, so it has no
+  `</head>`, and one such file blocked the whole install. Files whose content is a single short line
+  with no markup at all now look like verification tokens (judged by content, since the names vary
+  per site): they are left byte-for-byte untouched and named in the plan as looking like a token. A
+  head is never added to one.
+  Genuinely broken pages (markup without `</head>`, empty files) still block the install.
+- **Only real Meta pixel IDs are accepted.** `--meta-pixel-id` (and a pixel ID read from `.env`)
+  accepted any 6-20 digit number, so a typo, a placeholder or an ad-account number installed a
+  pixel that looks alive and never receives an event. Meta issues 15- and 16-digit pixel IDs only;
+  anything else is now refused, and the message says what a pixel ID looks like and where to find
+  it in Events Manager. Pixels already on a site are still detected whatever their shape, so a
+  broken one is reported rather than hidden.
+- **The managed PostHog snippet now starts, and can identify visitors before PostHog loads — and on
+  Next.js, so do the Meta pixel, the X pixel and Infinite's own pixel.** The snippet's stub method
+  list named methods under parents the stub never creates (`person.*`, `group.*`,
+  `feature_flags.*`, `sessionRecording.*`), so building the stub threw before `posthog.init` was
+  queued, and it had no top-level `identify`, `alias` or `get_distinct_id`, so an early
+  `posthog.identify()` threw too. On Next.js (App Router and Pages Router) infinite-tag puts every
+  provider in ONE script, in the order GA4, PostHog, X, Meta, Infinite, so that throw also stopped
+  everything after PostHog: on every Next.js site where infinite-tag managed PostHog, the Meta
+  pixel, the X pixel and the Infinite pixel it installed never started (GA4, placed first, did).
+  Static HTML and Vite sites give each provider its own script, so there only PostHog was affected.
+  The list is now PostHog's official snippet list as infinite.fast ships it. Only the method list
+  changed: `defaults`, `api_host` and installs the customer already had are untouched. A new test
+  runs the whole Next.js module with every provider and checks that each one starts.
+- **The harness's step list has one source of truth.** The runbook's step ids listed 12 steps while
+  the harness ran 13 (`setup-checks` was missing from the list), so anything reading the step ids
+  disagreed with what actually ran. The run order is now derived from the id list, an id without a
+  step does not compile, and a test fails if the two ever drift again.
+
+Meta browser code ported from infinite.fast, where every rule was fixed after a real incident. The
+code and its tests came across together; the tests run the snippet infinite-tag writes (the
+static-html `<script>` and the Next module's string literal) in a sandbox, not a text search.
+
+- **Meta click id (`_fbc`) saved on the landing page, for new installs.** When a visitor arrives
+  from a Meta ad, the `fbclid` exists in the landing URL and nowhere else. If the pixel cannot run
+  there (an ad blocker, a Traffic Permissions block), the click id used to be
+  lost, and a later sign-up or purchase reached Meta with nothing tying it to the ad, so the ad looked
+  like it did not work. The Meta snippet now saves the click id in Meta's own `_fbc` cookie before
+  the pixel starts. The last click wins: a second ad click replaces the first, and one cookie is
+  left, in the scope Meta uses, so an older copy can never shadow the newer click. The subdomain
+  index names the domain the cookie was actually written on (`www.acme.com` → 1, `shop.acme.co.uk` →
+  2). It never writes `_fbp`, never stores the click id anywhere else, writes nothing when there is no
+  `fbclid`, and refuses malformed or oversized ids. It sends nothing. It is not limited to the
+  production host, so previews can test it. It follows the visitor's consent in every consent
+  mode, as infinite.fast's capture does: nothing is written for a visitor who said no on the site,
+  or whose browser sends Do Not Track / Global Privacy Control, until they grant; and under
+  `--infinite-consent-mode required` nothing is written before a recorded grant.
+  `window.infiniteMetaClickId()` returns the click id or `""`.
+  Pixels the site already had are left exactly as they are.
+- **Manual Advanced Matching follows consent.** `window.infiniteMetaAdvancedMatch` now attaches
+  nothing for a visitor who denied on the site, or whose browser sends DNT/GPC without a grant, and
+  under `required` mode nothing until a grant. It checks on every call, so a revocation counts at
+  once. Unchanged and now pinned by tests: the email is trimmed and lowercased before hashing, the
+  account id is trimmed only (case kept, matching the server's hash), a phone number is never sent,
+  and a missing `fbq` or WebCrypto resolves `false` instead of failing. It is still off by default.
+- **New setup check: Meta automatic events.** A Meta pixel infinite-tag installed that is missing
+  `fbq('set', 'autoConfig', false, id)` before `init` is a problem in infinite-tag's own code. A
+  pixel the site already had with automatic events on is reported as information to review, never
+  as a problem and never edited. When the source cannot settle it, the check says "undetermined";
+  an opt-out that only exists inside a comment is "undetermined", never a pass. A Next module written
+  by an older infinite-tag (before 0.7) is recognised as infinite-tag's own. The same check counts
+  infinite-tag's managed Meta block across the whole page: exactly one `init` per pixel, at most one
+  click-id capture and one matching accessor, and the capture before `init`, so a page that ended up
+  with the block twice (every page view counted twice) is caught. Identical results are reported
+  once, naming up to five files and counting the rest, and the step note now also counts the
+  "worth checking" items. A site with no Meta pixel in its source gets one line about it, not two.
+- **Fixed: the setup checks could not see a managed Next.js pixel.** The Next module stores the
+  snippet as a string with escaped quotes, so the click-id check read a correct Next install as "no
+  pixel found". The checks now decode it, and the click-id check names the managed capture when it
+  is there.
+
 ## 0.11.0 — 2026-09-21
 
 The Meta pixel's `verify` lane now checks DELIVERY, not just that a snippet is on the page.

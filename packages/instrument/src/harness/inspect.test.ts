@@ -216,30 +216,43 @@ describe("readEnvKeys", () => {
   it("reads .env and .env.local but never a template", () => {
     const root = copyFixture("next-app-router-basic")
     write(root, ".env.example", "NEXT_PUBLIC_POSTHOG_KEY=phc_TEMPLATE\nNEXT_PUBLIC_GA_MEASUREMENT_ID=G-TEMPLATE\n")
-    write(root, ".env", "NEXT_PUBLIC_GA_MEASUREMENT_ID=G-FROMENV\n# comment\nNEXT_PUBLIC_META_PIXEL_ID=\"111222333444\"\n")
+    write(root, ".env", "NEXT_PUBLIC_GA_MEASUREMENT_ID=G-FROMENV\n# comment\nNEXT_PUBLIC_META_PIXEL_ID=\"111222333444555\"\n")
     write(root, ".env.local", "NEXT_PUBLIC_POSTHOG_KEY='phc_local'\nNEXT_PUBLIC_POSTHOG_HOST=https://eu.i.posthog.com\n")
     const env = readEnvKeys(root, ".")
     expect(env).toEqual({
       ga4MeasurementId: { value: "G-FROMENV", file: ".env" },
       posthogProjectKey: { value: "phc_local", file: ".env.local" },
       posthogApiHost: { value: "https://eu.i.posthog.com", file: ".env.local" },
-      metaPixelId: { value: "111222333444", file: ".env" }
+      metaPixelId: { value: "111222333444555", file: ".env" }
     })
   })
 })
 
 describe("resolveHarnessKeys", () => {
+  it("never adopts a .env Meta pixel id Meta could not have issued (not 15-16 digits)", () => {
+    for (const value of ["999888777", "12345678901234", "12345678901234567"]) {
+      const resolved = resolveHarnessKeys({
+        flags: {},
+        explicitFlags: false,
+        discovered: null,
+        env: { metaPixelId: { value, file: ".env" } },
+        detected: []
+      })
+      expect(resolved.artifacts.meta).toBeUndefined()
+    }
+  })
+
   it("prefers flags, then discovered artifacts, then .env; existing snippets only fill evidence", () => {
     const resolved = resolveHarnessKeys({
       flags: { ga4: { measurementId: "G-FLAG" } },
       explicitFlags: true,
       discovered: { ga4: { measurementId: "G-DISC" }, posthog: { projectKey: "phc_disc", apiHost: "https://us.i.posthog.com" } },
-      env: { metaPixelId: { value: "999888777", file: ".env" }, ga4MeasurementId: { value: "G-ENV", file: ".env" } },
+      env: { metaPixelId: { value: "999888777666555", file: ".env" }, ga4MeasurementId: { value: "G-ENV", file: ".env" } },
       detected: [{ provider: "x", via: "snippet", file: "index.html", line: 3, key: "o1234" }]
     })
     expect(resolved.artifacts.ga4).toEqual({ measurementId: "G-FLAG" })
     expect(resolved.artifacts.posthog?.projectKey).toBe("phc_disc")
-    expect(resolved.artifacts.meta).toEqual({ pixelId: "999888777" })
+    expect(resolved.artifacts.meta).toEqual({ pixelId: "999888777666555" })
     expect(resolved.artifacts.x).toBeUndefined()
     expect(resolved.sources).toEqual({ ga4: "flag", posthog: "discovered-artifacts", meta: "env" })
   })

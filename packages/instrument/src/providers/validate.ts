@@ -23,9 +23,12 @@ const POSTHOG_PROJECT_KEY = /^phc_[A-Za-z0-9]+$/
 // from breaking out of a string literal or `</script>`.
 const X_ID = /^[A-Za-z0-9_-]{2,}$/
 const INFINITE_SITE_SOURCE_KEY = /^site_[A-Za-z0-9_-]+$/
-// Meta/Facebook browser-pixel ids are always numeric (typically 15-16 digits). Digits
-// only is the guarantee that the id cannot break out of the fbq('init', "…") literal.
-const META_PIXEL_ID = /^[0-9]{6,20}$/
+// Meta/Facebook pixel (dataset) ids are 15 or 16 digits; Meta issues no other shape. Anything
+// else is a typo, a placeholder or a different id (an ad account, a page, an app) that would boot
+// a pixel that never receives events. Same rule infinite.fast's injector enforces (9f65b47,
+// inject-analytics.cjs). Digits only is also the guarantee that the id cannot break out of the
+// fbq('init', "…") literal.
+const META_PIXEL_ID = /^[0-9]{15,16}$/
 
 export function validateGa4MeasurementId(value: unknown): string | null {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -237,7 +240,7 @@ export function validateMetaPixelId(value: unknown): string | null {
     return "Meta requires a public pixelId before planning can continue."
   }
   if (!META_PIXEL_ID.test(value)) {
-    return `Meta pixelId ${JSON.stringify(value)} is not a valid pixel id (expected a numeric id).`
+    return `Meta pixelId ${JSON.stringify(value)} is not a valid pixel id. A Meta pixel id is 15 or 16 digits and nothing else (e.g. 1234567890123456): copy it from Events Manager → Data sources → your pixel → Settings.`
   }
   return null
 }

@@ -1,9 +1,16 @@
-// The runbook runner: teardown §5.2's eleven steps as an ordered list, each naming its own
+// The runbook runner: teardown §5.2's steps as an ordered list, each naming its own
 // failure code and what happens next (halt, or continue degraded and note it). The runner is
 // generic over the context so tests can drive it with fakes; run.ts supplies the real steps.
 import type { FailureNext, HarnessFailure, HarnessFailureCode, HarnessReport, StepOutcome } from "./types.js"
 
-/** Teardown §5.2, in order. Also the ids the report's step list uses. */
+/**
+ * Teardown §5.2 plus the setup-correctness step, in order. Also the ids the report's step list uses.
+ *
+ * THE ONE SOURCE OF TRUTH for the harness's step order: run.ts builds HARNESS_STEPS by mapping these
+ * ids through a Record keyed by RunbookStepId, so an id with no step does not compile and a step
+ * missing from this list never runs. (Before, this list said 12 steps while the harness ran 13:
+ * `setup-checks` was added to HARNESS_STEPS only.)
+ */
 export const RUNBOOK_STEP_IDS = [
   "preflight",
   "inspect",
@@ -13,6 +20,7 @@ export const RUNBOOK_STEP_IDS = [
   "confirm",
   "apply",
   "conversions",
+  "setup-checks",
   "server-lane",
   "server-lane-env",
   "verify",

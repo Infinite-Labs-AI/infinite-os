@@ -86,11 +86,14 @@ export {
   classifyUserAgent,
   computeDocumentEventId,
   computeVisitKey,
+  hashInfiniteEmail,
+  hashInfiniteExternalId,
   hmacHex,
   isDocumentPath,
   shouldRecordDocumentRequest,
   signServerEventBody
 } from "./server-lane/helpers.js"
+export type { InfiniteAdMatch } from "./server-lane/helpers.js"
 export {
   NEXT_DOCUMENT_MATCHER,
   SERVER_LANE_FENCE_END,
