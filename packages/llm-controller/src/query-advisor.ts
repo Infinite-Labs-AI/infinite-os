@@ -672,8 +672,7 @@ function xSyncFreshnessFailureSections(message: string, toolResults: QueryRefine
     `- A \`sync_source_now\` call failed in this turn.${errorMessage}`,
     "- Do not present stored X rows as latest, current, same-day-fresh, or first-ever coverage after a failed refresh.",
     "- If you still answer from stored X rows, explicitly label them as local stored/synced data from before the failed refresh and explain that current provider freshness could not be verified.",
-    "- For latest/current/today X ranking questions, refuse or caveat any current claim unless a later `sync_source_now` succeeds in this turn.",
-    "- For first/earliest X post questions, phrase any result as the earliest synced public post, not the user's first tweet ever, unless full-history coverage was verified after a successful refresh."
+    "- For latest/current/today X ranking questions, refuse or caveat any current claim unless a later `sync_source_now` succeeds in this turn."
   ];
 }
 

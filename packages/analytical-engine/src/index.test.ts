@@ -5979,6 +5979,44 @@ describe("run_metric_query comparison (compareTo)", () => {
     expect(result?.caveats).toContain("no_prior_baseline");
   });
 
+  it("reads date bounds from the view's date dimension (the `date` alias -> occurred_on) for the prior re-run", async () => {
+    const queries: Array<{ sql: string; params?: unknown[] }> = [];
+    const db = comparisonFakeDb(
+      "queryable.vw_revenue_by_source",
+      "recognized_revenue",
+      {
+        "2026-06-01..2026-06-07": { recognized_revenue: "14" },
+        "2026-05-25..2026-05-31": { recognized_revenue: "10" }
+      },
+      queries
+    );
+    const handlers = createActionHandlers(db);
+    const result = await handlers.run_metric_query?.(
+      {
+        metric: "recognized_revenue",
+        view: "queryable.vw_revenue_by_source",
+        compareTo: "prior_period",
+        // The model expresses the range with the generic `date` alias; the engine
+        // normalizes it to occurred_on — comparison must follow that.
+        filters: [
+          { field: "date", operator: "gte", value: "2026-06-01" },
+          { field: "date", operator: "lte", value: "2026-06-07" }
+        ]
+      },
+      COMPARISON_CONTEXT
+    );
+    expect((result?.data as { comparison?: Record<string, unknown> }).comparison).toMatchObject({
+      current: 14,
+      previous: 10,
+      absoluteDelta: 4,
+      direction: "up"
+    });
+    const aggregateRuns = queries.filter((entry) => entry.sql.includes("from queryable.vw_revenue_by_source"));
+    expect(aggregateRuns).toHaveLength(2);
+    expect(aggregateRuns[0]?.sql).toContain("occurred_on >=");
+    expect(aggregateRuns[1]?.params).toEqual(["workspace", "2026-05-25", "2026-05-31", 500]);
+  });
+
   it("omits the comparison block and adds comparison_requires_date_range when date bounds are missing", async () => {
     const queries: Array<{ sql: string; params?: unknown[] }> = [];
     const db = comparisonFakeDb(
