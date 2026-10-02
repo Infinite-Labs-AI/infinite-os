@@ -229,6 +229,60 @@ describe("the build check", () => {
     const result = (await subject.apply(plan, approveAll(plan))) as WizardApplyResult
     expect(result).toMatchObject({ ok: true, build: "failed_baseline" })
   })
+
+  it("B26: a build that could not run is not_run (undetermined), never 'already red' and never blamed on the install", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML })
+    const couldNotRun = { ok: false, failureSignature: [], durationMs: 1, error: "sandbox-exec could not apply the profile" } as BuildResult
+    const subject = installer({ build: async () => couldNotRun })
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    // The baseline could not run either (nested in another sandbox): red with no signature.
+    const before: WizardBeforeFacts = { ...fakeBefore(), baselineBuild: { ok: false, failureSignature: [], durationMs: 1 } }
+    const plan = subject.buildPlan(scan, fakeKeys(), before, [])
+    const result = (await subject.apply(plan, approveAll(plan))) as WizardApplyResult
+    expect(result).toMatchObject({ ok: true, build: "not_run" })
+    expect(result.warnings.some((warning) => warning.startsWith("The build could not run (test_error"))).toBe(true)
+    // With a green baseline it is still not a new failure: the install stays.
+    const green = makeSite({ "index.html": STATIC_HTML })
+    const second = installer({ build: async () => couldNotRun })
+    const secondPlan = second.buildPlan(await second.scan({ root: green, hosting: fakeHosting() }), fakeKeys(), { ...fakeBefore(), baselineBuild: { ok: true, failureSignature: [], durationMs: 1 } } as WizardBeforeFacts, [])
+    expect(await second.apply(secondPlan, approveAll(secondPlan))).toMatchObject({ ok: true, build: "not_run" })
+  })
+})
+
+describe("D17 sensitive pages (decision 17: a plan line from the detector)", () => {
+  it("a NEW managed PostHog gets the sensitive-pages line from the detector, and the approved bytes carry the paths", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML, "login.html": STATIC_HTML, "pricing.html": STATIC_HTML })
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    const line = plan.lines.find((entry) => entry.id === "sensitive_pages:posthog:managed")
+    expect(line, "the D17 line (the detector's /login) is on the plan").toBeDefined()
+    expect(line!.text).toContain("/login")
+    expect(line!.text).not.toContain("/pricing")
+    expect((await subject.apply(plan, approveAll(plan))).ok).toBe(true)
+    expect(read(root, "index.html")).toContain('var INFINITE_SENSITIVE_PATHS = ["/login"];')
+  })
+
+  it("negative: declined, the managed PostHog carries no sensitive paths; no sensitive route, no line", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML, "login.html": STATIC_HTML })
+    const subject = installer()
+    const plan = subject.buildPlan(await subject.scan({ root, hosting: fakeHosting() }), fakeKeys(), fakeBefore(), [])
+    const answer = approveAll(plan)
+    expect((await subject.apply(plan, { ...answer, approved: answer.approved.filter((id) => id !== "sensitive_pages:posthog:managed") })).ok).toBe(true)
+    expect(read(root, "index.html")).not.toContain("INFINITE_SENSITIVE_PATHS")
+    const plain = makeSite({ "index.html": STATIC_HTML, "pricing.html": STATIC_HTML })
+    const other = installer()
+    const plainPlan = other.buildPlan(await other.scan({ root: plain, hosting: fakeHosting() }), fakeKeys(), fakeBefore(), [])
+    expect(plainPlan.lines.some((entry) => entry.kind === "sensitive_pages")).toBe(false)
+  })
+
+  it("an adopted PostHog that already turns replay off there (setup check pass) gets no line", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML, "login.html": STATIC_HTML })
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const handled = { ...fakeBefore(), checks: [{ checkId: "sensitive_pages", tier: "S" as const, state: "pass" as const, at: "2026-10-02T09:00:00.000Z", runId: IDS.run }] }
+    expect(subject.buildPlan(scan, fakeKeys(), handled, []).lines.some((entry) => entry.kind === "sensitive_pages")).toBe(false)
+  })
 })
 
 describe("scan: app root, truncation, a corrupt receipt", () => {

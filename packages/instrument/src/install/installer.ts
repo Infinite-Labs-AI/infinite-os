@@ -21,6 +21,8 @@ import {
   type InspectPhaseResult
 } from "../harness/run.js"
 import { scanSourceFiles } from "../harness/scan.js"
+import { buildVerdict } from "../checks/build.js"
+import { detectSensitivePages, readAppSources } from "../setup-checks/index.js"
 import type { ResolvedKeys } from "../harness/types.js"
 import {
   computeContentHash,
@@ -117,6 +119,8 @@ export interface WizardScanResult extends ScanResult {
    * (review I1 P1-2: the installer never edits it; the rewrites it lacks become a checked agent job).
    */
   unmanagedNextConfig?: string | null
+  /** D17: the app's sensitive routes (`detectSensitivePages`), for the sensitive-pages plan lines. */
+  sensitivePaths?: string[]
 }
 
 export interface InstallerOptions {
@@ -181,7 +185,7 @@ export interface WizardApplyResult extends InstallerApplyResult {
   reason: string | null
   /** True when an `npm` line was approved and the package was installed. */
   npmInstalled: boolean
-  /** "passed" | "failed_baseline" (red before this run too) | "not_run" (no build check wired). */
+  /** "passed" | "failed_baseline" (red before this run too) | "not_run" (no build check wired, or the build could not run: B26). */
   build: "passed" | "failed_baseline" | "not_run"
   /** The resolved artifacts the managed bytes were written from (public ids only). */
   artifacts: WizardInstallArtifacts
@@ -204,21 +208,21 @@ function gitShow(root: string, rev: string, path: string): string | null {
 
 const repoRelative = (appRoot: string, file: string): string => (appRoot === "." ? file : `${appRoot}/${file}`)
 
-/** The D17 detector's sensitive paths (O6), read from its check result's URL evidence. */
-export function sensitivePathsFrom(before: BeforeFacts): string[] {
-  const paths = new Set<string>()
-  for (const check of before.checks) {
-    if (check.checkId !== SENSITIVE_PAGES_CHECK_ID || check.state === "pass") continue
-    for (const evidence of check.evidence ?? []) {
-      if (!("url" in evidence)) continue
-      try {
-        paths.add(new URL(evidence.url, "https://placeholder.invalid").pathname)
-      } catch {
-        // not a URL: skipped, never guessed
-      }
-    }
-  }
-  return [...paths].sort()
+/** The D17 detector's routes (`detectSensitivePages`) over the app's own source: login, checkout, … pages. */
+export function sensitiveRoutesOf(appRootAbsolute: string): string[] {
+  return [...new Set(detectSensitivePages(readAppSources(appRootAbsolute)).map((entry) => entry.route))].sort()
+}
+
+/**
+ * The sensitive paths the D17 plan lines name (decision 17: a plan line from a detector, never automatic):
+ * the detector's routes from the scan, unless the setup check found the site's PostHog init already turns
+ * replay and autocapture off there (`sensitive_pages` = pass). A NEW managed PostHog has no init in the code
+ * yet, so the check has nothing to say and the detector's routes stand. (The check's evidence is a file and
+ * line, never a URL: reading paths from it found none, so neither D17 line could ever appear.)
+ */
+export function sensitivePathsFor(scan: Pick<WizardScanResult, "sensitivePaths">, before: BeforeFacts): string[] {
+  const handled = before.checks.some((check) => check.checkId === SENSITIVE_PAGES_CHECK_ID && check.state === "pass")
+  return handled ? [] : [...(scan.sensitivePaths ?? [])]
 }
 
 export class WizardInstaller implements Installer {
@@ -277,6 +281,7 @@ export class WizardInstaller implements Installer {
     }
     const result: WizardScanResult = {
       unmanagedNextConfig: unmanagedNextConfigOf(phase.appRootAbsolute, phase.inspect.appRoot, framework),
+      sensitivePaths: sensitiveRoutesOf(phase.appRootAbsolute),
       root: opts.root,
       appRoot: phase.inspect.appRoot,
       framework,
@@ -311,7 +316,7 @@ export class WizardInstaller implements Installer {
   buildPlan(scan: ScanResult, keys: TagKeys, before: BeforeFacts, candidates: readonly ChecklistItem[]): WizardPlanModel {
     const wizardScan = this.requireWizardScan(scan)
     const beforeFacts = before as WizardBeforeFacts
-    const sensitivePaths = sensitivePathsFrom(before)
+    const sensitivePaths = sensitivePathsFor(wizardScan, before)
     const served = siteServing(wizardScan, beforeFacts, keys)
     const improve = improveLinesFor(wizardScan.facts, { framework: wizardScan.framework, keys, sensitivePaths, vercelServed: served.vercelServed })
     const managed = new Set<ProviderId>((wizardScan.manifest?.providers ?? []) as ProviderId[])
@@ -441,7 +446,7 @@ export class WizardInstaller implements Installer {
     if (model.guard.emit && approved.has("preview_guard_managed")) {
       artifacts.hostGuard = { mode: "deny", exempt: [...model.guard.exempt], deny: [...model.guard.deny] }
     }
-    if (approved.has("sensitive_pages:posthog:managed")) artifacts = withSensitivePaths(artifacts, sensitivePathsFrom(internals.before))
+    if (approved.has("sensitive_pages:posthog:managed")) artifacts = withSensitivePaths(artifacts, sensitivePathsFor(internals.scan, internals.before))
     const serverLane = approved.has("server_lane") && artifacts.infinite !== undefined && scan.serverLane !== null
 
     // ---- snapshot everything this install can touch (full rollback on any failure) ----
@@ -582,15 +587,20 @@ export class WizardInstaller implements Installer {
       let build: WizardApplyResult["build"] = "not_run"
       if (this.options.build) {
         const result = await this.options.build()
-        if (result.ok) build = "passed"
-        else {
-          const baseline = new Set(internals.before.baselineBuild?.failureSignature ?? [])
-          const fresh = result.failureSignature.filter((signature) => !baseline.has(signature))
-          if (internals.before.baselineBuild && !internals.before.baselineBuild.ok && fresh.length === 0) build = "failed_baseline"
-          else {
-            const restored = rollback()
-            return this.failed(artifacts, warnings, `The build failed after the install${fresh.length > 0 ? ` (${fresh.slice(0, 3).join("; ")})` : ""}; every change was rolled back.`, restored)
-          }
+        // ONE rule with the jobs step and the review's fix rounds (B26, `buildVerdict`): a build that could not
+        // run (or ended red with no failure signature) is UNDETERMINED: never "passed", never "red before this
+        // run too", and never blamed on the install.
+        const baselineBuild = internals.before.baselineBuild
+        const verdict = await buildVerdict(result, async () => baselineBuild ?? { failureSignature: [] })
+        if (verdict.state === "pass") build = result.ok ? "passed" : "failed_baseline"
+        else if (verdict.state === "undetermined") {
+          build = "not_run"
+          warnings.push(`The build could not run (${verdict.reason ?? "test_error"}); it is checked again in the draft pull request.`)
+        } else {
+          const known = new Set(baselineBuild?.failureSignature ?? [])
+          const fresh = result.failureSignature.filter((signature) => !known.has(signature))
+          const restored = rollback()
+          return this.failed(artifacts, warnings, `The build failed after the install${fresh.length > 0 ? ` (${fresh.slice(0, 3).join("; ")})` : ""}; every change was rolled back.`, restored)
         }
       } else {
         warnings.push("No build check ran (none wired); the build is checked again in the draft pull request.")
