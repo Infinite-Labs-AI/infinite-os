@@ -584,11 +584,6 @@ async function sendRaw(input: NodeJS.WritableStream, keys: string) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
-const ESC = String.fromCharCode(27);
-function stripAnsi(value: string): string {
-  return value.replace(new RegExp(`${ESC}\\[[0-9;?]*[A-Za-z]`, "g"), "");
-}
-
 /** The last drawn line that contains `text` (the frame is redrawn whole, so this is the latest one). */
 function lastLineWith(output: string, text: string): string {
   return stripAnsi(output).split(/\r?\n/u).filter((line) => line.includes(text)).at(-1) ?? "";

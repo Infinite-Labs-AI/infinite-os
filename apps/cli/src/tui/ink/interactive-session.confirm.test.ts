@@ -376,7 +376,7 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
         return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
       }
     });
-    await waitFor(() => output.text().includes("ready"));
+    await waitFor(() => output.text().includes("switch side"));
     await sendKeys(input, "pause it\r");
     await waitFor(() => output.text().includes("Pause ad 01?"), 4_000, output.text);
     const before = output.text().length;
@@ -442,7 +442,7 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
           return { messages: [{ role: "assistant", text: "Second answer." }] };
         }
       });
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "pause it\r");
       await waitFor(() => asked.length === 1);
       // Typed while the first turn is busy: queued.
@@ -487,7 +487,7 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
           return { messages: [{ role: "assistant", text: "Second answer." }] };
         }
       });
-      await waitFor(() => output.text().includes("ready"));
+      await waitFor(() => output.text().includes("switch side"));
       await sendKeys(input, "pause it\r");
       await waitFor(() => output.text().includes("Pause ad 01?"), 4_000, output.text);
       await sendKeys(input, "p");

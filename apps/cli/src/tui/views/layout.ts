@@ -226,11 +226,9 @@ export function renderCommittedTurn(input: Omit<LiveTurnInput, "rows" | "livePag
   const width = Math.max(1, Math.floor(input.width));
   // No row budget: a document is one page as tall as its body (no page line,
   // which no key could act on in scrollback), whatever page the live turn showed.
-  const { lines } = drawLiveTurn(input, width, ALL_ROWS, false);
-  if (!lines.length) {
-    return [];
-  }
-  return [paint("─".repeat(width), "line", input), ...lines];
+  // No rule of its own: scrollback draws the ONE thin rule between turns (D1,
+  // transcript-app.tsx), so a leading rule here would print two.
+  return drawLiveTurn(input, width, ALL_ROWS, false).lines;
 }
 
 /** A row budget no view reaches: a committed turn is drawn whole. */

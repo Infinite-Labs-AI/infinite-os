@@ -328,12 +328,12 @@ describe("the r4 layout", () => {
     expect(lines.slice(strip + 1)).toEqual(rows);
   });
 
-  it("a committed turn is one column at any width, under a thin rule, with every page", () => {
+  it("a committed turn is one column at any width, with every page, and no rule of its own", () => {
     const messages: Msg[] = [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }];
     const lines = renderCommittedTurn({ messages, views: [listViewFixture()], focus: null, width: 160, color: false, theme });
-    expect(lines[0]).toBe("─".repeat(160));
+    // Scrollback draws the ONE rule between turns (D1, transcript-app.tsx).
     expect(lines.some((line) => line.includes(" │ "))).toBe(false);
-    expect(lines[1]).toBe("❯ which ads are on?");
+    expect(lines[0]).toBe("❯ which ads are on?");
     expect(lines).toContain("∞ Two are on.");
     expect(lines.findIndex((line) => line.includes("Ads running"))).toBeGreaterThan(lines.indexOf("∞ Two are on."));
   });

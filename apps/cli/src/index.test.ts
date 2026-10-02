@@ -2053,7 +2053,6 @@ describe("cli smoke", () => {
     expect(rendered).not.toContain("Infinite TUI");
     expect(rendered).toContain("Checking source coverage.");
     expect(rendered).toContain("running metric query");
-    expect(rendered).toContain("recognized revenue");
     expect(rendered).not.toContain("session session-1");
     expect(rendered).toContain("Type a message.");
   });

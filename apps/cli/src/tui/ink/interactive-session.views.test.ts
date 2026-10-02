@@ -241,7 +241,7 @@ describe("a running turn's views (r4 working frames)", () => {
       title: "Infinite TUI"
     });
 
-    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await waitFor(() => output.text().includes("switch side"), 4_000, output.text);
     await sendKeys(input, "which ads are on?\r");
     await waitFor(() => /∞ Two are on; pausing Cold brew car +│/u.test(stripAnsi(output.text())), 4_000, output.text);
     expect(stripAnsi(output.text())).toMatch(/❯ which ads are on\? +│ +Ads running/u);

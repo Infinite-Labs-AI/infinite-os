@@ -177,7 +177,8 @@ describe("a running turn with views is drawn in the r4 layout while it works", (
       messages, views: [listView()], focus: null, width: 160, color: false, theme,
       steps: workingTurnSteps(messages, state, 900), nowMs: 900
     }).lines;
-    expect(lines[0]).toMatch(/^❯ pause the cold brew ad +│ Ads running/u);
+    // The view head at the plain tier is R3's bracketed title chip.
+    expect(lines[0]).toMatch(/^❯ pause the cold brew ad +│ \[Ads running\] ✓ Ready/u);
     expect(lines.join("\n")).toContain("∞ Two are on; pausing Cold");
     expect(lines.join("\n")).not.toContain("**");
     expect(lines.some((line) => /^ {2}pausing entity +━*╍╍ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] waiting for Meta$/u.test(line))).toBe(true);
