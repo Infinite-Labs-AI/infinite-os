@@ -103,7 +103,10 @@ describe("runJobs with Claude (fake)", () => {
     expect(run.stdin).toBe(WORKER_KICKOFF)
     expect(run.argv![run.argv!.indexOf("--append-system-prompt") + 1]).toBe("BRIEF: do the jobs")
     expect(agentArgvViolations("claude_code", run.argv!)).toEqual([])
-    // The token-bearing tag.mcp.json is gone once the turn ends, and nothing is alive.
+    // The token-bearing tag.mcp.json was 0600 in a 0700 dir under $HOME (never /tmp), and is gone once the turn ends.
+    const config = records(fakes).find((entry) => entry.kind === "mcp-config")!
+    expect([config.mode, config.dirMode]).toEqual([0o600, 0o700])
+    expect(runScratchDir(fakes.home, RUN_ID).startsWith(join(fakes.home, "Library/Caches/infinite-tag/"))).toBe(true)
     expect(readdirSync(runScratchDir(fakes.home, RUN_ID)).filter((name) => name.startsWith("tag.mcp"))).toEqual([])
     expect(runner.isAgentAlive()).toBe(false)
   })

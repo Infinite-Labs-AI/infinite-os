@@ -51,7 +51,7 @@ export function setScenario(setup: FakeSetup, scenario: unknown): void {
 }
 
 export interface FakeRecord {
-  kind: "run" | "probe" | "mcp" | "toolless" | "grandchild" | "hanging"
+  kind: "run" | "probe" | "mcp" | "mcp-config" | "toolless" | "grandchild" | "hanging"
   agent: "claude" | "codex"
   role?: "worker" | "reviewer"
   argv?: string[]
@@ -62,6 +62,8 @@ export interface FakeRecord {
   reply?: { result?: { structuredContent?: unknown; isError?: boolean }; error?: unknown }
   pid?: number
   cwdEntries?: string[]
+  mode?: number
+  dirMode?: number
 }
 
 export function records(setup: FakeSetup): FakeRecord[] {

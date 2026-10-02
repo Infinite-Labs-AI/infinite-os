@@ -3,7 +3,8 @@
 // Scenario keys: version, authStatus, authExit, turns[]: { mcp: "connect"|"skip", apiKeySource, rejectModel,
 // steps[], denials[], structured, result: null|{subtype,is_error,api_error_status,result}, exit }.
 import { randomUUID } from "node:crypto"
-import { readdirSync, readFileSync } from "node:fs"
+import { readdirSync, readFileSync, statSync } from "node:fs"
+import { dirname } from "node:path"
 
 import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps } from "./fake-agent-lib.mjs"
 
@@ -44,6 +45,7 @@ let mcp = null
 let connected = false
 const configPath = flag("--mcp-config")
 if (role === "worker" && configPath && (turn.mcp ?? "connect") === "connect") {
+  record({ kind: "mcp-config", agent: "claude", mode: statSync(configPath).mode & 0o777, dirMode: statSync(dirname(configPath)).mode & 0o777 })
   const config = JSON.parse(readFileSync(configPath, "utf8")).mcpServers.infinite_tag
   mcp = new McpClient(config.command, config.args, { ...process.env, ...config.env })
   connected = await mcp.connect()
