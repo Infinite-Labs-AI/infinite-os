@@ -363,8 +363,8 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
     const { glyph, tone } = GLYPHS[status];
     const mark = status === "run" ? SPINNER[Math.floor(Math.max(0, now - step.startedAt) / SPINNER_MS) % SPINNER.length]! : glyph;
     const label = padEndCells(cut(viewText(step.label), labelWidth), labelWidth);
-    // A step still waiting says so; once its card moved on, the words go with it.
-    const result = viewText(step.result) || (status === "wait" ? WAITING_WORDS : "");
+    // A step still waiting says so (unless its label already does); once its card moved on, the words go with it.
+    const result = viewText(step.result) || (status === "wait" && viewText(step.label) !== WAITING_WORDS ? WAITING_WORDS : "");
     const segments: (readonly [string, ThemeStyle])[] = [
       [`  ${label} ${" ".repeat(a)}`, "text"],
       [bar, barTone],

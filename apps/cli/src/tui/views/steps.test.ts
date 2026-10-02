@@ -256,6 +256,12 @@ describe("a step that waits (r4 ▣)", () => {
     expect(strip([step({ status: "wait", result: "pause 1 item" })])[1]!.map((segment) => segment.text).join("")).toMatch(/▣ pause 1 item$/u);
   });
 
+  it("never says it twice: a row labelled `waiting for your OK` with no result has no result", () => {
+    const row = strip([step({ status: "wait", label: "waiting for your OK", result: "" })])[1]!.map((segment) => segment.text).join("");
+    expect(row.match(/waiting for your OK/gu)).toHaveLength(1);
+    expect(row).toMatch(/▣$/u);
+  });
+
   it("follows the card it waited on: working once the yes is sent, then done, dismissed or failed", () => {
     expect(refineStepStatus(waiting, [])).toBe("wait");
     expect(refineStepStatus(waiting, [view("propose_change", "needs_yes")])).toBe("wait");

@@ -30,6 +30,8 @@ describe("one-shot progress lines", () => {
     expect(formatInteractiveProgress(event("tool.complete", {
       status: "requires_confirmation", words: { label: "waiting for your OK", result: "pause 1 item" }
     }), 0)).toBe("  waiting for your OK ▣ pause 1 item");
+    expect(formatInteractiveProgress(event("tool.complete", { status: "requires_confirmation", words: { label: "waiting for your OK" } }), 0))
+      .toBe("  waiting for your OK ▣");
   });
 
   it("a running call prints the app's words, or generic words; never JSON arguments", () => {

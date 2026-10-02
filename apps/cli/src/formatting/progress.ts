@@ -87,8 +87,9 @@ function finishedToolLine(
 ): string {
   const outcome = toolOutcome({ status: event.status, error: event.error, summary: event.summary, words });
   const mark = outcome.status === "fail" ? "✗" : outcome.status === "wait" ? PENDING : "✓";
-  const result = outcome.result || (outcome.status === "wait" ? WAITING_WORDS : "");
-  return `${words?.label ?? friendlyStepLabel(event.name)} ${mark}${result ? ` ${result}` : ""}`;
+  const label = words?.label ?? friendlyStepLabel(event.name);
+  const result = outcome.result || (outcome.status === "wait" && label !== WAITING_WORDS ? WAITING_WORDS : "");
+  return `${label} ${mark}${result ? ` ${result}` : ""}`;
 }
 
 /**
