@@ -444,7 +444,8 @@ describe("the emitted server-cookie module", () => {
       "https://acme.com/?utm_source=newsletter&utm_term=jane.doe%40example.com",
       "https://acme.com/?utm_source=jane.doe%40example.com"
     ]) {
-      for (const headers of [{ referer: "https://facebook.com/" }, { referer: "https://facebook.com/", "sec-gpc": "1" }]) {
+      const variants: Array<Record<string, string>> = [{ referer: "https://facebook.com/" }, { referer: "https://facebook.com/", "sec-gpc": "1" }]
+      for (const headers of variants) {
         const req = new Request(url, { headers })
         expect(emitted.infiniteCampaignCookieHeader(req, fixed)).toBe(campaignCookieHeader(req, GUARD, fixed, CONSENT))
       }
