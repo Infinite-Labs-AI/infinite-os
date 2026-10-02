@@ -116,3 +116,19 @@ describe("the Steps strip from the turn store", () => {
     resetTurnState();
   });
 });
+
+describe("one turn's steps", () => {
+  it("a new one-shot reporter starts with an empty Steps strip", async () => {
+    const { createInteractiveProgressReporter } = await import("../../formatting/live-activity.js");
+    resetTurnState();
+    const stream = { columns: 80, isTTY: false, write: () => true };
+    const first = createInteractiveProgressReporter(stream, { animate: false, now: () => 1_000 });
+    first.progress({ type: "tool.start", stage: "tool", message: "", toolId: "c1", name: "get_report", context: "" });
+    first.progress({ type: "tool.complete", stage: "tool", message: "", toolId: "c1", name: "get_report", summary: "ok", status: "ok" });
+    first.stop();
+    expect(getTurnState().steps).toHaveLength(1);
+    createInteractiveProgressReporter(stream, { animate: false, now: () => 2_000 });
+    expect(getTurnState().steps).toEqual([]);
+    resetTurnState();
+  });
+});

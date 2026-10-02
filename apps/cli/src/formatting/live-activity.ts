@@ -3,7 +3,7 @@ import { scrubTerminalControls } from "../desktop/confirm-in-session.js";
 import { formatElapsedSeconds, formatInteractiveProgress } from "./progress.js";
 import { turnController } from "../tui/app/turn-controller.js";
 import { renderInfiniteAppChrome, type InfiniteAppChromeInput } from "../tui/app/app-chrome.js";
-import { getTurnState, subscribeTurnState } from "../tui/app/turn-store.js";
+import { clearTurnSteps, getTurnState, subscribeTurnState } from "../tui/app/turn-store.js";
 import { LongRunToolCharmTicker } from "../tui/app/long-run-tool-charms.js";
 import { canUseInkProgressReporter, InkTranscriptProgressReporter } from "../tui/ink/progress-reporter.js";
 import { padEndCells } from "../tui/lib/display-width.js";
@@ -58,6 +58,8 @@ export function createInteractiveProgressReporter(
   } = {}
 ): InteractiveProgressReporter {
   const theme = options.theme ?? resolveTheme();
+  // A reporter is one turn: its Steps strip starts empty (the session's turns commit theirs first).
+  clearTurnSteps();
   if (options.renderSurface === "ink" && canUseInkProgressReporter(stream)) {
     return new InkTranscriptProgressReporter(stream, {
       ...options.transcript,

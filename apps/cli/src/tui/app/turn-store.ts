@@ -127,6 +127,9 @@ export interface TurnStep {
   result: string;
 }
 
+/** Forget the steps (a new turn starts on a path that never commits one to scrollback). */
+export const clearTurnSteps = () => patchTurnState((state) => (state.steps.length ? { ...state, steps: [] } : state));
+
 /** The most steps one turn keeps. */
 export const MAX_TURN_STEPS = 64;
 
