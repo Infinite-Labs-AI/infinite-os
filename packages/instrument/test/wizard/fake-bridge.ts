@@ -1,0 +1,523 @@
+// A fake Infinite desktop tag bridge for tests (lane O2; I1's offline end-to-end test uses it too).
+//
+// An in-process loopback HTTP server that implements every §3a verb from F0's cross-repo fixtures
+// (`contracts/tag-wizard-v1/bridge-verbs.fixtures.json`), with the desktop's transport rules (§3a.2: Origin /
+// Host refusal before the bearer check, bearer, strict body decoding, 64 KB bodies, link-scoped verbs need an
+// approved `X-Infinite-Link-Id`, paid verbs 402 when unsubscribed) and scripting hooks: link approve /
+// decline / expire / remembered / pending, 402, scripted errors per verb, test results per mode, receipts,
+// proof claim won / lost, deploy states (incl. a canceled merge build and a later serving SHA), the Meta relay.
+//
+// It records every call in order (`calls`) and writes a descriptor (0700 dir, 0600 file) into a temp
+// `GROWTH_OS_HOME`. Every response it sends is checked against the verb's exact response shape, so the fake
+// cannot drift from the contract. Its bearer is the obviously fake FAKE_BRIDGE_TOKEN.
+import { randomUUID } from "node:crypto"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
+import type { AddressInfo } from "node:net"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
+import {
+  BRIDGE_DIRNAME,
+  BRIDGE_ERROR_RESPONSE_SHAPE,
+  BRIDGE_ERROR_STATUS,
+  BRIDGE_LIMITS,
+  BRIDGE_PROTOCOL_VERSION,
+  BRIDGE_SERVICE,
+  BRIDGE_VERB_IDS,
+  BRIDGE_VERBS,
+  FAKE_BRIDGE_TOKEN,
+  TAG_CAPABILITIES,
+  bridgePathPattern,
+  matchBridgeVerb,
+  type BridgeDescriptor,
+  type BridgeErrorCode,
+  type BridgeRuntime,
+  type BridgeVerbFixture,
+  type BridgeVerbId,
+  type DeployStatusResponse,
+  type Link,
+  type MetaRelayStatusResponse,
+  type TagHosting,
+  type TagKeys,
+  type WizardRunPublic
+} from "../../src/wizard/contracts/bridge.js"
+import { shapeErrors } from "../../src/wizard/contracts/shape.js"
+import type { TestMode, TestResult, TestRunFixtureCase } from "../../src/wizard/contracts/test-engine.js"
+
+const CONTRACTS_DIR = new URL("../../contracts/tag-wizard-v1/", import.meta.url)
+
+export function loadVerbFixtures(): BridgeVerbFixture[] {
+  return JSON.parse(readFileSync(new URL("bridge-verbs.fixtures.json", CONTRACTS_DIR), "utf8")) as BridgeVerbFixture[]
+}
+
+export function loadTestRunCases(): TestRunFixtureCase[] {
+  return JSON.parse(readFileSync(new URL("test-run.fixtures.json", CONTRACTS_DIR), "utf8")) as TestRunFixtureCase[]
+}
+
+export function loadDescriptorExample(): BridgeDescriptor {
+  return JSON.parse(readFileSync(new URL("bridge-descriptor.example.json", CONTRACTS_DIR), "utf8")) as BridgeDescriptor
+}
+
+/** The first success response of a verb in the fixtures (deep copy). */
+export function fixtureResponse(verb: BridgeVerbId, predicate?: (row: BridgeVerbFixture) => boolean): Record<string, unknown> {
+  const row = loadVerbFixtures().find((candidate) => candidate.verb === verb && candidate.status < 300 && (predicate ? predicate(candidate) : true))
+  if (!row) throw new Error(`fake bridge: no success fixture for ${verb}`)
+  return structuredClone(row.response) as Record<string, unknown>
+}
+
+export type LinkMode = "approve" | "decline" | "expire" | "expire_410" | "remembered" | "pending"
+
+export interface ScriptedError {
+  status?: number
+  code: BridgeErrorCode
+  message?: string
+  retryable?: boolean
+  field?: string
+  state?: string
+  upstreamStatus?: number
+  /** Answer once, then behave normally. */
+  once?: boolean
+}
+
+export interface FakeDeployState {
+  mergeDeployment: DeployStatusResponse["mergeDeployment"]
+  serving: DeployStatusResponse["serving"]
+}
+
+export interface FakeBridgeScript {
+  link: LinkMode
+  /** Polls answered `pending` before the scripted outcome. */
+  linkPollsBeforeAnswer: number
+  workspaceName: string
+  /** false → every paid verb answers 402 subscription_required. */
+  paid: boolean
+  runtime: BridgeRuntime
+  capabilities: string[]
+  keys: TagKeys
+  hosting: TagHosting
+  run: WizardRunPublic
+  proofClaim: "won" | "lost"
+  /** Consumed one per deploy-status call; the last one repeats. */
+  deploy: FakeDeployState[]
+  testResults: Partial<Record<TestMode, TestResult>>
+  testPollsBeforeDone: number
+  metaRelay: Omit<MetaRelayStatusResponse, "protocolVersion" | "requestId">
+  errors: Partial<Record<BridgeVerbId, ScriptedError>>
+}
+
+export interface FakeBridgeCall {
+  verb: BridgeVerbId | null
+  method: string
+  path: string
+  headers: Record<string, string>
+  body: unknown
+  status: number
+}
+
+export interface FakeBridge {
+  url: string
+  port: number
+  home: string
+  env: Record<string, string>
+  descriptor: BridgeDescriptor
+  script: FakeBridgeScript
+  calls: FakeBridgeCall[]
+  callsFor(verb: BridgeVerbId): FakeBridgeCall[]
+  /** Rewrite the descriptor (e.g. another runtime variant) and keep serving. */
+  rewriteDescriptor(change: Partial<BridgeDescriptor>): void
+  close(): Promise<void>
+}
+
+const RUN_ID = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+const LINK_ID = "lk_FAKElinkAcmeStore00000"
+const TEST_RUN_IDS: Record<TestMode, string> = {
+  dry_live: "tr_FAKEdryLive00000000000",
+  rehearsal: "tr_FAKErehearsal000000000",
+  real_visit: "tr_FAKErealVisit000000000"
+}
+
+function defaultScript(): FakeBridgeScript {
+  const keys = fixtureResponse("keys")
+  delete keys.protocolVersion
+  delete keys.requestId
+  const hosting = fixtureResponse("hosting")
+  delete hosting.protocolVersion
+  delete hosting.requestId
+  const run = fixtureResponse("runs.get").run as WizardRunPublic
+  const relay = fixtureResponse("meta-relay.status")
+  delete relay.protocolVersion
+  delete relay.requestId
+  const deployRows = loadVerbFixtures().filter((row) => row.verb === "hosting.deploy" && row.status < 300)
+  return {
+    link: "approve",
+    linkPollsBeforeAnswer: 0,
+    workspaceName: "Acme",
+    paid: true,
+    runtime: { variant: "prod", label: "Infinite" },
+    capabilities: [...TAG_CAPABILITIES],
+    keys: keys as unknown as TagKeys,
+    hosting: hosting as unknown as TagHosting,
+    run: { ...structuredClone(run), approvedConversions: [], clickTestedConversions: [], proofState: "pending", proofClaimedBy: null },
+    proofClaim: "won",
+    deploy: deployRows.map((row) => {
+      const response = row.response as DeployStatusResponse
+      return { mergeDeployment: response.mergeDeployment, serving: response.serving }
+    }),
+    testResults: {},
+    testPollsBeforeDone: 0,
+    metaRelay: relay as unknown as FakeBridgeScript["metaRelay"],
+    errors: {}
+  }
+}
+
+function testResultFor(mode: TestMode, script: FakeBridgeScript): TestResult {
+  const scripted = script.testResults[mode]
+  if (scripted) return scripted
+  const fixture = loadTestRunCases().find((candidate) => candidate.request.mode === mode)
+  if (!fixture) throw new Error(`fake bridge: no test fixture for ${mode}`)
+  return fixture.result
+}
+
+async function readBody(req: IncomingMessage, limit: number): Promise<{ text: string; tooLarge: boolean }> {
+  const chunks: Buffer[] = []
+  let size = 0
+  let tooLarge = false
+  for await (const chunk of req) {
+    const buffer = chunk as Buffer
+    size += buffer.length
+    if (size > limit) tooLarge = true
+    else chunks.push(buffer)
+  }
+  return { text: Buffer.concat(chunks).toString("utf8"), tooLarge }
+}
+
+export interface StartFakeBridgeOptions {
+  script?: Partial<FakeBridgeScript>
+  /** An existing GROWTH_OS_HOME to write into (default: a new temp dir). */
+  home?: string
+}
+
+export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Promise<FakeBridge> {
+  const script: FakeBridgeScript = { ...defaultScript(), ...options.script }
+  const calls: FakeBridgeCall[] = []
+  const home = options.home ?? mkdtempSync(join(tmpdir(), "infinite-tag-fake-home-"))
+  const ownsHome = options.home === undefined
+  const linkRequests = new Map<string, { polls: number; site: { repoLabel: string; appRoot: string } }>()
+  const approvedLinks = new Set<string>()
+  const testRuns = new Map<string, { mode: TestMode; polls: number }>()
+  let deployIndex = 0
+  let port = 0
+
+  const send = (res: ServerResponse, record: FakeBridgeCall, status: number, body: unknown, headers: Record<string, string> = {}) => {
+    record.status = status
+    res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers })
+    res.end(JSON.stringify(body))
+  }
+  const fail = (
+    res: ServerResponse,
+    record: FakeBridgeCall,
+    requestId: string,
+    code: BridgeErrorCode,
+    extra: Partial<ScriptedError> = {}
+  ) => {
+    const status = extra.status ?? BRIDGE_ERROR_STATUS[code]
+    const error: Record<string, unknown> = {
+      code,
+      message: extra.message ?? `fake bridge: ${code}`,
+      retryable: extra.retryable ?? (status === 429 || status >= 500)
+    }
+    if (extra.field !== undefined) error.field = extra.field
+    if (extra.state !== undefined) error.state = extra.state
+    if (extra.upstreamStatus !== undefined) error.upstreamStatus = extra.upstreamStatus
+    const body = { protocolVersion: 1, requestId, error }
+    const problems = shapeErrors(body, BRIDGE_ERROR_RESPONSE_SHAPE)
+    if (problems.length > 0) throw new Error(`fake bridge drifted from the error contract: ${problems[0]}`)
+    const headers: Record<string, string> = {}
+    if (code === "unauthorized") headers["WWW-Authenticate"] = 'Bearer realm="infinite-desktop-tag"'
+    if (code === "rate_limited") headers["Retry-After"] = "1"
+    send(res, record, status, body, headers)
+  }
+
+  const server: Server = createServer((req, res) => {
+    void (async () => {
+      const method = req.method ?? "GET"
+      const path = req.url ?? "/"
+      const headers: Record<string, string> = {}
+      for (const [key, value] of Object.entries(req.headers)) {
+        if (key === "authorization") continue
+        headers[key] = Array.isArray(value) ? value.join(", ") : (value ?? "")
+      }
+      const record: FakeBridgeCall = { verb: null, method, path, headers, body: null, status: 0 }
+      calls.push(record)
+      const { text, tooLarge } = await readBody(req, BRIDGE_LIMITS.maxBodyBytes)
+      let body: unknown = null
+      if (text) {
+        try {
+          body = JSON.parse(text)
+        } catch {
+          body = text
+        }
+      }
+      record.body = body
+      const requestId =
+        typeof body === "object" && body !== null && typeof (body as Record<string, unknown>).requestId === "string"
+          ? ((body as Record<string, unknown>).requestId as string)
+          : randomUUID()
+
+      // §3a.2: Origin / Host first (DNS rebinding), then the bearer.
+      if (req.headers.origin !== undefined || req.headers.host !== `127.0.0.1:${port}`) return fail(res, record, requestId, "origin_refused")
+      if (req.headers.authorization !== `Bearer ${FAKE_BRIDGE_TOKEN}`) return fail(res, record, requestId, "unauthorized")
+
+      const spec = matchBridgeVerb(method, path)
+      if (!spec) {
+        const otherMethod = BRIDGE_VERB_IDS.some((id) => bridgePathPattern(BRIDGE_VERBS[id]).test(path))
+        return fail(res, record, requestId, otherMethod ? "method_not_allowed" : "route_not_found")
+      }
+      record.verb = spec.verb
+      if (tooLarge) return fail(res, record, requestId, "body_too_large")
+      if (spec.request) {
+        if (!String(req.headers["content-type"] ?? "").startsWith("application/json")) {
+          return fail(res, record, requestId, "invalid_request", { field: "Content-Type" })
+        }
+        const problems = shapeErrors(body, spec.request)
+        const unknown = problems.find((problem) => problem.includes("unknown key"))
+        if (unknown) return fail(res, record, requestId, "unknown_field", { message: unknown })
+        if (problems.length > 0) return fail(res, record, requestId, "invalid_request", { message: problems[0] ?? "" })
+      } else if (text) {
+        return fail(res, record, requestId, "invalid_request", { message: "GET takes no body" })
+      }
+      if (!req.headers["x-infinite-tag-version"]) return fail(res, record, requestId, "invalid_request", { field: "X-Infinite-Tag-Version" })
+      if (!script.capabilities.includes(spec.capability)) return fail(res, record, requestId, "capability_unavailable")
+
+      const scripted = script.errors[spec.verb]
+      if (scripted) {
+        if (scripted.once) delete script.errors[spec.verb]
+        return fail(res, record, requestId, scripted.code, scripted)
+      }
+      if (spec.linkScoped) {
+        const linkId = req.headers["x-infinite-link-id"]
+        if (typeof linkId !== "string" || !approvedLinks.has(linkId)) return fail(res, record, requestId, "link_not_found")
+      }
+      if (spec.paid && !script.paid) return fail(res, record, requestId, "subscription_required")
+
+      const reqBody = (body ?? {}) as Record<string, unknown>
+      const url = new URL(path, `http://127.0.0.1:${port}`)
+      const ok = (fields: Record<string, unknown>) => {
+        const response = { protocolVersion: BRIDGE_PROTOCOL_VERSION, requestId, ...fields }
+        const problems = shapeErrors(response, spec.response)
+        if (problems.length > 0) throw new Error(`fake bridge drifted from the ${spec.verb} contract: ${problems[0]}`)
+        send(res, record, spec.successStatus, response)
+      }
+      const strip = (value: Record<string, unknown>) => {
+        const copy = { ...value }
+        delete copy.protocolVersion
+        delete copy.requestId
+        return copy
+      }
+      const makeLink = (site: { repoLabel: string; appRoot: string }, remembered: boolean): Link => {
+        approvedLinks.add(LINK_ID)
+        return { linkId: LINK_ID, workspace: { name: script.workspaceName }, site, approvedAt: "2026-10-02T09:01:00.000Z", remembered }
+      }
+
+      switch (spec.verb) {
+        case "status":
+          return ok({
+            service: BRIDGE_SERVICE,
+            bootId: descriptor.bootId,
+            desktopVersion: descriptor.desktopVersion,
+            runtime: script.runtime,
+            signedIn: true,
+            capabilities: script.capabilities,
+            protocol: { min: 1, max: 1 }
+          })
+        case "link.request": {
+          const site = reqBody.site as { repoLabel: string; appRoot: string }
+          const linkSite = { repoLabel: site.repoLabel, appRoot: site.appRoot }
+          const linkRequestId = `lr_${randomUUID().replace(/-/g, "").slice(0, 22)}`
+          if (script.link === "remembered") {
+            return ok({ linkRequestId, state: "approved", expiresAt: "2026-10-02T09:06:00.000Z", link: makeLink(linkSite, true) })
+          }
+          linkRequests.set(linkRequestId, { polls: 0, site: linkSite })
+          return ok({ linkRequestId, state: "pending", expiresAt: "2026-10-02T09:06:00.000Z" })
+        }
+        case "link.poll": {
+          const id = url.pathname.split("/").pop() ?? ""
+          const pending = linkRequests.get(id)
+          if (!pending) return fail(res, record, requestId, "not_found")
+          pending.polls += 1
+          if (script.link === "pending" || pending.polls <= script.linkPollsBeforeAnswer) return ok({ state: "pending" })
+          if (script.link === "approve") return ok({ state: "approved", link: makeLink(pending.site, false) })
+          if (script.link === "decline") return ok({ state: "declined" })
+          if (script.link === "expire_410") return fail(res, record, requestId, "expired")
+          return ok({ state: "expired" })
+        }
+        case "link.revoke":
+          approvedLinks.delete(String(reqBody.linkId))
+          return ok({ revoked: true })
+        case "keys":
+          return ok({ ...structuredClone(script.keys) })
+        case "hosting":
+          return ok({ ...structuredClone(script.hosting) })
+        case "hosting.deploy": {
+          const state = script.deploy[Math.min(deployIndex, script.deploy.length - 1)]
+          deployIndex += 1
+          if (!state) return fail(res, record, requestId, "not_found")
+          return ok({ mergeDeployment: state.mergeDeployment, serving: state.serving, target: "production" })
+        }
+        case "runs.start":
+          script.run = { ...script.run, runId: RUN_ID, worker: reqBody.worker as WizardRunPublic["worker"], reviewer: reqBody.reviewer as WizardRunPublic["reviewer"] }
+          return ok({ runId: RUN_ID, startedAt: "2026-10-02T09:02:00.000Z" })
+        case "runs.proof-claim":
+          if (script.proofClaim === "lost") return fail(res, record, requestId, "claimed_by_other", { state: "proving" })
+          script.run = { ...script.run, proofState: "proving", proofClaimedBy: reqBody.producer as "tag" | "desktop" }
+          return ok({ granted: true, proofState: "proving" })
+        case "runs.patch": {
+          const patch = (reqBody.patch ?? {}) as Partial<WizardRunPublic> & { clickTestedConversions?: string[] }
+          const next = { ...script.run }
+          for (const [key, value] of Object.entries(patch)) {
+            if (key === "clickTestedConversions") {
+              next.clickTestedConversions = [...new Set([...next.clickTestedConversions, ...(value as string[])])]
+            } else {
+              ;(next as unknown as Record<string, unknown>)[key] = value
+            }
+          }
+          script.run = next
+          return ok({ run: script.run })
+        }
+        case "runs.get":
+          return ok({ run: script.run })
+        case "receipts":
+          return ok(strip(fixtureResponse("receipts")))
+        case "report": {
+          const report = reqBody.report as { schema: string; runId: string }
+          return ok({ id: randomUUID(), phase: reqBody.phase, storedAt: "2026-10-02T09:46:00.000Z", echo: { schema: report.schema, runId: report.runId } })
+        }
+        case "baseline":
+          return ok(strip(fixtureResponse("baseline")))
+        case "site-source":
+          return ok({
+            siteSourceKey: script.keys.infinite.siteSourceKey ?? "site_FAKEacmeStoreSourceKey",
+            productionHosts: reqBody.productionHosts,
+            consentMode: reqBody.consentMode,
+            created: script.keys.infinite.status !== "ready"
+          })
+        case "conversions": {
+          const conversions = (reqBody.conversions ?? []) as Array<{ name: string }>
+          const approved = new Set(script.run.approvedConversions)
+          return ok({
+            declared: conversions.filter((c) => approved.has(c.name)).map((c) => c.name),
+            refused: conversions.filter((c) => !approved.has(c.name)).map((c) => ({ name: c.name, reason: "not_approved" }))
+          })
+        }
+        case "ga4-key-events": {
+          const names = (reqBody.names ?? []) as string[]
+          const approved = new Set(script.run.approvedConversions)
+          const tested = new Set(script.run.clickTestedConversions)
+          return ok({
+            created: names.filter((name) => approved.has(name) && tested.has(name)),
+            alreadyExisted: [],
+            refused: names
+              .filter((name) => !approved.has(name) || !tested.has(name))
+              .map((name) => ({ name, reason: approved.has(name) ? "not_click_tested" : "not_approved" }))
+          })
+        }
+        case "server-lane.status":
+          return ok(strip(fixtureResponse("server-lane.status")))
+        case "server-lane.provision-env": {
+          const response = strip(fixtureResponse("server-lane.provision-env"))
+          if (reqBody.redeploy === "skip") response.redeploy = { skipped: true, reason: "not_requested" }
+          return ok(response)
+        }
+        case "meta-relay.status":
+          return ok({ ...script.metaRelay })
+        case "meta-relay.enable": {
+          if (!script.metaRelay.available) return fail(res, record, requestId, "relay_not_available", { state: script.metaRelay.reason ?? "not_available" })
+          const pixel = script.keys.meta.pixels.find((candidate) => candidate.sourceRef === reqBody.sourceRef)
+          if (!pixel) return fail(res, record, requestId, "invalid_request", { field: "sourceRef" })
+          script.metaRelay = { ...script.metaRelay, bound: { sourceRef: pixel.sourceRef, pixelId: pixel.pixelId }, enabled: true }
+          return ok({ ...script.metaRelay })
+        }
+        case "uninstall.remove-env":
+          return ok(strip(fixtureResponse("uninstall.remove-env")))
+        case "uninstall.disable-site-source":
+          return ok({ disabled: true })
+        case "test.start": {
+          const mode = reqBody.mode as TestMode
+          const testRunId = TEST_RUN_IDS[mode]
+          testRuns.set(testRunId, { mode, polls: 0 })
+          return ok({ testRunId, state: "queued" })
+        }
+        case "test.poll": {
+          const id = url.pathname.split("/").pop() ?? ""
+          const run = testRuns.get(id)
+          if (!run) return fail(res, record, requestId, "not_found")
+          run.polls += 1
+          const progress = [{ at: "2026-10-02T09:10:00.000Z", text: "Loading the site (nothing sent)" }]
+          if (run.polls <= script.testPollsBeforeDone) return ok({ state: "running", progress })
+          return ok({ state: "done", progress, result: testResultFor(run.mode, script) })
+        }
+        case "test.cancel": {
+          const id = url.pathname.split("/").slice(-2)[0] ?? ""
+          return ok({ testRunId: id, state: "cancelled" })
+        }
+      }
+    })().catch((error: unknown) => {
+      res.writeHead(500, { "Content-Type": "text/plain" })
+      res.end(String(error instanceof Error ? error.message : error))
+    })
+  })
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  port = (server.address() as AddressInfo).port
+
+  const dir = join(home, BRIDGE_DIRNAME)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  chmodSync(dir, 0o700)
+  const descriptor: BridgeDescriptor = {
+    schemaVersion: 1,
+    service: BRIDGE_SERVICE,
+    protocol: { min: 1, max: 1 },
+    capabilities: [...script.capabilities],
+    url: `http://127.0.0.1:${port}`,
+    pid: process.pid,
+    bootId: randomUUID(),
+    desktopVersion: "0.4.1",
+    runtime: script.runtime,
+    token: FAKE_BRIDGE_TOKEN,
+    startedAt: "2026-10-02T09:00:00.000Z"
+  }
+  const writeDescriptor = (value: BridgeDescriptor) => {
+    const file = join(dir, "bridge.json")
+    writeFileSync(file, JSON.stringify(value, null, 2), { mode: 0o600 })
+    chmodSync(file, 0o600)
+    const stateFile = join(dir, "state.json")
+    writeFileSync(stateFile, JSON.stringify({ schemaVersion: 1, state: "ready", updatedAt: "2026-10-02T09:00:00.000Z" }), { mode: 0o600 })
+    chmodSync(stateFile, 0o600)
+  }
+  writeDescriptor(descriptor)
+
+  const bridge: FakeBridge = {
+    url: descriptor.url,
+    port,
+    home,
+    env: { GROWTH_OS_HOME: home },
+    descriptor,
+    script,
+    calls,
+    callsFor: (verb) => calls.filter((call) => call.verb === verb),
+    rewriteDescriptor(change) {
+      Object.assign(descriptor, change)
+      writeDescriptor(descriptor)
+    },
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => {
+          if (ownsHome) rmSync(home, { recursive: true, force: true })
+          resolve()
+        })
+        server.closeAllConnections?.()
+      })
+  }
+  return bridge
+}
