@@ -152,6 +152,11 @@ export class RunStateFile implements RunStateAccessor {
    * Serialised: two saves never interleave, and the last write wins. Each save reports ITS OWN write; a
    * failed write never poisons the saves after it (they run once the cause clears).
    */
+  /** Waits for every save started so far (a failed one included) to settle. */
+  async settled(): Promise<void> {
+    await this.saving.catch(() => {})
+  }
+
   save(): Promise<void> {
     const text = `${JSON.stringify(this.state, null, 2)}\n`
     const write = this.saving.catch(() => {}).then(() => this.fs.writeTextAtomic(stateFilePath(this.root), text, WIZARD_STATE_FILE_MODE))

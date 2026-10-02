@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { FakeStdin, FakeStdout, FakeStore, flushMicrotasks, makeSnapshot, makeTestSanitizer, midRunSnapshot, stepRows } from "../../test/wizard/fake-store.js"
 import { SEQ, stripAnsi } from "./ansi.js"
-import { TtyUi } from "./tty-ui.js"
+import { frameSize, TtyUi } from "./tty-ui.js"
 
 function setup(options: { env?: Record<string, string>; columns?: number; store?: FakeStore } = {}) {
   const stdin = new FakeStdin()
@@ -260,5 +260,13 @@ describe("TtyUi asks", () => {
     ui.start(store)
     await expect(ui.waitForDismiss()).resolves.toBeUndefined()
     ui.stop()
+  })
+})
+
+describe("frameSize (review I1 P3-4)", () => {
+  it("a pty that reports no size (0 or undefined) frames at 80 × 24, never 0 columns", () => {
+    expect(frameSize({ columns: 0, rows: 0 })).toEqual({ width: 80, height: 24 })
+    expect(frameSize({})).toEqual({ width: 80, height: 24 })
+    expect(frameSize({ columns: 132, rows: 40 })).toEqual({ width: 132, height: 40 })
   })
 })

@@ -28,7 +28,8 @@ import { WizardEventEmitter } from "./events.js"
 import { nodeWizardFs, systemClock } from "./fs.js"
 import { acquireRunLock, type RunLockHandle } from "./lock.js"
 import { renderTerminal } from "./report.js"
-import { RunStateFile, WIZARD_REPORT_PATHS, createRunState, firstOpenStep, loadRunState, setStateAside } from "./run-state.js"
+import { RunStateFile, WIZARD_REPORT_PATHS, createRunState, firstOpenStep, loadRunState, setStateAside, stateFilePath } from "./run-state.js"
+import { WIZARD_PATHS } from "./contracts/state.js"
 import { installInterruptHandlers, runInterruptSequence, type SignalSource } from "./signals.js"
 import { WizardStore } from "./store.js"
 import { WIZARD_STEPS } from "./steps/index.js"
@@ -298,6 +299,8 @@ async function runLocked(input: LockedRun): Promise<number> {
   let ttyPrompter: TtyPrompter | null = null
   let deps: WizardDeps | null = null
   let runState: RunStateFile | null = null
+  /** True when this process created the state file (not a loaded or rebuilt run). */
+  let freshState = false
 
   // Every way out releases the lock exactly once, and only AFTER the agent tree is killed and the fence
   // snapshot is restored: `finish` is the sequence's lock-release stage, never called before it.
@@ -320,6 +323,9 @@ async function runLocked(input: LockedRun): Promise<number> {
       removeHandlers()
       ttyPrompter?.close()
       await lock.release()
+      // Review I1 P3-2: a run that never got past `link` (no app, the wrong folder, not a repo) leaves nothing
+      // behind in the customer's folder: the fresh state file it wrote, and the wizard dirs if now empty.
+      if (runState && freshState && !runState.get().link && runState.get().steps.link?.outcome !== "ok") await removeUnlinkedState(root, runState)
       return exitCode
     })())
   /** abort → kill the agents → fence abort → finish (lock release) → exit, for a signal or a crash. */
@@ -439,6 +445,7 @@ async function runLocked(input: LockedRun): Promise<number> {
     }
 
     store.setRun({ displayId: state.displayId, runId: state.runId })
+    freshState = !resuming && loaded.kind !== "ok"
     runState = new RunStateFile(nodeWizardFs, root, state)
     await runState.save()
     const accessor = runState
@@ -477,6 +484,16 @@ async function runLocked(input: LockedRun): Promise<number> {
     // and restore the snapshot BEFORE the lock is released, as on Ctrl+C.
     await stopAndFinish(WIZARD_EXIT.failed, () => {})
     return WIZARD_EXIT.failed
+  }
+}
+
+/** Removes a fresh, never-linked run's state file, then `.infinite/wizard` and `.infinite` when they are empty. */
+async function removeUnlinkedState(root: string, runState: RunStateFile): Promise<void> {
+  await runState.settled()
+  await fsp.rm(stateFilePath(root), { force: true }).catch(() => undefined)
+  for (const dir of [join(root, WIZARD_PATHS.dir), join(root, ".infinite")]) {
+    // rmdir refuses a non-empty folder: anything else in it (an install receipt, a user file) stays.
+    await fsp.rmdir(dir).catch(() => undefined)
   }
 }
 

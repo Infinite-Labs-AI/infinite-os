@@ -197,8 +197,7 @@ export class TtyUi implements WizardUi {
     }
     if (this.suspended) this.resume()
 
-    const width = this.options.stdout.columns ?? 80
-    const height = this.options.stdout.rows ?? 24
+    const { width, height } = frameSize(this.options.stdout)
     const outro = this.currentOutro(snapshot)
     const slot = this.overlay
     const pending = snapshot.pendingAsk
@@ -276,4 +275,13 @@ function defaultInterrupt(): void {
 
 export function createTtyUi(options: TtyUiOptions): TtyUi {
   return new TtyUi(options)
+}
+
+/**
+ * The frame size from the terminal: a pty that reports no size gives 0 (or nothing) for columns and rows, and a
+ * 0-column frame clipped every step title to a few characters (review I1 P3-4). Unknown or 0 → 80 × 24.
+ */
+export function frameSize(stdout: { columns?: number; rows?: number }): { width: number; height: number } {
+  const usable = (value: number | undefined, fallback: number) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback)
+  return { width: usable(stdout.columns, 80), height: usable(stdout.rows, 24) }
 }

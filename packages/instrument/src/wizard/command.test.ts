@@ -674,3 +674,41 @@ describe("uninstall --pr with no saved run links through the link step (O1-09)",
     expect(err.join("")).toContain("Could not link this machine to Infinite: The link was declined in Infinite.")
   })
 })
+
+describe("a run that never links leaves nothing behind (review I1 P3-2)", () => {
+  it("no app (link fails NO_APP, exit 4): no .infinite/wizard/state.json and no empty .infinite folder", async () => {
+    const root = tempDir("wizard-cmd-")
+    const { io } = fakeIo(root)
+    const spy = fakeWiring({
+      link: async () => ({ kind: "blocked", code: "INF_WIZ_NO_APP", reason: "This needs the Infinite app." })
+    })
+    expect(await runWizardCommand(["--json"], { io, wiring: spy.wiring })).toBe(4)
+    expect(existsSync(join(root, ".infinite/wizard/state.json"))).toBe(false)
+    expect(existsSync(join(root, ".infinite"))).toBe(false)
+  })
+
+  it("negative: a linked run keeps its state (the resume needs it), and a user's file in .infinite is never removed", async () => {
+    const root = tempDir("wizard-cmd-")
+    mkdirSync(join(root, ".infinite"), { recursive: true })
+    writeFileSync(join(root, ".infinite/install.json"), "{}\n")
+    const { io } = fakeIo(root)
+    const spy = fakeWiring({
+      link: async (ctx) => {
+        ctx.state.update((state) => {
+          state.link = { linkId: "lk_FAKEFAKEFAKEFAKEFAKE00", workspaceName: "Acme", approvedAt: "2026-10-02T09:01:00Z", runtimeVariant: "prod" }
+        })
+        return { kind: "ok", status: "linked" }
+      },
+      agent: async () => ({ kind: "blocked", code: "INF_WIZ_NO_APP", reason: "stop here" })
+    })
+    await runWizardCommand(["--json"], { io, wiring: spy.wiring })
+    expect(existsSync(join(root, ".infinite/wizard/state.json"))).toBe(true)
+    const unlinked = tempDir("wizard-cmd-")
+    mkdirSync(join(unlinked, ".infinite"), { recursive: true })
+    writeFileSync(join(unlinked, ".infinite/install.json"), "{}\n")
+    const second = fakeWiring({ link: async () => ({ kind: "blocked", code: "INF_WIZ_NO_APP", reason: "no app" }) })
+    await runWizardCommand(["--json"], { io: fakeIo(unlinked).io, wiring: second.wiring })
+    expect(existsSync(join(unlinked, ".infinite/install.json"))).toBe(true)
+    expect(existsSync(join(unlinked, ".infinite/wizard/state.json"))).toBe(false)
+  })
+})
