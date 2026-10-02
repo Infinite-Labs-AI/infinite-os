@@ -5,9 +5,11 @@ import { describe, expect, it, vi } from "vitest"
 import { FakeStdin, FakeStdout, FakeStore, flushMicrotasks, makeSnapshot, makeTestSanitizer, midRunSnapshot, stepRows } from "../../test/wizard/fake-store.js"
 import type { AskPayloads, PlanLine } from "../wizard/contracts/asks.js"
 import { makeStyles, stripAnsi, visibleWidth, wrapAnsi } from "./ansi.js"
-import { renderFrame, type FrameInput } from "./frame.js"
+import { exitLine, exitLines } from "./exit-line.js"
+import { overlayContext, renderFrame, type FrameInput } from "./frame.js"
 import { LEARN_CARDS, learnCard } from "./learn.js"
 import { OVERLAYS } from "./overlays/index.js"
+import type { PlanState } from "./overlays/plan.js"
 import type { OverlayContext } from "./overlays/types.js"
 import { TtyUi } from "./tty-ui.js"
 
@@ -139,7 +141,7 @@ describe("F1: the plan screen shows the FULL text of every line the user approve
       const text = readable(lines)
       // The cursor's line: full text, and the keys are still on screen.
       expect(text, PLAN_LINES[down]!.id).toContain(shown(PLAN_LINES[down]!).replace(/\s+/g, " "))
-      expect(text).toContain("ENTER approve")
+      expect(text).toMatch(/ENTER (approve|read on)/)
       for (const planLine of PLAN_LINES) if (text.includes(shown(planLine).replace(/\s+/g, " "))) seen.add(planLine.id)
       // A line is on screen in full or not at all (never half of one).
       for (const row of lines.map(stripAnsi).filter((candidate) => /│\s*$/.test(candidate))) expect(row).not.toContain("…")
@@ -330,5 +332,254 @@ describe("F5: the closing screen", () => {
     const lines = frame({ outro: long, width: 80 })
     expect(readable(lines)).toContain(long)
     expect(lines.map(stripAnsi).join("\n")).not.toContain("…")
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------
+// Terminal round 2 (final verify round 2: F1b, F11, F13).
+
+const PLAN_SNAPSHOT = (payload: AskPayloads["plan"]) =>
+  makeSnapshot({
+    steps: stepRows({ link: { state: "ok" }, agent: { state: "ok" }, before: { state: "ok" }, keys: { state: "ok" }, plan: { state: "running" } }),
+    currentStep: "plan",
+    pendingAsk: { askId: "a1", kind: "plan", payload }
+  })
+
+type PlanKey = "↓" | "↑" | "enter" | "space" | "e"
+
+/** Drives the plan like `TtyUi` does: each key gets the box the screen was drawn in. Returns every screen drawn. */
+function drivePlan(width: number, height: number, payload: AskPayloads["plan"], keys: readonly PlanKey[]) {
+  let state: PlanState = OVERLAYS.plan.init(payload)
+  let answer: unknown
+  const snapshot = PLAN_SNAPSHOT(payload)
+  const draw = () => frame({ snapshot, width, height, overlay: (ctx: OverlayContext) => OVERLAYS.plan.render(payload, state, ctx) })
+  const frames = [draw()]
+  for (const key of keys) {
+    const current = state
+    const ctx = overlayContext({ snapshot, width, height, styles: makeStyles(true), sanitize: makeTestSanitizer(), spinnerIndex: 0, overlay: (overlayCtx) => OVERLAYS.plan.render(payload, current, overlayCtx) })
+    const outcome = OVERLAYS.plan.onKey(
+      payload,
+      state,
+      key === "↓" ? { name: "down" } : key === "↑" ? { name: "up" } : key === "enter" ? { name: "enter" } : key === "space" ? { name: "space" } : { name: "char", char: "e" },
+      ctx ?? undefined
+    )
+    state = outcome.state
+    if ("answer" in outcome) {
+      answer = outcome.answer
+      break
+    }
+    frames.push(draw())
+  }
+  return { state, answer, frames }
+}
+
+const chosenPayload = (lines: PlanLine[] = PLAN_LINES): AskPayloads["plan"] => ({ ...planPayload(lines), decisions: { ...planPayload(lines).decisions, consentMode: "not_required" } })
+const fullText = (planLine: PlanLine) => shown(planLine).replace(/\s+/g, " ")
+
+describe("F1b: every plan line can be read in full in a short terminal", () => {
+  for (const [width, height] of [
+    [80, 24],
+    [80, 20],
+    [100, 24],
+    [100, 30],
+    [120, 36],
+    [120, 20]
+  ] as const) {
+    it(`${width}×${height}: the cursor's line is on screen in full at every position, and the frame fits the terminal`, () => {
+      for (let down = 0; down < PLAN_LINES.length; down += 1) {
+        const { frames } = drivePlan(width, height, planPayload(), Array<PlanKey>(down).fill("↓"))
+        const lines = frames.at(-1)!
+        expect(lines.length, `rows at cursor ${down}`).toBeLessThanOrEqual(height)
+        for (const row of lines) expect(visibleWidth(row)).toBeLessThan(width)
+        const text = readable(lines)
+        // The whole line, not its first row (it read "… or wait for your cookie" and stopped at 80×24).
+        expect(text, PLAN_LINES[down]!.id).toContain(fullText(PLAN_LINES[down]!))
+        // The question, the keys and the box's bottom border are still on screen.
+        expect(text).toContain("Approve the plan: 14 lines to approve.")
+        expect(text).toContain("ESC later")
+        expect(lines.map(stripAnsi).some((row) => row.includes("╰"))).toBe(true)
+        expect(lines.map(stripAnsi).join("\n")).not.toContain("…")
+      }
+    })
+  }
+
+  it("80×24: more than one line is on screen at once, and what is not is counted (it was ONE row of one line)", () => {
+    const text = readable(drivePlan(80, 24, planPayload(), []).frames[0]!)
+    for (const planLine of PLAN_LINES.slice(0, 4)) expect(text).toContain(fullText(planLine))
+    expect(text).toMatch(/The plan · lines 1–\d+ of 15/)
+    expect(text).toMatch(/↓ \d+ more lines below/)
+    // The summary gave its rows to the lines; the consent decision is still on screen, on its own line.
+    expect(text).not.toContain("Your decisions")
+    expect(readable(drivePlan(80, 24, planPayload(), ["e"]).frames.at(-1)!)).toContain("→ chosen: collect by default")
+  })
+
+  it("a tall terminal keeps the summary and the step list (negative: nothing is dropped when there is room)", () => {
+    const text = readable(drivePlan(120, 50, planPayload(), []).frames[0]!)
+    expect(text).toContain("Your decisions")
+    expect(text).toContain("The plan (one screen)")
+    expect(text).toContain("Check the live site")
+    expect(text).toContain("ENTER approve")
+  })
+
+  it("a line taller than the box scrolls by its wrapped rows: ↓ reads on, every word is shown, then the cursor moves on", () => {
+    const words = Array.from({ length: 48 }, (_, index) => `word${String(index + 1).padStart(3, "0")}`)
+    const tall = line("remove_duplicate:meta", "remove_duplicate", `Meta: ${words.join(" ")}`)
+    const payload = planPayload([PLAN_LINES[1]!, tall, PLAN_LINES[4]!])
+    const downs: PlanKey[] = ["↓"]
+    const first = drivePlan(80, 14, payload, downs)
+    expect(readable(first.frames.at(-1)!)).toContain("word001")
+    // 48 numbered words: 389 characters, under the 400-character cap on a plan line's text.
+    expect(readable(first.frames.at(-1)!)).not.toContain("word048")
+    expect(readable(first.frames.at(-1)!)).toContain("↓ this line continues (↓ to read on) · 1 more line below")
+    expect(first.state.seen).not.toContain(tall.id)
+    // Keep pressing ↓ until the cursor leaves the line: every word was on some screen, and no screen is too tall.
+    const seenWords = new Set<string>()
+    let state = first
+    while (state.state.cursor === 1 && downs.length < 40) {
+      for (const word of words) if (readable(state.frames.at(-1)!).includes(word)) seenWords.add(word)
+      expect(state.frames.at(-1)!.length).toBeLessThanOrEqual(14)
+      downs.push("↓")
+      state = drivePlan(80, 14, payload, downs)
+    }
+    expect(state.state.cursor).toBe(2)
+    expect([...seenWords].sort()).toEqual(words)
+    expect(downs.length).toBeGreaterThan(3)
+    expect(state.state.seen).toContain(tall.id)
+    // ↑ from the line's later rows goes back inside the line first.
+    const back = drivePlan(80, 14, payload, ["↓", "↓", "↑"])
+    expect(back.state.cursor).toBe(1)
+    expect(readable(back.frames.at(-1)!)).toContain("word001")
+  })
+})
+
+describe("F11: ENTER never approves a plan line that was not on screen", () => {
+  const needUser = PLAN_LINES.filter((planLine) => planLine.requires !== "info")
+
+  it("120×36: the first ENTER shows the next unread lines and says how many are left; it approves only after every line was shown", () => {
+    const opened = drivePlan(120, 36, chosenPayload(), [])
+    const unreadAtOpen = needUser.filter((planLine) => !readable(opened.frames[0]!).includes(fullText(planLine)))
+    expect(unreadAtOpen.length).toBeGreaterThan(3)
+    expect(readable(opened.frames[0]!)).toContain("ENTER read on")
+    expect(readable(opened.frames[0]!)).not.toContain("ENTER approve")
+
+    const once = drivePlan(120, 36, chosenPayload(), ["enter"])
+    expect(once.answer).toBeUndefined()
+    // It moved to the first line that was not on screen, and that line is now on screen in full.
+    expect(PLAN_LINES[once.state.cursor]!.id).toBe(unreadAtOpen[0]!.id)
+    expect(readable(once.frames.at(-1)!)).toContain(fullText(unreadAtOpen[0]!))
+    expect(readable(once.frames.at(-1)!)).toMatch(/(\d+ more lines? to read before you approve: ENTER shows the next, ↓ scrolls\.|That is the whole plan\. ENTER approves it as shown\.)/)
+
+    // ENTER again and again: it answers in the end, and by then every line was on a screen in full.
+    const keys: PlanKey[] = []
+    let run = opened
+    while (run.answer === undefined && keys.length < 20) {
+      keys.push("enter")
+      run = drivePlan(120, 36, chosenPayload(), keys)
+    }
+    expect(keys.length).toBeGreaterThan(2)
+    const everShown = run.frames.map(readable).join(" ")
+    for (const planLine of needUser) expect(everShown, planLine.id).toContain(fullText(planLine))
+    expect(readable(run.frames.at(-1)!)).toContain("That is the whole plan. ENTER approves it as shown.")
+    expect(readable(run.frames.at(-1)!)).toContain("ENTER approve")
+    expect(run.answer).toEqual({ approved: needUser.map((planLine) => planLine.id), declined: [], edits: {} })
+  })
+
+  for (const [width, height] of [
+    [80, 24],
+    [80, 20],
+    [100, 24]
+  ] as const) {
+    it(`${width}×${height}: one ENTER does not approve; the lines still to read are counted down to none`, () => {
+      const keys: PlanKey[] = []
+      let run = drivePlan(width, height, chosenPayload(), keys)
+      const left: number[] = []
+      while (run.answer === undefined && keys.length < 40) {
+        keys.push("enter")
+        run = drivePlan(width, height, chosenPayload(), keys)
+        const count = /(\d+) more lines? to read before you approve/.exec(readable(run.frames.at(-1)!))?.[1]
+        if (run.answer === undefined && count) left.push(Number(count))
+      }
+      expect(keys.length).toBeGreaterThan(2)
+      expect(left.length).toBeGreaterThan(0)
+      expect([...left].sort((a, b) => b - a)).toEqual(left)
+      const everShown = run.frames.map(readable).join(" ")
+      for (const planLine of needUser) expect(everShown, planLine.id).toContain(fullText(planLine))
+      expect(run.answer).toMatchObject({ declined: [] })
+    })
+  }
+
+  it("scrolling through the plan with ↓ counts as reading: ENTER then approves at once, with the skipped line declined", () => {
+    const toMeta = PLAN_LINES.findIndex((planLine) => planLine.id === "meta_relay")
+    const keys: PlanKey[] = [...Array<PlanKey>(toMeta).fill("↓"), "space", "↓", "↓", "enter"]
+    const run = drivePlan(80, 24, chosenPayload(), keys)
+    expect(run.answer).toEqual({ approved: needUser.filter((planLine) => planLine.id !== "meta_relay").map((planLine) => planLine.id), declined: ["meta_relay"], edits: {} })
+  })
+
+  it("negative: a plan that is on screen whole is approved by the first ENTER, and an unread note does not hold it", () => {
+    expect(drivePlan(120, 90, chosenPayload(), ["enter"]).answer).toMatchObject({ declined: [] })
+    // The 7-day note (`requires: "info"`) is nothing the user decides: with every other line read, ENTER approves.
+    const state = { ...OVERLAYS.plan.init(chosenPayload()), seen: needUser.map((planLine) => planLine.id) }
+    const ctx: OverlayContext = { width: 74, maxBodyLines: 8, styles: makeStyles(false), sanitize: makeTestSanitizer(), spinner: "⠋" }
+    expect(state.seen).not.toContain("checkin")
+    expect("answer" in OVERLAYS.plan.onKey(chosenPayload(), state, { name: "enter" }, ctx)).toBe(true)
+  })
+
+  it("the consent choice still comes first: with none chosen ENTER asks for it, whatever was read", () => {
+    const run = drivePlan(80, 24, planPayload(), ["enter"])
+    expect(run.answer).toBeUndefined()
+    expect(run.state.cursor).toBe(0)
+    expect(readable(run.frames.at(-1)!)).toContain("Choose the consent setting first: press E on it.")
+  })
+
+  it("in the real UI at 80×24 a single ENTER on the plan answers nothing (TtyUi passes the box to the overlay)", async () => {
+    const stdin = new FakeStdin()
+    const stdout = new FakeStdout(80, 24)
+    const ui = new TtyUi({ stdin, stdout, env: {}, sanitize: makeTestSanitizer(), onInterrupt: () => undefined, spinnerIntervalMs: 0, registerExitHook: false })
+    const store = new FakeStore(PLAN_SNAPSHOT(chosenPayload()))
+    ui.start(store)
+    stdin.type("\r")
+    await flushMicrotasks()
+    expect(store.answers).toEqual([])
+    expect(readable(ui.lastFrame())).toMatch(/\d+ more lines? to read before you approve/)
+    for (let presses = 0; presses < 40 && store.answers.length === 0; presses += 1) {
+      stdin.type("\r")
+      await flushMicrotasks()
+    }
+    expect(store.answers).toHaveLength(1)
+    ui.stop()
+  })
+})
+
+describe("F13: the exit line breaks between its parts, never inside the pull request URL or the report path", () => {
+  const input = { displayId: "r-db62", exitCode: 0, prUrl: "https://github.com/acme/acme-store/pull/42", reportPath: ".infinite/wizard/report.md" }
+  const styles = makeStyles(false)
+
+  it("at 100 columns the report path starts its own row (the terminal cut it as '.infinite/w' / 'izard/report.md')", () => {
+    // The one-line form is 104 columns: a 100-column terminal breaks it inside the path.
+    expect(visibleWidth(exitLine(input, styles))).toBeGreaterThan(100)
+    const rows = exitLines(input, styles, 100)
+    expect(rows).toEqual(["◆ infinite-tag run r-db62: done · PR https://github.com/acme/acme-store/pull/42", "  report .infinite/wizard/report.md"])
+    for (const width of [60, 80, 100, 120]) {
+      const wrapped = exitLines(input, styles, width)
+      for (const row of wrapped) expect(visibleWidth(row), `${width}`).toBeLessThan(width)
+      expect(wrapped.some((row) => row.includes(input.prUrl))).toBe(true)
+      expect(wrapped.some((row) => row.includes(input.reportPath))).toBe(true)
+    }
+  })
+
+  it("negative: a terminal wide enough keeps it on one line, the same words as before", () => {
+    expect(exitLines(input, styles, 140)).toEqual([exitLine(input, styles)])
+  })
+
+  it("the terminal UI writes the wrapped form on exit", () => {
+    const stdin = new FakeStdin()
+    const stdout = new FakeStdout(100, 36)
+    const ui = new TtyUi({ stdin, stdout, env: {}, sanitize: makeTestSanitizer(), onInterrupt: () => undefined, spinnerIntervalMs: 0, registerExitHook: false })
+    const store = new FakeStore(makeSnapshot({ exit: { exitCode: 0, prUrl: input.prUrl, reportPath: input.reportPath } }))
+    ui.start(store)
+    ui.stop()
+    const tail = stripAnsi(stdout.text).split("\n").filter((row) => row.includes("report .infinite") || row.includes("infinite-tag run"))
+    expect(tail.at(-2)).toMatch(/infinite-tag run .*: done · PR https:\/\/github\.com\/acme\/acme-store\/pull\/42$/)
+    expect(tail.at(-1)).toBe("  report .infinite/wizard/report.md")
   })
 })

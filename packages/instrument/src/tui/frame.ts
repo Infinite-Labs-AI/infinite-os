@@ -198,14 +198,62 @@ function liveLines(input: FrameInput, width: number, feedLines: number = FEED_LI
   return lines
 }
 
-function overlayBox(input: FrameInput, width: number, maxBodyLines: number): string[] {
-  if (!input.overlay) return []
+/** Rows the frame keeps outside the overlay box: the header bar, the blank line under it, and the footer. */
+const FRAME_ROWS = 3
+/** The compact step list kept above the box (4 rows and a blank line) when the terminal is tall enough for both. */
+const COMPACT_TASK_ROWS = 5
+/** The box body keeps at least this many rows before the step list gets any (final verify F1b: a short terminal). */
+const BODY_ROWS_BEFORE_TASKS = 16
+const BODY_ROWS_MAX = 60
+
+type OverlaySizing = Pick<FrameInput, "snapshot" | "width" | "height" | "styles" | "sanitize" | "spinnerIndex" | "overlay">
+
+function overlayStepTitle(input: OverlaySizing): string {
+  return input.snapshot.currentStep ? WIZARD_STEP_META[input.snapshot.currentStep].title : "infinite-tag"
+}
+
+/** The box rows that are not the body: borders, the title, the heading, the question, the blank lines, the keys. */
+function overlayChrome(view: OverlayView, step: string, inner: number, s: Styles): number {
+  const heading = view.heading && view.heading !== step ? 1 : 0
+  const keys = view.keys.length > 0 ? 1 + keyRows(view.keys, inner, s).length : 0
+  return 1 + 1 + heading + wrapText(view.question, inner).length + 1 + keys + 1
+}
+
+/**
+ * The box the pending ask's overlay is drawn in: its inner width and the rows its body may use. The body gets
+ * every row the terminal has after the box's own rows (measured from the overlay, not guessed); the compact
+ * step list is kept only when the body still has room. `TtyUi` passes the same context to the overlay's
+ * `onKey`, so a key that depends on what was on screen (the plan) sees the size the screen was drawn at.
+ */
+export function overlayContext(input: OverlaySizing): OverlayContext | null {
+  if (!input.overlay) return null
+  const width = Math.max(20, input.width) - 2
+  const height = Math.max(8, input.height)
+  const inner = Math.max(10, Math.min(width, OVERLAY_MAX_WIDTH) - 4)
+  const spinner = SPINNER_FRAMES[input.spinnerIndex % SPINNER_FRAMES.length] ?? "⠋"
+  const base = { width: inner, styles: input.styles, sanitize: input.sanitize, spinner }
+  const step = overlayStepTitle(input)
+  let maxBodyLines = 3
+  // The box's own rows depend on the overlay (a wrapped question, one or two key rows): measure, then size.
+  for (let pass = 0; pass < 3; pass += 1) {
+    const chrome = overlayChrome(input.overlay({ ...base, maxBodyLines }), step, inner, input.styles)
+    const all = height - FRAME_ROWS - chrome
+    const withTasks = all - COMPACT_TASK_ROWS
+    const next = Math.max(1, Math.min(BODY_ROWS_MAX, withTasks >= BODY_ROWS_BEFORE_TASKS ? withTasks : all))
+    if (next === maxBodyLines) break
+    maxBodyLines = next
+  }
+  return { ...base, maxBodyLines }
+}
+
+function overlayBox(input: FrameInput, width: number): string[] {
+  const ctx = overlayContext(input)
+  if (!input.overlay || !ctx) return []
   const s = input.styles
   const boxWidth = Math.min(width, OVERLAY_MAX_WIDTH)
-  const inner = Math.max(10, boxWidth - 4)
-  const spinner = SPINNER_FRAMES[input.spinnerIndex % SPINNER_FRAMES.length] ?? "⠋"
-  const view = input.overlay({ width: inner, maxBodyLines, styles: s, sanitize: input.sanitize, spinner })
-  const step = input.snapshot.currentStep ? WIZARD_STEP_META[input.snapshot.currentStep].title : "infinite-tag"
+  const inner = ctx.width
+  const view = input.overlay(ctx)
+  const step = overlayStepTitle(input)
   const content: string[] = [
     s.accent(`◆ ${step}`),
     // The box title is the step's title; an overlay whose heading says the same words does not say them twice.
@@ -289,15 +337,11 @@ export function renderFrame(input: FrameInput): string[] {
   const learnColumn = showLearn ? learnLines(input, LEARN_WIDTH) : []
   const footer = input.styles.dim("Ctrl+C stop")
 
-  // The overlay gets what is left after the header, the footer and a compact step list.
   let body: string[]
   let lower: string[]
   if (input.overlay) {
-    const compactTasks = 4
-    const chrome = 8
-    // A tall terminal gives the box its rows (the plan shows every line at once when they fit).
-    const maxBodyLines = Math.max(3, Math.min(60, height - out.length - 2 - compactTasks - chrome))
-    lower = overlayBox(input, inner, maxBodyLines)
+    // The box takes the rows it needs (`overlayContext`); the step list gets what is left, or nothing.
+    lower = overlayBox(input, inner)
   } else {
     // The full step list needs its rows first; what is left over (5 to 8) goes to the sub-statuses.
     const spare = height - out.length - Math.max(taskColumn.length, learnColumn.length) - 2 - STATUS_ROWS_MAX

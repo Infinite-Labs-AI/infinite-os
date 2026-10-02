@@ -34,7 +34,11 @@ export interface Overlay<K extends AskKind, S> {
   kind: K
   init(payload: AskPayloads[K]): S
   render(payload: AskPayloads[K], state: S, ctx: OverlayContext): OverlayView
-  onKey(payload: AskPayloads[K], state: S, key: Key): KeyOutcome<K, S>
+  /**
+   * `ctx` is the box the overlay was last drawn in (the TTY UI passes it), for an overlay whose keys depend on
+   * what was on screen (the plan: scrolling, and ENTER never approving an unread line).
+   */
+  onKey(payload: AskPayloads[K], state: S, key: Key, ctx?: OverlayContext): KeyOutcome<K, S>
 }
 
 export function answered<K extends AskKind, S>(outcome: KeyOutcome<K, S>): outcome is { state: S; answer: AskAnswer<K> } {

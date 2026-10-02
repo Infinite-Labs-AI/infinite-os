@@ -10,8 +10,8 @@
 import type { AskKind } from "../wizard/contracts/asks.js"
 import type { WizardStoreSnapshot } from "../wizard/contracts/state.js"
 import { SEQ, SPINNER_FRAMES, colorEnabled, layoutSafeLine, makeStyles, type Styles } from "./ansi.js"
-import { exitLine } from "./exit-line.js"
-import { renderFrame } from "./frame.js"
+import { exitLines } from "./exit-line.js"
+import { overlayContext, renderFrame } from "./frame.js"
 import { RawKeyboard, type Key, type KeyboardInput } from "./keys.js"
 import { OVERLAYS, answered } from "./overlays/index.js"
 import { handoverLine } from "./overlays/tty-handover.js"
@@ -126,15 +126,16 @@ export class TtyUi implements WizardUi {
     if (outro) tail += outro.split("\n").map((line) => layoutSafeLine(line, 400)).join("\n") + "\n"
     if (snapshot?.exit) {
       tail +=
-        exitLine(
+        exitLines(
           {
             displayId: this.options.sanitize(snapshot.run.displayId, 40),
             exitCode: snapshot.exit.exitCode,
             prUrl: snapshot.exit.prUrl === null ? null : this.options.sanitize(snapshot.exit.prUrl, 400),
             reportPath: snapshot.exit.reportPath === null ? null : this.options.sanitize(snapshot.exit.reportPath, 400)
           },
-          this.styles
-        ) + "\n"
+          this.styles,
+          frameSize(this.options.stdout).width
+        ).join("\n") + "\n"
     }
     this.write(tail)
     this.resolveDismiss()
@@ -261,7 +262,19 @@ export class TtyUi implements WizardUi {
     const slot = this.overlay
     const pending = snapshot.pendingAsk
     if (!slot || !pending || pending.askId !== slot.askId) return
-    const outcome = OVERLAYS[slot.kind].onKey(pending.payload as never, slot.state as never, key)
+    // The overlay is told the box it was drawn in, so a key can depend on what was on screen (the plan never
+    // approves a line that was not shown).
+    const { width, height } = frameSize(this.options.stdout)
+    const ctx = overlayContext({
+      snapshot,
+      width,
+      height,
+      styles: this.styles,
+      sanitize: this.options.sanitize,
+      spinnerIndex: this.spinnerIndex,
+      overlay: (overlayCtx) => OVERLAYS[slot.kind].render(pending.payload as never, slot.state as never, overlayCtx)
+    })
+    const outcome = OVERLAYS[slot.kind].onKey(pending.payload as never, slot.state as never, key, ctx ?? undefined)
     slot.state = outcome.state
     if (answered(outcome)) {
       this.overlay = null
