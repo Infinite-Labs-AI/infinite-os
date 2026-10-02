@@ -62,13 +62,13 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(out).toContain("Two are on.");
   });
 
-  it("the desktop entry forwards each tool.view frame to the session", () => {
-    expect(indexSource).toMatch(/async onSubmitLine\(line, onProgress, signal, onView\)/u);
-    expect(indexSource).toMatch(/runner\.turn\(trimmed, onProgress, linked\.signal, onView\)/u);
+  it("the desktop entry forwards each tool.view and creative.draft frame to the session", () => {
+    expect(indexSource).toMatch(/async onSubmitLine\(line, onProgress, signal, onView, onCreativeDraft\)/u);
+    expect(indexSource).toMatch(/runner\.turn\(trimmed, onProgress, linked\.signal, onView, onCreativeDraft\)/u);
   });
 
   it("a turn records its views in the turn store; the next submit commits and clears them", () => {
-    expect(sessionSource).toMatch(/\}, signal, recordTurnView\);/u);
+    expect(sessionSource).toMatch(/\}, signal, recordTurnView, recordCreativeDraft\);/u);
     const commit = sessionSource.slice(sessionSource.indexOf("const commitLatestTurn"), sessionSource.indexOf("const [exitRequested"));
     expect(commit).toContain("renderLiveTurn({");
     expect(commit).toContain("clearTurnViews();");
@@ -77,7 +77,7 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
 
   it("view keys are tried only with an empty composer and no card, picker or operator confirm", () => {
     const gate = sessionSource.slice(sessionSource.indexOf("if (\n      onViewKey &&"), sessionSource.indexOf("const page = livePageKey("));
-    for (const condition of ["!busy", "value.length === 0", "!confirmActionActive", "!selectionActive", "!pendingConfirmation"]) {
+    for (const condition of ["!busy", "value.length === 0", "!confirmActionActive", "!cardFieldActive", "!selectionActive", "!pendingConfirmation"]) {
       expect(gate).toContain(condition);
     }
     // After the wizard and connect-confirm branches, before the pager and the write gate.

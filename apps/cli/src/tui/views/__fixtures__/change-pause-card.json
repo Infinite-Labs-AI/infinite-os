@@ -1,0 +1,45 @@
+{
+  "v": 1,
+  "kind": "change",
+  "tool": "propose_pause_entity",
+  "title": "Pause ad",
+  "state": "needs_yes",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "target": {
+      "kind": "ad",
+      "id": "ad_1",
+      "label": "Hook A"
+    },
+    "rows": [
+      {
+        "label": "status",
+        "before": "on",
+        "after": "paused"
+      }
+    ],
+    "effect": "Stops spending",
+    "warnings": []
+  },
+  "approval": {
+    "kind": "card",
+    "turnId": "turn_1",
+    "handle": "h_1",
+    "title": "Pause ad “Hook A”?",
+    "summary": "Stops this ad's spend until you turn it back on.",
+    "confirmLabel": "Pause",
+    "dismissLabel": "Dismiss",
+    "rows": [
+      {
+        "label": "Ad",
+        "value": "Hook A"
+      }
+    ],
+    "expiresAt": "2026-01-15T11:10:00Z"
+  }
+}

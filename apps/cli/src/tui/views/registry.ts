@@ -31,6 +31,11 @@ import type { KindRender, KindRenderer, ViewRender, ViewRenderCtx } from "./type
 // T10 (things): list, record, document, link, quiet
 
 // T11 (actions): change, launch, images, job
+import { renderChange } from "./change.js";
+import { renderImages } from "./images.js";
+import { renderJob } from "./job.js";
+import { renderLaunch } from "./launch.js";
+import { reconcileLines } from "./outcome.js";
 
 type KindRendererMap = { [K in AnswerViewKind]?: KindRenderer<K> };
 
@@ -40,7 +45,10 @@ const KIND_RENDERERS: KindRendererMap = {
   // T10 (things)
 
   // T11 (actions)
-
+  change: renderChange,
+  launch: renderLaunch,
+  images: renderImages,
+  job: renderJob
 };
 
 /** Whether this kind draws a body yet (until then only its head and state reason print). */
@@ -61,6 +69,7 @@ export function renderView(view: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
       ...explainLines(view, shellCtx),
       ...stateReasonLines(view, shellCtx, fixAsk !== null),
       ...(body?.detail ?? []),
+      ...reconcileLines(view, shellCtx),
       ...truncationLines(view, shellCtx),
       ...caveatLines(view, shellCtx)
     ],

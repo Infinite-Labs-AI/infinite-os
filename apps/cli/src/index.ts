@@ -1686,18 +1686,21 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
       // Approve/decline a `requires_confirmation` write in-session. The runner
       // resolves the handle against the client that ran the originating turn
       // (handles are per-boot); `confirm` is single-use per handle.
-      onConfirmAction: (action, decision) =>
+      // `fields` (a card's answered values, e.g. a daily budget) go only to a
+      // Desktop that takes them; the client refuses them elsewhere.
+      onConfirmAction: (action, decision, fields) =>
         runner.confirm({
           turnId: action.turnId,
           confirmationHandle: action.confirmationHandle,
           decision,
+          ...(fields && Object.keys(fields).length ? { fields } : {}),
           signal: turnAbort.signal
         }),
       // Esc stops the running turn and Ctrl-C stops it instead of quitting:
       // aborting the turn's signal drops the `/v1/turn` request, and the
       // bridge stops the app turn on disconnect.
       turnStoppable: true,
-      async onSubmitLine(line, onProgress, signal, onView) {
+      async onSubmitLine(line, onProgress, signal, onView, onCreativeDraft) {
         const trimmed = line.trim();
         if (trimmed === "/help") {
           return { messages: [desktopHelpMessage()] };
@@ -1705,13 +1708,14 @@ async function runDesktopInteractiveEntry(env: CliEnv): Promise<void> {
         // The streamed answer renders through the shell's turnController via
         // `onProgress`; the terminal message.complete commits it. Answer views
         // (`tool.view`, only from a Desktop that negotiated them) go to `onView`,
-        // and the shell draws them beside the answer. The runner threads the
+        // and the shell draws them beside the answer; image drafts in progress
+        // (`creative.draft`) go to `onCreativeDraft` as one text line per run. The runner threads the
         // session forward (Desktop owns its own active workspace).
         // Not `AbortSignal.any`: it needs Node 20.3 and the engines allow 20.0.
         const linked = linkAbortSignals([turnAbort.signal, signal]);
         let outcome: Awaited<ReturnType<typeof runner.turn>>;
         try {
-          outcome = await runner.turn(trimmed, onProgress, linked.signal, onView);
+          outcome = await runner.turn(trimmed, onProgress, linked.signal, onView, onCreativeDraft);
         } finally {
           linked.dispose();
         }

@@ -1,5 +1,6 @@
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
 import {
+  type CreativeDraftFrameV1,
   type InteractiveAgentProfile,
   type InteractiveWorkspaceRequestV1,
   type ToolViewFrameV1,
@@ -67,7 +68,9 @@ export interface DesktopInteractiveTurnSource {
     signal: AbortSignal,
     interactive?: InteractiveWorkspaceRequestV1,
     /** Decoded `tool.view` frames; never delivered as `ChatProgressEvent`s. */
-    onView?: (frame: ToolViewFrameV1) => void
+    onView?: (frame: ToolViewFrameV1) => void,
+    /** Allowlisted `creative.draft` frames; never delivered as `ChatProgressEvent`s. */
+    onCreativeDraft?: (frame: CreativeDraftFrameV1) => void
   ): Promise<DesktopInteractiveTurnResult>;
 }
 
@@ -210,6 +213,9 @@ export function adaptDesktopClientToTurnSource(
     get sessionCapable() {
       return client.sessionCapable;
     },
+    get confirmFieldsCapable() {
+      return client.confirmFieldsCapable === true;
+    },
     async turn(
       input: DesktopTurnSourceInput,
       onFrame: (frame: BridgeFrame) => void
@@ -287,13 +293,15 @@ export interface DesktopSessionTurnRunner {
   /**
    * Run one turn with a full status preflight. See {@link DesktopSessionTurnOutcome}.
    * `onView` receives each decoded `tool.view` frame of the turn (only a
-   * Desktop that negotiated `result.view.v1` sends them).
+   * Desktop that negotiated `result.view.v1` sends them); `onCreativeDraft`
+   * each allowlisted `creative.draft` frame (image drafts in progress).
    */
   turn(
     message: string,
     onEvent?: (event: ChatProgressEvent) => void,
     signal?: AbortSignal,
-    onView?: (frame: ToolViewFrameV1) => void
+    onView?: (frame: ToolViewFrameV1) => void,
+    onCreativeDraft?: (frame: CreativeDraftFrameV1) => void
   ): Promise<DesktopSessionTurnOutcome>;
   /** The session threading across turns (reset on any scope change). */
   sessionId(): string | undefined;
@@ -353,7 +361,7 @@ export function createDesktopSessionTurnRunner(
       return lastClient.confirm(input);
     },
 
-    async turn(message, onEvent, signal, onView) {
+    async turn(message, onEvent, signal, onView, onCreativeDraft) {
       if (inFlight) {
         return { busy: true };
       }
@@ -412,6 +420,7 @@ export function createDesktopSessionTurnRunner(
           signal ?? NEVER_ABORT,
           interactive,
           onView,
+          onCreativeDraft,
         );
         if (result.sessionId) {
           sessionId = result.sessionId;

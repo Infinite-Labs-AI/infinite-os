@@ -1,0 +1,54 @@
+{
+  "v": 1,
+  "kind": "images",
+  "tool": "generate_images",
+  "title": "Images",
+  "state": "done",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "runId": "run_1",
+    "requested": 3,
+    "ready": 3,
+    "failed": 0,
+    "items": [
+      {
+        "id": "img_1",
+        "label": "Explained",
+        "status": "done",
+        "width": 1080,
+        "height": 1350
+      },
+      {
+        "id": "img_2",
+        "label": "Your audit",
+        "status": "done"
+      },
+      {
+        "id": "img_3",
+        "label": "3 fixes",
+        "status": "done"
+      }
+    ],
+    "format": "png",
+    "aspectRatio": "4:5",
+    "model": "image-model-1",
+    "madeWith": "infinite"
+  },
+  "cost": {
+    "usd": 0.5,
+    "estimate": true,
+    "whoPays": "infinite"
+  },
+  "appLink": {
+    "place": "creative.library",
+    "label": "Open in Library",
+    "params": {
+      "ids": "img_1,img_2,img_3"
+    }
+  }
+}

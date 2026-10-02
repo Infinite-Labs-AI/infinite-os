@@ -1,0 +1,53 @@
+{
+  "v": 1,
+  "kind": "change",
+  "tool": "propose_set_budget",
+  "title": "Change daily budget",
+  "state": "needs_yes",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "target": {
+      "kind": "adset",
+      "id": "as_1",
+      "label": "Ad set 01"
+    },
+    "rows": [
+      {
+        "label": "daily budget",
+        "before": "$40.00",
+        "after": null,
+        "reason": {
+          "code": "needs_answer",
+          "words": "you choose",
+          "show": "words"
+        }
+      }
+    ],
+    "warnings": []
+  },
+  "approval": {
+    "kind": "card",
+    "turnId": "turn_1",
+    "handle": "h_2",
+    "title": "Change the budget of “Ad set 01”?",
+    "summary": null,
+    "confirmLabel": "Lower to $30/day",
+    "dismissLabel": "Dismiss",
+    "rows": [],
+    "fields": [
+      {
+        "key": "adSetBudget",
+        "label": "Daily budget",
+        "input": "money_per_day",
+        "required": true,
+        "currency": "USD",
+        "current": "40"
+      }
+    ]
+  }
+}

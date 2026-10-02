@@ -138,11 +138,13 @@ describe("cells: a null is never 0", () => {
 });
 
 describe("the view shell", () => {
-  it("a kind with no renderer prints only the head and the state reason", () => {
+  it("a view whose body draws nothing prints only the head and the state reason", () => {
+    // `launch` has a renderer since T11; a launch with nothing to launch and no
+    // pictures draws no body, so only the shell lines remain.
     const render = renderView(envelope({
       kind: "launch", state: "blocked",
       stateReason: { code: "role", words: "Only an owner or admin can do this." },
-      body: { picturesInApp: true }
+      body: { picturesInApp: false }
     }), ctx());
     expect(render.head).toBe("Item  ⊗ Blocked");
     expect(render.detail).toEqual(["Only an owner or admin can do this."]);

@@ -67,6 +67,11 @@ export interface InSessionConfirmationAction {
    * NOT redacted or scrubbed here: renderers scrub every one before printing.
    */
   view?: AnswerViewV1;
+  /**
+   * The Desktop that minted this card takes field answers (`confirm.fields.v1`).
+   * False or absent: a card with a required field can only be dismissed here.
+   */
+  confirmFieldsCapable?: boolean;
 }
 
 /** The TTY seam: readiness flags, a line prompt, and a transcript writer. */

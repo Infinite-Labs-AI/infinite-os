@@ -1,11 +1,14 @@
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
 import type {
+  CreativeDraftFrameV1,
   InteractiveWorkspaceRequestV1,
   ToolViewFrameV1
 } from "@infinite-os/types";
 import {
   decodeAnswerView,
+  decodeCreativeDraftFrame,
   decodeToolViewFrame,
+  isCreativeDraftFrameData,
   isToolViewFrameData
 } from "./answer-view-decode.js";
 import type {
@@ -76,6 +79,12 @@ export interface DesktopTurnRunResult {
 export interface DesktopTurnSourceClient {
   /** Negotiated `turn.session.v1` (descriptor ∧ status capabilities). */
   readonly sessionCapable: boolean;
+  /**
+   * Negotiated `confirm.fields.v1`: the Desktop takes a card's field answers.
+   * Stamped on every pending card, so a card never asks for a value its
+   * Desktop cannot receive. Absent = false.
+   */
+  readonly confirmFieldsCapable?: boolean;
   turn(
     input: DesktopTurnSourceInput,
     onFrame: (frame: BridgeFrame) => void
@@ -87,7 +96,10 @@ export interface DesktopTurnSource {
    * `onView` receives each decoded `tool.view` frame (sent only after the
    * client negotiated `result.view.v1`). A `tool.view` frame never becomes a
    * `ChatProgressEvent`; one that does not decode is dropped, and the turn's
-   * text answer stays the answer.
+   * text answer stays the answer. `onCreativeDraft` receives each image
+   * draft frame (`creative.draft`, rebuilt from an allowlist: no brief, no
+   * image URLs) so the terminal can say "Drawing 3 images · ~25 s"; it never
+   * becomes a `ChatProgressEvent` either.
    */
   runTurn(
     message: string,
@@ -95,7 +107,8 @@ export interface DesktopTurnSource {
     onEvent: (event: ChatProgressEvent) => void,
     signal: AbortSignal,
     interactive?: InteractiveWorkspaceRequestV1,
-    onView?: (frame: ToolViewFrameV1) => void
+    onView?: (frame: ToolViewFrameV1) => void,
+    onCreativeDraft?: (frame: CreativeDraftFrameV1) => void
   ): Promise<DesktopTurnRunResult>;
 }
 
@@ -112,6 +125,8 @@ export function bridgeFrameToChatEvent(
       // A `tool.view` frame is a view for `onView`, never a chat event: the
       // shell would otherwise record it as an unknown typed event.
       if (isToolViewFrameData(frame.data)) return null;
+      // Likewise a `creative.draft` frame goes to `onCreativeDraft`.
+      if (isCreativeDraftFrameData(frame.data)) return null;
       // Codex: `data` is already a typed ChatProgressEvent — pass it through
       // untouched so no shape drifts on the way to the shell.
       if (isTypedEvent(frame.data)) {
@@ -164,7 +179,7 @@ export function createDesktopTurnSource(
   client: DesktopTurnSourceClient
 ): DesktopTurnSource {
   return {
-    async runTurn(message, sessionId, onEvent, signal, interactive, onView) {
+    async runTurn(message, sessionId, onEvent, signal, interactive, onView, onCreativeDraft) {
       let terminalSessionId = extractSessionId(undefined);
       let pendingConfirmations: InSessionConfirmationAction[] = [];
       // At most ONE `message.complete` per turn, first one wins. Both planes can
@@ -199,6 +214,18 @@ export function createDesktopTurnSource(
             }
             return;
           }
+          if (frame.kind === "progress" && isCreativeDraftFrameData(frame.data)) {
+            const draft = decodeCreativeDraftFrame(frame.data);
+            if (draft && onCreativeDraft) {
+              // Like a view: a draft line degrades and never fails a turn.
+              try {
+                onCreativeDraft(draft);
+              } catch {
+                // dropped on purpose
+              }
+            }
+            return;
+          }
           if (frame.kind === "done") {
             terminalSessionId =
               readSessionId(frame) ?? terminalSessionId;
@@ -209,7 +236,8 @@ export function createDesktopTurnSource(
             // transcript.
             pendingConfirmations = parsePendingConfirmations(
               frame.actionCalls,
-              readTurnId(frame)
+              readTurnId(frame),
+              client.confirmFieldsCapable === true
             );
           }
           const event = bridgeFrameToChatEvent(frame);
@@ -304,7 +332,8 @@ const URI_OBFUSCATING_CHAR_RE_GLOBAL = /(?:[^\S ]|\p{Cc}|\p{Cf})/gu;
  */
 function parsePendingConfirmations(
   actionCalls: unknown[] | undefined,
-  turnId: string | undefined
+  turnId: string | undefined,
+  confirmFieldsCapable: boolean
 ): InSessionConfirmationAction[] {
   if (!Array.isArray(actionCalls)) return [];
   const pending: InSessionConfirmationAction[] = [];
@@ -348,6 +377,7 @@ function parsePendingConfirmations(
       confirmationHandle,
       summary,
       confirmationDetails,
+      confirmFieldsCapable,
       ...(view ? { view } : {})
     });
   }

@@ -85,6 +85,38 @@ describe("resolveKey on a card", () => {
     expect(resolveKey("r", {} as Key, all)).toEqual({ type: "retry" });
   });
 
+  it("v, 1–9, space, e and c act on a card only when the card offers them", () => {
+    const plain = card();
+    for (const input of ["v", "1", "3", " ", "e", "c"]) {
+      expect(resolveKey(input, {} as Key, plain), input).toEqual({ type: "none" });
+    }
+    const send = card({ okKey: "s", card: { view: true, viewOpen: true, tabs: 3, page: true, copy: true, edit: true } });
+    expect(resolveKey("v", {} as Key, send)).toEqual({ type: "view" });
+    expect(resolveKey("1", {} as Key, send)).toEqual({ type: "tab", index: 0 });
+    expect(resolveKey("3", {} as Key, send)).toEqual({ type: "tab", index: 2 });
+    expect(resolveKey("4", {} as Key, send)).toEqual({ type: "none" });
+    expect(resolveKey("0", {} as Key, send)).toEqual({ type: "none" });
+    expect(resolveKey(" ", {} as Key, send)).toEqual({ type: "page" });
+    expect(resolveKey("e", {} as Key, send)).toEqual({ type: "edit" });
+    expect(resolveKey("c", {} as Key, send)).toEqual({ type: "copy" });
+  });
+
+  it("the widened card keys never approve or decline: only the OK key and n do", () => {
+    const send = card({ okKey: "s", card: { view: true, viewOpen: true, tabs: 9, page: true, copy: true, edit: true } });
+    const decisions = new Map<string, string>();
+    for (const input of ["s", "n", "y", "v", "e", "c", " ", "1", "9", "p", "j", "k", "m", "q"]) {
+      const type = resolveKey(input, {} as Key, send).type;
+      if (type === "ok" || type === "dismiss") decisions.set(input, type);
+    }
+    expect([...decisions]).toEqual([["s", "ok"], ["n", "dismiss"]]);
+    expect(resolveKey("\r", { return: true } as Key, send)).toEqual({ type: "none" });
+    expect(resolveKey("", { escape: true } as Key, send)).toEqual({ type: "none" });
+    // A reserved verb letter can never become the OK key, so v/e/c keep their meaning.
+    expect(okKeyFor("View")).toBe("y");
+    expect(okKeyFor("Edit")).toBe("y");
+    expect(okKeyFor("Copy")).toBe("y");
+  });
+
   it("esc stops a running turn, and is still never a decline", () => {
     expect(resolveKey("", { escape: true } as Key, card({ busy: true }))).toEqual({ type: "stop" });
   });
@@ -148,15 +180,37 @@ describe("keyBarHints", () => {
       card({ okLabel: "Pause", explain: true }),
       card({ okKey: null }),
       card({ caps: { open: true, watch: true, retry: true }, explain: true }),
+      card({ okKey: "s", card: { view: true } }),
+      card({ okKey: "s", card: { view: true, viewOpen: true, tabs: 3, page: true, copy: true, edit: true } }),
       { focus: "composer", busy: true, okKey: null, caps: NO_CAPS }
     ];
     for (const ctx of contexts) {
       for (const hint of keyBarHints(ctx)) {
         const key = hint.key === "esc" ? { escape: true } : {};
-        const input = hint.key === "esc" ? "" : hint.key;
+        const input = hint.key === "esc" ? "" : hint.key === "space" ? " " : hint.key.split("-")[0]!;
         expect(resolveKey(input, key as Key, ctx).type, `${ctx.focus} ${hint.key}`).not.toBe("none");
       }
     }
+  });
+
+  it("a send card offers v view before its OK key; an open document offers its tabs and pages", () => {
+    expect(formatKeyBar(keyBarHints(card({ okKey: "s", okLabel: "Send to 200 people", card: { view: true } }))))
+      .toBe("v view   s Send to 200 people   n dismiss");
+    expect(formatKeyBar(keyBarHints(card({
+      okKey: "s", okLabel: "Send to 200 people", card: { view: true, viewOpen: true, tabs: 3, page: true }
+    })))).toBe("v close   s Send to 200 people   n dismiss   1-3 switch   space next page");
+  });
+
+  it("e and c show only when the card says they work", () => {
+    expect(keyBarHints(card()).map((h) => h.key)).not.toContain("e");
+    expect(keyBarHints(card()).map((h) => h.key)).not.toContain("c");
+    const keys = keyBarHints(card({ okKey: "y", okLabel: "Confirm", card: { edit: true, copy: true } }));
+    expect(keys).toEqual([
+      { key: "y", label: "Confirm" },
+      { key: "n", label: "dismiss" },
+      { key: "e", label: "edit in the app" },
+      { key: "c", label: "copy" }
+    ]);
   });
 
   it("a running turn shows esc stop, the one key that works in the composer then", () => {

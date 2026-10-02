@@ -1,0 +1,66 @@
+{
+  "v": 1,
+  "kind": "launch",
+  "tool": "propose_send_sequence",
+  "title": "Send emails",
+  "state": "needs_yes",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "audience": {
+      "count": 200,
+      "basis": "re-counted now",
+      "excluded": [
+        {
+          "reason": "unsubscribed",
+          "count": 10
+        }
+      ],
+      "fromLine": "Demo Team"
+    },
+    "documents": [
+      {
+        "id": "doc_1",
+        "slot": "Email 1",
+        "subject": "Your trial ended",
+        "bodyText": "Hi {first name},\n\nLine 1 of the first email. Line 2 of the first email. Line 3 of the first email. Line 4 of the first email. Line 5 of the first email. Line 6 of the first email. Line 7 of the first email. Line 8 of the first email. Line 9 of the first email. Line 10 of the first email. Line 11 of the first email. Line 12 of the first email. Line 13 of the first email. Line 14 of the first email. Line 15 of the first email. Line 16 of the first email. Line 17 of the first email. Line 18 of the first email. Line 19 of the first email. Line 20 of the first email. Line 21 of the first email. Line 22 of the first email. Line 23 of the first email. Line 24 of the first email. Line 25 of the first email. Line 26 of the first email. Line 27 of the first email. Line 28 of the first email. Line 29 of the first email. Line 30 of the first email. Line 31 of the first email. Line 32 of the first email. Line 33 of the first email. Line 34 of the first email. Line 35 of the first email. Line 36 of the first email. Line 37 of the first email. Line 38 of the first email. Line 39 of the first email. Line 40 of the first email.\n\nSee you soon."
+      },
+      {
+        "id": "doc_2",
+        "slot": "Email 2",
+        "subject": "Three things we found",
+        "bodyText": "Hi again,\n\nHere are three things."
+      },
+      {
+        "id": "doc_3",
+        "slot": "Email 3",
+        "subject": "Last note",
+        "bodyText": "Last one.\n\nBye."
+      }
+    ],
+    "picturesInApp": false
+  },
+  "approval": {
+    "kind": "card",
+    "turnId": "turn_1",
+    "handle": "h_3",
+    "title": "Send this to 200 people?",
+    "summary": "Sends 3 emails over a week.",
+    "confirmLabel": "Send to 200 people",
+    "dismissLabel": "Dismiss",
+    "rows": [
+      {
+        "label": "subject",
+        "value": "Your trial ended"
+      },
+      {
+        "label": "to",
+        "value": "200 people"
+      }
+    ]
+  }
+}
