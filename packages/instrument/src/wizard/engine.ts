@@ -132,8 +132,10 @@ export const DEFAULT_STEP_BUDGETS: Partial<Record<WizardStepId, StepBudget>> = {
     ms: 6 * 60_000,
     onOverrun: { kind: "failed", code: "INF_WIZ_LINK_EXPIRED", message: "The link was not approved in time.", next: "halt" }
   },
+  // The agent's own budget is 10 minutes; builds and T0 between resume rounds come on top, so this only
+  // catches a wedged step.
   jobs: {
-    ms: 15 * 60_000,
+    ms: 40 * 60_000,
     onOverrun: { kind: "failed", code: "INF_WIZ_AGENT_TIMEOUT", message: "The agent jobs ran past their time budget.", next: "halt" }
   },
   prove: {
