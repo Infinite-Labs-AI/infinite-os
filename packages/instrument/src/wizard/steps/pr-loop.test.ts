@@ -213,7 +213,8 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(pr.body).toContain(PR_MARKERS.pr(RUN_ID))
     expect(pr.body).not.toContain("- [ ]")
 
-    expect(bridgeVerbs(w.bridge)).toEqual(["keys", "hosting", "test.rehearsal", "test.dry_live", "runs.patch", "ga4-key-events"])
+    // B14: the PR fields right after the PR is created, then the rehearsal, then the click-tested names.
+    expect(bridgeVerbs(w.bridge)).toEqual(["keys", "hosting", "runs.patch", "test.rehearsal", "test.dry_live", "runs.patch", "ga4-key-events"])
     const [rehearsal, previewSelf] = w.bridge.testRequests
     expect(rehearsal).toMatchObject({
       mode: "rehearsal",
@@ -230,8 +231,8 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(previewSelf!.clicks).toBeUndefined()
     expect(previewSelf!.fakeClickId).toBeUndefined()
 
-    const patch = w.bridge.calls.find((call) => call.verb === "runs.patch")!.body as { patch: Record<string, unknown> }
-    expect(patch.patch).toEqual({ prUrl: "https://github.com/acme/acme-store/pull/42", prNumber: 42, prHeadSha: head, phase: "in_pr", clickTestedConversions: ["sign_up"] })
+    const patches = w.bridge.calls.filter((call) => call.verb === "runs.patch").map((call) => (call.body as { patch: Record<string, unknown> }).patch)
+    expect(patches).toEqual([{ prUrl: "https://github.com/acme/acme-store/pull/42", prNumber: 42, prHeadSha: head, phase: "in_pr" }, { clickTestedConversions: ["sign_up"] }])
     expect(w.bridge.calls.find((call) => call.verb === "ga4-key-events")!.body).toEqual({ runId: RUN_ID, names: ["sign_up"] })
 
     const state = w.ctx.state.get()
@@ -261,7 +262,7 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     })
     w.bridge = w.deps.bridge as FakeBridge
     expectOk(await rehearsalStep.run(w.ctx, w.deps))
-    const patch = w.bridge.calls.find((call) => call.verb === "runs.patch")!.body as { patch: Record<string, unknown> }
+    const patch = w.bridge.calls.filter((call) => call.verb === "runs.patch").at(-1)!.body as { patch: Record<string, unknown> }
     expect(patch.patch.clickTestedConversions).toEqual(["sign_up"])
     expect(bridgeVerbs(w.bridge)).not.toContain("ga4-key-events")
   })
@@ -277,8 +278,9 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     })
     w.bridge = w.deps.bridge as FakeBridge
     expectOk(await rehearsalStep.run(w.ctx, w.deps))
-    const patch = w.bridge.calls.find((call) => call.verb === "runs.patch")!.body as { patch: Record<string, unknown> }
-    expect(patch.patch.clickTestedConversions).toBeUndefined()
+    // Only the PR-fields PATCH: no click-tested names (B14)
+    const patches = w.bridge.calls.filter((call) => call.verb === "runs.patch").map((call) => (call.body as { patch: Record<string, unknown> }).patch)
+    expect(patches.every((patch) => patch.clickTestedConversions === undefined)).toBe(true)
     expect(bridgeVerbs(w.bridge)).not.toContain("ga4-key-events")
   })
 
@@ -599,8 +601,10 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.agents.reviewCalls).toHaveLength(2)
     expect(w.agents.reviewCalls[1]!.brief).toMatch(/RE-REVIEW/)
     expect(w.bridge.testRequests.filter((request) => request.mode === "rehearsal").map((request) => request.rehearsal!.headSha)).toEqual([w.head, fixHead])
-    // The fix round's rehearsal click-tested the same conversion: no second PATCH, no second GA4 key-event call.
-    expect(bridgeVerbs(w.bridge).filter((verb) => verb === "runs.patch")).toHaveLength(1)
+    // The fix round's rehearsal click-tested the same conversion: no second click-tested PATCH, no second GA4
+    // key-event call (the PR-fields PATCH follows the PR creation once).
+    const clickPatches = w.bridge.calls.filter((call) => call.verb === "runs.patch" && (call.body as { patch: Record<string, unknown> }).patch.clickTestedConversions !== undefined)
+    expect(clickPatches).toHaveLength(1)
     expect(bridgeVerbs(w.bridge).filter((verb) => verb === "ga4-key-events")).toHaveLength(1)
 
     // Ready + the final comment.
@@ -1011,7 +1015,8 @@ describe("step `merge` (§3g.4 merge gate)", { timeout: 60_000 }, () => {
     const outcome = await mergeStep.run(w.ctx, w.deps)
     expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED" })
     expect((outcome as { reason: string }).reason).toMatch(/closed without merging/)
-    expect(w.bridge.calls.filter((call) => call.verb === "runs.patch")).toHaveLength(1)
+    // the rehearsal's two PATCHes (PR fields, click-tested names); the merge step adds none (no mergeSha)
+    expect(w.bridge.calls.filter((call) => call.verb === "runs.patch" && (call.body as { patch: { mergeSha?: string } }).patch.mergeSha !== undefined)).toHaveLength(0)
   })
 
   it("off GitHub: the branch head reaching the base is the merge", async () => {

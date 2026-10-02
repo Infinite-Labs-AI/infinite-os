@@ -154,9 +154,15 @@ describe("prove: the proof claim and the ONE real visit", () => {
     expect(column.cells.ga4_page_views_per_visit).toMatchObject({ value: null, display: "—", reason: "pending_open_infinite" })
   })
 
-  it("any other claim error is not swallowed", async () => {
+  it("any other claim error is never a lost claim: a 402 blocks SUBSCRIPTION_REQUIRED (§3z.4) and no visit is made", async () => {
     const bundle = fakeDeps({ bridge: { claim: { code: "subscription_required" } } })
-    await expect(runProve(bundle)).rejects.toMatchObject({ code: "subscription_required" })
+    expect((await runProve(bundle)).outcome).toMatchObject({ kind: "blocked", code: "INF_WIZ_SUBSCRIPTION_REQUIRED" })
+    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
+  })
+
+  it("negative: a claim error outside the §3z.4 table is not swallowed", async () => {
+    const bundle = fakeDeps({ bridge: { claim: { code: "invalid_request" } } })
+    await expect(runProve(bundle)).rejects.toMatchObject({ code: "invalid_request" })
     expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
   })
 

@@ -25,6 +25,8 @@ import { WIZARD_EXIT, exitCodeFor, type WizardCode } from "./contracts/codes.js"
 import type { AskFn, WizardDeps } from "./contracts/deps.js"
 import { WIZARD_PATHS, type WizardRunState } from "./contracts/state.js"
 import { guardBridge } from "./engine.js"
+import { buildScanner } from "../review/context.js"
+import { safeText } from "../review/post.js"
 import { mergeIsDeployed } from "./steps/prove.js"
 
 export const UNINSTALL_RECORD_SCHEMA = "infinite-tag.wizard-uninstall.v1" as const
@@ -351,7 +353,9 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
       "",
       "Infinite's settings for this site stay as they are until this is merged and deployed."
     ].join("\n")
-    await deps.fs.writeTextAtomic(join(ctx.root, UNINSTALL_PR_BODY_PATH), `${body}\n`, 0o600)
+    // B29: the uninstall PR body passes the same §3g.5 secret scan as every other posted string.
+    const scanner = buildScanner({ root: ctx.root, appRoot: ctx.state?.appRoot ?? "." }, deps, [])
+    await deps.fs.writeTextAtomic(join(ctx.root, UNINSTALL_PR_BODY_PATH), `${safeText(scanner, body)}\n`, 0o600)
     try {
       const created = await deps.host.createDraftPr({ base, head: branch, title: UNINSTALL_PR_TITLE, bodyFile: join(ctx.root, UNINSTALL_PR_BODY_PATH) })
       if ("unsupported" in created) lines.push(`Pushed ${branch}; open a merge request for it on your git host.`)

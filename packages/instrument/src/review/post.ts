@@ -130,6 +130,8 @@ export type FixReplyState = { kind: "fixed"; sha: string } | { kind: "unverified
 
 /** The reply on a thread (never re-read as feedback). */
 export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixReplyState | null): string {
+  // Only the untrusted part (the triage reason, which quotes review text) is scanned: the commit SHA is the
+  // wizard's own and a short SHA can be all digits (it must never read as a redacted phone number).
   const text =
     decision.action === "FIX"
       ? fix?.kind === "fixed"
@@ -138,9 +140,9 @@ export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixR
           ? `Changed in ${fix.sha.slice(0, 7)}. The required checks had not finished, so the wizard has not marked it done; it stays open.`
           : "Not fixed this round: the agent's change did not pass the wizard's checks. It stays open."
       : decision.action === "ASK"
-        ? `Waiting on the repo owner: ${decision.reason}`
-        : decision.reason
-  return `${neutralizeCheckboxes(safeText(scanner, text))}\n\n${PR_MARKERS.reply}`
+        ? `Waiting on the repo owner: ${safeText(scanner, decision.reason)}`
+        : safeText(scanner, decision.reason)
+  return `${neutralizeCheckboxes(stripControl(text))}\n\n${PR_MARKERS.reply}`
 }
 
 export interface FinalCommentInput {

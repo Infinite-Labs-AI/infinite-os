@@ -11,6 +11,7 @@
 // 3. Receipts (waitMs 120 s, re-polled every 10 s), T1 checks after the deploy, the `proven_live` column,
 //    then `PATCH proofState` to the result (winner only).
 // 4. Print the run's PostHog distinct id so the user can filter this visitor out.
+import { bridgeFailureOutcome, isTransientBridgeFailure } from "../../bridge/outcomes.js"
 import { gradeContextFrom } from "../../checks/grade-context.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
@@ -57,7 +58,16 @@ export type DeployWait = { deployed: true; sha: string; how: "merge_deployment" 
 
 /** One read of the deploy status: deployed now, or not yet. */
 export async function mergeIsDeployed(deps: WizardDeps, mergeSha: string, productionBranch: string | null): Promise<DeployWait> {
-  const status = await deps.bridge.deployStatus(mergeSha)
+  let status: Awaited<ReturnType<WizardDeps["bridge"]["deployStatus"]>>
+  try {
+    status = await deps.bridge.deployStatus(mergeSha)
+  } catch (error) {
+    // §3z.4: Infinite or Vercel did not answer this poll: "not yet", and the wait goes on.
+    if (isTransientBridgeFailure(error)) return { deployed: false }
+    throw error
+  }
+  // §3z.6 (A30): a merge deployment in `error` is treated like `canceled` (the serving commit decides), and
+  // `serving:null` (nothing built from Git is serving) is "not yet", never "nothing deployed".
   if (status.mergeDeployment?.state === "ready") return { deployed: true, sha: mergeSha, how: "merge_deployment" }
   const serving = status.serving?.sha ?? null
   if (!serving) return { deployed: false }
@@ -567,6 +577,16 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   } else {
     ctx.emit.emit("step.sub", { step: "prove", text: `No second visit: ${claimNote}; reading its receipts.`, tone: "info" })
     markers = markersFromState(state.markers.prove)
+    // §3z.9 (A21): the visit the desktop made for this run is graded HERE (the tag's one grader), from the
+    // facts the desktop stored; it never starts a second visit. No stored facts → receipts only.
+    const stored = await readStoredFacts(ctx, deps, runId)
+    if (stored) {
+      const census = await deps.checks.census(ctx.root, ctx.appRoot)
+      const consentMode = state.plan?.answers.consentMode ?? keys.infinite.consentMode
+      const grades = await deps.checks.gradeTestRun(stored, expect, "real_visit", gradeContextFrom({ census, consentMode, cmpDetected: stored.environment.cmpDetected }))
+      visit = { result: stored, grades }
+      markers = receiptMarkersFrom(stored, expect)
+    }
   }
 
   const receipts = await readReceipts(ctx, deps, runId, markers)
@@ -585,6 +605,9 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     const url = `https://${productionHost}/`
     t1.push(...(await deps.checks.redirectWalk([url])), ...(await deps.checks.csp(url)))
   }
+
+  // §3z.12 §3e.1 (B15): the passive checks read real events AFTER the deploy (baseline since = deploy time).
+  await applyPassiveChecks(ctx, deps, runId, deployedSince(state, deps))
 
   const at = deps.clock.now().toISOString()
   const column = buildProvenColumn({
@@ -607,7 +630,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   let proofState: "proven" | "problem" | "undetermined" | null = null
   if (patchProofState) {
     proofState = visitError ? "undetermined" : proofStateFrom(column)
-    await deps.bridge.patchRun(runId, { proofState })
+    // §3z.8 (A10): the proofState PATCH names its producer, which holds the claim.
+    await deps.bridge.patchRun(runId, { proofState }, { producer: "tag" })
   } else if (ownClaim) {
     proofState = visitError ? "undetermined" : proofStateFrom(column)
   }
@@ -626,6 +650,63 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   return { kind: "ok", status: `${passed} of ${lanes.length} tools passed the live test${tail}${proofState === "problem" ? " · problems found" : ""}` }
 }
 
+/** The desktop's stored real-visit facts for this run (A21), or null (no capability, none stored, or a read failure). */
+async function readStoredFacts(ctx: WizardContext, deps: WizardDeps, runId: string): Promise<TestResult | null> {
+  if (!deps.bridge.has("tag.test-facts.v1")) return null
+  try {
+    const { result } = await deps.bridge.testFacts(runId, { signal: ctx.signal })
+    return result.runId === runId && result.mode === "real_visit" ? result : null
+  } catch (error) {
+    if (bridgeErrorCode(error) === "not_found" || isTransientBridgeFailure(error)) return null
+    throw error
+  }
+}
+
+/** The earliest moment a "real" event can come from the merged code: the merge step's record (≤ 28 days back). */
+function deployedSince(state: Readonly<WizardRunState>, deps: WizardDeps): string | null {
+  const at = state.steps.merge?.at ?? null
+  if (!at) return null
+  const floor = deps.clock.now().getTime() - 27 * 24 * 60 * 60 * 1000
+  return Date.parse(at) < floor ? new Date(floor).toISOString() : at
+}
+
+/**
+ * B15: `first_real_outcome` (job 8: an Infinite conversion or a server-lane outcome since the deploy) and
+ * `first_real_conversion` (job 10: a PostHog conversion or a GA4 key event received since the deploy), as
+ * P-tier results with THIS run's id, applied through the registry (the one state machine). `first_identify`
+ * (job 9) has no v1 source and stays `waiting_real_event`. A failed read leaves them unknown, never 0.
+ */
+async function applyPassiveChecks(ctx: WizardContext, deps: WizardDeps, runId: string, since: string | null): Promise<void> {
+  const waiting = ctx.state.get().jobs.filter((item) => item.state === "waiting_real_event" && item.checks.some((check) => check.tier === "P"))
+  if (waiting.length === 0 || since === null || !deps.bridge.has("tag.baseline.v1")) return
+  let baseline: Awaited<ReturnType<WizardDeps["bridge"]["baseline"]>>
+  try {
+    baseline = await deps.bridge.baseline(runId, { since, signal: ctx.signal })
+  } catch (error) {
+    if (isTransientBridgeFailure(error) || bridgeErrorCode(error) !== null) return
+    throw error
+  }
+  const at = deps.clock.now().toISOString()
+  const results: CheckResult[] = []
+  const outcomes = (baseline.conversions.infinite ?? []).some((entry) => entry.count > 0) || (baseline.serverLane.outcomes7d ?? 0) > 0
+  const known = baseline.conversions.infinite !== null || baseline.serverLane.outcomes7d !== null
+  if (known) results.push({ checkId: "first_real_outcome", tier: "P", state: outcomes ? "pass" : "undetermined", reason: outcomes ? "a real conversion arrived after the deploy" : "waiting_real_event — no real conversion yet", at, runId })
+  const posthog = (baseline.posthog.conversions ?? []).some((entry) => entry.count > 0)
+  const ga4 = (baseline.ga4.keyEvents ?? []).some((entry) => (entry.received28d ?? 0) > 0)
+  const conversionKnown = baseline.posthog.conversions !== null || baseline.ga4.keyEvents !== null
+  if (conversionKnown) results.push({ checkId: "first_real_conversion", tier: "P", state: posthog || ga4 ? "pass" : "undetermined", reason: posthog || ga4 ? "a real conversion reached PostHog or GA4 after the deploy" : "waiting_real_event — no real conversion yet", at, runId })
+  if (results.length === 0) return
+  const updated = deps.registry.apply(waiting, results, runId)
+  ctx.state.update((draft) => {
+    for (const item of updated) {
+      const index = draft.jobs.findIndex((entry) => entry.id === item.id)
+      if (index >= 0) draft.jobs[index] = item
+    }
+  })
+  for (const item of updated) if (item.state === "proven") ctx.emit.emit("job.state", { itemId: item.id, state: "proven", by: "wizard", note: "a real event arrived after the deploy" })
+  await ctx.state.save()
+}
+
 export const step: WizardStep<"prove"> = {
   id: "prove",
   title: WIZARD_STEP_META.prove.title,
@@ -637,5 +718,14 @@ export const step: WizardStep<"prove"> = {
     const state = ctx.state?.get()
     return hashOf(["prove", state?.runId ?? null, state?.pr?.mergeSha ?? null])
   },
-  run: runProve
+  async run(ctx, deps) {
+    try {
+      return await runProve(ctx, deps)
+    } catch (error) {
+      // §3z.4: a bridge failure the step cannot carry on from is an outcome, never a crash.
+      const outcome = bridgeFailureOutcome(error)
+      if (outcome) return outcome
+      throw error
+    }
+  }
 }

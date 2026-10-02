@@ -287,6 +287,18 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   }
   await ctx.state.save()
 
+  // §3z.8 / B14: the PR fields go to Infinite right after the PR is created or adopted, so the app sees the
+  // pull request even when the rehearsal that follows fails.
+  assertNoAgentAlive(deps, "runs PATCH")
+  const opened = ctx.state.get().pr
+  await bestEffortBridge(ctx, "rehearsal", "tell Infinite about the pull request", () =>
+    deps.bridge.patchRun(runId, {
+      ...(opened?.url && opened.number !== null && opened.url.startsWith("https://") ? { prUrl: opened.url, prNumber: opened.number } : {}),
+      prHeadSha: head,
+      phase: "in_pr"
+    })
+  )
+
   const approved = state.plan?.answers.conversions ?? []
   const outcome = await rehearse(ctx, deps, {
     step: "rehearsal",
@@ -302,17 +314,15 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   recordRehearsalCells(ctx, outcome, { head, runId })
   applyRehearsalToJobs(ctx, deps, outcome, runId)
 
-  assertNoAgentAlive(deps, "runs PATCH")
+  // The names the rehearsal's click test proved (append-only union), after the tests (§3z.12 order).
   const prState = ctx.state.get().pr
-  const patched = await bestEffortBridge(ctx, "rehearsal", "tell Infinite about the pull request", () =>
-    deps.bridge.patchRun(runId, {
-      ...(prState?.url && prState.number !== null ? { prUrl: prState.url, prNumber: prState.number } : {}),
-      prHeadSha: head,
-      phase: "in_pr",
-      ...(outcome.clickTested.length > 0 ? { clickTestedConversions: outcome.clickTested } : {})
-    })
-  )
-  if (patched && outcome.clickTested.length > 0) await rememberClickTested(ctx, deps, runId, outcome.clickTested)
+  if (outcome.clickTested.length > 0) {
+    assertNoAgentAlive(deps, "runs PATCH")
+    const patched = await bestEffortBridge(ctx, "rehearsal", "tell Infinite which conversions the click test proved", () =>
+      deps.bridge.patchRun(runId, { clickTestedConversions: outcome.clickTested })
+    )
+    if (patched) await rememberClickTested(ctx, deps, runId, outcome.clickTested)
+  }
   await recordClickTests(ctx, deps, { step: "rehearsal", runId, outcome, approved })
   await ctx.state.save()
 
