@@ -109,8 +109,9 @@ export const ALWAYS_KEY_HINTS: readonly KeyHint[] = [
 export interface KeyBarOptions {
   /**
    * The turn on screen has a details view or card, so `tab switch side` has a
-   * side to switch to. Default true (r4's bar). False drops the hint: the boot
-   * frame, a plain answer, a turn that went to scrollback.
+   * side to switch to. Default true (r4's bar, and the boot frame's, which is
+   * r4's frame as drawn). False drops the hint: a plain answer, a turn that
+   * went to scrollback.
    */
   sides?: boolean;
 }

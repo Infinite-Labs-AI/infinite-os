@@ -1839,6 +1839,10 @@ export function InkInteractiveSessionApp({
   const liveLatestShown = finishedOverflow ? null : liveLatest;
   const liveTranscript = finishedOverflow ? idleTranscript : turnTranscript;
   const liveLayout = finishedOverflow ? layoutOf(null, idleTranscript) : turnLayout;
+  // The boot frame is r4's frame as drawn (D4), its key bar included: `tab
+  // switch side`, then `/ commands`. After it the bar offers `tab switch side`
+  // only while the turn on screen has details to switch to.
+  const bootFrameDrawn = frameProps.bootFrame && liveLayout.window.total === 0;
   // With nothing live after the first turn, the top bar's rule is the rule
   // over the composer (the frame is top bar, rule, composer, key bar), unless
   // a picker, the /connect steps or a draft line sit between them.
@@ -2001,7 +2005,7 @@ export function InkInteractiveSessionApp({
         theme={t}
         width={columns}
       />
-      <KeyBar hints={keyHints} sides={Boolean(liveTurn?.details) && !finishedOverflow} theme={t} width={columns} />
+      <KeyBar hints={keyHints} sides={bootFrameDrawn || (Boolean(liveTurn?.details) && !finishedOverflow)} theme={t} width={columns} />
     </Box>
   );
 }

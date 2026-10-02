@@ -41,7 +41,7 @@ describe("a live turn's working line and Steps (fake TTY; skipped on CI like the
       }
     });
 
-    // The boot key bar is `/ commands` alone (no side to switch to yet).
+    // The boot key bar is r4's: `tab switch side`, then `/ commands`.
     await waitFor(() => lastLineWith(output.text(), "commands") !== "", 4_000, output.text);
     await sendKeys(input, "how are the sample rows?\r");
 
