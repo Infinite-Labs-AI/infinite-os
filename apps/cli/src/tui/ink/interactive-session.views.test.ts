@@ -257,7 +257,8 @@ describe("copy in a running session (fake TTY; skipped on CI like the other PTY 
     const osc52 = `${ESC}]52;c;${Buffer.from("https://go.example.com/abc1").toString("base64")}\u0007`;
     expect(output.text()).not.toContain(osc52);
     await sendKeys(input, "\t");
-    await waitFor(() => stripAnsi(output.text()).includes("https://go.example.com/abc1  c copy"), 4_000, output.text);
+    // The body's copy key is r4's chip: ` c ` then ` copy`.
+    await waitFor(() => stripAnsi(output.text()).includes("https://go.example.com/abc1   c  copy"), 4_000, output.text);
     await waitFor(() => stripAnsi(output.text()).includes("c copy   tab"), 4_000, output.text);
     await sendKeys(input, "c");
     await waitFor(() => output.text().includes(osc52), 4_000, output.text);
