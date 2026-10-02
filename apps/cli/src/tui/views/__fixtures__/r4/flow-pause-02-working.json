@@ -39,6 +39,7 @@
         "tool": "propose_pause_entity",
         "title": "Pause Hook B",
         "state": "applying",
+        "appliedAt": 1790851436000,
         "asOf": null,
         "provenance": {
           "source": "Meta · ad",
@@ -103,6 +104,6 @@
     "busy": "the pause finishes either way"
   },
   "gaps": [
-    "\"◑ Working… 4s · after 20 s it says it's still running\" is renderer copy over a fixed clock (4 s since the approve)."
+    "\"◑ Working… 4s\": the session stamps `appliedAt` (renderer-local, never sent) when the yes goes out; the fixture stamps it 4 s before the fixed clock."
   ]
 }

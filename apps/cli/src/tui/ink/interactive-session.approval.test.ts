@@ -359,6 +359,46 @@ describe("the view card in a running session (fake TTY; skipped on CI like the o
   );
 });
 
+describe("the yes is working (run-2 M9: r4 flow-pause-02, fake TTY; skipped on CI)", () => {
+  it.skipIf(process.env.CI === "true")(
+    "after p, the card becomes the amber working card with a stopwatch until the receipt lands in its place",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput();
+      let answer: (value: unknown) => void = () => {};
+      const pending = card("change-pause-card");
+      const done = { ...pending.view!, approval: undefined, state: "done", outcome: "applied", title: "Paused ad “Hook A”",
+        receipt: { sentence: "Paused.", tone: "ok", revertible: false } };
+      const session = runInkInteractiveSession({
+        columns: 100,
+        errorOutput: ttyOutput(),
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: () => new Promise((resolve) => { answer = resolve; }),
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [pending] };
+        }
+      });
+      await waitFor(() => output.text().includes("switch side"));
+      await sendKeys(input, "pause hook a\r");
+      await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
+      const before = output.text().length;
+      await sendKeys(input, "p");
+      await waitFor(() => stripAnsi(output.text().slice(before)).includes("◑ Working… "), 4_000, output.text);
+      expect(stripAnsi(output.text().slice(before))).toMatch(/◑ Working… \d+s/u);
+      const settled = output.text().length;
+      answer({ ok: true, view: done });
+      await waitFor(() => stripAnsi(output.text().slice(settled)).includes("Agent proposed · You approved"), 4_000, output.text);
+      const after = stripAnsi(output.lastFrame());
+      expect(after).not.toContain("◑ Working…");
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+});
+
 describe("a tall card in a running session (fake TTY; skipped on CI like the other PTY tests)", () => {
   /** A launch of `sets` ad sets with 3 ads each (synthetic names). */
   function tallLaunch(sets: number): InSessionConfirmationAction {

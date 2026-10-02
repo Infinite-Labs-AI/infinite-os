@@ -11,7 +11,7 @@ import wrapAnsi from "wrap-ansi";
 import { Box, Text, render, renderToString, useApp, useCursor, useInput, useStdin, useStdout } from "./renderer.js";
 
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
-import type { ApprovalFieldAnswerV1, CreativeDraftFrameV1, ToolViewFrameV1 } from "@infinite-os/types";
+import type { AnswerViewV1, ApprovalFieldAnswerV1, CreativeDraftFrameV1, ToolViewFrameV1 } from "@infinite-os/types";
 import type { Key } from "ink";
 
 // Type-only import (erased at build, no runtime cycle): the in-chat /connect
@@ -40,6 +40,7 @@ import { turnController } from "../app/turn-controller.js";
 import {
   clearTurnViews,
   getTurnState,
+  patchTurnState,
   recordCreativeDraft,
   recordTurnView,
   subscribeTurnState,
@@ -700,7 +701,8 @@ export function InkInteractiveSessionApp({
   // count itself is derived independently inside both consumers via
   // `isInfiniteTurnBusy(state)`, so this must stay an OR (a tool-only turn with
   // React `busy === false` still needs the indicator to animate).
-  const transcriptBusy = busy || isInfiniteTurnBusy(turnState);
+  // A yes on its way ticks the clock too: the working card's stopwatch (r4 flow-pause-02).
+  const transcriptBusy = busy || isInfiniteTurnBusy(turnState) || confirmsInFlight > 0;
   const { clock } = useInfiniteTranscriptClock({ busy: transcriptBusy });
   // The composer's note while a turn runs (terminal-r4 `❯ Ask Infinite… (note)`):
   // that it is working and for how long, then any line queued behind it. No
@@ -846,7 +848,10 @@ export function InkInteractiveSessionApp({
       return null;
     }
     const messages = workingState ? workingTurnMessages(history, workingState, agentTitle) : history;
-    const steps = workingState ? workingTurnSteps(messages, workingState, workingClock) : turnSteps;
+    // A call still running says how far it is (its latest progress), busy or not.
+    const steps = workingState
+      ? workingTurnSteps(messages, workingState, workingClock)
+      : turnSteps.some((step) => step.endedAt === null) ? workingTurnSteps(messages, getTurnState(), clock) : turnSteps;
     const cache = new Map<number | undefined, LiveTurnRender>();
     return (turnRows: number | undefined): LiveTurnRender => {
       const hit = cache.get(turnRows);
@@ -869,13 +874,13 @@ export function InkInteractiveSessionApp({
       cache.set(turnRows, drawn);
       return drawn;
     };
-  }, [agentTitle, columns, headCardLines, headConfirmAction, history, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
+  }, [agentTitle, clock, columns, headCardLines, headConfirmAction, history, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
   // Beside a drawn turn, the transcript carries only what the drawn turn does
   // not show: its Steps are the drawn turn's own strip, and while it runs its
   // arriving answer and calls are in it too, so nothing is drawn twice.
   const idleTranscript = useMemo(
-    () => ({ agentTitle, messages: [], state: busy ? besideWorkingTurn(turnState) : { ...turnState, steps: [] } }),
-    [agentTitle, busy, turnState]
+    () => ({ agentTitle, messages: [], state: besideWorkingTurn(turnState) }),
+    [agentTitle, turnState]
   );
   // (end of the drawn turn)
   const cardKeyCtx = headCard ? headCard.keyCtx : confirmKeys?.ctx ?? null;
@@ -1418,11 +1423,27 @@ export function InkInteractiveSessionApp({
         appendMessages(detail.map((text) => ({ kind: "slash", role: "system", text: `  ${text}` }) as Msg));
       }
     };
+    // r4 "Working": while the yes is on its way, a change card stays on its
+    // turn as the amber working card, a stopwatch since the yes was sent. It
+    // holds the receipt's place (`receipt:<handle>`): a settled receipt view
+    // replaces it in place; anything else takes it off the turn.
+    const workingId = `receipt:${head.confirmationHandle}`;
+    const working = decision === "approve" && head.view?.kind === "change" && isPlainRecord(head.view.approval) ? head.view : null;
+    if (working) {
+      recordTurnView({
+        type: "tool.view", stage: "tool", message: "", viewId: workingId, name: working.tool,
+        view: { ...working, state: "applying", appliedAt: Date.now() } as AnswerViewV1
+      });
+    }
+    const dropWorking = () => {
+      if (working) patchTurnState((state) => ({ ...state, views: state.views.filter((frame) => frame.viewId !== workingId) }));
+    };
     setConfirmsInFlight((count) => count + 1);
     void (async () => {
       try {
         const result = await onConfirmAction?.(head, decision, fields);
         if (refusedField(result)) {
+          dropWorking();
           appendLines(confirmErrorLines(Object.assign(new Error(fieldInvalidMessage(result) ?? ""), { code: "field_invalid" })));
           return;
         }
@@ -1432,6 +1453,7 @@ export function InkInteractiveSessionApp({
           recordTurnView(receipt);
           return;
         }
+        dropWorking();
         appendLines(confirmResultLines(result, decision));
         afterReceipt(result);
       } catch (error) {
@@ -1440,6 +1462,7 @@ export function InkInteractiveSessionApp({
           recordTurnView(receipt);
           return;
         }
+        dropWorking();
         appendLines(confirmErrorLines(error));
         if (!refusedField(error)) afterReceipt(error);
       } finally {

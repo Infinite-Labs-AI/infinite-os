@@ -461,6 +461,23 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     expect(rows[rows.length - 2]).toEqual(row(74, "amber", ["key", " ? "], ["", " "], ["dim", "what it does"]));
   });
 
+  it("applying since the yes (run-2 M9): the stopwatch counts the seconds since it was sent, and r4's spacing", () => {
+    const sent = Date.parse("2026-10-01T10:43:56Z");
+    const view = { ...pause({ state: "applying", approval: { ...PAUSE_APPROVAL, title: "Pausing ad “Hook B · founder POV”…" } }), appliedAt: sent } as unknown as AnswerViewV1;
+    const now = Date.now;
+    Date.now = () => Date.parse("2026-10-01T10:44:00Z");
+    try {
+      const rows = cardRows(detail(view)).map(segs);
+      expect(rows).toContainEqual(row(74, "amber", ["cyan", "◑ Working… 4s"], ["", "  "], ["dim", "· after 20 s it says it's still running"]));
+      const working = rows.findIndex((cells) => cells.some(([, text]) => text.startsWith("◑ Working…")));
+      // r4 pauseCard: the working line, then three empty rows before `? what it does`.
+      expect(rows.slice(working + 1, working + 4).every((cells) => cells.every(([, text]) => !text.replace(/[│ ]/gu, "")))).toBe(true);
+      expect(rows[working + 4]).toEqual(row(74, "amber", ["key", " ? "], ["", " "], ["dim", "what it does"]));
+    } finally {
+      Date.now = now;
+    }
+  });
+
   it("done without view.explain (flow-pause-03): `? what it does` comes from the approval's summary, and ? opens it inside", () => {
     const view = pause({
       state: "done", outcome: "applied",

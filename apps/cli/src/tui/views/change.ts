@@ -49,13 +49,22 @@ function changeViewLines(view: AnswerViewV1, ctx: ViewRenderCtx, notes: Footnote
   }
   if (OPEN_CARD_STATES.has(view.state) && (approval || view.state === "applying")) {
     const title = viewText(approval?.title) || viewText(view.title);
-    // r4's hint is static (no clock): the app says when it is still running after 20 s.
+    // r4 "Working": a stopwatch since the yes was sent (`appliedAt`, set by
+    // the session when it sends it: `applying` is renderer-local), and the
+    // app says when it is still running after 20 s. Then r4's empty key row.
     const working = view.state === "applying"
-      ? ["", `${paint("◑ Working…", "cyan", ctx)}  ${paint("· after 20 s it says it's still running", "dim", ctx)}`]
+      ? ["", `${paint(`◑ Working…${stopwatch(view)}`, "cyan", ctx)}  ${paint("· after 20 s it says it's still running", "dim", ctx)}`, "", ""]
       : [];
     return changeCard(view, title, "amber", [...cardRows(body, approval, ctx, notes), ...working], ctx);
   }
   return changeLines(view.body, ctx, notes);
+}
+
+/** ` 4s`: whole seconds since the yes was sent, when the session stamped it; "" otherwise. */
+function stopwatch(view: AnswerViewV1): string {
+  const sent = (view as { appliedAt?: unknown }).appliedAt;
+  if (typeof sent !== "number" || !Number.isFinite(sent)) return "";
+  return ` ${Math.max(0, Math.floor((Date.now() - sent) / 1000))}s`;
 }
 
 /** A change drawn as a card (r4 `card()`): its rows, `o` when it opens, `?` when it explains. */
