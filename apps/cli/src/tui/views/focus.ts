@@ -11,6 +11,8 @@
 // view that has no use for it:
 // - a capital letter always types ("Make me…" never becomes `m`);
 // - a move that moves nothing types (`k` on the first row starts "keep going");
+// - a key that acts before the view is engaged (`j`, `2`) is typed too when
+//   the very next key types ("just" stays "just", never "ust");
 // - until the user ENGAGES the view (j/k, 1–9, space, →, ? acted, or tab), the
 //   keys that would send or page (`m`, Enter) type or stay with the composer,
 //   and ↑/↓ stay the composer's history recall.
@@ -35,7 +37,13 @@ export type ViewKeyEffect =
   /** Page the live region down (a tall turn without a `more` ask). */
   | { type: "page_live" }
   /** Put this (scrubbed) text on the clipboard (`c`: a link, an id, an email). */
-  | { type: "copy"; text: string };
+  | { type: "copy"; text: string }
+  /**
+   * Type this into the composer ahead of the key just pressed: a key that
+   * acted on the view before it was engaged turned out to start a message
+   * (`j` then `u` is "ju…", never "u…").
+   */
+  | { type: "type"; text: string };
 
 /** What the focused view offers right now (from its current render). */
 export interface ViewKeyFacts {
@@ -75,6 +83,12 @@ export interface ViewFocusState {
    * Until then `m` and Enter never send or page, and ↑/↓ recall history.
    */
   engaged: boolean;
+  /**
+   * A printable key that acted on the view while it was not yet engaged (`j`,
+   * `2`): if the very next key types, this is typed first. Any other next key
+   * clears it.
+   */
+  typedAhead: string;
   /** Whether the last key acted on the view; false = it goes to the composer. */
   handled: boolean;
   effect: ViewKeyEffect | null;
@@ -162,6 +176,7 @@ export function viewFocusAfterTurnDone(
     caps,
     facts,
     engaged: false,
+    typedAhead: "",
     handled: false,
     effect: null
   };
@@ -195,7 +210,7 @@ export function resolveViewKey(
   key: Partial<Key> = {},
   facts: ViewKeyFacts = state.facts
 ): ViewFocusState {
-  const base: ViewFocusState = { ...state, facts, handled: false, effect: null };
+  const base: ViewFocusState = { ...state, facts, typedAhead: "", handled: false, effect: null };
   if (state.focus === "composer" || state.viewIndex < 0) {
     if (key.tab && !key.shift && state.viewIndex >= 0 && hasViewKeys(facts)) {
       return { ...base, focus: state.detailsFocus, engaged: true, handled: true };
@@ -219,10 +234,22 @@ export function resolveViewKey(
   }
   const action = resolveKey(input, asKey(key), { focus: state.focus, busy: false, okKey: null, caps: state.caps });
   const next = applyViewAction(action, base, facts);
-  if (next.handled || !typesIntoComposer(input, key)) {
+  if (next.handled) {
+    // Before the view is engaged, a printable key that acts (`j`, `2`) may be
+    // the first letter of a message: the next key decides.
+    return !state.engaged && typesIntoComposer(input, key) ? { ...next, typedAhead: input } : next;
+  }
+  if (!typesIntoComposer(input, key)) {
     return next;
   }
-  return { ...next, focus: "composer", engaged: false };
+  // The key starts a message: the composer takes it, after any key that
+  // acted just before it ("just", not "ust").
+  return {
+    ...next,
+    focus: "composer",
+    engaged: false,
+    ...(state.typedAhead ? { effect: { type: "type" as const, text: state.typedAhead } } : {})
+  };
 }
 
 /**

@@ -1537,6 +1537,12 @@ export function InkInteractiveSessionApp({
       // slash commands (`turnAsk` drops an ask that starts with `/`).
       const ask = turnAsk(next.effect.text);
       if (ask) submitLine(ask);
+    } else if (next.effect?.type === "type") {
+      // A key that acted on the view started a message after all: the composer
+      // (empty here) takes it and the key just pressed, in order.
+      const typed = `${next.effect.text}${input}`;
+      setComposerState({ value: typed, cursor: typed.length });
+      return true;
     } else if (next.effect?.type === "page_live") {
       pageLive("next");
     } else if (next.effect?.type === "copy") {

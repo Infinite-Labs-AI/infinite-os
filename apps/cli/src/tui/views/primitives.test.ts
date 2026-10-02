@@ -424,6 +424,30 @@ describe("view focus: the latest turn keeps its keys until the next submit", () 
     expect(resolveViewKey("", engaged, { return: true }).effect).toEqual({ type: "ask", text: "connect meta" });
   });
 
+  it("\"just\" typed right after a list turn keeps its j: a move key that turns out to start a message is typed too", () => {
+    const s0 = viewFocusAfterTurnDone(listViewFixture());
+    const j = resolveViewKey("j", s0);
+    expect(j.handled).toBe(true);
+    expect(j.selected).toBe(1);
+    const u = resolveViewKey("u", j);
+    expect(u.handled).toBe(false);
+    expect(u.focus).toBe("composer");
+    expect(u.effect).toEqual({ type: "type", text: "j" });
+    // A second view key says the first was a move: nothing is typed after it.
+    const jk = resolveViewKey("k", j);
+    expect(jk.handled).toBe(true);
+    expect(resolveViewKey("h", jk).effect).toBeNull();
+    // A tab key on a document with tabs works the same way ("10 more…").
+    const doc = viewFocusAfterTurnDone(fixture("document-versions"));
+    expect(doc.facts.tabs).toBeGreaterThan(1);
+    const two = resolveViewKey("2", doc);
+    expect(two.handled).toBe(true);
+    expect(resolveViewKey("0", two).effect).toEqual({ type: "type", text: "2" });
+    // Once engaged by tab, a move is a move.
+    const engaged = resolveViewKey("j", resolveViewKey("", s0, { tab: true }));
+    expect(resolveViewKey("u", engaged).effect).toBeNull();
+  });
+
   it("a view's ask is a new user turn, never a command: an ask starting with / is dropped", () => {
     const view = envelope({
       state: "not_connected",

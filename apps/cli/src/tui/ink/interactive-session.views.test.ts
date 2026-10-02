@@ -164,8 +164,8 @@ describe("views in a running session (fake TTY; skipped on CI like the other PTY
     await waitFor(() => /│ {2}Ads running {2}✓ Ready/u.test(stripAnsi(output.text())), 4_000, output.text);
     // The key bar offers only what works on the view: rows to move, tab to type.
     await waitFor(() => stripAnsi(output.text()).includes("j k move"), 4_000, output.text);
-    // j moves the selection and types nothing; h starts a message and types.
-    await sendKeys(input, "jh");
+    // j then k move the selection and type nothing; h starts a message and types.
+    await sendKeys(input, "jkh");
     await sendKeys(input, "ello\r");
     await waitFor(() => stripAnsi(output.text()).includes("echo hello"), 4_000, output.text);
     expect(lines).toEqual(["which ads are on?", "hello"]);
@@ -173,6 +173,56 @@ describe("views in a running session (fake TTY; skipped on CI like the other PTY
     // The first turn went to scrollback in its two-pane layout, once.
     const text = stripAnsi(output.text());
     expect(text).toContain("❯ which ads are on?");
+    await sendKeys(input, "/exit\r");
+    await session;
+  });
+});
+
+describe("typing over a live view (fake TTY; skipped on CI like the other PTY tests)", () => {
+  it.skipIf(process.env.CI === "true")("\"just\" typed right after a list turn arrives whole; an ask of /exit never quits", { timeout: 30_000 }, async () => {
+    resetTurnState();
+    const input = ttyInput();
+    const output = ttyOutput(100);
+    const lines: string[] = [];
+    const slashNext = listFrame();
+    slashNext.view = { ...slashNext.view, next: [{ label: "Quit", ask: "/exit" }] } as typeof slashNext.view;
+    const session = runInkInteractiveSession({
+      errorOutput: ttyOutput(100),
+      input,
+      async onSubmitLine(line, _onProgress, _signal, onView) {
+        lines.push(line);
+        if (line === "which ads are on?") {
+          onView?.(slashNext);
+          return { messages: [{ role: "assistant", text: "Two are on." }] };
+        }
+        if (line === "/exit") {
+          return { exit: true, messages: [] };
+        }
+        return { messages: [{ role: "assistant", text: `echo ${line}` }] };
+      },
+      output,
+      title: "Infinite TUI"
+    });
+
+    await waitFor(() => output.text().includes("ready"), 4_000, output.text);
+    await sendKeys(input, "which ads are on?\r");
+    await waitFor(() => stripAnsi(output.text()).includes("j k move"), 4_000, output.text);
+    await sendKeys(input, "just do it\r");
+    await waitFor(() => stripAnsi(output.text()).includes("echo just do it"), 4_000, output.text);
+    expect(lines).toEqual(["which ads are on?", "just do it"]);
+
+    // A next step whose ask is /exit: Enter on it sends nothing and never quits.
+    await sendKeys(input, "which ads are on?\r");
+    await waitFor(() => lines.length === 3, 4_000, output.text);
+    await waitFor(() => stripAnsi(output.text()).split("j k move").length > 2, 4_000, output.text);
+    await sendKeys(input, "\t");
+    // Three rows, then the next step (the fourth row).
+    for (let i = 0; i < 3; i += 1) await sendKeys(input, "j");
+    await sendKeys(input, "\r");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(lines).toEqual(["which ads are on?", "just do it", "which ads are on?"]);
+    await sendKeys(input, "\tstill here\r");
+    await waitFor(() => stripAnsi(output.text()).includes("echo still here"), 4_000, output.text);
     await sendKeys(input, "/exit\r");
     await session;
   });
