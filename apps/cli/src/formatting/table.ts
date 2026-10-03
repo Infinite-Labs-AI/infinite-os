@@ -112,7 +112,7 @@ export function renderTable(input: TableInput, opts: TableOptions): TableRender 
     widths[0] = Math.min(fullLabel, Math.max(widths[0] ?? 0, width - (tableWidth(keep) - (widths[0] ?? 0))));
   }
   // Each body row's label on one line, cut with … to its column (run-3 N18).
-  const rowLabels = rows.map((row) => cutLabel(row[0] ?? "", widths[0] ?? 0));
+  const rowLabels = distinctCuts(rows.map((row) => row[0] ?? ""), widths[0] ?? 0);
   const labelsCut = rowLabels.some((label, index) => label !== (rows[index]?.[0] ?? ""));
 
   if (columnCount === 0 || tableWidth(keep) > width) {
@@ -206,6 +206,34 @@ function cutLabel(text: string, width: number): string {
   let end = chars.length;
   while (end > 0 && SEPARATORS.has(chars[end - 1]!)) end -= 1;
   return `${(end > 0 ? chars.slice(0, end) : chars).join("")}…`;
+}
+
+/**
+ * Each label cut to `width`. Names that share a start (one week's campaigns:
+ * `… · 2026-09-23 — b1_starttrial_us`) can cut to the same words; those rows
+ * keep their start AND their end around … instead, so they can still be told
+ * apart. A cut that is unique already keeps its start.
+ */
+function distinctCuts(texts: readonly string[], width: number): string[] {
+  const cuts = texts.map((text) => cutLabel(text, width));
+  const clashes = (index: number) => cuts.some((cut, other) =>
+    other !== index && cut === cuts[index] && texts[other] !== texts[index]);
+  return cuts.map((cut, index) => (clashes(index) ? cutMiddle(texts[index]!, width) : cut));
+}
+
+/** A label cut in the middle to `width` cells: its start and its end around …, never a separator beside the …. */
+function cutMiddle(text: string, width: number): string {
+  if (displayWidth(text) <= width) return text;
+  const chars = Array.from(text);
+  const room = Math.max(2, width) - 1;
+  const headRoom = Math.floor(room / 2);
+  let head = 0;
+  for (let used = 0; head < chars.length && used + displayWidth(chars[head]!) <= headRoom; head += 1) used += displayWidth(chars[head]!);
+  let tail = chars.length;
+  for (let used = 0; tail > head && used + displayWidth(chars[tail - 1]!) <= room - headRoom; tail -= 1) used += displayWidth(chars[tail - 1]!);
+  while (head > 0 && SEPARATORS.has(chars[head - 1]!)) head -= 1;
+  while (tail < chars.length && SEPARATORS.has(chars[tail]!)) tail += 1;
+  return `${chars.slice(0, head).join("")}…${chars.slice(tail).join("")}`;
 }
 
 /** What a cut label never ends on before its …: spaces and the separators names are built with. */

@@ -236,6 +236,36 @@ describe("renderTable: a long row label is cut with … before the numbers drop 
     expect(renderTable(one, { width: 31, color: false, theme: resolveTheme(), labelMin: 8 }).lines[3]).toBe("│ Sample · Trials…    │ $1.00 │");
   });
 
+  // Lane review: names that share a start (one week's campaigns) cut to the
+  // same words. Those rows keep their start and their end around … instead,
+  // so they can still be told apart; a cut that is already unique is unchanged.
+  it("two names that share a start and cut alike keep their ends instead (… in the middle)", () => {
+    const twins: TableInput = {
+      columns: [{ label: "" }, { label: "Spent", dropPriority: 0 }],
+      rows: [
+        ["Sample · Trials · US · 2026-09-23 — sample_b1_starttrial_us", "$1.00"],
+        ["Sample · Trials · US · 2026-09-24 — sample_b2_signup_us", "$2.00"],
+        ["Short one", "$3.00"]
+      ]
+    };
+    for (const width of [32, 40, 48, 56]) {
+      const t = renderTable(twins, { width, color: false, theme: resolveTheme(), labelMin: 8 });
+      const labels = t.lines.filter((line) => line.startsWith("│ ")).slice(1).map((line) => line.split("│")[1]!.trim());
+      expect(new Set(labels).size, `${width}: ${labels.join(" | ")}`).toBe(3);
+      // Where the start-cuts clash (up to the dates), the ends are kept; past that the start-cut is unique already.
+      const tail = width <= 40 ? /^Sample\b.*….*_us$/u : /^Sample · Trials · US · 2026-09-2[34]\b[^…]*…$/u;
+      expect(labels[0], `${width}`).toMatch(tail);
+      expect(labels[1], `${width}`).toMatch(tail);
+      expect(labels[2]).toBe("Short one");
+      expect(labels[0], `${width}`).not.toMatch(/[\s·—–-]…|…[\s·—–-]/u);
+      expect(t.lines.every((line) => displayWidth(line) <= width)).toBe(true);
+      expect(t.labelsCut).toBe(true);
+    }
+    // A cut that is unique already keeps its start (the r4 cut).
+    const one = renderTable({ ...twins, rows: [twins.rows[0]!, ["Short one", "$3.00"]] }, { width: 40, color: false, theme: resolveTheme(), labelMin: 8 });
+    expect(one.lines[3]!.split("│")[1]!.trim()).toMatch(/^Sample · Trials · US[^…]*…$/u);
+  });
+
   it("without labelMin the label is never cut (markdown tables keep r4's drop rule)", () => {
     const t = renderTable(wide, { width: 100, color: false, theme: resolveTheme() });
     expect(t.lines.filter((line) => line.includes(name))).toHaveLength(1);
