@@ -20,6 +20,7 @@
 import type { AnswerViewEnvelopeV1, AnswerViewV1 } from "@infinite-os/types";
 
 import { beforeAfter, cardBody, cardBox, cardWidth, chipRows, fieldRows, paragraphIn, setTo, type CardTone, type FieldRow } from "./card.js";
+import { displayWidth } from "../lib/display-width.js";
 import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
 import { cellText, fitLine, FootnoteBook, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
@@ -67,7 +68,53 @@ export function targetPathLine(body: unknown, width: number, ctx: Pick<ViewRende
   const target = isRecord(body) && isRecord(body.target) ? body.target : null;
   const path: unknown[] = Array.isArray(target?.path) ? target.path : [];
   const parts = path.map((part) => viewText(part)).filter(Boolean);
-  return parts.length ? paint(fitLine(parts.join(PATH_SEPARATOR), width), "dim", ctx) : null;
+  return parts.length ? paint(fitPath(parts, Math.max(1, Math.floor(width))), "dim", ctx) : null;
+}
+
+/** An outer part is never cut shorter than this (its first letters and `…`), or they all fold into one `…`. */
+const MIN_OUTER_PART = 6;
+
+/**
+ * A path cut to `width` from its OUTER parts first (TJ-7): the nearest parent
+ * (the last part, the ad set) is what names the target's place, so it keeps
+ * its leading words. The outer parts share what is left fairly (a short one
+ * gives its spare cells to the others), each cut with `…`; when even that
+ * does not fit, they fold into one `…` and the nearest parent is cut at its
+ * end.
+ */
+function fitPath(parts: readonly string[], width: number): string {
+  const whole = parts.join(PATH_SEPARATOR);
+  if (displayWidth(whole) <= width || parts.length === 1) {
+    return fitLine(whole, width);
+  }
+  const nearest = parts[parts.length - 1]!;
+  const outer = parts.slice(0, -1);
+  const budget = width - displayWidth(nearest) - PATH_SEPARATOR.length * outer.length;
+  if (budget >= MIN_OUTER_PART * outer.length) {
+    return [...fairCut(outer, budget), nearest].join(PATH_SEPARATOR);
+  }
+  return fitLine(`…${PATH_SEPARATOR}${nearest}`, width);
+}
+
+/** Cut `parts` to share `budget` cells: an equal share each, a short part's spare going to the rest. */
+function fairCut(parts: readonly string[], budget: number): string[] {
+  const shares = parts.map(() => 0);
+  let left = budget;
+  let open = parts.map((_part, index) => index);
+  while (open.length && left >= open.length) {
+    const share = Math.floor(left / open.length);
+    const still: number[] = [];
+    for (const index of open) {
+      const give = Math.min(displayWidth(parts[index]!) - shares[index]!, share);
+      shares[index] = shares[index]! + give;
+      left -= give;
+      if (displayWidth(parts[index]!) > shares[index]!) still.push(index);
+    }
+    // Every open part took its whole share: nothing is spare to hand on.
+    if (still.length === open.length) break;
+    open = still;
+  }
+  return parts.map((part, index) => fitLine(part, Math.max(1, shares[index]!)));
 }
 
 /** Whether the change is drawn as a card: done, or still open with a card approval (or running its yes). */
@@ -247,7 +294,9 @@ function changeValue(row: Record<string, unknown>, notes: FootnoteBook, ctx: Vie
   // A null after prints its reason, never a made-up value.
   const reason = cellText({ text: null, ...(isRecord(row.reason) ? { reason: row.reason as never } : {}) }, "text", null, notes);
   if (!("before" in row) || row.before === undefined) {
-    return `${paint("set to", "dim", ctx)} ${reason}`;
+    // A reason shown as words is the row's whole value (`kept as it is`), never `set to kept as it is`.
+    const words = isRecord(row.reason) && row.reason.show === "words";
+    return words ? reason : `${paint("set to", "dim", ctx)} ${reason}`;
   }
   return `${typeof row.before === "string" ? viewText(row.before) : "—"} ${paint("→", "dim", ctx)} ${reason}`;
 }
