@@ -14,13 +14,14 @@ export interface FakeGhCall {
 export interface FakeGhState {
   login?: string
   authOk?: boolean
-  repo?: { nameWithOwner?: string; isPrivate?: boolean; defaultBranch?: string | null; viewerPermission?: string }
+  repo?: { nameWithOwner?: string; isPrivate?: boolean; defaultBranch?: string | null; viewerPermission?: string; homepageUrl?: string | null }
   draftUnsupported?: boolean
   rejectInlineThreads?: boolean
   reviewDecision?: string
   prs?: Array<Record<string, unknown>>
   threads?: Array<{ id: string; prNumber: number; isResolved: boolean; path: string | null; line: number | null; comments: Array<{ author: string; authorAssociation: string; body: string }> }>
-  deployments?: Array<{ id: number; sha: string; environment: string; creator: string; statuses: Array<{ state: string; environment_url: string | null }> }>
+  /** GitHub's deployment rows (`sha: "*"` answers every SHA); statuses newest first. */
+  deployments?: Array<{ id: number; sha: string; environment: string; creator: string; production_environment?: boolean; created_at?: string; statuses: Array<{ state: string; environment_url?: string | null }> }>
   rules?: Record<string, Array<{ type: string; parameters?: Record<string, unknown> }>>
   checks?: Record<string, Array<{ name: string; bucket: string; state: string }>>
   calls?: FakeGhCall[]

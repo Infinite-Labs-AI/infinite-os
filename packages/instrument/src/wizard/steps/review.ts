@@ -28,6 +28,7 @@ import { mergeRequirementLine } from "../../github/rules.js"
 import { checksSummary } from "../../github/checks.js"
 import { DETERMINISTIC_CHECKS_BY_ITEM, isRepoRelativePath, triage, triageKey, type TriageDecision, type TriageItem } from "../../review/triage.js"
 import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
+import { provenPendingFor } from "./prove.js"
 import { announceRehearsal, commitStop, evidenceUrls, isShipContext, prepareShip, recordClickTests, type ShipContext } from "./rehearsal.js"
 
 const meta = WIZARD_STEP_META.review
@@ -492,7 +493,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     tagVersion: deps.tagVersion,
     site: { repoLabel: ship.repoLabel, productionHost: ship.facts.productionHost },
     columns: ctx.state.get().report,
-    provenLivePending: "deploy",
+    provenLivePending: provenPendingFor({ state: ctx.state.get(), hostingVercel: ship.facts.hosting?.provider === "vercel", noProve: false }),
     day7: null,
     notes: []
   })

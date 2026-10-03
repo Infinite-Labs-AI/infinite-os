@@ -25,7 +25,8 @@ import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../cont
 import { REPORT_COLUMN_IDS, REPORT_SCHEMA, SAMPLE_FLOOR_PAGE_VIEWS, type ReportColumnId, type ReportV2 } from "../contracts/report.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import { WIZARD_REPORT_PATHS } from "../run-state.js"
-import { proofStateFrom } from "./prove.js"
+import { proofStateFrom, provenPendingFor } from "./prove.js"
+import { readBeforeFactsFile } from "../handoff/before-facts.js"
 
 /** Where the final report lands (inside the gitignored `.infinite/wizard/`). */
 export { WIZARD_REPORT_PATHS }
@@ -105,13 +106,14 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
   const keys = deps.bridge.has("tag.keys.v1") ? await deps.bridge.keys() : null
   const site = {
     repoLabel: repoLabelFromRemote(await deps.git.remoteUrl(), ctx.root),
-    productionHost: keys?.infinite.productionHosts[0] ?? null
+    productionHost: keys?.infinite.productionHosts[0] ?? state.site?.productionHost ?? null
   }
-  const provenPending: ReportV2["columns"]["proven_live"]["pending"] = state.report.proven_live
-    ? null
-    : ctx.options.noProve
-      ? "open_infinite"
-      : "deploy"
+  // §3y.4 (P2-7): "deploy" only while Infinite can observe the deploy; "rerun_tag" when nothing in Infinite can.
+  const beforeHosting = (await readBeforeFactsFile(deps.fs, ctx.root, runId))?.facts.hosting ?? null
+  const hostingVercel = state.report.proven_live
+    ? false
+    : (beforeHosting ?? (deps.bridge.has("tag.hosting.v1") ? await deps.bridge.hosting() : null))?.provider === "vercel"
+  const provenPending: ReportV2["columns"]["proven_live"]["pending"] = provenPendingFor({ state, hostingVercel, noProve: ctx.options.noProve })
   const draft = deps.report.build({
     runId,
     tagVersion: deps.tagVersion,

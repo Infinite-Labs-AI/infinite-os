@@ -61,7 +61,10 @@ describe("the GitHub adapter (§3g.2)", () => {
   it("reads auth from `gh auth status --json hosts` and the repo facts", async () => {
     const { adapter } = setup({ repo: { isPrivate: false, viewerPermission: "READ" } })
     expect(await adapter.auth()).toEqual({ ok: true, login: "acme-dev" })
-    expect(await adapter.repoFacts()).toEqual({ isPrivate: false, defaultBranch: "main", viewerPermission: "READ" })
+    expect(await adapter.repoFacts()).toEqual({ isPrivate: false, defaultBranch: "main", viewerPermission: "READ", homepageUrl: null })
+    // §3y.1: the repo's homepage rides the SAME `gh repo view` (a hint for the live-site ask only).
+    const withHome = setup({ repo: { homepageUrl: "https://acme-store.com" } })
+    expect(await withHome.adapter.repoFacts()).toMatchObject({ homepageUrl: "https://acme-store.com" })
   })
 
   it("is not logged in when gh says so (negative)", async () => {
@@ -166,6 +169,43 @@ describe("the GitHub adapter (§3g.2)", () => {
     adapter.setPreviewProject("acme-store")
     expect(await adapter.previewUrl(SHA)).toBe("https://acme-store-git-x-acme.vercel.app")
     expect(matchesProject({ id: 9, environment: "Preview" }, "https://docs-git-x.vercel.app", "acme-store")).toBe(false)
+  })
+
+  it("§3y.4: the production deploy signal, with the live smoke's shapes (environment 'Production', production_environment false)", async () => {
+    const OTHER = "c".repeat(40)
+    const { adapter } = setup({
+      deployments: [
+        // Vercel's preview of the same SHA is never production.
+        { id: 11, sha: SHA, environment: "Preview", creator: "vercel[bot]", created_at: "2026-10-03T05:40:00Z", statuses: [{ state: "success", environment_url: "https://x-git.vercel.app" }] },
+        { id: 12, sha: SHA, environment: "Production", production_environment: false, creator: "vercel[bot]", created_at: "2026-10-03T05:47:00Z", statuses: [{ state: "success", environment_url: "https://site.vercel.app" }, { state: "in_progress" }] },
+        { id: 13, sha: OTHER, environment: "Production", production_environment: false, creator: "vercel[bot]", created_at: "2026-10-03T06:10:00Z", statuses: [{ state: "failure" }] }
+      ]
+    })
+    expect(await adapter.productionDeployment(SHA)).toEqual({ state: "ready" })
+    expect(await adapter.productionDeployment(OTHER)).toEqual({ state: "failed" })
+    expect(await adapter.productionDeployment("d".repeat(40))).toEqual({ state: "not_found" })
+    // The newest SUCCESSFUL production deployment (the failed newer one is skipped).
+    expect(await adapter.latestProductionDeployment()).toEqual({ sha: SHA, createdAt: "2026-10-03T05:47:00Z" })
+    expect(await adapter.vercelDeploymentSeen()).toBe(true)
+  })
+
+  it("§3y.4 negative: an ambiguous monorepo is not_found (never a guess); the linked project picks; building and inactive read right", async () => {
+    const { adapter } = setup({
+      deployments: [
+        { id: 21, sha: SHA, environment: "Production – docs", creator: "vercel[bot]", statuses: [{ state: "success" }] },
+        { id: 22, sha: SHA, environment: "Production – acme-store", creator: "vercel[bot]", statuses: [{ state: "queued" }] }
+      ]
+    })
+    expect(await adapter.productionDeployment(SHA)).toEqual({ state: "not_found" })
+    adapter.setPreviewProject("acme-store")
+    expect(await adapter.productionDeployment(SHA)).toEqual({ state: "building" })
+    adapter.setPreviewProject("docs")
+    expect(await adapter.productionDeployment(SHA)).toEqual({ state: "ready" })
+    const superseded = setup({ deployments: [{ id: 31, sha: SHA, environment: "Production", creator: "vercel[bot]", statuses: [{ state: "inactive" }, { state: "success" }] }] })
+    expect(await superseded.adapter.productionDeployment(SHA)).toEqual({ state: "ready" })
+    const none = setup({ deployments: [] })
+    expect(await none.adapter.vercelDeploymentSeen()).toBe(false)
+    expect(await none.adapter.latestProductionDeployment()).toBeNull()
   })
 
   it("reads branch rules (pull_request approvals, merge queue) and required checks (exit 8 = pending)", async () => {

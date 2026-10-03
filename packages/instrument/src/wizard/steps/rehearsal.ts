@@ -16,6 +16,7 @@ import { WIZARD_STEP_META } from "../contracts/steps.js"
 import type { TestTool } from "../contracts/test-engine.js"
 import { wizardGitExtras, type WizardGitOps } from "../../git/index.js"
 import { canPush } from "../../github/repo.js"
+import { resolveVercelSignal } from "../vercel-signal.js"
 import { isUnsupported } from "../../hosts/other.js"
 import { howToReviewSection } from "../../review/brief.js"
 import {
@@ -123,7 +124,10 @@ export async function prepareShip(ctx: WizardContext, deps: WizardDeps): Promise
       return failed("INF_WIZ_BRANCH_FAILED", `Could not switch back to ${state.git.branch}.`)
     }
   }
-  const facts = await loadRunFacts(deps, ctx.state.get().site ?? null)
+  const loaded = await loadRunFacts(deps, ctx.state.get().site ?? null)
+  // §3y.4: the Vercel signal and project name without an Infinite Vercel connection (read once, cached in state).
+  const signal = await resolveVercelSignal(ctx, deps, loaded.hosting)
+  const facts = { ...loaded, vercelSignal: signal.signal, vercelProject: signal.projectName }
   const scanner = buildScanner(ctx, deps, facts.connectionIds)
   const remoteUrl = await git.remoteUrl()
   let ghReady = false

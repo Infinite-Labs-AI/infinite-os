@@ -234,12 +234,16 @@ export async function rehearse(
   })
   const { facts } = input
   if (facts.readFailed) return empty("facts_unreadable")
-  if (!facts.hosting || facts.hosting.provider !== "vercel" || !facts.hosting.vercel) return empty("not_vercel")
-  if (facts.hosting.vercel.previewProtection !== "none" && facts.hosting.vercel.previewProtection !== "unknown") return empty("preview_protected")
+  // §3y.4: Infinite hosting on Vercel, a local `.vercel/` link, or a `vercel[bot]` deployment (the signal). Without
+  // Infinite's connection the preview's protection is unknown: the rehearsal still runs, and D2's
+  // `environment.previewProtected` grades a protected preview `undetermined`, never a pass.
+  const vercelHosting = facts.hosting?.provider === "vercel" && facts.hosting.vercel ? facts.hosting.vercel : null
+  if (!vercelHosting && facts.vercelSignal !== true) return empty("not_vercel")
+  if (vercelHosting && vercelHosting.previewProtection !== "none" && vercelHosting.previewProtection !== "unknown") return empty("preview_protected")
   if (!facts.productionHost) return empty("no_production_host")
   if (deps.host.kind !== "github") return empty("not_github")
   if (!input.ghReady) return empty("gh_unavailable")
-  if (isGitHubAdapter(deps.host)) deps.host.setPreviewProject(facts.hosting.vercel.projectName)
+  if (isGitHubAdapter(deps.host)) deps.host.setPreviewProject(vercelHosting?.projectName ?? facts.vercelProject ?? null)
   const waited = await waitForPreview(ctx, deps, input.step, input.head)
   if (waited.url === null) return empty(waited.why)
   const previewUrl = waited.url
@@ -636,7 +640,7 @@ function keepHeadIndependent<K extends string>(cells: Partial<Record<K, Cell>> |
 export function rehearsalLines(outcome: RehearsalOutcome): Array<{ text: string; tone: "ok" | "warn" | "info" }> {
   if (outcome.state === "undetermined") {
     const why: Record<RehearsalUndetermined, string> = {
-      not_vercel: "Rehearsal: undetermined (the site is not on Vercel)",
+      not_vercel: "Rehearsal: undetermined (no Vercel preview found for this site)",
       preview_protected: "Rehearsal: undetermined (the preview is protected)",
       no_preview: "Rehearsal: undetermined (no preview appeared within 10 minutes)",
       no_production_host: "Rehearsal: undetermined (no production host known)",

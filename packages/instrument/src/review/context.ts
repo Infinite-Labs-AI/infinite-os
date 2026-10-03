@@ -26,6 +26,8 @@ export interface RunFacts {
   claim?: SiteClaimState | null
   /** §3y.4: the run's cached Vercel signal (Infinite hosting, `.vercel/*`, or a `vercel[bot]` deployment). */
   vercelSignal?: boolean
+  /** §3y.4: the Vercel project name from `.vercel/*` (picks a monorepo's preview when Infinite hosting is not Vercel). */
+  vercelProject?: string | null
   /** A keys or hosting read failed (not "absent"): the rehearsal is then undetermined (read failed), never guessed. */
   readFailed?: boolean
   /** The production host the rehearsal serves the preview under (site source first, then Vercel's domains). */

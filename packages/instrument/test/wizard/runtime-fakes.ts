@@ -504,9 +504,43 @@ export function prSummary(overrides: Partial<PrSummary> = {}): PrSummary {
   }
 }
 
-export function createFakeHost(log: CallLog, script: { pr?: PrSummary; readPr?: PrSummary } = {}): GitHostAdapter {
+export interface FakeHostDeployments {
+  /** The merge SHA's production deployment, one answer per read (the last repeats). */
+  forSha: Array<"ready" | "failed" | "building" | "not_found">
+  /** The newest successful production deployment, one answer per read (the last repeats). */
+  latest?: Array<{ sha: string; createdAt: string } | null>
+  vercelSeen?: boolean
+}
+
+export function createFakeHost(log: CallLog, script: { pr?: PrSummary; readPr?: PrSummary; deployments?: FakeHostDeployments } = {}): GitHostAdapter {
   const unsupported = { unsupported: true as const }
+  let shaIndex = 0
+  let latestIndex = 0
+  const deployments = script.deployments
+  const deploymentReads = deployments
+    ? {
+        async productionDeployment(sha: string) {
+          log.push("host", "productionDeployment", sha)
+          const state = deployments.forSha[Math.min(shaIndex, deployments.forSha.length - 1)] ?? "not_found"
+          shaIndex += 1
+          return { state }
+        },
+        async latestProductionDeployment() {
+          log.push("host", "latestProductionDeployment")
+          const answers = deployments.latest ?? [null]
+          const answer = answers[Math.min(latestIndex, answers.length - 1)] ?? null
+          latestIndex += 1
+          return answer
+        },
+        async vercelDeploymentSeen() {
+          log.push("host", "vercelDeploymentSeen")
+          return deployments.vercelSeen ?? true
+        },
+        setPreviewProject() {}
+      }
+    : {}
   return {
+    ...deploymentReads,
     kind: "github",
     async auth() {
       return { ok: true, login: "acme-dev" }

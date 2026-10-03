@@ -267,9 +267,28 @@ if (group === "api") {
     }
     fail("fake gh: unknown graphql document")
   }
+  // GitHub's deployment row shape (Vercel writes `environment:"Production"` with `production_environment:false`).
+  const row = (entry, sha) => ({
+    id: entry.id,
+    sha: entry.sha === "*" ? sha : entry.sha,
+    environment: entry.environment,
+    production_environment: entry.production_environment ?? false,
+    created_at: entry.created_at ?? "2026-10-02T10:00:00Z",
+    creator: { login: entry.creator }
+  })
+  const newestFirst = (rows) => [...rows].sort((a, b) => Date.parse(b.created_at ?? "") - Date.parse(a.created_at ?? ""))
   const deployments = /^repos\/\{owner\}\/\{repo\}\/deployments\?sha=([0-9a-f]{40})/.exec(path)
   if (deployments) {
-    out(state.deployments.filter((row) => row.sha === "*" || row.sha === deployments[1]).map((row) => ({ id: row.id, environment: row.environment, creator: { login: row.creator } })))
+    out(newestFirst(state.deployments.filter((entry) => entry.sha === "*" || entry.sha === deployments[1])).map((entry) => row(entry, deployments[1])))
+  }
+  const byEnvironment = /^repos\/\{owner\}\/\{repo\}\/deployments\?environment=([^&]+)&per_page=(\d+)$/.exec(path)
+  if (byEnvironment) {
+    const environment = decodeURIComponent(byEnvironment[1])
+    out(newestFirst(state.deployments.filter((entry) => entry.environment === environment && entry.sha !== "*")).slice(0, Number(byEnvironment[2])).map((entry) => row(entry, entry.sha)))
+  }
+  const recent = /^repos\/\{owner\}\/\{repo\}\/deployments\?per_page=(\d+)$/.exec(path)
+  if (recent) {
+    out(newestFirst(state.deployments).slice(0, Number(recent[1])).map((entry) => row(entry, entry.sha === "*" ? "0".repeat(40) : entry.sha)))
   }
   const statuses = /^repos\/\{owner\}\/\{repo\}\/deployments\/(\d+)\/statuses/.exec(path)
   if (statuses) {

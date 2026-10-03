@@ -72,7 +72,7 @@ export const REASON_TEXT: Record<Reason, string> = {
   env_dependent: "the ID comes from a setting that previews do not have",
   pending_deploy: "waiting for the deploy",
   pending_open_infinite: "open Infinite (or re-run npx infinite-tag) to finish the live checks",
-  not_vercel: "the site is not on Vercel, so previews cannot be loaded",
+  not_vercel: "no Vercel preview was found for this site, so previews cannot be loaded",
   automation_detected: "the site treated the test window as a bot",
   not_exercised: "this run did not exercise it",
   not_probed: "the server lane was not probed",

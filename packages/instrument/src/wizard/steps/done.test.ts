@@ -5,7 +5,7 @@ import type { ReportV2 } from "../contracts/report.js"
 import { createRunState } from "../run-state.js"
 import { buildColumn } from "../report.js"
 import { REAL_VISIT_DISCLOSURE, WIZARD_REPORT_PATHS, repoLabelFromRemote, step } from "./done.js"
-import { buildProvenColumn } from "./prove.js"
+import { buildProvenColumn, provenPendingFor } from "./prove.js"
 
 const AT = "2026-10-02T09:13:00.000Z"
 
@@ -114,6 +114,16 @@ describe("done", () => {
     const report = bundle.log.calls.find((call) => call.what === "postReport")!.args[2] as ReportV2
     expect(report.columns.proven_live.pending).toBe("deploy")
     expect(bundle.log.calls.filter((call) => call.what === "postReport").map((call) => call.args[1])).toEqual(["live_today", "in_pr"])
+  })
+
+  it("§3y.4 (P2-7): 'deploy' only while Infinite can observe the deploy; 'rerun_tag' when nothing can; 'open_infinite' for a deployed claim", () => {
+    const base = { report: { live_today: null, in_pr: null, proven_live: null }, steps: {}, site: undefined }
+    expect(provenPendingFor({ state: base, hostingVercel: true, noProve: false })).toBe("deploy")
+    expect(provenPendingFor({ state: base, hostingVercel: false, noProve: false })).toBe("rerun_tag")
+    expect(provenPendingFor({ state: base, hostingVercel: false, noProve: true })).toBe("rerun_tag")
+    const claim = { productionHost: "fresh-acme.com", source: "answer" as const, decidedAt: "t", claim: { hosts: ["fresh-acme.com"], siteSourceKey: "site_x", collectPath: "/c", consentStorageKey: "k", proofPath: "/.well-known/infinite-site-verification.txt" as const, state: "pending_proof" as const } }
+    expect(provenPendingFor({ state: { ...base, site: claim }, hostingVercel: false, noProve: false })).toBe("deploy")
+    expect(provenPendingFor({ state: { ...base, site: claim, steps: { prove: { outcome: "parked", inputHash: "h", at: "t", code: "INF_WIZ_HOST_UNCONFIRMED" } } }, hostingVercel: false, noProve: false })).toBe("open_infinite")
   })
 
   it("the repo label is the normalised remote, never the raw one (no credentials)", () => {
