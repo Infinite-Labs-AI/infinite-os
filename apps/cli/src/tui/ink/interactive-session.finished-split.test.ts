@@ -80,7 +80,12 @@ describe("a finished tall turn keeps the split and its keys (live L8; fake TTY, 
         const left = paneWidths(cols).left;
         const { input, vt, opened, session } = await start(cols, rows, view);
         await sendKeys(input, "how are my sources?\r");
+        // The caption gate folds the answer to two sentences beside the view; `?` opens the rest (round 4).
+        await waitFor(() => vt.screenText().some((row) => row.slice(0, left).trim() === "… more (?)"), 4_000, () => vt.screenText().join("\n"));
+        expect(keyBar(vt)).toMatch(/^\s*\?\s+more/u);
+        await sendKeys(input, "?");
         await waitFor(() => vt.screenText().some((row) => /↓ \d+ more · tab, then ↓/u.test(row.slice(0, left))), 4_000, () => vt.screenText().join("\n"));
+        expect(vt.screenText().some((row) => row.includes("… more (?)"))).toBe(false);
 
         const screen = vt.screenText();
         const question = screen.findIndex((row) => row.startsWith("❯ how are my sources?"));
@@ -132,6 +137,9 @@ describe("a finished tall turn keeps the split and its keys (live L8; fake TTY, 
     it.skipIf(process.env.CI === "true")(`79x24, ${name}: one column, the turn goes up, tab then o still opens its place`, { timeout: 30_000 }, async () => {
       const { input, vt, opened, session } = await start(79, 24, view);
       await sendKeys(input, "how are my sources?\r");
+      // A view that does not fit goes up at once (its folded rest under it); one that fits shows the fold: `?` opens it, and then it does not fit.
+      await waitFor(() => vt.allText().some((row) => row.includes(`Line ${LINES} of the answer.`) || row.trim() === "… more (?)"), 4_000, () => vt.allText().join("\n"));
+      if (!vt.allText().some((row) => row.includes(`Line ${LINES} of the answer.`))) await sendKeys(input, "?");
       await waitFor(() => vt.allText().some((row) => row.includes(`Line ${LINES} of the answer.`)), 4_000, () => vt.allText().join("\n"));
       await waitFor(() => /tab\s+then o open/u.test(keyBar(vt)), 4_000, () => vt.screenText().join("\n"));
       await sendKeys(input, "\t");

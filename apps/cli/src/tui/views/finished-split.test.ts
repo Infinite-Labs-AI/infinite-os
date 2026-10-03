@@ -45,8 +45,9 @@ const meta = () => fixture("meta-level-campaigns", { appLink: { place: "ads.meta
 const plain = (lines: readonly string[]) => lines.map(stripAnsi);
 const stepsHeaderAt = (lines: readonly string[]) => lines.findIndex((line) => /^─ Steps /u.test(line));
 
+/** The turn with the caption gate's fold open (`?`): the whole long answer, taller than the window. */
 function draw(view: AnswerViewV1, width: number, focus: ViewFocusState | null, rows = TURN_ROWS): LiveTurnRender {
-  return renderLiveTurn({ messages: longAnswer, views: [view], focus, width, color: false, theme, caps: CAPS, rows, steps });
+  return renderLiveTurn({ messages: longAnswer, views: [view], focus, width, color: false, theme, caps: CAPS, rows, steps, captionOpen: true });
 }
 
 /** The facts the session hands `resolveViewKey`: the focused view's, with both panes. */
@@ -151,7 +152,7 @@ describe("a finished tall turn keeps the split, both panes held to the window (l
   });
 
   it("while it runs, the answer still keeps its newest lines (no more line)", () => {
-    const lines = plain(renderLiveTurn({ messages: longAnswer, views: [health()], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps, running: true }).lines);
+    const lines = plain(renderLiveTurn({ messages: longAnswer, views: [health()], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps, running: true, captionOpen: true }).lines);
     const left = lines.slice(0, stepsHeaderAt(lines)).map((line) => line.slice(0, 28).trim()).filter(Boolean);
     expect(left.at(-1)).toBe("Line 40 of the answer.");
     expect(left.some((line) => /more ·/u.test(line))).toBe(false);

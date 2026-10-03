@@ -594,6 +594,10 @@ export function InkInteractiveSessionApp({
   const followUpRunning = followUps !== null;
   // `?` on the head card toggles its explanation (the terminal can't hover).
   const [explainOpen, setExplainOpen] = useState(false);
+  // The caption gate's fold on the latest turn (round 4): an answer that comes
+  // with a view shows two sentences and `… more (?)`; `?` opens the rest here,
+  // until the next line. Scrollback always prints the rest under the view.
+  const [captionOpen, setCaptionOpen] = useState(false);
   // A head card WITH an approval view keeps its own key state (views/approval.ts):
   // `?`, the open document, its tab and page, and the field answers so far.
   const [cardUi, setCardUi] = useState<CardUiState>(() =>
@@ -1086,6 +1090,7 @@ export function InkInteractiveSessionApp({
         compact,
         ...(headCardLines ? { details: headCardLines } : {}),
         ...(statusViews.length ? { statusViews } : {}),
+        ...(captionOpen ? { captionOpen: true } : {}),
         ...(workingState ? { nowMs: workingClock, running: true } : {}),
         // A question with nothing for the details pane yet says `Working…` in the answer's place.
         ...(workingState && !turnViews.length && !headCardLines ? { working: workingState } : {})
@@ -1093,7 +1098,7 @@ export function InkInteractiveSessionApp({
       cache.set(cacheKey, drawn);
       return drawn;
     };
-  }, [agentTitle, clock, columns, headCardLines, headConfirmAction, history, liveKeptSteps, questionSplits, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
+  }, [agentTitle, captionOpen, clock, columns, headCardLines, headConfirmAction, history, liveKeptSteps, questionSplits, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
   // Beside a drawn turn, the transcript carries only what the drawn turn does
   // not show: its Steps are the drawn turn's own strip, and while it runs its
   // arriving answer and calls are in it too, so nothing is drawn twice.
@@ -1122,13 +1127,18 @@ export function InkInteractiveSessionApp({
         : !facts && committedFocus
           ? viewKeyHints(committedFocus.state, committedFocus.facts)
           : [];
-    const hints = headCard
+    const stateHints = headCard
       ? headCard.keys
       : confirmKeys
         ? keyBarHints(confirmKeys.ctx)
         : viewHints.length
           ? viewHints
           : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
+    // The caption gate's fold (round 4): while the keys are not on the view, `?` opens the folded answer.
+    const hints = turn?.folded && !keysOnView(viewFocus) && inputValue.length === 0 && !cardFieldActive
+      && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt
+      ? [{ key: "?", label: "more" }, ...stateHints.filter((hint) => hint.key !== "?")]
+      : stateHints;
     // A follow-up running: `esc stop` first, once (D6), before any card's keys.
     return runningBarHints(hints, followUpRunning && turnStoppable);
   };
@@ -1903,8 +1913,9 @@ export function InkInteractiveSessionApp({
   }, [busy, confirmsInFlight, pendingConfirmActions, pendingConnectConfirm, pendingFieldPrompt, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
 
   const submitLine = useCallback((rawLine: string) => {
-    // A new line ends the keys of the turn that went to scrollback (live L8).
+    // A new line ends the keys of the turn that went to scrollback (live L8), and the open fold.
     setCommittedFocus(null);
+    setCaptionOpen(false);
     if (cardFieldActive) {
       // The line is the card field's value, not a message (and never history).
       commitCardFieldValue(rawLine);
@@ -2181,6 +2192,12 @@ export function InkInteractiveSessionApp({
   // One key on the latest turn's views (only reached with an empty composer and
   // no card or picker open). `false` = the key goes on to the composer.
   const handleViewKey = (input: string, key: Key): boolean => {
+    // `?` opens the caption gate's fold while the keys are not on the view (round 4);
+    // on the view (after tab), `?` stays its explanation.
+    if (input === "?" && !key.ctrl && !key.meta && liveTurn?.folded && !keysOnView(viewFocus)) {
+      setCaptionOpen(true);
+      return true;
+    }
     const drawnFacts = liveTurnFacts(liveTurn);
     let next: ViewFocusState;
     if (viewFocus && drawnFacts) {
@@ -2294,7 +2311,7 @@ export function InkInteractiveSessionApp({
         onCardFieldCancel={() => setCardUi((ui) => cancelCardField(ui))}
         onConfirmActionApprove={() => handleCardAction({ type: "ok" })}
         onConfirmActionDecline={() => handleCardAction({ type: "dismiss" })}
-        onConfirmActionExplain={() => handleCardAction({ type: "explain" })}
+        onConfirmActionExplain={() => (liveTurn?.folded ? setCaptionOpen(true) : handleCardAction({ type: "explain" }))}
         onConfirmCardKey={handleCardAction}
         connectConfirmActive={Boolean(pendingConnectConfirm)}
         fieldPromptActive={fieldPromptActive}
@@ -2344,6 +2361,11 @@ export function InkInteractiveSessionApp({
       <KeyBar hints={keyHints} sides={bootFrameDrawn || (Boolean(liveTurn?.details) && !finishedOverflow)} theme={t} width={columns} />
     </Box>
   );
+}
+
+/** Whether the keys are on the view (tab engaged it, not the answer side): there `?` is its explanation. */
+function keysOnView(focus: ViewFocusState | null): boolean {
+  return Boolean(focus && focus.engaged && focus.focus !== "composer" && !focus.answerFocus);
 }
 
 /** What the latest live turn offers the keys: its focused view's facts, else its cut answer pane's (live L8). */

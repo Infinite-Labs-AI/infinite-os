@@ -138,9 +138,10 @@ describe("T12 in the session (fake TTY, skipped on CI)", () => {
       hooks!.onReceipt(receipt);
       // The receipt is on the turn before the follow-up has said anything.
       await waitFor(() => lastFrame().includes("Stopped spending at 10:42"), 4_000, lastFrame);
-      expect(lastFrame()).not.toContain("It stopped spending. Want the ad set paused too?");
-      follow.resolve({ ...receipt, followUp: { turnId: "t2", message: "It stopped spending. Want the ad set paused too?", actionCalls: [] } });
-      await waitFor(() => lastFrame().includes("It stopped spending. Want the ad set paused too?"), 4_000, lastFrame);
+      expect(lastFrame()).not.toContain("It stopped spending; want the ad set paused too?");
+      // One sentence: with "Ready." the answer stays within the caption gate's two (round 4), so none of it is folded.
+      follow.resolve({ ...receipt, followUp: { turnId: "t2", message: "It stopped spending; want the ad set paused too?", actionCalls: [] } });
+      await waitFor(() => lastFrame().includes("It stopped spending; want the ad set paused too?"), 4_000, lastFrame);
       // Same turn: the question, the receipt and the follow-up are on screen together, the receipt once.
       expect(lastFrame()).toContain("pause it");
       expect(lastFrame().split("Stopped spending at 10:42").length - 1).toBe(1);

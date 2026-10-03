@@ -33,7 +33,7 @@
 import type { AnswerViewV1 } from "@infinite-os/types";
 
 import { holdOpenMarkers } from "../../formatting/markdown-inline.js";
-import { markdownHasTable, markdownTablesFit } from "../../formatting/markdown-render.js";
+import { markdownHasTable, markdownTablesFit, renderMarkdown } from "../../formatting/markdown-render.js";
 import { answerTextWidth } from "../app/answer-column.js";
 import { renderTurnBody, workingAnswerLines } from "../app/transcript-renderer.js";
 import type { TurnState, TurnStep } from "../app/turn-store.js";
@@ -51,6 +51,7 @@ import {
   type ViewFocusState,
   type ViewKeyFacts
 } from "./focus.js";
+import { gateAnswerMessages } from "./caption-gate.js";
 import { turnRepeats } from "./meta-fold.js";
 import { fitLine, paint } from "./primitives.js";
 import { renderView } from "./registry.js";
@@ -369,7 +370,16 @@ export interface LiveTurnInput {
    * scrollback. Everything else is drawn as usual.
    */
   compact?: boolean;
+  /**
+   * The caption gate's fold is open (`?` on the answer, round 4): the answer
+   * shows every sentence. Closed (the default), an answer that comes with a
+   * view shows its first two sentences and a dim `… more (?)` line.
+   */
+  captionOpen?: boolean;
 }
+
+/** The dim line under the two sentences an answer shows above its view while the rest is folded. */
+export const CAPTION_FOLD_LINE = "  … more (?)";
 
 /** The columns the details pane gives a view or a card at this width (the whole width when one column). */
 export function detailsPaneWidth(width: number, split = true): number {
@@ -442,6 +452,8 @@ export interface LiveTurnRender {
   pane: PaneWindow | null;
   /** The answer pane is cut to the window (a finished split turn whose answer is taller than it). */
   answerPane: PaneWindow | null;
+  /** The caption gate folded part of the answer and the fold is closed: `?` opens it. */
+  folded: boolean;
 }
 
 /** The latest turn with its views, laid out for the live region: side by side from 80 columns. */
@@ -482,7 +494,8 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
     details: drawn.details,
     paged: renders.some((render) => (render.pages ?? 0) > 1),
     pane,
-    answerPane
+    answerPane,
+    folded: drawn.foldedRest !== null && input.captionOpen !== true
   };
 }
 
@@ -530,7 +543,12 @@ export function renderCommittedTurn(input: CommittedTurnInput): string[] {
   // which no key could act on in scrollback), whatever page the live turn showed.
   // No rule of its own: scrollback draws the ONE thin rule under each turn (D1,
   // transcript-app.tsx), so a rule here would print two.
-  const lines = drawLiveTurn(input, width, ALL_ROWS, false, false).lines;
+  const drawn = drawLiveTurn(input, width, ALL_ROWS, false, false);
+  // The caption gate (round 4): at most two sentences above the view; the
+  // folded rest follows the view, dim, so scrollback keeps every word.
+  const lines = drawn.foldedRest === null
+    ? drawn.lines
+    : [...drawn.lines, "", ...foldedRestLines(drawn.foldedRest, width, { color: input.color, theme: input.theme })];
   if (input.stepsStayLive) {
     return lines;
   }
@@ -538,6 +556,16 @@ export function renderCommittedTurn(input: CommittedTurnInput): string[] {
     width, color: input.color, theme: input.theme, views: [...input.views, ...(input.statusViews ?? [])]
   });
   return kept.length ? [...lines, ...(lines.length ? [""] : []), ...kept] : lines;
+}
+
+/**
+ * The folded rest of an answer as scrollback prints it under the view: a dim
+ * paragraph, drawn as the answer's markdown (its bullets and tables), in the
+ * answer column's indent.
+ */
+function foldedRestLines(rest: string, width: number, style: { color: boolean; theme: Theme }): string[] {
+  return renderMarkdown(rest, { width: Math.max(1, width - 2), color: false, theme: style.theme })
+    .map((line) => (line.trim() ? paint(fitLine(`  ${line}`, width), "dim", style) : ""));
 }
 
 /** A row budget no view reaches: a committed turn is drawn whole. */
@@ -616,8 +644,18 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     width, color: input.color, theme: input.theme, nowMs: input.nowMs, views: [...input.views, ...(input.statusViews ?? [])]
   });
   const takesPane = paneRenders([...drawn, ...card]).length > 0;
+  // The caption gate (round 4): an answer that comes with a view shows two
+  // sentences above it. Live, a dim `… more (?)` line follows them until `?`
+  // opens the rest; committed, the rest prints under the view.
+  const gate = takesPane ? gateAnswerMessages(input.messages) : null;
+  const foldedRest = gate?.rest ?? null;
+  const foldOpen = split && input.captionOpen === true;
+  const answerMessages = gate && foldedRest !== null && !foldOpen ? gate.messages : input.messages;
   const answerAt = (columns: number): string[] => {
-    const body = renderAnswerColumn(input.messages, columns, input.theme, input.color);
+    const body = [
+      ...renderAnswerColumn(answerMessages, columns, input.theme, input.color),
+      ...(split && foldedRest !== null && !foldOpen ? [paint(fitLine(CAPTION_FOLD_LINE, columns), "dim", { color: input.color, theme: input.theme })] : [])
+    ];
     const working = input.working
       ? workingAnswerLines(input.messages, input.working, { columns, color: input.color, theme: input.theme, nowMs: input.nowMs ?? 0 })
       : [];
@@ -656,7 +694,7 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   return {
     renders, lines, focusIndex: folded.has(focusIndex) ? -1 : focusIndex, rows, wide: sideBySide, details: takesPane,
     stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length,
-    pane: laid.pane, answerPane: laid.answerPane, natural: laid.natural
+    pane: laid.pane, answerPane: laid.answerPane, natural: laid.natural, foldedRest
   };
 }
 

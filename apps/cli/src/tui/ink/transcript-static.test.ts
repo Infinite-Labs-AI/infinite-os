@@ -477,7 +477,8 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
       },
       async onSubmitLine(): Promise<InkInteractiveLineResult> {
         return {
-          messages: [{ role: "assistant", text: Array.from({ length: 200 }, (_, i) => `alpha line ${i}`).join("\n") }],
+          // One fenced block: the caption gate (round 4) never cuts a block, so the answer beside the card stays tall.
+          messages: [{ role: "assistant", text: `\`\`\`\n${Array.from({ length: 200 }, (_, i) => `alpha line ${i}`).join("\n")}\n\`\`\`` }],
           pendingConfirmations: [pending]
         };
       },
@@ -528,6 +529,8 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
   const RAW = "mcp__sample_app__get_sample_rows";
   const FAILED_ROW = "  reading today ✗ not synced yet";
   const text = Array.from({ length: 200 }, (_, i) => `alpha line ${i}`).join("\n");
+  // One fenced block, for the turn with a card: the caption gate (round 4) never cuts a block.
+  const block = `\`\`\`\n${text}\n\`\`\``;
   /** Two calls of one tool, in the app's words: the first ends clean, the second fails. */
   const twoCalls = (onProgress: ((frame: never) => void) | undefined) => {
     const frame = (type: string, toolId: string, rest: Record<string, unknown>) =>
@@ -645,7 +648,7 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
       async onSubmitLine(line, onProgress): Promise<InkInteractiveLineResult> {
         if (line === "/exit") return { exit: true, messages: [] };
         twoCalls(onProgress as never);
-        return { messages: [{ role: "assistant", text }], pendingConfirmations: [pending] };
+        return { messages: [{ role: "assistant", text: block }], pendingConfirmations: [pending] };
       },
       output,
       title: "Infinite TUI"

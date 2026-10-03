@@ -128,13 +128,14 @@ describe("a tall turn keeps the split from 80 columns", () => {
     });
   }
 
+  // The caption gate's fold is open (`?`): the whole answer, taller than the room.
   const long: Msg[] = [
     { role: "user", text: "tell me everything" },
     { role: "assistant", text: Array.from({ length: 60 }, (_unused, index) => `Line ${index + 1} of the answer.`).join("\n\n") }
   ];
 
   it("while it runs, an answer taller than the room keeps its newest lines in view", () => {
-    const lines = plain(renderLiveTurn({ messages: long, views: [tallList()], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps, running: true }).lines);
+    const lines = plain(renderLiveTurn({ messages: long, views: [tallList()], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps, running: true , captionOpen: true }).lines);
     expect(lines.length).toBeLessThanOrEqual(TURN_ROWS);
     const left = lines.slice(0, stepsHeaderAt(lines)).map((line) => line.slice(0, 28).trim()).filter(Boolean);
     expect(left.at(-1)).toBe("Line 60 of the answer.");
@@ -142,7 +143,7 @@ describe("a tall turn keeps the split from 80 columns", () => {
   });
 
   it("finished, an answer taller than the room is held to it too, from its top, with its own more line (live L8)", () => {
-    const lines = plain(renderLiveTurn({ messages: long, views: [tallList()], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps }).lines);
+    const lines = plain(renderLiveTurn({ messages: long, views: [tallList()], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps , captionOpen: true }).lines);
     expect(lines.length).toBeLessThanOrEqual(TURN_ROWS);
     expect(lines[0]).toMatch(/^❯ tell me everything/u);
     expect(lines.some((line) => /^↓ \d+ more · tab, then ↓/u.test(line.slice(0, 28).trim()))).toBe(true);
