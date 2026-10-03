@@ -34,3 +34,31 @@ describe("a committed turn names no key (TJ-9)", () => {
     }
   }
 });
+
+describe("a committed turn keeps an approval the user already answered closed (R-IOV-1)", () => {
+  const managed = (name: string): AnswerViewV1 => ({
+    ...fixture(name),
+    state: "needs_yes",
+    approval: {
+      kind: "operation_managed", title: "Publish this article?", summary: "Posts it to the demo account now.",
+      confirmLabel: "Publish", dismissLabel: "Dismiss", rows: [{ label: "to", value: "@demo" }], ask: "Yes, publish it"
+    }
+  }) as unknown as AnswerViewV1;
+  for (const name of ["record-ad", "document-versions"]) {
+    for (const key of ["n", "p"]) {
+      for (const width of [48, 60, 80, 100]) {
+        it(`${name}: after ${key}, the committed copy at ${width} columns does not reprint the approval`, () => {
+          const view = managed(name);
+          const engaged = resolveViewKey("", viewFocusAfterTurnDone(view), { tab: true });
+          const open = renderCommittedTurn({ messages, views: [view], focus: engaged, width, color: false, theme, timeZone: "UTC" }).map(stripAnsi).join("\n");
+          expect(open).toContain("Publish this article?");
+          const answered = resolveViewKey(key, engaged);
+          expect(answered.approvalClosed).toBe(true);
+          const committed = renderCommittedTurn({ messages, views: [view], focus: answered, width, color: false, theme, timeZone: "UTC" }).map(stripAnsi).join("\n");
+          expect(committed).not.toContain("Publish this article?");
+          expect(committed).not.toMatch(/→ to see/u);
+        });
+      }
+    }
+  }
+});
