@@ -166,6 +166,8 @@ describe("money field", () => {
     const view = fixture("change-budget-field");
     const render = approvalRender(view, cardCtx({ fieldsCapable: false }));
     expect(text(render.lines)).toContain("Update the Infinite app to set a value here");
+    // One instruction: the field row never also says to set it in the app.
+    expect(text(render.lines)).not.toContain("set it in the app");
     expect(render.okKey).toBeNull();
     expect(formatKeyBar(render.keys)).toBe("n dismiss");
     const { effects, ui } = drive(view, [press("l"), press("y"), press("", { return: true })], { fieldsCapable: false });

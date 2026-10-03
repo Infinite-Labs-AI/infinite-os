@@ -249,7 +249,9 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
       if (words) footer.push("", ...arrowLines(words, canOpen, inner, ctx));
     }
     if (fields.length) {
-      footer.push("", ...fieldLines(fields, ui, innerCtx, { here: (field) => !live || fillableHere(field, ctx.fieldsCapable), canOpen }));
+      footer.push("", ...fieldLines(fields, ui, innerCtx, {
+        here: (field) => !live || fillableHere(field, ctx.fieldsCapable), canOpen, updateSaysIt: blockedByUpdate
+      }));
     }
     if (blockedByUpdate) {
       footer.push(...paragraphIn(UPDATE_FOR_FIELDS, inner, "amber", ctx));
@@ -598,8 +600,13 @@ function tabNounOf(documents: readonly CardDocument[]): { tabNoun?: string } {
   return nouns.size === 1 && noun ? { tabNoun: noun } : {};
 }
 
-/** What a field can say for itself on this card: whether it can be answered here, and whether `o` opens the card in the app. */
-interface FieldLineFacts { here: (field: ApprovalFieldV1) => boolean; canOpen: boolean }
+/**
+ * What a field can say for itself on this card: whether it can be answered
+ * here, whether `o` opens the card in the app, and whether the card's amber
+ * `Update the Infinite app …` line already says what to do (then the field row
+ * gives no second instruction).
+ */
+interface FieldLineFacts { here: (field: ApprovalFieldV1) => boolean; canOpen: boolean; updateSaysIt: boolean }
 
 /** Where a field the terminal cannot fill is set, in r4's words (`↗ … in the app  (o)`): `(o)` only when o opens it. */
 const SET_IN_APP_WORDS = "set it in the app";
@@ -621,13 +628,18 @@ function fieldLines(fields: readonly ApprovalFieldV1[], ui: CardUiState, ctx: Vi
   const lines: string[] = [];
   for (const field of fields) {
     const answer = ui.answers[field.key];
+    const current = field.current === null || field.current === undefined ? "" : fieldValue(field, field.current);
     if (!answer && !facts.here(field)) {
-      // ONE line: where it is set. Never `OK asks for a value` (no OK sets it here) and never options that cannot be typed.
-      const value = paint(`${SET_IN_APP_WORDS}${facts.canOpen ? "  (o)" : ""}`, "dim", ctx);
+      // ONE line. The value OK would write is always shown (an optional field's OK writes it as it is),
+      // then where it is set. Never `OK asks for a value` (no OK sets it here), never options that cannot
+      // be typed, and no second instruction under the card's amber update line.
+      const where = facts.updateSaysIt ? "" : `${SET_IN_APP_WORDS}${facts.canOpen ? "  (o)" : ""}`;
+      const value = current
+        ? `now ${current}${where ? paint(` · ${where}`, "dim", ctx) : ""}`
+        : paint(where || "—", "dim", ctx);
       lines.push(...fieldRows([{ label: viewText(field.label, field.key), value }], ctx.width, ctx));
       continue;
     }
-    const current = field.current === null || field.current === undefined ? "" : fieldValue(field, field.current);
     const value = ui.fieldEntry?.key === field.key
       ? paint(`▸ type ${fieldHint(field).replace(/^Type:? /u, "")}, then Enter`, "cb", ctx)
       : answer

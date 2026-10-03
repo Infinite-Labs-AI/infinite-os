@@ -68,11 +68,14 @@ describe("an approval field reads as one clear line (W3-ap-adset)", () => {
   });
 
   for (const width of [60, 100, 140]) {
-    it(`an app that cannot take answers from here: one line, set it in the app, no dead OK (${width} columns)`, () => {
+    it(`an app that cannot take answers from here, a required field: ONE instruction (update the app), no dead OK (${width} columns)`, () => {
       const render = approvalRender(createAdSet(), ctx({ width, fieldsCapable: false }));
       const out = text(render.lines);
       expect(budgetMentions(render.lines)).toHaveLength(1);
-      expect(out).toMatch(/Its budget\s+set it in the app\s*│/u);
+      expect(out).toMatch(/Its budget\s+—\s*│/u);
+      // The card's amber line is the one instruction; the field row never points elsewhere.
+      expect(out).toContain("Update the Infinite app to set a value here");
+      expect(out).not.toContain("set it in the app");
       expect(out).not.toContain("OK asks");
       expect(out).not.toContain("or: Let Meta split the budget");
       expect(out).not.toContain("(o)");
@@ -82,11 +85,40 @@ describe("an approval field reads as one clear line (W3-ap-adset)", () => {
     });
   }
 
+  it("an app that cannot take answers from here, a required field with a value: the value shows, still one instruction and no OK", () => {
+    const render = approvalRender(createAdSet({ ...BUDGET, current: "20" }), ctx({ fieldsCapable: false, caps: { open: true, watch: false, retry: false } }));
+    const out = text(render.lines);
+    expect(out).toMatch(/Its budget\s+now \$20\.00\/day\s*│/u);
+    expect(out).toContain("Update the Infinite app to set a value here");
+    expect(out).not.toContain("set it in the app");
+    expect(render.okKey).toBeNull();
+  });
+
+  for (const width of [60, 100, 140]) {
+    it(`an optional field the app cannot take from here keeps the value OK will write, and the OK (${width} columns)`, () => {
+      const optional = { ...BUDGET, required: false, current: "20" };
+      const render = approvalRender(createAdSet(optional), ctx({ width, fieldsCapable: false }));
+      const out = text(render.lines);
+      expect(out).toMatch(/Its budget\s+now \$20\.00\/day · set it in the app\s*│/u);
+      expect(out).not.toContain("Update the Infinite app");
+      expect(out).not.toContain("(o)");
+      expect(render.okKey).toBe("y");
+      for (const line of render.lines) expect(line.length).toBeLessThanOrEqual(width);
+    });
+  }
+
   it("with o opening the card in the app, the line says (o), and o opens it", () => {
+    const optional = { ...BUDGET, required: false, current: "20" };
     const over = { fieldsCapable: false, caps: { open: true, watch: false, retry: false } };
-    const out = text(approvalRender(createAdSet(), ctx(over)).lines);
-    expect(out).toMatch(/Its budget\s+set it in the app {2}\(o\)/u);
-    expect(drive(createAdSet(), ["o"], over).effects).toEqual([{ type: "open" }]);
+    const out = text(approvalRender(createAdSet(optional), ctx(over)).lines);
+    expect(out).toMatch(/Its budget\s+now \$20\.00\/day · set it in the app {2}\(o\)/u);
+    expect(drive(createAdSet(optional), ["o"], over).effects).toEqual([{ type: "open" }]);
+  });
+
+  it("a field with no value that cannot be filled here: bare set it in the app, (o) only when o opens it", () => {
+    const pick = { key: "pick", label: "Its goal", input: "choice", required: false, options: [], current: null };
+    expect(text(approvalRender(createAdSet(pick), ctx({ caps: { open: true, watch: false, retry: false } })).lines))
+      .toMatch(/Its goal\s+set it in the app {2}\(o\)\s*│/u);
   });
 
   it("n is still a real decline", () => {
@@ -108,5 +140,16 @@ describe("an approval field reads as one clear line (W3-ap-adset)", () => {
     expect(text(render.lines)).toMatch(/Its goal\s+set it in the app\s*│/u);
     expect(render.okKey).toBe("y");
     expect(drive(createAdSet(pick), ["y"]).effects).toEqual([{ type: "confirm", decision: "approve" }]);
+  });
+
+  it("a choice with no options but a value: the value shows; required, no OK; optional, OK writes it", () => {
+    const required = { key: "pick", label: "Its goal", input: "choice", required: true, options: [], current: "Sample goal" };
+    const req = approvalRender(createAdSet(required), ctx());
+    expect(text(req.lines)).toMatch(/Its goal\s+now Sample goal · set it in the app\s*│/u);
+    expect(req.okKey).toBeNull();
+    const optional = { ...required, required: false };
+    const opt = approvalRender(createAdSet(optional), ctx());
+    expect(text(opt.lines)).toMatch(/Its goal\s+now Sample goal · set it in the app\s*│/u);
+    expect(opt.okKey).toBe("y");
   });
 });
