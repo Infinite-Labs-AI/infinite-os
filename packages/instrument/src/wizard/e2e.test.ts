@@ -419,6 +419,9 @@ describe("the offline end-to-end run (§4.3)", () => {
       // install: the site source with the consent answer — through §3y.2's site-claim (the app offers it); the
       // hosts are verified, so the cloud answers the source exactly as site-source would.
       "site-claim",
+      // review P1-5: the verified path reads the workspace's claim once, to keep a proven claim's proof file in the
+      // repo (every preview then serves it, so the app can tie a preview to this site without a Vercel connection).
+      "site-claim-read",
       // jobs: the keys once (the connection ids the check-reason secret scan allows; review I1 P2-6).
       "keys",
       // jobs: no clickTestedConversions PATCH (a Next site's click tests are the rehearsal's, not T0).
