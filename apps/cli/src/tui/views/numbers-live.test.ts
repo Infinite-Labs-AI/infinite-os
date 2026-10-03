@@ -12,7 +12,7 @@ import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { displayWidth } from "../lib/display-width.js";
 import { resolveTheme } from "../theme.js";
 import type { Msg } from "../types.js";
-import { viewFocusAfterTurnDone } from "./focus.js";
+import { viewFocusAfterTurnDone, viewKeyHints } from "./focus.js";
 import { paneWidths, renderCommittedTurn, renderLiveTurn } from "./layout.js";
 import { renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
@@ -256,3 +256,14 @@ describe("numbers: `→ to see` only where → works (run-2 M7)", () => {
     expect(detail).toMatch(/Cost per result: —/u);
   });
 });
+
+describe("the view's `?` is the key bar's (run-2 N12)", () => {
+  it("no `? what it does` line inside the view, live or committed; the bar offers it", () => {
+    for (const width of [60, 100, 140]) {
+      expect(liveTurn([live()], width).join("\n")).not.toContain("what it does");
+      expect(committedTurn([live()], width).join("\n")).not.toContain("what it does");
+    }
+    expect(viewKeyHints(viewFocusAfterTurnDone([live()]))).toContainEqual({ key: "?", label: "what it does" });
+  });
+});
+

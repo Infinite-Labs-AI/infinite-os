@@ -35,12 +35,13 @@ describe("the top bar (terminal-r4 row 0, D1)", () => {
     expectGolden(topBarLines(NOT_CONNECTED, 100, TRUECOLOR)[0]!, GOLDEN.topbarNotConnected);
   });
 
-  it("always draws the asked source that is missing, first, and cuts the line from the right (flow-numbers-05--c60)", () => {
+  it("always draws the asked source that is missing, first, and drops whole sources from the right with a count (flow-numbers-05--c60, run-2 N10)", () => {
     const asked: TopBarData = { ...NOT_CONNECTED, asked: "Google Ads" };
+    // Two cells left: r4's own `●…` (a mark, no letter of a name) says there is more.
     expectGolden(topBarLines(asked, 60, TRUECOLOR)[0]!, GOLDEN.topbarNotConnected60);
-    // An 80-column window: the mark still leads, and the dot that does not fit is cut with `…`.
-    expect(stripAnsi(topBarLines(asked, 80, TRUECOLOR)[0]!)).toBe(
-      " ∞ Infinite   Infinite workspace   ⊘ Google Ads ⊘ Shopify ● GA4 ● Stripe ● Post…"
+    // An 80-column window: the mark still leads, whole sources follow, and the rest are a count.
+    expect(stripAnsi(topBarLines(asked, 80, TRUECOLOR)[0]!).trimEnd()).toBe(
+      " ∞ Infinite   Infinite workspace   ⊘ Google Ads ⊘ Shopify ● GA4 ● Stripe +2 more"
     );
     // The name is matched whatever its case or spacing.
     expect(stripAnsi(topBarLines({ ...NOT_CONNECTED, asked: " google  ads " }, 60, TRUECOLOR)[0]!)).toContain("⊘ Google Ads ⊘ Shopify");
@@ -77,6 +78,35 @@ describe("the top bar (terminal-r4 row 0, D1)", () => {
     expectGolden(topBarLines(OK, 60, TRUECOLOR)[0]!, GOLDEN.topbarNarrow60);
   });
 
+  it("never cuts a source mid-word: whole sources drop from the right, counted `+N more` when the count fits (run-2 N10)", () => {
+    const many = [
+      { label: "Meta", state: "broken" }, { label: "Shopify", state: "broken" }, { label: "Google Ads", state: "connected" },
+      { label: "GA4", state: "connected" }, { label: "Search Console", state: "connected" }, { label: "PostHog", state: "connected" },
+      { label: "Instagram", state: "connected" }, { label: "Stripe", state: "connected" }
+    ] as const;
+    const bar = (width: number) => stripAnsi(topBarLines({ workspace: "Infinite", sources: many, throughApp: true }, width, TRUECOLOR)[0]!).trimEnd();
+    expect(bar(60)).toBe(" ∞ Infinite   Infinite workspace   ⊘ Meta ⊘ Shopify +6 more");
+    // Two cells left after a whole source: r4's `●…` (a mark, no letter of a name).
+    expect(bar(100)).toBe(" ∞ Infinite   Infinite workspace   ⊘ Meta ⊘ Shopify ● Google Ads ● GA4 ● Search Console ● PostHog ●…");
+    expect(bar(106)).toBe(" ∞ Infinite   Infinite workspace   ⊘ Meta ⊘ Shopify ● Google Ads ● GA4 ● Search Console ● PostHog +2 more");
+    for (const width of [60, 80, 100, 140]) {
+      // No letter of a name is ever cut (`GA…`, the live eval's 60 columns).
+      expect(bar(width)).not.toMatch(/[A-Za-z0-9]…/u);
+      expect(stripAnsi(topBarLines({ workspace: "Infinite", sources: many }, width, TRUECOLOR)[0]!).length).toBeLessThanOrEqual(width);
+    }
+    // The count is dim, like the bar's other quiet words.
+    const painted = topBarLines({ workspace: "Infinite", sources: many }, 60, TRUECOLOR)[0]!;
+    expect(painted).toMatch(/\u001b\[[0-9;]*m\+6 more/u);
+  });
+
+  it("names the workspace as r4 does, `<name> workspace`: never `∞ Infinite  Infinite` (run-2 N10)", () => {
+    expect(stripAnsi(topBarLines({ workspace: "Infinite", sources: R4_SOURCES_OK }, 100, TRUECOLOR)[0]!).trimEnd())
+      .toBe(" ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe ● PostHog ● Google Ads ● Meta");
+    expect(stripAnsi(topBarLines({ workspace: "Acme", sources: [] }, 60, TRUECOLOR)[0]!)).toContain("  Acme workspace");
+    // A name that already says it is not said twice.
+    expect(stripAnsi(topBarLines({ workspace: "Infinite workspace" }, 60, TRUECOLOR)[0]!)).not.toContain("workspace workspace");
+  });
+
   it("says `through the Infinite app` on the right only when the whole line fits (boot--c160)", () => {
     expectGolden(topBarLines(OK, 160, TRUECOLOR)[0]!, GOLDEN.topbarWide160);
     expect(stripAnsi(topBarLines({ ...OK, throughApp: false }, 160, TRUECOLOR)[0]!)).not.toContain("through the Infinite app");
@@ -101,7 +131,7 @@ describe("the top bar (terminal-r4 row 0, D1)", () => {
 
   it("scrubs control characters out of the workspace and source names", () => {
     const [bar] = topBarLines({ workspace: "Acme\u001b[2J", sources: [{ label: "GA4\u0007", state: "connected" }] }, 80, TRUECOLOR);
-    expect(stripAnsi(bar!)).toContain("  Acme   ● GA4");
+    expect(stripAnsi(bar!)).toContain("  Acme workspace   ● GA4");
     expect(bar).not.toContain("\u001b[2J");
     expect(bar).not.toContain("\u0007");
   });

@@ -246,7 +246,8 @@ export function keyBarHints(ctx: KeyContext): KeyHint[] {
   if (ctx.caps.open) hints.push({ key: "o", label: "open in the app" });
   if (ctx.caps.watch) hints.push({ key: "w", label: "watch" });
   if (ctx.caps.retry) hints.push({ key: "r", label: "retry" });
-  if (ctx.explain) hints.push({ key: "?", label: "what it does" });
+  // A card says `? what it does` inside itself (r4 `card()`): never on the bar.
+  if (ctx.explain) hints.push({ key: "?", label: "what it does", chipOnly: true });
   return hints;
 }
 
@@ -260,15 +261,15 @@ function cardTabs(card: CardKeys): number {
  * The hints the bar draws, in order: the state's own keys (each key once, the
  * first meaning wins, each in its bar words), then `tab switch side` while
  * there is a side to switch to (`options.sides`), then always `/ commands`.
- * `?` is never on the bar: a card, and a view with an explanation, draw
- * `? what it does` inside themselves (terminal-r4).
+ * A view's `? what it does` is on the bar (run-2 N12); a card's is a chip
+ * inside the card (`chipOnly`), never on the bar.
  */
 export function keyBarShownHints(hints: readonly KeyHint[], options: KeyBarOptions = {}): KeyHint[] {
   const always = new Set(ALWAYS_KEY_HINTS.map((hint) => hint.key));
   const seen = new Set<string>();
   const shown: KeyHint[] = [];
   for (const hint of hints) {
-    if (always.has(hint.key) || seen.has(hint.key) || hint.chipOnly || hint.key === "?") {
+    if (always.has(hint.key) || seen.has(hint.key) || hint.chipOnly) {
       continue;
     }
     seen.add(hint.key);

@@ -584,11 +584,18 @@ describe("view focus: the latest turn keeps its keys until the next submit", () 
     expect(viewKeyHints(viewFocusAfterTurnDone(numbersFixture()))[0]).toEqual({ key: "j k", label: "row" });
   });
 
-  it("a view's own explanation offers `? what it does` inside the view, once; the bar never carries ? (run-r2 MUST 2)", () => {
+  it("a view's own explanation is `? what it does` on the key bar, never a line inside the answer; `? hide` while open (run-2 N12)", () => {
     const explained = envelope({ explain: "What it does." });
     const drawn = renderView(explained, ctx());
-    expect(drawn.detail.filter((line) => line.includes("what it does"))).toEqual(["[?] what it does"]);
+    expect(drawn.detail.join("\n")).not.toContain("what it does");
     expect(renderView(envelope({}), ctx()).detail.join("\n")).not.toContain("what it does");
+    const focus = viewFocusAfterTurnDone(explained);
+    expect(viewKeyHints(focus)).toContainEqual({ key: "?", label: "what it does" });
+    const open = resolveViewKey("?", { ...focus, focus: focus.detailsFocus, engaged: true });
+    expect(open.explainOpen).toBe(true);
+    expect(viewKeyHints(open)).toContainEqual({ key: "?", label: "hide" });
+    // Open, the explanation shows inside the view.
+    expect(renderView(explained, ctx({ explainOpen: true })).detail.join("\n")).toContain("What it does.");
   });
 
   it("r4's words in the bar: a table's rows are `j k row`, a document's tabs name what they are (run-2 M4)", () => {

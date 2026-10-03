@@ -167,7 +167,8 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
       onSubmitLine: async () => ({ messages: [] })
     })).split("\n");
     expect(committed.findIndex((row) => row.includes("note 29"))).toBeLessThan(committed.findIndex((row) => row.includes("∞ Infinite ")));
-    expect(barOf(committed)).toBe(" ∞ Infinite   Infinite workspace   ⊘ Google Ads ⊘ Shopify ● GA4 ● Stripe ● Post…");
+    // Whole sources only: the two that do not fit are counted, never `● Post…` (run-2 N10).
+    expect(barOf(committed)).toBe(" ∞ Infinite   Infinite workspace   ⊘ Google Ads ⊘ Shopify ● GA4 ● Stripe +2 more");
 
     // A turn that asked for nothing missing: the mark is drawn only when everything else fits (not at 80).
     resetTurnState();

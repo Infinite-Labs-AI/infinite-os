@@ -98,6 +98,8 @@ export interface ViewRender {
    * pane, so it never splits or squeezes the answer.
    */
   quiet?: true;
+  /** The view draws `? what it does` inside itself (a card): the key bar does not repeat it. */
+  explainInside?: true;
 }
 
 /**

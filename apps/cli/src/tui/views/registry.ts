@@ -23,7 +23,6 @@ import {
   truncationLines,
   viewText
 } from "./primitives.js";
-import { explainChip } from "./card.js";
 import { managedApproval, managedApprovalLines, managedSummaryLines } from "./managed.js";
 import type { KindRender, KindRenderer, ViewRender, ViewRenderCtx } from "./types.js";
 
@@ -115,9 +114,10 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
       ...(managed ? managedApprovalLines(managed, shellCtx) : []),
       ...reconcileLines(view, shellCtx),
       ...truncationLines(view, shellCtx),
-      ...caveatLines(view, shellCtx),
-      // `?` lives inside the view, never on the key bar (r4: every `? what it does` is in the thing it explains).
-      ...(!body?.offersExplain && (viewText(view.explain) !== "" || (managed?.summary ?? "") !== "") ? ["", explainChip(shellCtx)] : [])
+      ...caveatLines(view, shellCtx)
+      // A view's `? what it does` is a key on the key bar (`? hide` while open),
+      // never a line inside the answer (run-2 N12). A card draws its own inside
+      // itself (r4 `card()`), and the bar leaves it there (`explainInside`).
     ],
     footnotes: body?.footnotes ?? [],
     keys: body?.keys ?? [],
@@ -130,7 +130,8 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     ...(body?.rowCopies ? { rowCopies: body.rowCopies } : {}),
     ...(body?.copyText ? { copyText: body.copyText } : {}),
     ...(fixAsk ? { fixAsk } : {}),
-    ...(managed ? { approvalAsk: { key: managed.key, label: managed.label, ask: managed.ask } } : {})
+    ...(managed ? { approvalAsk: { key: managed.key, label: managed.label, ask: managed.ask } } : {}),
+    ...(body?.offersExplain ? { explainInside: true as const } : {})
   };
 }
 
