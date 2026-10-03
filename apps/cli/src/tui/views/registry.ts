@@ -106,18 +106,20 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
   const fixAsk = (body?.rowAsks ?? []).some((ask) => viewText(ask) !== "") ? null : stateFixAsk(view);
   // A tool that asks twice: its approval waits on this view (never the confirm queue).
   const managed = ctx.approvalClosed ? null : managedApproval(view);
+  const before = [...(body?.lead ?? []), ...explainLines(view, shellCtx), ...managedSummaryLines(managed, shellCtx)];
+  // A settled write's afterword ("Nothing ran.") follows its sentence on the next row (r4 receipts).
+  // A dismissal still on its way says only that (N22): its sentence waits for the app's answer.
+  const withBody = body?.joinsReason || (AFTERWORD_KINDS.has(view.kind) && isSettledWithoutRunning(view))
+    ? [...(awaitingApp(view, shellCtx) ? [] : stateReasonLines(view, shellCtx, fixAsk !== null)), ...(body?.detail ?? [])]
+    : blankBetween(stateReasonLines(view, shellCtx, fixAsk !== null), body?.detail ?? []);
+  // The body's detail ends `withBody`: its selected row moves down by what is drawn above it.
+  const bodyAt = before.length + withBody.length - (body?.detail.length ?? 0);
   return {
     head: headLine(body?.headTitle !== undefined ? { ...view, title: body.headTitle } : view, shellCtx),
     source: sourceLine(view, shellCtx),
     detail: [
-      ...(body?.lead ?? []),
-      ...explainLines(view, shellCtx),
-      ...managedSummaryLines(managed, shellCtx),
-      // A settled write's afterword ("Nothing ran.") follows its sentence on the next row (r4 receipts).
-      // A dismissal still on its way says only that (N22): its sentence waits for the app's answer.
-      ...(body?.joinsReason || (AFTERWORD_KINDS.has(view.kind) && isSettledWithoutRunning(view))
-        ? [...(awaitingApp(view, shellCtx) ? [] : stateReasonLines(view, shellCtx, fixAsk !== null)), ...(body?.detail ?? [])]
-        : blankBetween(stateReasonLines(view, shellCtx, fixAsk !== null), body?.detail ?? [])),
+      ...before,
+      ...withBody,
       ...(managed ? managedApprovalLines(managed, shellCtx) : []),
       ...reconcileLines(view, shellCtx),
       ...truncationLines(view, shellCtx),
@@ -141,7 +143,8 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     ...(managed ? { approvalAsk: { key: managed.key, label: managed.label, ask: managed.ask } } : {}),
     ...(body?.offersExplain ? { explainInside: true as const } : {}),
     ...openFor(view, body, shellCtx),
-    ...(body?.watchAsk ? { watchAsk: body.watchAsk } : {})
+    ...(body?.watchAsk ? { watchAsk: body.watchAsk } : {}),
+    ...(body?.selectedLines ? { selectedLines: [bodyAt + body.selectedLines[0], body.selectedLines[1]] as const } : {})
   };
 }
 
@@ -149,7 +152,9 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
  * The place `o` opens (T12, app.open.v1), only when the session can open
  * places: the kind's own (a job's landing, a list row's, a health fix), else
  * the state's fix link, else the view's own link. A kind that decided there is
- * none (null) gets none. Never a URL: place and params only.
+ * none (null) gets none. Never a URL: place and params only. Its label is the
+ * link's own (`Open in Meta Ads`), else `open`: never the fix's sentence
+ * (live T4: `If it changed in Ads Manager since: …` labelled the key).
  */
 function openFor(view: AnswerViewV1, body: KindRender | null, ctx: ViewRenderCtx): { openLink?: AppOpenTargetOf; openLabel?: string } {
   if (!ctx.caps.open) return {};
@@ -160,7 +165,7 @@ function openFor(view: AnswerViewV1, body: KindRender | null, ctx: ViewRenderCtx
   const link = fix && isRecord(fix.appLink) ? fix.appLink : isRecord(view.appLink) ? view.appLink : null;
   const target = appOpenTarget(link);
   if (!target) return {};
-  return { openLink: target, openLabel: viewText(fix && isRecord(fix.appLink) ? fix.label : link?.label) || viewText(link?.label) || "open" };
+  return { openLink: target, openLabel: viewText(link?.label) || "open" };
 }
 
 type AppOpenTargetOf = NonNullable<KindRender["openLink"]>;

@@ -210,10 +210,11 @@ describe("the session wires the live cap (CI-run)", () => {
     );
   });
 
+  // One column (under 80); from 80 the turn keeps the split, held to the window (live L8).
   it("a finished 200-line turn in a 24-row session is whole above the frame: no page of it, no hint", () => {
     const text = Array.from({ length: 200 }, (_, i) => `gamma line ${i}`).join("\n");
     const rendered = stripAnsi(renderInkInteractiveSessionToString({
-      columns: 80,
+      columns: 79,
       rows: 24,
       initialMessages: [{ role: "user", text: "how did it go?" }, { role: "assistant", text }],
       async onSubmitLine() {
@@ -232,9 +233,9 @@ describe("the session wires the live cap (CI-run)", () => {
     const last = rendered.findIndex((line) => /gamma line 199(?!\d)/.test(line));
     const frame = rendered.slice(last + 1);
     expect(frame).toHaveLength(5);
-    expect(frame[0]).toBe("─".repeat(80));
+    expect(frame[0]).toBe("─".repeat(79));
     expect(frame[1]).toContain("∞ Infinite");
-    expect(frame[2]).toBe("─".repeat(80));
+    expect(frame[2]).toBe("─".repeat(79));
     expect(frame[3]).toContain("❯ Ask Infinite…");
     expect(frame[4]).toContain("/  commands");
   });
@@ -250,7 +251,8 @@ describe("the session wires the live cap (CI-run)", () => {
       title: "Infinite TUI"
     })).split("\n");
     expect(rendered[0]).toContain("∞ Infinite");
-    expect(rendered[2]).toBe("❯ how did it go?");
+    // From 80 columns the turn sits side by side; with no Steps its details pane is empty.
+    expect(rendered[2]).toMatch(/^❯ how did it go\? +│$/u);
     expect(rendered.some((line) => /more lines|lines above/.test(line))).toBe(false);
   });
 
@@ -286,10 +288,14 @@ describe("the session wires the live cap (CI-run)", () => {
   });
 });
 
+// One column (under 80): there a finished turn too tall for the window goes
+// whole into scrollback. From 80 it keeps the split, its panes held to the
+// window, until the next line (live L8, interactive-session.finished-split.test.ts).
+const ONE_COLUMN = 79;
 describe("scrollback in a running session (fake TTY; skipped on CI like the other PTY tests)", () => {
   it.skipIf(process.env.CI === "true")("a 200-line finished answer is whole in scrollback at once: no pager hint, no fullscreen redraw", { timeout: 30_000 }, async () => {
     const input = ttyInput();
-    const output = ttyOutput();
+    const output = ttyOutput(ONE_COLUMN);
     const errorOutput = ttyOutput();
     const answer = (name: string) => Array.from({ length: 200 }, (_, i) => `${name} line ${i}`).join("\n");
 
@@ -329,7 +335,7 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     );
     // Only the frame stays live under it: the turn's rule, the top bar, one rule, the composer, the key bar.
     expect(rows.slice(at + 202).map((row) => row.trimEnd()).filter(Boolean)).toEqual([
-      "─".repeat(80), " ∞ Infinite", "─".repeat(80), "❯ Ask Infinite…", " /  commands"
+      "─".repeat(ONE_COLUMN), " ∞ Infinite", "─".repeat(ONE_COLUMN), "❯ Ask Infinite…", " /  commands"
     ]);
 
     // The composer still takes the next question; its answer lands the same way.
@@ -372,14 +378,16 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     });
     await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "first\r");
-    // While it streams the live region follows the tail, with the hint for what is above.
-    await waitFor(() => output.text().includes("alpha line 119") && output.text().includes("lines above"), 4_000, output.text);
+    // While it streams the turn keeps the split (80 columns): the answer pane follows the newest lines.
+    await waitFor(() => output.text().includes("alpha line 119"), 4_000, output.text);
     expect(stripAnsi(output.text())).not.toContain("alpha line 50");
+    expect(stripAnsi(output.text())).toMatch(/alpha line 119 +│/u);
     finish();
-    await waitFor(() => output.text().includes("alpha line 50"), 4_000, output.text);
+    // Finished, from 80 the turn keeps the split, its answer held to the window from the top (live L8).
+    await waitFor(() => /↓ \d+ more · tab, then ↓/u.test(stripAnsi(output.text()).split(`${ESC}[?2026h`).at(-1) ?? ""), 4_000, output.text);
     await sendKeys(input, "/exit\r");
     await session;
-    // Finished: the tail's rows were erased and the whole turn printed once, in order, with no hint left.
+    // Leaving commits it: the tail's rows were erased and the whole turn printed once, in order, with no hint left.
     const rows = scrollbackRows(output.text());
     const answer = rows.map((row) => row.trim().replace(/^∞ /u, "")).filter((row) => /^alpha line \d+$/u.test(row));
     expect(answer).toEqual(Array.from({ length: 120 }, (_, i) => `alpha line ${i}`));
@@ -426,7 +434,7 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
 
   it.skipIf(process.env.CI === "true")("idle Ctrl-C still writes the whole last answer before quitting", { timeout: 30_000 }, async () => {
     const input = ttyInput();
-    const output = ttyOutput();
+    const output = ttyOutput(ONE_COLUMN);
     const session = runInkInteractiveSession({
       errorOutput: ttyOutput(),
       input,
@@ -469,7 +477,8 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
       },
       async onSubmitLine(): Promise<InkInteractiveLineResult> {
         return {
-          messages: [{ role: "assistant", text: Array.from({ length: 200 }, (_, i) => `alpha line ${i}`).join("\n") }],
+          // One fenced block: the caption gate (round 4) never cuts a block, so the answer beside the card stays tall.
+          messages: [{ role: "assistant", text: `\`\`\`\n${Array.from({ length: 200 }, (_, i) => `alpha line ${i}`).join("\n")}\n\`\`\`` }],
           pendingConfirmations: [pending]
         };
       },
@@ -520,6 +529,8 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
   const RAW = "mcp__sample_app__get_sample_rows";
   const FAILED_ROW = "  reading today ✗ not synced yet";
   const text = Array.from({ length: 200 }, (_, i) => `alpha line ${i}`).join("\n");
+  // One fenced block, for the turn with a card: the caption gate (round 4) never cuts a block.
+  const block = `\`\`\`\n${text}\n\`\`\``;
   /** Two calls of one tool, in the app's words: the first ends clean, the second fails. */
   const twoCalls = (onProgress: ((frame: never) => void) | undefined) => {
     const frame = (type: string, toolId: string, rest: Record<string, unknown>) =>
@@ -533,7 +544,7 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
   it.skipIf(process.env.CI === "true")("two calls, the second fails, then a 200-line answer: the answer goes up whole, its Steps strip stays live (live run-4 N12); the next line prints the failed row under the answer, the clean one never", { timeout: 30_000 }, async () => {
     resetTurnState();
     const input = ttyInput();
-    const output = ttyOutput();
+    const output = ttyOutput(ONE_COLUMN);
     let finish: () => void = () => {};
     const session = runInkInteractiveSession({
       errorOutput: ttyOutput(),
@@ -568,10 +579,11 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
     // which keeps the finished turn's Steps strip (r4 keeps it under the turn
     // on screen) until the next line: both calls, bars and all.
     const after = rows.slice(last + 1).filter(Boolean);
-    expect(after.slice(0, 4)).toEqual(["─".repeat(80), " ∞ Infinite", "─".repeat(80), `─ Steps ${"─".repeat(72)}`]);
-    expect(after[4]).toMatch(/^ {2}reading the last 20…\s+━+\s+✓ 200 days$/u);
+    expect(after.slice(0, 4)).toEqual(["─".repeat(ONE_COLUMN), " ∞ Infinite", "─".repeat(ONE_COLUMN), `─ Steps ${"─".repeat(ONE_COLUMN - 8)}`]);
+    // One column draws the label whole (from 80 r4 cuts it to the label column: `reading the last …`).
+    expect(after[4]).toMatch(/^ {2}reading the last (?:…|200 days)\s+━+\s+✓ 200 days$/u);
     expect(after[5]).toMatch(/^ {2}reading today\s+━+\s+✗ not synced yet$/u);
-    expect(after.slice(6)).toEqual(["─".repeat(80), "❯ Ask Infinite…", " /  commands"]);
+    expect(after.slice(6)).toEqual(["─".repeat(ONE_COLUMN), "❯ Ask Infinite…", " /  commands"]);
     expect(rows).not.toContain(FAILED_ROW);
     expect(rows.some((row) => /more lines|lines above/u.test(row))).toBe(false);
     await sendKeys(input, "/exit\r");
@@ -636,7 +648,7 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
       async onSubmitLine(line, onProgress): Promise<InkInteractiveLineResult> {
         if (line === "/exit") return { exit: true, messages: [] };
         twoCalls(onProgress as never);
-        return { messages: [{ role: "assistant", text }], pendingConfirmations: [pending] };
+        return { messages: [{ role: "assistant", text: block }], pendingConfirmations: [pending] };
       },
       output,
       title: "Infinite TUI"
@@ -772,7 +784,7 @@ function ttyInput() {
   return stream;
 }
 
-function ttyOutput() {
+function ttyOutput(columns = 80) {
   const chunks: string[] = [];
   const stream = new PassThrough() as PassThrough & NodeJS.WriteStream & {
     columns: number;
@@ -780,7 +792,7 @@ function ttyOutput() {
     rows: number;
     text: () => string;
   };
-  stream.columns = 80;
+  stream.columns = columns;
   stream.rows = 24;
   stream.isTTY = true;
   stream.on("data", (chunk) => chunks.push(String(chunk)));

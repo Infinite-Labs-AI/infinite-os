@@ -6,6 +6,18 @@
 // active workspace.
 import { isRecord } from "./primitives.js";
 
+/**
+ * The words for the `o` key, on a card's key line and on the key bar alike
+ * (live T4: they must agree): `open in <place>` when the app link names itself
+ * that way (r4 `o open in Library`, `o open in Meta Ads`), else `open`. Never
+ * a link's other words (`Posts`, a fix sentence): those read as the place, not
+ * the key, and stay on the view's own `↗ … (o)` line.
+ */
+export function openKeyLabel(label: string): string {
+  const named = /^open in\s+(.+)$/iu.exec(label.trim());
+  return named ? `open in ${named[1]}` : "open";
+}
+
 /** What `o` sends: a registered place and its params, nothing else. */
 export interface AppOpenTarget {
   place: string;

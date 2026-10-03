@@ -75,8 +75,9 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
       initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
       onSubmitLine: async () => ({ messages: [] })
     }));
-    expect(out).toMatch(/^▸ ● on +Demo B/mu);
-    expect(out).not.toMatch(/^▸ ● on +Demo A/mu);
+    // From 80 columns the list is the details pane, right of the answer.
+    expect(out).toMatch(/│ ▸ ● on +Demo B/mu);
+    expect(out).not.toMatch(/▸ ● on +Demo A/mu);
   });
 
   it("the turn's Steps strip is drawn once, from the turn store's calls", () => {
@@ -95,11 +96,11 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(out).toMatch(/^ {2}listing meta entities +━+ ✓ 3 ads$/mu);
   });
 
-  it("under 120 columns the live turn is one column: the view under the answer", () => {
+  it("under 80 columns the live turn is one column: the view under the answer", () => {
     resetTurnState();
     recordTurnView(listFrame());
     const out = stripAnsi(renderInkInteractiveSessionToString({
-      columns: 100,
+      columns: 79,
       initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
       onSubmitLine: async () => ({ messages: [] })
     }));
@@ -121,15 +122,78 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(out.split("\n").every((line) => displayWidth(line) <= 60)).toBe(true);
   });
 
-  it("without views the transcript is unchanged (an old desktop sends none)", () => {
+  it("without views (an old desktop sends none) the turn still splits from 80 columns: r4's `steps only` on the right", () => {
+    const draw = (columns: number) => {
+      resetTurnState();
+      patchTurnState((state) => ({
+        ...state,
+        steps: [{ id: "c1", name: "list_meta_entities", label: "listing meta entities", status: "ok", startedAt: 0, endedAt: 500, result: "3 ads" }]
+      }));
+      return stripAnsi(renderInkInteractiveSessionToString({
+        columns,
+        initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
+        onSubmitLine: async () => ({ messages: [] })
+      })).split("\n").map((row) => row.trimEnd());
+    };
+    const wide = draw(100);
+    expect(wide).toContain(`❯ which ads are on?${" ".repeat(9)} │ steps only`);
+    expect(wide).toContain(`∞ Two are on.${" ".repeat(15)} │`);
+    expect(wide.filter((row) => row.includes("steps only"))).toHaveLength(1);
+    // Nothing on the right to switch to: the bar keeps `tab switch side` off.
+    expect(wide.join("\n")).not.toContain("switch side");
+    // Under 80 the transcript draws it, one column, unchanged.
+    const narrow = draw(79);
+    expect(narrow.join("\n")).not.toContain(" │ ");
+    expect(narrow.join("\n")).not.toContain("steps only");
+    expect(narrow.join("\n")).toContain("Two are on.");
+  });
+
+  it("a finished question with no Steps keeps the split at 80, its details pane empty (no `steps only` over nothing)", () => {
     resetTurnState();
-    const out = stripAnsi(renderInkInteractiveSessionToString({
-      columns: 100,
+    const rows = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 80,
       initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
       onSubmitLine: async () => ({ messages: [] })
+    })).split("\n").map((row) => row.trimEnd());
+    expect(rows).toContain(`❯ which ads are on?${" ".repeat(7)} │`);
+    expect(rows.join("\n")).not.toContain("steps only");
+    expect(rows.join("\n")).not.toContain("─ Steps");
+  });
+
+  it.each([
+    ["stopped", "■ Stopped. Anything already running in the app may still finish."],
+    ["failed", "error: the app did not answer"]
+  ])("a question that %s stays side by side at 80 (it never jumps to one column)", (_name, text) => {
+    resetTurnState();
+    const rows = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 80,
+      initialMessages: [
+        { role: "user", text: "which ads are on?" },
+        { role: "assistant", text: "Two are", partial: true },
+        { kind: "slash", role: "system", text, turnNote: true }
+      ],
+      onSubmitLine: async () => ({ messages: [] })
+    })).split("\n").map((row) => row.trimEnd());
+    expect(rows).toContain(`❯ which ads are on?${" ".repeat(7)} │`);
+    const noteRow = rows.find((row) => row.includes(text.slice(0, 9)));
+    expect(noteRow?.slice(26)).toMatch(/^ │/u);
+    expect(rows.every((row) => displayWidth(row) <= 80)).toBe(true);
+  });
+
+  it("the stop and error lines (and a line queued behind the turn) are the turn's own notes, not command output", () => {
+    expect(sessionSource).toMatch(/kind: "slash",\s+role: "system",\s+turnNote: true,\s+text: stoppedLine \?\? `error: /u);
+    expect(sessionSource).toMatch(/kind: "slash",\s+role: "system",\s+turnNote: true,\s+text: `queued: /u);
+  });
+
+  it("a command's output is never drawn as a turn: no split and no `steps only`, at any width", () => {
+    resetTurnState();
+    const out = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 120,
+      initialMessages: [{ role: "user", text: "/help" }, { kind: "slash", role: "system", text: "Commands: /connect, /project" }],
+      onSubmitLine: async () => ({ messages: [] })
     }));
+    expect(out).not.toContain("steps only");
     expect(out).not.toContain(" │ ");
-    expect(out).toContain("Two are on.");
   });
 
   it("a turn that asked for a source that is not connected leads the top bar with its amber mark, live and once the turn is in scrollback", () => {
@@ -179,31 +243,31 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(barOf(plain)).toBe(" ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe ● PostHog ● Meta");
   });
 
-  it("in an 80x24 window a finished turn that misses by its blank rows stays live, compact; a taller one still goes whole to scrollback", () => {
+  it("in a 79x24 window a finished turn that misses by its blank rows stays live, compact; at 80x24 it sits side by side, a taller one too, its details pane cut to the window", () => {
     const r4 = (screen: string) => {
       const fixture = JSON.parse(readFileSync(fileURLToPath(new URL(`../views/__fixtures__/r4/${screen}.json`, import.meta.url)), "utf8"));
       const view = decodeAnswerView(fixture.turn.views[0]);
       if (!view) throw new Error(`${screen} does not decode`);
       return { fixture, frame: { type: "tool.view", stage: "tool", message: view.title, viewId: "v1", name: view.tool, view } as ToolViewFrameV1 };
     };
-    const draw = (screen: string) => {
+    const draw = (screen: string, columns = 80) => {
       const { fixture, frame } = r4(screen);
       resetTurnState();
       recordTurnView(frame);
       recordStepEnd({ id: "c1", name: frame.name, label: fixture.turn.steps[0].label, status: "ok", result: fixture.turn.steps[0].result, endedAt: 2_000, durationMs: 1_000 });
       return stripAnsi(renderInkInteractiveSessionToString({
-        columns: 80, rows: 24,
+        columns, rows: 24,
         initialMessages: [{ role: "user", text: fixture.turn.question }, { role: "assistant", text: fixture.turn.answer }],
         onSubmitLine: async () => ({ messages: [] })
       })).replace(/\n+$/u, "").split("\n").map((row) => row.trimEnd());
     };
 
-    // The health view is 19 rows as r4 spaces it, two more than the window gives a turn: compact, it is 16.
-    const health = draw("view-10-health");
+    // One column (79), the health view is 19 rows as r4 spaces it, two more than the window gives a turn: compact, it is 16.
+    const health = draw("view-10-health", 79);
     expect(health[0]).toContain("∞ Infinite");
     expect(health[2]).toBe("❯ is everything connected?");
     const answer = health.findIndex((row) => row.startsWith("∞ 5 of 6 are fine."));
-    expect(health[answer + 1]).toBe("─".repeat(80));
+    expect(health[answer + 1]).toBe("─".repeat(79));
     expect(health[answer + 2]).toMatch(/Connections\s+✓ Ready/u);
     const strip = health.findIndex((row) => row.startsWith("─ Steps"));
     expect(health[strip - 1]).toBe("Fix it: Reconnect Shopify");
@@ -212,17 +276,33 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(health.length).toBeLessThanOrEqual(22);
     expect(health.some((row) => /more lines|lines above/u.test(row))).toBe(false);
 
-    // The numbers view does not fit even compact: whole in scrollback, in r4's own spacing, the frame under it.
-    // The frame keeps the turn's Steps strip until the next line (r4 flow-numbers-01; live run-4 N12).
+    // At 80 it sits side by side (r4), roomy: the head on the question's row, the Steps under both panes.
+    const split = draw("view-10-health");
+    expect(split[2]).toMatch(/^❯ is everything +│ {2}Connections {2}✓ Ready$/u);
+    const splitStrip = split.findIndex((row) => row.startsWith("─ Steps"));
+    // r4 pads the panes (to 16 rows, as the window allows): a blank pane row sits over the Steps rule.
+    expect(split.some((row) => /^ +│ Fix it: Reconnect Shopify$/u.test(row))).toBe(true);
+    expect(split[splitStrip - 1]).toMatch(/^ +│$/u);
+    expect(split.slice(2, splitStrip).every((row) => row.includes("│"))).toBe(true);
+    expect(split.at(-1)).toBe(" tab  switch side    /  commands");
+    expect(split.every((row) => [...row].length <= 80)).toBe(true);
+    expect(split.some((row) => /more lines|lines above/u.test(row))).toBe(false);
+
+    // The numbers view is taller than the window: from 80 it stays split (layout decision, 2026-10-03),
+    // the question on screen, the details pane cut with `↓ N more`, r4's frame whole around it.
     const numbers = draw("view-01-numbers");
-    expect(numbers[0]).toBe("❯ google ads since launch?");
-    const rule = numbers.findIndex((row) => row === "─".repeat(80));
-    expect(numbers[rule - 1]).toBe("");
-    expect(numbers.slice(-8, -1)).toEqual([
-      "─".repeat(80), " ∞ Infinite", "─".repeat(80), `─ Steps ${"─".repeat(72)}`,
-      "  checking Google Ads  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✓ 3 campaigns", "─".repeat(80), "❯ Ask Infinite…"
+    expect(numbers[0]).toContain("∞ Infinite");
+    expect(numbers[2]).toMatch(/^❯ google ads since +│ {2}Google Ads since launch {2}✓ Ready$/u);
+    const numbersStrip = numbers.findIndex((row) => row.startsWith("─ Steps"));
+    expect(numbers.slice(2, numbersStrip).every((row) => row.includes("│"))).toBe(true);
+    expect(numbers[numbersStrip - 2]).toMatch(/^ +│ ↓ \d+ more · tab, then ↓$/u);
+    expect(numbers[numbersStrip - 1]).toMatch(/^ +│$/u);
+    expect(numbers.slice(numbersStrip, numbersStrip + 2)).toEqual([
+      `─ Steps ${"─".repeat(72)}`, "  checking Google Ads  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✓ 3 campaigns"
     ]);
-    expect(numbers.at(-1)).toBe(" /  commands");
+    expect(numbers.length).toBeLessThanOrEqual(23);
+    expect(numbers.every((row) => [...row].length <= 80)).toBe(true);
+    expect(numbers.some((row) => /more lines|lines above/u.test(row))).toBe(false);
     expect(numbers.filter((row) => row.startsWith("─ Steps"))).toHaveLength(1);
   });
 
@@ -272,8 +352,8 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     });
     if (!doc) throw new Error("document view does not decode");
     recordTurnView({ type: "tool.view", stage: "tool", message: doc.title, viewId: "d1", name: doc.tool, view: doc });
-    const draw = (rows: number) => stripAnsi(renderInkInteractiveSessionToString({
-      columns: 100,
+    const draw = (rows: number, columns = 100) => stripAnsi(renderInkInteractiveSessionToString({
+      columns,
       rows,
       initialMessages: [{ role: "user", text: "show me the win-back emails" }, { role: "assistant", text: "Here are both emails." }],
       onSubmitLine: async () => ({ messages: [] })
@@ -285,12 +365,19 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
       expect(out, `${rows} rows`).toMatch(/page 1 of \d+/u);
       expect(out.split("\n").length, `${rows} rows`).toBeLessThan(rows);
     }
-    // 24 rows have no room for the turn even at the document's smallest page:
-    // the finished turn goes whole into scrollback instead of being paged
-    // (both emails, every line, no page line and no pager hint).
+    // In one column (under 80) 24 rows have no room for the turn even at the
+    // document's smallest page: the finished turn goes whole into scrollback
+    // instead of being paged (both emails, every line, no page line and no
+    // pager hint). Side by side, the same 24 rows hold a page beside the answer.
     resetTurnState();
     recordTurnView({ type: "tool.view", stage: "tool", message: doc.title, viewId: "d1", name: doc.tool, view: doc });
-    const whole = draw(24);
+    const paged = draw(24);
+    expect(paged).toContain("│ │ Line 1 of the body.");
+    expect(paged).toMatch(/page 1 of \d+/u);
+    expect(paged.split("\n").length).toBeLessThan(24);
+    resetTurnState();
+    recordTurnView({ type: "tool.view", stage: "tool", message: doc.title, viewId: "d1", name: doc.tool, view: doc });
+    const whole = draw(24, 79);
     expect(whole).toContain("Win-back sequence");
     expect(whole).toContain("Line 1 of the body.");
     expect(whole).toContain("Line 60 of the body.");
@@ -392,6 +479,41 @@ describe("a running turn's views (r4 working frames)", () => {
     expect(stripAnsi(output.text())).not.toContain("**Demo");
     finish();
     await waitFor(() => /∞ Two are on; paused Demo item +│/u.test(stripAnsi(output.text())), 4_000, output.text);
+    await sendKeys(input, "/exit\r");
+    await session;
+  });
+});
+
+describe("stopping a question at 80 columns (fake TTY; skipped on CI like the other PTY tests)", () => {
+  it.skipIf(process.env.CI === "true")("a question with no view stopped at 80 keeps the separator column", { timeout: 30_000 }, async () => {
+    resetTurnState();
+    const input = ttyInput();
+    const output = ttyOutput(80);
+    const session = runInkInteractiveSession({
+      columns: 80,
+      errorOutput: ttyOutput(80),
+      input,
+      turnStoppable: true,
+      onSubmitLine(line, onProgress, signal) {
+        if (line === "/exit") return Promise.resolve({ exit: true, messages: [] });
+        onProgress?.({ type: "message.delta", stage: "message", message: "PARTIAL", text: "Two are" });
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("Detached from the Desktop turn.")), { once: true });
+        });
+      },
+      output,
+      title: "Infinite TUI"
+    });
+    const lastFrame = () => stripAnsi(output.text().split(`${ESC}[?2026h`).at(-1) ?? "");
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
+    await sendKeys(input, "which ads are on?\r");
+    await waitFor(() => /❯ which ads are on\? +│ steps only/u.test(lastFrame()), 4_000, lastFrame);
+    input.write("\x1b");
+    await waitFor(() => lastFrame().includes("■ Stopped."), 4_000, lastFrame);
+    // Still two columns: the question beside the separator, the stop line in the answer pane.
+    expect(lastFrame()).toMatch(/❯ which ads are on\? +│/u);
+    const stopRow = lastFrame().split("\n").find((row) => row.includes("■ Stopped."))!;
+    expect(stopRow.slice(26)).toMatch(/^ │/u);
     await sendKeys(input, "/exit\r");
     await session;
   });

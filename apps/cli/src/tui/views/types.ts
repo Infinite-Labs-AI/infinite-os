@@ -125,6 +125,12 @@ export interface ViewRender {
   openLabel?: string;
   /** What `w` asks as a NEW user turn (a job's watch step), only when the session can watch. */
   watchAsk?: string;
+  /**
+   * Where the selected row is drawn in `detail`: its first line and how many
+   * lines it takes. A cut details pane scrolls to keep it on screen after j/k.
+   * Absent when the view draws no selected row.
+   */
+  selectedLines?: readonly [start: number, count: number];
 }
 
 /**

@@ -117,13 +117,13 @@ describe("after n, the line over the dismissed card is the app's words after a n
   for (const cols of [60, 100, 140]) {
     it(`at ${cols} columns the line reads "${LEFT_RUNNING}" in the same frame as the dismissed card`, () => {
       const lines = ansiToSegmentLines(draw(loadR4Fixture(DISMISSED_SCREEN), cols)).map((line) => textOf(line).trimEnd());
-      // From 120 columns the card sits right of the answer (`│`), on the same rows.
+      // From 80 columns the card sits right of the answer (`│`), on the same rows.
       const caption = lines.findIndex((line) => line.split("│")[0]!.trimEnd() === `∞ ${LEFT_RUNNING}`);
       const card = lines.findIndex((line) => line.includes(`✕ ${DISMISSED_WORDS}`));
       expect(caption, lines.join("\n")).toBeGreaterThan(-1);
       expect(card, lines.join("\n")).toBeGreaterThan(-1);
-      expect(lines.some((line) => line.includes("│")), `${cols} columns is drawn ${cols >= 120 ? "side by side" : "in one column"}`)
-        .toBe(cols >= 120);
+      expect(lines.some((line) => line.includes("│")), `${cols} columns is drawn ${cols >= 80 ? "side by side" : "in one column"}`)
+        .toBe(cols >= 80);
       expect(lines.join("\n")).not.toContain("once you say OK");
     });
   }

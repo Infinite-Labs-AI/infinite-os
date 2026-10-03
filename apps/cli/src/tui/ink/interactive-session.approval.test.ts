@@ -125,7 +125,7 @@ describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", 
     onSubmitLine: async () => ({ messages: [] })
   })).split("\n");
 
-  it("from 120 columns: the head and the card take the right pane, beside the answer, and the Steps come after", () => {
+  it("from 80 columns: the head and the card take the right pane, beside the answer, and the Steps come after", () => {
     const rows = rowsOf(160, card("change-pause-card"));
     const question = rows.findIndex((row) => row.startsWith("❯ pause demo a"));
     expect(question).toBeGreaterThan(0);
@@ -141,15 +141,15 @@ describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", 
     if (steps >= 0) expect(steps).toBeGreaterThan(bottom);
   });
 
-  it("under 120 columns: the answer, a blank and a rule, then the head and the card, then the Steps", () => {
-    const rows = rowsOf(100, card("change-pause-card"));
+  it("under 80 columns: the answer, a blank and a rule, then the head and the card, then the Steps", () => {
+    const rows = rowsOf(79, card("change-pause-card"));
     const answer = rows.findIndex((row) => row.startsWith("∞ Ready."));
     expect(rows[answer + 1]).toBe("");
-    expect(rows[answer + 2]).toBe("─".repeat(100));
+    expect(rows[answer + 2]).toBe("─".repeat(79));
     expect(rows[answer + 3]).toContain("Pause");
     const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Demo A”?"));
     expect(top).toBeGreaterThan(answer + 2);
-    const ruleUnderTurn = rows.findIndex((row, index) => index > top && row === "─".repeat(100));
+    const ruleUnderTurn = rows.findIndex((row, index) => index > top && row === "─".repeat(79));
     expect(ruleUnderTurn).toBeGreaterThan(top);
   });
 
@@ -365,7 +365,7 @@ describe("the yes is working (run-2 M9: r4 flow-pause-02, fake TTY; skipped on C
     { timeout: 30_000 },
     async () => {
       const input = ttyInput();
-      const output = ttyOutput();
+      const output = ttyOutput(100);
       let answer: (value: unknown) => void = () => {};
       const pending = card("change-pause-card");
       const done = { ...pending.view!, approval: undefined, state: "done", outcome: "applied", title: "Paused ad “Demo A”",
@@ -447,10 +447,11 @@ describe("n shows the dismissed card at once (run-2 M5, fake TTY; skipped on CI)
       expect(decisions).toEqual(["decline"]);
       answer({ ok: true });
       await new Promise((resolve) => setTimeout(resolve, 300));
-      // A plain ok: no second "Dismissed" line printed under it; the card now says it was sent (run-3 N22).
+      // A plain ok: no second "Dismissed" line printed under it, and no afterword under it (live T4).
       const lastFrame = stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
       expect(lastFrame.match(/✕ Dismissed — nothing was executed\./gu)).toHaveLength(1);
-      expect(lastFrame).toContain("Sent to the app");
+      expect(lastFrame).not.toContain("Sent to the app");
+      expect(lastFrame).not.toContain("Sending to the app");
       expect(decisions).toEqual(["decline"]);
       await sendKeys(input, "/exit\r");
       await session;

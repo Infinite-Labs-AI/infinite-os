@@ -122,6 +122,9 @@ function historyWhat(entry: Record<string, unknown>): string {
   return changeText(entry);
 }
 
+/** The fewest columns a history entry's words wrap in, after its time; narrower, the line is cut. */
+const MIN_HISTORY_WRAP = 16;
+
 function historyLines(value: unknown, ctx: ViewRenderCtx): string[] {
   const history = recordsOf(value);
   if (!history.length) {
@@ -136,8 +139,14 @@ function historyLines(value: unknown, ctx: ViewRenderCtx): string[] {
     // r4 `by Robin (in the app)`: where it was done follows who did it.
     const by = who && source ? `${who} (${source})` : who || source;
     const what = [historyWhat(entry), by].filter(Boolean).join(" · ");
-    const text = [when ? paint(when, "muted", ctx) : "", what].filter(Boolean).join("  ");
-    lines.push(fitLine(text, ctx.width));
+    // Too long for the width (a narrow details pane): the words wrap under
+    // themselves, after the time, rather than being cut.
+    const lead = when ? displayWidth(when) + 2 : 0;
+    const rows = ctx.width - lead >= MIN_HISTORY_WRAP && displayWidth(what) > ctx.width - lead ? wrapText(what, ctx.width - lead) : [what];
+    rows.forEach((row, index) => {
+      const head = !when ? "" : index === 0 ? `${paint(when, "muted", ctx)}  ` : " ".repeat(lead);
+      lines.push(fitLine(`${head}${row}`, ctx.width));
+    });
   }
   return lines;
 }

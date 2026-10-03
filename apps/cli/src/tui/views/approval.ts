@@ -53,10 +53,11 @@ import {
   paint,
   sourceLine,
   viewText,
-  wrapText
+  wrapText,
+  wrapWords
 } from "./primitives.js";
 import { stateHeadFor } from "./states.js";
-import { appOpenTarget, type AppOpenTarget } from "./open-target.js";
+import { appOpenTarget, openKeyLabel, type AppOpenTarget } from "./open-target.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
 /** The card's own key state: what is open, which document, which page, and the answers so far. */
@@ -197,16 +198,22 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   const ok = cardOk(view, fields, ui.answers, ctx.fieldsCapable, sentFields);
   const fieldPrompt = ok?.type === "ask_field" ? ok.field : undefined;
   const documentOpen = ui.documentOpen && documents.length > 0;
-  // `?` shows what the card does: the app's summary, its detail rows, when it expires.
-  const explain = summary !== "" || detailRows.length > 0;
-  const expires = live ? formatAsOf(approval.expiresAt, ctx.timeZone) : null;
   const docWidth = Math.max(8, Math.min(DOCUMENT_MAX_WIDTH, paneWidth));
   const title = viewText(approval.title) || viewText(view.title);
+  // The card says its target's name once, in its border title (W3-ap-pause).
+  // A title the border cuts (a long ad name, a narrow pane) is said whole
+  // behind `?`, unless the app's summary already says it.
+  const titleCut = displayWidth(title) > titleRoom(width);
+  const wholeTitle = titleCut && !summary.includes(title) ? title : "";
+  // `?` shows what the card does: the whole title when the border cut it, the app's summary, its detail rows, when it expires.
+  const explain = summary !== "" || detailRows.length > 0 || wholeTitle !== "";
+  const expires = live ? formatAsOf(approval.expiresAt, ctx.timeZone) : null;
 
   // ── above the card: the head (· viewing while a document is open) and the source ──
   const paneCtx: ViewRenderCtx = { ...ctx, width: paneWidth };
-  // The head is never wider than the card under it (W3-ap-pause): a long name is
-  // cut with `…` in the head only; the card's title keeps it whole where it fits.
+  // The head is never wider than the card under it (W3-ap-pause). It says the
+  // action and the kind when the view's title is the action and the whole name
+  // (`headLine`): the name is said once, in the card's border title.
   const head = headLine(view, { ...paneCtx, width });
   const source = sourceLine(view, paneCtx);
   const prelude = [
@@ -229,11 +236,6 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
     const object = cardObject(view, approval, innerCtx, notes);
     // A change's target path (contract revision 3): the card's first row, dim, under its title.
     const path = view.kind === "change" ? targetPathLine(view.body, inner, ctx) : null;
-    if (displayWidth(title) > titleRoom(width)) {
-      // The border cuts a long title (a narrow pane, a long ad name): the card's
-      // first rows say it whole, wrapped, so the full name is always on screen.
-      top.push(...paragraphIn(title, inner, "b", ctx));
-    }
     if (path) {
       top.push(path);
     }
@@ -242,7 +244,7 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
     }
     middle.push(...object);
     if (ui.explainOpen && explain) {
-      middle.push("", ...explainLines(summary, detailRows, expires, innerCtx));
+      middle.push("", ...explainLines(summary, detailRows, expires, innerCtx, wholeTitle));
     }
     if (finishInApp) {
       const words = viewText(finishInApp.words);
@@ -264,7 +266,7 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   }
   footer.push(...reconcileLines(view, documentOpen ? { ...innerCtx, width: docWidth } : innerCtx));
   if (documentOpen && ui.explainOpen && explain) {
-    footer.push("", ...explainLines(summary, detailRows, expires, { ...innerCtx, width: docWidth }));
+    footer.push("", ...explainLines(summary, detailRows, expires, { ...innerCtx, width: docWidth }, wholeTitle));
   }
   if (notes.size) {
     footer.push("", ...notes.lines().flatMap((line) => paragraphIn(line, inner, "dim", ctx)));
@@ -276,6 +278,8 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   // action's own, read from the card's title ("Pause ad …?" → p).
   const resendWorded = offersResend(view) && /^check again\b/iu.test(confirmLabel);
   const okKey = ok ? okKeyFor(resendWorded ? viewText(approval.title) || confirmLabel : confirmLabel) : null;
+  // `o`'s words, the same on the card's key line and on the bar (live T4).
+  const openWords = openKeyLabel(appLinkLabel(view, finishInApp));
   const keysFor = (paging: boolean): { keyCtx: KeyContext; keys: KeyHint[] } => {
     const keyCtx: KeyContext = {
       focus: "card",
@@ -297,15 +301,14 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
     };
     const keys: KeyHint[] = ui.fieldEntry
       ? [{ key: "enter", label: "set" }, { key: "esc", label: "cancel" }]
-      : keyBarHints(keyCtx);
+      : keyBarHints(keyCtx).map((hint) => (hint.key === "o" ? { ...hint, label: openWords } : hint));
     return { keyCtx, keys };
   };
-  const openLabel = appLinkLabel(view, finishInApp);
   const chromeRows = prelude.length + (documentOpen ? 0 : BOX_ROWS);
   const draw = (paging: boolean) => {
     const { keyCtx, keys } = keysFor(paging);
     const chips = chipRows(
-      cardChips(keys, documentOpen, openLabel, ui.fieldEntry ? null : keyCtx.okKey),
+      cardChips(keys, documentOpen, ui.fieldEntry ? null : keyCtx.okKey),
       ui.fieldEntry ? null : keyCtx.okKey,
       documentOpen ? docWidth : inner,
       ctx
@@ -907,15 +910,17 @@ function cardObject(view: AnswerViewV1, approval: Record<string, unknown>, ctx: 
   }
 }
 
-/** What `?` opens: the app's summary, its detail rows, and when the card expires. */
+/** What `?` opens: the card's whole title when its border cut it, the app's summary, its detail rows, and when the card expires. */
 function explainLines(
   summary: string,
   detailRows: readonly { label: string; value: string }[],
   expires: string | null,
-  ctx: ViewRenderCtx
+  ctx: ViewRenderCtx,
+  wholeTitle = ""
 ): string[] {
   return [
-    ...(summary ? wrapText(summary, ctx.width) : []),
+    ...(wholeTitle ? wrapWords(wholeTitle, ctx.width).map((line) => paint(line, "b", ctx)) : []),
+    ...(summary ? wrapWords(summary, ctx.width) : []),
     ...(detailRows.length ? fieldRows(detailRows, ctx.width, ctx) : []),
     ...(expires ? [paint(`expires ${expires}`, "dim", ctx)] : [])
   ];
@@ -944,14 +949,12 @@ function appLinkLabel(view: AnswerViewV1, finishInApp: Record<string, unknown> |
 
 /**
  * The chips the card draws: every key the bar offers but `?` (it has its own
- * row), `o` named after the place it opens. With a document open the OK key
+ * row), `o` in the bar's words (named after the place it opens). With a document open the OK key
  * leads, then the document keys, then `n` (r4 "Viewing the email"); `v close`
  * stays in the key bar only, so the chips keep to one row under the page.
  */
-function cardChips(keys: readonly KeyHint[], documentOpen: boolean, openLabel: string, okKey: string | null): KeyHint[] {
-  const chips = keys
-    .filter((hint) => hint.key !== "?")
-    .map((hint) => (hint.key === "o" && openLabel ? { ...hint, label: openLabel } : hint));
+function cardChips(keys: readonly KeyHint[], documentOpen: boolean, okKey: string | null): KeyHint[] {
+  const chips = keys.filter((hint) => hint.key !== "?");
   if (!documentOpen) {
     return chips;
   }

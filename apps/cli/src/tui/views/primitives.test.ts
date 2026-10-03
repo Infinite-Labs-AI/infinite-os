@@ -298,14 +298,16 @@ describe("the view shell", () => {
 });
 
 describe("the r4 layout", () => {
-  it("is one column under 120 columns and splits at 120+ (layout decision, 2026-10-02)", () => {
-    expect(layoutTurn(["a"], fakeRender, [], 119).some((l) => l.includes(" │ "))).toBe(false);
-    expect(layoutTurn(["a"], fakeRender, [], 120).some((l) => l.includes(" │ "))).toBe(true);
+  it("is one column under 80 columns and splits at 80+ (r4 `frame()`: wide=W>=80)", () => {
+    expect(layoutTurn(["a"], fakeRender, [], 79).some((l) => l.includes(" │ "))).toBe(false);
+    expect(layoutTurn(["a"], fakeRender, [], 80).some((l) => l.includes(" │ "))).toBe(true);
     expect(layoutTurn(["a"], fakeRender, [], 160, null, { split: false }).some((l) => l.includes(" │ "))).toBe(false);
   });
 
   it("the answer pane is 28% of the width, clamped to 26–40", () => {
-    expect(paneWidths(119).wide).toBe(false);
+    expect(paneWidths(79).wide).toBe(false);
+    expect(paneWidths(80)).toEqual({ wide: true, left: 26, right: 51 });
+    expect(paneWidths(100)).toEqual({ wide: true, left: 28, right: 69 });
     expect(paneWidths(120)).toEqual({ wide: true, left: 33, right: 84 });
     expect(paneWidths(160)).toEqual({ wide: true, left: 40, right: 117 });
     expect(paneWidths(200)).toEqual({ wide: true, left: 40, right: 157 });

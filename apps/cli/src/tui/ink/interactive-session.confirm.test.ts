@@ -469,14 +469,15 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
   );
 
   it.skipIf(process.env.CI === "true")(
-    "a dismissal the app took reads ✕ Dismissed — nothing was executed., then Sent to the app",
+    "a dismissal the app took reads ✕ Dismissed — nothing was executed., and no Sent to the app under it (live T4)",
     { timeout: 30_000 },
     async () => {
       const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
         receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
       const { input, output, session, before } = await answer("n", { ok: true, view: dismissed });
-      await waitFor(() => output.text().slice(before).includes("Sent to the app"), 4_000, output.text);
-      expect(output.text().slice(before)).toContain("✕ Dismissed — nothing was executed.");
+      await waitFor(() => output.text().slice(before).includes("✕ Dismissed — nothing was executed."), 4_000, output.text);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(output.text().slice(before)).not.toContain("Sent to the app");
       await sendKeys(input, "/exit\r");
       await session;
     }
@@ -562,7 +563,8 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
         expect(lastFrame()).toContain("Okay, left it running.");
         expect(lastFrame()).not.toContain("Ready. It stops spending");
         confirm.resolve({ ok: true, declined: true, askedCaption: ASKED, dismissedCaption: "Okay, left it running.", view: dismissed });
-        await waitFor(() => lastFrame().includes("Sent to the app"), 4_000, lastFrame);
+        await waitFor(() => !lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
+        expect(lastFrame()).not.toContain("Sent to the app");
         expect(lastFrame()).toContain("Okay, left it running.");
         expect(lastFrame()).not.toContain("Ready. It stops spending");
         await sendKeys(input, "/exit\r");
@@ -607,14 +609,14 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
   );
 
   // Live re-check run 3, N22: `Sent to the app` was drawn at `n` and never
-  // changed. In flight it says `Sending to the app…`; the app's answer makes it
-  // `Sent to the app`, with a receipt of its own or without one.
+  // changed. In flight it says `Sending to the app…`; the app's answer leaves
+  // the receipt line alone (live T4: no `Sent to the app`), with a receipt of its own or without one.
   for (const [what, answer] of [
     ["the app's dismissed receipt", "receipt"],
     ["a plain ok", "plain"]
   ] as const) {
     it.skipIf(process.env.CI === "true")(
-      `n: Sending to the app… until the app answers, then Sent to the app (${what})`,
+      `n: Sending to the app… until the app answers, then the receipt line alone (${what})`,
       { timeout: 30_000 },
       async () => {
         const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
@@ -639,8 +641,9 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
         // Live run-4 N22: until the app answers, the receipt's sentence is not claimed.
         expect(lastFrame()).not.toContain("Dismissed — nothing was executed.");
         confirm.resolve(answer === "receipt" ? { ok: true, declined: true, view: dismissed } : { ok: true });
-        await waitFor(() => lastFrame().includes("Sent to the app"), 4_000, lastFrame);
+        await waitFor(() => lastFrame().includes("Dismissed — nothing was executed."), 4_000, lastFrame);
         expect(lastFrame()).not.toContain("Sending");
+        expect(lastFrame()).not.toContain("Sent to the app");
         expect(lastFrame()).toContain("Dismissed — nothing was executed.");
         await sendKeys(input, "/exit\r");
         await session;

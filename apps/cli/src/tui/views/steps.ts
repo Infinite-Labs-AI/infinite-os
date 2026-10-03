@@ -32,7 +32,7 @@ import { compactPreview, defuseTrailStructure, parseToolTrailResultLine, splitTo
 import { ansi, type Theme, type ThemeStyle } from "../theme.js";
 import type { Msg } from "../types.js";
 import { shortOkVerb } from "../keys/keymap.js";
-import { viewText, wrapText } from "./primitives.js";
+import { cutAtWord, viewText, wrapText } from "./primitives.js";
 import { isChangedOnProvider, stateHeadFor } from "./states.js";
 
 /** r4's result column. */
@@ -694,7 +694,8 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
     const running = status === "run" || status === "bg";
     const bar = (running ? `${"━".repeat(Math.max(1, b - 2))}╍╍` : "━".repeat(b)).slice(0, Math.max(1, gantt - a));
     const barTone: ThemeStyle = status === "ok" ? "dim" : status === "fail" ? "red" : status === "stopped" ? "dim" : "cyan";
-    const label = padEndCells(cut(words, labelWidth), labelWidth);
+    // r4's cut length (the column less one, then `…`), at a word's end where one is near (half the column).
+    const label = padEndCells(cutAtWord(words, labelWidth, 1 / 2), labelWidth);
     const segments: (readonly [string, ThemeStyle])[] = [
       [`  ${label} ${" ".repeat(a)}`, "text"],
       [bar, barTone],

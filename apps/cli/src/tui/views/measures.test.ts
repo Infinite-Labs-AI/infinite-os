@@ -257,6 +257,21 @@ describe("numbers: leaders", () => {
     expect(render.detail).toContain("Lowest cost per trial · Demo B · $20.00");
     expect(text(render)).not.toMatch(/winner/iu);
   });
+
+  // Review of 4b5acc2 (W3-num-meta at 80): a leader's long row name moves to
+  // its own line or breaks after one of its parts, never mid-word.
+  for (const width of [30, 40, 51, 60]) {
+    it(`a long row name breaks only after one of its parts (${width} columns)`, () => {
+      const NAME = "sample_video_confession_ads-manager_na_dark_captions_v3";
+      const render = draw(edited("numbers-week-today", (body) => { body.leaders[0].rowLabel = NAME; }), { width });
+      const at = render.detail.findIndex((line) => line.startsWith("Most clicks"));
+      const block = render.detail.slice(at, render.detail.indexOf("", at) === -1 ? undefined : render.detail.indexOf("", at));
+      for (const line of block) expect(displayWidth(line)).toBeLessThanOrEqual(width);
+      const pieces = block.join(" ").split(/\s+/u).filter((word) => NAME.includes(word) && word.length > 2);
+      for (const piece of pieces.slice(0, -1)) expect(/[_./-]$/u.test(piece), `${piece} in ${JSON.stringify(block)}`).toBe(true);
+      expect(pieces.join("")).toBe(NAME);
+    });
+  }
 });
 
 describe("numbers: the coverage strip", () => {

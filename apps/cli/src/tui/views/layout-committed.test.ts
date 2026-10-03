@@ -27,7 +27,10 @@ describe("a committed turn names no key (TJ-9)", () => {
         const engaged = resolveViewKey("", viewFocusAfterTurnDone(view, { open: true, watch: true, retry: false }), { tab: true });
         const live = renderLiveTurn({ messages, views: [view], focus: engaged, width, color: false, theme, timeZone: "UTC" }).lines.map(stripAnsi).join("\n");
         const committed = renderCommittedTurn({ messages, views: [view], focus: engaged, width, color: false, theme, timeZone: "UTC" }).map(stripAnsi).join("\n");
-        if (live.includes("→ to see")) expect(committed).toMatch(/hidden/u);
+        // In one column the live view and the committed copy are drawn at the same
+        // width, so what the live one hid behind → the committed one names in words.
+        // From 80 columns the live view sits in the narrower details pane.
+        if (live.includes("→ to see") && !live.includes(" │ ")) expect(committed).toMatch(/hidden/u);
         expect(committed).not.toMatch(/→ to see|j k|m for more|\bc copy\b|\(o\)/u);
         for (const line of committed.split("\n")) expect(line.length, line).toBeLessThanOrEqual(width);
       });
