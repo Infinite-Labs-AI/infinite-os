@@ -54,6 +54,7 @@ import { normalizeHost } from "./contracts/host-deny.js"
 import { WIZARD_PATHS, type WizardRunState } from "./contracts/state.js"
 import { testExpectFromKeys, type TestExpect } from "./contracts/test-engine.js"
 import { nodeWizardFs, systemClock } from "./fs.js"
+import { readInstallManifest } from "../manifest.js"
 import { BEFORE_FACTS_SCHEMA, type BeforeFactsFile } from "./handoff/before-facts.js"
 import { applyKeysChoices, KEYS_RESULT_SCHEMA, type KeysStepResult } from "./handoff/keys-result.js"
 import { createReportBuilder } from "./report.js"
@@ -178,8 +179,29 @@ export function briefFactsFor(root: string, state: Readonly<WizardRunState> | nu
     appRoot: state.appRoot,
     plan: saved?.plan ? briefPlanFrom(saved.plan, saved.approvals) : null,
     connections: keys ? briefConnectionsFrom(keys) : null,
-    previewGuard: previewGuardBrief(saved?.guard ?? null)
+    previewGuard: previewGuardBrief(saved?.guard ?? null),
+    helpers: writtenHelpers(root)
   }
+}
+
+/**
+ * §3x.3 (B3) The conversion helpers the install really wrote, read from the repo (never assumed from the plan): the
+ * managed module that EXPORTS `infiniteTrack`, or the managed page block that defines the globals. Null = none.
+ */
+export function writtenHelpers(root: string): BriefFacts["helpers"] {
+  const manifest = readInstallManifest(root)
+  if (!manifest) return null
+  for (const file of manifest.files) {
+    let text: string
+    try {
+      text = readFileSync(join(root, file), "utf8")
+    } catch {
+      continue
+    }
+    if (/\.[cm]?[jt]sx?$/.test(file) && /export\s+(?:async\s+)?function\s+infiniteTrack\b|export\s+const\s+infiniteTrack\b/.test(text)) return { module: file }
+    if (/\.html?$/.test(file) && /window\.infiniteTrack\s*=/.test(text)) return { module: null }
+  }
+  return null
 }
 
 export interface DefaultDepsInput extends CreateDepsInput {

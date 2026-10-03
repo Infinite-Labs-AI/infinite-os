@@ -466,6 +466,10 @@ export class WizardInstaller implements Installer {
       artifacts.hostGuard = { mode: "deny", exempt: [...model.guard.exempt], deny: [...model.guard.deny] }
     }
     if (approved.has("sensitive_pages:posthog:managed")) artifacts = withSensitivePaths(artifacts, sensitivePathsFor(internals.scan, internals.before))
+    // §3x.3 (B3): the conversion helpers ship whenever job 10 is seeded (§3y.5: approved conversion names and a tool this
+    // install writes or keeps managed), so the job's brief never promises helpers the repo does not have.
+    const writesTool = artifacts.infinite !== undefined || artifacts.ga4 !== undefined || artifacts.posthog !== undefined || artifacts.meta !== undefined
+    if (answers.conversions.length > 0 && writesTool) artifacts = { ...artifacts, conversions: { helpers: true } }
     const serverLane = approved.has("server_lane") && artifacts.infinite !== undefined && scan.serverLane !== null
 
     // ---- snapshot everything this install can touch (full rollback on any failure) ----

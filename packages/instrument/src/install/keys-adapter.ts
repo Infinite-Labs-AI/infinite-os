@@ -166,6 +166,11 @@ export function artifactsFromKeysDetailed(keys: TagKeys, answers: PlanModel["dec
             ? "multiple_pixels"
             : "not_connected"
   }
+
+  // §3x.3 (B3): the conversion helpers are emitted exactly when job 10 is seeded (§3y.5: approved conversion names,
+  // and a tool this install writes), so the brief's "the helpers are already in your repo" is never false.
+  const installsTool = artifacts.infinite !== undefined || artifacts.ga4 !== undefined || artifacts.posthog !== undefined || artifacts.meta !== undefined
+  if (answers.conversionNames.length > 0 && installsTool) artifacts.conversions = { helpers: true }
   return { artifacts, skipped }
 }
 

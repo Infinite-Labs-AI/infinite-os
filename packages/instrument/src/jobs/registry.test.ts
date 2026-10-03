@@ -17,6 +17,7 @@ import { snapshotFromFiles } from "./repo-files.js"
 import { briefConnectionsFrom, briefPlanFrom } from "./plan-data.js"
 import { applyApprovalsTo, createJobRegistry, newlyInstalledTools, requiredLineKind, seedCandidatesFrom } from "./registry.js"
 import { fixtureKeys } from "../../test/wizard/o8/fixtures.js"
+import { run3File, run3Json } from "../../test/wizard/run3-fixture.js"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -49,6 +50,8 @@ const SITE: Record<string, string> = {
   "components/cta.tsx": "<button onClick={() => fbq('track', 'Lead')}>Talk to sales</button>\n<a href='/signup'>Sign up</a>\n",
   "lib/fbc.ts": "document.cookie = '_fbc=fb.1.' + Date.now() + '.' + id + '; path=/'\n",
   "app/api/signup/route.ts": "export async function POST(req) {\n  await supabase.auth.signUp({ email, password })\n}\n",
+  "app/signup/page.tsx":
+    "'use client'\nexport default function Signup() {\n  async function onSubmit(event) {\n    const res = await fetch('/api/signup', { method: 'POST' })\n    if (res.ok) router.push('/welcome')\n  }\n  return <form onSubmit={onSubmit}><button>Create account</button></form>\n}\n",
   "app/login/actions.ts": "'use server'\nexport async function login() {\n  await supabase.auth.signInWithPassword({ email, password })\n}\n",
   "components/user-menu.tsx": "onClick={() => supabase.auth.signOut()}\n",
   "app/privacy/page.tsx": "<p>We use Google Analytics.</p>\n",
@@ -109,8 +112,13 @@ describe("seedCandidates", () => {
     const identify = items.find((item) => item.id === "identify_reset:auth")!
     // The signOut in a test file is ignored; the CMP file is never allowed.
     expect(identify.allow.files).toEqual(["app/login/actions.ts", "components/user-menu.tsx"])
-    // A Next.js site click-tests in the rehearsal (RH), never offline.
-    expect(items.find((item) => item.id === "conversions_to_tools:signup")!.checks.map((c) => `${c.tier}:${c.id}`)).toEqual(["RH:click_test", "S:no_fbq_standard_on_click", "P:first_real_conversion"])
+    // §3x.3: an outcome conversion is checked where it succeeds (static) and by its first real event, never by a
+    // click test (its success branch cannot run in a no-send load); it targets the success line, not the links.
+    const signup = items.find((item) => item.id === "conversions_to_tools:signup")!
+    expect(signup.checks.map((c) => `${c.tier}:${c.id}`)).toEqual(["S:no_fbq_standard_on_click", "S:track_after_success", "P:first_real_conversion"])
+    expect(signup.trigger.evidence).toEqual([{ file: "app/signup/page.tsx", line: 5 }])
+    expect(signup.allow.files).toEqual(["app/signup/page.tsx"])
+    expect(signup.title).toBe("Send the signup conversion to every tool")
     expect(items.every((item) => item.owner === "agent" && item.checks.every((c) => c.state === "not_run"))).toBe(true)
   })
 
@@ -423,7 +431,8 @@ describe("briefs carry the plan's decisions as data (review P0-1)", () => {
     appRoot: ".",
     plan: briefPlanFrom(plan, approvals),
     connections: briefConnectionsFrom(fixtureKeys()),
-    previewGuard: { expression: "__infiniteHostAllowed(location.hostname)", exemptHosts: ["acme-store.com"], metaRecipe: "(function () { if (!(__infiniteHostAllowed(location.hostname))) { return; } <bootstrap> })();" }
+    previewGuard: { expression: "__infiniteHostAllowed(location.hostname)", exemptHosts: ["acme-store.com"], metaRecipe: "(function () { if (!(__infiniteHostAllowed(location.hostname))) { return; } <bootstrap> })();" },
+    helpers: { module: "lib/infinite-analytics.ts" }
   }
   const brief = buildBrief(seeded, briefFacts)
   const block = (id: string) => brief.slice(brief.indexOf(`### Job ${JSON.stringify(id)}`)).split("\n### ")[0]!
@@ -504,5 +513,75 @@ describe("I1b: job 3's /ingest rewrite has a Next config it may edit", () => {
     expect(item.allow.files).toContain("next.config.ts")
     expect([...item.allow.files, ...item.allow.create]).not.toContain("next.config.mjs")
     expect(item.allow.create).toEqual([])
+  })
+})
+
+describe("§3x.3 live run 3: job 10 targets the success, job 11 is not a second job 6, titles are distinct (W4, W5)", () => {
+  const RUN3_FILES = [
+    "package.json",
+    "app/account/page.tsx",
+    "app/account/logout-button.tsx",
+    "app/api/auth/login/route.ts",
+    "app/api/auth/logout/route.ts",
+    "app/api/signup/route.ts",
+    "app/layout.tsx",
+    "app/login/page.tsx",
+    "app/page.tsx",
+    "app/pricing/page.tsx",
+    "app/signup/page.tsx",
+    "lib/users.ts"
+  ]
+  const run3Scan = () => scanOf(Object.fromEntries(RUN3_FILES.map((rel) => [rel, run3File(`site-6d16d8f/${rel}`)])))
+  const before = run3Json<{ facts: BeforeFacts }>("wizard/before.json").facts
+  const saved = run3Json<{ candidates: ChecklistItem[]; plan: PlanModel; approvals: { approved: string[]; declined: string[]; edits: Record<string, string> } }>("wizard/plan-approvals.json")
+
+  it("W4: job 10's evidence is exactly the success branch app/signup/page.tsx:18, never the five /signup links", () => {
+    const signup = seedCandidatesFrom(run3Scan(), before).find((item) => item.id === "conversions_to_tools:signup")!
+    expect(signup.trigger.evidence).toEqual([{ file: "app/signup/page.tsx", line: 18 }])
+    expect(signup.allow.files).toEqual(["app/signup/page.tsx"])
+    expect(signup.state).toBe("pending")
+    // Negative (today's main): the links are conversion ELEMENTS, never job 10's targets for a signup.
+    expect(signup.trigger.evidence.some((entry) => "file" in entry && entry.file === "app/pricing/page.tsx")).toBe(false)
+  })
+
+  it("W4: a signup with no browser success branch is the user's (needs_you), never aimed at its links", () => {
+    const files = Object.fromEntries(RUN3_FILES.filter((rel) => rel !== "app/signup/page.tsx").map((rel) => [rel, run3File(`site-6d16d8f/${rel}`)]))
+    const signup = seedCandidatesFrom(scanOf(files), before).find((item) => item.id === "conversions_to_tools:signup")
+    expect(signup).toMatchObject({ state: "blocked", blockedReason: "needs_you", allow: { files: [], create: [] } })
+  })
+
+  it("W5: with duplicates_remove approved, run 3's setup_check_fixes:provider_census is not seeded (4 items, not 5)", () => {
+    expect(saved.candidates.map((item) => item.id)).toContain("setup_check_fixes:provider_census")
+    const seeded = applyApprovalsTo(saved.candidates, saved.plan, saved.approvals)
+    expect(seeded.map((item) => item.id)).toEqual(["duplicates_remove:ga4_config:G-TEST0000000", "preview_guard:ga4", "preview_guard:meta", "conversions_to_tools:signup"])
+    // Negative: the duplicate removal DECLINED → the setup finding is still a job (nothing else fixes it).
+    const declined = applyApprovalsTo(saved.candidates, saved.plan, {
+      ...saved.approvals,
+      approved: saved.approvals.approved.filter((id) => !id.startsWith("remove_duplicate:")),
+      declined: ["remove_duplicate:ga4:ga4_config:G-TEST0000000"]
+    })
+    expect(declined.map((item) => item.id)).toContain("setup_check_fixes:provider_census")
+  })
+
+  it("titles: each item of a several-item job is named by its target (no two share a title)", () => {
+    const items = seedCandidatesFrom(run3Scan(), before)
+    expect(items.filter((item) => item.jobId === "preview_guard").map((item) => item.title)).toEqual(["Keep previews silent: GA4", "Keep previews silent: Meta pixel"])
+    expect(items.find((item) => item.id === "conversions_to_tools:signup")!.title).toBe("Send the signup conversion to every tool")
+    expect(new Set(items.map((item) => item.title)).size).toBe(items.length)
+  })
+
+  it("W4: the brief names the import from the job's file and says the helpers exist; without helpers it refuses", () => {
+    const items = seedCandidatesFrom(run3Scan(), before).filter((item) => item.id === "conversions_to_tools:signup")
+    const plan: PlanModel = { hash: "sha256:0", lines: [{ id: "conversion_names", kind: "conversion_names", text: "Conversions: signup", requires: "approval", editable: true, jobIds: ["conversions_to_tools:signup"] }], decisions: { consentMode: "not_required", conversionNames: ["signup"], privacyText: null, npmInstall: null } }
+    const approvals = { approved: ["conversion_names"], declined: [], edits: {} }
+    const facts = { runId: RUN_ID, framework: "next-app-router", packageManager: "npm", router: "app" as const, appRoot: ".", plan: briefPlanFrom(plan, approvals), connections: null, previewGuard: null, helpers: { module: "lib/infinite-analytics.ts" } }
+    const brief = buildBrief(items, facts)
+    expect(brief).toContain('import { infiniteTrack, infiniteTrackThenNavigate } from \\"../../lib/infinite-analytics\\"')
+    expect(brief).toContain("The helpers are already in your repo: import { infiniteTrack, infiniteTrackThenNavigate } from \"../../lib/infinite-analytics\". Never re-implement them.")
+    expect(brief).toContain('call infiniteTrack("signup") right after the success is confirmed and before any navigation')
+    expect(brief).toContain("Never on the link or button that leads to the form.")
+    // Negative: no helpers written → no promise in the operator rules, and job 10 refuses to brief.
+    expect(() => buildBrief(items, { ...facts, helpers: null })).toThrow(/helpers the install writes/)
+    expect(buildBrief([], { ...facts, helpers: null })).not.toContain("helpers are already")
   })
 })

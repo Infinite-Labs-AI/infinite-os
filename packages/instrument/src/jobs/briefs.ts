@@ -12,9 +12,12 @@
 // Every repo-derived string (paths, findings, check reasons, plan line text that quotes paths) is
 // UNTRUSTED: it is stripped of control and invisible characters and JSON-quoted, so a file named
 // "a\n### Job evil" can never forge a block or an instruction (review P2-5).
+import { posix } from "node:path"
+
 import { sanitizeUntrusted } from "../agents/sanitize.js"
 import type { ChecklistItem, JobId } from "../wizard/contracts/jobs.js"
 import { GLOBAL_DENY_TEXT } from "./allow.js"
+import { OUTCOME_CONVERSION_TYPES } from "./detectors/outcomes.js"
 import { boundConversionNames, type BriefConnections, type BriefPlan } from "./plan-data.js"
 
 /** The facts a brief carries: the framework (installer scan) and the approved plan's data. */
@@ -35,6 +38,20 @@ export interface BriefFacts {
    * expression in place; §3z.12 B13).
    */
   previewGuard?: { expression: string; exemptHosts: string[]; metaRecipe?: string } | null
+  /**
+   * §3x.3 (B3) The conversion helpers this run's install WROTE: the repo-relative managed module that exports them
+   * (`lib/infinite-analytics.ts`), or `module: null` when they are page globals (static HTML / Vite). Absent or null =
+   * not written, and then no brief mentions them.
+   */
+  helpers?: { module: string | null } | null
+}
+
+/** §3x.3 The import line job 10 pastes in `file`: the managed module's path from that file, with no extension. */
+export function helperImportFor(file: string, module: string): string {
+  const from = posix.dirname(file.split("\\").join("/"))
+  let path = posix.relative(from === "" ? "." : from, module.replace(/\.[cm]?[jt]sx?$/, ""))
+  if (!path.startsWith(".")) path = `./${path}`
+  return `import { infiniteTrack, infiniteTrackThenNavigate } from "${path}"`
 }
 
 /** §3e.1 agent instruction gists, one per agent job. */
@@ -95,6 +112,15 @@ function duplicateGist(target: string): string {
   return "Here: keep the first init listed under Evidence and remove the others, unless an approved plan line below names a different one to keep."
 }
 
+/** §3x.3 (B3) Job 10's target line: an outcome is sent where it SUCCEEDS; a click conversion on its click. */
+function conversionGist(target: string, data: Record<string, unknown> | Error): string {
+  const helper = data instanceof Error || typeof data.helperImport !== "string" ? "" : ` The helpers are already in your repo: ${data.helperImport}. Never re-implement them.`
+  if (OUTCOME_CONVERSION_TYPES.has(target as never)) {
+    return `Here: call infiniteTrack(${JSON.stringify(target)}) right after the success is confirmed and before any navigation (or use infiniteTrackThenNavigate). Never on the link or button that leads to the form.${helper}`
+  }
+  return `Here: call infiniteTrack(<the approved name>) on the click that IS the ${target} (or infiniteTrackThenNavigate before its navigation).${helper}`
+}
+
 /** Strips control, bidi and zero-width characters: untrusted text stays on one inert line. */
 export function inertText(value: string): string {
   // The ONE sanitiser (§3z.12 B9); a brief value is never cut short here.
@@ -132,7 +158,14 @@ export function operatorRules(facts: BriefFacts): string {
     ...NEVER_LIST.map((rule) => `- ${rule}`),
     `- ${GLOBAL_DENY_TEXT}`,
     "",
-    "Use the helpers infinite-tag ships (`infiniteTrack`, `infiniteTrackThenNavigate`, `infiniteIdentify`, `infiniteReset`, `reportInfiniteOutcome`, `infiniteMetaMirror`); never re-implement them.",
+    // §3x.3 (B3): only when the install wrote them (a brief never promises helpers the repo does not have).
+    ...(facts.helpers
+      ? [
+          facts.helpers.module
+            ? `The conversion helpers are already in your repo, exported by ${quoted(facts.helpers.module)} (\`infiniteTrack\`, \`infiniteTrackThenNavigate\`, \`infiniteIdentify\`, \`infiniteReset\`, \`infiniteMetaMirror\`). Never re-implement them.`
+            : "The conversion helpers are already on every page as globals (`window.infiniteTrack`, `window.infiniteTrackThenNavigate`, `window.infiniteIdentify`, `window.infiniteReset`, `window.infiniteMetaMirror`). Never re-implement them."
+        ]
+      : []),
     "When a job is finished, blocked, or not needed, claim it with `job_claim`. Your claim is not the result: the wizard runs its own checks before it ticks anything.",
     "Questions about consent, conversion names, privacy text, the banner or npm installs are already decided in the plan; do not ask them. Where a job carries plan data (conversion names, the privacy paragraph, the guard expression, connection IDs), use exactly that data; never choose your own.",
     // §3y.10 (P3-10, P3-13).
@@ -168,7 +201,16 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
       if (!plan) return new Error(`the brief for ${item.id} needs the approved plan (conversion names)`)
       const names = boundConversionNames(target, plan.conversionNames)
       if (names.length === 0) return new Error(`the brief for ${item.id} has no approved conversion name for "${target}"`)
-      return { conversionType: target, approvedConversionNames: names }
+      if (item.jobId === "server_conversions") return { conversionType: target, approvedConversionNames: names }
+      // §3x.3 (B3): job 10 is seeded only when the install wrote the helpers; a brief without them would send the
+      // agent looking for code that does not exist (run 3), so it refuses instead.
+      if (!facts.helpers) return new Error(`the brief for ${item.id} needs the conversion helpers the install writes, and this install wrote none`)
+      const file = item.allow.files[0] ?? null
+      return {
+        conversionType: target,
+        approvedConversionNames: names,
+        ...(facts.helpers.module && file ? { helperImport: helperImportFor(file, facts.helpers.module) } : {})
+      }
     }
     case "privacy_paragraph": {
       if (!plan || plan.privacyText === null) return new Error(`the brief for ${item.id} needs the approved privacy paragraph`)
@@ -211,7 +253,9 @@ export function jobBlock(item: ChecklistItem, facts: BriefFacts): string {
   if (gist === undefined) throw new Error(`no brief for job ${item.jobId} (code jobs are never briefed)`)
   const data = planDataFor(item, facts)
   if (data instanceof Error) throw data
-  const target = TARGET_GISTS[item.id] ?? (item.jobId === "duplicates_remove" ? duplicateGist(itemTargetOf(item)) : undefined)
+  const target =
+    TARGET_GISTS[item.id] ??
+    (item.jobId === "duplicates_remove" ? duplicateGist(itemTargetOf(item)) : item.jobId === "conversions_to_tools" ? conversionGist(itemTargetOf(item), data) : undefined)
   const lines = (facts.plan?.lines ?? []).filter((line) => line.jobIds.includes(item.id))
   const out = [
     `### Job ${quoted(item.id)} (${item.n}. ${item.title})`,

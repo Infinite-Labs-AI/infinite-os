@@ -17,7 +17,8 @@ import { buildManagedRewritePairs, hasExactNextConfigRewrites, parseVercelConfig
 import { lineNumberAt } from "../harness/scan.js"
 import { detectAuth } from "../jobs/detectors/auth.js"
 import { detectCspOwners } from "../jobs/detectors/csp-owner.js"
-import { detectOutcomes, isServerFile } from "../jobs/detectors/outcomes.js"
+import { detectConversionSuccessPaths, detectOutcomes, isServerFile } from "../jobs/detectors/outcomes.js"
+import { matchingBracket } from "../setup-checks/code-view.js"
 import { PRIVACY_TOOL_NAMES } from "../jobs/detectors/privacy-page.js"
 import { boundConversionNames } from "../jobs/plan-data.js"
 import type { RepoSnapshot } from "../jobs/repo-files.js"
@@ -35,6 +36,7 @@ export const JOB_STATIC_CHECK_IDS = [
   "rescan_app_found",
   "next_rewrites_exact",
   "outcome_after_success",
+  "track_after_success",
   "outcome_declared",
   "event_id_stable",
   "no_pii_in_outcome",
@@ -250,6 +252,74 @@ function noOutcomeCall(checkId: JobStaticCheckId, scope: ReadonlyMap<string, str
   return checkResult(checkId, "problem", "S", ctx, { reason: `no reportInfiniteOutcome call in ${files([...scope.keys()]) || "the job's files"}` })
 }
 
+const TRACK_CALLS = ["infiniteTrack", "infiniteTrackThenNavigate"] as const
+/** A line that is a link, a button or a click handler (the conversion's intent, never its success). */
+const CTA_LINE = /<\s*(?:a|Link|button)\b|\bonClick\s*=|(?<![.\w$])href\s*=/
+const NAVIGATION_CALL = /\b(?:router\s*\.\s*(?:push|replace)|(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)|redirect)\s*\(|\b(?:window\s*\.\s*)?location\s*\.\s*href\s*=/
+
+/** The conversion name a track call sends: `infiniteTrack("x")`'s first argument, else any plain string argument. */
+function trackedName(call: Pick<Call, "name" | "args">): string | null {
+  const parts = splitTopLevelArgs(call.args)
+  if (call.name === "infiniteTrack") return parts[0] !== undefined ? literalString(parts[0]) : null
+  for (const part of parts) {
+    const value = literalString(part)
+    if (value !== null && /^[a-z][a-z0-9_]*$/.test(value)) return value
+  }
+  return null
+}
+
+function splitTopLevelArgs(args: string): string[] {
+  const out: string[] = []
+  let depth = 0
+  let quote: string | null = null
+  let start = 0
+  for (let index = 0; index < args.length; index += 1) {
+    const ch = args[index]!
+    if (quote) {
+      if (ch === "\\") index += 1
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === "`") quote = ch
+    else if (ch === "(" || ch === "{" || ch === "[") depth += 1
+    else if (ch === ")" || ch === "}" || ch === "]") depth -= 1
+    else if (ch === "," && depth === 0) {
+      out.push(args.slice(start, index))
+      start = index + 1
+    }
+  }
+  if (args.slice(start).trim() !== "") out.push(args.slice(start))
+  return out
+}
+
+/**
+ * The success branch that starts on `line`: an `if (…)`'s consequent (a `{…}` block, or one statement up to its
+ * `;` / line end / `else`); for a navigation-only success point, the code from the first `await` to the end of that
+ * line. Offsets into the file's text; null when the line holds neither.
+ */
+function successRegion(text: string, line: number): { start: number; end: number } | null {
+  const masked = maskCommentsAndStrings(text, true)
+  const lineStart = text.split("\n").slice(0, line - 1).reduce((sum, entry) => sum + entry.length + 1, 0)
+  const lineEnd = text.indexOf("\n", lineStart) === -1 ? text.length : text.indexOf("\n", lineStart)
+  const condition = /\bif\s*\(/.exec(masked.slice(lineStart, lineEnd))
+  if (condition) {
+    const open = lineStart + condition.index + condition[0].length - 1
+    const close = matchingBracket(masked, open)
+    if (close < 0) return null
+    let cursor = close + 1
+    while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor += 1
+    if (masked[cursor] === "{") {
+      const end = matchingBracket(masked, cursor)
+      return end < 0 ? null : { start: cursor, end }
+    }
+    const rest = masked.slice(cursor)
+    const stop = rest.search(/;|\n|\belse\b/)
+    return { start: cursor, end: stop < 0 ? masked.length : cursor + stop }
+  }
+  const awaited = masked.slice(0, lineEnd).search(/\bawait\b/)
+  return awaited < 0 ? null : { start: awaited, end: lineEnd }
+}
+
 export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCheckId, CheckFn> {
   const run = (checkId: JobStaticCheckId, body: (input: JobInput, ctx: CheckContext) => CheckResult): CheckFn =>
     (input, ctx) => isolated(checkId, "S", ctx, async () => [body(jobInput(input, deps), ctx)])
@@ -342,6 +412,48 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
         }
       }
       return result("outcome_after_success", ctx, "pass", "the outcome is reported after the success point")
+    }),
+
+    // §3x.3 (B3) Job 10, outcome conversions: `infiniteTrack(<approved name>)` (or `infiniteTrackThenNavigate(…,
+    // <approved name>)`) sits INSIDE the success branch the job was seeded from, before its navigation; never on the
+    // link or button that leads to the form (that click is intent, recorded by the runtime as such).
+    track_after_success: run("track_after_success", (input, ctx) => {
+      const target = itemTarget(input.item)
+      const approved = context().conversionNames
+      if (!approved) return result("track_after_success", ctx, "undetermined", "the approved conversion names are not known, so the call could not be compared")
+      const names = boundConversionNames(target, [...approved])
+      if (names.length === 0) return result("track_after_success", ctx, "undetermined", `no approved conversion name is bound to ${target}`)
+      const scope = itemFiles(input)
+      const calls = [...scope].flatMap(([file, text]) =>
+        callsOf(text, TRACK_CALLS)
+          .filter((call) => trackedName(call) !== null && names.includes(trackedName(call)!))
+          .map((call) => ({ ...call, file }))
+      )
+      if (calls.length === 0) return result("track_after_success", ctx, "problem", `no infiniteTrack(${JSON.stringify(names[0])}) in ${files([...scope.keys()]) || "the job's files"}`)
+      for (const call of calls) {
+        const lineText = scope.get(call.file)!.split("\n")[call.line - 1] ?? ""
+        if (CTA_LINE.test(lineText)) {
+          return result("track_after_success", ctx, "problem", `${call.file}:${call.line} sends the ${target} from the link or button that leads to the form, not from its success`, call.file, call.line)
+        }
+      }
+      const successes = detectConversionSuccessPaths(snapshotOf(scope, input.appRoot)).filter((finding) => finding.conversionType === target)
+      if (successes.length === 0) return result("track_after_success", ctx, "undetermined", "the success point the job was seeded from is no longer recognisable, so the call's place could not be checked")
+      for (const success of successes) {
+        const text = scope.get(success.file)!
+        const region = successRegion(text, success.line)
+        if (!region) continue
+        const masked = maskCommentsAndStrings(text, true)
+        const navigation = new RegExp(NAVIGATION_CALL.source, "g")
+        navigation.lastIndex = region.start
+        const nav = navigation.exec(masked)
+        const navAt = nav && nav.index < region.end ? nav.index : null
+        const inside = calls.find(
+          (call) => call.file === success.file && call.index >= region.start && call.index < region.end && (navAt === null || call.name === "infiniteTrackThenNavigate" || call.index < navAt)
+        )
+        if (inside) return result("track_after_success", ctx, "pass", `${inside.file}:${inside.line} sends the ${target} after it succeeds`, inside.file, inside.line)
+      }
+      const first = successes[0]!
+      return result("track_after_success", ctx, "problem", `the ${target} is not sent inside its success branch (${first.file}:${first.line}), before the navigation`, first.file, first.line)
     }),
 
     // Job 8: the outcome's `type` is one of the conversion names the user approved for this job.

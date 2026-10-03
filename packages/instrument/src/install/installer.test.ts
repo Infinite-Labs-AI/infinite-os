@@ -17,9 +17,13 @@ import {
   fakeProductionDeniedConflict,
   IDS,
   makeSite,
+  notConnectedKeys,
   read,
   STATIC_HTML
 } from "../../test/wizard/o7-fakes.js"
+import { createBrowserVm } from "../../test/site-code/browser-vm.js"
+import { transpileToCommonJs } from "../../test/site-code/typescript.js"
+import { run3File } from "../../test/wizard/run3-fixture.js"
 import { parseHarnessArgs } from "../harness/args.js"
 import { runHarness, type HarnessIo } from "../harness/run.js"
 import { readInstallManifest } from "../manifest.js"
@@ -501,5 +505,47 @@ describe("review fixes (O7 fix round)", () => {
     writeFileSync(join(root, ".infinite/install.json"), newer)
     await expect(installer().scan({ root, hosting: fakeHosting() })).rejects.toThrow(/Corrupt/)
     expect(read(root, ".infinite/install.json")).toBe(newer)
+  })
+})
+
+describe("§3x.3 (B3, W4): the conversion helpers are written whenever job 10 is seeded", () => {
+  const RUN3_FILES = ["package.json", "tsconfig.json", "app/layout.tsx", "app/page.tsx", "app/signup/page.tsx", "app/globals.css", "app/api/signup/route.ts", "lib/users.ts"]
+  const run3Site = () => makeSite(Object.fromEntries(RUN3_FILES.map((rel) => [rel, run3File(`site-6d16d8f/${rel}`)])))
+
+  async function installRun3(conversion: boolean) {
+    const root = run3Site()
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const keys = notConnectedKeys()
+    const ready = { ...keys, infinite: fakeKeys().infinite }
+    const candidates = conversion ? [candidate("conversions_to_tools", "signup", { allow: { files: ["app/signup/page.tsx"], create: [] } })] : []
+    const plan = subject.buildPlan(scan, ready, fakeBefore({ keys: ready }), candidates)
+    const answer = approveAll(plan)
+    if (!conversion) answer.approved = answer.approved.filter((id) => id !== "conversion_names")
+    const result = (await subject.apply(plan, answer)) as WizardApplyResult
+    return { root, plan, result }
+  }
+
+  it("next-app-router + conversions ['signup'] (run 3): the managed module EXPORTS the five helpers (executed, not grepped)", async () => {
+    const { root, plan, result } = await installRun3(true)
+    expect(plan.decisions.conversionNames).toEqual(["signup"])
+    expect(result.ok).toBe(true)
+    expect(result.artifacts.conversions).toEqual({ helpers: true })
+    const vm = createBrowserVm({ url: "https://acme-store.com/" })
+    vm.window.exports = {}
+    vm.runScript(`(function (exports) {\n${transpileToCommonJs(read(root, "lib/infinite-analytics.ts"))}\n})(window.exports);`)
+    expect(vm.scriptErrors).toEqual([])
+    const api = vm.window.exports as Record<string, unknown>
+    for (const name of ["infiniteTrack", "infiniteTrackThenNavigate", "infiniteIdentify", "infiniteReset", "infiniteMetaMirror"]) expect(typeof api[name], name).toBe("function")
+  })
+
+  it("negative: no approved conversion name → no helpers (and so no job 10 promising them)", async () => {
+    const { root, result } = await installRun3(false)
+    expect(result.ok).toBe(true)
+    expect(result.artifacts.conversions).toBeUndefined()
+    const vm = createBrowserVm({ url: "https://acme-store.com/" })
+    vm.window.exports = {}
+    vm.runScript(`(function (exports) {\n${transpileToCommonJs(read(root, "lib/infinite-analytics.ts"))}\n})(window.exports);`)
+    expect(typeof (vm.window.exports as Record<string, unknown>).infiniteTrack).toBe("undefined")
   })
 })

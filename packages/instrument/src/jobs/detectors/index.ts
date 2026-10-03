@@ -11,7 +11,7 @@ import { detectAuth, type AuthDetection } from "./auth.js"
 import { detectCspOwners, type CspOwnerFinding } from "./csp-owner.js"
 import { detectFbcWriters, type FbcWriterFinding } from "./fbc-writers.js"
 import { detectLayout, type LayoutFinding } from "./layout.js"
-import { detectConversionElements, detectOutcomes, type ConversionElementFinding, type OutcomeFinding } from "./outcomes.js"
+import { detectConversionElements, detectConversionSuccessPaths, detectOutcomes, type ConversionElementFinding, type OutcomeFinding } from "./outcomes.js"
 import { detectPrivacyPages, type PrivacyPageFinding } from "./privacy-page.js"
 import { detectRedirects, type RedirectFinding } from "./redirects.js"
 import { detectMiddlewareFiles, detectServerMount, type ServerMountFinding } from "./server-mount.js"
@@ -23,6 +23,8 @@ export interface StaticDetections {
   middleware: string[]
   layout: LayoutFinding[]
   outcomes: OutcomeFinding[]
+  /** §3x.3 Where an outcome conversion succeeds in the browser (job 10's targets for signup/lead/booking/purchase/trial). */
+  successPaths: ConversionElementFinding[]
   conversionElements: ConversionElementFinding[]
   auth: AuthDetection
   csp: CspOwnerFinding[]
@@ -79,6 +81,7 @@ export function detectStatic(snapshot: RepoSnapshot, framework: string): StaticD
     layout: detectLayout(snapshot, framework),
     outcomes,
     conversionElements: detectConversionElements(snapshot),
+    successPaths: detectConversionSuccessPaths(snapshot),
     auth: detectAuth(snapshot),
     csp: detectCspOwners(snapshot),
     redirects: detectRedirects(snapshot, countedPaths),

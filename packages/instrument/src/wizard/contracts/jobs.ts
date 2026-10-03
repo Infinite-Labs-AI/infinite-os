@@ -167,7 +167,9 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     requiresApprovedLine: ["conversion_names"],
     // T0 click_test for static HTML / Vite, RH click_test for every other framework.
     // §3z.12 §3e.1 (B15): `first_real_conversion` (P) reads baseline(runId, since = the deploy time) on a re-run.
-    checks: [c("T0", "click_test"), c("RH", "click_test"), c("S", "no_fbq_standard_on_click"), c("P", "first_real_conversion")],
+    // §3x.3: an outcome conversion (signup, lead, booking, purchase, trial) carries `track_after_success` instead of
+    // the click test (its success branch cannot run in a no-send load); a click conversion keeps the click test.
+    checks: [c("T0", "click_test"), c("RH", "click_test"), c("S", "no_fbq_standard_on_click"), c("S", "track_after_success"), c("P", "first_real_conversion")],
     donePath: ["done_in_code", "waiting_real_event", "proven"]
   },
   setup_check_fixes: {
