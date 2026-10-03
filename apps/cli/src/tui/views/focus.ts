@@ -25,6 +25,7 @@ import { printableImagesView } from "../../desktop/image-url-cut.js";
 import { resolveKey, type FocusKind, type KeyAction, type KeyContext, type KeyHint } from "../keys/keymap.js";
 import { DEFAULT_THEME, type Theme } from "../theme.js";
 import { changeCardSummary } from "./change.js";
+import { compareHasRangeMethod } from "./compare.js";
 import { listOpeningRow } from "./list.js";
 import { managedApproval } from "./managed.js";
 import type { AppOpenTarget } from "./open-target.js";
@@ -202,7 +203,8 @@ export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender
     tabs: count(render.tabs),
     pages: count(render.pages),
     hiddenColumns: count(render.hiddenColumns),
-    explain: viewText(view.explain) !== "" || (managedApproval(view)?.summary ?? "") !== "" || changeCardSummary(view) !== "",
+    explain: viewText(view.explain) !== "" || (managedApproval(view)?.summary ?? "") !== "" || changeCardSummary(view) !== ""
+      || compareHasRangeMethod(view),
     more: turnAsk(truncatedMoreAsk(view)),
     fixAsk: turnAsk(render.fixAsk),
     ...(viewText(render.fixLabel) ? { fixLabel: viewText(render.fixLabel) } : {}),

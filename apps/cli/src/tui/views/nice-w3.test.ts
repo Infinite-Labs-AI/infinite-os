@@ -12,6 +12,7 @@ import { displayWidth } from "../lib/display-width.js";
 import { stripAnsi } from "../lib/text.js";
 import { resolveTheme } from "../theme.js";
 import { fieldRows, wrapUrl } from "./card.js";
+import { viewFocusAfterTurnDone } from "./focus.js";
 import { documentListLines } from "./launch.js";
 import { renderLiveTurn } from "./layout.js";
 import { renderView } from "./registry.js";
@@ -97,6 +98,15 @@ describe("compare (W3-cmp-youtube, W3-cmp-analysis)", () => {
   it("the range method is behind ?", () => {
     expect(lines(renderView(view, ctx())).join("\n")).not.toContain("Range method");
     expect(lines(renderView(view, ctx({ explainOpen: true }))).join("\n")).toContain("Range method: two gates then a p-value");
+  });
+
+  it("with no explain of its own, ? is still offered, so the range method can be seen (R-IOV-6)", () => {
+    const bare = { ...view, explain: undefined } as unknown as AnswerViewV1;
+    const state = viewFocusAfterTurnDone(bare);
+    expect(state.facts.explain).toBe(true);
+    expect(lines(renderView(bare, ctx({ explainOpen: true }))).join("\n")).toContain("Range method: two gates then a p-value");
+    const noMethod = { ...view, explain: undefined, body: { ...(view.body as unknown as Record<string, unknown>), differences: [] } } as unknown as AnswerViewV1;
+    expect(viewFocusAfterTurnDone(noMethod).facts.explain).toBe(false);
   });
 
   it("a difference with no named metric takes the sole measure's unit", () => {
