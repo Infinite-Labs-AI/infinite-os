@@ -715,6 +715,7 @@ export function createLlmController(options: {
         synthesisSections: ReturnType<typeof buildQuerySynthesisSections>
       ) => assembleInfiniteOsPrompt({
         actions,
+        toolSchemas: tools,
         workspaceId: input.workspaceId,
         surface: input.surface,
         currentDate: now().toISOString().slice(0, 10),

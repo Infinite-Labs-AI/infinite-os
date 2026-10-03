@@ -19,6 +19,8 @@ export const HOST_OUTCOME_PREFIX = "[host outcome] ";
 
 export interface PromptAssemblyInput {
   actions: ActionDefinition[];
+  /** The actual schemas sent alongside this prompt; absent/mismatched descriptions stay in the manifest. */
+  toolSchemas?: readonly { name: string; summary: string }[];
   workspaceId: string;
   surface: "api" | "app" | "cli" | "desktop";
   currentDate?: string;
@@ -43,11 +45,15 @@ export interface PromptAssemblyInput {
 }
 
 export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
+  const schemaSummaries = new Map(input.toolSchemas?.map((tool) => [tool.name, tool.summary]));
   const actions = input.actions.map((action) => ({
     id: action.id,
     authority: action.authority,
     category: action.category,
-    summary: action.summary,
+    // Codex receives this exact prose in each function tool's description too. Keep the
+    // manifest's authority/provenance map without duplicating the schema's description.
+    ...(input.modelProvider === "codex" && schemaSummaries.get(action.id) === action.summary
+      ? {} : { summary: action.summary }),
     provenancePolicy: action.provenancePolicy,
     recommendedNextActions: action.recommendedNextActions
   }));
