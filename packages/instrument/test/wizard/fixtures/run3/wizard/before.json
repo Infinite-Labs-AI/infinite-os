@@ -1,0 +1,1370 @@
+{
+  "schema": "infinite-tag.before-facts.v1",
+  "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+  "writtenAt": "2026-10-03T14:39:18.480Z",
+  "measuredAt": "2026-10-03T14:39:18.480Z",
+  "productionHost": "tag-smoke.foundernationtv.com",
+  "scan": {
+    "framework": "next-app-router",
+    "packageManager": "npm",
+    "appRoot": ".",
+    "fileCount": 11,
+    "truncated": false
+  },
+  "facts": {
+    "hosting": {
+      "provider": "none",
+      "vercel": null
+    },
+    "keys": {
+      "infinite": {
+        "status": "not_provisioned",
+        "siteSourceKey": null,
+        "productionHosts": [],
+        "consentMode": null,
+        "consentStorageKey": "infinite_analytics_consent",
+        "collectPath": "/infinite/ledger"
+      },
+      "ga4": {
+        "status": "not_connected",
+        "propertyLabel": null,
+        "streams": []
+      },
+      "posthog": {
+        "status": "not_connected",
+        "projectKey": null,
+        "apiHost": null,
+        "ingestHost": null,
+        "uiHost": null,
+        "region": null
+      },
+      "meta": {
+        "status": "not_connected",
+        "pixels": []
+      },
+      "serverLane": {
+        "laneState": "no_secret",
+        "envWriteGranted": false
+      }
+    },
+    "census": {
+      "entries": [
+        {
+          "tool": "ga4",
+          "kind": "gtag_config",
+          "id": "G-TEST0000000",
+          "file": "app/layout.tsx",
+          "line": 27,
+          "owner": "adopted"
+        },
+        {
+          "tool": "ga4",
+          "kind": "gtag_config",
+          "id": "G-TEST0000000",
+          "file": "app/layout.tsx",
+          "line": 32,
+          "owner": "adopted"
+        },
+        {
+          "tool": "meta",
+          "kind": "fbq_init",
+          "id": "1116400780828774",
+          "file": "app/layout.tsx",
+          "line": 41,
+          "owner": "adopted"
+        }
+      ],
+      "envSourcedIds": [],
+      "identify": {
+        "identifyCalls": [],
+        "resetCalls": []
+      }
+    },
+    "dryLive": {
+      "mode": "dry_live",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+      "startedAt": "2026-10-03T14:38:49.782Z",
+      "finishedAt": "2026-10-03T14:39:15.429Z",
+      "environment": {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) InfiniteDev9/0.4.2 Chrome/148.0.7778.280 Electron/42.11.8 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "automationDetected": false,
+        "visibilityState": "visible",
+        "blockedBySiteBotRules": false,
+        "previewProtected": false,
+        "consentSeeded": false,
+        "cmpDetected": null
+      },
+      "loads": [
+        {
+          "label": "home",
+          "url": "https://tag-smoke.foundernationtv.com/",
+          "finalUrl": "https://tag-smoke.foundernationtv.com/pricing",
+          "status": 200,
+          "rendered": true,
+          "managedMarkerSeen": false,
+          "redirects": []
+        },
+        {
+          "label": "pricing",
+          "url": "https://tag-smoke.foundernationtv.com/pricing",
+          "finalUrl": "https://tag-smoke.foundernationtv.com/pricing",
+          "status": 200,
+          "rendered": true,
+          "managedMarkerSeen": false,
+          "redirects": []
+        },
+        {
+          "label": "signup",
+          "url": "https://tag-smoke.foundernationtv.com/signup",
+          "finalUrl": "https://tag-smoke.foundernationtv.com/signup",
+          "status": 200,
+          "rendered": true,
+          "managedMarkerSeen": false,
+          "redirects": []
+        },
+        {
+          "label": "account",
+          "url": "https://tag-smoke.foundernationtv.com/account",
+          "finalUrl": "https://tag-smoke.foundernationtv.com/account",
+          "status": 200,
+          "rendered": true,
+          "managedMarkerSeen": false,
+          "redirects": []
+        },
+        {
+          "label": "login",
+          "url": "https://tag-smoke.foundernationtv.com/login",
+          "finalUrl": "https://tag-smoke.foundernationtv.com/login",
+          "status": 200,
+          "rendered": true,
+          "managedMarkerSeen": false,
+          "redirects": []
+        }
+      ],
+      "requests": {
+        "total": 115,
+        "cancelled": 6,
+        "otherBeacons": []
+      },
+      "ga4": {
+        "events": [
+          {
+            "tid": "G-TEST0000000",
+            "en": "page_view",
+            "dlHost": "tag-smoke.foundernationtv.com",
+            "transport": "post",
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
+          },
+          {
+            "tid": "G-TEST0000000",
+            "en": "page_view",
+            "dlHost": "tag-smoke.foundernationtv.com",
+            "transport": "post",
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": true
+          },
+          {
+            "tid": "G-TEST0000000",
+            "en": "page_view",
+            "dlHost": "tag-smoke.foundernationtv.com",
+            "transport": "post",
+            "status": "cancelled",
+            "loadLabel": "pricing",
+            "afterNav": false
+          },
+          {
+            "tid": "G-TEST0000000",
+            "en": "page_view",
+            "dlHost": "tag-smoke.foundernationtv.com",
+            "transport": "post",
+            "status": "cancelled",
+            "loadLabel": "signup",
+            "afterNav": false
+          },
+          {
+            "tid": "G-TEST0000000",
+            "en": "page_view",
+            "dlHost": "tag-smoke.foundernationtv.com",
+            "transport": "post",
+            "status": "cancelled",
+            "loadLabel": "account",
+            "afterNav": false
+          },
+          {
+            "tid": "G-TEST0000000",
+            "en": "page_view",
+            "dlHost": "tag-smoke.foundernationtv.com",
+            "transport": "post",
+            "status": "cancelled",
+            "loadLabel": "login",
+            "afterNav": false
+          }
+        ]
+      },
+      "posthog": {
+        "events": [],
+        "bootRequests": []
+      },
+      "infinite": {
+        "events": []
+      },
+      "meta": {
+        "configRequests": [
+          "1116400780828774"
+        ],
+        "tr": [],
+        "console": [],
+        "fbc": {
+          "present": false,
+          "value": null,
+          "domain": null
+        },
+        "fbp": {
+          "present": true
+        }
+      },
+      "csp": {
+        "violations": []
+      },
+      "clicks": [],
+      "pii": [],
+      "serverLaneProbe": null,
+      "markers": {
+        "infiniteEventIds": [],
+        "posthogDistinctId": null,
+        "metaEventIds": []
+      }
+    },
+    "checks": [
+      {
+        "checkId": "click_id_capture",
+        "state": "pass",
+        "reason": "INF_SETUP_CLICK_ID_PRESENT: A Meta pixel initialises in app/layout.tsx, a shared entry that loads on every route, so it is present on the first page a visitor lands on and can read `fbclid` into `_fbc` there. That is the setup being right; it is not proof a cookie was written — a pixel blocked by Traffic Permissions writes no `_fbp`/`_fbc` at all, which is what the `meta` verification lane checks separately.",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 1
+          }
+        ],
+        "tier": "S",
+        "at": "2026-10-03T14:38:49.229Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "meta_pixel_config",
+        "state": "info",
+        "reason": "INF_SETUP_META_AUTOCONFIG_ADOPTED_ON: Worth checking: the Meta pixel already on your site in app/layout.tsx (pixel 111640…8774) has no `fbq('set', 'autoConfig', false, …)` before `init`, so Meta's automatic events are ON by default, so Meta collects automatic events (button clicks, page details) from your pages. infinite-tag leaves pixels it did not install untouched. To turn them off, add `fbq('set', 'autoConfig', false, '<pixel id>')` before that pixel's `fbq('init', …)`. Automatic events are not what improves matching; Manual Advanced Matching is.",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 41
+          }
+        ],
+        "tier": "S",
+        "at": "2026-10-03T14:38:49.229Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "provider_census",
+        "state": "problem",
+        "reason": "INF_SETUP_PROVIDER_DUPLICATE_INIT: GA4 G-TEST...0000 is initialised 2 times in one page (app/layout.tsx:27, app/layout.tsx:32). Every initialisation sends its own page view, so each visit is counted 2 times and every rate built on page views is wrong by that factor. Keep one and delete the others.",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 27
+          }
+        ],
+        "tier": "S",
+        "at": "2026-10-03T14:38:49.229Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "host_guard",
+        "state": "info",
+        "reason": "INF_SETUP_HOST_GUARD_MISSING: Worth checking: the site's own GA4 at app/layout.tsx:27 starts on every host — preview deploys (*.vercel.app), localhost and staging included — so previews and local testing send data into the real GA4 and inflate its numbers. A plan line can wrap this init in infinite-tag's preview guard, which always lets your production domain through. The same applies at app/layout.tsx:32.",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 27
+          }
+        ],
+        "tier": "S",
+        "at": "2026-10-03T14:38:49.229Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "host_guard",
+        "state": "info",
+        "reason": "INF_SETUP_HOST_GUARD_MISSING: Worth checking: the site's own Meta pixel at app/layout.tsx:41 starts on every host — preview deploys (*.vercel.app), localhost and staging included — so previews and local testing send data into the real Meta pixel and inflate its numbers. A plan line can wrap this init in infinite-tag's preview guard, which always lets your production domain through.",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 41
+          }
+        ],
+        "tier": "S",
+        "at": "2026-10-03T14:38:49.229Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "meta_automatic_events",
+        "state": "undetermined",
+        "reason": "test_error — the pixel could not be graded, so its automatic events were not counted",
+        "tier": "T1",
+        "at": "2026-10-03T14:39:15.431Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "test_run:infinite",
+        "state": "undetermined",
+        "reason": "test_error — the site's consent mode is not known, so silence cannot be told from consent",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/pricing"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/signup"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/account"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/login"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:15.430Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "test_run:ga4",
+        "state": "undetermined",
+        "reason": "not_connected — ga4 fires but has no connection to compare its id with",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/pricing"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/signup"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/account"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/login"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:15.430Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "test_run:posthog",
+        "state": "undetermined",
+        "reason": "test_error — the site's consent mode is not known, so silence cannot be told from consent",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/pricing"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/signup"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/account"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/login"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:15.430Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "test_run:meta",
+        "state": "undetermined",
+        "reason": "test_error — the site's consent mode is not known, so silence cannot be told from consent",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/pricing"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/signup"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/account"
+          },
+          {
+            "url": "https://tag-smoke.foundernationtv.com/login"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:15.430Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "ga4_loader_id",
+        "state": "undetermined",
+        "reason": "not_connected: no GA4 connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:15.996Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "posthog_live_init",
+        "state": "undetermined",
+        "reason": "not_connected: no PostHog connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:15.997Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "meta_live_init",
+        "state": "undetermined",
+        "reason": "not_connected: no Meta pixel connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:15.997Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "infinite_runtime_once",
+        "state": "undetermined",
+        "reason": "not_connected: no Infinite connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:15.997Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "byte_census",
+        "state": "problem",
+        "reason": "duplicate tags on one page: gtag('config', G-TEST...0000) 2 times — each one double-counts every page view",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:15.997Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "ga4_loader_id",
+        "state": "undetermined",
+        "reason": "not_connected: no GA4 connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/pricing"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:16.236Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "posthog_live_init",
+        "state": "undetermined",
+        "reason": "not_connected: no PostHog connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/pricing"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:16.237Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "meta_live_init",
+        "state": "undetermined",
+        "reason": "not_connected: no Meta pixel connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/pricing"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:16.237Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "infinite_runtime_once",
+        "state": "undetermined",
+        "reason": "not_connected: no Infinite connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/pricing"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:16.237Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "byte_census",
+        "state": "problem",
+        "reason": "duplicate tags on one page: gtag('config', G-TEST...0000) 2 times — each one double-counts every page view",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/pricing"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:16.237Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "ga4_loader_id",
+        "state": "undetermined",
+        "reason": "not_connected: no GA4 connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/signup"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:16.603Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "posthog_live_init",
+        "state": "undetermined",
+        "reason": "not_connected: no PostHog connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/signup"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:16.603Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "meta_live_init",
+        "state": "undetermined",
+        "reason": "not_connected: no Meta pixel connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/signup"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:16.603Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "infinite_runtime_once",
+        "state": "undetermined",
+        "reason": "not_connected: no Infinite connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/signup"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:16.603Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "byte_census",
+        "state": "problem",
+        "reason": "duplicate tags on one page: gtag('config', G-TEST...0000) 2 times — each one double-counts every page view",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/signup"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:16.603Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "ga4_loader_id",
+        "state": "undetermined",
+        "reason": "not_connected: no GA4 connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/account"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.329Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "posthog_live_init",
+        "state": "undetermined",
+        "reason": "not_connected: no PostHog connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/account"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.329Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "meta_live_init",
+        "state": "undetermined",
+        "reason": "not_connected: no Meta pixel connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/account"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.329Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "infinite_runtime_once",
+        "state": "undetermined",
+        "reason": "not_connected: no Infinite connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/account"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.329Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "byte_census",
+        "state": "problem",
+        "reason": "duplicate tags on one page: gtag('config', G-TEST...0000) 2 times — each one double-counts every page view",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/account"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.329Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "ga4_loader_id",
+        "state": "undetermined",
+        "reason": "not_connected: no GA4 connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/login"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.576Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "posthog_live_init",
+        "state": "undetermined",
+        "reason": "not_connected: no PostHog connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/login"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.576Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "meta_live_init",
+        "state": "undetermined",
+        "reason": "not_connected: no Meta pixel connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/login"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.576Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "infinite_runtime_once",
+        "state": "undetermined",
+        "reason": "not_connected: no Infinite connection, so its id was not checked",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/login"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.576Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "byte_census",
+        "state": "problem",
+        "reason": "duplicate tags on one page: gtag('config', G-TEST...0000) 2 times — each one double-counts every page view",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/login"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.576Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "redirect_walk",
+        "state": "pass",
+        "reason": "no redirect: the landing URL keeps its campaign tags",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.623Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      },
+      {
+        "checkId": "csp_header",
+        "state": "undetermined",
+        "reason": "no expectation: the run's connection ids were not available, so the policy was not checked against anything",
+        "evidence": [
+          {
+            "url": "https://tag-smoke.foundernationtv.com/"
+          }
+        ],
+        "tier": "T1",
+        "at": "2026-10-03T14:39:17.623Z",
+        "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+      }
+    ],
+    "observedProductionHost": "tag-smoke.foundernationtv.com",
+    "baseline": {
+      "window": {
+        "days": 28,
+        "from": "2026-09-05T14:39:18.302Z",
+        "to": "2026-10-03T14:39:18.302Z"
+      },
+      "ga4": {
+        "status": "not_connected",
+        "pageViews": null,
+        "localhostExcluded": null,
+        "topOffenders": null,
+        "keyEvents": null,
+        "syncedAt": null
+      },
+      "posthog": {
+        "status": "not_connected",
+        "pageViews": null,
+        "proxied": null,
+        "conversions": null
+      },
+      "conversions": {
+        "infinite": null
+      },
+      "serverLane": {
+        "laneState": null,
+        "documentRequests7d": null,
+        "outcomes7d": null
+      },
+      "stripe": {
+        "status": "not_connected",
+        "lastLiveEventAt": null
+      }
+    },
+    "baselineBuild": {
+      "ok": true,
+      "failureSignature": [],
+      "durationMs": 2344,
+      "skipped": null,
+      "exitCode": 0,
+      "timedOut": false,
+      "error": null,
+      "sandboxed": true,
+      "packageManager": "npm",
+      "outputTail": [
+        "  Finished TypeScript in 730ms ...",
+        "  Collecting page data using 11 workers ...",
+        "  Generating static pages using 11 workers (0/9) ...",
+        "  Generating static pages using 11 workers (2/9)",
+        "  Generating static pages using 11 workers (4/9)",
+        "  Generating static pages using 11 workers (6/9)",
+        "✓ Generating static pages using 11 workers (9/9) in 252ms",
+        "  Finalizing page optimization ...",
+        "Route (app)",
+        "┌ ○ /",
+        "├ ○ /_not-found",
+        "├ ƒ /account",
+        "├ ƒ /api/auth/login",
+        "├ ƒ /api/auth/logout",
+        "├ ƒ /api/signup",
+        "├ ○ /login",
+        "├ ○ /pricing",
+        "└ ○ /signup",
+        "○  (Static)   prerendered as static content",
+        "ƒ  (Dynamic)  server-rendered on demand"
+      ]
+    }
+  },
+  "grades": {
+    "infinite": {
+      "checkId": "test_run:infinite",
+      "state": "undetermined",
+      "reason": "test_error — the site's consent mode is not known, so silence cannot be told from consent",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/pricing"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/signup"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/account"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/login"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:15.430Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    "ga4": {
+      "checkId": "test_run:ga4",
+      "state": "undetermined",
+      "reason": "not_connected — ga4 fires but has no connection to compare its id with",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/pricing"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/signup"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/account"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/login"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:15.430Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    "posthog": {
+      "checkId": "test_run:posthog",
+      "state": "undetermined",
+      "reason": "test_error — the site's consent mode is not known, so silence cannot be told from consent",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/pricing"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/signup"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/account"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/login"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:15.430Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    "meta": {
+      "checkId": "test_run:meta",
+      "state": "undetermined",
+      "reason": "test_error — the site's consent mode is not known, so silence cannot be told from consent",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/pricing"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/signup"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/account"
+        },
+        {
+          "url": "https://tag-smoke.foundernationtv.com/login"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:15.430Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    }
+  },
+  "setupChecks": [
+    {
+      "checkId": "click_id_capture",
+      "state": "pass",
+      "reason": "INF_SETUP_CLICK_ID_PRESENT: A Meta pixel initialises in app/layout.tsx, a shared entry that loads on every route, so it is present on the first page a visitor lands on and can read `fbclid` into `_fbc` there. That is the setup being right; it is not proof a cookie was written — a pixel blocked by Traffic Permissions writes no `_fbp`/`_fbc` at all, which is what the `meta` verification lane checks separately.",
+      "evidence": [
+        {
+          "file": "app/layout.tsx",
+          "line": 1
+        }
+      ],
+      "tier": "S",
+      "at": "2026-10-03T14:38:49.229Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "meta_pixel_config",
+      "state": "info",
+      "reason": "INF_SETUP_META_AUTOCONFIG_ADOPTED_ON: Worth checking: the Meta pixel already on your site in app/layout.tsx (pixel 111640…8774) has no `fbq('set', 'autoConfig', false, …)` before `init`, so Meta's automatic events are ON by default, so Meta collects automatic events (button clicks, page details) from your pages. infinite-tag leaves pixels it did not install untouched. To turn them off, add `fbq('set', 'autoConfig', false, '<pixel id>')` before that pixel's `fbq('init', …)`. Automatic events are not what improves matching; Manual Advanced Matching is.",
+      "evidence": [
+        {
+          "file": "app/layout.tsx",
+          "line": 41
+        }
+      ],
+      "tier": "S",
+      "at": "2026-10-03T14:38:49.229Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "provider_census",
+      "state": "problem",
+      "reason": "INF_SETUP_PROVIDER_DUPLICATE_INIT: GA4 G-TEST...0000 is initialised 2 times in one page (app/layout.tsx:27, app/layout.tsx:32). Every initialisation sends its own page view, so each visit is counted 2 times and every rate built on page views is wrong by that factor. Keep one and delete the others.",
+      "evidence": [
+        {
+          "file": "app/layout.tsx",
+          "line": 27
+        }
+      ],
+      "tier": "S",
+      "at": "2026-10-03T14:38:49.229Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "host_guard",
+      "state": "info",
+      "reason": "INF_SETUP_HOST_GUARD_MISSING: Worth checking: the site's own GA4 at app/layout.tsx:27 starts on every host — preview deploys (*.vercel.app), localhost and staging included — so previews and local testing send data into the real GA4 and inflate its numbers. A plan line can wrap this init in infinite-tag's preview guard, which always lets your production domain through. The same applies at app/layout.tsx:32.",
+      "evidence": [
+        {
+          "file": "app/layout.tsx",
+          "line": 27
+        }
+      ],
+      "tier": "S",
+      "at": "2026-10-03T14:38:49.229Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "host_guard",
+      "state": "info",
+      "reason": "INF_SETUP_HOST_GUARD_MISSING: Worth checking: the site's own Meta pixel at app/layout.tsx:41 starts on every host — preview deploys (*.vercel.app), localhost and staging included — so previews and local testing send data into the real Meta pixel and inflate its numbers. A plan line can wrap this init in infinite-tag's preview guard, which always lets your production domain through.",
+      "evidence": [
+        {
+          "file": "app/layout.tsx",
+          "line": 41
+        }
+      ],
+      "tier": "S",
+      "at": "2026-10-03T14:38:49.229Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    }
+  ],
+  "envTargetChecks": [],
+  "liveChecks": [
+    {
+      "checkId": "ga4_loader_id",
+      "state": "undetermined",
+      "reason": "not_connected: no GA4 connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:15.996Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "posthog_live_init",
+      "state": "undetermined",
+      "reason": "not_connected: no PostHog connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:15.997Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "meta_live_init",
+      "state": "undetermined",
+      "reason": "not_connected: no Meta pixel connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:15.997Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "infinite_runtime_once",
+      "state": "undetermined",
+      "reason": "not_connected: no Infinite connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:15.997Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "byte_census",
+      "state": "problem",
+      "reason": "duplicate tags on one page: gtag('config', G-TEST...0000) 2 times — each one double-counts every page view",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:15.997Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "ga4_loader_id",
+      "state": "undetermined",
+      "reason": "not_connected: no GA4 connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/pricing"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:16.236Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "posthog_live_init",
+      "state": "undetermined",
+      "reason": "not_connected: no PostHog connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/pricing"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:16.237Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "meta_live_init",
+      "state": "undetermined",
+      "reason": "not_connected: no Meta pixel connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/pricing"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:16.237Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "infinite_runtime_once",
+      "state": "undetermined",
+      "reason": "not_connected: no Infinite connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/pricing"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:16.237Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "byte_census",
+      "state": "problem",
+      "reason": "duplicate tags on one page: gtag('config', G-TEST...0000) 2 times — each one double-counts every page view",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/pricing"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:16.237Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "ga4_loader_id",
+      "state": "undetermined",
+      "reason": "not_connected: no GA4 connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/signup"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:16.603Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "posthog_live_init",
+      "state": "undetermined",
+      "reason": "not_connected: no PostHog connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/signup"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:16.603Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "meta_live_init",
+      "state": "undetermined",
+      "reason": "not_connected: no Meta pixel connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/signup"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:16.603Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "infinite_runtime_once",
+      "state": "undetermined",
+      "reason": "not_connected: no Infinite connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/signup"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:16.603Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "byte_census",
+      "state": "problem",
+      "reason": "duplicate tags on one page: gtag('config', G-TEST...0000) 2 times — each one double-counts every page view",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/signup"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:16.603Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "ga4_loader_id",
+      "state": "undetermined",
+      "reason": "not_connected: no GA4 connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/account"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.329Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "posthog_live_init",
+      "state": "undetermined",
+      "reason": "not_connected: no PostHog connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/account"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.329Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "meta_live_init",
+      "state": "undetermined",
+      "reason": "not_connected: no Meta pixel connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/account"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.329Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "infinite_runtime_once",
+      "state": "undetermined",
+      "reason": "not_connected: no Infinite connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/account"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.329Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "byte_census",
+      "state": "problem",
+      "reason": "duplicate tags on one page: gtag('config', G-TEST...0000) 2 times — each one double-counts every page view",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/account"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.329Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "ga4_loader_id",
+      "state": "undetermined",
+      "reason": "not_connected: no GA4 connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/login"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.576Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "posthog_live_init",
+      "state": "undetermined",
+      "reason": "not_connected: no PostHog connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/login"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.576Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "meta_live_init",
+      "state": "undetermined",
+      "reason": "not_connected: no Meta pixel connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/login"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.576Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "infinite_runtime_once",
+      "state": "undetermined",
+      "reason": "not_connected: no Infinite connection, so its id was not checked",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/login"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.576Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "byte_census",
+      "state": "problem",
+      "reason": "duplicate tags on one page: gtag('config', G-TEST...0000) 2 times — each one double-counts every page view",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/login"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.576Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "redirect_walk",
+      "state": "pass",
+      "reason": "no redirect: the landing URL keeps its campaign tags",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.623Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "checkId": "csp_header",
+      "state": "undetermined",
+      "reason": "no expectation: the run's connection ids were not available, so the policy was not checked against anything",
+      "evidence": [
+        {
+          "url": "https://tag-smoke.foundernationtv.com/"
+        }
+      ],
+      "tier": "T1",
+      "at": "2026-10-03T14:39:17.623Z",
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    }
+  ],
+  "cmpDetected": null,
+  "loginFound": false
+}

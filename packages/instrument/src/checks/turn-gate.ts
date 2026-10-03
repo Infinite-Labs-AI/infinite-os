@@ -18,7 +18,10 @@
 //   • THE NEVER-LIST (R2-20, the brief's Meta rules): a write to `_fbp`; `ph` (as `ph:` or shorthand)
 //     inside `fbq(` / Advanced Matching / `adMatch`; `autoConfig` true, or a removed `autoConfig … false`
 //     opt-out (literal or variable pixel); a provider-id literal that is not one of the connection's ids
-//     (a fallback `fbq('init', env || '<15 digits>')` included); `test_event_code` (it is NOT
+//     AND that the turn adds to the file (§3x.1: a per-file DELTA — wrapping, re-indenting or deduplicating
+//     the site's own init re-emits its id without raising its count, and passes); any provider-id literal,
+//     connection ids included, used as an operand of `||` / `??` / `?:` that the turn adds (§3x.1
+//     `fallback_provider_id`, its own counter, so a dedupe cannot "pay for" a new fallback); `test_event_code` (it is NOT
 //     protection); a page-built `eventID` / `event_id` (a `metaEventId ?? uuid()` fallback is built);
 //     `fbq('track', <standard conversion>)` in a click handler (a same-file named handler included), or
 //     anywhere in page code without an `eventID` (D11: the browser mirrors a conversion only with the
@@ -72,7 +75,8 @@ export const TURN_GATE_RULES = {
   ph_in_meta: "sends a phone number (ph) to Meta",
   autoconfig_on: "turns Meta's automatic configuration on",
   autoconfig_opt_out_removed: "removes the autoConfig false opt-out",
-  foreign_provider_id: "adds a provider id that is not the connection's",
+  foreign_provider_id: "adds a provider id this file did not have and the connection does not use",
+  fallback_provider_id: "uses a provider id as a default or fallback value (||, ?? or ?:)",
   test_event_code: "uses test_event_code (it is not protection)",
   page_built_event_id: "builds a Meta event id in the page (use the server's metaEventId)",
   standard_on_click: "fires a standard Meta conversion from a click handler",
@@ -279,7 +283,14 @@ function commentOnly(raw: string, masked: string | undefined): boolean {
 }
 
 /** Contextual rules over a text whose first line is `startLine`; keeps hits on added lines only. */
-function contextualHits(file: string, text: string, startLine: number, addedLines: ReadonlySet<number>, allowed: ReadonlySet<string>): TurnGateHit[] {
+function contextualHits(
+  file: string,
+  text: string,
+  startLine: number,
+  addedLines: ReadonlySet<number>,
+  allowed: ReadonlySet<string>,
+  idSeen: (id: string, line: number) => void
+): TurnGateHit[] {
   const code = codeView(file, text)
   const hits: TurnGateHit[] = []
   const push = (rule: TurnGateRule, offset: number) => {
@@ -316,11 +327,51 @@ function contextualHits(file: string, text: string, startLine: number, addedLine
     const end = matchingBracket(code, open)
     const call = code.slice(at, end === -1 ? code.length : end + 1)
     for (const literal of call.matchAll(DIGIT_ID_LITERAL)) {
-      if (!allowed.has(literal[1] as string)) push("foreign_provider_id", at + (literal.index ?? 0))
+      const id = literal[1] as string
+      if (allowed.has(id)) continue
+      // A candidate only: §3x.1 makes it a hit when the turn raised this id's count in the file.
+      const line = startLine + lineAt(code, at + (literal.index ?? 0))
+      if (addedLines.has(line)) idSeen(id, line)
     }
   }
   return hits
 }
+
+/**
+ * §3x.1 What a line counts toward the per-file id delta: every quoted G- / phc_ literal and every quoted
+ * 15–16 digit literal, by occurrence. Counting is wider than the hit sources (a digit literal is a HIT only in
+ * a pixel context) and the same on both sides of the diff, so a re-emitted id never reads as new.
+ */
+const COUNTED_ID_LITERALS: RegExp[] = [/["'`](G-[A-Z0-9]{4,})["'`]/g, /["'`](phc_[A-Za-z0-9_]{10,})["'`]/g, DIGIT_ID_LITERAL]
+const ANY_ID = String.raw`["'\x60](G-[A-Z0-9]{4,}|phc_[A-Za-z0-9_]{10,}|\d{15,16})["'\x60]`
+/** An id as the RIGHT operand of `||` / `??`, or the consequent of a ternary `?` (not `?.` / `??`). */
+const FALLBACK_RIGHT = new RegExp(String.raw`(?:\|\||\?\?|(?<![?])\?(?![?.:]))\s*${ANY_ID}`, "g")
+/** An id as the LEFT operand of `||` / `??`. */
+const FALLBACK_LEFT = new RegExp(String.raw`${ANY_ID}\s*(?:\|\||\?\?)`, "g")
+/** An id as the alternate of a ternary: `: '<id>'` after a ternary `?` on the same line. */
+const FALLBACK_ALTERNATE = new RegExp(String.raw`:\s*${ANY_ID}`, "g")
+const TERNARY_QUESTION = /(?<![?])\?(?![?.:])/
+
+function countLiterals(text: string, into: Map<string, number>): void {
+  for (const pattern of COUNTED_ID_LITERALS) for (const match of text.matchAll(pattern)) into.set(match[1] as string, (into.get(match[1] as string) ?? 0) + 1)
+}
+
+/** §3x.1 `fallback_provider_id`: the ids this line uses as a default / fallback operand (each once per line). */
+export function fallbackIdsOnLine(text: string): string[] {
+  const ids = new Set<string>()
+  for (const match of text.matchAll(FALLBACK_RIGHT)) ids.add(match[1] as string)
+  for (const match of text.matchAll(FALLBACK_LEFT)) ids.add(match[1] as string)
+  const question = TERNARY_QUESTION.exec(text)
+  if (question) {
+    for (const match of text.matchAll(FALLBACK_ALTERNATE)) {
+      if ((match.index ?? 0) > question.index) ids.add(match[1] as string)
+    }
+  }
+  return [...ids]
+}
+
+/** A removed line that is only a comment (the old file is not available, so its start decides). */
+const COMMENT_START = /^\s*(?:\/\/|\/\*|\*|<!--)/
 
 /** Every rule hit in one turn's diff. Pure. */
 export function scanTurnDiff(diff: TurnDiff, options: TurnGateOptions): TurnGateHit[] {
@@ -335,6 +386,36 @@ export function scanTurnDiff(diff: TurnDiff, options: TurnGateOptions): TurnGate
     const buildTime = isServerExecutedFile(file.path, full)
     const masked = maskedAddedLines(file.path, file.added, full)
     const byLine = new Map(file.added.map((entry) => [entry.line, entry.text]))
+    // §3x.1 the per-file delta: an id is NEW to this file only when the turn raises its count here.
+    const addedIds = new Map<string, number>()
+    const removedIds = new Map<string, number>()
+    const addedFallbacks = new Map<string, number>()
+    const removedFallbacks = new Map<string, number>()
+    const firstFallbackLine = new Map<string, number>()
+    for (const { line, text } of file.added) {
+      if (commentOnly(text, masked.get(line))) continue
+      countLiterals(text, addedIds)
+      for (const id of fallbackIdsOnLine(text)) {
+        addedFallbacks.set(id, (addedFallbacks.get(id) ?? 0) + 1)
+        if (!firstFallbackLine.has(id)) firstFallbackLine.set(id, line)
+      }
+    }
+    for (const { text } of file.removed) {
+      if (COMMENT_START.test(text)) continue
+      countLiterals(text, removedIds)
+      for (const id of fallbackIdsOnLine(text)) removedFallbacks.set(id, (removedFallbacks.get(id) ?? 0) + 1)
+    }
+    const raised = (id: string) => (addedIds.get(id) ?? 0) > (removedIds.get(id) ?? 0)
+    /** id → the first added line where it is a foreign-id candidate (hit only when raised). */
+    const foreignCandidates = new Map<string, number>()
+    const idSeen = (id: string, line: number) => {
+      if (allowed.has(id) || !raised(id)) return
+      const known = foreignCandidates.get(id)
+      if (known === undefined || line < known) foreignCandidates.set(id, line)
+    }
+    for (const [id, count] of addedFallbacks) {
+      if (count > (removedFallbacks.get(id) ?? 0)) add({ rule: "fallback_provider_id", file: file.path, line: firstFallbackLine.get(id) as number })
+    }
     for (const { line, text } of file.added) {
       // The literal rules read every line, comments included.
       if (SECRET_PATH.test(text)) add({ rule: "secret_path_literal", file: file.path, line })
@@ -351,14 +432,10 @@ export function scanTurnDiff(diff: TurnDiff, options: TurnGateOptions): TurnGate
       }
       if (/_fbp/.test(text) && FBP_WRITE.some((pattern) => pattern.test(text))) add({ rule: "fbp_write", file: file.path, line })
       for (const pattern of PROVIDER_ID_LITERALS) {
-        for (const match of text.matchAll(pattern)) {
-          if (!allowed.has(match[1] as string)) add({ rule: "foreign_provider_id", file: file.path, line })
-        }
+        for (const match of text.matchAll(pattern)) idSeen(match[1] as string, line)
       }
       if (PIXEL_NAMED.test(text)) {
-        for (const match of text.matchAll(DIGIT_ID_LITERAL)) {
-          if (!allowed.has(match[1] as string)) add({ rule: "foreign_provider_id", file: file.path, line })
-        }
+        for (const match of text.matchAll(DIGIT_ID_LITERAL)) idSeen(match[1] as string, line)
       }
     }
     // A removed opt-out with no equivalent added back for the same pixel argument.
@@ -376,10 +453,12 @@ export function scanTurnDiff(diff: TurnDiff, options: TurnGateOptions): TurnGate
     if (file.added.length === 0) continue
     const addedLines = new Set(file.added.map((entry) => entry.line))
     if (full !== null) {
-      for (const hit of contextualHits(file.path, full, 1, addedLines, allowed)) add(hit)
+      for (const hit of contextualHits(file.path, full, 1, addedLines, allowed, idSeen)) add(hit)
     } else {
-      for (const hunk of hunksOf(file.added)) for (const hit of contextualHits(file.path, hunk.text, hunk.start, addedLines, allowed)) add(hit)
+      for (const hunk of hunksOf(file.added)) for (const hit of contextualHits(file.path, hunk.text, hunk.start, addedLines, allowed, idSeen)) add(hit)
     }
+    // One hit per raised foreign id, on the first added line carrying it.
+    for (const line of foreignCandidates.values()) add({ rule: "foreign_provider_id", file: file.path, line })
   }
   return hits
 }

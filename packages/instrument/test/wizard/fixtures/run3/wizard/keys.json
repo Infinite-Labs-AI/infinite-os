@@ -1,0 +1,86 @@
+{
+  "schema": "infinite-tag.wizard-keys.v1",
+  "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+  "at": "2026-10-03T14:39:19.230Z",
+  "linkId": "lk_J4XNuFXY9P6dzcG0jcZaXA",
+  "keysDigest": "sha256:c00690e36e8cb721315ca4346ef792c73a57268695817b0d1bc4550fd5d4e67b",
+  "choices": {
+    "ga4MeasurementId": null,
+    "metaPixel": null
+  },
+  "comparisons": [
+    {
+      "tool": "infinite",
+      "connection": "not_provisioned",
+      "expected": [],
+      "live": [],
+      "inCode": [],
+      "state": "info",
+      "reason": "not_provisioned"
+    },
+    {
+      "tool": "ga4",
+      "connection": "not_connected",
+      "expected": [],
+      "live": [
+        "G-TEST0000000"
+      ],
+      "inCode": [
+        "G-TEST0000000"
+      ],
+      "state": "undetermined",
+      "reason": "not_connected"
+    },
+    {
+      "tool": "posthog",
+      "connection": "not_connected",
+      "expected": [],
+      "live": [],
+      "inCode": [],
+      "state": "undetermined",
+      "reason": "not_connected"
+    },
+    {
+      "tool": "meta",
+      "connection": "not_connected",
+      "expected": [],
+      "live": [],
+      "inCode": [
+        "1116400780828774"
+      ],
+      "state": "undetermined",
+      "reason": "not_connected"
+    }
+  ],
+  "lines": [
+    {
+      "id": "user_action:connect_ga4",
+      "kind": "user_action",
+      "text": "Connect GA4 in Infinite (Connections) to set it up here. The wizard never makes up a key, so GA4 is skipped until then.",
+      "requires": "user_action",
+      "editable": false
+    },
+    {
+      "id": "user_action:connect_posthog",
+      "kind": "user_action",
+      "text": "Connect PostHog in Infinite (Connections) to set it up here. The wizard never makes up a key, so PostHog is skipped until then.",
+      "requires": "user_action",
+      "editable": false
+    },
+    {
+      "id": "user_action:connect_meta",
+      "kind": "user_action",
+      "text": "Connect Meta in Infinite (Connections) to set it up here. The wizard never makes up a key, so Meta is skipped until then.",
+      "requires": "user_action",
+      "editable": false
+    },
+    {
+      "id": "user_action:vercel_env_write",
+      "kind": "user_action",
+      "text": "Let Infinite save the server-lane settings on Vercel: allow env-var writes in Infinite (Connections › Vercel).",
+      "requires": "user_action",
+      "editable": false
+    }
+  ],
+  "metaInstall": false
+}

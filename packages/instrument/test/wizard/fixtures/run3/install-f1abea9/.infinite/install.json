@@ -1,0 +1,73 @@
+{
+  "workspaceId": "wizard:dd2343b40c24780b",
+  "appRoot": ".",
+  "framework": "next-app-router",
+  "providers": [
+    "infinite"
+  ],
+  "files": [
+    "app/layout.tsx",
+    "lib/infinite-analytics-client.tsx",
+    "lib/infinite-analytics.ts",
+    "next.config.mjs"
+  ],
+  "envKeys": [],
+  "contentHashes": {
+    "app/layout.tsx": "9843fd867951d2efc0e0f5ec9100135b8f546aceaa6e4d78d8c53465367b388a",
+    "lib/infinite-analytics-client.tsx": "d0ce7de5904144e371723317a3983a597b7b9989ed6fa5e418840216f8619b65",
+    "lib/infinite-analytics.ts": "a3437dba24d1c530153e49159faf1e025edd2674b935ec55a1e8a85526693f34",
+    "next.config.mjs": "4c7e60721ab04208527266b29aa44f8cdf5591f003a2afc515a56595bfca03b5"
+  },
+  "configOwnership": {
+    "next.config.mjs": {
+      "kind": "created",
+      "installedHash": "4c7e60721ab04208527266b29aa44f8cdf5591f003a2afc515a56595bfca03b5"
+    }
+  },
+  "wiringVersion": 1,
+  "verifiedAt": null,
+  "ids": {
+    "ga4": [],
+    "posthog": null,
+    "meta": [],
+    "infinite": {
+      "siteSourceKey": "site_c1bc78d179a6bd7cee9f40fb6acf7acb"
+    }
+  },
+  "edits": [
+    {
+      "id": "ed_87bf3abbb11d3f8a",
+      "file": ".gitignore",
+      "jobId": null,
+      "planLineId": "gitignore_fence",
+      "by": "wizard",
+      "beforeHash": "sha256:83125942bbb60809f5b698c5cf98e9381afcbe1a0b8865c95783e7016af955f0",
+      "afterHash": "sha256:6aacf94446b9a3354749f208c700c5770c034e7547a5a6231bc6d65fe19cc56f",
+      "textEdits": [
+        {
+          "offset": 78,
+          "removed": "",
+          "inserted": "# infinite:start\n.infinite/conversions.proposed.json\n.infinite/wizard/\n.infinite/REPORT.md\n.infinite/harness-brief.json\n# infinite:end\n"
+        }
+      ],
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    },
+    {
+      "id": "ed_c90d5393e0e3206a",
+      "file": "public/.well-known/infinite-site-verification.txt",
+      "jobId": null,
+      "planLineId": "install_provider:infinite",
+      "by": "wizard",
+      "beforeHash": null,
+      "afterHash": "sha256:2ed32014d14ad41c35370954efe63ee13d0a28acc190cbcfc3f4c253d2888714",
+      "textEdits": [
+        {
+          "offset": 0,
+          "removed": "",
+          "inserted": "infinite-site-verification: isv_GykqOF_B1mK3mylWkgvt4A\n"
+        }
+      ],
+      "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+    }
+  ]
+}
