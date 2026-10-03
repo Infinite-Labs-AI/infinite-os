@@ -136,7 +136,7 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(handler).toContain('if (decision === "decline" && onCardTurn()) setHistory((current) => messagesAfterDecline(current, outcome));');
     // With the dismissed receipt it answered with, or when it kept the dismissed card; never on a thrown answer.
     expect(handler).toMatch(/recordTurnView\(step\.frame\);\s+refocusCardTurn\(\);\s+if \(!thrown && step\.frame\.view\.state === "cancelled"\) captionDeclined\(outcome\);/u);
-    expect(handler).toMatch(/if \(step\.type === "keep"\) \{\s+if \(!thrown\) captionDeclined\(outcome\);/u);
+    expect(handler).toMatch(/if \(step\.type === "keep"\) \{\s+if \(!thrown\) \{[^}]*captionDeclined\(outcome\);/u);
   });
 
   it("the keys move to the card's frame on its turn, so the bar shows only keys that work now (run-3 N20, CI-visible)", () => {
@@ -149,6 +149,14 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // After the dismissed (or working) frame, after the app's receipt, and when the frame is taken off.
     expect(handler).toContain("if (working || dismissed) refocusCardTurn();");
     expect(handler.split("refocusCardTurn();").length - 1).toBe(3);
+  });
+
+  it("a no the app took with no receipt of its own leaves the dismissed card, now sent (run-3 N22, CI-visible)", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction"),
+      source.indexOf("useEffect(() => {\n    // Don't drain")
+    );
+    expect(handler).toContain("if (dismissed && onCardTurn()) recordTurnView(dismissalSent(dismissed));");
   });
 
   it("scrubs the un-redacted summary through terminalText before rendering", () => {
@@ -495,6 +503,47 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
         expect(after).toContain("Dismissed — nothing was executed.");
         // Nothing redraws the pre-OK line once the app's words are on screen.
         expect(after.slice(after.indexOf("Okay, left it running."))).not.toContain("Ready. It stops spending");
+        await sendKeys(input, "/exit\r");
+        await session;
+        resetTurnState();
+      }
+    );
+  }
+
+  // Live re-check run 3, N22: `Sent to the app` was drawn at `n` and never
+  // changed. In flight it says `Sending to the app…`; the app's answer makes it
+  // `Sent to the app`, with a receipt of its own or without one.
+  for (const [what, answer] of [
+    ["the app's dismissed receipt", "receipt"],
+    ["a plain ok", "plain"]
+  ] as const) {
+    it.skipIf(process.env.CI === "true")(
+      `n: Sending to the app… until the app answers, then Sent to the app (${what})`,
+      { timeout: 30_000 },
+      async () => {
+        const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
+          receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
+        const confirm = deferred<unknown>();
+        const input = ttyInput();
+        const output = ttyOutput();
+        const session = runInkInteractiveSession({
+          columns: 80, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+          onConfirmAction: () => confirm.promise,
+          async onSubmitLine(): Promise<InkInteractiveLineResult> {
+            return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+          }
+        });
+        const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+        await waitFor(() => output.text().includes("Ask Infinite"));
+        await sendKeys(input, "pause it\r");
+        await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+        await sendKeys(input, "n");
+        await waitFor(() => lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
+        expect(lastFrame()).not.toContain("Sent to the app");
+        confirm.resolve(answer === "receipt" ? { ok: true, declined: true, view: dismissed } : { ok: true });
+        await waitFor(() => lastFrame().includes("Sent to the app"), 4_000, lastFrame);
+        expect(lastFrame()).not.toContain("Sending");
+        expect(lastFrame()).toContain("Dismissed — nothing was executed.");
         await sendKeys(input, "/exit\r");
         await session;
         resetTurnState();

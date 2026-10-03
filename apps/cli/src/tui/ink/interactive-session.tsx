@@ -62,7 +62,7 @@ import {
 import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
 import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, type KeyAction, type KeyContext } from "../keys/keymap.js";
-import { fallbackCardLines, declineFrame, fallbackCardRowCount, fieldInvalidMessage, messagesAfterDecline, settleConfirmOutcome } from "./confirm-card.js";
+import { fallbackCardLines, declineFrame, dismissalSent, fallbackCardRowCount, fieldInvalidMessage, messagesAfterDecline, settleConfirmOutcome } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
 import { askedSource, ruleLine, TOP_BAR_ROWS, type TopBarData } from "./top-bar.js";
@@ -1590,7 +1590,11 @@ export function InkInteractiveSessionApp({
         return false;
       }
       if (step.type === "keep") {
-        if (!thrown) captionDeclined(outcome);
+        if (!thrown) {
+          // The app took the no and sent no receipt of its own: the dismissed card, now sent (run-3 N22).
+          if (dismissed && onCardTurn()) recordTurnView(dismissalSent(dismissed));
+          captionDeclined(outcome);
+        }
         return false;
       }
       dropWorking();

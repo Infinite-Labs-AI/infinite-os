@@ -99,8 +99,17 @@ export function dismissedReceiptFrame(head: InSessionConfirmationAction): ToolVi
     message: terminalText(view.title),
     viewId: `receipt:${head.confirmationHandle}`,
     name: view.tool,
-    view: { ...view, state: "cancelled", stateReason: { code: "dismissed", words: DISMISSED_WORDS } } as typeof view
+    // `sending` (renderer-local, never sent, like the working card's `appliedAt`):
+    // the no is on its way, so the card says `Sending to the app…` (run-3 N22).
+    view: { ...view, state: "cancelled", stateReason: { code: "dismissed", words: DISMISSED_WORDS }, sending: true } as unknown as typeof view
   };
+}
+
+/** The dismissed card once the app took the no and sent no receipt of its own: the same card, now sent. */
+export function dismissalSent(frame: ToolViewFrameV1): ToolViewFrameV1 {
+  const { sending: _sending, ...view } = frame.view as typeof frame.view & { sending?: unknown };
+  void _sending;
+  return { ...frame, view: view as typeof frame.view };
 }
 
 /** The frame a decision leaves on its turn the moment it is made: only a `n` leaves one (the dismissed card). */

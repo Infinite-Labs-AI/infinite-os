@@ -5,8 +5,8 @@ import type { InSessionConfirmationAction } from "../../desktop/confirm-in-sessi
 import { displayWidth } from "../lib/display-width.js";
 import { confirmCardKeys } from "../keys/keymap.js";
 import { DEFAULT_THEME } from "../theme.js";
-import { ConfirmActionMenu, DECLINED_FALLBACK_CAPTION, DISMISSED_WORDS, declineFrame, dismissedReceiptFrame, fallbackCardLines, fallbackCardRowCount, messagesAfterDecline, receiptViewFrame, settleConfirmOutcome } from "./confirm-card.js";
-import { renderLiveTurn } from "../views/layout.js";
+import { ConfirmActionMenu, DECLINED_FALLBACK_CAPTION, DISMISSED_WORDS, declineFrame, dismissalSent, dismissedReceiptFrame, fallbackCardLines, fallbackCardRowCount, messagesAfterDecline, receiptViewFrame, settleConfirmOutcome } from "./confirm-card.js";
+import { renderCommittedTurn, renderLiveTurn } from "../views/layout.js";
 import type { TurnStep } from "../app/turn-store.js";
 import { renderToString } from "./renderer.js";
 
@@ -295,5 +295,65 @@ describe("the line over a declined card (run-3 M5)", () => {
     const esc = String.fromCharCode(27);
     const out = messagesAfterDecline(turn(ASKED), { ...declined, dismissedCaption: `${esc}[31mOkay, left it running.${esc}[0m` });
     expect(out[1]?.text).toBe(DISMISSED);
+  });
+});
+
+// Live re-check run 3, N22: `Sent to the app` was drawn the moment `n` was
+// pressed and never changed. While the no is on its way the dismissed card
+// says so; once the app answers it reads r4's last frame (`Sent to the app`),
+// or the app's own word when its receipt carries one.
+describe("the dismissed card's last line follows the app's answer (run-3 N22)", () => {
+  const cardView = {
+    v: 1, kind: "change", tool: "propose_pause_entity", title: "Pause Hook A", state: "needs_yes", asOf: null,
+    scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+    body: { target: { kind: "ad", label: "Hook A" }, rows: [{ label: "Status", before: "On", after: "Paused" }], warnings: [] },
+    approval: { kind: "card", title: "Pause ad “Hook A”?", summary: "Stops its spend.", confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [] }
+  };
+  const head = pending({ view: cardView as never });
+  const drawn = (frame: { view: unknown }) => renderLiveTurn({
+    messages: [{ role: "user", text: "pause hook a" }, { role: "assistant", text: "Okay, left it running." }],
+    views: [frame.view as never], focus: null, width: 100, color: false, theme: DEFAULT_THEME
+  }).lines.map(plain);
+  const appReceipt = (receipt: Record<string, unknown>) => ({
+    ok: true, declined: true,
+    view: { ...cardView, approval: undefined, state: "cancelled", receipt: { sentence: DISMISSED_WORDS, tone: "ok", revertible: false, ...receipt } }
+  });
+
+  it("while the no is on its way: `Sending to the app…`, never `Sent`", () => {
+    const lines = drawn(dismissedReceiptFrame(head)!);
+    expect(lines).toContain(`✕ ${DISMISSED_WORDS}`);
+    expect(lines).toContain("Sending to the app…");
+    expect(lines.join("\n")).not.toContain("Sent to the app");
+  });
+
+  it("the app's receipt replaces it in place: `Sent to the app`, as r4's last frame", () => {
+    const step = settleConfirmOutcome(head, appReceipt({}), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
+    expect(step.type).toBe("receipt");
+    const lines = drawn(step.type === "receipt" ? step.frame : { view: null });
+    expect(lines).toContain("Sent to the app");
+    expect(lines.join("\n")).not.toContain("Sending");
+  });
+
+  it("the app's own word, when its receipt carries one", () => {
+    const step = settleConfirmOutcome(head, appReceipt({ provenanceLine: "Recorded in the app" }), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
+    const lines = drawn(step.type === "receipt" ? step.frame : { view: null });
+    expect(lines).toContain("Recorded in the app");
+    expect(lines.join("\n")).not.toMatch(/Sen(t|ding) to the app/u);
+  });
+
+  it("an app that took the no with no receipt of its own: the same card, now sent", () => {
+    const frame = dismissedReceiptFrame(head)!;
+    const sent = dismissalSent(frame);
+    expect(sent.viewId).toBe(frame.viewId);
+    expect(drawn(sent)).toContain("Sent to the app");
+    expect(drawn(sent).join("\n")).not.toContain("Sending");
+  });
+
+  it("printed into scrollback, where nothing follows the answer, it says what was done: sent", () => {
+    const lines = renderCommittedTurn({
+      messages: [{ role: "user", text: "pause hook a" }], views: [dismissedReceiptFrame(head)!.view], focus: null, width: 100, color: false, theme: DEFAULT_THEME
+    }).map(plain);
+    expect(lines).toContain("Sent to the app");
+    expect(lines.join("\n")).not.toContain("Sending");
   });
 });
