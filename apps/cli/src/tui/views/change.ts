@@ -21,6 +21,7 @@ import type { AnswerViewEnvelopeV1, AnswerViewV1 } from "@infinite-os/types";
 
 import { beforeAfter, cardBody, cardBox, cardWidth, chipRows, fieldRows, paragraphIn, setTo, type CardTone, type FieldRow } from "./card.js";
 import { displayWidth } from "../lib/display-width.js";
+import { openKeyLabel } from "./open-target.js";
 import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
 import { cellText, cutAtWord, FootnoteBook, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
@@ -177,7 +178,7 @@ function changeCard(view: AnswerViewV1, title: string, tone: CardTone, content: 
   const inner = cardInner(ctx);
   const link = isRecord(view.appLink) ? view.appLink : null;
   const chips = ctx.caps.open && link
-    ? chipRows([{ key: "o", label: viewText(link.label, "open in the app") }], null, inner, ctx)
+    ? chipRows([{ key: "o", label: openKeyLabel(viewText(link.label)) }], null, inner, ctx)
     : [];
   // A view's own explain is printed by the shell under the view; the approval's
   // summary (the `?` text Cmd+L shows) has no other place, so it opens inside.

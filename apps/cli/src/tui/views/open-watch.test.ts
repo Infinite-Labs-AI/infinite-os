@@ -188,6 +188,83 @@ describe("`o` on an approval card", () => {
   });
 });
 
+// Live T4 (round 4): `o` was labelled with the state's fix sentence ("If it
+// changed in Ads Manager since: Live refresh in Meta Ads"), and a card said
+// `o Open in Meta Ads` while the bar said `o open in the app`. The o label is
+// the app link's own label (`open in <place>` when it names itself so), else
+// `open`; the card's key line and the bar say the same. What o opens is unchanged.
+describe("one `o` label: the app link's own, never the fix sentence (live T4)", () => {
+  const FIX_SENTENCE = "If it changed in Ads Manager since: Live refresh in Meta Ads";
+  const stale = (appLink: Record<string, unknown>) => view({
+    ...raw("numbers-ads"),
+    state: "out_of_date",
+    stateReason: { code: "out_of_date", words: "These numbers are from yesterday.", fix: { label: FIX_SENTENCE, appLink } }
+  });
+  // A chip without colour reads `[o] open in Meta Ads` (card.ts chipRows).
+  const chipLabel = (lines: readonly string[]): string | null => {
+    for (const row of lines.map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""))) {
+      const match = /\[o\] (.+?)(?:\s{2,}|\s*│|$)/u.exec(row);
+      if (match) return match[1]!.trim();
+    }
+    return null;
+  };
+
+  it("a state fix with an app link: o reads the link's label, never the fix sentence, and opens the fix's place", () => {
+    const v = stale({ place: "ads.meta", label: "Open in Meta Ads" });
+    const render = renderView(v, ctx(NEW));
+    expect(render.openLabel).toBe("Open in Meta Ads");
+    const state = engaged(v, NEW);
+    const o = hints(state, v).find((hint) => hint.key === "o");
+    expect(o?.label).toBe("open in Meta Ads");
+    expect(JSON.stringify(hints(state, v))).not.toContain("If it changed");
+    expect(press(state, v, "o").effect).toEqual({ type: "open", target: { place: "ads.meta" } });
+  });
+
+  it("a fix link with no label of its own: plain `open`", () => {
+    const v = stale({ place: "ads.meta" });
+    const state = engaged(v, NEW);
+    expect(hints(state, v).find((hint) => hint.key === "o")?.label).toBe("open");
+    expect(JSON.stringify(renderView(v, ctx(NEW)))).not.toContain(`o  ${FIX_SENTENCE}`);
+  });
+
+  it("an approval card: its `o` chip and the key bar say the same label", () => {
+    const v = view({
+      ...raw("images-done"),
+      state: "needs_yes",
+      appLink: { place: "ads.meta", label: "Open in Meta Ads" },
+      approval: { kind: "card", title: "Pause ad “Ad A”?", confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [] }
+    });
+    const drawn = approvalRender(v, { ...ctx(NEW), ui: cardUiStart(null), fieldsCapable: true });
+    const bar = drawn.keys.find((hint) => hint.key === "o");
+    expect(bar?.label).toBe("open in Meta Ads");
+    expect(chipLabel(drawn.lines)).toBe("open in Meta Ads");
+    expect(keyBarText(drawn.keys)).not.toContain("open in the app");
+  });
+
+  it("an approval card whose link does not name itself `Open in …`: chip and bar both `open`", () => {
+    const v = view({
+      ...raw("images-done"),
+      state: "needs_yes",
+      appLink: { place: "creative.library", label: "Library" },
+      approval: { kind: "card", title: "Save 3 images?", confirmLabel: "Save", dismissLabel: "Dismiss", rows: [] }
+    });
+    const drawn = approvalRender(v, { ...ctx(NEW), ui: cardUiStart(null), fieldsCapable: true });
+    expect(drawn.keys.find((hint) => hint.key === "o")?.label).toBe("open");
+    expect(chipLabel(drawn.lines)).toBe("open");
+  });
+
+  it("a settled change card: its `o` chip says what the bar says", () => {
+    const v = view({ ...raw("change-pause-card"), state: "done", outcome: "applied", approval: undefined,
+      appLink: { place: "ads.meta", label: "Open in Meta Ads" },
+      receipt: { sentence: "Paused.", tone: "ok", revertible: false } });
+    const render = renderView(v, ctx(NEW));
+    const state = engaged(v, NEW);
+    const bar = hints(state, v).find((hint) => hint.key === "o")?.label;
+    expect(bar).toBe("open in Meta Ads");
+    expect(chipLabel(render.detail)).toBe(bar);
+  });
+});
+
 // TJ-3 + W3-list-ready (plan owner's decision): the engagement gate stays, as
 // in a normal coding harness an empty prompt never captures a letter. Before
 // the view is engaged `o`, `w`, `m` and `c` are the first letter of a message;

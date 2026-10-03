@@ -152,7 +152,9 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
  * The place `o` opens (T12, app.open.v1), only when the session can open
  * places: the kind's own (a job's landing, a list row's, a health fix), else
  * the state's fix link, else the view's own link. A kind that decided there is
- * none (null) gets none. Never a URL: place and params only.
+ * none (null) gets none. Never a URL: place and params only. Its label is the
+ * link's own (`Open in Meta Ads`), else `open`: never the fix's sentence
+ * (live T4: `If it changed in Ads Manager since: …` labelled the key).
  */
 function openFor(view: AnswerViewV1, body: KindRender | null, ctx: ViewRenderCtx): { openLink?: AppOpenTargetOf; openLabel?: string } {
   if (!ctx.caps.open) return {};
@@ -163,7 +165,7 @@ function openFor(view: AnswerViewV1, body: KindRender | null, ctx: ViewRenderCtx
   const link = fix && isRecord(fix.appLink) ? fix.appLink : isRecord(view.appLink) ? view.appLink : null;
   const target = appOpenTarget(link);
   if (!target) return {};
-  return { openLink: target, openLabel: viewText(fix && isRecord(fix.appLink) ? fix.label : link?.label) || viewText(link?.label) || "open" };
+  return { openLink: target, openLabel: viewText(link?.label) || "open" };
 }
 
 type AppOpenTargetOf = NonNullable<KindRender["openLink"]>;

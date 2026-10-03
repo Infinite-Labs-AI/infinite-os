@@ -12,6 +12,7 @@ import type { AnswerViewEnvelopeV1, AnswerViewV1 } from "@infinite-os/types";
 
 import { chipRows, paragraphIn } from "./card.js";
 import { labelValueLines, warningLines } from "./change.js";
+import { openKeyLabel } from "./open-target.js";
 import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
 import { cellText, FootnoteBook, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
@@ -48,7 +49,7 @@ function launchViewLines(view: AnswerViewV1, ctx: ViewRenderCtx, notes: Footnote
     const body = isRecord(view.body) ? view.body : {};
     const link = isRecord(view.appLink) ? view.appLink : null;
     const chips = ctx.caps.open && link
-      ? chipRows([{ key: "o", label: viewText(link.label, "open in the app") }], null, ctx.width, ctx)
+      ? chipRows([{ key: "o", label: openKeyLabel(viewText(link.label)) }], null, ctx.width, ctx)
       : [];
     return [
       ...paragraphIn(`✓ ${sentence}`, ctx.width, "gb", ctx),

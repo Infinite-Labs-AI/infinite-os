@@ -243,7 +243,8 @@ export function keyBarHints(ctx: KeyContext): KeyHint[] {
   if (card.page) hints.push({ key: "space", label: "next page" });
   if (card.edit) hints.push({ key: "e", label: "edit in the app" });
   if (card.copy) hints.push({ key: "c", label: "copy" });
-  if (ctx.caps.open) hints.push({ key: "o", label: "open in the app" });
+  // The card names its place (`openKeyLabel`, approval.ts); with no name, `open`.
+  if (ctx.caps.open) hints.push({ key: "o", label: "open" });
   if (ctx.caps.watch) hints.push({ key: "w", label: "watch" });
   if (ctx.caps.retry) hints.push({ key: "r", label: "retry" });
   // A card says `? what it does` inside itself (r4 `card()`): never on the bar.

@@ -400,7 +400,9 @@ describe("the approval card, as r4 draws it", () => {
       // r4 says "See the Facebook previews in the app"; the terminal keeps its generic words.
       row(74, "amber", ["blue", "↗"], ["", " Pictures show in the app.  "], ["dim", "(o)"])
     ]);
-    expect(rows[9]).toEqual(row(74, "amber", ["pk", " l "], ["", " "], ["b", "Launch 3 ads"], ["", "   "], ["key", " n "], ["", " dismiss   "], ["key", " o "], ["", " previews"]));
+    // r4 view-07 draws `o previews` here; the card's `o` chip says what the bar says (live T4, one o label):
+    // `open in <place>` when the link names itself so, else `open` (views/open-target.ts openKeyLabel).
+    expect(rows[9]).toEqual(row(74, "amber", ["pk", " l "], ["", " "], ["b", "Launch 3 ads"], ["", "   "], ["key", " n "], ["", " dismiss   "], ["key", " o "], ["", " open"]));
   });
 });
 

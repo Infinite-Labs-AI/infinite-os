@@ -28,7 +28,7 @@ import { changeCardSummary } from "./change.js";
 import { compareHasRangeMethod } from "./compare.js";
 import { listOpeningRow } from "./list.js";
 import { managedApproval } from "./managed.js";
-import type { AppOpenTarget } from "./open-target.js";
+import { openKeyLabel, type AppOpenTarget } from "./open-target.js";
 import { truncatedMoreAsk, turnAsk, viewText } from "./primitives.js";
 import { quietStopAsk, renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
@@ -226,7 +226,7 @@ export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender
     rowCopies: (render.rowCopies ?? []).map((text) => viewText(text) || null),
     copy: viewText(render.copyText) || null,
     approve: approveFact(render.approvalAsk),
-    open: render.openLink ? { target: render.openLink, label: viewText(render.openLabel) || "open in the app" } : null,
+    open: render.openLink ? { target: render.openLink, label: viewText(render.openLabel) || "open" } : null,
     watch: turnAsk(render.watchAsk),
     table: view.kind === "numbers",
     tabNoun: view.kind === "document" ? documentTabNoun(view.body) : null,
@@ -424,16 +424,8 @@ export function resolveViewKey(
  */
 export const HANDLED_KIND_KEYS: ReadonlySet<string> = new Set<string>();
 
-/**
- * The composer bar's word for `o`, as r4 draws it: `open`, or `open in <place>`
- * when the link names itself that way (flow-images `o open in Library`). Never
- * a link's raw label (`Posts`, `Connect the store`): those read as the place,
- * not the key, and stay on the view's own `(o)` line.
- */
-function openBarLabel(label: string): string {
-  const named = /^open in\s+(.+)$/iu.exec(label.trim());
-  return named ? `open in ${named[1]}` : "open";
-}
+/** The composer bar's word for `o`: the same words as a card's `o` chip (`openKeyLabel`). */
+const openBarLabel = openKeyLabel;
 
 function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKeyFacts): ViewFocusState {
   // Every key that acts engages the view.
