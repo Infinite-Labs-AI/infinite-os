@@ -19,8 +19,9 @@ const stripAnsi = (value: string) => value.replace(new RegExp(`${String.fromChar
 
 describe("T12 wiring (CI-runnable)", () => {
   it("the view keys take the app's negotiated caps, never a fixed none", () => {
-    expect(source.match(/viewFocusAfterTurnDone\(views\.map\(\(frame\) => frame\.view\), viewCaps\(\)\)/gu)?.length).toBe(3);
-    expect(source).not.toMatch(/viewFocusAfterTurnDone\([^)]*\), NO_KEY_CAPS\)/u);
+    // The third argument is the turn's card (the polish lane's lookup fold); the caps stay the app's.
+    expect(source.match(/viewFocusAfterTurnDone\(views\.map\(\(frame\) => frame\.view\), viewCaps\(\)(?:, [^;]+)?\) : null/gu)?.length).toBe(3);
+    expect(source).not.toMatch(/viewFocusAfterTurnDone\([^;]*NO_KEY_CAPS/u);
     expect(indexSource).toContain("appCaps: () => runner.caps(),");
   });
 
