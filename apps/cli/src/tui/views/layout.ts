@@ -257,10 +257,12 @@ export function turnMaySplit(messages: readonly Msg[], width: number): boolean {
  * not a `/` command, and no command output with it): the turns r4 draws in its
  * frame, so the session draws one in the turn layout even with no view, its
  * details pane r4's `steps only`. A command's output stays the transcript's.
+ * The question's own notes (its stop or error line, a line queued behind it:
+ * `turnNote`) keep it a question, so it never jumps to one column as it ends.
  */
 export function isQuestionTurn(messages: readonly Msg[]): boolean {
   return messages.some((msg) => msg.role === "user" && msg.kind === undefined && !msg.text.trimStart().startsWith("/"))
-    && messages.every((msg) => msg.kind !== "slash" && msg.kind !== "intro" && msg.kind !== "panel");
+    && messages.every((msg) => (msg.kind !== "slash" || msg.turnNote === true) && msg.kind !== "intro" && msg.kind !== "panel");
 }
 
 /**
@@ -451,8 +453,14 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   };
   // When wide, r4 always splits: a turn with an answer and nothing for the
   // details pane shows r4's dim `steps only` there (its calls are the Steps).
+  // A finished turn with no Steps at all leaves the pane empty (the separator
+  // only), so the label never points at a strip that is not on screen.
   const leftAnswer = wide && !takesPane ? answerAt(panes.left) : [];
-  const stepsOnly: ViewRender[] = leftAnswer.length ? [stepsOnlyRender({ color: input.color, theme: input.theme })] : [];
+  const quietCalls = drawn.some((render) => !inDetailsPane(render) && render.detail.length > 0);
+  const hasSteps = stepRows.length > 0 || quietCalls || input.working !== undefined;
+  const stepsOnly: ViewRender[] = leftAnswer.length
+    ? [hasSteps ? stepsOnlyRender({ color: input.color, theme: input.theme }) : EMPTY_PANE]
+    : [];
   const sideBySide = wide && (takesPane || stepsOnly.length > 0);
   const answer = leftAnswer.length ? leftAnswer : answerAt(sideBySide ? panes.left : width);
   const compact = input.compact === true;
@@ -472,6 +480,9 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
 function stepsOnlyRender(style: { color: boolean; theme: Theme }): ViewRender {
   return { head: paint("steps only", "dim", style), source: null, detail: [], footnotes: [], keys: [], okKey: null, rowCount: 0, quiet: true };
 }
+
+/** An empty details pane: a wide turn with no view, no card and no Steps keeps r4's split, the separator only. */
+const EMPTY_PANE: ViewRender = { head: "", source: null, detail: [], footnotes: [], keys: [], okKey: null, rowCount: 0 };
 
 /** The renders the details pane draws: a quiet one only when the turn has nothing else to show. */
 function paneRenders(all: readonly ViewRender[]): ViewRender[] {

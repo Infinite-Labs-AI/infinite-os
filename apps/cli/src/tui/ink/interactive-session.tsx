@@ -1173,6 +1173,7 @@ export function InkInteractiveSessionApp({
     appendMessages([{
       kind: "slash",
       role: "system",
+      turnNote: true,
       text: `queued: "${previewQueuedLine(line)}"`
     }]);
   }, [appendMessages, rememberInputLine]);
@@ -1269,9 +1270,11 @@ export function InkInteractiveSessionApp({
           appendMessages(stampAgentTitle(partial, turnTitle));
         }
       }
+      // The turn's own note, not a command's output: a question keeps its layout as it ends.
       appendMessages([{
         kind: "slash",
         role: "system",
+        turnNote: true,
         text: stoppedLine ?? `error: ${error instanceof Error ? error.message : String(error)}`
       }]);
     } finally {

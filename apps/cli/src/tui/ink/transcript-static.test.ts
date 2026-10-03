@@ -250,8 +250,8 @@ describe("the session wires the live cap (CI-run)", () => {
       title: "Infinite TUI"
     })).split("\n");
     expect(rendered[0]).toContain("∞ Infinite");
-    // From 80 columns the turn sits side by side, r4's `steps only` right of the question.
-    expect(rendered[2]).toMatch(/^❯ how did it go\? +│ steps only$/u);
+    // From 80 columns the turn sits side by side; with no Steps its details pane is empty.
+    expect(rendered[2]).toMatch(/^❯ how did it go\? +│$/u);
     expect(rendered.some((line) => /more lines|lines above/.test(line))).toBe(false);
   });
 

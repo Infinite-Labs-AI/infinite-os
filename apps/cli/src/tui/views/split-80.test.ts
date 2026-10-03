@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { r4Segments, seg } from "../../formatting/r4-segments.test-util.js";
+import { getTurnState, resetTurnState } from "../app/turn-store.js";
 import { INFINITE_R4_THEME } from "../theme.js";
 import type { Msg } from "../types.js";
 import { cardBox } from "./card.js";
-import { layoutTurn, paneWidths, renderCommittedTurn, renderLiveTurn, SPLIT_MIN_COLUMNS, turnMaySplit } from "./layout.js";
+import { isQuestionTurn, layoutTurn, paneWidths, renderCommittedTurn, renderLiveTurn, SPLIT_MIN_COLUMNS, turnMaySplit } from "./layout.js";
 import { cutAtWord } from "./primitives.js";
 import type { ViewRender } from "./types.js";
 
@@ -60,22 +61,45 @@ describe("the split threshold is r4's: 80 columns", () => {
 });
 
 describe("a turn with nothing for the details pane: r4's `steps only`", () => {
+  const read = [{ id: "c1", name: "read_sample", label: "reading the sample", status: "ok" as const, startedAt: 0, endedAt: 400, result: "read" }];
+
   it.each([80, 100, 160])("at %i the answer is the left pane and the details pane says `steps only`, dim", (width) => {
     const { left } = r4Panes(width);
-    const drawn = renderLiveTurn({ messages, views: [], focus: null, width, color: true, theme });
+    const drawn = renderLiveTurn({ messages, views: [], focus: null, steps: read, width, color: true, theme });
     expect(r4Segments(drawn.lines[0]!).slice(-3)).toEqual(seg(["│", "line"], [" ", ""], ["steps only", "dim"]));
-    const plain = renderLiveTurn({ messages, views: [], focus: null, width, color: false, theme }).lines;
+    const plain = renderLiveTurn({ messages, views: [], focus: null, steps: read, width, color: false, theme }).lines;
     expect(plain[0]).toBe(`❯ how is the week going?${" ".repeat(left - 24)} │ steps only`);
     // Every row of the body carries the separator, and no line is wider than the window.
-    expect(drawn.lines.every((line) => line.includes("│"))).toBe(true);
+    const body = drawn.lines.slice(0, drawn.lines.findIndex((line) => line.includes("Steps")));
+    expect(body.length).toBeGreaterThan(0);
+    expect(body.every((line) => line.includes("│"))).toBe(true);
     // Nothing on the right to switch to: the key bar keeps `tab switch side` off.
     expect(drawn.details).toBe(false);
   });
 
   it("says nothing else: no scenario sentence, no source row", () => {
-    const lines = renderLiveTurn({ messages, views: [], focus: null, width: 100, color: false, theme }).lines;
-    const right = lines.map((line) => line.slice(31).trimEnd()).filter(Boolean);
+    const lines = renderLiveTurn({ messages, views: [], focus: null, steps: read, width: 100, color: false, theme }).lines;
+    const body = lines.slice(0, lines.findIndex((line) => line.startsWith("─ Steps")));
+    const right = body.map((line) => line.slice(31).trimEnd()).filter(Boolean);
     expect(right).toEqual(["steps only"]);
+  });
+
+  it.each([80, 100, 160])("at %i a finished turn with no Steps keeps the split, its details pane empty: no `steps only` pointing at nothing", (width) => {
+    const { left } = r4Panes(width);
+    const drawn = renderLiveTurn({ messages, views: [], focus: null, width, color: false, theme });
+    expect(drawn.lines.join("\n")).not.toContain("steps only");
+    expect(drawn.lines.some((line) => line.startsWith("─ Steps"))).toBe(false);
+    // Still two columns: every row ends at the separator, the answer in the left pane.
+    expect(drawn.lines[0]).toBe(`❯ how is the week going?${" ".repeat(left - 24)} │`);
+    expect(drawn.lines.every((line) => line.endsWith(" │"))).toBe(true);
+    expect(drawn.details).toBe(false);
+  });
+
+  it("a running turn with no Steps yet says `steps only` (its calls are on the way)", () => {
+    resetTurnState();
+    const working = getTurnState();
+    const lines = renderLiveTurn({ messages: messages.slice(0, 1), views: [], focus: null, width: 80, color: false, theme, working, nowMs: 0 }).lines;
+    expect(lines[0]!.slice(26)).toBe(" │ steps only");
   });
 
   it("the Steps strip stays under both panes, at the whole width", () => {
@@ -108,6 +132,47 @@ describe("a turn with nothing for the details pane: r4's `steps only`", () => {
   it("in scrollback it is one column, with no `steps only`", () => {
     const lines = renderCommittedTurn({ messages, views: [], focus: null, width: 160, color: false, theme });
     expect(lines).toEqual(["❯ how is the week going?", "", "∞ Steady: the same pace as last week."]);
+  });
+});
+
+describe("a question stays a question turn when it stops or fails (it never jumps to one column)", () => {
+  const partial: Msg[] = [
+    { role: "user", text: "how is the week going?" },
+    { role: "assistant", text: "Steady so far: the same", partial: true }
+  ];
+  const note = (text: string): Msg => ({ kind: "slash", role: "system", text, turnNote: true });
+
+  it("a question is a question turn", () => {
+    expect(isQuestionTurn(partial)).toBe(true);
+  });
+
+  it.each([
+    ["its stop line", "■ Stopped. Anything already running in the app may still finish."],
+    ["its error line", "error: the app did not answer"],
+    ["a line queued behind it", "queued: \"and last week?\""]
+  ])("with %s after it, it is still a question turn", (_name, text) => {
+    expect(isQuestionTurn([...partial, note(text)])).toBe(true);
+    // Stopped before any answer came: the question and the stop line.
+    expect(isQuestionTurn([partial[0]!, note(text)])).toBe(true);
+  });
+
+  it("a stopped question draws side by side at 80 with the stop line in the answer pane", () => {
+    const stopped = [...partial, note("■ Stopped. Anything already running in the app may still finish.")];
+    const lines = renderLiveTurn({ messages: stopped, views: [], focus: null, width: 80, color: false, theme }).lines;
+    expect(lines.every((line) => line.slice(26).startsWith(" │"))).toBe(true);
+    expect(lines.join("\n")).toContain("■ Stopped.");
+    expect(lines.every((line) => line.length <= 80)).toBe(true);
+  });
+
+  it("a command's output is not a question turn: a `/` line, or a typed command answered by command lines", () => {
+    expect(isQuestionTurn([{ role: "user", text: "/help" }, { kind: "slash", role: "system", text: "Commands: /connect" }])).toBe(false);
+    expect(isQuestionTurn([{ role: "user", text: "sync demo" }, { kind: "slash", role: "system", text: "Synced demo." }])).toBe(false);
+    expect(isQuestionTurn([{ role: "user", text: "connect demo" }, { kind: "slash", role: "system", text: "Type confirm to continue." }])).toBe(false);
+  });
+
+  it("an intro or a panel is never a question turn", () => {
+    expect(isQuestionTurn([{ kind: "intro", role: "system", text: "Welcome" }, ...partial])).toBe(false);
+    expect(isQuestionTurn([...partial, { kind: "panel", role: "system", text: "Projects" }])).toBe(false);
   });
 });
 

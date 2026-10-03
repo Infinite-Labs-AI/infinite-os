@@ -125,6 +125,10 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
   it("without views (an old desktop sends none) the turn still splits from 80 columns: r4's `steps only` on the right", () => {
     const draw = (columns: number) => {
       resetTurnState();
+      patchTurnState((state) => ({
+        ...state,
+        steps: [{ id: "c1", name: "list_meta_entities", label: "listing meta entities", status: "ok", startedAt: 0, endedAt: 500, result: "3 ads" }]
+      }));
       return stripAnsi(renderInkInteractiveSessionToString({
         columns,
         initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
@@ -142,6 +146,43 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(narrow.join("\n")).not.toContain(" │ ");
     expect(narrow.join("\n")).not.toContain("steps only");
     expect(narrow.join("\n")).toContain("Two are on.");
+  });
+
+  it("a finished question with no Steps keeps the split at 80, its details pane empty (no `steps only` over nothing)", () => {
+    resetTurnState();
+    const rows = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 80,
+      initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
+      onSubmitLine: async () => ({ messages: [] })
+    })).split("\n").map((row) => row.trimEnd());
+    expect(rows).toContain(`❯ which ads are on?${" ".repeat(7)} │`);
+    expect(rows.join("\n")).not.toContain("steps only");
+    expect(rows.join("\n")).not.toContain("─ Steps");
+  });
+
+  it.each([
+    ["stopped", "■ Stopped. Anything already running in the app may still finish."],
+    ["failed", "error: the app did not answer"]
+  ])("a question that %s stays side by side at 80 (it never jumps to one column)", (_name, text) => {
+    resetTurnState();
+    const rows = stripAnsi(renderInkInteractiveSessionToString({
+      columns: 80,
+      initialMessages: [
+        { role: "user", text: "which ads are on?" },
+        { role: "assistant", text: "Two are", partial: true },
+        { kind: "slash", role: "system", text, turnNote: true }
+      ],
+      onSubmitLine: async () => ({ messages: [] })
+    })).split("\n").map((row) => row.trimEnd());
+    expect(rows).toContain(`❯ which ads are on?${" ".repeat(7)} │`);
+    const noteRow = rows.find((row) => row.includes(text.slice(0, 9)));
+    expect(noteRow?.slice(26)).toMatch(/^ │/u);
+    expect(rows.every((row) => displayWidth(row) <= 80)).toBe(true);
+  });
+
+  it("the stop and error lines (and a line queued behind the turn) are the turn's own notes, not command output", () => {
+    expect(sessionSource).toMatch(/kind: "slash",\s+role: "system",\s+turnNote: true,\s+text: stoppedLine \?\? `error: /u);
+    expect(sessionSource).toMatch(/kind: "slash",\s+role: "system",\s+turnNote: true,\s+text: `queued: /u);
   });
 
   it("a command's output is never drawn as a turn: no split and no `steps only`, at any width", () => {
@@ -432,6 +473,41 @@ describe("a running turn's views (r4 working frames)", () => {
     expect(stripAnsi(output.text())).not.toContain("**Demo");
     finish();
     await waitFor(() => /∞ Two are on; paused Demo item +│/u.test(stripAnsi(output.text())), 4_000, output.text);
+    await sendKeys(input, "/exit\r");
+    await session;
+  });
+});
+
+describe("stopping a question at 80 columns (fake TTY; skipped on CI like the other PTY tests)", () => {
+  it.skipIf(process.env.CI === "true")("a question with no view stopped at 80 keeps the separator column", { timeout: 30_000 }, async () => {
+    resetTurnState();
+    const input = ttyInput();
+    const output = ttyOutput(80);
+    const session = runInkInteractiveSession({
+      columns: 80,
+      errorOutput: ttyOutput(80),
+      input,
+      turnStoppable: true,
+      onSubmitLine(line, onProgress, signal) {
+        if (line === "/exit") return Promise.resolve({ exit: true, messages: [] });
+        onProgress?.({ type: "message.delta", stage: "message", message: "PARTIAL", text: "Two are" });
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("Detached from the Desktop turn.")), { once: true });
+        });
+      },
+      output,
+      title: "Infinite TUI"
+    });
+    const lastFrame = () => stripAnsi(output.text().split(`${ESC}[?2026h`).at(-1) ?? "");
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
+    await sendKeys(input, "which ads are on?\r");
+    await waitFor(() => /❯ which ads are on\? +│ steps only/u.test(lastFrame()), 4_000, lastFrame);
+    input.write("\x1b");
+    await waitFor(() => lastFrame().includes("■ Stopped."), 4_000, lastFrame);
+    // Still two columns: the question beside the separator, the stop line in the answer pane.
+    expect(lastFrame()).toMatch(/❯ which ads are on\? +│/u);
+    const stopRow = lastFrame().split("\n").find((row) => row.includes("■ Stopped."))!;
+    expect(stopRow.slice(26)).toMatch(/^ │/u);
     await sendKeys(input, "/exit\r");
     await session;
   });
