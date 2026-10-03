@@ -46,7 +46,7 @@ export function createGitHubAdapter(gh: GhClient): GitHubHostAdapter {
     auth: () => ghAuthStatus(gh),
     async repoFacts() {
       const value = await repo()
-      return { isPrivate: value.isPrivate, defaultBranch: value.defaultBranch, viewerPermission: value.viewerPermission }
+      return { isPrivate: value.isPrivate, defaultBranch: value.defaultBranch, viewerPermission: value.viewerPermission, homepageUrl: value.homepageUrl }
     },
     findPr: (branch) => findPr(gh, branch),
     createDraftPr: (input): Promise<PrSummary> => createDraftPr(gh, input),

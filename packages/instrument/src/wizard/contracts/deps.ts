@@ -38,6 +38,8 @@ export interface WizardOptions {
   noProve: boolean
   /** Launched by an agent (a nesting marker is set and there is no TTY): §3d.7. */
   nested: boolean
+  /** §3y.1 `--production-host <host>`: the live site's address (validated; never a preview-shaped host). */
+  productionHost?: string | null
 }
 
 /** Read and update the run state; `save` writes state.json atomically (0600). */

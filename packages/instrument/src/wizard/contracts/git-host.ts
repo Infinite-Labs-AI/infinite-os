@@ -112,7 +112,8 @@ export interface ReviewThread {
 export interface GitHostAdapter {
   kind: GitHostKind
   auth(): Promise<{ ok: boolean; login: string | null }>
-  repoFacts(): Promise<{ isPrivate: boolean; defaultBranch: string | null; viewerPermission: string | null } | Unsupported>
+  /** `homepageUrl` (§3y.1, optional): the repo's homepage, a hint for the live-site ask only. */
+  repoFacts(): Promise<{ isPrivate: boolean; defaultBranch: string | null; viewerPermission: string | null; homepageUrl?: string | null } | Unsupported>
   findPr(branch: string): Promise<PrSummary | null | Unsupported>
   createDraftPr(input: { base: string; head: string; title: string; bodyFile: string }): Promise<PrSummary | Unsupported>
   readPr(number: number): Promise<PrSummary | Unsupported>

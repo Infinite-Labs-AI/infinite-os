@@ -65,6 +65,7 @@ function setup(options: {
   fsFiles?: Record<string, string>
   defaultBranch?: string | null
   clockStepMs?: number
+  ctx?: Partial<import("../contracts/deps.js").WizardContext>
 } = {}): Setup {
   const log: CallLog = []
   const state = initialState(options.state)
@@ -72,7 +73,7 @@ function setup(options: {
   const git = fakeGit(log, options.git)
   const checks = fakeChecks(log, options.checks)
   const fs = memoryFs(log, { "/repo/.env": SITE[".env"], ...(options.fsFiles ?? {}) })
-  const { ctx, events } = context(state, log)
+  const { ctx, events } = context(state, log, options.ctx ?? {})
   const registry = spyRegistry(log, createJobRegistry({ briefFacts: () => null }))
   const wizardDeps = deps({ bridge: bridge.client, git: git.git, host: fakeHost(log, options.defaultBranch === undefined ? "main" : options.defaultBranch), checks: checks.checks, installer: fakeInstaller(log), registry, fs: fs.fs })
   if (options.clockStepMs) {
@@ -380,16 +381,106 @@ describe("step before: the dry load's own failures stay unknown", () => {
     expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("1 unknown") })
   })
 
-  it("no production domain → no test load, an unknown check, and no T1 reads", async () => {
+  it("no production domain (the user says it isn't live yet) → no test load, an unknown check, and no T1 reads", async () => {
     const keys = keysResponse()
     keys.infinite.productionHosts = []
     const hosting = hostingResponse()
     hosting.vercel!.productionDomains = []
-    const s = setup({ keys, hosting })
+    const s = setup({ keys, hosting, ctx: { ask: (async () => "__none__") as never } })
     const outcome = await s.run()
     expect(s.bridge.sentTests).toEqual([])
     expect(s.log.some((entry) => entry.startsWith("checks.liveBytes"))).toBe(false)
     expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("1 unknown") })
+    // §3y.1: the answer is saved (a null host), so the same run never asks again.
+    expect(s.state.site).toMatchObject({ productionHost: null, source: "answer" })
+  })
+})
+
+describe("step before: the live-site address (§3y.1)", () => {
+  const unknownHost = () => {
+    const keys = keysResponse()
+    keys.infinite.productionHosts = []
+    keys.infinite.status = "not_provisioned"
+    keys.infinite.siteSourceKey = null
+    const hosting: HostingResponse = { ...hostingResponse(), provider: "none", vercel: null }
+    return { keys, hosting }
+  }
+  type Asked = Array<{ kind: string; payload: { question: string; options?: Array<{ label: string; value: string }>; default?: string } }>
+  const answering = (asked: Asked, answers: unknown[]) =>
+    (async (kind: string, payload: Asked[number]["payload"]) => {
+      asked.push({ kind, payload })
+      return answers.shift()
+    }) as never
+
+  it("asks ONCE, pre-filled with the repo's hints (a preview-shaped hint dropped), and tests the chosen host", async () => {
+    const asked: Asked = []
+    const s = setup({
+      ...unknownHost(),
+      fsFiles: {
+        "/repo/public/CNAME": "acme-store.vercel.app\n",
+        "/repo/app/layout.tsx": 'export const metadata = { metadataBase: new URL("https://www.acme-store.com") }\n',
+        "/repo/public/robots.txt": "User-agent: *\nSitemap: https://acme-store.com/sitemap.xml\n"
+      },
+      ctx: { ask: answering(asked, ["www.acme-store.com"]) }
+    })
+    const outcome = await s.run()
+    expect(outcome.kind).toBe("ok")
+    expect(asked).toHaveLength(1)
+    expect(asked[0]!.kind).toBe("single")
+    expect(asked[0]!.payload.question).toBe("Which address is your live site? The wizard tests it without sending anything, and Infinite collects only there.")
+    expect(asked[0]!.payload.options!.map((option) => option.value)).toEqual(["www.acme-store.com", "acme-store.com", "__type__", "__none__"])
+    expect(asked[0]!.payload.options![0]!.label).toBe("www.acme-store.com  (from app/layout.tsx)")
+    expect(asked[0]!.payload.default).toBe("www.acme-store.com")
+    expect(s.state.site).toMatchObject({ productionHost: "www.acme-store.com", source: "answer" })
+    expect(s.bridge.sentTests.map((test) => test.productionHost)).toEqual(["www.acme-store.com"])
+    const subs = s.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
+    expect(subs).toContain("✓ Live site: www.acme-store.com (you said)")
+  })
+
+  it("a typed address that is not a domain, then a preview address, is refused twice and read as 'not live yet'", async () => {
+    const asked: Asked = []
+    const s = setup({ ...unknownHost(), ctx: { ask: answering(asked, ["__type__", "not a host", "shop.vercel.app"]) } })
+    await s.run()
+    expect(asked.map((entry) => entry.kind)).toEqual(["single", "text", "text"])
+    expect(asked[0]!.payload.default).toBe("__type__")
+    const subs = s.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
+    expect(subs).toContain("! not a host isn't a domain name")
+    expect(subs.some((text) => text.startsWith("! shop.vercel.app is a preview-style address"))).toBe(true)
+    expect(s.state.site).toMatchObject({ productionHost: null, source: "answer" })
+    expect(s.bridge.sentTests).toEqual([])
+  })
+
+  it("--yes never answers it: no ask, no host, no park, nothing saved", async () => {
+    const s = setup({ ...unknownHost(), ctx: { options: { json: true, yes: true, answersFile: null, resume: false, noAgent: false, worker: null, reviewer: null, consentMode: null, noProve: false, nested: false } } })
+    const outcome = await s.run()
+    expect(outcome.kind).toBe("ok")
+    expect(s.state.site).toBeUndefined()
+    expect(s.bridge.sentTests).toEqual([])
+  })
+
+  it("--production-host skips the ask and is recorded as the flag's", async () => {
+    const s = setup({ ...unknownHost(), ctx: { options: { json: true, yes: true, answersFile: null, resume: false, noAgent: false, worker: null, reviewer: null, consentMode: null, noProve: false, nested: false, productionHost: "acme-store.com" } } })
+    await s.run()
+    expect(s.state.site).toMatchObject({ productionHost: "acme-store.com", source: "flag" })
+    expect(s.bridge.sentTests.map((test) => test.productionHost)).toEqual(["acme-store.com"])
+  })
+
+  it("an earlier answer in this run is reused on a resume (never asked again)", async () => {
+    const s = setup({ ...unknownHost(), state: { site: { productionHost: null, source: "answer", decidedAt: "2026-10-02T09:01:00.000Z" } } })
+    // The default context's ask throws: reaching it would fail the test.
+    expect((await s.run()).kind).toBe("ok")
+  })
+
+  it("the sanity line: an answered host whose live page shows none of the repo's own IDs", async () => {
+    const asked: Asked = []
+    const s = setup({
+      ...unknownHost(),
+      checks: { census: census([{ tool: "ga4", kind: "gtag_config", id: "G-NOTONPAGE1", file: "app/layout.tsx", line: 2 }]) },
+      ctx: { ask: answering(asked, ["__type__", "acme-store.com"]) }
+    })
+    await s.run()
+    const subs = s.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
+    expect(subs.some((text) => text.startsWith("! acme-store.com doesn't show the GA4 ID in your code (G-NOTONPAGE1)"))).toBe(true)
   })
 })
 

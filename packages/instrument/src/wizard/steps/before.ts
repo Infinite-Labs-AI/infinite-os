@@ -41,12 +41,13 @@ import { normalizeHost } from "../contracts/host-deny.js"
 import type { BeforeFacts, BuildResult, CheckResult, ScanResult } from "../contracts/jobs.js"
 import type { WizardFs } from "../contracts/deps.js"
 import type { BaselineResponseFields, ReportColumnSnapshot } from "../contracts/report.js"
-import type { BaseSource } from "../contracts/state.js"
+import type { BaseSource, WizardRunState } from "../contracts/state.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { wizardBranchName } from "../contracts/git-host.js"
 import { wizardGitExtras } from "../../git/index.js"
 import { buildColumn } from "../report.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { askProductionHost, hostDecidedLines, repoHostCandidates, resolveProductionHost } from "../site-host.js"
 import {
   TEST_LIMITS,
   testExpectFromKeys,
@@ -166,10 +167,69 @@ export async function resolveBase(
   return originHead ? { base: originHead, baseSource: "origin_head" } : null
 }
 
-/** The production host the dry load visits: the site source's first host, else Vercel's first domain. */
-export function productionHostOf(keys: TagKeys, hosting: TagHosting): string | null {
-  const host = keys.infinite.productionHosts[0] ?? hosting.vercel?.productionDomains[0] ?? null
-  return host ? normalizeHost(host) : null
+/**
+ * The production host the dry load visits (§3y.1, one precedence for every consumer): the site source's first
+ * host, else Vercel's first domain, else this run's answer, else `--production-host`.
+ */
+export function productionHostOf(keys: TagKeys, hosting: TagHosting, site: WizardRunState["site"] | null = null, flag: string | null = null): string | null {
+  return resolveProductionHost({ keys, hosting, site, flag }).host
+}
+
+/**
+ * §3y.1: decides the run's production host ONCE (right after the silent keys read, before the baseline build).
+ * Infinite's own host, an earlier answer or the flag decide it; otherwise ONE ask, pre-filled with the repo's
+ * hints. `--yes` and nested mode never answer it: the run goes on with no host (never a guess).
+ */
+export async function decideProductionHost(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  keys: TagKeys,
+  hosting: TagHosting,
+  sub: (text: string, tone?: "ok" | "warn" | "info" | "pending") => void
+): Promise<string | null> {
+  const current = ctx.state.get().site ?? null
+  const resolved = resolveProductionHost({ keys, hosting, site: current, flag: ctx.options.productionHost ?? null })
+  let host = resolved.host
+  let source = resolved.source
+  if (!resolved.decided) {
+    if (ctx.options.yes || ctx.options.nested) {
+      sub("! No live site address: --yes never answers that; pass --production-host <domain> to test it", "warn")
+      return null
+    }
+    const facts = await deps.host.repoFacts().catch(() => null)
+    const homepageUrl = facts && !("unsupported" in facts) ? (facts.homepageUrl ?? null) : null
+    const candidates = await repoHostCandidates(ctx.root, ctx.appRoot, deps.fs, { homepageUrl })
+    host = await askProductionHost(ctx, candidates, (text, tone) => sub(text, tone))
+    source = "answer"
+  }
+  if (source !== null && (!current || current.productionHost !== host || current.source !== source)) {
+    const decidedAt = deps.clock.now().toISOString()
+    ctx.state.update((state) => {
+      state.site = { ...(state.site ?? {}), productionHost: host, source: source!, decidedAt }
+    })
+    await ctx.state.save()
+  }
+  if (source !== "infinite") for (const line of hostDecidedLines(host, source)) sub(line, host ? "ok" : "warn")
+  return host
+}
+
+/**
+ * The sanity line after the dry load (DECISIONS §1.1, should): the repo's own provider IDs, none of which the live
+ * page showed, hint the answered host is not this repo's site. A line only; nothing changes.
+ */
+export function liveIdMismatchLines(census: BeforeFacts["census"], dryLive: TestResult, host: string): string[] {
+  const seen: Record<"ga4" | "posthog" | "meta", Set<string>> = {
+    ga4: new Set(dryLive.ga4.events.map((event) => event.tid)),
+    posthog: new Set(dryLive.posthog.events.map((event) => event.projectKey)),
+    meta: new Set(dryLive.meta.configRequests)
+  }
+  const lines: string[] = []
+  for (const tool of ["ga4", "posthog", "meta"] as const) {
+    const ids = [...new Set(census.entries.filter((entry) => entry.tool === tool && entry.owner === "adopted" && entry.id).map((entry) => entry.id!))]
+    if (ids.length === 0 || ids.some((id) => seen[tool].has(id))) continue
+    lines.push(`! ${host} doesn't show the ${TOOL_LABEL[tool]} ID in your code (${ids[0]}); check it's this repo's live site.`)
+  }
+  return lines
 }
 
 /**
@@ -433,6 +493,9 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         const keys: TagKeys = withoutEnvelope(await deps.bridge.keys({ signal: ctx.signal }))
         const expect = testExpectFromKeys(keys)
 
+        // ---- §3y.1: the production host, decided once (Infinite, an earlier answer, the flag, or ONE ask) ----
+        const productionHost = await decideProductionHost(ctx, deps, keys, hosting, sub)
+
         // ---- baseline build, scan, census, setup checks ----
         const baselineBuild = await deps.checks.buildBaseline()
         if (!baselineBuild.ok) sub("! Your build already fails on production; the wizard reports it and only fixes new failures", "warn")
@@ -453,7 +516,6 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         }
 
         // ---- dry_live of production (nothing sent; no clicks, no fake click id) ----
-        const productionHost = productionHostOf(keys, hosting)
         const cmpDetectedStatic = jobScan.detections.cmp.cmp
         let dryLive: TestResult | null = null
         let grades: Partial<Record<TestTool, CheckResult>> | null = null
@@ -487,6 +549,8 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
               dryChecks.push(check)
               if (check.state === "problem") sub(`! ${TOOL_LABEL[tool]} ${gradeWords(check, finalHostOf(result) ?? productionHost)}`, "warn")
             }
+            // An address the user gave (not Infinite's): say when the live page shows none of the repo's own IDs.
+            if (ctx.state.get().site?.source !== "infinite") for (const line of liveIdMismatchLines(census, result, productionHost)) sub(line, "warn")
           }
         }
 
@@ -498,7 +562,7 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           liveChecks.push(...(await deps.checks.redirectWalk([`https://${productionHost}/`])))
           liveChecks.push(...(await deps.checks.csp(`https://${productionHost}/`)))
           if (expect.meta && expect.meta.length > 0) {
-            const domains = [...new Set([...keys.infinite.productionHosts, ...(hosting.vercel?.productionDomains ?? [])].map(normalizeHost))]
+            const domains = [...new Set([...keys.infinite.productionHosts, ...(hosting.vercel?.productionDomains ?? []), productionHost].map(normalizeHost))]
             liveChecks.push(...(await deps.checks.metaDomains(domains, expect.meta)))
           }
         }

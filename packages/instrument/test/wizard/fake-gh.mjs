@@ -107,7 +107,8 @@ if (group === "repo" && sub === "view") {
     nameWithOwner: repo.nameWithOwner ?? "acme/acme-store",
     isPrivate: repo.isPrivate ?? true,
     defaultBranchRef: repo.defaultBranch === null ? null : { name: repo.defaultBranch ?? "main" },
-    viewerPermission: repo.viewerPermission ?? "WRITE"
+    viewerPermission: repo.viewerPermission ?? "WRITE",
+    homepageUrl: repo.homepageUrl ?? null
   })
 }
 

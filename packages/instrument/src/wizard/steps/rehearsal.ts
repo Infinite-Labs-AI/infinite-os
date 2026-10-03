@@ -123,7 +123,7 @@ export async function prepareShip(ctx: WizardContext, deps: WizardDeps): Promise
       return failed("INF_WIZ_BRANCH_FAILED", `Could not switch back to ${state.git.branch}.`)
     }
   }
-  const facts = await loadRunFacts(deps)
+  const facts = await loadRunFacts(deps, ctx.state.get().site ?? null)
   const scanner = buildScanner(ctx, deps, facts.connectionIds)
   const remoteUrl = await git.remoteUrl()
   let ghReady = false

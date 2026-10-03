@@ -244,7 +244,7 @@ export async function rehearse(
   if (waited.url === null) return empty(waited.why)
   const previewUrl = waited.url
 
-  const expect: TestExpect = facts.keys ? testExpectFromKeys(facts.keys) : {}
+  const expect: TestExpect = facts.keys ? testExpectFromKeys(facts.keys, facts.claim ?? null) : {}
   const consentSeed =
     input.consentRequired && facts.keys?.infinite.consentStorageKey
       ? { kind: "infinite_runtime_grant" as const, storageKey: facts.keys.infinite.consentStorageKey }

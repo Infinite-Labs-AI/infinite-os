@@ -33,6 +33,7 @@ import { WIZARD_PATHS } from "./contracts/state.js"
 import { installInterruptHandlers, runInterruptSequence, type SignalSource } from "./signals.js"
 import { WizardStore } from "./store.js"
 import { WIZARD_STEPS } from "./steps/index.js"
+import { hostRefusalLine, parseHostInput } from "./site-host.js"
 import { runUninstallFlow, type UninstallLinkFn } from "./uninstall-flow.js"
 import { getWizardWiring, type WizardIo, type WizardWiring } from "./wiring.js"
 
@@ -45,7 +46,7 @@ export const NOT_A_TTY_MESSAGE =
 export const WIZARD_USAGE = [
   "Usage: npx infinite-tag [--json] [--yes] [--answers <file>] [--root <dir>] [--app-root <dir>] [--resume]",
   "                        [--no-agent] [--worker claude|codex] [--reviewer claude|codex|brief|none]",
-  "                        [--consent-mode not_required|required] [--no-prove] [--fresh]",
+  "                        [--consent-mode not_required|required] [--production-host <domain>] [--no-prove] [--fresh]",
   "       npx infinite-tag uninstall --pr [--json] [--root <dir>] [--base <branch>] [--answers <file>]"
 ].join("\n")
 
@@ -150,6 +151,15 @@ export function parseWizardArgs(argv: readonly string[], cwd: string): Parse<Par
         const dir = value()
         if (!dir) return { ok: false, message: "--app-root needs a directory." }
         appRootArg = dir
+        break
+      }
+      case "--production-host": {
+        // §3y.1: validated like the typed answer; a malformed or preview-shaped host is a usage error (exit 2).
+        const raw = value()
+        if (!raw) return { ok: false, message: "--production-host needs your live site's domain (for example acme.com)." }
+        const parsed = parseHostInput(raw)
+        if (!parsed.ok) return { ok: false, message: `--production-host: ${hostRefusalLine(parsed).replace(/^! /, "")}` }
+        options.productionHost = parsed.host
         break
       }
       case "--worker":

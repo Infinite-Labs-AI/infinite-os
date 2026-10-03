@@ -174,7 +174,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
   if (prNumber !== null && deps.host.kind === "github") {
     try {
       // B29: every string the wizard posts goes through the §3g.5 secret scan (tokens, keys, env values).
-      const facts = await loadRunFacts(deps)
+      const facts = await loadRunFacts(deps, ctx.state.get().site ?? null)
       const scanner = buildScanner(ctx, deps, facts.connectionIds)
       const commented = await deps.host.comment(prNumber, `${safeText(scanner, markdown)}\n\n${PR_MARKERS.report(runId)}`)
       if (commented && typeof commented === "object" && "unsupported" in commented) {
