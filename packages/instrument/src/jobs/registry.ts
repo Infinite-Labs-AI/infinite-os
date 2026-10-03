@@ -230,7 +230,7 @@ export function itemTitle(jobId: JobId, target: string): string {
     case "preview_guard":
       return `Keep previews silent: ${TOOL_TITLE[target] ?? target}`
     case "conversions_to_tools":
-      return `Send the ${target} conversion to every tool`
+      return `Send the ${target} conversion to GA4 and PostHog`
     case "server_conversions":
       return `Report the ${target} conversion from the server`
     default:
@@ -540,7 +540,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
           ? {
               jobId: "conversions_to_tools",
               target: type,
-              finding: `The ${type} succeeds at ${success.map((finding) => `${finding.file}:${finding.line}`).join(", ")}; send the approved ${type} conversion to every tool there`,
+              finding: `The ${type} succeeds at ${success.map((finding) => `${finding.file}:${finding.line}`).join(", ")}; send the approved ${type} conversion to GA4 and PostHog there`,
               evidence: fileEvidence(success),
               allow: allow(filesOf(success))
             }
@@ -560,7 +560,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
     out.push({
       jobId: "conversions_to_tools",
       target: type,
-      finding: `${type} conversion points found; send the approved ${type} conversion to every tool`,
+      finding: `${type} conversion points found; send the approved ${type} conversion to GA4 and PostHog`,
       evidence: fileEvidence([...elements, ...handlers]),
       allow: allow([...filesOf(elements), ...filesOf(handlers)])
     })

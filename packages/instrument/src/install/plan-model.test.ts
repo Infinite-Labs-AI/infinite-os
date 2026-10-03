@@ -30,6 +30,7 @@ import {
   resolvePlanAnswers,
   SERVER_LANE_PROBE_DISCLOSURE,
   withGuardHosts,
+  GA4_SPA_LINE_TEXT,
   type PlanModelInput,
   type PlanScanFacts
 } from "./plan-model.js"
@@ -117,7 +118,7 @@ describe("the plan model asks ONLY the four decisions", () => {
 
   it("the agent budget line says who pays; no agent → an info line, never an approval", () => {
     const withAgent = buildPlanModel(input({ candidates: [candidate("identify_reset", "auth")] }))
-    expect(withAgent.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "approval", text: "Claude Code: up to 1 job · Opus 4.8 at xhigh effort · up to 30 turns or 10 min · your Claude plan pays" })
+    expect(withAgent.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "approval", text: "Claude Code: up to 1 job · Opus 4.8 at xhigh effort · up to 50 turns or 20 min · your Claude plan pays" })
     const none = buildPlanModel(input({ candidates: [candidate("identify_reset", "auth")], agent: null }))
     expect(none.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "info" })
   })
@@ -390,7 +391,8 @@ describe("review fixes (O7 fix round)", () => {
     const ga4Id: ImproveLine = { id: "improve_additive:ga4:id", kind: "improve_additive", provider: "ga4", target: "id", text: "GA4: change the id.", owner: "agent", evidence: { file: "index.html", line: 3 } }
     const plan = buildPlanModel(input({ scan: scanFacts({ improve: [ga4Id], adopted: [{ provider: "ga4", via: "snippet", file: "index.html", line: 3, key: IDS.ga4Other }] }), candidates: [candidate("ga4_improve", "spa_page_view")] }))
     expect(plan.lines.find((line) => line.id === "improve_additive:ga4:id")?.jobIds).not.toContain("ga4_improve:spa_page_view")
-    expect(plan.lines.find((line) => line.id === "improve_additive:ga4:spa_page_view")?.jobIds).toEqual(["ga4_improve:spa_page_view"])
+    // R4-8: GA4's page-change fix is its own line kind (the change the user approves, in words).
+    expect(plan.lines.find((line) => line.id === "ga4_spa_page_views:ga4:spa_page_view")).toMatchObject({ jobIds: ["ga4_improve:spa_page_view"], text: GA4_SPA_LINE_TEXT })
   })
 
   it("P2-14: an agent improve line no detector seeds gets its own item behind the same gate; declined → none", () => {

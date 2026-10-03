@@ -89,6 +89,8 @@ describe("liveTodayColumnInput", () => {
     expect(liveTodayColumnInput(source()).facts.find((fact) => fact.input === "census.identify_reset")).toMatchObject({ state: "problem" })
     expect(liveTodayColumnInput(source({ loginFound: false })).facts.find((fact) => fact.input === "census.identify_reset")).toMatchObject({ state: "info" })
     const repeated = liveTodayColumnInput(source({ repeatedInits: [{ tool: "ga4", id: "G-FAKE00001", count: 2 }] }))
-    expect(repeated.facts.find((fact) => fact.input === "census")).toMatchObject({ state: "problem", display: "GA4 set up 2 times" })
+    // R4-13: this source's no-send load measured 1 GA4 page view per visit, so the cell says the copy cost code, not data.
+    expect(repeated.facts.find((fact) => fact.input === "census")).toMatchObject({ state: "problem", display: "GA4 set up 2 times with the same ID (GA4 still counted 1 page view per visit: the copy costs code, not data)" })
+    expect(liveTodayColumnInput(source({ repeatedInits: [{ tool: "ga4", id: "G-FAKE00001", count: 2 }], dryLive: null })).facts.find((fact) => fact.input === "census")).toMatchObject({ display: "GA4 set up 2 times" })
   })
 })

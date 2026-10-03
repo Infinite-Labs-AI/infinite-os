@@ -185,8 +185,24 @@ export function briefFactsFor(root: string, state: Readonly<WizardRunState> | nu
     helpers: writtenHelpers(root),
     guardSites: adoptedInitSites(root, state.appRoot),
     consentMode: state.plan?.answers.consentMode ?? null,
-    managedFiles: readInstallManifest(root)?.files ?? null
+    managedFiles: managedModules(root)
   }
+}
+
+/**
+ * R4-6: Infinite's own modules the install wrote whole (they carry the "Managed by Infinite" header), never a customer
+ * file the install only edited. Null when no receipt is readable.
+ */
+export function managedModules(root: string): string[] | null {
+  const manifest = readInstallManifest(root)
+  if (!manifest) return null
+  return manifest.files.filter((file) => {
+    try {
+      return /Managed by Infinite/.test(readFileSync(join(root, file), "utf8").slice(0, 400))
+    } catch {
+      return false
+    }
+  })
 }
 
 /** The public id an adopted init names, as written (a literal only; a variable is never resolved here). */

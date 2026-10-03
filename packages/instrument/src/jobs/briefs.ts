@@ -162,6 +162,11 @@ export const TARGET_GISTS: Readonly<Record<string, string>> = {
  * Review I1 P1-2: the user's own Next config gets the managed rewrites; no tag goes in any page.
  */
 export const TARGET_WHAT: Readonly<Record<string, string>> = {
+  // R4-6: the job's own task, never the whole job's gist (run 4's capture job read "Boot the pixel…; send browser
+  // conversions only through infiniteMetaMirror…" above "paste the capture").
+  "meta_improve:capture": "Add Infinite's `_fbc` capture beside the existing pixel, exactly as Plan data gives it.",
+  "meta_improve:autoconfig_off_adopted": "Turn Meta's automatic events off on the existing pixel with the one line Plan data gives.",
+  "ga4_improve:spa_page_view": "Make the existing GA4 send one page_view per client-side page change, with the bytes Plan data gives.",
   // §3x.3 (F6).
   "meta_improve:spa_page_view":
     "Add exactly one fbq('track', 'PageView') per client-side navigation from the router's navigation hook. Never on the first load (the bootstrap already sends it) and never inside a click handler.",
@@ -311,12 +316,11 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
           const raw = target === "meta" ? guard.metaRecipe! : guard.expression
           return { file: site.file, line: site.line, context: site.context, guardAsWritten: site.context === "template_literal" ? escapeForTemplateLiteral(raw) : raw }
         })
-      return {
-        guardExpression: guard.expression,
-        productionHostsExempt: guard.exemptHosts,
-        ...(target === "meta" ? { metaGuardRecipe: guard.metaRecipe } : {}),
-        ...(guardAt.length > 0 ? { guardAt } : {})
-      }
+      // R4-6: with the guard as written at each init, the raw expression and recipe are not repeated (run 4's brief
+      // carried the same ~600-character guard three times per job).
+      return guardAt.length > 0
+        ? { productionHostsExempt: guard.exemptHosts, guardAt }
+        : { guardExpression: guard.expression, productionHostsExempt: guard.exemptHosts, ...(target === "meta" ? { metaGuardRecipe: guard.metaRecipe } : {}) }
     }
     case "posthog_improve": {
       if (!facts.connections) return new Error(`the brief for ${item.id} needs the connections' public IDs`)
@@ -401,5 +405,9 @@ export function jobBlock(item: ChecklistItem, facts: BriefFacts): string {
 export function buildBrief(items: readonly ChecklistItem[], facts: BriefFacts): string {
   const agentItems = items.filter((item) => item.owner === "agent")
   const blocks = agentItems.map((item) => jobBlock(item, facts))
-  return [operatorRules(facts), "", "## Jobs", "", blocks.join("\n\n")].join("\n")
+  // R4-6: "never open" names only Infinite's own modules, never a file a job of this turn must change (the install's
+  // receipt also lists customer files it edited, such as the layout it mounts the tag in).
+  const editable = new Set(agentItems.flatMap((item) => [...item.allow.files, ...item.allow.create]))
+  const ruleFacts: BriefFacts = facts.managedFiles ? { ...facts, managedFiles: facts.managedFiles.filter((file) => !editable.has(file)) } : facts
+  return [operatorRules(ruleFacts), "", "## Jobs", "", blocks.join("\n\n")].join("\n")
 }

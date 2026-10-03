@@ -861,7 +861,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expectOk(await reviewStep.run(w.ctx, w.deps))
     const threads = w.gh.read().threads.filter((thread) => thread.comments[0]!.author === "acme-dev")
     const reply = (id: string) => threads.find((thread) => thread.comments[0]!.body.includes(id))!.comments[1]!.body
-    expect(reply("F1")).toMatch(/^Not fixed: the agent ran out of its 5 minutes before changing anything\. It stays open\./)
+    expect(reply("F1")).toMatch(/^Not fixed: the agent ran out of its 10 minutes before changing anything\. It stays open\./)
     expect(reply("F1")).not.toContain("did not pass the wizard's checks")
     expect(reply("F5")).toMatch(/^This is Infinite's own code \(lib\/infinite-server-lane\.ts\), which the wizard never hands to your agent\. The finding is recorded in this run's report for Infinite to fix\./)
     // Only F1 went to the worker; nothing was built for a round that changed nothing.
@@ -890,7 +890,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     })
     expectOk(await reviewStep.run(w.ctx, w.deps))
     const thread = w.gh.read().threads.find((entry) => entry.comments[0]!.author === "acme-dev")!
-    expect(thread.comments[1]!.body).toMatch(/^Not fixed: the agent ran out of its 5 minutes; its unfinished change to app\/layout\.tsx was undone\. It stays open\./)
+    expect(thread.comments[1]!.body).toMatch(/^Not fixed: the agent ran out of its 10 minutes; its unfinished change to app\/layout\.tsx was undone\. It stays open\./)
     expect(thread.comments[1]!.body).not.toMatch(/before changing anything|without changing anything/)
   })
 
