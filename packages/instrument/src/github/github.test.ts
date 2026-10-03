@@ -158,6 +158,26 @@ describe("the GitHub adapter (§3g.2)", () => {
     expect(after.isResolved).toBe(true)
   })
 
+  it("R2-5: edits ONLY its own marked comment (author AND marker), by PATCH; none → false (the caller posts)", async () => {
+    const { adapter, gh, fx } = setup()
+    fx.write(".infinite/wizard/pr-body.md", "body\n")
+    await adapter.createDraftPr({ base: "main", head: "infinite/tag/2026-10-02-7f3c2a", title: "t", bodyFile: ".infinite/wizard/pr-body.md" })
+    const marker = "<!-- infinite-tag:final v1 run=r-1 -->"
+    // Someone else pasted the marker: never edited (trust is author AND marker).
+    gh.update((state) => {
+      ;(state.prs![0]! as { comments: unknown[] }).comments.push({ id: 9001, author: { login: "someone-else" }, authorAssociation: "NONE", body: `fake ${marker}` })
+    })
+    expect(await adapter.updateOwnComment(42, marker, (body) => `${body} EDITED`)).toBe(false)
+    await adapter.comment(42, `what happened\n\n${marker}`)
+    expect(await adapter.updateOwnComment(42, marker, (body) => body.replace("what happened", "what happened, final"))).toBe(true)
+    const comments = (gh.read().prs[0]! as { comments: Array<{ id: number; body: string; author: { login: string } }> }).comments
+    expect(comments.find((entry) => entry.author.login === "acme-dev")!.body).toBe(`what happened, final\n\n${marker}`)
+    expect(comments.find((entry) => entry.id === 9001)!.body).toBe(`fake ${marker}`)
+    const patch = gh.read().calls.find((call) => call.argv.includes("PATCH"))!
+    expect(patch.argv.slice(0, 4)).toEqual(["api", "-X", "PATCH", `repos/{owner}/{repo}/issues/comments/${comments.find((entry) => entry.author.login === "acme-dev")!.id}`])
+    expect(gh.read().calls.some((call) => call.argv.includes("DELETE"))).toBe(false)
+  })
+
   it("falls back to a body-only review when GitHub refuses the inline threads (422)", async () => {
     const { adapter, gh, fx } = setup({ rejectInlineThreads: true })
     fx.write(".infinite/wizard/pr-body.md", "body\n")

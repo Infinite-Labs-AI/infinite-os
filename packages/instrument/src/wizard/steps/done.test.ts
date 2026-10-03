@@ -235,7 +235,7 @@ describe("R2-2 / R2-4 (live run 2): Proven live with no real visit and no receip
     expect(provenPendingFor({ state: base, hostingVercel: true, noProve: false, productionHost: null })).toBe("rerun_tag")
     const state = noVisitState()
     state.site = { productionHost: null, source: "answer", decidedAt: AT }
-    const bundle = fakeDeps({ bridge: { keys: { protocolVersion: 1, requestId: "req-fake", ...keysFixture(), infinite: { ...keysFixture().infinite, status: "not_provisioned", siteSourceKey: null, productionHosts: [] } } } as never })
+    const bundle = fakeDeps({ bridge: { keys: { ...keysFixture(), infinite: { ...keysFixture().infinite, status: "not_provisioned", siteSourceKey: null, productionHosts: [] } } } as never })
     const ctx = fakeContext(state, {}, bundle.clock)
     await step.run(ctx, bundle.deps)
     const report = bundle.log.calls.find((call) => call.what === "postReport" && call.args[1] === "proven_live")!.args[2] as ReportV2
