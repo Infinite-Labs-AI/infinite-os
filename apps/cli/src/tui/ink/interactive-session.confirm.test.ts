@@ -103,11 +103,29 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
       source.indexOf("const resolveConfirmAction"),
       source.indexOf("useEffect(() => {\n    // Don't drain")
     );
-    expect(handler).toContain("confirmResultLines(result, decision)");
-    expect(handler).toContain("confirmErrorLines(error)");
-    expect(handler).toContain("const receipt = receiptViewFrame(head, result);");
-    expect(handler).toContain("recordTurnView(receipt);");
+    // Both the answer and a thrown error settle through the one pure step
+    // (confirm-card.tsx settleConfirmOutcome: receipt view on the turn, keep, or lines).
+    expect(handler).toContain("settleConfirmOutcome(head, outcome, { decision, dismissed: dismissed !== null, onCardTurn: onCardTurn(), thrown })");
+    expect(handler).toContain("if (settle(result, false)) afterReceipt(result);");
+    expect(handler).toContain("if (settle(error, true) && !refusedField(error)) afterReceipt(error);");
+    expect(handler).toContain("recordTurnView(step.frame);");
+    expect(handler).toContain("appendLines(step.lines);");
+    expect(cardSource).toContain("confirmResultLines(outcome, opts.decision)");
+    expect(cardSource).toContain("confirmErrorLines(outcome)");
     expect(handler).not.toContain("JSON.stringify");
+  });
+
+  it("n records the dismissed card BEFORE the decline is sent (run-2 M5, CI-visible)", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction"),
+      source.indexOf("useEffect(() => {\n    // Don't drain")
+    );
+    expect(handler).toContain("const dismissed = declineFrame(head, decision);");
+    expect(handler).toMatch(/if \(dismissed\) \{\s+recordTurnView\(dismissed\);/u);
+    expect(handler.indexOf("recordTurnView(dismissed)")).toBeGreaterThan(-1);
+    expect(handler.indexOf("recordTurnView(dismissed)")).toBeLessThan(handler.indexOf("onConfirmAction?.(head"));
+    // The decline is sent once: one call to the app in the handler.
+    expect(handler.split("onConfirmAction?.(").length - 1).toBe(1);
   });
 
   it("scrubs the un-redacted summary through terminalText before rendering", () => {
