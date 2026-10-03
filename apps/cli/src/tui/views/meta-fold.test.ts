@@ -56,6 +56,20 @@ describe("what a later read repeats (N27, the app's rule)", () => {
     expect(metaViewRepeats(campaigns(), edited((raw) => { raw.tool = "get_other_performance"; }))).toBeNull();
   });
 
+  it("the host's account handles (rev 3 scope.account) take part in the same-read check: never drawn, but two accounts never fold", () => {
+    const withAccount = (base: Record<string, unknown>, project: string, source: string): AnswerViewV1 => {
+      const raw = clone(base) as Record<string, any>;
+      raw.scope = { ...raw.scope, account: { project, source } };
+      return decode(raw);
+    };
+    const same = metaViewRepeats(withAccount(RAW.campaigns, "proj_demo", "src_demo"), withAccount(RAW.ads, "proj_demo", "src_demo"));
+    expect(same).toEqual(metaViewRepeats(campaigns(), ads()));
+    expect(metaViewRepeats(withAccount(RAW.campaigns, "proj_demo", "src_demo"), withAccount(RAW.ads, "proj_demo", "src_other"))).toBeNull();
+    expect(metaViewRepeats(withAccount(RAW.campaigns, "proj_demo", "src_demo"), withAccount(RAW.ads, "proj_other", "src_demo"))).toBeNull();
+    expect(metaViewRepeats(withAccount(RAW.campaigns, "proj_demo", "src_demo"), ads())).toBeNull();
+    expect(metaViewRepeats(campaigns(), withAccount(RAW.ads, "proj_demo", "src_demo"))).toBeNull();
+  });
+
   it("a part read at another instant draws again: a refreshed today is not folded", () => {
     const refreshed = edited((raw) => { raw.body.legs.today.asOf = "2026-10-01T18:45:00Z"; });
     const repeats = metaViewRepeats(campaigns(), refreshed)!;
