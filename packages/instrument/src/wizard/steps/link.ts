@@ -13,7 +13,6 @@
 // No run is created here (the `agent` step does that).
 import { randomInt } from "node:crypto"
 import { realpathSync } from "node:fs"
-import { join } from "node:path"
 
 import type { BridgeDescriptor, Link } from "../contracts/bridge.js"
 import { BRIDGE_LIMITS } from "../contracts/bridge.js"
@@ -24,6 +23,7 @@ import { isBridgeDiscoveryError, isBridgeError } from "../../bridge/errors.js"
 import { bridgeErrorOutcome, discoveryOutcome, missingCapabilities, protocolOutcome, SUBSCRIPTION_MESSAGE } from "../../bridge/outcomes.js"
 import { linkSiteFor } from "../../bridge/repo-identity.js"
 import { hashInputs, PROCESS_NONCE, sub } from "../../bridge/step-kit.js"
+import { repoHostCandidates } from "../site-host.js"
 
 const META = WIZARD_STEP_META.link
 /** A new code and card at most this many times (each one can expire), all inside ONE approval window. */
@@ -38,29 +38,14 @@ export function newLinkCode(): string {
   return String(randomInt(0, 10_000)).padStart(4, "0")
 }
 
-const HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/
-
-/** A best-effort production host for the card's workspace pre-selection: a CNAME file, else package.json `homepage`. */
+/**
+ * The card's workspace pre-selection hint (DECISIONS §1.1, P3-9): the FIRST repo candidate (CNAME, Next
+ * `metadataBase`, the sitemap config, robots.txt, the canonical / og:url, package.json `homepage`), files only.
+ * A hint, never an answer: the live address is decided in `before`.
+ */
 export async function productionHostHint(ctx: Pick<WizardContext, "root" | "appRoot">, deps: Pick<WizardDeps, "fs">): Promise<string | null> {
-  const appDir = join(ctx.root, ctx.appRoot === "." ? "" : ctx.appRoot)
-  for (const file of [join(appDir, "public", "CNAME"), join(appDir, "CNAME"), join(ctx.root, "CNAME")]) {
-    const text = await deps.fs.readText(file)
-    const host = text?.split(/\r?\n/, 1)[0]?.trim().toLowerCase().replace(/\.$/, "")
-    if (host && HOST_PATTERN.test(host)) return host
-  }
-  const pkg = await deps.fs.readText(join(appDir, "package.json"))
-  if (pkg) {
-    try {
-      const homepage = (JSON.parse(pkg) as { homepage?: unknown }).homepage
-      if (typeof homepage === "string") {
-        const host = new URL(homepage).hostname.toLowerCase()
-        if (HOST_PATTERN.test(host)) return host
-      }
-    } catch {
-      // Not JSON or not a URL: no hint.
-    }
-  }
-  return null
+  const candidates = await repoHostCandidates(ctx.root, ctx.appRoot, deps.fs)
+  return candidates[0]?.host ?? null
 }
 
 function variantLabel(descriptor: Pick<BridgeDescriptor, "runtime">): string {

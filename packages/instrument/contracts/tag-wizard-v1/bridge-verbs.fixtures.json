@@ -32,7 +32,8 @@
         "tag.meta-relay.v1",
         "tag.uninstall.v1",
         "tag.test.v1",
-        "tag.test-facts.v1"
+        "tag.test-facts.v1",
+        "tag.site-claim.v1"
       ],
       "protocol": {
         "min": 1,
@@ -3087,6 +3088,181 @@
     }
   },
   {
+    "verb": "site-claim",
+    "method": "POST",
+    "path": "/v1/site-source/claim",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000401",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "productionHosts": [
+        "fresh-acme.com",
+        "www.fresh-acme.com"
+      ],
+      "consentMode": "not_required"
+    },
+    "status": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000401",
+      "state": "pending_proof",
+      "siteSource": null,
+      "claim": {
+        "hosts": [
+          "fresh-acme.com",
+          "www.fresh-acme.com"
+        ],
+        "siteSourceKey": "site_fa4e000000000000000000000000c1a1",
+        "consentMode": "not_required",
+        "collectPath": "/infinite/ledger",
+        "consentStorageKey": "infinite_analytics_consent",
+        "proofPath": "/.well-known/infinite-site-verification.txt",
+        "proofBody": "infinite-site-verification: isv_FAKEacmeProofToken0000\n",
+        "state": "pending_proof",
+        "provenHosts": [],
+        "lastCheck": null,
+        "expiresAt": "2026-11-01T09:20:00.000Z"
+      }
+    }
+  },
+  {
+    "verb": "site-claim",
+    "method": "POST",
+    "path": "/v1/site-source/claim",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000402",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "productionHosts": [
+        "acme-store.com",
+        "www.acme-store.com"
+      ],
+      "consentMode": "not_required"
+    },
+    "status": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000402",
+      "state": "ready",
+      "siteSource": {
+        "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+        "productionHosts": [
+          "acme-store.com",
+          "www.acme-store.com"
+        ],
+        "consentMode": "not_required",
+        "created": false
+      },
+      "claim": null
+    }
+  },
+  {
+    "verb": "site-claim-read",
+    "method": "GET",
+    "path": "/v1/site-source/claim",
+    "request": null,
+    "status": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000403",
+      "claim": {
+        "hosts": [
+          "fresh-acme.com",
+          "www.fresh-acme.com"
+        ],
+        "siteSourceKey": "site_fa4e000000000000000000000000c1a1",
+        "consentMode": "not_required",
+        "collectPath": "/infinite/ledger",
+        "consentStorageKey": "infinite_analytics_consent",
+        "proofPath": "/.well-known/infinite-site-verification.txt",
+        "proofBody": "infinite-site-verification: isv_FAKEacmeProofToken0000\n",
+        "state": "pending_proof",
+        "provenHosts": [],
+        "lastCheck": {
+          "at": "2026-10-02T09:44:00.000Z",
+          "outcome": "not_served"
+        },
+        "expiresAt": "2026-11-01T09:20:00.000Z"
+      }
+    }
+  },
+  {
+    "verb": "site-prove",
+    "method": "POST",
+    "path": "/v1/site-source/prove",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000404"
+    },
+    "status": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000404",
+      "state": "pending",
+      "hosts": [
+        {
+          "host": "fresh-acme.com",
+          "outcome": "not_served"
+        },
+        {
+          "host": "www.fresh-acme.com",
+          "outcome": "redirects_elsewhere"
+        }
+      ],
+      "siteSource": null
+    }
+  },
+  {
+    "verb": "site-prove",
+    "method": "POST",
+    "path": "/v1/site-source/prove",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000405"
+    },
+    "status": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000405",
+      "state": "proven",
+      "hosts": [
+        {
+          "host": "fresh-acme.com",
+          "outcome": "proven"
+        },
+        {
+          "host": "www.fresh-acme.com",
+          "outcome": "redirects_elsewhere"
+        }
+      ],
+      "siteSource": {
+        "siteSourceKey": "site_fa4e000000000000000000000000c1a1",
+        "productionHosts": [
+          "fresh-acme.com"
+        ],
+        "consentMode": "not_required",
+        "created": true
+      }
+    }
+  },
+  {
+    "verb": "site-prove",
+    "method": "POST",
+    "path": "/v1/site-source/prove",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000406"
+    },
+    "status": 200,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000406",
+      "state": "none",
+      "hosts": [],
+      "siteSource": null
+    }
+  },
+  {
     "verb": "site-source",
     "method": "POST",
     "path": "/v1/site-source",
@@ -3245,6 +3421,22 @@
       "error": {
         "code": "subscription_required",
         "message": "The workspace linked to this site is not subscribed to Infinite",
+        "retryable": false
+      }
+    }
+  },
+  {
+    "verb": "site-claim-read",
+    "method": "GET",
+    "path": "/v1/site-source/claim",
+    "request": null,
+    "status": 402,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000411",
+      "error": {
+        "code": "subscription_required",
+        "message": "this workspace has no active Infinite subscription",
         "retryable": false
       }
     }
@@ -3594,6 +3786,31 @@
     }
   },
   {
+    "verb": "site-claim",
+    "method": "POST",
+    "path": "/v1/site-source/claim",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000412",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "productionHosts": [
+        "infinite.fast"
+      ],
+      "consentMode": "not_required"
+    },
+    "status": 409,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000412",
+      "error": {
+        "code": "foreign_site_hosts",
+        "message": "this is Infinite's own workspace",
+        "retryable": false,
+        "state": "infinite_workspace"
+      }
+    }
+  },
+  {
     "verb": "link.poll",
     "method": "GET",
     "path": "/v1/link/request/lr_FAKElinkExpired0000000?wait=25",
@@ -3675,6 +3892,25 @@
       "error": {
         "code": "rate_limited",
         "message": "too many link requests; try again in a minute",
+        "retryable": true
+      }
+    }
+  },
+  {
+    "verb": "site-prove",
+    "method": "POST",
+    "path": "/v1/site-source/prove",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000413"
+    },
+    "status": 429,
+    "response": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-000000000413",
+      "error": {
+        "code": "rate_limited",
+        "message": "too many proof checks for this workspace; try again later",
         "retryable": true
       }
     }

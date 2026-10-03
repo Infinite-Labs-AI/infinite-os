@@ -46,6 +46,11 @@ import {
   REVIEW_SCHEMA,
   STATE_CHANGING_VERBS,
   TAG_CAPABILITIES,
+  CLAIM_PUBLIC_SHAPE,
+  PROVE_OUTCOMES,
+  RESERVED_SITE_KEY_PATTERN,
+  SITE_PROOF_BODY_PATTERN,
+  SITE_PROOF_PATH,
   TEST_INFO_CODES,
   TEST_PROBLEM_CODES,
   TEST_RUN_FIXTURE_CASE_SHAPE,
@@ -97,6 +102,8 @@ import {
   type WizardCode,
   type WizardRunState
 } from "./index.js"
+
+import { BARE_PLATFORM_HOSTS, isDenyListedHost, isPreviewShapedHost, parseHostInput } from "../site-host.js"
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
 const contractsDir = resolve(packageRoot, "contracts")
@@ -200,11 +207,12 @@ describe("shapeErrors (the key-list check every fixture goes through)", () => {
 })
 
 describe("the status fixture row (review I2 P3-6)", () => {
-  it("advertises the same 16 protocol-1 capabilities as the descriptor (tag.test-facts.v1 included)", () => {
+  it("advertises the same 17 protocol-1 capabilities as the descriptor (tag.test-facts.v1 and tag.site-claim.v1 included)", () => {
     const status = readJson<BridgeVerbFixture[]>("bridge-verbs.fixtures.json").find((f) => f.verb === "status" && f.status === 200)!
     const capabilities = (status.response as { capabilities: string[] }).capabilities
     expect(capabilities).toEqual([...TAG_CAPABILITIES])
     expect(capabilities).toContain("tag.test-facts.v1")
+    expect(capabilities).toContain("tag.site-claim.v1")
     expect(capabilities).toEqual(readJson<{ capabilities: string[] }>("bridge-descriptor.example.json").capabilities)
   })
 })
@@ -331,6 +339,38 @@ describe("bridge-verbs.fixtures.json (§3a)", () => {
     for (const row of fixtures.filter((f) => f.verb === "runs.patch" && (f.request as { patch?: { proofState?: string } } | null)?.patch?.proofState)) {
       expect((row.request as { producer?: string }).producer).toBe("tag")
     }
+  })
+
+  it("§3y.2 rows: site-claim answers exactly one of source / claim, the claim's key is reserved-shaped and its proof body exact", () => {
+    const claimRows = fixtures.filter((f) => f.verb === "site-claim" && f.status === 200)
+    expect(claimRows.map((row) => (row.response as { state: string }).state).sort()).toEqual(["pending_proof", "ready"])
+    for (const row of claimRows) {
+      const response = row.response as { state: string; siteSource: unknown; claim: unknown }
+      expect((response.siteSource === null) !== (response.claim === null), row.path).toBe(true)
+      expect(response.state === "ready" ? response.siteSource : response.claim).not.toBeNull()
+    }
+    const claims = fixtures.flatMap((f) => {
+      const response = f.response as { claim?: { siteSourceKey: string; proofBody: string; proofPath: string; state: string } | null }
+      return response.claim ? [response.claim] : []
+    })
+    expect(claims.length).toBeGreaterThanOrEqual(2)
+    for (const claim of claims) {
+      expect(claim.siteSourceKey).toMatch(RESERVED_SITE_KEY_PATTERN)
+      expect(claim.proofBody).toMatch(SITE_PROOF_BODY_PATTERN)
+      expect(claim.proofPath).toBe(SITE_PROOF_PATH)
+    }
+    // A proven prove answer carries the source WITH the reserved key; pending and none carry no source.
+    const proves = fixtures.filter((f) => f.verb === "site-prove" && f.status === 200).map((f) => f.response as { state: string; siteSource: { siteSourceKey: string } | null; hosts: Array<{ outcome: string }> })
+    expect(proves.map((p) => p.state).sort()).toEqual(["none", "pending", "proven"])
+    for (const prove of proves) {
+      expect(prove.siteSource === null, prove.state).toBe(prove.state !== "proven")
+      for (const host of prove.hosts) expect(PROVE_OUTCOMES).toContain(host.outcome)
+    }
+    expect(proves.find((p) => p.state === "proven")!.siteSource!.siteSourceKey).toBe(claims[0]!.siteSourceKey)
+    // Negative: the shape refuses a claim answer that adds a field (the tag decodes strictly).
+    const pending = claimRows.find((row) => (row.response as { state: string }).state === "pending_proof")!
+    expect(shapeErrors({ ...(pending.response as object), extra: true }, BRIDGE_VERBS["site-claim"].response).join()).toContain('unknown key "extra"')
+    expect(shapeErrors({ ...((pending.response as { claim: object }).claim), token: "x" }, CLAIM_PUBLIC_SHAPE).join()).toContain('unknown key "token"')
   })
 
   it("negative: a provision-env body that asks for a production redeploy does not type-check as protocol 1", () => {
@@ -461,6 +501,17 @@ describe("bridge-verbs.fixtures.json (§3a)", () => {
     expect(testExpectFromKeys({ ...keys, meta: { status: "connected", pixels: [] } }).meta).toBeUndefined()
   })
 
+  it("§3y.2: while a claim is pending, expect.infinite is the claim's reserved key (a cloud answer); the keys win once proven", () => {
+    const keys = fixtures.find((f) => f.verb === "keys" && f.status === 200)!.response as KeysResponse
+    const fresh: KeysResponse = { ...keys, infinite: { status: "not_provisioned", siteSourceKey: null, productionHosts: [], consentMode: null, consentStorageKey: null, collectPath: null } }
+    const claim = { siteSourceKey: "site_fa4e000000000000000000000000c1a1", collectPath: "/infinite/ledger", state: "pending_proof" }
+    expect(testExpectFromKeys(fresh).infinite).toBeUndefined()
+    expect(testExpectFromKeys(fresh, claim).infinite).toEqual({ siteSourceKey: claim.siteSourceKey, collectPath: "/infinite/ledger" })
+    // NEGATIVE: a proven (or expired) claim is never consulted; a ready source always wins over a claim.
+    expect(testExpectFromKeys(fresh, { ...claim, state: "proven" }).infinite).toBeUndefined()
+    expect(testExpectFromKeys(keys, claim).infinite?.siteSourceKey).toBe(keys.infinite.siteSourceKey)
+  })
+
   it("the story is internally consistent: lane state, relay availability, and only click-tested GA4 key events", () => {
     const keys = fixtures.find((f) => f.verb === "keys" && f.status === 200)!.response as KeysResponse
     const laneStatus = fixtures.find((f) => f.verb === "server-lane.status" && f.status === 200)!.response as { laneState: string }
@@ -494,6 +545,8 @@ describe("bridge-verbs.fixtures.json (§3a)", () => {
         "conversions",
         "meta-relay.enable",
         "site-source",
+        "site-claim",
+        "site-prove",
         "uninstall.remove-env",
         "uninstall.disable-site-source",
         "runs.proof-claim",
@@ -868,13 +921,56 @@ describe("host-deny-v1.json (§3h.9)", () => {
   })
 })
 
+describe("host-class-v1.fixture.json (review-2 P3-4 + the 2026-10-03 founder ruling: the production-host class, pinned in both repos)", () => {
+  // The SAME bytes as 1bu-1 `src/lib/analytics/wizard/host-class-v1.fixture.json`, which pins the same sha256 against
+  // the cloud's classifier: the tag and the cloud class every listed host the same way. Change it in both repos together.
+  const HOST_CLASS_V1_SHA256 = "d1489375005665da247ddd26b751f47ffb614981727ada975ca170a07ab0f887"
+  const text = readText(contractsDir, "host-class-v1.fixture.json")
+  const doc = JSON.parse(text) as { version: number; classes: string[]; cases: Array<{ host: string; class: string; note: string }> }
+  /** The tag's own class of a host, from the rules `parseHostInput` applies (`refused` = the production-host test). */
+  const classWith = (refused: (host: string) => boolean) => (host: string): string => {
+    const normalized = host.trim().toLowerCase().replace(/\.$/, "")
+    if (!refused(host)) return isDenyListedHost(host) ? "inconsistent" : "custom"
+    if (BARE_PLATFORM_HOSTS.includes(normalized)) return "bare_platform"
+    if (normalized.endsWith(".vercel.app")) return "vercel"
+    return "preview"
+  }
+  const classOf = classWith(isPreviewShapedHost)
+
+  it("is pinned by sha256 (the bytes 1bu-1 pins)", () => {
+    expect(createHash("sha256").update(text).digest("hex")).toBe(HOST_CLASS_V1_SHA256)
+    expect(doc.version).toBe(1)
+    expect(doc.classes).toEqual(["vercel", "preview", "bare_platform", "custom"])
+    for (const klass of doc.classes) expect(doc.cases.some((entry) => entry.class === klass)).toBe(true)
+  })
+
+  it("the tag's own rule classes every case exactly as the fixture says, and accepts ONLY custom", () => {
+    expect(doc.cases.map((entry) => [entry.host, classOf(entry.host)])).toEqual(doc.cases.map((entry) => [entry.host, entry.class]))
+    for (const entry of doc.cases) {
+      if (!/^[a-z0-9.-]+\.?$/i.test(entry.host) || !entry.host.includes(".")) continue
+      expect([entry.host, parseHostInput(entry.host).ok]).toEqual([entry.host, entry.class === "custom"])
+    }
+  })
+
+  it("NEGATIVE: a drifted rule is caught (a Vercel production alias accepted, a bare platform domain accepted, *.github.io accepted)", () => {
+    // Round 3's rule accepted a one-label production alias; review-2's accepted github.io and *.github.io.
+    const productionAlias = (host: string) => /^[a-z0-9]+(?:-[a-z]+)*\.vercel\.app\.?$/i.test(host.trim()) && !host.includes("-git-")
+    const aliasAccepted = classWith((host) => isPreviewShapedHost(host) && !productionAlias(host))
+    expect(doc.cases.filter((entry) => aliasAccepted(entry.host) !== entry.class).map((entry) => entry.host)).toContain("infinite-tag-smoke-site.vercel.app")
+    const githubAccepted = classWith((host) => isPreviewShapedHost(host) && !/github\.io$/.test(host))
+    expect(doc.cases.filter((entry) => githubAccepted(entry.host) !== entry.class).map((entry) => entry.host)).toEqual(["acme.github.io", "github.io"])
+    const bareAccepted = classWith((host) => isPreviewShapedHost(host) && !BARE_PLATFORM_HOSTS.includes(host))
+    expect(doc.cases.some((entry) => bareAccepted(entry.host) !== entry.class)).toBe(true)
+  })
+})
+
 describe("codes (§3d.5)", () => {
   it("exitCodeFor covers every WizardCode with the table's exit", () => {
     expect(WIZARD_CODES).toHaveLength(Object.keys(WIZARD_CODE_EXIT).length)
     const expected: Record<number, string[]> = {
       1: ["APPLY_ROLLED_BACK", "AGENT_TOOLLESS", "AGENT_TIMEOUT", "PUSH_REFUSED", "PR_CREATE_FAILED", "REVIEW_UNPARSEABLE", "PROOF_INCOMPLETE", "BRANCH_FAILED", "FENCE_TAMPER", "AGENT_FAILED"],
       2: ["NOT_BUILT", "NOT_MAC", "UNSUPPORTED_PLATFORM", "NO_GIT", "DIRTY_TREE", "BRIDGE_PROTOCOL", "LOCKED", "RUNTIME_MISMATCH"],
-      3: ["NEEDS_ANSWERS", "MERGE_PARKED", "AGENT_OUT_OF_USAGE", "DEPLOY_TIMEOUT", "PREVIEW_NOT_FOUND", "SITE_LOCKED", "INFINITE_UNAVAILABLE", "DEV_SERVER_RUNNING"],
+      3: ["NEEDS_ANSWERS", "MERGE_PARKED", "AGENT_OUT_OF_USAGE", "DEPLOY_TIMEOUT", "PREVIEW_NOT_FOUND", "SITE_LOCKED", "INFINITE_UNAVAILABLE", "DEV_SERVER_RUNNING", "DEPLOY_FAILED", "HOST_UNCONFIRMED"],
       4: ["NO_APP", "SIGNED_OUT", "SUBSCRIPTION_REQUIRED", "LINK_DECLINED", "LINK_EXPIRED"]
     }
     for (const [exit, codes] of Object.entries(expected)) {

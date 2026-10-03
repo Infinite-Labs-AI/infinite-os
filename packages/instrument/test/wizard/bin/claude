@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto"
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { dirname } from "node:path"
 
-import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps } from "./fake-agent-lib.mjs"
+import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps, withReadCheck } from "./fake-agent-lib.mjs"
 
 const argv = process.argv.slice(2)
 const scenario = loadScenario("claude")
@@ -83,7 +83,7 @@ if (turn.result !== null) {
     num_turns: result.num_turns ?? 3,
     result: result.result ?? "",
     permission_denials: (turn.denials ?? []).map((path) => ({ tool_name: "Read", tool_use_id: randomUUID(), tool_input: { file_path: path } })),
-    structured_output: turn.structured ?? { claims: [], questions: [] }
+    structured_output: role === "reviewer" ? withReadCheck(turn.structured ?? null, process.cwd(), turn) : (turn.structured ?? { claims: [], questions: [] })
   })
 }
 process.exit(turn.exit ?? 0)

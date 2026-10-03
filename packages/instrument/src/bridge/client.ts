@@ -54,6 +54,10 @@ import {
   type RunPatch,
   type RunResponse,
   type ServerLaneStatusResponse,
+  type SiteClaimBody,
+  type SiteClaimReadResponse,
+  type SiteClaimResponse,
+  type SiteProveResponse,
   type SiteSourceBody,
   type SiteSourceResponse,
   type StartRunBody,
@@ -332,6 +336,18 @@ export class DescriptorTagBridgeClient implements TagBridgeClient {
 
   disableSiteSource(options?: BridgeCallOptions): Promise<DisableSiteSourceResponse> {
     return this.call("uninstall.disable-site-source", { body: {}, signal: options?.signal })
+  }
+
+  siteClaim(body: WithoutEnvelope<SiteClaimBody>, options?: BridgeCallOptions): Promise<SiteClaimResponse> {
+    return this.call("site-claim", { body: { ...body }, signal: options?.signal })
+  }
+
+  readSiteClaim(options?: BridgeCallOptions): Promise<SiteClaimReadResponse> {
+    return this.call("site-claim-read", { signal: options?.signal })
+  }
+
+  proveSite(options?: BridgeCallOptions): Promise<SiteProveResponse> {
+    return this.call("site-prove", { body: {}, signal: options?.signal })
   }
 
   startTest(body: WithoutEnvelope<TestRunRequest>, options?: BridgeCallOptions): Promise<TestRunStartResponse> {

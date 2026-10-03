@@ -26,7 +26,7 @@
 //
 // The errors are read structurally (`code`, `state`, `retryable`, `upstreamStatus`), so a test fake that
 // throws a plain object with the §3a.2 envelope fields maps exactly like the real client's `BridgeError`.
-import type { TagBridgeClient, TagCapability } from "../wizard/contracts/bridge.js"
+import { BRIDGE_ERROR_STATUS, type TagBridgeClient, type TagCapability } from "../wizard/contracts/bridge.js"
 import type { StepOutcome } from "../wizard/contracts/deps.js"
 import { BridgeDiscoveryError, isBridgeDiscoveryError } from "./errors.js"
 
@@ -65,6 +65,8 @@ export const LINKED_SITES_MESSAGE = "The Infinite app's list of linked sites is 
 /** The §3a.2 fields a bridge failure carries (the real `BridgeError` and every test fake). */
 export interface BridgeFailureLike {
   code: string
+  /** The request field an `invalid_request` names (§3a.2 `error.field`). */
+  field?: string
   state?: string
   retryable?: boolean
   upstreamStatus?: number
@@ -73,10 +75,11 @@ export interface BridgeFailureLike {
 
 export function asBridgeFailure(error: unknown): BridgeFailureLike | null {
   if (typeof error !== "object" || error === null) return null
-  const record = error as { code?: unknown; state?: unknown; retryable?: unknown; upstreamStatus?: unknown; message?: unknown }
+  const record = error as { code?: unknown; field?: unknown; state?: unknown; retryable?: unknown; upstreamStatus?: unknown; message?: unknown }
   if (typeof record.code !== "string" || record.code.startsWith("INF_WIZ_")) return null
   return {
     code: record.code,
+    ...(typeof record.field === "string" ? { field: record.field } : {}),
     ...(typeof record.state === "string" ? { state: record.state } : {}),
     ...(typeof record.retryable === "boolean" ? { retryable: record.retryable } : {}),
     ...(typeof record.upstreamStatus === "number" ? { upstreamStatus: record.upstreamStatus } : {}),
@@ -222,7 +225,7 @@ export function bridgeFailureLine(error: unknown, piece: string): string | null 
     case "invalid_request":
       if (failure.state === "would_drop_ga4_events") return "Infinite has GA4 key events set by hand; set up conversions in Infinite first"
       if (failure.state === "unverified_host") return `${piece}: prove the domain in Infinite first; Infinite's tag is not installed this run`
-      return null
+      return genericRefusalLine(failure, piece)
     case "foreign_site_hosts":
       if (failure.state === "no_hosting_connection") return `${piece}: connect the site's Vercel project in Infinite first; nothing was changed`
       if (failure.state === "disabled_source_other_hosts") return `${piece}: this workspace's old site source belongs to another site; nothing was changed`
@@ -234,8 +237,24 @@ export function bridgeFailureLine(error: unknown, piece: string): string | null 
     case "relay_not_available":
       return `${piece}: not available (${failure.state ?? "not available"})`
     case "capability_unavailable":
-      return failure.state ? `${piece}: not available (${failure.state})` : null
+      return failure.state ? `${piece}: not available (${failure.state})` : genericRefusalLine(failure, piece)
+    case "not_found":
+      // §3y.6 (P1-2): the server lane's two "not found" answers are user lines, never "Internal error".
+      if (failure.state === "no_site_source") return `${piece}: Infinite has no site for this domain yet, so nothing was saved on Vercel`
+      if (failure.state === "no_hosting_connection") return `${piece}: connect your Vercel project in Infinite (Connections › GitHub · Website) to save its settings; nothing was saved`
+      return genericRefusalLine(failure, piece)
     default:
-      return null
+      return genericRefusalLine(failure, piece)
   }
+}
+
+/**
+ * §3y.6: any other refusal (a 4xx that is neither a hard stop nor transient) is ONE line, never a crash. A
+ * transient failure and a client-side error (not a §3a.2 answer) return null: the caller parks or rethrows.
+ */
+function genericRefusalLine(failure: BridgeFailureLike, piece: string): string | null {
+  if (isTransientBridgeFailure(failure)) return null
+  const status = (BRIDGE_ERROR_STATUS as Record<string, number | undefined>)[failure.code]
+  if (status === undefined || status < 400 || status >= 500) return null
+  return `${piece}: Infinite refused it (${failure.code}${failure.state ? ` · ${failure.state}` : ""}); nothing was changed`
 }

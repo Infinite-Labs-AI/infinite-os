@@ -3,8 +3,9 @@
 import type { GitHostAdapter, GitHostAdapterExtras, PrComment, PrSummary } from "../wizard/contracts/git-host.js"
 import { prChecks, type PrCheck } from "../github/checks.js"
 import type { GhClient } from "../github/gh.js"
-import { comment, createDraftPr, findPr, markReady, readPr, updateBranch } from "../github/pr.js"
+import { comment, createDraftPr, findPr, markReady, readPr, updateBranch, updateOwnComment } from "../github/pr.js"
 import { previewUrlForSha } from "../github/preview.js"
+import { latestProductionDeployment, productionDeploymentForSha, vercelDeploymentSeen, type GhDeployState, type LatestProductionDeployment } from "../github/deployments.js"
 import { ghAuthStatus, ghRepoFacts, type GhRepoFacts } from "../github/repo.js"
 import { postCommentReview } from "../github/review.js"
 import { baseRules } from "../github/rules.js"
@@ -19,6 +20,8 @@ export interface GitHubHostAdapter extends GitHostAdapter, GitHostAdapterExtras 
   readThreadDetails(number: number): Promise<ReviewThreadDetail[]>
   /** The PR's conversation comments and review bodies (a printed-brief review arrives as one of these). */
   readComments(number: number): Promise<PrComment[]>
+  /** R2-5: edits the wizard's own marked comment (author AND marker); false when there is none. */
+  updateOwnComment(number: number, marker: string, edit: (body: string) => string): Promise<boolean>
   // GitHub supports every method: the return types narrow (never `{unsupported:true}`).
   readPr(number: number): Promise<PrSummary>
   findPr(branch: string): Promise<PrSummary | null>
@@ -26,6 +29,37 @@ export interface GitHubHostAdapter extends GitHostAdapter, GitHostAdapterExtras 
   checks(number: number): Promise<PrCheck[]>
   rules(base: string): Promise<{ requiresReview: boolean; mergeQueue: boolean }>
   previewUrl(sha: string): Promise<string | null>
+  /** §3y.4: the merge SHA's production deployment (GitHub Deployments; the linked project picks in a monorepo). */
+  productionDeployment(sha: string): Promise<{ state: GhDeployState }>
+  /** §3y.4: the newest successful production deployment, or null. */
+  latestProductionDeployment(): Promise<LatestProductionDeployment | null>
+  /** §3y.4: the repo has a deployment by `vercel[bot]` (a Vercel signal without an Infinite connection). */
+  vercelDeploymentSeen(): Promise<boolean>
+}
+
+/** The deploy reads a host offers (§3y.4): the GitHub adapter's, or none (another host, or a test fake). */
+export interface DeploymentReader {
+  productionDeployment(sha: string): Promise<{ state: GhDeployState }>
+  latestProductionDeployment(): Promise<LatestProductionDeployment | null>
+  vercelDeploymentSeen(): Promise<boolean>
+  setPreviewProject?(projectName: string | null): void
+}
+
+/** R2-5: the comment editor a host offers (the GitHub adapter's), or none (another host, or a test fake). */
+export interface CommentEditor {
+  updateOwnComment(number: number, marker: string, edit: (body: string) => string): Promise<boolean>
+}
+
+export function commentEditor(host: GitHostAdapter): CommentEditor | null {
+  const candidate = host as Partial<CommentEditor> & { kind?: string }
+  return candidate.kind === "github" && typeof candidate.updateOwnComment === "function" ? (candidate as CommentEditor) : null
+}
+
+export function deploymentReader(host: GitHostAdapter): DeploymentReader | null {
+  const candidate = host as Partial<DeploymentReader> & { kind?: string }
+  return candidate.kind === "github" && typeof candidate.productionDeployment === "function" && typeof candidate.latestProductionDeployment === "function" && typeof candidate.vercelDeploymentSeen === "function"
+    ? (candidate as DeploymentReader)
+    : null
 }
 
 export type { PrComment } from "../wizard/contracts/git-host.js"
@@ -46,7 +80,7 @@ export function createGitHubAdapter(gh: GhClient): GitHubHostAdapter {
     auth: () => ghAuthStatus(gh),
     async repoFacts() {
       const value = await repo()
-      return { isPrivate: value.isPrivate, defaultBranch: value.defaultBranch, viewerPermission: value.viewerPermission }
+      return { isPrivate: value.isPrivate, defaultBranch: value.defaultBranch, viewerPermission: value.viewerPermission, homepageUrl: value.homepageUrl }
     },
     findPr: (branch) => findPr(gh, branch),
     createDraftPr: (input): Promise<PrSummary> => createDraftPr(gh, input),
@@ -79,8 +113,16 @@ export function createGitHubAdapter(gh: GhClient): GitHubHostAdapter {
     markReady: (number) => markReady(gh, number),
     checks: (number) => prChecks(gh, number),
     comment: (number, body) => comment(gh, number, body),
+    async updateOwnComment(number, marker, edit) {
+      const login = (await ghAuthStatus(gh)).login
+      if (!login) return false
+      return updateOwnComment(gh, { number, login, marker, edit })
+    },
     updateBranch: (number) => updateBranch(gh, number),
     previewUrl: (sha) => previewUrlForSha(gh, sha, previewProject),
+    productionDeployment: (sha) => productionDeploymentForSha(gh, sha, previewProject),
+    latestProductionDeployment: () => latestProductionDeployment(gh, previewProject),
+    vercelDeploymentSeen: () => vercelDeploymentSeen(gh),
     rules: (base) => baseRules(gh, base)
   }
   return adapter

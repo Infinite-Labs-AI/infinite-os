@@ -118,6 +118,27 @@ describe("ReportBuilder.build", () => {
     }
     expect(report.rows[0]!.cells.proven_live).toMatchObject({ state: "pending", reason: "pending_deploy" })
   })
+
+  it("review-2 P3-7: a missing Proven live column pending rerun_tag reads \"—\" not exercised, never \"open Infinite\"", () => {
+    const report = builder.build({
+      runId: RUN,
+      tagVersion: "0.12.0",
+      site: { repoLabel: "github.com/acme/acme-store", productionHost: null },
+      columns: { live_today: null, in_pr: null, proven_live: null },
+      provenLivePending: "rerun_tag",
+      day7: null,
+      notes: []
+    })
+    expect(report.columns.proven_live.pending).toBe("rerun_tag")
+    for (const row of report.rows) {
+      if (row.id === "day7_checkin") continue
+      expect(row.cells.proven_live, row.id).toMatchObject({ display: "—", value: null, state: "not_measured", reason: "not_exercised" })
+    }
+    const each = report.finishLine.find((line) => line.id === "each_tool_once")!.cells.proven_live
+    expect(each).toMatchObject({ display: "—", state: "not_measured", reason: "not_exercised" })
+    // NEGATIVE: nothing in the report sends the user to the app.
+    expect(JSON.stringify(report)).not.toContain("pending_open_infinite")
+  })
 })
 
 describe("buildColumn (typed inputs → one column)", () => {

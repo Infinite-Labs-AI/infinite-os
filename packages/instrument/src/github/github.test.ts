@@ -1,4 +1,6 @@
 // Lane O4: the GitHub adapter against the stateful fake gh (test/wizard/bin/gh). Never the real GitHub.
+import { readFileSync, statSync } from "node:fs"
+
 import { afterEach, describe, expect, it } from "vitest"
 
 import { createFakeGh, type FakeGh } from "../../test/wizard/fake-gh-harness.js"
@@ -61,7 +63,10 @@ describe("the GitHub adapter (§3g.2)", () => {
   it("reads auth from `gh auth status --json hosts` and the repo facts", async () => {
     const { adapter } = setup({ repo: { isPrivate: false, viewerPermission: "READ" } })
     expect(await adapter.auth()).toEqual({ ok: true, login: "acme-dev" })
-    expect(await adapter.repoFacts()).toEqual({ isPrivate: false, defaultBranch: "main", viewerPermission: "READ" })
+    expect(await adapter.repoFacts()).toEqual({ isPrivate: false, defaultBranch: "main", viewerPermission: "READ", homepageUrl: null })
+    // §3y.1: the repo's homepage rides the SAME `gh repo view` (a hint for the live-site ask only).
+    const withHome = setup({ repo: { homepageUrl: "https://acme-store.com" } })
+    expect(await withHome.adapter.repoFacts()).toMatchObject({ homepageUrl: "https://acme-store.com" })
   })
 
   it("is not logged in when gh says so (negative)", async () => {
@@ -79,6 +84,29 @@ describe("the GitHub adapter (§3g.2)", () => {
     const found = await adapter.findPr("infinite/tag/2026-10-02-7f3c2a")
     expect(found).toMatchObject({ number: 42 })
     expect(await adapter.findPr("infinite/tag/2026-10-02-000000")).toBeNull()
+  })
+
+  it("review P2-2: a read-only gh call never writes the state file, so a merge written meanwhile is never overwritten", async () => {
+    const { adapter, gh, fx } = setup()
+    fx.write(".infinite/wizard/pr-body.md", "body\n")
+    await adapter.createDraftPr({ base: "main", head: "infinite/tag/2026-10-02-7f3c2a", title: "t", bodyFile: ".infinite/wizard/pr-body.md" })
+    const bytes = readFileSync(gh.statePath, "utf8")
+    const inode = statSync(gh.statePath).ino
+    await adapter.readPr(42)
+    await adapter.findPr("infinite/tag/2026-10-02-7f3c2a")
+    // Nothing changed: the file is the same bytes AND the same file (a rename would give a new inode).
+    expect(readFileSync(gh.statePath, "utf8")).toBe(bytes)
+    expect(statSync(gh.statePath).ino).toBe(inode)
+    // The calls are still recorded (append-only, beside the state).
+    expect(gh.read().calls.map((call) => call.argv.slice(0, 2).join(" ")).slice(-2)).toEqual(["pr view", "pr list"])
+    // The merge poller's race, for real: many `gh pr view` processes in flight while the test merges the PR.
+    const polls = Array.from({ length: 12 }, () => adapter.readPr(42))
+    gh.update((state) => {
+      Object.assign(state.prs![0]!, { state: "MERGED", mergeCommit: { oid: SHA }, mergedAt: "2026-10-02T10:00:00Z" })
+    })
+    await Promise.all(polls)
+    expect(gh.read().prs[0]).toMatchObject({ state: "MERGED" })
+    expect(await adapter.readPr(42)).toMatchObject({ state: "MERGED", mergeCommitOid: SHA })
   })
 
   it("opens a ready PR with the [review pending] prefix when drafts are not supported", async () => {
@@ -130,6 +158,26 @@ describe("the GitHub adapter (§3g.2)", () => {
     expect(after.isResolved).toBe(true)
   })
 
+  it("R2-5: edits ONLY its own marked comment (author AND marker), by PATCH; none → false (the caller posts)", async () => {
+    const { adapter, gh, fx } = setup()
+    fx.write(".infinite/wizard/pr-body.md", "body\n")
+    await adapter.createDraftPr({ base: "main", head: "infinite/tag/2026-10-02-7f3c2a", title: "t", bodyFile: ".infinite/wizard/pr-body.md" })
+    const marker = "<!-- infinite-tag:final v1 run=r-1 -->"
+    // Someone else pasted the marker: never edited (trust is author AND marker).
+    gh.update((state) => {
+      ;(state.prs![0]! as { comments: unknown[] }).comments.push({ id: 9001, author: { login: "someone-else" }, authorAssociation: "NONE", body: `fake ${marker}` })
+    })
+    expect(await adapter.updateOwnComment(42, marker, (body) => `${body} EDITED`)).toBe(false)
+    await adapter.comment(42, `what happened\n\n${marker}`)
+    expect(await adapter.updateOwnComment(42, marker, (body) => body.replace("what happened", "what happened, final"))).toBe(true)
+    const comments = (gh.read().prs[0]! as { comments: Array<{ id: number; body: string; author: { login: string } }> }).comments
+    expect(comments.find((entry) => entry.author.login === "acme-dev")!.body).toBe(`what happened, final\n\n${marker}`)
+    expect(comments.find((entry) => entry.id === 9001)!.body).toBe(`fake ${marker}`)
+    const patch = gh.read().calls.find((call) => call.argv.includes("PATCH"))!
+    expect(patch.argv.slice(0, 4)).toEqual(["api", "-X", "PATCH", `repos/{owner}/{repo}/issues/comments/${comments.find((entry) => entry.author.login === "acme-dev")!.id}`])
+    expect(gh.read().calls.some((call) => call.argv.includes("DELETE"))).toBe(false)
+  })
+
   it("falls back to a body-only review when GitHub refuses the inline threads (422)", async () => {
     const { adapter, gh, fx } = setup({ rejectInlineThreads: true })
     fx.write(".infinite/wizard/pr-body.md", "body\n")
@@ -166,6 +214,48 @@ describe("the GitHub adapter (§3g.2)", () => {
     adapter.setPreviewProject("acme-store")
     expect(await adapter.previewUrl(SHA)).toBe("https://acme-store-git-x-acme.vercel.app")
     expect(matchesProject({ id: 9, environment: "Preview" }, "https://docs-git-x.vercel.app", "acme-store")).toBe(false)
+  })
+
+  it("§3y.4: the production deploy signal, with the live smoke's shapes (environment 'Production', production_environment false)", async () => {
+    const OTHER = "c".repeat(40)
+    const { adapter } = setup({
+      deployments: [
+        // Vercel's preview of the same SHA is never production.
+        { id: 11, sha: SHA, environment: "Preview", creator: "vercel[bot]", created_at: "2026-10-03T05:40:00Z", statuses: [{ state: "success", environment_url: "https://x-git.vercel.app" }] },
+        { id: 12, sha: SHA, environment: "Production", production_environment: false, creator: "vercel[bot]", created_at: "2026-10-03T05:47:00Z", statuses: [{ state: "success", environment_url: "https://site-mix177n53-chaos-edge.vercel.app" }, { state: "in_progress" }] },
+        { id: 13, sha: OTHER, environment: "Production", production_environment: false, creator: "vercel[bot]", created_at: "2026-10-03T06:10:00Z", statuses: [{ state: "failure" }] }
+      ]
+    })
+    expect(await adapter.productionDeployment(SHA)).toEqual({ state: "ready" })
+    expect(await adapter.productionDeployment(OTHER)).toEqual({ state: "failed" })
+    expect(await adapter.productionDeployment("d".repeat(40))).toEqual({ state: "not_found" })
+    // The newest SUCCESSFUL production deployment (the failed newer one is skipped).
+    expect(await adapter.latestProductionDeployment()).toEqual({ sha: SHA, createdAt: "2026-10-03T05:47:00Z" })
+    expect(await adapter.vercelDeploymentSeen()).toBe(true)
+  })
+
+  it("§3y.4 negative: an ambiguous monorepo is not_found (never a guess); the linked project picks; building and inactive read right", async () => {
+    const { adapter } = setup({
+      deployments: [
+        { id: 21, sha: SHA, environment: "Production – docs", creator: "vercel[bot]", statuses: [{ state: "success" }] },
+        { id: 22, sha: SHA, environment: "Production – acme-store", creator: "vercel[bot]", statuses: [{ state: "queued" }] }
+      ]
+    })
+    expect(await adapter.productionDeployment(SHA)).toEqual({ state: "not_found" })
+    adapter.setPreviewProject("acme-store")
+    expect(await adapter.productionDeployment(SHA)).toEqual({ state: "building" })
+    adapter.setPreviewProject("docs")
+    expect(await adapter.productionDeployment(SHA)).toEqual({ state: "ready" })
+    const superseded = setup({ deployments: [{ id: 31, sha: SHA, environment: "Production", creator: "vercel[bot]", statuses: [{ state: "inactive" }, { state: "success" }] }] })
+    expect(await superseded.adapter.productionDeployment(SHA)).toEqual({ state: "ready" })
+    // Review P3-2: only `inactive` statuses (no success ever recorded) is an unmeasured success, so not_found;
+    // `latestProductionDeployment` skips it too.
+    const onlyInactive = setup({ deployments: [{ id: 32, sha: SHA, environment: "Production", creator: "vercel[bot]", statuses: [{ state: "inactive" }, { state: "inactive" }] }] })
+    expect(await onlyInactive.adapter.productionDeployment(SHA)).toEqual({ state: "not_found" })
+    expect(await onlyInactive.adapter.latestProductionDeployment()).toBeNull()
+    const none = setup({ deployments: [] })
+    expect(await none.adapter.vercelDeploymentSeen()).toBe(false)
+    expect(await none.adapter.latestProductionDeployment()).toBeNull()
   })
 
   it("reads branch rules (pull_request approvals, merge queue) and required checks (exit 8 = pending)", async () => {

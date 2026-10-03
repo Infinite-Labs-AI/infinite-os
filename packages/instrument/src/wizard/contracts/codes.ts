@@ -61,7 +61,11 @@ export const WIZARD_CODES_BY_EXIT = {
     // §3z.4: Infinite or its cloud did not answer (502/504, busy, rate limited, retryable internal error).
     "INF_WIZ_INFINITE_UNAVAILABLE",
     // §3z.12 (B21): a dev server keeps writing build output; stop it, then run again.
-    "INF_WIZ_DEV_SERVER_RUNNING"
+    "INF_WIZ_DEV_SERVER_RUNNING",
+    // §3y.4: the merge's production deployment failed (GitHub or Infinite says so) and nothing later descends from it.
+    "INF_WIZ_DEPLOY_FAILED",
+    // §3y.4: deployed, but the site-file claim is not proven yet; the run's one real visit is kept for later.
+    "INF_WIZ_HOST_UNCONFIRMED"
   ],
   4: [
     "INF_WIZ_NO_APP",

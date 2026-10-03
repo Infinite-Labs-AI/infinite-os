@@ -72,7 +72,7 @@ export const REASON_TEXT: Record<Reason, string> = {
   env_dependent: "the ID comes from a setting that previews do not have",
   pending_deploy: "waiting for the deploy",
   pending_open_infinite: "open Infinite (or re-run npx infinite-tag) to finish the live checks",
-  not_vercel: "the site is not on Vercel, so previews cannot be loaded",
+  not_vercel: "no Vercel preview was found for this site, so previews cannot be loaded",
   automation_detected: "the site treated the test window as a bot",
   not_exercised: "this run did not exercise it",
   not_probed: "the server lane was not probed",
@@ -137,6 +137,8 @@ export interface ColumnInput {
   unmeasured?: { reason: Reason; state: "pending" | "not_measured" }
   /** The run's server-clock start (`runs.start`): a receipt before it never backs "verified"/"proven". */
   runStartedAt?: string | null
+  /** When the column's cells were built, for a column with no measurement (`meta.measuredAt` null, no fact). */
+  builtAt?: string
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -377,7 +379,7 @@ export function buildColumn(column: ReportColumnId, input: ColumnInput): ReportC
   }
   if (column === "in_pr" && !input.meta.sha) throw new ReportRuleError("in_pr: the column is keyed to the PR head (meta.sha is required)")
   if (column === "live_today" && input.meta.sha !== null) throw new ReportRuleError(LIVE_TODAY_SHA_RULE)
-  const at = input.meta.measuredAt ?? input.facts.map((fact) => fact.at).sort().at(-1) ?? new Date(0).toISOString()
+  const at = input.meta.measuredAt ?? input.facts.map((fact) => fact.at).sort().at(-1) ?? input.builtAt ?? new Date(0).toISOString()
   const finishLine: Partial<Record<FinishLineId, Cell>> = {}
   for (const id of FINISH_LINE_IDS) finishLine[id] = finishLineCell(id, column, input.facts, input.runId, at, input.unmeasured, input.runStartedAt ?? null)
   const cells: Partial<Record<ReportRowId, Cell>> = {}
@@ -422,7 +424,8 @@ type BuildInput = Parameters<ReportBuilder["build"]>[0]
 function missingColumnReason(column: ReportColumnId, pending: ReportV2["columns"]["proven_live"]["pending"]): { reason: Reason; state: "pending" | "not_measured" } {
   if (column !== "proven_live") return { reason: "not_exercised", state: "not_measured" }
   if (pending === "deploy") return { reason: "pending_deploy", state: "pending" }
-  if (pending === "open_infinite" || pending === "rerun_tag") return { reason: "pending_open_infinite", state: "pending" }
+  // R2-4: "open Infinite" only when Infinite finishes it; `rerun_tag` (nothing in Infinite can) is "—" not exercised.
+  if (pending === "open_infinite") return { reason: "pending_open_infinite", state: "pending" }
   return { reason: "not_exercised", state: "not_measured" }
 }
 
@@ -641,11 +644,20 @@ export function durationWords(ms: number): string {
 export function verdictLine(report: ReportV2): string {
   const site = report.site.productionHost ?? report.site.repoLabel
   const column = report.columns.proven_live
-  if (column.measuredAt === null || column.pending !== null) {
-    const why = column.pending === "deploy" ? " (waiting for the deploy)" : column.pending === null ? "" : " (open Infinite, or run npx infinite-tag again, to finish the live checks)"
+  const cells = report.finishLine.map((line) => ({ id: line.id, cell: line.cells.proven_live }))
+  // R2-2: a column with no pass and no problem measured nothing (no real visit, no receipt): never "N problems left".
+  const measured = cells.some((entry) => entry.cell.state === "pass" || entry.cell.state === "problem")
+  if (column.measuredAt === null || column.pending !== null || !measured) {
+    const why =
+      column.pending === "deploy"
+        ? " (waiting for the deploy)"
+        : column.pending === "open_infinite"
+          ? " (open Infinite to finish the live checks)"
+          : column.pending === "rerun_tag"
+            ? " (nothing in Infinite can finish it: run npx infinite-tag again once it is live)"
+            : ""
     return `${site}: set up in the pull request · not checked live yet${why}`
   }
-  const cells = report.finishLine.map((line) => ({ id: line.id, cell: line.cells.proven_live }))
   const problems = cells.filter((entry) => entry.cell.state === "problem").length
   if (problems > 0) return `${site}: ${problems} problem${problems === 1 ? "" : "s"} left on the live site (the "${COLUMN_LABELS.proven_live}" column says which)`
   const proof = cells.find((entry) => entry.id === "proof_from_real_visit")?.cell.state === "pass"

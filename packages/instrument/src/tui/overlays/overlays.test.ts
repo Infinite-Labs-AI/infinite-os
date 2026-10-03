@@ -30,6 +30,14 @@ const ENTER = "\r"
 const ESC = "\x1b"
 
 describe("overlays", () => {
+  it("§3y P3-9: the link card never prints an app root of '.' (a monorepo's real app root still shows)", () => {
+    const render = (appRoot: string) =>
+      OVERLAYS["link-code"].render({ code: "7918", site: { repoLabel: "github.com/a/smoke-site", appRoot, folderLabel: "~/Github/smoke-site" } }, {}, ctx()).body.map(stripAnsi)
+    expect(render(".")).toContain("Folder: ~/Github/smoke-site")
+    expect(render(".").join("\n")).not.toContain("(app:")
+    expect(render("apps/web")).toContain("Folder: ~/Github/smoke-site (app: apps/web)")
+  })
+
   it("has one overlay per ask kind", () => {
     expect(Object.keys(OVERLAYS).sort()).toEqual([...ASK_KINDS].sort())
   })

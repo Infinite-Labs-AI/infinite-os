@@ -7,7 +7,7 @@
 // (INF_WIZ_NEEDS_ANSWERS, exit 3): `install` cannot create the site source without it.
 import { createHash } from "node:crypto"
 
-import { gateSeededItems, resolvePlanAnswers, withGuardHosts, type WizardPlanModel } from "../../install/plan-model.js"
+import { agentJobsUpTo, gateSeededItems, planAsksConsent, resolvePlanAnswers, runnableAgentJobs, withGuardHosts, type WizardPlanModel } from "../../install/plan-model.js"
 import { keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates, savePlanApprovals } from "../../install/step-inputs.js"
 import { ASK_CANCELLED, ASK_TIMEOUT } from "../contracts/asks.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
@@ -34,18 +34,18 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const scan = await deps.installer.scan({ root: ctx.root, ...(ctx.appRoot !== "." ? { appRoot: ctx.appRoot } : {}), hosting: inputs.hosting })
   const candidates = await planCandidates(ctx, deps)
   const plan = deps.installer.buildPlan(scan, keysOnly(inputs.keys), inputs.before, candidates)
-  // The same count as the plan's own agent line ("Claude Code: N jobs"): the detector candidates AND the plan's
-  // own seeds (terminal QA #13: this line said 10 where the plan line, the approval and "Job 1/11" said 11).
-  const agentJobs = [...candidates, ...((plan as Partial<WizardPlanModel>).seeds ?? [])].filter((item) => item.owner === "agent").length
+  // §3y.5 (P2-8): ONE count: the plan's own budget line ("up to N"), this line, "Plan approved" and "Job i/N" all
+  // come from `agentJobsAfterApprovals` (the registry's gate + the plan's gate; withheld and unrunnable jobs out).
+  const agentJobs = agentJobsUpTo(candidates, (plan as Partial<WizardPlanModel>).seeds ?? [], plan, ctx.options.consentMode)
   const decisions = plan.lines.filter((line) => line.editable).length
-  sub(ctx, `${agentJobs} agent job${agentJobs === 1 ? "" : "s"} · ${decisions} decision${decisions === 1 ? "" : "s"} need${decisions === 1 ? "s" : ""} you`, "info")
+  sub(ctx, `Up to ${agentJobs} agent job${agentJobs === 1 ? "" : "s"} · ${decisions} decision${decisions === 1 ? "" : "s"} need${decisions === 1 ? "s" : ""} you`, "info")
 
   // A resume of the SAME plan with its consent already answered asks nothing again (the saved answer
   // carries the edits too: an edited privacy paragraph or conversion list survives the resume).
   const saved = ctx.state.get().plan
   const savedFile = await loadPlanApprovals(ctx, deps)
   let answer =
-    saved && saved.hash === plan.hash && saved.answers.consentMode !== null && savedFile?.planHash === plan.hash ? savedFile.approvals : null
+    saved && saved.hash === plan.hash && (saved.answers.consentMode !== null || !planAsksConsent(plan)) && savedFile?.planHash === plan.hash ? savedFile.approvals : null
   if (!answer) {
     const asked = await deps.installer.planAsk(plan)
     const reply = await ctx.ask("plan", asked)
@@ -87,7 +87,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     plan: { hash: plan.hash, lines: plan.lines, decisions: plan.decisions }
   })
 
-  if (resolved.consentMode === null) {
+  // R2-6: a plan that does not ask consent (nothing it governs is installed or recorded) needs no answer.
+  if (resolved.consentMode === null && planAsksConsent(plan)) {
     await ctx.state.save()
     return {
       kind: "parked",
@@ -120,11 +121,12 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   }
 
   const approved = resolved.lines.filter((line) => line.approved === true).length
-  const agentItems = items.filter((item) => item.owner === "agent")
-  const blocked = agentItems.filter((item) => item.state === "blocked").length
+  // The jobs that RUN (the jobs step's "Job i/N" counts the same items); the ones waiting for you are said apart.
+  const running = runnableAgentJobs(items).length
+  const blocked = items.filter((item) => item.owner === "agent" && item.state === "blocked").length
   return {
     kind: "ok",
-    status: `Plan approved · ${approved} line${approved === 1 ? "" : "s"} · ${agentItems.length} agent job${agentItems.length === 1 ? "" : "s"}${blocked > 0 ? ` (${blocked} wait${blocked === 1 ? "s" : ""} for you)` : ""}`
+    status: `Plan approved · ${approved} line${approved === 1 ? "" : "s"} · ${running} agent job${running === 1 ? "" : "s"}${blocked > 0 ? ` (${blocked} more wait${blocked === 1 ? "s" : ""} for you)` : ""}`
   }
 }
 

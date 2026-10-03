@@ -198,3 +198,18 @@ export async function runSteps(steps, ctx) {
     }
   }
 }
+
+/**
+ * §3y.7: a reviewer that CAN read its folder quotes `.infinite/review/read-check.txt` at the start of its summary,
+ * as the brief asks. A turn with `blind: true` reads nothing (the live run's Codex) and answers as scripted.
+ */
+export function withReadCheck(review, cwd, turn) {
+  if (turn.blind || review === null || typeof review !== "object" || typeof review.summary !== "string") return review
+  let nonce
+  try {
+    nonce = readFileSync(join(cwd, ".infinite", "review", "read-check.txt"), "utf8").trim()
+  } catch {
+    return review
+  }
+  return { ...review, summary: `read-check: ${nonce} ${review.summary}` }
+}

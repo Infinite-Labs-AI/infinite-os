@@ -35,6 +35,7 @@ function validReceipt(overrides: Partial<PackReceipt> = {}): PackReceipt[] {
     "contracts/browser-collect-v1.fixture.json",
     "contracts/browser-collect-v1.schema.json",
     "contracts/server-lane-v1.vectors.json",
+    "contracts/host-class-v1.fixture.json",
     "contracts/host-deny-v1.json",
     "contracts/tag-wizard-v1/bridge-descriptor.example.json",
     "contracts/tag-wizard-v1/bridge-verbs.fixtures.json",
@@ -48,7 +49,7 @@ function validReceipt(overrides: Partial<PackReceipt> = {}): PackReceipt[] {
   ]
   const paths = [
     ...required,
-    ...Array.from({ length: 72 }, (_, index) => `dist/src/generated-${index}.js`)
+    ...Array.from({ length: 71 }, (_, index) => `dist/src/generated-${index}.js`)
   ]
   const files = paths.map((path) => ({ path, size: 1, mode: 0o644 }))
   files[0]!.size = 257_751 - (files.length - 1)

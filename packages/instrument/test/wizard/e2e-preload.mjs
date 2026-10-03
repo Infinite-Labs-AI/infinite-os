@@ -1,4 +1,4 @@
-/* global process, URL, Response */
+/* global process, URL, Response, setTimeout */
 // Preloaded into the BUILT wizard by the offline E2E (`node --import <this> dist/src/cli.js --json`;
 // test-only, never published). It does two things, both through seams the real wiring already has:
 //
@@ -58,6 +58,27 @@ if (process.env.E2E_NO_AGENTS === "1") {
   wiring.createDeps = async (input) => {
     const deps = await createDeps(input)
     deps.agents.detect = async () => ({ worker: null, reviewer: null, nested: null, unavailable: [] })
+    return deps
+  }
+}
+
+// §3y (IO-12): a run that must WAIT minutes by design (the 3-minute proof grace after a deploy) runs on virtual
+// time: the clock's sleep advances an offset and yields briefly, and `now()` includes the offset, so every
+// deadline the wizard computes from its clock still holds — in seconds of real time. E2E_FAST_CLOCK=1 only.
+if (process.env.E2E_FAST_CLOCK === "1") {
+  const createDeps = wiring.createDeps
+  wiring.createDeps = async (input) => {
+    const deps = await createDeps(input)
+    let offset = 0
+    deps.clock = {
+      now: () => new Date(Date.now() + offset),
+      sleep: (ms, signal) =>
+        new Promise((resolve, reject) => {
+          if (signal?.aborted) return reject(signal.reason ?? new Error("aborted"))
+          offset += ms
+          setTimeout(resolve, Math.min(ms, 25))
+        })
+    }
     return deps
   }
 }

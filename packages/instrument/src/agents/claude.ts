@@ -104,6 +104,8 @@ export function buildClaudeWorkerArgv(input: ClaudeWorkerArgvInput): string[] {
     "Edit(**/.npmrc)",
     "Write(**/.npmrc)",
     ...sensitiveDenies(input.sensitive, ["Read", "Edit", "Write"]),
+    // §3y.10 (P3-10): the wizard's own files are never the worker's to read (the brief carries what it needs).
+    "Read(./.infinite/**)",
     "Edit(./.infinite/**)",
     "Write(./.infinite/**)",
     "Edit(**/node_modules/**)",

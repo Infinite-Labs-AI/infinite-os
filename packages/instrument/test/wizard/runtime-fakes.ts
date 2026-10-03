@@ -11,6 +11,8 @@ import {
   type KeysResponse,
   type HostingResponse,
   type RunPatch,
+  type SiteClaimResponse,
+  type SiteProveResponse,
   type TagBridgeClient,
   type TagCapability,
   type TestRunPollResponse,
@@ -203,6 +205,10 @@ export interface FakeBridgeScript {
   reportEcho?: (phase: string, runId: string) => { schema: string; runId: string }
   /** §3z.9 (A21): the real-visit facts the desktop stored (absent → 404 not_found). */
   storedFacts?: TestResult
+  /** §3y.2: the `site-prove` answers in order (the last one repeats); absent → `none`. */
+  siteProve?: Array<Omit<SiteProveResponse, "protocolVersion" | "requestId">>
+  /** §3y.2: the `site-claim` answer (absent → ready with the fixture source). */
+  siteClaim?: Omit<SiteClaimResponse, "protocolVersion" | "requestId">
 }
 
 export function createFakeBridge(log: CallLog, script: FakeBridgeScript = {}): TagBridgeClient & { linkId: string | null } {
@@ -210,6 +216,7 @@ export function createFakeBridge(log: CallLog, script: FakeBridgeScript = {}): T
   let deployIndex = 0
   let pollIndex = 0
   let receiptsIndex = 0
+  let proveIndex = 0
   const descriptor: BridgeDescriptor = {
     schemaVersion: 1,
     service: "infinite-desktop-tag",
@@ -348,6 +355,23 @@ export function createFakeBridge(log: CallLog, script: FakeBridgeScript = {}): T
       record("disableSiteSource")
       return envelope({ disabled: true as const })
     },
+    async siteClaim(body: unknown) {
+      record("siteClaim", body)
+      return envelope(
+        script.siteClaim ?? { state: "ready" as const, siteSource: { siteSourceKey: SITE_SOURCE_KEY, productionHosts: [HOST], consentMode: "not_required" as const, created: true }, claim: null }
+      )
+    },
+    async readSiteClaim() {
+      record("readSiteClaim")
+      return envelope({ claim: script.siteClaim?.claim ?? null })
+    },
+    async proveSite() {
+      record("proveSite")
+      const answers = script.siteProve ?? [{ state: "none" as const, hosts: [], siteSource: null }]
+      const answer = answers[Math.min(proveIndex, answers.length - 1)]!
+      proveIndex += 1
+      return envelope(answer)
+    },
     async startTest(body: unknown) {
       record("startTest", body)
       return envelope({ testRunId: "tr_FAKEFAKEFAKEFAKEFAKE00", state: "queued" as const })
@@ -406,12 +430,26 @@ export interface FakeGitScript {
   dirtyPaths?: string[]
   createBranchFails?: boolean
   remote?: string | null
+  /**
+   * Files per revision (`git show <rev>:<path>`). Only when set does the fake carry `showFile` (other steps
+   * switch to the full wizard git surface when they see it).
+   */
+  files?: Record<string, Record<string, string>>
 }
 
 export function createFakeGit(log: CallLog, script: FakeGitScript = {}): GitOps {
   const ancestors = new Set((script.ancestors ?? []).map(([a, b]) => `${a}..${b}`))
   const unfetched = new Set(script.unfetched ?? [])
+  const files = script.files
   return {
+    ...(files
+      ? {
+          async showFile(rev: string, path: string): Promise<string | null> {
+            log.push("git", "showFile", rev, path)
+            return files[rev]?.[path] ?? null
+          }
+        }
+      : {}),
     async isRepo() {
       log.push("git", "isRepo")
       return true
@@ -480,9 +518,43 @@ export function prSummary(overrides: Partial<PrSummary> = {}): PrSummary {
   }
 }
 
-export function createFakeHost(log: CallLog, script: { pr?: PrSummary; readPr?: PrSummary } = {}): GitHostAdapter {
+export interface FakeHostDeployments {
+  /** The merge SHA's production deployment, one answer per read (the last repeats). */
+  forSha: Array<"ready" | "failed" | "building" | "not_found">
+  /** The newest successful production deployment, one answer per read (the last repeats). */
+  latest?: Array<{ sha: string; createdAt: string } | null>
+  vercelSeen?: boolean
+}
+
+export function createFakeHost(log: CallLog, script: { pr?: PrSummary; readPr?: PrSummary; deployments?: FakeHostDeployments } = {}): GitHostAdapter {
   const unsupported = { unsupported: true as const }
+  let shaIndex = 0
+  let latestIndex = 0
+  const deployments = script.deployments
+  const deploymentReads = deployments
+    ? {
+        async productionDeployment(sha: string) {
+          log.push("host", "productionDeployment", sha)
+          const state = deployments.forSha[Math.min(shaIndex, deployments.forSha.length - 1)] ?? "not_found"
+          shaIndex += 1
+          return { state }
+        },
+        async latestProductionDeployment() {
+          log.push("host", "latestProductionDeployment")
+          const answers = deployments.latest ?? [null]
+          const answer = answers[Math.min(latestIndex, answers.length - 1)] ?? null
+          latestIndex += 1
+          return answer
+        },
+        async vercelDeploymentSeen() {
+          log.push("host", "vercelDeploymentSeen")
+          return deployments.vercelSeen ?? true
+        },
+        setPreviewProject() {}
+      }
+    : {}
   return {
+    ...deploymentReads,
     kind: "github",
     async auth() {
       return { ok: true, login: "acme-dev" }

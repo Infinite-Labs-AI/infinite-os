@@ -8,7 +8,7 @@
 // steps[], final (the -o JSON), exit, threadId }.
 import { readdirSync, writeFileSync } from "node:fs"
 
-import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps } from "./fake-agent-lib.mjs"
+import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps, withReadCheck } from "./fake-agent-lib.mjs"
 
 const argv = process.argv.slice(2)
 const scenario = loadScenario("codex")
@@ -93,6 +93,7 @@ await runSteps(turn.steps, {
 mcp?.close()
 
 const out = flag("-o")
-if (out && turn.final !== null) writeFileSync(out, JSON.stringify(turn.final ?? (role === "reviewer" ? null : { claims: [], questions: [] })))
+const final = turn.final ?? (role === "reviewer" ? null : { claims: [], questions: [] })
+if (out && turn.final !== null) writeFileSync(out, JSON.stringify(role === "reviewer" ? withReadCheck(final, cwd, turn) : final))
 if ((turn.exit ?? 0) === 0) emit({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })
 process.exit(turn.exit ?? 0)

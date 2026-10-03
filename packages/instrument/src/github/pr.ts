@@ -142,6 +142,21 @@ export async function comment(gh: GhClient, number: number, body: string): Promi
   await gh.run(["pr", "comment", String(number), "--body-file", "-"], { input: body })
 }
 
+/**
+ * R2-5 (live run 2): edits the wizard's OWN comment on the PR, found by author (the gh user) AND `marker` (trust is
+ * never the marker alone: anyone can paste it). `edit` gets the current body and returns the new one. Returns false
+ * when no such comment exists, so the caller can post instead. A PATCH of the one comment; never a delete.
+ */
+export async function updateOwnComment(gh: GhClient, input: { number: number; login: string; marker: string; edit: (body: string) => string }): Promise<boolean> {
+  const rows = await gh.json<Array<{ id?: number; user?: { login?: string } | null; body?: string }>>(["api", `repos/{owner}/{repo}/issues/${input.number}/comments?per_page=100`])
+  const own = [...rows].reverse().find((row) => typeof row.id === "number" && row.user?.login === input.login && typeof row.body === "string" && row.body.includes(input.marker))
+  if (!own) return false
+  const body = input.edit(own.body!)
+  if (body === own.body) return true
+  await gh.run(["api", "-X", "PATCH", `repos/{owner}/{repo}/issues/comments/${own.id}`, "--input", "-"], { input: JSON.stringify({ body }) })
+  return true
+}
+
 /** `gh pr update-branch` (a merge commit; `--rebase` is never used). */
 export async function updateBranch(gh: GhClient, number: number): Promise<void> {
   await gh.run(["pr", "update-branch", String(number)])

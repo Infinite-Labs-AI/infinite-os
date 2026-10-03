@@ -18,7 +18,7 @@
 // one, the turn is retried ONCE with the user's default model at the same effort, and the user is told.
 // Never a provider switch, never Infinite-paid inference, never a real prompt in tests (fakes only).
 import { randomUUID } from "node:crypto"
-import { readFile, rm, writeFile } from "node:fs/promises"
+import { access, readFile, rm, writeFile } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -494,8 +494,9 @@ export class AgentRunnerImpl implements AgentRunner {
         sensitiveRealpaths: sensitive.map((entry) => entry.path),
         codexBinDir: runtime.codexBinDir,
         codexInstallRoot: runtime.codexInstallRoot,
-        // B20: the repo's own secrets ("none") and, for the worker, .git read-only.
-        repoDenies: await repoSecretPaths(this.options.root)
+        // B20: the repo's own secrets ("none") and, for the worker, .git read-only. §3y.10 (P3-10): the wizard's
+        // own `.infinite/` is "none" for the worker too (the brief carries what it needs).
+        repoDenies: await withWizardDirDenied(await repoSecretPaths(this.options.root), this.options.root)
       })
       const schemaPath = join(ctx.scratch, "claims.schema.json")
       await writeFile(schemaPath, schemaFileText(CLAIMS_SCHEMA), { mode: 0o600 })
@@ -650,7 +651,9 @@ export class AgentRunnerImpl implements AgentRunner {
         codexBinDir: runtime.codexBinDir,
         codexInstallRoot: runtime.codexInstallRoot,
         // B20: the repo's own secrets ("none") and, for the worker, .git read-only.
-        repoDenies: await repoSecretPaths(input.worktreeDir)
+        repoDenies: await repoSecretPaths(input.worktreeDir),
+        // §3y.7: the review worktree is readable even under the $HOME deny (it lives in ~/Library/Caches/…).
+        readRoots: [await resolveRealpath(input.worktreeDir)]
       })
       const schemaPath = join(scratch, "review.schema.json")
       await writeFile(schemaPath, schemaFileText(REVIEW_SCHEMA), { mode: 0o600 })
@@ -687,6 +690,18 @@ export class AgentRunnerImpl implements AgentRunner {
     const final: "completed" | "out_of_usage" | "timeout" | "error" = outcome ?? (exit.timedOut ? "timeout" : exit.code === 0 ? "completed" : "error")
     return { outcome: final, review: final === "completed" ? parseReview(structured) : null, modelRejected }
   }
+}
+
+/** §3y.10: the worker's Codex profile also denies `<root>/.infinite` (its realpath, when it exists). */
+export async function withWizardDirDenied(denies: { none: string[]; readOnly: string[] }, root: string): Promise<{ none: string[]; readOnly: string[] }> {
+  const dir = join(root, ".infinite")
+  try {
+    await access(dir)
+  } catch {
+    return denies
+  }
+  const real = await resolveRealpath(dir)
+  return denies.none.includes(real) ? denies : { ...denies, none: [...denies.none, real].sort() }
 }
 
 /** Runs the reviewer in a throwaway detached worktree of the head SHA (only committed files: no `.env*`). */

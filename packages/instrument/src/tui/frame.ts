@@ -28,8 +28,8 @@ const FEED_LINES = 5
 const FEED_LINES_MAX = 8
 /** The status line (or the step's description) wraps instead of being cut, up to this many rows. */
 const STATUS_ROWS_MAX = 3
-/** A sub-status wraps to at most this many rows (its text is capped at 120 characters). */
-const SUB_ROWS_MAX = 2
+/** A sub-status wraps to at most this many rows (its text is capped at 240 characters: 4 rows even at 72 columns). */
+const SUB_ROWS_MAX = 4
 /**
  * The overlay box uses the terminal's width up to this (a line longer than ~150 columns is hard to read). The
  * old cap of 100 left 20 columns unused at 120 and cut the plan's lines (final verify F1).

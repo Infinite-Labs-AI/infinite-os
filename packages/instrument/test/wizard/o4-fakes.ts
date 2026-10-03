@@ -2,7 +2,7 @@
 // registry / installer / report builder, a fake clock, a real-disk WizardFs, and a WizardContext with an
 // in-memory run state, an event log and scripted ask answers. No network, no real agent, no real desktop.
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from "node:fs"
-import { dirname } from "node:path"
+import { dirname, join } from "node:path"
 
 import type { AgentRunner, AgentRunResult, ReviewFailure, ReviewResult, RunJobsInput } from "../../src/wizard/contracts/agents.js"
 import type { AskAnswer, AskKind, AskPayloads } from "../../src/wizard/contracts/asks.js"
@@ -150,6 +150,9 @@ export function fakeBridge(options: { keys?: TagKeys; hosting?: TagHosting; resu
     enableMetaRelay: notUsed("enableMetaRelay"),
     removeServerLaneEnv: notUsed("removeServerLaneEnv"),
     disableSiteSource: notUsed("disableSiteSource"),
+    siteClaim: notUsed("siteClaim"),
+    readSiteClaim: notUsed("readSiteClaim"),
+    proveSite: notUsed("proveSite"),
     async startTest(request) {
       calls.push({ verb: `test.${request.mode}`, body: request })
       testRequests.push(request)
@@ -177,10 +180,18 @@ export interface ScriptedAgents extends AgentRunner {
   jobCalls: RunJobsInput[]
 }
 
+/** In a scripted review, the place the reviewer quotes the read-check nonce (besides the summary's prefix). */
+export const READ_CHECK_PLACEHOLDER = "{{read-check}}"
+
 /** Agents that replay scripted reviews and run a scripted fix function (no prompt is ever spent). */
 export function scriptedAgents(options: {
   reviews?: Array<ReviewResult | ReviewFailure>
   fix?: (input: RunJobsInput, round: number) => Promise<Partial<AgentRunResult>> | Partial<AgentRunResult>
+  /**
+   * §3y.7: by default the scripted reviewer READS its folder and quotes the read-check nonce at the start of its
+   * summary (as the brief asks); `blind: true` reads nothing (the live run's Codex).
+   */
+  blind?: boolean
 }): ScriptedAgents {
   const reviews = [...(options.reviews ?? [])]
   const agents: ScriptedAgents = {
@@ -194,7 +205,17 @@ export function scriptedAgents(options: {
       agents.reviewCalls.push({ worktreeDir: input.worktreeDir, brief: input.brief, reviewer: input.reviewer })
       const next = reviews.shift()
       if (!next) return { error: "unparseable" }
-      return next
+      if ("error" in next || options.blind) return next
+      let nonce: string | null = null
+      try {
+        nonce = readFileSync(join(input.worktreeDir, ".infinite", "review", "read-check.txt"), "utf8").trim()
+      } catch {
+        nonce = null
+      }
+      if (!nonce) return next
+      // A scripted review may also quote the nonce elsewhere (a note, a finding): `{{read-check}}` is replaced by it.
+      const quoted = JSON.parse(JSON.stringify(next).split(READ_CHECK_PLACEHOLDER).join(nonce)) as ReviewResult
+      return { ...quoted, summary: `read-check: ${nonce} ${quoted.summary}` }
     },
     async runJobs(input) {
       agents.jobCalls.push(input)

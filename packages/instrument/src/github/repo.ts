@@ -26,6 +26,8 @@ export interface GhRepoFacts {
   defaultBranch: string | null
   /** ADMIN / MAINTAIN / WRITE can push; READ / TRIAGE cannot (stop; never fork). */
   viewerPermission: string | null
+  /** §3y.1: the repo's homepage (a host hint for the live-site ask only; never an answer). */
+  homepageUrl: string | null
 }
 
 export async function ghRepoFacts(gh: GhClient): Promise<GhRepoFacts> {
@@ -34,7 +36,8 @@ export async function ghRepoFacts(gh: GhClient): Promise<GhRepoFacts> {
     isPrivate?: boolean
     defaultBranchRef?: { name?: string } | null
     viewerPermission?: string | null
-  }>(["repo", "view", "--json", "nameWithOwner,isPrivate,defaultBranchRef,viewerPermission"])
+    homepageUrl?: string | null
+  }>(["repo", "view", "--json", "nameWithOwner,isPrivate,defaultBranchRef,viewerPermission,homepageUrl"])
   const nameWithOwner = typeof raw.nameWithOwner === "string" ? raw.nameWithOwner : ""
   const [owner = "", name = ""] = nameWithOwner.split("/")
   if (!owner || !name) throw new Error("gh repo view returned no nameWithOwner")
@@ -45,7 +48,8 @@ export async function ghRepoFacts(gh: GhClient): Promise<GhRepoFacts> {
     // Unknown privacy is treated as PUBLIC: IDs not in the diff are then redacted (the safe side).
     isPrivate: raw.isPrivate === true,
     defaultBranch: raw.defaultBranchRef?.name ?? null,
-    viewerPermission: raw.viewerPermission ?? null
+    viewerPermission: raw.viewerPermission ?? null,
+    homepageUrl: typeof raw.homepageUrl === "string" && raw.homepageUrl.length > 0 ? raw.homepageUrl : null
   }
 }
 

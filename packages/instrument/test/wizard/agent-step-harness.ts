@@ -245,12 +245,18 @@ export function makeDeps(parts: {
   installer?: Installer
   env?: Record<string, string>
   remoteUrl?: string | null
+  /** The working tree's uncommitted paths (the agent step checks it before it starts the cloud run). */
+  dirtyPaths?: string[]
 }): WizardDeps {
   let now = Date.parse("2026-10-02T10:00:00.000Z")
   return {
     bridge: parts.bridge,
     agents: parts.agents,
-    git: { remoteUrl: async () => parts.remoteUrl ?? "git@github.com:Acme/acme-store.git" } as unknown as WizardDeps["git"],
+    git: {
+      remoteUrl: async () => parts.remoteUrl ?? "git@github.com:Acme/acme-store.git",
+      isRepo: async () => true,
+      cleanTree: async () => ({ clean: (parts.dirtyPaths ?? []).length === 0, dirtyPaths: parts.dirtyPaths ?? [] })
+    } as unknown as WizardDeps["git"],
     host: {} as WizardDeps["host"],
     checks: parts.checks ?? fakeChecks().checks,
     registry: parts.registry ?? fakeRegistry().registry,
