@@ -135,8 +135,20 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     );
     expect(handler).toContain('if (decision === "decline" && onCardTurn()) setHistory((current) => messagesAfterDecline(current, outcome));');
     // With the dismissed receipt it answered with, or when it kept the dismissed card; never on a thrown answer.
-    expect(handler).toMatch(/recordTurnView\(step\.frame\);\s+if \(!thrown && step\.frame\.view\.state === "cancelled"\) captionDeclined\(outcome\);/u);
+    expect(handler).toMatch(/recordTurnView\(step\.frame\);\s+refocusCardTurn\(\);\s+if \(!thrown && step\.frame\.view\.state === "cancelled"\) captionDeclined\(outcome\);/u);
     expect(handler).toMatch(/if \(step\.type === "keep"\) \{\s+if \(!thrown\) captionDeclined\(outcome\);/u);
+  });
+
+  it("the keys move to the card's frame on its turn, so the bar shows only keys that work now (run-3 N20, CI-visible)", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction"),
+      source.indexOf("useEffect(() => {\n    // Don't drain")
+    );
+    expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);");
+    expect(handler).toMatch(/const refocusCardTurn = \(\) => \{\s+if \(!onCardTurn\(\)\) return;/u);
+    // After the dismissed (or working) frame, after the app's receipt, and when the frame is taken off.
+    expect(handler).toContain("if (working || dismissed) refocusCardTurn();");
+    expect(handler.split("refocusCardTurn();").length - 1).toBe(3);
   });
 
   it("scrubs the un-redacted summary through terminalText before rendering", () => {
@@ -489,6 +501,60 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
       }
     );
   }
+
+  // Live re-check run 3, N20: after `n` the bar kept `? what it does` (the
+  // list view's, above the card) where r4's dismissed frame offers only
+  // `tab switch side  / commands`: the keys stay on the newest view, the
+  // dismissed card, which has none.
+  it.skipIf(process.env.CI === "true")(
+    "after n the key bar is r4's dismissed bar: no ? what it does, while in flight and after the app's answer",
+    { timeout: 30_000 },
+    async () => {
+      const list = {
+        type: "tool.view", stage: "tool", message: "Ads", viewId: "list_1", name: "list_items",
+        view: {
+          v: 1, kind: "list", tool: "list_items", title: "Ads", state: "ready", asOf: null,
+          explain: "Our stored copy of the account.",
+          scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+          body: { layout: "rows", columns: [], rows: [{ id: "ad_1", title: "Ad 01", status: { word: "on", tone: "ok" }, cells: {} }] }
+        }
+      };
+      const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
+        receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
+      const confirm = deferred<unknown>();
+      const input = ttyInput();
+      const output = ttyOutput();
+      const session = runInkInteractiveSession({
+        columns: 100,
+        errorOutput: ttyOutput(),
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: () => confirm.promise,
+        async onSubmitLine(_line, _progress, _signal, onView): Promise<InkInteractiveLineResult> {
+          onView?.(list as never);
+          return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+        }
+      });
+      output.columns = 100;
+      const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+      expect(lastFrame()).toContain("what it does");
+      await sendKeys(input, "n");
+      await waitFor(() => lastFrame().includes("Dismissed — nothing was executed."), 4_000, lastFrame);
+      expect(lastFrame()).not.toContain("what it does");
+      expect(lastFrame()).toMatch(/tab\s+switch side\s+\/\s+commands/u);
+      confirm.resolve({ ok: true, declined: true, view: dismissed });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(lastFrame()).toContain("Dismissed — nothing was executed.");
+      expect(lastFrame()).not.toContain("what it does");
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
+    }
+  );
 
   // A receipt belongs to the turn its card came from: a line queued while that
   // turn was busy waits for the confirm, and a line typed while the confirm is

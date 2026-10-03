@@ -1541,6 +1541,15 @@ export function InkInteractiveSessionApp({
     // holds the receipt's place (`receipt:<handle>`): a settled receipt view
     // replaces it in place; anything else takes it off the turn.
     const workingId = `receipt:${head.confirmationHandle}`;
+    // The card's frame on its turn (working, dismissed, the app's receipt) is
+    // the turn's latest view, so the keys move to it, as they do when a turn
+    // ends: the bar shows only keys that work now (run-3 N20: `? what it does`
+    // stayed after `n`, from the view above the card). Only on the card's turn.
+    const refocusCardTurn = () => {
+      if (!onCardTurn()) return;
+      const views = getTurnState().views;
+      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
+    };
     const working = decision === "approve" && head.view?.kind === "change" && isPlainRecord(head.view.approval) ? head.view : null;
     if (working) {
       recordTurnView({
@@ -1557,8 +1566,11 @@ export function InkInteractiveSessionApp({
     if (dismissed) {
       recordTurnView(dismissed);
     }
+    if (working || dismissed) refocusCardTurn();
     const dropWorking = () => {
-      if (working || dismissed) patchTurnState((state) => ({ ...state, views: state.views.filter((frame) => frame.viewId !== workingId) }));
+      if (!working && !dismissed) return;
+      patchTurnState((state) => ({ ...state, views: state.views.filter((frame) => frame.viewId !== workingId) }));
+      refocusCardTurn();
     };
     // A no the app took (run-3 M5): the line over the card becomes the app's
     // words after a no ("Okay, left it running."), in the same update as the
@@ -1573,6 +1585,7 @@ export function InkInteractiveSessionApp({
       if (step.type === "receipt") {
         // A settled receipt view goes on the turn, drawn as r4 draws it (confirm-card.tsx).
         recordTurnView(step.frame);
+        refocusCardTurn();
         if (!thrown && step.frame.view.state === "cancelled") captionDeclined(outcome);
         return false;
       }
