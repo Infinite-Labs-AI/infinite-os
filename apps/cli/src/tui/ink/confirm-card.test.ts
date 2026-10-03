@@ -334,11 +334,16 @@ describe("the dismissed card's last line follows the app's answer (run-3 N22)", 
     expect(lines.join("\n")).not.toContain("Sending");
   });
 
-  it("the app's own word, when its receipt carries one", () => {
-    const step = settleConfirmOutcome(head, appReceipt({ provenanceLine: "Recorded in the app" }), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
+  // Lane review: a provenance line is a fact of the receipt (who proposed, a
+  // side effect such as `Clears the matching Home card`), never a delivery
+  // word. It is drawn as its own dim line under `Sent to the app`.
+  it("a receipt's provenance line is its own line under `Sent to the app`, never in its place", () => {
+    const step = settleConfirmOutcome(head, appReceipt({ provenanceLine: "Clears the matching Home card" }), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
     const lines = drawn(step.type === "receipt" ? step.frame : { view: null });
-    expect(lines).toContain("Recorded in the app");
-    expect(lines.join("\n")).not.toMatch(/Sen(t|ding) to the app/u);
+    const sent = lines.indexOf("Sent to the app");
+    expect(sent).toBeGreaterThanOrEqual(0);
+    expect(lines[sent + 1]).toBe("Clears the matching Home card");
+    expect(lines.join("\n")).not.toContain("Sending");
   });
 
   it("an app that took the no with no receipt of its own: the same card, now sent", () => {
