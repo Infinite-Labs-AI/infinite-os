@@ -197,6 +197,22 @@ describe("numbers: which columns a narrow table keeps, and one Results column (r
     expect(header(wide, wide.indexOf("By day"))).toEqual(expect.arrayContaining(["Clicks (all)", "Link clicks"]));
   });
 
+  // The same run, the campaign table: its row's status word was short (`On`),
+  // so the Status column stayed and the measured Link clicks went. A status is
+  // a word the row's records still show (→); the click count a rate is of is not.
+  it("at 60 a short status word goes before Link clicks, after Clicks (all)", () => {
+    const view = edited((body) => {
+      body.legs.settled.rows[0].status = { word: "On", tone: "ok" };
+    });
+    const detail = draw(view, { width: 60 }).detail;
+    const at = detail.indexOf("Sep 28 – Oct 1");
+    expect(header(detail, at)).toEqual(["Spent", "Link clicks", "CTR (link)"]);
+    expect(detail.slice(at).join(" ").match(/\+ ([^·]+) · → to see/u)?.[1] ?? "").toMatch(/\bStatus\b/u);
+    // With the room, the status stays beside every measure.
+    const wide = committedTurn([view], 140);
+    expect(header(wide, wide.indexOf("Sep 28 – Oct 1"))).toContain("Status");
+  });
+
   it("a column dropped before a wider one that had to go too comes back when it fits", () => {
     const detail = draw(live(), { width: 60 }).detail;
     const at = detail.indexOf("Sep 28 – Oct 1");

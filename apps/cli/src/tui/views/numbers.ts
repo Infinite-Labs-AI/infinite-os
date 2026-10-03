@@ -623,6 +623,13 @@ const DROP_PRIORITY: Readonly<Record<string, number>> = {
   spend: 0, spent: 0, ctr: 0, ctrlink: 0, roas: 0
 };
 
+/**
+ * The row's status word (`On`, `Paused`) drops after all clicks and before link
+ * clicks: its row's records still show it (→), and a narrow table keeps the
+ * click count its rate is of (live run-4 N19: `On` stayed, Link clicks went).
+ */
+const STATUS_DROP = 0.75;
+
 /** A column key as `DROP_PRIORITY` knows it: lower case, no `_` or `-` (`linkClicks`, `link_clicks` → `linkclicks`). */
 function dropKey(key: string): string {
   return key.toLowerCase().replace(/[_-]/gu, "");
@@ -694,7 +701,7 @@ function legLines(
   } else if (rows.length) {
     const hasStatus = rows.some((row) => isRecord(row.status) && viewText(row.status.word) !== "");
     const tableColumns: CellTableColumn[] = [
-      ...(hasStatus ? [{ label: "Status", unit: "text" as const }] : []),
+      ...(hasStatus ? [{ label: "Status", unit: "text" as const, dropPriority: STATUS_DROP }] : []),
       ...columns
     ];
     const cellsOf = (cells: Record<string, unknown>, status: unknown): TableCell[] => [
