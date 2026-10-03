@@ -379,8 +379,10 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   // A later read of the same account repeats the earlier one's parts: it draws them once (N27).
   const repeats = turnRepeats(input.views);
   const folds = (index: number): Partial<ViewRenderCtx> => (repeats[index] ? { repeats: repeats[index]! } : {});
+  // Committed to scrollback (`split` false), no view has the keys, the focused one included (TJ-9):
+  // it is drawn as scrollback, so it never offers a key that no longer works there.
   const renders = input.views.map((view, index) =>
-    renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus
+    renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus && split
       ? { ...focusedViewCtx(input.focus, base), ...folds(index) }
       : { ...plainCtx, selected: openingRow(view), columnKey: false, ...folds(index) }));
   // Scrollback has no keys, so nothing may stay behind one. A view with tabs
