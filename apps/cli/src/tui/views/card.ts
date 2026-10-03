@@ -126,17 +126,17 @@ export function fieldRows(rows: readonly FieldRow[], width: number, ctx: PaintCt
   if (valueWidth < 8) {
     return shown.flatMap((row) => [
       ...(row.label ? [paint(fitPainted(row.label, max), "dim", ctx)] : []),
-      ...wrapText(row.value, max)
+      ...wrapUrl(row.value, max)
     ]);
   }
   const indent = " ".repeat(column);
   return shown.flatMap((row) => {
     if (displayWidth(row.label) + 2 > column) {
-      const values = row.value ? wrapText(row.value, valueWidth) : [];
+      const values = row.value ? wrapUrl(row.value, valueWidth) : [];
       return [paint(fitPainted(row.label, max), "dim", ctx), ...values.map((value) => `${indent}${value}`)];
     }
     const label = row.label;
-    const values = row.value ? wrapText(row.value, valueWidth) : [""];
+    const values = row.value ? wrapUrl(row.value, valueWidth) : [""];
     const pad = " ".repeat(Math.max(0, column - displayWidth(label)));
     return values.map((value, index) =>
       index === 0
@@ -218,6 +218,42 @@ export function cardBody(
   if (explain) {
     lines.push("", explainChip(ctx, explainOpen));
   }
+  return lines;
+}
+
+/** A value that is one URL and nothing else (no colour, no spaces). */
+const URL_ONLY = /^[a-z][a-z0-9+.-]*:\/\/\S+$/iu;
+
+/**
+ * Wrap a URL at its separators (`/ ? & = .`), never mid-token (W3-ap-link): a
+ * line breaks after a separator; only a token longer than the whole line is
+ * cut where it must be. Any other text wraps as words.
+ */
+export function wrapUrl(text: string, width: number): string[] {
+  const max = Math.max(1, Math.floor(width));
+  if (!URL_ONLY.test(text) || displayWidth(text) <= max) {
+    return wrapText(text, max);
+  }
+  const tokens = text.split(/(?<=[/?&=.])/u).filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+  for (const token of tokens) {
+    if (displayWidth(line) + displayWidth(token) <= max) {
+      line += token;
+      continue;
+    }
+    if (line) lines.push(line);
+    line = "";
+    // A token wider than the whole line is cut where it must be.
+    let rest = token;
+    while (displayWidth(rest) > max) {
+      const head = cutCells(rest, max);
+      lines.push(head);
+      rest = rest.slice(head.length);
+    }
+    line = rest;
+  }
+  if (line) lines.push(line);
   return lines;
 }
 

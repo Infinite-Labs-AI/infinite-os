@@ -14,7 +14,7 @@
 // - `markdown` goes through `renderMarkdown`; `plain`, `html_stripped` and
 //   `code` print line for line. Every string is scrubbed first.
 import { renderMarkdown } from "../../formatting/markdown-render.js";
-import { chipRows } from "./card.js";
+import { chipRows, wrapUrl } from "./card.js";
 import { fitLine, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import {
   bodyOf,
@@ -84,7 +84,10 @@ export const renderDocument: KindRenderer<"document"> = (view, ctx) => {
   }
   const liveUrl = viewText(body.liveUrl);
   if (liveUrl) {
-    after.push(paint(fitLine(liveUrl, width), "muted", ctx));
+    // A labelled line (TJ-2), wrapped at the URL's separators, never a bare URL line.
+    const label = "Live: ";
+    after.push(...wrapUrl(liveUrl, Math.max(1, width - label.length))
+      .map((line, index) => paint(`${index === 0 ? label : " ".repeat(label.length)}${line}`, "muted", ctx)));
   }
 
   // The body, wrapped to the pane (at most the reading measure), then paged
@@ -192,9 +195,11 @@ function sectionLines(part: Fields, viewUntrusted: boolean, ctx: ViewRenderCtx):
         : paint(fitted, outside ? "warning" : "text", ctx)
     );
   }
-  const text = typeof part.text === "string" ? part.text : "";
+  const markdown = part.format === "markdown";
+  const raw = typeof part.text === "string" ? part.text : "";
+  // No picture is drawn here: an image token keeps only its alt words (TJ-2).
+  const text = markdown ? imagesAsWords(raw) : raw;
   if (text) {
-    const markdown = part.format === "markdown";
     lines.push(...renderMarkdown(text, {
       width: ctx.width,
       color: ctx.color,
@@ -204,4 +209,16 @@ function sectionLines(part: Fields, viewUntrusted: boolean, ctx: ViewRenderCtx):
     }));
   }
   return lines;
+}
+
+/**
+ * A markdown image token as its alt words (TJ-2): `![alt](url "title")`, one
+ * cut short by a cleaner (`![alt](an image on …`, to the end of its line), and
+ * an html `<img … alt="…">`. One with no alt words is dropped whole. The
+ * terminal never draws a picture, and never the URL that stood for one.
+ */
+export function imagesAsWords(text: string): string {
+  return text
+    .replace(/!\[([^\]\n]*)\]\((?:[^()\n]|\([^()\n]*\))*\)?/gu, (_token, alt: string) => alt.trim())
+    .replace(/<img\b[^>\n]*>/giu, (tag) => /\balt\s*=\s*(["'])(.*?)\1/iu.exec(tag)?.[2]?.trim() ?? "");
 }
