@@ -15,7 +15,7 @@ import { sgrParams } from "../style/sgr.js";
 import type { Token } from "../style/tokens.js";
 import { DEFAULT_THEME } from "../theme.js";
 import { approvalRender, CARD_UI_START, cardKeyStep, type ApprovalRenderCtx, type CardUiState } from "./approval.js";
-import { cardBox, chipRows, fieldRows, beforeAfter } from "./card.js";
+import { cardBox, chipRows, fieldRows, beforeAfter, paragraphIn } from "./card.js";
 import { viewKeyFacts } from "./focus.js";
 import { renderView } from "./registry.js";
 import type { ViewRenderCtx } from "./types.js";
@@ -1045,4 +1045,49 @@ describe("an operation_managed approval says where its OK is given (W3-chg-xpub)
   it("an ask that is a command offers no key and no line", () => {
     expect(out(publish({ ask: "/publish" })).join("\n")).not.toMatch(/OK it here/u);
   });
+});
+
+// Review of 4b5acc2 (2026-10-03): a name never breaks mid-word anywhere in a
+// card, so the two paths that wrap card text (a field row's value and a card
+// paragraph) each get a test that goes red on a plain hard wrap.
+describe("a long name in a card's rows and paragraphs breaks only after one of its parts", () => {
+  const NAME = "sample_video_confession_ads-manager_na_dark_captions_v3";
+  const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
+  const strip = (line: string) => plainText(line).replace(/^│ ?| ?│$/gu, "").trim();
+  /** Each line that ends inside the name ends right after a separator; the pieces join back into the whole name. */
+  function expectWholeParts(lines: readonly string[]) {
+    const words = lines.map(strip).filter(Boolean);
+    for (const line of words) {
+      const last = line.split(/\s+/u).at(-1)!;
+      if (NAME.includes(last) && !NAME.endsWith(last)) {
+        expect(/[_./-]$/u.test(last), `${last} (in ${JSON.stringify(words)})`).toBe(true);
+      }
+    }
+    expect(words.join(" ").replace(/([_./-]) /gu, "$1")).toContain(NAME);
+  }
+
+  for (const width of [12, 24, 30, 41]) {
+    it(`a field row's value at ${width} columns`, () => {
+      const lines = fieldRows([{ label: "Ad", value: NAME }], width, { color: true, theme });
+      for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(width);
+      expectWholeParts(lines.map((line) => plainText(line).replace(/^Ad\s*/u, "")));
+    });
+
+    it(`a card paragraph at ${width} columns`, () => {
+      const lines = paragraphIn(`Also stops ${NAME} today.`, width, "dim", { color: true, theme });
+      for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(width);
+      expectWholeParts(lines);
+    });
+  }
+
+  for (const cols of [51, 60]) {
+    it(`a waiting card's warning at ${cols}: inside the box, the name breaks only at its parts`, () => {
+      const view = pause({ body: { ...PAUSE_BODY, warnings: [`Also stops ${NAME} today.`] } });
+      const box = cardRows(approvalRender(view, cardCtx({ width: cols, caps: OPEN })).lines);
+      for (const line of box) expect(displayWidth(line)).toBeLessThanOrEqual(cols);
+      const warning = box.map(strip).filter((line) => line.startsWith("! Also") || /^[a-z0-9_.\/-]+( today\.)?$/u.test(line));
+      expect(warning.length, box.map(plainText).join("\n")).toBeGreaterThan(1);
+      expectWholeParts(warning.map((line) => line.replace(/^! /u, "")));
+    });
+  }
 });

@@ -90,6 +90,8 @@ export const renderList: KindRenderer<"list"> = (view, ctx) => {
   const rowCount = rows.length + steps.length;
   const selected = clampIndex(ctx.selected, rowCount);
   const lines: string[] = [];
+  // Where the selected row lands in `lines` (a cut pane follows it on j/k).
+  let selectedLines: [number, number] | null = null;
 
   const filterWords = viewText(body.filterWords);
   if (filterWords) {
@@ -103,10 +105,16 @@ export const renderList: KindRenderer<"list"> = (view, ctx) => {
       lines.push(...wrapText(emptyWords, ctx.width));
     }
   } else if (body.layout === "log") {
-    lines.push(...logLines(top, 0, selected, ctx));
+    const pushLog = (part: readonly Fields[], first: number) => part.forEach((row, offset) => {
+      const drawnRow = logLines([row], first + offset, selected, ctx);
+      if (first + offset === selected) selectedLines = [lines.length, drawnRow.length];
+      lines.push(...drawnRow);
+    });
+    pushLog(top, 0);
     let index = top.length;
     for (const group of groups) {
-      lines.push(...groupHead(group.label, group.reason, ctx), ...logLines(group.rows, index, selected, ctx));
+      lines.push(...groupHead(group.label, group.reason, ctx));
+      pushLog(group.rows, index);
       index += group.rows.length;
     }
   } else {
@@ -114,10 +122,18 @@ export const renderList: KindRenderer<"list"> = (view, ctx) => {
     const drawn = rowLines(rows, columns, selected, ctx, notes, currency, viewText(body.nameLabel));
     hiddenColumns = drawn.hidden.length;
     // Top rows first, then each group under its label and reason.
-    lines.push(...drawn.header, ...drawn.rows.slice(0, top.length).flat());
+    const pushRows = (first: number, end: number) => {
+      for (let at = first; at < end; at += 1) {
+        if (at === selected) selectedLines = [lines.length, drawn.rows[at]!.length];
+        lines.push(...drawn.rows[at]!);
+      }
+    };
+    lines.push(...drawn.header);
+    pushRows(0, top.length);
     let index = top.length;
     for (const group of groups) {
-      lines.push(...groupHead(group.label, group.reason, ctx), ...drawn.rows.slice(index, index + group.rows.length).flat());
+      lines.push(...groupHead(group.label, group.reason, ctx));
+      pushRows(index, index + group.rows.length);
       index += group.rows.length;
     }
     if (drawn.hidden.length && !ctx.showHiddenColumns) {
@@ -153,7 +169,8 @@ export const renderList: KindRenderer<"list"> = (view, ctx) => {
     rowCount,
     rowAsks: [...rows.map(() => null), ...steps.map((step) => step.ask)],
     ...(copies.some((copy) => copy !== null) ? { rowCopies: [...copies, ...steps.map(() => null)] } : {}),
-    ...(hiddenColumns ? { hiddenColumns } : {})
+    ...(hiddenColumns ? { hiddenColumns } : {}),
+    ...(selectedLines ? { selectedLines } : {})
   };
 };
 

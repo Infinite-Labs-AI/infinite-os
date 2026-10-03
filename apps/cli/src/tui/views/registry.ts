@@ -106,18 +106,20 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
   const fixAsk = (body?.rowAsks ?? []).some((ask) => viewText(ask) !== "") ? null : stateFixAsk(view);
   // A tool that asks twice: its approval waits on this view (never the confirm queue).
   const managed = ctx.approvalClosed ? null : managedApproval(view);
+  const before = [...(body?.lead ?? []), ...explainLines(view, shellCtx), ...managedSummaryLines(managed, shellCtx)];
+  // A settled write's afterword ("Nothing ran.") follows its sentence on the next row (r4 receipts).
+  // A dismissal still on its way says only that (N22): its sentence waits for the app's answer.
+  const withBody = body?.joinsReason || (AFTERWORD_KINDS.has(view.kind) && isSettledWithoutRunning(view))
+    ? [...(awaitingApp(view, shellCtx) ? [] : stateReasonLines(view, shellCtx, fixAsk !== null)), ...(body?.detail ?? [])]
+    : blankBetween(stateReasonLines(view, shellCtx, fixAsk !== null), body?.detail ?? []);
+  // The body's detail ends `withBody`: its selected row moves down by what is drawn above it.
+  const bodyAt = before.length + withBody.length - (body?.detail.length ?? 0);
   return {
     head: headLine(body?.headTitle !== undefined ? { ...view, title: body.headTitle } : view, shellCtx),
     source: sourceLine(view, shellCtx),
     detail: [
-      ...(body?.lead ?? []),
-      ...explainLines(view, shellCtx),
-      ...managedSummaryLines(managed, shellCtx),
-      // A settled write's afterword ("Nothing ran.") follows its sentence on the next row (r4 receipts).
-      // A dismissal still on its way says only that (N22): its sentence waits for the app's answer.
-      ...(body?.joinsReason || (AFTERWORD_KINDS.has(view.kind) && isSettledWithoutRunning(view))
-        ? [...(awaitingApp(view, shellCtx) ? [] : stateReasonLines(view, shellCtx, fixAsk !== null)), ...(body?.detail ?? [])]
-        : blankBetween(stateReasonLines(view, shellCtx, fixAsk !== null), body?.detail ?? [])),
+      ...before,
+      ...withBody,
       ...(managed ? managedApprovalLines(managed, shellCtx) : []),
       ...reconcileLines(view, shellCtx),
       ...truncationLines(view, shellCtx),
@@ -141,7 +143,8 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     ...(managed ? { approvalAsk: { key: managed.key, label: managed.label, ask: managed.ask } } : {}),
     ...(body?.offersExplain ? { explainInside: true as const } : {}),
     ...openFor(view, body, shellCtx),
-    ...(body?.watchAsk ? { watchAsk: body.watchAsk } : {})
+    ...(body?.watchAsk ? { watchAsk: body.watchAsk } : {}),
+    ...(body?.selectedLines ? { selectedLines: [bodyAt + body.selectedLines[0], body.selectedLines[1]] as const } : {})
   };
 }
 

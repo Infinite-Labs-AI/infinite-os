@@ -106,6 +106,12 @@ export interface ViewFocusState {
   page: number;
   /** The first line the details pane shows when it is cut to the window (`facts.pane`); absent = its top. */
   paneScroll?: number;
+  /**
+   * j/k moved the row last: a cut pane scrolls from `paneScroll` just enough
+   * to show the selected row. ↓/↑ (PgDn/PgUp) clear it, so a scroll is never
+   * pulled back to the row.
+   */
+  followRow?: boolean;
   explainOpen: boolean;
   showHiddenColumns: boolean;
   caps: KeyContext["caps"];
@@ -387,7 +393,7 @@ export function resolveViewKey(
     const pane = facts.pane!;
     const step = key.pageDown || key.pageUp ? Math.max(1, pane.page) : 1;
     const paneScroll = key.downArrow || key.pageDown ? pane.above + Math.min(step, pane.below) : pane.above - Math.min(step, pane.above);
-    return { ...base, engaged: true, paneScroll, handled: true };
+    return { ...base, engaged: true, paneScroll, followRow: false, handled: true };
   }
   const action = resolveKey(input, asKey(key), { focus: state.focus, busy: false, okKey: null, caps: state.caps });
   const next = applyViewAction(action, base, facts);
@@ -439,7 +445,9 @@ function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKe
       }
       const selected = clamp(state.selected + action.delta, 0, facts.rowCount - 1);
       // A move that moves nothing types (`k` on the first row starts "keep…").
-      return selected === state.selected ? state : handled({ selected });
+      // In a cut pane the row stays on screen: the pane scrolls from where it stands now.
+      const follow = facts.pane ? { paneScroll: facts.pane.above, followRow: true } : {};
+      return selected === state.selected ? state : handled({ selected, ...follow });
     }
     case "enter": {
       if (!state.engaged) {

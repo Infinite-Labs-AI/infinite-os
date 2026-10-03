@@ -11,6 +11,7 @@ import { INFINITE_R4_THEME } from "../theme.js";
 import type { Msg } from "../types.js";
 import { resolveViewKey, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "./focus.js";
 import { layoutTurn, paneWidths, PANE_MIN_ROWS, renderCommittedTurn, renderLiveTurn } from "./layout.js";
+import { renderView } from "./registry.js";
 import type { ViewRender } from "./types.js";
 
 // A turn taller than the window keeps the split (layout decision, 2026-10-03:
@@ -221,5 +222,115 @@ describe("a short details pane is padded like r4's frame", () => {
     const header = stepsHeaderAt(lines);
     expect(lines[header - 1]!.trim()).toBe("│");
     expect(lines[header - 2]!.trim()).not.toBe("│");
+  });
+});
+
+// Review of 4b5acc2: a resize recomputes the caps (the scroll offset kept and
+// clamped), and j/k keep the selected row on screen in a cut pane.
+describe("a resize recomputes the cut pane", () => {
+  const draw = (width: number, rows: number, paneScroll: number) => renderLiveTurn({
+    messages, views: [tallList()], focus: focusOf(tallList(), { paneScroll }), width, color: true, theme, rows, steps
+  });
+
+  for (const [from, to] of [[[80, 38], [90, 24]], [[100, 38], [80, 24]], [[120, 24], [100, 38]]] as const) {
+    it(`${from[0]}x${from[1]} → ${to[0]}x${to[1]}: the more line's count follows the room, the offset is kept, every line fits`, () => {
+      const before = draw(from[0], from[1], 5);
+      const after = draw(to[0], to[1], 5);
+      for (const [drawn, [width, rows]] of [[before, from], [after, to]] as const) {
+        expect(drawn.lines.length).toBeLessThanOrEqual(rows);
+        for (const line of drawn.lines) expect(displayWidth(line)).toBeLessThanOrEqual(width);
+        expect(drawn.pane!.above).toBe(5);
+        const more = plain(drawn.lines).find((line) => /↓ \d+ more · ↓ PgDn$/u.test(line.trimEnd()))!;
+        expect(Number(/↓ (\d+) more/u.exec(more)![1])).toBe(drawn.pane!.below);
+      }
+      expect(after.pane!.shown).not.toBe(before.pane!.shown);
+      expect(after.pane!.below).not.toBe(before.pane!.below);
+    });
+
+    it(`${from[0]}x${from[1]} → ${to[0]}x${to[1]}: an offset past the end is clamped to the last page`, () => {
+      const after = draw(to[0], to[1], 999);
+      expect(after.pane!.below).toBe(0);
+      expect(after.pane!.above).toBeLessThan(999);
+      expect(plain(after.lines).some((line) => line.includes("Sample row 60"))).toBe(true);
+      for (const line of after.lines) expect(displayWidth(line)).toBeLessThanOrEqual(to[0]);
+    });
+  }
+});
+
+describe("j and k keep the selected row on screen in a cut pane", () => {
+  const width = 100;
+  const panes = paneWidths(width);
+  const draw = (over: Partial<ViewFocusState>) => renderLiveTurn({
+    messages, views: [tallList()], focus: focusOf(tallList(), over), width, color: true, theme, rows: TURN_ROWS, steps
+  });
+  /** The details-pane rows on screen. */
+  const right = (lines: readonly string[]) => plain(lines).map((line) => line.slice(panes.left + 3));
+
+  it("j onto a row below the cut scrolls the pane just enough to show it", () => {
+    const top = draw({ selected: 0 });
+    const facts = top.focused!.facts;
+    let state: ViewFocusState = focusOf(tallList(), { selected: 0, facts });
+    // Walk j down past the bottom of the pane.
+    for (let step = 0; step < 45; step += 1) {
+      state = resolveViewKey("j", state, {}, draw(state).focused!.facts);
+    }
+    expect(state.selected).toBe(45);
+    const shown = right(draw(state).lines);
+    expect(shown.some((line) => line.includes("Sample row 46")), shown.join("\n")).toBe(true);
+    // Just enough: the selected row is the last row the pane shows before its more line.
+    const more = shown.findIndex((line) => /^↓ \d+ more/u.test(line.trimEnd()));
+    expect(shown.slice(0, more).at(-1)).toContain("Sample row 46");
+  });
+
+  it("k back above the top scrolls the pane up to it", () => {
+    let state: ViewFocusState = focusOf(tallList(), { selected: 30, paneScroll: 25 });
+    for (let step = 0; step < 10; step += 1) {
+      state = resolveViewKey("k", state, {}, draw(state).focused!.facts);
+    }
+    expect(state.selected).toBe(20);
+    const shown = right(draw(state).lines);
+    expect(shown.some((line) => line.includes("Sample row 21")), shown.join("\n")).toBe(true);
+  });
+
+  it("↓ after j scrolls the pane, and the pane no longer snaps back to the selected row", () => {
+    let state: ViewFocusState = focusOf(tallList(), { selected: 0 });
+    state = resolveViewKey("j", state, {}, draw(state).focused!.facts);
+    for (let step = 0; step < 40; step += 1) {
+      state = resolveViewKey("", state, { downArrow: true }, draw(state).focused!.facts);
+    }
+    const drawn = draw(state);
+    expect(drawn.pane!.above).toBe(state.paneScroll);
+    expect(right(drawn.lines).some((line) => line.includes("Sample row 02"))).toBe(false);
+  });
+});
+
+describe("a view says where its selected row is drawn (what j/k keep on screen)", () => {
+  const ctx = (selected: number) => ({
+    width: 70, color: true, theme, selected, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false,
+    caps: { open: false, watch: false, retry: false }, timeZone: "UTC", engaged: true
+  });
+
+  it("a list: the line of the selected row", () => {
+    const render = renderView(tallList(), ctx(41));
+    const [start, count] = render.selectedLines!;
+    expect(count).toBe(1);
+    expect(stripAnsi(render.detail[start]!)).toContain("Sample row 42");
+  });
+
+  it("a list under the state's sentence: the row's line counts what the shell drew above it", () => {
+    const view = { ...tallList(), state: "partial", stateReason: { code: "partial_rows", words: "Some rows are still loading." } } as AnswerViewV1;
+    const render = renderView(view, ctx(41));
+    expect(render.detail.map(stripAnsi).join("\n")).toContain("Some rows are still loading.");
+    const [start] = render.selectedLines!;
+    expect(stripAnsi(render.detail[start]!)).toContain("Sample row 42");
+  });
+
+  it("a numbers table: the line of the selected row, on the selection background", () => {
+    const raw = JSON.parse(readFileSync(fileURLToPath(new URL("./__fixtures__/numbers-tall.json", import.meta.url)), "utf8"));
+    const view = decodeAnswerView(raw)!;
+    const render = renderView(view, ctx(30));
+    const [start, count] = render.selectedLines!;
+    expect(count).toBeGreaterThan(0);
+    expect(stripAnsi(render.detail.slice(start, start + count).join(" "))).toContain("Ad set 31");
   });
 });

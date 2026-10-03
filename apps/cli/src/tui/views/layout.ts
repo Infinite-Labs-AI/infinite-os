@@ -18,7 +18,8 @@
 // A turn TALLER than the window keeps the split too (layout decision,
 // 2026-10-03): given the rows the live region has for it, the panes are held
 // to them. The details pane shows the view from its top (or where ↓/↑ scrolled
-// it, after tab) and its last row says `↓ N more · tab, then ↓`; while the turn
+// it, after tab; j/k scroll it just enough to keep the selected row on
+// screen) and its last row says `↓ N more · tab, then ↓`; while the turn
 // runs, an answer taller than the room shows its newest lines. A short pane is
 // padded as r4's frame() pads it (16 rows, as the window allows), and a blank
 // pane row always sits over the Steps rule. Committed to scrollback the turn
@@ -127,6 +128,11 @@ export interface LayoutOptions {
   /** The keys are on the details pane (after tab): the more line names ↓ PgDn, not tab. */
   paneKeys?: boolean;
   /**
+   * Keep this view's selected row (`selectedLines`) on screen in a cut pane
+   * (j/k moved it): the pane scrolls from `paneScroll` just enough to show it.
+   */
+  follow?: ViewRender;
+  /**
    * The turn is still running: an answer taller than the room keeps its newest
    * lines in the answer pane. A FINISHED answer taller than the room is not
    * held (the answer pane cannot scroll): the turn is drawn whole, and the
@@ -177,10 +183,19 @@ function layoutTurnParts(
   if (!renders.length) {
     out.push(...answer.map((line) => fitLine(line, total)));
   } else {
-    const details = renders.flatMap((render, index) => [
-      ...(index > 0 ? [""] : []),
-      ...viewLines(render, wide ? panes.right : total, compact)
-    ]);
+    const details: string[] = [];
+    // The followed row's lines in `details` (j/k in a cut pane).
+    let followed: readonly [number, number] | null = null;
+    for (const [index, render] of renders.entries()) {
+      if (index > 0) details.push("");
+      const drawnView = viewLines(render, wide ? panes.right : total, compact);
+      if (render === options.follow && render.selectedLines) {
+        // `viewLines` puts the head, the source and a blank row over the detail, and the footnotes under it.
+        const bodyStart = inDetailsPane(render) ? drawnView.length - render.detail.length - render.footnotes.length : 0;
+        followed = [details.length + bodyStart + render.selectedLines[0], render.selectedLines[1]];
+      }
+      details.push(...drawnView);
+    }
     if (wide) {
       const separator = rule(PANE_SEPARATOR);
       const row = (left: string, right: string) => right
@@ -199,7 +214,14 @@ function layoutTurnParts(
       let right = details;
       if (details.length > room) {
         const shown = room - 1;
-        const above = Math.max(0, Math.min(details.length - shown, Math.floor(options.paneScroll ?? 0)));
+        let from = Math.floor(options.paneScroll ?? 0);
+        if (followed) {
+          // Just enough to show the selected row: up to its first line, or down to its last.
+          const [start, count] = followed;
+          if (start < from) from = start;
+          else if (start + Math.min(count, shown) > from + shown) from = start + Math.min(count, shown) - shown;
+        }
+        const above = Math.max(0, Math.min(details.length - shown, from));
         const below = details.length - above - shown;
         pane = { above, below, shown };
         right = [...details.slice(above, above + shown), paneMoreLine(pane, options.paneKeys === true, style)];
@@ -591,7 +613,8 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const keysOnPane = Boolean(input.focus && input.focus.engaged && input.focus.focus !== "composer");
   const laid = layoutTurnParts(answer, [...drawn, ...card, ...stepsOnly], stepRows, width, { color: input.color, theme: input.theme }, {
     split: wide, steps: withSteps, compact,
-    ...(split && frame !== undefined ? { maxRows: frame, paneScroll: input.focus?.paneScroll ?? 0, paneKeys: keysOnPane, answerTail: input.running === true } : {})
+    ...(split && frame !== undefined ? { maxRows: frame, paneScroll: input.focus?.paneScroll ?? 0, paneKeys: keysOnPane, answerTail: input.running === true } : {}),
+    ...(split && input.focus?.followRow && focusIndex >= 0 && !folded.has(focusIndex) && renders[focusIndex] ? { follow: renders[focusIndex] } : {})
   });
   const lines = laid.lines;
   const detailRows = paneRenders([...drawn, ...card])
