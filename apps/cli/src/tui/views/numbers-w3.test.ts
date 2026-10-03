@@ -130,7 +130,7 @@ describe("a kpis window's 'as of' that repeats the source line's is said once (W
   });
 
   it("a leg read at another instant keeps its own 'as of'", () => {
-    const other = numbers({ ...(view.body as Record<string, unknown>), legs: { settled: { ...((view.body as any).legs.settled), asOf: "2026-01-15T17:00:00Z" } } });
+    const other = numbers({ ...(view.body as unknown as Record<string, unknown>), legs: { settled: { ...(view.body as unknown as { legs: { settled: Record<string, unknown> } }).legs.settled, asOf: "2026-01-15T17:00:00Z" } } });
     expect(lines(renderView(other, ctx()))).toContain("Now · Jan 15 · not final · as of 17:00");
   });
 });
