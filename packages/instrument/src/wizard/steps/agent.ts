@@ -15,6 +15,7 @@ import { AGENT_MODELS } from "../../agents/runner.js"
 import type { AgentInfo, AgentReviewerKind, AgentWorkerKind } from "../contracts/agents.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { blockingDirtyPaths, dirtyTreeMessage } from "../leftovers.js"
 
 const META = WIZARD_STEP_META.agent
 
@@ -105,6 +106,13 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     await ctx.state.save()
     return { kind: "ok", status: statusLine(worker, reviewerInfo, reviewer, nested) }
   }
+  // §3y.8 (P3-11): the repo and clean-tree preconditions BEFORE the cloud run exists, so a dirty tree never leaves
+  // a run open at `before` in Infinite (the same exemptions as `before`: `.gitignore` and `.infinite/`).
+  if (!(await deps.git.isRepo())) {
+    return { kind: "failed", code: "INF_WIZ_NO_GIT", message: "This folder is not a git repository. Run npx infinite-tag in your website's repo.", next: "halt" }
+  }
+  const dirty = blockingDirtyPaths((await deps.git.cleanTree()).dirtyPaths)
+  if (dirty.length > 0) return { kind: "failed", code: "INF_WIZ_DIRTY_TREE", message: dirtyTreeMessage(dirty), next: "halt" }
   // LAST: start the cloud run with the worker and reviewer (R1-11).
   const fingerprint = await repoFingerprint({ remoteUrl: await deps.git.remoteUrl(), root: ctx.root, appRoot: ctx.appRoot })
   let runId: string

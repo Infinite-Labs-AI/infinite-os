@@ -48,6 +48,8 @@ import { wizardGitExtras } from "../../git/index.js"
 import { buildColumn } from "../report.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import { askProductionHost, hostDecidedLines, repoHostCandidates, resolveProductionHost } from "../site-host.js"
+import { blockingDirtyPaths, dirtyTreeMessage, resetStaleReceipt } from "../leftovers.js"
+import { homedir } from "node:os"
 import {
   TEST_LIMITS,
   testExpectFromKeys,
@@ -78,8 +80,6 @@ export {
 
 const TOOL_LABEL: Record<TestTool, string> = { infinite: "Infinite", ga4: "GA4", posthog: "PostHog", meta: "Meta pixel" }
 const SPA_FRAMEWORKS: ReadonlySet<string> = new Set(["next-app-router", "next-pages-router", "vite-react"])
-/** `.gitignore` and the wizard's own `.infinite/` are exempt from the clean-tree check (`ios:…/harness/run.ts:197`). */
-const CLEAN_TREE_EXEMPT = (path: string): boolean => path === ".gitignore" || path === ".infinite" || path.startsWith(".infinite/")
 
 /** The bridge error code of a thrown bridge error (lane O2's `BridgeError {status, code, retryable}`), else null. */
 export function bridgeErrorCode(error: unknown): BridgeErrorCode | null {
@@ -410,16 +410,8 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         return { kind: "failed", code: "INF_WIZ_NO_GIT", message: "This folder is not a git repository. Run npx infinite-tag in your website's repo.", next: "halt" }
       }
       const tree = await deps.git.cleanTree()
-      const dirty = tree.dirtyPaths.filter((path) => !CLEAN_TREE_EXEMPT(path))
-      if (!tree.clean && dirty.length > 0) {
-        const shown = dirty.slice(0, 5).join(", ")
-        return {
-          kind: "failed",
-          code: "INF_WIZ_DIRTY_TREE",
-          message: `Commit or stash your changes first (${shown}${dirty.length > 5 ? `, +${dirty.length - 5} more` : ""}); the wizard works on its own branch.`,
-          next: "halt"
-        }
-      }
+      const dirty = blockingDirtyPaths(tree.dirtyPaths)
+      if (!tree.clean && dirty.length > 0) return { kind: "failed", code: "INF_WIZ_DIRTY_TREE", message: dirtyTreeMessage(dirty), next: "halt" }
       const runId = ctx.runId
       if (runId === null) {
         return { kind: "failed", code: "INF_WIZ_BRANCH_FAILED", message: "No run id: the agent step did not start the run, so the branch cannot be named.", next: "halt" }
@@ -487,6 +479,16 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           })
           await ctx.state.save()
           sub(`Branch ${branch} from ${base.base}${base.baseSource === "vercel" ? "" : " (fallback)"}`, "ok")
+          // §3y.8: a receipt with another run's never-merged records is set aside (only on a new branch, never a resume).
+          const extras = "showFile" in deps.git ? wizardGitExtras(deps.git) : null
+          if (extras) {
+            const home = deps.env.HOME ?? homedir()
+            const kept = await resetStaleReceipt({ root: ctx.root, fs: deps.fs, git: extras, baseSha, runId, home })
+            if (kept) {
+              sub("Set aside an install receipt that was never merged", "info")
+              sub(`(kept in ${kept.startsWith(home) ? `~${kept.slice(home.length)}` : kept})`, "info")
+            }
+          }
         }
 
         // ---- keys, silently (connection IDs only; `expect` never comes from the repo) ----
