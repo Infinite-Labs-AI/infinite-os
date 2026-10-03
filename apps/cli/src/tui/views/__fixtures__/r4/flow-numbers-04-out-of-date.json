@@ -1,0 +1,127 @@
+{
+  "screen": "flow-numbers-04-out-of-date",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "google ads since launch?",
+    "answer": "These stop at Sep 29; today's update hasn't landed yet.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "numbers",
+        "tool": "get_google_ads_performance",
+        "title": "Google Ads since launch",
+        "state": "out_of_date",
+        "asOf": "2026-09-30",
+        "provenance": {
+          "source": "Google Ads",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "ads.google",
+          "label": "Open in Google Ads"
+        },
+        "body": {
+          "layout": "table",
+          "currency": "USD",
+          "columns": [
+            {
+              "key": "spend",
+              "label": "Spend",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "impressions",
+              "label": "Impressions",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "clicks",
+              "label": "Clicks",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "ctr",
+              "label": "CTR",
+              "unit": "percent",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "cpc",
+              "label": "CPC",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "conv",
+              "label": "Conv",
+              "unit": "count",
+              "factGroup": "conversions"
+            }
+          ],
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-09-29",
+                "to": "2026-09-30",
+                "tz": "UTC",
+                "label": "since launch"
+              },
+              "final": true,
+              "asOf": "2026-09-29",
+              "rows": []
+            }
+          }
+        },
+        "stateReason": {
+          "code": "stale_sync",
+          "words": "Last synced Sep 30 11:15 UTC (24 h ago) · up to Sep 29 · today's 11:15 sync hasn't landed"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking Google Ads",
+        "start": 0,
+        "end": 0.6,
+        "result": "24 h old",
+        "status": "old"
+      }
+    ]
+  }
+}

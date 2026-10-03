@@ -1,0 +1,109 @@
+{
+  "screen": "flow-pause-02-working",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "pause hook b",
+    "answer": "Pausing it now.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "change",
+        "tool": "propose_pause_entity",
+        "title": "Pause Hook B",
+        "state": "applying",
+        "appliedAt": 1790851436000,
+        "asOf": null,
+        "provenance": {
+          "source": "Meta · ad",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "body": {
+          "target": {
+            "kind": "ad",
+            "id": "ad_hook_b",
+            "label": "Hook B · founder POV"
+          },
+          "rows": [
+            {
+              "label": "status",
+              "before": "on",
+              "after": "PAUSED"
+            }
+          ],
+          "effect": "Stops spending",
+          "warnings": []
+        },
+        "approval": {
+          "kind": "card",
+          "turnId": "turn_r4",
+          "handle": "h_pause",
+          "title": "Pausing ad “Hook B · founder POV”…",
+          "summary": "Stops this ad's spend until you turn it back on.",
+          "confirmLabel": "Pause",
+          "dismissLabel": "Dismiss",
+          "doneTitle": "Paused ad “Hook B · founder POV”",
+          "rows": [
+            {
+              "label": "Ad",
+              "value": "Hook B · founder POV"
+            }
+          ],
+          "expiresAt": "2026-10-01T10:59:00Z"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking your campaigns",
+        "start": 0,
+        "end": 0.5,
+        "result": "1 ad",
+        "status": "ok"
+      },
+      {
+        "label": "pausing on Meta",
+        "start": 0.5,
+        "end": 1,
+        "result": "running",
+        "status": "run"
+      }
+    ],
+    "busy": "the pause finishes either way"
+  },
+  "gaps": [
+    "\"◑ Working… 4s\": the session stamps `appliedAt` (renderer-local, never sent) when the yes goes out; the fixture stamps it 4 s before the fixed clock."
+  ]
+}

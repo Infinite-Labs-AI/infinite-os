@@ -31,7 +31,6 @@ import {
   type SetupProviderId
 } from "./setup-prompts.js";
 import * as setupPrompts from "./setup-prompts.js";
-import { formatInfiniteBusyIndicator } from "./tui/ink/status-indicator.js";
 
 import {
   appendInputHistory,
@@ -403,9 +402,9 @@ describe("cli smoke", () => {
 
     const plain = stripAnsi(rendered);
     expect(plain).toContain("╔ ∞ Infinite ");
-    expect(plain).toContain("╭─ ∞ Infinite ");
-    expect(plain).toContain("│ You have 31 followers.");
-    expect(plain).toContain("╰");
+    // The r4 answer: `∞` and the words, no box (terminal-r4).
+    expect(plain).toContain("∞ You have 31 followers.");
+    expect(plain).not.toContain("╭─");
     expect(plain).toContain("session cli-session");
     expect(plain).toContain("model codex:gpt-5.4");
     expect(plain).toContain("tokens 10/4");
@@ -414,7 +413,8 @@ describe("cli smoke", () => {
   it("resolves built-in Hermes-style CLI skins from the environment", () => {
     expect(resolveTheme({}).brand.name).toBe("Infinite");
     expect(resolveTheme({ INFINITE_CLI_SKIN: "mono" }).brand.name).toBe("Infinite Mono");
-    expect(resolveTheme({ INFINITE_THEME: "slate" }).color.primary).toBe("#54C6FF");
+    // A skin's hexes paint at the truecolor tier only.
+    expect(resolveTheme({ INFINITE_THEME: "slate", COLORTERM: "truecolor" }).color.primary).toBe("#54C6FF");
     expect(resolveTheme({ INFINITE_SKIN: "unknown" }).brand.name).toBe("Infinite");
   });
 
@@ -435,7 +435,7 @@ describe("cli smoke", () => {
         "tool_prefix: \"▏\""
       ].join("\n"));
 
-      const theme = resolveTheme({ INFINITE_SKIN_FILE: skinPath });
+      const theme = resolveTheme({ INFINITE_SKIN_FILE: skinPath, COLORTERM: "truecolor" });
       expect(theme.brand.name).toBe("Cyber Agent");
       expect(theme.brand.prompt).toBe("»");
       expect(theme.brand.tool).toBe("▏");
@@ -462,7 +462,7 @@ describe("cli smoke", () => {
         "  agent_name: \"Aurora\""
       ].join("\n"));
 
-      const theme = resolveTheme({ INFINITE_CLI_SKIN: "aurora", INFINITE_SKIN_DIR: skinDir });
+      const theme = resolveTheme({ INFINITE_CLI_SKIN: "aurora", INFINITE_SKIN_DIR: skinDir, COLORTERM: "truecolor" });
       expect(theme.brand.name).toBe("Aurora");
       expect(theme.color.primary).toBe("#44FFDD");
       expect(theme.color.error).toBe("#FF3366");
@@ -642,9 +642,10 @@ describe("cli smoke", () => {
 
     expect(rendered).toContain("∞ Infinite");
     expect(rendered).toContain("Revenue is up.");
-    expect(rendered).toContain("tools 1");
-    expect(rendered).toContain("Run Metric Query");
-    expect(rendered).toContain("metric=recognized_revenue");
+    // One Steps row per call: a friendly label and the result, never the call's arguments.
+    expect(stripAnsi(rendered)).toContain("─ Steps ");
+    expect(rendered).toContain("running metric query");
+    expect(rendered).not.toContain("metric=recognized_revenue");
     expect(rendered).toContain("1 row");
     expect(rendered).toContain("1 source");
     expect(rendered).toContain("session cli-session");
@@ -1391,8 +1392,9 @@ describe("cli smoke", () => {
       status: "ok",
     }, 1000);
     expect(line).not.toContain("NaN");
-    expect(line).toContain("Get X Inspiration Playbook");
-    // A measured tool still shows its timing.
+    // `X` is a name: the step label keeps its capital (steps.test.ts `reading X playbook`).
+    expect(line).toBe("  getting X inspiration playbook ✓");
+    // r4 Steps rows carry no durations, timed or not.
     expect(formatInteractiveProgress({
       type: "tool.complete",
       stage: "tool",
@@ -1401,22 +1403,22 @@ describe("cli smoke", () => {
       name: "run_breakdown_query",
       durationMs: 2500,
       status: "ok",
-    }, 1000)).toContain("(2.5s)");
+    }, 1000)).toBe("  running breakdown query ✓");
   });
 
-  it("renders interactive progress lines with Hermes-style tool formatting", () => {
+  it("renders interactive progress lines as r4 Steps rows: no gutter, no wide glyph, friendly labels", () => {
     expect(
       formatInteractiveProgress({ stage: "resolve", message: "Preparing X engagement breakdown." }, 3400)
-    ).toBe("┊ ⚡ preparing X engagement breakdown…  3.4s");
+    ).toBe("  ⠋ preparing X engagement breakdown…  3.4s");
     expect(
       formatInteractiveProgress({ stage: "recall", message: "Recalled prior session context." }, 1200)
-    ).toBe("┊ 🔍 recall    Recalled prior session context  1.2s");
+    ).toBe("  · recall  Recalled prior session context  1.2s");
     expect(
       formatInteractiveProgress({ stage: "tool", message: "Running run_breakdown_query." }, 9800)
-    ).toBe("┊ ⚡ tool      run_breakdown_query  9.8s");
+    ).toBe("  ⠋ running breakdown query  9.8s");
     expect(
       formatInteractiveProgress({ stage: "tool", message: "Checking available metrics." }, 2100)
-    ).toBe("┊ 🔍 checking  available metrics  2.1s");
+    ).toBe("  ⠋ checking available metrics  2.1s");
     expect(
       formatInteractiveProgress({
         type: "tool.generating",
@@ -1424,7 +1426,7 @@ describe("cli smoke", () => {
         message: "Drafting run_breakdown_query.",
         name: "run_breakdown_query"
       }, 1800)
-    ).toBe("┊ ⚡ drafting  Run Breakdown Query…  1.8s");
+    ).toBe("  ⠋ drafting run breakdown query…  1.8s");
     expect(
       formatInteractiveProgress({
         type: "tool.complete",
@@ -1436,7 +1438,7 @@ describe("cli smoke", () => {
         summary: "Finished run_breakdown_query",
         status: "ok"
       }, 9800)
-    ).toBe("┊ ⚡ tool      Run Breakdown Query (62.0s) :: Finished run_breakdown_query ✓");
+    ).toBe("  running breakdown query ✓ Finished run_breakdown_query");
     expect(
       formatInteractiveProgress({
         type: "subagent.start",
@@ -1449,7 +1451,7 @@ describe("cli smoke", () => {
           summary: "Review Hermes transcript renderer"
         }
       }, 2100)
-    ).toBe("┊ ◇ delegate  Review Hermes transcript renderer  2.1s");
+    ).toBe("  ◇ delegate  Review Hermes transcript renderer  2.1s");
   });
 
   it("records Hermes-style turn state from progress events", () => {
@@ -1464,8 +1466,10 @@ describe("cli smoke", () => {
       name: "run_metric_query"
     });
 
-    expect(getTurnState().turnTrail).toEqual(["drafting Run Metric Query…"]);
-    expect(getTurnState().activity.at(-1)?.text).toBe("drafting Run Metric Query");
+    // Plain words from the tool's name, never a title-cased tool id.
+    expect(getTurnState().turnTrail).toEqual(["drafting run metric query…"]);
+    // The working line says the step's words, never `drafting <tool words>` (run-2 M6).
+    expect(getTurnState().activity.at(-1)?.text).toBe("running metric query");
 
     controller.recordProgressEvent({
       type: "tool.start",
@@ -1689,9 +1693,10 @@ describe("cli smoke", () => {
 
     expect(rendered).toContain("thinking");
     expect(rendered).toContain("Compare revenue against traffic freshness.");
-    expect(rendered).toContain("tools 1");
-    expect(rendered).toContain("Run Metric Query(\"recognized revenue\")");
-    expect(rendered).toContain("recognized_revenue=9800");
+    expect(rendered).toContain("─ Steps ");
+    expect(rendered).toContain("running metric query");
+    // r4's result column is 22 wide: a longer result is cut with an ellipsis.
+    expect(rendered).toContain("✓ recognized_revenue=98…");
     expect(rendered).toContain("Revenue is up.");
     expect(rendered).toContain("session session-1");
     expect(rendered).toContain("model codex:gpt-5.4");
@@ -1717,23 +1722,19 @@ describe("cli smoke", () => {
 
     const rendered = renderInfiniteTranscript({ state: getTurnState() }, { columns: 72, color: false, nowMs: 3_400 });
 
-    expect(rendered).toContain("running 1");
-    expect(rendered).toContain("Run Breakdown Query");
-    expect(rendered).toContain("call_2");
-    expect(rendered).toContain("started");
-    expect(rendered).toContain("traffic by channel");
-    expect(rendered).toContain("2.4s");
+    // A running call is a Steps row with a spinner and a ╍╍ tail, no raw id or arguments.
+    expect(rendered).toContain("running breakdown query");
+    expect(rendered).toMatch(/╍╍ [\u2800-\u28ff]/u);
+    expect(rendered).not.toContain("call_2");
     expect(rendered).toContain("2 todos left");
     expect(rendered).toContain("Compare channel mix");
     expect(rendered).toContain("Draft recommendation");
   });
 
-  it("renders Hermes-style Ink busy status for active tools", () => {
+  it("shows a running turn only as the composer's note: working and for how long (r4: no status line)", () => {
     const rendered = renderInkTranscriptToString({
       columns: 96,
-      indicatorTick: 0,
       nowMs: 3_400,
-      status: ["session cli"],
       transcript: {
         state: {
           ...getTurnState(),
@@ -1749,19 +1750,17 @@ describe("cli smoke", () => {
         }
       }
     });
-    const statusLine = rendered.split("\n").find((line) => line.includes("session cli")) ?? "";
+    const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(statusLine).toContain("querying…");
-    expect(statusLine).toContain("Run Metric Query");
-    expect(statusLine).toContain("2.4s");
+    expect(composer).toContain("Ask Infinite… (2s)");
+    expect(rendered).not.toContain("session cli");
+    expect(rendered).not.toContain("querying…");
   });
 
-  it("shows a turn-level elapsed clock while streaming without active tools", () => {
+  it("counts a streaming turn's time from when it started, in whole seconds", () => {
     const rendered = renderInkTranscriptToString({
       columns: 96,
-      indicatorTick: 4,
       nowMs: 2_300,
-      status: ["session cli"],
       transcript: {
         state: {
           ...getTurnState(),
@@ -1770,57 +1769,24 @@ describe("cli smoke", () => {
       },
       turnStartedAt: 1_000
     });
-    const statusLine = rendered.split("\n").find((line) => line.includes("session cli")) ?? "";
+    const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(statusLine).toContain("ruminating…");
-    expect(statusLine).toContain("streaming");
-    expect(statusLine).toContain("1.3s");
+    expect(composer).toContain("Ask Infinite… (1s)");
   });
 
-  it("keeps Hermes spinner frames independent from slower face and verb ticks", () => {
-    const state = {
-      ...getTurnState(),
-      streaming: "Revenue is up."
-    };
-    const first = formatInfiniteBusyIndicator({
-      labelTick: 0,
-      nowMs: 2_300,
-      spinnerTick: 0,
-      state,
-      turnStartedAt: 1_000
-    });
-    const second = formatInfiniteBusyIndicator({
-      labelTick: 0,
-      nowMs: 2_300,
-      spinnerTick: 1,
-      state,
-      turnStartedAt: 1_000
-    });
-
-    expect(first).toContain("(｡•́︿•̀｡)");
-    expect(second).toContain("(｡•́︿•̀｡)");
-    expect(first).toContain("pondering…");
-    expect(second).toContain("pondering…");
-    expect(first).not.toBe(second);
-  });
-
-  it("renders submit-time busy status before transcript progress events arrive", () => {
+  it("says the turn is working at submit, before transcript progress events arrive", () => {
     const rendered = renderInkTranscriptToString({
       busy: true,
       columns: 96,
-      indicatorTick: 0,
       nowMs: 2_300,
-      status: ["session cli"],
       transcript: {
         state: getTurnState()
       },
       turnStartedAt: 1_000
     });
-    const statusLine = rendered.split("\n").find((line) => line.includes("session cli")) ?? "";
+    const composer = rendered.split("\n").find((line) => line.includes("❯")) ?? "";
 
-    expect(statusLine).toContain("pondering…");
-    expect(statusLine).toContain("working");
-    expect(statusLine).toContain("1.3s");
+    expect(composer).toContain("Ask Infinite… (1s)");
   });
 
   it("renders nested subagent trees in Hermes transcript snapshots", () => {
@@ -2051,7 +2017,7 @@ describe("cli smoke", () => {
     expect(snapshots.join("\n")).toContain("Revenue is up.");
     expect(rendered).toContain("∞ Infinite Runtime");
     expect(rendered).toContain("Revenue is up.");
-    expect(rendered).toContain("Run Metric Query");
+    expect(rendered).toContain("running metric query");
     expect(rendered).toContain("session runtime-session");
     expect(rendered).toContain("Type a message.");
     expect(snapshots.join("\n")).not.toContain("Post-unsubscribe update.");
@@ -2082,16 +2048,15 @@ describe("cli smoke", () => {
       columns: 88,
       nowMs: 2_500,
       prompt: { placeholder: "Type a message." },
-      status: ["session session-1"],
-      title: "Infinite TUI",
       transcript: { state: getTurnState() }
     });
 
-    expect(rendered).toContain("∞ Infinite TUI");
+    // The r4 top bar's brand chip, never a per-frame titled rule or a status line.
+    expect(rendered).toContain("∞ Infinite");
+    expect(rendered).not.toContain("Infinite TUI");
     expect(rendered).toContain("Checking source coverage.");
-    expect(rendered).toContain("Run Metric Query");
-    expect(rendered).toContain("recognized revenue");
-    expect(rendered).toContain("session session-1");
+    expect(rendered).toContain("running metric query");
+    expect(rendered).not.toContain("session session-1");
     expect(rendered).toContain("Type a message.");
   });
 
@@ -2107,11 +2072,15 @@ describe("cli smoke", () => {
       title: "Infinite TUI"
     });
 
-    expect(rendered).toContain("∞ Infinite TUI");
+    expect(rendered).toContain("∞ Infinite");
     expect(rendered).toContain("Prior answer.");
-    expect(rendered).toContain("session cli_123");
-    expect(rendered).toContain("ready");
+    // r4: no status line (no session id, no ready/busy word).
+    expect(rendered).not.toContain("session cli_123");
+    expect(rendered).not.toMatch(/\bready\b/u);
     expect(rendered).toContain("Ask Infinite.");
+    // A plain answer has no details to switch to: the bar is `/ commands` alone.
+    expect(rendered).toContain("/  commands");
+    expect(rendered).not.toContain("switch side");
   });
 
   it("matches slash command completions for the Ink composer", () => {
@@ -2505,7 +2474,8 @@ describe("cli smoke", () => {
     );
 
     expect(activities).toHaveLength(1);
-    expect(activities[0]).toMatch(/\(Run Metric Query · 8s\)$/);
+    // The call's label as the Steps strip words it, never a title-cased tool id.
+    expect(activities[0]).toMatch(/\(running metric query · 8s\)$/);
   });
 
   it("keeps progress durable for non-TTY output", () => {
@@ -2520,7 +2490,7 @@ describe("cli smoke", () => {
     progress.progress({ stage: "resolve", message: "Preparing X engagement breakdown." });
     progress.stop();
 
-    expect(chunks.join("")).toBe("┊ ⚡ preparing X engagement breakdown…  3.4s\n");
+    expect(chunks.join("")).toBe("  ⠋ preparing X engagement breakdown…  3.4s\n");
     expect(chunks.join("")).not.toContain("\r");
   });
 
@@ -2588,9 +2558,8 @@ describe("cli smoke", () => {
     progress.stop();
 
     const output = stripAnsi(chunks.join(""));
-    expect(output).toContain("╭─ Infinite ");
-    expect(output).toContain("│ Revenue is up.");
-    expect(output).toContain("╰");
+    expect(output).toContain("∞ Revenue is up.");
+    expect(output).not.toContain("╭─");
 
     const rendered = stripAnsi(renderCliResultForStream(
       { ok: true, sessionId: "session-1", message: "Revenue is up.", provenance: [], actionCalls: [] },
@@ -2658,9 +2627,9 @@ describe("cli smoke", () => {
 
     expect(chunks.join("")).toContain("Revenue is up.");
     expect(rendered).toContain("∞ Infinite");
-    expect(rendered).toContain("tools 1");
-    expect(rendered).toContain("Run Metric Query");
-    expect(rendered).toContain("metric=recognized_revenue");
+    expect(stripAnsi(rendered)).toContain("─ Steps ");
+    expect(rendered).toContain("running metric query");
+    expect(rendered).not.toContain("metric=recognized_revenue");
     expect(rendered).toContain("tokens 12/5");
     expect(rendered).not.toContain("Revenue is up.");
   });
@@ -2759,12 +2728,10 @@ describe("cli smoke", () => {
     expect(output).toContain("∞ Infinite");
     expect(output).toContain("thinking");
     expect(output).toContain("Checking source coverage.");
-    expect(output).toContain("running 1");
-    expect(output).toContain("Run Metric Query");
-    expect(output).toContain("recognized revenue");
-    expect(output).toContain("recognized revenue by source");
-    expect(output).toContain("1 update");
-    expect(output).toContain("call_1");
+    // The running call's Steps row shows its latest progress as its result.
+    expect(output).toContain("running metric query");
+    expect(output).toContain("recognized revenue by…");
+    expect(output).not.toContain("call_1");
     expect(output).toContain("session session-1");
     expect(output).toContain("Type a message.");
     expect(output).toContain("\u001b[");
@@ -2799,9 +2766,10 @@ describe("cli smoke", () => {
 
     const output = chunks.join("");
     expect(output).toContain("Revenue is up.");
-    expect(output).toContain("streaming");
-    expect(output).toContain("1.3s");
-    expect(output).toContain("session session-1");
+    // The turn's elapsed time rides in the composer's note (r4: no status line).
+    expect(output).toContain("Type a message. (1s)");
+    expect(output).not.toContain("(working");
+    expect(output).not.toContain("session session-1");
   });
 
   it("keeps alternate-screen transcript progress as the simple-stream Ink fallback", () => {
@@ -2844,8 +2812,7 @@ describe("cli smoke", () => {
     expect(output).toContain("∞ Infinite TUI");
     expect(output).toContain("thinking");
     expect(output).toContain("Checking source coverage.");
-    expect(output).toContain("Run Metric Query");
-    expect(output).toContain("recognized revenue");
+    expect(output).toContain("running metric query");
     expect(output).toContain("session session-1");
     expect(output).toContain("Type a message.");
     expect(output).toContain("\u001b[?25h\u001b[?1049l");
@@ -2918,11 +2885,13 @@ describe("cli smoke", () => {
     });
     progress.stop();
 
+    // The r4 table (renderTable): line borders, numbers right-aligned.
     const streamed = stripAnsi(chunks.join(""));
-    expect(streamed).toContain("│ Metric   Value");
-    expect(streamed).toContain("│ Revenue  $123");
-    expect(streamed).toContain("│ Signups  45");
-    expect(streamed).toContain("│ Done.");
+    expect(streamed).toContain("∞ ┌─────────┬───────┐");
+    expect(streamed).toContain("  │ Metric  │ Value │");
+    expect(streamed).toContain("  │ Revenue │  $123 │");
+    expect(streamed).toContain("  │ Signups │    45 │");
+    expect(streamed).toContain("  Done.");
     expect(streamed).not.toContain("---:");
   });
 
@@ -2954,7 +2923,7 @@ describe("cli smoke", () => {
     const written = chunks.join("");
     expect(written).not.toContain("\u001b]0;pwned");
     expect(written).not.toContain("\u202e");
-    expect(stripAnsi(written)).toMatch(/│ Before after +mirror/);
+    expect(stripAnsi(written)).toMatch(/∞ Before after +mirror/);
   });
 
   it("draws markdown tables as bordered tables in final TTY assistant panels", () => {
@@ -2999,9 +2968,11 @@ describe("cli smoke", () => {
     progress.stop();
 
     const rendered = chunks.join("");
-    expect(rendered).toContain("\r  ⠋ Run Breakdown Query · Running run_breakdown_query.  0.0s");
+    // The running row is the step's label in plain words: no title-cased tool id, no raw id after it.
+    expect(rendered).toContain("\r  ⠋ running breakdown query  0.0s");
+    expect(rendered).not.toContain("run_breakdown_query");
     expect(rendered).toMatch(/\r {40,}\r/);
-    expect(rendered).toContain("┊ ⚡ tool      Run Breakdown Query (1.3s) ✓\n");
+    expect(rendered).toContain("  running breakdown query ✓\n");
   });
 
   it("supports fallback single-choice prompts without a TTY", async () => {

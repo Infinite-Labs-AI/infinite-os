@@ -29,10 +29,28 @@ import {
 } from "./desktop/answer-view-decode.js";
 import {
   askConfirmDecision,
+  askDismissOnly,
   confirmResultLines,
   leftForLaterLine
 } from "./desktop/confirm-result-lines.js";
+import {
+  DISMISS_ONLY_QUESTION,
+  needsTypedField,
+  typedFieldLine
+} from "./desktop/confirm-in-session.js";
+import {
+  STATUS_CONNECTIONS_CAPABILITY,
+  decodeStatusConnections,
+  type DesktopConnection
+} from "./desktop/status-connections.js";
+import { STEP_WORDS_CAPABILITY } from "./desktop/step-words.js";
 import { negotiateInteractiveWorkspace } from "./desktop/interactive-protocol.js";
+import { plainToolProgressLine } from "./formatting/progress.js";
+import {
+  boundedTerminalText,
+  terminalOutputText,
+  terminalText
+} from "./desktop/terminal-text.js";
 
 const PROTOCOL_VERSION = 1;
 const DESCRIPTOR_SCHEMA_VERSION = 1;
@@ -51,7 +69,6 @@ const MAX_CONFIRMATION_DETAILS = 12;
 const MAX_CONFIRMATION_LABEL_CHARS = 80;
 const MAX_CONFIRMATION_VALUE_CHARS = 240;
 const MAX_CONFIRMATION_INPUT_DEPTH = 4;
-const TRUNCATION_SUFFIX = " ... [truncated]";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const HIERARCHICAL_URI_RE =
   /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s<>"'`]+/gu;
@@ -116,6 +133,12 @@ export interface DesktopStatus {
   workspace?: { id?: string; name: string };
   error?: { code: string; message: string };
   interactive?: InteractiveWorkspaceStatusV1;
+  /**
+   * The workspace's sources as the app names them, in the app's order. Present
+   * only when the descriptor and this status both advertise
+   * `status.connections.v1` and the status carries a list.
+   */
+  connections?: DesktopConnection[];
 }
 
 export interface DesktopProgressFrame {
@@ -160,6 +183,13 @@ export interface DesktopAppClient {
    * until `status()` resolves; an old Desktop never gets `accept`.
    */
   readonly viewsCapable: boolean;
+  /**
+   * Whether the Desktop negotiated `step.words.v1` (descriptor ∧ status). When
+   * true, `turn()` adds it to `accept`, so the turn's `tool.start` and
+   * `tool.complete` frames carry the app's own words for each step. False
+   * until `status()` resolves; an old Desktop is never asked.
+   */
+  readonly stepWordsCapable: boolean;
   /** Whether the Desktop negotiated `confirm.fields.v1` (descriptor ∧ status). */
   readonly confirmFieldsCapable: boolean;
   /** Negotiated only when descriptor and status both advertise the v1 contract. */
@@ -227,6 +257,12 @@ interface PendingConfirmation {
   confirmationDetails: ConfirmationDetail[];
   /** The approval view's expiry, when the app sent a view. */
   expiresAt?: string;
+  /**
+   * Set when the card asks for a typed value (a required field) this prompt
+   * cannot send: the words saying where to answer it. Such a card is never
+   * approved here, only dismissed or left.
+   */
+  typedFieldWords?: string;
 }
 
 interface ConfirmationDetail {
@@ -373,6 +409,7 @@ function createClientFromDescriptor(
   let confirmationReplaySafe = false;
   let sessionCapable = false;
   let viewsCapable = false;
+  let stepWordsCapable = false;
   let confirmFieldsCapable = false;
   let interactiveWorkspace: InteractiveWorkspaceStatusV1 | undefined;
   let statusCapabilities: string[] = [];
@@ -383,6 +420,9 @@ function createClientFromDescriptor(
     },
     get viewsCapable() {
       return viewsCapable;
+    },
+    get stepWordsCapable() {
+      return stepWordsCapable;
     },
     get confirmFieldsCapable() {
       return confirmFieldsCapable;
@@ -395,6 +435,7 @@ function createClientFromDescriptor(
       confirmationReplaySafe = false;
       sessionCapable = false;
       viewsCapable = false;
+      stepWordsCapable = false;
       confirmFieldsCapable = false;
       interactiveWorkspace = undefined;
       statusCapabilities = [];
@@ -423,6 +464,9 @@ function createClientFromDescriptor(
         viewsCapable =
           descriptor.capabilities.includes(RESULT_VIEW_CAPABILITY) &&
           status.capabilities.includes(RESULT_VIEW_CAPABILITY);
+        stepWordsCapable =
+          descriptor.capabilities.includes(STEP_WORDS_CAPABILITY) &&
+          status.capabilities.includes(STEP_WORDS_CAPABILITY);
         confirmFieldsCapable =
           descriptor.capabilities.includes(CONFIRM_FIELDS_CAPABILITY) &&
           status.capabilities.includes(CONFIRM_FIELDS_CAPABILITY);
@@ -475,6 +519,13 @@ function createClientFromDescriptor(
           );
         }
       }
+      // Opt-ins are per turn: only what this Desktop advertised (descriptor ∧
+      // status) is asked for. A bridge refuses an `accept` entry it does not
+      // advertise, and an old Desktop sees the exact legacy body (no `accept`).
+      const accept = [
+        ...(viewsCapable ? [RESULT_VIEW_CAPABILITY] : []),
+        ...(stepWordsCapable ? [STEP_WORDS_CAPABILITY] : [])
+      ];
       const deadline = createRequestDeadline(input.signal, requestTimeoutMs);
       try {
         const response = await authenticatedFetch(
@@ -497,10 +548,7 @@ function createClientFromDescriptor(
                 ? { sessionId: nonEmptyString(input.sessionId) }
                 : {}),
               ...(input.interactive ? { interactive: input.interactive } : {}),
-              // Views are opt-in per turn: only a Desktop that advertised
-              // result.view.v1 gets `accept`, so an old Desktop sees the
-              // exact legacy body.
-              ...(viewsCapable ? { accept: [RESULT_VIEW_CAPABILITY] } : {})
+              ...(accept.length ? { accept } : {})
             })
           },
           deadline
@@ -667,7 +715,7 @@ export async function runDesktopAppCommand(
       expectedContextRevision: desktopStatus.contextRevision,
       signal: options.signal
     },
-    (frame) => renderProgress(frame.data, io)
+    (frame) => renderProgress(frame.data, io, client.stepWordsCapable)
   );
   io.writeOut(
     `${terminalOutputText(result.message, "Desktop returned an empty answer.")}\n`
@@ -699,9 +747,19 @@ export async function runDesktopAppCommand(
   for (const action of pending) {
     // Only y/yes approves and only n/no declines. Bare Enter or any other
     // answer re-prompts once, then leaves the card pending: nothing is sent.
-    const decision = options.promptConfirmation
-      ? await options.promptConfirmation(action)
-      : await promptForConfirmation(action, options.promptAnswer);
+    let decision: "approve" | "decline" | "pending";
+    if (action.typedFieldWords) {
+      // A card that needs a typed value: never approved on this prompt.
+      io.writeOut(`${action.typedFieldWords}\n`);
+      const asked = options.promptConfirmation
+        ? await options.promptConfirmation(action)
+        : await promptForDismissal(options.promptAnswer);
+      decision = asked === "approve" ? "pending" : asked;
+    } else {
+      decision = options.promptConfirmation
+        ? await options.promptConfirmation(action)
+        : await promptForConfirmation(action, options.promptAnswer);
+    }
     if (decision === "pending") {
       io.writeOut(`${leftForLaterLine(action.expiresAt)}\n`);
       continue;
@@ -805,6 +863,14 @@ function parseStatus(
   const workspace = parseWorkspace(value.workspace);
   const error = parseRemoteError(value.error);
   const interactive = parseInteractiveWorkspaceStatus(value.interactive);
+  // Additive and capability-gated: an old Desktop sends none, and a list that
+  // does not decode is left out (the top bar then draws no dots) rather than
+  // failing the status.
+  const connections =
+    descriptor.capabilities.includes(STATUS_CONNECTIONS_CAPABILITY) &&
+    capabilities.includes(STATUS_CONNECTIONS_CAPABILITY)
+      ? decodeStatusConnections(value.connections)
+      : undefined;
   return {
     service: DESKTOP_SERVICE,
     bootId: descriptor.bootId,
@@ -815,7 +881,8 @@ function parseStatus(
     ...(provider ? { provider } : {}),
     ...(workspace ? { workspace } : {}),
     ...(error ? { error } : {}),
-    ...(interactive ? { interactive } : {})
+    ...(interactive ? { interactive } : {}),
+    ...(connections ? { connections } : {})
   };
 }
 
@@ -1167,13 +1234,15 @@ function parsePendingConfirmations(
       suppliedDetails.length > 0
         ? suppliedDetails
         : buildGenericConfirmationDetails(value.input);
-    const expiresAt = decodeAnswerView(value.view)?.approval?.expiresAt;
+    const view = decodeAnswerView(value.view) ?? undefined;
+    const expiresAt = view?.approval?.expiresAt;
     pending.push({
       actionId,
       confirmationHandle,
       summary,
       confirmationDetails,
-      ...(typeof expiresAt === "string" ? { expiresAt } : {})
+      ...(typeof expiresAt === "string" ? { expiresAt } : {}),
+      ...(needsTypedField(view) ? { typedFieldWords: typedFieldLine(view) } : {})
     });
   }
   return pending;
@@ -1344,11 +1413,20 @@ function renderStatus(status: DesktopStatus, io: DesktopAppIo): void {
   }
 }
 
-function renderProgress(value: unknown, io: DesktopAppIo): void {
+function renderProgress(value: unknown, io: DesktopAppIo, stepWords = false): void {
   if (!isRecord(value)) return;
   // This command draws no views: a `tool.view` frame is not a progress line.
   if (isToolViewFrameData(value)) return;
   const type = nonEmptyString(value.type);
+  // A tool frame prints the step in words: the app's own when the turn asked
+  // for them, else generic words from the tool's name. Never the raw tool id.
+  if (type?.startsWith("tool.")) {
+    const line = plainToolProgressLine(value, stepWords);
+    if (line) {
+      io.writeErr(`${boundedTerminalText(line, MAX_CONFIRMATION_VALUE_CHARS)}\n`);
+    }
+    return;
+  }
   if (
     type === "message.delta" ||
     type === "reasoning.delta" ||
@@ -1359,10 +1437,23 @@ function renderProgress(value: unknown, io: DesktopAppIo): void {
   const text =
     nonEmptyString(value.message) ??
     nonEmptyString(value.text) ??
-    nonEmptyString(value.summary) ??
-    (type?.startsWith("tool.") ? nonEmptyString(value.name) : undefined);
+    nonEmptyString(value.summary);
   if (text) {
     io.writeErr(`${boundedTerminalText(text, MAX_CONFIRMATION_VALUE_CHARS)}\n`);
+  }
+}
+
+async function promptForDismissal(
+  promptAnswer?: (question: string) => Promise<string>
+): Promise<"decline" | "pending"> {
+  if (promptAnswer) {
+    return askDismissOnly(promptAnswer, DISMISS_ONLY_QUESTION);
+  }
+  const prompt = createInterface({ input: stdin, output: stdout });
+  try {
+    return await askDismissOnly((text) => prompt.question(text), DISMISS_ONLY_QUESTION);
+  } finally {
+    prompt.close();
   }
 }
 
@@ -1380,122 +1471,6 @@ async function promptForConfirmation(
   } finally {
     prompt.close();
   }
-}
-
-function terminalText(value: string, fallback = ""): string {
-  return (
-    scanTerminalText(value, false).replace(/\s+/gu, " ").trim() || fallback
-  );
-}
-
-function terminalOutputText(value: string, fallback = ""): string {
-  return scanTerminalText(value, true).trim() || fallback;
-}
-
-function scanTerminalText(value: string, preserveLineBreaks: boolean): string {
-  const output: string[] = [];
-  let index = 0;
-  while (index < value.length) {
-    const code = value.charCodeAt(index);
-    if (code === 0x1b) {
-      const next = value.charCodeAt(index + 1);
-      if (next === 0x5b) {
-        index = skipControlSequence(value, index + 2);
-      } else if (
-        next === 0x5d ||
-        next === 0x50 ||
-        next === 0x58 ||
-        next === 0x5e ||
-        next === 0x5f
-      ) {
-        index = skipControlString(value, index + 2);
-      } else {
-        index += Number.isNaN(next) ? 1 : 2;
-      }
-      continue;
-    }
-    if (code === 0x9b) {
-      index = skipControlSequence(value, index + 1);
-      continue;
-    }
-    if (
-      code === 0x90 ||
-      code === 0x98 ||
-      code === 0x9d ||
-      code === 0x9e ||
-      code === 0x9f
-    ) {
-      index = skipControlString(value, index + 1);
-      continue;
-    }
-    if (code === 0x0a) {
-      output.push(preserveLineBreaks ? "\n" : " ");
-      index += 1;
-      continue;
-    }
-    if (code === 0x0d) {
-      output.push(preserveLineBreaks ? "\n" : " ");
-      index += value.charCodeAt(index + 1) === 0x0a ? 2 : 1;
-      continue;
-    }
-    if (code === 0x09) {
-      output.push(preserveLineBreaks ? "  " : " ");
-      index += 1;
-      continue;
-    }
-    if (
-      code <= 0x1f ||
-      (code >= 0x7f && code <= 0x9f) ||
-      code === 0x061c ||
-      code === 0x200e ||
-      code === 0x200f ||
-      (code >= 0x202a && code <= 0x202e) ||
-      (code >= 0x2066 && code <= 0x2069)
-    ) {
-      output.push(" ");
-      index += 1;
-      continue;
-    }
-    output.push(value[index]!);
-    index += 1;
-  }
-  return output.join("");
-}
-
-function skipControlSequence(value: string, start: number): number {
-  let index = start;
-  while (index < value.length) {
-    const code = value.charCodeAt(index);
-    index += 1;
-    if (code >= 0x40 && code <= 0x7e) return index;
-  }
-  return value.length;
-}
-
-function skipControlString(value: string, start: number): number {
-  let index = start;
-  while (index < value.length) {
-    const code = value.charCodeAt(index);
-    if (code === 0x07 || code === 0x9c) return index + 1;
-    if (code === 0x1b && value.charCodeAt(index + 1) === 0x5c) return index + 2;
-    index += 1;
-  }
-  return value.length;
-}
-
-function boundedTerminalText(
-  value: string,
-  maxChars: number,
-  fallback = ""
-): string {
-  const sanitized = terminalText(value, fallback);
-  const characters = Array.from(sanitized);
-  if (characters.length <= maxChars) return sanitized;
-  const visibleChars = Math.max(
-    0,
-    maxChars - Array.from(TRUNCATION_SUFFIX).length
-  );
-  return `${characters.slice(0, visibleChars).join("")}${TRUNCATION_SUFFIX}`;
 }
 
 function redactSensitiveTerminalText(value: string): string {

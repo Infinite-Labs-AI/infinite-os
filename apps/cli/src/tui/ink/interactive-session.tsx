@@ -1,16 +1,18 @@
 import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { stdin as defaultInput, stderr as defaultErrorOutput, stdout as defaultOutput } from "node:process";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 // The composer value renders in `<Text wrap="wrap">` (see InkLineInput), and Ink's
 // wrap="wrap" word-wraps via `wrapAnsi(text, width, { trim: false, hard: true })`
 // (ink/build/wrap-text.js). The native-cursor row prediction MUST use the SAME
 // wrap so it never lands a row off the line the user is typing on — char-by-char
 // width accumulation (a different, tighter packing) drifts from Ink's word-wrap.
 import wrapAnsi from "wrap-ansi";
-import { Box, Text, render, renderToString, useApp, useCursor, useInput, useStdin, useStdout } from "./renderer.js";
+import { Box, Text, activeInkRenderer, render, renderToString, useApp, useCursor, useInput, useStdin, useStdout } from "./renderer.js";
 
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
+import type { AnswerViewV1, ApprovalFieldAnswerV1, CreativeDraftFrameV1, ToolViewFrameV1 } from "@infinite-os/types";
+import type { Key } from "ink";
 
 // Type-only import (erased at build, no runtime cycle): the in-chat /connect
 // wizard descriptor + decision are owned by index.ts (which owns the registry /
@@ -28,16 +30,27 @@ import type {
 // The cloud-brain entry threads `pendingConfirmations` + `onConfirmAction` in;
 // the LOCAL interactive path never returns them, so this stays fully dormant.
 import {
+  requeueConfirmation,
   terminalText,
   type InSessionConfirmationAction
 } from "../../desktop/confirm-in-session.js";
-import { confirmErrorLines, confirmResultLines, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
+import { confirmErrorLines, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
 
 import { turnController } from "../app/turn-controller.js";
-import { getTurnState, subscribeTurnState, type TurnState } from "../app/turn-store.js";
+import {
+  clearTurnViews,
+  getTurnState,
+  patchTurnState,
+  recordCreativeDraft,
+  recordTurnView,
+  subscribeTurnState,
+  type TurnState
+} from "../app/turn-store.js";
 import { TYPING_IDLE_MS } from "../config/timing.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
-import { resolveTheme, type Theme } from "../theme.js";
+import { detectTerminalBackground } from "../style/background.js";
+import { drawsToTerminal, syncInkColorLevel } from "../style/ink-level.js";
+import { colorEnabled, resolveTheme, themeInkStyle, type Theme } from "../theme.js";
 import type { Msg } from "../types.js";
 import {
   HomeInventory,
@@ -46,38 +59,66 @@ import {
   type HomeInventoryConnection,
   type HomeInventoryTool
 } from "./home-inventory.js";
-import { isInfiniteTurnBusy } from "./status-indicator.js";
+import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
-import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, type KeyContext } from "../keys/keymap.js";
+import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, type KeyAction, type KeyContext } from "../keys/keymap.js";
+import { fallbackCardLines, declineFrame, dismissalSent, fallbackCardRowCount, fieldInvalidMessage, messagesAfterDecline, settleConfirmOutcome } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
+import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
+import { askedSource, ruleLine, TOP_BAR_ROWS, type TopBarData } from "./top-bar.js";
 import {
+  AnsiLine,
+  inkLatestTurnRows,
   inkTranscriptLayout,
   InkTranscriptApp,
-  renderCommittedTranscriptLines,
+  transcriptColumns,
   useInfiniteTranscriptClock
 } from "./transcript-app.js";
 import {
-  commitOnSubmit,
+  CLEAR_SCREEN_AND_SCROLLBACK,
+  commitLatest,
   DEFAULT_COMPOSER_ROWS,
+  DEFAULT_KEY_BAR_ROWS,
   livePageKey,
   pageLiveWindow,
+  redrawCommitted,
+  RESIZE_REPRINT_MS,
   type CommittedEntry,
   type LivePageDirection
 } from "./transcript-static.js";
 import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
+import { resolveViewKey, turnAsk, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
+import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
+import { detailsPaneWidth, renderCommittedTurn, renderLiveTurn, rowsBesideCard, turnMaySplit, type LiveTurnRender } from "../views/layout.js";
+import { besideWorkingTurn, workingTurnMessages, workingTurnSteps, type InfiniteTranscriptInput } from "../app/transcript-renderer.js";
+import {
+  approvalRender,
+  cancelCardField,
+  CARD_UI_START,
+  cardKeyStep,
+  cardUiStart,
+  commitCardField,
+  receiptDetailLines,
+  resendView,
+  type ApprovalRender,
+  type CardUiState
+} from "../views/approval.js";
+import { creativeDraftLine } from "../views/images.js";
 
 /**
- * The every-launch home inventory shown above the transcript on the empty home
- * screen (the big wordmark + Tools / Commands / Connected + welcome). Supplied by
- * the CLI (`index.ts`) so the registry / curated lists / live source fetch stay
- * there; the TUI only renders it. Absent (`undefined`) = no inventory (e.g. tests
- * / non-home paths) and the screen falls back to the bare rocket banner.
+ * The first-run inventory shown above the boot frame on the empty home screen
+ * (the big wordmark + Tools / Commands / Connected + welcome), only on the
+ * first-ever run (D4: every later boot is the r4 frame alone). Supplied by the
+ * CLI (`index.ts`) so the registry / curated lists / live source fetch stay
+ * there; the TUI only renders it. Absent (`undefined`) = no inventory.
  */
 export interface HomeInventoryData {
   tools: readonly HomeInventoryTool[];
   commands: readonly HomeInventoryCommand[];
-  /** `undefined` = daemon unreachable / fetch skipped (renders a muted note). */
+  /** `undefined` = the terminal cannot list them (see `connectionsNote`). */
   connections?: readonly HomeInventoryConnection[];
+  /** Why `connections` is undefined, in a few words (the daemon is down, the read failed); absent = no Connected row. */
+  connectionsNote?: string;
   version?: string;
   workspace?: string;
 }
@@ -97,6 +138,8 @@ const FWD_DEL_RE = new RegExp(`${ESC}\\[3(?:[~$^]|;)`);
 const PRINTABLE_INPUT_RE = /^[ -~\u00a0-\uffff]+$/;
 const TAB_PATH_RE = /((?:["']?(?:[A-Za-z]:[\\/]|\.{1,2}\/|~\/|\/|@|[^"'`\s]+\/))[^\s]*)$/;
 const QUEUED_PREVIEW_LIMIT = 50;
+/** The rule over the composer (terminal-r4: `─` across, then `❯ Ask Infinite…`). */
+const COMPOSER_RULE_ROWS = 1;
 
 export interface InkInteractiveLineResult {
   exit?: boolean;
@@ -218,9 +261,9 @@ export interface InkInteractiveSessionAppProps {
   getAgentTitle?: () => string | undefined;
   getCompletions?: (value: string) => readonly CompletionSuggestion[];
   /**
-   * The every-launch home inventory (big wordmark + Tools / Commands / Connected
-   * + welcome) shown ONCE on the empty home screen, above the transcript. Omitted
-   * = the home screen falls back to the bare rocket banner (e.g. tests).
+   * The first-run inventory (big wordmark + Tools / Commands / Connected +
+   * welcome) shown ONCE on the empty home screen, above the boot frame. The CLI
+   * passes it only on the first-ever run (D4). Omitted = the boot frame alone.
    */
   homeInventory?: HomeInventoryData;
   initialInputCursor?: number;
@@ -228,15 +271,30 @@ export interface InkInteractiveSessionAppProps {
   initialInputValue?: string;
   initialInputHistory?: readonly string[];
   initialMessages?: readonly Msg[];
+  /** Write cards already waiting when the session opens (tests draw a card with it). */
+  initialPendingConfirmations?: readonly InSessionConfirmationAction[];
+  /**
+   * The key focus the session opens in over a card already there (a restored
+   * screen; the r4 goldens draw `flow-email-02` with its emails open, the
+   * user having pressed `v`): the head card's documents open. Absent = the
+   * default. A list's opening row is the view's own (`body.selected`).
+   */
+  initialFocus?: { documentOpen?: boolean };
   onRememberInput?: (line: string) => void;
   /**
    * Run one submitted line. `signal` aborts when the user stops the turn (Esc,
    * or Ctrl-C while a turn runs); only honoured when `turnStoppable` is set.
+   * `onView` takes each answer view (`tool.view` frame) the turn produces; the
+   * finished turn then draws them beside its answer (terminal-r4 layout).
+   * `onCreativeDraft` takes each image-draft frame, drawn as one progress line
+   * per run ("Drawing 3 images · ~25 s"); never a picture or an image URL.
    */
   onSubmitLine(
     line: string,
     onProgress: (event: ChatProgressEvent) => void,
-    signal: AbortSignal
+    signal: AbortSignal,
+    onView?: (frame: ToolViewFrameV1) => void,
+    onCreativeDraft?: (frame: CreativeDraftFrameV1) => void
   ): Promise<InkInteractiveLineResult>;
   /**
    * Resolve an in-session write confirmation surfaced by a turn's
@@ -244,8 +302,21 @@ export interface InkInteractiveSessionAppProps {
    * decision (approve or a real decline) and resolves with its raw result,
    * which the session prints as receipt lines (`confirmResultLines`). Only the cloud-brain entry wires this; the LOCAL interactive path
    * never returns `pendingConfirmations`, so it is never invoked there. (Plan 2)
+   * `fields` carries the card's answered fields (a daily budget), sent only to
+   * a Desktop that takes them (`confirmFieldsCapable` on the card).
    */
-  onConfirmAction?(action: InSessionConfirmationAction, decision: "approve" | "decline"): Promise<unknown>;
+  onConfirmAction?(
+    action: InSessionConfirmationAction,
+    decision: "approve" | "decline",
+    fields?: Record<string, ApprovalFieldAnswerV1>
+  ): Promise<unknown>;
+  /**
+   * The running turn's own short reason, said in the composer's note in place
+   * of the generic timer `4s` (terminal-r4 `❯ Ask Infinite… (the pause
+   * finishes either way)`). Read on every render; shown only while a turn runs.
+   */
+  busyNote?: string | (() => string | undefined);
+  /** The composer's placeholder. Default `Ask Infinite…` (terminal-r4). */
   promptPlaceholder?: string;
   requiresConfirmation?: (line: string) => string | undefined;
   requiresSelection?: (line: string) => InkInteractiveSelectionPrompt | undefined;
@@ -255,9 +326,16 @@ export interface InkInteractiveSessionAppProps {
    * `null` = no cap.
    */
   rows?: number | null;
+  /** Not drawn: the r4 frame has no status line (the composer carries the busy note). */
   status?: readonly string[] | (() => readonly string[]);
   theme?: Theme;
+  /** Not drawn: the r4 top bar shows the brand chip. */
   title?: string;
+  /**
+   * The top bar's workspace and sources (D1), read on every render so a
+   * `/project use` shows at once. Absent = the brand chip alone.
+   */
+  topBar?: TopBarData | (() => TopBarData | undefined);
   /**
    * The caller honours `onSubmitLine`'s abort signal, so Esc stops the running
    * turn and Ctrl-C stops it instead of quitting. Off (the local path, whose
@@ -275,18 +353,31 @@ export interface InkInteractiveSessionRunOptions extends InkInteractiveSessionAp
 export async function runInkInteractiveSession(options: InkInteractiveSessionRunOptions): Promise<void> {
   // No `columns` fallback to `output.columns` here: that froze the width at launch.
   // The app follows the live width itself; `options.columns` stays a test override.
-  const instance = render(
-    <InkInteractiveSessionApp {...options} />,
-    {
-      exitOnCtrlC: false,
-      patchConsole: false,
-      stderr: options.errorOutput ?? defaultErrorOutput,
-      stdin: options.input ?? defaultInput,
-      stdout: options.output ?? defaultOutput
-    }
-  );
+  const input = options.input ?? defaultInput;
+  const output = options.output ?? defaultOutput;
+  const onTerminal = drawsToTerminal(input) && drawsToTerminal(output);
+  // Before Ink mounts: a light profile gets the 16 tier (OSC 11 probe, SPEC §3.2).
+  if (onTerminal && !options.theme) {
+    await detectTerminalBackground(process.env, input, output);
+  }
+  // On a real terminal, Ink's chalk paints at our tier, not the level it sniffed.
+  const restoreColorLevel = onTerminal ? syncInkColorLevel((options.theme ?? resolveTheme()).tier) : () => {};
+  try {
+    const instance = render(
+      <InkInteractiveSessionApp {...options} />,
+      {
+        exitOnCtrlC: false,
+        patchConsole: false,
+        stderr: options.errorOutput ?? defaultErrorOutput,
+        stdin: input,
+        stdout: output
+      }
+    );
 
-  await instance.waitUntilExit();
+    await instance.waitUntilExit();
+  } finally {
+    restoreColorLevel();
+  }
 }
 
 export function renderInkInteractiveSessionToString(
@@ -387,19 +478,22 @@ export function InkInteractiveSessionApp({
   initialInputValue = "",
   initialInputHistory = [],
   initialMessages = [],
+  initialPendingConfirmations = [],
+  initialFocus,
   onRememberInput,
   onSubmitLine,
   onConfirmAction,
-  promptPlaceholder = "Type a message, /help, or /exit.",
+  busyNote,
+  promptPlaceholder = COMPOSER_PLACEHOLDER,
   requiresConfirmation,
   requiresSelection,
   rows: rowsOverride,
-  status = [],
   theme,
-  title,
+  topBar,
   turnStoppable = false
 }: InkInteractiveSessionAppProps) {
   const app = useApp();
+  const { stdout: sessionStdout, write: writeAboveFrame } = useStdout();
   const t = theme ?? resolveTheme();
   // One turn-abort per session: each turn arms a fresh signal (Esc / Ctrl-C
   // stop it) and disarms it when the turn settles.
@@ -430,8 +524,13 @@ export function InkInteractiveSessionApp({
   const historyRef = useRef(history);
   historyRef.current = history;
   const [committed, setCommitted] = useState<readonly CommittedEntry[]>([]);
+  // Bumped when a width change reprints the scrollback: <Static> prints every committed entry again.
+  const [staticEpoch, setStaticEpoch] = useState(0);
   const [homeCommitted, setHomeCommitted] = useState(false);
   const turnSeq = useRef(0);
+  // Counts every commit of the live turn (turnSeq counts only those with content),
+  // so a confirm that comes back knows whether its turn is still the live one.
+  const commitSeq = useRef(0);
   // First visible line of a paged live turn; null = follow the tail.
   const [liveOffset, setLiveOffset] = useState<number | null>(null);
   const [pendingOperatorLine, setPendingOperatorLine] = useState<string | null>(null);
@@ -442,9 +541,34 @@ export function InkInteractiveSessionApp({
   // Stays empty for the LOCAL path (which never surfaces `pendingConfirmations`).
   const [pendingConfirmActions, setPendingConfirmActions] = useState<
     readonly InSessionConfirmationAction[]
-  >([]);
+  >(initialPendingConfirmations);
+  // Confirms sent to the app and not yet answered. They hold the queued-line drain
+  // like an open card does, so the receipt lands on the turn its card came from.
+  const [confirmsInFlight, setConfirmsInFlight] = useState(0);
   // `?` on the head card toggles its explanation (the terminal can't hover).
   const [explainOpen, setExplainOpen] = useState(false);
+  // A head card WITH an approval view keeps its own key state (views/approval.ts):
+  // `?`, the open document, its tab and page, and the field answers so far.
+  const [cardUi, setCardUi] = useState<CardUiState>(() =>
+    initialFocus?.documentOpen && initialPendingConfirmations.length ? { ...CARD_UI_START, documentOpen: true } : CARD_UI_START);
+  // The opening focus applies to the first head card only.
+  const initialDocumentOpen = useRef(initialFocus?.documentOpen === true);
+  // The latest finished turn's answer views keep their keys (j/k, 1–9, →, m, ?)
+  // until the next line is submitted (views/focus.ts). The views themselves live
+  // in the turn store (`turnState.views`), cleared when the turn commits.
+  // Views already on the turn when the session opens take their keys, like a
+  // finished turn's (a list on the row its view names).
+  const [viewFocus, setViewFocus] = useState<ViewFocusState | null>(() => {
+    const views = getTurnState().views;
+    return views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null;
+  });
+  const viewFocusRef = useRef(viewFocus);
+  viewFocusRef.current = viewFocus;
+  // The rows the live turn was last drawn to, so the turn commits to scrollback
+  // with the same document pages the user was reading.
+  const liveTurnRowsRef = useRef<number | undefined>(undefined);
+  // Whether the latest turn is drawn side by side (its card right of the answer), for the turn's end.
+  const splitTurnRef = useRef(false);
   const [pendingSelection, setPendingSelection] = useState<{
     prompt: InkInteractiveSelectionPrompt;
     selectedIndex: number;
@@ -468,6 +592,8 @@ export function InkInteractiveSessionApp({
   const [activeFieldTick, setActiveFieldTick] = useState(0);
   const [queuedLines, setQueuedLines] = useState<readonly string[]>([]);
   const [turnState, setTurnState] = useState<TurnState>(() => getTurnState());
+  // The not-connected source of a turn that already went to scrollback (see `topBarData`).
+  const [askedAfterCommit, setAskedAfterCommit] = useState<string | null>(null);
   const typingIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => subscribeTurnState(() => setTurnState(getTurnState())), []);
@@ -509,7 +635,13 @@ export function InkInteractiveSessionApp({
     setLiveOffset(null);
   }, []);
 
-  const statusParts = typeof status === "function" ? status() : status;
+  // The top bar leads with the source the turn on screen asked about and found
+  // not connected (r4's not-connected frame), at any width. A turn sent whole
+  // to scrollback the moment it finished is still the turn on screen: the mark
+  // stays until the next line is submitted.
+  const sessionTopBar = typeof topBar === "function" ? topBar() : topBar;
+  const askedNow = askedSource(turnState.views.map((frame) => frame.view)) ?? askedAfterCommit;
+  const topBarData = sessionTopBar && askedNow ? { ...sessionTopBar, asked: askedNow } : sessionTopBar;
   // Live label for the in-flight answer; completed messages carry their own
   // frozen `title` (stamped at submit) so a mid-session `/project use` never
   // relabels earlier answers.
@@ -517,39 +649,113 @@ export function InkInteractiveSessionApp({
   // The latest turn stays live (its keys still act on it) until the NEXT line is
   // submitted; only then is it printed once into scrollback through <Static>, at
   // the current width. The home inventory goes with the first commit.
+  //
+  // One exception (River: "like a normal coding harness"): a FINISHED turn that
+  // does not fit the live region is never paged. It goes whole into scrollback
+  // the moment it finishes (`"overflow"`, see `finishedOverflow` below), and
+  // only the frame stays live. A write card still waiting for its answer stays
+  // live with the turn's Steps (`keepCard`): only the question, the answer and
+  // the other views go up.
+  const commitLiveTurn = useCallback((why: "submit" | "overflow", keepCard = false) => {
+    commitSeq.current += 1;
+    const turn = historyRef.current;
+    const { views, steps } = getTurnState();
+    const focus = viewFocusRef.current;
+    // Scrollback is ONE column at any width (River, 2026-10-02): the question,
+    // the answer, its views underneath, under a thin rule.
+    // `redraw` draws it again at another width (a width change reprints scrollback).
+    // A call that did not end clean keeps its row under the answer (a failed
+    // step never disappears with the Steps strip). While a card still waits,
+    // the turn's calls stay live under it and print when that is committed.
+    const stepsStayLive = keepCard && steps.length > 0;
+    const drawTurn = (width: number) => renderCommittedTurn({
+      messages: turn,
+      views: views.map((frame) => frame.view),
+      focus,
+      steps,
+      stepsStayLive,
+      width: transcriptColumns(width),
+      color: colorEnabled(t),
+      theme: t
+    });
+    const drawn = drawTurn(columns);
+    const latest: CommittedEntry | null = turn.length || views.length || drawn.length
+      ? { id: `turn:${++turnSeq.current}`, lines: drawn, redraw: (width) => ({ lines: drawTurn(width) }) }
+      : null;
+    const inventory = homeInventory;
+    const drawHome = (width: number) => inventory ? (
+      <HomeInventory
+        columns={width}
+        commands={inventory.commands}
+        connections={inventory.connections}
+        connectionsNote={inventory.connectionsNote}
+        theme={t}
+        tools={inventory.tools}
+        version={inventory.version}
+        workspace={inventory.workspace}
+      />
+    ) : null;
+    const home: CommittedEntry | null = why === "submit" && homeInventory && !homeCommitted && turn.length === 0
+      ? { id: "home", lines: [], node: drawHome(columns), redraw: (width) => ({ lines: [], node: drawHome(width) }) }
+      : null;
+    setCommitted((current) => commitLatest({ committed: home ? [...current, home] : current, latest }).committed);
+    setHomeCommitted(true);
+    // The next line starts a new turn: the bar forgets what the last one asked about.
+    const asked = askedSource(views.map((frame) => frame.view));
+    setAskedAfterCommit((current) => (why === "submit" ? null : asked ?? current));
+    historyRef.current = [];
+    setHistory([]);
+    if (keepCard) {
+      // The card that stays live keeps the turn's Steps (its own call waits there as ▣).
+      patchTurnState((state) => (state.views.length ? { ...state, views: [] } : state));
+    } else {
+      clearTurnViews();
+    }
+    // The store's listener is subscribed in an effect; a commit in the first
+    // frame's layout effect (a session that opens on a tall turn) runs before it.
+    setTurnState(getTurnState());
+    setViewFocus(null);
+    setLiveOffset(null);
+  }, [agentTitle, columns, homeCommitted, homeInventory, t]);
   const commitLatestTurn = useCallback((line: string) => {
     if (!line.trim()) {
       return;
     }
-    const turn = historyRef.current;
-    const latest: CommittedEntry | null = turn.length
-      ? {
-          id: `turn:${++turnSeq.current}`,
-          lines: renderCommittedTranscriptLines({ agentTitle, messages: turn }, { columns, theme: t })
-        }
-      : null;
-    const home: CommittedEntry | null = homeInventory && !homeCommitted && turn.length === 0
-      ? {
-          id: "home",
-          lines: [],
-          node: (
-            <HomeInventory
-              columns={columns}
-              commands={homeInventory.commands}
-              connections={homeInventory.connections}
-              tools={homeInventory.tools}
-              version={homeInventory.version}
-              workspace={homeInventory.workspace}
-            />
-          )
-        }
-      : null;
-    setCommitted((current) => commitOnSubmit({ committed: home ? [...current, home] : current, latest }, line).committed);
-    setHomeCommitted(true);
-    historyRef.current = [];
-    setHistory([]);
-    setLiveOffset(null);
-  }, [agentTitle, columns, homeCommitted, homeInventory, t]);
+    commitLiveTurn("submit");
+  }, [commitLiveTurn]);
+
+  // A width change (run-r2 MUST 4): the terminal re-wraps the frame it holds
+  // into more rows than Ink can erase, and the part pushed into scrollback is
+  // out of the cursor's reach, so scrolling up showed the turn twice, once
+  // torn. Once the width holds still, clear the screen AND the scrollback
+  // (through Ink, which redraws its frame after the write), then print every
+  // committed entry again at the new width (<Static> remounts on the epoch).
+  // Only on a terminal, with the stock renderer (the vendored one diffs cells
+  // and draws scrollback in flow); `INFINITE_REFLOW_GUARD=0` turns it off with
+  // the reflow guard.
+  const columnsRef = useRef(columns);
+  columnsRef.current = columns;
+  const printedColumns = useRef(columns);
+  useEffect(() => {
+    if (columns === printedColumns.current) {
+      return;
+    }
+    if (!sessionStdout?.isTTY || activeInkRenderer !== "stock" || process.env.INFINITE_REFLOW_GUARD === "0") {
+      printedColumns.current = columns;
+      return;
+    }
+    const timer = setTimeout(() => {
+      const width = columnsRef.current;
+      if (width === printedColumns.current) {
+        return;
+      }
+      printedColumns.current = width;
+      writeAboveFrame(CLEAR_SCREEN_AND_SCROLLBACK);
+      setCommitted((current) => redrawCommitted(current, width));
+      setStaticEpoch((epoch) => epoch + 1);
+    }, RESIZE_REPRINT_MS);
+    return () => clearTimeout(timer);
+  }, [columns, sessionStdout, writeAboveFrame]);
 
   // Every way out of the session (/exit, /quit, a result's `exit`, idle Ctrl-C)
   // commits the live turn to <Static> first, uncapped, at the current width, and
@@ -582,12 +788,33 @@ export function InkInteractiveSessionApp({
   // count itself is derived independently inside both consumers via
   // `isInfiniteTurnBusy(state)`, so this must stay an OR (a tool-only turn with
   // React `busy === false` still needs the indicator to animate).
-  const transcriptBusy = busy || isInfiniteTurnBusy(turnState);
-  const { clock, labelTick, spinnerTick } = useInfiniteTranscriptClock({
-    busy: transcriptBusy,
-    state: turnState
-  });
-  const visibleStatusParts = formatInteractiveStatus(statusParts, busy, queuedLines);
+  // A yes on its way ticks the clock too: the working card's stopwatch (r4 flow-pause-02).
+  const transcriptBusy = busy || isInfiniteTurnBusy(turnState) || confirmsInFlight > 0;
+  const { clock } = useInfiniteTranscriptClock({ busy: transcriptBusy });
+  // The composer's note while a turn runs (terminal-r4 `❯ Ask Infinite… (note)`):
+  // that it is working and for how long, then any line queued behind it. No
+  // status line and no session id (r4 has neither).
+  // A turn that gives its own short reason says that instead of `working`.
+  // Without a reason of its own, the running view says why waiting is safe (r4):
+  // images being made, or a yes on its way (`the pause finishes either way`).
+  const viewReason = useMemo(() => {
+    const views = turnState.views.map((frame) => frame.view);
+    if (views.some((view) => view.kind === "images" && (view.state === "working" || view.state === "applying" || view.state === "background"))) {
+      return "the creatives finish either way";
+    }
+    const applying = views.find((view) => view.state === "applying" && isPlainRecord(view.approval));
+    const verb = applying && isPlainRecord(applying.approval) && typeof applying.approval.confirmLabel === "string"
+      ? shortOkVerb(applying.approval.confirmLabel)
+      : "";
+    return verb && verb !== "approve" ? `the ${verb} finishes either way` : null;
+  }, [turnState.views]);
+  const busyReason = transcriptBusy
+    ? (typeof busyNote === "function" ? busyNote() : busyNote)?.trim() || viewReason
+    : null;
+  const composerNote = [
+    busyReason ?? (busy ? formatBusyNote({ nowMs: clock, state: turnState, turnStartedAt: busyStartedAt }) : null),
+    ...formatQueuedStatus(queuedLines)
+  ].filter((part): part is string => Boolean(part)).join(" · ");
   // The head card's keys: its named OK key, `n`, and `?` (keymap.ts owns the rules).
   // `o`/`w`/`r` stay off until app links, watch and retry land (T12, T11).
   const headConfirmAction = pendingConfirmActions[0] ?? null;
@@ -595,20 +822,204 @@ export function InkInteractiveSessionApp({
     () => headConfirmAction ? confirmCardKeys(headConfirmAction, NO_KEY_CAPS) : null,
     [headConfirmAction]
   );
+  // The latest turn with answer views is drawn in the r4 layout (answer left,
+  // details right from 120 columns, Steps below) as the live region's latest
+  // lines, at the transcript's width; the transcript then carries only what
+  // the drawn turn does not show. A turn still running is drawn the same way
+  // (r4's working frames): the answer arriving (held open) beside the views
+  // that already came, its calls running in the Steps.
+  //
+  // The turn is drawn to the rows the live region has for it (`turnRowsAt`,
+  // below, once the composer and the key bar are counted), so a document's
+  // page fits on screen. `renderTurnAt` draws it at a given row count, cached
+  // for this set of inputs.
+  const turnViews = turnState.views;
+  const turnSteps = turnState.steps;
+  // While the turn runs the drawn turn follows its state and the clock (its spinner, a running bar).
+  const workingState = busy ? turnState : null;
+  const workingClock = busy ? clock : 0;
+  // The head write card is the turn's last details (r4 "Needs your OK"):
+  // beside the answer from 120 columns, under the answer and a rule below
+  // that, the Steps under it. It is drawn at the details pane's width.
+  // A turn whose answer has a table of its own stays one column at any width,
+  // so its card is drawn at the whole width, under the answer.
+  const turnSplits = useMemo(() => turnMaySplit(history, transcriptColumns(columns)), [columns, history]);
+  const cardPaneWidth = detailsPaneWidth(transcriptColumns(columns), turnSplits);
+  splitTurnRef.current = turnSplits;
+  // The rows the turn takes besides the card (its question, answer, rule,
+  // other views, Steps), so the card is held to what is left of the window.
+  const rowsBesideHeadCard = useMemo(
+    () => headConfirmAction
+      ? rowsBesideCard({
+          messages: history,
+          views: turnViews.map((frame) => frame.view),
+          focus: null,
+          steps: turnSteps,
+          width: transcriptColumns(columns),
+          color: colorEnabled(t),
+          theme: t,
+          ...(headConfirmAction.view ? { statusViews: [headConfirmAction.view] } : {})
+        })
+      : 0,
+    [columns, headConfirmAction, history, t, turnSteps, turnViews]
+  );
   // A new head card (from any queue writer) always opens with its explanation
   // closed: the explanation stays behind `?`.
-  useEffect(() => {
+  // A card brought back opens with the answers it sent; a card whose answer
+  // the app refused opens with the app's words under its field.
+  // A layout effect, so the reset lands in the same task as the frame that
+  // shows the card: a key pressed on the card the moment it appears (`v`)
+  // is never undone by a late reset.
+  useLayoutEffect(() => {
     setExplainOpen(false);
+    setCardUi(cardUiStart(headConfirmAction));
   }, [headConfirmAction]);
-  // With no card, the bar is the composer's: `esc stop` while a stoppable turn
-  // runs (the only key that works then), nothing when idle.
-  const keyHints = confirmKeys
-    ? keyBarHints(confirmKeys.ctx)
-    : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
+  // The opening focus (`initialFocus.documentOpen`) opens the first head card's documents, once.
+  useLayoutEffect(() => {
+    if (initialDocumentOpen.current && headConfirmAction) {
+      setCardUi((ui) => ({ ...ui, documentOpen: true }));
+    }
+    initialDocumentOpen.current = false;
+  }, [headConfirmAction]);
+  // The head card drawn from its approval view (an old desktop sends none: the
+  // summary + details card and `y Confirm` stay). Its key context is the one the
+  // keymap resolves with, so the bar and the keys agree by construction.
+  // Image drafts in progress this turn, one line per run ("Drawing 3 images ·
+  // ~25 s"), above the card and the composer. Never a picture or a URL.
+  const draftLines = useMemo(
+    () => turnState.drafts.map((draft) => creativeDraftLine(draft, clock)),
+    [clock, turnState.drafts]
+  );
   // The home inventory shows ONCE, on the empty home screen (no transcript yet)
   // and only when the CLI supplied its data. The first submitted line commits it
   // into scrollback with the first turn (`commitLatestTurn`), so it never repeats.
   const showHomeInventory = Boolean(homeInventory) && !homeCommitted && history.length === 0;
+  // The card's row budget: the window less everything else the frame draws
+  // (the home inventory, the composer, the drafts, the key bar, the live
+  // region's floor and the 2-row margin `liveRegionCap` keeps). A taller card
+  // pages its middle, so the frame never reaches the window height and Ink
+  // never takes its fullscreen path (which clears the user's scrollback).
+  // The card is the latest turn's details, so its budget is the live region's
+  // (the window less the inventory, the composer and its rule, the drafts, the
+  // key bar, the 2-row margin and the top bar with its rule), less the rows the
+  // turn shows beside it (`rowsBesideHeadCard`).
+  const cardRowsAround = rows
+    ? (showHomeInventory ? homeInventoryRowCount(columns, homeInventory) : 0)
+      + COMPOSER_RULE_ROWS
+      + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(inputValue, columns, t))
+      + draftLines.length
+      + 2
+      + TOP_BAR_ROWS
+    : null;
+  const headCard = useMemo<ApprovalRender | null>(() => {
+    if (!headConfirmAction?.view || !isPlainRecord(headConfirmAction.view.approval)) {
+      return null;
+    }
+    const view = headConfirmAction.view;
+    const drawAt = (keyBarRows: number) => approvalRender(view, {
+      width: cardPaneWidth,
+      color: colorEnabled(t),
+      theme: t,
+      selected: 0,
+      tab: cardUi.tab,
+      page: cardUi.page,
+      explainOpen: cardUi.explainOpen,
+      showHiddenColumns: false,
+      caps: NO_KEY_CAPS,
+      ui: cardUi,
+      fieldsCapable: headConfirmAction.confirmFieldsCapable === true,
+      ...(headConfirmAction.sentFields ? { sentFields: headConfirmAction.sentFields } : {}),
+      pageRows: rows ? Math.max(4, Math.floor(rows / 3)) : undefined,
+      ...(rows && cardRowsAround !== null
+        ? { maxRows: Math.max(CARD_MIN_ROWS, rows - cardRowsAround - keyBarRows - rowsBesideHeadCard) }
+        : {})
+    });
+    // The bar's hints come from the drawn card ("space next page"), so draw,
+    // count the bar, and draw again when its height differs from the guess.
+    let drawn = drawAt(DEFAULT_KEY_BAR_ROWS);
+    const barRows = keyBarRowCount(drawn.keys, columns);
+    if (barRows > DEFAULT_KEY_BAR_ROWS) {
+      drawn = drawAt(barRows);
+    }
+    return drawn;
+  }, [cardPaneWidth, cardRowsAround, cardUi, columns, headConfirmAction, rows, rowsBesideHeadCard, t]);
+  // The card's lines for the turn's details: the view's card, else (an old
+  // desktop, no view) the r4 card from its details, its `?` text inside.
+  const headCardLines = useMemo<readonly string[] | null>(
+    () => headCard
+      ? headCard.lines
+      : headConfirmAction
+        ? fallbackCardLines(headConfirmAction, explainOpen ? confirmKeys?.explainText ?? null : null, cardPaneWidth, t)
+        : null,
+    [cardPaneWidth, confirmKeys, explainOpen, headCard, headConfirmAction, t]
+  );
+  const renderTurnAt = useMemo(() => {
+    if (!turnViews.length && !headCardLines) {
+      return null;
+    }
+    const messages = workingState ? workingTurnMessages(history, workingState, agentTitle) : history;
+    // A call still running says how far it is (its latest progress), busy or not.
+    const steps = workingState
+      ? workingTurnSteps(messages, workingState, workingClock)
+      : turnSteps.some((step) => step.endedAt === null) ? workingTurnSteps(messages, getTurnState(), clock) : turnSteps;
+    const cache = new Map<string, LiveTurnRender>();
+    // `compact`: without the blank rows around the details (see `compactTurn` below).
+    return (turnRows: number | undefined, compact = false): LiveTurnRender => {
+      const cacheKey = `${turnRows ?? "all"}:${compact ? "compact" : "roomy"}`;
+      const hit = cache.get(cacheKey);
+      if (hit) {
+        return hit;
+      }
+      const drawn = renderLiveTurn({
+        messages,
+        views: turnViews.map((frame) => frame.view),
+        focus: viewFocus,
+        steps,
+        width: transcriptColumns(columns),
+        color: colorEnabled(t),
+        theme: t,
+        rows: turnRows,
+        compact,
+        ...(headCardLines ? { details: headCardLines } : {}),
+        ...(headConfirmAction?.view ? { statusViews: [headConfirmAction.view] } : {}),
+        ...(workingState ? { nowMs: workingClock } : {})
+      });
+      cache.set(cacheKey, drawn);
+      return drawn;
+    };
+  }, [agentTitle, clock, columns, headCardLines, headConfirmAction, history, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
+  // Beside a drawn turn, the transcript carries only what the drawn turn does
+  // not show: its Steps are the drawn turn's own strip, and while it runs its
+  // arriving answer and calls are in it too, so nothing is drawn twice.
+  const idleTranscript = useMemo(
+    () => ({ agentTitle, messages: [], state: besideWorkingTurn(turnState) }),
+    [agentTitle, turnState]
+  );
+  // (end of the drawn turn)
+  const cardKeyCtx = headCard ? headCard.keyCtx : confirmKeys?.ctx ?? null;
+  // While a card field is being typed, the composer takes the keys (Enter sets
+  // the value, Esc cancels it); the card itself takes none.
+  const cardFieldActive = Boolean(headCard && cardUi.fieldEntry);
+  // With no card, the latest turn's views offer their keys while the composer is
+  // empty (views/focus.ts: only what works on the focused view). Otherwise the
+  // bar is the composer's: `esc stop` while a stoppable turn runs (the only key
+  // that works then), nothing when idle.
+  const keyHintsFor = (turn: LiveTurnRender | null) => {
+    const viewHints = turn?.focused && viewFocus && !confirmKeys && inputValue.length === 0
+      && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt
+      ? viewKeyHints(viewFocus, turn.focused.facts, turn.focused.render.keys)
+      : [];
+    return headCard
+      ? headCard.keys
+      : confirmKeys
+        ? keyBarHints(confirmKeys.ctx)
+        : viewHints.length
+          ? viewHints
+          : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
+  };
+  // The home inventory shows ONCE, on the empty home screen (no transcript yet)
+  // and only when the CLI supplied its data. The first submitted line commits it
+  // into scrollback with the first turn (`commitLatestTurn`), so it never repeats.
   const completions = useMemo(
     () => getCompletions?.(inputValue).slice(0, 6) ?? [],
     [getCompletions, inputValue]
@@ -684,6 +1095,8 @@ export function InkInteractiveSessionApp({
     setBusyStartedAt(Date.now());
     setBusy(true);
     let sawFinalMessage = false;
+    // The turn ends waiting on a write card: it opens where the card is.
+    let endsOnCard = false;
     // Freeze the active-project label now and stamp it onto this turn's
     // answers, so switching projects later never relabels them.
     const turnTitle = getAgentTitle?.();
@@ -713,7 +1126,7 @@ export function InkInteractiveSessionApp({
           // through `progressResult` and gate on it like the branch below.
           appendMessages(stampAgentTitle(progressResult.finalMessages, getAgentTitle?.() ?? turnTitle));
         }
-      }, signal);
+      }, signal, recordTurnView, recordCreativeDraft);
 
       if (result.exit) {
         requestExit();
@@ -750,6 +1163,7 @@ export function InkInteractiveSessionApp({
       // empties. Absent (LOCAL path / no writes) this is a no-op.
       if (result.pendingConfirmations && result.pendingConfirmations.length > 0) {
         setPendingConfirmActions(result.pendingConfirmations);
+        endsOnCard = true;
       }
     } catch (error) {
       // A stopped turn rejects with whatever the transport makes of the abort
@@ -776,8 +1190,14 @@ export function InkInteractiveSessionApp({
       turnController.reset();
       setBusy(false);
       setBusyStartedAt(undefined);
-      // A finished turn opens at its top; a tall one is paged from there.
-      setLiveOffset(0);
+      // A finished turn opens at its top; a tall one is paged from there. One
+      // that waits on a write card opens on the card: below 120 columns the
+      // card follows the answer, so a tall turn opens at its end (the card,
+      // the Steps), and PgUp pages back up through the answer.
+      setLiveOffset(endsOnCard && !splitTurnRef.current ? null : 0);
+      // Its views stay live and take their keys until the next line is submitted.
+      const views = getTurnState().views;
+      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
     }
   }, [appendMessages, getAgentTitle, onSubmitLine, requestExit, turnAbort]);
 
@@ -1065,23 +1485,185 @@ export function InkInteractiveSessionApp({
   // is a real "no" that reaches the app's ledger, not a local note. Either way
   // the transcript gets receipt lines (the app's receipt sentence, scrubbed),
   // never JSON; a confirm that throws gets its error lines instead.
-  const resolveConfirmAction = useCallback((decision: "approve" | "decline") => {
+  const resolveConfirmAction = useCallback((
+    decision: "approve" | "decline",
+    fields?: Record<string, ApprovalFieldAnswerV1>
+  ) => {
     const head = pendingConfirmActions[0];
     if (!head) {
       return;
     }
     setPendingConfirmActions((current) => current.slice(1));
+    // The receipt belongs to this turn. If a new line has committed it by the time
+    // the app answers, the receipt prints as lines (in order) instead of landing as
+    // a card on the next question's views.
+    const seqAtResolve = commitSeq.current;
+    const onCardTurn = () => commitSeq.current === seqAtResolve;
     const appendLines = (lines: readonly ConfirmLine[]) =>
       appendMessages(lines.map((line) => ({ kind: "slash", role: "system", text: line.text }) as Msg));
+    // An answer the app refused before anything ran (`field_invalid`): the card
+    // comes back in front with the app's words, for a corrected value.
+    const refusedField = (outcome: unknown): boolean => {
+      const message = decision === "approve" ? fieldInvalidMessage(outcome) : null;
+      if (message === null) return false;
+      setPendingConfirmActions((current) => requeueConfirmation(current, withoutSent(head, message), "front"));
+      return true;
+    };
+    // Not sure it happened: when the app says a resend is safe (it dedupes) or
+    // nothing ran for certain (the handle is live again), the card comes back
+    // behind the card the user is on, offering OK again (`safe_resend`) or `r`
+    // (`retryable`) with exactly the answers this approve sent. Otherwise a
+    // receipt that is not all done shows its object (a launch's ✓/✗/? items).
+    const afterReceipt = (outcome: unknown) => {
+      const resend = decision === "approve" ? resendView(head.view, outcome) : null;
+      if (resend) {
+        const back: InSessionConfirmationAction = { ...withoutSent(head), view: resend, ...(fields ? { sentFields: fields } : {}) };
+        setPendingConfirmActions((current) => requeueConfirmation(current, back, "behind_head"));
+        return;
+      }
+      const detail = receiptDetailLines(outcome, {
+        width: Math.max(8, columns - 4),
+        color: false,
+        theme: t,
+        selected: 0,
+        tab: 0,
+        page: 0,
+        explainOpen: false,
+        showHiddenColumns: false,
+        caps: NO_KEY_CAPS
+      });
+      if (detail.length) {
+        appendMessages(detail.map((text) => ({ kind: "slash", role: "system", text: `  ${text}` }) as Msg));
+      }
+    };
+    // r4 "Working": while the yes is on its way, a change card stays on its
+    // turn as the amber working card, a stopwatch since the yes was sent. It
+    // holds the receipt's place (`receipt:<handle>`): a settled receipt view
+    // replaces it in place; anything else takes it off the turn.
+    const workingId = `receipt:${head.confirmationHandle}`;
+    // The card's frame on its turn (working, dismissed, the app's receipt) is
+    // the turn's latest view, so the keys move to it, as they do when a turn
+    // ends: the bar shows only keys that work now (run-3 N20: `? what it does`
+    // stayed after `n`, from the view above the card). Only on the card's turn.
+    const refocusCardTurn = () => {
+      if (!onCardTurn()) return;
+      const views = getTurnState().views;
+      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
+    };
+    const working = decision === "approve" && head.view?.kind === "change" && isPlainRecord(head.view.approval) ? head.view : null;
+    if (working) {
+      recordTurnView({
+        type: "tool.view", stage: "tool", message: "", viewId: workingId, name: working.tool,
+        view: { ...working, state: "applying", appliedAt: Date.now() } as AnswerViewV1
+      });
+    }
+    // r4 "Dismissed" (run-2 M5): a `n` shows the dismissed card and the Steps
+    // row's `· dismissed` in the same frame as the key, in the receipt's place.
+    // The decline is sent once; the app's answer then confirms it (a settled
+    // receipt replaces it in place, a plain ok keeps it) or shows what really
+    // happened instead (another receipt, or the failure's lines).
+    const dismissed = declineFrame(head, decision);
+    if (dismissed) {
+      recordTurnView(dismissed);
+    }
+    if (working || dismissed) refocusCardTurn();
+    const dropWorking = () => {
+      if (!working && !dismissed) return;
+      patchTurnState((state) => ({ ...state, views: state.views.filter((frame) => frame.viewId !== workingId) }));
+      refocusCardTurn();
+    };
+    // A no the app took (run-3 M5): the line over the card becomes the app's
+    // words after a no ("Okay, left it running."), in the same update as the
+    // receipt it answered with, and only on the card's own turn.
+    const captionDeclined = (outcome: unknown) => {
+      if (decision === "decline" && onCardTurn()) setHistory((current) => messagesAfterDecline(current, outcome));
+    };
+    // A card that carries the app's captions changes the line at the key, in
+    // the dismissed card's frame (r4 flow-pause-09). A no that does not land
+    // (a failure, a thrown answer, another receipt) puts the app's line back;
+    // the receipt-time swap above then finds nothing left to change.
+    const early = decision === "decline" && dismissed && onCardTurn() ? head.captions ?? null : null;
+    if (early) setHistory((current) => messagesAfterDecline(current, { ok: true, askedCaption: early.asked, dismissedCaption: early.dismissed }));
+    const restoreCaption = () => {
+      if (early && onCardTurn()) setHistory((current) => messagesAfterDecline(current, { ok: true, askedCaption: early.dismissed, dismissedCaption: early.asked }));
+    };
+    // What the app's answer does to that frame is decided by one pure step
+    // (confirm-card.tsx `settleConfirmOutcome`, unit-tested on CI).
+    const settle = (outcome: unknown, thrown: boolean): boolean => {
+      const step = settleConfirmOutcome(head, outcome, { decision, dismissed: dismissed !== null, onCardTurn: onCardTurn(), thrown });
+      if (step.type === "receipt") {
+        // A settled receipt view goes on the turn, drawn as r4 draws it (confirm-card.tsx).
+        recordTurnView(step.frame);
+        refocusCardTurn();
+        if (!thrown && step.frame.view.state === "cancelled") captionDeclined(outcome);
+        else restoreCaption();
+        return false;
+      }
+      if (step.type === "keep") {
+        if (!thrown) {
+          // The app took the no and sent no receipt of its own: the dismissed card, now sent (run-3 N22).
+          if (dismissed && onCardTurn()) recordTurnView(dismissalSent(dismissed));
+          captionDeclined(outcome);
+        } else restoreCaption();
+        return false;
+      }
+      restoreCaption();
+      dropWorking();
+      appendLines(step.lines);
+      return true;
+    };
+    setConfirmsInFlight((count) => count + 1);
     void (async () => {
       try {
-        const result = await onConfirmAction?.(head, decision);
-        appendLines(confirmResultLines(result, decision));
+        const result = await onConfirmAction?.(head, decision, fields);
+        if (refusedField(result)) {
+          dropWorking();
+          appendLines(confirmErrorLines(Object.assign(new Error(fieldInvalidMessage(result) ?? ""), { code: "field_invalid" })));
+          return;
+        }
+        if (settle(result, false)) afterReceipt(result);
       } catch (error) {
-        appendLines(confirmErrorLines(error));
+        if (settle(error, true) && !refusedField(error)) afterReceipt(error);
+      } finally {
+        setConfirmsInFlight((count) => count - 1);
       }
     })();
-  }, [appendMessages, onConfirmAction, pendingConfirmActions]);
+  }, [appendMessages, columns, onConfirmAction, pendingConfirmActions, t]);
+
+  // One key on the head card, already resolved by the keymap. With an approval
+  // view the card's own step decides (views/approval.ts); an old desktop's card
+  // knows only OK, `n` and `?`.
+  const handleCardAction = useCallback((action: KeyAction) => {
+    if (!headCard) {
+      if (action.type === "ok") {
+        resolveConfirmAction("approve");
+      } else if (action.type === "dismiss") {
+        resolveConfirmAction("decline");
+      } else if (action.type === "explain") {
+        setExplainOpen((open) => !open);
+      }
+      return;
+    }
+    const step = cardKeyStep(action, headCard, cardUi);
+    setCardUi(step.ui);
+    if (step.effect?.type === "confirm") {
+      resolveConfirmAction(step.effect.decision, step.effect.fields);
+    } else if (step.effect?.type === "close") {
+      // A card already answered (not sure it happened): `n` only closes it here.
+      // The app was told once; nothing more is sent.
+      setPendingConfirmActions((current) => current.slice(1));
+      appendMessages([{ kind: "slash", role: "system", text: "Closed — nothing more was sent." }]);
+    }
+  }, [appendMessages, cardUi, headCard, resolveConfirmAction]);
+
+  // Enter while a card field is open sets its value (never approves); a value
+  // that does not fit keeps the field open with a hint.
+  const commitCardFieldValue = useCallback((value: string) => {
+    setCardUi((ui) => commitCardField(ui, value).ui);
+    setInputValue("");
+    setInputCursor(0);
+    setInputSelection(null);
+  }, []);
 
   useEffect(() => {
     // Don't drain a queued line while a /connect wizard is active — its keystrokes
@@ -1093,6 +1675,7 @@ export function InkInteractiveSessionApp({
       pendingFieldPrompt ||
       pendingConnectConfirm ||
       pendingConfirmActions.length > 0 ||
+      confirmsInFlight > 0 ||
       queuedLines.length === 0
     ) {
       return;
@@ -1106,9 +1689,14 @@ export function InkInteractiveSessionApp({
 
     setQueuedLines(remainingLines);
     runSubmittedLine(nextLine);
-  }, [busy, pendingConfirmActions, pendingConnectConfirm, pendingFieldPrompt, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
+  }, [busy, confirmsInFlight, pendingConfirmActions, pendingConnectConfirm, pendingFieldPrompt, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
 
   const submitLine = useCallback((rawLine: string) => {
+    if (cardFieldActive) {
+      // The line is the card field's value, not a message (and never history).
+      commitCardFieldValue(rawLine);
+      return;
+    }
     const line = rawLine.trim();
     setInputValue("");
     setInputCursor(0);
@@ -1129,7 +1717,7 @@ export function InkInteractiveSessionApp({
 
     rememberInputLine(line);
     runSubmittedLine(line);
-  }, [busy, queueBusyLine, rememberInputLine, requestExit, runSubmittedLine]);
+  }, [busy, cardFieldActive, commitCardFieldValue, queueBusyLine, rememberInputLine, requestExit, runSubmittedLine]);
 
   // The composer row shows the ACTIVE wizard field's value when a free-text field
   // is being collected: masked (bullets ×length) for secret fields, plain for the
@@ -1150,96 +1738,258 @@ export function InkInteractiveSessionApp({
   }, [fieldPromptActive, currentConnectField, activeFieldTick]);
 
   const connectComposerValue = activeFieldComposer ? activeFieldComposer.display : inputValue;
+  // The placeholder is `Ask Infinite…` (with the busy note while a turn runs).
+  // A card's keys and `esc stop` live in the key bar only (D6: never twice);
+  // the pickers, the /connect fields and the operator confirm keep the words
+  // that say how to answer them.
   const connectPlaceholder = activeFieldComposer
     ? activeFieldComposer.secret
       ? "type the secret (hidden), Enter to continue, Ctrl-C to cancel"
       : "type a value, Enter to continue, Ctrl-C to cancel"
-    : confirmKeys
-      ? `press ${confirmKeys.ctx.okKey} to ${confirmKeys.ctx.okLabel}, n to dismiss`
-      : pendingConnectConfirm
+    : pendingConnectConfirm
+      ? "choose with up/down, Enter to select"
+      : pendingSelection
         ? "choose with up/down, Enter to select"
-        : pendingSelection
-          ? "choose with up/down, Enter to select"
-          : pendingOperatorLine
-            ? "type confirm to continue, anything else to cancel"
-            : busy && turnStoppable
-              ? "esc to stop"
-              : promptPlaceholder;
+        : pendingOperatorLine
+          ? "type confirm to continue, anything else to cancel"
+          : composerPlaceholderText(promptPlaceholder, composerNote);
 
   // The live frame's row budget. The home inventory renders ABOVE the transcript,
   // so its rows go into the composer's native-cursor row prediction (the PR #27
   // invariant: predicted composer row == live rendered row count); committed
   // <Static> rows never do. Everything the frame draws besides the transcript is
   // reserved out of the live-region cap, so the frame never fills the window.
-  const homeInventoryRows = showHomeInventory ? homeInventoryRowCount(columns) : 0;
-  // The key bar renders directly above the composer: its real wrapped rows go to
-  // the live-region cap through its own `keyBarRows` slot (0 when no card is
-  // open), and into the composer-row prediction below.
-  const keyBarRows = keyBarRowCount(keyHints, columns);
+  const homeInventoryRows = showHomeInventory ? homeInventoryRowCount(columns, homeInventory) : 0;
+  // The key bar is the LAST row, under the composer (one row: it is cut, never
+  // wrapped). Its row goes to the live-region cap through its own `keyBarRows`
+  // slot; it is below the composer, so never into the composer-row prediction.
+  // The rule over the composer is reserved with the composer.
   const composerText = activeFieldComposer ? activeFieldComposer.display : inputValue;
+  const overlayRows = liveOverlayRows({
+    // The write card is the latest turn's details, inside the live region.
+    confirmAction: null,
+    confirmCardRows: null,
+    confirmExplain: null,
+    draftRows: draftLines.length,
+    connectConfirm: Boolean(pendingConnectConfirm),
+    field: fieldPromptActive && pendingFieldPrompt ? pendingFieldPrompt : null,
+    selection: pendingSelection?.prompt ?? null,
+    width: columns
+  });
+  // While a turn runs, the composer keeps three rows reserved, so a second
+  // and third draft line never move the tail being read. A finished turn is
+  // measured against the rows the composer really draws: a turn that fits on
+  // screen stays live with its keys.
+  const composerRowsNow = composerRowsFor(composerText || connectPlaceholder, columns, t);
   const reservedRows = homeInventoryRows
-    + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(composerText || connectPlaceholder, columns, t))
-    + liveOverlayRows({
-      confirmAction: pendingConfirmActions[0] ?? null,
-      confirmExplain: explainOpen ? confirmKeys?.explainText ?? null : null,
-      connectConfirm: Boolean(pendingConnectConfirm),
-      field: fieldPromptActive && pendingFieldPrompt ? pendingFieldPrompt : null,
-      selection: pendingSelection?.prompt ?? null,
-      width: columns
-    })
+    + COMPOSER_RULE_ROWS
+    + (transcriptBusy ? Math.max(DEFAULT_COMPOSER_ROWS, composerRowsNow) : composerRowsNow)
+    + overlayRows
     + completions.length;
-  const liveLayout = inkTranscriptLayout({
+  // The RESTING frame's reserve: an empty composer, no menu, picker or /connect
+  // step. Whether a finished turn fits is decided against it (see `finishedOverflow`).
+  const restingReservedRows = homeInventoryRows
+    + COMPOSER_RULE_ROWS
+    + composerRowsFor(composerPlaceholderText(promptPlaceholder, composerNote), columns, t);
+  // The rows the latest turn may take: the live budget (the same count the
+  // live window pages with) less the key bar. The key bar's hints come from the
+  // drawn turn (a document's `space next page`), so draw, count the bar, and
+  // draw again when the bar's height differs from the guess.
+  const drawTurnWith = (reserved: number, compact = false): { turn: LiveTurnRender | null; turnRows: number | undefined } => {
+    let turn: LiveTurnRender | null = null;
+    let turnRows: number | undefined;
+    if (renderTurnAt) {
+      let barRows = DEFAULT_KEY_BAR_ROWS;
+      for (let pass = 0; pass < 3; pass += 1) {
+        turnRows = inkLatestTurnRows({
+          busy,
+          columns,
+          composerRows: reserved,
+          keyBarRows: barRows,
+          nowMs: clock,
+          rows,
+          showComposer: false,
+          theme: t,
+          transcript: idleTranscript,
+          turnStartedAt: busyStartedAt
+        });
+        turn = renderTurnAt(turnRows, compact);
+        const drawnBarRows = keyBarRowCount(keyHintsFor(turn), columns);
+        if (drawnBarRows === barRows) {
+          break;
+        }
+        barRows = drawnBarRows;
+      }
+    }
+    return { turn, turnRows };
+  };
+  // The boot frame (D4) is the screen before the first turn only. After it, a
+  // live region with nothing in it draws no row: the frame alone stays live.
+  const frameProps = { bootFrame: !homeCommitted, emptyLive: "none" as const };
+  const layoutAt = (latest: CommittedEntry | null, shown: InfiniteTranscriptInput, reserved: number, barRows: number) => inkTranscriptLayout({
+    ...frameProps,
     busy,
     columns,
-    composerRows: reservedRows,
-    homeBanner: !showHomeInventory,
-    indicatorTick: labelTick,
-    keyBarRows,
+    composerRows: reserved,
+    keyBarRows: barRows,
+    latest,
     livePage: liveOffset,
     nowMs: clock,
     rows,
     showComposer: false,
-    spinnerTick,
-    status: visibleStatusParts,
     theme: t,
-    title,
-    transcript,
+    topBar: topBarData,
+    transcript: shown,
     turnStartedAt: busyStartedAt
   });
-  const composerRow = homeInventoryRows + keyBarRows + liveLayout.rowCount;
+  const finished = !transcriptBusy && !exitRequested && (history.length > 0 || turnViews.length > 0);
+  // Whether the latest turn, drawn roomy or compact, is paged in the frame AT
+  // REST (an empty one-row composer, no menu or picker): see `finishedOverflow`.
+  const pagedAtRest = (compact: boolean): boolean => {
+    const resting = drawTurnWith(restingReservedRows, compact).turn;
+    return layoutAt(
+      resting ? { id: "live-turn", lines: resting.lines } : null,
+      resting ? idleTranscript : transcript,
+      restingReservedRows,
+      keyBarRowCount(keyHintsFor(resting), columns)
+    ).window.paged;
+  };
+  // A finished turn that misses the live region only by its blank rows (the
+  // ones around its details: over the rule, under the head, over the Steps) is
+  // drawn without them and stays live, under the top bar, with its Steps and
+  // its keys. Going to scrollback is for a turn that does not fit even so.
+  // Only a turn that is then WHOLE on screen: a long document that would still
+  // page inside itself reads better whole in scrollback, so it keeps the rule
+  // it had.
+  const wholeCompactAtRest = (): boolean => !pagedAtRest(true) && drawTurnWith(restingReservedRows, true).turn?.paged !== true;
+  const compactTurn = finished && renderTurnAt !== null && pagedAtRest(false) && wholeCompactAtRest();
+  const { turn: liveTurn, turnRows: liveTurnRows } = drawTurnWith(reservedRows, compactTurn);
+  liveTurnRowsRef.current = liveTurnRows;
+  const keyHints = keyHintsFor(liveTurn);
+  const keyBarRows = keyBarRowCount(keyHints, columns);
+  const liveLatest = useMemo<CommittedEntry | null>(
+    () => liveTurn ? { id: "live-turn", lines: liveTurn.lines } : null,
+    [liveTurn]
+  );
+  const turnTranscript = liveTurn ? idleTranscript : transcript;
+  const layoutOf = (latest: CommittedEntry | null, shown: InfiniteTranscriptInput) => layoutAt(latest, shown, reservedRows, keyBarRows);
+  const turnLayout = layoutOf(liveLatest, turnTranscript);
+  // A finished turn never pages (River: "it should just work like a normal
+  // coding harness"). While a turn runs, a tall one shows its tail (`N lines
+  // above`). Once it is finished and still taller than the live region, the
+  // WHOLE turn goes into scrollback at once (one column, nothing cut, no
+  // hint) and only the frame stays live. A turn that fits stays live until
+  // the next line, so its views keep their keys. A write card still waiting
+  // for its answer stays live too: its question, answer and other views go up
+  // and the card stays, paging inside itself as before.
+  // "Fits" is decided against the RESTING frame, never the current one: a
+  // wrapped draft, the `/` menu, a picker or the /connect steps shrink the
+  // live region only for a while. Meanwhile a turn that fits at rest pages
+  // (as any live turn does) and is whole again once the composer is empty; it
+  // is never sent to scrollback by typing.
+  let finishedOverflow = finished && turnLayout.window.paged;
+  if (finishedOverflow && reservedRows !== restingReservedRows) {
+    finishedOverflow = pagedAtRest(compactTurn);
+  }
+  useLayoutEffect(() => {
+    if (finishedOverflow) {
+      commitLiveTurn("overflow", pendingConfirmActions.length > 0);
+    }
+  });
+  // The frame in which the overflow is found draws the turn nowhere (the commit
+  // above replaces it in the same tick), so a page of it and the pager hint
+  // never reach the screen.
+  const liveLatestShown = finishedOverflow ? null : liveLatest;
+  const liveTranscript = finishedOverflow ? idleTranscript : turnTranscript;
+  const liveLayout = finishedOverflow ? layoutOf(null, idleTranscript) : turnLayout;
+  // The boot frame is r4's frame as drawn (D4), its key bar included: `tab
+  // switch side`, then `/ commands`. After it the bar offers `tab switch side`
+  // only while the turn on screen has details to switch to.
+  const bootFrameDrawn = frameProps.bootFrame && liveLayout.window.total === 0;
+  // With nothing live after the first turn, the top bar's rule is the rule
+  // over the composer (the frame is top bar, rule, composer, key bar), unless
+  // a picker, the /connect steps or a draft line sit between them.
+  const composerRuleRows = homeCommitted && liveLayout.rowCount === TOP_BAR_ROWS && overlayRows === 0 ? 0 : COMPOSER_RULE_ROWS;
+  // Rows above the composer: the first-run inventory, the live frame (top bar,
+  // rule, latest turn), any image-draft lines, and the rule over the composer.
+  const composerRow = homeInventoryRows + liveLayout.rowCount + draftLines.length + composerRuleRows;
   const pageLive = (direction: LivePageDirection) => setLiveOffset(pageLiveWindow(liveLayout.window, direction));
+  // One key on the latest turn's views (only reached with an empty composer and
+  // no card or picker open). `false` = the key goes on to the composer.
+  const handleViewKey = (input: string, key: Key): boolean => {
+    if (!viewFocus || !liveTurn?.focused) {
+      return false;
+    }
+    const facts = { ...liveTurn.focused.facts, livePageNext: liveLayout.window.hiddenBelow > 0 };
+    const next = resolveViewKey(input, viewFocus, key, facts);
+    setViewFocus(next);
+    if (next.effect?.type === "ask") {
+      // `next` and `more` are NEW user turns, never direct tool calls and never
+      // slash commands (`turnAsk` drops an ask that starts with `/`).
+      const ask = turnAsk(next.effect.text);
+      if (ask) submitLine(ask);
+    } else if (next.effect?.type === "type") {
+      // A key that acted on the view started a message after all: the composer
+      // (empty here) takes it and the key just pressed, in order.
+      const typed = `${next.effect.text}${input}`;
+      setComposerState({ value: typed, cursor: typed.length });
+      return true;
+    } else if (next.effect?.type === "page_live") {
+      pageLive("next");
+    } else if (next.effect?.type === "copy") {
+      const targets = copyTargets(process.env, process.platform);
+      if (targets.osc52 && sessionStdout?.isTTY) {
+        // `c`: an OSC 52 clipboard write (zero width, so Ink's frame is untouched).
+        sessionStdout.write(clipboardSequence(next.effect.text));
+      }
+      if (targets.pbcopy) {
+        // A local Mac: Terminal.app ignores OSC 52, so the system tool copies too.
+        copyThroughPbcopy(next.effect.text);
+      }
+    }
+    return next.handled;
+  };
 
+  // terminal-r4's frame, top to bottom (D1): [first-run inventory] · top bar ·
+  // rule · the latest turn (or the boot frame) · the card and other overlays ·
+  // rule · composer · completions · the key bar, LAST.
+  //
+  // The frame is the TERMINAL's width and clips whatever is wider (run-2 M2).
+  // On a narrowing resize Ink redraws at once, before `columns` follows the
+  // resize, so that one frame still holds rows drawn for the old width. Unclipped,
+  // the terminal wraps each of them into several rows, more than Ink counts and
+  // erases next time, and torn rows of the old answer stay on screen.
   return (
-    <Box flexDirection="column" width={columns}>
+    <Box flexDirection="column" overflowX="hidden" width="100%">
       {showHomeInventory && homeInventory ? (
         <HomeInventory
           columns={columns}
           commands={homeInventory.commands}
           connections={homeInventory.connections}
+          connectionsNote={homeInventory.connectionsNote}
+          theme={t}
           tools={homeInventory.tools}
           version={homeInventory.version}
           workspace={homeInventory.workspace}
         />
       ) : null}
       <InkTranscriptApp
+        {...frameProps}
         busy={busy}
         columns={columns}
         committed={committed}
         composerRows={reservedRows}
-        homeBanner={!showHomeInventory}
-        indicatorTick={labelTick}
+        staticKey={staticEpoch}
         keyBarRows={keyBarRows}
+        latest={liveLatestShown}
         livePage={liveOffset}
         livePageSpace={pendingConfirmActions.length === 0 && !pendingSelection && !pendingOperatorLine}
         nowMs={clock}
         rows={rows}
-        prompt={{ placeholder: promptPlaceholder }}
         showComposer={false}
-        spinnerTick={spinnerTick}
-        status={visibleStatusParts}
         theme={t}
-        title={title}
-        transcript={transcript}
+        topBar={topBarData}
+        transcript={liveTranscript}
         turnStartedAt={busyStartedAt}
       />
       <SelectionMenu
@@ -1258,23 +2008,21 @@ export function InkInteractiveSessionApp({
         theme={t}
         width={columns}
       />
-      <ConfirmActionMenu
-        explainText={explainOpen ? confirmKeys?.explainText ?? null : null}
-        pending={headConfirmAction}
-        theme={t}
-        width={columns}
-      />
-      <KeyBar hints={keyHints} theme={t} width={columns} />
+      <CreativeDraftLines lines={draftLines} theme={t} width={columns} />
+      {composerRuleRows ? <AnsiLine line={ruleLine(columns, t)} /> : null}
       <InkLineInput
         busy={busy}
         completionActive={completions.length > 0}
-        completionRows={completions.length}
+        rowsBelow={completions.length + keyBarRows}
         cursor={inputCursor}
-        confirmActionActive={pendingConfirmActions.length > 0}
-        confirmKeys={confirmKeys?.ctx ?? null}
-        onConfirmActionApprove={() => resolveConfirmAction("approve")}
-        onConfirmActionDecline={() => resolveConfirmAction("decline")}
-        onConfirmActionExplain={() => setExplainOpen((open) => !open)}
+        cardFieldActive={cardFieldActive}
+        confirmActionActive={pendingConfirmActions.length > 0 && !cardFieldActive}
+        confirmKeys={cardKeyCtx}
+        onCardFieldCancel={() => setCardUi((ui) => cancelCardField(ui))}
+        onConfirmActionApprove={() => handleCardAction({ type: "ok" })}
+        onConfirmActionDecline={() => handleCardAction({ type: "dismiss" })}
+        onConfirmActionExplain={() => handleCardAction({ type: "explain" })}
+        onConfirmCardKey={handleCardAction}
         connectConfirmActive={Boolean(pendingConnectConfirm)}
         fieldPromptActive={fieldPromptActive}
         fieldChoiceActive={Boolean(currentConnectField?.choices)}
@@ -1301,6 +2049,7 @@ export function InkInteractiveSessionApp({
         onSelectionNext={() => selectPendingOption("next")}
         onSelectionPrevious={() => selectPendingOption("previous")}
         onSubmit={submitLine}
+        onViewKey={handleViewKey}
         pendingConfirmation={Boolean(pendingOperatorLine)}
         placeholder={connectPlaceholder}
         row={composerRow}
@@ -1319,6 +2068,7 @@ export function InkInteractiveSessionApp({
         theme={t}
         width={columns}
       />
+      <KeyBar hints={keyHints} sides={bootFrameDrawn || (Boolean(liveTurn?.details) && !finishedOverflow)} theme={t} width={columns} />
     </Box>
   );
 }
@@ -1351,22 +2101,6 @@ export function formatQueuedStatus(lines: readonly string[]): readonly string[] 
 
   const extra = lines.length > 1 ? ` (+${lines.length - 1})` : "";
   return [`queued: "${previewQueuedLine(lines[0] ?? "")}"${extra}`];
-}
-
-export function formatInteractiveStatus(
-  statusParts: readonly string[] | undefined,
-  busy: boolean,
-  queuedLines: readonly string[]
-): readonly string[] {
-  const contextual = busy
-    ? (statusParts ?? []).filter((part) => part !== "session" && !part.startsWith("session "))
-    : (statusParts ?? []);
-
-  return [
-    ...contextual,
-    busy ? "busy" : "ready",
-    ...formatQueuedStatus(queuedLines)
-  ];
 }
 
 export function isForwardDeleteInput(event: unknown): boolean {
@@ -2133,7 +2867,7 @@ export function navigateInputHistory(
 function InkLineInput({
   busy,
   completionActive,
-  completionRows,
+  rowsBelow,
   confirmActionActive,
   confirmKeys,
   connectConfirmActive,
@@ -2142,9 +2876,12 @@ function InkLineInput({
   fieldPromptActive,
   livePaging,
   onChange,
+  cardFieldActive = false,
+  onCardFieldCancel,
   onConfirmActionApprove,
   onConfirmActionDecline,
   onConfirmActionExplain,
+  onConfirmCardKey,
   onChoiceCommit,
   onChoiceNext,
   onChoicePrevious,
@@ -2166,6 +2903,7 @@ function InkLineInput({
   onSelectionNext,
   onSelectionPrevious,
   onSubmit,
+  onViewKey,
   pendingConfirmation,
   placeholder,
   row,
@@ -2180,7 +2918,8 @@ function InkLineInput({
 }: {
   busy: boolean;
   completionActive: boolean;
-  completionRows: number;
+  /** Rows drawn under the composer: an open completion menu, then the key bar. */
+  rowsBelow: number;
   confirmActionActive: boolean;
   confirmKeys: KeyContext | null;
   connectConfirmActive: boolean;
@@ -2190,9 +2929,14 @@ function InkLineInput({
   /** Whether the live latest turn has hidden lines below / above (T4 paging). */
   livePaging: { next: boolean; previous: boolean };
   onChange(state: ComposerEditState): void;
+  /** A card field is being typed: the composer takes the keys, Enter sets it, Esc cancels it. */
+  cardFieldActive?: boolean;
+  onCardFieldCancel?(): void;
   onConfirmActionApprove(): void;
   onConfirmActionDecline(): void;
   onConfirmActionExplain(): void;
+  /** Any other card key the keymap resolved (v, 1–9, space, r, e, c); never approves or declines. */
+  onConfirmCardKey?(action: KeyAction): void;
   onChoiceCommit(): void;
   onChoiceNext(): void;
   onChoicePrevious(): void;
@@ -2215,6 +2959,8 @@ function InkLineInput({
   onSelectionNext(): void;
   onSelectionPrevious(): void;
   onSubmit(value: string): void;
+  /** A key for the latest turn's views; returns whether it acted (else the composer takes it). */
+  onViewKey?(input: string, key: Key): boolean;
   pendingConfirmation: boolean;
   placeholder: string;
   row: number;
@@ -2231,9 +2977,23 @@ function InkLineInput({
   const { stdout } = useStdout();
   const forwardDelete = useForwardDeleteSignal();
   const markCursorActivity = useActivityAwareCursorBlink(stdout);
-  useInput((input, key) => {
+  // The composer's edit state as of the last key, so keys that arrive before
+  // React re-renders compose (none is lost); each render resets it to the props.
+  const editRef = useRef<ComposerEditState>({ cursor, selection, value });
+  editRef.current = { cursor, selection, value };
+  const change = (next: ComposerEditState) => {
+    editRef.current = next;
+    onChange(next);
+  };
+  // One stable subscription that always runs THIS render's handler. Ink
+  // re-subscribes `useInput` in an effect, after the frame is already on
+  // screen, so a key pressed in between used to reach an older render's
+  // handler: `v` on a card that had just appeared typed into the composer.
+  const handleInputRef = useRef<(input: string, key: Key) => void>(() => {});
+  handleInputRef.current = (input, key) => {
     markCursorActivity();
-    const editState = { cursor, selection, value };
+    const editState = editRef.current;
+    const value = editState.value;
     // In-chat /connect wizard (#20): Ctrl-C cancels the WIZARD ONLY (zeroizing the
     // secret) and must be guarded BEFORE the session-wide `onExit()` below — a
     // bare Ctrl-C mid-wizard must not quit the whole session.
@@ -2253,6 +3013,12 @@ function InkLineInput({
     // Esc stops the running turn. It never approves or declines anything.
     if (busy && key.escape && turnStoppable) {
       turnAbort.stop("esc");
+      return;
+    }
+    // Esc in a card's field closes the field (the card stays; nothing is sent).
+    // Enter sets the field through `onSubmit`; every other key types.
+    if (cardFieldActive && key.escape) {
+      onCardFieldCancel?.();
       return;
     }
     // Field-collection loop: every printable keystroke is routed to the wizard's
@@ -2307,12 +3073,28 @@ function InkLineInput({
       }
       return;
     }
+    // The latest turn's views take the keys they use (views/focus.ts) while the
+    // composer is empty and no card, picker or operator confirm is open. Any
+    // other key falls through: a printable one types (and focus moves to the
+    // composer), space and PgDn still page the live region below.
+    if (
+      onViewKey &&
+      !busy &&
+      value.length === 0 &&
+      !confirmActionActive &&
+      !cardFieldActive &&
+      !selectionActive &&
+      !pendingConfirmation &&
+      onViewKey(input, key)
+    ) {
+      return;
+    }
     // Page a tall live turn (transcript-static.ts): PgDn/PgUp always, space only on
     // an empty prompt in composer focus. Ahead of the write gate so a long answer
     // stays readable while its card waits; a paging key never approves or declines
     // anything, and space stays with an open card or picker (T7/T11 bind it there).
     const page = livePageKey(input, key, {
-      composerEmpty: value.length === 0 && !confirmActionActive && !selectionActive && !pendingConfirmation,
+      composerEmpty: value.length === 0 && !confirmActionActive && !cardFieldActive && !selectionActive && !pendingConfirmation,
       canPageNext: livePaging.next,
       canPagePrevious: livePaging.previous
     });
@@ -2335,6 +3117,8 @@ function InkLineInput({
         onConfirmActionDecline();
       } else if (action.type === "explain") {
         onConfirmActionExplain();
+      } else if (action.type !== "none") {
+        onConfirmCardKey?.(action);
       }
       return;
     }
@@ -2358,16 +3142,16 @@ function InkLineInput({
       return;
     }
     if (key.ctrl && input === "j") {
-      onChange(applyComposerEdit(editState, { type: "insert-newline" }));
+      change(applyComposerEdit(editState, { type: "insert-newline" }));
       return;
     }
     const keyWithPosition = key as typeof key & { end?: boolean; home?: boolean };
     if (keyWithPosition.home || (key.ctrl && input === "a")) {
-      onChange(applyComposerEdit(editState, { type: "move-start" }));
+      change(applyComposerEdit(editState, { type: "move-start" }));
       return;
     }
     if (keyWithPosition.end || (key.ctrl && input === "e")) {
-      onChange(applyComposerEdit(editState, { type: "move-end" }));
+      change(applyComposerEdit(editState, { type: "move-end" }));
       return;
     }
     if (key.tab) {
@@ -2386,7 +3170,7 @@ function InkLineInput({
       }
       const next = applyComposerEdit(editState, { type: key.shift ? "move-line-up-select" : "move-line-up" });
       if (next.cursor !== editState.cursor) {
-        onChange(next);
+        change(next);
         return;
       }
       onHistoryOlder();
@@ -2398,7 +3182,7 @@ function InkLineInput({
       }
       const next = applyComposerEdit(editState, { type: key.shift ? "move-line-down-select" : "move-line-down" });
       if (next.cursor !== editState.cursor) {
-        onChange(next);
+        change(next);
         return;
       }
       onHistoryNewer();
@@ -2409,7 +3193,7 @@ function InkLineInput({
       const type = key.shift
         ? word ? "move-word-left-select" : "move-left-select"
         : word ? "move-word-left" : "move-left";
-      onChange(applyComposerEdit(editState, { type }));
+      change(applyComposerEdit(editState, { type }));
       return;
     }
     if (key.rightArrow || (key.ctrl && input === "f")) {
@@ -2417,53 +3201,56 @@ function InkLineInput({
       const type = key.shift
         ? word ? "move-word-right-select" : "move-right-select"
         : word ? "move-word-right" : "move-right";
-      onChange(applyComposerEdit(editState, { type }));
+      change(applyComposerEdit(editState, { type }));
       return;
     }
     if (key.meta && input === "b") {
-      onChange(applyComposerEdit(editState, { type: "move-word-left" }));
+      change(applyComposerEdit(editState, { type: "move-word-left" }));
       return;
     }
     if (key.meta && input === "f") {
-      onChange(applyComposerEdit(editState, { type: "move-word-right" }));
+      change(applyComposerEdit(editState, { type: "move-word-right" }));
       return;
     }
     if (key.backspace) {
-      onChange(applyComposerEdit(editState, { type: "backspace" }));
+      change(applyComposerEdit(editState, { type: "backspace" }));
       return;
     }
     if (key.delete) {
-      onChange(applyComposerEdit(editState, { type: forwardDelete.current ? "delete-forward" : "backspace" }));
+      change(applyComposerEdit(editState, { type: forwardDelete.current ? "delete-forward" : "backspace" }));
       return;
     }
     if (input && !key.ctrl && !key.meta) {
       const action = input.length > 1 || input.includes("\n") || input.includes("[200~") || input.includes("[201~")
         ? { text: input, type: "insert-paste" as const }
         : { text: input, type: "insert" as const };
-      onChange(applyComposerEdit(editState, action));
+      change(applyComposerEdit(editState, action));
     }
-  });
+  };
+  useInput(useCallback((input: string, key: Key) => handleInputRef.current(input, key), []));
 
   // In-chat /connect wizard (#20): a free-text field row uses a `?`-style prompt
   // and never the native cursor (the rendered `value` is already the masked bullets
   // string for secret fields, so there is no raw value to position a cursor in).
   const fieldRowActive = fieldPromptActive && !fieldChoiceActive;
   const overlayActive = selectionActive || connectConfirmActive || fieldRowActive || confirmActionActive;
-  // A pending write gate shows the same `!` warning glyph as an operator confirm
-  // (a write is being gated), not the `?` overlay glyph used by the pickers.
-  const label = pendingConfirmation || confirmActionActive ? "!" : overlayActive ? "?" : theme.brand.prompt;
+  // The prompt is r4's cyan `❯`, with a write card open too (its keys are in the
+  // key bar). An operator confirm shows a `!` and the pickers and /connect
+  // fields a `?`, in amber: those rows take a typed answer, not a message.
+  const pickerActive = selectionActive || connectConfirmActive || fieldRowActive;
+  const label = pendingConfirmation ? "!" : pickerActive ? "?" : theme.brand.prompt;
   const promptWidth = displayWidth(`${label} `);
   const inputWidth = Math.max(1, width - promptWidth);
   // When the frame is tall enough to trip ink's fullscreen write branch, ink parks the
   // native cursor a row above the composer (see wouldTriggerInkFullscreen). Suppress the
   // native cursor there and let renderComposerValueWithCursor draw the in-text caret.
-  // An open completion menu renders BELOW the composer and counts toward ink's outputHeight
-  // (the other overlays already force the native cursor off), so include its rows here.
+  // An open completion menu and the key bar render BELOW the composer and count toward
+  // ink's outputHeight (the other overlays already force the native cursor off).
   const composerRows = composerCursorLayout(value, value.length, inputWidth).line + 1;
   const inkFullscreen = wouldTriggerInkFullscreen({
     rowsAboveComposer: row,
     composerRows,
-    rowsBelowComposer: completionRows,
+    rowsBelowComposer: rowsBelow,
     terminalRows: stdout?.rows
   });
   const nativeCursor =
@@ -2473,20 +3260,22 @@ function InkLineInput({
     ? composerNativeCursorPosition({ cursor, label, row, value, width })
     : undefined);
 
+  // An empty composer shows its placeholder on one row, cut to the width
+  // (terminal-r4: `❯ Ask Infinite…` in dim, the busy note in brackets).
   const content = fieldRowActive
     // Masked or plain field value with a trailing cursor — `value` already carries
     // bullets for a secret field, so the raw secret is never in the render tree.
-    ? (value ? `${value}|` : placeholder)
+    ? (value ? `${value}|` : truncateCells(placeholder, inputWidth))
     : value
       ? renderComposerValueWithCursor(value, cursor, selection, { nativeCursor })
-      : placeholder;
-  const color = value ? theme.color.text : theme.color.muted;
+      : truncateCells(placeholder, inputWidth);
+  const look = themeInkStyle(theme, value ? "text" : "muted");
 
   return (
     <Box width={width}>
-      <Text color={pendingConfirmation || overlayActive ? theme.color.warning : theme.color.primaryBright}>{label} </Text>
+      <Text {...themeInkStyle(theme, pendingConfirmation || pickerActive ? "warning" : "primary")}>{label} </Text>
       <Box width={inputWidth}>
-        <Text color={color} wrap="wrap">{content}</Text>
+        <Text {...look} wrap="wrap">{content}</Text>
       </Box>
     </Box>
   );
@@ -2617,43 +3406,30 @@ function ConnectConfirmMenu({
   );
 }
 
-// The in-session write gate (cloud brain, Plan 2). Purely presentational — all
-// key handling stays in the single `useInput` owner. Renders the head pending
-// confirmation: the summary (scrubbed through `terminalText` — it is NOT covered
-// by the upstream redaction contract, and its `<Text>` child reaches the raw
-// terminal) then each already-redacted `label: value` detail VERBATIM (mirroring
-// the readline card's `renderConfirmationCard`), then the `?` explanation when it
-// is open. The keys (named OK key, `n dismiss`, `?`) live in the `KeyBar` below.
-function ConfirmActionMenu({
-  explainText,
-  pending,
-  theme,
-  width
-}: {
-  /** The scrubbed `?` text when the explanation is open, else null. */
-  explainText: string | null;
-  pending: InSessionConfirmationAction | null;
-  theme: Theme;
-  width: number;
-}) {
-  if (!pending) {
+// Image drafts in progress (`creative.draft`), one line per run. Text only.
+function CreativeDraftLines({ lines, theme, width }: { lines: readonly string[]; theme: Theme; width: number }) {
+  if (!lines.length) {
     return null;
   }
   return (
     <Box flexDirection="column" width={width}>
-      <Text color={theme.color.warning}>
-        {truncateCells(`Approve this write? — ${terminalText(pending.summary, "action")}`, width)}
-      </Text>
-      {pending.confirmationDetails.map((detail, index) => (
-        <Text color={theme.color.muted} key={`${detail.label}-${index}`}>
-          {truncateCells(`  ${detail.label}: ${detail.value}`, width)}
+      {lines.map((line, index) => (
+        <Text color={line.startsWith("✗") ? theme.color.error : theme.color.primary} key={`draft-${index}`} wrap="truncate-end">
+          {truncateCells(line, width)}
         </Text>
       ))}
-      {explainText ? (
-        <Text color={theme.color.text} wrap="wrap">{`? ${explainText}`}</Text>
-      ) : null}
     </Box>
   );
+}
+
+/** A queue entry with no carried answers; with `fieldError`, the app's words for the field. */
+function withoutSent(entry: InSessionConfirmationAction, fieldError?: string): InSessionConfirmationAction {
+  const { sentFields: _sent, fieldError: _error, ...rest } = entry;
+  return { ...rest, ...(fieldError ? { fieldError } : {}) };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function CompletionMenu({
@@ -2702,6 +3478,9 @@ function composerRowsFor(text: string, columns: number, theme: Theme): number {
   return composerCursorLayout(text, text.length, Math.max(1, columns - labelWidth)).line + 1;
 }
 
+/** A card never pages below this many rows, however small the window. */
+const CARD_MIN_ROWS = 6;
+
 /**
  * Rows the overlays between the transcript and the composer draw right now
  * (selection, /connect wizard, Connect/Cancel, write gate) — reserved out of the
@@ -2710,16 +3489,22 @@ function composerRowsFor(text: string, columns: number, theme: Theme): number {
  */
 function liveOverlayRows({
   confirmAction,
+  confirmCardRows,
   confirmExplain,
   connectConfirm,
+  draftRows,
   field,
   selection,
   width
 }: {
   confirmAction: InSessionConfirmationAction | null;
+  /** Rows of a card drawn from its approval view (head + frame), else null. */
+  confirmCardRows: number | null;
   /** The open `?` explanation under the write card, else null. */
   confirmExplain: string | null;
   connectConfirm: boolean;
+  /** Image-draft progress lines. */
+  draftRows: number;
   field: { descriptor: ConnectSetupDescriptor; index: number } | null;
   selection: InkInteractiveSelectionPrompt | null;
   width: number;
@@ -2738,12 +3523,12 @@ function liveOverlayRows({
   if (connectConfirm) {
     rows += 3;
   }
-  if (confirmAction) {
-    // Summary + details; the key hints moved to the KeyBar (counted by the caller).
-    rows += 1 + confirmAction.confirmationDetails.length;
-    if (confirmExplain) {
-      rows += wrapAnsi(`? ${confirmExplain}`, Math.max(1, width), { trim: false, hard: true }).split("\n").length;
-    }
+  rows += draftRows;
+  if (confirmAction && confirmCardRows !== null) {
+    rows += confirmCardRows;
+  } else if (confirmAction) {
+    // The r4 card drawn from the details (confirm-card.tsx), its `?` text inside it.
+    rows += fallbackCardRowCount(confirmAction, confirmExplain, width);
   }
   return rows;
 }

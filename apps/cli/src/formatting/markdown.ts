@@ -1,6 +1,4 @@
-import { displayWidth, padEndCells } from "../tui/lib/display-width.js";
 import { DEFAULT_THEME } from "../tui/theme.js";
-import { splitMarkdownTableRow, type MarkdownTableBlock } from "./markdown-blocks.js";
 import { renderMarkdown } from "./markdown-render.js";
 
 export { readMarkdownTableBlock, type MarkdownTableBlock } from "./markdown-blocks.js";
@@ -13,34 +11,6 @@ export { readMarkdownTableBlock, type MarkdownTableBlock } from "./markdown-bloc
  */
 export function formatMarkdownForTerminal(message: string, width: number): string[] {
   return renderMarkdown(message, { width, color: false, theme: DEFAULT_THEME });
-}
-
-/**
- * The streaming table row renderer used by the live activity panel while a
- * table is still arriving (see `readMarkdownTableBlock(lines, { final })`).
- */
-export function renderMarkdownTableBlock(block: MarkdownTableBlock, width: number): string[] {
-  const rows = block.tableLines.map(splitMarkdownTableRow).filter((row) => row.length > 0);
-  if (rows.length === 0) {
-    return block.rawLines;
-  }
-
-  const columnCount = Math.max(...rows.map((row) => row.length));
-  const widths = Array.from({ length: columnCount }, (_value, column) =>
-    Math.max(...rows.map((row) => displayWidth(stripInlineMarkup(row[column] ?? ""))))
-  );
-  const rendered = rows.map((row) =>
-    widths
-      .map((cellWidth, column) => padEndCells(stripInlineMarkup(row[column] ?? ""), cellWidth))
-      .join("  ")
-      .trimEnd()
-  );
-
-  if (rendered.some((line) => displayWidth(line) > width)) {
-    return block.rawLines;
-  }
-
-  return rendered;
 }
 
 export function stripInlineMarkup(value: string): string {

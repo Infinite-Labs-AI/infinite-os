@@ -46,7 +46,8 @@ describe("the session draws at the width it is given", () => {
     { kind: "slash", role: "system", text: "a long system note ".repeat(12) }
   ];
 
-  it.each([60, 120])("no row is wider than %i columns", (columns) => {
+  // 200: the width is fluid (the old 160-column cap is gone).
+  it.each([60, 120, 200])("no row is wider than %i columns", (columns) => {
     const rendered = renderInkInteractiveSessionToString({
       columns,
       initialInputValue: "a draft that is also long enough to wrap the composer row ".repeat(3),
@@ -62,8 +63,10 @@ describe("the session draws at the width it is given", () => {
     for (const row of rows) {
       expect(displayWidth(row), JSON.stringify(row)).toBeLessThanOrEqual(columns);
     }
-    // The top rule spans the full width, so the frame really is drawn at `columns`.
-    expect(displayWidth(rows[0] ?? "")).toBe(columns);
+    // The rule under the top bar spans the full width, so the frame really is drawn at `columns`.
+    // (the brand chip prints as same-width brackets when the test's tier is plain)
+    expect(rows[0]).toMatch(/^(?: ∞ Infinite|\[∞ Infinite\])/u);
+    expect(rows[1]).toBe("─".repeat(columns));
   });
 });
 
@@ -97,11 +100,13 @@ describe("live width in a running session (fake TTY; skipped on CI like the othe
   });
 });
 
+/** The widths of the frame's full rules (under the top bar, over the composer) drawn so far. */
 function topRuleWidths(text: string): number[] {
   return stripAnsi(text)
     .split(/\r?\n/)
-    .filter((line) => line.includes("Infinite TUI ─"))
-    .map((line) => displayWidth(line.trimEnd()));
+    .map((line) => line.replace(/^\u001b\[[0-9;?]*[a-zA-Z]/gu, "").trimEnd())
+    .filter((line) => /^─+$/u.test(line))
+    .map((line) => displayWidth(line));
 }
 
 function ttyInput() {

@@ -1,0 +1,103 @@
+{
+  "screen": "flow-images-04-done",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "make 3 new ads from our best hook",
+    "answer": "All 3 are in your Library.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "images",
+        "tool": "generate_ad_images",
+        "title": "Make 3 creatives",
+        "state": "done",
+        "asOf": null,
+        "provenance": {
+          "source": "Creatives",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "creative.library",
+          "label": "Open in Library",
+          "params": {
+            "run": "run_r4"
+          }
+        },
+        "body": {
+          "runId": "run_r4",
+          "requested": 3,
+          "ready": 3,
+          "failed": 0,
+          "items": [
+            {
+              "id": "i1",
+              "label": "Explained",
+              "status": "done"
+            },
+            {
+              "id": "i2",
+              "label": "Your audit",
+              "status": "done"
+            },
+            {
+              "id": "i3",
+              "label": "3 fixes",
+              "status": "done"
+            }
+          ],
+          "format": "HD",
+          "aspectRatio": "4:5",
+          "model": "Infinite's image model",
+          "madeWith": "infinite"
+        },
+        "receipt": {
+          "sentence": "3 creatives ready",
+          "tone": "ok",
+          "revertible": false
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "making 3 creatives",
+        "start": 0,
+        "end": 1,
+        "result": "3 ready",
+        "status": "ok"
+      }
+    ]
+  }
+}

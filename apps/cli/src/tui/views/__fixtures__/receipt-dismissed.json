@@ -1,0 +1,27 @@
+{
+  "v": 1,
+  "kind": "change",
+  "tool": "propose_pause_entity",
+  "title": "Pause ad",
+  "state": "cancelled",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "target": {
+      "kind": "ad",
+      "id": "ad_1",
+      "label": "Hook A"
+    },
+    "rows": [],
+    "warnings": []
+  },
+  "receipt": {
+    "sentence": "Dismissed — nothing was executed.",
+    "tone": "ok",
+    "revertible": false
+  }
+}

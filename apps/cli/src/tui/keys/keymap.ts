@@ -5,12 +5,14 @@
 // works right now.
 //
 // The approval rule this file exists to hold: on a card ONLY the card's named OK
-// key approves and ONLY `n` dismisses (a real "no" that reaches the app). Enter
-// and Esc never approve or decline (Esc stops a running turn, nothing else).
+// key approves and ONLY `n` dismisses (a real "no" that reaches the app), each
+// in lowercase only (a capital letter starts a message). Enter and Esc never
+// approve or decline (Esc stops a running turn, nothing else).
 import type { Key } from "ink";
-import wrapAnsi from "wrap-ansi";
 
 import { terminalText } from "../../desktop/terminal-text.js";
+import { paintSegments, truncSegments, type StyledSegment } from "../lib/styled-segments.js";
+import type { Theme } from "../theme.js";
 
 export type FocusKind = "composer" | "card" | "rows" | "document";
 
@@ -27,11 +29,92 @@ export interface KeyContext {
   caps: { open: boolean; watch: boolean; retry: boolean };
   /** The card's verb for the key bar ("Pause", "Lower to $30/day"). Defaults to "approve". */
   okLabel?: string;
+  /**
+   * The OK key's words in the key bar, when not the first word of `okLabel`
+   * ("check again"). The card's own chip keeps `okLabel` whole.
+   */
+  okVerb?: string;
   /** Whether `?` has an explanation to show; the bar offers `?` only when true. */
   explain?: boolean;
+  /** What else a card offers right now (the approval renderer says; absent = nothing). */
+  card?: CardKeys;
 }
 
-export interface KeyHint { key: string; label: string }
+/**
+ * The card keys beyond OK, `n` and `?` (terminal-r4 "Send to 214 people": `v`
+ * shows every email, `1`–`3` switch between them, space pages a long body).
+ * Each key works, and is shown, only when its flag is set. None of them ever
+ * approves or declines.
+ */
+export interface CardKeys {
+  /** `v` opens the card's documents (and closes them again). */
+  view?: boolean;
+  /** The documents are open: `v` reads "close". */
+  viewOpen?: boolean;
+  /** `1`–`9` switch between this many documents. */
+  tabs?: number;
+  /** What the documents are, for the bar (`1-3 email`, terminal-r4); absent = "switch". */
+  tabNoun?: string;
+  /** Space pages the open document. */
+  page?: boolean;
+  /** `c` copies what the card shows. */
+  copy?: boolean;
+  /** `e` edits in the app. */
+  edit?: boolean;
+  /**
+   * The yes already went out (a still-running card, r4 flow-pause-07): only
+   * the OK key ("check again") is offered. `n` still closes the card, but
+   * there is nothing left to decline, so the card and the bar never offer it.
+   */
+  decided?: boolean;
+}
+
+export interface KeyHint {
+  key: string;
+  label: string;
+  /** The card's OK key: an amber chip and a bold label (terminal-r4 `PK`), always first among the card's decisions. */
+  ok?: boolean;
+  /**
+   * What the key bar says instead of `label` (terminal-r4: the card's chip
+   * reads `p Pause`, `s Send to 214 people`; the bar reads `p pause`, `s send`).
+   */
+  barLabel?: string;
+  /** A key the card shows on its own chips but not in the key bar (r4: an open document's bar is `s send   1-3 email`). */
+  chipOnly?: boolean;
+}
+
+/**
+ * The OK key's words in the key bar (terminal-r4 `PK('p','pause')`): the first
+ * word of the card's label, lower case ("Send to 214 people" → "send",
+ * "Generate · ~$0.52" → "generate").
+ */
+export function shortOkVerb(label: string): string {
+  const first = terminalText(label).trim().split(/[\s·]+/u)[0] ?? "";
+  const word = first.replace(/[^\p{L}\p{N}'-]+$/u, "").toLowerCase();
+  return word || "approve";
+}
+
+/**
+ * The keys the bar ends with (terminal-r4): `tab` switches between the answer
+ * and its details, `/` starts a command. `/ commands` is always there; `tab
+ * switch side` only while the turn on screen has details to switch to (a view
+ * or a card: the right pane from 120 columns, under the answer below that).
+ */
+export const ALWAYS_KEY_HINTS: readonly KeyHint[] = [
+  { key: "tab", label: "switch side" },
+  { key: "/", label: "commands" }
+];
+
+/** What the bar's closing keys depend on. */
+export interface KeyBarOptions {
+  /**
+   * The turn on screen has a details view or card, so `tab switch side` has a
+   * side to switch to. Default true (r4's bar, and the boot frame's, which is
+   * r4's frame as drawn). False drops the hint: a plain answer, a turn that
+   * went to scrollback.
+   */
+  sides?: boolean;
+}
 
 /** Keys with one meaning everywhere, so a card's verb can never claim them. */
 export const RESERVED_KEYS: ReadonlySet<string> = new Set([
@@ -85,6 +168,12 @@ export function resolveKey(input: string, key: Key, ctx: KeyContext): KeyAction 
   if (Array.from(input).length !== 1) {
     return { type: "none" };
   }
+  // On a card a capital letter never decides or acts: it is the start of a
+  // message ("Show me the emails first" must not Send). Only the exact
+  // lowercase OK key, `n` and `r` decide.
+  if (ctx.focus === "card" && input !== input.toLowerCase()) {
+    return { type: "none" };
+  }
   const k = input.toLowerCase();
   if (k === "?") return { type: "explain" };
   if (k === "o") return ctx.caps.open ? { type: "open" } : { type: "none" };
@@ -92,8 +181,17 @@ export function resolveKey(input: string, key: Key, ctx: KeyContext): KeyAction 
   if (k === "r") return ctx.caps.retry ? { type: "retry" } : { type: "none" };
 
   if (ctx.focus === "card") {
+    // ONLY the named OK key approves and ONLY `n` dismisses. The OK key is
+    // never a reserved letter or a digit (`okKeyFor`), so v/e/c/1–9/space can
+    // never collide with it.
     if (k === "n") return { type: "dismiss" };
     if (ctx.okKey !== null && k === ctx.okKey) return { type: "ok" };
+    const card = ctx.card ?? {};
+    if (k === "v" && card.view) return { type: "view" };
+    if (/^[1-9]$/u.test(k) && Number(k) <= cardTabs(card)) return { type: "tab", index: Number(k) - 1 };
+    if (k === " " && card.page) return { type: "page" };
+    if (k === "e" && card.edit) return { type: "edit" };
+    if (k === "c" && card.copy) return { type: "copy" };
     return { type: "none" };
   }
 
@@ -112,12 +210,15 @@ export function resolveKey(input: string, key: Key, ctx: KeyContext): KeyAction 
 }
 
 /**
- * The key bar: only what works right now. A card offers its named OK key with
- * the card's own verb, then `n dismiss`, then `o`/`w`/`r` when their capability
- * is present, then `?` when there is an explanation. The composer shows
- * `esc stop` while a turn runs (`busy` means a STOPPABLE turn: Esc resolves to
- * stop exactly then) and no bar when idle. The rows and document hints arrive
- * with the view renderers (T8–T11).
+ * The state's keys for the bar: only what works right now. A card offers its
+ * named OK key with the card's own verb, then `n dismiss`, then `o`/`w`/`r`
+ * when their capability is present, then `?` when there is an explanation.
+ * The composer offers `esc stop` while a turn runs (`busy` means a STOPPABLE
+ * turn: Esc resolves to stop exactly then), first and once, and nothing of
+ * its own when idle. The rows and document hints of a finished turn's views
+ * come from `views/focus.ts` (`viewKeyHints`), from the same facts its key
+ * resolver uses. The bar itself ends with `tab switch side` (while the turn
+ * has details) and `/ commands` (`keyBarSegments`).
  */
 export function keyBarHints(ctx: KeyContext): KeyHint[] {
   if (ctx.focus === "composer") {
@@ -127,29 +228,107 @@ export function keyBarHints(ctx: KeyContext): KeyHint[] {
     return [];
   }
   const hints: KeyHint[] = [];
+  const card = ctx.card ?? {};
+  // With its documents open, the bar is the OK key and the documents' own keys
+  // (r4 flow-email-02); `v` and `n` still work, and stay on the card's chips.
+  const reading = card.viewOpen === true;
+  if (card.view) hints.push({ key: "v", label: card.viewOpen ? "close" : "view", ...(reading ? { chipOnly: true } : {}) });
   if (ctx.okKey !== null) {
-    hints.push({ key: ctx.okKey, label: ctx.okLabel ?? "approve" });
+    const label = ctx.okLabel ?? "approve";
+    hints.push({ key: ctx.okKey, label, ok: true, barLabel: terminalText(ctx.okVerb ?? "") || shortOkVerb(label) });
   }
-  hints.push({ key: "n", label: "dismiss" });
+  if (!card.decided) hints.push({ key: "n", label: "dismiss", ...(reading ? { chipOnly: true } : {}) });
+  const tabs = cardTabs(card);
+  if (tabs > 1) hints.push({ key: `1-${tabs}`, label: card.tabNoun || "switch" });
+  if (card.page) hints.push({ key: "space", label: "next page" });
+  if (card.edit) hints.push({ key: "e", label: "edit in the app" });
+  if (card.copy) hints.push({ key: "c", label: "copy" });
   if (ctx.caps.open) hints.push({ key: "o", label: "open in the app" });
   if (ctx.caps.watch) hints.push({ key: "w", label: "watch" });
   if (ctx.caps.retry) hints.push({ key: "r", label: "retry" });
-  if (ctx.explain) hints.push({ key: "?", label: "what it does" });
+  // A card says `? what it does` inside itself (r4 `card()`): never on the bar.
+  if (ctx.explain) hints.push({ key: "?", label: "what it does", chipOnly: true });
   return hints;
 }
 
-/** The bar as one plain line; every label is scrubbed before it reaches the TTY. */
-export function formatKeyBar(hints: readonly KeyHint[]): string {
-  return hints.map((hint) => `${hint.key} ${terminalText(hint.label)}`).join("   ");
+/** How many documents `1`–`9` reach on a card (at most 9). */
+function cardTabs(card: CardKeys): number {
+  const tabs = typeof card.tabs === "number" && Number.isFinite(card.tabs) ? Math.floor(card.tabs) : 0;
+  return Math.max(0, Math.min(9, tabs));
 }
 
-/** Rows the bar takes at `width`, wrapped the way Ink's `wrap="wrap"` does. */
-export function keyBarRowCount(hints: readonly KeyHint[], width: number): number {
-  if (hints.length === 0) {
-    return 0;
+/**
+ * The hints the bar draws, in order: the state's own keys (each key once, the
+ * first meaning wins, each in its bar words), then `tab switch side` while
+ * there is a side to switch to (`options.sides`), then always `/ commands`.
+ * A view's `? what it does` is on the bar (run-2 N12); a card's is a chip
+ * inside the card (`chipOnly`), never on the bar.
+ */
+export function keyBarShownHints(hints: readonly KeyHint[], options: KeyBarOptions = {}): KeyHint[] {
+  const always = new Set(ALWAYS_KEY_HINTS.map((hint) => hint.key));
+  const seen = new Set<string>();
+  const shown: KeyHint[] = [];
+  for (const hint of hints) {
+    if (always.has(hint.key) || seen.has(hint.key) || hint.chipOnly) {
+      continue;
+    }
+    seen.add(hint.key);
+    shown.push(hint.barLabel ? { key: hint.key, label: hint.barLabel, ...(hint.ok ? { ok: true } : {}) } : hint);
   }
-  return wrapAnsi(formatKeyBar(hints), Math.max(1, width), { trim: false, hard: true }).split("\n").length;
+  return [...shown, ...ALWAYS_KEY_HINTS.filter((hint) => hint.key !== "tab" || options.sides !== false)];
 }
+
+/**
+ * The bar as styled segments (terminal-r4 `K()` / `PK()`): each key a chip
+ * (` k ` on the key grey; the OK key amber, its label bold), one space, the
+ * label, three spaces to the next key. Every label is scrubbed before it
+ * reaches the TTY. Not cut to a width.
+ */
+export function keyBarSegments(hints: readonly KeyHint[], options: KeyBarOptions = {}): StyledSegment[] {
+  const shown = keyBarShownHints(hints, options);
+  return shown.flatMap((hint, index): StyledSegment[] => {
+    const key = terminalText(hint.key);
+    const label = terminalText(hint.label);
+    const gap = index < shown.length - 1 ? "   " : "";
+    return hint.ok
+      ? [["pk", ` ${key} `], ["", " "], ["b", label], ["", gap]]
+      : [["key", ` ${key} `], ["", ` ${label}${gap}`]];
+  });
+}
+
+/** The state's keys as one plain line, as the bar words them (`p pause   n dismiss`); every label is scrubbed. */
+export function formatKeyBar(hints: readonly KeyHint[]): string {
+  const always = new Set(ALWAYS_KEY_HINTS.map((hint) => hint.key));
+  return keyBarShownHints(hints)
+    .filter((hint) => !always.has(hint.key) || hints.some((given) => given.key === hint.key))
+    .map((hint) => `${hint.key} ${terminalText(hint.label)}`)
+    .join("   ");
+}
+
+/**
+ * The drawn bar's text with no colour, uncut: chips keep their padding and the
+ * bar ends with `tab switch side` (unless `sides` is false) and `/ commands`
+ * (` p  Pause    n  dismiss    tab  …`).
+ */
+export function keyBarText(hints: readonly KeyHint[], options: KeyBarOptions = {}): string {
+  return keyBarSegments(hints, options).map(([, text]) => text).join("");
+}
+
+/**
+ * The key bar, the session's LAST row: one row, cut to `width` with `…` on
+ * the key that does not fit (later keys dropped), painted at the theme's tier.
+ */
+export function keyBarLine(hints: readonly KeyHint[], width: number, theme: Theme, options: KeyBarOptions = {}): string {
+  return paintSegments(truncSegments(keyBarSegments(hints, options), Math.max(1, Math.floor(width))), theme);
+}
+
+/** Rows the bar takes: always one (it is cut to the width, never wrapped). */
+export function keyBarRowCount(_hints: readonly KeyHint[], _width: number): number {
+  return KEY_BAR_ROWS;
+}
+
+/** The key bar is one row at every width. */
+export const KEY_BAR_ROWS = 1;
 
 /** The structural slice of a pending confirmation the keymap reads. */
 export interface PendingCardKeySource {
@@ -158,13 +337,16 @@ export interface PendingCardKeySource {
     explain?: string;
     approval?: { confirmLabel: string; summary: string | null };
   };
+  /** The summary was made from the tool's name: nothing real to explain behind `?`. */
+  summaryFromTool?: boolean;
 }
 
 /**
  * The key context and `?` text for a pending write card. With an approval view
  * the OK key comes from `approval.confirmLabel`; an old desktop (no view) gets
  * `y Confirm`. `?` shows `approval.summary`, else `view.explain`; without a view
- * it shows the pending summary. Every string is scrubbed here.
+ * it shows the pending summary, unless that was made from the tool's name.
+ * Every string is scrubbed here.
  */
 export function confirmCardKeys(
   pending: PendingCardKeySource,
@@ -177,7 +359,7 @@ export function confirmCardKeys(
   const okLabel = terminalText(confirmLabel ?? "", "Confirm");
   const rawExplain = pending.view
     ? stringOrUndefined(approval?.summary) ?? stringOrUndefined(pending.view.explain) ?? null
-    : stringOrUndefined(pending.summary) ?? null;
+    : pending.summaryFromTool ? null : stringOrUndefined(pending.summary) ?? null;
   const explainText = rawExplain === null ? null : terminalText(rawExplain) || null;
   return {
     ctx: {
@@ -185,6 +367,7 @@ export function confirmCardKeys(
       busy: false,
       okKey: okKeyFor(okLabel),
       okLabel,
+      okVerb: shortOkVerb(okLabel),
       caps,
       explain: explainText !== null
     },

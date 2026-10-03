@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "kind": "link",
+  "tool": "create_tracked_link",
+  "title": "Tracked link",
+  "state": "done",
+  "asOf": null,
+  "scope": { "workspaceName": "Demo", "crossWorkspace": false },
+  "caveats": [],
+  "body": {
+    "target": "url",
+    "minted": true,
+    "opened": false,
+    "url": "https://example.com/landing?utm_source=forum",
+    "shortUrl": "https://go.example.com/abc1",
+    "finalUrl": "https://example.com/landing",
+    "utm": { "source": "forum", "medium": "social", "campaign": "demo-thread" },
+    "ga4Channel": "Organic Social",
+    "warnings": ["The campaign tag is new; reports start counting tomorrow."]
+  }
+}

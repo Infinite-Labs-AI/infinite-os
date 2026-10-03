@@ -67,3 +67,53 @@ describe("parseAnsiSegments", () => {
     expect(parseAnsiSegments(line).map((s) => s.text).join("")).toBe("│ Revenue is up 14% today. │");
   });
 });
+
+describe("parseAnsiSegments carries every r4 attribute", () => {
+  it("keeps backgrounds, underline, inverse and faint", () => {
+    const line = `${ESC}[38;2;255;255;255;48;2;42;52;64m p ${ESC}[39;49m ${ESC}[4mlink${ESC}[24m ${ESC}[7msel${ESC}[27m ${ESC}[2mfaint${ESC}[22m`;
+    expect(parseAnsiSegments(line)).toEqual([
+      { text: " p ", color: "#ffffff", backgroundColor: "#2a3440" },
+      { text: " " },
+      { text: "link", underline: true },
+      { text: " " },
+      { text: "sel", inverse: true },
+      { text: " " },
+      { text: "faint", dim: true }
+    ]);
+  });
+
+  it("keeps 256-colour indices and named colours as they are (the user's palette stays theirs)", () => {
+    const line = `${ESC}[38;5;243mdim${ESC}[39m ${ESC}[48;5;235msel${ESC}[49m ${ESC}[36mcyan${ESC}[39m ${ESC}[1;97;100mtag${ESC}[22;39;49m ${ESC}[30;43mok${ESC}[39;49m`;
+    expect(parseAnsiSegments(line)).toEqual([
+      { text: "dim", color: "ansi256(243)" },
+      { text: " " },
+      { text: "sel", backgroundColor: "ansi256(235)" },
+      { text: " " },
+      { text: "cyan", color: "cyan" },
+      { text: " " },
+      { text: "tag", color: "whiteBright", backgroundColor: "blackBright", bold: true },
+      { text: " " },
+      { text: "ok", color: "black", backgroundColor: "yellow" }
+    ]);
+  });
+
+  it("ends a token inside a chip without ending the chip's background", () => {
+    const line = `${ESC}[38;2;255;255;255;48;2;42;52;64m a ${ESC}[38;2;109;121;134mx${ESC}[39m b ${ESC}[39;49m`;
+    expect(parseAnsiSegments(line)).toEqual([
+      { text: " a ", color: "#ffffff", backgroundColor: "#2a3440" },
+      { text: "x", color: "#6d7986", backgroundColor: "#2a3440" },
+      { text: " b ", backgroundColor: "#2a3440" }
+    ]);
+  });
+
+  it("22 ends both bold and faint; 0 and an empty SGR end everything", () => {
+    const line = `${ESC}[1;2;4;7;48;5;1mA${ESC}[22mB${ESC}[mC${ESC}[1;4mD${ESC}[0mE`;
+    expect(parseAnsiSegments(line)).toEqual([
+      { text: "A", backgroundColor: "ansi256(1)", bold: true, dim: true, underline: true, inverse: true },
+      { text: "B", backgroundColor: "ansi256(1)", underline: true, inverse: true },
+      { text: "C" },
+      { text: "D", bold: true, underline: true },
+      { text: "E" }
+    ]);
+  });
+});

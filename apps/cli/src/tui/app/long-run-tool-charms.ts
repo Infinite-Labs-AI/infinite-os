@@ -1,5 +1,6 @@
 import { LONG_RUN_CHARMS } from "../content/charms.js";
-import { pick, toolTrailLabel } from "../lib/text.js";
+import { pick } from "../lib/text.js";
+import { friendlyStepLabel } from "../views/steps.js";
 import type { ActiveTool, ActivityItem } from "../types.js";
 
 const DELAY_MS = 8_000;
@@ -49,7 +50,8 @@ export class LongRunToolCharmTicker {
 
       this.slots.set(tool.id, { count: slot.count + 1, lastAt: now });
       sink.pushActivity(
-        `${pick(LONG_RUN_CHARMS)} (${toolTrailLabel(tool.name)} · ${Math.round((now - tool.startedAt) / 1000)}s)`
+        // The call's own label (the app's words, else generic words), never the raw tool id.
+        `${pick(LONG_RUN_CHARMS)} (${tool.label ?? friendlyStepLabel(tool.name)} · ${Math.round((now - tool.startedAt) / 1000)}s)`
       );
     }
   }

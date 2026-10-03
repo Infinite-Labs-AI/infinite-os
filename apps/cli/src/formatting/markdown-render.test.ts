@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { displayWidth, stripAnsi } from "../tui/lib/display-width.js";
-import { resolveTheme } from "../tui/theme.js";
-import { parseInline, wrapSpans } from "./markdown-inline.js";
-import { renderMarkdown } from "./markdown-render.js";
+import { ansiFg, INFINITE_R4_THEME, resolveTheme } from "../tui/theme.js";
+import { r4Segments, seg } from "./r4-segments.test-util.js";
+import { holdOpenMarkers, parseInline, wrapSpans } from "./markdown-inline.js";
+import { hiddenColumnsHint, markdownHasTable, renderMarkdown } from "./markdown-render.js";
 import { stripInlineMarkup } from "./markdown.js";
 
 const theme = resolveTheme({});
@@ -33,10 +36,19 @@ describe("renderMarkdown", () => {
     const colored = renderMarkdown(text, { width: 28, color: true, theme });
     expect(colored.map(stripAnsi)).toEqual(plain);
     expect(colored.every((l) => displayWidth(l) <= 28)).toBe(true);
-    expect(colored.join("")).toContain("\u001b[1m");
+    // Bold is r4's b token (bold white): an SGR that opens with 1.
+    expect(colored.join("")).toMatch(/\u001b\[1[;m]/u);
     expect(colored.join("")).toContain("\u001b[3m");
     expect(colored.join("")).toContain("\u001b[9m");
     expect(plain.join("\n")).not.toMatch(/[*`~]/);
+  });
+
+  it("**bold** in an answer is r4's b token (bold white), never bold in the default colour (run-2 N3)", () => {
+    const out = renderMarkdown("Spend is **up 12%** on the week.", { width: 60, color: true, theme: INFINITE_R4_THEME });
+    expect(r4Segments(out[0]!)).toEqual(seg(["Spend is ", ""], ["up 12%", "b"], [" on the week.", ""]));
+    // A muted note keeps its own colour: bold there stays an attribute on it.
+    const note = renderMarkdown("a **b** c", { width: 60, color: true, theme: INFINITE_R4_THEME, role: "muted" });
+    expect(r4Segments(note[0]!).some((part) => part.style === "b")).toBe(false);
   });
 
   it("renders a link as its text with ↗ and never prints the URL", () => {
@@ -68,13 +80,72 @@ describe("renderMarkdown", () => {
     expect(out.at(-1)).toBe("after");
   });
 
-  it("colors a level-1 heading with the primary color and keeps lower headings bold only", () => {
-    const out = renderMarkdown("# Top\n\n## Next", { width: 40, color: true, theme });
-    expect(out[0]).toContain("\u001b[1m");
-    expect(out[0]).toContain("\u001b[38;2;0;213;255m");
-    expect(stripAnsi(out[0] ?? "")).toBe("Top");
-    expect(out[2]).toContain("\u001b[1m");
-    expect(out[2]).not.toContain("\u001b[38;2;0;213;255m");
+  it("draws headings in r4's b, code in cyan, links cyan underlined with ↗, bullets and the code wrap mark dim", () => {
+    const r4 = INFINITE_R4_THEME;
+    const [top, , next] = renderMarkdown("# Top\n\n## Next", { width: 40, color: true, theme: r4 });
+    expect(r4Segments(top!)).toEqual(seg(["Top", "b"]));
+    expect(r4Segments(next!)).toEqual(seg(["Next", "b"]));
+    expect(r4Segments(renderMarkdown("Run `npm test` or read [the docs](https://example.com/docs).", { width: 60, color: true, theme: r4 })[0]!)).toEqual(
+      seg(["Run ", ""], ["npm test", "cyan"], [" or read ", ""], ["the docs ↗", "cyan u"], [".", ""])
+    );
+    expect(r4Segments(renderMarkdown("- one\n  - two", { width: 40, color: true, theme: r4 })[1]!)).toEqual(seg(["  ", ""], ["◦", "dim"], [" two", ""]));
+    expect(r4Segments(renderMarkdown("> said\n\n---", { width: 6, color: true, theme: r4 })[0]!)).toEqual(seg(["│", "line"], [" said", ""]));
+    const code = renderMarkdown("```\n" + "x".repeat(20) + "\n```", { width: 12, color: true, theme: r4 });
+    expect(r4Segments(code[0]!)).toEqual(seg(["  ", ""], ["x".repeat(9), "cyan"], ["↩", "dim"]));
+  });
+
+  it("keeps the caller's colour after a styled span (a dim note stays dim)", () => {
+    const r4 = INFINITE_R4_THEME;
+    const [line] = renderMarkdown("see `x` now", { width: 40, color: true, theme: r4, role: "muted" });
+    expect(line).toContain(`\u001b[39m${ansiFg(r4, "muted")}`);
+  });
+
+  it("sets a last Total row apart: a rule above it and bold, like the views' tables (N9)", () => {
+    const out = renderMarkdown("| Ad | Spend |\n|---|--:|\n| Hook A | $1.00 |\n| Hook B | $2.00 |\n| Total | $3.00 |", { width: 40, color: false, theme });
+    expect(out).toEqual([
+      "┌────────┬───────┐",
+      "│ Ad     │ Spend │",
+      "├────────┼───────┤",
+      "│ Hook A │ $1.00 │",
+      "│ Hook B │ $2.00 │",
+      "├────────┼───────┤",
+      "│ Total  │ $3.00 │",
+      "└────────┴───────┘"
+    ]);
+    const colored = renderMarkdown("| Ad | Spend |\n|---|--:|\n| Hook A | $1.00 |\n| Total | $1.00 |", { width: 40, color: true, theme: INFINITE_R4_THEME });
+    expect(r4Segments(colored[5]!)).toEqual(seg(["│", "line"], [" ", ""], ["Total", "b"], ["  ", ""], ["│", "line"], [" ", ""], ["$1.00", "b"], [" ", ""], ["│", "line"]));
+  });
+
+  it("a table that dropped columns says so in ONE wording: what is hidden and how many more columns it needs (M3)", () => {
+    const table = "| Name | One | Two | Three |\n|---|---|---|---|\n| Ad set 01 | 10 | 20 | 30 |";
+    const out = renderMarkdown(table, { width: 24, color: false, theme });
+    expect(out.slice(-2)).toEqual(["+ Three, Two hidden ·", "needs 9 more cols"]);
+    const wide = renderMarkdown(table, { width: 32, color: false, theme });
+    const wider = renderMarkdown(table, { width: 26, color: false, theme });
+    expect(wider.slice(-2)).toEqual(["+ Three hidden · needs 7", "more cols"]);
+    expect(wide.slice(-2).join(" ")).toBe("+ Three hidden · needs 1 more col");
+    // A fact, never a promise or a key: the same words wherever the table prints.
+    expect([...out, ...wide, ...wider].join("\n")).not.toMatch(/widen|to see|→/u);
+    expect(hiddenColumnsHint(["Note", "CPA"], 86)).toBe("+ Note, CPA hidden · needs 86 more cols");
+    expect(hiddenColumnsHint(["Note"], 0)).toBe("+ Note hidden · needs 1 more col");
+    // One call site: the wording lives in `hiddenColumnsHint` and nowhere else in the CLI's source.
+    const source = readFileSync(fileURLToPath(new URL("./markdown-render.ts", import.meta.url)), "utf8");
+    expect(source.match(/hidden · needs/gu)).toHaveLength(1);
+    expect(source).not.toMatch(/widen by|widenLimit/u);
+    const roomy = renderMarkdown(
+      "| Name | One | Two | Three |\n|---|---|---|---|\n| Ad set 01 | 10 | 20 | 30 |",
+      { width: 160, color: false, theme }
+    );
+    expect(roomy.join("\n")).not.toContain("+ ");
+  });
+
+  it("markdownHasTable says what renderMarkdown draws as a table", () => {
+    expect(markdownHasTable("| A | B |\n|---|---|\n| 1 | 2 |")).toBe(true);
+    expect(markdownHasTable("A | B\n---|---\n1 | 2")).toBe(true);
+    expect(markdownHasTable("> | A | B |\n> |---|---|\n> | 1 | 2 |")).toBe(true);
+    expect(markdownHasTable("Plain words, with `a | b` in code.")).toBe(false);
+    expect(markdownHasTable("```\n| A | B |\n|---|---|\n```")).toBe(false);
+    expect(markdownHasTable("No pipes here.")).toBe(false);
   });
 
   it("scrubs terminal control and bidi characters out of every text node, code included", () => {
@@ -234,5 +305,52 @@ describe("pathological model text (wave-1 adversarial review)", () => {
     const out = renderMarkdown("a **b c **d e **f** g *h* _i_ ~~j~~", { width: 80, color: false, theme });
     // Pinned against the pre-memo implementation's output.
     expect(out).toEqual(["a b c **d e **f g h i j"]);
+  });
+});
+
+// Eval M4: a half-received span never prints its markers, while streaming or after a stop.
+describe("holdOpenMarkers", () => {
+  it.each([
+    ["**Cold brew car", "Cold brew car"],
+    ["Try **Cold brew car", "Try Cold brew car"],
+    ["Try **Cold brew carousel**", "Try **Cold brew carousel**"],
+    ["**Cold brew car*", "Cold brew car*"],
+    ["See `npm te", "See npm te"],
+    ["See `npm test` now", "See `npm test` now"],
+    ["an _italic wor", "an italic wor"],
+    ["snake_case and 5*3 and 5 * 3", "snake_case and 5*3 and 5 * 3"],
+    ["ends with **", "ends with "],
+    ["~~gone", "gone"],
+    ["Read [the docs](https://exa", "Read the docs"],
+    ["Read [the docs]", "Read the docs"],
+    ["Read [the do", "Read the do"],
+    ["done **one**.\n\n**Two is still", "done **one**.\n\nTwo is still"],
+    ["**early unclosed stays\n\nlater para", "**early unclosed stays\n\nlater para"],
+    ["```\nconst a = **b\n", "```\nconst a = **b\n"],
+    // A marker inside a URL, a path or after = : . @ # is text, never an opener.
+    ["see https://x.com/_foo and **bold", "see https://x.com/_foo and bold"],
+    ["open src/_drafts/*.md and _ital", "open src/_drafts/*.md and ital"],
+    ["set key=_val, user@_x, #_tag and a.b_c", "set key=_val, user@_x, #_tag and a.b_c"],
+    ["see ftp://host/~~x/__y", "see ftp://host/~~x/__y"]
+  ])("%j → %j", (partial, held) => {
+    expect(holdOpenMarkers(partial)).toBe(held);
+  });
+
+  it("renders a held partial without a literal marker", () => {
+    expect(renderMarkdown(holdOpenMarkers("Try **Cold brew car"), { width: 60, color: false, theme })).toEqual(["Try Cold brew car"]);
+  });
+
+  it.each([
+    ["a://b://c and _ital", "a://b://c and ital"],
+    ["://_x and _ital", "://_x and ital"]
+  ])("finds a URL the way a whitespace token holds `://`: %j → %j", (partial, held) => {
+    expect(holdOpenMarkers(partial)).toBe(held);
+  });
+
+  it("stays linear on a long run of one character (no backtracking on streamed text)", () => {
+    const text = "!".repeat(200_000);
+    const started = performance.now();
+    expect(holdOpenMarkers(text)).toBe(text);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 });

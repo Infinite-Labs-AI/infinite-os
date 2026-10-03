@@ -4,8 +4,10 @@ import {
   askConfirmDecision,
   confirmErrorLines,
   confirmResultLines,
+  askDismissOnly,
   leftForLaterLine,
-  readConfirmAnswer
+  readConfirmAnswer,
+  receiptNextAsk
 } from "./confirm-result-lines.js";
 
 // Synthetic data only: infinite-os is public.
@@ -51,11 +53,22 @@ describe("confirmResultLines", () => {
   it("a receipt view's state picks the glyph, and its provenance line follows", () => {
     const view = receiptView("outcome_unknown", "Sent, but the reply was lost", "warn", { provenanceLine: "via the app‮" });
     expect(confirmResultLines({ ok: true, view }, "approve")).toEqual([
-      { tone: "warn", text: "? Sent, but the reply was lost" },
+      { tone: "warn", text: "◑ Sent, but the reply was lost" },
       { tone: "muted", text: "  via the app" }
     ]);
     expect(confirmResultLines({ ok: true, view: receiptView("partial", "2 of 3 done", "warn") }, "approve")[0])
       .toEqual({ tone: "warn", text: "◐ 2 of 3 done" });
+    // The receipt's glyph and tone are the view head's (STATE_HEAD): a spending cap is amber, never red.
+    expect(confirmResultLines({ ok: true, view: receiptView("hit_limit", "Hit the $5 cap", "warn") }, "approve")[0])
+      .toEqual({ tone: "warn", text: "$ Hit the $5 cap" });
+    // A write not sent because it changed on Meta is the head's amber ⧗, not a red ✗.
+    const changed = {
+      ...receiptView("failed", "This changed since you looked. Nothing ran.", "warn"),
+      outcome: "not_sent",
+      stateReason: { code: "changed_on_meta", words: "This changed since you looked.", short: "Changed on Meta" }
+    };
+    expect(confirmResultLines({ ok: true, view: changed }, "approve")[0])
+      .toEqual({ tone: "warn", text: "⧗ This changed since you looked. Nothing ran." });
   });
 
   it("an undecodable view falls back to the neutral fields", () => {
@@ -73,6 +86,27 @@ describe("confirmResultLines", () => {
   it("a missing result is a plain done or dismissed", () => {
     expect(confirmResultLines(undefined, "approve")).toEqual([{ tone: "ok", text: "✓ Done" }]);
     expect(confirmResultLines(undefined, "decline")).toEqual([{ tone: "muted", text: "✕ Dismissed — nothing was executed." }]);
+  });
+
+  it("outcome_unknown prints its reconcile step, never retry words", () => {
+    const view = {
+      ...receiptView("outcome_unknown", "Not sure it happened", "warn"),
+      outcome: "unknown",
+      retry: "check_first",
+      reconcile: { label: "Check first\u001b[2J", ask: "did the pause of Hook B land?" }
+    };
+    const lines = confirmResultLines({ ok: false, view }, "approve");
+    expect(lines).toEqual([
+      { tone: "warn", text: "◑ Not sure it happened" },
+      { tone: "warn", text: "→ Check first" }
+    ]);
+    const words = lines.map((line) => line.text).join("\n");
+    expect(words).not.toMatch(/retry|try again/iu);
+    // The thrown path (a failed resolution carries the view) prints the same step.
+    expect(confirmErrorLines(Object.assign(new Error("x"), { code: "dispatch_uncertain", view }))).toEqual(lines);
+    expect(receiptNextAsk({ ok: false, view })).toBe("did the pause of Hook B land?");
+    expect(receiptNextAsk({ ok: true, view: receiptView("done", "Paused") })).toBeNull();
+    expect(receiptNextAsk(undefined)).toBeNull();
   });
 });
 
@@ -99,7 +133,7 @@ describe("confirmErrorLines", () => {
       code: "desktop_confirmation_outcome_unknown"
     });
     expect(confirmErrorLines(unknown)).toEqual([
-      { tone: "warn", text: "? Desktop may have resolved this confirmation." }
+      { tone: "warn", text: "◑ Desktop may have resolved this confirmation." }
     ]);
   });
 
@@ -108,10 +142,10 @@ describe("confirmErrorLines", () => {
       code: "desktop_turn_detached"
     });
     expect(confirmErrorLines(detached)).toEqual([
-      { tone: "warn", text: "? Stopped waiting for Infinite Desktop. Provider work may still continue." }
+      { tone: "warn", text: "◑ Stopped waiting for Infinite Desktop. Provider work may still continue." }
     ]);
     const bare = Object.assign(new Error(""), { code: "desktop_turn_detached" });
-    expect(confirmErrorLines(bare)).toEqual([{ tone: "warn", text: "? Not sure it happened." }]);
+    expect(confirmErrorLines(bare)).toEqual([{ tone: "warn", text: "◑ Not sure it happened." }]);
   });
 
   it("any other coded app answer prints its message, scrubbed, under a neutral warn mark", () => {
@@ -141,6 +175,14 @@ describe("confirmErrorLines", () => {
 });
 
 describe("typed answers (readline and one-shot)", () => {
+  it("a card that needs a typed value can only be dismissed: y never approves", async () => {
+    expect(await askDismissOnly(async () => "n", "q")).toBe("decline");
+    expect(await askDismissOnly(async () => "NO ", "q")).toBe("decline");
+    expect(await askDismissOnly(async () => "y", "q")).toBe("pending");
+    expect(await askDismissOnly(async () => "yes", "q")).toBe("pending");
+    expect(await askDismissOnly(async () => "", "q")).toBe("pending");
+  });
+
   it.each([["y", "approve"], ["Y", "approve"], ["yes", "approve"], [" YES ", "approve"],
     ["n", "decline"], ["N", "decline"], ["no", "decline"], ["No ", "decline"],
     ["", null], ["ok", null], ["nah", null], ["yep", null]] as const)("%j → %s", (answer, decision) =>

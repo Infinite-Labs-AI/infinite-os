@@ -1,0 +1,114 @@
+{
+  "screen": "flow-pause-07-still-running",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "pause hook b",
+    "answer": "It's still going. I'll show the result when it lands.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "change",
+        "tool": "propose_pause_entity",
+        "title": "Pause Hook B",
+        "state": "outcome_unknown",
+        "asOf": null,
+        "provenance": {
+          "source": "Meta · ad",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "ads.meta",
+          "label": "open Meta Ads",
+          "params": {
+            "ad": "ad_hook_b"
+          }
+        },
+        "body": {
+          "target": {
+            "kind": "ad",
+            "id": "ad_hook_b",
+            "label": "Hook B · founder POV"
+          },
+          "rows": [
+            {
+              "label": "status",
+              "before": "on",
+              "after": "PAUSED"
+            }
+          ],
+          "effect": "Stops spending",
+          "warnings": []
+        },
+        "approval": {
+          "kind": "card",
+          "turnId": "turn_r4",
+          "handle": "h_pause",
+          "title": "Pause ad “Hook B · founder POV”?",
+          "summary": "Stops this ad's spend until you turn it back on.",
+          "confirmLabel": "check again (won't pause twice)",
+          "dismissLabel": "Dismiss",
+          "doneTitle": "Paused ad “Hook B · founder POV”",
+          "rows": [
+            {
+              "label": "Ad",
+              "value": "Hook B · founder POV"
+            }
+          ],
+          "expiresAt": "2026-10-01T10:59:00Z"
+        },
+        "retry": "safe_resend",
+        "stateReason": {
+          "code": "still_running",
+          "words": "The cloud Meta action is still running. Refresh Ads to see its result.",
+          "short": "Still running"
+        }
+      }
+    ],
+    "pending": 0,
+    "steps": [
+      {
+        "label": "pausing on Meta",
+        "start": 0,
+        "end": 1,
+        "result": "20 s, still running",
+        "status": "unk"
+      }
+    ]
+  },
+  "gaps": [
+    "D3: head \"◑ Still running\" (amber) via stateReason.short."
+  ]
+}

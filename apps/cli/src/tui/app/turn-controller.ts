@@ -18,9 +18,10 @@ import {
   toolTrailLabel
 } from "../lib/text.js";
 import { hasReasoningTag, splitReasoning } from "../lib/reasoning.js";
+import { stepWordsOf, type StepWords } from "../../desktop/step-words.js";
 import type { ActiveTool, ActivityItem, Msg, SubagentProgress, TodoItem } from "../types.js";
-
-import { getTurnState, patchTurnState, resetTurnState } from "./turn-store.js";
+import { friendlyStepLabel, plainToolWords, toolOutcome } from "../views/steps.js";
+import { closeRunningSteps, getTurnState, patchTurnState, recordStepEnd, recordStepStart, resetTurnState } from "./turn-store.js";
 
 const ACTIVITY_LIMIT = 8;
 const TRAIL_LIMIT = 8;
@@ -92,6 +93,11 @@ export class InfiniteTurnController {
   private activeReasoningText = "";
   private activeTools: ActiveTool[] = [];
   private activityId = 0;
+  // Calls the transport gave no id (an older desktop sends `toolId: ""`): each
+  // gets an id of its own, so its row is never another call's. A start waits
+  // here for its complete, matched by tool name, oldest first.
+  private anonymousCalls: { id: string; name: string }[] = [];
+  private anonymousSeq = 0;
   private bufRef = "";
   private pendingSegmentTools: string[] = [];
   private reasoningSegmentIndex: null | number = null;
@@ -104,6 +110,8 @@ export class InfiniteTurnController {
   private toolProgressTimer: Timer = null;
   private toolTokenAcc = 0;
   private turnTools: string[] = [];
+  /** Calls being prepared (`tool.generating`), by tool name: the working-line words each left. */
+  private preparing = new Map<string, string>();
 
   constructor(now: () => number = Date.now) {
     this.now = now;
@@ -124,12 +132,12 @@ export class InfiniteTurnController {
     }
 
     if (event.type === "tool.generating") {
-      this.recordToolGenerating(event.name);
+      this.recordToolGenerating(event.name, stepWordsOf(event));
       return;
     }
 
     if (event.type === "tool.start") {
-      this.recordToolStart(event.toolId, event.name, event.context || event.message);
+      this.recordToolStart(event.toolId, event.name, event.context || event.message, stepWordsOf(event));
       return;
     }
 
@@ -139,7 +147,7 @@ export class InfiniteTurnController {
     }
 
     if (event.type === "tool.complete") {
-      this.recordToolComplete(event.toolId, event.name, event.error, event.summary, event.durationMs, event.status);
+      this.recordToolComplete(event.toolId, event.name, event.error, event.summary, event.durationMs, event.status, undefined, stepWordsOf(event));
       return;
     }
 
@@ -471,10 +479,34 @@ export class InfiniteTurnController {
     this.pulseReasoningStreaming();
   }
 
-  recordToolGenerating(name: string) {
-    const label = toolTrailLabel(name);
-    this.pushTrail(`drafting ${label}…`);
-    this.pushActivity(`drafting ${label}`, "info", label);
+  /**
+   * A call the model is still writing. The working line says the step's own
+   * words (the app's, else the generic words from the tool's name: `getting
+   * Meta performance`), never `drafting <tool id words>` (run-2 M6). The call's
+   * start renames it to the start's words and its end takes it off, so no
+   * `• …` bullet is left behind once the turn stops working.
+   */
+  recordToolGenerating(name: string, words?: StepWords | null) {
+    const label = words?.label ?? friendlyStepLabel(name);
+    // The trail line is internal (transient, never drawn by the session): plain words, never the id.
+    this.pushTrail(`drafting ${plainToolWords(name)}…`);
+    this.pushActivity(label, "info", label);
+    this.preparing.set(name, compactPreview(label, 96));
+  }
+
+  /** The working-line words a call being prepared left: renamed to `to` (its start), or taken off (its end). */
+  private settlePreparing(name: string, to?: string) {
+    const said = this.preparing.get(name);
+    if (said === undefined) return;
+    const next = to ? compactPreview(to, 96) : undefined;
+    if (next) this.preparing.set(name, next);
+    else this.preparing.delete(name);
+    patchTurnState((state) => ({
+      ...state,
+      activity: next
+        ? state.activity.map((item) => (item.text === said ? { ...item, text: next } : item))
+        : state.activity.filter((item) => item.text !== said)
+    }));
   }
 
   recordToolProgress(toolId: string, toolName: string, preview: string) {
@@ -503,19 +535,51 @@ export class InfiniteTurnController {
     }, STREAM_BATCH_MS);
   }
 
-  recordToolStart(toolId: string, name: string, context: string) {
+  /**
+   * A call's row id. The transport's own call id when it sent one; a call with
+   * none gets its own (`call_3`), and its complete finds it by tool name, oldest
+   * first. So one row is one call: two calls to one tool are two rows, and a
+   * complete with no id never lands on another call's row.
+   */
+  private callIdFor(toolId: string, name: string, phase: "start" | "complete"): string {
+    if (toolId) {
+      return toolId;
+    }
+    if (phase === "complete") {
+      const open = this.anonymousCalls.findIndex((call) => call.name === name);
+      if (open >= 0) {
+        return this.anonymousCalls.splice(open, 1)[0]!.id;
+      }
+    }
+    const id = `call_${++this.anonymousSeq}`;
+    if (phase === "start") {
+      this.anonymousCalls.push({ id, name });
+    }
+    return id;
+  }
+
+  /**
+   * `words` are the app's own words for the step (`step.words.v1`), already
+   * scrubbed: its label is the row's label. Without them the label is generic
+   * words made from the tool's name, never the raw id or its arguments.
+   */
+  recordToolStart(toolId: string, name: string, context: string, words?: StepWords | null) {
     this.flushStreamingSegment();
     this.closeReasoningSegment();
     this.pruneTransient();
     this.endReasoningPhase();
 
+    const id = this.callIdFor(toolId, name, "start");
+    const label = words?.label ?? friendlyStepLabel(name);
+    this.settlePreparing(name, label);
     const sample = `${name} ${context}`.trim();
 
     this.toolTokenAcc += sample ? estimateTokensRough(sample) : 0;
     this.activeTools = [
-      ...this.activeTools.filter((tool) => tool.id !== toolId),
-      { context, id: toolId, name, progressCount: 0, startedAt: this.now(), updatedAt: this.now() }
+      ...this.activeTools.filter((tool) => tool.id !== id),
+      { context, id, label, name, progressCount: 0, startedAt: this.now(), updatedAt: this.now() }
     ];
+    recordStepStart({ id, name, label, startedAt: this.now() });
 
     patchTurnState({ toolTokens: this.toolTokenAcc, tools: this.activeTools });
   }
@@ -527,42 +591,62 @@ export class InfiniteTurnController {
     summary?: string,
     durationMs?: number,
     status?: string,
-    todos?: unknown
+    todos?: unknown,
+    words?: StepWords | null
   ) {
     this.recordTodos(todos);
+    const id = this.callIdFor(toolId, fallbackName ?? "tool", "complete");
+    const started = this.activeTools.find((tool) => tool.id === id);
+    const name = started?.name ?? fallbackName ?? "tool";
+    this.settlePreparing(name);
     // A transport may report failure as `status:"error"` with NO error string —
     // the desktop bridge does exactly that, because a tool's error text is raw
-    // provider output it must not forward. Mark the trail from the STATUS too,
-    // or a failed tool renders "✓".
-    const line = this.completeTool(
-      toolId,
-      fallbackName,
-      error || (status === "error" ? summary : undefined),
-      summary,
-      durationMs,
-      Boolean(error) || status === "error"
-    );
+    // provider output it must not forward. The outcome reads the STATUS too, or
+    // a failed tool renders "✓"; and a call that waits for the person's OK
+    // (`requires_confirmation`) is pending, never "✓".
+    const outcome = toolOutcome({ status, error, summary, words });
+    const line = this.completeTool(id, name, outcome, durationMs, words ?? null);
+    recordStepEnd({
+      id,
+      name,
+      // The app's words on the complete frame rename the row; else it keeps what its start said.
+      label: words?.label ?? started?.label ?? friendlyStepLabel(name),
+      relabel: Boolean(words),
+      status: outcome.status,
+      result: outcome.result,
+      endedAt: this.now(),
+      durationMs
+    });
 
     this.pendingSegmentTools = [...this.pendingSegmentTools, line];
     this.flushPendingToolsIntoLastSegment();
     this.publishToolState();
   }
 
-  private completeTool(toolId: string, fallbackName?: string, error?: string, summary?: string, durationMs?: number, failed?: boolean) {
-    const done = this.activeTools.find((tool) => tool.id === toolId);
-    const name = done?.name ?? fallbackName ?? "tool";
+  private completeTool(
+    id: string,
+    name: string,
+    outcome: ReturnType<typeof toolOutcome>,
+    durationMs: number | undefined,
+    words: StepWords | null
+  ) {
+    const done = this.activeTools.find((tool) => tool.id === id);
     const label = toolTrailLabel(name);
     const fallbackDuration = done?.startedAt ? (this.now() - done.startedAt) / 1000 : undefined;
+    // The trail line of a call the app worded is its words alone: the label
+    // the Steps strip showed, no arguments, the app's result.
+    const worded = words?.label ?? (done?.label && done.label !== friendlyStepLabel(name) ? done.label : undefined);
 
     const line = buildToolTrailLine(
-      name,
-      done?.latestPreview || done?.context || "",
-      failed ?? Boolean(error),
-      error || summary || "",
-      durationMs !== undefined ? durationMs / 1000 : fallbackDuration
+      worded ?? name,
+      worded ? "" : done?.latestPreview || done?.context || "",
+      outcome.status === "fail",
+      outcome.result,
+      durationMs !== undefined ? durationMs / 1000 : fallbackDuration,
+      outcome.status === "wait"
     );
 
-    this.activeTools = this.activeTools.filter((tool) => tool.id !== toolId);
+    this.activeTools = this.activeTools.filter((tool) => tool.id !== id);
 
     const next = this.turnTools.filter((item) => !sameToolTrailGroup(label, item));
 
@@ -664,10 +748,13 @@ export class InfiniteTurnController {
    * What the live turn shows right now, as transcript messages, for a turn the
    * user stopped (Esc / Ctrl-C): the finished segments, completed tool rows not
    * yet shelved, every still-running tool marked stopped (no ✓/✗, since the app
-   * may still finish it), and the streamed partial answer. Pure: it changes
-   * nothing, so the caller commits it and then `reset()`s as before.
+   * may still finish it), and the streamed partial answer with any span it cut
+   * off unopened. It changes nothing but the turn store's running steps (marked
+   * stopped), so the caller commits it and then `reset()`s as before.
    */
   stoppedTranscript(): Msg[] {
+    // The calls still running keep their rows in the Steps strip, marked stopped.
+    closeRunningSteps("stopped", this.now());
     let messages: Msg[] = [...this.segmentMessages];
     const tools = [
       ...this.pendingSegmentTools,
@@ -682,18 +769,22 @@ export class InfiniteTurnController {
     const text = raw && hasReasoningTag(raw) ? splitReasoning(raw).text : raw;
 
     if (text.trim()) {
-      messages.push({ role: "assistant", text: finalTail(text, this.segmentMessages) });
+      // Kept as written; a span the stop cut off is drawn without its opening marker (eval M4).
+      messages.push({ role: "assistant", text: finalTail(text, this.segmentMessages), partial: true });
     }
 
     return messages.filter((msg) => msg.text.trim() || hasDetails(msg));
   }
 
   reset() {
+    // A call that never reported back by the turn's end has no known outcome (r4 `?`).
+    closeRunningSteps("unk", this.now());
     this.toolProgressTimer = clear(this.toolProgressTimer);
     this.clearReasoning();
     this.idle();
     this.activeReasoningText = "";
     this.activeTools = [];
+    this.anonymousCalls = [];
     this.bufRef = "";
     this.pendingSegmentTools = [];
     this.reasoningSegmentIndex = null;

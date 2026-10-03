@@ -23,17 +23,12 @@ import React from "react";
 import * as inkStock from "ink";
 import * as infiniteInk from "@infinite-os/ink";
 
+import { guardResizeReflow } from "./reflow-guard.js";
+import { resolveInkRenderer, type CliInkRenderer } from "./renderer-choice.js";
+
+export { resolveInkRenderer, type CliInkRenderer } from "./renderer-choice.js";
+
 type InkModule = typeof inkStock;
-
-export type CliInkRenderer = "stock" | "infinite";
-
-export function resolveInkRenderer(env: NodeJS.ProcessEnv = process.env): CliInkRenderer {
-  const requested = env.INFINITE_INK_RENDERER?.trim().toLowerCase();
-  // "infinite" is canonical; "hermes"/"hermes-ink" stay accepted as legacy aliases.
-  return requested === "infinite" || requested === "hermes" || requested === "hermes-ink"
-    ? "infinite"
-    : "stock";
-}
 
 function stripStockOnlyOptions(options: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!options) {
@@ -74,6 +69,17 @@ function buildInfiniteBackend(): InkModule {
 const activeRenderer = resolveInkRenderer();
 const backend: InkModule = activeRenderer === "infinite" ? buildInfiniteBackend() : inkStock;
 
+/**
+ * Stock Ink draws to a terminal through the resize-reflow guard, so a window
+ * that narrows never leaves torn rows of the old frame (eval M2; see
+ * `reflow-guard.ts`). The vendored renderer diffs cells and redraws itself.
+ */
+const stockRender: typeof inkStock.render = (node, options) => {
+  const stream = typeof (options as NodeJS.WriteStream | undefined)?.write === "function";
+  const given: inkStock.RenderOptions = stream ? { stdout: options as NodeJS.WriteStream } : { ...(options as inkStock.RenderOptions | undefined) };
+  return inkStock.render(node, { ...given, stdout: guardResizeReflow(given.stdout ?? process.stdout) });
+};
+
 export const activeInkRenderer: CliInkRenderer = activeRenderer;
 
 // Explicit `typeof inkStock.*` annotations keep the emitted declarations
@@ -81,7 +87,7 @@ export const activeInkRenderer: CliInkRenderer = activeRenderer;
 // (ansi-styles / cli-boxes / type-fest), which would not be portable.
 export const Box: typeof inkStock.Box = backend.Box;
 export const Text: typeof inkStock.Text = backend.Text;
-export const render: typeof inkStock.render = backend.render;
+export const render: typeof inkStock.render = activeRenderer === "infinite" ? backend.render : stockRender;
 export const renderToString: typeof inkStock.renderToString = backend.renderToString;
 export const useApp: typeof inkStock.useApp = backend.useApp;
 export const useInput: typeof inkStock.useInput = backend.useInput;

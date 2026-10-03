@@ -1,17 +1,21 @@
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
 import type {
+  CreativeDraftFrameV1,
   InteractiveWorkspaceRequestV1,
   ToolViewFrameV1
 } from "@infinite-os/types";
 import {
   decodeAnswerView,
+  decodeCreativeDraftFrame,
   decodeToolViewFrame,
+  isCreativeDraftFrameData,
   isToolViewFrameData
 } from "./answer-view-decode.js";
 import type {
   InSessionConfirmationAction,
   InSessionConfirmationDetail
 } from "./confirm-in-session.js";
+import { decodeStepWords } from "./step-words.js";
 
 /**
  * A normalized bridge frame emitted by the Desktop Cmd+L turn stream.
@@ -76,6 +80,18 @@ export interface DesktopTurnRunResult {
 export interface DesktopTurnSourceClient {
   /** Negotiated `turn.session.v1` (descriptor ∧ status capabilities). */
   readonly sessionCapable: boolean;
+  /**
+   * Negotiated `confirm.fields.v1`: the Desktop takes a card's field answers.
+   * Stamped on every pending card, so a card never asks for a value its
+   * Desktop cannot receive. Absent = false.
+   */
+  readonly confirmFieldsCapable?: boolean;
+  /**
+   * Negotiated `step.words.v1`: the turn asked for the app's own words on its
+   * `tool.start` / `tool.complete` frames. Absent = false: words on a frame
+   * are then never read, and every step keeps its generic label.
+   */
+  readonly stepWordsCapable?: boolean;
   turn(
     input: DesktopTurnSourceInput,
     onFrame: (frame: BridgeFrame) => void
@@ -87,7 +103,10 @@ export interface DesktopTurnSource {
    * `onView` receives each decoded `tool.view` frame (sent only after the
    * client negotiated `result.view.v1`). A `tool.view` frame never becomes a
    * `ChatProgressEvent`; one that does not decode is dropped, and the turn's
-   * text answer stays the answer.
+   * text answer stays the answer. `onCreativeDraft` receives each image
+   * draft frame (`creative.draft`, rebuilt from an allowlist: no brief, no
+   * image URLs) so the terminal can say "Drawing 3 images · ~25 s"; it never
+   * becomes a `ChatProgressEvent` either.
    */
   runTurn(
     message: string,
@@ -95,7 +114,8 @@ export interface DesktopTurnSource {
     onEvent: (event: ChatProgressEvent) => void,
     signal: AbortSignal,
     interactive?: InteractiveWorkspaceRequestV1,
-    onView?: (frame: ToolViewFrameV1) => void
+    onView?: (frame: ToolViewFrameV1) => void,
+    onCreativeDraft?: (frame: CreativeDraftFrameV1) => void
   ): Promise<DesktopTurnRunResult>;
 }
 
@@ -105,17 +125,20 @@ export interface DesktopTurnSource {
  * an empty Claude delta).
  */
 export function bridgeFrameToChatEvent(
-  frame: BridgeFrame
+  frame: BridgeFrame,
+  options: { stepWords?: boolean } = {}
 ): ChatProgressEvent | null {
   switch (frame.kind) {
     case "progress": {
       // A `tool.view` frame is a view for `onView`, never a chat event: the
       // shell would otherwise record it as an unknown typed event.
       if (isToolViewFrameData(frame.data)) return null;
+      // Likewise a `creative.draft` frame goes to `onCreativeDraft`.
+      if (isCreativeDraftFrameData(frame.data)) return null;
       // Codex: `data` is already a typed ChatProgressEvent — pass it through
       // untouched so no shape drifts on the way to the shell.
       if (isTypedEvent(frame.data)) {
-        return frame.data as unknown as ChatProgressEvent;
+        return withStepWords(frame.data as Record<string, unknown>, options.stepWords === true) as unknown as ChatProgressEvent;
       }
       // Claude: streamed text arrives as a delta chunk (or a bare message).
       const text = firstString(
@@ -164,7 +187,7 @@ export function createDesktopTurnSource(
   client: DesktopTurnSourceClient
 ): DesktopTurnSource {
   return {
-    async runTurn(message, sessionId, onEvent, signal, interactive, onView) {
+    async runTurn(message, sessionId, onEvent, signal, interactive, onView, onCreativeDraft) {
       let terminalSessionId = extractSessionId(undefined);
       let pendingConfirmations: InSessionConfirmationAction[] = [];
       // At most ONE `message.complete` per turn, first one wins. Both planes can
@@ -199,6 +222,18 @@ export function createDesktopTurnSource(
             }
             return;
           }
+          if (frame.kind === "progress" && isCreativeDraftFrameData(frame.data)) {
+            const draft = decodeCreativeDraftFrame(frame.data);
+            if (draft && onCreativeDraft) {
+              // Like a view: a draft line degrades and never fails a turn.
+              try {
+                onCreativeDraft(draft);
+              } catch {
+                // dropped on purpose
+              }
+            }
+            return;
+          }
           if (frame.kind === "done") {
             terminalSessionId =
               readSessionId(frame) ?? terminalSessionId;
@@ -209,10 +244,11 @@ export function createDesktopTurnSource(
             // transcript.
             pendingConfirmations = parsePendingConfirmations(
               frame.actionCalls,
-              readTurnId(frame)
+              readTurnId(frame),
+              client.confirmFieldsCapable === true
             );
           }
-          const event = bridgeFrameToChatEvent(frame);
+          const event = bridgeFrameToChatEvent(frame, { stepWords: client.stepWordsCapable === true });
           if (!event) return;
           if ("type" in event && event.type === "message.complete") {
             if (completionEmitted) return;
@@ -229,6 +265,21 @@ export function createDesktopTurnSource(
       };
     }
   };
+}
+
+/**
+ * A typed event with its `words` (step.words.v1) read: on a `tool.start` or
+ * `tool.complete` of a turn that asked for them, `words` becomes the decoded,
+ * scrubbed `{ label, result? }`; otherwise (not asked for, not a tool frame's
+ * place for words, or not display text) the field is left off. An event with
+ * no `words` is returned as it came, so an old desktop's frames never change.
+ */
+function withStepWords(data: Record<string, unknown>, negotiated: boolean): Record<string, unknown> {
+  if (!("words" in data)) return data;
+  const { words: raw, ...rest } = data;
+  const carriesWords = data.type === "tool.start" || data.type === "tool.complete";
+  const words = negotiated && carriesWords ? decodeStepWords(raw) : null;
+  return words ? { ...rest, words } : rest;
 }
 
 function readSessionId(frame: BridgeFrame): string | undefined {
@@ -304,7 +355,8 @@ const URI_OBFUSCATING_CHAR_RE_GLOBAL = /(?:[^\S ]|\p{Cc}|\p{Cf})/gu;
  */
 function parsePendingConfirmations(
   actionCalls: unknown[] | undefined,
-  turnId: string | undefined
+  turnId: string | undefined,
+  confirmFieldsCapable: boolean
 ): InSessionConfirmationAction[] {
   if (!Array.isArray(actionCalls)) return [];
   const pending: InSessionConfirmationAction[] = [];
@@ -325,9 +377,10 @@ function parsePendingConfirmations(
       MAX_CONFIRMATION_LABEL_CHARS,
       "action"
     );
+    const appSummary = nonEmptyString(value.summary);
     const summary = boundedTerminalText(
       redactSensitiveTerminalText(
-        nonEmptyString(value.summary) ?? actionId.replaceAll("_", " ")
+        appSummary ?? actionId.replaceAll("_", " ")
       ),
       MAX_CONFIRMATION_VALUE_CHARS,
       "action"
@@ -343,12 +396,22 @@ function parsePendingConfirmations(
     // that does not decode is left off; the redacted summary + details above
     // still carry the card.
     const view = decodeAnswerView(value.view);
+    // The app's line over the card and its words after a no (run-3 M5): both, or neither.
+    const asked = nonEmptyString(value.askedCaption);
+    const declined = nonEmptyString(value.dismissedCaption);
+    const captions = asked && declined
+      ? { asked: boundedTerminalText(asked, MAX_CONFIRMATION_VALUE_CHARS), dismissed: boundedTerminalText(declined, MAX_CONFIRMATION_VALUE_CHARS) }
+      : null;
     pending.push({
       turnId: turnId ?? "",
       confirmationHandle,
       summary,
+      // No summary from the app: the words above are the tool's name, which a card never shows as its title.
+      ...(appSummary ? {} : { summaryFromTool: true as const }),
       confirmationDetails,
-      ...(view ? { view } : {})
+      confirmFieldsCapable,
+      ...(view ? { view } : {}),
+      ...(captions ? { captions } : {})
     });
   }
   if (pending.length > 0 && !turnId) {

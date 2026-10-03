@@ -6,6 +6,7 @@ import {
   confirmCardKeys,
   formatKeyBar,
   keyBarHints,
+  keyBarText,
   keyBarRowCount,
   okKeyFor,
   resolveKey,
@@ -57,9 +58,20 @@ describe("resolveKey on a card", () => {
     expect(resolveKey(" ", {} as Key, ctx)).toEqual({ type: "none" });
   });
 
-  it("shifted letters keep their meaning; ctrl and meta chords never approve", () => {
-    expect(resolveKey("P", { shift: true } as Key, card())).toEqual({ type: "ok" });
-    expect(resolveKey("N", { shift: true } as Key, card())).toEqual({ type: "dismiss" });
+  it("a capital letter never decides (it starts a message: \"Show me…\"); ctrl and meta chords never approve", () => {
+    for (const okKey of ["p", "s", "l"]) {
+      const upper = okKey.toUpperCase();
+      expect(resolveKey(upper, { shift: true } as Key, card({ okKey }))).toEqual({ type: "none" });
+      expect(resolveKey(upper, {} as Key, card({ okKey }))).toEqual({ type: "none" });
+      expect(resolveKey(okKey, {} as Key, card({ okKey }))).toEqual({ type: "ok" });
+    }
+    expect(resolveKey("S", { shift: true } as Key, card({ okKey: "s" }))).toEqual({ type: "none" });
+    expect(resolveKey("P", { shift: true } as Key, card())).toEqual({ type: "none" });
+    expect(resolveKey("N", { shift: true } as Key, card())).toEqual({ type: "none" });
+    const retryable = card({ caps: { open: true, watch: true, retry: true } });
+    expect(resolveKey("R", { shift: true } as Key, retryable)).toEqual({ type: "none" });
+    expect(resolveKey("O", { shift: true } as Key, retryable)).toEqual({ type: "none" });
+    expect(resolveKey("r", {} as Key, retryable)).toEqual({ type: "retry" });
     expect(resolveKey("p", { ctrl: true } as Key, card())).toEqual({ type: "none" });
     expect(resolveKey("p", { meta: true } as Key, card())).toEqual({ type: "none" });
     expect(resolveKey("n", { ctrl: true } as Key, card())).toEqual({ type: "none" });
@@ -83,6 +95,38 @@ describe("resolveKey on a card", () => {
     expect(resolveKey("o", {} as Key, all)).toEqual({ type: "open" });
     expect(resolveKey("w", {} as Key, all)).toEqual({ type: "watch" });
     expect(resolveKey("r", {} as Key, all)).toEqual({ type: "retry" });
+  });
+
+  it("v, 1–9, space, e and c act on a card only when the card offers them", () => {
+    const plain = card();
+    for (const input of ["v", "1", "3", " ", "e", "c"]) {
+      expect(resolveKey(input, {} as Key, plain), input).toEqual({ type: "none" });
+    }
+    const send = card({ okKey: "s", card: { view: true, viewOpen: true, tabs: 3, page: true, copy: true, edit: true } });
+    expect(resolveKey("v", {} as Key, send)).toEqual({ type: "view" });
+    expect(resolveKey("1", {} as Key, send)).toEqual({ type: "tab", index: 0 });
+    expect(resolveKey("3", {} as Key, send)).toEqual({ type: "tab", index: 2 });
+    expect(resolveKey("4", {} as Key, send)).toEqual({ type: "none" });
+    expect(resolveKey("0", {} as Key, send)).toEqual({ type: "none" });
+    expect(resolveKey(" ", {} as Key, send)).toEqual({ type: "page" });
+    expect(resolveKey("e", {} as Key, send)).toEqual({ type: "edit" });
+    expect(resolveKey("c", {} as Key, send)).toEqual({ type: "copy" });
+  });
+
+  it("the widened card keys never approve or decline: only the OK key and n do", () => {
+    const send = card({ okKey: "s", card: { view: true, viewOpen: true, tabs: 9, page: true, copy: true, edit: true } });
+    const decisions = new Map<string, string>();
+    for (const input of ["s", "n", "y", "v", "e", "c", " ", "1", "9", "p", "j", "k", "m", "q"]) {
+      const type = resolveKey(input, {} as Key, send).type;
+      if (type === "ok" || type === "dismiss") decisions.set(input, type);
+    }
+    expect([...decisions]).toEqual([["s", "ok"], ["n", "dismiss"]]);
+    expect(resolveKey("\r", { return: true } as Key, send)).toEqual({ type: "none" });
+    expect(resolveKey("", { escape: true } as Key, send)).toEqual({ type: "none" });
+    // A reserved verb letter can never become the OK key, so v/e/c keep their meaning.
+    expect(okKeyFor("View")).toBe("y");
+    expect(okKeyFor("Edit")).toBe("y");
+    expect(okKeyFor("Copy")).toBe("y");
   });
 
   it("esc stops a running turn, and is still never a decline", () => {
@@ -131,11 +175,42 @@ describe("keyBarHints", () => {
     expect(keyBarHints({ focus: "card", busy: false, okKey: "p", caps: { open: false, watch: false, retry: false } })
       .map((h) => h.key)).not.toContain("o"));
 
-  it("a card shows its named OK key with the card's verb, then n dismiss", () => {
+  it("a card shows its named OK key with the card's verb, then n dismiss; the bar says the short verb (run-2 M4)", () => {
     expect(keyBarHints(card({ okLabel: "Pause" }))).toEqual([
-      { key: "p", label: "Pause" },
+      { key: "p", label: "Pause", ok: true, barLabel: "pause" },
       { key: "n", label: "dismiss" }
     ]);
+    // terminal-r4's bar names the action in one lower-case word; the card's chip keeps the whole label.
+    expect(keyBarText(keyBarHints(card({ okKey: "l", okLabel: "Launch 3 ads" }))))
+      .toBe(" l  launch    n  dismiss    tab  switch side    /  commands");
+    expect(keyBarText(keyBarHints(card({ okKey: "g", okLabel: "Generate · ~$0.52" }))))
+      .toBe(" g  generate    n  dismiss    tab  switch side    /  commands");
+    // A card that names its own short verb keeps it ("check again").
+    expect(keyBarText(keyBarHints(card({ okLabel: "Pause", okVerb: "check again" }))))
+      .toBe(" p  check again    n  dismiss    tab  switch side    /  commands");
+  });
+
+  it("the bar never carries ? on a card: the card shows `? what it does` inside it (run-2 M4)", () => {
+    const hints = keyBarHints(card({ okLabel: "Pause", explain: true }));
+    expect(hints.map((h) => h.key)).toContain("?");
+    expect(keyBarText(hints)).toBe(" p  pause    n  dismiss    tab  switch side    /  commands");
+    expect(formatKeyBar(hints)).toBe("p pause   n dismiss");
+  });
+
+  it("a view's `? what it does` is a key bar key, not a line in the answer (run-2 N12); a card's stays inside the card", () => {
+    const viewHints = [{ key: "j k", label: "row" }, { key: "?", label: "what it does" }, { key: "tab", label: "switch side" }];
+    expect(keyBarText(viewHints)).toBe(" j k  row    ?  what it does    tab  switch side    /  commands");
+    expect(keyBarText([{ key: "?", label: "hide" }, { key: "tab", label: "switch side" }])).toBe(" ?  hide    tab  switch side    /  commands");
+    // A card's ? is a chip inside the card only.
+    expect(keyBarText([{ key: "?", label: "what it does", chipOnly: true }, { key: "tab", label: "switch side" }])).toBe(" tab  switch side    /  commands");
+  });
+
+  it("a card whose yes already went out offers only its OK key: no `n dismiss` (r4 flow-pause-07, run-r2 MUST 2)", () => {
+    const sent = card({ okLabel: "check again (won't pause twice)", okVerb: "check again", card: { decided: true } });
+    expect(keyBarHints(sent).map((h) => h.key)).toEqual(["p"]);
+    expect(keyBarText(keyBarHints(sent))).toBe(" p  check again    tab  switch side    /  commands");
+    // `n` still closes the card (never a decline: nothing is left to decline), so the user is never stuck on it.
+    expect(resolveKey("n", {} as Key, sent)).toEqual({ type: "dismiss" });
   });
 
   it("shows ? only when there is an explanation, and o/w/r only with their capability", () => {
@@ -148,35 +223,71 @@ describe("keyBarHints", () => {
       card({ okLabel: "Pause", explain: true }),
       card({ okKey: null }),
       card({ caps: { open: true, watch: true, retry: true }, explain: true }),
+      card({ okKey: "s", card: { view: true } }),
+      card({ okKey: "s", card: { view: true, viewOpen: true, tabs: 3, page: true, copy: true, edit: true } }),
       { focus: "composer", busy: true, okKey: null, caps: NO_CAPS }
     ];
     for (const ctx of contexts) {
       for (const hint of keyBarHints(ctx)) {
         const key = hint.key === "esc" ? { escape: true } : {};
-        const input = hint.key === "esc" ? "" : hint.key;
+        const input = hint.key === "esc" ? "" : hint.key === "space" ? " " : hint.key.split("-")[0]!;
         expect(resolveKey(input, key as Key, ctx).type, `${ctx.focus} ${hint.key}`).not.toBe("none");
       }
     }
   });
 
-  it("a running turn shows esc stop, the one key that works in the composer then", () => {
+  it("a send card offers v view before its OK key; an open document offers its tabs and pages", () => {
+    expect(formatKeyBar(keyBarHints(card({ okKey: "s", okLabel: "Send to 200 people", card: { view: true } }))))
+      .toBe("v view   s send   n dismiss");
+    expect(formatKeyBar(keyBarHints(card({
+      okKey: "s", okLabel: "Send to 200 people", card: { view: true, viewOpen: true, tabs: 3, page: true }
+    })))).toBe("s send   1-3 switch   space next page");
+    // terminal-r4 names what the tabs are: `1-3 email`.
+    expect(formatKeyBar(keyBarHints(card({
+      okKey: "s", okLabel: "Send to 200 people", card: { view: true, viewOpen: true, tabs: 3, tabNoun: "email" }
+    })))).toBe("s send   1-3 email");
+    // The drawn bar: chips, then always tab and / (terminal-r4 region-keybar-approval-email).
+    expect(keyBarText(keyBarHints(card({ okKey: "s", okLabel: "Send to 200 people", card: { view: true } }))))
+      .toBe(" v  view    s  send    n  dismiss    tab  switch side    /  commands");
+  });
+
+  it("e and c show only when the card says they work", () => {
+    expect(keyBarHints(card()).map((h) => h.key)).not.toContain("e");
+    expect(keyBarHints(card()).map((h) => h.key)).not.toContain("c");
+    const keys = keyBarHints(card({ okKey: "y", okLabel: "Confirm", card: { edit: true, copy: true } }));
+    expect(keys).toEqual([
+      { key: "y", label: "Confirm", ok: true, barLabel: "confirm" },
+      { key: "n", label: "dismiss" },
+      { key: "e", label: "edit in the app" },
+      { key: "c", label: "copy" }
+    ]);
+  });
+
+  it("a running turn shows esc stop first, once, then the keys the bar always ends with (D6)", () => {
     expect(keyBarHints({ focus: "composer", busy: true, okKey: null, caps: NO_CAPS }))
       .toEqual([{ key: "esc", label: "stop" }]);
     expect(formatKeyBar(keyBarHints({ focus: "composer", busy: true, okKey: null, caps: NO_CAPS })))
       .toBe("esc stop");
+    expect(keyBarText(keyBarHints({ focus: "composer", busy: true, okKey: null, caps: NO_CAPS })))
+      .toBe(" esc  stop    tab  switch side    /  commands");
   });
 
-  it("the idle composer shows no bar", () => {
+  it("the idle composer has no keys of its own; the bar still ends with tab and /", () => {
     expect(keyBarHints({ focus: "composer", busy: false, okKey: null, caps: NO_CAPS })).toEqual([]);
+    expect(keyBarText([])).toBe(" tab  switch side    /  commands");
+    // With no details on screen there is no side to switch to: `/ commands` alone.
+    expect(keyBarText([], { sides: false })).toBe(" /  commands");
+    expect(keyBarText([{ key: "esc", label: "stop" }, { key: "tab", label: "switch side" }], { sides: false })).toBe(" esc  stop    /  commands");
+    expect(keyBarText([{ key: "j k", label: "row" }], { sides: true })).toBe(" j k  row    tab  switch side    /  commands");
   });
 
-  it("formats, scrubs and counts the bar rows at the given width", () => {
+  it("formats and scrubs the bar, which is one row at every width (cut, never wrapped)", () => {
     const hints = keyBarHints(card({ okLabel: "Pause\u001b[2J‮", explain: true }));
-    const line = formatKeyBar(hints);
-    expect(line).toBe("p Pause   n dismiss   ? what it does");
+    expect(formatKeyBar(hints)).toBe("p pause   n dismiss");
+    expect(keyBarText(hints)).toBe(" p  pause    n  dismiss    tab  switch side    /  commands");
     expect(keyBarRowCount(hints, 80)).toBe(1);
-    expect(keyBarRowCount([], 80)).toBe(0);
-    expect(keyBarRowCount(hints, 10)).toBeGreaterThan(1);
+    expect(keyBarRowCount([], 80)).toBe(1);
+    expect(keyBarRowCount(hints, 10)).toBe(1);
   });
 });
 

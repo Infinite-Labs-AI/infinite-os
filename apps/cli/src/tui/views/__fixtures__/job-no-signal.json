@@ -1,0 +1,35 @@
+{
+  "v": 1,
+  "kind": "job",
+  "tool": "run_command",
+  "title": "Command",
+  "state": "background",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "jobId": "job_2",
+    "label": "Export",
+    "phase": "running",
+    "steps": [],
+    "startedAt": null,
+    "runsWhere": "this_mac_app_open",
+    "outlivesTurn": true,
+    "noCompletionSignal": true,
+    "command": {
+      "argv": [
+        "export",
+        "--all"
+      ],
+      "exitCode": null,
+      "signal": null,
+      "endedBy": "exit",
+      "stdoutTail": "line 1\nline 2",
+      "stderrTail": "",
+      "truncated": false
+    }
+  }
+}

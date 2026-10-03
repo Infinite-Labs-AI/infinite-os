@@ -1,0 +1,70 @@
+{
+  "screen": "view-12-quiet",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "write me an x post about it",
+    "answer": "Here is a draft: \"Paying $40 per trial and not sure if it's good? Here's how to tell…\"",
+    "views": [
+      {
+        "v": 1,
+        "kind": "quiet",
+        "tool": "read_playbook",
+        "title": "",
+        "state": "ready",
+        "asOf": null,
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "body": {
+          "stepLine": "The draft is in the answer. Below is what I read to write it."
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "reading the X playbook",
+        "start": 0,
+        "end": 0.3,
+        "result": "read",
+        "status": "ok"
+      },
+      {
+        "label": "checking what I can do",
+        "start": 0.3,
+        "end": 0.5,
+        "result": "3 found",
+        "status": "ok"
+      }
+    ]
+  }
+}

@@ -4,18 +4,27 @@
 // Why: the session re-rendered the WHOLE transcript every frame. Once the frame was
 // as tall as the terminal, Ink took its fullscreen branch (`clearTerminal` + redraw),
 // which wipes the terminal's scrollback. Now:
-//   - A finished turn is printed ONCE into <Static> (normal terminal scrollback) —
-//     but only when the NEXT line is submitted. Until then the latest turn (its
-//     answer, its pending card, later its views) stays in the live region, so the
-//     view keys can still act on it.
-//   - The live region is capped at `liveRegionCap(...)` rows. A taller latest turn
-//     is shown a page at a time (PgDn/PgUp, or space on an empty prompt), with a
-//     one-row hint saying what is hidden.
+//   - A finished turn is printed ONCE into <Static> (normal terminal scrollback).
+//     One that fits the live region goes there only when the NEXT line is
+//     submitted: until then it (its answer, its views) stays live, so the view
+//     keys can still act on it.
+//   - The live region is capped at `liveRegionCap(...)` rows. While a turn RUNS,
+//     a taller one shows its tail, with a one-row hint saying what is above
+//     (PgUp/PgDn page it). A FINISHED turn is never paged: one taller than the
+//     cap goes whole into scrollback the moment it finishes, as a coding
+//     harness prints it, and only the frame stays live. A write card still
+//     waiting for its answer is the exception that stays: the rest of its turn
+//     goes up and the card stays live (in a window too small for the card
+//     alone, the pager still pages it).
 //   - Committed rows never count toward the composer's native-cursor row
 //     prediction (`inkTranscriptRowCount`): Ink positions the cursor inside the
 //     live frame only.
-// Committed lines are rendered at the width current when they were committed and
-// do not reflow on a later resize — the same as any terminal scrollback.
+// Committed lines are rendered at the width current when they were committed.
+// When the window's width changes, the session clears the screen AND the
+// scrollback and prints every committed entry again at the new width (its
+// `redraw`), as Claude Code does: a terminal re-wraps the old frame into more
+// rows than it can erase, and the torn copy would otherwise stay in scrollback
+// (run-r2 MUST 4).
 //
 // Everything here is pure; the components only call it.
 import type { Key } from "ink";
@@ -30,6 +39,22 @@ export interface CommittedEntry {
    * (the home inventory). Committed rows are never counted, so it needs no lines.
    */
   node?: ReactNode;
+  /** The entry drawn again at another width (a width change reprints scrollback). */
+  redraw?: (columns: number) => Pick<CommittedEntry, "lines" | "node">;
+}
+
+/** Erase the screen, then the scrollback, then home the cursor (CSI 2J, CSI 3J, CSI H). */
+export const CLEAR_SCREEN_AND_SCROLLBACK = "\u001b[2J\u001b[3J\u001b[H";
+
+/** How long the width must hold still before the transcript is reprinted at it (a drag sends many resizes). */
+export const RESIZE_REPRINT_MS = 150;
+
+/**
+ * Every committed entry drawn at `columns` (its `redraw`), in order; an entry
+ * without one is kept as it is. Never mutates its input.
+ */
+export function redrawCommitted(committed: readonly CommittedEntry[], columns: number): CommittedEntry[] {
+  return committed.map((entry) => (entry.redraw ? { ...entry, ...entry.redraw(columns) } : entry));
 }
 
 export interface TranscriptCommitState {
@@ -38,19 +63,28 @@ export interface TranscriptCommitState {
 }
 
 /**
- * The latest turn moves to `committed` only when a non-blank next line is
- * submitted. A blank line, or no latest turn, leaves the state untouched (the
- * same object is returned). Never mutates its input; `committed` only grows,
- * which `<Static>` relies on (it prints `items.slice(printedCount)`).
+ * The latest turn moves to `committed`. No latest turn leaves the state
+ * untouched (the same object is returned). Never mutates its input;
+ * `committed` only grows, which `<Static>` relies on (it prints
+ * `items.slice(printedCount)`). Two things commit a turn: the next line
+ * (`commitOnSubmit`), and a finished turn too tall for the live region, which
+ * goes up the moment it finishes.
  */
+export function commitLatest<S extends TranscriptCommitState>(
+  state: S
+): Omit<S, keyof TranscriptCommitState> & TranscriptCommitState {
+  if (!state.latest) {
+    return state;
+  }
+  return { ...state, committed: [...state.committed, state.latest], latest: null };
+}
+
+/** `commitLatest` when a non-blank next line is submitted; a blank line leaves the state untouched. */
 export function commitOnSubmit<S extends TranscriptCommitState>(
   state: S,
   line: string
 ): Omit<S, keyof TranscriptCommitState> & TranscriptCommitState {
-  if (!line.trim() || !state.latest) {
-    return state;
-  }
-  return { ...state, committed: [...state.committed, state.latest], latest: null };
+  return line.trim() ? commitLatest(state) : state;
 }
 
 /** Rows reserved by default for the composer (it may wrap) and overlays. */
@@ -74,6 +108,24 @@ export function liveRegionCap(rows: number | undefined, composerRows: number, ke
   }
   const reserved = Math.max(0, composerRows) + Math.max(0, keyBarRows) + 2;
   return Math.max(MIN_LIVE_REGION_ROWS, Math.floor(rows) - reserved);
+}
+
+/**
+ * The rows the live region's content (the latest turn, then the transcript) may
+ * take: the cap minus the top rule, the status rows and an in-app composer row.
+ * Never below 2 (one content row plus the pager hint). Infinite when `rows` is
+ * unknown. `liveLinesWindow` pages with it, and the session sizes a document's
+ * page to it, so both sides count the same rows.
+ */
+export function liveBodyRows(
+  rows: number | undefined,
+  composerRows: number,
+  keyBarRows: number,
+  statusRowCount: number,
+  showComposer: boolean
+): number {
+  const cap = liveRegionCap(rows, composerRows, keyBarRows);
+  return Math.max(2, cap - 1 - Math.max(0, statusRowCount) - (showComposer ? 1 : 0));
 }
 
 export interface LiveWindow {

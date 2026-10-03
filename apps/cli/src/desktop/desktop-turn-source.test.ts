@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
-import type { ToolViewFrameV1 } from "@infinite-os/types";
+import type { CreativeDraftFrameV1, ToolViewFrameV1 } from "@infinite-os/types";
 import {
   bridgeFrameToChatEvent,
   createDesktopTurnSource,
@@ -189,6 +189,55 @@ describe("createDesktopTurnSource", () => {
     ]);
   });
 
+  it("marks a summary made from the tool's name, so the card never titles itself with it", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "queued",
+          data: { turnId: "turn-9" },
+          actionCalls: [
+            { status: "requires_confirmation", confirmationHandle: "h1", actionId: "mcp__infinite_app__propose_pause_meta_entity" },
+            { status: "requires_confirmation", confirmationHandle: "h2", actionId: "propose_pause", summary: "Pause ad Hook B" }
+          ]
+        }
+      ]
+    });
+    const r = await createDesktopTurnSource(client).runTurn("pause it", undefined, () => {}, new AbortController().signal);
+    const [fromTool, fromApp] = r.pendingConfirmations!;
+    expect(fromTool!.summary).toBe("mcp infinite app propose pause meta entity");
+    expect(fromTool!.summaryFromTool).toBe(true);
+    expect(fromApp!.summary).toBe("Pause ad Hook B");
+    expect(fromApp!.summaryFromTool).toBeUndefined();
+  });
+
+  // Lane review (M5): a card can carry the app's line over it and its words
+  // after a no, so `n` changes the line in the same frame as the key.
+  it("keeps the app's card captions (askedCaption, dismissedCaption) only when both are words", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "queued",
+          data: { turnId: "turn-7" },
+          actionCalls: [
+            { status: "requires_confirmation", confirmationHandle: "h1", actionId: "propose_pause",
+              askedCaption: "Ready. It stops spending once you say OK.", dismissedCaption: "Okay, left it running." },
+            { status: "requires_confirmation", confirmationHandle: "h2", actionId: "propose_pause", dismissedCaption: "Okay, left it running." },
+            { status: "requires_confirmation", confirmationHandle: "h3", actionId: "propose_pause", askedCaption: 7, dismissedCaption: " " }
+          ]
+        }
+      ]
+    });
+    const r = await createDesktopTurnSource(client).runTurn("pause it", undefined, () => {}, new AbortController().signal);
+    const [both, one, neither] = r.pendingConfirmations!;
+    expect(both!.captions).toEqual({ asked: "Ready. It stops spending once you say OK.", dismissed: "Okay, left it running." });
+    expect(one!.captions).toBeUndefined();
+    expect(neither!.captions).toBeUndefined();
+  });
+
   it("derives redacted confirmation details from raw action input when none supplied", async () => {
     const client = fakeClient({
       sessionCapable: true,
@@ -308,6 +357,97 @@ describe("createDesktopTurnSource", () => {
       "tool.start",
       "message.complete"
     ]);
+  });
+
+  it("routes a creative.draft frame to onCreativeDraft, allowlisted, never as a ChatProgressEvent", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "progress",
+          data: {
+            type: "creative.draft",
+            runId: "run_1",
+            status: "running",
+            count: 3,
+            format: "png",
+            aspectRatio: "4:5",
+            quality: "high",
+            pending: [{ startedAtMs: 1000, etaMs: 25000, imageUrl: "https://cdn.example.com/a.png" }],
+            brief: "a private brief",
+            images: [{ url: "https://cdn.example.com/b.png" }],
+            estimatedPerImageUsd: 0.17
+          }
+        },
+        { kind: "done", message: "Drawing.", data: { turnId: "turn-7" }, actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const drafts: CreativeDraftFrameV1[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "make 3",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal,
+      undefined,
+      undefined,
+      (frame) => drafts.push(frame)
+    );
+    expect(drafts).toEqual([{
+      type: "creative.draft",
+      runId: "run_1",
+      status: "running",
+      count: 3,
+      format: "png",
+      aspectRatio: "4:5",
+      quality: "high",
+      pending: [{ startedAtMs: 1000, etaMs: 25000 }],
+      estimatedPerImageUsd: 0.17
+    }]);
+    expect(JSON.stringify(drafts)).not.toMatch(/http|brief/u);
+    expect(events.map((e) => (e as { type?: string }).type)).toEqual(["message.complete"]);
+  });
+
+  it("drops a creative.draft frame that does not decode, and one with no listener, without failing the turn", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        { kind: "progress", data: { type: "creative.draft", status: "running", count: 3 } },
+        { kind: "progress", data: { type: "creative.draft", runId: "r", status: "painting", count: 3 } },
+        { kind: "done", message: "ok", data: { turnId: "turn-8" }, actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const drafts: CreativeDraftFrameV1[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "make 3", undefined, (e) => events.push(e), new AbortController().signal, undefined, undefined,
+      (frame) => drafts.push(frame)
+    );
+    expect(drafts).toEqual([]);
+    expect(events.map((e) => (e as { type?: string }).type)).toEqual(["message.complete"]);
+    const quiet = fakeClient({
+      sessionCapable: true,
+      frames: [
+        { kind: "progress", data: { type: "creative.draft", runId: "r", status: "done", count: 1, format: "png", aspectRatio: "1:1", quality: "high" } },
+        { kind: "done", message: "ok", data: { turnId: "turn-9" }, actionCalls: [] }
+      ]
+    });
+    const quietEvents: ChatProgressEvent[] = [];
+    await createDesktopTurnSource(quiet).runTurn("x", undefined, (e) => quietEvents.push(e), new AbortController().signal);
+    expect(quietEvents.map((e) => (e as { type?: string }).type)).toEqual(["message.complete"]);
+  });
+
+  it("stamps each pending card with whether the desktop takes fields", async () => {
+    const frames: BridgeFrame[] = [{
+      kind: "done", message: "ok", data: { turnId: "turn-10" },
+      actionCalls: [{ status: "requires_confirmation", confirmationHandle: "h1", actionId: "set_budget", summary: "Set budget" }]
+    }];
+    const capable = { ...fakeClient({ sessionCapable: true, frames }), confirmFieldsCapable: true };
+    const old = fakeClient({ sessionCapable: true, frames });
+    const a = await createDesktopTurnSource(capable).runTurn("x", undefined, () => {}, new AbortController().signal);
+    const b = await createDesktopTurnSource(old).runTurn("x", undefined, () => {}, new AbortController().signal);
+    expect(a.pendingConfirmations![0]!.confirmFieldsCapable).toBe(true);
+    expect(b.pendingConfirmations![0]!.confirmFieldsCapable).toBe(false);
   });
 
   it("a throwing onView drops the view and the turn still resolves with its answer and pending cards", async () => {
@@ -479,6 +619,9 @@ describe("bridgeFrameToChatEvent", () => {
       })
     ).toBeNull();
     expect(
+      bridgeFrameToChatEvent({ kind: "progress", data: { type: "creative.draft", runId: "r" } })
+    ).toBeNull();
+    expect(
       bridgeFrameToChatEvent({ kind: "progress", data: { type: "tool.view" } })
     ).toBeNull();
   });
@@ -527,5 +670,82 @@ describe("bridgeFrameToChatEvent", () => {
     expect(
       bridgeFrameToChatEvent({ kind: "error", message: "boom" })
     ).toBeNull();
+  });
+});
+
+describe("step words on tool frames (step.words.v1)", () => {
+  const toolFrames = (words: { start?: unknown; complete?: unknown }): BridgeFrame[] => [
+    {
+      kind: "progress",
+      data: {
+        type: "tool.start", stage: "tool", message: "mcp__sample_app__list_sample_rows", toolId: "call-1",
+        name: "mcp__sample_app__list_sample_rows", context: "", ...(words.start !== undefined ? { words: words.start } : {})
+      }
+    },
+    {
+      kind: "progress",
+      data: {
+        type: "tool.complete", stage: "tool", message: "mcp__sample_app__list_sample_rows", toolId: "call-1",
+        name: "mcp__sample_app__list_sample_rows", status: "ok", ...(words.complete !== undefined ? { words: words.complete } : {})
+      }
+    },
+    { kind: "done", message: "Done.", actionCalls: [] }
+  ];
+
+  async function toolEvents(client: DesktopTurnSourceClient): Promise<Record<string, unknown>[]> {
+    const events: ChatProgressEvent[] = [];
+    await createDesktopTurnSource(client).runTurn("q", undefined, (event) => events.push(event), new AbortController().signal);
+    return events.filter((event) => "type" in event && event.type.startsWith("tool.")) as unknown as Record<string, unknown>[];
+  }
+
+  it("a desktop that negotiated them: the events carry the app's words, scrubbed", async () => {
+    const client = {
+      ...fakeClient({
+        sessionCapable: true,
+        frames: toolFrames({
+          start: { label: "checking\u001b[31m the catalog" },
+          complete: { label: "checking the catalog", result: "3 rows" }
+        })
+      }),
+      stepWordsCapable: true
+    };
+    const [start, complete] = await toolEvents(client);
+    expect(start!.words).toEqual({ label: "checking the catalog" });
+    expect(complete!.words).toEqual({ label: "checking the catalog", result: "3 rows" });
+    // Every existing field stays as it was sent.
+    expect(start).toMatchObject({ type: "tool.start", toolId: "call-1", name: "mcp__sample_app__list_sample_rows" });
+    expect(complete).toMatchObject({ type: "tool.complete", toolId: "call-1", status: "ok" });
+  });
+
+  it("words that are a tool id or JSON are dropped, so the step keeps its generic label", async () => {
+    const client = {
+      ...fakeClient({
+        sessionCapable: true,
+        frames: toolFrames({ start: { label: "mcp__sample_app__list_sample_rows" }, complete: { label: '{"rows":3}' } })
+      }),
+      stepWordsCapable: true
+    };
+    const [start, complete] = await toolEvents(client);
+    expect(start).not.toHaveProperty("words");
+    expect(complete).not.toHaveProperty("words");
+  });
+
+  it("a desktop that did not negotiate them: words on a frame are never read", async () => {
+    const frames = toolFrames({ start: { label: "checking the catalog" }, complete: { label: "checking the catalog", result: "3 rows" } });
+    for (const client of [
+      fakeClient({ sessionCapable: true, frames }),
+      { ...fakeClient({ sessionCapable: true, frames }), stepWordsCapable: false }
+    ]) {
+      const [start, complete] = await toolEvents(client);
+      expect(start).not.toHaveProperty("words");
+      expect(complete).not.toHaveProperty("words");
+    }
+  });
+
+  it("an old desktop's frames (no words) pass through untouched", async () => {
+    const frames = toolFrames({});
+    const [start, complete] = await toolEvents({ ...fakeClient({ sessionCapable: true, frames }), stepWordsCapable: true });
+    expect(start).toEqual(frames[0]!.data);
+    expect(complete).toEqual(frames[1]!.data);
   });
 });

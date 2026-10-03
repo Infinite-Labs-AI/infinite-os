@@ -1,0 +1,1 @@
+{"id":"region-card-width-cap","view_kind":"region","state":null,"cols":100,"lines":[],"data":{"note":"card() caps the box at 74 cols: bw=min(w,74); inner=bw-4","at_details_w_133":74}}

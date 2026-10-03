@@ -5,7 +5,7 @@
  * Key rule: no key may end in "token", contain "credential", or equal a host-private key.
  */
 // ---- contract body (vendored verbatim into 1bu-1; edit only in infinite-os) ----
-export const ANSWER_VIEW_CONTRACT_REVISION = 1 as const;
+export const ANSWER_VIEW_CONTRACT_REVISION = 2 as const;
 export const RESULT_VIEW_CAPABILITY = "result.view.v1" as const;
 export const CONFIRM_FIELDS_CAPABILITY = "confirm.fields.v1" as const;
 export const CONFIRM_STREAM_CAPABILITY = "confirm.stream.v1" as const;
@@ -36,7 +36,8 @@ export interface ReasonV1 { code: string; words: string; show?: "dash" | "words"
 export interface AppLinkV1 { place: string; label: string; params?: Record<string, string>; url?: string }
 /** The message a client sends as a NEW user turn. Clients never call tools directly. */
 export interface NextStepV1 { label: string; ask: string }
-export interface StateReasonV1 { code: string; words: string; fix?: { label: string; appLink?: AppLinkV1; ask?: string } }
+/** short: the head's words in place of the generic state words ("Changed on Meta", "1 not measured"); words: the full sentence. */
+export interface StateReasonV1 { code: string; words: string; short?: string; fix?: { label: string; appLink?: AppLinkV1; ask?: string } }
 export interface ProvenanceV1 { source: string; via: "our_db" | "live_read" | "this_mac" | "server"; verdictsBy?: string }
 export interface CostV1 {
   usd: number | null; estimate: boolean;
@@ -80,8 +81,9 @@ export interface ReconcileV1 { label: string; ask: string }
 // ── bodies ──
 /** A picture by reference only (Cmd+L's CreativeThumb reads our archive by id). Never a URL. The terminal ignores it. */
 export interface CreativeRefV1 { archiveAssetId: string }
-export interface CellV1 { value: number | null; reason?: ReasonV1; untrusted?: true }      // money in MAJOR units; percent in points
-export interface TextCellV1 { text: string | null; reason?: ReasonV1; untrusted?: true }
+/** tone "bad": the host flags this value as the one to look at ("0 trials"); renderers draw it in the warn colour. rev 2 */
+export interface CellV1 { value: number | null; reason?: ReasonV1; untrusted?: true; tone?: "bad" }      // money in MAJOR units; percent in points
+export interface TextCellV1 { text: string | null; reason?: ReasonV1; untrusted?: true; tone?: "bad" }
 export interface WindowV1 { from: string; to: string; tz: string; label: string }          // YYYY-MM-DD
 export type UnitV1 = "money" | "count" | "percent" | "ratio" | "seconds" | "text";
 export interface ColumnV1 { key: string; label: string; unit: UnitV1; factGroup: string }  // never combine across factGroups
@@ -107,6 +109,7 @@ export type SectionV1 =
 export interface NumbersBodyV1 {
   layout: "kpis" | "table" | "series" | "steps" | "composite";
   currency: string | null; columns: ColumnV1[];
+  rowLabel?: string;                                      // the row-label column's header ("Campaign"); rev 2
   legs?: { settled: NumbersLegV1; today?: TodayLegV1 };   // required unless layout === "composite"; legs are NEVER summed
   leaders?: LeaderV1[];                                   // leaders per measure; never one winner without revenue
   sections?: SectionV1[]; verdictSource?: string; truncated?: TruncationV1;   // sections nest ONE level only
@@ -119,12 +122,15 @@ export interface ListRowV1 {
 }
 export interface ListBodyV1 {
   layout: "rows" | "log" | "groups" | "files";
+  currency?: string | null;                               // money cells' currency; rev 2
+  selected?: string;                                      // the row id the list opens on (the one the answer is about); rev 2
   columns: { key: string; label: string; unit?: UnitV1 }[]; rows: ListRowV1[];
   groups?: { label: string; reason?: string; rows: ListRowV1[] }[];
   total: number | null; shown: number; filterWords?: string; emptyWords?: string;
   omitted?: { count: number; reason: string }; truncated?: TruncationV1;
 }
 export interface RecordBodyV1 {
+  title?: string; currency?: string | null;               // the thing's full name ("Ad “Hook B · founder POV”"); money's currency; rev 2
   fields: { label: string; value: CellV1 | TextCellV1; unit?: UnitV1 }[]; creativeRef?: CreativeRefV1;
   history?: { at: IsoTime; from: string | null; to: string | null; who: string | null; source?: string }[];
   rule?: { summary: string; channel: string; schedule: string; nextRunAt: IsoTime | null;
@@ -173,7 +179,9 @@ export interface JobBodyV1 {
 }
 export interface CompareBodyV1 {
   window: WindowV1;
-  arms: { key: string; label: string; n?: number | null; days?: number | null; metrics: Record<string, CellV1> }[];
+  armLabel?: string;                                      // the arm column's header ("Version"); rev 2
+  arms: { key: string; label: string; n?: number | null; days?: number | null; metrics: Record<string, CellV1>;
+    interval?: { metric: string; low: number; high: number; level: number } }[];   // the arm's likely range for `metric`; rev 2
   metricRows: { key: string; label: string; unit: UnitV1 }[];
   differences: { label: string; against: string; absolute: CellV1; relative: CellV1;
     interval?: { low: number; high: number; level: number }; method: string }[];

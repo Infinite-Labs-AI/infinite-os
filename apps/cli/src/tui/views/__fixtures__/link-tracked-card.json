@@ -1,0 +1,40 @@
+{
+  "v": 1,
+  "kind": "link",
+  "tool": "propose_create_tracked_link",
+  "title": "Tracked link",
+  "state": "needs_yes",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "target": "url",
+    "minted": false,
+    "opened": false,
+    "url": "https://example.com/page",
+    "utm": {
+      "source": "newsletter",
+      "medium": "email",
+      "campaign": "spring"
+    },
+    "warnings": []
+  },
+  "approval": {
+    "kind": "card",
+    "turnId": "turn_1",
+    "handle": "h_6",
+    "title": "New tracked link",
+    "summary": null,
+    "confirmLabel": "Confirm",
+    "dismissLabel": "Dismiss",
+    "rows": [
+      {
+        "label": "to",
+        "value": "example.com/page"
+      }
+    ]
+  }
+}
