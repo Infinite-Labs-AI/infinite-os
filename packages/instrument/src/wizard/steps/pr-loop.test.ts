@@ -16,6 +16,7 @@ import {
   fakeInstaller,
   initialState,
   PIXEL_ID,
+  READ_CHECK_PLACEHOLDER,
   review,
   RUN_ID,
   scriptedAgents,
@@ -589,6 +590,43 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(existsSync(join(w.fx.root, ".infinite/wizard/review-brief.md"))).toBe(true)
     // The merge card says the same.
     expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toBe("No second review (Codex could not read the files)")
+  })
+
+  it("review P3-3: the RIGHT nonce but every item cant_tell is blind → one retry → still blind: nothing posted, never 'nothing to change'", async () => {
+    // Not `blindReviewer`: the scripted reviewer reads its folder and quotes the right nonce both times.
+    const w = await opened({ reviews: [liveBlindReview(), liveBlindReview()], answers: { "teammate-comments": { actOn: [] } } })
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expectOk(outcome)
+    expect(outcome.status).toContain("no second review (Codex could not read the files)")
+    expect(w.agents.reviewCalls).toHaveLength(2)
+    expect(w.agents.reviewCalls[1]!.brief).toContain("Your last answer shows you could not read the files.")
+    expect(w.gh.read().calls.filter((call) => call.stdin?.includes("addPullRequestReview(input"))).toEqual([])
+    expect(eventText(w.ctx)).not.toContain("nothing to change")
+  })
+
+  it("review P3-5: a nonce quoted in the summary's body or a checklist note is never posted or stored", async () => {
+    const quoted = review([])
+    quoted.summary = `I read .infinite/review/read-check.txt (${READ_CHECK_PLACEHOLDER}) and the diff.`
+    quoted.checklist = (["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16"] as const).map((item) => ({
+      item,
+      status: item === "R12" ? ("cant_tell" as const) : ("pass" as const),
+      note: item === "R12" ? `could not tell; the read-check said ${READ_CHECK_PLACEHOLDER}` : "checked"
+    }))
+    const w = await opened({ reviews: [quoted], answers: { "teammate-comments": { actOn: [] } } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const posted = w.gh
+      .read()
+      .calls.filter((call) => call.stdin?.includes("addPullRequestReview(input"))
+      .map((call) => (JSON.parse(call.stdin!) as { variables: { body: string } }).variables.body)
+    expect(posted).toHaveLength(1)
+    // The nonce is exactly 16 hex (a SHA is 40): no such run is posted, and the redaction marker shows where it was.
+    const nonceShaped = /(?<![0-9a-f])[0-9a-f]{16}(?![0-9a-f])/
+    expect(posted[0]).not.toMatch(nonceShaped)
+    expect(posted[0]).toContain("[read-check]")
+    expect(posted[0]).not.toContain(READ_CHECK_PLACEHOLDER)
+    const ledger = readFileSync(join(w.fx.root, ".infinite/wizard/review-ledger.json"), "utf8")
+    expect(ledger).not.toMatch(nonceShaped)
+    expect(ledger).toContain("[read-check]")
   })
 
   it("§3y.7 a missing nonce alone is blind (even with every item checked)", async () => {

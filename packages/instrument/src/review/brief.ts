@@ -187,21 +187,51 @@ export type ReviewCompleteness = "complete" | "incomplete" | "blind"
 
 export interface ClassifiedReview {
   state: ReviewCompleteness
-  /** The review with the read-check prefix removed from its summary (the nonce is never posted or stored). */
+  /** The review with the nonce redacted from every string (the nonce is never posted or stored). */
   review: ReviewResult
   /** The checklist items the reviewer could not check (`cant_tell`), in order. */
   unchecked: string[]
 }
 
+/** What a quoted nonce reads as anywhere outside the summary's prefix (review P3-5). */
+export const READ_CHECK_REDACTED = "[read-check]" as const
+
+/** `text` with every copy of the nonce replaced (an empty nonce redacts nothing). */
+function withoutNonce(text: string, nonce: string): string {
+  return nonce.length > 0 ? text.split(nonce).join(READ_CHECK_REDACTED) : text
+}
+
+/**
+ * The review with the nonce gone from EVERY string that is posted or stored (review P3-5): the summary's
+ * `read-check:` prefix is removed, and any other copy (in the summary, a checklist note, a finding's id, path, body
+ * or suggested fix) is replaced by `[read-check]`.
+ */
+export function redactReadCheck(review: ReviewResult, nonce: string): ReviewResult {
+  const summary = review.summary.trimStart()
+  const stripped = summary.startsWith(READ_CHECK_PREFIX) ? summary.replace(/^read-check:\s*\S*\s*/, "") : summary
+  return {
+    ...review,
+    summary: withoutNonce(stripped, nonce),
+    checklist: review.checklist.map((row) => ({ ...row, note: withoutNonce(row.note, nonce) })),
+    findings: review.findings.map((finding) => ({
+      ...finding,
+      id: withoutNonce(finding.id, nonce),
+      path: withoutNonce(finding.path, nonce),
+      body: withoutNonce(finding.body, nonce),
+      suggested_fix: finding.suggested_fix === null ? null : withoutNonce(finding.suggested_fix, nonce)
+    }))
+  }
+}
+
 /**
  * `blind`: the nonce is missing or wrong, OR every item is `cant_tell`; `incomplete`: the nonce is right and 1–15
- * items are `cant_tell`; `complete`: the nonce is right and none is. Any read-check prefix is stripped either way.
+ * items are `cant_tell`; `complete`: the nonce is right and none is. The nonce is redacted either way
+ * (`redactReadCheck`).
  */
 export function classifyReview(review: ReviewResult, nonce: string): ClassifiedReview {
   const summary = review.summary.trimStart()
   const quoted = nonce.length > 0 && summary.startsWith(`${READ_CHECK_PREFIX} ${nonce}`)
-  const stripped = summary.startsWith(READ_CHECK_PREFIX) ? summary.replace(/^read-check:\s*\S*\s*/, "") : summary
-  const clean: ReviewResult = { ...review, summary: stripped }
+  const clean = redactReadCheck(review, nonce)
   const unchecked = review.checklist.filter((row) => row.status === "cant_tell").map((row) => row.item)
   const everyItemUnchecked = review.checklist.length > 0 && unchecked.length === review.checklist.length
   if (!quoted || everyItemUnchecked) return { state: "blind", review: clean, unchecked }

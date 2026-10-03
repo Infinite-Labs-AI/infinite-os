@@ -180,6 +180,9 @@ export interface ScriptedAgents extends AgentRunner {
   jobCalls: RunJobsInput[]
 }
 
+/** In a scripted review, the place the reviewer quotes the read-check nonce (besides the summary's prefix). */
+export const READ_CHECK_PLACEHOLDER = "{{read-check}}"
+
 /** Agents that replay scripted reviews and run a scripted fix function (no prompt is ever spent). */
 export function scriptedAgents(options: {
   reviews?: Array<ReviewResult | ReviewFailure>
@@ -209,7 +212,10 @@ export function scriptedAgents(options: {
       } catch {
         nonce = null
       }
-      return nonce ? { ...next, summary: `read-check: ${nonce} ${next.summary}` } : next
+      if (!nonce) return next
+      // A scripted review may also quote the nonce elsewhere (a note, a finding): `{{read-check}}` is replaced by it.
+      const quoted = JSON.parse(JSON.stringify(next).split(READ_CHECK_PLACEHOLDER).join(nonce)) as ReviewResult
+      return { ...quoted, summary: `read-check: ${nonce} ${quoted.summary}` }
     },
     async runJobs(input) {
       agents.jobCalls.push(input)
