@@ -187,8 +187,12 @@ describe("R2-2 / R2-4 (live run 2): Proven live with no real visit and no receip
     // Nothing in Infinite can finish it (this run held the claim, no live address): rerun_tag, never "open Infinite".
     expect(report.columns.proven_live.pending).toBe("rerun_tag")
     const headline = verdictLine(report)
-    expect(headline).toContain("not checked live yet")
+    expect(headline).toContain("not checked live yet (nothing in Infinite can finish it")
     expect(headline).not.toMatch(/problems? left on the live site/)
+    // Even a column stamped as measured, with no pass and no problem in it, is never "no problem found".
+    const stamped = { ...report, columns: { ...report.columns, proven_live: { ...report.columns.proven_live, measuredAt: AT, pending: null } } }
+    expect(verdictLine(stamped)).toContain("not checked live yet")
+    expect(verdictLine(stamped)).not.toContain("no problem found")
     const terminal = renderTerminal(report, 120)
     const markdown = renderMarkdown(report)
     for (const text of [terminal, markdown]) {
