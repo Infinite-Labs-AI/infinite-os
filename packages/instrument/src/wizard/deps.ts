@@ -202,8 +202,10 @@ export function adoptedInitSites(root: string, appRoot: string): NonNullable<Bri
   let census: ReturnType<typeof runCensus>
   try {
     census = runCensus({ root, appRoot })
-  } catch {
-    return out
+  } catch (error) {
+    // Review P3-3: never "no adopted tags" (the brief would then give no guard as written, and the agent would escape
+    // a template literal by hand again): the census failure is the run's, named.
+    throw new Error(`the code census could not run (${error instanceof Error ? error.message.slice(0, 120) : String(error).slice(0, 120)}), so the brief cannot say where your existing tags are`)
   }
   for (const entry of census.entries) {
     if (entry.owner !== "adopted" || (entry.tool !== "ga4" && entry.tool !== "posthog" && entry.tool !== "meta")) continue

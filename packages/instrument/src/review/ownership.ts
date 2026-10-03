@@ -49,6 +49,14 @@ function insertedLines(text: string, inserted: string): [number, number] | null 
   return [first, first + body.split("\n").length - 1]
 }
 
+/** `.infinite/install.json` is there but does not parse: whose code a file is cannot be told. */
+export class InstallReceiptUnreadableError extends Error {
+  constructor(cause: unknown) {
+    super(`${INSTALL_MANIFEST_FILE} does not parse (${cause instanceof Error ? cause.message.slice(0, 80) : String(cause).slice(0, 80)}), so the wizard cannot tell Infinite's own files from yours. Restore it from git (git checkout -- .infinite/install.json), then run again.`)
+    this.name = "InstallReceiptUnreadableError"
+  }
+}
+
 /**
  * Reads the receipt and the tree. `existedAtBase(path)` = the file is in the PR's base commit (null = unknown, and
  * then the file is never called Infinite's own code: only a file the run CREATED can be Infinite's whole).
@@ -63,8 +71,10 @@ export async function wizardOwnership(
   if (text !== null) {
     try {
       receipt = JSON.parse(text) as ReceiptLike
-    } catch {
-      receipt = {}
+    } catch (error) {
+      // Review P3-3: never an empty receipt. With no receipt every Infinite file would read as the customer's, and a
+      // finding on Infinite's own code would go to the customer's agent; the run stops here, naming why.
+      throw new InstallReceiptUnreadableError(error)
     }
   }
   const managed = new Set(strings(receipt.files))

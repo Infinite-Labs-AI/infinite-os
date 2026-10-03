@@ -42,6 +42,7 @@ import { bridgeErrorCode, bridgeErrorState } from "../bridge-errors.js"
 import { gradeReasonCode, gradeWords } from "../before-column.js"
 import { buildColumn, type ColumnFact, type RowCellInput } from "../report.js"
 import { PREVIEW_REFUSED, productionMatcher, rehearsalTargets, runDesktopTest } from "../../review/rehearse.js"
+import { GhError } from "../../github/gh.js"
 import { testPageUrls } from "./rehearsal.js"
 import { readBeforeFactsFile } from "../handoff/before-facts.js"
 import { HOST_DENY_V1, normalizeHost } from "../contracts/host-deny.js"
@@ -1391,7 +1392,17 @@ async function measureAfterDeploy(
 
   // The merge's OWN deployment address (a `*.vercel.app` the guard silences), from GitHub.
   let mergePreview: PostDeployLoad = { kind: "none", reason: "not_exercised" }
-  const deploymentUrl = input.reader?.productionDeploymentUrl ? await input.reader.productionDeploymentUrl(input.mergeSha).catch(() => null) : null
+  // Review P3-3: a GitHub failure is said as a failed read, never "not exercised".
+  let deploymentUrl: string | null = null
+  if (input.reader?.productionDeploymentUrl) {
+    try {
+      deploymentUrl = await input.reader.productionDeploymentUrl(input.mergeSha)
+    } catch (error) {
+      const kind = error instanceof GhError ? error.kind : "error"
+      mergePreview = { kind: "none", reason: "read_failed", said: `the merge's own deployment address could not be read from GitHub (${kind})` }
+      ctx.emit.emit("step.sub", { step: "prove", text: `! The merge's own deployment address could not be read from GitHub (${kind}); previews are not re-checked after the deploy`, tone: "warn" })
+    }
+  }
   if (deploymentUrl && !isProd(new URL(deploymentUrl).hostname) && isDeniedHost(new URL(deploymentUrl).hostname)) {
     ctx.emit.emit("step.sub", { step: "prove", text: `Loading the merge's own address ${new URL(deploymentUrl).host} (nothing sent)…`, tone: "pending" })
     const loaded = await runDesktopTest(ctx, deps, "prove", {

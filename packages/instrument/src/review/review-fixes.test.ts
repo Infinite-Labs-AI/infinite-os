@@ -421,3 +421,12 @@ describe("W6 §3x.3 live run 3's review: Infinite's own files never go to the cu
     )
   })
 })
+
+describe("review P3-3: an install receipt that does not parse is named, never read as empty", () => {
+  it("wizardOwnership throws InstallReceiptUnreadableError instead of calling Infinite's files the customer's", async () => {
+    const { wizardOwnership: ownership, InstallReceiptUnreadableError: Unreadable } = await import("./ownership.js")
+    const fs = { readText: async () => "{ not json" } as unknown as Parameters<typeof ownership>[0]["fs"]
+    await expect(ownership({ fs }, "/repo", async () => false)).rejects.toBeInstanceOf(Unreadable)
+    await expect(ownership({ fs }, "/repo", async () => false)).rejects.toThrow(/\.infinite\/install\.json does not parse/)
+  })
+})
