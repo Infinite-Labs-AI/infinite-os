@@ -15,7 +15,10 @@ export const linkCodeOverlay: Overlay<"link-code", Record<string, never>> = {
       question: "Approve this in the Infinite app, and check the code there matches this one.",
       body: [
         `Site: ${s.bold(ctx.sanitize(payload.site.repoLabel, OVERLAY_TEXT_CAPS.label))}`,
-        `Folder: ${s.bold(ctx.sanitize(payload.site.folderLabel, OVERLAY_TEXT_CAPS.label))} (app: ${ctx.sanitize(payload.site.appRoot, OVERLAY_TEXT_CAPS.label)})`,
+        // §3y P3-9: a single-app repo's app root is "."; it is never printed.
+        payload.site.appRoot === "." || payload.site.appRoot === ""
+          ? `Folder: ${s.bold(ctx.sanitize(payload.site.folderLabel, OVERLAY_TEXT_CAPS.label))}`
+          : `Folder: ${s.bold(ctx.sanitize(payload.site.folderLabel, OVERLAY_TEXT_CAPS.label))} (app: ${ctx.sanitize(payload.site.appRoot, OVERLAY_TEXT_CAPS.label)})`,
         "",
         `   ${s.bold(s.accent(code))}`,
         "",

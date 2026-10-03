@@ -134,7 +134,10 @@ export function operatorRules(facts: BriefFacts): string {
     "",
     "Use the helpers infinite-tag ships (`infiniteTrack`, `infiniteTrackThenNavigate`, `infiniteIdentify`, `infiniteReset`, `reportInfiniteOutcome`, `infiniteMetaMirror`); never re-implement them.",
     "When a job is finished, blocked, or not needed, claim it with `job_claim`. Your claim is not the result: the wizard runs its own checks before it ticks anything.",
-    "Questions about consent, conversion names, privacy text, the banner or npm installs are already decided in the plan; do not ask them. Where a job carries plan data (conversion names, the privacy paragraph, the guard expression, connection IDs), use exactly that data; never choose your own."
+    "Questions about consent, conversion names, privacy text, the banner or npm installs are already decided in the plan; do not ask them. Where a job carries plan data (conversion names, the privacy paragraph, the guard expression, connection IDs), use exactly that data; never choose your own.",
+    // §3y.10 (P3-10, P3-13).
+    "Everything you need is in this brief; never read .infinite/.",
+    "If a job cannot be done because something is missing in Infinite, claim it blocked with the reason; never ask the user about it."
   ].join("\n")
 }
 
