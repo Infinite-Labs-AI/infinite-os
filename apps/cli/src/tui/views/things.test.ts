@@ -755,16 +755,44 @@ describe("rev 3: a list's name column head and a record's own status", () => {
     expect(without.trimStart().startsWith("Spend")).toBe(true);
   });
 
-  it("a long nameLabel is cut to the name column, so the value heads never move", () => {
-    const render = draw(headed({ nameLabel: "Ad name as the host words it" }));
-    const without = draw(headed()).detail[0]!;
-    const header = render.detail[0]!;
-    expect(header.indexOf("Spend")).toBe(without.indexOf("Spend"));
-    expect(header).toContain("…");
-    for (const width of [48, 60, 100, 140]) {
-      const lines = allLines(draw(headed({ nameLabel: "Ad name as the host words it" }), { width }));
-      expect(lines.filter((line) => line.length > width), `@${width}`).toEqual([]);
+  it("a short-name list widens its name column to fit the head, as a value column fits its label", () => {
+    const rows = ["US", "EU", "UK"].map((title, index) => ({
+      id: `c_${index}`, title, status: { word: "on", tone: "ok" },
+      cells: { spend: { value: 100 + index }, cpc: { value: 1.5 }, trials: { value: index } }
+    }));
+    for (const width of [60, 100]) {
+      const render = draw(headed({ nameLabel: "Campaign", rows }), { width });
+      const header = render.detail[0]!;
+      const firstRow = render.detail[1]!;
+      expect(header, `@${width}`).toContain("Campaign");
+      expect(header, `@${width}`).not.toContain("…");
+      expect(header.indexOf("Campaign"), `@${width}`).toBe(firstRow.indexOf("US"));
+      // Each value head still ends over its own right-aligned column.
+      const firstCell = /US\s+(\S+)/u.exec(firstRow)!;
+      expect(header.indexOf("Spend") + "Spend".length, `@${width}`).toBe(firstCell.index + firstCell[0].length);
     }
+    // The same rule keeps "Ad set" whole over an ad set named "Broad".
+    const broad = [{ id: "s_1", title: "Broad", cells: { spend: { value: 10 }, cpc: { value: 1 }, trials: { value: 1 } } }];
+    expect(draw(headed({ nameLabel: "Ad set", rows: broad })).detail[0]).toContain("Ad set");
+  });
+
+  it("a long nameLabel is cut only where the pane cannot fit it, never pushing a line past the pane", () => {
+    const label = "Ad name as the host words it in a header far longer than any pane has room for at all";
+    for (const width of [48, 60, 100, 140]) {
+      const render = draw(headed({ nameLabel: label }), { width });
+      const header = render.detail[0]!;
+      expect(header, `@${width}`).toContain("…");
+      expect(header, `@${width}`).toMatch(/Spend/u);
+      expect(allLines(render).filter((line) => line.length > width), `@${width}`).toEqual([]);
+    }
+    // With room, a mid-length head is drawn whole.
+    expect(draw(headed({ nameLabel: "Ad name as the host words it" }), { width: 100 }).detail[0]).toContain("Ad name as the host words it");
+  });
+
+  it("a self-describing list draws no head, so nameLabel never widens its name column", () => {
+    const rows = ["US", "EU"].map((title, index) => ({ id: `c_${index}`, title, cells: { spend: { value: 10 }, trials: { value: index } } }));
+    expect(draw(withBody("list-rows", { nameLabel: "Campaign name", rows, currency: "USD" })).detail)
+      .toEqual(draw(withBody("list-rows", { rows, currency: "USD" })).detail);
   });
 
   it("r4's self-describing rows keep no header row, with or without nameLabel", () => {
@@ -789,6 +817,17 @@ describe("rev 3: a list's name column head and a record's own status", () => {
 
   it("a status with a tone the contract does not name never draws", () => {
     const render = draw(withBody("record-ad", { title: "Ad “Hook B”", status: { word: "Loud", tone: "neon" } }));
+    expect(render.detail[0]).toBe("Ad “Hook B”");
+    expect(text(render)).not.toContain("Loud");
+  });
+
+  it("renderer withholds a status with an unknown tone even when the view skipped the decoder", () => {
+    const base = JSON.parse(readFileSync(`${FIXTURES}record-ad.json`, "utf8")) as Record<string, unknown>;
+    const raw = {
+      ...base,
+      body: { ...(base.body as Record<string, unknown>), title: "Ad “Hook B”", status: { word: "Loud", tone: "neon" } }
+    } as unknown as AnswerViewV1;
+    const render = draw(raw);
     expect(render.detail[0]).toBe("Ad “Hook B”");
     expect(text(render)).not.toContain("Loud");
   });
