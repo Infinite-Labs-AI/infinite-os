@@ -5,14 +5,19 @@
  * Key rule: no key may end in "token", contain "credential", or equal a host-private key.
  */
 // ---- contract body (vendored verbatim into 1bu-1; edit only in infinite-os) ----
-export const ANSWER_VIEW_CONTRACT_REVISION = 2 as const;
+export const ANSWER_VIEW_CONTRACT_REVISION = 3 as const;   // rev 3: ChangeBodyV1.target.creativeRef + .path
 export const RESULT_VIEW_CAPABILITY = "result.view.v1" as const;
 export const CONFIRM_FIELDS_CAPABILITY = "confirm.fields.v1" as const;
 export const CONFIRM_STREAM_CAPABILITY = "confirm.stream.v1" as const;
 export const APP_OPEN_CAPABILITY = "app.open.v1" as const;
 export const ANSWER_VIEW_LIMITS = {
   maxRows: 200, maxCellChars: 500, maxTextChars: 2_000, maxDocumentChars: 64_000, maxFrameBytes: 262_144,
+  // A change target's parents; rev 3. A part longer than maxTargetPathPartChars is cut to it, ending in "…";
+  // more than maxTargetPathParts parts (or any part not a string, or empty once cleaned) withholds the whole path.
+  maxTargetPathParts: 4, maxTargetPathPartChars: 120,
 } as const;
+/** rev 3: a CreativeRefV1.archiveAssetId is an archive id: letters, digits and `_ . : -`, at most 128; no '/', never a URL or path. */
+export const ARCHIVE_ASSET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 
 export const ANSWER_VIEW_KINDS = [
   "numbers", "list", "record", "document", "images", "change",
@@ -80,7 +85,7 @@ export interface ReconcileV1 { label: string; ask: string }
 
 // ── bodies ──
 /** A picture by reference only (Cmd+L's CreativeThumb reads our archive by id). Never a URL. The terminal ignores it. */
-export interface CreativeRefV1 { archiveAssetId: string }
+export interface CreativeRefV1 { archiveAssetId: string }   // an archive id (ARCHIVE_ASSET_ID_PATTERN): never a URL or path; rev 3
 /** tone "bad": the host flags this value as the one to look at ("0 trials"); renderers draw it in the warn colour. rev 2 */
 export interface CellV1 { value: number | null; reason?: ReasonV1; untrusted?: true; tone?: "bad" }      // money in MAJOR units; percent in points
 export interface TextCellV1 { text: string | null; reason?: ReasonV1; untrusted?: true; tone?: "bad" }
@@ -151,7 +156,11 @@ export interface ImagesBodyV1 {
   eta?: { startedAtMs: number; etaMs: number | null };
 }
 export interface ChangeBodyV1 {
-  target: { kind: string; id?: string; label: string };
+  target: {
+    kind: string; id?: string; label: string;
+    creativeRef?: CreativeRefV1;   // the target's picture, by archive reference (never a URL); the terminal ignores it; rev 3
+    path?: string[];               // the target's parents, outermost first (["Campaign", "Ad set"]); bounds in ANSWER_VIEW_LIMITS; rev 3
+  };
   rows: { label: string; before?: string | null; after: string | null; reason?: ReasonV1 }[]; // no `before` = "set to"
   effect?: string; warnings: string[];
   staleBefore?: { label: string; ours: string; live: string };

@@ -105,6 +105,7 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     head: headLine(view, shellCtx),
     source: sourceLine(view, shellCtx),
     detail: [
+      ...(body?.lead ?? []),
       ...explainLines(view, shellCtx),
       ...managedSummaryLines(managed, shellCtx),
       // A settled write's afterword ("Nothing ran.") follows its sentence on the next row (r4 receipts).

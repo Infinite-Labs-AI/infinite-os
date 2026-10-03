@@ -1,10 +1,14 @@
 import {
   ANSWER_VIEW_KINDS,
+  ANSWER_VIEW_LIMITS,
+  ARCHIVE_ASSET_ID_PATTERN,
   ANSWER_VIEW_STATES,
   type AnswerViewV1,
   type CreativeDraftFrameV1,
   type ToolViewFrameV1
 } from "@infinite-os/types";
+
+import { terminalText } from "./terminal-text.js";
 
 /**
  * Structural decode of the answer view contract (`@infinite-os/types`
@@ -24,6 +28,10 @@ import {
  * valid views (wave-1 adversarial review). The contract types also do not
  * enforce one level of `sections` nesting, or `legs` being required outside
  * `composite`, so kind renderers (T8) must cap recursion and check types.
+ *
+ * One body field IS cleaned here (contract revision 3): a change target's
+ * `path` and `creativeRef` (see `cleanChangeTarget`). The view is copied,
+ * never mutated, and only when the target carries either key.
  */
 const KINDS = new Set<string>(ANSWER_VIEW_KINDS);
 const STATES = new Set<string>(ANSWER_VIEW_STATES);
@@ -48,7 +56,53 @@ export function decodeAnswerView(value: unknown): AnswerViewV1 | null {
   ) {
     return null;
   }
+  if (value.kind === "change" && isRecord(value.body) && isRecord(value.body.target)) {
+    const target = value.body.target;
+    if ("path" in target || "creativeRef" in target) {
+      return { ...value, body: { ...value.body, target: cleanChangeTarget(target) } } as unknown as AnswerViewV1;
+    }
+  }
   return value as unknown as AnswerViewV1;
+}
+
+/**
+ * A change target with its revision 3 fields kept bounded, or dropped whole
+ * when malformed (never half-kept):
+ * - `path`: an array of 1 to `maxTargetPathParts` strings. Each part is
+ *   scrubbed for the TTY (escapes, controls and bidi gone, whitespace
+ *   collapsed, ends trimmed) and capped at `maxTargetPathPartChars` with `…`.
+ *   More parts, a non-string part or a part that scrubs to nothing drops the
+ *   path: a shortened path would name the wrong parents.
+ * - `creativeRef`: rebuilt from its one key, `archiveAssetId`, when that is
+ *   an archive id (the contract's `ARCHIVE_ASSET_ID_PATTERN`: no `/`, so a URL,
+ *   a data URI or a file path never passes); anything riding along is dropped.
+ */
+function cleanChangeTarget(target: Record<string, unknown>): Record<string, unknown> {
+  const { path, creativeRef, ...rest } = target;
+  const parts = cleanTargetPath(path);
+  const picture = isRecord(creativeRef) && typeof creativeRef.archiveAssetId === "string" && ARCHIVE_ASSET_ID_PATTERN.test(creativeRef.archiveAssetId)
+    ? { archiveAssetId: creativeRef.archiveAssetId }
+    : null;
+  return { ...rest, ...(picture ? { creativeRef: picture } : {}), ...(parts ? { path: parts } : {}) };
+}
+
+function cleanTargetPath(path: unknown): string[] | null {
+  if (!Array.isArray(path) || path.length === 0 || path.length > ANSWER_VIEW_LIMITS.maxTargetPathParts) {
+    return null;
+  }
+  const parts: string[] = [];
+  for (const part of path) {
+    const words = typeof part === "string" ? terminalText(part) : "";
+    if (!words) return null;
+    parts.push(capChars(words, ANSWER_VIEW_LIMITS.maxTargetPathPartChars));
+  }
+  return parts;
+}
+
+/** `text` cut to `max` characters (code points), the last one `…`, when it is longer. */
+function capChars(text: string, max: number): string {
+  const characters = Array.from(text);
+  return characters.length <= max ? text : `${characters.slice(0, Math.max(0, max - 1)).join("")}…`;
 }
 
 /** A `tool.view` progress frame, or `null` when it is not one or its view does not decode. */

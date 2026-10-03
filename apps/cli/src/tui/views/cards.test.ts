@@ -848,3 +848,54 @@ describe("job (r4 Job)", () => {
     expect(bare).toContain("⠋ Draft         4 of 7");
   });
 });
+
+// ── the target's path (contract revision 3), outside the r4 goldens ──
+
+describe("the change target's path (contract revision 3) where no golden covers it", () => {
+  const PATH = ["Spring trials", "Broad · US · 25-54"];
+  const PATH_WORDS = "Spring trials › Broad · US · 25-54";
+  const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
+  const MANAGED = {
+    kind: "operation_managed", title: "Pause this ad?", summary: "Stops its spend.",
+    confirmLabel: "Pause", dismissLabel: "Dismiss", ask: "Yes, pause it"
+  };
+  const plain = (approval: Record<string, unknown> | undefined) => decode({
+    kind: "change", tool: "propose_pause_entity", title: "Pause Hook B", state: "needs_yes",
+    provenance: { source: "Meta · ad", via: "our_db" },
+    body: { ...PAUSE_BODY, target: { kind: "ad", label: "Hook B", path: PATH } },
+    ...(approval ? { approval } : {})
+  });
+
+  for (const [name, approval] of [["an operation_managed approval", MANAGED], ["no approval", undefined]] as const) {
+    for (const cols of [60, 100, 140]) {
+      it(`a plain change (${name}) at ${cols}: the row under the bold target is the path, one dim run, nothing wider than ${cols}`, () => {
+        const lines = renderView(plain(approval), viewCtx({ width: cols })).detail;
+        const at = lines.findIndex((line) => JSON.stringify(segs(line)) === JSON.stringify([["b", "Hook B"]]));
+        expect(at).toBeGreaterThanOrEqual(0);
+        expect(segs(lines[at + 1]!)).toEqual([["dim", PATH_WORDS]]);
+        expect(lines.filter((line) => plainText(line).includes(PATH_WORDS))).toHaveLength(1);
+        for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(cols);
+      });
+    }
+  }
+
+  const cardWith = (target: Record<string, unknown>, rows: unknown[]) => decode({
+    kind: "change", tool: "propose_pause_entity", title: "Pause Hook B", state: "needs_yes",
+    provenance: { source: "Meta · ad", via: "our_db" },
+    body: { ...PAUSE_BODY, target: { ...target, path: PATH }, rows },
+    approval: { kind: "card", turnId: "turn_r4", handle: "h_pause", title: "Pause ad?", summary: null,
+      confirmLabel: "Pause", dismissLabel: "Dismiss", expiresAt: "2026-10-01T10:59:00Z" }
+  });
+
+  for (const [name, view] of [
+    ["no rows", () => cardWith({ kind: "ad", label: "Hook B" }, [])],
+    ["a pending_write target", () => cardWith({ kind: "pending_write", label: "Hook B" }, [{ label: "status", after: "PAUSED" }])]
+  ] as const) {
+    for (const cols of [60, 100, 140]) {
+      it(`a waiting card with ${name} at ${cols} draws the path exactly once`, () => {
+        const lines = approvalRender(view(), cardCtx({ width: cols })).lines.map(plainText);
+        expect(lines.join("\n").split(PATH_WORDS).length - 1).toBe(1);
+      });
+    }
+  }
+});

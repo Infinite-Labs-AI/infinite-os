@@ -39,7 +39,7 @@ import {
   paragraphIn,
   type CardTone
 } from "./card.js";
-import { changeLines, changeNotes, changeRows, labelValueLines, warningLines } from "./change.js";
+import { changeLines, changeNotes, changeRows, labelValueLines, targetPathLine, warningLines } from "./change.js";
 import { imagesLines } from "./images.js";
 import { jobLines } from "./job.js";
 import { launchLines, launchWarningLines } from "./launch.js";
@@ -218,6 +218,11 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   } else {
     const effect = viewText(approval.effect);
     const object = cardObject(view, approval, innerCtx, notes);
+    // A change's target path (contract revision 3): the card's first row, dim, under its title.
+    const path = view.kind === "change" ? targetPathLine(view.body, inner, ctx) : null;
+    if (path) {
+      top.push(path);
+    }
     if (effect) {
       top.push(...paragraphIn(effect, inner, "dim", ctx), ...(object.length ? [""] : []));
     }
@@ -810,7 +815,7 @@ function cardObject(view: AnswerViewV1, approval: Record<string, unknown>, ctx: 
       const target = isRecord(body.target) ? body.target : {};
       const changes = changeRows(body, ctx, notes);
       if (target.kind === "pending_write" || !changes.length) {
-        return rows.length ? appRows() : changeLines(view.body, ctx, notes);
+        return rows.length ? appRows() : changeLines(view.body, ctx, notes, { path: false });
       }
       return [...fieldRows(changes, ctx.width, ctx), ...changeNotes(body, ctx)];
     }
