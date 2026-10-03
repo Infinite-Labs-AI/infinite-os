@@ -473,6 +473,30 @@ function refusedReadView(step: TurnStep, views: readonly AnswerViewV1[], steps: 
   return steps.filter((other) => drewView(other, matches[0]!)).length === 1 ? matches[0] : undefined;
 }
 
+/**
+ * The words a refused call says, from its view's typed state (r4 `sending to
+ * 214 ✗ not allowed`, `pricing 3 images ✗ limit`). A frame carries no refusal
+ * code, and the transport's own words for a refusal are generic (`didn't go
+ * through`), so the state wins. Never parsed out of text.
+ */
+const REFUSAL_WORDS: Partial<Record<AnswerViewState, string>> = {
+  blocked: "not allowed",
+  hit_limit: "limit"
+};
+
+/**
+ * The one view that stands for a call: the view it drew (`viewDrawnBy`), else,
+ * for a failed call, exactly one view of its tool with exactly one call of it
+ * in the turn, so there is no doubt whose view it is.
+ */
+function viewStandingFor(step: TurnStep, views: readonly AnswerViewV1[], steps: readonly TurnStep[]): AnswerViewV1 | undefined {
+  const drawn = viewDrawnBy(step, views, steps);
+  if (drawn || step.status !== "fail") return drawn;
+  const matches = views.filter((view) => drewView(step, view));
+  if (matches.length !== 1) return undefined;
+  return steps.filter((other) => drewView(other, matches[0]!)).length === 1 ? matches[0] : undefined;
+}
+
 /** What a row that waited says while its card is being applied (r4 `pausing on Meta ⠋ running`). */
 const APPLYING_WORDS = "running";
 
@@ -564,13 +588,20 @@ function stepRowFacts(step: TurnStep, steps: readonly TurnStep[], options: Pick<
       result: status === "run" ? APPLYING_WORDS : resultCase(stateHeadFor(view).words)
     };
   }
+  const standing = viewStandingFor(step, options.views ?? [], steps);
+  const refusal = status === "fail" && standing ? REFUSAL_WORDS[standing.state] : undefined;
+  if (refusal) {
+    // A refused call says what its view's state says (`✗ not allowed`, `✗ limit`).
+    return { status, mark, tone, label: viewText(step.label), result: refusal };
+  }
   // A step still waiting says so (unless its label already does); a failed one says why in plain words.
   const result = status === "fail"
     ? plainFailureReason(said, viewText(step.label))
     : said || (status === "wait" && viewText(step.label) !== WAITING_WORDS
       // A view that asks a question waits for an answer, not for an OK (TJ-10).
       ? (view?.state === "needs_answer" ? WAITING_ANSWER_WORDS : WAITING_WORDS)
-      : "");
+      // Never a lone mark: an unknown (?) or nothing-to-change (·) row with no words of its own says its view's (`not sure it happened`, `nothing to change`).
+      : view && (status === "unk" || status === "off") ? resultCase(stateHeadFor(view).words) : "");
   return { status, mark, tone, label: viewText(step.label), result };
 }
 
