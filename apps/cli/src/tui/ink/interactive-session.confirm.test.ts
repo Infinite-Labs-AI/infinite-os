@@ -163,6 +163,8 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // The head card goes in too: a lookup it folds never takes the keys (lane review SHOULD).
     expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), headCardViewRef.current ? [headCardViewRef.current] : []) : null);");
     expect(handler).toMatch(/const refocusCardTurn = \(\) => \{\s+if \(!onCardTurn\(\)\) return;/u);
+    // The cut pane stays at its foot, on what the card became (W3L2-M2).
+    expect(handler).toContain("setViewFocus((focus) => focus ? { ...focus, paneScroll: PANE_FOOT } : focus);");
     // After the dismissed (or working) frame, after the app's receipt, and when the frame is taken off.
     expect(handler).toContain("if (working || dismissed) refocusCardTurn();");
     // T12: a streamed follow-up's views move the keys too, on the card's turn only.

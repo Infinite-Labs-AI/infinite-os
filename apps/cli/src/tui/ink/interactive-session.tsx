@@ -1694,9 +1694,8 @@ export function InkInteractiveSessionApp({
     const refocusCardTurn = () => {
       if (!onCardTurn()) return;
       const views = getTurnState().views;
-      setViewFocus(views.length
-        ? { ...viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), headCardViewRef.current ? [headCardViewRef.current] : []), paneScroll: PANE_FOOT }
-        : null);
+      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), headCardViewRef.current ? [headCardViewRef.current] : []) : null);
+      setViewFocus((focus) => focus ? { ...focus, paneScroll: PANE_FOOT } : focus);
     };
     const working = decision === "approve" && head.view?.kind === "change" && isPlainRecord(head.view.approval) ? head.view : null;
     if (working) {
