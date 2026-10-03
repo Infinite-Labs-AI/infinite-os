@@ -1468,7 +1468,8 @@ describe("cli smoke", () => {
 
     // Plain words from the tool's name, never a title-cased tool id.
     expect(getTurnState().turnTrail).toEqual(["drafting run metric query…"]);
-    expect(getTurnState().activity.at(-1)?.text).toBe("drafting run metric query");
+    // The working line says the step's words, never `drafting <tool words>` (run-2 M6).
+    expect(getTurnState().activity.at(-1)?.text).toBe("running metric query");
 
     controller.recordProgressEvent({
       type: "tool.start",

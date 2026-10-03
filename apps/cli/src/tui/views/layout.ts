@@ -96,9 +96,13 @@ export function layoutTurn(
 ): string[] {
   const total = Math.max(1, Math.floor(width));
   const all: readonly ViewRender[] = view === null ? [] : isRenderList(view) ? view : [view];
-  // Steps-only views follow the turn's other views in the details pane.
-  const renders = [...all.filter((render) => inDetailsPane(render) && !render.quiet), ...all.filter((render) => inDetailsPane(render) && render.quiet)];
-  const quietSteps = all.filter((render) => !inDetailsPane(render)).flatMap((render) => render.detail.map((line) => `  ${line}`));
+  // A steps-only view speaks only when the turn has nothing else to show
+  // (r4 view-12): beside another view or a card it prints nothing, and the
+  // Steps strip says what it read (run-2 M6: no stray `steps only`).
+  const renders = paneRenders(all);
+  const quietSteps = all.every((render) => render.quiet)
+    ? all.filter((render) => !inDetailsPane(render)).flatMap((render) => render.detail.map((line) => `  ${line}`))
+    : [];
   const rule = (line: string) => (style ? paint(line, "line", style) : line);
   const out: string[] = [];
   const panes = paneWidths(total);
@@ -392,16 +396,22 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const stepRows = stepRowLines(steps, {
     width, color: input.color, theme: input.theme, nowMs: input.nowMs, views: [...input.views, ...(input.statusViews ?? [])]
   });
-  const takesPane = drawn.some(inDetailsPane) || card.length > 0;
+  const takesPane = paneRenders([...drawn, ...card]).length > 0;
   const sideBySide = wide && takesPane;
   const answer = renderAnswerColumn(input.messages, sideBySide ? panes.left : width, input.theme, input.color);
   const compact = input.compact === true;
   const lines = layoutTurn(answer, [...drawn, ...card], stepRows, width, { color: input.color, theme: input.theme }, { split: wide, steps: withSteps, compact });
-  const detailRows = [...drawn, ...card].filter(inDetailsPane)
+  const detailRows = paneRenders([...drawn, ...card])
     .reduce((sum, render, index) => sum + (index > 0 ? 1 : 0) + viewLines(render, sideBySide ? panes.right : width, compact).length, 0);
   return {
     renders, lines, focusIndex, rows, wide: sideBySide, details: takesPane, stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length
   };
+}
+
+/** The renders the details pane draws: a quiet one only when the turn has nothing else to show. */
+function paneRenders(all: readonly ViewRender[]): ViewRender[] {
+  const quietOnly = all.every((render) => render.quiet);
+  return all.filter((render) => inDetailsPane(render) && (quietOnly || !render.quiet));
 }
 
 /** Whether a drawn view takes the details pane (every view but a quiet one without a head). */
