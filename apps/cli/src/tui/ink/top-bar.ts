@@ -164,13 +164,26 @@ export function askedSource(views: readonly Pick<AnswerViewV1, "state" | "proven
 }
 
 /** A thin rule across the width, in the `line` grey. */
-export function ruleLine(width: number, theme: Theme): string {
-  return paintSegments([["line", "─".repeat(Math.max(1, Math.floor(width)))]], theme);
+export function ruleLine(width: number, theme: Theme, mark?: RuleMark | null): string {
+  const total = Math.max(1, Math.floor(width));
+  if (!mark) {
+    return paintSegments([["line", "─".repeat(total)]], theme);
+  }
+  // The focused pane's part of the rule (live L8): heavy, in the accent, so it reads without colour too.
+  const from = Math.max(0, Math.min(total, Math.floor(mark.from)));
+  const to = Math.max(from, Math.min(total, Math.floor(mark.to)));
+  return paintSegments([["line", "─".repeat(from)], ["cyan", "━".repeat(to - from)], ["line", "─".repeat(total - to)]], theme);
+}
+
+/** The columns of the rule under the top bar that mark the pane the keys are on. */
+export interface RuleMark {
+  from: number;
+  to: number;
 }
 
 /** The top bar and the rule under it, painted at the theme's tier. */
-export function topBarLines(data: TopBarData | undefined, width: number, theme: Theme): string[] {
-  return [paintSegments(topBarSegments(data, width), theme), ruleLine(width, theme)];
+export function topBarLines(data: TopBarData | undefined, width: number, theme: Theme, mark?: RuleMark | null): string[] {
+  return [paintSegments(topBarSegments(data, width), theme), ruleLine(width, theme, mark)];
 }
 
 /** `─ Steps ─────`: the rule the Steps strip hangs from (the boot frame draws it with no steps). */

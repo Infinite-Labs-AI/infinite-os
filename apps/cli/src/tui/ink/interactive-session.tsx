@@ -92,9 +92,18 @@ import {
   type LivePageDirection
 } from "./transcript-static.js";
 import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
-import { resolveViewKey, turnAsk, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
+import {
+  answerOnlyFacts,
+  committedViewFacts,
+  resolveViewKey,
+  turnAsk,
+  viewFocusAfterTurnDone,
+  viewKeyHints,
+  type ViewFocusState,
+  type ViewKeyFacts
+} from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
-import { detailsPaneWidth, isQuestionTurn, renderCommittedTurn, renderLiveTurn, rowsBesideCard, turnMaySplit, type LiveTurnRender } from "../views/layout.js";
+import { detailsPaneWidth, isQuestionTurn, paneWidths, renderCommittedTurn, renderLiveTurn, rowsBesideCard, turnMaySplit, type LiveTurnRender } from "../views/layout.js";
 import { besideWorkingTurn, workingTurnMessages, workingTurnSteps, type InfiniteTranscriptInput } from "../app/transcript-renderer.js";
 import {
   approvalRender,
@@ -607,6 +616,13 @@ export function InkInteractiveSessionApp({
   });
   const viewFocusRef = useRef(viewFocus);
   viewFocusRef.current = viewFocus;
+  // A finished turn that went whole to scrollback (below 80 columns, or a
+  // window too short to hold its panes) keeps its view focusable until the
+  // next question (live L8): tab, then `o` still opens its place. Only the
+  // keys that need no live draw (`committedViewFacts`).
+  const [committedFocus, setCommittedFocus] = useState<{ state: ViewFocusState; facts: ViewKeyFacts } | null>(null);
+  // What the latest live turn's focused view offered when last drawn, for that commit.
+  const liveFactsRef = useRef<ViewKeyFacts | null>(null);
   // The rows the live turn was last drawn to, so the turn commits to scrollback
   // with the same document pages the user was reading.
   const liveTurnRowsRef = useRef<number | undefined>(undefined);
@@ -780,6 +796,13 @@ export function InkInteractiveSessionApp({
     // The store's listener is subscribed in an effect; a commit in the first
     // frame's layout effect (a session that opens on a tall turn) runs before it.
     setTurnState(getTurnState());
+    // Sent up for its height, the turn's view keeps the keys that need no live draw (live L8).
+    const offered = why === "overflow" && focus && focus.viewIndex >= 0 && liveFactsRef.current
+      ? committedViewFacts(liveFactsRef.current)
+      : null;
+    setCommittedFocus(offered && (offered.open || offered.watch || offered.more || offered.fixAsk || offered.copy)
+      ? { state: { ...focus!, focus: focus!.detailsFocus, engaged: false, answerFocus: false, typedAhead: "", handled: false, effect: null }, facts: offered }
+      : null);
     setViewFocus(null);
     setLiveOffset(null);
   }, [agentTitle, columns, homeCommitted, homeInventory, t]);
@@ -1089,10 +1112,16 @@ export function InkInteractiveSessionApp({
   // that works then), nothing when idle.
   const keyHintsFor = (turn: LiveTurnRender | null) => {
     // While a streamed follow-up runs the view keys rest, as during any running turn.
-    const viewHints = turn?.focused && viewFocus && !confirmKeys && inputValue.length === 0
-      && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt && !followUpRunning
-      ? viewKeyHints(viewFocus, turn.focused.facts, turn.focused.render.keys)
-      : [];
+    const quiet = !confirmKeys && inputValue.length === 0
+      && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt && !followUpRunning;
+    const facts = liveTurnFacts(turn);
+    const viewHints = !quiet
+      ? []
+      : facts && viewFocus
+        ? viewKeyHints(viewFocus, facts, turn?.focused?.render.keys ?? [])
+        : !facts && committedFocus
+          ? viewKeyHints(committedFocus.state, committedFocus.facts)
+          : [];
     const hints = headCard
       ? headCard.keys
       : confirmKeys
@@ -1103,9 +1132,6 @@ export function InkInteractiveSessionApp({
     // A follow-up running: `esc stop` first, once (D6), before any card's keys.
     return runningBarHints(hints, followUpRunning && turnStoppable);
   };
-  // The home inventory shows ONCE, on the empty home screen (no transcript yet)
-  // and only when the CLI supplied its data. The first submitted line commits it
-  // into scrollback with the first turn (`commitLatestTurn`), so it never repeats.
   const completions = useMemo(
     () => getCompletions?.(inputValue).slice(0, 6) ?? [],
     [getCompletions, inputValue]
@@ -1288,8 +1314,9 @@ export function InkInteractiveSessionApp({
       // the Steps), and PgUp pages back up through the answer.
       setLiveOffset(endsOnCard && !splitTurnRef.current ? null : 0);
       // Its views stay live and take their keys until the next line is submitted.
+      // A turn with no view keeps a focus too: its answer pane may be cut to the window (live L8).
       const views = getTurnState().views;
-      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), turnCard ? [turnCard] : []) : null);
+      setViewFocus(viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), turnCard ? [turnCard] : []));
     }
   }, [appendMessages, getAgentTitle, onSubmitLine, requestExit, turnAbort, viewCaps]);
 
@@ -1876,6 +1903,8 @@ export function InkInteractiveSessionApp({
   }, [busy, confirmsInFlight, pendingConfirmActions, pendingConnectConfirm, pendingFieldPrompt, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
 
   const submitLine = useCallback((rawLine: string) => {
+    // A new line ends the keys of the turn that went to scrollback (live L8).
+    setCommittedFocus(null);
     if (cardFieldActive) {
       // The line is the card field's value, not a message (and never history).
       commitCardFieldValue(rawLine);
@@ -2054,6 +2083,7 @@ export function InkInteractiveSessionApp({
   const compactTurn = finished && renderTurnAt !== null && pagedAtRest(false) && wholeCompactAtRest();
   const { turn: liveTurn, turnRows: liveTurnRows } = drawTurnWith(reservedRows, compactTurn);
   liveTurnRowsRef.current = liveTurnRows;
+  liveFactsRef.current = liveTurn?.focused?.facts ?? null;
   const keyHints = keyHintsFor(liveTurn);
   const keyBarRows = keyBarRowCount(keyHints, columns);
   const liveLatest = useMemo<CommittedEntry | null>(
@@ -2122,6 +2152,20 @@ export function InkInteractiveSessionApp({
   const liveLatestShown = finishedOverflow ? null : liveLatest;
   const liveTranscript = finishedOverflow ? idleTranscript : turnTranscript;
   const liveLayout = finishedOverflow ? layoutOf(null, idleTranscript) : turnLayout;
+  // The pane the keys are on, marked on the rule under the top bar (live L8):
+  // the answer pane after tab switched sides, the details pane while a view is engaged.
+  const panesNow = paneWidths(transcriptColumns(columns));
+  const markSide = viewFocus && liveTurn && !finishedOverflow && panesNow.wide && turnSplits
+    ? viewFocus.answerFocus
+      ? "answer"
+      : viewFocus.engaged && viewFocus.focus !== "composer" && liveTurn.details ? "view" : null
+    : null;
+  const ruleMark = useMemo(
+    () => markSide === "answer"
+      ? { from: 0, to: panesNow.left }
+      : markSide === "view" ? { from: panesNow.left + 3, to: panesNow.left + 3 + panesNow.right } : null,
+    [markSide, panesNow.left, panesNow.right]
+  );
   // The boot frame is r4's frame as drawn (D4), its key bar included: `tab
   // switch side`, then `/ commands`. After it the bar offers `tab switch side`
   // only while the turn on screen has details to switch to.
@@ -2137,12 +2181,18 @@ export function InkInteractiveSessionApp({
   // One key on the latest turn's views (only reached with an empty composer and
   // no card or picker open). `false` = the key goes on to the composer.
   const handleViewKey = (input: string, key: Key): boolean => {
-    if (!viewFocus || !liveTurn?.focused) {
+    const drawnFacts = liveTurnFacts(liveTurn);
+    let next: ViewFocusState;
+    if (viewFocus && drawnFacts) {
+      next = resolveViewKey(input, viewFocus, key, { ...drawnFacts, livePageNext: liveLayout.window.hiddenBelow > 0 });
+      setViewFocus(next);
+    } else if (!drawnFacts && committedFocus) {
+      // The last turn went to scrollback whole: its view still takes tab and `o` (live L8).
+      next = resolveViewKey(input, committedFocus.state, key, committedFocus.facts);
+      setCommittedFocus({ ...committedFocus, state: next });
+    } else {
       return false;
     }
-    const facts = { ...liveTurn.focused.facts, livePageNext: liveLayout.window.hiddenBelow > 0 };
-    const next = resolveViewKey(input, viewFocus, key, facts);
-    setViewFocus(next);
     if (next.effect?.type === "ask") {
       // `next` and `more` are NEW user turns, never direct tool calls and never
       // slash commands (`turnAsk` drops an ask that starts with `/`).
@@ -2211,6 +2261,7 @@ export function InkInteractiveSessionApp({
         showComposer={false}
         theme={t}
         topBar={topBarData}
+        ruleMark={ruleMark}
         transcript={liveTranscript}
         turnStartedAt={busyStartedAt}
       />
@@ -2293,6 +2344,15 @@ export function InkInteractiveSessionApp({
       <KeyBar hints={keyHints} sides={bootFrameDrawn || (Boolean(liveTurn?.details) && !finishedOverflow)} theme={t} width={columns} />
     </Box>
   );
+}
+
+/** What the latest live turn offers the keys: its focused view's facts, else its cut answer pane's (live L8). */
+function liveTurnFacts(turn: LiveTurnRender | null): ViewKeyFacts | null {
+  if (!turn) return null;
+  if (turn.focused) return turn.focused.facts;
+  return turn.answerPane
+    ? answerOnlyFacts({ above: turn.answerPane.above, below: turn.answerPane.below, page: turn.answerPane.shown })
+    : null;
 }
 
 export function appendInputHistory(

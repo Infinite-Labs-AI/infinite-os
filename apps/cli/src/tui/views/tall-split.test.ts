@@ -18,7 +18,7 @@ import type { ViewRender } from "./types.js";
 // an everyday window should see it). From 80 columns the current turn is drawn in the two
 // panes WHATEVER its height: the answer pane keeps the question and the
 // answer (while it runs, the newest lines when the answer alone is taller than
-// the room; finished, such a turn still goes whole to scrollback), the
+// the room; finished, from its top with its own more line, live L8), the
 // details pane shows the view from its top, cut to the room with a dim
 // `↓ N more · tab, then ↓` line, and after tab ↓/↑ (PgDn/PgUp) scroll it.
 // Committed to scrollback the turn is written whole, in one column, as before.
@@ -141,10 +141,11 @@ describe("a tall turn keeps the split from 80 columns", () => {
     expect(left.some((line) => line.startsWith("❯"))).toBe(false);
   });
 
-  it("finished, an answer taller than the room is drawn whole (the session sends it whole to scrollback)", () => {
+  it("finished, an answer taller than the room is held to it too, from its top, with its own more line (live L8)", () => {
     const lines = plain(renderLiveTurn({ messages: long, views: [tallList()], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps }).lines);
-    expect(lines.length).toBeGreaterThan(TURN_ROWS);
+    expect(lines.length).toBeLessThanOrEqual(TURN_ROWS);
     expect(lines[0]).toMatch(/^❯ tell me everything/u);
+    expect(lines.some((line) => /^↓ \d+ more · tab, then ↓/u.test(line.slice(0, 28).trim()))).toBe(true);
   });
 
   it("a window too short to split usefully keeps today's draw", () => {

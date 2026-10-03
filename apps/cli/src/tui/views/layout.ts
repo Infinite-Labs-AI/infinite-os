@@ -20,10 +20,13 @@
 // to them. The details pane shows the view from its top (or where ↓/↑ scrolled
 // it, after tab; j/k scroll it just enough to keep the selected row on
 // screen) and its last row says `↓ N more · tab, then ↓`; while the turn
-// runs, an answer taller than the room shows its newest lines. A short pane is
-// padded as r4's frame() pads it (16 rows, as the window allows), and a blank
-// pane row always sits over the Steps rule. Committed to scrollback the turn
-// is written whole, in one column, as before.
+// runs, an answer taller than the room shows its newest lines. FINISHED, the
+// answer pane is held the same way (live L8: a finished tall turn kept the
+// split and its keys only if it fit): it shows the question from the top (or
+// where ↓/↑ scrolled it, once tab put the keys on it) with its own `↓ N more`
+// / `↑ N above` line. A short pane is padded as r4's frame() pads it (16 rows,
+// as the window allows), and a blank pane row always sits over the Steps rule.
+// Committed to scrollback the turn is written whole, in one column, as before.
 //
 // Every line this returns fits its width: the panes are laid out to their own
 // widths first, and each line is cut to fit as a last resort.
@@ -134,11 +137,20 @@ export interface LayoutOptions {
   follow?: ViewRender;
   /**
    * The turn is still running: an answer taller than the room keeps its newest
-   * lines in the answer pane. A FINISHED answer taller than the room is not
-   * held (the answer pane cannot scroll): the turn is drawn whole, and the
-   * session sends it whole to scrollback, as any finished turn too tall to stay.
+   * lines in the answer pane.
    */
   answerTail?: boolean;
+  /**
+   * A FINISHED answer taller than the room is held to it too (live L8): the
+   * answer pane shows `answerScroll` onward with its own dim `↓ N more` /
+   * `↑ N above` line, so the turn keeps the split and its keys. Off (a card
+   * still waiting beside it): such an answer is drawn whole, as before.
+   */
+  answerCut?: boolean;
+  /** The first answer line shown when the answer pane is cut (clamped). */
+  answerScroll?: number;
+  /** The keys are on the answer pane (after tab): its more line names ↓ PgDn, not tab. */
+  answerKeys?: boolean;
 }
 
 /** r4 `frame()` pads the panes to this many rows (`while(wide&&body.length<16)`). */
@@ -160,7 +172,7 @@ function layoutTurnParts(
   width: number,
   style: { color: boolean; theme: Theme } | null,
   options: LayoutOptions
-): { lines: string[]; pane: PaneWindow | null; natural: number } {
+): { lines: string[]; pane: PaneWindow | null; answerPane: PaneWindow | null; natural: number } {
   const total = Math.max(1, Math.floor(width));
   const all: readonly ViewRender[] = view === null ? [] : isRenderList(view) ? view : [view];
   // A steps-only view speaks only when the turn has nothing else to show
@@ -178,6 +190,7 @@ function layoutTurnParts(
   // `steps: false` (a turn committed to scrollback, D1) draws no Steps strip at all.
   const strip = options.steps === false ? [] : [...steps, ...quietSteps];
   let pane: PaneWindow | null = null;
+  let answerPane: PaneWindow | null = null;
   let natural = 0;
 
   if (!renders.length) {
@@ -207,10 +220,19 @@ function layoutTurnParts(
       natural = Math.max(answer.length, details.length) + gap;
       const capacity = options.maxRows === undefined ? undefined : Math.floor(options.maxRows) - (strip.length ? strip.length + 1 : 0);
       const capped = capacity !== undefined && capacity - gap >= PANE_CAP_FLOOR
-        && (options.answerTail === true || answer.length <= capacity - gap);
+        && (options.answerTail === true || options.answerCut === true || answer.length <= capacity - gap);
       const room = capped ? capacity - gap : Number.POSITIVE_INFINITY;
-      // A tall answer keeps its newest lines (what is arriving, or the end of what it said).
-      const left = answer.length > room ? answer.slice(answer.length - room) : answer;
+      let left: readonly string[] = answer;
+      if (answer.length > room && options.answerTail !== true) {
+        // Finished (live L8): the answer pane is cut like the details pane, from its top or where ↓/↑ scrolled it.
+        const shown = room - 1;
+        const above = Math.max(0, Math.min(answer.length - shown, Math.floor(options.answerScroll ?? 0)));
+        answerPane = { above, below: answer.length - above - shown, shown };
+        left = [...answer.slice(above, above + shown), paneMoreLine(answerPane, options.answerKeys === true, style)];
+      } else if (answer.length > room) {
+        // Running: a tall answer keeps its newest lines (what is arriving).
+        left = answer.slice(answer.length - room);
+      }
       let right = details;
       if (details.length > room) {
         const shown = room - 1;
@@ -257,7 +279,7 @@ function layoutTurnParts(
     out.push(stepHeader(total, style ?? { color: false, theme: DEFAULT_THEME }), ...strip.map((line) => fitLine(line, total)));
     natural += strip.length + 1;
   }
-  return { lines: out, pane, natural };
+  return { lines: out, pane, answerPane, natural };
 }
 
 /**
@@ -418,6 +440,8 @@ export interface LiveTurnRender {
    * it shows and what is above and below. Null when the pane is whole.
    */
   pane: PaneWindow | null;
+  /** The answer pane is cut to the window (a finished split turn whose answer is taller than it). */
+  answerPane: PaneWindow | null;
 }
 
 /** The latest turn with its views, laid out for the live region: side by side from 80 columns. */
@@ -441,7 +465,7 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
     }
     drawn = next;
   }
-  const { renders, lines, focusIndex, pane } = drawn;
+  const { renders, lines, focusIndex, pane, answerPane } = drawn;
   const focusedRender = renders[focusIndex];
   return {
     lines,
@@ -450,13 +474,15 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
         render: focusedRender,
         facts: {
           ...viewKeyFacts(input.views[focusIndex], focusedRender, input.livePageNext ?? false),
-          ...(pane ? { pane: { above: pane.above, below: pane.below, page: pane.shown } } : {})
+          ...(pane ? { pane: { above: pane.above, below: pane.below, page: pane.shown } } : {}),
+          ...(answerPane ? { answerPane: { above: answerPane.above, below: answerPane.below, page: answerPane.shown } } : {})
         }
       }
       : null,
     details: drawn.details,
     paged: renders.some((render) => (render.pages ?? 0) > 1),
-    pane
+    pane,
+    answerPane
   };
 }
 
@@ -610,10 +636,18 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const sideBySide = wide && (takesPane || stepsOnly.length > 0);
   const answer = leftAnswer.length ? leftAnswer : answerAt(sideBySide ? panes.left : width);
   const compact = input.compact === true;
-  const keysOnPane = Boolean(input.focus && input.focus.engaged && input.focus.focus !== "composer");
+  const keysOnAnswer = Boolean(input.focus?.answerFocus);
+  const keysOnPane = Boolean(input.focus && input.focus.engaged && input.focus.focus !== "composer") && !keysOnAnswer;
+  // A finished answer is held to the window (live L8), except beside a card still waiting (it pages, as before).
+  const answerCut = input.running !== true && !input.details?.length;
   const laid = layoutTurnParts(answer, [...drawn, ...card, ...stepsOnly], stepRows, width, { color: input.color, theme: input.theme }, {
     split: wide, steps: withSteps, compact,
-    ...(split && frame !== undefined ? { maxRows: frame, paneScroll: input.focus?.paneScroll ?? 0, paneKeys: keysOnPane, answerTail: input.running === true } : {}),
+    ...(split && frame !== undefined
+      ? {
+        maxRows: frame, paneScroll: input.focus?.paneScroll ?? 0, paneKeys: keysOnPane, answerTail: input.running === true,
+        answerCut, answerScroll: input.focus?.answerScroll ?? 0, answerKeys: keysOnAnswer
+      }
+      : {}),
     ...(split && input.focus?.followRow && focusIndex >= 0 && !folded.has(focusIndex) && renders[focusIndex] ? { follow: renders[focusIndex] } : {})
   });
   const lines = laid.lines;
@@ -622,7 +656,7 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   return {
     renders, lines, focusIndex: folded.has(focusIndex) ? -1 : focusIndex, rows, wide: sideBySide, details: takesPane,
     stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length,
-    pane: laid.pane, natural: laid.natural
+    pane: laid.pane, answerPane: laid.answerPane, natural: laid.natural
   };
 }
 
