@@ -37,10 +37,12 @@ import {
 import { confirmErrorLines, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
 import { appOpenLines } from "../../desktop/app-open.js";
 import { confirmStreamSteps } from "../../desktop/confirm-stream.js";
+import { createFollowUpAbort, followUpNote, lineWaits, offTurnViewLines, runningBarHints, runningTurnAbort } from "./follow-up-turn.js";
 
 import { turnController } from "../app/turn-controller.js";
 import {
   clearTurnViews,
+  closeRunningSteps,
   getTurnState,
   patchTurnState,
   recordCreativeDraft,
@@ -368,10 +370,19 @@ export interface InkInteractiveSessionAppProps {
 
 /** What a streamed confirm hands the session before it resolves (T12). */
 export interface ConfirmStreamHooks {
+  /**
+   * The follow-up's own signal (P33-M2): aborted only by Esc / Ctrl-C after
+   * the receipt, so a stop ends only the follow-up, never the write.
+   */
+  signal: AbortSignal;
   /** The card's receipt (a plain confirm's answer), before the follow-up. */
   onReceipt(result: unknown): void;
   /** A view from the agent's follow-up, for the card's own turn. */
   onView(frame: ToolViewFrameV1): void;
+  /** A follow-up call's start, progress or end, for the card's turn's Steps (P33-S3). */
+  onStep(event: ChatProgressEvent): void;
+  /** A follow-up's image draft in progress (`drawing 2 of 3`), as on a normal turn (P33-S3). */
+  onCreativeDraft(frame: CreativeDraftFrameV1): void;
 }
 
 export interface InkInteractiveSessionRunOptions extends InkInteractiveSessionAppProps {
@@ -530,6 +541,11 @@ export function InkInteractiveSessionApp({
   // One turn-abort per session: each turn arms a fresh signal (Esc / Ctrl-C
   // stop it) and disarms it when the turn settles.
   const [turnAbort] = useState<TurnAbort>(() => createTurnAbort());
+  // A streamed yes's follow-up, from its receipt to its terminal frame, is the
+  // running turn (P33-M2, follow-up-turn.ts): its own stop, armed at the
+  // receipt. Esc / Ctrl-C stop the running turn first, else the follow-up.
+  const [followUpAbort] = useState(() => createFollowUpAbort());
+  const [stopAbort] = useState<TurnAbort>(() => runningTurnAbort(turnAbort, followUpAbort));
   const liveColumns = useTerminalColumns(88);
   const columns = columnsOverride ?? liveColumns;
   const liveRows = useTerminalRows();
@@ -577,6 +593,9 @@ export function InkInteractiveSessionApp({
   // Confirms sent to the app and not yet answered. They hold the queued-line drain
   // like an open card does, so the receipt lands on the turn its card came from.
   const [confirmsInFlight, setConfirmsInFlight] = useState(0);
+  // Streamed follow-ups running after their receipt, and since when (the composer's note).
+  const [followUps, setFollowUps] = useState<{ count: number; startedAt: number } | null>(null);
+  const followUpRunning = followUps !== null;
   // `?` on the head card toggles its explanation (the terminal can't hover).
   const [explainOpen, setExplainOpen] = useState(false);
   // A head card WITH an approval view keeps its own key state (views/approval.ts):
@@ -872,7 +891,10 @@ export function InkInteractiveSessionApp({
     ? (typeof busyNote === "function" ? busyNote() : busyNote)?.trim() || viewReason
     : null;
   const composerNote = [
-    busyReason ?? (busy ? formatBusyNote({ nowMs: clock, state: turnState, turnStartedAt: busyStartedAt }) : null),
+    busyReason
+      ?? (busy
+        ? formatBusyNote({ nowMs: clock, state: turnState, turnStartedAt: busyStartedAt })
+        : followUps ? followUpNote(followUps.startedAt, clock) : null),
     ...formatQueuedStatus(queuedLines)
   ].filter((part): part is string => Boolean(part)).join(" · ");
   // The head card's keys: its named OK key, `n`, and `?` (keymap.ts owns the rules).
@@ -1016,7 +1038,8 @@ export function InkInteractiveSessionApp({
     [cardPaneWidth, confirmKeys, explainOpen, headCard, headConfirmAction, t]
   );
   // The strip a tall finished turn left live (see `keptSteps`): only while no other turn runs or has calls.
-  const liveKeptSteps = !busy && !turnSteps.length ? keptSteps : null;
+  // A streamed follow-up is the card's turn still running: the kept strip stays hidden while it runs.
+  const liveKeptSteps = !busy && !followUpRunning && !turnSteps.length ? keptSteps : null;
   const renderTurnAt = useMemo(() => {
     if (!turnViews.length && !headCardLines && !liveKeptSteps) {
       return null;
@@ -1072,17 +1095,20 @@ export function InkInteractiveSessionApp({
   // bar is the composer's: `esc stop` while a stoppable turn runs (the only key
   // that works then), nothing when idle.
   const keyHintsFor = (turn: LiveTurnRender | null) => {
+    // While a streamed follow-up runs the view keys rest, as during any running turn.
     const viewHints = turn?.focused && viewFocus && !confirmKeys && inputValue.length === 0
-      && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt
+      && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt && !followUpRunning
       ? viewKeyHints(viewFocus, turn.focused.facts, turn.focused.render.keys)
       : [];
-    return headCard
+    const hints = headCard
       ? headCard.keys
       : confirmKeys
         ? keyBarHints(confirmKeys.ctx)
         : viewHints.length
           ? viewHints
           : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
+    // A follow-up running: `esc stop` first, once (D6), before any card's keys.
+    return runningBarHints(hints, followUpRunning && turnStoppable);
   };
   // The home inventory shows ONCE, on the empty home screen (no transcript yet)
   // and only when the CLI supplied its data. The first submitted line commits it
@@ -1696,21 +1722,48 @@ export function InkInteractiveSessionApp({
       if (settle(result, false)) afterReceipt(result);
     };
     // T12: after the receipt, the agent's follow-up goes on the card's own turn:
-    // its views as they come, then its answer and any card it proposed. Its
-    // error never undoes the receipt; it only adds the follow-up's words.
+    // its views, Steps and image drafts as they come, then its answer and any
+    // card it proposed. Its error never undoes the receipt; it only adds the
+    // follow-up's words. From the receipt to the end of the call the follow-up
+    // is the running turn (P33-M2): typed lines wait, the bar offers `esc stop`,
+    // and Esc / Ctrl-C abort this controller, which ends only the follow-up.
+    const followUp = new AbortController();
+    let followUpArmed = false;
+    const label = head.summary;
     const streamHooks: ConfirmStreamHooks = {
-      onReceipt: onAnswer,
+      signal: followUp.signal,
+      onReceipt: (result) => {
+        onAnswer(result);
+        if (followUpArmed) return;
+        followUpArmed = true;
+        followUpAbort.arm(followUp);
+        setFollowUps((current) => ({ count: (current?.count ?? 0) + 1, startedAt: current?.startedAt ?? Date.now() }));
+      },
       onView: (frame) => {
-        if (!onCardTurn()) return;
+        if (!onCardTurn()) {
+          // Off its turn the view still prints, labelled, under the live turn; never dropped.
+          appendMessages(offTurnViewLines(frame.view, label, transcriptColumns(columns), t)
+            .map((text) => ({ kind: "slash", role: "system", text }) as Msg));
+          return;
+        }
         recordTurnView(frame);
         refocusCardTurn();
+      },
+      // A call's row and an image draft go only on the card's own turn (another turn has its own).
+      onStep: (event) => {
+        if (onCardTurn()) turnController.recordProgressEvent(event);
+      },
+      onCreativeDraft: (frame) => {
+        if (onCardTurn()) recordCreativeDraft(frame);
       }
     };
     // When the call ends, what happens and in what order is one pure step list
     // (confirm-stream.ts `confirmStreamSteps`, unit-tested on CI): the receipt
     // settled once, then the follow-up's answer, its error words, its cards.
-    const runSteps = (end: Parameters<typeof confirmStreamSteps>[0]) => {
-      for (const step of confirmStreamSteps(end, { answered, confirmFieldsCapable: head.confirmFieldsCapable === true })) {
+    // Off the card's turn they print as lines labelled with whose follow-up they are.
+    const runSteps = (end: Parameters<typeof confirmStreamSteps>[0], stopped: boolean) => {
+      const options = { answered, confirmFieldsCapable: head.confirmFieldsCapable === true, onCardTurn: onCardTurn(), label, stopped };
+      for (const step of confirmStreamSteps(end, options)) {
         switch (step.type) {
           case "settle":
             if (step.thrown) {
@@ -1729,18 +1782,32 @@ export function InkInteractiveSessionApp({
         }
       }
     };
+    // The follow-up's end: disarm its stop, close the calls it left running on
+    // the card's turn (stopped, or no result came back), and say whether the user stopped it.
+    let followUpEnded = false;
+    const endFollowUp = (): boolean => {
+      const stopped = followUpAbort.end(followUp);
+      if (!followUpArmed || followUpEnded) return stopped;
+      followUpEnded = true;
+      if (onCardTurn()) {
+        if (stopped) closeRunningSteps("stopped", Date.now());
+        turnController.reset();
+      }
+      setFollowUps((current) => (current && current.count > 1 ? { ...current, count: current.count - 1 } : null));
+      return stopped;
+    };
     setConfirmsInFlight((count) => count + 1);
     void (async () => {
       try {
         const result = await onConfirmAction?.(head, decision, fields, streamHooks);
-        runSteps({ type: "resolved", result });
+        runSteps({ type: "resolved", result }, endFollowUp());
       } catch (error) {
-        runSteps({ type: "rejected", error });
+        runSteps({ type: "rejected", error }, endFollowUp());
       } finally {
         setConfirmsInFlight((count) => count - 1);
       }
     })();
-  }, [appendMessages, columns, onConfirmAction, pendingConfirmActions, t]);
+  }, [appendMessages, columns, followUpAbort, onConfirmAction, pendingConfirmActions, t]);
 
   // `o` (T12): ask the app to open a place (the desktop's /v1/open). Navigation
   // only: nothing is written, no browser opens, and the line says what the app did.
@@ -1832,14 +1899,15 @@ export function InkInteractiveSessionApp({
       return;
     }
 
-    if (busy) {
+    // A streamed follow-up is the running turn too: the line waits for it (P33-M2).
+    if (lineWaits({ busy, followUpRunning })) {
       queueBusyLine(line);
       return;
     }
 
     rememberInputLine(line);
     runSubmittedLine(line);
-  }, [busy, cardFieldActive, commitCardFieldValue, queueBusyLine, rememberInputLine, requestExit, runSubmittedLine]);
+  }, [busy, cardFieldActive, commitCardFieldValue, followUpRunning, queueBusyLine, rememberInputLine, requestExit, runSubmittedLine]);
 
   // The composer row shows the ACTIVE wizard field's value when a free-text field
   // is being collected: masked (bullets ×length) for secret fields, plain for the
@@ -2170,7 +2238,7 @@ export function InkInteractiveSessionApp({
       <CreativeDraftLines lines={draftLines} theme={t} width={columns} />
       {composerRuleRows ? <AnsiLine line={ruleLine(columns, t)} /> : null}
       <InkLineInput
-        busy={busy}
+        busy={busy || followUpRunning}
         completionActive={completions.length > 0}
         rowsBelow={completions.length + keyBarRows}
         cursor={inputCursor}
@@ -2214,7 +2282,7 @@ export function InkInteractiveSessionApp({
         row={composerRow}
         selectionActive={Boolean(pendingSelection)}
         theme={t}
-        turnAbort={turnAbort}
+        turnAbort={stopAbort}
         turnStoppable={turnStoppable}
         value={activeFieldComposer ? connectComposerValue : inputValue}
         valueIsMasked={Boolean(activeFieldComposer)}

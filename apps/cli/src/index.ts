@@ -47,7 +47,7 @@ import {
   type DesktopStatus
 } from "./desktop-app-client.js";
 import { desktopTopBarData } from "./desktop/status-connections.js";
-import { followUpViewFrame } from "./desktop/confirm-stream.js";
+import { followUpFrameRoute } from "./desktop/confirm-stream.js";
 import { resolveMode, type ModeDeps, type ModeIo } from "./desktop/mode-router.js";
 import {
   createDesktopSessionTurnRunner,
@@ -1816,24 +1816,34 @@ async function runDesktopInteractiveEntry(
       // Desktop that takes them; the client refuses them elsewhere.
       // A card with a view streams its confirm when the app can (confirm.stream.v1):
       // the receipt first, then the agent's follow-up, in the same turn (T12).
-      onConfirmAction: (action, decision, fields, stream) =>
-        runner.confirm({
+      // The follow-up's frames go where a normal turn's go (P33-S3): its views,
+      // its calls' Steps rows and its image drafts, on the card's turn. A
+      // streamed confirm runs on the follow-up's own signal linked to the
+      // session's (P33-M2): the session arms Esc on it only after the receipt,
+      // so a stop ends the follow-up and never the write.
+      onConfirmAction: (action, decision, fields, stream) => {
+        const streamed = stream && action.view && runner.streamCapable() ? stream : null;
+        const linked = streamed ? linkAbortSignals([turnAbort.signal, streamed.signal]) : null;
+        return runner.confirm({
           turnId: action.turnId,
           confirmationHandle: action.confirmationHandle,
           decision,
           ...(fields && Object.keys(fields).length ? { fields } : {}),
-          signal: turnAbort.signal,
-          ...(stream && action.view && runner.streamCapable()
+          signal: linked?.signal ?? turnAbort.signal,
+          ...(streamed
             ? {
                 stream: true,
-                onReceipt: (receipt) => stream.onReceipt(receipt),
+                onReceipt: (receipt) => streamed.onReceipt(receipt),
                 onProgress: (frame) => {
-                  const view = followUpViewFrame(frame);
-                  if (view) stream.onView(view);
+                  const route = followUpFrameRoute(frame);
+                  if (route?.type === "view") streamed.onView(route.frame);
+                  else if (route?.type === "draft") streamed.onCreativeDraft(route.frame);
+                  else if (route?.type === "step") streamed.onStep(route.event);
                 }
               }
             : {})
-        }),
+        }).finally(() => linked?.dispose());
+      },
       // `o` and `w` on the views follow what the app negotiated (app.open.v1);
       // `o` opens places through the app, never a browser.
       appCaps: () => runner.caps(),

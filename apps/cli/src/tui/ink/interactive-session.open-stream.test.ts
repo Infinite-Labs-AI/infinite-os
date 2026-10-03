@@ -36,21 +36,55 @@ describe("T12 wiring (CI-runnable)", () => {
 
   it("a streamed receipt settles the card once, before the follow-up; the follow-up goes on the card's turn", () => {
     const handler = source.slice(source.indexOf("const resolveConfirmAction"), source.indexOf("const openAppPlace"));
-    expect(handler).toContain("onReceipt: onAnswer,");
+    expect(handler).toMatch(/onReceipt: \(result\) => \{\s+onAnswer\(result\);/u);
     expect(handler).toContain("if (answered) return;");
     // The order of what happens when the call ends is confirm-stream.ts `confirmStreamSteps` (unit-tested there);
     // the session runs every step it returns, and each step does its one thing.
-    expect(handler).toContain("const result = await onConfirmAction?.(head, decision, fields, streamHooks);\n        runSteps({ type: \"resolved\", result });");
-    expect(handler).toMatch(/\} catch \(error\) \{\s+runSteps\(\{ type: "rejected", error \}\);/u);
-    expect(handler).toContain("for (const step of confirmStreamSteps(end, { answered, confirmFieldsCapable: head.confirmFieldsCapable === true })) {");
+    expect(handler).toContain("const result = await onConfirmAction?.(head, decision, fields, streamHooks);\n        runSteps({ type: \"resolved\", result }, endFollowUp());");
+    expect(handler).toMatch(/\} catch \(error\) \{\s+runSteps\(\{ type: "rejected", error \}, endFollowUp\(\)\);/u);
+    // P33-M2: whether the card's turn is still live goes into the steps, so an off-turn follow-up prints labelled.
+    expect(handler).toContain("const options = { answered, confirmFieldsCapable: head.confirmFieldsCapable === true, onCardTurn: onCardTurn(), label, stopped };");
+    expect(handler).toContain("for (const step of confirmStreamSteps(end, options)) {");
     expect(handler).toMatch(/case "settle":\s+if \(step\.thrown\) \{\s+if \(settle\(step\.outcome, true\) && !refusedField\(step\.outcome\)\) afterReceipt\(step\.outcome\);\s+\} else onAnswer\(step\.outcome\);\s+break;/u);
     expect(handler).toMatch(/case "message":\s+appendMessages\(\[\{ role: "assistant", text: step\.text \}\]\);\s+break;/u);
     expect(handler).toMatch(/case "lines":\s+appendLines\(step\.lines\);\s+break;/u);
     expect(handler).toMatch(/case "queue":\s+setPendingConfirmActions\(\(current\) => \[\.\.\.current, \.\.\.step\.pending\]\);\s+break;/u);
-    // The follow-up's views land only on the card's own turn.
-    expect(handler).toMatch(/onView: \(frame\) => \{\s+if \(!onCardTurn\(\)\) return;\s+recordTurnView\(frame\);/u);
+    // The follow-up's views land on the card's own turn; off it they print labelled, never dropped.
+    expect(handler).toMatch(/onView: \(frame\) => \{\s+if \(!onCardTurn\(\)\) \{\s+[^}]*offTurnViewLines\(frame\.view, label,/u);
     // The client streams only a card that carried a view, and only from an app that can.
-    expect(indexSource).toContain("...(stream && action.view && runner.streamCapable()");
+    expect(indexSource).toContain("const streamed = stream && action.view && runner.streamCapable() ? stream : null;");
+  });
+});
+
+describe("P33-M2 / S3 wiring (CI-runnable)", () => {
+  const handler = source.slice(source.indexOf("const resolveConfirmAction"), source.indexOf("const openAppPlace"));
+
+  it("the follow-up runs on its own controller, armed for Esc only once the receipt came", () => {
+    expect(handler).toContain("const followUp = new AbortController();");
+    expect(handler).toContain("signal: followUp.signal,");
+    expect(handler).toMatch(/onReceipt: \(result\) => \{\s+onAnswer\(result\);\s+if \(followUpArmed\) return;\s+followUpArmed = true;\s+followUpAbort\.arm\(followUp\);/u);
+    // Esc / Ctrl-C reach it through the composer's stop, which stops a running turn first.
+    expect(source).toContain("const [stopAbort] = useState<TurnAbort>(() => runningTurnAbort(turnAbort, followUpAbort));");
+    expect(source).toContain("turnAbort={stopAbort}");
+    expect(source).toContain("busy={busy || followUpRunning}");
+    // The confirm's signal is the follow-up's own, linked to the session's.
+    expect(indexSource).toContain("const linked = streamed ? linkAbortSignals([turnAbort.signal, streamed.signal]) : null;");
+    expect(indexSource).toContain("signal: linked?.signal ?? turnAbort.signal,");
+  });
+
+  it("typed lines wait while the follow-up runs; the bar says esc stop first; the kept strip hides", () => {
+    expect(source).toContain("if (lineWaits({ busy, followUpRunning })) {");
+    expect(source).toContain("return runningBarHints(hints, followUpRunning && turnStoppable);");
+    expect(source).toContain("const liveKeptSteps = !busy && !followUpRunning && !turnSteps.length ? keptSteps : null;");
+    expect(source).toContain(": followUps ? followUpNote(followUps.startedAt, clock) : null),");
+  });
+
+  it("the follow-up's Steps and image drafts go on the card's turn only", () => {
+    expect(handler).toMatch(/onStep: \(event\) => \{\s+if \(onCardTurn\(\)\) turnController\.recordProgressEvent\(event\);/u);
+    expect(handler).toMatch(/onCreativeDraft: \(frame\) => \{\s+if \(onCardTurn\(\)\) recordCreativeDraft\(frame\);/u);
+    expect(indexSource).toContain("const route = followUpFrameRoute(frame);");
+    expect(indexSource).toContain('else if (route?.type === "draft") streamed.onCreativeDraft(route.frame);');
+    expect(indexSource).toContain('else if (route?.type === "step") streamed.onStep(route.event);');
   });
 });
 
@@ -214,6 +248,99 @@ describe("T12 in the session (fake TTY, skipped on CI)", () => {
       await waitFor(() => lastFrame().includes("Opened in the app."), 4_000, lastFrame);
       await sendKeys(input, "/exit\r");
       await session;
+      resetTurnState();
+    }
+  );
+});
+
+describe("P33-M2 / S3 in the session (fake TTY, skipped on CI)", () => {
+  async function openCardAndReceipt(extra: { onSubmit?: (line: string) => Promise<InkInteractiveLineResult> } = {}) {
+    const follow = deferred<unknown>();
+    let hooks: ConfirmStreamHooks | undefined;
+    const submitted: string[] = [];
+    const input = ttyInput();
+    const output = ttyOutput();
+    const session = runInkInteractiveSession({
+      columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI", turnStoppable: true,
+      onConfirmAction: (_action, _decision, _fields, stream) => {
+        hooks = stream;
+        return follow.promise;
+      },
+      async onSubmitLine(line): Promise<InkInteractiveLineResult> {
+        submitted.push(line);
+        if (submitted.length === 1) return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+        return extra.onSubmit ? extra.onSubmit(line) : { messages: [{ role: "assistant", text: `SECOND-ANSWER to ${line}` }] };
+      }
+    });
+    output.columns = 100;
+    const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+    await waitFor(() => output.text().includes("Ask Infinite"));
+    await sendKeys(input, "pause it\r");
+    await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+    await sendKeys(input, "p");
+    await waitFor(() => hooks !== undefined, 4_000, lastFrame);
+    hooks!.onReceipt({ ok: true, view: RECEIPT_VIEW });
+    await waitFor(() => lastFrame().includes("Stopped spending at 10:42"), 4_000, lastFrame);
+    const keyBar = () => lastFrame().trimEnd().split("\n").at(-1) ?? "";
+    return { follow, hooks: () => hooks!, submitted, input, session, lastFrame, keyBar };
+  }
+
+  it.skipIf(process.env.CI === "true")(
+    "a line typed between the receipt and done waits; the bar says esc stop first; the answer stays on its own turn",
+    { timeout: 30_000 },
+    async () => {
+      const run = await openCardAndReceipt();
+      await waitFor(() => run.lastFrame().includes("following up"), 4_000, run.lastFrame);
+      expect(run.keyBar().trim().startsWith("esc  stop")).toBe(true);
+      await sendKeys(run.input, "how is campaign two doing\r");
+      await waitFor(() => run.lastFrame().includes('queued: "how is campaign two doing"'), 4_000, run.lastFrame);
+      expect(run.submitted).toEqual(["pause it"]);
+      run.follow.resolve({ ok: true, view: RECEIPT_VIEW, followUp: { turnId: "t2", message: "FOLLOWUP-ANSWER:\n\n- one\n- two", actionCalls: [] } });
+      await waitFor(() => run.submitted.length === 2, 4_000, run.lastFrame);
+      await waitFor(() => run.lastFrame().includes("SECOND-ANSWER to how is campaign two doing"), 4_000, run.lastFrame);
+      // The follow-up answered the card's turn, with its bullets, before the second question was asked.
+      const text = run.lastFrame();
+      expect(text.indexOf("FOLLOWUP-ANSWER") === -1 || text.indexOf("FOLLOWUP-ANSWER") < text.indexOf("❯ how is campaign two doing")).toBe(true);
+      expect(text.indexOf("SECOND-ANSWER")).toBeGreaterThan(text.indexOf("❯ how is campaign two doing"));
+      await sendKeys(run.input, "/exit\r");
+      await run.session;
+      resetTurnState();
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "Esc stops only the follow-up's own signal; the receipt stays done",
+    { timeout: 30_000 },
+    async () => {
+      const run = await openCardAndReceipt();
+      const signal = run.hooks().signal;
+      expect(signal.aborted).toBe(false);
+      await sendKeys(run.input, "\u001b");
+      await waitFor(() => signal.aborted, 4_000, run.lastFrame);
+      run.follow.resolve({ ok: true, view: RECEIPT_VIEW, followUpError: { code: "desktop_turn_detached", message: "detached" } });
+      await waitFor(() => run.lastFrame().includes("Stopped the follow-up."), 4_000, run.lastFrame);
+      expect(run.lastFrame()).toContain("Stopped spending at 10:42");
+      expect(run.lastFrame()).not.toMatch(/Not done|following up/u);
+      expect(run.keyBar()).not.toContain("esc");
+      await sendKeys(run.input, "/exit\r");
+      await run.session;
+      resetTurnState();
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "a follow-up's tool.start becomes a Steps row and its creative.draft a draft line, on the card's turn",
+    { timeout: 30_000 },
+    async () => {
+      const run = await openCardAndReceipt();
+      run.hooks().onStep({ type: "tool.start", stage: "tool", message: "", toolId: "c9", name: "list_ad_sets", context: "", words: { label: "checking the ad set" } } as never);
+      run.hooks().onCreativeDraft({ type: "creative.draft", runId: "run_9", status: "running", count: 3, format: "png", aspectRatio: "4:5", quality: "high" });
+      await waitFor(() => run.lastFrame().includes("checking the ad set"), 4_000, run.lastFrame);
+      await waitFor(() => /3 images|image/iu.test(run.lastFrame()), 4_000, run.lastFrame);
+      run.follow.resolve({ ok: true, view: RECEIPT_VIEW, followUp: { turnId: "t2", message: "Done.", actionCalls: [] } });
+      await waitFor(() => !run.lastFrame().includes("following up"), 4_000, run.lastFrame);
+      await sendKeys(run.input, "/exit\r");
+      await run.session;
       resetTurnState();
     }
   );

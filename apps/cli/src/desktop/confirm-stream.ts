@@ -155,7 +155,7 @@ export function confirmStreamSteps(
 }
 
 /** `The follow-up to “Pause ad 01”` (the card's summary, scrubbed and bounded). */
-function followUpLabel(summary: string | undefined): string {
+export function followUpLabel(summary: string | undefined): string {
   const words = boundedTerminalText(summary ?? "", MAX_LABEL_CHARS);
   return words ? `The follow-up to “${words}”` : "The follow-up to your OK";
 }
