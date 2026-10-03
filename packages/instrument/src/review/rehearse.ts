@@ -32,9 +32,16 @@ import type { TagKeys } from "../wizard/contracts/bridge.js"
 import type { RunFacts } from "./context.js"
 import { derivedInPrCells, ga4KeyEventCells, preMergeCells } from "./in-pr-cells.js"
 import { bridgeErrorCode, bridgeStopCode, sub } from "./context.js"
+import { asBridgeFailure } from "../bridge/outcomes.js"
 
 export type RehearsalUndetermined =
   | "not_vercel"
+  /** The desktop refused the preview origin: no Vercel connection in Infinite and no pending domain proof to check. */
+  | "preview_unconfirmed"
+  /** The desktop refused the preview origin: no Vercel connection, and the preview did not serve the pending proof file. */
+  | "preview_unserved"
+  /** The desktop refused the preview origin although Infinite has a Vercel connection (not that project's preview). */
+  | "preview_refused"
   | "preview_protected"
   | "no_preview"
   | "no_production_host"
@@ -113,6 +120,14 @@ export function rehearsalTargets(productionHost: string, evidenceUrls: readonly 
   return targets
 }
 
+/**
+ * Review P2-1: the desktop refuses a test whose preview origin it cannot tie to this site (1bu-1
+ * `verifyPreviewOrigins`: 400 `invalid_request` naming `rehearsal.previewOrigin` or `targets.<i>.url`). That is a
+ * refusal, never "the test window did not finish".
+ */
+export const PREVIEW_REFUSED = "preview_refused" as const
+const PREVIEW_FIELD = /^(rehearsal\.previewOrigin|targets\.\d+\.url)$/
+
 /** Polls a desktop test run to its end (the server holds each poll ≤ 25 s); cancels it on abort. */
 export async function runDesktopTest(
   ctx: WizardContext,
@@ -127,6 +142,8 @@ export async function runDesktopTest(
     if (bridgeStopCode(error) !== null) throw error
     const code = bridgeErrorCode(error)
     if (code === null) throw error
+    const field = asBridgeFailure(error)?.field
+    if (code === "invalid_request" && field !== undefined && PREVIEW_FIELD.test(field)) return { result: null, error: PREVIEW_REFUSED }
     return { result: null, error: code }
   }
 }
@@ -286,6 +303,12 @@ export async function rehearse(
 
   sub(ctx, input.step, `Loading the preview under ${facts.productionHost} (nothing sent)…`, "pending")
   const rehearsal = await runDesktopTest(ctx, deps, input.step, rehearsalRequest)
+  // P1-2: the desktop ties a preview to this site through Infinite's Vercel connection or, without one, through the
+  // pending claim's proof file the preview must serve. A refused preview is said as such (never "did not finish"),
+  // and the preview's own load (the same origin) is not asked for again.
+  if (rehearsal.error === PREVIEW_REFUSED) {
+    return empty(vercelHosting ? "preview_refused" : facts.claim?.state === "pending_proof" ? "preview_unserved" : "preview_unconfirmed", previewUrl)
+  }
   const preview = await runDesktopTest(ctx, deps, input.step, previewRequest)
   if (!rehearsal.result) return empty(rehearsal.error === "busy" ? "test_busy" : "test_error", previewUrl)
 
@@ -423,6 +446,9 @@ function finishCell(verdict: { state: CellState; reason?: Reason }, text: { pass
 
 const UNDETERMINED_REASON: Record<RehearsalUndetermined, Reason> = {
   not_vercel: "not_vercel",
+  preview_unconfirmed: "not_exercised",
+  preview_unserved: "not_exercised",
+  preview_refused: "not_exercised",
   preview_protected: "preview_protected",
   no_preview: "not_exercised",
   no_production_host: "not_exercised",
@@ -641,6 +667,9 @@ export function rehearsalLines(outcome: RehearsalOutcome): Array<{ text: string;
   if (outcome.state === "undetermined") {
     const why: Record<RehearsalUndetermined, string> = {
       not_vercel: "Rehearsal: undetermined (no Vercel preview found for this site)",
+      preview_unconfirmed: "Rehearsal: undetermined (Infinite can't confirm the preview is this site's without a Vercel connection)",
+      preview_unserved: "Rehearsal: undetermined (the preview did not serve this pull request's proof file, e.g. it is protected)",
+      preview_refused: "Rehearsal: undetermined (Infinite refused the preview: it is not this site's Vercel project)",
       preview_protected: "Rehearsal: undetermined (the preview is protected)",
       no_preview: "Rehearsal: undetermined (no preview appeared within 10 minutes)",
       no_production_host: "Rehearsal: undetermined (no production host known)",

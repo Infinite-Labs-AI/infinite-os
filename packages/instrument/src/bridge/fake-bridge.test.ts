@@ -6,10 +6,10 @@ import { join } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
 
-import { deployCanceledThenServing, loadTestRunCases, loadVerbFixtures, phaseMoveAllowed, startFakeBridge, type FakeBridge } from "../../test/wizard/fake-bridge.js"
+import { deployCanceledThenServing, fixtureResponse, loadTestRunCases, loadVerbFixtures, phaseMoveAllowed, startFakeBridge, type FakeBridge } from "../../test/wizard/fake-bridge.js"
 import type { ReportV2 } from "../wizard/contracts/report.js"
 import type { TestRunRequest } from "../wizard/contracts/test-engine.js"
-import { FAKE_BRIDGE_TOKEN } from "../wizard/contracts/bridge.js"
+import { FAKE_BRIDGE_TOKEN, type ClaimPublic } from "../wizard/contracts/bridge.js"
 import { openTagBridge } from "./client.js"
 import { readBridgeDescriptor } from "./descriptor.js"
 import { BridgeError } from "./errors.js"
@@ -202,6 +202,39 @@ describe("fake bridge refuses what D2 and C1 refuse", () => {
       const { protocolVersion: _v, requestId: _r, ...body } = testCase.request as TestRunRequest
       expect((await client.startTest(body)).state, testCase.id).toBe("queued")
     }
+  })
+
+  it("review P1-2: a preview origin the desktop cannot tie to the hosting read's Vercel project → 400 invalid_request with its field (verifyPreviewOrigins)", async () => {
+    const rehearsal = loadTestRunCases().find((candidate) => candidate.request.mode === "rehearsal")!
+    const { protocolVersion: _v, requestId: _r, ...rehearse } = structuredClone(rehearsal.request) as TestRunRequest
+    const previewSelf = requestOf("dry_live_preview_self_beacon")
+    // No Infinite Vercel connection and no pending claim: every preview is refused, before any window opens.
+    const none = await fake({ script: { hosting: { provider: "none", vercel: null } } })
+    const noneClient = await linkedClient(none)
+    await expect(noneClient.startTest(rehearse)).rejects.toMatchObject({ status: 400, code: "invalid_request", field: "rehearsal.previewOrigin" })
+    await expect(noneClient.startTest(previewSelf)).rejects.toMatchObject({ status: 400, code: "invalid_request", field: "targets.0.url" })
+    // A production-only dry_live names no preview, so it is not affected.
+    expect((await noneClient.startTest(requestOf("dry_live_all_once"))).state).toBe("queued")
+    // 1bu-1 9c7d0680bc: no Vercel connection, but a PENDING claim whose proof line the preview serves → accepted;
+    // the preview not serving it (protected, 404), or a claim that is no longer pending → refused.
+    const pendingClaim = fixtureResponse("site-claim", (row) => (row.response as { state?: string }).state === "pending_proof").claim as ClaimPublic
+    const claimed = await fake({ script: { hosting: { provider: "none", vercel: null }, claim: pendingClaim } })
+    const claimedClient = await linkedClient(claimed)
+    expect((await claimedClient.startTest(rehearse)).state).toBe("queued")
+    expect((await claimedClient.startTest(previewSelf)).state).toBe("queued")
+    claimed.script.previewServesClaimProof = false
+    await expect(claimedClient.startTest(rehearse)).rejects.toMatchObject({ status: 400, field: "rehearsal.previewOrigin" })
+    claimed.script.previewServesClaimProof = true
+    claimed.script.claim = { ...pendingClaim, state: "proven" }
+    await expect(claimedClient.startTest(rehearse)).rejects.toMatchObject({ status: 400, field: "rehearsal.previewOrigin" })
+    // Vercel connected: this project's preview is accepted; another project's, or a production alias, is refused.
+    const vercel = await fake()
+    const client = await linkedClient(vercel)
+    expect((await client.startTest(rehearse)).state).toBe("queued")
+    const other = { ...rehearse, rehearsal: { ...rehearse.rehearsal!, previewOrigin: "https://someone-else-git-x.vercel.app" } }
+    await expect(client.startTest(other)).rejects.toMatchObject({ status: 400, field: "rehearsal.previewOrigin" })
+    const alias = { ...previewSelf, targets: [{ url: "https://acme-store.vercel.app/", label: "preview_self" }] }
+    await expect(client.startTest(alias)).rejects.toMatchObject({ status: 400, field: "targets.0.url" })
   })
 
   it("ONE proof claim: a second claim (or a claim on a finished run) → 409 claimed_by_other with the state", async () => {

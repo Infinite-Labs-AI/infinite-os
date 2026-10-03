@@ -65,6 +65,8 @@ export const LINKED_SITES_MESSAGE = "The Infinite app's list of linked sites is 
 /** The §3a.2 fields a bridge failure carries (the real `BridgeError` and every test fake). */
 export interface BridgeFailureLike {
   code: string
+  /** The request field an `invalid_request` names (§3a.2 `error.field`). */
+  field?: string
   state?: string
   retryable?: boolean
   upstreamStatus?: number
@@ -73,10 +75,11 @@ export interface BridgeFailureLike {
 
 export function asBridgeFailure(error: unknown): BridgeFailureLike | null {
   if (typeof error !== "object" || error === null) return null
-  const record = error as { code?: unknown; state?: unknown; retryable?: unknown; upstreamStatus?: unknown; message?: unknown }
+  const record = error as { code?: unknown; field?: unknown; state?: unknown; retryable?: unknown; upstreamStatus?: unknown; message?: unknown }
   if (typeof record.code !== "string" || record.code.startsWith("INF_WIZ_")) return null
   return {
     code: record.code,
+    ...(typeof record.field === "string" ? { field: record.field } : {}),
     ...(typeof record.state === "string" ? { state: record.state } : {}),
     ...(typeof record.retryable === "boolean" ? { retryable: record.retryable } : {}),
     ...(typeof record.upstreamStatus === "number" ? { upstreamStatus: record.upstreamStatus } : {}),

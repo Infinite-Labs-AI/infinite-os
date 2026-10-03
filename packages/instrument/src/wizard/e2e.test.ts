@@ -33,6 +33,7 @@ import {
   makeWorld,
   mergePullRequest,
   readGhState,
+  saveGhState,
   readJsonl,
   realAgentDirs,
   runWizard,
@@ -969,7 +970,7 @@ function productionDeployment(id: number, sha: string, state: "success" | "failu
 }
 
 describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted site) reaches a PROOF", () => {
-  it("one host ask pre-filled from the repo, a site-file claim, the GitHub preview, the GitHub deploy, the proof, ONE real visit, an Infinite receipt", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
+  it("one host ask pre-filled from the repo, a site-file claim, the GitHub preview (accepted by its proof file, as the desktop does), the GitHub deploy, the proof, ONE real visit, an Infinite receipt", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
     const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor } })
     // The repo's only hint at its live address (a CNAME file); Infinite knows none.
     mkdirSync(join(w.site.repo, "public"), { recursive: true })
@@ -985,7 +986,7 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
       // Vercel deploys the merge (GitHub Deployments shows it), and the deploy serves the PR's proof file.
       const gh = readGhState(w.ghState) as unknown as { deployments: unknown[] }
       gh.deployments.push(productionDeployment(7101, sha, "success"))
-      writeFileSync(w.ghState, `${JSON.stringify(gh, null, 2)}\n`)
+      saveGhState(w.ghState, gh)
       w.bridge.script.siteFileServed = true
       return "open"
     }
@@ -1026,9 +1027,14 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
     const tagged = execFileSync("git", ["--git-dir", w.site.bare, "grep", "-l", FAKE_RESERVED_SITE_KEY, head.head], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: w.site.home } })
     expect(tagged).toMatch(/\.(tsx?|jsx?|mjs)/)
 
-    // ---- 4. the rehearsal ran from the GitHub preview (never "not on Vercel") ----
-    expect(subs.some((text) => text.includes("no Vercel preview found") || text.includes("not on Vercel"))).toBe(false)
-    expect(w.bridge.callsFor("test.start").some((call) => (call.body as { mode: string }).mode === "rehearsal")).toBe(true)
+    // ---- 4. the rehearsal ran from the GitHub preview (never "not on Vercel"). Review P1-2: with no Vercel connection
+    // the desktop accepts the preview only because it serves the pending claim's proof file (1bu-1 9c7d0680bc); the
+    // fake applies that same rule, so a preview the real app refuses cannot pass here. ----
+    expect(subs.some((text) => text.includes("no Vercel preview found") || text.includes("not on Vercel") || text.startsWith("Rehearsal: undetermined"))).toBe(false)
+    const rehearsalStart = w.bridge.callsFor("test.start").find((call) => (call.body as { mode: string }).mode === "rehearsal")!
+    expect((rehearsalStart.body as { rehearsal: { previewOrigin: string } }).rehearsal.previewOrigin).toBe("https://acme-store-git-infinite-tag-acme.vercel.app")
+    expect(rehearsalStart.status).toBe(202)
+    expect(w.bridge.callsFor("test.start").find((call) => (call.body as { targets: Array<{ label: string }> }).targets[0]?.label === "preview_self")?.status).toBe(202)
 
     // ---- 7. prove: deployed via GitHub, the host confirmed, ONE real visit, a verified Infinite receipt, proofState proven ----
     expect(subs.some((text) => text.startsWith("✓ Deployed") && text.includes("(GitHub deployment)"))).toBe(true)
@@ -1082,7 +1088,9 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
 
   it("NEGATIVE: deployed, but the proof file is not served → parked HOST_UNCONFIRMED (exit 3), NO real visit, NO proof claim", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
     // The 3-minute proof grace runs on the preload's virtual clock (E2E_FAST_CLOCK): the same deadlines, in seconds.
-    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_FAST_CLOCK: "1" } })
+    // The proof file is served nowhere (a CDN rule), so the PR's preview does not serve it either: the desktop
+    // refuses the preview (review P1-2), and the terminal says so (P2-1), never "the test window did not finish".
+    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor, previewServesClaimProof: false }, env: { E2E_FAST_CLOCK: "1" } })
     const respond = (ask: { kind: string; payload: unknown }) => {
       const payload = ask.payload as { question?: string; options?: Array<{ value: string }>; number?: number }
       if (ask.kind === "single" && payload.question?.startsWith("Which address is your live site?")) return "__type__"
@@ -1091,7 +1099,7 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
       const sha = mergePullRequest(w.site, w.ghState, payload.number!)
       const gh = readGhState(w.ghState) as unknown as { deployments: unknown[] }
       gh.deployments.push(productionDeployment(7102, sha, "success"))
-      writeFileSync(w.ghState, `${JSON.stringify(gh, null, 2)}\n`)
+      saveGhState(w.ghState, gh)
       // The deploy is live, but the proof file is NOT served (e.g. a CDN rule), so the cloud cannot confirm the host.
       w.bridge.script.siteFileOutcome = "not_served"
       return "open"
@@ -1103,6 +1111,12 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
     expect(labels).not.toContain("runs.proof-claim")
     expect(labels.some((entry) => entry.startsWith("test.start(real_visit"))).toBe(false)
     expect(labels.filter((entry) => entry === "site-prove").length).toBeGreaterThanOrEqual(2)
+    // The rehearsal was asked once, refused 400 naming the preview; its preview_self load was not asked.
+    expect(w.bridge.callsFor("test.start").filter((call) => (call.body as { mode: string }).mode === "rehearsal").map((call) => call.status)).toEqual([400])
+    expect(labels).not.toContain("test.start(dry_live:preview_self)")
+    const subs = run.ofType("step.sub").map((event) => String(event.text))
+    expect(subs.filter((text) => text.startsWith("Rehearsal:"))).toEqual(["Rehearsal: undetermined (the preview did not serve this pull request's proof file, e.g. it is protected)"])
+    expect(subs.some((text) => text.includes("the test window did not finish"))).toBe(false)
   })
 })
 

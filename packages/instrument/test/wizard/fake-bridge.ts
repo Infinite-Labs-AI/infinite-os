@@ -12,7 +12,9 @@
 // regression the real stack would catch:
 // - `test.start`: the §3h.1 mode rules (`testRequestModeErrors`: `real_visit` with `fakeClickId` / `clicks` /
 //   `spaNavigation` / `targets.length ≠ 1`, `dry_live` with clicks or the fake click id against production)
-//   → 400 `invalid_request`; a `real_visit` without the tag's granted proof claim → 409 `claimed_by_other`;
+//   → 400 `invalid_request`; a preview origin the desktop cannot tie to this site (the hosting read's Vercel
+//   project, or with no Vercel connection a pending claim's proof file it serves; review P1-2, `refusedPreviewField`)
+//   → 400 `invalid_request` with its `field`; a `real_visit` without the tag's granted proof claim → 409 `claimed_by_other`;
 // - `runs.proof-claim`: one claim (`pending|pending_desktop → proving`); any other state → 409 with `state`;
 // - `runs.patch`: `phase` only moves forward (400), `mergeSha` is set once (400), `proofState` only while
 //   `proving` (409 `claimed_by_other`; the same result again is a no-op), plus the cloud's own body rules
@@ -160,6 +162,12 @@ export interface FakeBridgeScript {
   siteFileServed: boolean
   /** What `site-prove` reports per host while the file is not served. */
   siteFileOutcome: ProveOutcome
+  /**
+   * Review P1-2: with no Vercel connection, the desktop accepts a preview origin only when it serves the pending
+   * claim's proof line (it GETs `<origin>/.well-known/infinite-site-verification.txt`). The PR carries that file, so a
+   * preview of it serves it (true); false = the preview does not (protected, a 404, another line).
+   */
+  previewServesClaimProof: boolean
 }
 
 export interface FakeBridgeCall {
@@ -249,7 +257,8 @@ function defaultScript(): FakeBridgeScript {
     storedFacts: null,
     claim: null,
     siteFileServed: false,
-    siteFileOutcome: "not_served"
+    siteFileOutcome: "not_served",
+    previewServesClaimProof: true
   }
 }
 
@@ -284,6 +293,86 @@ function productionOrSibling(productionHost: string): (host: string) => boolean 
     const candidate = normalizeHost(host)
     return candidate === apex || candidate.endsWith(`.${apex}`)
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The desktop's preview rule (review P1-2), ported from 1bu-1 `apps/desktop/src/main/analytics-tag/`:
+// `test-engine/routes.ts` `previewOriginsOf`, `tag-wizard-wiring.ts` `verifyPreviewOrigins` (+ `verifyByPendingClaim`,
+// 1bu-1 9c7d0680bc) and `isProjectPreviewOrigin`, `test-engine/rehearsal.ts` `isVercelPreviewOrigin`,
+// `test-engine/hosts.ts` `isSiblingHost`. A preview origin is accepted only when
+// - the hosting read names a Vercel project and the origin is `<projectName>-<…>.vercel.app`, not a production alias;
+// - or the hosting read is `provider:"none"` (no Vercel connection), the workspace's claim is `pending_proof` with a
+//   well-formed proof line, and every origin serves that line (`previewServesClaimProof`).
+// Anything else is 400 `invalid_request` naming the first preview's field, before any window opens. So an offline run
+// cannot pass on a preview the real app refuses.
+// ---------------------------------------------------------------------------------------------
+
+function isVercelPreviewOrigin(origin: string): boolean {
+  let url: URL
+  try {
+    url = new URL(origin)
+  } catch {
+    return false
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.port) return false
+  if (`${url.protocol}//${url.host}` !== origin.replace(/\/$/, "")) return false
+  return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.vercel\.app$/.test(url.hostname)
+}
+
+function isSiblingHost(a: string, b: string): boolean {
+  const left = normalizeHost(a).replace(/^www\./, "")
+  const right = normalizeHost(b).replace(/^www\./, "")
+  if (!left || !right) return false
+  return left === right || left.endsWith(`.${right}`) || right.endsWith(`.${left}`)
+}
+
+/** The preview origins a test request names: the rehearsal's preview, and every dry_live target off production. */
+export function previewOriginsOf(request: TestRunRequest): Array<{ origin: string; field: string }> {
+  const out: Array<{ origin: string; field: string }> = []
+  if (request.rehearsal) out.push({ origin: request.rehearsal.previewOrigin, field: "rehearsal.previewOrigin" })
+  if (request.mode === "dry_live") {
+    for (const [index, target] of request.targets.entries()) {
+      const url = new URL(target.url)
+      if (!isSiblingHost(url.hostname, request.productionHost)) out.push({ origin: url.origin, field: `targets.${index}.url` })
+    }
+  }
+  return out
+}
+
+export function isProjectPreviewOrigin(origin: string, project: { projectName: string; productionAliases: readonly string[] }): boolean {
+  if (!isVercelPreviewOrigin(origin)) return false
+  const host = new URL(origin).hostname
+  if (project.productionAliases.map((alias) => alias.toLowerCase()).includes(host)) return false
+  const name = project.projectName.trim().toLowerCase()
+  if (!/^[a-z0-9][a-z0-9._-]{0,99}$/.test(name)) return false
+  return new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-[a-z0-9-]+\\.vercel\\.app$`).test(host)
+}
+
+const PROOF_LINE = /^infinite-site-verification: isv_[A-Za-z0-9_-]{22}$/
+
+/** `verifyPreviewOrigins` over the hosting read: the field of the first refused preview, or null (all accepted / none). */
+export function refusedPreviewField(
+  request: TestRunRequest,
+  hosting: TagHosting,
+  pending: { claim: ClaimPublic | null; previewServesClaimProof: boolean } = { claim: null, previewServesClaimProof: false }
+): string | null {
+  const previews = previewOriginsOf(request)
+  if (previews.length === 0) return null
+  if (hosting.provider === "none" && hosting.vercel === null) {
+    // `verifyByPendingClaim`: the pending claim is the only proof left (every origin already passed the shape check).
+    const claim = pending.claim
+    const ok =
+      claim !== null &&
+      claim.state === "pending_proof" &&
+      PROOF_LINE.test(claim.proofBody.trim()) &&
+      previews.every((row) => isVercelPreviewOrigin(row.origin.replace(/\/$/, ""))) &&
+      pending.previewServesClaimProof
+    return ok ? null : previews[0]!.field
+  }
+  const vercel = hosting.vercel
+  if (!vercel || typeof vercel.projectName !== "string") return previews[0]!.field
+  const project = { projectName: vercel.projectName, productionAliases: Array.isArray(vercel.productionAliases) ? vercel.productionAliases : [] }
+  return previews.every((row) => isProjectPreviewOrigin(row.origin.replace(/\/$/, ""), project)) ? null : previews[0]!.field
 }
 
 function testResultFor(mode: TestMode, script: FakeBridgeScript, request: TestRunRequest | null = null): TestResult {
@@ -689,6 +778,9 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           const request = reqBody as unknown as TestRunRequest
           const modeErrors = testRequestModeErrors(request, productionOrSibling(request.productionHost))
           if (modeErrors.length > 0) return fail(res, record, requestId, "invalid_request", { message: modeErrors.join("; ") })
+          // Review P1-2: the desktop's preview rule (see `refusedPreviewField`), checked before the real-visit claim.
+          const refusedField = refusedPreviewField(request, script.hosting, { claim: script.claim, previewServesClaimProof: script.previewServesClaimProof })
+          if (refusedField !== null) return fail(res, record, requestId, "invalid_request", { field: refusedField, message: "Infinite can't confirm this preview is this site's." })
           // §3h.1: the one real visit only after the tag's granted proof claim (D2's route check).
           if (request.mode === "real_visit" && (script.run.proofState !== "proving" || script.run.proofClaimedBy !== "tag")) {
             return fail(res, record, requestId, "claimed_by_other", { state: script.run.proofState, message: "real_visit needs a granted proof claim." })
