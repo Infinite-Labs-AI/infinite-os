@@ -212,6 +212,32 @@ describe("createDesktopTurnSource", () => {
     expect(fromApp!.summaryFromTool).toBeUndefined();
   });
 
+  // Lane review (M5): a card can carry the app's line over it and its words
+  // after a no, so `n` changes the line in the same frame as the key.
+  it("keeps the app's card captions (askedCaption, dismissedCaption) only when both are words", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "queued",
+          data: { turnId: "turn-7" },
+          actionCalls: [
+            { status: "requires_confirmation", confirmationHandle: "h1", actionId: "propose_pause",
+              askedCaption: "Ready. It stops spending once you say OK.", dismissedCaption: "Okay, left it running." },
+            { status: "requires_confirmation", confirmationHandle: "h2", actionId: "propose_pause", dismissedCaption: "Okay, left it running." },
+            { status: "requires_confirmation", confirmationHandle: "h3", actionId: "propose_pause", askedCaption: 7, dismissedCaption: " " }
+          ]
+        }
+      ]
+    });
+    const r = await createDesktopTurnSource(client).runTurn("pause it", undefined, () => {}, new AbortController().signal);
+    const [both, one, neither] = r.pendingConfirmations!;
+    expect(both!.captions).toEqual({ asked: "Ready. It stops spending once you say OK.", dismissed: "Okay, left it running." });
+    expect(one!.captions).toBeUndefined();
+    expect(neither!.captions).toBeUndefined();
+  });
+
   it("derives redacted confirmation details from raw action input when none supplied", async () => {
     const client = fakeClient({
       sessionCapable: true,

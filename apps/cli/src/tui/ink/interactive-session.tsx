@@ -1578,6 +1578,15 @@ export function InkInteractiveSessionApp({
     const captionDeclined = (outcome: unknown) => {
       if (decision === "decline" && onCardTurn()) setHistory((current) => messagesAfterDecline(current, outcome));
     };
+    // A card that carries the app's captions changes the line at the key, in
+    // the dismissed card's frame (r4 flow-pause-09). A no that does not land
+    // (a failure, a thrown answer, another receipt) puts the app's line back;
+    // the receipt-time swap above then finds nothing left to change.
+    const early = decision === "decline" && dismissed && onCardTurn() ? head.captions ?? null : null;
+    if (early) setHistory((current) => messagesAfterDecline(current, { ok: true, askedCaption: early.asked, dismissedCaption: early.dismissed }));
+    const restoreCaption = () => {
+      if (early && onCardTurn()) setHistory((current) => messagesAfterDecline(current, { ok: true, askedCaption: early.dismissed, dismissedCaption: early.asked }));
+    };
     // What the app's answer does to that frame is decided by one pure step
     // (confirm-card.tsx `settleConfirmOutcome`, unit-tested on CI).
     const settle = (outcome: unknown, thrown: boolean): boolean => {
@@ -1587,6 +1596,7 @@ export function InkInteractiveSessionApp({
         recordTurnView(step.frame);
         refocusCardTurn();
         if (!thrown && step.frame.view.state === "cancelled") captionDeclined(outcome);
+        else restoreCaption();
         return false;
       }
       if (step.type === "keep") {
@@ -1594,9 +1604,10 @@ export function InkInteractiveSessionApp({
           // The app took the no and sent no receipt of its own: the dismissed card, now sent (run-3 N22).
           if (dismissed && onCardTurn()) recordTurnView(dismissalSent(dismissed));
           captionDeclined(outcome);
-        }
+        } else restoreCaption();
         return false;
       }
+      restoreCaption();
       dropWorking();
       appendLines(step.lines);
       return true;

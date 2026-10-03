@@ -139,6 +139,19 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(handler).toMatch(/if \(step\.type === "keep"\) \{\s+if \(!thrown\) \{[^}]*captionDeclined\(outcome\);/u);
   });
 
+  it("a card that carries the app's captions changes the line at the key, and puts it back when the no did not land (M5 review, CI-visible)", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction"),
+      source.indexOf("useEffect(() => {\n    // Don't drain")
+    );
+    // At the key: the swap comes before the decline is sent, with the dismissed card.
+    expect(handler).toContain("const early = decision === \"decline\" && dismissed && onCardTurn() ? head.captions ?? null : null;");
+    expect(handler.indexOf("if (early) setHistory(")).toBeGreaterThan(-1);
+    expect(handler.indexOf("if (early) setHistory(")).toBeLessThan(handler.indexOf("onConfirmAction?.(head"));
+    // Put back when the app did not take the no: a failure's lines, a thrown answer, or another receipt.
+    expect(handler.split("restoreCaption();").length - 1).toBe(3);
+  });
+
   it("the keys move to the card's frame on its turn, so the bar shows only keys that work now (run-3 N20, CI-visible)", () => {
     const handler = source.slice(
       source.indexOf("const resolveConfirmAction"),
@@ -510,6 +523,85 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
     );
   }
 
+  // Lane review (M5): with the captions on the card, the line changes in the
+  // frame `n` is pressed in, beside the dismissed card, before the app answers.
+  for (const columns of [60, 100, 140]) {
+    it.skipIf(process.env.CI === "true")(
+      `n on a card with the app's captions: Okay, left it running. in the key's frame (${columns} columns)`,
+      { timeout: 30_000 },
+      async () => {
+        const ASKED = "Ready. It stops spending once you say OK.";
+        const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
+          receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
+        const confirm = deferred<unknown>();
+        const input = ttyInput();
+        const output = ttyOutput();
+        output.columns = columns;
+        output.rows = 40;
+        const session = runInkInteractiveSession({
+          columns, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+          onConfirmAction: () => confirm.promise,
+          async onSubmitLine(): Promise<InkInteractiveLineResult> {
+            return {
+              messages: [{ role: "assistant", text: ASKED }],
+              pendingConfirmations: [{ ...CARD, captions: { asked: ASKED, dismissed: "Okay, left it running." } }]
+            };
+          }
+        });
+        const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+        await waitFor(() => output.text().includes("Ask Infinite"));
+        await sendKeys(input, "pause it\r");
+        await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+        await sendKeys(input, "n");
+        // The app has not answered: the new line and the dismissed card are in one frame.
+        await waitFor(() => lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
+        expect(lastFrame()).toContain("Okay, left it running.");
+        expect(lastFrame()).not.toContain("Ready. It stops spending");
+        confirm.resolve({ ok: true, declined: true, askedCaption: ASKED, dismissedCaption: "Okay, left it running.", view: dismissed });
+        await waitFor(() => lastFrame().includes("Sent to the app"), 4_000, lastFrame);
+        expect(lastFrame()).toContain("Okay, left it running.");
+        expect(lastFrame()).not.toContain("Ready. It stops spending");
+        await sendKeys(input, "/exit\r");
+        await session;
+        resetTurnState();
+      }
+    );
+  }
+
+  it.skipIf(process.env.CI === "true")(
+    "a no that did not land puts the app's line over the card back",
+    { timeout: 30_000 },
+    async () => {
+      const ASKED = "Ready. It stops spending once you say OK.";
+      const confirm = deferred<unknown>();
+      const input = ttyInput();
+      const output = ttyOutput();
+      const session = runInkInteractiveSession({
+        columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+        onConfirmAction: () => confirm.promise,
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          return {
+            messages: [{ role: "assistant", text: ASKED }],
+            pendingConfirmations: [{ ...CARD, captions: { asked: ASKED, dismissed: "Okay, left it running." } }]
+          };
+        }
+      });
+      output.columns = 100;
+      const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+      await sendKeys(input, "n");
+      await waitFor(() => lastFrame().includes("Okay, left it running."), 4_000, lastFrame);
+      confirm.reject(Object.assign(new Error("Desktop is not reachable."), { code: "desktop_unreachable" }));
+      await waitFor(() => lastFrame().includes("Ready. It stops spending"), 4_000, lastFrame);
+      expect(lastFrame()).not.toContain("Okay, left it running.");
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
+    }
+  );
+
   // Live re-check run 3, N22: `Sent to the app` was drawn at `n` and never
   // changed. In flight it says `Sending to the app…`; the app's answer makes it
   // `Sent to the app`, with a receipt of its own or without one.
@@ -610,8 +702,9 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
   // in flight starts a new turn that the receipt never lands on.
   function deferred<T>() {
     let resolve!: (value: T) => void;
-    const promise = new Promise<T>((done) => { resolve = done; });
-    return { promise, resolve };
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+    return { promise, resolve, reject };
   }
 
   it.skipIf(process.env.CI === "true")(
