@@ -919,7 +919,7 @@ describe("the change target's path (contract revision 3) where no golden covers 
 // state words whole; the name is cut with `…` in the head only, and the whole
 // name stays in the card.
 describe("a long name in a card's head is cut to the card (W3-ap-pause)", () => {
-  const LONG = "sample_video_long_name_for_the_head_test_dark_captions";
+  const LONG = "sample_video_long_name_for_the_head_test_alpha_bravo_x";
   const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
   const longPause = () => pause({
     title: `Pause ${LONG}`,

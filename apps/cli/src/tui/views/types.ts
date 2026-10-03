@@ -146,7 +146,7 @@ export type KindRender = Omit<ViewRender, "head" | "source" | "fixAsk" | "quiet"
   offersExplain?: boolean;
   /**
    * The words in the head's title chip, when the view's own title only repeats
-   * the state chip's (`6 of 7 days are in` beside `◐ 6 of 7 days in`); "" for
+   * the state chip's (`n of m days are in` beside `◐ n of m days in`); "" for
    * no title chip. The shell still draws the head and its state words.
    */
   headTitle?: string;

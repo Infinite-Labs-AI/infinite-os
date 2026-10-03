@@ -1186,8 +1186,8 @@ function wordSet(text: string): Set<string> {
 
 /**
  * The head's title when the view's own only repeats its state chip (W3-num-gads:
- * `6 of 7 days are in` beside `◐ 6 of 7 days in`): what the numbers are of, the
- * source (r4 flow-numbers-03 ` Google Ads since launch  ◐ Partial`), or no title
+ * `n of m days are in` beside `◐ n of m days in`): what the numbers are of, the
+ * source (r4 flow-numbers-03 names the subject in the title chip), or no title
  * at all. Undefined (the view's title stands) when there is no short, or the
  * title has words of its own.
  */

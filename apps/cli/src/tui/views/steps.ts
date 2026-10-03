@@ -474,8 +474,8 @@ function refusedReadView(step: TurnStep, views: readonly AnswerViewV1[], steps: 
 }
 
 /**
- * The words a refused call says, from its view's typed state (r4 `sending to
- * 214 ✗ not allowed`, `pricing 3 images ✗ limit`). A frame carries no refusal
+ * The words a refused call says, from its view's typed state (r4's step rows
+ * `✗ not allowed` and `✗ limit`). A frame carries no refusal
  * code, and the transport's own words for a refusal are generic (`didn't go
  * through`), so the state wins. Never parsed out of text.
  */

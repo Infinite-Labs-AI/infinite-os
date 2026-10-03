@@ -41,9 +41,9 @@ const STEP_GLYPHS: Record<string, { glyph: string; role: ItemTone }> = {
 
 /**
  * `(o) · <place>` after a fix, or just `(o)` when the place only repeats the
- * fix's own label (W3-health-sources: `Open Connections ↗  (o) · Open Connections`
- * printed the label twice). r4's `Reconnect Shopify ↗  (o) · Connections, in the
- * app` keeps its place: those words say something the label does not.
+ * fix's own label (W3-health-sources: `Open <place> ↗  (o) · Open <place>`
+ * printed the label twice). A place with words of its own (r4 view-10:
+ * `<fix> ↗  (o) · <place>, in the app`) keeps them.
  */
 function fixOpenHint(label: string, appLink: unknown): string {
   const words = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();

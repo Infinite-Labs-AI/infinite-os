@@ -107,8 +107,8 @@ describe("a step's words come from the view that stands for it (W3 r2)", () => {
   });
 
   it("the app's own result words still win for unknown and no-change rows", () => {
-    expect(rows([step({ status: "ok", result: "already paused" })], [view("read_metrics", "no_change", { kind: "change" })])[0]).toMatch(/· already paused$/u);
-    expect(rows([step({ status: "ok", result: "20 s, still running" })], [quiet("read_metrics", "outcome_unknown")])[0]).toMatch(/\? 20 s, still running$/u);
+    expect(rows([step({ status: "ok", result: "already off" })], [view("read_metrics", "no_change", { kind: "change" })])[0]).toMatch(/· already off$/u);
+    expect(rows([step({ status: "ok", result: "sample words" })], [quiet("read_metrics", "outcome_unknown")])[0]).toMatch(/\? sample words$/u);
   });
 
   it("in scrollback, blocked, limit and unknown rows keep their words", () => {
