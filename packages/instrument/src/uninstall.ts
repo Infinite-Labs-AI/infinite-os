@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, rmdirSync, rmSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, rmdirSync, rmSync } from "node:fs"
 import { dirname, join } from "node:path"
 
 import { snapshotFiles, restoreSnapshot } from "./apply.js"
@@ -12,7 +12,9 @@ import {
 import { readConversionsManifest, unmarkConversions } from "./harness/marking.js"
 import { readHarnessOutputs, removeHarnessOutputs } from "./harness/outputs.js"
 import { reverseServerLane } from "./server-lane/install.js"
-import type { UninstallResult } from "./types.js"
+import { reverseEditRecord } from "./install/edits.js"
+import { writeFileAtomic } from "./frameworks/shared.js"
+import type { InstallManifest, UninstallResult } from "./types.js"
 
 export interface UninstallInstallationOptions {
   root: string
@@ -53,6 +55,60 @@ function reverseHarness(root: string, dryRun: boolean): { removedFiles: string[]
   return { removedFiles, restoredFiles, warnings }
 }
 
+export interface ReverseEditsResult {
+  /** Files restored (or, for an edit that created the file, removed), newest record first. */
+  reversed: string[]
+  /** Files left as they are because they changed since the edit ("changed since; left as is"). */
+  leftAsIs: string[]
+  /** One founder-facing line per file left as is. */
+  warnings: string[]
+}
+
+/**
+ * §3e.6: reverse the receipt's `edits` NEWEST FIRST — they were made after the managed install, so
+ * they come off before it. Each record is reversed only while its file still hashes to the record's
+ * `afterHash`, by applying its exact `textEdits` in reverse (agent edits carry them too), and only when
+ * the result hashes to `beforeHash`; otherwise the file is left exactly as it is, with a warning.
+ * A dry run only reports what it would do.
+ */
+export function reverseRecordedEdits(root: string, manifest: Pick<InstallManifest, "edits">, dryRun: boolean): ReverseEditsResult {
+  const reversed: string[] = []
+  const leftAsIs: string[] = []
+  const warnings: string[] = []
+  const blocked = new Set<string>()
+  const pending = new Map<string, string | null>()
+  const read = (file: string): string | null => {
+    if (pending.has(file)) return pending.get(file) ?? null
+    const absolutePath = join(root, file)
+    return existsSync(absolutePath) ? readFileSync(absolutePath, "utf8") : null
+  }
+  for (const record of [...(manifest.edits ?? [])].reverse()) {
+    if (blocked.has(record.file)) continue
+    const outcome = reverseEditRecord(read(record.file), record)
+    if (!outcome.ok) {
+      // An older record of the same file can only be reversed on top of this one: stop the chain.
+      blocked.add(record.file)
+      leftAsIs.push(record.file)
+      warnings.push(
+        outcome.reason === "missing"
+          ? `${record.file}: recorded edit not reversed — the file is gone; left as is.`
+          : `${record.file}: changed since infinite-tag edited it; left as is (review it by hand).`
+      )
+      continue
+    }
+    pending.set(record.file, outcome.content)
+    if (!reversed.includes(record.file)) reversed.push(record.file)
+  }
+  if (!dryRun) {
+    for (const [file, content] of pending) {
+      const absolutePath = join(root, file)
+      if (content === null) rmSync(absolutePath, { force: true })
+      else writeFileAtomic(absolutePath, content)
+    }
+  }
+  return { reversed, leftAsIs: [...new Set(leftAsIs)], warnings }
+}
+
 export function uninstallInstallation(options: UninstallInstallationOptions): UninstallResult {
   const manifest = readInstallManifest(options.root)
   const dryRun = options.dryRun ?? false
@@ -82,21 +138,28 @@ export function uninstallInstallation(options: UninstallInstallationOptions): Un
 
   // A server-lane-only manifest (no providers) never ran the pixel adapter, so it has nothing
   // to reverse there; the lane's own reversal below is hash-gated per file.
-  const runAdapter = manifest.providers.length > 0 || !manifest.serverLane
+  // An edits-only receipt (the wizard improved adopted tags and installed nothing) has no pixel wiring either.
+  const runAdapter = manifest.providers.length > 0 || (!manifest.serverLane && (manifest.edits ?? []).length === 0)
   const adapter = getFrameworkAdapter(manifest.framework)
   if (runAdapter && !adapter?.uninstall) {
     throw new Error(`No uninstall implementation is registered for ${manifest.framework}.`)
   }
 
   const snapshot = snapshotFiles(options.root, [
-    ...manifest.files,
-    ...(manifest.serverLane?.brief ? [manifest.serverLane.brief] : []),
-    ...(manifest.serverLane?.guide ? [manifest.serverLane.guide] : []),
-    installManifestRelativePath
+    ...new Set([
+      ...manifest.files,
+      ...(manifest.serverLane?.brief ? [manifest.serverLane.brief] : []),
+      ...(manifest.serverLane?.guide ? [manifest.serverLane.guide] : []),
+      ...(manifest.edits ?? []).map((edit) => edit.file),
+      installManifestRelativePath
+    ])
   ])
 
   let frameworkResult: { removedFiles: string[]; restoredFiles: string[]; warnings: string[] }
+  let edits: ReverseEditsResult
   try {
+    // The wizard's recorded edits were made AFTER the managed install: they come off first.
+    edits = reverseRecordedEdits(options.root, manifest, dryRun)
     frameworkResult =
       runAdapter && adapter?.uninstall
         ? adapter.uninstall({
@@ -146,9 +209,10 @@ export function uninstallInstallation(options: UninstallInstallationOptions): Un
       ...(hasWiringLeftover ? frameworkResult.removedFiles : [...frameworkResult.removedFiles, installManifestRelativePath]),
       ...harness.removedFiles
     ],
-    restoredFiles: [...frameworkResult.restoredFiles, ...harness.restoredFiles],
-    warnings: [...frameworkResult.warnings, ...harness.warnings],
-    manifestPath: hasWiringLeftover ? null : manifestPath
+    restoredFiles: [...new Set([...edits.reversed, ...frameworkResult.restoredFiles, ...harness.restoredFiles])],
+    warnings: [...edits.warnings, ...frameworkResult.warnings, ...harness.warnings],
+    manifestPath: hasWiringLeftover ? null : manifestPath,
+    ...((manifest.edits ?? []).length > 0 ? { editsReversed: edits.reversed, editsLeftAsIs: edits.leftAsIs } : {})
   }
 }
 

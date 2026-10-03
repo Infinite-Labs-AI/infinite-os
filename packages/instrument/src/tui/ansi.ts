@@ -1,0 +1,318 @@
+// Contains code adapted from PostHog wizard v2.74.1, MIT, Copyright (c) 2025 PostHog (notice: packages/instrument/LICENSE).
+// ANSI primitives for the TTY UI: colour on/off (`NO_COLOR`, `FORCE_COLOR`), styles, the spinner, terminal
+// control sequences, and width-aware truncation/padding so a frame never wraps.
+//
+// Terminal sequences adapted from PostHog wizard v2.74.1 (`src/ui/tui/terminal.ts`), MIT,
+// Copyright (c) 2025 PostHog. See packages/instrument/LICENSE.
+
+export const ESC = "\x1b["
+export const SEQ = {
+  reset: "\x1b[0m",
+  enterAltScreen: "\x1b[?1049h",
+  leaveAltScreen: "\x1b[?1049l",
+  hideCursor: "\x1b[?25l",
+  showCursor: "\x1b[?25h",
+  clearScreen: "\x1b[2J",
+  cursorHome: "\x1b[H",
+  clearLine: "\x1b[2K",
+  clearToEnd: "\x1b[0J",
+  moveTo: (row: number, col = 1) => `\x1b[${row};${col}H`
+} as const
+
+/** Braille spinner frames (the design's). */
+export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const
+
+/**
+ * Colour is on when stdout is a TTY, unless `NO_COLOR` is set (any non-empty value, no-color.org) or
+ * `FORCE_COLOR` is `0`/`false`. `FORCE_COLOR` with any other value forces it on (also off a TTY).
+ */
+export function colorEnabled(env: Readonly<Record<string, string | undefined>>, isTTY: boolean): boolean {
+  const noColor = env.NO_COLOR
+  if (noColor !== undefined && noColor !== "") return false
+  const force = env.FORCE_COLOR
+  if (force !== undefined) {
+    const value = force.trim().toLowerCase()
+    if (value === "0" || value === "false") return false
+    return true
+  }
+  if (env.TERM === "dumb") return false
+  return isTTY
+}
+
+type Paint = (text: string) => string
+
+export interface Styles {
+  enabled: boolean
+  bold: Paint
+  dim: Paint
+  ok: Paint
+  warn: Paint
+  bad: Paint
+  info: Paint
+  accent: Paint
+  you: Paint
+  agent: Paint
+  infinite: Paint
+  inverse: Paint
+}
+
+const wrap = (open: string, close: string): Paint => (text) => (text ? `${ESC}${open}m${text}${ESC}${close}m` : text)
+
+export function makeStyles(enabled: boolean): Styles {
+  if (!enabled) {
+    const id: Paint = (text) => text
+    return { enabled, bold: id, dim: id, ok: id, warn: id, bad: id, info: id, accent: id, you: id, agent: id, infinite: id, inverse: id }
+  }
+  return {
+    enabled,
+    bold: wrap("1", "22"),
+    dim: wrap("2", "22"),
+    ok: wrap("32", "39"),
+    warn: wrap("33", "39"),
+    bad: wrap("31", "39"),
+    info: wrap("36", "39"),
+    accent: wrap("35", "39"),
+    you: wrap("33", "39"),
+    agent: wrap("35", "39"),
+    infinite: wrap("36", "39"),
+    inverse: wrap("7", "27")
+  }
+}
+
+// eslint-disable-next-line no-control-regex
+const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_PATTERN, "")
+}
+
+// Every escape form a terminal acts on: CSI (7- and 8-bit), OSC, DCS/SOS/PM/APC, and single-char ESC sequences.
+// eslint-disable-next-line no-control-regex
+const TERMINAL_SEQUENCE = /\x1b\[[0-?]*[ -/]*[@-~]|\x9b[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x9d[^\x07\x1b\x9c]*(?:\x07|\x9c|\x1b\\)?|\x1b[PX^_][^\x1b]*(?:\x1b\\)?|[\x90\x98\x9e\x9f][^\x9c\x1b]*(?:\x9c|\x1b\\)?|\x1b[@-Z\\-_]|\x1b[ -/][0-~]?/g
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g
+const INVISIBLE_CHARS = /[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g
+
+/**
+ * One line of the wizard's OWN rendering (the before/after table from the report builder) made safe to print
+ * WITHOUT losing its layout: escape sequences, control characters and bidi/zero-width characters are removed,
+ * a tab becomes one space, and runs of spaces are KEPT (the table's columns are padding). Capped at `max` code
+ * points. Untrusted text (agent narration, comments, page text) still goes through O3's `sanitizeUntrusted`,
+ * which collapses whitespace on purpose.
+ */
+export function layoutSafeLine(line: string, max: number): string {
+  const clean = line.replace(TERMINAL_SEQUENCE, "").replace(/\t/g, " ").replace(CONTROL_CHARS, "").replace(INVISIBLE_CHARS, "").trimEnd()
+  const points = Array.from(clean)
+  return points.length <= max ? clean : `${points.slice(0, max - 1).join("")}…`
+}
+
+function isZeroWidth(code: number): boolean {
+  return (
+    (code >= 0x0300 && code <= 0x036f) ||
+    (code >= 0x200b && code <= 0x200f) ||
+    (code >= 0xfe00 && code <= 0xfe0f) ||
+    code === 0x20e3
+  )
+}
+
+function isWide(code: number): boolean {
+  return (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe4f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x1f300 && code <= 0x1faff) ||
+    (code >= 0x20000 && code <= 0x3fffd)
+  )
+}
+
+/** Display width of a string with no ANSI sequences in it. */
+export function charsWidth(text: string): number {
+  let width = 0
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0
+    if (isZeroWidth(code)) continue
+    width += isWide(code) ? 2 : 1
+  }
+  return width
+}
+
+/** Display width, ignoring ANSI sequences. */
+export function visibleWidth(text: string): number {
+  return charsWidth(stripAnsi(text))
+}
+
+/**
+ * Cut a string (which may carry ANSI sequences) to at most `width` columns, adding `…` when it cut. Styling
+ * sequences are kept and a reset is appended after a cut so colour never bleeds.
+ */
+export function truncate(text: string, width: number): string {
+  if (width <= 0) return ""
+  if (visibleWidth(text) <= width) return text
+  const target = width - 1
+  let out = ""
+  let used = 0
+  let index = 0
+  let sawAnsi = false
+  while (index < text.length) {
+    ANSI_PATTERN.lastIndex = index
+    const match = ANSI_PATTERN.exec(text)
+    if (match && match.index === index) {
+      out += match[0]
+      sawAnsi = true
+      index += match[0].length
+      continue
+    }
+    const code = text.codePointAt(index) ?? 0
+    const char = String.fromCodePoint(code)
+    const w = isZeroWidth(code) ? 0 : isWide(code) ? 2 : 1
+    if (used + w > target) break
+    out += char
+    used += w
+    index += char.length
+  }
+  return `${out}…${sawAnsi ? SEQ.reset : ""}`
+}
+
+/** Pad (with spaces) or cut to exactly `width` columns. */
+export function fit(text: string, width: number): string {
+  const cut = truncate(text, width)
+  const pad = width - visibleWidth(cut)
+  return pad > 0 ? cut + " ".repeat(pad) : cut
+}
+
+/** Word-wrap plain text (no ANSI) to `width` columns; long words are hard-cut. */
+export function wrapText(text: string, width: number): string[] {
+  if (width <= 0) return []
+  const lines: string[] = []
+  for (const paragraph of text.split("\n")) {
+    let line = ""
+    for (const word of paragraph.split(/\s+/).filter(Boolean)) {
+      let rest = word
+      while (charsWidth(rest) > width) {
+        if (line) {
+          lines.push(line)
+          line = ""
+        }
+        let head = ""
+        for (const char of rest) {
+          if (charsWidth(head + char) > width) break
+          head += char
+        }
+        lines.push(head)
+        rest = rest.slice(head.length)
+      }
+      if (!rest) continue
+      if (!line) line = rest
+      else if (charsWidth(`${line} ${rest}`) <= width) line = `${line} ${rest}`
+      else {
+        lines.push(line)
+        line = rest
+      }
+    }
+    lines.push(line)
+  }
+  return lines
+}
+
+/** The SGR codes that close one of the styles `makeStyles` opens (22 closes bold and dim, 39 a colour, 27 inverse). */
+const SGR_CLOSERS: Record<string, (open: string) => boolean> = {
+  "22": (open) => open === "1" || open === "2",
+  "39": (open) => /^(3[0-7]|9[0-7])$/.test(open),
+  "27": (open) => open === "7"
+}
+
+/**
+ * Word-wrap text that may carry SGR styling to `width` columns. Every line after the first starts with
+ * `hangingIndent` spaces (the text lines up under the first line's text, past its marker). The styles open at a
+ * break are closed at the end of that line and re-opened on the next, so colour never bleeds into the box border.
+ * Nothing is cut: a word wider than the room is hard-split. Leading spaces of the text are kept (a marker column).
+ */
+export function wrapAnsi(text: string, width: number, hangingIndent = 0): string[] {
+  if (width <= 0) return []
+  if (visibleWidth(text) <= width) return [text]
+  const indent = Math.max(0, Math.min(hangingIndent, width - 1))
+  const lines: string[] = []
+  /** The SGR parameters open right now, in order. */
+  let open: string[] = []
+  let line = ""
+  let lineWidth = 0
+  /** Whether the current line holds anything visible besides its indent. */
+  let lineHasText = false
+  let word = ""
+  let wordWidth = 0
+  /** The style sequences inside the pending word: they change `open` only once the word is placed. */
+  let wordSequences: string[] = []
+  /** Spaces seen since the last word (kept only inside a line, and at the very start of the text). */
+  let gap = ""
+  let started = false
+
+  const reopen = () => open.map((code) => `${ESC}${code}m`).join("")
+  const breakLine = () => {
+    lines.push(open.length > 0 ? `${line}${SEQ.reset}` : line)
+    line = `${" ".repeat(indent)}${reopen()}`
+    lineWidth = indent
+    lineHasText = false
+  }
+  const track = (sequence: string) => {
+    const sgr = /^\x1b\[([0-9;]*)m$/.exec(sequence)
+    if (!sgr) return
+    for (const code of (sgr[1] || "0").split(";")) {
+      const closes = SGR_CLOSERS[code]
+      if (code === "0" || code === "") open = []
+      else if (closes) open = open.filter((candidate) => !closes(candidate))
+      else open.push(code)
+    }
+  }
+  const flushWord = () => {
+    if (!word) return
+    const gapWidth = lineHasText || !started ? gap.length : 0
+    if (lineHasText && lineWidth + gapWidth + wordWidth > width) {
+      breakLine()
+    } else if (gapWidth > 0) {
+      line += gap
+      lineWidth += gapWidth
+    }
+    line += word
+    lineWidth += wordWidth
+    if (wordWidth > 0) lineHasText = true
+    for (const sequence of wordSequences) track(sequence)
+    started = true
+    word = ""
+    wordWidth = 0
+    wordSequences = []
+    gap = ""
+  }
+
+  let index = 0
+  while (index < text.length) {
+    ANSI_PATTERN.lastIndex = index
+    const match = ANSI_PATTERN.exec(text)
+    if (match && match.index === index) {
+      // A style change travels with the word it sits in, so a break never separates them.
+      word += match[0]
+      wordSequences.push(match[0])
+      index += match[0].length
+      continue
+    }
+    const code = text.codePointAt(index) ?? 0
+    const char = String.fromCodePoint(code)
+    index += char.length
+    if (char === " " || char === "\n" || char === "\t") {
+      flushWord()
+      gap += " "
+      continue
+    }
+    const w = isZeroWidth(code) ? 0 : isWide(code) ? 2 : 1
+    // A word wider than a whole line is hard-split: what fits is placed, the rest starts the next line.
+    if (wordWidth + w > width - indent) flushWord()
+    word += char
+    wordWidth += w
+  }
+  flushWord()
+  lines.push(line)
+  return lines
+}

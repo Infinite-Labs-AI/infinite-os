@@ -1,0 +1,42 @@
+#!/usr/bin/env node
+// Fake `npm` for the wizard's offline E2E (test-only, never published). No registry, no network:
+//   npm install <pkg…>  → adds each package to package.json `dependencies` (sorted) and to the
+//                         package-lock.json root entry, as the real npm would, with a fake version;
+//   npm run <script>    → runs the package.json script with /bin/sh (the build check runs `npm run build`).
+// Every call is appended to $FAKE_NPM_RECORD when set (the build runs in a minimal env, where it is not).
+import { spawnSync } from "node:child_process"
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs"
+
+const argv = process.argv.slice(2)
+if (process.env.FAKE_NPM_RECORD) appendFileSync(process.env.FAKE_NPM_RECORD, `${JSON.stringify({ argv, cwd: process.cwd() })}\n`)
+
+const sorted = (record) => Object.fromEntries(Object.entries(record).sort(([a], [b]) => a.localeCompare(b)))
+
+if (argv[0] === "install" && argv.length > 1) {
+  const packages = argv.slice(1).filter((arg) => !arg.startsWith("-"))
+  const manifest = JSON.parse(readFileSync("package.json", "utf8"))
+  manifest.dependencies = sorted({ ...(manifest.dependencies ?? {}), ...Object.fromEntries(packages.map((name) => [name, "^1.0.0"])) })
+  writeFileSync("package.json", `${JSON.stringify(manifest, null, 2)}\n`)
+  const lock = JSON.parse(readFileSync("package-lock.json", "utf8"))
+  const root = lock.packages?.[""] ?? {}
+  root.dependencies = sorted({ ...(root.dependencies ?? {}), ...Object.fromEntries(packages.map((name) => [name, "^1.0.0"])) })
+  lock.packages = { ...lock.packages, "": root }
+  for (const name of packages) lock.packages[`node_modules/${name}`] = { version: "1.0.0", resolved: `https://registry.npmjs.org/${name}/-/fake-1.0.0.tgz`, license: "MIT" }
+  lock.packages = sorted(lock.packages)
+  writeFileSync("package-lock.json", `${JSON.stringify(lock, null, 2)}\n`)
+  process.stdout.write(`\nadded ${packages.length} package${packages.length === 1 ? "" : "s"} in 0.1s (fake npm)\n`)
+  process.exit(0)
+}
+
+if (argv[0] === "run" && argv[1]) {
+  const script = JSON.parse(readFileSync("package.json", "utf8")).scripts?.[argv[1]]
+  if (typeof script !== "string") {
+    process.stderr.write(`npm error Missing script: "${argv[1]}"\n`)
+    process.exit(1)
+  }
+  const result = spawnSync("/bin/sh", ["-c", script], { stdio: "inherit" })
+  process.exit(result.status ?? 1)
+}
+
+process.stderr.write(`fake npm: unsupported command: ${argv.join(" ")}\n`)
+process.exit(1)

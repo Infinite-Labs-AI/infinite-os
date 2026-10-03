@@ -43,7 +43,7 @@ function indexHtmlCanInject(html: string): boolean {
 /** The provider `<script>…</script>` snippets targeting index.html, assembled into the managed block. */
 function managedBlockFor(instructions: InstallInstruction[]): string {
   const providerSnippets = instructions
-    .filter((instruction) => instruction.provider && instruction.path.endsWith(INDEX_HTML))
+    .filter((instruction) => (instruction.provider || instruction.helpers) && instruction.path.endsWith(INDEX_HTML))
     .map((instruction) => instruction.snippet.trim())
     .filter((snippet) => snippet.length > 0)
   return buildManagedHtmlBlock(providerSnippets)

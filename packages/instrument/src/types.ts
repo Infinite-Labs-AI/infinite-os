@@ -1,3 +1,5 @@
+import type { InstallManifestIds, WizardEditRecord } from "./wizard/contracts/jobs.js"
+
 export const packageManagers = ["pnpm", "npm", "yarn", "bun"] as const
 export type PackageManager = (typeof packageManagers)[number]
 
@@ -45,8 +47,42 @@ export interface UnmanagedProvider {
   file: string
 }
 
-/** A requested provider that already existed in the repo and was left byte-for-byte alone. */
-export type AdoptedProvider = UnmanagedProvider
+/**
+ * A requested provider that already existed in the repo and was left byte-for-byte alone. `improve`
+ * (decision 4, the wizard only) lists the in-place improvements proposed for it; each is a plan line
+ * the user approves, and an unapproved line changes nothing. Absent = adopted byte-for-byte.
+ */
+export type AdoptedProvider = UnmanagedProvider & { improve?: ImproveLine[] }
+
+/** The plan-line kinds an improvement to an ADOPTED provider can carry (each is "never" under --yes). */
+export type ImproveLineKind =
+  | "improve_additive"
+  | "remove_duplicate"
+  | "preview_guard_adopted"
+  | "autoconfig_off_adopted"
+  | "sensitive_pages"
+  | "posthog_defaults_bump_adopted"
+  | "capture_beside_adopted_pixel"
+  | "retire_fbc_writer"
+
+/**
+ * One proposed improvement to an adopted provider. `owner: "code"` = the wizard makes a deterministic,
+ * recorded, reversible edit (a vercel.json rewrite, the capture-only block, the autoConfig literal);
+ * `owner: "agent"` = an agent job seeded only behind the approved line (`jobIds`).
+ */
+export interface ImproveLine {
+  /** The plan line id this improvement is shown as. */
+  id: string
+  kind: ImproveLineKind
+  provider: ProviderId
+  /** Short target name (`proxy`, `history_change`, `capture`, `autoconfig`, …). */
+  target: string
+  text: string
+  owner: "code" | "agent"
+  /** Where the adopted code lives (app-root-relative), when known. */
+  evidence: { file: string; line: number } | null
+  jobIds?: string[]
+}
 
 export interface PackageManagerDetection {
   kind: PackageManagerDetectionKind
@@ -67,9 +103,11 @@ export interface PackageManagerCommands {
  * or undefined when it is not statically determinable (rendered as "not detected"). This is
  * read-only reporting — inspect never changes the founder's config.
  */
-export interface PosthogConfigSummary {
+export interface PosthogInitConfig {
   /** App-root-relative file the PostHog init was read from. */
   file: string
+  /** 1-based line of the init call (1 when the file has evidence but no readable init). */
+  line: number
   autocapture?: string
   disableSessionRecording?: string
   capturePageview?: string
@@ -77,6 +115,13 @@ export interface PosthogConfigSummary {
   persistence?: string
   apiHost?: string
   uiHost?: string
+  /** PostHog's `defaults` bundle date (e.g. `2025-05-24`), as written. */
+  defaults?: string
+}
+
+/** The FIRST PostHog init's options (as before), plus every init found (`inits`). */
+export interface PosthogConfigSummary extends PosthogInitConfig {
+  inits: PosthogInitConfig[]
 }
 
 export interface InspectResult {
@@ -113,6 +158,8 @@ export interface InstallPlan {
   adopted: AdoptedProvider[]
   /** Present when the plan was made with `--server-lane`. */
   serverLane?: ServerLanePlan
+  /** The wizard only: the user's own config(s) the managed rewrites still have to be added to (an agent job). */
+  deferredConfigRewrites?: DeferredConfigRewrite[]
 }
 
 /**
@@ -149,6 +196,10 @@ export interface UninstallResult {
   restoredFiles: string[]
   warnings: string[]
   manifestPath: string | null
+  /** Receipt edits reversed this run (repo-root-relative files), newest first. */
+  editsReversed?: string[]
+  /** Receipt edits NOT reversed because the file changed since ("changed since; left as is"). */
+  editsLeftAsIs?: string[]
 }
 
 export interface VerifyResult {
@@ -224,6 +275,12 @@ export interface InfiniteHandoffContext {
 export interface MetaPublicArtifact {
   pixelId: string
   /**
+   * ADOPTED pixel: emit only the managed `_fbc` landing capture (no pixel bootstrap) beside the pixel the
+   * site already has. Set by an approved plan line (wf5-PORT-PLAN row 5); `pixelId` names the adopted
+   * pixel. Absent = a full managed install.
+   */
+  captureOnly?: boolean
+  /**
    * `--meta-advanced-matching on|off`. ABSENT = OFF, and only an explicit `true` installs it.
    *
    * Manual Advanced Matching: the page defines `window.infiniteMetaAdvancedMatch`, which the
@@ -259,6 +316,20 @@ export interface PosthogPublicArtifact {
   uiHost?: string
   /** When present, the framework adapter injects the reverse-proxy rewrites. */
   proxy?: PosthogProxySpec
+  /**
+   * PostHog's `defaults` bundle. ABSENT = keep what the site's managed PostHog already carries (read from
+   * the managed files the previous manifest lists; "2025-05-24" for every install made before 0.12), or
+   * "2026-01-30" on a fresh install (infinite.fast's value). Moving an existing install to a new bundle
+   * changes what is measured, so it happens only when this is set explicitly (an approved plan line), and
+   * the plan then says "measurement changed".
+   */
+  defaults?: "2025-05-24" | "2026-01-30"
+  /**
+   * Decision 17: pages where session replay and autocapture are OFF (`disable_session_recording: true`,
+   * `autocapture: false` at init), from an approved plan line. Root-relative paths; a trailing slash is
+   * ignored. Absent or empty = PostHog's own defaults everywhere.
+   */
+  sensitivePaths?: string[]
 }
 
 export interface XPublicArtifact {
@@ -267,14 +338,26 @@ export interface XPublicArtifact {
 }
 
 export interface WorkspaceInstallArtifacts {
-  /** Explicit host allowlist for the shared browser runtime (Infinite collection only — the
-   *  runtime never forwards into GA4/PostHog since 0.6.0; those providers install natively). */
+  /** Explicit host allowlist for the shared browser runtime (Infinite collection only — the runtime
+   *  forwards nothing into GA4/PostHog; those providers install natively, and the site's own code
+   *  reaches them through the managed helpers). */
   productionHosts?: string[]
   infinite?: InfinitePublicArtifact
   ga4?: Ga4PublicArtifact
   posthog?: PosthogPublicArtifact
   x?: XPublicArtifact
   meta?: MetaPublicArtifact
+  /**
+   * The preview guard (decision 3; decision 8 for Meta) around the managed GA4, PostHog and Meta
+   * bootstraps (`src/host-guard.ts`). `exempt` = the production hosts that always fire; `deny` = extra
+   * preview hosts on top of `contracts/host-deny-v1.json`. Absent = no guard (the plain installer).
+   */
+  hostGuard?: { mode: "deny"; exempt: string[]; deny: string[] }
+  /**
+   * The managed conversion helpers (decisions 9 and 13, `src/conversions/`). Only an explicit
+   * `helpers: true` emits them. Absent = none (the plain installer's bytes are unchanged).
+   */
+  conversions?: { helpers: boolean }
 }
 
 export interface InstallManifest {
@@ -294,6 +377,15 @@ export interface InstallManifest {
    * file actually contains the wiring, not merely because it was recorded here.
    */
   requiresManual?: ManualRequirement[]
+  /**
+   * §3e.6 the edit receipt: every change the wizard or an agent made to a file it does not own as a
+   * whole (improve edits, guard wraps, the npm job's package.json + lockfile, agent job edits), with
+   * exact text edits so `uninstall` reverses each one byte for byte, newest first, only while the
+   * file still hashes to `afterHash`. Absent on installs made without the wizard.
+   */
+  edits?: WizardEditRecord[]
+  /** §3e.6 the public IDs this install emitted (they are in the committed code anyway); `doctor` reads them. */
+  ids?: InstallManifestIds
   wiringVersion: number
   verifiedAt: string | null
 }
@@ -420,6 +512,15 @@ export interface FrameworkPlanDraft {
   assumptions: string[]
   blockers: string[]
   confidence: number
+  /** `deferUnmanagedNextConfig`: the user's own Next config the rewrites still have to be added to (left as is). */
+  deferredConfigRewrites?: DeferredConfigRewrite[]
+}
+
+/** A config file the installer leaves to the user / their agent, with the exact lines it needs (review I1 P1-2). */
+export interface DeferredConfigRewrite {
+  /** App-relative in a framework draft; repo-relative in an InstallPlan. */
+  path: string
+  snippet: string
 }
 
 export interface InstallInstruction {
@@ -429,6 +530,8 @@ export interface InstallInstruction {
   description: string
   snippet: string
   provider?: ProviderId
+  /** The managed conversion-helper script (`src/conversions/globals.ts`); it serves every provider. */
+  helpers?: true
 }
 
 /** Optional context passed to FrameworkAdapter.plan so it can see cross-cutting install choices. */
@@ -439,6 +542,12 @@ export interface FrameworkPlanOptions {
   configOwnership?: Record<string, ManagedConfigOwnership>
   /** The manifest from a prior install, so an adapter can tell files IT wired from ones the user owns. */
   previousManifest?: InstallManifest | null
+  /**
+   * The wizard (review I1 P1-2): an existing, unmanaged Next config that lacks the rewrites is NOT a blocker;
+   * the rest installs and the rewrites become a checked agent job (`deferredConfigRewrites`). The plain
+   * installer leaves this unset and keeps refusing.
+   */
+  deferUnmanagedNextConfig?: boolean
 }
 
 export interface InfiniteProxySpec {
@@ -496,6 +605,10 @@ export interface ProviderAdapter {
   plan(
     framework: SupportedFramework,
     artifact: WorkspaceInstallArtifacts[ProviderId] | undefined,
-    context?: { artifacts: WorkspaceInstallArtifacts }
+    context?: {
+      artifacts: WorkspaceInstallArtifacts
+      /** The `defaults` value the site's current MANAGED PostHog carries (absent = no managed PostHog yet). */
+      managedPosthogDefaults?: string
+    }
   ): ProviderPlanDraft
 }

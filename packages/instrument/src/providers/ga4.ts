@@ -1,6 +1,15 @@
+import { resolveArtifactHostGuard, wrapGuardedSnippet, type HostGuardSpec } from "../host-guard.js"
 import type { InstallInstruction, ProviderAdapter, SupportedFramework } from "../types.js"
 import { isHtmlInjectedFramework } from "../types.js"
 import { jsLiteral, urlQueryValue, validateGa4MeasurementId } from "./validate.js"
+
+/**
+ * The marker the managed GA4 snippet sets once it has STARTED (its preview guard passed and it queued
+ * `config`): `window.__infiniteGa4Lane = { id: "G-…" }`. The navigation helper holds a click only when
+ * this is set — never on `typeof gtag`, because an adopted gtag stub with no loader never calls back
+ * (`src/conversions/navigate.ts`).
+ */
+export const GA4_LANE_MARKER = "__infiniteGa4Lane"
 
 function frameworkEnvKeys(framework: SupportedFramework): string[] {
   switch (framework) {
@@ -20,7 +29,7 @@ export const ga4ProviderAdapter: ProviderAdapter = {
   envKeys(framework) {
     return frameworkEnvKeys(framework)
   },
-  plan(framework, artifact) {
+  plan(framework, artifact, context) {
     const measurementId =
       artifact && typeof artifact === "object" && "measurementId" in artifact
         ? artifact.measurementId
@@ -29,6 +38,10 @@ export const ga4ProviderAdapter: ProviderAdapter = {
     const invalid = validateGa4MeasurementId(measurementId)
     if (invalid) {
       return { assumptions: [], blockers: [invalid], instructions: [] }
+    }
+    const guard = resolveArtifactHostGuard(context?.artifacts ?? {})
+    if (guard.error) {
+      return { assumptions: [], blockers: [guard.error], instructions: [] }
     }
 
     const instructions: InstallInstruction[] = [
@@ -40,13 +53,20 @@ export const ga4ProviderAdapter: ProviderAdapter = {
           : "Add the GA4 public loader and gtag bootstrap to the managed analytics module.",
         provider: "ga4",
         snippet: isHtmlInjectedFramework(framework)
-          ? buildHtmlSnippet(measurementId!)
-          : buildBootstrapSnippet(measurementId!)
+          ? buildHtmlSnippet(measurementId!, guard.spec)
+          : buildGa4BootstrapSnippet(measurementId!, guard.spec)
       }
     ]
 
     return {
-      assumptions: ["GA4 wiring will use only the public measurementId artifact."],
+      assumptions: [
+        "GA4 wiring will use only the public measurementId artifact.",
+        ...(guard.spec
+          ? [
+              "GA4 starts only on your production hosts and any host that is not a preview or a laptop: previews (*.vercel.app, *.netlify.app, *.pages.dev) and localhost send nothing."
+            ]
+          : [])
+      ],
       blockers: [],
       instructions
     }
@@ -64,14 +84,24 @@ function frameworkInstructionPath(framework: SupportedFramework): string {
   }
 }
 
-// 0.6.0 — FULL NATIVE bootstrap (founder decision: installers only do explicit native setup/repair
-// and never reduce a provider). This is Google's own gtag.js snippet: the loader, the dataLayer,
-// `gtag('js')` and `gtag('config', ID)` with GA4's DEFAULT send_page_view (true) and enhanced
-// measurement untouched. Infinite never loads GA4 on its behalf, never forwards events into it, and
-// never gates it on the Infinite consent signal — consent for GA4 (Consent Mode) is the site's own,
-// exactly as with a hand-pasted snippet.
-function buildBootstrapSnippet(measurementId: string): string {
-  return [
+// FULL NATIVE bootstrap (0.6.0): Google's own gtag.js snippet — the loader, the dataLayer, `gtag('js')`
+// and `gtag('config', ID)` with GA4's DEFAULT send_page_view (true) and enhanced measurement untouched.
+// A provider is never reduced WITHOUT a plan line the user approved. The Infinite runtime forwards
+// nothing into GA4 and never gates it on the Infinite consent signal — consent for GA4 (Consent Mode) is
+// the site's own, exactly as with a hand-pasted snippet; conversions reach GA4 because the site's own
+// code calls the managed helpers (decisions 9 and 13).
+//
+// THE PREVIEW GUARD (decision 3), when the plan carries one: the WHOLE snippet sits inside one IIFE
+// behind the guard, like infinite.fast (inject L375): no loader, no `config`, no lane marker off-host. On
+// a silenced host the guard still defines `window.dataLayer` and a queue-only `window.gtag`
+// (`GA4_SILENCED_STUB`), so the site's own `gtag('event', …)` or `dataLayer.push(…)` on a preview — the
+// draft PR's own preview included — cannot throw and strand a click. Nothing loads, so nothing is sent,
+// and with no lane marker no helper ever holds a click for it.
+//
+// THE LANE MARKER (`GA4_LANE_MARKER`) is set last, once `config` is queued: the one signal the
+// navigation helper trusts that GA4 actually started.
+export function buildGa4BootstrapSnippet(measurementId: string, guard?: HostGuardSpec): string {
+  const body = [
     "window.dataLayer = window.dataLayer || [];",
     "window.gtag = window.gtag || function(){window.dataLayer.push(arguments);};",
     "(function(){",
@@ -81,10 +111,18 @@ function buildBootstrapSnippet(measurementId: string): string {
     "  document.head.appendChild(script);",
     "})();",
     "window.gtag('js', new Date());",
-    `window.gtag('config', ${jsLiteral(measurementId)});`
+    `window.gtag('config', ${jsLiteral(measurementId)});`,
+    `window.${GA4_LANE_MARKER} = { id: ${jsLiteral(measurementId)} };`
   ].join("\n")
+  return guard ? wrapGuardedSnippet(body, guard, GA4_SILENCED_STUB) : body
 }
 
-function buildHtmlSnippet(measurementId: string): string {
-  return ["<script>", buildBootstrapSnippet(measurementId), "</script>"].join("\n")
+/** What a silenced host gets instead of GA4: a dataLayer and a queue-only gtag. No loader, no marker. */
+export const GA4_SILENCED_STUB = [
+  "window.dataLayer = window.dataLayer || [];",
+  "window.gtag = window.gtag || function(){window.dataLayer.push(arguments);};"
+].join("\n")
+
+function buildHtmlSnippet(measurementId: string, guard?: HostGuardSpec): string {
+  return ["<script>", buildGa4BootstrapSnippet(measurementId, guard), "</script>"].join("\n")
 }

@@ -317,6 +317,9 @@ export function renderApplied(input: {
   return lines.join("\n")
 }
 
+const HELPERS_LINE =
+  "Your own code sends conversions to GA4 and PostHog through the managed helpers (infiniteTrack, infiniteTrackThenNavigate, infiniteIdentify); they follow the visitor's consent at every call."
+
 function consentGuidance(artifacts: WorkspaceInstallArtifacts): string[] {
   if (artifacts.infinite?.consentMode === "required") {
     return [
@@ -330,7 +333,9 @@ function consentGuidance(artifacts: WorkspaceInstallArtifacts): string[] {
   ) {
     return [
       "Infinite collects without consent unless DNT/GPC is enabled; GA4/PostHog stay fully independent.",
-      "Each provider runs its own native bootstrap (own page views, own consent); Infinite never forwards events into it."
+      "Each provider runs its own native bootstrap (own page views, own consent); Infinite never forwards events into it.",
+      // Decisions 9 and 13: conversions reach the providers because the SITE'S code calls the helpers.
+      ...(artifacts.conversions?.helpers === true ? [HELPERS_LINE] : [])
     ]
   }
   return []

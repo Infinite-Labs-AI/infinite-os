@@ -40,6 +40,21 @@ re-pointed at the workspace, and the renderer adapted to the `infinite` CLI's
 chrome. Modifications are Copyright (c) 2026 Ultima AI, Inc, also MIT.
 
 
+packages/instrument/ (infinite-tag): the setup wizard
+------------------------------------------------------
+
+The `npx infinite-tag` setup wizard (`packages/instrument/src/wizard/`, `src/tui/`, `src/agents/`)
+adapts patterns from the PostHog wizard. No PostHog file is copied verbatim; each adapted file
+carries a header naming its source.
+
+| Upstream | What we took | License |
+| --- | --- | --- |
+| **PostHog wizard** — <https://github.com/PostHog/wizard> (`@posthog/wizard` v2.74.1) — Copyright (c) 2025 PostHog | Patterns for the wizard's terminal UI store, router, agent runner and ask flow (`wizard_ask`). | MIT |
+
+Because this NOTICE is not in the npm tarball, PostHog's full MIT notice (copyright line and
+permission text) is also appended to `packages/instrument/LICENSE`, which npm always packs.
+
+
 Everything else
 ---------------
 

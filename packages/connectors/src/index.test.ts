@@ -2744,6 +2744,9 @@ describe("live provider clients", () => {
   });
 
   it("ignores an existing Meta Ads cursor when planning an explicit backfill", async () => {
+    // The cursor is a week old, RELATIVE to now: a fixed date became a time bomb on the one day it equalled
+    // "today minus the 120-day window" (2026-06-05 on 2026-10-03), where a correct backfill starts too.
+    const cursorValue = new Date(Date.now() - 7 * 86_400_000).toISOString();
     const requests: Array<{ url: string; authorization: string | null }> = [];
     const router = metaGraphMockRouter({
       data: [
@@ -2766,7 +2769,7 @@ describe("live provider clients", () => {
       return router(url);
     }, async () => {
       const db = fakeDb({
-        cursorValue: "2026-06-05T04:08:40.304Z",
+        cursorValue,
         credential: {
           credential_kind: "marketing_api_access_token",
           encrypted_payload: encryptedCredential({
@@ -2794,7 +2797,7 @@ describe("live provider clients", () => {
         since?: string;
         until?: string;
       };
-      expect(timeRange.since).not.toBe("2026-06-05");
+      expect(timeRange.since).not.toBe(cursorValue.slice(0, 10));
       expect(timeRange.since).toMatch(/20\d\d-\d\d-\d\d/);
       expect(campaignInsights?.authorization).toBe("Bearer meta-access-token");
     });

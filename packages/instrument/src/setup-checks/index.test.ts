@@ -51,12 +51,15 @@ describe("runSetupChecks", () => {
       "INF_SETUP_CLICK_ID_NOT_AT_LANDING",
       "INF_SETUP_CONVERSION_WRONG_ELEMENT",
       "INF_SETUP_FORM_NO_CONVERSION",
+      // The site's own pixel starts on every host, previews included: a plan line (decision 8),
+      // never an automatic edit, so it is information.
+      "INF_SETUP_HOST_GUARD_MISSING",
       // The site's own pixel has Meta's automatic events on: information for a plan line, never a
       // problem and never an edit (founder decision 10).
       "INF_SETUP_META_AUTOCONFIG_ADOPTED_ON"
     ])
-    expect(setupChecksNote(report)).toBe("3 setup problems, 0 undetermined, 1 worth checking")
-    expect(setupFindingLines(report)).toHaveLength(4)
+    expect(setupChecksNote(report)).toBe("3 setup problems, 0 undetermined, 2 worth checking")
+    expect(setupFindingLines(report)).toHaveLength(5)
   })
 
   it("writes nothing into the app it inspects", () => {
@@ -70,7 +73,8 @@ describe("runSetupChecks", () => {
     const report = runSetupChecks(
       makeApp({
         "index.html": [
-          "<html><head><script>fbq('set', 'autoConfig', false, '914812061724377');fbq('init', '914812061724377');</script></head>",
+          // The site's own pixel, behind a host check (so previews stay silent) and with automatic events off.
+          "<html><head><script>(function(){ if (location.hostname === 'localhost' || location.hostname.endsWith('.vercel.app')) return; fbq('set', 'autoConfig', false, '111222333444555');fbq('init', '111222333444555'); })()</script></head>",
           '<body><form data-conversion="signup" method="post"><input type="email" /><button type="submit">Join</button></form></body></html>'
         ].join("\n")
       })

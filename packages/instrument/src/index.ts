@@ -245,3 +245,28 @@ export type {
   ServerLaneStatus
 } from "./harness/server-lane-env.js"
 export type { ServerLaneEnvReport, ServerLaneEnvSet, ServerLaneEnvPath } from "./harness/types.js"
+
+// ---- The setup wizard (0.12): its entry points, the doctor, and the public contracts other tools read. ----
+export { runWizardCommand, runWizardUninstall, parseWizardArgs, WIZARD_USAGE } from "./wizard/command.js"
+export { createDefaultWizardDeps, installDefaultWizardWiring } from "./wizard/deps.js"
+export { parseAnswersFile, readAnswersFile } from "./wizard/asks.js"
+export type { AnswersFile } from "./wizard/asks.js"
+export { WIZARD_EXIT, WIZARD_CODES, exitCodeFor, isWizardCode, DOCTOR_EXIT_CODES } from "./wizard/contracts/codes.js"
+export type { WizardCode, WizardExitCode } from "./wizard/contracts/codes.js"
+export type { WizardRunState } from "./wizard/contracts/state.js"
+export type { ReportV2 } from "./wizard/contracts/report.js"
+export { HOST_DENY_V1, normalizeHost } from "./wizard/contracts/host-deny.js"
+export { DOCTOR_USAGE, parseDoctorArgs, runDoctorCommand } from "./doctor/command.js"
+export { DOCTOR_REPORT_SCHEMA, DoctorUsageError, renderDoctorText, runDoctor } from "./doctor/run.js"
+export type { DoctorDeps, DoctorIds, DoctorOptions, DoctorReport } from "./doctor/run.js"
+
+// ---- Site code the wizard installs (preview guard, conversion helpers, attribution, the Meta mirror). ----
+export { buildHostGuardExpression, classifyHost, hostGuardAllows, productionDeniedConflict, wrapGuardedSnippet } from "./host-guard.js"
+export type { HostGuardSpec, HostGuardVerdict } from "./host-guard.js"
+export { buildConversionHelpersScript, CONVERSION_HELPER_GLOBALS, nextHelperWrappersSource } from "./conversions/globals.js"
+export { buildLandingAttributionScript } from "./attribution/capture.js"
+export { campaignCookieModuleSource, withCampaignCookie } from "./attribution/cookie.js"
+export { buildMetaMirrorScript, META_MIRROR_EVENTS } from "./providers/meta-browser/mirror.js"
+
+// ---- The live checks' proxy-aware fetch (HTTPS_PROXY / HTTP_PROXY / NO_PROXY). ----
+export { envProxyFetch } from "./checks/live/env-proxy-fetch.js"

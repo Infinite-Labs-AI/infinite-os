@@ -460,6 +460,8 @@ export function applyManagedNextConfig(params: {
   appRootAbsolute: string
   proxy: ProxyInput
   previousOwnership?: Record<string, ManagedConfigOwnership>
+  /** The plan deferred this unmanaged config's rewrites to an agent job: leave it exactly as it is. */
+  deferUnmanaged?: boolean
 }): ManagedConfigApplyResult {
   const existingPaths = nextConfigCandidates.filter((candidate) =>
     existsSync(join(params.appRootAbsolute, candidate))
@@ -476,6 +478,7 @@ export function applyManagedNextConfig(params: {
       if (hasExactNextConfigRewrites(current, params.proxy)) {
         return { path: existing, changed: false }
       }
+      if (params.deferUnmanaged) return { path: existing, changed: false }
       throw new Error(`Refusing to overwrite existing unmanaged ${existing}.`)
     }
     const previous = params.previousOwnership?.[existing]
@@ -642,6 +645,8 @@ export interface NextConfigProxyPlan {
   files: string[]
   instructions: InstallInstruction[]
   blockers: string[]
+  /** `deferUnmanaged`: the unmanaged config the rewrites must still be added to, and the exact lines. */
+  deferred?: Array<{ path: string; snippet: string }>
 }
 
 /**
@@ -651,7 +656,8 @@ export interface NextConfigProxyPlan {
 export function planNextConfigProxy(
   root: string,
   proxy: ProxyInput,
-  ownership?: Record<string, ManagedConfigOwnership>
+  ownership?: Record<string, ManagedConfigOwnership>,
+  options: { deferUnmanaged?: boolean } = {}
 ): NextConfigProxyPlan {
   const existingPaths = nextConfigCandidates.filter((candidate) =>
     existsSync(join(root, candidate))
@@ -685,6 +691,17 @@ export function planNextConfigProxy(
   if (existing && !existingIsManaged) {
     if (hasExactNextConfigRewrites(source!, proxy)) {
       return { files: [], instructions: [], blockers: [] }
+    }
+    if (options.deferUnmanaged) {
+      // The wizard: the user's own config is never edited by the installer, and it is not a blocker either.
+      // The rest installs; adding these rewrites is a checked agent job (`next_rewrites_exact`).
+      const snippet = buildManualNextConfigInstruction(proxy)
+      return {
+        files: [],
+        instructions: [{ path: existing, action: "manual", description: `Add the managed analytics rewrites to your existing ${existing}.`, snippet }],
+        blockers: [],
+        deferred: [{ path: existing, snippet }]
+      }
     }
     return {
       files: [],
