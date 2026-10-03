@@ -557,37 +557,29 @@ describe("health", () => {
     expect(detail.find((line) => line.startsWith("✗ Email"))).toMatch(/sign-in expired/u);
   });
 
-  it("with two fixes to open, j/k picks which one o opens", () => {
+  it("with two fixes to open, o opens the first, and no row is selectable (TJ-4: r4 has no j k on health)", () => {
     const view = edited("health-connections", (body) => {
       body.items[3].fix = { label: "Sign in to email", appLink: { place: "connections", label: "Connections" } };
     });
-    // On a row with no fix, o opens nothing.
-    expect(draw(view, { caps: OPEN }).keys).toEqual([]);
-    expect(text(draw(view, { caps: OPEN }))).not.toContain("(o)");
-    const first = draw(view, { caps: OPEN, selected: 2 });
-    expect(first.rowCount).toBe(4);
-    expect(first.detail).toContain("Fix it: Connect the store ↗  (o) · Connections");
-    expect(first.detail).toContain("Fix it: Sign in to email ↗");
-    const last = draw(view, { caps: OPEN, selected: 3 });
-    expect(last.detail).toContain("Fix it: Connect the store ↗");
-    expect(last.detail).toContain("Fix it: Sign in to email ↗  (o) · Connections");
-    expect(last.keys).toEqual([{ key: "o", label: "Sign in to email" }]);
-    expect(last.detail.find((line) => line.includes("Email"))).toMatch(/^▸ /u);
+    for (const selected of [0, 2, 3]) {
+      const drawn = draw(view, { caps: OPEN, selected });
+      expect(drawn.rowCount).toBe(0);
+      expect(drawn.detail).toContain("Fix it: Connect the store ↗  (o) · Connections");
+      expect(drawn.detail).toContain("Fix it: Sign in to email ↗");
+      expect(drawn.keys).toEqual([{ key: "o", label: "Connect the store" }]);
+      expect(text(drawn)).not.toContain("▸");
+    }
   });
 
-  it("with fixes to select, the resume place never claims o (o stays with the selected row)", () => {
+  it("an item fix holds o before the resume place; with no item fix, the resume place takes o", () => {
     const view = edited("health-connections", (body) => {
       body.items[3].fix = { label: "Sign in to email", appLink: { place: "connections", label: "Connections" } };
       body.resume = { appLink: { place: "onboarding", label: "Resume setup" } };
     });
-    const onOk = draw(view, { caps: OPEN, selected: 1 });
-    expect(onOk.keys).toEqual([]);
-    expect(onOk.detail).toContain("→ Resume setup");
-    expect(text(onOk)).not.toContain("(o)");
-    const onFix = draw(view, { caps: OPEN, selected: 2 });
-    expect(onFix.keys).toEqual([{ key: "o", label: "Connect the store" }]);
-    expect(onFix.detail).toContain("→ Resume setup");
-    // Nothing to select and no fix: the resume place takes o.
+    const drawn = draw(view, { caps: OPEN, selected: 1 });
+    expect(drawn.keys).toEqual([{ key: "o", label: "Connect the store" }]);
+    expect(drawn.detail).toContain("→ Resume setup");
+    // No fix: the resume place takes o.
     const resumeOnly = draw(edited("health-connections", (body) => {
       delete body.items[2].fix;
       body.resume = { appLink: { place: "onboarding", label: "Resume setup" } };

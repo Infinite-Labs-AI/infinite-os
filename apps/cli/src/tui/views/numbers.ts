@@ -976,11 +976,33 @@ function listSectionLines(body: Record<string, unknown>, ctx: ViewRenderCtx, dra
     const empty = viewText(body.emptyWords);
     return empty ? wrapText(empty, ctx.width).map((line) => paint(line, "muted", ctx)) : [];
   }
+  if (!columns.some((column) => column.label)) {
+    // One column with no header label (a list of names): a plain list, never a
+    // boxed table with an empty header (W3-health-scopes). A row's status word follows its name.
+    return plainListLines(rows, ctx);
+  }
   return cellTableLines({
     columns,
     rows: rows.map((row) => ({ label: viewText(row.title), cells: columns.map((column) => asRecord(row.cells)[column.key] as TableCell) })),
     currency: null
   }, ctx, draw);
+}
+
+/** `Dawn       Live`: each row's name, padded to the longest, then its status word in its tone. */
+function plainListLines(rows: readonly Record<string, unknown>[], ctx: ViewRenderCtx): string[] {
+  const names = rows.map((row) => viewText(row.title));
+  const words = rows.map((row) => (isRecord(row.status) ? viewText(row.status.word) : ""));
+  const nameWidth = Math.min(Math.max(0, ...names.map(displayWidth)), Math.max(1, Math.floor(ctx.width / 2)));
+  return rows.flatMap((row, index) => {
+    const word = words[index]!;
+    const name = names[index]!;
+    if (!word) return wrapText(name, ctx.width);
+    const tone = isRecord(row.status) && (row.status.tone === "bad" || row.status.tone === "warn") ? "warning" : "muted";
+    if (displayWidth(name) <= nameWidth && nameWidth + 2 + displayWidth(word) <= ctx.width) {
+      return [`${padEndCells(name, nameWidth)}  ${paint(word, tone, ctx)}`];
+    }
+    return [...wrapText(name, ctx.width), ...wrapText(word, Math.max(1, ctx.width - 2)).map((line) => `  ${paint(line, tone, ctx)}`)];
+  });
 }
 
 function recordSectionLines(body: Record<string, unknown>, ctx: ViewRenderCtx, notes: FootnoteBook): string[] {

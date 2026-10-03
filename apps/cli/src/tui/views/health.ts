@@ -4,8 +4,10 @@
 // One line per item: glyph (in the item's tone), name, state words (the
 // server's blocker words win over the generic ones; amber or red when not OK),
 // and how fresh its data is (dim). The fixes follow the rows, each `Fix it:`
-// and a link; `(o) · <place>` marks the one fix `o` opens, and only when the
-// session can open the app. With more than one fix to open, j/k picks which.
+// and a link, the same fix once; `(o) · <place>` marks the one fix `o` opens
+// (the first), and only when the session can open the app. The rows are read,
+// not browsed (r4 view-10 has no `j k`), so `o` never depends on a selection;
+// with no item fix, `o` opens the view's own place (the shell's fallback).
 //
 // `numbers.ts` and this file draw each other's sections (a composite can hold
 // a health section and a health body can hold numbers). The two only call
@@ -14,7 +16,6 @@ import type { KeyHint } from "../keys/keymap.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
 import { asList, asRecord, sectionLines, type MeasureDraw } from "./numbers.js";
 import { FootnoteBook, formatAsOf, isRecord, linkLine, openHint, paint, viewText, wrapText } from "./primitives.js";
-import { marker as selectionMarker } from "./things.js";
 import { appOpenTarget, type AppOpenTarget } from "./open-target.js";
 import type { KindRender, KindRenderer, ViewRenderCtx } from "./types.js";
 
@@ -45,7 +46,7 @@ function openableFix(fix: unknown): string | null {
 
 export interface HealthBodyDraw {
   lines: string[];
-  /** Rows j/k select (0 unless more than one fix can be opened). */
+  /** Rows j/k select: always 0 (r4 view-10 has no `j k` on health). */
   rowCount: number;
   /** The fix `o` opens, when the session can open the app. */
   openLabel: string | null;
@@ -78,14 +79,8 @@ export function healthBodyLines(
   const nested = options.nested === true;
   const items = asList(body.items).filter(isRecord);
   const openable = items.map((item) => openableFix(item.fix));
-  const fixCount = openable.filter(Boolean).length;
-  const selectable = !nested && ctx.caps.open && fixCount > 1;
-  const selected = Math.max(0, Math.min(items.length - 1, Math.floor(ctx.selected)));
-  const target = nested || !ctx.caps.open
-    ? -1
-    : selectable
-      ? (openable[selected] ? selected : -1)
-      : openable.findIndex(Boolean);
+  // Never selectable (TJ-4): `o` opens the first fix, whatever row is on screen.
+  const target = nested || !ctx.caps.open ? -1 : openable.findIndex(Boolean);
 
   const rows = items.map((item) => {
     const state = typeof item.state === "string" && Object.hasOwn(ITEM_STATES, item.state) ? ITEM_STATES[item.state]! : ITEM_STATES.unknown!;
@@ -101,26 +96,24 @@ export function healthBodyLines(
     };
   });
 
-  const marker = selectable ? 2 : 0;
   const nameWidth = Math.min(Math.max(8, Math.floor(ctx.width / 3)), Math.max(0, ...rows.map((row) => displayWidth(row.name))));
   const wordsWidth = Math.max(0, ...rows.map((row) => displayWidth(row.words)));
   const lines: string[] = [];
-  rows.forEach((row, index) => {
-    const lead = selectable ? selectionMarker(index === selected, ctx) : "";
+  rows.forEach((row) => {
     const glyph = paint(row.state.glyph, row.state.role, ctx);
     const one = `${row.state.glyph} ${padEndCells(row.name, nameWidth)}  ${padEndCells(row.words, wordsWidth)}  ${row.fresh}`.trimEnd();
-    if (displayWidth(row.name) <= nameWidth && marker + displayWidth(one) <= ctx.width) {
+    if (displayWidth(row.name) <= nameWidth && displayWidth(one) <= ctx.width) {
       const words = paint(row.words, row.state.role === "success" ? "text" : row.state.role, ctx);
       const pad = " ".repeat(Math.max(0, wordsWidth - displayWidth(row.words)));
       lines.push(row.fresh
-        ? `${lead}${glyph} ${padEndCells(row.name, nameWidth)}  ${words}${pad}  ${paint(row.fresh, "muted", ctx)}`
-        : `${lead}${glyph} ${padEndCells(row.name, nameWidth)}  ${words}`);
+        ? `${glyph} ${padEndCells(row.name, nameWidth)}  ${words}${pad}  ${paint(row.fresh, "muted", ctx)}`
+        : `${glyph} ${padEndCells(row.name, nameWidth)}  ${words}`);
     } else {
       // Too narrow for one line: the name, then the state and freshness beneath.
-      const indent = " ".repeat(marker + 2);
-      wrapText(row.name, Math.max(1, ctx.width - marker - 2)).forEach((part, partIndex) =>
-        lines.push(partIndex === 0 ? `${lead}${glyph} ${part}` : `${indent}${part}`));
-      wrapText([row.words, row.fresh].filter(Boolean).join(" · "), Math.max(1, ctx.width - marker - 2))
+      const indent = "  ";
+      wrapText(row.name, Math.max(1, ctx.width - 2)).forEach((part, partIndex) =>
+        lines.push(partIndex === 0 ? `${glyph} ${part}` : `${indent}${part}`));
+      wrapText([row.words, row.fresh].filter(Boolean).join(" · "), Math.max(1, ctx.width - 2))
         .forEach((part) => lines.push(`${indent}${paint(part, "muted", ctx)}`));
     }
   });
@@ -131,10 +124,15 @@ export function healthBodyLines(
 
   // r4: the fixes after the rows, each `Fix it: <link ↗>`, and `(o) · <place>`
   // on the one `o` opens. A fix the session cannot open prints plainly.
+  // The same fix (its words and its place) prints once (TJ-4: two items, one `Fix it: Open Connections`).
+  const seenFixes = new Set<string>();
   extra.push(items.flatMap((item, index) => {
     const fix = asRecord(item.fix);
     const label = viewText(fix.label);
     if (!label) return [];
+    const key = JSON.stringify([label, appOpenTarget(fix.appLink)]);
+    if (seenFixes.has(key)) return [];
+    seenFixes.add(key);
     const lead = "Fix it: ";
     if (ctx.caps.open && isRecord(fix.appLink)) {
       const inner = { ...ctx, width: Math.max(1, ctx.width - lead.length) };
@@ -153,9 +151,8 @@ export function healthBodyLines(
   const resume = asRecord(body.resume);
   const resumeLabel = isRecord(resume.appLink) ? viewText(resume.appLink.label) : "";
   if (resumeLabel) {
-    // `o` opens the resume place only when no item fix holds it and no row is
-    // selectable (with j/k, `o` belongs to the selected row, even one with no fix).
-    const opens = !nested && ctx.caps.open && !selectable && openLabel === null;
+    // `o` opens the resume place only when no item fix holds it.
+    const opens = !nested && ctx.caps.open && openLabel === null;
     if (opens) {
       openLabel = resumeLabel;
       openLink = appOpenTarget(resume.appLink);
@@ -189,7 +186,7 @@ export function healthBodyLines(
     if (lines.length) lines.push("");
     lines.push(...block);
   }
-  return { lines, rowCount: selectable ? items.length : 0, openLabel, openLink: openLabel ? openLink : null };
+  return { lines, rowCount: 0, openLabel, openLink: openLabel ? openLink : null };
 }
 
 export const renderHealth: KindRenderer<"health"> = (view, ctx): KindRender => {
@@ -201,8 +198,8 @@ export const renderHealth: KindRenderer<"health"> = (view, ctx): KindRender => {
     footnotes: draw.notes.lines().flatMap((line) => wrapText(line, ctx.width).map((part) => paint(part, "muted", ctx))),
     keys,
     okKey: null,
-    // `o` opens exactly the fix marked `(o)`; a health view that marks none opens nothing (T12).
-    ...(ctx.caps.open ? { openLink: drawn.openLink, ...(drawn.openLabel ? { openLabel: drawn.openLabel } : {}) } : {}),
+    // `o` opens exactly the fix marked `(o)`; with none marked, the shell's own fallback (the view's place) stands.
+    ...(ctx.caps.open && drawn.openLink ? { openLink: drawn.openLink, ...(drawn.openLabel ? { openLabel: drawn.openLabel } : {}) } : {}),
     rowCount: drawn.rowCount,
     ...(draw.hidden ? { hiddenColumns: draw.hidden } : {})
   };
