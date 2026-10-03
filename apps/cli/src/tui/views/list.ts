@@ -10,7 +10,7 @@
 // as a record. `omitted`, `filterWords` and `emptyWords` print verbatim.
 //
 // The list opens on the row the view names (`body.selected`, r4 view-02 opens
-// on the flagged Hook B, so its details show at once), and a cell the view
+// on the flagged Demo B, so its details show at once), and a cell the view
 // marks `tone: "bad"` is amber (r4 `0 trials`).
 import type { AnswerViewV1, CellV1, TextCellV1, UnitV1 } from "@infinite-os/types";
 
@@ -180,7 +180,7 @@ function statusText(row: Fields): { text: string; tone: ReturnType<typeof toneRo
 }
 
 /**
- * r4's row grammar (`● on  Hook A · demo loop  $18.20  1.32%  3 trials`)
+ * r4's row grammar (`● on  Demo A · sample 01  $22.22  2.22%  3 trials`)
  * needs no header when every cell says what it is: at most one money column
  * (with its currency) and one percent column, and counts that carry their
  * column's noun. Anything else keeps the header row.
@@ -364,8 +364,8 @@ function logLines(rows: readonly Fields[], first: number, selected: number, ctx:
 }
 
 /**
- * The selected row's details: one dim line (r4 `Hook B · since Sep 24 ·
- * Broad · US · 25–54`), each detail as its value, or `label value` when the
+ * The selected row's details: one dim line (r4 `Demo B · since Jan 02 ·
+ * Sample ad set`), each detail as its value, or `label value` when the
  * value does not already say what it is; then its URL, and its app place
  * when `o` can open it.
  */

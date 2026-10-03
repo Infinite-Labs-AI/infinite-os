@@ -150,26 +150,26 @@ function decode(raw: Record<string, unknown>): AnswerViewV1 {
 }
 
 const PAUSE_BODY = {
-  target: { kind: "ad", id: "ad_hook_b", label: "Hook B · founder POV" },
+  target: { kind: "ad", id: "ad_demo_b", label: "Demo B · sample copy" },
   rows: [{ label: "status", before: "on", after: "PAUSED" }],
   effect: "Stops spending",
   warnings: []
 };
 const PAUSE_APPROVAL = {
   kind: "card", turnId: "turn_r4", handle: "h_pause",
-  title: "Pause ad “Hook B · founder POV”?",
+  title: "Pause ad “Demo B · sample copy”?",
   summary: "Stops this ad's spend until you turn it back on.",
   confirmLabel: "Pause", dismissLabel: "Dismiss",
-  doneTitle: "Paused ad “Hook B · founder POV”",
-  rows: [{ label: "Ad", value: "Hook B · founder POV" }],
+  doneTitle: "Paused ad “Demo B · sample copy”",
+  rows: [{ label: "Ad", value: "Demo B · sample copy" }],
   expiresAt: "2026-10-01T10:59:00Z"
 };
 
 function pause(over: Record<string, unknown> = {}): AnswerViewV1 {
   return decode({
-    kind: "change", tool: "propose_pause_entity", title: "Pause Hook B", state: "needs_yes",
+    kind: "change", tool: "propose_pause_entity", title: "Pause Demo B", state: "needs_yes",
     provenance: { source: "Meta · ad", via: "our_db" },
-    appLink: { place: "ads.meta", label: "open in Meta Ads", params: { ad: "ad_hook_b" } },
+    appLink: { place: "ads.meta", label: "open in Meta Ads", params: { ad: "ad_demo_b" } },
     body: PAUSE_BODY, approval: PAUSE_APPROVAL, ...over
   });
 }
@@ -195,15 +195,15 @@ describe("card parts (r4 boxed(), lbl(), K(), PK())", () => {
   });
 
   it("a title too long for the border is cut so the box always closes: ` ─┐` stays (run-r2 MUST 3)", () => {
-    const fits = cardBox("Paused ad “Hook B” · Agent proposed · You approved", [], 60, "green", { color: true, theme })[0]!;
-    expect(segs(fits)).toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B” · Agent proposed · You approved"], ["", " "], ["green", "─────┐"]]);
-    const long = "Paused ad “Hook B · founder POV” · Agent proposed · You approved";
+    const fits = cardBox("Paused ad “Demo B” · Agent proposed · You approved", [], 60, "green", { color: true, theme })[0]!;
+    expect(segs(fits)).toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B” · Agent proposed · You approved"], ["", " "], ["green", "─────┐"]]);
+    const long = "Paused ad “Demo B · sample copy” · Agent proposed · You approved";
     // At 60 the title passes the border: it is cut to the card width less 6 and ends in "…", then ` ─┐`.
     expect(segs(cardBox(long, [], 60, "green", { color: true, theme })[0]!))
-      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B · founder POV” · Agent proposed · Y…"], ["", " "], ["green", "─┐"]]);
+      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed · Y…"], ["", " "], ["green", "─┐"]]);
     // At 69 the title fits but its rule would not: it is cut by one more cell, so the corner still shows.
     expect(segs(cardBox(long, [], 69, "green", { color: true, theme })[0]!))
-      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B · founder POV” · Agent proposed · You approv…"], ["", " "], ["green", "─┐"]]);
+      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed · You approv…"], ["", " "], ["green", "─┐"]]);
     for (const width of [20, 40, 60, 69, 74]) {
       const top = cardBox(long, [], width, "green", { color: true, theme })[0]!;
       expect(displayWidth(top)).toBe(width);
@@ -228,8 +228,8 @@ describe("card parts (r4 boxed(), lbl(), K(), PK())", () => {
 
   it("field labels pad to at most 14 (r4 9–14): a longer label sits on its own row, the value under the column (run-2 N6)", () => {
     const plain = { color: false, theme };
-    expect(fieldRows([{ label: "Ad", value: "Hook A" }, { label: "Spend, last 7 days", value: "$40.00" }], 60, plain)).toEqual([
-      "Ad       Hook A",
+    expect(fieldRows([{ label: "Ad", value: "Demo A" }, { label: "Spend, last 7 days", value: "$40.00" }], 60, plain)).toEqual([
+      "Ad       Demo A",
       "Spend, last 7 days",
       "         $40.00"
     ]);
@@ -261,7 +261,7 @@ describe("the approval card, as r4 draws it", () => {
     const render = approvalRender(view, cardCtx({ width: 69 }));
     const { blank, bottom } = box(69, "amber");
     expect(cardRows(render.lines).map(segs)).toEqual([
-      [["amber", "┌─"], ["", " "], ["b", "Pause ad “Hook B · founder POV”?"], ["", " "], ["amber", "────────────────────────────────┐"]],
+      [["amber", "┌─"], ["", " "], ["b", "Pause ad “Demo B · sample copy”?"], ["", " "], ["amber", "────────────────────────────────┐"]],
       row(69, "amber", ["dim", "status"], ["", "   on "], ["dim", "→"], ["", " "], ["b", "PAUSED"]),
       blank,
       row(69, "amber", ["pk", " p "], ["", " "], ["b", "Pause"], ["", "   "], ["key", " n "], ["", " dismiss"]),
@@ -276,7 +276,7 @@ describe("the approval card, as r4 draws it", () => {
     const render = approvalRender(pause(), cardCtx({ width: 100, caps: OPEN }));
     const { blank, bottom } = box(74, "amber");
     expect(cardRows(render.lines).map(segs)).toEqual([
-      [["amber", "┌─"], ["", " "], ["b", "Pause ad “Hook B · founder POV”?"], ["", " "], ["amber", "─────────────────────────────────────┐"]],
+      [["amber", "┌─"], ["", " "], ["b", "Pause ad “Demo B · sample copy”?"], ["", " "], ["amber", "─────────────────────────────────────┐"]],
       row(74, "amber", ["dim", "status"], ["", "   on "], ["dim", "→"], ["", " "], ["b", "PAUSED"]),
       blank,
       row(74, "amber", ["pk", " p "], ["", " "], ["b", "Pause"], ["", "   "], ["key", " n "], ["", " dismiss   "], ["key", " o "], ["", " open in Meta Ads"]),
@@ -289,11 +289,11 @@ describe("the approval card, as r4 draws it", () => {
   it("the head and the source line sit above the card, then a blank row (flow-pause-01)", () => {
     const render = approvalRender(pause(), cardCtx());
     const plain = render.lines.map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
-    expect(plain[0]).toContain("Pause Hook B");
+    expect(plain[0]).toContain("Pause Demo B");
     expect(plain[0]).toContain("▣ Needs your OK");
     expect(segs(render.lines[1]!)).toEqual([["dim", "Meta · ad"]]);
     expect(plain[2]).toBe("");
-    expect(plain[3]!.startsWith("┌─ Pause ad “Hook B · founder POV”? ")).toBe(true);
+    expect(plain[3]!.startsWith("┌─ Pause ad “Demo B · sample copy”? ")).toBe(true);
     // The border carries approval.title, never the tool's name.
     expect(plain.join("\n")).not.toContain("propose_pause_entity");
   });
@@ -301,7 +301,7 @@ describe("the approval card, as r4 draws it", () => {
   it("the card does not repeat what its title says: no target line, no Ad row, no effect line", () => {
     const plain = approvalRender(pause(), cardCtx()).lines.map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
     const inside = plain.slice(plain.findIndex((line) => line.startsWith("┌")));
-    expect(inside.join("\n")).not.toMatch(/│ Hook B · founder POV/u);
+    expect(inside.join("\n")).not.toMatch(/│ Demo B · sample copy/u);
     expect(inside.join("\n")).not.toMatch(/│ Ad /u);
     expect(inside.join("\n")).not.toContain("Stops spending");
     expect(inside.join("\n")).not.toContain("expires");
@@ -373,18 +373,18 @@ describe("the approval card, as r4 draws it", () => {
       appLink: { place: "ads.meta", label: "previews", params: { adset: "adset_broad" } },
       body: {
         tree: [{
-          level: "campaign", name: "Infinite trials", fields: [], status: "existing",
+          level: "campaign", name: "Sample campaign", fields: [], status: "existing",
           children: [{
-            level: "adset", name: "Broad · US · 25–54", fields: [], status: "existing",
+            level: "adset", name: "Sample ad set", fields: [], status: "existing",
             children: ["Explained", "Your audit", "3 fixes"].map((name) => ({ level: "ad", name, fields: [], status: "new", children: [] }))
           }]
         }],
         picturesInApp: true
       },
       approval: {
-        ...PAUSE_APPROVAL, handle: "h_launch", title: "Launch 3 ads into “Broad · US · 25–54”?", summary: "Creates 3 paused ads in this ad set.",
+        ...PAUSE_APPROVAL, handle: "h_launch", title: "Launch 3 ads into “Sample ad set”?", summary: "Creates 3 paused ads in this ad set.",
         confirmLabel: "Launch 3 ads", effect: "Lands PAUSED on Meta — nothing spends until you activate it.",
-        rows: [{ label: "Ad set", value: "Broad · US · 25–54" }]
+        rows: [{ label: "Ad set", value: "Sample ad set" }]
       }
     });
     const rows = cardRows(approvalRender(view, cardCtx({ caps: OPEN })).lines).map(segs);
@@ -392,8 +392,8 @@ describe("the approval card, as r4 draws it", () => {
     expect(rows.slice(1, 8)).toEqual([
       row(74, "amber", ["dim", "Lands PAUSED on Meta — nothing spends until you activate it."]),
       blank,
-      row(74, "amber", ["", "Campaign  "], ["b", "Infinite trials"]),
-      row(74, "amber", ["", "└ Ad set  "], ["b", "Broad · US · 25–54"]),
+      row(74, "amber", ["", "Campaign  "], ["b", "Sample campaign"]),
+      row(74, "amber", ["", "└ Ad set  "], ["b", "Sample ad set"]),
       row(74, "amber", ["", "  └ Ads   "], ["gb", "NEW"], ["", " "], ["b", "Explained · Your audit · 3 fixes"]),
       blank,
       // r4 says "See the Facebook previews in the app"; the terminal keeps its generic words.
@@ -482,7 +482,7 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     const { blank, bottom } = box(69, "green");
     expect(rows).toEqual([
       // r4 overruns the 69-wide card by one cell here (N2); the CLI cuts the title so the box closes (run-r2 MUST 3).
-      [["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B · founder POV” · Agent proposed · You approv…"], ["", " "], ["green", "─┐"]],
+      [["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed · You approv…"], ["", " "], ["green", "─┐"]],
       row(69, "green", ["dim", "status"], ["", "   on "], ["dim", "→"], ["", " "], ["b", "PAUSED"]),
       row(69, "green", ["dim", "Stopped spending at 10:42"]),
       row(69, "green", ["dim", "Clears the matching Home card"]),
@@ -519,18 +519,18 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
 
   it("a receipt view from the app (no approval left, the done title as its title) gets the same green card", () => {
     const view = receiptView({
-      title: "Paused ad “Hook B · founder POV”", state: "done", outcome: "applied",
+      title: "Paused ad “Demo B · sample copy”", state: "done", outcome: "applied",
       receipt: { sentence: "Paused.", tone: "ok", revertible: false }
     });
     const top = segs(cardRows(detail(view))[0]!);
-    expect(top[2]).toEqual(["b", "Paused ad “Hook B · founder POV” · Agent proposed · You approved"]);
+    expect(top[2]).toEqual(["b", "Paused ad “Demo B · sample copy” · Agent proposed · You approved"]);
     expect(top[0]).toEqual(["green", "┌─"]);
   });
 
   it("applying (flow-pause-02): an amber card titled with the approval's words, then ◑ Working… in cyan", () => {
-    const view = pause({ state: "applying", approval: { ...PAUSE_APPROVAL, title: "Pausing ad “Hook B · founder POV”…" } });
+    const view = pause({ state: "applying", approval: { ...PAUSE_APPROVAL, title: "Pausing ad “Demo B · sample copy”…" } });
     const rows = cardRows(detail(view)).map(segs);
-    expect(rows[0]![2]).toEqual(["b", "Pausing ad “Hook B · founder POV”…"]);
+    expect(rows[0]![2]).toEqual(["b", "Pausing ad “Demo B · sample copy”…"]);
     expect(rows[0]![0]).toEqual(["amber", "┌─"]);
     expect(rows).toContainEqual(row(74, "amber", ["cyan", "◑ Working…"], ["", "  "], ["dim", "· after 20 s it says it's still running"]));
     // flow-pause-02: the working card still ends with `? what it does` (the approval's summary).
@@ -539,7 +539,7 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
 
   it("applying since the yes (run-2 M9): the stopwatch counts the seconds since it was sent, and r4's spacing", () => {
     const sent = Date.parse("2026-10-01T10:43:56Z");
-    const view = { ...pause({ state: "applying", approval: { ...PAUSE_APPROVAL, title: "Pausing ad “Hook B · founder POV”…" } }), appliedAt: sent } as unknown as AnswerViewV1;
+    const view = { ...pause({ state: "applying", approval: { ...PAUSE_APPROVAL, title: "Pausing ad “Demo B · sample copy”…" } }), appliedAt: sent } as unknown as AnswerViewV1;
     const now = Date.now;
     Date.now = () => Date.parse("2026-10-01T10:44:00Z");
     try {
@@ -866,17 +866,17 @@ describe("job (r4 Job)", () => {
 // ── the target's path (contract revision 3), outside the r4 goldens ──
 
 describe("the change target's path (contract revision 3) where no golden covers it", () => {
-  const PATH = ["Spring trials", "Broad · US · 25-54"];
-  const PATH_WORDS = "Spring trials › Broad · US · 25-54";
+  const PATH = ["Sample campaign", "Sample ad set"];
+  const PATH_WORDS = "Sample campaign › Sample ad set";
   const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
   const MANAGED = {
     kind: "operation_managed", title: "Pause this ad?", summary: "Stops its spend.",
     confirmLabel: "Pause", dismissLabel: "Dismiss", ask: "Yes, pause it"
   };
   const plain = (approval: Record<string, unknown> | undefined) => decode({
-    kind: "change", tool: "propose_pause_entity", title: "Pause Hook B", state: "needs_yes",
+    kind: "change", tool: "propose_pause_entity", title: "Pause Demo B", state: "needs_yes",
     provenance: { source: "Meta · ad", via: "our_db" },
-    body: { ...PAUSE_BODY, target: { kind: "ad", label: "Hook B", path: PATH } },
+    body: { ...PAUSE_BODY, target: { kind: "ad", label: "Demo B", path: PATH } },
     ...(approval ? { approval } : {})
   });
 
@@ -884,7 +884,7 @@ describe("the change target's path (contract revision 3) where no golden covers 
     for (const cols of [60, 100, 140]) {
       it(`a plain change (${name}) at ${cols}: the row under the bold target is the path, one dim run, nothing wider than ${cols}`, () => {
         const lines = renderView(plain(approval), viewCtx({ width: cols })).detail;
-        const at = lines.findIndex((line) => JSON.stringify(segs(line)) === JSON.stringify([["b", "Hook B"]]));
+        const at = lines.findIndex((line) => JSON.stringify(segs(line)) === JSON.stringify([["b", "Demo B"]]));
         expect(at).toBeGreaterThanOrEqual(0);
         expect(segs(lines[at + 1]!)).toEqual([["dim", PATH_WORDS]]);
         expect(lines.filter((line) => plainText(line).includes(PATH_WORDS))).toHaveLength(1);
@@ -894,7 +894,7 @@ describe("the change target's path (contract revision 3) where no golden covers 
   }
 
   const cardWith = (target: Record<string, unknown>, rows: unknown[]) => decode({
-    kind: "change", tool: "propose_pause_entity", title: "Pause Hook B", state: "needs_yes",
+    kind: "change", tool: "propose_pause_entity", title: "Pause Demo B", state: "needs_yes",
     provenance: { source: "Meta · ad", via: "our_db" },
     body: { ...PAUSE_BODY, target: { ...target, path: PATH }, rows },
     approval: { kind: "card", turnId: "turn_r4", handle: "h_pause", title: "Pause ad?", summary: null,
@@ -902,8 +902,8 @@ describe("the change target's path (contract revision 3) where no golden covers 
   });
 
   for (const [name, view] of [
-    ["no rows", () => cardWith({ kind: "ad", label: "Hook B" }, [])],
-    ["a pending_write target", () => cardWith({ kind: "pending_write", label: "Hook B" }, [{ label: "status", after: "PAUSED" }])]
+    ["no rows", () => cardWith({ kind: "ad", label: "Demo B" }, [])],
+    ["a pending_write target", () => cardWith({ kind: "pending_write", label: "Demo B" }, [{ label: "status", after: "PAUSED" }])]
   ] as const) {
     for (const cols of [60, 100, 140]) {
       it(`a waiting card with ${name} at ${cols} draws the path exactly once`, () => {

@@ -282,7 +282,7 @@ export function viewFocusAfterTurnDone(
     viewIndex,
     focus: hasViewKeys(facts) ? detailsFocus : "composer",
     detailsFocus,
-    // A list opens on the row its view names (r4 view-02: the flagged Hook B).
+    // A list opens on the row its view names (r4 view-02: the flagged Demo B).
     selected: view ? Math.min(openingRow(view), Math.max(0, facts.rowCount - 1)) : 0,
     tab: 0,
     page: 0,
@@ -528,7 +528,7 @@ export function viewKeyHints(
  * ONE chip naming the first such key the view offers, by priority o > w > m >
  * c (`tab then o open in Meta Ads`), in place of `tab switch side`. Engaged,
  * or with nothing behind the gate, it is `tab switch side`. (TJ-3; r4's
- * goldens draw `o open` at rest: a deliberate deviation for River's eval.)
+ * goldens draw `o open` at rest: a deliberate deviation for the visual eval.)
  */
 function tabHint(state: ViewFocusState, facts: ViewKeyFacts): KeyHint {
   const unlocks = state.engaged && state.focus !== "composer" ? null : gatedKeyHint(state, facts);

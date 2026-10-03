@@ -31,7 +31,7 @@
     "rows": [
       {
         "id": "ad_1",
-        "title": "Hook A",
+        "title": "Demo A",
         "status": {
           "word": "on",
           "tone": "ok"
@@ -47,7 +47,7 @@
       },
       {
         "id": "ad_2",
-        "title": "Hook B",
+        "title": "Demo B",
         "status": {
           "word": "on",
           "tone": "ok"
@@ -63,7 +63,7 @@
       },
       {
         "id": "ad_3",
-        "title": "Hook C",
+        "title": "Demo C",
         "status": {
           "word": "off",
           "tone": "muted"

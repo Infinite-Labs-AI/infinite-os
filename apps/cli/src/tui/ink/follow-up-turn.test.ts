@@ -191,7 +191,7 @@ describe("a card's confirm through the runner (confirmThroughRunner)", () => {
   const VIEW = {
     v: 1, kind: "change", tool: "pause_entity", title: "Pause", state: "ready", asOf: null,
     scope: { workspaceName: "Example Co", crossWorkspace: false }, caveats: [],
-    body: { target: { kind: "ad", label: "Hook B" }, rows: [], warnings: [] }
+    body: { target: { kind: "ad", label: "Demo B" }, rows: [], warnings: [] }
   };
   const CARD = { turnId: "t1", confirmationHandle: "h1", summary: "Pause ad 01", confirmationDetails: [], view: VIEW } as unknown as InSessionConfirmationAction;
 

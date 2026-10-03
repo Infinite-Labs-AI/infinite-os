@@ -43,7 +43,7 @@ function lookup(target: { id: string; label: string }, extra: readonly string[] 
   return {
     v: 1, kind: "list", tool: "list_sample_entities", title: LOOKUP_TITLE, state: "ready", asOf: null,
     provenance: { source: "Sample · stored copy", via: "our_db" },
-    scope: { workspaceName: "Infinite workspace", crossWorkspace: false }, caveats: [],
+    scope: { workspaceName: "Demo workspace", crossWorkspace: false }, caveats: [],
     body: { layout: "rows", columns: [{ key: "delivery", label: "Delivery", unit: "text" }], rows, total: rows.length, shown: rows.length }
   };
 }
@@ -89,7 +89,7 @@ describe("a lookup of the card's own ad is its Steps row, never a view above the
 
   it("a lookup that lists another ad too stays a view, above the card", () => {
     const screen = loadR4Fixture("flow-pause-01-needs-your-ok");
-    const lines = ansiToSegmentLines(draw(["Hook C · demo"])(screen, 100)).map((line) => textOf(line));
+    const lines = ansiToSegmentLines(draw(["Demo C · demo"])(screen, 100)).map((line) => textOf(line));
     const head = lines.findIndex((line) => line.includes(LOOKUP_TITLE));
     expect(head).toBeGreaterThan(-1);
     expect(lines.findIndex((line) => line.startsWith("┌─ Pause ad"))).toBeGreaterThan(head);

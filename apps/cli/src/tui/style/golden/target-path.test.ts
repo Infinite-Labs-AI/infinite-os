@@ -37,8 +37,8 @@ import { textOf, type SegmentLine } from "./normalize.js";
 import { renderR4Screen } from "./screen.js";
 
 const FIXED_CLOCK = Date.parse("2026-10-01T10:44:00Z");
-const PATH = ["Spring trials", "Broad · US · 25-54"];
-const PATH_WORDS = "Spring trials › Broad · US · 25-54";
+const PATH = ["Sample campaign", "Sample ad set"];
+const PATH_WORDS = "Sample campaign › Sample ad set";
 const PICTURE = { archiveAssetId: "asset_synthetic_0042" };
 const PAUSE_SCREENS = r4FixtureIds().filter((screen) => screen.startsWith("flow-pause-"));
 
@@ -144,11 +144,11 @@ describe("a change target's path: one dim line under the target, in every pause 
 
   for (const cols of [60, 100, 140]) {
     it(`a long path stays one line at ${cols} columns, its outer parts cut with … and the nearest parent kept (TJ-7)`, () => {
-      const long = ["A campaign whose name runs on and on past any card", "An ad set named for every audience it reaches at once", "Hook B"];
+      const long = ["A campaign whose name runs on and on past any card", "An ad set named for every audience it reaches at once", "Demo B"];
       const fixture = loadR4Fixture("flow-pause-01-needs-your-ok");
       const after = screen(withTarget(fixture, { path: long }), cols);
       const row = addedRow(screen(fixture, cols), after);
-      expect(row.replace(/[│┊]/gu, "").trim()).toMatch(/^A campaign whose name[^›]*… › An ad set[^›]*… › Hook B$/u);
+      expect(row.replace(/[│┊]/gu, "").trim()).toMatch(/^A campaign whose name[^›]*… › An ad set[^›]*… › Demo B$/u);
       expect(rows(after).every((line) => displayWidth(line) <= cols)).toBe(true);
     });
   }

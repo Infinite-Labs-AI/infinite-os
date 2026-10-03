@@ -168,7 +168,7 @@ function treeLines(nodes: readonly unknown[], depth: number, ctx: ViewRenderCtx)
   }
   const lines: string[] = [];
   const records = nodes.filter(isRecord);
-  // Leaf siblings of one level fold onto one line: "└ Ads   Hook A · Hook B".
+  // Leaf siblings of one level fold onto one line: "└ Ads   Demo A · Demo B".
   const leaves = records.filter((node) => !hasChildren(node));
   const foldable = leaves.length > 1 && leaves.length === records.length
     && leaves.every((node) => node.level === leaves[0]?.level);
