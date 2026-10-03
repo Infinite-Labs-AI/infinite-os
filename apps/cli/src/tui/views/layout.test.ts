@@ -457,3 +457,68 @@ describe("a table that draws whole in the answer pane keeps the split", () => {
     expect(turnMaySplit([{ role: "assistant", text: wideTable.split("\n").map((line) => `> ${line}`).join("\n") }], 160)).toBe(false);
   });
 });
+
+// Live run 4, N11: before a pause card the turn looked the ad up, and that
+// lookup (a list whose one row IS the card's ad) printed above the card as
+// its own view. r4 draws the card alone: the lookup is its Steps row.
+describe("a lookup of the card's own target folds into its Steps row (live run-4 N11)", () => {
+  const fixture = (name: string) => {
+    const view = decodeAnswerView(JSON.parse(readFileSync(fileURLToPath(new URL(`./__fixtures__/${name}.json`, import.meta.url)), "utf8")));
+    if (!view) throw new Error(`${name} does not decode`);
+    return view;
+  };
+  /** The list-rows fixture cut to the rows given (ad_1 is the pause card's ad). */
+  const lookup = (ids: readonly string[]) => {
+    const list = fixture("list-rows") as Extract<ReturnType<typeof fixture>, { kind: "list" }>;
+    const rows = list.body.rows.filter((row) => ids.includes(row.id));
+    return { ...list, title: "Sample ads", body: { ...list.body, rows, shown: rows.length, total: rows.length } };
+  };
+  const steps: TurnStep[] = [
+    { id: "c1", name: "list_sample_entities", label: "checking your campaigns", status: "ok", startedAt: 0, endedAt: 500, result: "1 ad" },
+    { id: "c2", name: "propose_pause_entity", label: "waiting for your OK", status: "wait", startedAt: 500, endedAt: 600, result: "pause 1 ad" }
+  ];
+  const card = ["┌─ Pause ad “Hook A”? ─┐", "│  p  Pause    n  dismiss │", "└──────────────────────┘"];
+  const turn: Msg[] = [{ role: "user", text: "pause hook a" }, { role: "assistant", text: "Ready. It stops spending once you say OK." }];
+
+  it.each([60, 100, 160])("at %i, with the card waiting: the card and the Steps, never the lookup's head or row", (width) => {
+    const views = [lookup(["ad_1"])];
+    const drawn = renderLiveTurn({ messages: turn, views, focus: viewFocusAfterTurnDone(views), width, color: false, theme, details: card, statusViews: [fixture("change-pause-card")], steps, nowMs: 600 });
+    const text = drawn.lines.join("\n");
+    expect(text).not.toContain("Sample ads");
+    expect(drawn.lines.some((line) => /│\s*Hook A\b|^\s*▸?\s*●?\s*on\s+Hook A/u.test(line))).toBe(false);
+    expect(text).toContain("┌─ Pause ad “Hook A”? ─┐");
+    expect(drawn.lines.some((line) => /checking your campaigns\s+━+\s+✓ 1 ad/u.test(line))).toBe(true);
+    // The keys are the card's: the folded list offers none.
+    expect(drawn.focused).toBeNull();
+  });
+
+  it("a lookup that shows more than the card's target stays a view of its own", () => {
+    const views = [lookup(["ad_1", "ad_2", "ad_3"])];
+    const drawn = renderLiveTurn({ messages: turn, views, focus: viewFocusAfterTurnDone(views), width: 100, color: false, theme, details: card, statusViews: [fixture("change-pause-card")], steps, nowMs: 600 });
+    expect(drawn.lines.join("\n")).toContain("Sample ads");
+    expect(drawn.focused).not.toBeNull();
+  });
+
+  it("with no card in the turn the same one-row list is drawn", () => {
+    const views = [lookup(["ad_1"])];
+    const drawn = renderLiveTurn({ messages: turn, views, focus: viewFocusAfterTurnDone(views), width: 100, color: false, theme, steps: steps.slice(0, 1), nowMs: 600 });
+    expect(drawn.lines.join("\n")).toContain("Sample ads");
+  });
+
+  it("after n: the dismissed card on the turn folds it too, live and in scrollback", () => {
+    const views = [lookup(["ad_1"]), fixture("receipt-dismissed")];
+    const live = renderLiveTurn({ messages: turn, views, focus: viewFocusAfterTurnDone(views), width: 100, color: false, theme, steps, nowMs: 600 }).lines.join("\n");
+    expect(live).not.toContain("Sample ads");
+    expect(live).toContain("Dismissed");
+    const committed = renderCommittedTurn({ messages: turn, views, focus: null, width: 100, color: false, theme, steps }).join("\n");
+    expect(committed).not.toContain("Sample ads");
+    expect(committed).toContain("Dismissed");
+  });
+
+  it("a card still waiting when its turn goes up folds the lookup out of scrollback too", () => {
+    const views = [lookup(["ad_1"])];
+    const committed = renderCommittedTurn({ messages: turn, views, statusViews: [fixture("change-pause-card")], focus: null, width: 100, color: false, theme, steps, stepsStayLive: true }).join("\n");
+    expect(committed).not.toContain("Sample ads");
+    expect(committed).toContain("Ready. It stops spending once you say OK.");
+  });
+});

@@ -367,6 +367,8 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     ...(split ? {} : { scrollback: true })
   };
   const focusIndex = input.focus ? input.focus.viewIndex : focusedViewIndex(input.views);
+  // A lookup of the card's own target is that card's Steps row, not a view (live run-4 N11).
+  const folded = foldedLookups(input.views, [...input.views, ...(input.statusViews ?? [])]);
   // A view with no key focus yet (a turn still running, a committed turn) is drawn on its opening row.
   // `→` acts only on the view the keys are on, once the turn has finished (a
   // running turn's keys are the composer's): any other names what its tables
@@ -381,7 +383,8 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   // with all of its columns. A numbers view keeps r4's ONE table there and
   // names what it hid in words (`+ CPM hidden`, run-2 M7): its records were
   // the ~150-line dump the live eval saw. No view names a key (`ctx.scrollback`).
-  const drawn = split ? renders : renders.flatMap((render, index) => {
+  const drawn = split ? renders.filter((_render, index) => !folded.has(index)) : renders.flatMap((render, index) => {
+    if (folded.has(index)) return [];
     const view = input.views[index]!;
     const whole = { ...plainCtx, selected: openingRow(view), showHiddenColumns: Boolean(render.hiddenColumns) && view.kind !== "numbers" };
     const tabs = render.tabs ?? 0;
@@ -406,8 +409,42 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const detailRows = paneRenders([...drawn, ...card])
     .reduce((sum, render, index) => sum + (index > 0 ? 1 : 0) + viewLines(render, sideBySide ? panes.right : width, compact).length, 0);
   return {
-    renders, lines, focusIndex, rows, wide: sideBySide, details: takesPane, stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length
+    renders, lines, focusIndex: folded.has(focusIndex) ? -1 : focusIndex, rows, wide: sideBySide, details: takesPane,
+    stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length
   };
+}
+
+/**
+ * The views that are only a lookup of a write card's own target: a list whose
+ * every row is the thing a change card in the turn acts on (its id, else its
+ * name), with nothing more behind it. r4 draws the card alone and the lookup
+ * as its Steps row (`checking your campaigns ✓ 1 ad`), so such a list is not
+ * drawn while the card is on its turn (waiting, working or answered). A list
+ * with any other row, or more than it shows, stays a view.
+ */
+function foldedLookups(views: readonly AnswerViewV1[], all: readonly AnswerViewV1[]): ReadonlySet<number> {
+  const targets = all.flatMap((view) => {
+    if (view.kind !== "change" || !isPlainRecord(view.body) || !isPlainRecord(view.body.target)) return [];
+    const { id, label } = view.body.target;
+    return [{ id: typeof id === "string" && id ? id : null, label: typeof label === "string" && label ? label : null }];
+  });
+  const folded = new Set<number>();
+  if (!targets.length) return folded;
+  const isTarget = (row: unknown) => isPlainRecord(row) && targets.some((target) =>
+    target.id !== null && typeof row.id === "string" ? row.id === target.id : target.label !== null && row.title === target.label);
+  views.forEach((view, index) => {
+    if (view.kind !== "list" || !isPlainRecord(view.body)) return;
+    const body = view.body as Record<string, unknown>;
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    const groups = Array.isArray(body.groups) ? body.groups : [];
+    const more = (typeof body.total === "number" && body.total > rows.length) || isPlainRecord(body.omitted) || isPlainRecord(body.truncated);
+    if (rows.length && !groups.length && !more && rows.every(isTarget)) folded.add(index);
+  });
+  return folded;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** The renders the details pane draws: a quiet one only when the turn has nothing else to show. */

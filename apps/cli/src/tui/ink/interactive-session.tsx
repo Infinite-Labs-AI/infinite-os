@@ -601,6 +601,9 @@ export function InkInteractiveSessionApp({
   const [keptSteps, setKeptSteps] = useState<{ steps: readonly TurnStep[]; views: readonly AnswerViewV1[] } | null>(null);
   const keptStepsRef = useRef(keptSteps);
   keptStepsRef.current = keptSteps;
+  // The head write card's view, for a turn that goes up while the card stays live:
+  // a lookup of the card's own target is folded out of scrollback too (live run-4 N11).
+  const headCardViewRef = useRef<AnswerViewV1 | null>(null);
   // The not-connected source of a turn that already went to scrollback (see `topBarData`).
   const [askedAfterCommit, setAskedAfterCommit] = useState<string | null>(null);
   const typingIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -672,7 +675,7 @@ export function InkInteractiveSessionApp({
     // The strip an earlier overflow kept live is this turn's, until the next line.
     const kept = storeSteps.length ? null : keptStepsRef.current;
     const steps = kept ? kept.steps : storeSteps;
-    const statusViews = kept ? kept.views : [];
+    const statusViews = [...(kept ? kept.views : []), ...(keepCard && headCardViewRef.current ? [headCardViewRef.current] : [])];
     const focus = viewFocusRef.current;
     // Scrollback is ONE column at any width (River, 2026-10-02): the question,
     // the answer, its views underneath, under a thin rule.
@@ -837,6 +840,7 @@ export function InkInteractiveSessionApp({
   // The head card's keys: its named OK key, `n`, and `?` (keymap.ts owns the rules).
   // `o`/`w`/`r` stay off until app links, watch and retry land (T12, T11).
   const headConfirmAction = pendingConfirmActions[0] ?? null;
+  headCardViewRef.current = headConfirmAction?.view ?? null;
   const confirmKeys = useMemo(
     () => headConfirmAction ? confirmCardKeys(headConfirmAction, NO_KEY_CAPS) : null,
     [headConfirmAction]
