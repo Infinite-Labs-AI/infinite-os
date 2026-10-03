@@ -9,6 +9,8 @@ import type { TagHosting, TagKeys } from "../wizard/contracts/bridge.js"
 import type { StepOutcome, WizardContext, WizardDeps } from "../wizard/contracts/deps.js"
 import type { ChecklistItem, WizardEditRecord } from "../wizard/contracts/jobs.js"
 import type { WizardStepId } from "../wizard/contracts/steps.js"
+import type { SiteClaimState, SiteState } from "../wizard/contracts/state.js"
+import { resolveProductionHost } from "../wizard/site-host.js"
 import { MCP_ENV } from "../wizard/contracts/agents.js"
 import { INSTALL_MANIFEST_PATH, isPackageOrLockfile } from "../git/commit.js"
 import { parseRemote } from "../hosts/index.js"
@@ -17,6 +19,15 @@ import { collectEnvLiterals, createScanner, type ScanLiteral, type Scanner } fro
 export interface RunFacts {
   keys: TagKeys | null
   hosting: TagHosting | null
+  /**
+   * §3y.2: the run's pending site-file claim (a cloud answer). While it is pending the rehearsal and the real visit
+   * expect Infinite's tag with its reserved key (`testExpectFromKeys(keys, claim)`). Absent = none.
+   */
+  claim?: SiteClaimState | null
+  /** §3y.4: the run's cached Vercel signal (Infinite hosting, `.vercel/*`, or a `vercel[bot]` deployment). */
+  vercelSignal?: boolean
+  /** §3y.4: the Vercel project name from `.vercel/*` (picks a monorepo's preview when Infinite hosting is not Vercel). */
+  vercelProject?: string | null
   /** A keys or hosting read failed (not "absent"): the rehearsal is then undetermined (read failed), never guessed. */
   readFailed?: boolean
   /** The production host the rehearsal serves the preview under (site source first, then Vercel's domains). */
@@ -41,7 +52,7 @@ export function connectionIdsFrom(keys: TagKeys | null): string[] {
  * Reads keys and hosting once per step (both public-ID reads; neither returns a secret). The `before` step read
  * them too, but the run state has no field for them (§3d.6), so each O4 step re-reads them here.
  */
-export async function loadRunFacts(deps: WizardDeps): Promise<RunFacts> {
+export async function loadRunFacts(deps: WizardDeps, site: SiteState | null = null): Promise<RunFacts> {
   let readFailed = false
   // A 402 / signed-out stops the step (`bridgeStop`); any other failed read is "unknown", never a guess.
   const read = async <T>(capability: "tag.keys.v1" | "tag.hosting.v1", fn: () => Promise<T>): Promise<T | null> => {
@@ -56,9 +67,19 @@ export async function loadRunFacts(deps: WizardDeps): Promise<RunFacts> {
   }
   const keys = await read("tag.keys.v1", () => deps.bridge.keys())
   const hosting = await read("tag.hosting.v1", () => deps.bridge.hosting())
-  const productionHost =
-    keys?.infinite.productionHosts[0] ?? hosting?.vercel?.productionDomains[0] ?? hosting?.vercel?.productionAliases[0] ?? null
-  return { keys, hosting, productionHost: productionHost ? productionHost.toLowerCase() : null, connectionIds: connectionIdsFrom(keys), ...(readFailed ? { readFailed } : {}) }
+  // §3y.1: one precedence (site source, Vercel's domains, this run's answer or flag); a Vercel alias last, as before.
+  const productionHost = resolveProductionHost({ keys, hosting, site }).host ?? hosting?.vercel?.productionAliases[0] ?? null
+  const claim = site?.claim?.state === "pending_proof" ? site.claim : null
+  const connectionIds = [...new Set([...connectionIdsFrom(keys), ...(claim ? [claim.siteSourceKey] : [])])]
+  return {
+    keys,
+    hosting,
+    productionHost: productionHost ? productionHost.toLowerCase() : null,
+    connectionIds,
+    ...(claim ? { claim } : {}),
+    ...(site?.vercelSignal !== undefined ? { vercelSignal: site.vercelSignal } : {}),
+    ...(readFailed ? { readFailed } : {})
+  }
 }
 
 /**

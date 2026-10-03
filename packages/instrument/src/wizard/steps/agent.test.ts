@@ -25,7 +25,7 @@ function repo() {
   return root
 }
 
-async function runStep(input: { scenario?: unknown; options?: Partial<WizardOptions>; onlyClaude?: boolean; state?: ReturnType<typeof baseState>; startRunError?: unknown; missing?: TagCapability[] }) {
+async function runStep(input: { scenario?: unknown; options?: Partial<WizardOptions>; onlyClaude?: boolean; state?: ReturnType<typeof baseState>; startRunError?: unknown; missing?: TagCapability[]; dirtyPaths?: string[] }) {
   const root = repo()
   const fakes = fakeAgents(input.scenario ?? {})
   dirs.push(fakes.home)
@@ -39,12 +39,22 @@ async function runStep(input: { scenario?: unknown; options?: Partial<WizardOpti
   const runner = makeRunner(fakes, root, { preferWorker: null })
   const { bridge, calls } = fakeBridge({ startRunError: input.startRunError, missing: input.missing })
   const { ctx, recorded, state } = makeCtx({ root, state: input.state ?? baseState({ root }), options: input.options })
-  const deps = makeDeps({ bridge, agents: runner })
+  const deps = makeDeps({ bridge, agents: runner, ...(input.dirtyPaths ? { dirtyPaths: input.dirtyPaths } : {}) })
   const outcome = await step.run(ctx, deps)
   return { outcome, calls, recorded, state: state(), ctx, root }
 }
 
 describe("step agent", () => {
+  it("§3y.8 (P3-11): a dirty tree fails DIRTY_TREE BEFORE the cloud run exists (no orphan run at 'before'); the wizard's own paths are exempt", async () => {
+    const dirty = await runStep({ dirtyPaths: ["app/layout.tsx", ".gitignore", ".infinite/install.json"] })
+    expect(dirty.outcome).toEqual({ kind: "failed", code: "INF_WIZ_DIRTY_TREE", message: "Commit or stash your changes first (app/layout.tsx); the wizard works on its own branch.", next: "halt" })
+    expect(dirty.calls.startRun).toHaveLength(0)
+    expect(dirty.state.runId).toBeNull()
+    // NEGATIVE: only the exempt paths dirty → the run starts as usual.
+    const clean = await runStep({ dirtyPaths: [".gitignore", ".infinite/wizard/state.json"] })
+    expect(clean.calls.startRun).toHaveLength(1)
+  })
+
   it("both agents: Claude works, Codex reviews; ends with exactly ONE startRun carrying both", async () => {
     const { outcome, calls, state, ctx, root, recorded } = await runStep({})
     expect(outcome).toEqual({ kind: "ok", status: "Claude Code does the work · Codex reviews it" })

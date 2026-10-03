@@ -4,8 +4,10 @@
 // (`mergeCommit.oid`, never the head SHA: a squash merge does not contain it) is saved and PATCHed as the run's
 // `mergeSha`. ESC / "later" → parked (exit 3); a re-run picks the PR back up.
 import { createHash } from "node:crypto"
+import { join } from "node:path"
 
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
+import type { PrSummary } from "../contracts/git-host.js"
 import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import { wizardGitExtras } from "../../git/index.js"
@@ -13,6 +15,7 @@ import { isGitHubAdapter } from "../../hosts/github.js"
 import { isUnsupported } from "../../hosts/other.js"
 import { assertNoAgentAlive, requireRunId, status, sub } from "../../review/context.js"
 import { mergeRequirementLine } from "../../github/rules.js"
+import { parseLedger, REVIEW_LEDGER_PATH } from "../../review/ledger.js"
 
 const meta = WIZARD_STEP_META.merge
 /** "While the terminal is open": a day of polling, then the run parks (the desktop's watcher carries on). */
@@ -52,6 +55,22 @@ async function saveMerge(ctx: WizardContext, deps: WizardDeps, runId: string, me
  * "Pull request #N is ready." and "Merge it to ship." (the overlay adds both, so they are never said here);
  * every further line is a detail row shown under it (the design's "branch → base" and "N files changed").
  */
+/**
+ * §3y.7: the merge card's review words, from the review ledger's completeness: a blind review is "No second review
+ * (<agent> could not read the files)", an incomplete one names how many items were not checked.
+ */
+export async function reviewSentence(ctx: Pick<WizardContext, "root">, deps: Pick<WizardDeps, "fs">, runId: string, reviewer: string | null): Promise<string> {
+  const label = reviewer === "codex" ? "Codex" : reviewer === "claude_code" ? "Claude Code" : null
+  if (!label) return "No second review"
+  const completeness = parseLedger(await deps.fs.readText(join(ctx.root, REVIEW_LEDGER_PATH)), runId).completeness
+  if (completeness?.state === "blind") return `No second review (${label} could not read the files)`
+  if (completeness?.state === "incomplete") {
+    const count = completeness.unchecked.length
+    return `Review incomplete (${label} could not check ${count} item${count === 1 ? "" : "s"})`
+  }
+  return `Reviewed by ${label}`
+}
+
 export function mergeSummary(input: { sentence: string; branch: string; base: string; filesChanged: number | null; checks: string }): string {
   const files = input.filesChanged === null ? null : `${input.filesChanged} file${input.filesChanged === 1 ? "" : "s"} changed`
   return [input.sentence, `${input.branch} → ${input.base}`, [files, input.checks].filter(Boolean).join(" · ")].filter(Boolean).join("\n")
@@ -65,6 +84,47 @@ async function filesChanged(deps: WizardDeps, baseSha: string | null | undefined
   } catch {
     // A detail row only: the merge question is still asked without it.
     return null
+  }
+}
+
+/**
+ * §3y.9: opens `merge-ready` and polls `gh pr view` every 30 s until the card closes. A merge (or a close) seen while
+ * the card is up aborts the ask through its signal (§3z.12 §3d.8), so the card closes by itself, with no keypress.
+ */
+export async function askWhilePolling(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  github: { readPr(number: number): Promise<PrSummary> },
+  number: number,
+  payload: { prUrl: string; number: number; summary: string }
+): Promise<{ answer: "open" | "later" | string; pr: PrSummary | null }> {
+  const close = new AbortController()
+  const stop = new AbortController()
+  let seen: PrSummary | null = null
+  const poller = (async () => {
+    while (!stop.signal.aborted && !ctx.signal.aborted) {
+      await deps.clock.sleep(PR_LOOP_LIMITS.mergePollMs, stop.signal).catch(() => undefined)
+      if (stop.signal.aborted || ctx.signal.aborted) return
+      let pr: PrSummary
+      try {
+        pr = await github.readPr(number)
+      } catch {
+        // A failed read is retried on the next poll.
+        continue
+      }
+      if ((pr.state === "MERGED" && pr.mergeCommitOid) || pr.state === "CLOSED") {
+        seen = pr
+        close.abort()
+        return
+      }
+    }
+  })()
+  try {
+    const answer = await ctx.ask("merge-ready", payload, { signal: close.signal })
+    return { answer: String(answer), pr: seen }
+  } finally {
+    stop.abort()
+    await poller
   }
 }
 
@@ -99,7 +159,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const rules = await github.rules(state.git.base)
   const requirement = isUnsupported(rules) ? null : mergeRequirementLine({ reviewDecision: pr.reviewDecision, ...rules })
   const once = state.report.in_pr?.finishLine.each_tool_once?.state
-  const reviewed = state.agent?.reviewer === "codex" ? "Reviewed by Codex" : state.agent?.reviewer === "claude_code" ? "Reviewed by Claude Code" : "No second review"
+  const reviewed = await reviewSentence(ctx, deps, runId, state.agent?.reviewer ?? null)
   const rehearsal = once === "pass" ? "rehearsal passed" : once === "problem" ? "rehearsal found a problem" : "rehearsal undetermined"
   const summary = mergeSummary({
     sentence: [`${reviewed} · ${rehearsal}.`, requirement].filter(Boolean).join(" "),
@@ -109,10 +169,26 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     checks: once === "pass" ? "rehearsal passed on the latest commit" : once === "problem" ? "the rehearsal found a problem" : "the rehearsal could not tell"
   })
   sub(ctx, "merge", `Waiting for you to merge #${number}…`, "pending")
-  const answer = await ctx.ask("merge-ready", { prUrl: pr.url, number, summary })
-  if (answer !== "open") return parked(answer === "later" ? "You chose to merge later." : "The merge question was closed.", number)
+  // §3y.9 (P2-6): GitHub is polled every 30 s WHILE the card is up; a merge seen closes the card (the ask's signal).
+  const seen = await askWhilePolling(ctx, deps, github, number, { prUrl: pr.url, number, summary })
+  if (seen.pr?.state === "MERGED" && seen.pr.mergeCommitOid) {
+    sub(ctx, "merge", "✓ Merged on GitHub", "ok")
+    return saveMerge(ctx, deps, runId, seen.pr.mergeCommitOid, seen.pr.mergedAt)
+  }
+  if (seen.pr?.state === "CLOSED") return parked("The pull request was closed without merging. Run `npx infinite-tag` to start a fresh run.", null)
+  const answer = seen.answer
+  if (answer !== "open") {
+    // ESC / later: one final read, so a merge made just now is never missed.
+    const last = await github.readPr(number).catch(() => null)
+    if (last?.state === "MERGED" && last.mergeCommitOid) {
+      sub(ctx, "merge", "✓ Merged on GitHub", "ok")
+      return saveMerge(ctx, deps, runId, last.mergeCommitOid, last.mergedAt)
+    }
+    return parked(answer === "later" ? "You chose to merge later." : "The merge question was closed.", number)
+  }
   // B29: "open" opens the pull request in the browser (darwin TTY runs; the wiring sets `openUrl` only there).
   if (!ctx.options.json && deps.openUrl && /^https:\/\//.test(pr.url)) await deps.openUrl(pr.url).catch(() => undefined)
+  sub(ctx, "merge", "Checking GitHub every 30 s — merge whenever you're ready (ESC later)", "pending")
 
   const started = deps.clock.now().getTime()
   for (;;) {

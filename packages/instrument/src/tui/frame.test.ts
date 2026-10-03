@@ -5,6 +5,7 @@ import { colorEnabled, makeStyles, stripAnsi, visibleWidth } from "./ansi.js"
 import { renderFrame, type FrameInput } from "./frame.js"
 import { OVERLAYS } from "./overlays/index.js"
 import type { OverlayContext } from "./overlays/types.js"
+import { hostRefusalLine } from "../wizard/site-host.js"
 
 function frame(change: Partial<FrameInput> = {}): string[] {
   return renderFrame({
@@ -36,6 +37,19 @@ describe("renderFrame", () => {
     expect(short).not.toContain("Job 1/7")
     expect(short).toContain("Job 2/7")
     for (const line of lines) expect(visibleWidth(line)).toBeLessThan(120)
+  })
+
+  it("R2-3: a long sub-status (the refused-host reason) wraps in full; it is never cut at 120 characters", () => {
+    const at = "2026-10-03T08:28:40.000Z"
+    const reason = hostRefusalLine({ reason: "preview", shown: "infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app" })
+    expect(reason.length).toBeGreaterThan(120)
+    const snapshot = midRunSnapshot({ currentStep: "before", steps: stepRows({ link: { state: "ok" }, agent: { state: "ok" }, before: { state: "running", subs: [{ text: reason, tone: "warn", at }] } }) })
+    for (const width of [80, 120]) {
+      const text = plain(frame({ snapshot, width })).replace(/\s+/g, " ")
+      expect(text, `width ${width}`).toContain("Or type your own domain now (ESC if it has none yet).")
+      expect(text).not.toContain("collects o …")
+      for (const line of frame({ snapshot, width })) expect(visibleWidth(line)).toBeLessThan(width)
+    }
   })
 
   it("70 columns: the Learn card is dropped and no line runs past the screen", () => {

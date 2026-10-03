@@ -11,15 +11,16 @@ import type { WizardApplyResult } from "../../install/installer.js"
 import { DECISION_LINE_IDS } from "../../install/plan-model.js"
 import { bridgeErrorCode, keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates } from "../../install/step-inputs.js"
 import { bridgeFailureLine, bridgeFailureOutcome, bridgeFailureState, hardStopOutcome } from "../../bridge/outcomes.js"
-import { productionHostHint } from "./link.js"
 import { makeEditRecord } from "../../install/edits.js"
+import { isProofBody, PROOF_FILE_PLAN_LINE_ID, proofFileTarget } from "../../install/proof-file.js"
+import { isPreviewShapedHost, resolveProductionHost } from "../site-host.js"
 import { GITIGNORE_FENCE_START } from "../../harness/outputs.js"
 import { wizardGitExtras } from "../../git/index.js"
 import type { InstallerApplyResult } from "../contracts/jobs.js"
 import { JOB_TABLE, type ChecklistItem } from "../contracts/jobs.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
-import type { TagHosting, TagKeys } from "../contracts/bridge.js"
-import { HOST_DENY_V1, normalizeHost } from "../contracts/host-deny.js"
+import type { ClaimPublic, SiteSourceFields, TagHosting, TagKeys } from "../contracts/bridge.js"
+import { normalizeHost } from "../contracts/host-deny.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 
 const meta = WIZARD_STEP_META.install
@@ -35,21 +36,18 @@ function sub(ctx: WizardContext, text: string, tone: "ok" | "warn" | "info" | "p
   ctx.emit.emit("step.sub", { step: "install", text, tone })
 }
 
-function denied(host: string): boolean {
-  const normalized = normalizeHost(host)
-  return HOST_DENY_V1.deny.exact.includes(normalized) || HOST_DENY_V1.deny.suffix.some((suffix) => normalized.endsWith(suffix))
-}
-
 /**
  * §3z.7 (A28): the site source's `productionHosts` = the normalised union of keys `infinite.productionHosts`,
  * the link's `productionHostHint` (when set) and `before`'s observed final production host (when it is not
- * deny-shaped); at most 10, no duplicates, and no preview-shaped host (`*.vercel.app`, …) unless Infinite
- * already lists it. The cloud treats `www.<host>` and `<host>` as one site and proves a host it has not
+ * deny-shaped); at most 10, no duplicates, and no platform host (`*.vercel.app`, `vercel.app`, `github.io`, …)
+ * unless Infinite already lists it. The cloud treats `www.<host>` and `<host>` as one site and proves a host it has not
  * verified through the linked Vercel project.
  */
 export function siteSourceHosts(keys: TagKeys, hint: string | null, observed: string | null): string[] {
   const listed = keys.infinite.productionHosts.map(normalizeHost).filter((host) => host !== "")
-  const extra = [...(hint ? [hint] : []), ...(observed ? [observed] : [])].map(normalizeHost).filter((host) => host !== "" && !denied(host))
+  // Founder ruling 2026-10-03: only the site's own domain. A platform address (ANY `*.vercel.app`, a production alias
+  // included, or a bare `vercel.app` / `github.io`) never joins, as the hint or as the observed host.
+  const extra = [...(hint ? [hint] : []), ...(observed ? [observed] : [])].map(normalizeHost).filter((host) => host !== "" && !isPreviewShapedHost(host))
   return [...new Set([...listed, ...extra])].slice(0, MAX_SITE_SOURCE_HOSTS)
 }
 
@@ -74,6 +72,32 @@ export async function recordGitignoreFence(ctx: WizardContext, deps: WizardDeps)
   if (runId === null) return false
   await deps.installer.recordEdits([makeEditRecord({ file: ".gitignore", before, after, jobId: null, planLineId: GITIGNORE_FENCE_LINE_ID, by: "wizard", runId })])
   return true
+}
+
+/**
+ * §3y.2: writes `.well-known/infinite-site-verification.txt` (the cloud's exact public body) where the framework
+ * serves it, and records it in `.infinite/install.json` (`by:"wizard"`, `planLineId:"install_provider:infinite"`,
+ * `jobId:null`). An identical file already there (a resume) records nothing new.
+ */
+export async function writeProofFile(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  scan: { appRoot: string; framework: string },
+  claim: Pick<ClaimPublic, "proofBody">
+): Promise<string | null> {
+  const target = proofFileTarget(ctx.root, scan.appRoot, scan.framework)
+  if (!("path" in target) || !isProofBody(claim.proofBody)) return null
+  const absolute = `${ctx.root}/${target.path}`
+  const before = await deps.fs.readText(absolute)
+  if (before === claim.proofBody) return target.path
+  await deps.fs.mkdirp(absolute.slice(0, absolute.lastIndexOf("/")), 0o755)
+  await deps.fs.writeTextAtomic(absolute, claim.proofBody, 0o644)
+  const runId = ctx.state.get().runId
+  if (runId !== null) {
+    await deps.installer.recordEdits([makeEditRecord({ file: target.path, before, after: claim.proofBody, jobId: null, planLineId: PROOF_FILE_PLAN_LINE_ID, by: "wizard", runId })])
+  }
+  sub(ctx, `✓ Wrote ${target.path} (Infinite reads it after your merge to confirm the domain)`, "ok")
+  return target.path
 }
 
 /** Job 2 ("unusual layout") for each file the installer could not edit itself: an open job, never installed. */
@@ -126,7 +150,9 @@ export function configRewriteJobs(deferred: ReadonlyArray<{ path: string; snippe
 
 async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const state = ctx.state.get()
-  if (!state.plan || state.plan.answers.consentMode === null) {
+  // R2-6: the consent answer is required only when the plan asked it (it is left out when nothing it governs exists).
+  const asksConsent = state.plan?.lines.some((line) => line.id === DECISION_LINE_IDS.consentMode) ?? false
+  if (!state.plan || (state.plan.answers.consentMode === null && asksConsent)) {
     return { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "The plan's consent mode is unanswered.", resumeHint: PARK_HINT }
   }
   const consentMode = state.plan.answers.consentMode
@@ -174,18 +200,78 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
 
   // ---- the site source + the consent answer: ONLY behind an approved Infinite line (P2-20) ----
   const installInfinite = check.lines.some((line) => line.kind === "install_provider" && line.id.startsWith("install_provider:infinite") && approved.has(line.id))
-  if (installInfinite) {
-    const hosts = siteSourceHosts(keys, await productionHostHint(ctx, deps), inputs.before.observedProductionHost)
+  let claim: ClaimPublic | null = null
+  // An Infinite install always comes with the consent line (the plan asks it whenever Infinite can be installed).
+  if (installInfinite && consentMode === null) {
+    return { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "The plan's consent mode is unanswered.", resumeHint: PARK_HINT }
+  }
+  if (installInfinite && consentMode !== null) {
+    // §3y.1: the one production host (Infinite's, this run's answer, or the flag); repo hints never answer it.
+    const host = resolveProductionHost({ keys, hosting: inputs.hosting, site: ctx.state.get().site ?? null }).host
+    const hosts = siteSourceHosts(keys, host, inputs.before.observedProductionHost)
     if (hosts.length === 0) {
       sub(ctx, "Infinite does not know your production domain yet: Infinite's tag is not installed this run", "warn")
     } else {
+      // §3y.2: the claim verb in place of site-source whenever the app offers it (the cloud answers the source when
+      // the hosts are verified, else a pending claim with a reserved key: nothing is collected before the proof).
+      const useClaim = deps.bridge.has("tag.site-claim.v1")
+      const runId = ctx.state.get().runId
       try {
-        const source = await deps.bridge.ensureSiteSource({ productionHosts: hosts, consentMode }, { signal: ctx.signal })
-        keys = {
-          ...keys,
-          infinite: { ...keys.infinite, status: "ready", siteSourceKey: source.siteSourceKey, productionHosts: source.productionHosts, consentMode: source.consentMode }
+        let source: SiteSourceFields | null = null
+        if (useClaim && runId) {
+          const answer = await deps.bridge.siteClaim({ runId, productionHosts: hosts, consentMode }, { signal: ctx.signal })
+          source = answer.state === "ready" ? answer.siteSource : null
+          claim = answer.state === "pending_proof" ? answer.claim : null
+          if (!source && !claim) throw new Error("site-claim answered neither a site source nor a claim")
+        } else {
+          const answer = await deps.bridge.ensureSiteSource({ productionHosts: hosts, consentMode }, { signal: ctx.signal })
+          source = { siteSourceKey: answer.siteSourceKey, productionHosts: answer.productionHosts, consentMode: answer.consentMode, created: answer.created }
         }
-        sub(ctx, `✓ Site source ${source.created ? "created" : "updated"} · consent ${source.consentMode === "required" ? "waits for your banner" : "collects by default"}`, "ok")
+        if (source) {
+          keys = {
+            ...keys,
+            infinite: { ...keys.infinite, status: "ready", siteSourceKey: source.siteSourceKey, productionHosts: source.productionHosts, consentMode: source.consentMode }
+          }
+          sub(ctx, `✓ Site source ${source.created ? "created" : "updated"} · consent ${source.consentMode === "required" ? "waits for your banner" : "collects by default"}`, "ok")
+        } else if (claim) {
+          const placed = proofFileTarget(ctx.root, scan.appRoot, scan.framework)
+          if (!("path" in placed) || !isProofBody(claim.proofBody)) {
+            // The proof file cannot be served (or the cloud's body is not the exact public form): no tag goes in
+            // with a key nothing could ever prove.
+            claim = null
+            keys = { ...keys, infinite: { ...keys.infinite, status: "not_provisioned", siteSourceKey: null } }
+            sub(ctx, "Infinite: the proof file cannot be placed where this site serves it; Infinite's tag is not installed this run", "warn")
+          } else {
+            // The managed tag carries the RESERVED key (in memory only); ingest refuses it until the proof.
+            keys = {
+              ...keys,
+              infinite: {
+                status: "ready",
+                siteSourceKey: claim.siteSourceKey,
+                productionHosts: [...claim.hosts],
+                consentMode: claim.consentMode,
+                consentStorageKey: claim.consentStorageKey,
+                collectPath: claim.collectPath
+              }
+            }
+            const pending = claim
+            ctx.state.update((current) => {
+              current.site = {
+                ...(current.site ?? { productionHost: host, source: "answer" as const, decidedAt: ctx.now().toISOString() }),
+                claim: {
+                  hosts: [...pending.hosts],
+                  siteSourceKey: pending.siteSourceKey,
+                  collectPath: pending.collectPath,
+                  consentStorageKey: pending.consentStorageKey,
+                  proofPath: pending.proofPath,
+                  state: "pending_proof"
+                }
+              }
+            })
+            await ctx.state.save()
+            sub(ctx, `Infinite reserved a site key for ${pending.hosts[0]}: it records nothing until your merge serves the proof file`, "info")
+          }
+        }
       } catch (error) {
         const code = bridgeErrorCode(error)
         const state = bridgeFailureState(error)
@@ -196,6 +282,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
           // §3z.7 (A28): another site's source, or a host the workspace has not proven: no Infinite pixel is
           // installed (its key is never written into this site), one user line, and the other tools go on.
           keys = { ...keys, infinite: { ...keys.infinite, status: "not_provisioned", siteSourceKey: null } }
+          claim = null
           const line =
             code === "invalid_request"
               ? `Prove ${hosts[0] ?? "your domain"} in Infinite (Site Settings), then run npx infinite-tag again; Infinite's tag is not installed this run`
@@ -228,6 +315,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   }
   for (const warning of result.warnings ?? []) sub(ctx, warning.length > 120 ? `${warning.slice(0, 117)}…` : warning, "warn")
   await recordGitignoreFence(ctx, deps)
+  // §3y.2: the claim's ONE managed file, recorded as the wizard's own edit (the PR carries it; uninstall removes it).
+  if (claim) await writeProofFile(ctx, deps, scan, claim)
 
   // ---- open jobs: a manual edit is job 2, never "installed"; it passes the ONE seeding gate (B13) ----
   const openJobs = deps.registry.applyApprovals(

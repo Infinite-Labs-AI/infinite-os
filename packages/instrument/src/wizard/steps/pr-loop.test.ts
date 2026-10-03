@@ -1,6 +1,6 @@
 // Lane O4: the `rehearsal`, `review` and `merge` steps end to end over a real git fixture (bare remote + clone),
 // the stateful fake gh, a recording fake bridge and scripted agents. No network, no real agent, no prompt.
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
@@ -16,6 +16,7 @@ import {
   fakeInstaller,
   initialState,
   PIXEL_ID,
+  READ_CHECK_PLACEHOLDER,
   review,
   RUN_ID,
   scriptedAgents,
@@ -32,12 +33,13 @@ import { createGitHubAdapter } from "../../hosts/github.js"
 import { createGitLabAdapter } from "../../hosts/gitlab.js"
 import { createOtherAdapter } from "../../hosts/other.js"
 import { REVIEW_LEDGER_PATH } from "../../review/ledger.js"
+import { reviewSentence } from "./merge.js"
 import { FAKE_BRIDGE_TOKEN, type TagHosting } from "../contracts/bridge.js"
 import { exitCodeFor } from "../contracts/codes.js"
 import type { Clock, StepOutcome, WizardDeps } from "../contracts/deps.js"
 import { PR_MARKERS, type GitHostAdapter } from "../contracts/git-host.js"
 import type { ChecklistItem } from "../contracts/jobs.js"
-import type { AgentRunResult, RunJobsInput } from "../contracts/agents.js"
+import type { AgentRunResult, ReviewResult, RunJobsInput } from "../contracts/agents.js"
 import { step as mergeStep } from "./merge.js"
 import { step as rehearsalStep } from "./rehearsal.js"
 import { step as reviewStep } from "./review.js"
@@ -81,6 +83,8 @@ interface WorldOptions {
   reviewer?: "codex" | "claude_code" | "brief" | null
   worker?: "claude_code" | "codex" | null
   reviews?: ScriptedAgents["reviews"]
+  /** §3y.7: the scripted reviewer reads nothing (it never quotes the read-check nonce). */
+  blindReviewer?: boolean
   fix?: (input: RunJobsInput, round: number, world: World) => Partial<AgentRunResult> | Promise<Partial<AgentRunResult>>
   answers?: Parameters<typeof testContext>[0]["answers"]
   npmRecorded?: boolean
@@ -143,7 +147,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
   const bridge = fakeBridge({ hosting: options.hosting ?? fakeHosting() })
   const clock = options.clock ?? fakeClock()
   let current: World
-  const agents = scriptedAgents({ reviews: options.reviews ?? [], fix: options.fix ? (input, round) => options.fix!(input, round, current) : undefined })
+  const agents = scriptedAgents({ reviews: options.reviews ?? [], blind: options.blindReviewer ?? false, fix: options.fix ? (input, round) => options.fix!(input, round, current) : undefined })
   const host =
     options.host === "gitlab" ? createGitLabAdapter(git) : options.host === "other" ? createOtherAdapter() : createGitHubAdapter(createGhClient({ cwd: fx.root, env: gh.env }))
   const ctx = testContext({
@@ -555,6 +559,122 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     input.onProgress({ jobId: input.items[0]!.id, text: "Editing app/layout.tsx for jane.doe@acme-store.com" })
     return { edits: [{ id: "a1", file: "app/layout.tsx", jobId: "review_comments", planLineId: null, by: "agent", beforeHash: "sha256:a", afterHash: "sha256:b", textEdits: [], runId: RUN_ID }] }
   }
+
+  /** The live run's Codex answer (pr2-codex-review.md): every item cant_tell, changes_suggested, no finding. */
+  const liveBlindReview = (): ReviewResult => ({
+    verdict: "changes_suggested",
+    summary: "Review blocked: file-access tooling is unavailable, and your instructions prohibit commands. No repository contents were inspected.",
+    checklist: (["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16"] as const).map((item) => ({ item, status: "cant_tell" as const, note: "Could not inspect files." })),
+    findings: []
+  })
+
+  it("§3y.7 the live run's blind review → one retry → still blind: NO review posted, the brief path, and never 'nothing to change'", async () => {
+    const w = await opened({ reviews: [liveBlindReview(), liveBlindReview()], blindReviewer: true, answers: { "teammate-comments": { actOn: [] } } })
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expectOk(outcome)
+    expect(outcome.status).toContain("no second review (Codex could not read the files)")
+    // One retry with a fresh session, the same worktree, and the "read them now" note.
+    expect(w.agents.reviewCalls).toHaveLength(2)
+    expect(w.agents.reviewCalls[1]!.worktreeDir).toBe(w.agents.reviewCalls[0]!.worktreeDir)
+    expect(w.agents.reviewCalls[1]!.brief).toContain("Your last answer shows you could not read the files.")
+    // Nothing posted as a review; the final comment says why; the terminal warns and points at the brief.
+    const state = w.gh.read()
+    expect(state.calls.filter((call) => call.stdin?.includes("addPullRequestReview(input"))).toEqual([])
+    const final = (state.prs[0] as { comments?: Array<{ body: string }> }).comments?.map((comment) => comment.body).join("\n") ?? ""
+    expect(final).toContain("No second review (Codex could not read the files).")
+    expect(final).not.toContain("Reviewed by Codex")
+    const text = eventText(w.ctx)
+    expect(text).toContain("! Codex could not read the pull request's files, so there is no second review.")
+    expect(text).toContain("The review brief is in .infinite/wizard/review-brief.md.")
+    expect(text).not.toContain("nothing to change")
+    expect(existsSync(join(w.fx.root, ".infinite/wizard/review-brief.md"))).toBe(true)
+    // The merge card says the same.
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toBe("No second review (Codex could not read the files)")
+  })
+
+  it("review P3-3: the RIGHT nonce but every item cant_tell is blind → one retry → still blind: nothing posted, never 'nothing to change'", async () => {
+    // Not `blindReviewer`: the scripted reviewer reads its folder and quotes the right nonce both times.
+    const w = await opened({ reviews: [liveBlindReview(), liveBlindReview()], answers: { "teammate-comments": { actOn: [] } } })
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expectOk(outcome)
+    expect(outcome.status).toContain("no second review (Codex could not read the files)")
+    expect(w.agents.reviewCalls).toHaveLength(2)
+    expect(w.agents.reviewCalls[1]!.brief).toContain("Your last answer shows you could not read the files.")
+    expect(w.gh.read().calls.filter((call) => call.stdin?.includes("addPullRequestReview(input"))).toEqual([])
+    expect(eventText(w.ctx)).not.toContain("nothing to change")
+  })
+
+  it("review P3-5: a nonce quoted in the summary's body or a checklist note is never posted or stored", async () => {
+    const quoted = review([])
+    quoted.summary = `I read .infinite/review/read-check.txt (${READ_CHECK_PLACEHOLDER}) and the diff.`
+    quoted.checklist = (["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16"] as const).map((item) => ({
+      item,
+      status: item === "R12" ? ("cant_tell" as const) : ("pass" as const),
+      note: item === "R12" ? `could not tell; the read-check said ${READ_CHECK_PLACEHOLDER}` : "checked"
+    }))
+    const w = await opened({ reviews: [quoted], answers: { "teammate-comments": { actOn: [] } } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const posted = w.gh
+      .read()
+      .calls.filter((call) => call.stdin?.includes("addPullRequestReview(input"))
+      .map((call) => (JSON.parse(call.stdin!) as { variables: { body: string } }).variables.body)
+    expect(posted).toHaveLength(1)
+    // The nonce is exactly 16 hex (a SHA is 40): no such run is posted, and the redaction marker shows where it was.
+    const nonceShaped = /(?<![0-9a-f])[0-9a-f]{16}(?![0-9a-f])/
+    expect(posted[0]).not.toMatch(nonceShaped)
+    expect(posted[0]).toContain("[read-check]")
+    expect(posted[0]).not.toContain(READ_CHECK_PLACEHOLDER)
+    const ledger = readFileSync(join(w.fx.root, ".infinite/wizard/review-ledger.json"), "utf8")
+    expect(ledger).not.toMatch(nonceShaped)
+    expect(ledger).toContain("[read-check]")
+  })
+
+  it("§3y.7 a missing nonce alone is blind (even with every item checked)", async () => {
+    const good = review([])
+    const w = await opened({ reviews: [good, good], blindReviewer: true, answers: { "teammate-comments": { actOn: [] } } })
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expectOk(outcome)
+    expect(outcome.status).toContain("no second review")
+    expect(eventText(w.ctx)).not.toContain("nothing to change")
+  })
+
+  it("§3y.7 a partial cant_tell is INCOMPLETE in the terminal, the posted review, the merge card and the final comment; the nonce is never posted", async () => {
+    const partial = review([])
+    partial.checklist = (["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16"] as const).map((item) => ({
+      item,
+      status: item === "R10" || item === "R12" ? ("cant_tell" as const) : ("pass" as const),
+      note: item === "R10" ? "not applicable: no server lane" : "checked"
+    }))
+    const w = await opened({ reviews: [partial], answers: { "teammate-comments": { actOn: [] } } })
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expectOk(outcome)
+    expect(outcome.status).toContain("reviewed by Codex (incomplete)")
+    const text = eventText(w.ctx)
+    expect(text).toContain("! Codex's review is incomplete: it could not check R10, R12 (14 of 16 checked)")
+    expect(text).not.toContain("nothing to change")
+    const state = w.gh.read()
+    const posted = state.calls.filter((call) => call.stdin?.includes("addPullRequestReview(input")).map((call) => (JSON.parse(call.stdin!) as { variables: { body: string } }).variables.body)
+    expect(posted).toHaveLength(1)
+    expect(posted[0]).toContain("**Second review by Codex (round 1): incomplete — it could not check R10, R12.**")
+    expect(posted[0]).not.toMatch(/read-check/)
+    const final = (state.prs[0] as { comments?: Array<{ body: string }> }).comments?.map((comment) => comment.body).join("\n") ?? ""
+    expect(final).toContain("Reviewed by Codex (incomplete: R10, R12 not checked).")
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toBe("Review incomplete (Codex could not check 2 items)")
+    // The stored review carries no nonce either.
+    const ledger = JSON.parse(readFileSync(join(w.fx.root, ".infinite/wizard/review-ledger.json"), "utf8")) as { rounds: Array<{ review: { summary: string } }> }
+    expect(ledger.rounds[0]!.review.summary).not.toMatch(/read-check/)
+  })
+
+  it("§3y.7 complete + looks_good + 0 findings is the ONLY 'nothing to change'; changes_suggested with none named says so", async () => {
+    const w = await opened({ reviews: [review([])], answers: { "teammate-comments": { actOn: [] } } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(eventText(w.ctx)).toContain("Codex reviewed the pull request: nothing to change")
+    const named = review([], "changes_suggested")
+    const v = await opened({ reviews: [named], answers: { "teammate-comments": { actOn: [] } } })
+    expectOk(await reviewStep.run(v.ctx, v.deps))
+    expect(eventText(v.ctx)).toContain("! Codex suggested changes but named none")
+    expect(eventText(v.ctx)).not.toContain("nothing to change")
+  })
 
   it("posts ONE COMMENT review, acts only on trusted items, fixes in a descendant commit, replies, resolves its own fixed thread, re-rehearses, then readies the PR", async () => {
     const w = await opened({

@@ -32,9 +32,16 @@ import type { TagKeys } from "../wizard/contracts/bridge.js"
 import type { RunFacts } from "./context.js"
 import { derivedInPrCells, ga4KeyEventCells, preMergeCells } from "./in-pr-cells.js"
 import { bridgeErrorCode, bridgeStopCode, sub } from "./context.js"
+import { asBridgeFailure } from "../bridge/outcomes.js"
 
 export type RehearsalUndetermined =
   | "not_vercel"
+  /** The desktop refused the preview origin: no Vercel connection in Infinite and no pending domain proof to check. */
+  | "preview_unconfirmed"
+  /** The desktop refused the preview origin: no Vercel connection, and the preview did not serve the pending proof file. */
+  | "preview_unserved"
+  /** The desktop refused the preview origin although Infinite has a Vercel connection (not that project's preview). */
+  | "preview_refused"
   | "preview_protected"
   | "no_preview"
   | "no_production_host"
@@ -113,6 +120,14 @@ export function rehearsalTargets(productionHost: string, evidenceUrls: readonly 
   return targets
 }
 
+/**
+ * Review P2-1: the desktop refuses a test whose preview origin it cannot tie to this site (1bu-1
+ * `verifyPreviewOrigins`: 400 `invalid_request` naming `rehearsal.previewOrigin` or `targets.<i>.url`). That is a
+ * refusal, never "the test window did not finish".
+ */
+export const PREVIEW_REFUSED = "preview_refused" as const
+const PREVIEW_FIELD = /^(rehearsal\.previewOrigin|targets\.\d+\.url)$/
+
 /** Polls a desktop test run to its end (the server holds each poll ≤ 25 s); cancels it on abort. */
 export async function runDesktopTest(
   ctx: WizardContext,
@@ -127,6 +142,8 @@ export async function runDesktopTest(
     if (bridgeStopCode(error) !== null) throw error
     const code = bridgeErrorCode(error)
     if (code === null) throw error
+    const field = asBridgeFailure(error)?.field
+    if (code === "invalid_request" && field !== undefined && PREVIEW_FIELD.test(field)) return { result: null, error: PREVIEW_REFUSED }
     return { result: null, error: code }
   }
 }
@@ -234,17 +251,21 @@ export async function rehearse(
   })
   const { facts } = input
   if (facts.readFailed) return empty("facts_unreadable")
-  if (!facts.hosting || facts.hosting.provider !== "vercel" || !facts.hosting.vercel) return empty("not_vercel")
-  if (facts.hosting.vercel.previewProtection !== "none" && facts.hosting.vercel.previewProtection !== "unknown") return empty("preview_protected")
+  // §3y.4: Infinite hosting on Vercel, a local `.vercel/` link, or a `vercel[bot]` deployment (the signal). Without
+  // Infinite's connection the preview's protection is unknown: the rehearsal still runs, and D2's
+  // `environment.previewProtected` grades a protected preview `undetermined`, never a pass.
+  const vercelHosting = facts.hosting?.provider === "vercel" && facts.hosting.vercel ? facts.hosting.vercel : null
+  if (!vercelHosting && facts.vercelSignal !== true) return empty("not_vercel")
+  if (vercelHosting && vercelHosting.previewProtection !== "none" && vercelHosting.previewProtection !== "unknown") return empty("preview_protected")
   if (!facts.productionHost) return empty("no_production_host")
   if (deps.host.kind !== "github") return empty("not_github")
   if (!input.ghReady) return empty("gh_unavailable")
-  if (isGitHubAdapter(deps.host)) deps.host.setPreviewProject(facts.hosting.vercel.projectName)
+  if (isGitHubAdapter(deps.host)) deps.host.setPreviewProject(vercelHosting?.projectName ?? facts.vercelProject ?? null)
   const waited = await waitForPreview(ctx, deps, input.step, input.head)
   if (waited.url === null) return empty(waited.why)
   const previewUrl = waited.url
 
-  const expect: TestExpect = facts.keys ? testExpectFromKeys(facts.keys) : {}
+  const expect: TestExpect = facts.keys ? testExpectFromKeys(facts.keys, facts.claim ?? null) : {}
   const consentSeed =
     input.consentRequired && facts.keys?.infinite.consentStorageKey
       ? { kind: "infinite_runtime_grant" as const, storageKey: facts.keys.infinite.consentStorageKey }
@@ -282,6 +303,12 @@ export async function rehearse(
 
   sub(ctx, input.step, `Loading the preview under ${facts.productionHost} (nothing sent)…`, "pending")
   const rehearsal = await runDesktopTest(ctx, deps, input.step, rehearsalRequest)
+  // P1-2: the desktop ties a preview to this site through Infinite's Vercel connection or, without one, through the
+  // pending claim's proof file the preview must serve. A refused preview is said as such (never "did not finish"),
+  // and the preview's own load (the same origin) is not asked for again.
+  if (rehearsal.error === PREVIEW_REFUSED) {
+    return empty(vercelHosting ? "preview_refused" : facts.claim?.state === "pending_proof" ? "preview_unserved" : "preview_unconfirmed", previewUrl)
+  }
   const preview = await runDesktopTest(ctx, deps, input.step, previewRequest)
   if (!rehearsal.result) return empty(rehearsal.error === "busy" ? "test_busy" : "test_error", previewUrl)
 
@@ -419,6 +446,9 @@ function finishCell(verdict: { state: CellState; reason?: Reason }, text: { pass
 
 const UNDETERMINED_REASON: Record<RehearsalUndetermined, Reason> = {
   not_vercel: "not_vercel",
+  preview_unconfirmed: "not_exercised",
+  preview_unserved: "not_exercised",
+  preview_refused: "not_exercised",
   preview_protected: "preview_protected",
   no_preview: "not_exercised",
   no_production_host: "not_exercised",
@@ -636,7 +666,10 @@ function keepHeadIndependent<K extends string>(cells: Partial<Record<K, Cell>> |
 export function rehearsalLines(outcome: RehearsalOutcome): Array<{ text: string; tone: "ok" | "warn" | "info" }> {
   if (outcome.state === "undetermined") {
     const why: Record<RehearsalUndetermined, string> = {
-      not_vercel: "Rehearsal: undetermined (the site is not on Vercel)",
+      not_vercel: "Rehearsal: undetermined (no Vercel preview found for this site)",
+      preview_unconfirmed: "Rehearsal: undetermined (Infinite can't confirm the preview is this site's without a Vercel connection)",
+      preview_unserved: "Rehearsal: undetermined (the preview did not serve this pull request's proof file, e.g. it is protected)",
+      preview_refused: "Rehearsal: undetermined (Infinite refused the preview: it is not this site's Vercel project)",
       preview_protected: "Rehearsal: undetermined (the preview is protected)",
       no_preview: "Rehearsal: undetermined (no preview appeared within 10 minutes)",
       no_production_host: "Rehearsal: undetermined (no production host known)",

@@ -68,12 +68,16 @@ import { DEFAULT_POSTHOG_PROXY_PATH, INFINITE_API_ORIGIN, infiniteCollectDestina
 import { hasExactNextConfigRewrites, type ManagedProxySpec } from "../frameworks/vercel-config.js"
 import { isManagedInfiniteFile } from "../frameworks/managed-files.js"
 import { findLockfile, runNpmJob } from "./npm.js"
+import { proofFileBlockedText, proofFileTarget } from "./proof-file.js"
 import {
   buildPlanModel,
   DECISION_LINE_IDS,
+  planAsksConsent,
+  lineFactsFor,
   planAskPayload,
   resolvePlanAnswers,
   type PlanAgentSummary,
+  type PlanRunFacts,
   type PlanScanFacts,
   type ProductionDeniedConflict,
   type WizardBeforeFacts,
@@ -135,6 +139,11 @@ export interface InstallerOptions {
   consentFlag(): "required" | "not_required" | null
   /** O5's `productionDeniedConflict` (wired at integration). */
   productionDeniedConflict: ProductionDeniedConflict
+  /**
+   * §3y.5: the run facts the runnability rule reads (this run's site state, the `tag.site-claim.v1` capability).
+   * Absent = no answered host and no claim capability.
+   */
+  runFacts?: () => PlanRunFacts | null
   /** O6's `CheckRunner.build` (the build runs sandboxed there). Absent = no build check (said so). */
   build?: () => Promise<BuildResult>
   /** The npm job's spawner (tests pass a fake). */
@@ -320,6 +329,14 @@ export class WizardInstaller implements Installer {
     const served = siteServing(wizardScan, beforeFacts, keys)
     const improve = improveLinesFor(wizardScan.facts, { framework: wizardScan.framework, keys, sensitivePaths, vercelServed: served.vercelServed })
     const managed = new Set<ProviderId>((wizardScan.manifest?.providers ?? []) as ProviderId[])
+    const run = this.options.runFacts?.() ?? null
+    // §3y.2: on the claim path the proof file must be served at the site's root; a static site that builds into
+    // another directory cannot be, so Infinite's line says where to put it (before anything is approved).
+    let infiniteBlocked = served.infiniteBlocked
+    if (!infiniteBlocked && run?.siteClaim && keys.infinite.status !== "ready" && !lineFactsFor({ keys, before: beforeFacts, scan: { serverLane: wizardScan.serverLane } as PlanScanFacts, run }).vercelServesHost) {
+      const target = proofFileTarget(wizardScan.root, wizardScan.appRoot, wizardScan.framework)
+      if ("blocked" in target) infiniteBlocked = proofFileBlockedText(target.blocked)
+    }
     const facts: PlanScanFacts = {
       framework: wizardScan.framework,
       managedProviders: [...managed],
@@ -332,7 +349,7 @@ export class WizardInstaller implements Installer {
       sensitivePaths,
       appRoot: wizardScan.appRoot,
       posthogProxy: served.posthogProxy,
-      infiniteBlocked: served.infiniteBlocked,
+      infiniteBlocked,
       nextConfigRewrites: nextConfigRewritesNeeded(wizardScan, keys),
       // Review I1 P1-2: an installer blocker is said on the plan screen, before anything is approved or written.
       installBlocked: this.dryInstallFailure(
@@ -349,7 +366,8 @@ export class WizardInstaller implements Installer {
       candidates,
       agent: this.options.agent(),
       consentFlag: this.options.consentFlag(),
-      productionDeniedConflict: this.options.productionDeniedConflict
+      productionDeniedConflict: this.options.productionDeniedConflict,
+      run
     })
     this.internals.set(model, { scan: wizardScan, keys, before: beforeFacts, candidates, improve })
     return model
@@ -413,7 +431,8 @@ export class WizardInstaller implements Installer {
     const root = scan.root
     const runId = this.requireRunId()
     const answers = resolvePlanAnswers(plan, approvals, { consentFlag: this.options.consentFlag() })
-    if (answers.consentMode === null) throw new Error("apply needs an answered consent mode (the run parks at `plan` without one).")
+    // R2-6: a plan that does not ask consent installs nothing consent governs (no Infinite, no managed tag, no capture).
+    if (answers.consentMode === null && planAsksConsent(plan)) throw new Error("apply needs an answered consent mode (the run parks at `plan` without one).")
     const approved = new Set(answers.lines.filter((entry) => entry.approved === true).map((entry) => entry.id))
     const warnings: string[] = [...scan.warnings]
     const served = siteServing(scan, internals.before, keys)
@@ -432,7 +451,7 @@ export class WizardInstaller implements Installer {
         continue
       }
       if (!previous?.providers.includes(tool)) continue
-      const kept = keptArtifact(tool, previous, keys, answers.consentMode)
+      const kept = answers.consentMode === null ? "the plan has no consent answer for it" : keptArtifact(tool, previous, keys, answers.consentMode)
       if (typeof kept === "string") {
         return this.failed(artifacts, warnings, `${TOOL_LABEL[tool]} is already installed here and its update was not approved, but ${kept}. Approve "Update ${TOOL_LABEL[tool]}", or remove it with uninstall first.`, false)
       }

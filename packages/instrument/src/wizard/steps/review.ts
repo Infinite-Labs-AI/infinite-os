@@ -4,7 +4,7 @@
 // → commits, pushes, proves the new head descends from the old → replies on its own threads (and on a
 // teammate's only with the user's OK) → resolves only its own fixed threads → re-rehearses → `gh pr ready` + the
 // final comment. With one agent it writes and prints the review brief instead.
-import { createHash } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 import { join } from "node:path"
 
 import type { AgentKind, ReviewFailure, ReviewResult } from "../contracts/agents.js"
@@ -16,7 +16,7 @@ import { WIZARD_STEP_META } from "../contracts/steps.js"
 import { isGloballyDenied } from "../../git/commit.js"
 import { isGitHubAdapter, type GitHubHostAdapter } from "../../hosts/github.js"
 import { isUnsupported } from "../../hosts/other.js"
-import { isReviewResult, parseBriefReview, printedReviewBrief, reviewerBrief } from "../../review/brief.js"
+import { classifyReview, isReviewResult, parseBriefReview, printedReviewBrief, reviewerBrief, type ClassifiedReview } from "../../review/brief.js"
 import { allowlistUnion, assertNoAgentAlive, bestEffortBridge, bridgeStop, manifestFiles, status, sub } from "../../review/context.js"
 import { parseUnifiedDiff } from "../../review/diff.js"
 import { job16Item, restoreFiles, runFixRound, snapshotFiles, verifyFix } from "../../review/fix.js"
@@ -28,10 +28,14 @@ import { mergeRequirementLine } from "../../github/rules.js"
 import { checksSummary } from "../../github/checks.js"
 import { DETERMINISTIC_CHECKS_BY_ITEM, isRepoRelativePath, triage, triageKey, type TriageDecision, type TriageItem } from "../../review/triage.js"
 import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
+import { provenPendingFor } from "./prove.js"
 import { announceRehearsal, commitStop, evidenceUrls, isShipContext, prepareShip, recordClickTests, type ShipContext } from "./rehearsal.js"
 
 const meta = WIZARD_STEP_META.review
 const REVIEW_INPUT_DIR = ".infinite/review"
+/** §3y.7: the read-check nonce the reviewer must quote (16 random hex; never posted). */
+export const READ_CHECK_PATH = `${REVIEW_INPUT_DIR}/read-check.txt`
+export const BLIND_RETRY_NOTE = "Your last answer shows you could not read the files. Read them now with the read-only commands named above, then answer."
 const HEAD_SYNC_ATTEMPTS = 5
 const HEAD_SYNC_SLEEP_MS = 3_000
 
@@ -93,13 +97,23 @@ async function writeReviewInputs(session: Session, dir: string, diff: string): P
   return names
 }
 
-/** Runs the reviewer agent on `head` (one retry when its JSON does not parse). */
-async function runReviewer(session: Session, reviewer: AgentKind, round: number, head: string, fromSha: string, openItems: string[]): Promise<ReviewResult | ReviewFailure> {
+/** What one reviewer run gave: a classified review, a blind one (after its one retry), or a failure. */
+export type ReviewerRun = { review: ReviewResult; classified: ClassifiedReview } | { blind: true } | ReviewFailure
+
+/**
+ * Runs the reviewer agent on `head`: one retry when its JSON does not parse, and (§3y.7) one retry with a fresh
+ * session when the review is BLIND (the read-check nonce missing or wrong, or every item `cant_tell`).
+ */
+async function runReviewer(session: Session, reviewer: AgentKind, round: number, head: string, fromSha: string, openItems: string[]): Promise<ReviewerRun> {
   const { ship, deps, ctx } = session
   const worktree = await ship.git.worktreeAddDetached(head)
   try {
     const inputs = await writeReviewInputs(session, worktree.dir, await ship.git.diff(fromSha, head))
+    const nonce = randomBytes(8).toString("hex")
+    await deps.fs.writeTextAtomic(join(worktree.dir, READ_CHECK_PATH), `${nonce}\n`, 0o600)
     const brief = reviewerBrief({
+      reviewer,
+      readCheck: READ_CHECK_PATH,
       prNumber: session.number,
       repoLabel: ship.repoLabel,
       tagVersion: deps.tagVersion,
@@ -111,28 +125,38 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
     // The headline names who is working NOW (terminal QA #19: the worker's last line from the jobs or fix turn
     // stayed above "Codex is reviewing").
     ctx.emit.emit("narrate", { agent: reviewer, role: "reviewer", text: round > 1 ? "Reading the fix commit (read-only)" : "Reading the pull request (read-only)" })
-    let result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief })
-    if ("error" in result && result.error === "unparseable") {
-      result = await deps.agents.review({
-        worktreeDir: worktree.dir,
-        reviewer,
-        brief: `${brief}\n\nYour previous answer did not match the JSON schema. Return JSON only, exactly matching it.`
-      })
+    const once = async (text: string): Promise<ReviewResult | ReviewFailure> => {
+      let result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: text })
+      if ("error" in result && result.error === "unparseable") {
+        result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: `${text}\n\nYour previous answer did not match the JSON schema. Return JSON only, exactly matching it.` })
+      }
+      // Belt and braces: whatever the runner parsed must match review.schema.json before anything is posted.
+      if (!("error" in result) && !isReviewResult(result)) return { error: "unparseable" }
+      return result
     }
-    // Belt and braces: whatever the runner parsed must match review.schema.json before anything is posted.
-    if (!("error" in result) && !isReviewResult(result)) return { error: "unparseable" }
-    return result
+    const first = await once(brief)
+    if ("error" in first) return first
+    let classified = classifyReview(first, nonce)
+    if (classified.state === "blind") {
+      sub(ctx, "review", `${AGENT_LABEL[reviewer]}'s review shows it could not read the files; asking once more`, "info")
+      const retry = await once(`${brief}\n\n${BLIND_RETRY_NOTE}`)
+      if ("error" in retry && (retry.error === "out_of_usage" || retry.error === "timeout")) return retry
+      if (!("error" in retry)) classified = classifyReview(retry, nonce)
+    }
+    if (classified.state === "blind") return { blind: true }
+    return { review: classified.review, classified }
   } finally {
     await ship.git.worktreeRemove(worktree.dir)
   }
 }
 
 /** Scans and posts one review round (GitHub: one COMMENT review; elsewhere: `.infinite/wizard/REVIEW.md`). */
-async function postRound(session: Session, review: ReviewResult, reviewer: AgentKind, round: number, head: string): Promise<void> {
+async function postRound(session: Session, review: ReviewResult, reviewer: AgentKind, round: number, head: string, classified: ClassifiedReview | null = null): Promise<void> {
   const { ship, deps, ctx } = session
   const state = ctx.state.get()
   const fullDiff = await ship.git.diff(state.git!.baseSha, head)
-  const post = buildReviewPost({ review, diffFiles: parseUnifiedDiff(fullDiff), scanner: ship.scanner, runId: ship.runId, round, head, reviewer })
+  const unchecked = classified?.state === "incomplete" ? classified.unchecked : []
+  const post = buildReviewPost({ review, diffFiles: parseUnifiedDiff(fullDiff), scanner: ship.scanner, runId: ship.runId, round, head, reviewer, unchecked })
   const redact = (text: string) => (ship.isPrivate ? text : redactIdsNotInDiff(text, fullDiff, ship.facts.connectionIds))
   const body = redact(post.body)
   const threads = post.threads.map((thread) => ({ ...thread, body: redact(thread.body) }))
@@ -144,8 +168,24 @@ async function postRound(session: Session, review: ReviewResult, reviewer: Agent
     const located = threads.map((thread) => `- \`${thread.path}:${thread.line}\` ${thread.body.replace(/\n+/g, " ")}`).join("\n")
     await deps.fs.writeTextAtomic(path, `${previous}${previous ? "\n\n" : ""}${body}${located ? `\n\n${located}` : ""}\n`, 0o600)
   }
-  const line = reviewFoundLine(AGENT_LABEL[reviewer], review.findings.length, round)
-  sub(ctx, "review", line.text, line.tone)
+  for (const line of reviewFoundLines(AGENT_LABEL[reviewer], review, round, classified)) sub(ctx, "review", line.text, line.tone)
+}
+
+/**
+ * §3y.7: what the reviewer found, with its completeness. "Nothing to change" ONLY for a complete review that approves
+ * with no findings; an incomplete review names what it could not check; "changes suggested" with no finding says so.
+ */
+export function reviewFoundLines(reviewer: string, review: Pick<ReviewResult, "verdict" | "findings" | "checklist">, round: number, classified: Pick<ClassifiedReview, "state" | "unchecked"> | null): Array<{ text: string; tone: "ok" | "info" | "warn" }> {
+  const lines: Array<{ text: string; tone: "ok" | "info" | "warn" }> = []
+  const complete = classified === null || classified.state === "complete"
+  if (classified?.state === "incomplete") {
+    const total = review.checklist.length
+    lines.push({ text: `! ${reviewer}'s review is incomplete: it could not check ${classified.unchecked.join(", ")} (${total - classified.unchecked.length} of ${total} checked)`, tone: "warn" })
+  }
+  if (review.findings.length > 0) lines.push(reviewFoundLine(reviewer, review.findings.length, round))
+  else if (review.verdict !== "looks_good") lines.push({ text: `! ${reviewer} suggested changes but named none`, tone: "warn" })
+  else if (complete) lines.push(reviewFoundLine(reviewer, 0, round))
+  return lines
 }
 
 /**
@@ -492,7 +532,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     tagVersion: deps.tagVersion,
     site: { repoLabel: ship.repoLabel, productionHost: ship.facts.productionHost },
     columns: ctx.state.get().report,
-    provenLivePending: "deploy",
+    provenLivePending: provenPendingFor({ state: ctx.state.get(), hostingVercel: ship.facts.hosting?.provider === "vercel", noProve: false, productionHost: ship.facts.productionHost }),
     day7: null,
     notes: []
   })
@@ -508,6 +548,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     reportMarkdown: deps.report.renderMarkdown(report),
     reviewer: session.reviewer,
     reviewed: session.reviewed,
+    completeness: session.ledger.completeness ?? null,
     jobs: ctx.state.get().jobs,
     decisions: [...session.decisions, ...openFromLedger],
     untrusted: session.untrusted,
@@ -522,6 +563,30 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     const previous = (await deps.fs.readText(path)) ?? ""
     await deps.fs.writeTextAtomic(path, `${previous}${previous ? "\n\n" : ""}${comment}`, 0o600)
   }
+}
+
+/**
+ * §3y.7: a reviewer that still could not read the files after its retry. No review is posted; the printed brief is
+ * written (the existing one-agent path) and every surface says there is no second review, and why.
+ */
+async function blindFallback(session: Session, reviewer: AgentKind, prepared: ShipContext): Promise<void> {
+  const { ctx, deps } = session
+  const state = ctx.state.get()
+  const brief = printedReviewBrief({
+    prNumber: session.number,
+    prUrl: state.pr?.url ?? null,
+    repoLabel: prepared.repoLabel,
+    tagVersion: deps.tagVersion,
+    runId: prepared.runId,
+    inputs: { diff: "the pull request's diff", plan: "the pull request's description", checks: "the table in the pull request" }
+  })
+  await deps.fs.mkdirp(join(ctx.root, WIZARD_PATHS.dir), 0o700)
+  await deps.fs.writeTextAtomic(join(ctx.root, WIZARD_PATHS.reviewBrief), brief, 0o600)
+  sub(ctx, "review", `! ${AGENT_LABEL[reviewer]} could not read the pull request's files, so there is no second review.`, "warn")
+  sub(ctx, "review", `The review brief is in ${WIZARD_PATHS.reviewBrief}.`, "warn")
+  session.notes.push(`No second review yet: ${AGENT_LABEL[reviewer]} could not read the files. Paste ${WIZARD_PATHS.reviewBrief} into any agent; a re-run of \`npx infinite-tag\` reads its review back.`)
+  session.ledger.completeness = { reviewer, state: "blind", unchecked: [] }
+  session.reviewed = false
 }
 
 async function mergedEarly(session: Session): Promise<StepOutcome> {
@@ -658,6 +723,11 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
     } else if (agentReviewer) {
       const openItems = session.ledger.open.map((entry) => `${entry.path ?? "general"}: ${entry.excerpt.slice(0, 120)}`)
       const result = await runReviewer(session, agentReviewer, round, head, round === 1 ? gitState.baseSha : reviewedSha, openItems)
+      if ("blind" in result) {
+        // §3y.7: still blind after its one retry: nothing is posted as a review, and the one-agent brief path runs.
+        await blindFallback(session, agentReviewer, prepared)
+        break
+      }
       if ("error" in result) {
         await saveLedger(session)
         await ctx.state.save()
@@ -671,8 +741,9 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
         await finish(session)
         return failed("INF_WIZ_REVIEW_UNPARSEABLE", "The second review could not be read; the pull request was marked ready without it.", "continue")
       }
-      review = result
-      await postRound(session, review, agentReviewer, round, head)
+      review = result.review
+      session.ledger.completeness = { reviewer: agentReviewer, state: result.classified.state, unchecked: result.classified.unchecked }
+      await postRound(session, review, agentReviewer, round, head, result.classified)
     } else {
       break
     }
@@ -821,7 +892,13 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
   const final = ctx.state.get()
   const once = final.report.in_pr?.finishLine.each_tool_once?.state
   const rehearsalText = once === "pass" ? "rehearsal passed on the latest commit" : once === "problem" ? "rehearsal found a problem" : "rehearsal undetermined"
-  const who = session.reviewed ? `reviewed by ${agentReviewer ? AGENT_LABEL[agentReviewer] : "your agent (brief)"}` : "no second review"
+  const blind = session.ledger.completeness?.state === "blind" && agentReviewer !== null
+  const incomplete = session.ledger.completeness?.state === "incomplete"
+  const who = blind
+    ? `no second review (${AGENT_LABEL[agentReviewer!]} could not read the files)`
+    : session.reviewed
+      ? `reviewed by ${agentReviewer ? AGENT_LABEL[agentReviewer] : "your agent (brief)"}${incomplete ? " (incomplete)" : ""}`
+      : "no second review"
   const found = session.reviewed ? reviewTally(session.ledger.rounds) : null
   const line = [`${final.pr?.number ? `Pull request #${final.pr.number}` : "Branch"}`, who, ...(found ? [found] : []), rehearsalText].join(" · ")
   status(ctx, "review", line)

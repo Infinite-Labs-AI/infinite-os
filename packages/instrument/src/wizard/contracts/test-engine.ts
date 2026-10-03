@@ -194,9 +194,11 @@ export function testRequestBoundErrors(request: TestRunRequest): string[] {
  *   for US, `https://eu.i.posthog.com` for EU, a self-hosted project's own host; never `/ingest`). A first-party
  *   proxy is a FACT the test observes (`posthog.events[].sameOrigin`, `libCustomApiHost`), not an expectation;
  * - meta: every connected pixel id;
- * - infinite: the site source key + collect path, once provisioned.
+ * - infinite: the site source key + collect path, once provisioned; §3y.2: while a site-file claim is PENDING, the
+ *   claim's reserved key + collect path (the claim is a cloud answer, the same class of source as the keys verb,
+ *   never a repo value, so R2-16 holds). Once proven, the keys carry the source and the claim is not consulted.
  */
-export function testExpectFromKeys(keys: TagKeys): TestExpect {
+export function testExpectFromKeys(keys: TagKeys, claim?: { siteSourceKey: string; collectPath: string; state: string } | null): TestExpect {
   const expect: TestExpect = {}
   if (keys.ga4.status === "connected" && keys.ga4.streams.length > 0) expect.ga4 = keys.ga4.streams.map((stream) => stream.measurementId)
   if (keys.posthog.status === "connected" && keys.posthog.projectKey && keys.posthog.ingestHost) {
@@ -205,6 +207,8 @@ export function testExpectFromKeys(keys: TagKeys): TestExpect {
   if (keys.meta.status === "connected" && keys.meta.pixels.length > 0) expect.meta = keys.meta.pixels.map((pixel) => pixel.pixelId)
   if (keys.infinite.status === "ready" && keys.infinite.siteSourceKey && keys.infinite.collectPath) {
     expect.infinite = { siteSourceKey: keys.infinite.siteSourceKey, collectPath: keys.infinite.collectPath }
+  } else if (claim && claim.state === "pending_proof" && claim.siteSourceKey && claim.collectPath) {
+    expect.infinite = { siteSourceKey: claim.siteSourceKey, collectPath: claim.collectPath }
   }
   return expect
 }

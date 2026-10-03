@@ -33,6 +33,9 @@ import { WIZARD_PATHS } from "./contracts/state.js"
 import { installInterruptHandlers, runInterruptSequence, type SignalSource } from "./signals.js"
 import { WizardStore } from "./store.js"
 import { WIZARD_STEPS } from "./steps/index.js"
+import { hostRefusalLine, parseHostInput } from "./site-host.js"
+import { discardCommand, discardLeftovers, dirtyTreeMessage, findLeftovers } from "./leftovers.js"
+import { wizardGitExtras } from "../git/index.js"
 import { runUninstallFlow, type UninstallLinkFn } from "./uninstall-flow.js"
 import { getWizardWiring, type WizardIo, type WizardWiring } from "./wiring.js"
 
@@ -45,7 +48,7 @@ export const NOT_A_TTY_MESSAGE =
 export const WIZARD_USAGE = [
   "Usage: npx infinite-tag [--json] [--yes] [--answers <file>] [--root <dir>] [--app-root <dir>] [--resume]",
   "                        [--no-agent] [--worker claude|codex] [--reviewer claude|codex|brief|none]",
-  "                        [--consent-mode not_required|required] [--no-prove] [--fresh]",
+  "                        [--consent-mode not_required|required] [--production-host <domain>] [--no-prove] [--fresh]",
   "       npx infinite-tag uninstall --pr [--json] [--root <dir>] [--base <branch>] [--answers <file>]"
 ].join("\n")
 
@@ -150,6 +153,15 @@ export function parseWizardArgs(argv: readonly string[], cwd: string): Parse<Par
         const dir = value()
         if (!dir) return { ok: false, message: "--app-root needs a directory." }
         appRootArg = dir
+        break
+      }
+      case "--production-host": {
+        // §3y.1: validated like the typed answer; a malformed or preview-shaped host is a usage error (exit 2).
+        const raw = value()
+        if (!raw) return { ok: false, message: "--production-host needs your live site's domain (for example acme.com)." }
+        const parsed = parseHostInput(raw)
+        if (!parsed.ok) return { ok: false, message: `--production-host: ${hostRefusalLine(parsed, "final").replace(/^! /, "")}` }
+        options.productionHost = parsed.host
         break
       }
       case "--worker":
@@ -439,6 +451,8 @@ async function runLocked(input: LockedRun): Promise<number> {
     // The run state: resume, start fresh, or ask (a corrupt file is never silently reset).
     let state: WizardRunState
     let resuming = false
+    /** §3y.8: the unfinished run `--fresh` set aside (its leftovers and its cloud run are handled below). */
+    let setAside: WizardRunState | null = null
     if (loaded.kind === "corrupt") {
       const yes = await asks.askUserOnly("confirm", {
         question: `The saved run (${loaded.path}) cannot be read (${loaded.problems[0] ?? "corrupt"}). Start a fresh run? The old file is kept beside it.`,
@@ -456,6 +470,7 @@ async function runLocked(input: LockedRun): Promise<number> {
     } else {
       if (loaded.kind === "ok") {
         await setStateAside(root, asideSuffix(loaded.state, loaded.state.steps.done?.outcome === "ok" ? "done" : `set-aside-${Date.now()}`))
+        if (loaded.state.steps.done?.outcome !== "ok") setAside = loaded.state
       }
       state = newState()
     }
@@ -473,6 +488,14 @@ async function runLocked(input: LockedRun): Promise<number> {
         state: () => runState?.get() ?? forState
       })
     deps = await createDeps(state)
+
+    // §3y.8 (P2-4, P3-11): `--fresh` offers to discard the set-aside run's OWN unfinished edits (never anyone
+    // else's), then marks its cloud run abandoned so no run is left open at `before`.
+    if (setAside) {
+      const stopped = await freshStart({ root, deps, ask: asks.ask, io, old: setAside })
+      if (stopped !== null) return await end(stopped)
+      await abandonRun(deps, setAside, io)
+    }
 
     // §3d.6 / §3z.5 (B25): no state file here (a fresh clone, a teammate's machine) → an OPEN wizard PR's
     // marker names the run; the minimal state is rebuilt from it and `link` checks the run with `runs.get`.
@@ -501,6 +524,7 @@ async function runLocked(input: LockedRun): Promise<number> {
           return await end(exitCodeFor("INF_WIZ_NEEDS_ANSWERS"))
         }
         await setStateAside(root, asideSuffix(state, "pr-closed"))
+        await abandonRun(deps, state, io)
         const previousAppRoot = state.appRoot
         state = newState()
         resuming = false
@@ -554,6 +578,62 @@ async function runLocked(input: LockedRun): Promise<number> {
       writeCrashReason()
     }
     return WIZARD_EXIT.failed
+  }
+}
+
+/**
+ * §3y.8: `--fresh` over the set-aside run's own leftovers. When EVERY blocking dirty path is the run's own edit (its
+ * bytes still exactly what the run wrote) and the checked-out branch is the run's branch or its base, ONE confirm
+ * (default yes; `--yes` never answers it): yes discards exactly those edits and switches to the base. Anyone else's
+ * change refuses, naming only those paths. Returns an exit code to stop with, or null to go on.
+ */
+export async function freshStart(input: { root: string; deps: WizardDeps; ask: WizardContext["ask"]; io: WizardIo; old: WizardRunState }): Promise<number | null> {
+  const { root, deps, io, old } = input
+  const git = wizardGitExtras(deps.git)
+  if (!git || !old.runId) return null
+  const scan = await findLeftovers(root, nodeWizardFs, git, old.runId)
+  if (scan.leftovers.length === 0 && !scan.gitignoreFence) return null
+  if (scan.others.length > 0) {
+    io.stderr.write(`${dirtyTreeMessage(scan.others)}\n`)
+    return exitCodeFor("INF_WIZ_DIRTY_TREE")
+  }
+  const base = old.git?.base ?? null
+  const current = await git.currentBranch()
+  if (!base || (current !== old.git?.branch && current !== base)) {
+    io.stderr.write(`${dirtyTreeMessage(scan.leftovers.map((entry) => entry.path))}\n`)
+    return exitCodeFor("INF_WIZ_DIRTY_TREE")
+  }
+  const paths = scan.leftovers.map((entry) => entry.path)
+  if (paths.length > 0) {
+    const yes = await input.ask("confirm", {
+      question: `Your last run (${old.displayId}) left its own unfinished changes, never committed: ${paths.join(", ")}. Discard them and start fresh?`,
+      defaultYes: true
+    })
+    if (yes !== true) {
+      io.stderr.write(`Not started: your last run's own changes are still there. To discard them yourself: ${discardCommand(scan, base)}\n`)
+      return exitCodeFor("INF_WIZ_DIRTY_TREE")
+    }
+  }
+  await discardLeftovers(root, nodeWizardFs, git, scan, old.runId)
+  if (current !== base) await git.switchTo(base)
+  return null
+}
+
+/** §3y.8 (P3-11): marks a set-aside run `abandoned` in Infinite (best effort: a refusal is one line, never a stop). */
+export async function abandonRun(deps: WizardDeps, old: WizardRunState, io: WizardIo): Promise<void> {
+  if (!old.runId || !old.link) return
+  try {
+    if (!deps.bridge.has("tag.runs.v1")) return
+    deps.bridge.setLinkId(old.link.linkId)
+    await deps.bridge.patchRun(old.runId, { phase: "abandoned" })
+  } catch {
+    io.stderr.write("The earlier run could not be marked abandoned in Infinite (it stays as it was); this run goes on.\n")
+  } finally {
+    try {
+      deps.bridge.setLinkId(null)
+    } catch {
+      // No descriptor: nothing was set.
+    }
   }
 }
 

@@ -389,7 +389,8 @@ export interface ImproveEditInput {
   line: ImproveLine
   keys: TagKeys
   /** The plan's consent answer: the capture block uses the same Infinite consent hook as managed Meta. */
-  consentMode: "required" | "not_required"
+  /** Null only on a plan that did not ask consent (R2-6); the Meta capture then refuses instead of guessing. */
+  consentMode: "required" | "not_required" | null
   /** The site is served by Vercel (see `ImproveLinesContext.vercelServed`): the vercel.json rewrite is served. */
   vercelServed: boolean
   runId: string
@@ -470,6 +471,7 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     const scriptStart = tag.start
     const lineStart = before.lastIndexOf("\n", scriptStart - 1) + 1
     const indent = /^[ \t]*/.exec(before.slice(lineStart, scriptStart))?.[0] ?? ""
+    if (input.consentMode === null) return { ok: false, reason: "the plan has no consent answer, and the capture waits for the same consent as Infinite" }
     const capture = buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: input.consentMode } })
     const block = `${CAPTURE_BLOCK_MARKER}\n${indent}<script>\n${capture}\n${indent}</script>\n${indent}`
     const after = before.slice(0, scriptStart) + block + before.slice(scriptStart)

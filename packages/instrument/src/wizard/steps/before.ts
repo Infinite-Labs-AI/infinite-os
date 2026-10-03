@@ -41,12 +41,16 @@ import { normalizeHost } from "../contracts/host-deny.js"
 import type { BeforeFacts, BuildResult, CheckResult, ScanResult } from "../contracts/jobs.js"
 import type { WizardFs } from "../contracts/deps.js"
 import type { BaselineResponseFields, ReportColumnSnapshot } from "../contracts/report.js"
-import type { BaseSource } from "../contracts/state.js"
+import type { BaseSource, WizardRunState } from "../contracts/state.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { wizardBranchName } from "../contracts/git-host.js"
 import { wizardGitExtras } from "../../git/index.js"
 import { buildColumn } from "../report.js"
+import { EVENT_LIMITS } from "../contracts/events.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { askProductionHost, hostDecidedLines, repoHostCandidates, resolveProductionHost } from "../site-host.js"
+import { blockingDirtyPaths, dirtyTreeMessage, resetStaleReceipt } from "../leftovers.js"
+import { homedir } from "node:os"
 import {
   TEST_LIMITS,
   testExpectFromKeys,
@@ -77,8 +81,6 @@ export {
 
 const TOOL_LABEL: Record<TestTool, string> = { infinite: "Infinite", ga4: "GA4", posthog: "PostHog", meta: "Meta pixel" }
 const SPA_FRAMEWORKS: ReadonlySet<string> = new Set(["next-app-router", "next-pages-router", "vite-react"])
-/** `.gitignore` and the wizard's own `.infinite/` are exempt from the clean-tree check (`ios:…/harness/run.ts:197`). */
-const CLEAN_TREE_EXEMPT = (path: string): boolean => path === ".gitignore" || path === ".infinite" || path.startsWith(".infinite/")
 
 /** The bridge error code of a thrown bridge error (lane O2's `BridgeError {status, code, retryable}`), else null. */
 export function bridgeErrorCode(error: unknown): BridgeErrorCode | null {
@@ -166,10 +168,70 @@ export async function resolveBase(
   return originHead ? { base: originHead, baseSource: "origin_head" } : null
 }
 
-/** The production host the dry load visits: the site source's first host, else Vercel's first domain. */
-export function productionHostOf(keys: TagKeys, hosting: TagHosting): string | null {
-  const host = keys.infinite.productionHosts[0] ?? hosting.vercel?.productionDomains[0] ?? null
-  return host ? normalizeHost(host) : null
+/**
+ * The production host the dry load visits (§3y.1, one precedence for every consumer): the site source's first
+ * host, else Vercel's first domain, else this run's answer, else `--production-host`.
+ */
+export function productionHostOf(keys: TagKeys, hosting: TagHosting, site: WizardRunState["site"] | null = null, flag: string | null = null): string | null {
+  return resolveProductionHost({ keys, hosting, site, flag }).host
+}
+
+/**
+ * §3y.1: decides the run's production host ONCE (right after the silent keys read, before the baseline build).
+ * Infinite's own host, an earlier answer or the flag decide it; otherwise ONE ask, pre-filled with the repo's
+ * hints. `--yes` and nested mode never answer it: the run goes on with no host (never a guess).
+ */
+export async function decideProductionHost(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  keys: TagKeys,
+  hosting: TagHosting,
+  sub: (text: string, tone?: "ok" | "warn" | "info" | "pending") => void
+): Promise<string | null> {
+  const current = ctx.state.get().site ?? null
+  const resolved = resolveProductionHost({ keys, hosting, site: current, flag: ctx.options.productionHost ?? null })
+  let host = resolved.host
+  let source = resolved.source
+  if (!resolved.decided) {
+    if (ctx.options.yes || ctx.options.nested) {
+      sub("! No live site address: --yes never answers that; pass --production-host <domain> to test it", "warn")
+      return null
+    }
+    const facts = await deps.host.repoFacts().catch(() => null)
+    const homepageUrl = facts && !("unsupported" in facts) ? (facts.homepageUrl ?? null) : null
+    // Founder ruling 2026-10-03: only the site's own domain, so no `*.vercel.app` candidate is ever derived or offered.
+    const candidates = await repoHostCandidates(ctx.root, ctx.appRoot, deps.fs, { homepageUrl })
+    host = await askProductionHost(ctx, candidates, (text, tone) => sub(text, tone))
+    source = "answer"
+  }
+  if (source !== null && (!current || current.productionHost !== host || current.source !== source)) {
+    const decidedAt = deps.clock.now().toISOString()
+    ctx.state.update((state) => {
+      state.site = { ...(state.site ?? {}), productionHost: host, source: source!, decidedAt }
+    })
+    await ctx.state.save()
+  }
+  if (source !== "infinite") for (const line of hostDecidedLines(host, source)) sub(line, host ? "ok" : "warn")
+  return host
+}
+
+/**
+ * The sanity line after the dry load (DECISIONS §1.1, should): the repo's own provider IDs, none of which the live
+ * page showed, hint the answered host is not this repo's site. A line only; nothing changes.
+ */
+export function liveIdMismatchLines(census: BeforeFacts["census"], dryLive: TestResult, host: string): string[] {
+  const seen: Record<"ga4" | "posthog" | "meta", Set<string>> = {
+    ga4: new Set(dryLive.ga4.events.map((event) => event.tid)),
+    posthog: new Set(dryLive.posthog.events.map((event) => event.projectKey)),
+    meta: new Set(dryLive.meta.configRequests)
+  }
+  const lines: string[] = []
+  for (const tool of ["ga4", "posthog", "meta"] as const) {
+    const ids = [...new Set(census.entries.filter((entry) => entry.tool === tool && entry.owner === "adopted" && entry.id).map((entry) => entry.id!))]
+    if (ids.length === 0 || ids.some((id) => seen[tool].has(id))) continue
+    lines.push(`! ${host} doesn't show the ${TOOL_LABEL[tool]} ID in your code (${ids[0]}); check it's this repo's live site.`)
+  }
+  return lines
 }
 
 /**
@@ -342,7 +404,8 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
     requiredCapabilities: [...meta.requiredCapabilities],
     inputHash: beforeInputHash,
     async run(ctx, deps): Promise<StepOutcome> {
-      const sub = (text: string, tone: "ok" | "warn" | "info" | "pending" = "info") => ctx.emit.emit("step.sub", { step: "before", text: text.slice(0, 120), tone })
+      // The cap is the event's own (240, R2-3): the host refusal (founder ruling 2026-10-03) must never be cut mid-word.
+      const sub = (text: string, tone: "ok" | "warn" | "info" | "pending" = "info") => ctx.emit.emit("step.sub", { step: "before", text: text.slice(0, EVENT_LIMITS.subTextMaxChars), tone })
       const at = () => deps.clock.now().toISOString()
 
       // ---- preconditions ----
@@ -350,16 +413,8 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         return { kind: "failed", code: "INF_WIZ_NO_GIT", message: "This folder is not a git repository. Run npx infinite-tag in your website's repo.", next: "halt" }
       }
       const tree = await deps.git.cleanTree()
-      const dirty = tree.dirtyPaths.filter((path) => !CLEAN_TREE_EXEMPT(path))
-      if (!tree.clean && dirty.length > 0) {
-        const shown = dirty.slice(0, 5).join(", ")
-        return {
-          kind: "failed",
-          code: "INF_WIZ_DIRTY_TREE",
-          message: `Commit or stash your changes first (${shown}${dirty.length > 5 ? `, +${dirty.length - 5} more` : ""}); the wizard works on its own branch.`,
-          next: "halt"
-        }
-      }
+      const dirty = blockingDirtyPaths(tree.dirtyPaths)
+      if (!tree.clean && dirty.length > 0) return { kind: "failed", code: "INF_WIZ_DIRTY_TREE", message: dirtyTreeMessage(dirty), next: "halt" }
       const runId = ctx.runId
       if (runId === null) {
         return { kind: "failed", code: "INF_WIZ_BRANCH_FAILED", message: "No run id: the agent step did not start the run, so the branch cannot be named.", next: "halt" }
@@ -427,11 +482,24 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           })
           await ctx.state.save()
           sub(`Branch ${branch} from ${base.base}${base.baseSource === "vercel" ? "" : " (fallback)"}`, "ok")
+          // §3y.8: a receipt with another run's never-merged records is set aside (only on a new branch, never a resume).
+          const extras = "showFile" in deps.git ? wizardGitExtras(deps.git) : null
+          if (extras) {
+            const home = deps.env.HOME ?? homedir()
+            const kept = await resetStaleReceipt({ root: ctx.root, fs: deps.fs, git: extras, baseSha, runId, home })
+            if (kept) {
+              sub("Set aside an install receipt that was never merged", "info")
+              sub(`(kept in ${kept.startsWith(home) ? `~${kept.slice(home.length)}` : kept})`, "info")
+            }
+          }
         }
 
         // ---- keys, silently (connection IDs only; `expect` never comes from the repo) ----
         const keys: TagKeys = withoutEnvelope(await deps.bridge.keys({ signal: ctx.signal }))
         const expect = testExpectFromKeys(keys)
+
+        // ---- §3y.1: the production host, decided once (Infinite, an earlier answer, the flag, or ONE ask) ----
+        const productionHost = await decideProductionHost(ctx, deps, keys, hosting, sub)
 
         // ---- baseline build, scan, census, setup checks ----
         const baselineBuild = await deps.checks.buildBaseline()
@@ -453,7 +521,6 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         }
 
         // ---- dry_live of production (nothing sent; no clicks, no fake click id) ----
-        const productionHost = productionHostOf(keys, hosting)
         const cmpDetectedStatic = jobScan.detections.cmp.cmp
         let dryLive: TestResult | null = null
         let grades: Partial<Record<TestTool, CheckResult>> | null = null
@@ -487,6 +554,8 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
               dryChecks.push(check)
               if (check.state === "problem") sub(`! ${TOOL_LABEL[tool]} ${gradeWords(check, finalHostOf(result) ?? productionHost)}`, "warn")
             }
+            // An address the user gave (not Infinite's): say when the live page shows none of the repo's own IDs.
+            if (ctx.state.get().site?.source !== "infinite") for (const line of liveIdMismatchLines(census, result, productionHost)) sub(line, "warn")
           }
         }
 
@@ -498,7 +567,7 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           liveChecks.push(...(await deps.checks.redirectWalk([`https://${productionHost}/`])))
           liveChecks.push(...(await deps.checks.csp(`https://${productionHost}/`)))
           if (expect.meta && expect.meta.length > 0) {
-            const domains = [...new Set([...keys.infinite.productionHosts, ...(hosting.vercel?.productionDomains ?? [])].map(normalizeHost))]
+            const domains = [...new Set([...keys.infinite.productionHosts, ...(hosting.vercel?.productionDomains ?? []), productionHost].map(normalizeHost))]
             liveChecks.push(...(await deps.checks.metaDomains(domains, expect.meta)))
           }
         }

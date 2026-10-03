@@ -14,7 +14,7 @@
 //   • the server-lane line carries the probe disclosure (§3h.6);
 //   • nothing here is computed from agent output.
 import { automaticEventsPerVisitOf } from "../checks/grade-test-run.js"
-import { requiredLineKind } from "../jobs/registry.js"
+import { applyApprovalsTo, requiredLineKind } from "../jobs/registry.js"
 import { createHash } from "node:crypto"
 
 import type { ImproveLine, ImproveLineKind, ProviderId } from "../types.js"
@@ -27,6 +27,8 @@ import { CONVERSION_NAME_PATTERN } from "../wizard/contracts/bridge.js"
 import { HOST_DENY_V1, normalizeHost } from "../wizard/contracts/host-deny.js"
 import type { BeforeFacts, BuildResult, ChecklistItem, JobId, PlanModel } from "../wizard/contracts/jobs.js"
 import { JOB_TABLE } from "../wizard/contracts/jobs.js"
+import type { SiteState } from "../wizard/contracts/state.js"
+import { isPreviewShapedHost, resolveProductionHost } from "../wizard/site-host.js"
 
 import { artifactsFromKeysDetailed } from "./keys-adapter.js"
 
@@ -102,6 +104,18 @@ export interface PlanModelInput {
   /** `--consent-mode` (the only way `--yes` gets a consent answer). */
   consentFlag: "required" | "not_required" | null
   productionDeniedConflict: ProductionDeniedConflict
+  /**
+   * §3y.5: the run facts the runnability rule reads beyond the keys and hosting: this run's site state (the
+   * answered host, a pending site-file claim) and whether the Infinite app offers `tag.site-claim.v1`. Absent =
+   * no answered host and no claim capability (the host is then Infinite's own, if any).
+   */
+  run?: PlanRunFacts | null
+}
+
+export interface PlanRunFacts {
+  site?: SiteState | null
+  /** The bridge advertises `tag.site-claim.v1` (the site-file proof path exists). */
+  siteClaim: boolean
 }
 
 /** The preview-guard decision for a wizard install (§3h.9). */
@@ -128,6 +142,152 @@ export interface WizardPlanModel extends PlanModel {
   metaGoal: "StartTrial" | "Purchase" | null
   /** The server lane is offered (its privacy sentence depends on the `server_lane` line's answer). */
   serverLaneOffered: boolean
+  /**
+   * §3y.5 (P3-13): candidate ids this plan never seeds as agent jobs because nothing would run them (job 10 when
+   * this run installs neither Infinite's tag nor a connected tool). Each is said by one `user_action` line.
+   */
+  withheld: string[]
+}
+
+// ---------------------------------------------------------------------------------------------
+// §3y.5 Runnability: no approvable line without an executor that will run on the current facts
+// ---------------------------------------------------------------------------------------------
+
+/** The facts `lineRunnable` reads (all from Infinite or this run's own answers; never from the repo). */
+export interface LineFacts {
+  /** §3y.1 `resolveProductionHost` (Infinite's host, an answer, or `--production-host`). */
+  productionHost: string | null
+  /** Infinite already has a site source for this workspace (keys `infinite.status === "ready"`). */
+  infiniteReady: boolean
+  /** A site-file claim is pending for this run: the source is reserved, not verified yet. */
+  claimPending: boolean
+  /**
+   * Infinite's Vercel connection serves the production host as a production DOMAIN (or its www twin) — exactly the
+   * set the cloud proves through Vercel (`proveHostsThroughVercel` reads `productionDomains`). A `*.vercel.app`
+   * production alias is NOT counted: the cloud takes the site-file claim path for it (review-2 P2-2), so the plan
+   * must too (the claim wording, no server lane until the claim is proven).
+   */
+  vercelServesHost: boolean
+  /** The Infinite app offers `tag.site-claim.v1`. */
+  siteClaim: boolean
+  /** The framework has a supported server-lane target. */
+  serverLaneTarget: boolean
+  /** Infinite hosting is Vercel. */
+  hostingVercel: boolean
+  /** Infinite's Vercel connection may write env vars. */
+  envWriteGranted: boolean
+}
+
+/** The line kinds the rule decides; every other PlanLineKind is runnable whenever the plan emits it. */
+export type RunnableLineKey = PlanLineKind | "install_provider:infinite"
+
+export const RUNNABILITY_TEXT = {
+  infiniteNoHost: "Infinite: tell the wizard your live domain (npx infinite-tag --production-host acme.com) to add Infinite's tag.",
+  infiniteNoProof: (host: string) =>
+    `Infinite: update the Infinite app (or connect your website in Infinite › Connections › GitHub · Website) so it can confirm ${host}; then run again.`,
+  serverLaneNoConnection: "Server lane (counts visits ad blockers hide): connect your Vercel project in Infinite (Connections › GitHub · Website), then run npx infinite-tag again.",
+  serverLaneNoScope: "Server lane: reconnect Vercel in Infinite and allow environment variables, then run again.",
+  claimWording: (host: string) =>
+    `Infinite confirms ${host} is yours after your merge, from a one-line file this pull request adds (/.well-known/infinite-site-verification.txt). Until then it records nothing.`,
+  conversionsUnwired: (names: readonly string[]) =>
+    `Conversions (${names.join(", ") || "none named"}): wired once Infinite's tag or a connected tool is installed; this run installs neither.`
+} as const
+
+/** The source is verified: an existing site source (not a pending claim), or a Vercel connection serving the host. */
+function verifiedPath(facts: LineFacts): boolean {
+  return (facts.infiniteReady && !facts.claimPending) || facts.vercelServesHost
+}
+
+/**
+ * §3y.5 / DECISIONS §1.6: whether a line can be approvable. `{ok:false, line}` = emit it as `user_action` with that
+ * text (an empty text = no line at all). A test enumerates every PlanLineKind against unrunnable facts.
+ */
+export function lineRunnable(kind: RunnableLineKey, facts: LineFacts): { ok: true } | { ok: false; line: string } {
+  switch (kind) {
+    case "install_provider:infinite": {
+      if (facts.infiniteReady) return { ok: true }
+      if (facts.productionHost === null || isPreviewShapedHost(facts.productionHost)) return { ok: false, line: RUNNABILITY_TEXT.infiniteNoHost }
+      if (facts.vercelServesHost || facts.siteClaim) return { ok: true }
+      return { ok: false, line: RUNNABILITY_TEXT.infiniteNoProof(facts.productionHost) }
+    }
+    case "server_lane": {
+      if (!facts.serverLaneTarget) return { ok: false, line: "" }
+      const infinite = lineRunnable("install_provider:infinite", facts)
+      if (!infinite.ok || !verifiedPath(facts) || !facts.hostingVercel) return { ok: false, line: RUNNABILITY_TEXT.serverLaneNoConnection }
+      if (!facts.envWriteGranted) return { ok: false, line: RUNNABILITY_TEXT.serverLaneNoScope }
+      return { ok: true }
+    }
+    case "npm_install":
+      // The package exists only for the server lane: no approvable lane, no line.
+      return lineRunnable("server_lane", facts).ok ? { ok: true } : { ok: false, line: "" }
+    case "preview_guard_managed":
+      return facts.productionHost !== null ? { ok: true } : { ok: false, line: GUARD_NO_HOST_TEXT }
+    default:
+      return { ok: true }
+  }
+}
+
+export const GUARD_NO_HOST_TEXT = "Infinite does not know your production domain yet, so no preview guard is added; tell the wizard your live domain (--production-host)."
+
+/** The facts for this plan (keys, hosting, the scan, the run's site state and the bridge's claim capability). */
+export function lineFactsFor(input: Pick<PlanModelInput, "keys" | "before" | "scan" | "run">): LineFacts {
+  const hosting = input.before.hosting
+  const site = input.run?.site ?? null
+  const productionHost = resolveProductionHost({ keys: input.keys, hosting, site }).host
+  // Domains only, never `productionAliases`: the cloud's Vercel proof reads the same set (review-2 P2-2).
+  const served = new Set((hosting.vercel?.productionDomains ?? []).map(normalizeHost))
+  const twin = (host: string) => (host.startsWith("www.") ? host.slice(4) : `www.${host}`)
+  return {
+    productionHost,
+    infiniteReady: input.keys.infinite.status === "ready" && input.keys.infinite.siteSourceKey !== null,
+    claimPending: site?.claim?.state === "pending_proof",
+    vercelServesHost: hosting.provider === "vercel" && productionHost !== null && (served.has(productionHost) || served.has(twin(productionHost))),
+    siteClaim: input.run?.siteClaim === true,
+    serverLaneTarget: input.scan.serverLane !== null,
+    hostingVercel: hosting.provider === "vercel" && hosting.vercel !== null,
+    envWriteGranted: hosting.vercel?.envWriteGranted === true
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// §3y.5 Counts: ONE function feeds the budget line, "Plan approved" and the jobs step's "Job i/N"
+// ---------------------------------------------------------------------------------------------
+
+/** The items a plan seeds for these approvals: the registry's gate, then the plan's own gate (blocked kept). */
+export function seedItemsAfterApprovals(
+  candidates: readonly ChecklistItem[],
+  seeds: readonly ChecklistItem[],
+  plan: PlanModel,
+  approvals: PlanApprovalsLike,
+  lines?: ReadonlyArray<{ id: string; approved: boolean | null }>
+): ChecklistItem[] {
+  const withheld = new Set((plan as Partial<WizardPlanModel>).withheld ?? [])
+  const pool = [...candidates, ...seeds.filter((seed) => !candidates.some((item) => item.id === seed.id))].filter((item) => !withheld.has(item.id))
+  const applied = applyApprovalsTo(pool, plan, approvals)
+  const lineStates =
+    lines ??
+    plan.lines.map((planLine) => ({
+      id: planLine.id,
+      approved: planLine.requires !== "approval" ? null : approvals.declined.includes(planLine.id) ? false : approvals.approved.includes(planLine.id) ? true : null
+    }))
+  return gateSeededItems(plan, { lines: [...lineStates] }, applied)
+}
+
+/** The agent jobs that will run: an agent item that is open (not blocked waiting for the user). */
+export function runnableAgentJobs(items: readonly ChecklistItem[]): ChecklistItem[] {
+  return items.filter((item) => item.owner === "agent" && (item.state === "pending" || item.state === "claimed"))
+}
+
+/** The budget line's "up to N": the agent jobs that run when every approvable line of `plan` is approved. */
+export function agentJobsUpTo(candidates: readonly ChecklistItem[], seeds: readonly ChecklistItem[], plan: PlanModel, consentFlag: "required" | "not_required" | null): number {
+  const approved = plan.lines.filter((entry) => entry.requires === "approval").map((entry) => entry.id)
+  const all = resolvePlanAnswers(plan, { approved, declined: [], edits: {} }, { consentFlag: consentFlag ?? plan.decisions.consentMode ?? "not_required" })
+  return agentJobsAfterApprovals(candidates, seeds, plan, all.approvals).length
+}
+
+/** DECISIONS §1.6 "Counts": the agent jobs these approvals run (the budget line, "Plan approved" and "Job i/N"). */
+export function agentJobsAfterApprovals(candidates: readonly ChecklistItem[], seeds: readonly ChecklistItem[], plan: PlanModel, approvals: PlanApprovalsLike): ChecklistItem[] {
+  return runnableAgentJobs(seedItemsAfterApprovals(candidates, seeds, plan, approvals))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -263,6 +423,8 @@ export function guardDecision(input: {
   keys: TagKeys
   hosting: TagHosting
   observedProductionHost: string | null
+  /** §3y.1 / D3: this run's answered (or flagged) production host is ALWAYS exempt. */
+  runProductionHost?: string | null
   newGuardedTools: readonly ProviderId[]
   adoptedGuardWanted: boolean
   productionDeniedConflict: ProductionDeniedConflict
@@ -271,7 +433,8 @@ export function guardDecision(input: {
   const configured = [
     ...input.keys.infinite.productionHosts,
     ...(input.hosting.vercel?.productionDomains ?? []),
-    ...(input.hosting.vercel?.productionAliases ?? [])
+    ...(input.hosting.vercel?.productionAliases ?? []),
+    ...(input.runProductionHost ? [input.runProductionHost] : [])
   ].map(normalizeHost)
   const observed = input.observedProductionHost ? [normalizeHost(input.observedProductionHost)] : []
   // The observed host is trusted only once Infinite lists it: a production served on a denied suffix
@@ -319,7 +482,7 @@ export function draftPrivacyParagraph(tools: readonly ProviderId[], serverLane: 
  * adapter, and not already in the repo as someone else's tag (an adopted tool is improved, never
  * reinstalled). Infinite is always installable: its site source is created at `install`.
  */
-function newTools(input: PlanModelInput): { tools: ProviderId[]; ids: Partial<Record<ProviderId, string>> } {
+function newTools(input: PlanModelInput, facts: LineFacts): { tools: ProviderId[]; ids: Partial<Record<ProviderId, string>>; infiniteUnrunnable: string | null } {
   // Adopted = the installer's own evidence OR lane O6's census (which also reads an init inside a
   // `<Script>{`…`}</Script>` template literal, the common Next pattern the installer's string-masked
   // scan skips): a pixel the census already found on the page is improved in place, never installed twice.
@@ -334,7 +497,13 @@ function newTools(input: PlanModelInput): { tools: ProviderId[]; ids: Partial<Re
   )
   const tools: ProviderId[] = []
   const ids: Partial<Record<ProviderId, string>> = {}
-  if (!adopted.has("infinite") && !input.scan.infiniteBlocked) tools.push("infinite")
+  // §3y.5: Infinite's line is approvable only when its install will run (a host, and a source or a proof path).
+  let infiniteUnrunnable: string | null = null
+  if (!adopted.has("infinite") && !input.scan.infiniteBlocked) {
+    const runnable = lineRunnable("install_provider:infinite", facts)
+    if (runnable.ok) tools.push("infinite")
+    else infiniteUnrunnable = runnable.line
+  }
   if (artifacts.ga4 && !adopted.has("ga4")) {
     tools.push("ga4")
     ids.ga4 = artifacts.ga4.measurementId
@@ -347,7 +516,7 @@ function newTools(input: PlanModelInput): { tools: ProviderId[]; ids: Partial<Re
     tools.push("meta")
     ids.meta = artifacts.meta.pixelId
   }
-  return { tools, ids }
+  return { tools, ids, infiniteUnrunnable }
 }
 
 function line(partial: Omit<PlanLine, "editable"> & { editable?: boolean }): PlanLine {
@@ -359,16 +528,37 @@ export function planHash(lines: readonly PlanLine[], decisions: PlanModel["decis
   return `sha256:${createHash("sha256").update(JSON.stringify({ lines, decisions }), "utf8").digest("hex")}`
 }
 
+/** R2-6: true when the plan asks the consent decision (it is left out when nothing it governs exists this run). */
+export function planAsksConsent(plan: Pick<PlanModel, "lines">): boolean {
+  return plan.lines.some((line) => line.kind === "consent_mode")
+}
+
 export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
-  const { keys, before, scan, candidates } = input
+  const { keys, before, scan } = input
   const lines: PlanLine[] = []
-  const { tools, ids: toolIds } = newTools(input)
+  const facts = lineFactsFor(input)
+  const { tools, ids: toolIds, infiniteUnrunnable } = newTools(input, facts)
   const hosting = before.hosting
+  const serverLaneRule = lineRunnable("server_lane", facts)
+  const serverLaneApprovable = serverLaneRule.ok && scan.serverLane !== null && tools.includes("infinite")
+  // §3y.5 (P3-13): job 10 is seeded only when this install emits the conversion helpers (a new or managed tool).
+  const helpersEmitted = tools.length > 0 || scan.managedProviders.length > 0
+  const infiniteRecordable = tools.includes("infinite") || scan.managedProviders.includes("infinite") || keys.infinite.status === "ready"
+  // R2-6: job 8 reports through Infinite (`reportInfiniteOutcome`): with no helper emitted AND no Infinite to report
+  // to, it is withheld with job 10 (one user_action line), so the conversion decision governs nothing this run.
+  const withheldItems = helpersEmitted
+    ? []
+    : input.candidates.filter((item) => item.jobId === "conversions_to_tools" || (!infiniteRecordable && item.jobId === "server_conversions"))
+  const withheld = withheldItems.map((item) => item.id)
+  const candidates = input.candidates.filter((item) => !withheld.includes(item.id))
 
   // ---- the four decisions ----
+  // R2-6 (live run 2): a decision is asked only when something it governs can be installed or recorded this run.
+  // Consent governs Infinite's collection (an install, a managed tag, or a site source it is recorded on) and the
+  // consent gate of the managed tags and the Meta click-id capture. Conversion names govern the conversion jobs, the
+  // emitted helpers and Infinite's declared conversions. Neither is asked, or pre-checked, when none of that exists.
   const consentProposed = input.consentFlag ?? keys.infinite.consentMode ?? null
-  lines.push(
-    line({
+  const consentLine = line({
       id: DECISION_LINE_IDS.consentMode,
       kind: "consent_mode",
       text:
@@ -380,20 +570,23 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       requires: "approval",
       editable: true
     })
-  )
-  const conversionNames = proposedConversionNames(candidates)
+  lines.push(consentLine)
+  // The names are the user's decision for Infinite whatever runs this time (a withheld job-10 type still names one).
+  const conversionNames = proposedConversionNames(input.candidates)
   const conversionJobs = candidates.filter((item) => item.jobId === "server_conversions" || item.jobId === "conversions_to_tools").map((item) => item.id)
-  lines.push(
-    line({
-      id: DECISION_LINE_IDS.conversionNames,
-      kind: "conversion_names",
-      text: conversionNames.length > 0 ? `Conversions: ${conversionNames.join(" · ")}` : "Conversions: none found — add names, or skip",
-      requires: "approval",
-      editable: true,
-      ...(conversionJobs.length > 0 ? { jobIds: conversionJobs } : {})
-    })
-  )
-  const privacyText = draftPrivacyParagraph(tools, scan.serverLane !== null && tools.includes("infinite"))
+  if (conversionJobs.length > 0 || helpersEmitted || infiniteRecordable) {
+    lines.push(
+      line({
+        id: DECISION_LINE_IDS.conversionNames,
+        kind: "conversion_names",
+        text: conversionNames.length > 0 ? `Conversions: ${conversionNames.join(" · ")}` : "Conversions: none found — add names, or skip",
+        requires: "approval",
+        editable: true,
+        ...(conversionJobs.length > 0 ? { jobIds: conversionJobs } : {})
+      })
+    )
+  }
+  const privacyText = draftPrivacyParagraph(tools, serverLaneApprovable)
   if (privacyText) {
     const privacyJobs = candidates.filter((item) => item.jobId === "privacy_paragraph").map((item) => item.id)
     const where = candidates.find((item) => item.jobId === "privacy_paragraph")?.trigger.evidence.find((entry) => "file" in entry)
@@ -409,7 +602,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     )
   }
   let npmInstall: string | null = null
-  if (scan.serverLane && scan.serverLane.installPackages.length > 0 && tools.includes("infinite")) {
+  if (scan.serverLane && scan.serverLane.installPackages.length > 0 && serverLaneApprovable && lineRunnable("npm_install", facts).ok) {
     if (scan.npm && "commandLine" in scan.npm) {
       npmInstall = scan.npm.commandLine
       lines.push(
@@ -449,6 +642,13 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       })
     )
   }
+  if (tools.includes("infinite") && !facts.infiniteReady && !facts.vercelServesHost && facts.productionHost) {
+    // The claim path (§3y.2): said right under the Infinite line, before anything is approved.
+    lines.push(line({ id: "info:infinite_site_file", kind: "install_provider", text: RUNNABILITY_TEXT.claimWording(facts.productionHost), requires: "info" }))
+  }
+  if (infiniteUnrunnable) {
+    lines.push(line({ id: "user_action:infinite", kind: "user_action", text: infiniteUnrunnable, requires: "user_action" }))
+  }
   if (scan.infiniteBlocked && !scan.adopted.some((entry) => entry.provider === "infinite")) {
     lines.push(line({ id: "user_action:infinite_blocked", kind: "user_action", text: `Infinite: ${scan.infiniteBlocked}`, requires: "user_action" }))
   }
@@ -472,7 +672,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       })
     )
   }
-  if (scan.serverLane && tools.includes("infinite")) {
+  if (serverLaneApprovable && scan.serverLane) {
     lines.push(
       line({
         id: "server_lane",
@@ -482,6 +682,9 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         ownership: "managed"
       })
     )
+  } else if (scan.serverLane && (tools.includes("infinite") || infiniteUnrunnable) && !serverLaneRule.ok && serverLaneRule.line) {
+    // §3y.5: never pre-checked when it cannot run; it says what is needed instead.
+    lines.push(line({ id: "user_action:server_lane", kind: "user_action", text: serverLaneRule.line, requires: "user_action" }))
   }
 
   // ---- the preview guard ----
@@ -491,6 +694,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     keys,
     hosting,
     observedProductionHost: before.observedProductionHost,
+    runProductionHost: facts.productionHost,
     newGuardedTools: guardedNew,
     adoptedGuardWanted: adoptedGuardLines.length > 0 || candidates.some((item) => item.jobId === "preview_guard"),
     productionDeniedConflict: input.productionDeniedConflict
@@ -510,7 +714,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       line({
         id: "preview_guard_blocked",
         kind: "user_action",
-        text: `Your live site is served on ${guard.hosts.join(", ")}, which the preview guard would silence; add it in Infinite first. No preview guard is added until then.`,
+        text: `Your live site is served on ${guard.hosts.join(", ")}, which the preview guard would silence; tell the wizard your live domain (--production-host). No preview guard is added until then.`,
         requires: "user_action"
       })
     )
@@ -519,7 +723,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       line({
         id: "preview_guard_blocked",
         kind: "user_action",
-        text: "Infinite does not know your production domain yet, so no preview guard is added; add the domain in Infinite first.",
+        text: GUARD_NO_HOST_TEXT,
         requires: "user_action"
       })
     )
@@ -683,6 +887,14 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     }
   }
 
+  if (withheldItems.length > 0) {
+    lines.push(line({ id: "user_action:conversions_unwired", kind: "user_action", text: RUNNABILITY_TEXT.conversionsUnwired(proposedConversionNames(withheldItems)), requires: "user_action" }))
+  }
+
+  // R2-6: the consent line stays only when it governs something on THIS plan (see above).
+  const consentGoverns = infiniteRecordable || helpersEmitted || lines.some((entry) => entry.kind === "capture_beside_adopted_pixel")
+  if (!consentGoverns) lines.splice(lines.indexOf(consentLine), 1)
+
   // ---- B28: the 7-day check-in (on by default, BUILD-PLAN §1.4; the plan says so, nothing to answer) ----
   lines.push(
     line({
@@ -694,7 +906,10 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   )
 
   // ---- the agent's budget (the cost line in the go-ahead) ----
-  const agentJobs = [...candidates, ...seeds].filter((item) => item.owner === "agent").length
+  // §3y.5: "up to N" = the agent jobs that run when every approvable line is approved (the one count function).
+  const provisionalDecisions: PlanModel["decisions"] = { consentMode: consentProposed, conversionNames, privacyText, npmInstall }
+  const provisional = { hash: "", lines, decisions: provisionalDecisions, installTools: tools, managedTools: [...scan.managedProviders], serverLaneOffered: serverLaneApprovable, withheld } as unknown as PlanModel
+  const agentJobs = agentJobsUpTo(candidates, seeds, provisional, input.consentFlag)
   if (agentJobs > 0) {
     const name = input.agent?.worker === "claude_code" ? "Claude Code" : input.agent?.worker === "codex" ? "Codex" : null
     lines.push(
@@ -702,7 +917,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         id: "agent_budget",
         kind: "agent_budget",
         text: name
-          ? `${name}: ${agentJobs} job${agentJobs === 1 ? "" : "s"} · ${AGENT_MODELS[input.agent!.worker!].label} at ${AGENT_MODELS[input.agent!.worker!].effort} effort · up to ${AGENT_LIMITS.jobs.maxTurns} turns or ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min · ${input.agent?.whoPays?.label ?? "who pays: unknown"}`
+          ? `${name}: up to ${agentJobs} job${agentJobs === 1 ? "" : "s"} · ${AGENT_MODELS[input.agent!.worker!].label} at ${AGENT_MODELS[input.agent!.worker!].effort} effort · up to ${AGENT_LIMITS.jobs.maxTurns} turns or ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min · ${input.agent?.whoPays?.label ?? "who pays: unknown"}`
           : `No agent found: the ${agentJobs} agent job${agentJobs === 1 ? "" : "s"} are listed for you to do by hand.`,
         requires: name ? "approval" : "info"
       })
@@ -724,7 +939,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     managedTools: [...scan.managedProviders],
     seeds,
     metaGoal: goal,
-    serverLaneOffered: scan.serverLane !== null && tools.includes("infinite")
+    serverLaneOffered: serverLaneApprovable,
+    withheld
   }
 }
 
@@ -1033,7 +1249,9 @@ export function resolvePlanAnswers(
  */
 export function gateSeededItems(plan: PlanModel, answers: Pick<ResolvedPlanAnswers, "lines">, items: readonly ChecklistItem[]): ChecklistItem[] {
   const approval = new Map(answers.lines.map((entry) => [entry.id, entry.approved]))
-  const gated = gateByLines(plan, approval, items)
+  // §3y.5: an item the plan withheld (nothing would run it) is never seeded, whatever the lines say.
+  const withheld = new Set((plan as Partial<WizardPlanModel>).withheld ?? [])
+  const gated = gateByLines(plan, approval, items.filter((item) => !withheld.has(item.id)))
   // The go-ahead cost line (P2-18): unless it is approved, no agent job runs — each waits for the user.
   const budget = plan.lines.find((planLine) => planLine.id === "agent_budget" && planLine.requires === "approval")
   if (!budget || approval.get(budget.id) === true) return gated

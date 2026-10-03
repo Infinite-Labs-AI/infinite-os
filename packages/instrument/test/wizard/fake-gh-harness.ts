@@ -1,8 +1,9 @@
 // Drives the fake `gh` (test/wizard/bin/gh → fake-gh.mjs) from a test: its JSON state file, the env that puts it
 // first on PATH, and helpers to read what the wizard sent it.
-import { readFileSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+
+import { readFakeGhState, writeFakeGhState } from "./fake-gh-state.js"
 
 export const FAKE_GH_BIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "bin")
 
@@ -14,13 +15,14 @@ export interface FakeGhCall {
 export interface FakeGhState {
   login?: string
   authOk?: boolean
-  repo?: { nameWithOwner?: string; isPrivate?: boolean; defaultBranch?: string | null; viewerPermission?: string }
+  repo?: { nameWithOwner?: string; isPrivate?: boolean; defaultBranch?: string | null; viewerPermission?: string; homepageUrl?: string | null }
   draftUnsupported?: boolean
   rejectInlineThreads?: boolean
   reviewDecision?: string
   prs?: Array<Record<string, unknown>>
   threads?: Array<{ id: string; prNumber: number; isResolved: boolean; path: string | null; line: number | null; comments: Array<{ author: string; authorAssociation: string; body: string }> }>
-  deployments?: Array<{ id: number; sha: string; environment: string; creator: string; statuses: Array<{ state: string; environment_url: string | null }> }>
+  /** GitHub's deployment rows (`sha: "*"` answers every SHA); statuses newest first. */
+  deployments?: Array<{ id: number; sha: string; environment: string; creator: string; production_environment?: boolean; created_at?: string; statuses: Array<{ state: string; environment_url?: string | null }> }>
   rules?: Record<string, Array<{ type: string; parameters?: Record<string, unknown> }>>
   checks?: Record<string, Array<{ name: string; bucket: string; state: string }>>
   calls?: FakeGhCall[]
@@ -38,7 +40,7 @@ export interface FakeGh {
 
 export function createFakeGh(input: { dir: string; remote: string; env: Record<string, string>; state?: FakeGhState }): FakeGh {
   const statePath = join(input.dir, "fake-gh-state.json")
-  writeFileSync(statePath, `${JSON.stringify({ login: "acme-dev", authOk: true, ...input.state }, null, 2)}\n`)
+  writeFakeGhState(statePath, { login: "acme-dev", authOk: true, ...input.state })
   const nodeDir = dirname(process.execPath)
   const env = {
     ...input.env,
@@ -47,10 +49,7 @@ export function createFakeGh(input: { dir: string; remote: string; env: Record<s
     FAKE_GH_REMOTE: input.remote,
     FAKE_GH_NODE: process.execPath
   }
-  const read = () => {
-    const parsed = JSON.parse(readFileSync(statePath, "utf8"))
-    return { calls: [], prs: [], threads: [], ...parsed }
-  }
+  const read = () => ({ prs: [], threads: [], ...readFakeGhState(statePath) }) as ReturnType<FakeGh["read"]>
   return {
     statePath,
     env,
@@ -58,7 +57,7 @@ export function createFakeGh(input: { dir: string; remote: string; env: Record<s
     update(mutate) {
       const state = read()
       mutate(state)
-      writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`)
+      writeFakeGhState(statePath, state)
     },
     traffic() {
       return read()

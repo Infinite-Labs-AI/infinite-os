@@ -1,4 +1,5 @@
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
@@ -6,6 +7,8 @@ import { cleanup, tempDir } from "../../test/wizard/repo.js"
 import { agentArgvViolations, CLAIMS_SCHEMA, codexPermissionArgs, CODEX_DISABLED_FEATURES, REVIEW_SCHEMA } from "../wizard/contracts/agents.js"
 import { buildClaudeReviewerArgv, buildClaudeWorkerArgv, claudeMcpConfig, sensitiveDenies } from "./claude.js"
 import { buildCodexReviewerArgv, buildCodexWorkerArgv } from "./codex.js"
+import { withWizardDirDenied } from "./runner.js"
+import { operatorRules } from "../jobs/briefs.js"
 import { apiKeySourceMatches, claudeWhoPays, codexWhoPays, parseVersion } from "./detect.js"
 import { resolveSensitivePaths, type SensitivePath } from "./paths.js"
 
@@ -42,7 +45,7 @@ describe("Claude argv (§3f.3 + §3f.7)", () => {
       "Read(//Users/u/.growth-os/**)", "Edit(//Users/u/.growth-os/**)", "Write(//Users/u/.growth-os/**)",
       "Read(//Users/u/Library/Application Support/Infinite/**)", "Edit(//Users/u/Library/Application Support/Infinite/**)", "Write(//Users/u/Library/Application Support/Infinite/**)",
       "Read(//Users/u/.npmrc)", "Edit(//Users/u/.npmrc)", "Write(//Users/u/.npmrc)",
-      "Edit(./.infinite/**)", "Write(./.infinite/**)", "Edit(**/node_modules/**)", "Write(**/node_modules/**)",
+      "Read(./.infinite/**)", "Edit(./.infinite/**)", "Write(./.infinite/**)", "Edit(**/node_modules/**)", "Write(**/node_modules/**)",
       "Edit(./.git/**)", "Write(./.git/**)", "Edit(./.claude/**)", "Write(./.claude/**)", "Edit(./.codex/**)", "Write(./.codex/**)",
       "--strict-mcp-config", "--mcp-config", "/Users/u/Library/Caches/infinite-tag/run/tag.mcp.1.json",
       "--append-system-prompt", "RULES",
@@ -145,6 +148,34 @@ describe("the resolved sensitive paths → a Read deny each", () => {
   })
 })
 
+describe("§3y.10 (P3-10): the worker never reads the wizard's own files; the reviewers still read theirs", () => {
+  it("Claude: Read(./.infinite/**) is denied to the worker only", () => {
+    const worker = buildClaudeWorkerArgv({ sensitive: [], mcpConfigPath: "/x", systemPrompt: "r", claimsSchema: "{}", maxTurns: 1, session: { mode: "new", sessionId: "s" }, model: MODEL })
+    expect(worker).toContain("Read(./.infinite/**)")
+    const reviewer = buildClaudeReviewerArgv({ sensitive: [], systemPrompt: "r", reviewSchema: "{}", maxTurns: 1, model: MODEL })
+    expect(reviewer).not.toContain("Read(./.infinite/**)")
+  })
+
+  it("Codex: the worker's profile denies <root>/.infinite (its realpath, when it exists); nothing when it does not", async () => {
+    const root = mkdtempSync(join(tmpdir(), "wizard-dir-deny-"))
+    try {
+      expect(await withWizardDirDenied({ none: [], readOnly: [] }, root)).toEqual({ none: [], readOnly: [] })
+      mkdirSync(join(root, ".infinite"))
+      const denied = await withWizardDirDenied({ none: ["/a/.env"], readOnly: ["/g"] }, root)
+      expect(denied.none).toContain(realpathSync(join(root, ".infinite")))
+      expect(denied.readOnly).toEqual(["/g"])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("the operator rules say the brief is all the worker needs, and a job blocked by Infinite is claimed blocked, never asked", () => {
+    const rules = operatorRules({ runId: "r", framework: "next-app-router", packageManager: "pnpm", router: "app", appRoot: ".", plan: null, connections: null, previewGuard: null })
+    expect(rules).toContain("Everything you need is in this brief; never read .infinite/.")
+    expect(rules).toContain("If a job cannot be done because something is missing in Infinite, claim it blocked with the reason; never ask the user about it.")
+  })
+})
+
 describe("Codex argv (§3f.3 + §3f.7)", () => {
   const permission = (role: "worker" | "reviewer") =>
     codexPermissionArgs({
@@ -211,6 +242,24 @@ describe("Codex argv (§3f.3 + §3f.7)", () => {
     expect(argv.join(" ")).not.toContain("mcp_servers")
   })
 
+  it("§3y.7: the reviewer's worktree is re-allowed READ right after :project_roots (the $HOME deny covers ~/Library/Caches); never the worker", () => {
+    const input = {
+      homeRealpath: "/Users/u",
+      sensitiveRealpaths: ["/Users/u/.growth-os"],
+      codexBinDir: "/Users/u/.local/bin",
+      codexInstallRoot: "/Users/u/.codex/packages/standalone/releases/0.160.0",
+      repoDenies: { none: ["/Users/u/Library/Caches/infinite-tag-review/wt/.env"] },
+      readRoots: ["/Users/u/Library/Caches/infinite-tag-review/wt"]
+    }
+    const reviewer = codexPermissionArgs({ role: "reviewer", ...input })[3]!
+    expect(reviewer).toBe(
+      'permissions.infinite_tag_ro.filesystem={":root"="read", "/Users/u"="none", "/Users/u/.local/bin"="read", "/Users/u/.codex/packages/standalone/releases/0.160.0"="read", ":project_roots"="read", "/Users/u/Library/Caches/infinite-tag-review/wt"="read", "/Users/u/Library/Caches/infinite-tag-review/wt/.env"="none"}'
+    )
+    const worker = codexPermissionArgs({ role: "worker", ...input })[3]!
+    expect(worker).not.toContain("infinite-tag-review/wt\"=\"read")
+    expect(() => codexPermissionArgs({ role: "reviewer", ...input, readRoots: ["relative/path"] })).toThrow(/not an absolute path/)
+  })
+
   it("refuses a Codex argv without the profile, or with -s / sandbox_mode (negatives)", () => {
     const base = { repo: "/repo", model: { model: null, effort: "x" }, node: "n", cliPath: "c", outputPath: "o", schemaPath: "s" }
     expect(() => buildCodexWorkerArgv({ ...base, permissionArgs: [] })).toThrow(/missing default_permissions profile/)
@@ -220,6 +269,24 @@ describe("Codex argv (§3f.3 + §3f.7)", () => {
     for (const feature of CODEX_DISABLED_FEATURES) expect(good).toContain(`features.${feature}=false`)
     expect(good).toContain("features.apps=false")
     expect(good).toContain("--ignore-user-config")
+  })
+
+  it("R2-1: neither the built reviewer nor the worker argv disables code_mode_host (Codex 0.160's shell host)", () => {
+    const reviewer = buildCodexReviewerArgv({ worktree: "/wt", permissionArgs: permission("reviewer"), model: { model: "gpt-6.1-sol", effort: "xhigh" }, outputPath: "/c/r.json", schemaPath: "/c/s.json" })
+    const worker = buildCodexWorkerArgv({ repo: "/repo", permissionArgs: permission("worker"), model: { model: "gpt-6.1-sol", effort: "xhigh" }, node: "n", cliPath: "c", outputPath: "o", schemaPath: "s" })
+    const resume = buildCodexWorkerArgv({ repo: "/repo", permissionArgs: permission("worker"), model: { model: null, effort: "xhigh" }, node: "n", cliPath: "c", outputPath: "o", schemaPath: "s", resumeThreadId: "t-1" })
+    for (const argv of [reviewer, worker, resume]) {
+      expect(argv.some((arg) => arg.includes("code_mode_host"))).toBe(false)
+      // the other disables stay
+      expect(argv).toContain("features.browser_use=false")
+      expect(argv).toContain("features.computer_use=false")
+    }
+    expect(CODEX_DISABLED_FEATURES as readonly string[]).not.toContain("code_mode_host")
+    // negative: an argv that disables it is refused, so it cannot come back by accident
+    expect(agentArgvViolations("codex", [...reviewer.slice(0, -1), "-c", "features.code_mode_host=false", "-"])).toEqual([
+      "features.code_mode_host=false blinds the agent (it disables Codex's shell)"
+    ])
+    expect(() => buildCodexReviewerArgv({ worktree: "/wt", permissionArgs: [...permission("reviewer"), "-c", "features.code_mode_host = false"], model: { model: null, effort: "x" }, outputPath: "o", schemaPath: "s" })).toThrow(/code_mode_host=false blinds the agent/)
   })
 })
 

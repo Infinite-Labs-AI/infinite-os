@@ -20,6 +20,7 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { startFakeBridge, type FakeBridge, type StartFakeBridgeOptions } from "./fake-bridge.js"
+import { readFakeGhState, writeFakeGhState } from "./fake-gh-state.js"
 
 const here = dirname(fileURLToPath(import.meta.url))
 export const PACKAGE_ROOT = resolve(here, "../..")
@@ -254,8 +255,14 @@ export function writeGhState(site: SiteRepo, extra: Record<string, unknown> = {}
   return path
 }
 
+/** The fake gh's state, with its calls from the append-only call log (review P2-2). */
 export function readGhState(path: string): GhState {
-  return JSON.parse(readFileSync(path, "utf8")) as GhState
+  return readFakeGhState(path) as unknown as GhState
+}
+
+/** Writes the fake gh's state the way the fake does (atomic, no call log), so a concurrent gh call never clobbers it. */
+export function saveGhState(path: string, state: object): void {
+  writeFakeGhState(path, state)
 }
 
 export interface GhState {
@@ -282,9 +289,9 @@ export interface GhState {
 
 /** Merges the PR's branch on the bare remote (as GitHub's merge button would) and marks it merged in gh. */
 export function mergePullRequest(site: SiteRepo, ghState: string, number: number): string {
-  const state = readGhState(ghState)
-  const pr = state.prs.find((candidate) => candidate.number === number)
-  if (!pr) throw new Error(`no PR #${number} in the fake gh state`)
+  const found = readGhState(ghState).prs.find((candidate) => candidate.number === number)
+  if (!found) throw new Error(`no PR #${number} in the fake gh state`)
+  const pr = { headRefName: found.headRefName }
   const clone = join(site.base, `merge-${number}`)
   execFileSync("git", ["clone", "-q", site.bare, clone], { env: { PATH: "/usr/bin:/bin", HOME: site.home, GIT_CONFIG_NOSYSTEM: "1" } })
   git(clone, "config", "user.email", "noreply@github.com")
@@ -292,8 +299,10 @@ export function mergePullRequest(site: SiteRepo, ghState: string, number: number
   git(clone, "merge", "-q", "--no-ff", "-m", `Merge pull request #${number} from acme/${pr.headRefName}`, `origin/${pr.headRefName}`)
   git(clone, "push", "-q", "origin", "main")
   const mergeSha = git(clone, "rev-parse", "HEAD")
-  Object.assign(pr, { state: "MERGED", isDraft: false, mergeCommit: { oid: mergeSha }, mergedAt: "2026-10-02T10:00:00Z" })
-  writeFileSync(ghState, `${JSON.stringify(state, null, 2)}\n`)
+  // Read again after the (slow) git work, so the write carries whatever gh changed meanwhile.
+  const state = readGhState(ghState)
+  Object.assign(state.prs.find((candidate) => candidate.number === number)!, { state: "MERGED", isDraft: false, mergeCommit: { oid: mergeSha }, mergedAt: "2026-10-02T10:00:00Z" })
+  saveGhState(ghState, state)
   return mergeSha
 }
 

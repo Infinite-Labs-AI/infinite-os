@@ -84,6 +84,8 @@ export function buildReviewPost(input: {
   round: number
   head: string
   reviewer: AgentKind
+  /** §3y.7: the items the reviewer could not check (an incomplete review says so in its header). */
+  unchecked?: readonly string[]
 }): ReviewPost {
   const marker = PR_MARKERS.review({ runId: input.runId, round: input.round, head: input.head, reviewer: input.reviewer })
   const threads: ReviewPost["threads"] = []
@@ -110,8 +112,13 @@ export function buildReviewPost(input: {
     .map((row) => `| ${row.item} | ${STATUS_TEXT[row.status]} | ${escapeCell(safeText(input.scanner, row.note))} |`)
     .join("\n")
   const verdict = input.review.verdict === "looks_good" ? "looks good" : "changes suggested"
+  const unchecked = input.unchecked ?? []
+  const header =
+    unchecked.length > 0
+      ? `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): incomplete — it could not check ${unchecked.join(", ")}.** Posted by infinite-tag; a review is an opinion, not a receipt.`
+      : `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): ${verdict}.** Posted by infinite-tag; a review is an opinion, not a receipt.`
   const content = [
-    `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): ${verdict}.** Posted by infinite-tag; a review is an opinion, not a receipt.`,
+    header,
     safeText(input.scanner, input.review.summary),
     checklist ? `| Item | Status | Note |\n|---|---|---|\n${checklist}` : "",
     bodyFindings.length > 0 ? `**Notes outside the changed lines**\n\n${bodyFindings.join("\n")}` : ""
@@ -151,6 +158,8 @@ export interface FinalCommentInput {
   reportMarkdown: string
   reviewer: AgentKind | "brief" | null
   reviewed: boolean
+  /** §3y.7: the latest review's completeness (blind = the reviewer could not read the files). */
+  completeness?: { state: "complete" | "incomplete" | "blind"; unchecked: readonly string[] } | null
   jobs: readonly ChecklistItem[]
   decisions: readonly TriageDecision[]
   /** Comments from people outside the repo: listed, never acted on. */
@@ -170,10 +179,15 @@ export function buildFinalComment(input: FinalCommentInput): string {
   const open = input.decisions
     .filter((decision) => decision.action === "ASK")
     .map((decision) => `- ${decision.item.path ? `\`${decision.item.path}\`` : "general"}: ${decision.reason} (${excerpt(decision.item.body)})`)
+  const agentLabel = input.reviewer === "claude_code" || input.reviewer === "codex" ? AGENT_LABEL[input.reviewer] : null
   const review =
-    input.reviewer === null || input.reviewer === "brief" || !input.reviewed
-      ? "No second review ran on this pull request."
-      : `Reviewed by ${AGENT_LABEL[input.reviewer]}. A review is an opinion; only a receipt from this run means "proven".`
+    agentLabel && input.completeness?.state === "blind"
+      ? `No second review (${agentLabel} could not read the files).`
+      : input.reviewer === null || input.reviewer === "brief" || !input.reviewed || !agentLabel
+        ? "No second review ran on this pull request."
+        : input.completeness?.state === "incomplete"
+          ? `Reviewed by ${agentLabel} (incomplete: ${input.completeness.unchecked.join(", ")} not checked). A review is an opinion; only a receipt from this run means "proven".`
+          : `Reviewed by ${agentLabel}. A review is an opinion; only a receipt from this run means "proven".`
   const text = [
     "**infinite-tag: what happened**",
     review,
@@ -187,11 +201,34 @@ export function buildFinalComment(input: FinalCommentInput): string {
           .join("\n")}`
       : "",
     ...input.notes.map((note) => `> ${note}`),
-    "Merge when you're happy. After it deploys, Infinite proves it live."
+    FINAL_COMMENT_MERGE_LINE
   ]
     .filter(Boolean)
     .join("\n\n")
   return `${neutralizeCheckboxes(safeText(input.scanner, text))}\n\n${PR_MARKERS.final(input.runId)}\n`
+}
+
+/** The last line of the merge-time comment, and its replacement once the live check has run (R2-5). */
+export const FINAL_COMMENT_MERGE_LINE = "Merge when you're happy. After it deploys, Infinite proves it live."
+export const FINAL_COMMENT_UPDATED_LINE = "Updated after the live check: the table above is the run's final report, the same one as in the terminal and in Infinite."
+
+/** The sections that follow the report in `buildFinalComment` (the report ends where the first of them starts). */
+const AFTER_REPORT = ["\n\n**Checklist (the wizard's own checks", "\n\n**Declined, with reasons**", "\n\n**You decide**", "\n\n**Comments from people outside the repo", "\n\n> ", `\n\n${FINAL_COMMENT_MERGE_LINE}`, `\n\n${FINAL_COMMENT_UPDATED_LINE}`, "\n\n<!-- infinite-tag:"]
+
+/**
+ * R2-5 (live run 2): the "what happened" comment with its report replaced by the final one (after Prove), so the PR,
+ * the terminal and the app show ONE report. Everything else in the comment (the review sentence, the checklist, the
+ * decisions, the marker) is kept as posted. `reportMarkdown` must already be scanned by the caller. Returns null when
+ * the body holds no report table (nothing is guessed).
+ */
+export function withFinalReport(body: string, reportMarkdown: string): string | null {
+  const start = body.indexOf("### Before and after")
+  if (start < 0) return null
+  const ends = AFTER_REPORT.map((marker) => body.indexOf(marker, start)).filter((index) => index > start)
+  if (ends.length === 0) return null
+  const end = Math.min(...ends)
+  const spliced = `${body.slice(0, start)}${neutralizeCheckboxes(reportMarkdown.trim())}${body.slice(end)}`
+  return spliced.replace(`\n\n${FINAL_COMMENT_MERGE_LINE}`, `\n\n${FINAL_COMMENT_UPDATED_LINE}`)
 }
 
 export function excerpt(text: string, max = 160): string {

@@ -11,6 +11,7 @@ import { openTagBridge } from "../../bridge/client.js"
 import type { WizardRunState } from "../contracts/state.js"
 import { KEYS_RESULT_SCHEMA, writeKeysResult } from "../handoff/keys-result.js"
 import { conversionDeclaration, PROTOCOL_1_DEDUPES, step } from "./settings.js"
+import { writeBeforeFacts } from "../../../test/wizard/o7-fakes.js"
 
 // Every way to start a process, spied: the settings step must never start one (no `vercel`, ever).
 vi.mock("node:child_process", async (importOriginal) => {
@@ -86,6 +87,15 @@ async function setup(options: {
     lines: [],
     metaInstall: true
   })
+  // `before`'s facts for this run, as a real run has them (the server lane's fresh re-check reads its keys).
+  await writeBeforeFacts(nodeWizardFs, root, RUN_ID, {
+    hosting: { provider: bridge.script.hosting.provider, vercel: bridge.script.hosting.vercel },
+    keys: bridge.script.keys,
+    census: { entries: [], envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } },
+    dryLive: null,
+    checks: [],
+    observedProductionHost: "acme-store.com"
+  })
   const harness = makeContext({ root, runId: RUN_ID, state: freshState(root, planState(options.conversions, options.lines)) })
   return { bridge, harness, deps: makeDeps({ bridge: client, agentAlive: options.agentAlive ?? false }) }
 }
@@ -113,6 +123,8 @@ describe("step settings", () => {
     expect(bridge.calls.map((call) => call.verb)).toEqual([
       "runs.get",
       "conversions",
+      // §3y.6: a fresh hosting read re-checks that the lane can run before anything is written.
+      "hosting",
       "server-lane.provision-env",
       "ga4-key-events",
       "meta-relay.status",
@@ -269,6 +281,63 @@ describe("step settings: the customer's Vercel is written only with the user's y
       expect(harness.subs().some((text) => text.startsWith("Server lane: nothing saved on Vercel"))).toBe(true)
     })
   }
+})
+
+describe("step settings: refusals are lines, never a crash (§3y.6, P1-2)", () => {
+  it("404 not_found no_site_source on provision-env → one line, ok; a bare re-run on the same state is ok too (no wedge)", async () => {
+    const { bridge, harness, deps } = await setup({
+      conversions: ["signup"],
+      lines: ALL_APPROVED,
+      approved: ["signup"],
+      clickTested: [],
+      script: { errors: { "server-lane.provision-env": { code: "not_found", state: "no_site_source" } }, metaRelay: { available: false, reason: "not_rolled_out", bound: null, enabled: false } }
+    })
+    const first = await step.run(harness.ctx, deps)
+    expect(first).toMatchObject({ kind: "ok", status: "Vercel: needs your permission in Infinite · 1 conversion declared" })
+    expect(harness.subs()).toContain("! Server lane: Infinite has no site for this domain yet, so nothing was saved on Vercel")
+    const again = await step.run(harness.ctx, deps)
+    expect(again.kind).toBe("ok")
+    expect(bridge.callsFor("server-lane.provision-env").map((call) => call.status)).toEqual([404, 404])
+  })
+
+  it("404 no_hosting_connection and an unknown 4xx are lines too; the other pieces still run", async () => {
+    const hosting = await setup({
+      conversions: ["signup"],
+      lines: ALL_APPROVED,
+      approved: ["signup"],
+      clickTested: ["signup"],
+      script: {
+        errors: { "server-lane.provision-env": { code: "not_found", state: "no_hosting_connection" }, "ga4-key-events": { code: "invalid_request", field: "names" } },
+        metaRelay: { available: false, reason: "not_rolled_out", bound: null, enabled: false }
+      }
+    })
+    const outcome = await step.run(hosting.harness.ctx, hosting.deps)
+    expect(outcome.kind).toBe("ok")
+    expect(hosting.harness.subs()).toContain("! Server lane: connect your Vercel project in Infinite (Connections › GitHub · Website) to save its settings; nothing was saved")
+    expect(hosting.harness.subs()).toContain("! GA4 key events: Infinite refused it (invalid_request); nothing was changed")
+    expect(hosting.bridge.callsFor("meta-relay.status")).toHaveLength(1)
+  })
+
+  it("a plan whose server lane was a user_action line → 'not offered', no env write, and the status names what is needed", async () => {
+    const { bridge, harness, deps } = await setup({
+      conversions: [],
+      lines: [{ id: "install_provider:infinite", approved: true }, { id: "user_action:server_lane", approved: null }],
+      approved: [],
+      clickTested: []
+    })
+    const outcome = await step.run(harness.ctx, deps)
+    expect(outcome).toMatchObject({ kind: "ok", status: "Server lane: needs Vercel connected in Infinite · 0 conversions declared" })
+    expect(bridge.callsFor("server-lane.provision-env")).toHaveLength(0)
+  })
+
+  it("approved, but a FRESH hosting read shows no Vercel connection any more → not offered, nothing written", async () => {
+    const { bridge, harness, deps } = await setup({ conversions: [], lines: ALL_APPROVED, approved: [], clickTested: [] })
+    bridge.script.hosting = { provider: "none", vercel: null }
+    const outcome = await step.run(harness.ctx, deps)
+    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("Server lane: needs Vercel connected in Infinite") })
+    expect(harness.subs()).toContain("Server lane: not offered (Infinite has no Vercel connection serving this site)")
+    expect(bridge.callsFor("server-lane.provision-env")).toHaveLength(0)
+  })
 })
 
 describe("step settings: Meta relay pixel", () => {

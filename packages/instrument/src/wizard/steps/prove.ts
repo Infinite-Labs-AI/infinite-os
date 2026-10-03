@@ -11,15 +11,19 @@
 // 3. Receipts (waitMs 120 s, re-polled every 10 s), T1 checks after the deploy, the `proven_live` column,
 //    then `PATCH proofState` to the result (winner only).
 // 4. Print the run's PostHog distinct id so the user can filter this visitor out.
-import { bridgeFailureOutcome, isTransientBridgeFailure } from "../../bridge/outcomes.js"
+import { bridgeFailureOutcome, hardStopOutcome, isTransientBridgeFailure } from "../../bridge/outcomes.js"
+import { deploymentReader, type DeploymentReader } from "../../hosts/github.js"
+import { resolveProductionHost } from "../site-host.js"
+import { resolveVercelSignal } from "../vercel-signal.js"
 import { gradeContextFrom } from "../../checks/grade-context.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 
-import type { TagKeys, TagHosting, TestRunPollResponse } from "../contracts/bridge.js"
+import { SITE_PROOF_PATH, type ProveOutcome, type SiteProveResponse, type TagKeys, type TestRunPollResponse } from "../contracts/bridge.js"
+import type { WizardGitOps } from "../contracts/git-host.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import type { CheckResult } from "../contracts/jobs.js"
-import { RECEIPT_LIMITS, type LaneReceipt, type ReceiptLane, type ReceiptMarkers, type ReceiptsResponseFields } from "../contracts/receipts.js"
+import { RECEIPT_LANES, RECEIPT_LIMITS, type LaneReceipt, type ReceiptLane, type ReceiptMarkers, type ReceiptsResponseFields } from "../contracts/receipts.js"
 import { REASONS, type Reason, type ReportColumnSnapshot } from "../contracts/report.js"
 import { WIZARD_PATHS, type WizardRunState } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
@@ -39,6 +43,13 @@ import { buildColumn, type ColumnFact, type RowCellInput } from "../report.js"
 export const PROVE_LIMITS = {
   deployPollMs: 15_000,
   deployWaitMs: 20 * 60_000,
+  /** §3y.4: the site-file proof is asked at most this often while the deploy is awaited (the cloud allows 120/h). */
+  claimPollMs: 60_000,
+  /** §3y.4: once deployed, a pending claim is re-asked this long (a CDN may serve the old build briefly). */
+  claimGraceMs: 3 * 60_000,
+  claimGracePollMs: 30_000,
+  /** At most one "still waiting" line this often. */
+  waitLineEveryMs: 2 * 60_000,
   testPollWaitSeconds: 25,
   /** Above the real visit's own 90 s deadline: the desktop enforces it; this only stops a wedged poll. */
   realVisitClientMs: TEST_LIMITS.deadlineMs.real_visit + 60_000
@@ -55,7 +66,8 @@ function hashOf(parts: unknown[]): string {
 // 1. The deploy
 // ---------------------------------------------------------------------------------------------
 
-export type DeployWait = { deployed: true; sha: string; how: "merge_deployment" | "serving_descends" } | { deployed: false }
+export type DeployHow = "merge_deployment" | "serving_descends" | "github_deployment" | "site_file" | "you_said"
+export type DeployWait = { deployed: true; sha: string; how: DeployHow } | { deployed: false }
 
 /** One read of the deploy status: deployed now, or not yet. */
 export async function mergeIsDeployed(deps: WizardDeps, mergeSha: string, productionBranch: string | null): Promise<DeployWait> {
@@ -73,27 +85,218 @@ export async function mergeIsDeployed(deps: WizardDeps, mergeSha: string, produc
   const serving = status.serving?.sha ?? null
   if (!serving) return { deployed: false }
   if (serving === mergeSha) return { deployed: true, sha: mergeSha, how: "merge_deployment" }
-  // The serving commit may be newer than anything this clone has: fetch the production branch first.
-  if (productionBranch) await deps.git.remoteBranchSha(productionBranch)
-  let descends = false
-  try {
-    descends = await deps.git.isAncestor(mergeSha, serving)
-  } catch {
-    // An unknown commit (not fetched yet) is "not yet", never "deployed".
-    descends = false
-  }
-  return descends ? { deployed: true, sha: serving, how: "serving_descends" } : { deployed: false }
+  return (await descends(deps, mergeSha, serving, productionBranch)) ? { deployed: true, sha: serving, how: "serving_descends" } : { deployed: false }
 }
 
-async function waitForDeploy(ctx: WizardContext, deps: WizardDeps, mergeSha: string, productionBranch: string | null): Promise<DeployWait> {
+/** `mergeSha` is in `serving`'s history (the production branch fetched first: the serving commit may be newer). */
+async function descends(deps: WizardDeps, mergeSha: string, serving: string, productionBranch: string | null): Promise<boolean> {
+  if (productionBranch) await deps.git.remoteBranchSha(productionBranch)
+  try {
+    return await deps.git.isAncestor(mergeSha, serving)
+  } catch {
+    // An unknown commit (not fetched yet) is "not yet", never "deployed".
+    return false
+  }
+}
+
+/** §3y.4: what one GitHub read says about the merge's production deploy. */
+export type GithubDeployRead = { deployed: true; sha: string; how: "github_deployment" | "serving_descends" } | { failed: true } | { waiting: "building" | "not_found" }
+
+export async function githubDeployRead(deps: WizardDeps, reader: DeploymentReader, mergeSha: string, productionBranch: string | null): Promise<GithubDeployRead> {
+  const own = await reader.productionDeployment(mergeSha).catch(() => ({ state: "not_found" as const }))
+  if (own.state === "ready") return { deployed: true, sha: mergeSha, how: "github_deployment" }
+  // A later successful production deployment that contains the merge serves it too (a canceled or failed merge build).
+  const latest = await reader.latestProductionDeployment().catch(() => null)
+  if (latest && latest.sha === mergeSha) return { deployed: true, sha: mergeSha, how: "github_deployment" }
+  if (latest && (await descends(deps, mergeSha, latest.sha, productionBranch))) return { deployed: true, sha: latest.sha, how: "serving_descends" }
+  if (own.state === "failed") return { failed: true }
+  return { waiting: own.state === "building" ? "building" : "not_found" }
+}
+
+/** The signals `prove` can wait on this run (§3y.4). With none, it asks instead of waiting. */
+export interface DeploySignals {
+  /** Infinite's Vercel connection (`hosting.deploy`). */
+  infinite: boolean
+  /** GitHub Deployments (a Vercel signal, or production deployments seen). */
+  github: DeploymentReader | null
+  /** A pending site-file claim the cloud can check. */
+  claim: boolean
+}
+
+/**
+ * `no_signal`: the claim was proven, but it says nothing about THIS merge's deploy (the file was already served before
+ * it), and no other signal exists; the step then asks, as it does with no signal at all.
+ */
+export type DeployOutcome = (DeployWait & { deployed: true }) | { deployed: false; why: "timeout" | "failed" | "no_signal" | "claim_gone" }
+
+/**
+ * Review P3-1: the cloud reading the proof file shows THIS merge deployed only when the merge brought that file:
+ * the merge commit holds it, and its first parent (what production served before) did not hold the same bytes.
+ * A refreshed claim keeps its token, so a file live from an earlier merge (e.g. `--fresh` after a merged but
+ * unproven run) would otherwise read as a deploy nobody measured. Unknown (no `showFile`, an unfetched commit) is
+ * false: never a guess.
+ */
+export async function mergeBroughtProofFile(ctx: WizardContext, deps: WizardDeps, mergeSha: string, productionBranch: string | null): Promise<boolean> {
+  const git = deps.git as Partial<WizardGitOps>
+  if (typeof git.showFile !== "function") return false
+  const showFile = git.showFile.bind(deps.git)
+  // The merge happened on the host: fetch the production branch so the merge commit is known here.
+  if (productionBranch) await deps.git.remoteBranchSha(productionBranch).catch(() => null)
+  const rest = SITE_PROOF_PATH.replace(/^\//, "")
+  const prefix = ctx.appRoot === "." || ctx.appRoot === "" ? "" : `${ctx.appRoot}/`
+  // The two places `proofFileTarget` writes it (Next/Vite `public/`, a static site's root).
+  for (const path of [`${prefix}public/${rest}`, `${prefix}${rest}`]) {
+    const merged = await showFile(mergeSha, path).catch(() => null)
+    if (merged === null) continue
+    const before = await showFile(`${mergeSha}^1`, path).catch(() => null)
+    return before !== merged
+  }
+  return false
+}
+
+/** The step's sub line, throttled to one "still waiting" line per two minutes. */
+function waitLines(ctx: WizardContext, deps: WizardDeps): (text: string) => void {
+  let last = -Infinity
+  return (text) => {
+    const now = deps.clock.now().getTime()
+    if (now - last < PROVE_LIMITS.waitLineEveryMs) return
+    last = now
+    ctx.emit.emit("step.sub", { step: "prove", text, tone: "pending" })
+  }
+}
+
+/** One `site-prove` call; transient failures and refusals read "pending" (the desktop and the hourly watch go on). */
+async function proveOnce(ctx: WizardContext, deps: WizardDeps): Promise<SiteProveResponse | null> {
+  try {
+    return await deps.bridge.proveSite({ signal: ctx.signal })
+  } catch (error) {
+    if (hardStopOutcome(error) !== null) throw error
+    if (isTransientBridgeFailure(error) || bridgeErrorCode(error) !== null) return null
+    throw error
+  }
+}
+
+/**
+ * §3y.4: waits on EVERY available signal (Infinite's deploy status, GitHub Deployments, a pending claim's proof),
+ * at most 20 minutes; a failed merge deployment with nothing later containing it stops at once.
+ */
+async function waitForDeploy(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  input: {
+    mergeSha: string
+    productionBranch: string | null
+    signals: DeploySignals
+    host: string | null
+    onProven: (answer: SiteProveResponse) => void
+    /** The cloud answered `none`: it holds no pending claim for this workspace any more. */
+    onGone: () => void
+  }
+): Promise<DeployOutcome> {
+  const { mergeSha, signals } = input
   const started = deps.clock.now().getTime()
+  const say = waitLines(ctx, deps)
+  let lastClaimPoll = -Infinity
+  let claimLive = signals.claim
   ctx.emit.emit("step.sub", { step: "prove", text: `Waiting for the deploy of ${mergeSha.slice(0, 7)}…`, tone: "pending" })
   for (;;) {
-    const result = await mergeIsDeployed(deps, mergeSha, productionBranch)
-    if (result.deployed) return result
-    if (deps.clock.now().getTime() - started >= PROVE_LIMITS.deployWaitMs) return { deployed: false }
+    if (signals.infinite) {
+      const result = await mergeIsDeployed(deps, mergeSha, input.productionBranch)
+      if (result.deployed) return result
+    }
+    if (signals.github) {
+      const read = await githubDeployRead(deps, signals.github, mergeSha, input.productionBranch)
+      if ("deployed" in read) return read
+      if ("failed" in read) return { deployed: false, why: "failed" }
+      say(read.waiting === "building" ? `GitHub: Vercel is building ${mergeSha.slice(0, 7)}…` : `GitHub shows no production deployment for ${mergeSha.slice(0, 7)} yet`)
+    }
+    const now = deps.clock.now().getTime()
+    if (claimLive && now - lastClaimPoll >= PROVE_LIMITS.claimPollMs) {
+      lastClaimPoll = now
+      const answer = await proveOnce(ctx, deps)
+      if (answer?.state === "proven") {
+        input.onProven(answer)
+        // The file exists only in this run's merge: the cloud reading it IS the deploy (`site_file`).
+        if (await mergeBroughtProofFile(ctx, deps, mergeSha, input.productionBranch)) return { deployed: true, sha: mergeSha, how: "site_file" }
+        // The file was already served before this merge: the proof stands, but it does not show this deploy.
+        claimLive = false
+        ctx.emit.emit("step.sub", {
+          step: "prove",
+          text: `The proof file was already on ${input.host ?? "your site"} before this merge, so it does not show that ${mergeSha.slice(0, 7)} deployed`,
+          tone: "info"
+        })
+        if (!signals.infinite && !signals.github) return { deployed: false, why: "no_signal" }
+      } else if (answer?.state === "none") {
+        // Review P1-1: the claim is gone (expired, or another source took the site); waiting on it can never prove.
+        claimLive = false
+        input.onGone()
+        if (!signals.infinite && !signals.github) return { deployed: false, why: "claim_gone" }
+      } else if (input.host) say(`Checking ${input.host}/.well-known/infinite-site-verification.txt…`)
+    }
+    if (deps.clock.now().getTime() - started >= PROVE_LIMITS.deployWaitMs) return { deployed: false, why: "timeout" }
     await deps.clock.sleep(PROVE_LIMITS.deployPollMs, ctx.signal)
   }
+}
+
+/** §3y.4: a deployed site whose claim is still pending is re-asked for up to 3 minutes (a CDN may lag). */
+async function proveAfterDeploy(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  onProven: (answer: SiteProveResponse) => void
+): Promise<{ proven: true } | { proven: false; outcome: ProveOutcome | null; gone?: true }> {
+  const started = deps.clock.now().getTime()
+  let outcome: ProveOutcome | null = null
+  for (;;) {
+    const answer = await proveOnce(ctx, deps)
+    if (answer?.state === "proven") {
+      onProven(answer)
+      return { proven: true }
+    }
+    // Review P1-1: `none` = the cloud holds no pending claim any more; asking again cannot prove it.
+    if (answer?.state === "none") return { proven: false, outcome, gone: true }
+    outcome = answer?.hosts.find((entry) => entry.outcome !== "proven")?.outcome ?? outcome
+    if (deps.clock.now().getTime() - started + PROVE_LIMITS.claimGracePollMs > PROVE_LIMITS.claimGraceMs) return { proven: false, outcome }
+    await deps.clock.sleep(PROVE_LIMITS.claimGracePollMs, ctx.signal)
+  }
+}
+
+/**
+ * §3y.4 / P2-7: the report's `columns.proven_live.pending` when this run has no proven column: `deploy` only while
+ * Infinite itself can observe the deploy (a hosting connection, or a pending claim the cloud checks);
+ * `open_infinite` while a deployed claim awaits the cloud (or `--no-prove` hands the proof to the app);
+ * `rerun_tag` when nothing in Infinite can observe it.
+ */
+export function provenPendingFor(input: {
+  state: Pick<WizardRunState, "report" | "site" | "steps">
+  hostingVercel: boolean
+  noProve: boolean
+  /** The run's production host as `resolveProductionHost` reads it; null = none known (the app cannot visit). */
+  productionHost?: string | null
+}): "deploy" | "open_infinite" | "rerun_tag" | null {
+  const column = input.state.report.proven_live
+  if (column) {
+    // R2-2: a proven column that measured something is the answer; one that measured nothing says who finishes it
+    // through its own unmeasured cells (set by `prove`): pending_open_infinite only while the app is proving it.
+    if (provenColumnHasEvidence(column)) return null
+    const reason = column.finishLine.proof_from_real_visit?.reason
+    return reason === "pending_open_infinite" ? "open_infinite" : reason === "pending_deploy" ? "deploy" : "rerun_tag"
+  }
+  // R2-4: with no production host the app has nothing to visit, whatever else it can observe.
+  if (input.productionHost === null) return "rerun_tag"
+  if (input.state.steps.prove?.code === "INF_WIZ_HOST_UNCONFIRMED") return "open_infinite"
+  const observable = input.hostingVercel || input.state.site?.claim?.state === "pending_proof"
+  if (!observable) return "rerun_tag"
+  return input.noProve ? "open_infinite" : "deploy"
+}
+
+/** DECISIONS §1.4 outcome words for a host that is not confirmed yet. */
+export const PROVE_OUTCOME_WORDS: Record<Exclude<ProveOutcome, "proven">, string> = {
+  not_served: "the file is not served yet",
+  wrong_token: "the file holds another workspace's token",
+  redirects_elsewhere: "the address redirects to another host",
+  blocked: "the site's bot protection blocked Infinite's check",
+  unreachable: "Infinite could not reach it",
+  not_checked: "Infinite has not checked it yet"
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -161,6 +364,15 @@ export function receiptMarkersFrom(result: TestResult, expect: TestExpect): Rece
 // ---------------------------------------------------------------------------------------------
 // 3. Receipts
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * R2-2: the receipts of a run that held the proof claim and made NO visit: nobody visited for this run (the claim
+ * keeps the app out), so no receipt can be this run's. Every lane is unknown; nothing is read.
+ */
+function noVisitReceipts(runId: string, at: string): ReceiptsResponseFields {
+  const unknown = { state: "undetermined" as const, receiptAt: null, reason: null, provenance: "cloud_ledger" as const }
+  return { runId, phase: "proven_live", checkedAt: at, lanes: Object.fromEntries(RECEIPT_LANES.map((lane) => [lane, { ...unknown }])) as ReceiptsResponseFields["lanes"] }
+}
 
 async function readReceipts(ctx: WizardContext, deps: WizardDeps, runId: string, markers: ReceiptMarkers): Promise<ReceiptsResponseFields> {
   const started = deps.clock.now().getTime()
@@ -240,6 +452,25 @@ export interface ProvenColumnInput {
   conversionsWaiting: number
   /** The run's server-clock start (`runs.start`); null when this state file predates it. */
   runStartedAt?: string | null
+  /**
+   * How a cell with no reading reads when this run has no real-visit facts (§3y.4, R2-4): `pending_open_infinite`
+   * only while Infinite really finishes the live check (the app is proving this run); otherwise "—" `not_exercised`
+   * (the report's `pending` is then `rerun_tag`). Default: "—" `not_exercised` (never a promise nobody keeps).
+   */
+  unmeasured?: { reason: Reason; state: "pending" | "not_measured" }
+}
+
+/** A receipt that shows the tool fired on the live site (verified or seen leaving). */
+function laneFired(lane: LaneReceipt): boolean {
+  return lane.state === "verified" || lane.state === "delivering"
+}
+
+/**
+ * R2-2 (live run 2): "Proven live" counts a pass or a problem ONLY from this run's real-visit facts or its own
+ * receipts. A column with neither measured nothing: no finish-line cell there is a pass or a problem.
+ */
+export function provenColumnHasEvidence(column: ReportColumnSnapshot): boolean {
+  return Object.values(column.finishLine).some((cell) => cell?.state === "pass" || cell?.state === "problem")
 }
 
 /** The `proven_live` column, from typed inputs only (receipts, graded facts, cloud reads). */
@@ -253,6 +484,11 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
   }
   const facts: ColumnFact[] = []
   const tools = toolsUnderTest(expect)
+  const unmeasured = input.unmeasured ?? { reason: "not_exercised" as Reason, state: "not_measured" as const }
+  // R2-2: no real visit and no receipt of this run → nothing on the live site was measured. The column then holds
+  // no fact at all: not the consent setting (no visit measured it), not a T1 read, not a missing receipt.
+  const evidence = visit !== null || Object.values(receipts.lanes).some(laneFired)
+  if (!evidence) return unmeasuredProvenColumn(input, receipts, unmeasured)
 
   if (visit) {
     for (const tool of tools) {
@@ -335,7 +571,42 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
     facts,
     rows,
     runStartedAt,
-    ...(visit ? {} : { unmeasured: { reason: "pending_open_infinite", state: "pending" } })
+    ...(visit ? {} : { unmeasured })
+  })
+}
+
+/**
+ * R2-2: the column when nothing on the live site was measured. `measuredAt` stays null (the headline then says "not
+ * checked live yet" with the reason), every cell is "—" with the run's unmeasured reason, and only the by-design
+ * pending cells (a real conversion, the day-7 key events) keep their own reasons. Never a pass, never a problem.
+ */
+function unmeasuredProvenColumn(input: ProvenColumnInput, receipts: ReceiptsResponseFields, unmeasured: NonNullable<ProvenColumnInput["unmeasured"]>): ReportColumnSnapshot {
+  const { at, expect } = input
+  const dash = (source: RowCellInput["source"]): RowCellInput => ({ value: null, state: unmeasured.state, source, at, reason: unmeasured.reason })
+  const tools = toolsUnderTest(expect)
+  const rows: Parameters<typeof buildColumn>[1]["rows"] = {
+    consent_setting: dash("cloud_read"),
+    preview_share: { value: null, state: "not_measured", source: "cloud_read", at, reason: "needs_7_days" },
+    ga4_key_events: { value: null, state: "pending", source: "cloud_read", at, reason: "needs_7_days" },
+    server_conversions:
+      input.conversionsWaiting > 0
+        ? { value: "waiting", display: `${input.conversionsWaiting} wired · waits for a real conversion`, state: "pending", source: "wizard_check", at }
+        : { value: null, state: "not_measured", source: "wizard_check", at, reason: "not_exercised" },
+    live_test_per_tool:
+      tools.length === 0 && !input.serverLaneInstalled ? { value: null, state: "not_measured", source: "cloud_receipt", at, reason: "not_connected" } : dash("cloud_receipt"),
+    ga4_page_views_per_visit: expect.ga4 ? dash("desktop_test") : { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" },
+    meta_pixel: expect.meta ? dash("desktop_test") : { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" },
+    posthog_route: expect.posthog ? dash("cloud_receipt") : { value: null, state: "not_measured", source: "cloud_receipt", at, reason: "not_connected" }
+  }
+  void receipts
+  return buildColumn("proven_live", {
+    runId: input.runId,
+    meta: { measuredAt: null, sha: input.mergeSha },
+    facts: [],
+    rows,
+    runStartedAt: input.runStartedAt ?? null,
+    unmeasured,
+    builtAt: at
   })
 }
 
@@ -493,9 +764,6 @@ async function writeOwnClaim(ctx: WizardContext, deps: WizardDeps, record: Prove
 // The step
 // ---------------------------------------------------------------------------------------------
 
-function productionHostFrom(keys: TagKeys, hosting: TagHosting): string | null {
-  return keys.infinite.productionHosts[0] ?? hosting.vercel?.productionDomains[0] ?? null
-}
 
 async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   if (ctx.options.noProve) {
@@ -512,24 +780,135 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   }
 
   const hosting = await deps.bridge.hosting()
-  const keys = await deps.bridge.keys()
-  const expect = testExpectFromKeys(keys)
-  const productionHost = productionHostFrom(keys, hosting)
+  let keys = await deps.bridge.keys()
+  const site = state.site ?? null
+  // §3y.2: a pending site-file claim (only with an app that can prove it).
+  const pendingClaim = site?.claim?.state === "pending_proof" && deps.bridge.has("tag.site-claim.v1") ? site.claim : null
+  let expect = testExpectFromKeys(keys, pendingClaim)
+  const productionHost = resolveProductionHost({ keys, hosting, site }).host
+  const productionBranch = hosting.vercel?.productionBranch ?? state.git?.base ?? null
 
-  const deploy = await waitForDeploy(ctx, deps, mergeSha, hosting.vercel?.productionBranch ?? null)
-  if (!deploy.deployed) {
-    return {
-      kind: "parked",
-      code: "INF_WIZ_DEPLOY_TIMEOUT",
-      reason: `The deploy of ${mergeSha.slice(0, 7)} was not seen in ${Math.round(PROVE_LIMITS.deployWaitMs / 60_000)} minutes.`,
-      resumeHint: "Open Infinite: it finishes the proof after the deploy and shows it in Site Settings. Or run npx infinite-tag again later."
+  // §3y.4: every signal this run can wait on. GitHub counts only when it shows Vercel deploying this repo.
+  const reader = deploymentReader(deps.host)
+  let github: DeploymentReader | null = null
+  if (reader && hosting.provider !== "vercel") {
+    const vercel = await resolveVercelSignal(ctx, deps, hosting)
+    reader.setPreviewProject?.(vercel.projectName)
+    if (vercel.signal || (await reader.latestProductionDeployment().catch(() => null)) !== null) github = reader
+  }
+  const signals: DeploySignals = { infinite: hosting.provider === "vercel", github, claim: pendingClaim !== null }
+  let claimProven = false
+  let claimGone = false
+  const onGone = () => {
+    claimGone = true
+  }
+  const onProven = (answer: SiteProveResponse) => {
+    claimProven = true
+    const at = deps.clock.now().toISOString()
+    ctx.state.update((draft) => {
+      if (draft.site?.claim) draft.site.claim = { ...draft.site.claim, state: "proven", provenAt: at }
+    })
+    ctx.emit.emit("step.sub", { step: "prove", text: `✓ ${answer.siteSource?.productionHosts[0] ?? productionHost ?? "Your domain"} confirmed (Infinite read the proof file)`, tone: "ok" })
+  }
+
+  // No way to see the deploy: ONE question instead of a 20-minute wait (never under --yes / --json).
+  const askDeployed = async (): Promise<Extract<DeployWait, { deployed: true }> | null> => {
+    const asked =
+      ctx.options.yes || ctx.options.json || ctx.options.nested
+        ? false
+        : await ctx.ask("confirm", {
+            question: `Infinite can't see when ${productionHost ?? "your site"} deploys (no Vercel connection, no GitHub deployments). Is pull request #${state.pr?.number ?? "?"} live on ${productionHost ?? "your site"} now?`,
+            defaultYes: false
+          })
+    return asked === true ? { deployed: true, sha: mergeSha, how: "you_said" } : null
+  }
+  const cannotSee: StepOutcome = { kind: "parked", code: "INF_WIZ_DEPLOY_TIMEOUT", reason: "Infinite cannot see this site's deploys.", resumeHint: "Run npx infinite-tag again once it's live." }
+
+  // Review P1-1: the cloud no longer holds a pending claim (expired, or another Infinite source took the site). Never
+  // "the file is not served yet": that is not what happened.
+  const claimGoneOutcome = (): StepOutcome => ({
+    kind: "parked",
+    code: "INF_WIZ_HOST_UNCONFIRMED",
+    reason: `${productionHost ?? pendingClaim?.hosts[0] ?? "Your site"} isn't confirmed: Infinite no longer holds a pending proof for it (it expired, or another Infinite source took the site).`,
+    resumeHint: "Check this site in Infinite › Site Settings, then run npx infinite-tag again."
+  })
+
+  let deploy: Extract<DeployWait, { deployed: true }>
+  if (!signals.infinite && !signals.github && !signals.claim) {
+    const said = await askDeployed()
+    if (!said) {
+      return cannotSee
+    }
+    deploy = said
+  } else {
+    const waited = await waitForDeploy(ctx, deps, { mergeSha, productionBranch, signals, host: productionHost, onProven, onGone })
+    if (!waited.deployed && waited.why === "claim_gone") {
+      return claimGoneOutcome()
+    }
+    if (!waited.deployed && waited.why === "no_signal") {
+      await ctx.state.save()
+      const said = await askDeployed()
+      if (!said) return cannotSee
+      deploy = said
+    } else if (!waited.deployed) {
+      if (waited.why === "failed") {
+        return {
+          kind: "parked",
+          code: "INF_WIZ_DEPLOY_FAILED",
+          reason: `The deploy of ${mergeSha.slice(0, 7)} failed (GitHub shows the Vercel production deployment failed).`,
+          resumeHint: "Fix it and run npx infinite-tag again."
+        }
+      }
+      return {
+        kind: "parked",
+        code: "INF_WIZ_DEPLOY_TIMEOUT",
+        reason: `The deploy of ${mergeSha.slice(0, 7)} was not seen in ${Math.round(PROVE_LIMITS.deployWaitMs / 60_000)} minutes.`,
+        resumeHint: signals.infinite || signals.claim
+          ? "Open Infinite: it finishes the proof after the deploy and shows it in Site Settings. Or run npx infinite-tag again later."
+          : "Run npx infinite-tag again once it's live."
+      }
+    } else {
+      deploy = waited
     }
   }
-  ctx.emit.emit("step.sub", {
-    step: "prove",
-    text: deploy.how === "merge_deployment" ? `✓ Deployed ${mergeSha.slice(0, 7)}` : `✓ Deployed (a later commit, ${deploy.sha.slice(0, 7)}, includes it)`,
-    tone: "ok"
-  })
+  const deployWords: Record<DeployHow, string> = {
+    merge_deployment: `✓ Deployed ${mergeSha.slice(0, 7)}`,
+    serving_descends: `✓ Deployed (a later commit, ${deploy.sha.slice(0, 7)}, includes it)`,
+    github_deployment: `✓ Deployed ${mergeSha.slice(0, 7)} (GitHub deployment)`,
+    site_file: `✓ Deployed ${mergeSha.slice(0, 7)} (Infinite read its proof file on ${productionHost ?? "your site"})`,
+    you_said: `✓ Pull request #${state.pr?.number ?? "?"} is live (you said)`
+  }
+  ctx.emit.emit("step.sub", { step: "prove", text: deployWords[deploy.how], tone: "ok" })
+
+  if (pendingClaim && !claimProven) {
+    // Deployed, but the cloud has not read the file yet. The run's ONE real visit is NOT spent before the proof
+    // (a visit before it can never yield an Infinite receipt); the desktop watcher and the hourly watch finish it.
+    if (claimGone) {
+      await ctx.state.save()
+      return claimGoneOutcome()
+    }
+    const after = await proveAfterDeploy(ctx, deps, onProven)
+    if (!after.proven && after.gone) {
+      await ctx.state.save()
+      return claimGoneOutcome()
+    }
+    if (!after.proven) {
+      await ctx.state.save()
+      const words = after.outcome && after.outcome !== "proven" ? PROVE_OUTCOME_WORDS[after.outcome] : PROVE_OUTCOME_WORDS.not_served
+      return {
+        kind: "parked",
+        code: "INF_WIZ_HOST_UNCONFIRMED",
+        reason: `${productionHost ?? pendingClaim.hosts[0]} isn't confirmed yet: ${words} (Infinite looks for /.well-known/infinite-site-verification.txt).`,
+        resumeHint: "The Infinite app finishes the proof once it is served; or run npx infinite-tag again."
+      }
+    }
+  }
+  if (claimProven) {
+    // The source now exists with the reserved key: the keys say so, and `expect` comes from them alone.
+    await ctx.state.save()
+    keys = await deps.bridge.keys()
+    expect = testExpectFromKeys(keys)
+  }
 
   // The claim: only the winner visits. The cloud's claim is one atomic `pending|pending_desktop → proving`;
   // a run the desktop is proving, or one already proven, answers 409 claimed_by_other with its state.
@@ -539,29 +918,37 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   // the PATCH): the cloud answers 409 to it like to anyone's, so the saved record tells them apart.
   let ownClaim: ProveVisitRecord | null = null
   let patchProofState = false
-  try {
-    const claim = await deps.bridge.claimProof(runId, "tag")
-    won = claim.granted === true
-    if (won) {
-      await writeOwnClaim(ctx, deps, { schema: PROVE_VISIT_SCHEMA, runId, mergeSha, claimedAt: deps.clock.now().toISOString(), visit: null })
-      patchProofState = true
+  // R2-4: true only while the Infinite app itself holds this run's proof claim (it then makes the visit).
+  let appProving = false
+  // Review-2 P3-3: with no production host there is no visit to make, so the proof is never claimed. The run stays
+  // unclaimed, which is honest and lets the app tell "no visit" apart from a measured result.
+  const noHost = productionHost === null
+  if (!noHost) {
+    try {
+      const claim = await deps.bridge.claimProof(runId, "tag")
+      won = claim.granted === true
+      if (won) {
+        await writeOwnClaim(ctx, deps, { schema: PROVE_VISIT_SCHEMA, runId, mergeSha, claimedAt: deps.clock.now().toISOString(), visit: null })
+        patchProofState = true
+      }
+    } catch (error) {
+      if (bridgeErrorCode(error) !== "claimed_by_other") throw error
+      const proofState = bridgeErrorState(error)
+      ownClaim = await readOwnClaim(ctx, deps, runId, mergeSha)
+      // The run state's prove markers are written only by THIS run's winning visit: they prove the claim
+      // was ours even when the record is gone (its receipts are then read with those markers).
+      if (!ownClaim && savedProveMarkers(state.markers.prove)) {
+        ownClaim = { schema: PROVE_VISIT_SCHEMA, runId, mergeSha, claimedAt: "", visit: null }
+      }
+      // Still `proving` under this run's own claim: the PATCH never landed, so this run sends it now.
+      patchProofState = ownClaim !== null && (proofState === "proving" || proofState === null)
+      appProving = ownClaim === null && (proofState === "proving" || proofState === null)
+      claimNote = ownClaim
+        ? "this run's own visit, from before the resume"
+        : proofState === "proving" || proofState === null
+          ? "the Infinite app is already proving this run"
+          : `this run's proof is already ${proofState}`
     }
-  } catch (error) {
-    if (bridgeErrorCode(error) !== "claimed_by_other") throw error
-    const proofState = bridgeErrorState(error)
-    ownClaim = await readOwnClaim(ctx, deps, runId, mergeSha)
-    // The run state's prove markers are written only by THIS run's winning visit: they prove the claim
-    // was ours even when the record is gone (its receipts are then read with those markers).
-    if (!ownClaim && savedProveMarkers(state.markers.prove)) {
-      ownClaim = { schema: PROVE_VISIT_SCHEMA, runId, mergeSha, claimedAt: "", visit: null }
-    }
-    // Still `proving` under this run's own claim: the PATCH never landed, so this run sends it now.
-    patchProofState = ownClaim !== null && (proofState === "proving" || proofState === null)
-    claimNote = ownClaim
-      ? "this run's own visit, from before the resume"
-      : proofState === "proving" || proofState === null
-        ? "the Infinite app is already proving this run"
-        : `this run's proof is already ${proofState}`
   }
 
   let visit: ProvenColumnInput["visit"] = null
@@ -577,6 +964,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     } else {
       visitError = "the real visit was interrupted before its results were saved (no second visit is made)"
     }
+  } else if (noHost) {
+    visitError = "no production host is known for this site"
   } else if (won) {
     if (!productionHost) {
       visitError = "no production host is known for this site"
@@ -622,7 +1011,9 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     }
   }
 
-  const receipts = await readReceipts(ctx, deps, runId, markers)
+  // A lane with no marker reads the run's STORED receipt (the app's visit, for a lost claim). With the claim held and
+  // no visit made, there is none to read (R2-2).
+  const receipts = (won || noHost) && visit === null ? noVisitReceipts(runId, deps.clock.now().toISOString()) : await readReceipts(ctx, deps, runId, markers)
   for (const [lane, receipt] of Object.entries(receipts.lanes) as Array<[ReceiptLane, LaneReceipt]>) {
     ctx.emit.emit("receipt", { lane, state: receipt.state, receiptAt: receipt.receiptAt, runId })
   }
@@ -658,7 +1049,10 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
       t1,
       serverLaneInstalled: keys.serverLane.laneState !== "no_secret",
       runStartedAt: state.runStartedAt ?? null,
-      conversionsWaiting: state.jobs.filter((item) => item.jobId === "server_conversions" && ["done_in_code", "waiting_real_event"].includes(item.state)).length
+      conversionsWaiting: state.jobs.filter((item) => item.jobId === "server_conversions" && ["done_in_code", "waiting_real_event"].includes(item.state)).length,
+      // R2-4: "open Infinite" only while the app is proving this run; when this run held the claim (or no host is
+      // known), nothing in Infinite finishes the live check, so its cells are "—" and the report says rerun_tag.
+      unmeasured: appProving && productionHost ? { reason: "pending_open_infinite", state: "pending" } : { reason: "not_exercised", state: "not_measured" }
     })
     ctx.state.update((draft) => {
       draft.report.proven_live = column
