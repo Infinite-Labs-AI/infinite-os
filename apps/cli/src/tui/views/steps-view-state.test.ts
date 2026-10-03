@@ -8,7 +8,7 @@ import type { AnswerViewV1 } from "@infinite-os/types";
 import { describe, expect, it } from "vitest";
 
 import type { TurnStep } from "../app/turn-store.js";
-import { stepRowLines, unsettledStepLines } from "./steps.js";
+import { refineStepStatus, stepRowLines, toolOutcome, unsettledStepLines } from "./steps.js";
 import { resolveTheme } from "../theme.js";
 
 const theme = resolveTheme({});
@@ -125,6 +125,86 @@ describe("a step's words come from the view that stands for it (W3 r2)", () => {
         for (const line of rows([step({ status: state.startsWith("b") || state.startsWith("h") ? "fail" : "ok", result: "" })], [quiet("read_metrics", state)], width)) {
           expect(line.length).toBeLessThanOrEqual(width);
         }
+      }
+    });
+  }
+});
+
+// Wave 3 r2 review (M1, S2): the desktop bridge sends an uncertain write as a
+// failed call (`status: "error"`, outcome uncertain, a "not sure" summary), so
+// the step is a fail. The one view that stands for it says it is unknown, and
+// ✗ (failed / not sent) would tell the person the write failed when it may
+// have landed. The view's state wins: `? not sure it happened`. A row a view
+// refined never ends in a lone mark (`◐`, `⧗`).
+describe("the view's state wins over the wire's failure (W3 r2 review)", () => {
+  const quiet = (tool: string, state: string, extra: Record<string, unknown> = {}) => view(tool, state, { kind: "quiet", ...extra });
+  const wired = (over: Partial<TurnStep> = {}) => {
+    const outcome = toolOutcome({ status: "error", summary: "not sure it went through" });
+    return step({ name: "mcp__sample_app__update_sample_brief", label: "updating the sample brief", ...outcome, ...over });
+  };
+
+  it("the real wire shape is a failed step", () => {
+    expect(toolOutcome({ status: "error", summary: "not sure it went through" }).status).toBe("fail");
+  });
+
+  it("a failed call whose one view is outcome-unknown is `? not sure it happened`, never ✗", () => {
+    const failed = wired();
+    const views = [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown" })];
+    const [row] = rows([failed], views);
+    expect(row).toMatch(/\? not sure it happened$/u);
+    expect(row).not.toContain("✗");
+    expect(row).not.toContain("went through");
+    expect(refineStepStatus(failed, views, [failed])).toBe("unk");
+  });
+
+  it("an outcome-unknown view's short reason stands for the row", () => {
+    const [row] = rows([wired()], [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown", stateReason: { code: "sample", words: "A sample sentence.", short: "Timed out" } })]);
+    expect(row).toMatch(/\? timed out$/u);
+    expect(row).not.toContain("✗");
+  });
+
+  it("a failed view whose outcome is unknown is unknown too", () => {
+    const [row] = rows([wired()], [quiet("update_sample_brief", "failed", { outcome: "unknown" })]);
+    expect(row).toMatch(/\? not sure it happened$/u);
+    expect(row).not.toContain("✗");
+  });
+
+  it("a failed call whose one view changed nothing is `· nothing to change`, never ✗", () => {
+    const [row] = rows([wired({ result: "didn't go through" })], [view("update_sample_brief", "no_change", { kind: "change", outcome: "no_change" })]);
+    expect(row).toMatch(/· nothing to change$/u);
+    expect(row).not.toContain("✗");
+  });
+
+  it("two calls of the tool and one unknown view: no telling which, each keeps its own ✗", () => {
+    const steps = [wired({ id: "a" }), wired({ id: "b" })];
+    const drawn = rows(steps, [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown" })]).filter((row) => row.includes("━"));
+    expect(drawn).toHaveLength(2);
+    for (const row of drawn) expect(row).toContain("✗");
+  });
+
+  it("in scrollback, the unknown row keeps its words", () => {
+    expect(unsettledStepLines([wired()], { width: 100, color: false, theme, views: [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown" })] }))
+      .toEqual([expect.stringMatching(/\? not sure it happened$/u)]);
+  });
+
+  it("a partial view's row says its words, never a lone ◐", () => {
+    expect(rows([step({ status: "ok", result: "" })], [view("read_metrics", "partial")])[0]).toMatch(/◐ partial$/u);
+    expect(rows([step({ status: "ok", result: "" })], [view("read_metrics", "partial", { stateReason: { code: "sample", words: "A sample sentence.", short: "4 of 5 days in" } })])[0])
+      .toMatch(/◐ 4 of 5 days in$/u);
+  });
+
+  it("an out-of-date view's row says its words, never a lone ⧗", () => {
+    expect(rows([step({ status: "ok", result: "" })], [view("read_metrics", "out_of_date")])[0]).toMatch(/⧗ out of date$/u);
+  });
+
+  it("the app's own result words still win for partial rows", () => {
+    expect(rows([step({ status: "ok", result: "sample words" })], [view("read_metrics", "partial")])[0]).toMatch(/◐ sample words$/u);
+  });
+
+  for (const width of [48, 60, 100, 140]) {
+    it(`fits ${width} columns`, () => {
+      for (const line of rows([wired()], [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown" })], width)) {
+        expect(line.length).toBeLessThanOrEqual(width);
       }
     });
   }

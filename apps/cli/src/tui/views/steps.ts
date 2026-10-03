@@ -413,6 +413,7 @@ const STATE_STATUS: Partial<Record<AnswerViewState, StepStatus>> = {
  */
 export function stepStatusForView(view: Pick<AnswerViewV1, "state" | "outcome" | "stateReason">): StepStatus | null {
   if (isChangedOnProvider(view)) return "old";
+  if (isOutcomeUnknown(view)) return "unk";
   return STATE_STATUS[view.state] ?? null;
 }
 
@@ -446,6 +447,8 @@ export function refineStepStatus(
   steps: readonly TurnStep[] = [step]
 ): StepStatus {
   if (refusedReadView(step, views, steps)) return "off";
+  const settled = failedCallSettledBy(step, views, steps);
+  if (settled) return settled.status;
   const view = viewDrawnBy(step, views, steps);
   if (!view) return step.status;
   if (step.status === "wait" && (view.state === "applying" || view.state === "working")) return "run";
@@ -496,6 +499,42 @@ function viewStandingFor(step: TurnStep, views: readonly AnswerViewV1[], steps: 
   if (matches.length !== 1) return undefined;
   return steps.filter((other) => drewView(other, matches[0]!)).length === 1 ? matches[0] : undefined;
 }
+
+/**
+ * Whether a view says no one knows if its write landed: an outcome-unknown
+ * state, or a failed one whose outcome is unknown. Never `✗` (failed / not
+ * sent): the write may have landed, and a retry could send it twice.
+ */
+function isOutcomeUnknown(view: Pick<AnswerViewV1, "state" | "outcome">): boolean {
+  return view.state === "outcome_unknown" || (view.state === "failed" && view.outcome === "unknown");
+}
+
+/**
+ * A failed call whose one standing view (`viewStandingFor`) says something
+ * other than a failure: the write may have landed (`?`), or there was nothing
+ * to change (`·`). The desktop bridge sends an uncertain write as a failed
+ * call (`status: "error"` with a "not sure" summary), so only its view can
+ * say it was not a failure. Else undefined, and the call keeps its own ✗.
+ */
+function failedCallSettledBy(
+  step: TurnStep,
+  views: readonly AnswerViewV1[],
+  steps: readonly TurnStep[]
+): { view: AnswerViewV1; status: "unk" | "off" } | undefined {
+  if (step.status !== "fail") return undefined;
+  const view = viewStandingFor(step, views, steps);
+  if (!view) return undefined;
+  if (isOutcomeUnknown(view)) return { view, status: "unk" };
+  return view.state === "no_change" ? { view, status: "off" } : undefined;
+}
+
+/** A view's state words for a Steps row: its head's words, and an unknown outcome says it is not sure, whatever its state. */
+function viewRowWords(view: AnswerViewV1): string {
+  return resultCase(stateHeadFor(isOutcomeUnknown(view) ? { ...view, state: "outcome_unknown" } : view).words);
+}
+
+/** The statuses a view refines a finished call to that carry no words of their own: the row says its view's (never a lone mark). */
+const VIEW_WORDED: ReadonlySet<StepStatus> = new Set<StepStatus>(["unk", "off", "part", "old"]);
 
 /** What a row that waited says while its card is being applied (r4 `pausing on Meta ⠋ running`). */
 const APPLYING_WORDS = "running";
@@ -579,13 +618,18 @@ function stepRowFacts(step: TurnStep, steps: readonly TurnStep[], options: Pick<
     // A refused read says what its view says (`· not connected`), never the transport's failure words.
     return { status, mark, tone, label: viewText(step.label), result: resultCase(stateHeadFor(refused).words) };
   }
+  const settled = failedCallSettledBy(step, options.views ?? [], steps);
+  if (settled) {
+    // A failed call whose view says it may have landed, or changed nothing, says what its view says (`? not sure it happened`), never the transport's failure words.
+    return { status, mark, tone, label: viewText(step.label), result: viewRowWords(settled.view) };
+  }
   if (step.status === "wait" && view && status !== "wait") {
     // The card it waited on has moved on: the row says what is being done, then how the card ended.
     const acted = status !== "off" && viewText(step.label) === WAITING_WORDS ? appliedLabel(said, view) : null;
     return {
       status, mark, tone,
       label: acted ?? viewText(step.label),
-      result: status === "run" ? APPLYING_WORDS : resultCase(stateHeadFor(view).words)
+      result: status === "run" ? APPLYING_WORDS : viewRowWords(view)
     };
   }
   const standing = viewStandingFor(step, options.views ?? [], steps);
@@ -600,8 +644,8 @@ function stepRowFacts(step: TurnStep, steps: readonly TurnStep[], options: Pick<
     : said || (status === "wait" && viewText(step.label) !== WAITING_WORDS
       // A view that asks a question waits for an answer, not for an OK (TJ-10).
       ? (view?.state === "needs_answer" ? WAITING_ANSWER_WORDS : WAITING_WORDS)
-      // Never a lone mark: an unknown (?) or nothing-to-change (·) row with no words of its own says its view's (`not sure it happened`, `nothing to change`).
-      : view && (status === "unk" || status === "off") ? resultCase(stateHeadFor(view).words) : "");
+      // Never a lone mark: a row its view refined (?, ·, ◐, ⧗) with no words of its own says its view's (`not sure it happened`, `nothing to change`, `4 of 5 days in`).
+      : view && VIEW_WORDED.has(status) ? viewRowWords(view) : "");
   return { status, mark, tone, label: viewText(step.label), result };
 }
 
