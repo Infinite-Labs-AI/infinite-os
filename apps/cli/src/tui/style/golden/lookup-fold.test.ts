@@ -92,6 +92,7 @@ describe("a lookup of the card's own ad is its Steps row, never a view above the
     const lines = ansiToSegmentLines(draw(["Demo C · demo"])(screen, 100)).map((line) => textOf(line));
     const head = lines.findIndex((line) => line.includes(LOOKUP_TITLE));
     expect(head).toBeGreaterThan(-1);
-    expect(lines.findIndex((line) => line.startsWith("┌─ Pause ad"))).toBeGreaterThan(head);
+    // From 80 columns both sit in the details pane, right of the answer: the card under the lookup.
+    expect(lines.findIndex((line) => line.includes("│ ┌─ Pause ad"))).toBeGreaterThan(head);
   });
 });

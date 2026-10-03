@@ -81,6 +81,12 @@ export interface Msg {
   role: Role;
   text: string;
   /**
+   * A system line about the question it follows (its stop or error line, a
+   * line queued behind it), not a command's output: the question keeps its
+   * turn layout (`isQuestionTurn`) when it ends this way.
+   */
+  turnNote?: boolean;
+  /**
    * Per-message agent label (e.g. `Infinite — Acme`), frozen when the message
    * is created so switching projects mid-session never relabels earlier answers.
    */

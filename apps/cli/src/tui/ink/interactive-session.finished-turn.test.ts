@@ -184,8 +184,8 @@ describe("what fits is decided against the resting frame (fake TTY; skipped on C
     await session;
   });
 
-  it.skipIf(process.env.CI === "true")("at 100x31 the turn just fits: it stays live and j selects a row", { timeout: 30_000 }, async () => {
-    const { input, output, session } = await start(100, 31);
+  it.skipIf(process.env.CI === "true")("at 79x31 the turn just fits: it stays live and j selects a row", { timeout: 30_000 }, async () => {
+    const { input, output, session } = await start(79, 31);
     await waitFor(() => stripAnsi(lastFrame(output.text())).includes("j k  row"), 4_000, output.text);
     expect(getTurnState().views).toHaveLength(1);
     expect(liveQuestion(output.text())).toBe(true);
@@ -197,8 +197,8 @@ describe("what fits is decided against the resting frame (fake TTY; skipped on C
     await session;
   });
 
-  it.skipIf(process.env.CI === "true")("at 100x30 it misses by a row: it stays live without the blank rows around its details, and j still selects a row", { timeout: 30_000 }, async () => {
-    const { input, output, session } = await start(100, 30);
+  it.skipIf(process.env.CI === "true")("at 79x30 it misses by a row: it stays live without the blank rows around its details, and j still selects a row", { timeout: 30_000 }, async () => {
+    const { input, output, session } = await start(79, 30);
     await waitFor(() => stripAnsi(lastFrame(output.text())).includes("j k  row"), 4_000, output.text);
     expect(getTurnState().views).toHaveLength(1);
     expect(liveQuestion(output.text())).toBe(true);
@@ -206,7 +206,7 @@ describe("what fits is decided against the resting frame (fake TTY; skipped on C
     const rows = stripAnsi(lastFrame(output.text())).split("\n").map((row) => row.trimEnd());
     // The rule sits right under the answer, and the table right under the source line (this turn made no calls: no Steps).
     const answer = rows.findIndex((row) => row.includes("∞ Three ad sets spent this week."));
-    expect(rows[answer + 1]).toBe("─".repeat(100));
+    expect(rows[answer + 1]).toBe("─".repeat(79));
     const head = rows.findIndex((row) => row.includes("✓ Ready"));
     expect(head).toBe(answer + 2);
     expect(rows.slice(head, head + 3).every((row) => row.trim() !== "")).toBe(true);
@@ -221,8 +221,8 @@ describe("what fits is decided against the resting frame (fake TTY; skipped on C
     expect(getTurnState().views).toEqual([]);
   });
 
-  it.skipIf(process.env.CI === "true")("at 100x27 it does not fit even so: the whole turn is in scrollback and only the frame is live", { timeout: 30_000 }, async () => {
-    const { input, output, session } = await start(100, 27);
+  it.skipIf(process.env.CI === "true")("at 79x27 it does not fit even so: the whole turn is in scrollback and only the frame is live", { timeout: 30_000 }, async () => {
+    const { input, output, session } = await start(79, 27);
     await waitFor(() => getTurnState().views.length === 0, 4_000, output.text);
     await waitFor(() => !liveQuestion(output.text()), 4_000, output.text);
     const text = stripAnsi(output.text());

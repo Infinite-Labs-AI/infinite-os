@@ -94,7 +94,7 @@ import {
 import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
 import { resolveViewKey, turnAsk, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
-import { detailsPaneWidth, renderCommittedTurn, renderLiveTurn, rowsBesideCard, turnMaySplit, type LiveTurnRender } from "../views/layout.js";
+import { detailsPaneWidth, isQuestionTurn, renderCommittedTurn, renderLiveTurn, rowsBesideCard, turnMaySplit, type LiveTurnRender } from "../views/layout.js";
 import { besideWorkingTurn, workingTurnMessages, workingTurnSteps, type InfiniteTranscriptInput } from "../app/transcript-renderer.js";
 import {
   approvalRender,
@@ -893,7 +893,7 @@ export function InkInteractiveSessionApp({
     [headConfirmAction]
   );
   // The latest turn with answer views is drawn in the r4 layout (answer left,
-  // details right from 120 columns, Steps below) as the live region's latest
+  // details right from 80 columns, Steps below) as the live region's latest
   // lines, at the transcript's width; the transcript then carries only what
   // the drawn turn does not show. A turn still running is drawn the same way
   // (r4's working frames): the answer arriving (held open) beside the views
@@ -909,7 +909,7 @@ export function InkInteractiveSessionApp({
   const workingState = busy ? turnState : null;
   const workingClock = busy ? clock : 0;
   // The head write card is the turn's last details (r4 "Needs your OK"):
-  // beside the answer from 120 columns, under the answer and a rule below
+  // beside the answer from 80 columns, under the answer and a rule below
   // that, the Steps under it. It is drawn at the details pane's width.
   // A turn whose answer has a table of its own stays one column at any width,
   // so its card is drawn at the whole width, under the answer.
@@ -1027,8 +1027,12 @@ export function InkInteractiveSessionApp({
   // The strip a tall finished turn left live (see `keptSteps`): only while no other turn runs or has calls.
   // A streamed follow-up is the card's turn still running: the kept strip stays hidden while it runs.
   const liveKeptSteps = !busy && !followUpRunning && !turnSteps.length ? keptSteps : null;
+  // A question with no view or card yet is drawn in the turn layout too once
+  // the window is wide enough to split (r4 always splits): its details pane
+  // is r4's `steps only`. Narrower, or a command's output, the transcript draws it.
+  const questionSplits = turnSplits && isQuestionTurn(history);
   const renderTurnAt = useMemo(() => {
-    if (!turnViews.length && !headCardLines && !liveKeptSteps) {
+    if (!turnViews.length && !headCardLines && !liveKeptSteps && !questionSplits) {
       return null;
     }
     const messages = workingState ? workingTurnMessages(history, workingState, agentTitle) : history;
@@ -1059,12 +1063,14 @@ export function InkInteractiveSessionApp({
         compact,
         ...(headCardLines ? { details: headCardLines } : {}),
         ...(statusViews.length ? { statusViews } : {}),
-        ...(workingState ? { nowMs: workingClock } : {})
+        ...(workingState ? { nowMs: workingClock, running: true } : {}),
+        // A question with nothing for the details pane yet says `Working…` in the answer's place.
+        ...(workingState && !turnViews.length && !headCardLines ? { working: workingState } : {})
       });
       cache.set(cacheKey, drawn);
       return drawn;
     };
-  }, [agentTitle, clock, columns, headCardLines, headConfirmAction, history, liveKeptSteps, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
+  }, [agentTitle, clock, columns, headCardLines, headConfirmAction, history, liveKeptSteps, questionSplits, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
   // Beside a drawn turn, the transcript carries only what the drawn turn does
   // not show: its Steps are the drawn turn's own strip, and while it runs its
   // arriving answer and calls are in it too, so nothing is drawn twice.
@@ -1167,6 +1173,7 @@ export function InkInteractiveSessionApp({
     appendMessages([{
       kind: "slash",
       role: "system",
+      turnNote: true,
       text: `queued: "${previewQueuedLine(line)}"`
     }]);
   }, [appendMessages, rememberInputLine]);
@@ -1263,9 +1270,11 @@ export function InkInteractiveSessionApp({
           appendMessages(stampAgentTitle(partial, turnTitle));
         }
       }
+      // The turn's own note, not a command's output: a question keeps its layout as it ends.
       appendMessages([{
         kind: "slash",
         role: "system",
+        turnNote: true,
         text: stoppedLine ?? `error: ${error instanceof Error ? error.message : String(error)}`
       }]);
     } finally {
@@ -1274,7 +1283,7 @@ export function InkInteractiveSessionApp({
       setBusy(false);
       setBusyStartedAt(undefined);
       // A finished turn opens at its top; a tall one is paged from there. One
-      // that waits on a write card opens on the card: below 120 columns the
+      // that waits on a write card opens on the card: below 80 columns the
       // card follows the answer, so a tall turn opens at its end (the card,
       // the Steps), and PgUp pages back up through the answer.
       setLiveOffset(endsOnCard && !splitTurnRef.current ? null : 0);

@@ -98,7 +98,7 @@ export function shortOkVerb(label: string): string {
  * The keys the bar ends with (terminal-r4): `tab` switches between the answer
  * and its details, `/` starts a command. `/ commands` is always there; `tab
  * switch side` only while the turn on screen has details to switch to (a view
- * or a card: the right pane from 120 columns, under the answer below that).
+ * or a card: the right pane from 80 columns, under the answer below that).
  */
 export const ALWAYS_KEY_HINTS: readonly KeyHint[] = [
   { key: "tab", label: "switch side" },

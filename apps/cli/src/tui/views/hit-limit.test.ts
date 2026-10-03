@@ -34,8 +34,11 @@ describe("the Hit a limit head (terminal-r4 flow-images-05)", () => {
       width: 100, color: true, theme: INFINITE_R4_THEME, selected: 0, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false,
       caps: { open: false, copy: false, watch: false, retry: false }
     } as never);
-    const goldenHead = golden.lines.find((line) => line.some((item) => item.text === "$ Hit a limit"))!;
-    expect(r4Segments(head)).toEqual(goldenHead);
+    // At 100 columns r4 draws it in the details pane: the cells right of ` │ `.
+    const row = golden.lines.find((line) => line.some((item) => item.text === "$ Hit a limit"))!;
+    const bar = row.findIndex((item) => item.style === "line" && item.text === "│");
+    expect(bar).toBeGreaterThan(0);
+    expect(r4Segments(head)).toEqual(row.slice(bar + 2));
   });
 
   it("the needs-you heads keep the bold amber for themselves", () => {

@@ -71,7 +71,7 @@ afterAll(() => {
 });
 
 describe("a finished turn that went up whole keeps r4's Steps strip in the frame (live run-4 N12)", () => {
-  for (const cols of [60, 100, 160]) {
+  for (const cols of [60]) {
     it(`flow-numbers-01 at ${cols} columns in a ${ROWS}-row window`, () => {
       const lines = ansiToSegmentLines(drawShort(cols));
       const text = lines.map((line) => textOf(line).trimEnd());
@@ -135,4 +135,28 @@ describe("a Steps strip too tall for the resting frame goes up with the turn, ne
     expect(frame.some((line) => line.startsWith("─ Steps"))).toBe(true);
     expect(frame.filter((line) => line.includes("checking source "))).toHaveLength(4);
   });
+});
+
+// From 80 columns a turn taller than the window no longer goes up (layout
+// decision, 2026-10-03: everyday windows should see the split): it stays live in its two panes,
+// held to the window, its details pane cut with `↓ N more`, and r4's frame
+// (top bar, Steps, rule, composer) is whole around it.
+describe("from 80 columns a turn too tall for the window stays split, the frame whole around it", () => {
+  for (const cols of [100, 160]) {
+    it(`flow-numbers-01 at ${cols} columns in a ${ROWS}-row window`, () => {
+      const lines = ansiToSegmentLines(drawShort(cols));
+      const text = lines.map((line) => textOf(line).trimEnd());
+      expect(text.some((line) => /more lines|lines above/u.test(line))).toBe(false);
+      const top = text.findIndex((line) => line.startsWith(" ∞ Infinite"));
+      const frame = lines.slice(top);
+      expect(text.length - top).toBeLessThanOrEqual(ROWS);
+      expect(text[top + 2]).toMatch(/^❯ google ads since launch\? +│ /u);
+      expect(text.some((line) => /│ ↓ \d+ more · tab, then ↓$/u.test(line))).toBe(true);
+      const golden = loadGolden(`${SCREEN}--c${cols}`);
+      for (const region of KEPT) {
+        const result = compareRegion(frame, goldenRegionRows(golden, region), region, { anchored: true });
+        expect(result.verdict, `${region}: ${JSON.stringify(result.diffs[0] ?? null)}`).toBe("MATCH");
+      }
+    });
+  }
 });

@@ -503,7 +503,7 @@ describe("a document page fits the live region", () => {
   // The rows the session gives the latest turn: the live cap minus the top rule and one status row.
   const budgetAt = (rows: number) => liveBodyRows(rows, DEFAULT_COMPOSER_ROWS, DEFAULT_KEY_BAR_ROWS, 1, false);
 
-  // Under 120 columns the answer, a rule and the steps stack on top of the view;
+  // Under 80 columns the answer, a rule and the steps stack on top of the view;
   // at 24 rows that chrome alone is taller than the live region, so they start at 30.
   for (const [width, rowsList] of [[120, [24, 30, 40]], [100, [30, 40]], [60, [30, 40]]] as const) {
     for (const rows of rowsList) {
@@ -541,12 +541,13 @@ describe("quiet in a turn (r4 view-12 `steps only`, run-2 M7)", () => {
 
   it("a quiet view takes the details pane under a dim `steps only` head, never its title, source or state words", () => {
     const quiet = withBody("quiet-steps", {}, { title: "Read playbook", provenance: { source: "Playbooks", via: "our_db" } });
-    // Below 120: the answer, a blank and a rule, then `steps only`, a blank source row, a blank, the line.
-    const narrow = renderLiveTurn({ messages, views: [quiet], focus: null, width: 100, color: false, theme }).lines;
-    const answer = narrow.findIndex((line) => line.startsWith("∞ Here is a draft"));
-    expect(narrow.slice(answer + 1, answer + 6)).toEqual(["", "─".repeat(100), "steps only", "", ""]);
-    expect(narrow[answer + 6]).toBe("read the writing playbook");
-    // From 120: side by side, `steps only` on the question's row.
+    // Below 80: the answer, a blank and a rule, then `steps only`, a blank source row, a blank, the line.
+    const narrow = renderLiveTurn({ messages, views: [quiet], focus: null, width: 79, color: false, theme }).lines;
+    expect(narrow.some((line) => line.startsWith("∞ Here is a draft"))).toBe(true);
+    const rule = narrow.indexOf("─".repeat(79));
+    expect(narrow.slice(rule - 1, rule + 4)).toEqual(["", "─".repeat(79), "steps only", "", ""]);
+    expect(narrow[rule + 4]).toBe("read the writing playbook");
+    // From 80: side by side, `steps only` on the question's row.
     const wide = renderLiveTurn({ messages, views: [quiet], focus: null, width: 160, color: false, theme }).lines;
     expect(wide[0]).toMatch(/^❯ write the trial email +│ steps only$/u);
     expect(wide.some((line) => /│ read the writing playbook$/u.test(line))).toBe(true);
@@ -591,9 +592,14 @@ describe("quiet in a turn (r4 view-12 `steps only`, run-2 M7)", () => {
       const committed = renderCommittedTurn({ messages, views: [failed], focus: null, width, color: false, theme, steps });
       for (const lines of [live, committed]) {
         const out = lines.join("\n");
-        expect(out).not.toMatch(/Read Subscription Metrics|steps only|half-open|YYYY|\{ start/u);
+        expect(out).not.toMatch(/Read Subscription Metrics|half-open|YYYY|\{ start/u);
         expect(out).toMatch(/checking subscriptions +(?:━+ +)?✗ couldn't/u);
       }
+      // Nothing of its own in the details pane: from 80 columns (r4 always splits) it is
+      // r4's bare `steps only`, as for any turn with nothing else to show; never in scrollback.
+      expect(live.some((line) => line.includes("│ steps only"))).toBe(width >= 80);
+      expect(live.filter((line) => line.includes("steps only"))).toHaveLength(width >= 80 ? 1 : 0);
+      expect(committed.join("\n")).not.toContain("steps only");
     }
   });
 

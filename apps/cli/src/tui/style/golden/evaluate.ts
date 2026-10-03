@@ -34,9 +34,9 @@ export type ScreenRenderer = (fixture: R4ScreenFixture, cols: number) => string;
 
 /**
  * Where each line-region golden is drawn: a screen fixture at a width. The card
- * goldens are 69 wide (r4's details pane at 100 cols, as drawn). Under the
- * LAYOUT decision a 100-col turn is one column (its card is 74 wide), so a
- * 69-wide card is drawn at 69 cols, where the one column is 69 wide.
+ * goldens are 69 wide (r4's details pane at 100 cols, as drawn). They are
+ * drawn at 69 cols, where the one column is 69 wide, so a card r4 draws wider
+ * than its pane (N2) is not cut by the 100-col frame.
  */
 export const REGION_SCREENS: Readonly<Record<string, { screen: string; cols: number }>> = {
   "region-topbar-ok": { screen: "boot", cols: 100 },

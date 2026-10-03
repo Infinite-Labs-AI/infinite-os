@@ -65,7 +65,8 @@ describe("the boot frame (D4: terminal-r4's frame, nothing else)", () => {
     expect(rows).toEqual([
       " ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe ● PostHog ● Google Ads ● Meta",
       "─".repeat(100),
-      ...Array.from({ length: 8 }, () => ""),
+      // From 80 columns: the split's empty answer pane and its separator (r4 boot--c100).
+      ...Array.from({ length: 8 }, () => `${" ".repeat(29)}│`),
       `─ Steps ${"─".repeat(92)}`,
       "─".repeat(100),
       "❯ Ask Infinite…",

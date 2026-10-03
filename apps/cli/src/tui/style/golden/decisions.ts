@@ -2,12 +2,11 @@
 // The goldens are r4 as drawn; these are the ONLY edits made to them, each one
 // named after its decision, so a lane can see why a golden row reads otherwise.
 //
-//   LAYOUT  Side by side only when the window is ≥ 120 cols; narrower, the turn
-//           is ONE column. Applied when the goldens are DUMPED, not here: the
-//           eval-width frames (--c60/--c100/--c160, boot) are r4's own frame()
-//           with its split moved from 80 to 120 (private dump-goldens.mjs), so
-//           --c100 is r4's stacked form at 100 cols and its body is compared.
-//           The region slices stay r4 as drawn at 100 (cards 69 wide).
+//   LAYOUT  Side by side from 80 cols, as r4's frame() draws it (2026-10-03;
+//           the 2026-10-02 reading put the split at 120). The eval-width frames
+//           (--c60/--c100/--c160, boot) are r4's own frame() at r4's split, so
+//           --c100 is r4's two-pane form at 100 cols (answer 28, details 69) and
+//           its body is compared. The region slices are r4 as drawn at 100.
 //   D3      r4's exact heads: Cmd+L-only is "⌘ Do this in Cmd+L" (the golden
 //           reads "⌘ Cmd+L only").
 //   D6      While busy, `esc stop` is the FIRST key-bar hint, shown once.

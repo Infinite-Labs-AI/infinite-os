@@ -250,7 +250,8 @@ describe("the session wires the live cap (CI-run)", () => {
       title: "Infinite TUI"
     })).split("\n");
     expect(rendered[0]).toContain("∞ Infinite");
-    expect(rendered[2]).toBe("❯ how did it go?");
+    // From 80 columns the turn sits side by side; with no Steps its details pane is empty.
+    expect(rendered[2]).toMatch(/^❯ how did it go\? +│$/u);
     expect(rendered.some((line) => /more lines|lines above/.test(line))).toBe(false);
   });
 
@@ -372,9 +373,10 @@ describe("scrollback in a running session (fake TTY; skipped on CI like the othe
     });
     await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "first\r");
-    // While it streams the live region follows the tail, with the hint for what is above.
-    await waitFor(() => output.text().includes("alpha line 119") && output.text().includes("lines above"), 4_000, output.text);
+    // While it streams the turn keeps the split (80 columns): the answer pane follows the newest lines.
+    await waitFor(() => output.text().includes("alpha line 119"), 4_000, output.text);
     expect(stripAnsi(output.text())).not.toContain("alpha line 50");
+    expect(stripAnsi(output.text())).toMatch(/alpha line 119 +│/u);
     finish();
     await waitFor(() => output.text().includes("alpha line 50"), 4_000, output.text);
     await sendKeys(input, "/exit\r");
@@ -569,7 +571,7 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
     // on screen) until the next line: both calls, bars and all.
     const after = rows.slice(last + 1).filter(Boolean);
     expect(after.slice(0, 4)).toEqual(["─".repeat(80), " ∞ Infinite", "─".repeat(80), `─ Steps ${"─".repeat(72)}`]);
-    expect(after[4]).toMatch(/^ {2}reading the last 20…\s+━+\s+✓ 200 days$/u);
+    expect(after[4]).toMatch(/^ {2}reading the last …\s+━+\s+✓ 200 days$/u);
     expect(after[5]).toMatch(/^ {2}reading today\s+━+\s+✗ not synced yet$/u);
     expect(after.slice(6)).toEqual(["─".repeat(80), "❯ Ask Infinite…", " /  commands"]);
     expect(rows).not.toContain(FAILED_ROW);

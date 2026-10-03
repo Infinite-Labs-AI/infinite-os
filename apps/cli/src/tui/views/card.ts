@@ -8,7 +8,7 @@ import wrapAnsi from "wrap-ansi";
 
 import type { KeyHint } from "../keys/keymap.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
-import { paint, wrapText } from "./primitives.js";
+import { cutAtWord, paint, wrapWords } from "./primitives.js";
 import type { ViewRenderCtx } from "./types.js";
 
 /** A card is never wider than this (r4 `card()`: `Math.min(w, 74)`). */
@@ -69,7 +69,8 @@ function topBorder(title: string, outer: number, tone: CardTone, ctx: PaintCtx):
   }
   // A title too long for the border is cut and ends in "…", so the box always
   // closes (r4's trunc() would drop the corner, leaving the box open: run-r2 MUST 3).
-  const shown = displayWidth(title) <= room ? title : `${cutCells(title, room - 1)}…`;
+  // The cut ends at a word where one ends near (`· Agent …`, never `· Agent pro…`).
+  const shown = cutAtWord(title, room);
   return `${border("┌─")} ${paint(shown, "b", ctx)} ${border(`${"─".repeat(outer - 5 - displayWidth(shown))}┐`)}`;
 }
 
@@ -227,12 +228,13 @@ const URL_ONLY = /^[a-z][a-z0-9+.-]*:\/\/\S+$/iu;
 /**
  * Wrap a URL at its separators (`/ ? & = .`), never mid-token (W3-ap-link): a
  * line breaks after a separator; only a token longer than the whole line is
- * cut where it must be. Any other text wraps as words.
+ * cut where it must be. Any other text wraps as words (`wrapWords`).
  */
 export function wrapUrl(text: string, width: number): string[] {
   const max = Math.max(1, Math.floor(width));
   if (!URL_ONLY.test(text) || displayWidth(text) <= max) {
-    return wrapText(text, max);
+    // Words wrap as words; a name too long for the line breaks at one of its parts, never mid-word.
+    return wrapWords(text, max);
   }
   const tokens = text.split(/(?<=[/?&=.])/u).filter(Boolean);
   const lines: string[] = [];
@@ -257,7 +259,7 @@ export function wrapUrl(text: string, width: number): string[] {
   return lines;
 }
 
-/** Wrap a painted paragraph to `width` and paint each line in one style. */
+/** Wrap a paragraph to `width` (a long name at its parts, `wrapWords`) and paint each line in one style. */
 export function paragraphIn(text: string, width: number, style: Parameters<typeof paint>[1], ctx: PaintCtx): string[] {
-  return wrapText(text, width).map((line) => paint(line, style, ctx));
+  return wrapWords(text, width).map((line) => paint(line, style, ctx));
 }

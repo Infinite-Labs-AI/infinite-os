@@ -50,7 +50,7 @@ const liveTurn = (views: AnswerViewV1[], width: number) =>
   renderLiveTurn({ messages, views, focus: viewFocusAfterTurnDone(views), width, color: false, theme, timeZone: "UTC" }).lines;
 const committedTurn = (views: AnswerViewV1[], width: number) =>
   renderCommittedTurn({ messages, views, focus: null, width, color: false, theme, timeZone: "UTC" });
-/** At 120 and up the details pane is right of ` │ `: its own lines. */
+/** At 80 and up the details pane is right of ` │ `: its own lines. */
 const detailsOf = (lines: readonly string[], width: number, split = true) => {
   const panes = paneWidths(width);
   return panes.wide && split ? lines.map((line) => line.slice(panes.left + 3)) : [...lines];
@@ -467,21 +467,22 @@ describe("numbers, the live shape: empty and unmeasured sections (run-2 M7)", ()
 });
 
 describe("numbers: `→ to see` only where → works (run-2 M7)", () => {
+  // One column (under 80), where the live view and the committed copy are the same width.
   it("the live turn's focused view names the key; committed to scrollback it names what is hidden, in words", () => {
     const hint = (lines: readonly string[]) => lines.filter((line) => line.includes("Cost per result, Results"));
-    expect(hint(liveTurn([live()], 100))).toEqual(["+ ROAS, Cost per result, Results, Impressions, CPM, CPC (link) · → to see"]);
-    expect(hint(committedTurn([live()], 100))).toEqual(["+ ROAS, Cost per result, Results, Impressions, CPM, CPC (link) hidden"]);
-    expect(committedTurn([live()], 100).join("\n")).not.toContain("→");
+    expect(hint(liveTurn([live()], 79))).toEqual(["+ ROAS, Cost per result, Results, Impressions, CPM, Status · → to see"]);
+    expect(hint(committedTurn([live()], 79))).toEqual(["+ ROAS, Cost per result, Results, Impressions, CPM, Status hidden"]);
+    expect(committedTurn([live()], 79).join("\n")).not.toContain("→");
   });
 
   it("a view the keys are not on names what it hid in words too", () => {
     const other = edited((_body, view) => { view.title = "Another read"; });
-    const lines = liveTurn([live(), other], 100);
+    const lines = liveTurn([live(), other], 79);
     const hints = lines.filter((line) => line.startsWith("+ ROAS, Cost per result"));
     // The first view is not focused (the keys are on the last one).
     expect(hints).toEqual([
-      "+ ROAS, Cost per result, Results, Impressions, CPM, CPC (link) hidden",
-      "+ ROAS, Cost per result, Results, Impressions, CPM, CPC (link) · → to see"
+      "+ ROAS, Cost per result, Results, Impressions, CPM, Status hidden",
+      "+ ROAS, Cost per result, Results, Impressions, CPM, Status · → to see"
     ]);
   });
 

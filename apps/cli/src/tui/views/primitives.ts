@@ -283,6 +283,94 @@ export function fitLine(line: string, width: number): string {
   return displayWidth(line) <= max ? line : truncateCells(line, max);
 }
 
+/**
+ * Plain text (a name, a title) cut to `width` cells ending in `…`, at a word's
+ * end where one is near: back to the last space when that keeps at least two
+ * thirds of the room (`Hook B · founder …`), or, inside a name with no space
+ * near, back to the end of one of its parts (`sample_video_long…`: the cut
+ * falls before a `_ - . /`), mid-word only when neither ends near
+ * (`Supercalifr…`). `minShare` is how much of the room a word cut must keep
+ * (two thirds unless the caller allows less). Text that fits is returned as is.
+ */
+export function cutAtWord(text: string, width: number, minShare = 2 / 3): string {
+  const max = Math.max(1, Math.floor(width));
+  if (displayWidth(text) <= max) {
+    return text;
+  }
+  const cut = truncateCells(text, max);
+  const kept = cut.slice(0, -1);
+  const next = Array.from(text)[Array.from(kept).length];
+  if (!kept || next === " ") {
+    return cut;
+  }
+  const floor = Math.ceil((max - 1) * minShare);
+  const space = kept.endsWith(" ") ? kept.length : kept.lastIndexOf(" ");
+  // Where a part of a name ends: right before its separator (the next one, or the last one kept).
+  const part = next !== undefined && NAME_PART_BREAK.test(next) ? kept.length : lastNameBreak(kept);
+  if (part > space) {
+    const name = kept.slice(0, part).replace(/[\s·•|,;:–—_./-]+$/u, "");
+    if (name && displayWidth(name) >= floor) return `${name}…`;
+  }
+  // A separator left dangling at the cut goes with it: `Agent proposed …`, never `Agent proposed · …`.
+  const words = space > 0 ? kept.slice(0, space).replace(/[\s·•|,;:–—-]+$/u, "") : "";
+  return words && displayWidth(words) >= floor ? `${words} …` : cut;
+}
+
+/** What parts a name: `sample_b1-video.v3/a` breaks after `_`, `-`, `.` or `/`. */
+const NAME_PART_BREAK = /[_./-]/u;
+
+/** The index of the last name separator in `text` (-1 when none). */
+function lastNameBreak(text: string): number {
+  for (let index = text.length - 1; index > 0; index -= 1) {
+    if (NAME_PART_BREAK.test(text[index]!)) return index;
+  }
+  return -1;
+}
+
+/**
+ * Plain words wrapped to `width` without breaking a name mid-word: a word
+ * longer than the line (`sample_b1_video_long-name_dark_v3`)
+ * breaks after one of its separators (`_ - . /`), and only a part longer than
+ * the whole line is cut where it must be. Painted text, and text whose every
+ * word fits, wraps as `wrapText` does.
+ */
+export function wrapWords(text: string, width: number): string[] {
+  const max = Math.max(1, Math.floor(width));
+  if (!text || text.includes("\u001b") || text.split(/\s+/u).every((word) => displayWidth(word) <= max)) {
+    return wrapText(text, max);
+  }
+  const lines: string[] = [];
+  let line = "";
+  const put = (piece: string, joiner: string) => {
+    if (line && displayWidth(line) + displayWidth(joiner) + displayWidth(piece) <= max) {
+      line += joiner + piece;
+      return;
+    }
+    if (line) lines.push(line);
+    line = piece;
+  };
+  for (const word of text.trim().split(/\s+/u)) {
+    if (displayWidth(word) <= max) {
+      put(word, " ");
+      continue;
+    }
+    // A name too long for the line: its parts, each ending in its separator.
+    word.split(/(?<=[_./-])/u).forEach((part, index) => {
+      let rest = part;
+      while (displayWidth(rest) > max) {
+        if (line) lines.push(line);
+        line = "";
+        const head = truncateCells(rest, max + 1).slice(0, -1);
+        lines.push(head);
+        rest = rest.slice(head.length);
+      }
+      if (rest) put(rest, index === 0 ? " " : "");
+    });
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
 /** Word-wrap scrubbed text to `width`, hard-breaking words that are too long. */
 export function wrapText(text: string, width: number): string[] {
   if (!text) {
@@ -316,10 +404,31 @@ export function shortTitle(view: AnswerViewV1): string {
   return suffix && title.endsWith(suffix) && title.length > suffix.length ? title.slice(0, -suffix.length) : title;
 }
 
+/**
+ * A change's head says the action and the kind (`Pause ad`) when its title is
+ * the action and the target's whole name (`Pause sample_video_long_…`): the card's
+ * border title says the name, once (W3-ap-pause; r4 flow-pause-*). A title
+ * that is not the whole name (r4's `Pause Hook B` for `Hook B · founder POV`)
+ * is kept as it is.
+ */
+function headTitle(view: AnswerViewV1): string {
+  const title = shortTitle(view);
+  if (view.kind !== "change" || !isRecord(view.body) || !isRecord(view.body.target)) {
+    return title;
+  }
+  const label = viewText(view.body.target.label);
+  const kind = viewText(view.body.target.kind);
+  if (!label || !/^[a-z][a-z_ ]*$/iu.test(kind) || kind === "pending_write") {
+    return title;
+  }
+  const named = [`“${label}”`, `"${label}"`, label].find((form) => title.includes(form));
+  return named ? title.replace(named, kind.replace(/_/gu, " ")).replace(/\s+/gu, " ").trim() : title;
+}
+
 export function headLine(view: AnswerViewV1, ctx: ViewRenderCtx): string {
   const head = stateHeadFor(view);
   const state = `${head.glyph} ${head.words}`;
-  const title = shortTitle(view);
+  const title = headTitle(view);
   const width = Math.max(1, Math.floor(ctx.width));
   if (!title) {
     return paint(fitLine(state, width), toneRole(head.tone), ctx);
@@ -330,9 +439,10 @@ export function headLine(view: AnswerViewV1, ctx: ViewRenderCtx): string {
     // No room for the chip: the title plain (when 4+ cells are left), the state still in its tone.
     const painted = paint(fitLine(state, width), toneRole(head.tone), ctx);
     const titleRoom = width - displayWidth(state) - 2;
-    return titleRoom >= 4 ? `${fitLine(title, titleRoom)}  ${painted}` : painted;
+    return titleRoom >= 4 ? `${cutAtWord(title, titleRoom)}  ${painted}` : painted;
   }
-  const shown = fitLine(title, room);
+  // A long title is cut at a word's (or a name part's) end, never mid-word where one ends near.
+  const shown = cutAtWord(title, room);
   return `${paint(` ${shown} `, "tag", ctx)} ${paint(state, toneRole(head.tone), ctx)}`;
 }
 

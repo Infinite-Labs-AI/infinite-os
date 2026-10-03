@@ -44,7 +44,8 @@ import {
   isRecord,
   paint,
   viewText,
-  wrapText
+  wrapText,
+  wrapWords
 } from "./primitives.js";
 import { stateHeadFor } from "./states.js";
 import type { KindRender, KindRenderer, ViewRenderCtx } from "./types.js";
@@ -85,6 +86,8 @@ export interface MeasureDraw {
   refMs?: number;
   /** The shared name start a table already said once (N28): a second leg's table does not say it again. */
   prefixSaid?: string;
+  /** The selected row's lines as the table drew them (on the selection background): the view finds them in its detail. */
+  selectedRow?: readonly string[];
 }
 
 /** A shared name start is said once only when it is at least this long (cells). */
@@ -193,6 +196,7 @@ export function cellTableLines(raw: CellTableInput, ctx: ViewRenderCtx, draw: Me
     for (let line = span[0]; line < span[0] + span[1]; line += 1) {
       if (lines[line] !== undefined) lines[line] = paint(lines[line]!, "sel", ctx);
     }
+    draw.selectedRow = lines.slice(span[0], span[0] + span[1]);
   }
   if (hiddenIndexes.length) {
     const named = hiddenIndexes.map((index) => labels[index + 1]).filter(Boolean).join(", ");
@@ -1124,7 +1128,8 @@ export function numbersBodyLines(
     const row = viewText(leader.rowLabel);
     if (!label || !row) return [];
     const value = drawCell(leader.value as TableCell, column ?? { label: "", unit: "count" }, currency, draw.notes);
-    const head = wrapText(`${label} · ${row} · ${value}`, ctx.width);
+    // A long row name breaks after one of its parts, never mid-word (`wrapWords`).
+    const head = wrapWords(`${label} · ${row} · ${value}`, ctx.width);
     // rev 3: the host's one context line (a spend context line), dim under the name, cut to the width (never wrapped).
     const detail = viewText(leader.detail);
     if (!detail) return head;
@@ -1267,6 +1272,8 @@ export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender =>
   const source = draw.legendDrawn ? sourceWordsLines(view, ctx) : [];
   const headTitle = headTitleFor(view);
   const detail = source.length ? [...body, "", ...source] : body;
+  // Where the selected row landed (a cut pane follows it on j/k).
+  const selectedAt = draw.selectedRow?.length ? detail.indexOf(draw.selectedRow[0]!) : -1;
   return {
     detail,
     footnotes: draw.notes.lines().flatMap((line) => wrapText(line, ctx.width).map((part) => paint(part, "muted", ctx))),
@@ -1276,6 +1283,7 @@ export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender =>
     // (not measured, partial, out of date…) is read, not browsed (flow-numbers-02: no keys).
     rowCount: view.state === "ready" ? selectableRows(asRecord(view.body)) : 0,
     ...(draw.hidden ? { hiddenColumns: draw.hidden } : {}),
-    ...(headTitle !== undefined ? { headTitle } : {})
+    ...(headTitle !== undefined ? { headTitle } : {}),
+    ...(selectedAt >= 0 ? { selectedLines: [selectedAt, draw.selectedRow!.length] as const } : {})
   };
 };

@@ -22,7 +22,7 @@ import type { AnswerViewEnvelopeV1, AnswerViewV1 } from "@infinite-os/types";
 import { beforeAfter, cardBody, cardBox, cardWidth, chipRows, fieldRows, paragraphIn, setTo, type CardTone, type FieldRow } from "./card.js";
 import { displayWidth } from "../lib/display-width.js";
 import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
-import { cellText, fitLine, FootnoteBook, isRecord, paint, viewText, wrapText } from "./primitives.js";
+import { cellText, cutAtWord, FootnoteBook, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
 
 /** The words a done change's card adds after its title: who proposed it and who said yes. */
@@ -61,7 +61,8 @@ const PATH_SEPARATOR = " › ";
 
 /**
  * A change target's parents as one dim line (`Sample campaign › Sample ad
- * set`), cut to `width` with `…`; null when the target has no path. Read
+ * set`), cut to `width` with `…` at a word's or a name part's end (never a
+ * name broken mid-word where a part ends near); null when the target has no path. Read
  * defensively and scrubbed, like every body field. Never a picture.
  */
 export function targetPathLine(body: unknown, width: number, ctx: Pick<ViewRenderCtx, "color" | "theme">): string | null {
@@ -85,7 +86,7 @@ const MIN_OUTER_PART = 6;
 function fitPath(parts: readonly string[], width: number): string {
   const whole = parts.join(PATH_SEPARATOR);
   if (displayWidth(whole) <= width || parts.length === 1) {
-    return fitLine(whole, width);
+    return cutAtWord(whole, width);
   }
   const nearest = parts[parts.length - 1]!;
   const outer = parts.slice(0, -1);
@@ -93,7 +94,7 @@ function fitPath(parts: readonly string[], width: number): string {
   if (budget >= MIN_OUTER_PART * outer.length) {
     return [...fairCut(outer, budget), nearest].join(PATH_SEPARATOR);
   }
-  return fitLine(`…${PATH_SEPARATOR}${nearest}`, width);
+  return cutAtWord(`…${PATH_SEPARATOR}${nearest}`, width);
 }
 
 /** Cut `parts` to share `budget` cells: an equal share each, a short part's spare going to the rest. */
@@ -114,7 +115,8 @@ function fairCut(parts: readonly string[], budget: number): string[] {
     if (still.length === open.length) break;
     open = still;
   }
-  return parts.map((part, index) => fitLine(part, Math.max(1, shares[index]!)));
+  // A short share still ends at a word where one ends at all (`Sample …`, never `Sample camp…`).
+  return parts.map((part, index) => cutAtWord(part, Math.max(1, shares[index]!), 1 / 3));
 }
 
 /** Whether the change is drawn as a card: done, or still open with a card approval (or running its yes). */
