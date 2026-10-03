@@ -920,30 +920,35 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   let patchProofState = false
   // R2-4: true only while the Infinite app itself holds this run's proof claim (it then makes the visit).
   let appProving = false
-  try {
-    const claim = await deps.bridge.claimProof(runId, "tag")
-    won = claim.granted === true
-    if (won) {
-      await writeOwnClaim(ctx, deps, { schema: PROVE_VISIT_SCHEMA, runId, mergeSha, claimedAt: deps.clock.now().toISOString(), visit: null })
-      patchProofState = true
+  // Review-2 P3-3: with no production host there is no visit to make, so the proof is never claimed. The run stays
+  // unclaimed, which is honest and lets the app tell "no visit" apart from a measured result.
+  const noHost = productionHost === null
+  if (!noHost) {
+    try {
+      const claim = await deps.bridge.claimProof(runId, "tag")
+      won = claim.granted === true
+      if (won) {
+        await writeOwnClaim(ctx, deps, { schema: PROVE_VISIT_SCHEMA, runId, mergeSha, claimedAt: deps.clock.now().toISOString(), visit: null })
+        patchProofState = true
+      }
+    } catch (error) {
+      if (bridgeErrorCode(error) !== "claimed_by_other") throw error
+      const proofState = bridgeErrorState(error)
+      ownClaim = await readOwnClaim(ctx, deps, runId, mergeSha)
+      // The run state's prove markers are written only by THIS run's winning visit: they prove the claim
+      // was ours even when the record is gone (its receipts are then read with those markers).
+      if (!ownClaim && savedProveMarkers(state.markers.prove)) {
+        ownClaim = { schema: PROVE_VISIT_SCHEMA, runId, mergeSha, claimedAt: "", visit: null }
+      }
+      // Still `proving` under this run's own claim: the PATCH never landed, so this run sends it now.
+      patchProofState = ownClaim !== null && (proofState === "proving" || proofState === null)
+      appProving = ownClaim === null && (proofState === "proving" || proofState === null)
+      claimNote = ownClaim
+        ? "this run's own visit, from before the resume"
+        : proofState === "proving" || proofState === null
+          ? "the Infinite app is already proving this run"
+          : `this run's proof is already ${proofState}`
     }
-  } catch (error) {
-    if (bridgeErrorCode(error) !== "claimed_by_other") throw error
-    const proofState = bridgeErrorState(error)
-    ownClaim = await readOwnClaim(ctx, deps, runId, mergeSha)
-    // The run state's prove markers are written only by THIS run's winning visit: they prove the claim
-    // was ours even when the record is gone (its receipts are then read with those markers).
-    if (!ownClaim && savedProveMarkers(state.markers.prove)) {
-      ownClaim = { schema: PROVE_VISIT_SCHEMA, runId, mergeSha, claimedAt: "", visit: null }
-    }
-    // Still `proving` under this run's own claim: the PATCH never landed, so this run sends it now.
-    patchProofState = ownClaim !== null && (proofState === "proving" || proofState === null)
-    appProving = ownClaim === null && (proofState === "proving" || proofState === null)
-    claimNote = ownClaim
-      ? "this run's own visit, from before the resume"
-      : proofState === "proving" || proofState === null
-        ? "the Infinite app is already proving this run"
-        : `this run's proof is already ${proofState}`
   }
 
   let visit: ProvenColumnInput["visit"] = null
@@ -959,6 +964,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     } else {
       visitError = "the real visit was interrupted before its results were saved (no second visit is made)"
     }
+  } else if (noHost) {
+    visitError = "no production host is known for this site"
   } else if (won) {
     if (!productionHost) {
       visitError = "no production host is known for this site"
@@ -1006,7 +1013,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
 
   // A lane with no marker reads the run's STORED receipt (the app's visit, for a lost claim). With the claim held and
   // no visit made, there is none to read (R2-2).
-  const receipts = won && visit === null ? noVisitReceipts(runId, deps.clock.now().toISOString()) : await readReceipts(ctx, deps, runId, markers)
+  const receipts = (won || noHost) && visit === null ? noVisitReceipts(runId, deps.clock.now().toISOString()) : await readReceipts(ctx, deps, runId, markers)
   for (const [lane, receipt] of Object.entries(receipts.lanes) as Array<[ReceiptLane, LaneReceipt]>) {
     ctx.emit.emit("receipt", { lane, state: receipt.state, receiptAt: receipt.receiptAt, runId })
   }

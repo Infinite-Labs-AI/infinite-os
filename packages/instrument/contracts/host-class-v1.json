@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "rule": "production host class: deny list (host-deny-v1, plus a bare suffix) minus the Vercel production-alias shape (one label, no -git-, no 9-char [a-z0-9] segment with a digit after the first)",
+  "classes": {
+    "production_alias": "a *.vercel.app host accepted as a production host",
+    "preview": "never a production host (preview-shaped, local, or a bare platform domain)",
+    "other": "not deny-listed: a custom domain"
+  },
+  "cases": [
+    {
+      "host": "acme.vercel.app",
+      "class": "production_alias"
+    },
+    {
+      "host": "infinite-tag-smoke-site.vercel.app",
+      "class": "production_alias"
+    },
+    {
+      "host": "acme-store-acme.vercel.app",
+      "class": "production_alias"
+    },
+    {
+      "host": "acme-chaos-edge.vercel.app",
+      "class": "production_alias"
+    },
+    {
+      "host": "my-marketing-site.vercel.app",
+      "class": "production_alias"
+    },
+    {
+      "host": "Acme.Vercel.App.",
+      "class": "production_alias"
+    },
+    {
+      "host": "acme-git-main-team.vercel.app",
+      "class": "preview"
+    },
+    {
+      "host": "infinite-tag-smoke-site-git-infinite-tag-2026-10-03-chaos-edge.vercel.app",
+      "class": "preview"
+    },
+    {
+      "host": "infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app",
+      "class": "preview"
+    },
+    {
+      "host": "acme-a1b2c3d4e-team.vercel.app",
+      "class": "preview"
+    },
+    {
+      "host": "acme-a1b2c3d4e.vercel.app",
+      "class": "preview"
+    },
+    {
+      "host": "www.acme.vercel.app",
+      "class": "preview"
+    },
+    {
+      "host": "preview.acme-store.vercel.app",
+      "class": "preview"
+    },
+    {
+      "host": "vercel.app",
+      "class": "preview"
+    },
+    {
+      "host": "netlify.app",
+      "class": "preview"
+    },
+    {
+      "host": "pages.dev",
+      "class": "preview"
+    },
+    {
+      "host": "shop.netlify.app",
+      "class": "preview"
+    },
+    {
+      "host": "shop.pages.dev",
+      "class": "preview"
+    },
+    {
+      "host": "app.localhost",
+      "class": "preview"
+    },
+    {
+      "host": "printer.local",
+      "class": "preview"
+    },
+    {
+      "host": "localhost",
+      "class": "preview"
+    },
+    {
+      "host": "127.0.0.1",
+      "class": "preview"
+    },
+    {
+      "host": "acme.com",
+      "class": "other"
+    },
+    {
+      "host": "www.acme-store.com",
+      "class": "other"
+    },
+    {
+      "host": "myvercel.app",
+      "class": "other"
+    },
+    {
+      "host": "acme.vercel.app.evil.com",
+      "class": "other"
+    },
+    {
+      "host": "acme-store-qwertyuio-acme.vercel.app",
+      "class": "production_alias",
+      "note": "known misread: a deployment URL whose hash has no digit reads as an alias; it can never prove (an old deployment never serves a new token)"
+    },
+    {
+      "host": "acme-store2024.vercel.app",
+      "class": "preview",
+      "note": "known misread: an alias with a 9-character segment holding a digit reads as a deployment URL; refused as 'looks like a Vercel preview'"
+    }
+  ]
+}

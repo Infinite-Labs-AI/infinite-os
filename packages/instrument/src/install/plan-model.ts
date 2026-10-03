@@ -161,7 +161,12 @@ export interface LineFacts {
   infiniteReady: boolean
   /** A site-file claim is pending for this run: the source is reserved, not verified yet. */
   claimPending: boolean
-  /** Infinite's Vercel connection serves the production host (a domain or alias, or its www twin). */
+  /**
+   * Infinite's Vercel connection serves the production host as a production DOMAIN (or its www twin) — exactly the
+   * set the cloud proves through Vercel (`proveHostsThroughVercel` reads `productionDomains`). A `*.vercel.app`
+   * production alias is NOT counted: the cloud takes the site-file claim path for it (review-2 P2-2), so the plan
+   * must too (the claim wording, no server lane until the claim is proven).
+   */
   vercelServesHost: boolean
   /** The Infinite app offers `tag.site-claim.v1`. */
   siteClaim: boolean
@@ -229,7 +234,8 @@ export function lineFactsFor(input: Pick<PlanModelInput, "keys" | "before" | "sc
   const hosting = input.before.hosting
   const site = input.run?.site ?? null
   const productionHost = resolveProductionHost({ keys: input.keys, hosting, site }).host
-  const served = new Set([...(hosting.vercel?.productionDomains ?? []), ...(hosting.vercel?.productionAliases ?? [])].map(normalizeHost))
+  // Domains only, never `productionAliases`: the cloud's Vercel proof reads the same set (review-2 P2-2).
+  const served = new Set((hosting.vercel?.productionDomains ?? []).map(normalizeHost))
   const twin = (host: string) => (host.startsWith("www.") ? host.slice(4) : `www.${host}`)
   return {
     productionHost,

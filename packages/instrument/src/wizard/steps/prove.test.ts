@@ -174,6 +174,25 @@ describe("prove: the proof claim and the ONE real visit", () => {
     expect(ctx.current().report.proven_live!.finishLine.proof_from_real_visit!.state).toBe("pass")
   })
 
+  it("review-2 P3-3: with no production host the proof is NEVER claimed: no visit, no PATCH, no stored receipt read", async () => {
+    const keys = keysFixture()
+    // Vercel hosting (the deploy is seen) but no production domain anywhere: Infinite knows no host for this site.
+    const hosting = await fakeDeps().deps.bridge.hosting()
+    const noDomains = { ...hosting, vercel: { ...hosting.vercel!, productionDomains: [], productionAliases: [] } }
+    const bundle = fakeDeps({ bridge: { keys: { ...keys, infinite: { ...keys.infinite, productionHosts: [] } }, hosting: noDomains } })
+    const { outcome, ctx } = await runProve(bundle)
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_PROOF_INCOMPLETE", message: "The real visit could not run: no production host is known for this site." })
+    const names = bundle.log.names("bridge")
+    // The run stays unclaimed (honest: nobody measured it), so the app can tell "no visit" from a result.
+    expect(names).not.toContain("bridge.claimProof")
+    expect(names).not.toContain("bridge.startTest")
+    expect(names).not.toContain("bridge.postReceipts")
+    expect(bundle.log.calls.filter((call) => call.what === "patchRun")).toHaveLength(0)
+    const column = ctx.current().report.proven_live!
+    expect(column.meta.measuredAt).toBeNull()
+    expect(column.finishLine.each_tool_once).toMatchObject({ display: "—", reason: "not_exercised" })
+  })
+
   it("a failed real visit is never proof: proofState undetermined, PROOF_INCOMPLETE (continue)", async () => {
     const bundle = fakeDeps({ bridge: { testPolls: [{ state: "failed", progress: [], error: { code: "load_failed", message: "the page did not load" } }] } })
     const { outcome } = await runProve(bundle)

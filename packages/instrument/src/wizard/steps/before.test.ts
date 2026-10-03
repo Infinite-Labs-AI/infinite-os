@@ -445,10 +445,10 @@ describe("step before: the live-site address (§3y.1)", () => {
     expect(asked.map((entry) => entry.kind)).toEqual(["single", "text", "text"])
     expect(asked[0]!.payload.default).toBe("__type__")
     // R2-3: the re-ask carries the refusal's reason (the sub line hides behind the popup).
-    expect(asked[2]!.payload.question).toMatch(/^not a host isn't a domain name /)
+    expect(asked[2]!.payload.question).toMatch(/^not a host isn't a domain name \(press ESC if it isn't live yet\) /)
     const subs = s.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
-    expect(subs).toContain("! not a host isn't a domain name")
-    expect(subs.some((text) => text.startsWith("! shop-git-main-acme.vercel.app is a Vercel preview address"))).toBe(true)
+    expect(subs).toContain("! not a host isn't a domain name (press ESC if it isn't live yet)")
+    expect(subs.some((text) => text.startsWith("! shop-git-main-acme.vercel.app looks like a Vercel preview"))).toBe(true)
     expect(s.state.site).toMatchObject({ productionHost: null, source: "answer" })
     expect(s.bridge.sentTests).toEqual([])
   })
@@ -462,12 +462,14 @@ describe("step before: the live-site address (§3y.1)", () => {
     })
     const outcome = await s.run()
     expect(outcome.kind).toBe("ok")
+    // Review-2 P2-3: both derived aliases are GUESSES; neither is pre-selected (the user picks one).
     expect(asked[0]!.payload.options!.map((option) => option.label)).toEqual([
-      "infinite-tag-smoke-site.vercel.app  (from your Vercel production deployments)",
+      "infinite-tag-smoke-site-chaos-edge.vercel.app  (a guess: your Vercel team's address for this project)",
+      "infinite-tag-smoke-site.vercel.app  (a guess: Vercel names it after the project; it may be another team's)",
       "Type another address",
       "It isn't live yet"
     ])
-    expect(asked[0]!.payload.default).toBe("infinite-tag-smoke-site.vercel.app")
+    expect(asked[0]!.payload.default).toBe("__type__")
     expect(s.state.site).toMatchObject({ productionHost: "infinite-tag-smoke-site.vercel.app", source: "answer" })
     expect(s.bridge.sentTests.map((test) => test.productionHost)).toEqual(["infinite-tag-smoke-site.vercel.app"])
   })
@@ -476,7 +478,7 @@ describe("step before: the live-site address (§3y.1)", () => {
     const asked: Asked = []
     const s = setup({ ...unknownHost(), ctx: { ask: answering(asked, ["__type__", "infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app", "infinite-tag-smoke-site.vercel.app"]) } })
     await s.run()
-    expect(asked[2]!.payload.question).toContain("is a Vercel preview address")
+    expect(asked[2]!.payload.question).toContain("looks like a Vercel preview")
     expect(s.state.site).toMatchObject({ productionHost: "infinite-tag-smoke-site.vercel.app" })
   })
 

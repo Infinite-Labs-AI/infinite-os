@@ -5,6 +5,7 @@ import { colorEnabled, makeStyles, stripAnsi, visibleWidth } from "./ansi.js"
 import { renderFrame, type FrameInput } from "./frame.js"
 import { OVERLAYS } from "./overlays/index.js"
 import type { OverlayContext } from "./overlays/types.js"
+import { hostRefusalLine } from "../wizard/site-host.js"
 
 function frame(change: Partial<FrameInput> = {}): string[] {
   return renderFrame({
@@ -40,13 +41,12 @@ describe("renderFrame", () => {
 
   it("R2-3: a long sub-status (the refused-host reason) wraps in full; it is never cut at 120 characters", () => {
     const at = "2026-10-03T08:28:40.000Z"
-    const reason =
-      '! infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app is a Vercel preview address (a branch or deployment URL). Give your production address: your own domain or infinite-tag-smoke-site.vercel.app, or choose "It isn\'t live yet".'
+    const reason = hostRefusalLine({ reason: "preview", shown: "infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app" })
     expect(reason.length).toBeGreaterThan(120)
     const snapshot = midRunSnapshot({ currentStep: "before", steps: stepRows({ link: { state: "ok" }, agent: { state: "ok" }, before: { state: "running", subs: [{ text: reason, tone: "warn", at }] } }) })
     for (const width of [80, 120]) {
       const text = plain(frame({ snapshot, width })).replace(/\s+/g, " ")
-      expect(text, `width ${width}`).toContain("or choose \"It isn't live yet\".")
+      expect(text, `width ${width}`).toContain("or press ESC if it isn't live yet.")
       expect(text).not.toContain("collects o …")
       for (const line of frame({ snapshot, width })) expect(visibleWidth(line)).toBeLessThan(width)
     }

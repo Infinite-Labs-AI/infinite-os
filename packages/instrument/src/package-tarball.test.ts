@@ -111,6 +111,7 @@ describe("npm 11 package tarball", () => {
       ).toBe(true)
       expect(existsSync(join(extracted, "package/contracts/tag-wizard-v1/bridge-verbs.fixtures.json"))).toBe(true)
       expect(existsSync(join(extracted, "package/contracts/host-deny-v1.json"))).toBe(true)
+      expect(existsSync(join(extracted, "package/contracts/host-class-v1.json"))).toBe(true)
       // The PostHog-derived wizard code ships PostHog's MIT notice in the packed LICENSE.
       const packedLicense = readFileSync(join(extracted, "package/LICENSE"), "utf8")
       expect(packedLicense).toContain("Copyright (c) 2025 PostHog")

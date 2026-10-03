@@ -11,6 +11,7 @@ import {
   agentJobsAfterApprovals,
   buildPlanModel,
   guardDecision,
+  lineFactsFor,
   lineRunnable,
   resolvePlanAnswers,
   RUNNABILITY_TEXT,
@@ -125,6 +126,27 @@ describe("the Infinite line (DECISIONS §1.6 table)", () => {
     expect(plan.lines.some((line) => line.id === "info:infinite_site_file")).toBe(false)
     expect(plan.lines.find((line) => line.id === "server_lane")?.requires).toBe("approval")
     expect(plan.lines.find((line) => line.id === "npm_install")?.requires).toBe("approval")
+  })
+
+  it("review-2 P2-2: Vercel connected but production only on <project>.vercel.app → the claim path, as the cloud takes it (no server lane)", () => {
+    // The cloud proves through Vercel only the project's production DOMAINS; for an alias it answers the claim
+    // (`pending_proof`) and `provision-env` has no source. So the plan must say the claim wording and never pre-check
+    // a lane whose executor cannot run.
+    const keys = freshKeys()
+    const hosting = fakeHosting({ productionDomains: [], productionAliases: ["acme-store.vercel.app"], envWriteGranted: true })
+    const input = freshInput({ keys, before: fakeBefore({ keys, hosting }), run: { site: answered("acme-store.vercel.app"), siteClaim: true } })
+    expect(lineFactsFor(input).vercelServesHost).toBe(false)
+    const plan = buildPlanModel(input)
+    const index = plan.lines.findIndex((line) => line.id === "install_provider:infinite")
+    expect(plan.lines[index]).toMatchObject({ requires: "approval" })
+    expect(plan.lines[index + 1]).toMatchObject({ id: "info:infinite_site_file", text: RUNNABILITY_TEXT.claimWording("acme-store.vercel.app") })
+    expect(plan.lines.some((line) => line.id === "server_lane")).toBe(false)
+    expect(plan.lines.some((line) => line.id === "npm_install")).toBe(false)
+    expect(plan.lines.find((line) => line.id === "user_action:server_lane")?.text).toBe(RUNNABILITY_TEXT.serverLaneNoConnection)
+    // Once the claim is proven (a source with the reserved key), the verified path opens the lane on the next run.
+    const proven = { ...keys, infinite: { ...keys.infinite, status: "ready" as const, siteSourceKey: "site_reserved", productionHosts: ["acme-store.vercel.app"] } }
+    const after = buildPlanModel(freshInput({ keys: proven, before: fakeBefore({ keys: proven, hosting }), run: { site: answered("acme-store.vercel.app"), siteClaim: true } }))
+    expect(after.lines.find((line) => line.id === "server_lane")?.requires).toBe("approval")
   })
 
   it("NEGATIVE: Vercel connected without env writes → the no-scope line, never a pre-checked lane", () => {

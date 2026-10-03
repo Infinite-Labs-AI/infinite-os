@@ -48,6 +48,7 @@ const MAX_UNPACKED_SIZE = 4_615_000
 // The wizard's public contracts (1bu-1 vendors them and pins their sha256). Listed exactly, so a stray
 // file under contracts/ still fails the pack.
 const TAG_WIZARD_CONTRACT_FILES = [
+  "contracts/host-class-v1.json",
   "contracts/host-deny-v1.json",
   "contracts/tag-wizard-v1/bridge-descriptor.example.json",
   "contracts/tag-wizard-v1/bridge-verbs.fixtures.json",

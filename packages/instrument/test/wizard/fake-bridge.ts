@@ -267,12 +267,16 @@ function defaultScript(): FakeBridgeScript {
 export const FAKE_RESERVED_SITE_KEY = "site_fa4e000000000000000000000000c1a1"
 export const FAKE_PROOF_BODY = "infinite-site-verification: isv_FAKEacmeProofToken0000\n"
 
-/** The cloud's verified-host rule as the fake applies it: the source's hosts, or the Vercel connection's domains. */
+/**
+ * The cloud's verified-host rule as the fake applies it: the source's hosts, or the Vercel connection's production
+ * DOMAINS. Never its `*.vercel.app` aliases: 1bu-1 `proveHostsThroughVercel` reads `productionDomains` only, so an
+ * alias takes the site-file claim (review-2 P2-2).
+ */
 function verifiedHosts(script: FakeBridgeScript): Set<string> {
   const hosts = new Set<string>()
   if (script.keys.infinite.status === "ready") for (const host of script.keys.infinite.productionHosts) hosts.add(normalizeHost(host))
   if (script.hosting.provider === "vercel" && script.hosting.vercel) {
-    for (const host of [...script.hosting.vercel.productionDomains, ...script.hosting.vercel.productionAliases]) hosts.add(normalizeHost(host))
+    for (const host of script.hosting.vercel.productionDomains) hosts.add(normalizeHost(host))
   }
   return hosts
 }
@@ -418,6 +422,8 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
   const approvedLinks = new Set<string>()
   const testRuns = new Map<string, { mode: TestMode; polls: number; request: TestRunRequest }>()
   let deployIndex = 0
+  // A `site-claim` (or `site-source`) answered `ready` this process: the cloud then holds an enabled source.
+  let readySiteClaimed = false
   let port = 0
 
   const send = (res: ServerResponse, record: FakeBridgeCall, status: number, body: unknown, headers: Record<string, string> = {}) => {
@@ -674,6 +680,7 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
         case "baseline":
           return ok(strip(fixtureResponse("baseline")))
         case "site-source":
+          readySiteClaimed = true
           return ok({
             siteSourceKey: script.keys.infinite.siteSourceKey ?? "site_FAKEacmeStoreSourceKey",
             productionHosts: reqBody.productionHosts,
@@ -705,6 +712,8 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
         case "server-lane.provision-env": {
           // §3z.7 (A9): protocol 1 accepts only redeploy:"skip" (the shape refuses anything else first).
           if (reqBody.redeploy !== "skip") return fail(res, record, requestId, "invalid_request", { field: "redeploy" })
+          // 1bu-1: no enabled production source (e.g. a still-pending claim) → 404 no_site_source (review-2 P2-2's replay).
+          if (script.keys.infinite.status !== "ready" && !readySiteClaimed) return fail(res, record, requestId, "not_found", { state: "no_site_source" })
           const response = strip(fixtureResponse("server-lane.provision-env"))
           response.redeploy = { skipped: true, reason: "not_requested" }
           return ok(response)
@@ -733,6 +742,7 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           const consentMode = reqBody.consentMode as ClaimPublic["consentMode"]
           const verified = verifiedHosts(script)
           if (hosts.every((host) => verified.has(host) || verified.has(host.replace(/^www\./, "")) || verified.has(`www.${host}`))) {
+            readySiteClaimed = true
             return ok({
               state: "ready",
               siteSource: { siteSourceKey: script.keys.infinite.siteSourceKey ?? "site_FAKEacmeStoreSourceKey", productionHosts: hosts, consentMode, created: script.keys.infinite.status !== "ready" },

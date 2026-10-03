@@ -103,6 +103,8 @@ import {
   type WizardRunState
 } from "./index.js"
 
+import { isDenyListedHost, isPreviewShapedHost, isVercelProductionAliasShape, parseHostInput } from "../site-host.js"
+
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
 const contractsDir = resolve(packageRoot, "contracts")
 const wizardDir = resolve(contractsDir, "tag-wizard-v1")
@@ -916,6 +918,34 @@ describe("host-deny-v1.json (§3h.9)", () => {
     expect(normalizeHost("  WWW.Acme-Store.COM. ")).toBe("www.acme-store.com")
     expect(normalizeHost("acme-store.com")).toBe("acme-store.com")
     expect(normalizeHost("acme-store.com..")).toBe("acme-store.com.")
+  })
+})
+
+describe("host-class-v1.json (review-2 P3-4: the production-host class, pinned in both repos)", () => {
+  // 1bu-1 vendors these bytes beside host-deny-v1.json and pins the same sha256 against its own classifier
+  // (`src/lib/analytics/wizard/host-deny.test.ts`), so the tag and the cloud classify every listed host the same way.
+  const HOST_CLASS_V1_SHA256 = "23c916b20be15fc63f3b78651e8e4257e8c895eaa90f300db94ed5809ea74e83"
+  const text = readText(contractsDir, "host-class-v1.json")
+  const doc = JSON.parse(text) as { version: number; cases: Array<{ host: string; class: "production_alias" | "preview" | "other"; note?: string }> }
+
+  it("is pretty JSON + newline, pinned by sha256", () => {
+    expect(text).toBe(`${JSON.stringify(doc, null, 2)}\n`)
+    expect(createHash("sha256").update(text).digest("hex")).toBe(HOST_CLASS_V1_SHA256)
+    expect(doc.version).toBe(1)
+    expect(new Set(doc.cases.map((entry) => entry.class))).toEqual(new Set(["production_alias", "preview", "other"]))
+  })
+
+  it("the tag's own rule answers every case exactly as the fixture says", () => {
+    for (const entry of doc.cases) {
+      expect(isPreviewShapedHost(entry.host), entry.host).toBe(entry.class === "preview")
+      expect(isVercelProductionAliasShape(entry.host), entry.host).toBe(entry.class === "production_alias")
+      expect(parseHostInput(entry.host).ok, entry.host).toBe(entry.class !== "preview")
+    }
+  })
+
+  it("NEGATIVE: a drifted rule is caught (the bare platform domain and the deployment URL)", () => {
+    const loose = (host: string) => isDenyListedHost(host) && !host.endsWith(".vercel.app")
+    expect(doc.cases.some((entry) => loose(entry.host) !== (entry.class === "preview"))).toBe(true)
   })
 })
 

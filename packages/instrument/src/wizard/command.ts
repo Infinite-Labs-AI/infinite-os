@@ -160,7 +160,7 @@ export function parseWizardArgs(argv: readonly string[], cwd: string): Parse<Par
         const raw = value()
         if (!raw) return { ok: false, message: "--production-host needs your live site's domain (for example acme.com)." }
         const parsed = parseHostInput(raw)
-        if (!parsed.ok) return { ok: false, message: `--production-host: ${hostRefusalLine(parsed).replace(/^! /, "")}` }
+        if (!parsed.ok) return { ok: false, message: `--production-host: ${hostRefusalLine(parsed, "final").replace(/^! /, "")}` }
         options.productionHost = parsed.host
         break
       }
