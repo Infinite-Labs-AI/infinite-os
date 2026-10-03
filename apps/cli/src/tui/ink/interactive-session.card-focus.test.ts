@@ -46,6 +46,8 @@ function pauseCard(): InSessionConfirmationAction {
   const raw = fixtureJson("change-pause-card");
   raw.body.target.path = ["Sample campaign · trials", "Sample ad set · broad"];
   raw.provenance = { source: "Sample · ad", via: "our_db" };
+  // The view's title is the action and the whole name, as the app sends it (`Pause <name>`).
+  raw.title = "Pause Demo A";
   const view = decodeAnswerView(raw);
   if (!view) throw new Error("change-pause-card does not decode");
   return {
@@ -150,6 +152,9 @@ describe("a waiting card under a tall view is on screen whenever p is offered (f
       await sendKeys(input, "n");
       await waitFor(() => decisions.length === 1, 4_000, () => vt.screenText().join("\n"));
       expect(decisions).toEqual(["decline"]);
+      // The dismissed card stays where the card was, on screen, and names the ad (N2-b).
+      await waitFor(() => vt.screenText().some((row) => /Pause Demo A\s+✕ Dismissed/u.test(row)), 4_000, () => vt.screenText().join("\n"));
+      expect(offersPause(vt.screenText())).toBe(false);
       await sendKeys(input, "/exit\r");
       await session;
     });

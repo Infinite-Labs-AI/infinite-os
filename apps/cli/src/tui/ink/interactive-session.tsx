@@ -1687,10 +1687,16 @@ export function InkInteractiveSessionApp({
     // the turn's latest view, so the keys move to it, as they do when a turn
     // ends: the bar shows only keys that work now (run-3 N20: `? what it does`
     // stayed after `n`, from the view above the card). Only on the card's turn.
+    // The card's turn after its key: the views take the keys again, and a cut
+    // details pane stays at its foot, where the card was and what it became
+    // (the working card, the receipt, `✕ Dismissed`) now is (W3L2-M2: the pane
+    // opened on the card; it must not jump back to the views' top).
     const refocusCardTurn = () => {
       if (!onCardTurn()) return;
       const views = getTurnState().views;
-      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), headCardViewRef.current ? [headCardViewRef.current] : []) : null);
+      setViewFocus(views.length
+        ? { ...viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), headCardViewRef.current ? [headCardViewRef.current] : []), paneScroll: PANE_FOOT }
+        : null);
     };
     const working = decision === "approve" && head.view?.kind === "change" && isPlainRecord(head.view.approval) ? head.view : null;
     if (working) {
@@ -3820,6 +3826,9 @@ function composerRowsFor(text: string, columns: number, theme: Theme): number {
 
 /** A card never pages below this many rows, however small the window. */
 const CARD_MIN_ROWS = 6;
+
+/** A details pane's scroll past any end: the layout holds it to the pane's last page (its foot). */
+const PANE_FOOT = Number.MAX_SAFE_INTEGER;
 
 /** A card's keys with its approving keys off (W3L2-M2): no OK key, no `r` (which approves again); `n` stays. */
 function cardKeysOffScreen(ctx: KeyContext): KeyContext {
