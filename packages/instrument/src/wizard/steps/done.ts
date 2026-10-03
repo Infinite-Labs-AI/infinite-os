@@ -12,7 +12,8 @@
 import { normalizeRemote } from "../../bridge/repo-identity.js"
 import { bridgeFailureOutcome } from "../../bridge/outcomes.js"
 import { buildScanner, loadRunFacts } from "../../review/context.js"
-import { safeText } from "../../review/post.js"
+import { safeText, withFinalReport } from "../../review/post.js"
+import { commentEditor } from "../../hosts/github.js"
 import { BRIDGE_BOUNDS } from "../contracts/bridge.js"
 import { PR_MARKERS } from "../contracts/git-host.js"
 import { escapeMarkdownCell } from "../../text-escape.js"
@@ -26,6 +27,7 @@ import { REPORT_COLUMN_IDS, REPORT_SCHEMA, SAMPLE_FLOOR_PAGE_VIEWS, type ReportC
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import { WIZARD_REPORT_PATHS } from "../run-state.js"
 import { proofStateFrom, provenPendingFor } from "./prove.js"
+import { resolveProductionHost } from "../site-host.js"
 import { readBeforeFactsFile } from "../handoff/before-facts.js"
 
 /** Where the final report lands (inside the gitignored `.infinite/wizard/`). */
@@ -36,6 +38,9 @@ export const DEFAULT_CHECKIN_OPT_IN = true
 
 export const REAL_VISIT_DISCLOSURE =
   "A real visit lands two bot-flagged document rows in your Infinite ledger (the page load and the server-lane probe)."
+/** R2-4: why "Proven live" is empty when no live address is known, and the one thing that finishes it. */
+export const NO_PRODUCTION_HOST_NOTE =
+  "No live site address is known, so no real visit ran and nothing is proven live. Run npx infinite-tag --production-host <your domain> once the site is live."
 /** The same words as the renderers' footnote for a shown raw count (§3i.3 rule 4), so the report says it once. */
 export const SAMPLE_FLOOR_NOTE = `Below ${SAMPLE_FLOOR_PAGE_VIEWS} page views: raw counts shown`
 
@@ -93,7 +98,9 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
       "proven_live",
       proven,
       "keeps_being_checked",
-      [{ input: "run.checkin_due_at", state: due ? "pass" : "pending", display: due ? `7-day check-in on ${shortDate(due)}` : "7-day check-in after the deploy", at }],
+      // R2-2: a scheduled check-in is not a measurement of the live site, so it is never a "Proven live" pass: it is
+      // pending until the check-in itself runs (the "7 days later" row carries its result).
+      [{ input: "run.checkin_due_at", state: "pending", display: due ? `7-day check-in on ${shortDate(due)}` : "7-day check-in after the deploy", at, reason: "needs_7_days" }],
       runId
     )
     ctx.state.update((draft) => {
@@ -110,10 +117,10 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
   }
   // §3y.4 (P2-7): "deploy" only while Infinite can observe the deploy; "rerun_tag" when nothing in Infinite can.
   const beforeHosting = (await readBeforeFactsFile(deps.fs, ctx.root, runId))?.facts.hosting ?? null
-  const hostingVercel = state.report.proven_live
-    ? false
-    : (beforeHosting ?? (deps.bridge.has("tag.hosting.v1") ? await deps.bridge.hosting() : null))?.provider === "vercel"
-  const provenPending: ReportV2["columns"]["proven_live"]["pending"] = provenPendingFor({ state, hostingVercel, noProve: ctx.options.noProve })
+  const hostingRead = state.report.proven_live ? beforeHosting : (beforeHosting ?? (deps.bridge.has("tag.hosting.v1") ? await deps.bridge.hosting() : null))
+  const hostingVercel = state.report.proven_live ? false : hostingRead?.provider === "vercel"
+  const productionHost = resolveProductionHost({ keys, hosting: hostingRead, site: state.site ?? null }).host
+  const provenPending: ReportV2["columns"]["proven_live"]["pending"] = provenPendingFor({ state, hostingVercel, noProve: ctx.options.noProve, productionHost })
   const draft = deps.report.build({
     runId,
     tagVersion: deps.tagVersion,
@@ -132,7 +139,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
     provenLivePending: provenPending,
     runStartedAt: state.runStartedAt ?? null,
     day7: null,
-    notes: notesFor(ctx, draft)
+    notes: [...notesFor(ctx, draft), ...(productionHost === null ? [NO_PRODUCTION_HOST_NOTE] : [])]
   })
   const payload = deps.report.payload(report)
 
@@ -178,9 +185,26 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
       // B29: every string the wizard posts goes through the §3g.5 secret scan (tokens, keys, env values).
       const facts = await loadRunFacts(deps, ctx.state.get().site ?? null)
       const scanner = buildScanner(ctx, deps, facts.connectionIds)
-      const commented = await deps.host.comment(prNumber, `${safeText(scanner, markdown)}\n\n${PR_MARKERS.report(runId)}`)
-      if (commented && typeof commented === "object" && "unsupported" in commented) {
-        ctx.emit.emit("step.sub", { step: "done", text: "The report is in .infinite/wizard/report.md (this host has no comment API).", tone: "info" })
+      const safeReport = safeText(scanner, markdown)
+      // R2-5 (live run 2): the "what happened" comment posted at merge time said "Proven live: —" for good. It now
+      // carries THIS report (the terminal's and the app's), edited in place; a new comment only when there is none.
+      const editor = commentEditor(deps.host)
+      let edited = false
+      if (editor) {
+        let spliced = false
+        edited = await editor.updateOwnComment(prNumber, PR_MARKERS.final(runId), (body) => {
+          const next = withFinalReport(body, safeReport)
+          spliced = next !== null
+          return next ?? body
+        })
+        edited = edited && spliced
+        if (edited) ctx.emit.emit("step.sub", { step: "done", text: "✓ Updated the pull request's \"what happened\" comment with this report", tone: "ok" })
+      }
+      if (!edited) {
+        const commented = await deps.host.comment(prNumber, `${safeReport}\n\n${PR_MARKERS.report(runId)}`)
+        if (commented && typeof commented === "object" && "unsupported" in commented) {
+          ctx.emit.emit("step.sub", { step: "done", text: "The report is in .infinite/wizard/report.md (this host has no comment API).", tone: "info" })
+        }
       }
     } catch (error) {
       ctx.emit.emit("step.sub", {

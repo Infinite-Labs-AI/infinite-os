@@ -270,8 +270,19 @@ export function provenPendingFor(input: {
   state: Pick<WizardRunState, "report" | "site" | "steps">
   hostingVercel: boolean
   noProve: boolean
+  /** The run's production host as `resolveProductionHost` reads it; null = none known (the app cannot visit). */
+  productionHost?: string | null
 }): "deploy" | "open_infinite" | "rerun_tag" | null {
-  if (input.state.report.proven_live) return null
+  const column = input.state.report.proven_live
+  if (column) {
+    // R2-2: a proven column that measured something is the answer; one that measured nothing says who finishes it
+    // through its own unmeasured cells (set by `prove`): pending_open_infinite only while the app is proving it.
+    if (provenColumnHasEvidence(column)) return null
+    const reason = column.finishLine.proof_from_real_visit?.reason
+    return reason === "pending_open_infinite" ? "open_infinite" : reason === "pending_deploy" ? "deploy" : "rerun_tag"
+  }
+  // R2-4: with no production host the app has nothing to visit, whatever else it can observe.
+  if (input.productionHost === null) return "rerun_tag"
   if (input.state.steps.prove?.code === "INF_WIZ_HOST_UNCONFIRMED") return "open_infinite"
   const observable = input.hostingVercel || input.state.site?.claim?.state === "pending_proof"
   if (!observable) return "rerun_tag"
@@ -432,6 +443,25 @@ export interface ProvenColumnInput {
   conversionsWaiting: number
   /** The run's server-clock start (`runs.start`); null when this state file predates it. */
   runStartedAt?: string | null
+  /**
+   * How a cell with no reading reads when this run has no real-visit facts (§3y.4, R2-4): `pending_open_infinite`
+   * only while Infinite really finishes the live check (the app is proving this run); otherwise "—" `not_exercised`
+   * (the report's `pending` is then `rerun_tag`). Default: "—" `not_exercised` (never a promise nobody keeps).
+   */
+  unmeasured?: { reason: Reason; state: "pending" | "not_measured" }
+}
+
+/** A receipt that shows the tool fired on the live site (verified or seen leaving). */
+function laneFired(lane: LaneReceipt): boolean {
+  return lane.state === "verified" || lane.state === "delivering"
+}
+
+/**
+ * R2-2 (live run 2): "Proven live" counts a pass or a problem ONLY from this run's real-visit facts or its own
+ * receipts. A column with neither measured nothing: no finish-line cell there is a pass or a problem.
+ */
+export function provenColumnHasEvidence(column: ReportColumnSnapshot): boolean {
+  return Object.values(column.finishLine).some((cell) => cell?.state === "pass" || cell?.state === "problem")
 }
 
 /** The `proven_live` column, from typed inputs only (receipts, graded facts, cloud reads). */
@@ -445,6 +475,11 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
   }
   const facts: ColumnFact[] = []
   const tools = toolsUnderTest(expect)
+  const unmeasured = input.unmeasured ?? { reason: "not_exercised" as Reason, state: "not_measured" as const }
+  // R2-2: no real visit and no receipt of this run → nothing on the live site was measured. The column then holds
+  // no fact at all: not the consent setting (no visit measured it), not a T1 read, not a missing receipt.
+  const evidence = visit !== null || Object.values(receipts.lanes).some(laneFired)
+  if (!evidence) return unmeasuredProvenColumn(input, receipts, unmeasured)
 
   if (visit) {
     for (const tool of tools) {
@@ -527,7 +562,42 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
     facts,
     rows,
     runStartedAt,
-    ...(visit ? {} : { unmeasured: { reason: "pending_open_infinite", state: "pending" } })
+    ...(visit ? {} : { unmeasured })
+  })
+}
+
+/**
+ * R2-2: the column when nothing on the live site was measured. `measuredAt` stays null (the headline then says "not
+ * checked live yet" with the reason), every cell is "—" with the run's unmeasured reason, and only the by-design
+ * pending cells (a real conversion, the day-7 key events) keep their own reasons. Never a pass, never a problem.
+ */
+function unmeasuredProvenColumn(input: ProvenColumnInput, receipts: ReceiptsResponseFields, unmeasured: NonNullable<ProvenColumnInput["unmeasured"]>): ReportColumnSnapshot {
+  const { at, expect } = input
+  const dash = (source: RowCellInput["source"]): RowCellInput => ({ value: null, state: unmeasured.state, source, at, reason: unmeasured.reason })
+  const tools = toolsUnderTest(expect)
+  const rows: Parameters<typeof buildColumn>[1]["rows"] = {
+    consent_setting: dash("cloud_read"),
+    preview_share: { value: null, state: "not_measured", source: "cloud_read", at, reason: "needs_7_days" },
+    ga4_key_events: { value: null, state: "pending", source: "cloud_read", at, reason: "needs_7_days" },
+    server_conversions:
+      input.conversionsWaiting > 0
+        ? { value: "waiting", display: `${input.conversionsWaiting} wired · waits for a real conversion`, state: "pending", source: "wizard_check", at }
+        : { value: null, state: "not_measured", source: "wizard_check", at, reason: "not_exercised" },
+    live_test_per_tool:
+      tools.length === 0 && !input.serverLaneInstalled ? { value: null, state: "not_measured", source: "cloud_receipt", at, reason: "not_connected" } : dash("cloud_receipt"),
+    ga4_page_views_per_visit: expect.ga4 ? dash("desktop_test") : { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" },
+    meta_pixel: expect.meta ? dash("desktop_test") : { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" },
+    posthog_route: expect.posthog ? dash("cloud_receipt") : { value: null, state: "not_measured", source: "cloud_receipt", at, reason: "not_connected" }
+  }
+  void receipts
+  return buildColumn("proven_live", {
+    runId: input.runId,
+    meta: { measuredAt: null, sha: input.mergeSha },
+    facts: [],
+    rows,
+    runStartedAt: input.runStartedAt ?? null,
+    unmeasured,
+    builtAt: at
   })
 }
 
@@ -839,6 +909,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   // the PATCH): the cloud answers 409 to it like to anyone's, so the saved record tells them apart.
   let ownClaim: ProveVisitRecord | null = null
   let patchProofState = false
+  // R2-4: true only while the Infinite app itself holds this run's proof claim (it then makes the visit).
+  let appProving = false
   try {
     const claim = await deps.bridge.claimProof(runId, "tag")
     won = claim.granted === true
@@ -857,6 +929,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     }
     // Still `proving` under this run's own claim: the PATCH never landed, so this run sends it now.
     patchProofState = ownClaim !== null && (proofState === "proving" || proofState === null)
+    appProving = ownClaim === null && (proofState === "proving" || proofState === null)
     claimNote = ownClaim
       ? "this run's own visit, from before the resume"
       : proofState === "proving" || proofState === null
@@ -958,7 +1031,10 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
       t1,
       serverLaneInstalled: keys.serverLane.laneState !== "no_secret",
       runStartedAt: state.runStartedAt ?? null,
-      conversionsWaiting: state.jobs.filter((item) => item.jobId === "server_conversions" && ["done_in_code", "waiting_real_event"].includes(item.state)).length
+      conversionsWaiting: state.jobs.filter((item) => item.jobId === "server_conversions" && ["done_in_code", "waiting_real_event"].includes(item.state)).length,
+      // R2-4: "open Infinite" only while the app is proving this run; when this run held the claim (or no host is
+      // known), nothing in Infinite finishes the live check, so its cells are "—" and the report says rerun_tag.
+      unmeasured: appProving && productionHost ? { reason: "pending_open_infinite", state: "pending" } : { reason: "not_exercised", state: "not_measured" }
     })
     ctx.state.update((draft) => {
       draft.report.proven_live = column

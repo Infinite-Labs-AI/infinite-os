@@ -201,11 +201,34 @@ export function buildFinalComment(input: FinalCommentInput): string {
           .join("\n")}`
       : "",
     ...input.notes.map((note) => `> ${note}`),
-    "Merge when you're happy. After it deploys, Infinite proves it live."
+    FINAL_COMMENT_MERGE_LINE
   ]
     .filter(Boolean)
     .join("\n\n")
   return `${neutralizeCheckboxes(safeText(input.scanner, text))}\n\n${PR_MARKERS.final(input.runId)}\n`
+}
+
+/** The last line of the merge-time comment, and its replacement once the live check has run (R2-5). */
+export const FINAL_COMMENT_MERGE_LINE = "Merge when you're happy. After it deploys, Infinite proves it live."
+export const FINAL_COMMENT_UPDATED_LINE = "Updated after the live check: the table above is the run's final report, the same one as in the terminal and in Infinite."
+
+/** The sections that follow the report in `buildFinalComment` (the report ends where the first of them starts). */
+const AFTER_REPORT = ["\n\n**Checklist (the wizard's own checks", "\n\n**Declined, with reasons**", "\n\n**You decide**", "\n\n**Comments from people outside the repo", "\n\n> ", `\n\n${FINAL_COMMENT_MERGE_LINE}`, `\n\n${FINAL_COMMENT_UPDATED_LINE}`, "\n\n<!-- infinite-tag:"]
+
+/**
+ * R2-5 (live run 2): the "what happened" comment with its report replaced by the final one (after Prove), so the PR,
+ * the terminal and the app show ONE report. Everything else in the comment (the review sentence, the checklist, the
+ * decisions, the marker) is kept as posted. `reportMarkdown` must already be scanned by the caller. Returns null when
+ * the body holds no report table (nothing is guessed).
+ */
+export function withFinalReport(body: string, reportMarkdown: string): string | null {
+  const start = body.indexOf("### Before and after")
+  if (start < 0) return null
+  const ends = AFTER_REPORT.map((marker) => body.indexOf(marker, start)).filter((index) => index > start)
+  if (ends.length === 0) return null
+  const end = Math.min(...ends)
+  const spliced = `${body.slice(0, start)}${neutralizeCheckboxes(reportMarkdown.trim())}${body.slice(end)}`
+  return spliced.replace(`\n\n${FINAL_COMMENT_MERGE_LINE}`, `\n\n${FINAL_COMMENT_UPDATED_LINE}`)
 }
 
 export function excerpt(text: string, max = 160): string {

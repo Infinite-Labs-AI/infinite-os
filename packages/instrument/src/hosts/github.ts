@@ -3,7 +3,7 @@
 import type { GitHostAdapter, GitHostAdapterExtras, PrComment, PrSummary } from "../wizard/contracts/git-host.js"
 import { prChecks, type PrCheck } from "../github/checks.js"
 import type { GhClient } from "../github/gh.js"
-import { comment, createDraftPr, findPr, markReady, readPr, updateBranch } from "../github/pr.js"
+import { comment, createDraftPr, findPr, markReady, readPr, updateBranch, updateOwnComment } from "../github/pr.js"
 import { previewUrlForSha } from "../github/preview.js"
 import { latestProductionDeployment, productionDeploymentForSha, vercelDeploymentSeen, type GhDeployState, type LatestProductionDeployment } from "../github/deployments.js"
 import { ghAuthStatus, ghRepoFacts, type GhRepoFacts } from "../github/repo.js"
@@ -20,6 +20,8 @@ export interface GitHubHostAdapter extends GitHostAdapter, GitHostAdapterExtras 
   readThreadDetails(number: number): Promise<ReviewThreadDetail[]>
   /** The PR's conversation comments and review bodies (a printed-brief review arrives as one of these). */
   readComments(number: number): Promise<PrComment[]>
+  /** R2-5: edits the wizard's own marked comment (author AND marker); false when there is none. */
+  updateOwnComment(number: number, marker: string, edit: (body: string) => string): Promise<boolean>
   // GitHub supports every method: the return types narrow (never `{unsupported:true}`).
   readPr(number: number): Promise<PrSummary>
   findPr(branch: string): Promise<PrSummary | null>
@@ -41,6 +43,16 @@ export interface DeploymentReader {
   latestProductionDeployment(): Promise<LatestProductionDeployment | null>
   vercelDeploymentSeen(): Promise<boolean>
   setPreviewProject?(projectName: string | null): void
+}
+
+/** R2-5: the comment editor a host offers (the GitHub adapter's), or none (another host, or a test fake). */
+export interface CommentEditor {
+  updateOwnComment(number: number, marker: string, edit: (body: string) => string): Promise<boolean>
+}
+
+export function commentEditor(host: GitHostAdapter): CommentEditor | null {
+  const candidate = host as Partial<CommentEditor> & { kind?: string }
+  return candidate.kind === "github" && typeof candidate.updateOwnComment === "function" ? (candidate as CommentEditor) : null
 }
 
 export function deploymentReader(host: GitHostAdapter): DeploymentReader | null {
@@ -101,6 +113,11 @@ export function createGitHubAdapter(gh: GhClient): GitHubHostAdapter {
     markReady: (number) => markReady(gh, number),
     checks: (number) => prChecks(gh, number),
     comment: (number, body) => comment(gh, number, body),
+    async updateOwnComment(number, marker, edit) {
+      const login = (await ghAuthStatus(gh)).login
+      if (!login) return false
+      return updateOwnComment(gh, { number, login, marker, edit })
+    },
     updateBranch: (number) => updateBranch(gh, number),
     previewUrl: (sha) => previewUrlForSha(gh, sha, previewProject),
     productionDeployment: (sha) => productionDeploymentForSha(gh, sha, previewProject),

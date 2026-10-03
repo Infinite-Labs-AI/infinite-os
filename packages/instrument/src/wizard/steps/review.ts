@@ -532,7 +532,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     tagVersion: deps.tagVersion,
     site: { repoLabel: ship.repoLabel, productionHost: ship.facts.productionHost },
     columns: ctx.state.get().report,
-    provenLivePending: provenPendingFor({ state: ctx.state.get(), hostingVercel: ship.facts.hosting?.provider === "vercel", noProve: false }),
+    provenLivePending: provenPendingFor({ state: ctx.state.get(), hostingVercel: ship.facts.hosting?.provider === "vercel", noProve: false, productionHost: ship.facts.productionHost }),
     day7: null,
     notes: []
   })

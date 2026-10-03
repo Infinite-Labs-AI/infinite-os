@@ -182,7 +182,7 @@ if (group === "pr") {
     out("")
   }
   if (sub === "comment") {
-    pr.comments.push({ author: { login: state.login }, authorAssociation: "OWNER", body: stdin })
+    pr.comments.push({ id: pr.number * 1000 + pr.comments.length + 1, author: { login: state.login }, authorAssociation: "OWNER", body: stdin })
     changed()
     out(`${pr.url}#issuecomment-1\n`)
   }
@@ -316,6 +316,22 @@ if (group === "api") {
   if (statuses) {
     const row = state.deployments.find((candidate) => String(candidate.id) === statuses[1])
     out(row ? row.statuses : [])
+  }
+  // R2-5: the PR's conversation comments (REST shape), and a PATCH of one comment's body (never a delete).
+  const issueComments = /^repos\/\{owner\}\/\{repo\}\/issues\/(\d+)\/comments\?per_page=\d+$/.exec(path)
+  if (issueComments) {
+    const pr = state.prs.find((candidate) => String(candidate.number) === issueComments[1])
+    out((pr?.comments ?? []).map((entry) => ({ id: entry.id, user: { login: entry.author?.login ?? entry.author }, body: entry.body })))
+  }
+  const methodIndex = argv.indexOf("-X")
+  const editComment = /^repos\/\{owner\}\/\{repo\}\/issues\/comments\/(\d+)$/.exec(argv[methodIndex + 2] ?? "")
+  if (methodIndex === 1 && argv[2] === "PATCH" && editComment) {
+    const entry = state.prs.flatMap((candidate) => candidate.comments ?? []).find((candidate) => String(candidate.id) === editComment[1])
+    if (!entry) fail("gh: Not Found (HTTP 404)")
+    entry.body = JSON.parse(stdin).body
+    entry.edited = true
+    changed()
+    out({ id: entry.id })
   }
   const rules = /^repos\/\{owner\}\/\{repo\}\/rules\/branches\/(.+)$/.exec(path)
   if (rules) out(state.rules[decodeURIComponent(rules[1])] ?? [])
