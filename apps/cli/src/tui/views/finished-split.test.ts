@@ -77,7 +77,7 @@ describe("a finished tall turn keeps the split, both panes held to the window (l
         const view = make();
         const start = viewFocusAfterTurnDone([view], CAPS);
         const before = draw(view, width, start);
-        // At rest tab goes to the view (River: tab first, then o); tab again to the answer.
+        // At rest tab goes to the view (the layout decision: tab first, then o); tab again to the answer.
         const onView = resolveViewKey("", start, { tab: true }, factsOf(before));
         expect(onView.engaged).toBe(true);
         expect(onView.answerFocus ?? false).toBe(false);

@@ -1,8 +1,8 @@
 // Live L8 (round 4), in a running session: a finished answer taller than the
 // window went whole to scrollback, the bar dropped to `/ commands`, Tab did
 // nothing and `o` typed an `o`. From 80 columns the last finished turn now
-// keeps the split and its keys until the next question: tab (the view, as
-// River's rule says: tab first), then o opens the view's place; tab again puts
+// keeps the split and its keys until the next question: tab (the view first,
+// as the layout decision says), then o opens the view's place; tab again puts
 // the keys on the answer pane (its rule marked), where ↓ scrolls it alone. The
 // next question commits the turn whole, in one column. Below 80 the turn goes
 // to scrollback in one column, and its view stays focusable there: tab, then

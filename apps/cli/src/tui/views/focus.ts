@@ -337,7 +337,7 @@ function resolveAnswerKey(input: string, state: ViewFocusState, key: Partial<Key
     const answerScroll = key.downArrow || key.pageDown ? pane.above + Math.min(step, pane.below) : pane.above - Math.min(step, pane.above);
     return { ...base, answerScroll, handled: true };
   }
-  // `o` opens the view's place from either side (River: tab first, then o).
+  // `o` opens the view's place from either side (the layout decision: tab first, then o).
   if (input === "o" && facts.open) return { ...base, handled: true, effect: { type: "open", target: facts.open.target } };
   // Any other printable key starts a message: the composer takes it.
   return typesIntoComposer(input, key) ? leave : base;
