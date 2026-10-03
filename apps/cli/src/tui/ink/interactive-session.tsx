@@ -62,7 +62,7 @@ import {
 import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
 import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, type KeyAction, type KeyContext } from "../keys/keymap.js";
-import { fallbackCardLines, declineFrame, fallbackCardRowCount, fieldInvalidMessage, settleConfirmOutcome } from "./confirm-card.js";
+import { fallbackCardLines, declineFrame, fallbackCardRowCount, fieldInvalidMessage, messagesAfterDecline, settleConfirmOutcome } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
 import { askedSource, ruleLine, TOP_BAR_ROWS, type TopBarData } from "./top-bar.js";
@@ -1560,6 +1560,12 @@ export function InkInteractiveSessionApp({
     const dropWorking = () => {
       if (working || dismissed) patchTurnState((state) => ({ ...state, views: state.views.filter((frame) => frame.viewId !== workingId) }));
     };
+    // A no the app took (run-3 M5): the line over the card becomes the app's
+    // words after a no ("Okay, left it running."), in the same update as the
+    // receipt it answered with, and only on the card's own turn.
+    const captionDeclined = (outcome: unknown) => {
+      if (decision === "decline" && onCardTurn()) setHistory((current) => messagesAfterDecline(current, outcome));
+    };
     // What the app's answer does to that frame is decided by one pure step
     // (confirm-card.tsx `settleConfirmOutcome`, unit-tested on CI).
     const settle = (outcome: unknown, thrown: boolean): boolean => {
@@ -1567,9 +1573,13 @@ export function InkInteractiveSessionApp({
       if (step.type === "receipt") {
         // A settled receipt view goes on the turn, drawn as r4 draws it (confirm-card.tsx).
         recordTurnView(step.frame);
+        if (!thrown && step.frame.view.state === "cancelled") captionDeclined(outcome);
         return false;
       }
-      if (step.type === "keep") return false;
+      if (step.type === "keep") {
+        if (!thrown) captionDeclined(outcome);
+        return false;
+      }
       dropWorking();
       appendLines(step.lines);
       return true;

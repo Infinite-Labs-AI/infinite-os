@@ -128,6 +128,17 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(handler.split("onConfirmAction?.(").length - 1).toBe(1);
   });
 
+  it("a no the app took swaps the line over the card on the card's turn only (run-3 M5, CI-visible)", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction"),
+      source.indexOf("useEffect(() => {\n    // Don't drain")
+    );
+    expect(handler).toContain('if (decision === "decline" && onCardTurn()) setHistory((current) => messagesAfterDecline(current, outcome));');
+    // With the dismissed receipt it answered with, or when it kept the dismissed card; never on a thrown answer.
+    expect(handler).toMatch(/recordTurnView\(step\.frame\);\s+if \(!thrown && step\.frame\.view\.state === "cancelled"\) captionDeclined\(outcome\);/u);
+    expect(handler).toMatch(/if \(step\.type === "keep"\) \{\s+if \(!thrown\) captionDeclined\(outcome\);/u);
+  });
+
   it("scrubs the un-redacted summary through terminalText before rendering", () => {
     // The card (confirm-card.tsx) runs the summary through terminalText; the
     // details are redacted upstream and scrubbed again as they become rows;
@@ -433,6 +444,51 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
       await session;
     }
   );
+
+  // Live re-check run 3, M5: the line over the card was the app's pre-OK
+  // words ("Ready. It stops spending once you say OK.") and stayed after `n`.
+  // The app's answer to the no carries its words after a no; the line becomes
+  // them when the app's dismissed receipt lands.
+  for (const columns of [60, 100, 140]) {
+    it.skipIf(process.env.CI === "true")(
+      `n, then the app's no: the line over the card reads Okay, left it running. (${columns} columns)`,
+      { timeout: 30_000 },
+      async () => {
+        const ASKED = "Ready. It stops spending once you say OK.";
+        const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
+          receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
+        const input = ttyInput();
+        const output = ttyOutput();
+        output.columns = columns;
+        output.rows = 40;
+        const session = runInkInteractiveSession({
+          columns,
+          errorOutput: ttyOutput(),
+          input,
+          output,
+          title: "Infinite TUI",
+          onConfirmAction: async () => ({ ok: true, declined: true, askedCaption: ASKED, dismissedCaption: "Okay, left it running.", view: dismissed }),
+          async onSubmitLine(): Promise<InkInteractiveLineResult> {
+            return { messages: [{ role: "assistant", text: ASKED }], pendingConfirmations: [CARD] };
+          }
+        });
+        await waitFor(() => output.text().includes("Ask Infinite"));
+        await sendKeys(input, "pause it\r");
+        // From 120 columns the answer is the left pane (40 columns): the line wraps after "spending".
+        await waitFor(() => stripAnsi(output.text()).includes("Ready. It stops spending"), 4_000, output.text);
+        const before = output.text().length;
+        await sendKeys(input, "n");
+        await waitFor(() => stripAnsi(output.text().slice(before)).includes("Okay, left it running."), 4_000, () => stripAnsi(output.text().slice(before)));
+        const after = stripAnsi(output.text().slice(before));
+        expect(after).toContain("Dismissed — nothing was executed.");
+        // Nothing redraws the pre-OK line once the app's words are on screen.
+        expect(after.slice(after.indexOf("Okay, left it running."))).not.toContain("Ready. It stops spending");
+        await sendKeys(input, "/exit\r");
+        await session;
+        resetTurnState();
+      }
+    );
+  }
 
   // A receipt belongs to the turn its card came from: a line queued while that
   // turn was busy waits for the confirm, and a line typed while the confirm is

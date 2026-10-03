@@ -5,7 +5,7 @@ import type { InSessionConfirmationAction } from "../../desktop/confirm-in-sessi
 import { displayWidth } from "../lib/display-width.js";
 import { confirmCardKeys } from "../keys/keymap.js";
 import { DEFAULT_THEME } from "../theme.js";
-import { ConfirmActionMenu, DISMISSED_WORDS, declineFrame, dismissedReceiptFrame, fallbackCardLines, fallbackCardRowCount, receiptViewFrame, settleConfirmOutcome } from "./confirm-card.js";
+import { ConfirmActionMenu, DECLINED_FALLBACK_CAPTION, DISMISSED_WORDS, declineFrame, dismissedReceiptFrame, fallbackCardLines, fallbackCardRowCount, messagesAfterDecline, receiptViewFrame, settleConfirmOutcome } from "./confirm-card.js";
 import { renderLiveTurn } from "../views/layout.js";
 import type { TurnStep } from "../app/turn-store.js";
 import { renderToString } from "./renderer.js";
@@ -241,3 +241,59 @@ describe("what the app's answer does to a resolved card (CI-runnable M5 wiring)"
   });
 });
 
+
+// Live re-check run 3, M5: after `n` the line over the card still read the
+// app's pre-OK words ("Ready. It stops spending once you say OK.") where r4
+// flow-pause-09 and Cmd+L say "Okay, left it running.". The app sends both
+// lines with the decline (`askedCaption`, `dismissedCaption`); only the app's
+// own line is swapped, never the model's words.
+describe("the line over a declined card (run-3 M5)", () => {
+  const ASKED = "Ready. It stops spending once you say OK.";
+  const DISMISSED = "Okay, left it running.";
+  const turn = (answer: string) => [
+    { role: "user" as const, text: "pause hook b" },
+    { role: "assistant" as const, text: answer }
+  ];
+  const declined = { ok: true, declined: true, askedCaption: ASKED, dismissedCaption: DISMISSED };
+
+  it("the app's line over the card becomes the app's words after a no", () => {
+    expect(messagesAfterDecline(turn(ASKED), declined)).toEqual(turn(DISMISSED));
+    // Each kind says its own words (a daily budget: "Okay, kept the budget as it is.").
+    expect(messagesAfterDecline(turn("Ready. It saves $10 a day once you say OK."), {
+      ...declined, askedCaption: "Ready. It saves $10 a day once you say OK.", dismissedCaption: "Okay, kept the budget as it is."
+    })).toEqual(turn("Okay, kept the budget as it is."));
+  });
+
+  it("never swaps the model's own words", () => {
+    const own = turn("Hook B spent $12.40 with no trials. Pause it?");
+    expect(messagesAfterDecline(own, declined)).toBe(own);
+    // More than one answer message is the model's, even when one repeats the line.
+    const twice = [...turn(ASKED), { role: "assistant" as const, text: "More words." }];
+    expect(messagesAfterDecline(twice, declined)).toBe(twice);
+  });
+
+  it("a desktop that sends no words of its own: a turn that said nothing gets the neutral line; any words stay", () => {
+    const plain = { ok: true, declined: true };
+    expect(messagesAfterDecline(turn(""), plain)).toEqual(turn(DECLINED_FALLBACK_CAPTION));
+    expect(messagesAfterDecline([{ role: "user", text: "pause hook b" }], plain)).toEqual(turn(DECLINED_FALLBACK_CAPTION));
+    const asked = turn(ASKED);
+    expect(messagesAfterDecline(asked, plain)).toBe(asked);
+    // Neutral: it claims nothing about what still runs or spends.
+    expect(DECLINED_FALLBACK_CAPTION).not.toMatch(/running|spend|paus/iu);
+  });
+
+  it("a no the app did not take, or a turn already in scrollback, changes nothing", () => {
+    const asked = turn(ASKED);
+    expect(messagesAfterDecline(asked, { ...declined, ok: false })).toBe(asked);
+    expect(messagesAfterDecline(asked, new Error("network down"))).toBe(asked);
+    expect(messagesAfterDecline(asked, undefined)).toBe(asked);
+    const gone: { role: "user" | "assistant"; text: string }[] = [];
+    expect(messagesAfterDecline(gone, declined)).toBe(gone);
+  });
+
+  it("the app's words are scrubbed like every app line", () => {
+    const esc = String.fromCharCode(27);
+    const out = messagesAfterDecline(turn(ASKED), { ...declined, dismissedCaption: `${esc}[31mOkay, left it running.${esc}[0m` });
+    expect(out[1]?.text).toBe(DISMISSED);
+  });
+});
