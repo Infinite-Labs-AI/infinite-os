@@ -36,6 +36,7 @@ import {
   type ViewFocusState,
   type ViewKeyFacts
 } from "./focus.js";
+import { turnRepeats } from "./meta-fold.js";
 import { fitLine, paint } from "./primitives.js";
 import { renderView } from "./registry.js";
 import { stepHeader, stepRowLines, stepsFromTrail, unsettledStepLines } from "./steps.js";
@@ -375,10 +376,28 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   // `→` acts only on the view the keys are on, once the turn has finished (a
   // running turn's keys are the composer's): any other names what its tables
   // hid in words.
+  // A later read of the same account repeats the earlier one's parts: it draws them once (N27).
+  const repeats = turnRepeats(input.views);
+  const folds = (index: number): Partial<ViewRenderCtx> => (repeats[index] ? { repeats: repeats[index]! } : {});
+  // Committed to scrollback (`split` false), no view has the keys, the focused one included (TJ-9):
+  // it is drawn as scrollback, so it never offers a key that no longer works there.
+  // What the user already did on the focused view stays done there (R-IOV-1): an
+  // approval answered (p or n) stays closed, an explanation opened stays open.
+  const answered = (index: number): Partial<ViewRenderCtx> => {
+    if (!input.focus || index !== focusIndex || input.views[index]?.kind === "quiet") return {};
+    return {
+      ...(input.focus.approvalClosed ? { approvalClosed: true } : {}),
+      ...(input.focus.explainOpen ? { explainOpen: true } : {})
+    };
+  };
   const renders = input.views.map((view, index) =>
-    renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus
-      ? focusedViewCtx(input.focus, base)
-      : { ...plainCtx, selected: openingRow(view), columnKey: false }));
+    renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus && split
+      ? { ...focusedViewCtx(input.focus, base), ...folds(index) }
+      : {
+        ...plainCtx, selected: openingRow(view), columnKey: false,
+        ...(split && input.focus && focusIndex >= 0 && index !== focusIndex ? { keysElsewhere: true } : {}),
+        ...answered(index), ...folds(index)
+      }));
   // Scrollback has no keys, so nothing may stay behind one. A view with tabs
   // (a document's versions) prints every tab, in order, under the one head,
   // and a list or compare table that dropped columns (`→`) prints every row
@@ -388,7 +407,7 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const drawn = split ? renders.filter((_render, index) => !folded.has(index)) : renders.flatMap((render, index) => {
     if (folded.has(index)) return [];
     const view = input.views[index]!;
-    const whole = { ...plainCtx, selected: openingRow(view), showHiddenColumns: Boolean(render.hiddenColumns) && view.kind !== "numbers" };
+    const whole = { ...plainCtx, selected: openingRow(view), showHiddenColumns: Boolean(render.hiddenColumns) && view.kind !== "numbers", ...answered(index), ...folds(index) };
     const tabs = render.tabs ?? 0;
     if (tabs < 2) return [whole.showHiddenColumns ? renderView(view, whole) : render];
     return Array.from({ length: tabs }, (_unused, tab) => {

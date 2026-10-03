@@ -143,12 +143,12 @@ describe("a change target's path: one dim line under the target, in every pause 
   }
 
   for (const cols of [60, 100, 140]) {
-    it(`a long path stays one line at ${cols} columns, cut with …`, () => {
+    it(`a long path stays one line at ${cols} columns, its outer parts cut with … and the nearest parent kept (TJ-7)`, () => {
       const long = ["A campaign whose name runs on and on past any card", "An ad set named for every audience it reaches at once", "Hook B"];
       const fixture = loadR4Fixture("flow-pause-01-needs-your-ok");
       const after = screen(withTarget(fixture, { path: long }), cols);
       const row = addedRow(screen(fixture, cols), after);
-      expect(row.replace(/[│┊]/gu, "").trim()).toMatch(/^A campaign whose name .*…$/u);
+      expect(row.replace(/[│┊]/gu, "").trim()).toMatch(/^A campaign whose name[^›]*… › An ad set[^›]*… › Hook B$/u);
       expect(rows(after).every((line) => displayWidth(line) <= cols)).toBe(true);
     });
   }

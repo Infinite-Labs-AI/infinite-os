@@ -445,10 +445,32 @@ export function refineStepStatus(
   views: readonly AnswerViewV1[],
   steps: readonly TurnStep[] = [step]
 ): StepStatus {
+  if (refusedReadView(step, views, steps)) return "off";
   const view = viewDrawnBy(step, views, steps);
   if (!view) return step.status;
   if (step.status === "wait" && (view.state === "applying" || view.state === "working")) return "run";
   return stepStatusForView(view) ?? "ok";
+}
+
+/**
+ * The states of a read that did not run here for a reason that is not a
+ * failure: the source is not connected, or only Cmd+L can do it. The desktop
+ * reports such a refused read as a failed call (`status: "error"`), so only
+ * its view can say it (TJ-10, r4 flow-numbers-05 `· not connected`).
+ */
+const REFUSED_READ_STATES: ReadonlySet<string> = new Set(["not_connected", "cmdl_only"]);
+
+/**
+ * The one view that stands for a failed call, when it says the read was
+ * refused rather than failed (`REFUSED_READ_STATES`): exactly one view of the
+ * call's tool and exactly one call of it in the turn, so there is no doubt
+ * whose view it is. Else undefined, and the call keeps its own ✗.
+ */
+function refusedReadView(step: TurnStep, views: readonly AnswerViewV1[], steps: readonly TurnStep[]): AnswerViewV1 | undefined {
+  if (step.status !== "fail") return undefined;
+  const matches = views.filter((view) => drewView(step, view));
+  if (matches.length !== 1 || !REFUSED_READ_STATES.has(matches[0]!.state)) return undefined;
+  return steps.filter((other) => drewView(other, matches[0]!)).length === 1 ? matches[0] : undefined;
 }
 
 /** What a row that waited says while its card is being applied (r4 `pausing on Meta ⠋ running`). */
@@ -528,6 +550,11 @@ function stepRowFacts(step: TurnStep, steps: readonly TurnStep[], options: Pick<
   const { glyph, tone } = GLYPHS[status];
   const mark = status === "run" ? SPINNER[Math.floor(Math.max(0, now - step.startedAt) / SPINNER_MS) % SPINNER.length]! : glyph;
   const said = viewText(step.result);
+  const refused = refusedReadView(step, options.views ?? [], steps);
+  if (refused) {
+    // A refused read says what its view says (`· not connected`), never the transport's failure words.
+    return { status, mark, tone, label: viewText(step.label), result: resultCase(stateHeadFor(refused).words) };
+  }
   if (step.status === "wait" && view && status !== "wait") {
     // The card it waited on has moved on: the row says what is being done, then how the card ended.
     const acted = status !== "off" && viewText(step.label) === WAITING_WORDS ? appliedLabel(said, view) : null;
@@ -540,7 +567,10 @@ function stepRowFacts(step: TurnStep, steps: readonly TurnStep[], options: Pick<
   // A step still waiting says so (unless its label already does); a failed one says why in plain words.
   const result = status === "fail"
     ? plainFailureReason(said, viewText(step.label))
-    : said || (status === "wait" && viewText(step.label) !== WAITING_WORDS ? WAITING_WORDS : "");
+    : said || (status === "wait" && viewText(step.label) !== WAITING_WORDS
+      // A view that asks a question waits for an answer, not for an OK (TJ-10).
+      ? (view?.state === "needs_answer" ? WAITING_ANSWER_WORDS : WAITING_WORDS)
+      : "");
   return { status, mark, tone, label: viewText(step.label), result };
 }
 

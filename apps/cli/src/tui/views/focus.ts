@@ -25,11 +25,12 @@ import { printableImagesView } from "../../desktop/image-url-cut.js";
 import { resolveKey, type FocusKind, type KeyAction, type KeyContext, type KeyHint } from "../keys/keymap.js";
 import { DEFAULT_THEME, type Theme } from "../theme.js";
 import { changeCardSummary } from "./change.js";
+import { compareHasRangeMethod } from "./compare.js";
 import { listOpeningRow } from "./list.js";
 import { managedApproval } from "./managed.js";
 import type { AppOpenTarget } from "./open-target.js";
 import { truncatedMoreAsk, turnAsk, viewText } from "./primitives.js";
-import { renderView } from "./registry.js";
+import { quietStopAsk, renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
 export { turnAsk };
@@ -66,6 +67,8 @@ export interface ViewKeyFacts {
   more: string | null;
   /** The state's fix ask Enter sends (only when no row has an ask of its own). */
   fixAsk: string | null;
+  /** What the bar calls that ask (`check first` for a reconcile step); absent = `fix`. */
+  fixLabel?: string;
   /** The live region has more lines below (`m` pages it when there is no `more` ask). */
   livePageNext: boolean;
   /** What `c` copies on each selectable row (null = nothing on that row). */
@@ -125,11 +128,18 @@ const EMPTY_FACTS: ViewKeyFacts = {
 };
 
 /**
- * The view the keys act on: the last one that is not quiet (steps only), else
+ * The view the keys act on: the last quiet call that stopped with a step to
+ * take (`quietStopAsk`), else the last one that is not quiet (steps only), else
  * the last. A folded lookup (`foldedLookups`) is not drawn, so it never takes
  * the keys; with every view folded, none does (-1).
  */
 export function focusedViewIndex(views: readonly AnswerViewV1[], folded: ReadonlySet<number> = NONE_FOLDED): number {
+  // A quiet call that stopped with a step to take (`Check first`, its fix) takes the keys first (R-IOV-3).
+  for (let index = views.length - 1; index >= 0; index -= 1) {
+    if (!folded.has(index) && views[index] && quietStopAsk(views[index]!) !== null) {
+      return index;
+    }
+  }
   let last = -1;
   for (let index = views.length - 1; index >= 0; index -= 1) {
     if (folded.has(index)) {
@@ -193,9 +203,11 @@ export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender
     tabs: count(render.tabs),
     pages: count(render.pages),
     hiddenColumns: count(render.hiddenColumns),
-    explain: viewText(view.explain) !== "" || (managedApproval(view)?.summary ?? "") !== "" || changeCardSummary(view) !== "",
+    explain: viewText(view.explain) !== "" || (managedApproval(view)?.summary ?? "") !== "" || changeCardSummary(view) !== ""
+      || compareHasRangeMethod(view),
     more: turnAsk(truncatedMoreAsk(view)),
     fixAsk: turnAsk(render.fixAsk),
+    ...(viewText(render.fixLabel) ? { fixLabel: viewText(render.fixLabel) } : {}),
     livePageNext,
     rowCopies: (render.rowCopies ?? []).map((text) => viewText(text) || null),
     copy: viewText(render.copyText) || null,
@@ -484,7 +496,7 @@ export function viewKeyHints(
     if (facts.rowAsks.some((ask) => ask !== null)) {
       hints.push({ key: "enter", label: "open" });
     } else if (facts.fixAsk) {
-      hints.push({ key: "enter", label: "fix" });
+      hints.push({ key: "enter", label: facts.fixLabel || "fix" });
     }
   }
   if (facts.tabs > 1) hints.push({ key: `1-${Math.min(9, facts.tabs)}`, label: facts.tabNoun || "switch tab" });

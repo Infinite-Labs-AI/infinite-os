@@ -59,9 +59,14 @@ export const renderLink: KindRenderer<"link"> = (view, ctx) => {
     }
   } else {
     const address = viewText(body.shortUrl) || viewText(body.url);
+    const tagged = viewText(body.finalUrl);
     if (address && body.minted === true) {
       lines.push(copyLine(address, ctx));
       copyText = address;
+    } else if (view.state === "preview" && tagged) {
+      // A preview (W3-link-preview): nothing was made, but the tagged URL it shows is real
+      // words to paste. `c` copies it; its `to` row says it, so no bare base URL above.
+      copyText = tagged;
     } else if (address) {
       lines.push(paint(fitLine(address, width), "muted", ctx));
     }

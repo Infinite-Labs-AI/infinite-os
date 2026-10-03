@@ -10,6 +10,7 @@ import type { AnswerViewEnvelopeV1, AnswerViewKind } from "@infinite-os/types";
 
 import type { KeyContext, KeyHint } from "../keys/keymap.js";
 import type { Theme } from "../theme.js";
+import type { MetaRepeats } from "./meta-fold.js";
 import type { AppOpenTarget } from "./open-target.js";
 
 export interface ViewRenderCtx {
@@ -54,6 +55,14 @@ export interface ViewRenderCtx {
    * acts, unless `scrollback`.
    */
   columnKey?: boolean;
+  /** Another view of this finished turn has the keys (R-IOV-3): this one names no key (`m for more`). */
+  keysElsewhere?: boolean;
+  /**
+   * What this view repeats of an earlier view of the same read in its turn
+   * (N27, `meta-fold.ts`): those parts are not drawn again, and ONE dim line
+   * names them. Set by the turn's layout; absent = the view draws whole.
+   */
+  repeats?: MetaRepeats;
 }
 
 /** One view, drawn. `layout.ts` stacks head, source, detail, then footnotes. */
@@ -84,6 +93,11 @@ export interface ViewRender {
    * Set by the shell only when no row has an ask of its own.
    */
   fixAsk?: string;
+  /**
+   * What the bar calls Enter's ask when it is not a fix: a quiet call not sure
+   * it happened sends its reconcile step (`check first`). Absent = `fix`.
+   */
+  fixLabel?: string;
   /** What `c` copies on each selectable row (a row's `copy`, else its URL); null = nothing. */
   rowCopies?: readonly (string | null)[];
   /** What `c` copies for the view as a whole (a minted link); used when the row has nothing. */

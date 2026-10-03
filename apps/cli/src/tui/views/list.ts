@@ -255,7 +255,23 @@ function rowLines(
   // When it draws, the name column fits its head ("Campaign"; rev 3) the way a value
   // column fits its label, so the head is cut only when the pane has no room for it.
   const nameWidth = headed ? displayWidth(nameLabel) : 0;
-  const titleWidth = Math.max(1, Math.min(Math.max(longestTitle, nameWidth), width - fixed - used(kept)));
+  const wantTitle = Math.max(longestTitle, nameWidth);
+  let titleWidth = Math.max(1, Math.min(wantTitle, width - fixed - used(kept)));
+  // The label column takes the free width before it is cut (TJ-13: `No email on th…` beside a
+  // 53-cell text column): the widest text columns give way first, each down to its own label
+  // (or MIN_TITLE_CELLS), their cells cut with `…`. A number is never cut.
+  for (const index of [...kept].sort((a, b) => (columnWidths[b] ?? 0) - (columnWidths[a] ?? 0))) {
+    const need = wantTitle - titleWidth;
+    if (need <= 0) break;
+    // A text column that reads as numbers (right-aligned below) is not words to cut.
+    if (columns[index]!.unit !== "text" || cells.every((row) => !row[index] || looksNumeric(row[index] ?? ""))) continue;
+    const floor = Math.max(MIN_TITLE_CELLS, displayWidth(columns[index]!.label));
+    const take = Math.min(need, (columnWidths[index] ?? 0) - floor);
+    if (take <= 0) continue;
+    columnWidths[index] = (columnWidths[index] ?? 0) - take;
+    for (const row of cells) row[index] = truncateCells(row[index] ?? "", columnWidths[index]!);
+    titleWidth += take;
+  }
   // A count that carries its noun (`3 trials`) reads left-aligned, as r4 prints it.
   const right = columns.map((column, index) =>
     !(bare && column.unit === "count") && (column.unit !== "text" || cells.every((row) => !row[index] || looksNumeric(row[index] ?? "")))

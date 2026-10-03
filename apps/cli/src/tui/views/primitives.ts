@@ -442,7 +442,7 @@ export function turnAsk(value: unknown): string | null {
   return text && !text.startsWith("/") ? text : null;
 }
 
-/** `shown of total · reason · m for more`, for the kinds whose bodies page (numbers, list); no key named in scrollback. */
+/** `shown of total · reason · m for more`, for the kinds whose bodies page (numbers, list); no key named in scrollback or on a view without the keys. */
 export function truncationLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[] {
   if (view.kind !== "numbers" && view.kind !== "list") {
     return [];
@@ -456,7 +456,8 @@ export function truncationLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[
   const parts = [
     total === null ? `${count.format(truncated.shown)} shown` : `${count.format(truncated.shown)} of ${count.format(total)}`,
     viewText(truncated.reason),
-    truncatedMoreAsk(view) && !ctx.scrollback ? "m for more" : ""
+    // `m` acts only on the view the keys are on, never on another view of a finished turn.
+    truncatedMoreAsk(view) && !ctx.scrollback && !ctx.keysElsewhere ? "m for more" : ""
   ].filter(Boolean);
   return paragraph(parts.join(" · "), "muted", ctx);
 }
