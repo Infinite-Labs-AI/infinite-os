@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   ANSWER_VIEW_CONTRACT_REVISION, ANSWER_VIEW_KINDS, ANSWER_VIEW_LIMITS, ANSWER_VIEW_STATES, ARCHIVE_ASSET_ID_PATTERN,
-  type AnswerViewV1, type ChangeBodyV1, type LeaderV1, type ListBodyV1, type RecordBodyV1, type TodayLegV1
+  type AnswerViewEnvelopeV1, type AnswerViewV1, type ChangeBodyV1, type LeaderV1, type ListBodyV1, type RecordBodyV1,
+  type StateReasonV1, type TodayLegV1
 } from "./answer-view.js";
 const stripped = (k: string) => { const n = k.toLowerCase().replace(/[^a-z0-9]/g, "");
   return n.endsWith("token") || n.includes("credential") || n === "confirmationid"; };
@@ -56,6 +57,37 @@ describe("answer view contract v1", () => {
     expect(src).toMatch(/nameLabel\?: string;.*rev 3/);
     expect(src).toMatch(/status\?: StatusWordV1;.*rev 3/);
     expect(src).toMatch(/detail\?: string;.*rev 3/);
+  });
+  it("revision 3: an answer may name its host's account handles and a state reason its step word (both optional)", () => {
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(3);
+    expect(ANSWER_VIEW_LIMITS.maxHostHandleChars).toBe(128);
+    const scope = { workspaceName: "Demo", crossWorkspace: false,
+      account: { project: "proj_demo", source: "src_demo" } } satisfies AnswerViewEnvelopeV1["scope"];
+    const reason = { code: "role_needed", words: "Only an owner or admin can do this.", short: "Not allowed",
+      step: "not allowed" } satisfies StateReasonV1;
+    // A view built without them is unchanged: both are optional.
+    const oldScope = { workspaceName: "Demo", crossWorkspace: false } satisfies AnswerViewEnvelopeV1["scope"];
+    const oldReason = { code: "role_needed", words: "Only an owner or admin can do this." } satisfies StateReasonV1;
+    expect(["account" in oldScope, "step" in oldReason]).toEqual([false, false]);
+    expect(reason.step.length).toBeLessThanOrEqual(ANSWER_VIEW_LIMITS.maxShortTextChars);
+    // The handles share the archive id's character rule (one pattern, no second regex) and its bound.
+    for (const handle of [scope.account.project, scope.account.source, "0f8e2a4c-5b6d-4e7f-8a9b-0c1d2e3f4a5b",
+      "a".repeat(ANSWER_VIEW_LIMITS.maxHostHandleChars)]) expect(ARCHIVE_ASSET_ID_PATTERN.test(handle), handle).toBe(true);
+    for (const handle of ["", "proj demo", "proj/demo", "https://example.com/p", "a".repeat(ANSWER_VIEW_LIMITS.maxHostHandleChars + 1)]) {
+      expect(ARCHIVE_ASSET_ID_PATTERN.test(handle), handle).toBe(false);
+    }
+    // A full view carries both and still holds no stripped key.
+    const view = { v: 1, kind: "quiet", tool: "t", title: "T", state: "blocked", stateReason: reason, asOf: null,
+      scope, caveats: [], body: { stepLine: "not allowed" } } satisfies AnswerViewV1;
+    expect(view.scope.account).toEqual({ project: "proj_demo", source: "src_demo" });
+  });
+  it("revision 3: the contract source documents the account handles and the step word", () => {
+    const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 3 as const;.*AnswerViewEnvelopeV1\.scope\.account; StateReasonV1\.step/);
+    expect(src).toMatch(/account\?: \{ project: string; source: string \};.*host-only; the terminal ignores it.*rev 3$/m);
+    expect(src).toMatch(/step\?: string;.*rev 3$/m);
+    expect(src).toMatch(/maxHostHandleChars: 128/);
+    expect(src).toMatch(/Short host words; rev 3:.*StateReasonV1\.step/);
   });
   it("a numbers view keeps today out of the settled leg", () => {
     const view = { v: 1, kind: "numbers", tool: "t", title: "T", state: "ready", asOf: null,

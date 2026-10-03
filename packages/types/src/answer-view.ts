@@ -5,7 +5,7 @@
  * Key rule: no key may end in "token", contain "credential", or equal a host-private key.
  */
 // ---- contract body (vendored verbatim into 1bu-1; edit only in infinite-os) ----
-export const ANSWER_VIEW_CONTRACT_REVISION = 3 as const;   // rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail
+export const ANSWER_VIEW_CONTRACT_REVISION = 3 as const;   // rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail; AnswerViewEnvelopeV1.scope.account; StateReasonV1.step
 export const RESULT_VIEW_CAPABILITY = "result.view.v1" as const;
 export const CONFIRM_FIELDS_CAPABILITY = "confirm.fields.v1" as const;
 export const CONFIRM_STREAM_CAPABILITY = "confirm.stream.v1" as const;
@@ -15,10 +15,13 @@ export const ANSWER_VIEW_LIMITS = {
   // A change target's parents; rev 3. A part longer than maxTargetPathPartChars is cut to it, ending in "…";
   // more than maxTargetPathParts parts (or any part not a string, or empty once cleaned) withholds the whole path.
   maxTargetPathParts: 4, maxTargetPathPartChars: 120,
-  // Short host words; rev 3: ListBodyV1.nameLabel, RecordBodyV1.status.word, LeaderV1.detail. A longer string is cut to
+  // Short host words; rev 3: ListBodyV1.nameLabel, RecordBodyV1.status.word, LeaderV1.detail, StateReasonV1.step. A longer string is cut to
   // maxShortTextChars, ending in "…"; a value not a string, or empty once cleaned, is withheld (the field is dropped);
   // a status whose tone is not one of StatusWordV1's tones is withheld.
   maxShortTextChars: 80,
+  // The host's account handles; rev 3: AnswerViewEnvelopeV1.scope.account. Each part matches ARCHIVE_ASSET_ID_PATTERN's
+  // character rule and is at most maxHostHandleChars; a part that is bad or missing withholds the whole slot, never half.
+  maxHostHandleChars: 128,
 } as const;
 /** rev 3: a CreativeRefV1.archiveAssetId is an archive id: letters, digits and `_ . : -`, at most 128; no '/', never a URL or path.
  *  It never starts with a URL scheme (http, https, javascript, data, mailto, file, blob, vbscript, ftp; any case) and a ':'.
@@ -49,7 +52,10 @@ export interface AppLinkV1 { place: string; label: string; params?: Record<strin
 /** The message a client sends as a NEW user turn. Clients never call tools directly. */
 export interface NextStepV1 { label: string; ask: string }
 /** short: the head's words in place of the generic state words ("Changed on Meta", "1 not measured"); words: the full sentence. */
-export interface StateReasonV1 { code: string; words: string; short?: string; fix?: { label: string; appLink?: AppLinkV1; ask?: string } }
+export interface StateReasonV1 {
+  code: string; words: string; short?: string; fix?: { label: string; appLink?: AppLinkV1; ask?: string };
+  step?: string;  // the Steps row's short word for this state, in host words ("not allowed", "limit"); drawn verbatim, never derived from codes; bounds as maxShortTextChars; rev 3
+}
 export interface ProvenanceV1 { source: string; via: "our_db" | "live_read" | "this_mac" | "server"; verdictsBy?: string }
 export interface CostV1 {
   usd: number | null; estimate: boolean;
@@ -240,7 +246,10 @@ export interface AnswerViewEnvelopeV1<K extends AnswerViewKind = AnswerViewKind>
   state: AnswerViewState; stateReason?: StateReasonV1;
   outcome?: OutcomeV1; retry?: RetryV1; // writes: explicit, never parsed from messages
   asOf: IsoTime | null; provenance?: ProvenanceV1;
-  scope: { workspaceName: string; crossWorkspace: boolean };
+  scope: {
+    workspaceName: string; crossWorkspace: boolean;
+    account?: { project: string; source: string };   // the host's opaque handles for the workspace and the connected source the numbers came from, so a redraw or re-read of an OLD answer uses its own account, never the one selected now; each part matches ARCHIVE_ASSET_ID_PATTERN's character rule, at most maxHostHandleChars (128); a bad or missing part withholds the whole slot; host-only; the terminal ignores it; a public bridge may drop it; rev 3
+  };
   cost?: CostV1; caveats: string[];    // server words, printed verbatim
   next?: NextStepV1[]; appLink?: AppLinkV1; untrusted?: true;
   approval?: ApprovalV1; receipt?: ReceiptV1; reconcile?: ReconcileV1;
