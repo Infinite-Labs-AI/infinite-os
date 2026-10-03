@@ -241,6 +241,49 @@ describe("the key bar (region-keybar-*, the last row)", () => {
     expect(line.endsWith("…")).toBe(true);
   });
 
+  // S2 (round 5): a composite view engaged at 80 cut its bar at `tab switch si…`, so the way to the answer side was unreadable.
+  const composite: KeyHint[] = [
+    { key: "j k", label: "row" },
+    { key: "↑ ↓", label: "scroll" },
+    { key: "1-3", label: "level" },
+    { key: "→", label: "columns" },
+    { key: "o", label: "open in Meta Ads" },
+    { key: "?", label: "what it does" },
+    { key: "tab", label: "switch side" }
+  ];
+
+  it("drops lower keys first so o open and tab switch side stay whole at 80 (S2)", () => {
+    const line = stripAnsi(keyBarLine(composite, 80, TRUECOLOR));
+    expect([...line].length).toBeLessThanOrEqual(80);
+    expect(line).toContain(" tab  switch side");
+    expect(line).toContain(" o  open in Meta Ads");
+    expect(line).toContain(" ↑ ↓  scroll");
+    expect(line).not.toContain("…");
+    // `/ commands` goes first, then the keys at the end of the bar (`?` before `→`).
+    expect(line).not.toContain("commands");
+    expect(line).not.toContain("what it does");
+  });
+
+  it("keeps the order of the keys that stay", () => {
+    const line = stripAnsi(keyBarLine(composite, 80, TRUECOLOR));
+    const order = [" j k ", " ↑ ↓ ", " o ", " tab "].map((key) => line.indexOf(key));
+    expect(order.every((at) => at >= 0)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it("still cuts only the tail when every kept key fits (the r4 c60 bars keep their `/` chip)", () => {
+    const line = stripAnsi(keyBarLine(card("p", "pause", { caps: { open: true, watch: false, retry: false } }), 60, TRUECOLOR));
+    expect(line).toBe(" p  pause    n  dismiss    o  open    tab  switch side    / ");
+    const cut = stripAnsi(keyBarLine([{ key: "j k", label: "row" }, { key: "→", label: "columns" }, { key: "o", label: "open" }], 60, TRUECOLOR));
+    // r4 view-01-numbers--c60, as drawn.
+    expect(cut).toBe(" j k  row    →  columns    o  open    tab  switch side    / ");
+  });
+
+  it("drops nothing when the bar fits", () => {
+    const line = stripAnsi(keyBarLine(composite, 140, TRUECOLOR));
+    expect(line.trimEnd().endsWith(" ?  what it does    tab  switch side    /  commands")).toBe(true);
+  });
+
   it("prints chips as same-width brackets when plain", () => {
     expect(keyBarLine([], 100, theme("plain"))).toBe("[tab] switch side   [/] commands");
   });

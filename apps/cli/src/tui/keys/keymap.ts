@@ -11,7 +11,7 @@
 import type { Key } from "ink";
 
 import { terminalText } from "../../desktop/terminal-text.js";
-import { paintSegments, truncSegments, type StyledSegment } from "../lib/styled-segments.js";
+import { paintSegments, segmentsWidth, truncSegments, type StyledSegment } from "../lib/styled-segments.js";
 import type { Theme } from "../theme.js";
 
 export type FocusKind = "composer" | "card" | "rows" | "document";
@@ -294,7 +294,10 @@ const TAB_HINT = ALWAYS_KEY_HINTS.find((hint) => hint.key === "tab")!;
  * reaches the TTY. Not cut to a width.
  */
 export function keyBarSegments(hints: readonly KeyHint[], options: KeyBarOptions = {}): StyledSegment[] {
-  const shown = keyBarShownHints(hints, options);
+  return shownSegments(keyBarShownHints(hints, options));
+}
+
+function shownSegments(shown: readonly KeyHint[]): StyledSegment[] {
   return shown.flatMap((hint, index): StyledSegment[] => {
     const key = terminalText(hint.key);
     const label = terminalText(hint.label);
@@ -326,9 +329,44 @@ export function keyBarText(hints: readonly KeyHint[], options: KeyBarOptions = {
 /**
  * The key bar, the session's LAST row: one row, cut to `width` with `…` on
  * the key that does not fit (later keys dropped), painted at the theme's tier.
+ * When the cut would reach a key the user needs to move on (the OK key, `n`,
+ * `o`, `tab`, `esc`, `enter`, `↑ ↓`), lower keys give way first, whole:
+ * `/ commands`, then the others from the end of the bar (`fitKeyBar`, S2).
  */
 export function keyBarLine(hints: readonly KeyHint[], width: number, theme: Theme, options: KeyBarOptions = {}): string {
-  return paintSegments(truncSegments(keyBarSegments(hints, options), Math.max(1, Math.floor(width))), theme);
+  const cells = Math.max(1, Math.floor(width));
+  return paintSegments(truncSegments(shownSegments(fitKeyBar(keyBarShownHints(hints, options), cells)), cells), theme);
+}
+
+/** The keys that always stay whole on a bar that is too wide (S2): the way on from here. */
+const KEPT_BAR_KEYS: ReadonlySet<string> = new Set(["n", "o", "tab", "esc", "enter", "↑ ↓"]);
+
+const keptOnBar = (hint: KeyHint): boolean => hint.ok === true || KEPT_BAR_KEYS.has(hint.key);
+
+/**
+ * The shown keys that fit `width` with every kept key whole. A bar whose kept
+ * keys already fit is left as it is (only its tail is cut, as r4 draws its
+ * c60 bars: `… tab switch side    / comm…`). Otherwise `/ commands` drops
+ * first, then the other keys one by one from the end; the kept keys keep
+ * their order and are never dropped.
+ */
+export function fitKeyBar(shown: readonly KeyHint[], width: number): KeyHint[] {
+  let kept = [...shown];
+  const fits = (hints: readonly KeyHint[]): boolean => {
+    const last = hints.reduce((at, hint, index) => keptOnBar(hint) ? index : at, -1);
+    // A key after the last kept one needs its 3-space gap whole, or the cut would land in the kept label.
+    const gap = last < hints.length - 1 ? 3 : 0;
+    return last < 0 || segmentsWidth(shownSegments(hints.slice(0, last + 1))) + gap <= width;
+  };
+  const order = [
+    ...kept.filter((hint) => hint.key === "/"),
+    ...kept.filter((hint) => hint.key !== "/" && !keptOnBar(hint)).reverse()
+  ];
+  for (const drop of order) {
+    if (fits(kept)) break;
+    kept = kept.filter((hint) => hint !== drop);
+  }
+  return kept;
 }
 
 /** Rows the bar takes: always one (it is cut to the width, never wrapped). */

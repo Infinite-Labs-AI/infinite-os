@@ -97,8 +97,9 @@ describe("a finished tall turn keeps the split and its keys (live L8; fake TTY, 
 
         // tab, then o: the app opens the view's place; nothing is typed.
         await sendKeys(input, "\t");
-        // At 80 a composite's bar is cut at its end (`tab switch si…`): one row, never wrapped.
-        await waitFor(() => /o\s+open/u.test(keyBar(vt)) && /tab\s+switch s/u.test(keyBar(vt)), 4_000, () => keyBar(vt));
+        // The bar is one row; when it is too wide, lower keys give way so `o open` and `tab switch side` stay whole (S2).
+        await waitFor(() => /o\s+open/u.test(keyBar(vt)) && /tab\s+switch side/u.test(keyBar(vt)), 4_000, () => keyBar(vt));
+        expect(keyBar(vt), keyBar(vt)).not.toMatch(/tab\s+switch si…/u);
         await sendKeys(input, "o");
         await waitFor(() => opened.length === 1, 4_000, () => vt.screenText().join("\n"));
         expect(composer(vt)).toMatch(/^❯ Ask Infinite/u);
