@@ -368,11 +368,13 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   };
   const focusIndex = input.focus ? input.focus.viewIndex : focusedViewIndex(input.views);
   // A view with no key focus yet (a turn still running, a committed turn) is drawn on its opening row.
-  // `→` acts only on the view the keys are on: any other names what its tables hid in words.
+  // `→` acts only on the view the keys are on, once the turn has finished (a
+  // running turn's keys are the composer's): any other names what its tables
+  // hid in words.
   const renders = input.views.map((view, index) =>
     renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus
       ? focusedViewCtx(input.focus, base)
-      : { ...plainCtx, selected: openingRow(view), ...(index === focusIndex ? {} : { columnKey: false }) }));
+      : { ...plainCtx, selected: openingRow(view), columnKey: false }));
   // Scrollback has no keys, so nothing may stay behind one. A view with tabs
   // (a document's versions) prints every tab, in order, under the one head,
   // and a list or compare table that dropped columns (`→`) prints every row

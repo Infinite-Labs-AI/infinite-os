@@ -384,9 +384,11 @@ describe("a committed turn hides nothing behind a key (scrollback has none)", ()
 
   it("a numbers view that drops a column at 60: live it names the key, committed it keeps r4's table and names what it hid in words (run-2 M7)", () => {
     const ads = fixture("numbers-ads");
-    const live = renderLiveTurn({ messages, views: [ads], focus: null, width: 60, color: false, theme }).lines;
+    const live = renderLiveTurn({ messages, views: [ads], focus: viewFocusAfterTurnDone([ads]), width: 60, color: false, theme }).lines;
     expect(live).toContain("+ Impressions · → to see");
     expect(live.some((line) => /Impressions: \d/u.test(line))).toBe(false);
+    // A turn still running has no view keys yet: → does nothing there, so the hint says it in words.
+    expect(renderLiveTurn({ messages, views: [ads], focus: null, width: 60, color: false, theme }).lines).toContain("+ Impressions hidden");
     const lines = renderCommittedTurn({ messages, views: [ads], focus: null, width: 60, color: false, theme });
     expect(lines.some((line) => keyWords.test(line))).toBe(false);
     // ONE bordered table, never label: value records, and the hidden column named.
