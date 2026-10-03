@@ -127,7 +127,7 @@ export interface DeploySignals {
  * `no_signal`: the claim was proven, but it says nothing about THIS merge's deploy (the file was already served before
  * it), and no other signal exists; the step then asks, as it does with no signal at all.
  */
-export type DeployOutcome = (DeployWait & { deployed: true }) | { deployed: false; why: "timeout" | "failed" | "no_signal" }
+export type DeployOutcome = (DeployWait & { deployed: true }) | { deployed: false; why: "timeout" | "failed" | "no_signal" | "claim_gone" }
 
 /**
  * Review P3-1: the cloud reading the proof file shows THIS merge deployed only when the merge brought that file:
@@ -183,7 +183,15 @@ async function proveOnce(ctx: WizardContext, deps: WizardDeps): Promise<SiteProv
 async function waitForDeploy(
   ctx: WizardContext,
   deps: WizardDeps,
-  input: { mergeSha: string; productionBranch: string | null; signals: DeploySignals; host: string | null; onProven: (answer: SiteProveResponse) => void }
+  input: {
+    mergeSha: string
+    productionBranch: string | null
+    signals: DeploySignals
+    host: string | null
+    onProven: (answer: SiteProveResponse) => void
+    /** The cloud answered `none`: it holds no pending claim for this workspace any more. */
+    onGone: () => void
+  }
 ): Promise<DeployOutcome> {
   const { mergeSha, signals } = input
   const started = deps.clock.now().getTime()
@@ -218,6 +226,11 @@ async function waitForDeploy(
           tone: "info"
         })
         if (!signals.infinite && !signals.github) return { deployed: false, why: "no_signal" }
+      } else if (answer?.state === "none") {
+        // Review P1-1: the claim is gone (expired, or another source took the site); waiting on it can never prove.
+        claimLive = false
+        input.onGone()
+        if (!signals.infinite && !signals.github) return { deployed: false, why: "claim_gone" }
       } else if (input.host) say(`Checking ${input.host}/.well-known/infinite-site-verification.txt…`)
     }
     if (deps.clock.now().getTime() - started >= PROVE_LIMITS.deployWaitMs) return { deployed: false, why: "timeout" }
@@ -226,7 +239,11 @@ async function waitForDeploy(
 }
 
 /** §3y.4: a deployed site whose claim is still pending is re-asked for up to 3 minutes (a CDN may lag). */
-async function proveAfterDeploy(ctx: WizardContext, deps: WizardDeps, onProven: (answer: SiteProveResponse) => void): Promise<{ proven: true } | { proven: false; outcome: ProveOutcome | null }> {
+async function proveAfterDeploy(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  onProven: (answer: SiteProveResponse) => void
+): Promise<{ proven: true } | { proven: false; outcome: ProveOutcome | null; gone?: true }> {
   const started = deps.clock.now().getTime()
   let outcome: ProveOutcome | null = null
   for (;;) {
@@ -235,6 +252,8 @@ async function proveAfterDeploy(ctx: WizardContext, deps: WizardDeps, onProven: 
       onProven(answer)
       return { proven: true }
     }
+    // Review P1-1: `none` = the cloud holds no pending claim any more; asking again cannot prove it.
+    if (answer?.state === "none") return { proven: false, outcome, gone: true }
     outcome = answer?.hosts.find((entry) => entry.outcome !== "proven")?.outcome ?? outcome
     if (deps.clock.now().getTime() - started + PROVE_LIMITS.claimGracePollMs > PROVE_LIMITS.claimGraceMs) return { proven: false, outcome }
     await deps.clock.sleep(PROVE_LIMITS.claimGracePollMs, ctx.signal)
@@ -700,6 +719,10 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   }
   const signals: DeploySignals = { infinite: hosting.provider === "vercel", github, claim: pendingClaim !== null }
   let claimProven = false
+  let claimGone = false
+  const onGone = () => {
+    claimGone = true
+  }
   const onProven = (answer: SiteProveResponse) => {
     claimProven = true
     const at = deps.clock.now().toISOString()
@@ -722,6 +745,15 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   }
   const cannotSee: StepOutcome = { kind: "parked", code: "INF_WIZ_DEPLOY_TIMEOUT", reason: "Infinite cannot see this site's deploys.", resumeHint: "Run npx infinite-tag again once it's live." }
 
+  // Review P1-1: the cloud no longer holds a pending claim (expired, or another Infinite source took the site). Never
+  // "the file is not served yet": that is not what happened.
+  const claimGoneOutcome = (): StepOutcome => ({
+    kind: "parked",
+    code: "INF_WIZ_HOST_UNCONFIRMED",
+    reason: `${productionHost ?? pendingClaim?.hosts[0] ?? "Your site"} isn't confirmed: Infinite no longer holds a pending proof for it (it expired, or another Infinite source took the site).`,
+    resumeHint: "Check this site in Infinite › Site Settings, then run npx infinite-tag again."
+  })
+
   let deploy: Extract<DeployWait, { deployed: true }>
   if (!signals.infinite && !signals.github && !signals.claim) {
     const said = await askDeployed()
@@ -730,7 +762,10 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     }
     deploy = said
   } else {
-    const waited = await waitForDeploy(ctx, deps, { mergeSha, productionBranch, signals, host: productionHost, onProven })
+    const waited = await waitForDeploy(ctx, deps, { mergeSha, productionBranch, signals, host: productionHost, onProven, onGone })
+    if (!waited.deployed && waited.why === "claim_gone") {
+      return claimGoneOutcome()
+    }
     if (!waited.deployed && waited.why === "no_signal") {
       await ctx.state.save()
       const said = await askDeployed()
@@ -769,7 +804,15 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   if (pendingClaim && !claimProven) {
     // Deployed, but the cloud has not read the file yet. The run's ONE real visit is NOT spent before the proof
     // (a visit before it can never yield an Infinite receipt); the desktop watcher and the hourly watch finish it.
+    if (claimGone) {
+      await ctx.state.save()
+      return claimGoneOutcome()
+    }
     const after = await proveAfterDeploy(ctx, deps, onProven)
+    if (!after.proven && after.gone) {
+      await ctx.state.save()
+      return claimGoneOutcome()
+    }
     if (!after.proven) {
       await ctx.state.save()
       const words = after.outcome && after.outcome !== "proven" ? PROVE_OUTCOME_WORDS[after.outcome] : PROVE_OUTCOME_WORDS.not_served

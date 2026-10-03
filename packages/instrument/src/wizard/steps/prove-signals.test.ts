@@ -209,6 +209,33 @@ describe("prove: the site-file claim (§3y.4)", () => {
     expect(subs.some((text) => text.includes("Infinite read its proof file"))).toBe(false)
   })
 
+  it("review P1-1: the cloud answers site-prove 'none' (the claim expired or another source took the site) → parked HOST_UNCONFIRMED at once with THAT reason, never 'not served', no visit", async () => {
+    const none = { state: "none" as const, hosts: [], siteSource: null }
+    const bundle = world({ siteProve: [pending(), none] })
+    const { outcome, subs } = await run(bundle, mergedState(answeredSite(true)))
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_HOST_UNCONFIRMED" })
+    expect((outcome as { reason: string }).reason).toBe(`${HOST} isn't confirmed: Infinite no longer holds a pending proof for it (it expired, or another Infinite source took the site).`)
+    expect((outcome as { reason: string }).reason).not.toContain("not served")
+    const names = bundle.log.names("bridge")
+    // It stopped asking after the 'none' (no 20-minute wait on a claim that cannot prove).
+    expect(names.filter((name) => name === "bridge.proveSite")).toHaveLength(2)
+    expect(names).not.toContain("bridge.claimProof")
+    expect(names).not.toContain("bridge.startTest")
+    expect(subs.some((text) => text.startsWith("✓ Deployed"))).toBe(false)
+  })
+
+  it("review P1-1: deployed on GitHub, then 'none' during the 3-minute grace → the same honest park, at once", async () => {
+    const none = { state: "none" as const, hosts: [], siteSource: null }
+    const bundle = world({ deployments: { forSha: ["ready"] }, siteProve: [none] })
+    const started = bundle.clock.now().getTime()
+    const { outcome } = await run(bundle, mergedState(answeredSite(true)))
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_HOST_UNCONFIRMED" })
+    expect((outcome as { reason: string }).reason).toContain("no longer holds a pending proof")
+    expect(bundle.log.names("bridge").filter((name) => name === "bridge.proveSite")).toHaveLength(1)
+    expect(bundle.clock.now().getTime() - started).toBeLessThan(PROVE_LIMITS.claimGraceMs)
+    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
+  })
+
   it("deployed on GitHub but the claim still pending → 3 more minutes of proofs, then parked HOST_UNCONFIRMED with NO real visit and NO proof claim", async () => {
     const bundle = world({ deployments: { forSha: ["ready"] }, siteProve: [pending("wrong_token")] })
     const { outcome } = await run(bundle, mergedState(answeredSite(true)))
