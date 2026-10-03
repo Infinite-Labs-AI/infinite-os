@@ -190,8 +190,8 @@ export function fakeGit(log: CallLog, options: FakeGitOptions = {}) {
 export function fakeHost(
   log: CallLog,
   defaultBranch: string | null = "main",
-  /** The newest successful GitHub "Production" deployment the host ask reads (null = none). */
-  latestProduction: { sha: string; createdAt: string; environmentUrl: string | null; environment: string | null } | null = null
+  /** The newest successful GitHub "Production" deployment (null = none). `before` never reads it for the host ask. */
+  latestProduction: { sha: string; createdAt: string } | null = null
 ): GitHostAdapter {
   return strict<GitHostAdapter>("host", {
     kind: "github",
@@ -200,7 +200,7 @@ export function fakeHost(
       if (defaultBranch === "THROW") throw new Error("gh: not logged in")
       return { isPrivate: true, defaultBranch, viewerPermission: "WRITE" }
     },
-    // The deploy reads (`deploymentReader`): only the newest production deployment is read by `before`.
+    // The deploy reads (`deploymentReader`): `before` reads none of them (no `*.vercel.app` candidate is derived).
     ...({
       async productionDeployment() {
         throw new Error("host.productionDeployment must not be called by before")

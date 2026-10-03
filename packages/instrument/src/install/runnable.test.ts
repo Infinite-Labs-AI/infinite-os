@@ -7,6 +7,7 @@ import { candidate, fakeBefore, fakeHosting, fakeKeys, fakeProductionDeniedConfl
 import { PLAN_LINE_KINDS, type PlanLineKind } from "../wizard/contracts/asks.js"
 import type { TagHosting } from "../wizard/contracts/bridge.js"
 import { buildHostGuardExpression, classifyHost, productionDeniedConflict } from "../host-guard.js"
+import { resolveProductionHost } from "../wizard/site-host.js"
 import {
   agentJobsAfterApprovals,
   buildPlanModel,
@@ -128,25 +129,25 @@ describe("the Infinite line (DECISIONS §1.6 table)", () => {
     expect(plan.lines.find((line) => line.id === "npm_install")?.requires).toBe("approval")
   })
 
-  it("review-2 P2-2: Vercel connected but production only on <project>.vercel.app → the claim path, as the cloud takes it (no server lane)", () => {
-    // The cloud proves through Vercel only the project's production DOMAINS; for an alias it answers the claim
-    // (`pending_proof`) and `provision-env` has no source. So the plan must say the claim wording and never pre-check
-    // a lane whose executor cannot run.
+  it("NEGATIVE (founder ruling 2026-10-03): Vercel connected but production only on <project>.vercel.app → no Infinite line, no claim, no server lane", () => {
+    // Infinite needs the site's own domain. The alias is never the run's host, and even a stale run state naming it
+    // (an earlier tag version) never makes the Infinite line, the claim wording or the server lane approvable.
     const keys = freshKeys()
     const hosting = fakeHosting({ productionDomains: [], productionAliases: ["acme-store.vercel.app"], envWriteGranted: true })
-    const input = freshInput({ keys, before: fakeBefore({ keys, hosting }), run: { site: answered("acme-store.vercel.app"), siteClaim: true } })
-    expect(lineFactsFor(input).vercelServesHost).toBe(false)
-    const plan = buildPlanModel(input)
-    const index = plan.lines.findIndex((line) => line.id === "install_provider:infinite")
-    expect(plan.lines[index]).toMatchObject({ requires: "approval" })
-    expect(plan.lines[index + 1]).toMatchObject({ id: "info:infinite_site_file", text: RUNNABILITY_TEXT.claimWording("acme-store.vercel.app") })
-    expect(plan.lines.some((line) => line.id === "server_lane")).toBe(false)
-    expect(plan.lines.some((line) => line.id === "npm_install")).toBe(false)
-    expect(plan.lines.find((line) => line.id === "user_action:server_lane")?.text).toBe(RUNNABILITY_TEXT.serverLaneNoConnection)
-    // Once the claim is proven (a source with the reserved key), the verified path opens the lane on the next run.
-    const proven = { ...keys, infinite: { ...keys.infinite, status: "ready" as const, siteSourceKey: "site_reserved", productionHosts: ["acme-store.vercel.app"] } }
-    const after = buildPlanModel(freshInput({ keys: proven, before: fakeBefore({ keys: proven, hosting }), run: { site: answered("acme-store.vercel.app"), siteClaim: true } }))
-    expect(after.lines.find((line) => line.id === "server_lane")?.requires).toBe("approval")
+    for (const site of [undefined, answered("acme-store.vercel.app")]) {
+      const input = freshInput({ keys, before: fakeBefore({ keys, hosting }), run: { ...(site ? { site } : {}), siteClaim: true } })
+      expect(lineFactsFor(input).vercelServesHost).toBe(false)
+      const plan = buildPlanModel(input)
+      expect(plan.lines.find((line) => line.id === "user_action:infinite")?.text, String(site?.productionHost)).toBe(RUNNABILITY_TEXT.infiniteNoHost)
+      expect(plan.lines.some((line) => line.id === "install_provider:infinite" && line.requires === "approval")).toBe(false)
+      expect(plan.lines.some((line) => line.id === "info:infinite_site_file")).toBe(false)
+      expect(plan.lines.some((line) => line.id === "server_lane" || line.id === "npm_install")).toBe(false)
+    }
+    // A custom domain on the same connection takes the verified path (the lane approvable).
+    const custom = fakeHosting({ productionDomains: ["acme-store.com"], productionAliases: ["acme-store.vercel.app"], envWriteGranted: true })
+    const plan = buildPlanModel(freshInput({ keys, before: fakeBefore({ keys, hosting: custom }), run: { site: answered("acme-store.com"), siteClaim: true } }))
+    expect(plan.lines.find((line) => line.id === "install_provider:infinite")?.requires).toBe("approval")
+    expect(plan.lines.find((line) => line.id === "server_lane")?.requires).toBe("approval")
   })
 
   it("NEGATIVE: Vercel connected without env writes → the no-scope line, never a pre-checked lane", () => {
@@ -251,7 +252,7 @@ describe("ONE count of the agent jobs (P2-8)", () => {
   })
 })
 
-describe("live run 2: the preview guard exempts exactly the accepted <project>.vercel.app production host", () => {
+describe("founder ruling 2026-10-03: the preview guard never exempts a *.vercel.app because the run accepted it", () => {
   const ALIAS = "acme-store.vercel.app"
   const decide = (runProductionHost: string | null, observed: string | null) =>
     guardDecision({
@@ -264,19 +265,23 @@ describe("live run 2: the preview guard exempts exactly the accepted <project>.v
       productionDeniedConflict
     })
 
-  it("the alias is exempt (fires), every other *.vercel.app stays silent, exempt first", () => {
-    const guard = decide(ALIAS, ALIAS)
-    expect(guard).toEqual({ emit: true, exempt: [ALIAS], deny: expect.any(Array) })
-    if (!guard.emit) return
-    expect(classifyHost(ALIAS, guard)).toBe("exempt")
-    for (const preview of ["acme-store-git-infinite-tag-acme.vercel.app", "acme-store-a1b2c3d4e-acme.vercel.app", "other.vercel.app"]) {
-      expect(classifyHost(preview, guard), preview).toBe("denied")
+  it("NEGATIVE: the alias (flag or answer) is never the run's host, so a live site on it emits no guard (production_denied), never an exemption", () => {
+    for (const raw of [ALIAS, `https://${ALIAS}/`, "acme-store-git-main-acme.vercel.app", "acme-store-a1b2c3d4e-acme.vercel.app", "vercel.app"]) {
+      const runHost = resolveProductionHost({ keys: freshKeys(), hosting: NO_HOSTING, flag: raw }).host
+      expect(runHost, raw).toBeNull()
+      expect(decide(runHost, ALIAS)).toEqual({ emit: false, reason: "production_denied", hosts: [ALIAS] })
     }
-    // The emitted expression lists the alias first in its exempt array (the same order as the TS twin).
-    expect(buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny })).toContain(`"${ALIAS}"`)
   })
 
-  it("NEGATIVE: the alias observed on the live site but never accepted as the run's host would be silenced → no guard", () => {
-    expect(decide(null, ALIAS)).toEqual({ emit: false, reason: "production_denied", hosts: [ALIAS] })
+  it("a custom domain run host is exempt (fires), every *.vercel.app stays silent, exempt first", () => {
+    const runHost = resolveProductionHost({ keys: freshKeys(), hosting: NO_HOSTING, flag: "acme-store.com" }).host
+    const guard = decide(runHost, "acme-store.com")
+    expect(guard).toEqual({ emit: true, exempt: ["acme-store.com"], deny: expect.any(Array) })
+    if (!guard.emit) return
+    expect(classifyHost("acme-store.com", guard)).toBe("exempt")
+    for (const preview of [ALIAS, "acme-store-git-infinite-tag-acme.vercel.app", "acme-store-a1b2c3d4e-acme.vercel.app"]) {
+      expect(classifyHost(preview, guard), preview).toBe("denied")
+    }
+    expect(buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny })).toContain(`"acme-store.com"`)
   })
 })

@@ -35,7 +35,7 @@ import type { WizardDeps } from "../contracts/deps.js"
 
 import { GITIGNORE_FENCE_BLOCK } from "../../harness/outputs.js"
 import { reverseEditRecord, sha256Tagged } from "../../install/edits.js"
-import { GITIGNORE_FENCE_LINE_ID, step as installStep } from "./install.js"
+import { GITIGNORE_FENCE_LINE_ID, siteSourceHosts, step as installStep } from "./install.js"
 import { step as planStep } from "./plan.js"
 
 afterEach(cleanupSites)
@@ -369,6 +369,21 @@ describe("§3y.2 the site-file claim at install (IO-3)", () => {
     )
     expect(h.siteSourceCalls).toEqual([])
     expect(readInstallManifest(h.ctx.root)?.ids?.infinite ?? null).toBeNull()
+  })
+})
+
+describe("siteSourceHosts: only the site's own domain (founder ruling 2026-10-03)", () => {
+  const noHosts = () => fakeKeys({ infinite: { ...fakeKeys().infinite, productionHosts: [] } })
+
+  it("NEGATIVE: no Vercel or platform address joins the claim, as the run's host or the observed one", () => {
+    for (const host of ["acme-store.vercel.app", "acme-store-git-main-acme.vercel.app", "acme-store-a1b2c3d4e-acme.vercel.app", "vercel.app", "github.io", "acme.github.io", "acme.netlify.app"]) {
+      expect(siteSourceHosts(noHosts(), host, host), host).toEqual([])
+      expect(siteSourceHosts(noHosts(), "acme-store.com", host), host).toEqual(["acme-store.com"])
+    }
+  })
+
+  it("a custom domain (and its observed www twin) joins", () => {
+    expect(siteSourceHosts(noHosts(), "acme-store.com", "www.acme-store.com")).toEqual(["acme-store.com", "www.acme-store.com"])
   })
 })
 

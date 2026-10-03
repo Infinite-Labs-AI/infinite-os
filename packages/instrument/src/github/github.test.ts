@@ -230,8 +230,7 @@ describe("the GitHub adapter (§3g.2)", () => {
     expect(await adapter.productionDeployment(OTHER)).toEqual({ state: "failed" })
     expect(await adapter.productionDeployment("d".repeat(40))).toEqual({ state: "not_found" })
     // The newest SUCCESSFUL production deployment (the failed newer one is skipped).
-    // It carries the deployment URL Vercel wrote (the live smoke's shape), from which the alias candidate comes.
-    expect(await adapter.latestProductionDeployment()).toEqual({ sha: SHA, createdAt: "2026-10-03T05:47:00Z", environmentUrl: "https://site-mix177n53-chaos-edge.vercel.app", environment: "Production" })
+    expect(await adapter.latestProductionDeployment()).toEqual({ sha: SHA, createdAt: "2026-10-03T05:47:00Z" })
     expect(await adapter.vercelDeploymentSeen()).toBe(true)
   })
 

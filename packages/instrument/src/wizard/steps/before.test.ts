@@ -438,7 +438,7 @@ describe("step before: the live-site address (§3y.1)", () => {
     expect(subs).toContain("✓ Live site: www.acme-store.com (you said)")
   })
 
-  it("a typed address that is not a domain, then a preview address, is refused twice and read as 'not live yet'", async () => {
+  it("a typed address that is not a domain, then a Vercel address, is refused twice and read as 'not live yet'", async () => {
     const asked: Asked = []
     const s = setup({ ...unknownHost(), ctx: { ask: answering(asked, ["__type__", "not a host", "shop-git-main-acme.vercel.app"]) } })
     await s.run()
@@ -448,38 +448,44 @@ describe("step before: the live-site address (§3y.1)", () => {
     expect(asked[2]!.payload.question).toMatch(/^not a host isn't a domain name \(press ESC if it isn't live yet\) /)
     const subs = s.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
     expect(subs).toContain("! not a host isn't a domain name (press ESC if it isn't live yet)")
-    expect(subs.some((text) => text.startsWith("! shop-git-main-acme.vercel.app looks like a Vercel preview"))).toBe(true)
+    expect(subs).toContain("! Infinite needs your site's own domain. shop-git-main-acme.vercel.app is a Vercel address — add a custom domain in Vercel, then run npx infinite-tag again.")
     expect(s.state.site).toMatchObject({ productionHost: null, source: "answer" })
     expect(s.bridge.sentTests).toEqual([])
   })
 
-  it("live run 2: the site's Vercel production alias (from GitHub's Production deployment) is offered, accepted and tested", async () => {
+  it("NEGATIVE (founder ruling 2026-10-03): GitHub's Production deployment is on Vercel, the repo names the alias — the ask still offers no *.vercel.app", async () => {
     const asked: Asked = []
     const s = setup({
       ...unknownHost(),
-      latestProduction: { sha: "a".repeat(40), createdAt: "2026-10-03T08:20:00Z", environmentUrl: "https://infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app", environment: "Production" },
-      ctx: { ask: answering(asked, ["infinite-tag-smoke-site.vercel.app"]) }
+      fsFiles: { "/repo/public/CNAME": "infinite-tag-smoke-site.vercel.app\n" },
+      latestProduction: { sha: "a".repeat(40), createdAt: "2026-10-03T08:20:00Z" },
+      ctx: { ask: answering(asked, ["infinite-tag-smoke-site.vercel.app", "infinite-tag-smoke-site.vercel.app"]) }
     })
     const outcome = await s.run()
     expect(outcome.kind).toBe("ok")
-    // Review-2 P2-3: both derived aliases are GUESSES; neither is pre-selected (the user picks one).
-    expect(asked[0]!.payload.options!.map((option) => option.label)).toEqual([
-      "infinite-tag-smoke-site-chaos-edge.vercel.app  (a guess: your Vercel team's address for this project)",
-      "infinite-tag-smoke-site.vercel.app  (a guess: Vercel names it after the project; it may be another team's)",
-      "Type another address",
-      "It isn't live yet"
-    ])
+    expect(asked[0]!.payload.options!.map((option) => option.label)).toEqual(["Type another address", "It isn't live yet"])
     expect(asked[0]!.payload.default).toBe("__type__")
-    expect(s.state.site).toMatchObject({ productionHost: "infinite-tag-smoke-site.vercel.app", source: "answer" })
-    expect(s.bridge.sentTests.map((test) => test.productionHost)).toEqual(["infinite-tag-smoke-site.vercel.app"])
+    // The host ask reads no deployment to derive an alias from.
+    expect(s.log).not.toContain("host.latestProductionDeployment")
+    // A scripted client that answers the alias anyway is refused, re-asked once with the reason, and refused again.
+    expect(asked.map((entry) => entry.kind)).toEqual(["single", "text"])
+    expect(asked[1]!.payload.question).toContain("infinite-tag-smoke-site.vercel.app is a Vercel address — add a custom domain in Vercel, then run npx infinite-tag again.")
+    expect(s.state.site).toMatchObject({ productionHost: null, source: "answer" })
+    expect(s.bridge.sentTests).toEqual([])
   })
 
-  it("NEGATIVE: a typed Vercel deployment URL is refused; the production alias typed next is the host", async () => {
+  it("NEGATIVE: a typed production alias, then a hash URL, are both refused; a custom domain is the only way in", async () => {
     const asked: Asked = []
-    const s = setup({ ...unknownHost(), ctx: { ask: answering(asked, ["__type__", "infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app", "infinite-tag-smoke-site.vercel.app"]) } })
+    const s = setup({ ...unknownHost(), ctx: { ask: answering(asked, ["__type__", "infinite-tag-smoke-site.vercel.app", "infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app"]) } })
     await s.run()
-    expect(asked[2]!.payload.question).toContain("looks like a Vercel preview")
-    expect(s.state.site).toMatchObject({ productionHost: "infinite-tag-smoke-site.vercel.app" })
+    expect(asked[2]!.payload.question).toContain("infinite-tag-smoke-site.vercel.app is a Vercel address")
+    expect(s.state.site).toMatchObject({ productionHost: null })
+    const custom: Asked = []
+    const t = setup({ ...unknownHost(), ctx: { ask: answering(custom, ["__type__", "vercel.app", "https://www.acme-store.com"]) } })
+    await t.run()
+    expect(custom[2]!.payload.question).toContain("vercel.app is a Vercel address")
+    expect(t.state.site).toMatchObject({ productionHost: "www.acme-store.com" })
+    expect(t.bridge.sentTests.map((test) => test.productionHost)).toEqual(["www.acme-store.com"])
   })
 
   it("--yes never answers it: no ask, no host, no park, nothing saved", async () => {

@@ -1120,150 +1120,90 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
   })
 })
 
-/** Live run 2: the smoke site's only host is its Vercel project's PRODUCTION alias, never a custom domain. */
+/** The smoke site's Vercel addresses: none is ever the production host (founder ruling 2026-10-03, only custom domains). */
 const VERCEL_ALIAS = "acme-store.vercel.app"
+const VERCEL_BRANCH_ALIAS = "acme-store-git-main-acme.vercel.app"
+const VERCEL_HASH_URL = "acme-store-a1b2c3d4e-acme.vercel.app"
+const vercelRefusal = (host: string) => `Infinite needs your site's own domain. ${host} is a Vercel address — add a custom domain in Vercel, then run npx infinite-tag again.`
 
-/** The fresh site, served on the alias: every production load (and its final URL) is on `acme-store.vercel.app`. */
-function aliasTestResultFor(request: TestRunRequest): TestResult | undefined {
-  const result = freshTestResultFor(request)
-  if (!result) return result
-  if (request.mode === "dry_live" && request.targets[0]?.label === "preview_self") return result
-  return JSON.parse(JSON.stringify(result).replace(/:\/\/(?:www\.)?acme-store\.com/g, `://${VERCEL_ALIAS}`)) as TestResult
-}
-
-/** The live site's routes on the alias too (the T1 reads after the deploy go there). */
-function serveLiveSiteOnAlias(w: E2eWorld): void {
-  const path = join(w.site.base, "live-site.json")
-  const routes = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>
-  for (const [url, page] of Object.entries(routes)) routes[url.replace(/^https:\/\/(?:www\.)?acme-store\.com/, `https://${VERCEL_ALIAS}`)] = page
-  writeFileSync(path, JSON.stringify(routes))
-}
-
-describe("live run 2: production on <project>.vercel.app, and a run with no real visit", () => {
-  it("a fresh workspace whose only host is the production alias reaches proven_live through the site-file claim", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
-    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: aliasTestResultFor } })
-    serveLiveSiteOnAlias(w)
-    // GitHub already shows Vercel's earlier production deployment of main: its URL is a deployment URL (never the
-    // alias), from which the host ask offers `acme-store.vercel.app`. No CNAME, no custom domain anywhere.
+describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is refused, and a run with no real visit", () => {
+  it("a fresh workspace whose only address is <project>.vercel.app: no vercel.app is offered, the alias and a branch alias are refused, and the run goes on with no host (no claim, no Infinite, no visit)", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
+    // No agents: this world is about the host ask and what follows it, not the jobs.
+    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_NO_AGENTS: "1" } })
+    // Every place round 3 took the alias from: the repo names it (CNAME) and GitHub shows Vercel's production deployment.
+    mkdirSync(join(w.site.repo, "public"), { recursive: true })
+    writeFileSync(join(w.site.repo, "public/CNAME"), `${VERCEL_ALIAS}\n`)
+    commitAndPush(w, "cname on the vercel alias")
     const mainSha = bareGit(w.site.bare, "rev-parse", "main")
     const gh = readGhState(w.ghState) as unknown as { deployments: unknown[] }
-    gh.deployments.push({ id: 7050, sha: mainSha, environment: "Production", production_environment: false, creator: "vercel[bot]", created_at: "2026-10-02T08:00:00Z", statuses: [{ state: "success", environment_url: "https://acme-store-a1b2c3d4e-acme.vercel.app" }] })
+    gh.deployments.push({ id: 7050, sha: mainSha, environment: "Production", production_environment: false, creator: "vercel[bot]", created_at: "2026-10-02T08:00:00Z", statuses: [{ state: "success", environment_url: `https://${VERCEL_HASH_URL}` }] })
     saveGhState(w.ghState, gh)
     const asked: Array<{ kind: string; payload: unknown }> = []
+    const typed = [`https://${VERCEL_ALIAS}/`, VERCEL_BRANCH_ALIAS]
     const respond = (ask: { kind: string; payload: unknown }) => {
       asked.push(ask)
-      const payload = ask.payload as { question?: string; default?: string; number?: number }
-      // Review-2 P2-3: the alias is a GUESS, never the default; the user picks it.
-      if (ask.kind === "single" && payload.question?.startsWith("Which address is your live site?")) return VERCEL_ALIAS
+      const payload = ask.payload as { question?: string; number?: number }
+      if (ask.kind === "single" && payload.question?.startsWith("Which address is your live site?")) return "__type__"
+      if (ask.kind === "text" && payload.question?.includes("Your live site's address")) return typed.shift()
       if (ask.kind !== "merge-ready") return undefined
       const sha = mergePullRequest(w.site, w.ghState, payload.number!)
       const state = readGhState(w.ghState) as unknown as { deployments: unknown[] }
       state.deployments.push(productionDeployment(7151, sha, "success"))
       saveGhState(w.ghState, state)
-      w.bridge.script.siteFileServed = true
       return "open"
     }
-    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond, timeoutMs: RUN_TIMEOUT })
+    // No --consent-mode and no consent in the answers: with no host, nothing consent governs is installed.
+    const answers = writeAnswers(w, { ...answersFile(), consentMode: undefined })
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond, timeoutMs: RUN_TIMEOUT })
     const why = trace(run)
-    expect(run.code, why).toBe(0)
-    expect(stepOutcomes(run), why).toEqual(["link:ok", "agent:ok", "before:ok", "keys:ok", "plan:ok", "install:ok", "jobs:ok", "settings:ok", "rehearsal:ok", "review:ok", "merge:ok", "prove:ok", "done:ok"])
+    const outcomes = stepOutcomes(run)
+    expect(outcomes.slice(0, 5), why).toEqual(["link:ok", "agent:ok", "before:ok", "keys:ok", "plan:ok"])
+    expect(outcomes.at(-1), why).toBe("done:ok")
     expect(w.tripwire.connections).toEqual([])
 
-    // The ask offered the alias from Vercel's production deployment, and it was accepted (never "preview-style").
+    // The host ask offered no vercel.app (the CNAME's alias dropped, nothing derived from the deployment URL).
     const hostAsk = asked.find((ask) => (ask.payload as { question?: string }).question?.startsWith("Which address is your live site?"))!
-    const hostOptions = (hostAsk.payload as { options: Array<{ label: string; value: string }>; default: string }).options
-    expect(hostOptions.slice(0, 2)).toEqual([
-      { label: "acme-store-acme.vercel.app  (a guess: your Vercel team's address for this project)", value: "acme-store-acme.vercel.app" },
-      { label: `${VERCEL_ALIAS}  (a guess: Vercel names it after the project; it may be another team's)`, value: VERCEL_ALIAS }
-    ])
-    expect((hostAsk.payload as { default: string }).default).toBe("__type__")
+    expect((hostAsk.payload as { options: Array<{ value: string }> }).options.map((option) => option.value)).toEqual(["__type__", "__none__"])
+    expect(JSON.stringify(hostAsk.payload)).not.toContain("vercel.app")
+
+    // The production alias, then a branch alias: each refused with the founder's line, in full (never cut at 120).
+    const texts = asked.filter((ask) => ask.kind === "text").map((ask) => String((ask.payload as { question: string }).question))
+    expect(texts).toHaveLength(2)
+    expect(texts[1]!.startsWith(`${vercelRefusal(VERCEL_ALIAS)} Or type your own domain now (ESC if it has none yet).`)).toBe(true)
     const subs = run.ofType("step.sub").map((event) => String(event.text))
-    expect(subs).toContain(`✓ Live site: ${VERCEL_ALIAS} (you said)`)
-    expect(subs.some((text) => text.includes("preview-style") || text.includes("Vercel preview address"))).toBe(false)
+    expect(subs).toContain(`! ${vercelRefusal(VERCEL_ALIAS)} Or type your own domain now (ESC if it has none yet).`)
+    expect(subs).toContain(`! ${vercelRefusal(VERCEL_BRANCH_ALIAS)}`)
+    expect(subs).toContain("No live site yet: the live test, Infinite's tag and the proof wait for a domain.")
+    expect(subs.some((text) => text.startsWith("✓ Live site:"))).toBe(false)
 
-    // The claim names exactly the alias; the PR carries the proof file and the reserved key.
-    const claimCall = w.bridge.callsFor("site-claim")[0]!
-    expect((claimCall.body as { productionHosts: string[] }).productionHosts).toEqual([VERCEL_ALIAS])
-    expect(claimCall.status).toBe(200)
-    const head = headOfBranch(w)!
-    expect(bareShow(w.site.bare, head.head, "public/.well-known/infinite-site-verification.txt")).toBe(FAKE_PROOF_BODY)
+    // Nothing was claimed, installed or visited on any Vercel address; Infinite's line is the "tell us your domain" one.
+    const labels = w.bridge.calls.map(label)
+    for (const verb of ["site-claim", "site-source", "site-prove", "runs.proof-claim", "runs.patch(proofState)"]) expect(labels, verb).not.toContain(verb)
+    expect(labels.some((entry) => entry.startsWith("test.start(real_visit") || entry.startsWith("test.start(dry_live:home)"))).toBe(false)
+    expect(JSON.stringify(w.bridge.calls.map((call) => call.body))).not.toMatch(/"productionHosts?":\s*\[?"[^"]*vercel\.app/)
+    const planAsk = run.ofType("ask.open").find((event) => event.kind === "plan")!.payload as { lines: Array<{ id: string; requires: string }> }
+    expect(planAsk.lines.some((line) => line.id === "install_provider:infinite" && line.requires === "approval")).toBe(false)
+    expect(planAsk.lines.find((line) => line.id === "user_action:infinite")).toMatchObject({ requires: "user_action" })
+    expect(w.bridge.script.claim ?? null).toBeNull()
+    const head = headOfBranch(w)
+    if (head) expect(() => bareShow(w.site.bare, head.head, "public/.well-known/infinite-site-verification.txt")).toThrow()
 
-    // The rehearsal ran on the PR's preview (a branch alias), never on the production alias itself.
-    const rehearsalStart = w.bridge.callsFor("test.start").find((call) => (call.body as { mode: string }).mode === "rehearsal")!
-    expect(rehearsalStart.status).toBe(202)
-    expect((rehearsalStart.body as { rehearsal: { previewOrigin: string }; productionHost: string }).rehearsal.previewOrigin).toBe("https://acme-store-git-infinite-tag-acme.vercel.app")
-    expect((rehearsalStart.body as { productionHost: string }).productionHost).toBe(VERCEL_ALIAS)
-
-    // Prove: deployed (GitHub), the alias confirmed by its proof file, ONE real visit ON the alias, a verified receipt.
-    expect(subs.some((text) => text.includes(`${VERCEL_ALIAS} confirmed`))).toBe(true)
-    const visits = w.bridge.callsFor("test.start").filter((call) => (call.body as { mode: string }).mode === "real_visit")
-    expect(visits).toHaveLength(1)
-    expect((visits[0]!.body as { productionHost: string }).productionHost).toBe(VERCEL_ALIAS)
-    expect(run.ofType("receipt").filter((event) => event.lane === "infinite").at(-1)).toMatchObject({ state: "verified" })
-    expect(w.bridge.script.claim?.state).toBe("proven")
-    expect(w.bridge.script.keys.infinite.productionHosts).toEqual([VERCEL_ALIAS])
-    expect(w.bridge.script.run.proofState).toBe("proven")
-    expect(w.bridge.script.run.phase).toBe("proven")
-    const report = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/report.json"), "utf8")) as { site: { productionHost: string }; columns: { proven_live: { pending: string | null; measuredAt: string | null } } }
-    expect(report.site.productionHost).toBe(VERCEL_ALIAS)
-    expect(report.columns.proven_live).toMatchObject({ pending: null })
-    expect(report.columns.proven_live.measuredAt).not.toBeNull()
+    // The report: no live address, so Proven live waits for a re-run with the domain.
+    const report = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/report.json"), "utf8")) as { site: { productionHost: string | null }; columns: { proven_live: { pending: string | null; measuredAt: string | null } }; notes: string[] }
+    expect(report.site.productionHost).toBeNull()
+    expect(report.columns.proven_live).toMatchObject({ pending: "rerun_tag", measuredAt: null })
+    expect(report.notes.some((note) => note.includes("--production-host"))).toBe(true)
   })
 
-  it("review-2 P2-2: a Vercel-CONNECTED workspace whose production is only <project>.vercel.app takes the claim path the cloud takes (no server lane)", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
-    // The real cloud proves through Vercel only the project's production DOMAINS: for the alias it answers the claim
-    // (`pending_proof`) and `provision-env` has no source (404 no_site_source). The plan must agree: Infinite with
-    // the claim wording, the server lane a user_action line, and the proof file in the PR.
-    const hosting: TagHosting = {
-      provider: "vercel",
-      vercel: { projectRef: "prj_fixture", projectName: "acme-store", productionBranch: "main", rootDirectory: null, framework: "nextjs", productionDomains: [], productionAliases: [VERCEL_ALIAS], envWriteGranted: true, previewProtection: "none" }
+  it("--production-host on any Vercel address (the production alias, a branch alias, a hash URL, bare vercel.app) is a usage error (exit 2) before any bridge call", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor } })
+    for (const host of [VERCEL_ALIAS, VERCEL_BRANCH_ALIAS, VERCEL_HASH_URL, "vercel.app"]) {
+      const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--production-host", `https://${host}`], respond: () => undefined, timeoutMs: RUN_TIMEOUT })
+      expect(run.code, `${host}\n${trace(run)}`).toBe(2)
+      expect(run.stderr, host).toContain(`--production-host: ${vercelRefusal(host)}`)
     }
-    const w = await world({ bridge: { keys: freshKeys(), hosting, testResultFor: aliasTestResultFor } })
-    serveLiveSiteOnAlias(w)
-    const respond = (ask: { kind: string; payload: unknown }) => {
-      const payload = ask.payload as { question?: string; number?: number }
-      if (ask.kind === "single" && payload.question?.startsWith("Which address is your live site?")) return "__type__"
-      if (ask.kind === "text" && payload.question?.includes("Your live site's address")) return `https://${VERCEL_ALIAS}/`
-      if (ask.kind !== "merge-ready") return undefined
-      const sha = mergePullRequest(w.site, w.ghState, payload.number!)
-      const state = readGhState(w.ghState) as unknown as { deployments: unknown[] }
-      state.deployments.push(productionDeployment(7181, sha, "success"))
-      saveGhState(w.ghState, state)
-      w.bridge.script.siteFileServed = true
-      return "open"
-    }
-    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond, timeoutMs: RUN_TIMEOUT })
-    const why = trace(run)
-    expect(run.code, why).toBe(0)
-    expect(stepOutcomes(run), why).toEqual(["link:ok", "agent:ok", "before:ok", "keys:ok", "plan:ok", "install:ok", "jobs:ok", "settings:ok", "rehearsal:ok", "review:ok", "merge:ok", "prove:ok", "done:ok"])
-
-    // The plan: Infinite approvable WITH the claim wording; the server lane (and its npm line) never approvable.
-    const planAsk = run.ofType("ask.open").find((event) => event.kind === "plan")!.payload as { lines: Array<{ id: string; requires: string; text?: string }> }
-    const infiniteAt = planAsk.lines.findIndex((line) => line.id === "install_provider:infinite")
-    expect(planAsk.lines[infiniteAt], why).toMatchObject({ requires: "approval" })
-    expect(planAsk.lines[infiniteAt + 1]).toMatchObject({ id: "info:infinite_site_file", requires: "info" })
-    expect(planAsk.lines.some((line) => line.id === "server_lane" || line.id === "npm_install")).toBe(false)
-    expect(planAsk.lines.find((line) => line.id === "user_action:server_lane")).toMatchObject({ requires: "user_action" })
-
-    // The claim (pending_proof, as the real cloud answers), the proof file in the PR, and no env write attempted.
-    const labels = w.bridge.calls.map(label)
-    const claimCall = w.bridge.callsFor("site-claim")[0]!
-    expect((claimCall.body as { productionHosts: string[] }).productionHosts).toEqual([VERCEL_ALIAS])
-    expect(claimCall.status).toBe(200)
-    // A `ready` answer would have created no claim: the fake (like the cloud) issued one for the alias.
-    expect(w.bridge.script.claim?.hosts).toEqual([VERCEL_ALIAS])
-    expect(labels).not.toContain("server-lane.provision-env")
-    const head = headOfBranch(w)!
-    expect(bareShow(w.site.bare, head.head, "public/.well-known/infinite-site-verification.txt")).toBe(FAKE_PROOF_BODY)
-
-    // Prove: the alias confirmed by its proof file, ONE real visit on it, the Infinite receipt verified.
-    const visits = w.bridge.callsFor("test.start").filter((call) => (call.body as { mode: string }).mode === "real_visit")
-    expect(visits).toHaveLength(1)
-    expect((visits[0]!.body as { productionHost: string }).productionHost).toBe(VERCEL_ALIAS)
-    expect(labels.indexOf("runs.proof-claim")).toBeGreaterThan(labels.indexOf("site-prove"))
-    expect(run.ofType("receipt").filter((event) => event.lane === "infinite").at(-1)).toMatchObject({ state: "verified" })
-    expect(w.bridge.script.claim?.state).toBe("proven")
-    expect(w.bridge.script.run.proofState).toBe("proven")
+    expect(w.bridge.calls).toEqual([])
+    expect(w.tripwire.connections).toEqual([])
   })
 
   it("no live address (the user says it isn't live yet): no consent or conversion question, and Proven live holds no pass and no problem", { timeout: RUN_TIMEOUT + 30_000 }, async () => {

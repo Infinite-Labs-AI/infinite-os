@@ -46,7 +46,7 @@ describe("renderFrame", () => {
     const snapshot = midRunSnapshot({ currentStep: "before", steps: stepRows({ link: { state: "ok" }, agent: { state: "ok" }, before: { state: "running", subs: [{ text: reason, tone: "warn", at }] } }) })
     for (const width of [80, 120]) {
       const text = plain(frame({ snapshot, width })).replace(/\s+/g, " ")
-      expect(text, `width ${width}`).toContain("or press ESC if it isn't live yet.")
+      expect(text, `width ${width}`).toContain("Or type your own domain now (ESC if it has none yet).")
       expect(text).not.toContain("collects o …")
       for (const line of frame({ snapshot, width })) expect(visibleWidth(line)).toBeLessThan(width)
     }

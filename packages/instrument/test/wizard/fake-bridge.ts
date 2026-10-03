@@ -366,8 +366,9 @@ export function refusedPreviewField(
   if (hosting.provider === "none" && hosting.vercel === null) {
     // `verifyByPendingClaim`: the pending claim is the only proof left (every origin already passed the shape check).
     const claim = pending.claim
-    // 1bu-1 a7042d367a: an origin that is one of the claim's OWN hosts (a `<project>.vercel.app` production alias)
-    // is never a preview: it serves the token once the merge deploys, so a rehearsal there would grade production.
+    // 1bu-1 a7042d367a: an origin that is one of the claim's OWN hosts is never a preview: it serves the token once
+    // the merge deploys, so a rehearsal there would grade production. (Since the 2026-10-03 founder ruling a claim
+    // never names a `*.vercel.app` host, so this cannot match a Vercel preview origin; kept as the desktop's rule.)
     const claimHosts = new Set((claim?.hosts ?? []).map(normalizeHost))
     const ok =
       claim !== null &&
@@ -736,8 +737,8 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           return ok({ disabled: true })
         case "site-claim": {
           const hosts = (reqBody.productionHosts as string[]).map(normalizeHost)
-          // 1bu-1 a7042d367a (`writeSiteClaim`): a preview-shaped host is refused before any write; a Vercel
-          // production alias (`<project>.vercel.app`) is not preview-shaped and gets a claim like any domain.
+          // 1bu-1 `writeSiteClaim`: a platform host is refused before any write — ANY `*.vercel.app` (a production
+          // alias included, founder ruling 2026-10-03), `*.netlify.app`, `*.pages.dev` and a bare platform domain.
           if (hosts.some(isPreviewShapedHost)) return fail(res, record, requestId, "invalid_request", { field: "productionHosts", state: "unverified_host" })
           const consentMode = reqBody.consentMode as ClaimPublic["consentMode"]
           const verified = verifiedHosts(script)

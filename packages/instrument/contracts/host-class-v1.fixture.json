@@ -1,8 +1,8 @@
 {
   "version": 1,
-  "about": "How a production-host answer is classed (2026-10-03 live fix item 3, review-2 P3-1/P3-2/P3-4). production_alias: a *.vercel.app host shaped like a project's production alias, claimable (the site-file proof decides). preview: refused as a production host. bare_platform: a deny suffix without its dot, refused. custom: not on the deny list, claimable. infinite-tag and the cloud must class every host here the same way.",
+  "about": "How a production-host answer is classed (founder ruling 2026-10-03: \"we shouldnt accept vercel.app sites lol, only custom domain sites\"; review-2 P3-2/P3-4). vercel: ANY *.vercel.app host (a project's production alias, a team alias, a branch alias, a deployment URL, a nested host), refused: \"Infinite needs your site's own domain. <host> is a Vercel address — add a custom domain in Vercel, then run npx infinite-tag again.\" preview: another platform's default address (*.netlify.app, *.pages.dev, *.github.io) or a local address, refused. bare_platform: a platform domain itself (vercel.app, netlify.app, pages.dev, github.io), refused. custom: not on the deny list, claimable (the site-file proof decides). infinite-tag and the cloud must class every host here the same way.",
   "classes": [
-    "production_alias",
+    "vercel",
     "preview",
     "bare_platform",
     "custom"
@@ -10,68 +10,58 @@
   "cases": [
     {
       "host": "infinite-tag-smoke-site.vercel.app",
-      "class": "production_alias",
-      "note": "a project's production alias (<project>.vercel.app)"
+      "class": "vercel",
+      "note": "a project's production alias (<project>.vercel.app): refused, the site needs its own domain"
     },
     {
       "host": "acme-store.vercel.app",
-      "class": "production_alias",
+      "class": "vercel",
       "note": "<project>.vercel.app"
     },
     {
       "host": "acme-store-chaos-edge.vercel.app",
-      "class": "production_alias",
+      "class": "vercel",
       "note": "<project>-<team>.vercel.app"
     },
     {
       "host": "ACME.vercel.app.",
-      "class": "production_alias",
+      "class": "vercel",
       "note": "case and one trailing dot are normalised away"
     },
     {
       "host": "acme2.vercel.app",
-      "class": "production_alias",
-      "note": "a digit in the first segment is never a hash"
-    },
-    {
-      "host": "acme-riverkhan.vercel.app",
-      "class": "production_alias",
-      "note": "a 9-letter team slug with no digit is not a hash"
+      "class": "vercel",
+      "note": "any one-label *.vercel.app"
     },
     {
       "host": "acme-store-qwertyuio-acme.vercel.app",
-      "class": "production_alias",
-      "note": "KNOWN MISREAD (review-2 P3-1): a deployment URL whose hash has no digit reads as an alias; it fails safe on the proof (an old deployment never serves the new token)"
+      "class": "vercel",
+      "note": "a deployment URL whose hash has no digit (no shape rule is needed any more)"
     },
     {
       "host": "infinite-tag-smoke-site-git-main-chaos-edge.vercel.app",
-      "class": "preview",
+      "class": "vercel",
       "note": "a branch alias (-git-)"
     },
     {
       "host": "acme-git-feature-x-team.vercel.app",
-      "class": "preview",
+      "class": "vercel",
       "note": "a branch alias (-git-)"
     },
     {
       "host": "infinite-tag-smoke-site-a1b2c3d4e-chaos-edge.vercel.app",
-      "class": "preview",
-      "note": "a deployment URL (<project>-<9-char hash with a digit>-<team>)"
-    },
-    {
-      "host": "acme-k9x8y7w6v.vercel.app",
-      "class": "preview",
-      "note": "a 9-char segment with a digit after the first reads as a deployment hash"
+      "class": "vercel",
+      "note": "a deployment URL (<project>-<hash>-<team>)"
     },
     {
       "host": "acme-store2024.vercel.app",
-      "class": "preview",
-      "note": "KNOWN MISREAD (review-2 P3-1): a real alias with a 9-char digit segment reads as a deployment URL; the refusal says it LOOKS like a preview"
+      "class": "vercel",
+      "note": "any one-label *.vercel.app"
     },
     {
       "host": "preview.acme.vercel.app",
-      "class": "preview",
-      "note": "more than one label under vercel.app (Vercel generates none)"
+      "class": "vercel",
+      "note": "more than one label under vercel.app"
     },
     {
       "host": "acme.netlify.app",
@@ -82,6 +72,11 @@
       "host": "acme.pages.dev",
       "class": "preview",
       "note": "a Cloudflare Pages default"
+    },
+    {
+      "host": "acme.github.io",
+      "class": "preview",
+      "note": "a GitHub Pages default (not the site's own domain; the preview guard's list is unchanged)"
     },
     {
       "host": "localhost",
@@ -106,17 +101,22 @@
     {
       "host": "vercel.app",
       "class": "bare_platform",
-      "note": "a deny suffix without its dot: nobody's site, never provable (review-2 P3-2)"
+      "note": "a platform domain itself: nobody's site, never provable (review-2 P3-2)"
     },
     {
       "host": "netlify.app",
       "class": "bare_platform",
-      "note": "a deny suffix without its dot (review-2 P3-2)"
+      "note": "a platform domain itself (review-2 P3-2)"
     },
     {
       "host": "pages.dev",
       "class": "bare_platform",
-      "note": "a deny suffix without its dot (review-2 P3-2)"
+      "note": "a platform domain itself (review-2 P3-2)"
+    },
+    {
+      "host": "github.io",
+      "class": "bare_platform",
+      "note": "GitHub Pages' platform domain itself (founder ruling 2026-10-03)"
     },
     {
       "host": "acme-store.com",

@@ -46,9 +46,9 @@ import { WIZARD_PATHS } from "../contracts/state.js"
 import { wizardBranchName } from "../contracts/git-host.js"
 import { wizardGitExtras } from "../../git/index.js"
 import { buildColumn } from "../report.js"
+import { EVENT_LIMITS } from "../contracts/events.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
-import { deploymentReader } from "../../hosts/github.js"
-import { askProductionHost, hostDecidedLines, repoHostCandidates, resolveProductionHost, vercelProductionAliasesFrom } from "../site-host.js"
+import { askProductionHost, hostDecidedLines, repoHostCandidates, resolveProductionHost } from "../site-host.js"
 import { blockingDirtyPaths, dirtyTreeMessage, resetStaleReceipt } from "../leftovers.js"
 import { homedir } from "node:os"
 import {
@@ -199,13 +199,8 @@ export async function decideProductionHost(
     }
     const facts = await deps.host.repoFacts().catch(() => null)
     const homepageUrl = facts && !("unsupported" in facts) ? (facts.homepageUrl ?? null) : null
-    // A Vercel site often serves production on a `*.vercel.app` alias: the newest GitHub "Production" deployment
-    // names the project and team (read-only, the same reads `prove` makes later). GUESSES only (review-2 P2-3):
-    // labelled so, never pre-selected; the user confirms one.
-    const reader = deploymentReader(deps.host)
-    const latest = reader ? await reader.latestProductionDeployment().catch(() => null) : null
-    const vercelAliases = latest ? vercelProductionAliasesFrom(latest.environmentUrl ?? null, latest.environment ?? null) : []
-    const candidates = await repoHostCandidates(ctx.root, ctx.appRoot, deps.fs, { homepageUrl, vercelAliases })
+    // Founder ruling 2026-10-03: only the site's own domain, so no `*.vercel.app` candidate is ever derived or offered.
+    const candidates = await repoHostCandidates(ctx.root, ctx.appRoot, deps.fs, { homepageUrl })
     host = await askProductionHost(ctx, candidates, (text, tone) => sub(text, tone))
     source = "answer"
   }
@@ -409,7 +404,8 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
     requiredCapabilities: [...meta.requiredCapabilities],
     inputHash: beforeInputHash,
     async run(ctx, deps): Promise<StepOutcome> {
-      const sub = (text: string, tone: "ok" | "warn" | "info" | "pending" = "info") => ctx.emit.emit("step.sub", { step: "before", text: text.slice(0, 120), tone })
+      // The cap is the event's own (240, R2-3): the host refusal (founder ruling 2026-10-03) must never be cut mid-word.
+      const sub = (text: string, tone: "ok" | "warn" | "info" | "pending" = "info") => ctx.emit.emit("step.sub", { step: "before", text: text.slice(0, EVENT_LIMITS.subTextMaxChars), tone })
       const at = () => deps.clock.now().toISOString()
 
       // ---- preconditions ----

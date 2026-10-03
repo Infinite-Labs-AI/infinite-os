@@ -20,7 +20,7 @@ import type { InstallerApplyResult } from "../contracts/jobs.js"
 import { JOB_TABLE, type ChecklistItem } from "../contracts/jobs.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import type { ClaimPublic, SiteSourceFields, TagHosting, TagKeys } from "../contracts/bridge.js"
-import { HOST_DENY_V1, normalizeHost } from "../contracts/host-deny.js"
+import { normalizeHost } from "../contracts/host-deny.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 
 const meta = WIZARD_STEP_META.install
@@ -36,26 +36,18 @@ function sub(ctx: WizardContext, text: string, tone: "ok" | "warn" | "info" | "p
   ctx.emit.emit("step.sub", { step: "install", text, tone })
 }
 
-function denied(host: string): boolean {
-  const normalized = normalizeHost(host)
-  return HOST_DENY_V1.deny.exact.includes(normalized) || HOST_DENY_V1.deny.suffix.some((suffix) => normalized.endsWith(suffix))
-}
-
 /**
  * §3z.7 (A28): the site source's `productionHosts` = the normalised union of keys `infinite.productionHosts`,
  * the link's `productionHostHint` (when set) and `before`'s observed final production host (when it is not
- * deny-shaped); at most 10, no duplicates, and no preview-shaped host (`*.vercel.app`, …) unless Infinite
- * already lists it. The cloud treats `www.<host>` and `<host>` as one site and proves a host it has not
+ * deny-shaped); at most 10, no duplicates, and no platform host (`*.vercel.app`, `vercel.app`, `github.io`, …)
+ * unless Infinite already lists it. The cloud treats `www.<host>` and `<host>` as one site and proves a host it has not
  * verified through the linked Vercel project.
  */
 export function siteSourceHosts(keys: TagKeys, hint: string | null, observed: string | null): string[] {
   const listed = keys.infinite.productionHosts.map(normalizeHost).filter((host) => host !== "")
-  // The run's resolved production host (`hint`) was accepted by `parseHostInput` / Infinite: a Vercel production
-  // alias (`acme.vercel.app`) passes; a preview shape never does. The observed host joins only when it is not
-  // deny-shaped, or when it IS that same accepted host.
-  const run = hint && !isPreviewShapedHost(hint) ? [normalizeHost(hint)] : []
-  const seen = observed ? normalizeHost(observed) : ""
-  const extra = [...run, ...(seen && (!denied(seen) || run.includes(seen)) ? [seen] : [])].filter((host) => host !== "")
+  // Founder ruling 2026-10-03: only the site's own domain. A platform address (ANY `*.vercel.app`, a production alias
+  // included, or a bare `vercel.app` / `github.io`) never joins, as the hint or as the observed host.
+  const extra = [...(hint ? [hint] : []), ...(observed ? [observed] : [])].map(normalizeHost).filter((host) => host !== "" && !isPreviewShapedHost(host))
   return [...new Set([...listed, ...extra])].slice(0, MAX_SITE_SOURCE_HOSTS)
 }
 
