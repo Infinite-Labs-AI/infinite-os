@@ -382,11 +382,23 @@ function hiddenColumnIndexes(labels: readonly string[], hidden: readonly string[
   return out;
 }
 
-/** One row's cell as drawn: its value, then the words for what one of it is (a folded noun), if any. */
+/**
+ * One row's cell as drawn: its value, then the words for what one of it is (a
+ * folded noun), if any. The app sends those words in the singular (`trial`;
+ * the plural, `checkouts initiated`, is not a rule the CLI can apply), so they
+ * follow a count of exactly 1 only. Any other count is drawn bare (`3`, never
+ * `3 trial`), and a dash never has a noun after it.
+ */
 function drawRowCell(input: CellTableInput, row: CellTableRow, index: number, notes: FootnoteBook): string {
-  const value = drawCell(row.cells[index], columnFor(input.columns[index]!, row, index), input.currency, notes);
+  const cell = row.cells[index];
+  const value = drawCell(cell, columnFor(input.columns[index]!, row, index), input.currency, notes);
   const noun = row.nouns?.[index];
-  return noun ? `${value} ${noun}` : value;
+  return noun && isOne(cell) ? `${value} ${noun}` : value;
+}
+
+/** A measured number cell whose value is exactly 1. */
+function isOne(cell: TableCell): boolean {
+  return typeof cell === "object" && cell !== null && "value" in cell && cell.value === 1;
 }
 
 function columnFor(column: CellTableColumn, row: CellTableRow, index: number): CellTableColumn {

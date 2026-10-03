@@ -190,9 +190,61 @@ describe("numbers: which columns a narrow table keeps, and one Results column (r
     expect(details.join("\n")).not.toMatch(/\bResult\b(?!s)/u);
   });
 
-  it("→ shows the folded column as one record line", () => {
+  it("→ shows the folded column as one record line; an unmeasured count has no noun after its dash", () => {
     const records = draw(live(), { width: 60, showHiddenColumns: true }).detail;
-    expect(records.filter((line) => /^\s*Results?: /u.test(line))).toEqual([expect.stringMatching(/^ {2}Results: —\S* trial$/u)]);
+    expect(records.filter((line) => /^\s*Results?: /u.test(line))).toEqual([expect.stringMatching(/^ {2}Results: —\S*$/u)]);
+  });
+
+  // Lane review (LG-3 MUST): the app sends the Result words in the singular
+  // (`trial`), so they follow a count of exactly 1 only. Any other count is
+  // drawn bare until the app sends words matched to it: never `3 trial`.
+  describe("the folded noun follows only a count it is right for", () => {
+    const resultsCell = (results: { value: number | null; reason?: Record<string, unknown> }) => {
+      const view = edited((body) => {
+        body.legs.settled.rows[0].cells.results = results;
+      });
+      const details = committedTurn([view], 140);
+      const at = details.indexOf("Sep 28 – Oct 1");
+      const row = details.slice(at).find((line) => line.includes("Sample · Trials"))!;
+      const cells = row.split("│").map((cell) => cell.trim());
+      const column = header(details, at).indexOf("Results");
+      return cells.filter(Boolean)[column + 1];
+    };
+
+    it("1 → `1 trial`", () => {
+      expect(resultsCell({ value: 1 })).toBe("1 trial");
+    });
+
+    it("3 → the bare `3`, never `3 trial`", () => {
+      expect(resultsCell({ value: 3 })).toBe("3");
+    });
+
+    it("0 → the bare `0`, never `0 trial`", () => {
+      expect(resultsCell({ value: 0 })).toBe("0");
+    });
+
+    it("unmeasured → the dash and its mark, with no noun (a table that fits keeps the column)", () => {
+      const table = {
+        columns: [{ label: "Results", unit: "count" as const, dropPriority: 0 }, { label: "Result", unit: "text" as const, dropPriority: 0 }],
+        rows: [
+          { label: "Hook A", cells: [{ value: null, reason: { code: "blanked", words: "numbers not confirmed" } }, { text: "trial" }] },
+          { label: "Hook B", cells: [{ value: 1 }, { text: "trial" }] }
+        ],
+        currency: "USD"
+      };
+      const notes = new FootnoteBook();
+      const lines = cellTableLines(table, ctx({ width: 60 }), { notes, hidden: 0 });
+      expect(lines.find((line) => line.includes("Hook A"))).toBe("│ Hook A │      —¹ │");
+      expect(lines.find((line) => line.includes("Hook B"))).toMatch(/│ +1 trial │$/u);
+    });
+
+    it("the record view says the same: `Results: 3`", () => {
+      const view = edited((body) => {
+        body.legs.settled.rows[0].cells.results = { value: 3 };
+      });
+      const records = draw(view, { width: 60, showHiddenColumns: true }).detail;
+      expect(records.filter((line) => /^\s*Results: /u.test(line))).toEqual(["  Results: 3"]);
+    });
   });
 });
 
