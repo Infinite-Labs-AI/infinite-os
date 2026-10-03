@@ -266,7 +266,27 @@ export function stepProgressWords(preview: string | undefined): string {
  * `key=value` pair or a camelCase identifier. A person's words have neither.
  */
 function looksLikeArguments(text: string): boolean {
-  return /[A-Za-z_][\w.]*\s*=/u.test(text) || /\b[a-z]+[A-Z][A-Za-z]*\b/u.test(text);
+  return hasKeyEquals(text) || /\b[a-z]+[A-Z][A-Za-z]*\b/u.test(text);
+}
+
+/**
+ * A `key=value` pair: an `=` after optional spaces and a run of word or dot
+ * characters holding a letter or `_`. A scan back from each `=` (never a
+ * backtracking regex: CodeQL js/polynomial-redos); it stops at the previous
+ * `=`, so the whole check is linear.
+ */
+function hasKeyEquals(text: string): boolean {
+  for (let at = text.indexOf("="); at !== -1; at = text.indexOf("=", at + 1)) {
+    let index = at - 1;
+    while (index >= 0 && /\s/u.test(text[index]!)) index -= 1;
+    let keyed = false;
+    while (index >= 0 && /[\w.]/u.test(text[index]!)) {
+      if (/[A-Za-z_]/u.test(text[index]!)) keyed = true;
+      index -= 1;
+    }
+    if (keyed) return true;
+  }
+  return false;
 }
 
 /**

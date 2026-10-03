@@ -285,6 +285,20 @@ describe("a call's outcome from its complete frame", () => {
     expect(stepProgressWords("list_sample_rows")).toBe("");
     expect(stepProgressWords(undefined)).toBe("");
   });
+
+  it("a running call's arguments are never shown (`key=value`, `key = value`, `a.b=c`)", () => {
+    expect(stepProgressWords("level=ad, scope=all")).toBe("");
+    expect(stepProgressWords("level = ad")).toBe("");
+    expect(stepProgressWords("filter.level=ad")).toBe("");
+    expect(stepProgressWords("2 = 2")).toBe("2 = 2");
+  });
+
+  it("checks a long progress line in linear time (CodeQL polynomial regex)", () => {
+    const long = `A${"A".repeat(60_000)}`;
+    const started = performance.now();
+    stepProgressWords(long);
+    expect(performance.now() - started).toBeLessThan(250);
+  });
 });
 
 describe("a step that waits (r4 ▣)", () => {
