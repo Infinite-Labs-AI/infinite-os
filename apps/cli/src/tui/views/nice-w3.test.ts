@@ -3,6 +3,7 @@
 // a hanging indent; a URL wraps at its separators; a compare's range method is
 // behind `?` and a difference's unit follows the sole measure; a link preview
 // copies its tagged URL. Synthetic views only.
+import { readFileSync } from "node:fs";
 import type { AnswerViewV1 } from "@infinite-os/types";
 import { describe, expect, it } from "vitest";
 
@@ -12,6 +13,7 @@ import { stripAnsi } from "../lib/text.js";
 import { resolveTheme } from "../theme.js";
 import { fieldRows, wrapUrl } from "./card.js";
 import { documentListLines } from "./launch.js";
+import { renderLiveTurn } from "./layout.js";
 import { renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
@@ -124,5 +126,22 @@ describe("a link preview copies its tagged URL (W3-link-preview)", () => {
     it(`fits ${width} columns`, () => {
       for (const line of lines(renderView(preview, ctx({ width })))) expect(displayWidth(line), line).toBeLessThanOrEqual(width);
     });
+  }
+});
+
+describe("images never draw a picture or a URL (sweep)", () => {
+  const FIXTURES = new URL("./__fixtures__/", import.meta.url);
+  const read = (name: string): AnswerViewV1 =>
+    decodeAnswerView(JSON.parse(readFileSync(new URL(`${name}.json`, FIXTURES), "utf8")))!;
+  for (const name of ["images-done", "images-codex"]) {
+    for (const width of [48, 60, 80, 100, 140]) {
+      it(`${name} at ${width} columns: no http, no data URI, every line fits`, () => {
+        const out = lines(renderView(read(name), ctx({ width, caps: { open: true, watch: true, retry: false } })));
+        expect(out.join("\n")).not.toMatch(/https?:|data:image|\.png|\.jpe?g/iu);
+        // On screen (the turn's layout), every line fits.
+        const turn = renderLiveTurn({ messages: [{ role: "user", text: "make them" }], views: [read(name)], focus: null, width, color: false, theme, caps: { open: true, watch: true, retry: false } }).lines;
+        for (const line of turn) expect(displayWidth(stripAnsi(line)), line).toBeLessThanOrEqual(width);
+      });
+    }
   }
 });
