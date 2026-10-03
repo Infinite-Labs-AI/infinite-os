@@ -16,7 +16,9 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest"
 
 import { envProxyFetch } from "../checks/live/env-proxy-fetch.js"
 import { parseCloudReport, type CloudReportContext } from "../../test/wizard/cloud-rules.js"
-import { FAKE_RUN_STARTED_AT, type FakeBridgeCall } from "../../test/wizard/fake-bridge.js"
+import { FAKE_PROOF_BODY, FAKE_RESERVED_SITE_KEY, FAKE_RUN_STARTED_AT, type FakeBridgeCall } from "../../test/wizard/fake-bridge.js"
+import type { TagKeys } from "./contracts/bridge.js"
+import type { TestResult, TestRunRequest } from "./contracts/test-engine.js"
 import {
   BUILT_CLI,
   FAKE_BIN,
@@ -390,8 +392,9 @@ describe("the offline end-to-end run (§4.3)", () => {
       "keys",
       // plan: approvedConversions.
       "runs.patch(approvedConversions)",
-      // install: the site source with the consent answer.
-      "site-source",
+      // install: the site source with the consent answer — through §3y.2's site-claim (the app offers it); the
+      // hosts are verified, so the cloud answers the source exactly as site-source would.
+      "site-claim",
       // jobs: the keys once (the connection ids the check-reason secret scan allows; review I1 P2-6).
       "keys",
       // jobs: no clickTestedConversions PATCH (a Next site's click tests are the rehearsal's, not T0).
@@ -399,6 +402,8 @@ describe("the offline end-to-end run (§4.3)", () => {
       // no GA4 key event yet (nothing is click-tested before the rehearsal).
       "runs.get",
       "conversions",
+      // §3y.6: a fresh hosting read re-checks the server lane can run before anything is written on Vercel.
+      "hosting",
       "server-lane.provision-env(skip)",
       // rehearsal: its context reads, the PR fields right after the PR is created (§3z.8), the rehearsal
       // under the production host, the preview's own URL, clickTestedConversions, then GA4 key events for
@@ -589,6 +594,7 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(run.code, trace(run)).toBe(3)
     expect(stepOutcomes(run).at(-1)).toBe("plan:parked:INF_WIZ_NEEDS_ANSWERS")
     expect(w.bridge.callsFor("site-source")).toEqual([])
+    expect(w.bridge.callsFor("site-claim")).toEqual([])
     expect(agentRuns(w, "claude")).toEqual([])
   })
 
@@ -600,6 +606,7 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(ignored.code, trace(ignored)).toBe(3)
     expect(stepOutcomes(ignored).at(-1)).toBe("plan:parked:INF_WIZ_NEEDS_ANSWERS")
     expect(w.bridge.callsFor("site-source")).toEqual([])
+    expect(w.bridge.callsFor("site-claim")).toEqual([])
 
     // 2. The user answers the wizard's own /dev/tty prompt; the jobs go to the parent agent as job.seeded.
     const tty = join(w.site.base, "tty.json")
@@ -722,8 +729,9 @@ describe("the negative variants (§4.3 a–h)", () => {
 })
 
 describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
-  it("(i) a 423 lock on site-source parks SITE_LOCKED at install (exit 3): no agent, nothing pushed", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({ bridge: { errors: { "site-source": { code: "site_setup_locked", state: "live_site_lock" } } } })
+  it("(i) a 423 lock on site-source (here through §3y.2's site-claim) parks SITE_LOCKED at install (exit 3): no agent, nothing pushed", { timeout: RUN_TIMEOUT }, async () => {
+    const lock = { code: "site_setup_locked" as const, state: "live_site_lock" }
+    const w = await world({ bridge: { errors: { "site-source": lock, "site-claim": lock } } })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(3)
     expect(stepOutcomes(run).at(-1)).toBe("install:parked:INF_WIZ_SITE_LOCKED")
@@ -912,5 +920,242 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
     const snapshots = join(w.site.home, "Library/Caches/infinite-tag/snapshots")
     const left = existsSync(snapshots) ? execFileSync("/usr/bin/find", [snapshots, "-name", "manifest.json"], { encoding: "utf8" }).trim() : ""
     expect(left).toBe("")
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// §3y (the live-fix round): a FRESH workspace, and a second reviewer that cannot (fully) read
+// ---------------------------------------------------------------------------------------------
+
+/** The live smoke's fresh workspace: `GET /v1/keys` with no site source and nothing connected. */
+function freshKeys(): TagKeys {
+  return {
+    infinite: { status: "not_provisioned", siteSourceKey: null, productionHosts: [], consentMode: null, consentStorageKey: null, collectPath: null },
+    ga4: { status: "not_connected", propertyLabel: null, streams: [] },
+    posthog: { status: "not_connected", projectKey: null, apiHost: null, ingestHost: null, uiHost: null, region: null },
+    meta: { status: "not_connected", pixels: [] },
+    serverLane: { laneState: "no_secret", envWriteGranted: false }
+  }
+}
+
+/**
+ * What the desktop "sees" on the fresh site: production today has no Infinite tag; the PR's preview (rehearsal) and
+ * the live site after the merge carry Infinite's managed tag with the claim's RESERVED key.
+ */
+function freshTestResultFor(request: TestRunRequest): TestResult | undefined {
+  const base = testResultFor(request)
+  if (!base) return base
+  const result = structuredClone(base)
+  if (request.mode === "dry_live" && request.targets[0]?.label !== "preview_self") {
+    result.infinite.events = []
+    result.markers = { ...result.markers, infiniteEventIds: [] }
+    return result
+  }
+  result.infinite.events = result.infinite.events.map((event) => ({ ...event, siteSourceKey: FAKE_RESERVED_SITE_KEY }))
+  return result
+}
+
+/** A GitHub Deployments row as Vercel writes it (the live smoke's shape: environment "Production", production_environment false). */
+function productionDeployment(id: number, sha: string, state: "success" | "failure" | "in_progress") {
+  return {
+    id,
+    sha,
+    environment: "Production",
+    production_environment: false,
+    creator: "vercel[bot]",
+    created_at: "2026-10-02T10:01:00Z",
+    statuses: [{ state, environment_url: state === "success" ? "https://acme-store-prod.vercel.app" : null }]
+  }
+}
+
+describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted site) reaches a PROOF", () => {
+  it("one host ask pre-filled from the repo, a site-file claim, the GitHub preview, the GitHub deploy, the proof, ONE real visit, an Infinite receipt", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
+    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor } })
+    // The repo's only hint at its live address (a CNAME file); Infinite knows none.
+    mkdirSync(join(w.site.repo, "public"), { recursive: true })
+    writeFileSync(join(w.site.repo, "public/CNAME"), `${PRODUCTION_HOST}\n`)
+    commitAndPush(w, "cname")
+    const asked: Array<{ kind: string; payload: unknown }> = []
+    const respond = (ask: { kind: string; payload: unknown }) => {
+      asked.push(ask)
+      const payload = ask.payload as { question?: string; default?: string; number?: number }
+      if (ask.kind === "single" && payload.question?.startsWith("Which address is your live site?")) return payload.default
+      if (ask.kind !== "merge-ready") return undefined
+      const sha = mergePullRequest(w.site, w.ghState, payload.number!)
+      // Vercel deploys the merge (GitHub Deployments shows it), and the deploy serves the PR's proof file.
+      const gh = readGhState(w.ghState) as unknown as { deployments: unknown[] }
+      gh.deployments.push(productionDeployment(7101, sha, "success"))
+      writeFileSync(w.ghState, `${JSON.stringify(gh, null, 2)}\n`)
+      w.bridge.script.siteFileServed = true
+      return "open"
+    }
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond, timeoutMs: RUN_TIMEOUT })
+    const why = trace(run)
+
+    // ---- every step ran; exit 0; nothing reached a network ----
+    expect(run.code, why).toBe(0)
+    expect(stepOutcomes(run), why).toEqual(["link:ok", "agent:ok", "before:ok", "keys:ok", "plan:ok", "install:ok", "jobs:ok", "settings:ok", "rehearsal:ok", "review:ok", "merge:ok", "prove:ok", "done:ok"])
+    expect(w.tripwire.connections).toEqual([])
+
+    // ---- 1. ONE host ask, pre-filled from the repo's CNAME; "Live site: <host> (you said)" ----
+    const hostAsks = asked.filter((ask) => (ask.payload as { question?: string }).question?.startsWith("Which address is your live site?"))
+    expect(hostAsks).toHaveLength(1)
+    expect((hostAsks[0]!.payload as { options: Array<{ label: string; value: string }> }).options[0]).toEqual({ label: `${PRODUCTION_HOST}  (from public/CNAME)`, value: PRODUCTION_HOST })
+    const subs = run.ofType("step.sub").map((event) => String(event.text))
+    expect(subs).toContain(`✓ Live site: ${PRODUCTION_HOST} (you said)`)
+
+    // ---- 2. the plan: no pre-checked line that does nothing; the lane is a user_action; Infinite approvable with the claim wording ----
+    const planAsk = run.ofType("ask.open").find((event) => event.kind === "plan")!.payload as { lines: Array<{ id: string; kind: string; requires: string; text: string }> }
+    expect(planAsk.lines.find((line) => line.id === "install_provider:infinite")?.requires).toBe("approval")
+    expect(planAsk.lines.find((line) => line.id === "info:infinite_site_file")?.text).toContain("/.well-known/infinite-site-verification.txt")
+    expect(planAsk.lines.some((line) => line.id === "server_lane")).toBe(false)
+    expect(planAsk.lines.find((line) => line.id === "user_action:server_lane")?.requires).toBe("user_action")
+    const budget = planAsk.lines.find((line) => line.id === "agent_budget")!
+    const upTo = Number(/up to (\d+) job/.exec(budget.text)![1])
+    const approvedStatus = run.ofType("step.done").find((event) => event.step === "plan")
+    expect(approvedStatus).toBeDefined()
+    expect(upTo).toBeGreaterThan(0)
+
+    // ---- 3. the PR carries the managed tag with the RESERVED key, the proof file and the receipt ----
+    const head = headOfBranch(w)!
+    const proof = bareShow(w.site.bare, head.head, "public/.well-known/infinite-site-verification.txt")
+    expect(proof).toBe(FAKE_PROOF_BODY)
+    const receipt = JSON.parse(bareShow(w.site.bare, head.head, ".infinite/install.json")) as { ids: { infinite: { siteSourceKey: string } | null }; edits: Array<{ file: string; by: string; planLineId: string | null }> }
+    expect(receipt.ids.infinite).toEqual({ siteSourceKey: FAKE_RESERVED_SITE_KEY })
+    expect(receipt.edits.find((edit) => edit.file === "public/.well-known/infinite-site-verification.txt")).toMatchObject({ by: "wizard", planLineId: "install_provider:infinite" })
+    const tagged = execFileSync("git", ["--git-dir", w.site.bare, "grep", "-l", FAKE_RESERVED_SITE_KEY, head.head], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: w.site.home } })
+    expect(tagged).toMatch(/\.(tsx?|jsx?|mjs)/)
+
+    // ---- 4. the rehearsal ran from the GitHub preview (never "not on Vercel") ----
+    expect(subs.some((text) => text.includes("no Vercel preview found") || text.includes("not on Vercel"))).toBe(false)
+    expect(w.bridge.callsFor("test.start").some((call) => (call.body as { mode: string }).mode === "rehearsal")).toBe(true)
+
+    // ---- 7. prove: deployed via GitHub, the host confirmed, ONE real visit, a verified Infinite receipt, proofState proven ----
+    expect(subs.some((text) => text.startsWith("✓ Deployed") && text.includes("(GitHub deployment)"))).toBe(true)
+    expect(subs.some((text) => text.includes(`${PRODUCTION_HOST} confirmed`))).toBe(true)
+    const labels = w.bridge.calls.map(label)
+    // The whole bridge story, in order (§3y.2 E2E order for the fresh-workspace variant): the host decided before the
+    // dry load; site-claim (not site-source) at install; NO server-lane provision; NO hosting.deploy (no Vercel
+    // connection: GitHub is the deploy signal); site-prove between the mergeSha PATCH and the proof claim, then the
+    // keys again (the source now exists with the reserved key); ONE real visit; receipts; proofState.
+    expect(labels).toEqual([
+      "status", "link.request", "link.poll", "keys",
+      "runs.start",
+      "hosting", "keys", "test.start(dry_live:home)", "test.poll", "baseline",
+      "keys",
+      "runs.patch(approvedConversions)",
+      "site-claim",
+      "keys",
+      "runs.get", "conversions",
+      "keys", "hosting", "runs.patch(phase,prHeadSha,prNumber,prUrl)", "test.start(rehearsal:home)", "test.poll", "test.start(dry_live:preview_self)", "test.poll", "runs.patch(clickTestedConversions)", "ga4-key-events(sign_up)",
+      "keys", "hosting",
+      "runs.patch(mergeSha,mergedAt,phase)",
+      "hosting", "keys", "site-prove", "keys", "runs.proof-claim", "test.start(real_visit:home)", "test.poll", "receipts", "baseline", "runs.patch(proofState)",
+      "runs.patch(checkinOptIn)", "keys", "report(live_today)", "report(in_pr)", "report(proven_live)", "runs.patch(phase)", "keys", "hosting"
+    ])
+    expect(labels).not.toContain("site-source")
+    expect(labels).not.toContain("hosting.deploy")
+    expect(labels.some((entry) => entry.startsWith("server-lane.provision-env"))).toBe(false)
+    const at = (entry: string) => labels.indexOf(entry)
+    // §3y.2 E2E order: site-claim at install; site-prove between the mergeSha PATCH and the proof claim.
+    expect(at("site-claim")).toBeGreaterThan(at("runs.patch(approvedConversions)"))
+    expect(at("site-prove")).toBeGreaterThan(at("runs.patch(mergeSha,mergedAt,phase)"))
+    expect(at("runs.proof-claim")).toBeGreaterThan(at("site-prove"))
+    expect(labels.filter((entry) => entry === "test.start(real_visit:home)")).toHaveLength(1)
+    expect(at("test.start(real_visit:home)")).toBeGreaterThan(at("runs.proof-claim"))
+    const visit = w.bridge.callsFor("test.start").find((call) => (call.body as { mode: string }).mode === "real_visit")!.body as { expect: { infinite?: { siteSourceKey: string } } }
+    expect(visit.expect.infinite?.siteSourceKey).toBe(FAKE_RESERVED_SITE_KEY)
+    const receipts = run.ofType("receipt").filter((event) => event.lane === "infinite")
+    expect(receipts.at(-1)).toMatchObject({ state: "verified" })
+    expect(Date.parse(String(receipts.at(-1)!.receiptAt))).toBeGreaterThan(Date.parse(FAKE_RUN_STARTED_AT))
+    const proofPatch = w.bridge.callsFor("runs.patch").map((call) => (call.body as { patch: { proofState?: string } }).patch.proofState).filter(Boolean)
+    expect(proofPatch).toEqual(["proven"])
+    // The cloud: the claim proven, the source created WITH the reserved key, the run proven.
+    expect(w.bridge.script.claim?.state).toBe("proven")
+    expect(w.bridge.script.keys.infinite.siteSourceKey).toBe(FAKE_RESERVED_SITE_KEY)
+    expect(w.bridge.script.run.proofState).toBe("proven")
+    expect(w.bridge.script.run.phase).toBe("proven")
+    const report = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/report.json"), "utf8")) as { columns: { proven_live: { pending: string | null; measuredAt: string | null } } }
+    expect(report.columns.proven_live.pending).toBeNull()
+    expect(report.columns.proven_live.measuredAt).not.toBeNull()
+  })
+
+  it("NEGATIVE: deployed, but the proof file is not served → parked HOST_UNCONFIRMED (exit 3), NO real visit, NO proof claim", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
+    // The 3-minute proof grace runs on the preload's virtual clock (E2E_FAST_CLOCK): the same deadlines, in seconds.
+    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_FAST_CLOCK: "1" } })
+    const respond = (ask: { kind: string; payload: unknown }) => {
+      const payload = ask.payload as { question?: string; options?: Array<{ value: string }>; number?: number }
+      if (ask.kind === "single" && payload.question?.startsWith("Which address is your live site?")) return "__type__"
+      if (ask.kind === "text") return PRODUCTION_HOST
+      if (ask.kind !== "merge-ready") return undefined
+      const sha = mergePullRequest(w.site, w.ghState, payload.number!)
+      const gh = readGhState(w.ghState) as unknown as { deployments: unknown[] }
+      gh.deployments.push(productionDeployment(7102, sha, "success"))
+      writeFileSync(w.ghState, `${JSON.stringify(gh, null, 2)}\n`)
+      // The deploy is live, but the proof file is NOT served (e.g. a CDN rule), so the cloud cannot confirm the host.
+      w.bridge.script.siteFileOutcome = "not_served"
+      return "open"
+    }
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond, timeoutMs: RUN_TIMEOUT })
+    expect(run.code, trace(run)).toBe(3)
+    expect(stepOutcomes(run).at(-1)).toBe("prove:parked:INF_WIZ_HOST_UNCONFIRMED")
+    const labels = w.bridge.calls.map(label)
+    expect(labels).not.toContain("runs.proof-claim")
+    expect(labels.some((entry) => entry.startsWith("test.start(real_visit"))).toBe(false)
+    expect(labels.filter((entry) => entry === "site-prove").length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe("§3y.7 the second reviewer: blind or incomplete is said, never 'nothing to change'", () => {
+  /** The live run's Codex: no file read, every item cant_tell, changes_suggested, no finding. */
+  const blindReview = () => ({
+    verdict: "changes_suggested",
+    summary: "Review blocked: file-access tooling is unavailable, and your instructions prohibit commands. No repository contents were inspected.",
+    checklist: ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16"].map((item) => ({ item, status: "cant_tell", note: "Could not inspect files." })),
+    findings: []
+  })
+  const scenarioWith = (codexTurns: unknown[]) => {
+    const base = agentScenario() as { claude: unknown; codex: unknown }
+    return { ...base, codex: { turns: codexTurns } }
+  }
+
+  it("a BLIND Codex (it reads nothing, twice) → no review posted, the brief path, 'No second review (Codex could not read the files)' everywhere", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
+    const w = await world({ scenario: scenarioWith([{ blind: true, final: blindReview() }, { blind: true, final: blindReview() }]) })
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
+    expect(run.code, trace(run)).toBe(0)
+    const reviewer = agentRuns(w, "codex", "reviewer")
+    expect(reviewer).toHaveLength(2)
+    const gh = readGhState(w.ghState)
+    expect(gh.prs[0]!.reviews).toEqual([])
+    const comments = ((gh.prs[0] as unknown as { comments?: Array<{ body: string }> }).comments ?? []).map((comment) => comment.body).join("\n")
+    expect(comments).toContain("No second review (Codex could not read the files).")
+    const text = run.ofType("step.sub").map((event) => String(event.text)).join("\n")
+    expect(text).toContain("! Codex could not read the pull request's files, so there is no second review.")
+    expect(text).not.toContain("nothing to change")
+    const mergeAsk = run.ofType("ask.open").find((event) => event.kind === "merge-ready")!.payload as { summary: string }
+    expect(mergeAsk.summary).toContain("No second review (Codex could not read the files)")
+    expect(existsSync(join(w.site.repo, ".infinite/wizard/review-brief.md"))).toBe(true)
+  })
+
+  it("a Codex that could not check two items → 'review incomplete' in the terminal, the posted review, the merge card and the final comment", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
+    const partial = {
+      verdict: "looks_good",
+      summary: "Checked what I could read.",
+      checklist: ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16"].map((item) => ({ item, status: item === "R10" || item === "R12" ? "cant_tell" : "pass", note: "ok" })),
+      findings: []
+    }
+    const w = await world({ scenario: scenarioWith([{ final: partial }]) })
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
+    expect(run.code, trace(run)).toBe(0)
+    const text = run.ofType("step.sub").map((event) => String(event.text)).join("\n")
+    expect(text).toContain("! Codex's review is incomplete: it could not check R10, R12 (14 of 16 checked)")
+    expect(text).not.toContain("nothing to change")
+    const gh = readGhState(w.ghState)
+    expect(gh.prs[0]!.reviews[0]!.body).toContain("**Second review by Codex (round 1): incomplete — it could not check R10, R12.**")
+    expect(gh.prs[0]!.reviews[0]!.body).not.toContain("read-check")
+    const mergeAsk = run.ofType("ask.open").find((event) => event.kind === "merge-ready")!.payload as { summary: string }
+    expect(mergeAsk.summary).toContain("Review incomplete (Codex could not check 2 items)")
+    const comments = ((gh.prs[0] as unknown as { comments?: Array<{ body: string }> }).comments ?? []).map((comment) => comment.body).join("\n")
+    expect(comments).toContain("Reviewed by Codex (incomplete: R10, R12 not checked).")
   })
 })

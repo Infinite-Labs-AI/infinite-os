@@ -62,6 +62,27 @@ if (process.env.E2E_NO_AGENTS === "1") {
   }
 }
 
+// §3y (IO-12): a run that must WAIT minutes by design (the 3-minute proof grace after a deploy) runs on virtual
+// time: the clock's sleep advances an offset and yields briefly, and `now()` includes the offset, so every
+// deadline the wizard computes from its clock still holds — in seconds of real time. E2E_FAST_CLOCK=1 only.
+if (process.env.E2E_FAST_CLOCK === "1") {
+  const createDeps = wiring.createDeps
+  wiring.createDeps = async (input) => {
+    const deps = await createDeps(input)
+    let offset = 0
+    deps.clock = {
+      now: () => new Date(Date.now() + offset),
+      sleep: (ms, signal) =>
+        new Promise((resolve, reject) => {
+          if (signal?.aborted) return reject(signal.reason ?? new Error("aborted"))
+          offset += ms
+          setTimeout(resolve, Math.min(ms, 25))
+        })
+    }
+    return deps
+  }
+}
+
 // §4.3 (e): the user answering the wizard's OWN /dev/tty prompt in nested mode (the test runs with no
 // controlling terminal, so the real prompt cannot open). E2E_TTY_ANSWERS names a JSON file:
 // {"lines": {"<line kind>": {"approved": bool, "edit"?: string}}, "default": bool}.
