@@ -47,7 +47,7 @@ import { renderChange } from "./change.js";
 import { renderImages } from "./images.js";
 import { renderJob } from "./job.js";
 import { renderLaunch } from "./launch.js";
-import { isSettledWithoutRunning, reconcileLines } from "./outcome.js";
+import { awaitingApp, isSettledWithoutRunning, reconcileLines } from "./outcome.js";
 
 type KindRendererMap = { [K in AnswerViewKind]?: KindRenderer<K> };
 
@@ -109,8 +109,9 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
       ...explainLines(view, shellCtx),
       ...managedSummaryLines(managed, shellCtx),
       // A settled write's afterword ("Nothing ran.") follows its sentence on the next row (r4 receipts).
+      // A dismissal still on its way says only that (N22): its sentence waits for the app's answer.
       ...(body?.joinsReason || (AFTERWORD_KINDS.has(view.kind) && isSettledWithoutRunning(view))
-        ? [...stateReasonLines(view, shellCtx, fixAsk !== null), ...(body?.detail ?? [])]
+        ? [...(awaitingApp(view, shellCtx) ? [] : stateReasonLines(view, shellCtx, fixAsk !== null)), ...(body?.detail ?? [])]
         : blankBetween(stateReasonLines(view, shellCtx, fixAsk !== null), body?.detail ?? [])),
       ...(managed ? managedApprovalLines(managed, shellCtx) : []),
       ...reconcileLines(view, shellCtx),

@@ -632,6 +632,8 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
         await sendKeys(input, "n");
         await waitFor(() => lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
         expect(lastFrame()).not.toContain("Sent to the app");
+        // Live run-4 N22: until the app answers, the receipt's sentence is not claimed.
+        expect(lastFrame()).not.toContain("Dismissed — nothing was executed.");
         confirm.resolve(answer === "receipt" ? { ok: true, declined: true, view: dismissed } : { ok: true });
         await waitFor(() => lastFrame().includes("Sent to the app"), 4_000, lastFrame);
         expect(lastFrame()).not.toContain("Sending");
@@ -684,12 +686,12 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
       await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
       expect(lastFrame()).toContain("what it does");
       await sendKeys(input, "n");
-      await waitFor(() => lastFrame().includes("Dismissed — nothing was executed."), 4_000, lastFrame);
+      await waitFor(() => lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
       expect(lastFrame()).not.toContain("what it does");
       expect(lastFrame()).toMatch(/tab\s+switch side\s+\/\s+commands/u);
       confirm.resolve({ ok: true, declined: true, view: dismissed });
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      expect(lastFrame()).toContain("Dismissed — nothing was executed.");
+      await waitFor(() => lastFrame().includes("Dismissed — nothing was executed."), 4_000, lastFrame);
+      expect(lastFrame()).not.toContain("what it does");
       expect(lastFrame()).not.toContain("what it does");
       await sendKeys(input, "/exit\r");
       await session;
