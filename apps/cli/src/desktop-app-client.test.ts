@@ -2806,7 +2806,7 @@ describe("app.open.v1 and confirm.stream.v1 (T12)", () => {
       expect(error).toMatchObject({ name: "DesktopAppClientError", code });
       expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
       const lines = confirmErrorLines(error);
-      expect(lines[0]?.text).not.toMatch(/Not done|✗/);
+      expect(lines[0]?.text).not.toMatch(/Not sent|Not done|✗/);
       expect(lines[0]?.text).toContain("Infinite already started this change");
     }
   );
@@ -2835,7 +2835,7 @@ describe("app.open.v1 and confirm.stream.v1 (T12)", () => {
       .catch((caught: unknown) => caught);
     expect(error).toMatchObject({ code });
     expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
-    expect(confirmErrorLines(error)[0]?.text).not.toMatch(/Not done|✗/u);
+    expect(confirmErrorLines(error)[0]?.text).not.toMatch(/Not sent|Not done|✗/u);
   });
 
   it.each(APP_NOT_SENT_CODES)("a streamed %s error WITH the app's notSent mark is a proven not-sent refusal: nothing ran", async (code) => {
@@ -2922,6 +2922,86 @@ describe("app.open.v1 and confirm.stream.v1 (T12)", () => {
     const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
       .catch((caught: unknown) => caught);
     expect(error).toMatchObject({ code: "confirmation_not_found", view: { state: "expired" } });
+    expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
+  });
+
+  // Wave 3 r2 (round-1 handoff): the app's notSent mark says a write never left,
+  // on every path a refusal can arrive by. Streamed: the error frame (above) and
+  // a failed receipt frame. Plain: a failed answer. A view, when the answer has
+  // one, speaks for itself; the mark counts only as a literal true.
+  it("a streamed failed receipt frame the app marks notSent, with no view, is a proven not-sent refusal", async () => {
+    const { client } = harness({
+      respond: () => ndjsonResponse([
+        frame(1, "progress", { type: "action.receipt", stage: "tool", message: "", confirmationHandle: "opaque-confirm-1", result: { ok: false, code: "stale_turn_context", message: "Nothing was executed.", notSent: true } }),
+        frame(2, "done", { turnId: "turn-1", message: "", actionCalls: [] })
+      ])
+    });
+    await client.status();
+    const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "stale_turn_context", nothingRan: true });
+    expect(confirmErrorLines(error)).toEqual([{ tone: "bad", text: "✗ Not sent: Nothing was executed." }]);
+  });
+
+  it("a streamed failed receipt frame WITHOUT the mark stays unsure", async () => {
+    const { client } = harness({
+      respond: () => ndjsonResponse([
+        frame(1, "progress", { type: "action.receipt", stage: "tool", message: "", confirmationHandle: "opaque-confirm-1", result: { ok: false, code: "stale_turn_context", message: "Check it in the app." } }),
+        frame(2, "done", { turnId: "turn-1", message: "", actionCalls: [] })
+      ])
+    });
+    await client.status();
+    const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
+      .catch((caught: unknown) => caught);
+    expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
+    expect(confirmErrorLines(error)[0]?.text).not.toMatch(/Not sent|✗/u);
+  });
+
+  it("a streamed error frame the app marks notSent says it was not sent, never that it didn't go through", async () => {
+    const { client } = harness({
+      respond: () => ndjsonResponse([frame(1, "error", { code: "local_provider_busy", message: "Nothing was executed.", notSent: true })])
+    });
+    await client.status();
+    const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
+      .catch((caught: unknown) => caught);
+    const lines = confirmErrorLines(error);
+    expect(lines).toEqual([{ tone: "bad", text: "✗ Not sent: Nothing was executed." }]);
+    expect(lines[0]?.text).not.toMatch(/didn't go through/u);
+  });
+
+  it.each([
+    ["at the top", { ok: false, code: "stale_turn_context", message: "Nothing was executed.", notSent: true }],
+    ["on its error", { ok: false, error: { code: "stale_turn_context", message: "Nothing was executed.", notSent: true } }]
+  ])("a plain confirm's failure the app marks notSent %s, with no view, is a proven not-sent refusal", async (_where, answer) => {
+    const { client } = harness({ status: CAPABILITIES, descriptor: CAPABILITIES, respond: () => jsonResponse(answer) });
+    await client.status();
+    const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve" })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "stale_turn_context", nothingRan: true });
+    expect(confirmErrorLines(error)).toEqual([{ tone: "bad", text: "✗ Not sent: Nothing was executed." }]);
+  });
+
+  it("a plain confirm's failure without the mark, or with a non-literal one, stays unsure", async () => {
+    for (const notSent of [undefined, "true", 1]) {
+      const { client } = harness({
+        status: CAPABILITIES, descriptor: CAPABILITIES,
+        respond: () => jsonResponse({ ok: false, code: "stale_turn_context", message: "Check it in the app.", ...(notSent === undefined ? {} : { notSent }) })
+      });
+      await client.status();
+      const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve" })
+        .catch((caught: unknown) => caught);
+      expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
+      expect(confirmErrorLines(error)[0]?.text).not.toMatch(/Not sent|✗/u);
+    }
+  });
+
+  it("a plain confirm's failure with a receipt view keeps the view, whatever the mark", async () => {
+    const notSentView = receiptView({ state: "failed", outcome: "not_sent", receipt: { sentence: "Nothing was sent.", tone: "warn", revertible: false } });
+    const { client } = harness({ respond: () => jsonResponse({ ok: false, code: "stale_turn_context", message: "Nothing was executed.", notSent: true, view: notSentView }) });
+    await client.status();
+    const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve" })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ view: { state: "failed", outcome: "not_sent" } });
     expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
   });
 });

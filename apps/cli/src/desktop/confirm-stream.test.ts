@@ -231,21 +231,55 @@ describe("the session's ordered steps when a confirm ends (confirmStreamSteps)",
   });
 });
 
+// Wave 3 r2 (round-1 handoff): the app's notSent mark rides the streamed error
+// frame into the client's error (`nothingRan`); the steps must hand that same
+// error to the card, so a write that never left says it was not sent.
+describe("a streamed error frame the app marks notSent is carried to the card", () => {
+  const marked = () => Object.assign(new Error("Nothing was executed."), { code: "local_provider_busy", nothingRan: true as const });
+
+  it("before any receipt, the card settles from the marked error itself, and says Not sent", () => {
+    const error = marked();
+    const steps = confirmStreamSteps({ type: "rejected", error }, { answered: false, confirmFieldsCapable: true });
+    expect(steps).toEqual([{ type: "settle", outcome: error, thrown: true }]);
+    const settled = steps[0]!.type === "settle" ? steps[0]!.outcome : null;
+    expect(confirmErrorLines(settled)).toEqual([{ tone: "bad", text: "✗ Not sent: Nothing was executed." }]);
+  });
+
+  it("off the card's turn, too, the card settles from the marked error, never labelled follow-up words", () => {
+    const error = marked();
+    expect(confirmStreamSteps({ type: "rejected", error }, { answered: false, confirmFieldsCapable: true, onCardTurn: false, label: "Pause ad 01" }))
+      .toEqual([{ type: "settle", outcome: error, thrown: true }]);
+  });
+
+  it("after the receipt, the write went: an error is only the follow-up's words, never Not sent", () => {
+    const steps = confirmStreamSteps({ type: "rejected", error: marked() }, { answered: true, confirmFieldsCapable: true });
+    const text = steps.flatMap((step) => (step.type === "lines" ? step.lines.map((line) => line.text) : [])).join("\n");
+    expect(text).toContain("The follow-up stopped");
+    expect(text).not.toMatch(/Not sent/u);
+  });
+
+  it("a streamed error without the mark is unsure, never Not sent and never didn't go through", () => {
+    const error = Object.assign(new Error("Check it in the app before trying again."), { code: "local_provider_busy" });
+    const text = confirmErrorLines(error)[0]?.text ?? "";
+    expect(text).not.toMatch(/Not sent|didn't go through|✗/u);
+  });
+});
+
 describe("a streamed error with no receipt is not done", () => {
   it("renders as not done, never as a receipt", () => {
     const error = Object.assign(new Error("That budget must be at least 1."), { code: "field_invalid", nothingRan: true });
     const lines = confirmErrorLines(error);
-    expect(lines).toEqual([{ tone: "bad", text: "✗ Not done: That budget must be at least 1." }]);
+    expect(lines).toEqual([{ tone: "bad", text: "✗ Not sent: That budget must be at least 1." }]);
   });
 
   it("without the app's words it still says nothing ran", () => {
     const error = Object.assign(new Error(""), { code: "confirmation_not_found", nothingRan: true });
-    expect(confirmErrorLines(error)).toEqual([{ tone: "bad", text: "✗ Not done: nothing ran." }]);
+    expect(confirmErrorLines(error)).toEqual([{ tone: "bad", text: "✗ Not sent: nothing ran." }]);
   });
 
   it("an error the bridge cannot vouch for keeps T6's words", () => {
     const error = Object.assign(new Error("Check it in the app before trying again."), { code: "receipt_unavailable" });
-    expect(confirmErrorLines(error)[0]?.text).not.toContain("Not done");
+    expect(confirmErrorLines(error)[0]?.text).not.toMatch(/Not sent|Not done/u);
   });
 });
 

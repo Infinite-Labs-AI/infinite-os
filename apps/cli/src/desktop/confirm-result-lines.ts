@@ -109,12 +109,12 @@ export function confirmErrorLines(error: unknown): ConfirmLine[] {
   if (code !== undefined && UNREACHABLE_CODES.has(code)) {
     return [{ tone: "bad", text: UNREACHABLE_LINE }];
   }
-  // A streamed confirm (confirm.stream.v1) that ended in an error before any
-  // receipt, with a code the app sends when nothing ran: not done, never a
-  // receipt (T12). The app's words say why (a value it refused, a card gone).
+  // A refusal the app proved never left (its `notSent` mark, or a code refused
+  // before anything resolves): r4's `✗ Not sent`, never a receipt and never
+  // the unsure words (T12). The app's words say why (a value it refused, a card gone).
   if (isRecord(error) && error.nothingRan === true) {
     const why = error instanceof Error ? boundedTerminalText(error.message, MAX_LINE_CHARS) : "";
-    return [{ tone: "bad", text: `✗ Not done: ${why || "nothing ran."}` }];
+    return [{ tone: "bad", text: `✗ Not sent: ${why || "nothing ran."}` }];
   }
   const fromView = receiptViewLines(isRecord(error) ? error.view : undefined, "approve");
   if (fromView) return fromView;
