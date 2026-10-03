@@ -19,9 +19,15 @@ import type { InSessionConfirmationAction } from "./confirm-in-session.js";
 import type { ConfirmLine } from "./confirm-result-lines.js";
 import { bridgeFrameToChatEvent, parsePendingConfirmations } from "./desktop-turn-source.js";
 import { boundedTerminalText, scrubTerminalControls } from "./terminal-text.js";
+import { renderMarkdown } from "../formatting/markdown-render.js";
+import { INFINITE_R4_THEME } from "../tui/theme.js";
 
 const MAX_LINE_CHARS = 240;
 const MAX_LABEL_CHARS = 80;
+/** The transcript width an off-turn answer is drawn at when the session gives none. */
+const DEFAULT_OFF_TURN_WIDTH = 80;
+/** An off-turn answer sits indented under its label. */
+const OFF_TURN_INDENT = "  ";
 const STOPPED_LINE = "■ Stopped the follow-up. Anything already running in the app may still finish.";
 
 export interface FollowUpOutcome {
@@ -108,6 +114,12 @@ export interface ConfirmStreamStepOptions {
   label?: string;
   /** The user stopped the follow-up (Esc / Ctrl-C): one stop line instead of its error words. */
   stopped?: boolean;
+  /**
+   * The transcript's width. Off the card's turn the answer is drawn by the
+   * markdown renderer at this width less its indent (bullets, bordered
+   * tables), as any answer is, never printed as raw markdown.
+   */
+  width?: number;
 }
 
 /**
@@ -143,7 +155,7 @@ export function confirmStreamSteps(
   }
   const label = followUpLabel(options.label);
   const said: ConfirmLine[] = [
-    ...(follow.message ? follow.message.split("\n").map((line) => ({ tone: "muted" as const, text: line ? `  ${line}` : "" })) : []),
+    ...(follow.message ? offTurnAnswerLines(follow.message, options.width ?? DEFAULT_OFF_TURN_WIDTH) : []),
     ...errorLines
   ];
   if (said.length) steps.push({ type: "lines", lines: [{ tone: "muted", text: `↳ ${label}:` }, ...said] });
@@ -152,6 +164,16 @@ export function confirmStreamSteps(
     steps.push({ type: "queue", pending: follow.pending });
   }
   return steps;
+}
+
+/**
+ * An off-turn answer, drawn as the transcript draws an answer (markdown-render:
+ * bullets, bordered tables, no colour codes: the line's tone paints it), each
+ * line indented under the label and never wider than the transcript.
+ */
+function offTurnAnswerLines(message: string, width: number): ConfirmLine[] {
+  const lines = renderMarkdown(message, { width: Math.max(8, width - OFF_TURN_INDENT.length), color: false, theme: INFINITE_R4_THEME });
+  return lines.map((line) => ({ tone: "muted" as const, text: line.trim() ? `${OFF_TURN_INDENT}${line}` : "" }));
 }
 
 /** `The follow-up to “Pause ad 01”` (the card's summary, scrubbed and bounded). */

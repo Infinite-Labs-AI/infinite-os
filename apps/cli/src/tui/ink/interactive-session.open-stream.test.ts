@@ -36,14 +36,15 @@ describe("T12 wiring (CI-runnable)", () => {
 
   it("a streamed receipt settles the card once, before the follow-up; the follow-up goes on the card's turn", () => {
     const handler = source.slice(source.indexOf("const resolveConfirmAction"), source.indexOf("const openAppPlace"));
-    expect(handler).toMatch(/onReceipt: \(result\) => \{\s+onAnswer\(result\);/u);
+    // Every receipt goes to onAnswer (createFollowUpStream, CI-tested in follow-up-turn.test.ts), which settles once.
+    expect(handler).toContain("const followUpStream = createFollowUpStream(followUpAbort, {\n      onReceipt: onAnswer,");
     expect(handler).toContain("if (answered) return;");
     // The order of what happens when the call ends is confirm-stream.ts `confirmStreamSteps` (unit-tested there);
     // the session runs every step it returns, and each step does its one thing.
     expect(handler).toContain("const result = await onConfirmAction?.(head, decision, fields, streamHooks);\n        runSteps({ type: \"resolved\", result }, endFollowUp());");
     expect(handler).toMatch(/\} catch \(error\) \{\s+runSteps\(\{ type: "rejected", error \}, endFollowUp\(\)\);/u);
     // P33-M2: whether the card's turn is still live goes into the steps, so an off-turn follow-up prints labelled.
-    expect(handler).toContain("const options = { answered, confirmFieldsCapable: head.confirmFieldsCapable === true, onCardTurn: onCardTurn(), label, stopped };");
+    expect(handler).toContain("const options = { answered, confirmFieldsCapable: head.confirmFieldsCapable === true, onCardTurn: onCardTurn(), label, stopped, width: transcriptColumns(columns) };");
     expect(handler).toContain("for (const step of confirmStreamSteps(end, options)) {");
     expect(handler).toMatch(/case "settle":\s+if \(step\.thrown\) \{\s+if \(settle\(step\.outcome, true\) && !refusedField\(step\.outcome\)\) afterReceipt\(step\.outcome\);\s+\} else onAnswer\(step\.outcome\);\s+break;/u);
     expect(handler).toMatch(/case "message":\s+appendMessages\(\[\{ role: "assistant", text: step\.text \}\]\);\s+break;/u);
@@ -51,8 +52,9 @@ describe("T12 wiring (CI-runnable)", () => {
     expect(handler).toMatch(/case "queue":\s+setPendingConfirmActions\(\(current\) => \[\.\.\.current, \.\.\.step\.pending\]\);\s+break;/u);
     // The follow-up's views land on the card's own turn; off it they print labelled, never dropped.
     expect(handler).toMatch(/onView: \(frame\) => \{\s+if \(!onCardTurn\(\)\) \{\s+[^}]*offTurnViewLines\(frame\.view, label,/u);
-    // The client streams only a card that carried a view, and only from an app that can.
-    expect(indexSource).toContain("const streamed = stream && action.view && runner.streamCapable() ? stream : null;");
+    // The client streams only a card that carried a view, and only from an app that can
+    // (confirmThroughRunner, driven with a fake runner in follow-up-turn.test.ts).
+    expect(indexSource).toContain("confirmThroughRunner(runner, { action, decision, fields, stream, turnSignal: turnAbort.signal }),");
   });
 });
 
@@ -60,16 +62,17 @@ describe("P33-M2 / S3 wiring (CI-runnable)", () => {
   const handler = source.slice(source.indexOf("const resolveConfirmAction"), source.indexOf("const openAppPlace"));
 
   it("the follow-up runs on its own controller, armed for Esc only once the receipt came", () => {
-    expect(handler).toContain("const followUp = new AbortController();");
-    expect(handler).toContain("signal: followUp.signal,");
-    expect(handler).toMatch(/onReceipt: \(result\) => \{\s+onAnswer\(result\);\s+if \(followUpArmed\) return;\s+followUpArmed = true;\s+followUpAbort\.arm\(followUp\);/u);
+    // Backstop only: the arming rule itself is CI-tested on createFollowUpStream (follow-up-turn.test.ts),
+    // and the session hands the confirm exactly the hooks that builder made.
+    expect(handler).toContain("const followUp = followUpStream.controller;");
+    expect(handler).toContain("const streamHooks: ConfirmStreamHooks = followUpStream.hooks;");
+    expect(handler).not.toMatch(/followUpAbort\.arm\(/u);
     // Esc / Ctrl-C reach it through the composer's stop, which stops a running turn first.
     expect(source).toContain("const [stopAbort] = useState<TurnAbort>(() => runningTurnAbort(turnAbort, followUpAbort));");
     expect(source).toContain("turnAbort={stopAbort}");
     expect(source).toContain("busy={busy || followUpRunning}");
-    // The confirm's signal is the follow-up's own, linked to the session's.
-    expect(indexSource).toContain("const linked = streamed ? linkAbortSignals([turnAbort.signal, streamed.signal]) : null;");
-    expect(indexSource).toContain("signal: linked?.signal ?? turnAbort.signal,");
+    // The confirm's signal is the follow-up's own, linked to the session's (confirmThroughRunner, CI-tested).
+    expect(indexSource).toContain("turnSignal: turnAbort.signal");
   });
 
   it("typed lines wait while the follow-up runs; the bar says esc stop first; the kept strip hides", () => {
@@ -82,9 +85,8 @@ describe("P33-M2 / S3 wiring (CI-runnable)", () => {
   it("the follow-up's Steps and image drafts go on the card's turn only", () => {
     expect(handler).toMatch(/onStep: \(event\) => \{\s+if \(onCardTurn\(\)\) turnController\.recordProgressEvent\(event\);/u);
     expect(handler).toMatch(/onCreativeDraft: \(frame\) => \{\s+if \(onCardTurn\(\)\) recordCreativeDraft\(frame\);/u);
-    expect(indexSource).toContain("const route = followUpFrameRoute(frame);");
-    expect(indexSource).toContain('else if (route?.type === "draft") streamed.onCreativeDraft(route.frame);');
-    expect(indexSource).toContain('else if (route?.type === "step") streamed.onStep(route.event);');
+    // Where index.ts sends each follow-up frame is confirmThroughRunner's job, driven with a fake runner in follow-up-turn.test.ts.
+    expect(indexSource).toContain("onConfirmAction: (action, decision, fields, stream) =>\n        confirmThroughRunner(runner,");
   });
 });
 
@@ -282,7 +284,7 @@ describe("P33-M2 / S3 in the session (fake TTY, skipped on CI)", () => {
     hooks!.onReceipt({ ok: true, view: RECEIPT_VIEW });
     await waitFor(() => lastFrame().includes("Stopped spending at 10:42"), 4_000, lastFrame);
     const keyBar = () => lastFrame().trimEnd().split("\n").at(-1) ?? "";
-    return { follow, hooks: () => hooks!, submitted, input, session, lastFrame, keyBar };
+    return { follow, hooks: () => hooks!, submitted, input, output, session, lastFrame, keyBar };
   }
 
   it.skipIf(process.env.CI === "true")(
@@ -298,12 +300,116 @@ describe("P33-M2 / S3 in the session (fake TTY, skipped on CI)", () => {
       run.follow.resolve({ ok: true, view: RECEIPT_VIEW, followUp: { turnId: "t2", message: "FOLLOWUP-ANSWER:\n\n- one\n- two", actionCalls: [] } });
       await waitFor(() => run.submitted.length === 2, 4_000, run.lastFrame);
       await waitFor(() => run.lastFrame().includes("SECOND-ANSWER to how is campaign two doing"), 4_000, run.lastFrame);
-      // The follow-up answered the card's turn, with its bullets, before the second question was asked.
-      const text = run.lastFrame();
-      expect(text.indexOf("FOLLOWUP-ANSWER") === -1 || text.indexOf("FOLLOWUP-ANSWER") < text.indexOf("❯ how is campaign two doing")).toBe(true);
-      expect(text.indexOf("SECOND-ANSWER")).toBeGreaterThan(text.indexOf("❯ how is campaign two doing"));
+      // R-S2: the follow-up answered the card's turn, with its bullets, before the second question was
+      // asked; read from everything drawn (the static scrollback included), so a dropped answer fails.
+      const all = stripAnsi(run.output.text());
+      const queuedAt = all.indexOf('queued: "how is campaign two doing"');
+      const answerAt = all.indexOf("FOLLOWUP-ANSWER");
+      const echoAt = all.indexOf("❯ how is campaign two doing", queuedAt);
+      const secondAt = all.indexOf("SECOND-ANSWER");
+      expect(queuedAt).toBeGreaterThan(-1);
+      expect(answerAt).toBeGreaterThan(queuedAt);
+      expect(all.slice(answerAt)).toMatch(/• one[\s\S]*• two/u);
+      expect(echoAt).toBeGreaterThan(answerAt);
+      expect(secondAt).toBeGreaterThan(echoAt);
+      // Drawn as the card's turn's answer, never labelled as an off-turn follow-up.
+      expect(all).not.toContain("↳ The follow-up to");
       await sendKeys(run.input, "/exit\r");
       await run.session;
+      resetTurnState();
+    }
+  );
+
+  // R-S1: before the receipt the yes's request is never stopped: a write that may already have gone
+  // must never turn into an unknown outcome. Esc with nothing running and Ctrl-C / Esc on another
+  // turn leave the confirm's signal alone; only after the receipt does Esc reach it.
+  it.skipIf(process.env.CI === "true")(
+    "before the receipt, Esc and Ctrl-C never abort the yes's request, even while another turn runs",
+    { timeout: 30_000 },
+    async () => {
+      const follow = deferred<unknown>();
+      let hooks: ConfirmStreamHooks | undefined;
+      const turnSignals: AbortSignal[] = [];
+      const input = ttyInput();
+      const output = ttyOutput();
+      const session = runInkInteractiveSession({
+        columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI", turnStoppable: true,
+        onConfirmAction: (_action, _decision, _fields, stream) => {
+          hooks = stream;
+          return follow.promise;
+        },
+        async onSubmitLine(_line, _progress, signal): Promise<InkInteractiveLineResult> {
+          turnSignals.push(signal!);
+          if (turnSignals.length === 1) return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+          await new Promise<void>((done) => signal!.addEventListener("abort", () => done(), { once: true }));
+          return { messages: [] };
+        }
+      });
+      output.columns = 100;
+      const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+      await sendKeys(input, "p");
+      await waitFor(() => hooks !== undefined, 4_000, lastFrame);
+      const signal = hooks!.signal;
+      // Nothing running yet: Esc stops nothing.
+      await sendKeys(input, "\u001b");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(signal.aborted).toBe(false);
+      // Another turn running: Ctrl-C stops that turn, then Esc stops the next one; the yes stays live.
+      await sendKeys(input, "how is campaign two doing\r");
+      await waitFor(() => turnSignals.length === 2, 4_000, lastFrame);
+      await sendKeys(input, "\u0003");
+      await waitFor(() => turnSignals[1]!.aborted, 4_000, lastFrame);
+      expect(signal.aborted).toBe(false);
+      await sendKeys(input, "and campaign three\r");
+      await waitFor(() => turnSignals.length === 3, 4_000, lastFrame);
+      await sendKeys(input, "\u001b");
+      await waitFor(() => turnSignals[2]!.aborted, 4_000, lastFrame);
+      expect(signal.aborted).toBe(false);
+      // The receipt arms the stop: now Esc reaches the follow-up's own signal.
+      hooks!.onReceipt({ ok: true, view: RECEIPT_VIEW });
+      await waitFor(() => lastFrame().includes("following up"), 4_000, lastFrame);
+      await sendKeys(input, "\u001b");
+      await waitFor(() => signal.aborted, 4_000, lastFrame);
+      follow.resolve({ ok: true, view: RECEIPT_VIEW, followUpError: { code: "desktop_turn_detached", message: "detached" } });
+      await waitFor(() => lastFrame().includes("Stopped the follow-up."), 4_000, lastFrame);
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "before the receipt, Ctrl-C with nothing running quits as before and never aborts the yes's request",
+    { timeout: 30_000 },
+    async () => {
+      let hooks: ConfirmStreamHooks | undefined;
+      const input = ttyInput();
+      const output = ttyOutput();
+      const session = runInkInteractiveSession({
+        columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI", turnStoppable: true,
+        onConfirmAction: (_action, _decision, _fields, stream) => {
+          hooks = stream;
+          return deferred<unknown>().promise;
+        },
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+        }
+      });
+      output.columns = 100;
+      const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+      await sendKeys(input, "p");
+      await waitFor(() => hooks !== undefined, 4_000, lastFrame);
+      // An armed stop would swallow this Ctrl-C (and abort the yes); unarmed, it quits.
+      await sendKeys(input, "\u0003");
+      const ended = await Promise.race([session.then(() => true), new Promise<boolean>((done) => setTimeout(() => done(false), 3_000))]);
+      expect(ended, lastFrame()).toBe(true);
+      expect(hooks!.signal.aborted).toBe(false);
       resetTurnState();
     }
   );

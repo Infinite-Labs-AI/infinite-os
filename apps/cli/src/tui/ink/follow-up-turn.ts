@@ -7,14 +7,33 @@
 // ends only the follow-up. The write already went before the receipt and is
 // never re-decided; before the receipt nothing here is armed, so Esc never
 // touches a yes on its way. Pure (no Ink), so every rule is CI-run.
-import type { AnswerViewV1 } from "@infinite-os/types";
+import type { ChatProgressEvent } from "@infinite-os/llm-controller";
+import type { AnswerViewV1, ApprovalFieldAnswerV1, CreativeDraftFrameV1, ToolViewFrameV1 } from "@infinite-os/types";
 
-import { followUpLabel } from "../../desktop/confirm-stream.js";
+import type { InSessionConfirmationAction, InSessionConfirmationClient } from "../../desktop/confirm-in-session.js";
+import { followUpFrameRoute, followUpLabel } from "../../desktop/confirm-stream.js";
 import type { KeyHint } from "../keys/keymap.js";
 import type { Theme } from "../theme.js";
 import { renderCommittedTurn } from "../views/layout.js";
 import { formatWholeElapsed } from "./status-indicator.js";
-import { TURN_STOPPED, type TurnAbort, type TurnStopReason } from "./turn-abort.js";
+import { linkAbortSignals, TURN_STOPPED, type TurnAbort, type TurnStopReason } from "./turn-abort.js";
+
+/** What a streamed confirm hands the session before it resolves (T12). */
+export interface ConfirmStreamHooks {
+  /**
+   * The follow-up's own signal (P33-M2): aborted only by Esc / Ctrl-C after
+   * the receipt, so a stop ends only the follow-up, never the write.
+   */
+  signal: AbortSignal;
+  /** The card's receipt (a plain confirm's answer), before the follow-up. */
+  onReceipt(result: unknown): void;
+  /** A view from the agent's follow-up, for the card's own turn. */
+  onView(frame: ToolViewFrameV1): void;
+  /** A follow-up call's start, progress or end, for the card's turn's Steps (P33-S3). */
+  onStep(event: ChatProgressEvent): void;
+  /** A follow-up's image draft in progress (`drawing 2 of 3`), as on a normal turn (P33-S3). */
+  onCreativeDraft(frame: CreativeDraftFrameV1): void;
+}
 
 /** The follow-ups running now (one per streamed yes whose receipt came), each on its own controller. */
 export interface FollowUpAbort {
@@ -63,6 +82,95 @@ export function runningTurnAbort(turn: TurnAbort, followUp: FollowUpAbort): Turn
     active: () => turn.active() || followUp.active(),
     end: (signal) => turn.end(signal)
   };
+}
+
+/** One streamed yes's follow-up: its own controller, and the hooks the confirm call gets. */
+export interface FollowUpStream {
+  controller: AbortController;
+  hooks: ConfirmStreamHooks;
+  /** Whether the receipt came, so the follow-up is running (its stop armed). */
+  armed(): boolean;
+}
+
+/**
+ * The hooks for one streamed yes (R-S1). The follow-up's stop is armed by
+ * the receipt and never before it: until the receipt, Esc and Ctrl-C never
+ * touch the yes's request, so a write that may already have gone never turns
+ * into an unknown outcome. Every receipt goes to `onReceipt` (the session
+ * settles the card once); the first one arms the stop and calls `onArmed`.
+ */
+export function createFollowUpStream(
+  abort: FollowUpAbort,
+  parts: Omit<ConfirmStreamHooks, "signal"> & { onArmed(): void }
+): FollowUpStream {
+  const controller = new AbortController();
+  let armed = false;
+  return {
+    controller,
+    armed: () => armed,
+    hooks: {
+      signal: controller.signal,
+      onReceipt: (result) => {
+        parts.onReceipt(result);
+        if (armed) return;
+        armed = true;
+        abort.arm(controller);
+        parts.onArmed();
+      },
+      onView: (frame) => parts.onView(frame),
+      onStep: (event) => parts.onStep(event),
+      onCreativeDraft: (frame) => parts.onCreativeDraft(frame)
+    }
+  };
+}
+
+/** The narrow runner a card's confirm goes through (the desktop session runner). */
+export interface ConfirmRunner {
+  confirm: InSessionConfirmationClient["confirm"];
+  /** Whether the last turn's app can stream a card's confirm (confirm.stream.v1 with views). */
+  streamCapable(): boolean;
+}
+
+/**
+ * A card's confirm through the runner (R-S4, index.ts). A card with a view
+ * streams its confirm when the app can (confirm.stream.v1): the receipt
+ * first, then the follow-up's frames where a normal turn's go (P33-S3): its
+ * views, its calls' Steps rows, its image drafts. A streamed confirm runs on
+ * the follow-up's own signal linked to the session's (P33-M2), let go when
+ * the call ends. Anything else confirms plainly on the session's signal.
+ */
+export function confirmThroughRunner(
+  runner: ConfirmRunner,
+  input: {
+    action: InSessionConfirmationAction;
+    decision: "approve" | "decline";
+    fields?: Record<string, ApprovalFieldAnswerV1>;
+    stream?: ConfirmStreamHooks;
+    turnSignal: AbortSignal;
+  }
+): Promise<unknown> {
+  const { action, decision, fields, stream, turnSignal } = input;
+  const streamed = stream && action.view && runner.streamCapable() ? stream : null;
+  const linked = streamed ? linkAbortSignals([turnSignal, streamed.signal]) : null;
+  return runner.confirm({
+    turnId: action.turnId,
+    confirmationHandle: action.confirmationHandle,
+    decision,
+    ...(fields && Object.keys(fields).length ? { fields } : {}),
+    signal: linked?.signal ?? turnSignal,
+    ...(streamed
+      ? {
+          stream: true,
+          onReceipt: (receipt) => streamed.onReceipt(receipt),
+          onProgress: (frame) => {
+            const route = followUpFrameRoute(frame);
+            if (route?.type === "view") streamed.onView(route.frame);
+            else if (route?.type === "draft") streamed.onCreativeDraft(route.frame);
+            else if (route?.type === "step") streamed.onStep(route.event);
+          }
+        }
+      : {})
+  }).finally(() => linked?.dispose());
 }
 
 /** Whether a submitted line waits in the queue: while a turn or a streamed follow-up runs. */

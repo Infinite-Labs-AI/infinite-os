@@ -47,7 +47,6 @@ import {
   type DesktopStatus
 } from "./desktop-app-client.js";
 import { desktopTopBarData } from "./desktop/status-connections.js";
-import { followUpFrameRoute } from "./desktop/confirm-stream.js";
 import { resolveMode, type ModeDeps, type ModeIo } from "./desktop/mode-router.js";
 import {
   createDesktopSessionTurnRunner,
@@ -82,6 +81,7 @@ import {
 } from "./tui/ink/interactive-session.js";
 import { runInfiniteWelcome } from "./tui/ink/infinite-welcome.js";
 import type { TopBarData, TopBarSource } from "./tui/ink/top-bar.js";
+import { confirmThroughRunner } from "./tui/ink/follow-up-turn.js";
 import { linkAbortSignals } from "./tui/ink/turn-abort.js";
 import { appendPersistentInputHistory, loadPersistentInputHistory } from "./tui/ink/input-history.js";
 import { resolveCliRenderSurface, usesTranscriptRenderSurface } from "./tui/runtime/render-surface.js";
@@ -1816,34 +1816,13 @@ async function runDesktopInteractiveEntry(
       // Desktop that takes them; the client refuses them elsewhere.
       // A card with a view streams its confirm when the app can (confirm.stream.v1):
       // the receipt first, then the agent's follow-up, in the same turn (T12).
-      // The follow-up's frames go where a normal turn's go (P33-S3): its views,
-      // its calls' Steps rows and its image drafts, on the card's turn. A
-      // streamed confirm runs on the follow-up's own signal linked to the
-      // session's (P33-M2): the session arms Esc on it only after the receipt,
-      // so a stop ends the follow-up and never the write.
-      onConfirmAction: (action, decision, fields, stream) => {
-        const streamed = stream && action.view && runner.streamCapable() ? stream : null;
-        const linked = streamed ? linkAbortSignals([turnAbort.signal, streamed.signal]) : null;
-        return runner.confirm({
-          turnId: action.turnId,
-          confirmationHandle: action.confirmationHandle,
-          decision,
-          ...(fields && Object.keys(fields).length ? { fields } : {}),
-          signal: linked?.signal ?? turnAbort.signal,
-          ...(streamed
-            ? {
-                stream: true,
-                onReceipt: (receipt) => streamed.onReceipt(receipt),
-                onProgress: (frame) => {
-                  const route = followUpFrameRoute(frame);
-                  if (route?.type === "view") streamed.onView(route.frame);
-                  else if (route?.type === "draft") streamed.onCreativeDraft(route.frame);
-                  else if (route?.type === "step") streamed.onStep(route.event);
-                }
-              }
-            : {})
-        }).finally(() => linked?.dispose());
-      },
+      // The follow-up's frames go where a normal turn's go (P33-S3), on the
+      // follow-up's own signal linked to the session's (P33-M2); the session
+      // arms Esc on it only after the receipt, so a stop ends the follow-up
+      // and never the write. `confirmThroughRunner` (follow-up-turn.ts) is
+      // unit-tested with a fake runner.
+      onConfirmAction: (action, decision, fields, stream) =>
+        confirmThroughRunner(runner, { action, decision, fields, stream, turnSignal: turnAbort.signal }),
       // `o` and `w` on the views follow what the app negotiated (app.open.v1);
       // `o` opens places through the app, never a browser.
       appCaps: () => runner.caps(),

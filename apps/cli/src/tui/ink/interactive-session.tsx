@@ -37,7 +37,7 @@ import {
 import { confirmErrorLines, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
 import { appOpenLines } from "../../desktop/app-open.js";
 import { confirmStreamSteps } from "../../desktop/confirm-stream.js";
-import { createFollowUpAbort, followUpNote, lineWaits, offTurnViewLines, runningBarHints, runningTurnAbort } from "./follow-up-turn.js";
+import { type ConfirmStreamHooks, createFollowUpAbort, createFollowUpStream, followUpNote, lineWaits, offTurnViewLines, runningBarHints, runningTurnAbort } from "./follow-up-turn.js";
 
 import { turnController } from "../app/turn-controller.js";
 import {
@@ -368,22 +368,8 @@ export interface InkInteractiveSessionAppProps {
   turnStoppable?: boolean;
 }
 
-/** What a streamed confirm hands the session before it resolves (T12). */
-export interface ConfirmStreamHooks {
-  /**
-   * The follow-up's own signal (P33-M2): aborted only by Esc / Ctrl-C after
-   * the receipt, so a stop ends only the follow-up, never the write.
-   */
-  signal: AbortSignal;
-  /** The card's receipt (a plain confirm's answer), before the follow-up. */
-  onReceipt(result: unknown): void;
-  /** A view from the agent's follow-up, for the card's own turn. */
-  onView(frame: ToolViewFrameV1): void;
-  /** A follow-up call's start, progress or end, for the card's turn's Steps (P33-S3). */
-  onStep(event: ChatProgressEvent): void;
-  /** A follow-up's image draft in progress (`drawing 2 of 3`), as on a normal turn (P33-S3). */
-  onCreativeDraft(frame: CreativeDraftFrameV1): void;
-}
+/** What a streamed confirm hands the session before it resolves (T12); built by follow-up-turn.ts. */
+export type { ConfirmStreamHooks } from "./follow-up-turn.js";
 
 export interface InkInteractiveSessionRunOptions extends InkInteractiveSessionAppProps {
   errorOutput?: NodeJS.WriteStream;
@@ -1727,18 +1713,12 @@ export function InkInteractiveSessionApp({
     // follow-up's words. From the receipt to the end of the call the follow-up
     // is the running turn (P33-M2): typed lines wait, the bar offers `esc stop`,
     // and Esc / Ctrl-C abort this controller, which ends only the follow-up.
-    const followUp = new AbortController();
-    let followUpArmed = false;
+    // The stop is armed by the receipt only (createFollowUpStream, CI-tested):
+    // before it, Esc and Ctrl-C never touch the yes's request.
     const label = head.summary;
-    const streamHooks: ConfirmStreamHooks = {
-      signal: followUp.signal,
-      onReceipt: (result) => {
-        onAnswer(result);
-        if (followUpArmed) return;
-        followUpArmed = true;
-        followUpAbort.arm(followUp);
-        setFollowUps((current) => ({ count: (current?.count ?? 0) + 1, startedAt: current?.startedAt ?? Date.now() }));
-      },
+    const followUpStream = createFollowUpStream(followUpAbort, {
+      onReceipt: onAnswer,
+      onArmed: () => setFollowUps((current) => ({ count: (current?.count ?? 0) + 1, startedAt: current?.startedAt ?? Date.now() })),
       onView: (frame) => {
         if (!onCardTurn()) {
           // Off its turn the view still prints, labelled, under the live turn; never dropped.
@@ -1756,13 +1736,15 @@ export function InkInteractiveSessionApp({
       onCreativeDraft: (frame) => {
         if (onCardTurn()) recordCreativeDraft(frame);
       }
-    };
+    });
+    const followUp = followUpStream.controller;
+    const streamHooks: ConfirmStreamHooks = followUpStream.hooks;
     // When the call ends, what happens and in what order is one pure step list
     // (confirm-stream.ts `confirmStreamSteps`, unit-tested on CI): the receipt
     // settled once, then the follow-up's answer, its error words, its cards.
     // Off the card's turn they print as lines labelled with whose follow-up they are.
     const runSteps = (end: Parameters<typeof confirmStreamSteps>[0], stopped: boolean) => {
-      const options = { answered, confirmFieldsCapable: head.confirmFieldsCapable === true, onCardTurn: onCardTurn(), label, stopped };
+      const options = { answered, confirmFieldsCapable: head.confirmFieldsCapable === true, onCardTurn: onCardTurn(), label, stopped, width: transcriptColumns(columns) };
       for (const step of confirmStreamSteps(end, options)) {
         switch (step.type) {
           case "settle":
@@ -1787,7 +1769,7 @@ export function InkInteractiveSessionApp({
     let followUpEnded = false;
     const endFollowUp = (): boolean => {
       const stopped = followUpAbort.end(followUp);
-      if (!followUpArmed || followUpEnded) return stopped;
+      if (!followUpStream.armed() || followUpEnded) return stopped;
       followUpEnded = true;
       if (onCardTurn()) {
         if (stopped) closeRunningSteps("stopped", Date.now());

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { appOpenLines } from "./app-open.js";
 import { confirmErrorLines } from "./confirm-result-lines.js";
 import { confirmStreamSteps, followUpFrameRoute, followUpOutcome, followUpViewFrame } from "./confirm-stream.js";
+import { displayWidth } from "../tui/lib/display-width.js";
 import { INFINITE_R4_THEME } from "../tui/theme.js";
 import { renderCommittedTurn } from "../tui/views/layout.js";
 
@@ -169,8 +170,30 @@ describe("the session's ordered steps when a confirm ends (confirmStreamSteps)",
     const steps = confirmStreamSteps({ type: "resolved", result }, { answered: true, confirmFieldsCapable: true, onCardTurn: false, label: "Pause ad 01" });
     expect(steps.map((step) => step.type)).toEqual(["lines"]);
     const lines = steps[0]!.type === "lines" ? steps[0]!.lines.map((line) => line.text) : [];
-    expect(lines).toEqual(["↳ The follow-up to “Pause ad 01”:", "  It stopped spending.", "", "  - Ad one: paused"]);
+    expect(lines).toEqual(["↳ The follow-up to “Pause ad 01”:", "  It stopped spending.", "", "  • Ad one: paused"]);
     expect(steps.some((step) => step.type === "message")).toBe(false);
+  });
+
+  // R-S3: off its turn the answer is still drawn by the markdown renderer, never printed as raw markdown.
+  it("off the card's turn, a list and a table draw as the rendered list and table under the label", () => {
+    const text = "Paused. Here is what changed:\n\n- Ad one: **paused**\n- Ad two: still on\n\n| Ad | Spend |\n|---|---|\n| Ad one | $12 |\n| Ad two | $30 |";
+    const result = { ...FOLLOW, followUp: { ...FOLLOW.followUp, message: text, actionCalls: [] } };
+    for (const width of [60, 100, 140]) {
+      const steps = confirmStreamSteps({ type: "resolved", result }, { answered: true, confirmFieldsCapable: true, onCardTurn: false, label: "Pause ad 01", width });
+      expect(steps.map((step) => step.type)).toEqual(["lines"]);
+      const lines = steps[0]!.type === "lines" ? steps[0]!.lines.map((line) => line.text) : [];
+      expect(lines[0]).toBe("↳ The follow-up to “Pause ad 01”:");
+      const body = lines.slice(1);
+      expect(body.filter((line) => line.includes("•"))).toHaveLength(2);
+      expect(body.some((line) => line.includes("┌"))).toBe(true);
+      expect(body.some((line) => /│ Ad one │\s+\$12 │/u.test(line))).toBe(true);
+      expect(body.join("\n")).not.toMatch(/\|---|\| Ad \||^ {2}- |\*\*/mu);
+      // Indented under the label, never wider than the transcript.
+      for (const line of body) {
+        if (line) expect(line.startsWith("  ")).toBe(true);
+        expect(displayWidth(line)).toBeLessThanOrEqual(width);
+      }
+    }
   });
 
   it("off the card's turn, a card the follow-up proposed is queued only after a line says whose it is", () => {
