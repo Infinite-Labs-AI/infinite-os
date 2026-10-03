@@ -228,7 +228,7 @@ export function fallbackCardLines(
   );
   const explain = explainText ? ["", ...wrapText(terminalText(explainText), inner)] : [];
   const chips = chipRows(keyBarHints(keys.ctx).filter((hint) => hint.key !== "?"), keys.ctx.okKey, inner, ctx);
-  return cardBox(summary || UNNAMED_WRITE, cardBody([...rows, ...explain], chips, keys.ctx.explain === true, ctx), width, "amber", ctx);
+  return cardBox(summary || UNNAMED_WRITE, cardBody([...rows, ...explain], chips, keys.ctx.explain === true, ctx, explainText !== null), width, "amber", ctx);
 }
 
 /** Rows the card for a pending write without a view takes (the live region reserves them). */

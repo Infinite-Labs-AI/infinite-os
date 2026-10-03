@@ -70,6 +70,9 @@ describe("the write card for a desktop that sends no approval view (r4 card)", (
     const open = fallbackCardLines(pending(), "Stops this ad's spend until you turn it back on.", 80, DEFAULT_THEME);
     expect(open.map(plain).join("\n")).toContain("│ Stops this ad's spend until you turn it back on.");
     expect(open.length).toBe(closed.length + 2);
+    // Open, the chip says `? hide`; closed, `? what it does` (live run-4 N12).
+    expect(plain(open[open.length - 2]!)).toBe(`│  ?  hide${" ".repeat(63)}│`);
+    expect(plain(closed[closed.length - 2]!)).toBe(`│  ?  what it does${" ".repeat(55)}│`);
     expect(fallbackCardRowCount(pending(), null, 80)).toBe(closed.length);
     expect(fallbackCardRowCount(pending(), "Stops this ad's spend until you turn it back on.", 80)).toBe(open.length);
   });

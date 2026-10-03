@@ -29,6 +29,7 @@ import type { Msg } from "../types.js";
 import {
   focusedViewCtx,
   focusedViewIndex,
+  foldedLookups,
   openingRow,
   NO_VIEW_CAPS,
   viewKeyFacts,
@@ -366,7 +367,10 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
     ...base, selected: 0, tab: 0, page: 0, explainOpen: false, showHiddenColumns: false, caps,
     ...(split ? {} : { scrollback: true })
   };
-  const focusIndex = input.focus ? input.focus.viewIndex : focusedViewIndex(input.views);
+  // A lookup of the card's own target is that card's Steps row, not a view (live run-4 N11).
+  const folded = foldedLookups(input.views, [...input.views, ...(input.statusViews ?? [])]);
+  // The keys go to a view that is drawn, never to a folded lookup.
+  const focusIndex = input.focus ? input.focus.viewIndex : focusedViewIndex(input.views, folded);
   // A view with no key focus yet (a turn still running, a committed turn) is drawn on its opening row.
   // `→` acts only on the view the keys are on, once the turn has finished (a
   // running turn's keys are the composer's): any other names what its tables
@@ -381,7 +385,8 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   // with all of its columns. A numbers view keeps r4's ONE table there and
   // names what it hid in words (`+ CPM hidden`, run-2 M7): its records were
   // the ~150-line dump the live eval saw. No view names a key (`ctx.scrollback`).
-  const drawn = split ? renders : renders.flatMap((render, index) => {
+  const drawn = split ? renders.filter((_render, index) => !folded.has(index)) : renders.flatMap((render, index) => {
+    if (folded.has(index)) return [];
     const view = input.views[index]!;
     const whole = { ...plainCtx, selected: openingRow(view), showHiddenColumns: Boolean(render.hiddenColumns) && view.kind !== "numbers" };
     const tabs = render.tabs ?? 0;
@@ -406,7 +411,8 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const detailRows = paneRenders([...drawn, ...card])
     .reduce((sum, render, index) => sum + (index > 0 ? 1 : 0) + viewLines(render, sideBySide ? panes.right : width, compact).length, 0);
   return {
-    renders, lines, focusIndex, rows, wide: sideBySide, details: takesPane, stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length
+    renders, lines, focusIndex: folded.has(focusIndex) ? -1 : focusIndex, rows, wide: sideBySide, details: takesPane,
+    stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length
   };
 }
 

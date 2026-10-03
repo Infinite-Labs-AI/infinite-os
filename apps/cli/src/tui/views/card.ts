@@ -185,9 +185,13 @@ export function chipRows(hints: readonly KeyHint[], okKey: string | null, width:
   return rows;
 }
 
-/** `?  what it does` (r4: every card ends with it), when `?` has something to show. */
-export function explainChip(ctx: PaintCtx): string {
-  return `${paint(" ? ", "key", ctx)} ${paint("what it does", "dim", ctx)}`;
+/**
+ * `?  what it does` (r4: every card ends with it), when `?` has something to
+ * show; `?  hide` while the explanation is open (live run-4 N12), as a view's
+ * `?` says on the key bar.
+ */
+export function explainChip(ctx: PaintCtx, open = false): string {
+  return `${paint(" ? ", "key", ctx)} ${paint(open ? "hide" : "what it does", "dim", ctx)}`;
 }
 
 /** A link in words: cyan, underlined, with `↗` (r4 `link()`). */
@@ -197,20 +201,22 @@ export function linkWords(words: string, ctx: PaintCtx): string {
 
 /**
  * The inside of a card (r4 `card()`): the content, then the key chips after a
- * blank row, then `?  what it does` after another, when the card offers `?`.
+ * blank row, then `?  what it does` after another, when the card offers `?`
+ * (`?  hide` while `explainOpen`).
  */
 export function cardBody(
   content: readonly string[],
   chips: readonly string[],
   explain: boolean,
-  ctx: PaintCtx
+  ctx: PaintCtx,
+  explainOpen = false
 ): string[] {
   const lines = [...content];
   if (chips.length) {
     lines.push("", ...chips);
   }
   if (explain) {
-    lines.push("", explainChip(ctx));
+    lines.push("", explainChip(ctx, explainOpen));
   }
   return lines;
 }

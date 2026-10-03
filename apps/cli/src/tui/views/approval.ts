@@ -296,7 +296,7 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
       ctx
     );
     const after = documentOpen ? [] : linkAfterLines(view, innerCtx);
-    const tail = [...cardBody([], chips, false, ctx), ...(after.length ? ["", ...after] : []), ...cardBody([], [], explain && !documentOpen && !ui.fieldEntry, ctx)];
+    const tail = [...cardBody([], chips, false, ctx), ...(after.length ? ["", ...after] : []), ...cardBody([], [], explain && !documentOpen && !ui.fieldEntry, ctx, ui.explainOpen)];
     const paged = pageCardBody({
       top,
       middle,

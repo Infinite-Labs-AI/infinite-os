@@ -135,7 +135,7 @@ function changeCard(view: AnswerViewV1, title: string, tone: CardTone, content: 
   const own = viewText(view.explain);
   const summary = own ? "" : changeCardSummary(view);
   const opened = ctx.explainOpen && summary ? ["", ...wrapText(summary, inner)] : [];
-  return cardBox(title, cardBody([...content, ...opened], chips, own !== "" || summary !== "", ctx), ctx.width, tone, ctx);
+  return cardBox(title, cardBody([...content, ...opened], chips, own !== "" || summary !== "", ctx, ctx.explainOpen), ctx.width, tone, ctx);
 }
 
 /**

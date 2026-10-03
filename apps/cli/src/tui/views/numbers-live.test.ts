@@ -168,6 +168,51 @@ describe("numbers: which columns a narrow table keeps, and one Results column (r
     expect(notes.lines()).toEqual(["¹ no purchase value counted"]);
   });
 
+  // Live run 4, N19 remainder: By day carried Clicks (all) beside Link clicks,
+  // and at 60 kept Clicks (all) and CTR (link) but hid Link clicks (the two
+  // tied, so the right one went first). Link clicks is the click a reader
+  // judges an ad by (CTR (link), CPC (link) follow it): Clicks (all) goes first.
+  it("at 60 Link clicks stays and Clicks (all) drops first, in the main table and in By day", () => {
+    const view = edited((body) => {
+      const add = (columns: Record<string, any>[], rows: Record<string, any>[], value: (index: number) => number) => {
+        columns.splice(columns.findIndex((column) => column.key === "linkClicks"), 0,
+          { key: "clicks", label: "Clicks (all)", unit: "count", factGroup: "delivery" });
+        rows.forEach((row, index) => {
+          row.cells.clicks = { value: value(index) };
+        });
+      };
+      add(body.columns, body.legs.settled.rows, () => 61);
+      const byDay = body.sections.find((section: Record<string, any>) => section.title === "By day").body;
+      add(byDay.columns, byDay.legs.settled.rows, (index) => 12 + index);
+    });
+    const detail = draw(view, { width: 60 }).detail;
+    for (const heading of ["Sep 28 – Oct 1", "By day"]) {
+      const at = detail.indexOf(heading);
+      expect(header(detail, at)).toContain("Link clicks");
+      expect(header(detail, at)).not.toContain("Clicks (all)");
+      expect(detail.slice(at).join(" ").match(/\+ ([^·]+) · → to see/u)?.[1] ?? "").toContain("Clicks (all)");
+    }
+    // With the room for both, both stay, in the app's order.
+    const wide = committedTurn([view], 140);
+    expect(header(wide, wide.indexOf("By day"))).toEqual(expect.arrayContaining(["Clicks (all)", "Link clicks"]));
+  });
+
+  // The same run, the campaign table: its row's status word was short (`On`),
+  // so the Status column stayed and the measured Link clicks went. A status is
+  // a word the row's records still show (→); the click count a rate is of is not.
+  it("at 60 a short status word goes before Link clicks, after Clicks (all)", () => {
+    const view = edited((body) => {
+      body.legs.settled.rows[0].status = { word: "On", tone: "ok" };
+    });
+    const detail = draw(view, { width: 60 }).detail;
+    const at = detail.indexOf("Sep 28 – Oct 1");
+    expect(header(detail, at)).toEqual(["Spent", "Link clicks", "CTR (link)"]);
+    expect(detail.slice(at).join(" ").match(/\+ ([^·]+) · → to see/u)?.[1] ?? "").toMatch(/\bStatus\b/u);
+    // With the room, the status stays beside every measure.
+    const wide = committedTurn([view], 140);
+    expect(header(wide, wide.indexOf("Sep 28 – Oct 1"))).toContain("Status");
+  });
+
   it("a column dropped before a wider one that had to go too comes back when it fits", () => {
     const detail = draw(live(), { width: 60 }).detail;
     const at = detail.indexOf("Sep 28 – Oct 1");

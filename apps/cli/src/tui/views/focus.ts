@@ -124,14 +124,61 @@ const EMPTY_FACTS: ViewKeyFacts = {
   rowCopies: [], copy: null, approve: null
 };
 
-/** The view the keys act on: the last one that is not quiet (steps only), else the last. */
-export function focusedViewIndex(views: readonly AnswerViewV1[]): number {
+/**
+ * The view the keys act on: the last one that is not quiet (steps only), else
+ * the last. A folded lookup (`foldedLookups`) is not drawn, so it never takes
+ * the keys; with every view folded, none does (-1).
+ */
+export function focusedViewIndex(views: readonly AnswerViewV1[], folded: ReadonlySet<number> = NONE_FOLDED): number {
+  let last = -1;
   for (let index = views.length - 1; index >= 0; index -= 1) {
+    if (folded.has(index)) {
+      continue;
+    }
     if (views[index]?.kind !== "quiet") {
       return index;
     }
+    if (last < 0) {
+      last = index;
+    }
   }
-  return views.length - 1;
+  return last;
+}
+
+const NONE_FOLDED: ReadonlySet<number> = new Set();
+
+/**
+ * The views that are only a lookup of a write card's own target: a list whose
+ * every row is the thing a change card in the turn acts on, with nothing more
+ * behind it. r4 draws the card alone and the lookup as its Steps row
+ * (`checking your campaigns ✓ 1 ad`), so such a list is not drawn while the
+ * card is on its turn (waiting, working or answered). `all` is every view of
+ * the turn, the cards drawn as details included. A list with any other row,
+ * or more than it shows, stays a view.
+ *
+ * A row is the target by its id when the target has one. A target with no id
+ * matches by name only a list of ONE row: two different things under the
+ * same name stay visible beside a write (a wrong pick on a write is never hidden).
+ */
+export function foldedLookups(views: readonly AnswerViewV1[], all: readonly AnswerViewV1[]): ReadonlySet<number> {
+  const targets = all.flatMap((view) => {
+    if (view.kind !== "change" || !isPlainRecord(view.body) || !isPlainRecord(view.body.target)) return [];
+    const { id, label } = view.body.target;
+    return [{ id: typeof id === "string" && id ? id : null, label: typeof label === "string" && label ? label : null }];
+  });
+  const folded = new Set<number>();
+  if (!targets.length) return folded;
+  views.forEach((view, index) => {
+    if (view.kind !== "list" || !isPlainRecord(view.body)) return;
+    const body = view.body as Record<string, unknown>;
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    const groups = Array.isArray(body.groups) ? body.groups : [];
+    const more = (typeof body.total === "number" && body.total > rows.length) || isPlainRecord(body.omitted) || isPlainRecord(body.truncated);
+    const isTarget = (row: unknown) => isPlainRecord(row) && targets.some((target) =>
+      target.id !== null ? row.id === target.id : rows.length === 1 && target.label !== null && row.title === target.label);
+    if (rows.length && !groups.length && !more && rows.every(isTarget)) folded.add(index);
+  });
+  return folded;
 }
 
 /** Facts for the focused view, read from its current render (width-dependent, e.g. dropped columns). */
@@ -210,10 +257,12 @@ export function copyTextAt(facts: ViewKeyFacts, selected: number): string | null
  */
 export function viewFocusAfterTurnDone(
   views: AnswerViewV1 | readonly AnswerViewV1[],
-  caps: KeyContext["caps"] = NO_VIEW_CAPS
+  caps: KeyContext["caps"] = NO_VIEW_CAPS,
+  statusViews: readonly AnswerViewV1[] = []
 ): ViewFocusState {
   const list = asViewList(views);
-  const viewIndex = focusedViewIndex(list);
+  // `statusViews`: the turn's views drawn elsewhere (a card waiting as details), which can fold a lookup.
+  const viewIndex = focusedViewIndex(list, foldedLookups(list, [...list, ...statusViews]));
   const view = list[viewIndex];
   const facts = view ? viewKeyFacts(view, renderView(view, defaultFocusCtx(caps))) : EMPTY_FACTS;
   const detailsFocus = view?.kind === "document" ? "document" : "rows";
