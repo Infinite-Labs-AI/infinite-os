@@ -35,6 +35,8 @@ import { terminalText } from "./terminal-text.js";
  * a composite's sections one level deep (see `cleanShortWords`). The view is
  * copied, never mutated, and only when it carries one of those keys: a view
  * without them (an older Desktop never sends them) is returned as it came.
+ * `stateReason.step` (revision 3) is bounded the same way (see
+ * `cleanStateReasonStep`).
  */
 const KINDS = new Set<string>(ANSWER_VIEW_KINDS);
 const STATES = new Set<string>(ANSWER_VIEW_STATES);
@@ -67,7 +69,23 @@ export function decodeAnswerView(value: unknown): AnswerViewV1 | null {
     }
   }
   body = cleanShortWords(value.kind, body, true);
-  return (body === value.body ? value : { ...value, body }) as unknown as AnswerViewV1;
+  const stateReason = cleanStateReasonStep(value.stateReason);
+  if (body === value.body && stateReason === value.stateReason) return value as unknown as AnswerViewV1;
+  return { ...value, body, ...(stateReason === value.stateReason ? {} : { stateReason }) } as unknown as AnswerViewV1;
+}
+
+/**
+ * A state reason with its revision 3 `step` (the Steps row's short word)
+ * bounded like the other short host words: scrubbed and cut to
+ * `maxShortTextChars` with `…`, or withheld (the rest of the reason kept)
+ * when it is not a string or scrubs to nothing. Anything else is returned
+ * as it came.
+ */
+function cleanStateReasonStep(reason: unknown): unknown {
+  if (!isRecord(reason) || !("step" in reason)) return reason;
+  const { step, ...rest } = reason;
+  const words = cleanShortText(step);
+  return words === undefined ? rest : { ...rest, step: words };
 }
 
 const STATUS_TONES = new Set(["ok", "warn", "bad", "muted"]);

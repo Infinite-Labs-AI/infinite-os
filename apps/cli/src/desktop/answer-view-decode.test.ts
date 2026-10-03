@@ -353,3 +353,45 @@ describe("decodeAnswerView: nameLabel, record status and leader detail (revision
     expect(decodeAnswerView(value)).toBe(value);
   });
 });
+
+// Contract revision 3, StateReasonV1.step: the Steps row's short word, bounded
+// like the other short host words (scrubbed, cut to maxShortTextChars with "…",
+// withheld when it is not a string or scrubs to nothing). The rest of the state
+// reason is kept as it came.
+describe("decodeAnswerView: stateReason.step (revision 3)", () => {
+  const MAX = ANSWER_VIEW_LIMITS.maxShortTextChars;
+  const blocked = (stateReason: Record<string, unknown>): Record<string, unknown> => ({
+    v: 1, kind: "quiet", tool: "example_read", title: "Example", state: "blocked", asOf: null,
+    scope: { workspaceName: "Example Co", crossWorkspace: false }, caveats: [], body: { stepLine: "Example step" }, stateReason
+  });
+  const reasonOf = (value: Record<string, unknown>): Record<string, unknown> => {
+    const decoded = decodeAnswerView(value);
+    if (!decoded) throw new Error("expected a view");
+    return decoded.stateReason as unknown as Record<string, unknown>;
+  };
+
+  it("keeps a short step word as sent, and a view without one exactly as it came", () => {
+    expect(reasonOf(blocked({ code: "role_required", words: "Ask an owner.", step: "not allowed" })).step).toBe("not allowed");
+    const plain = blocked({ code: "role_required", words: "Ask an owner." });
+    expect(decodeAnswerView(plain)).toBe(plain);
+  });
+
+  it("cuts a long step word to maxShortTextChars with …", () => {
+    const step = reasonOf(blocked({ code: "role_required", words: "Ask an owner.", step: "word ".repeat(30) })).step as string;
+    expect([...step].length).toBeLessThanOrEqual(MAX);
+    expect(step.endsWith("…")).toBe(true);
+  });
+
+  it("scrubs a step word for the TTY", () => {
+    expect(reasonOf(blocked({ code: "role_required", words: "w", step: " not\u001b[31m allowed\n" })).step).toBe("not allowed");
+  });
+
+  it.each([["blank", "  "], ["not a string", 7], ["only escapes", "\u001b[31m"]])(
+    "withholds a step word that is %s, keeping the rest of the reason",
+    (_label, bad) => {
+      const reason = reasonOf(blocked({ code: "role_required", words: "Ask an owner.", step: bad }));
+      expect("step" in reason).toBe(false);
+      expect(reason).toEqual({ code: "role_required", words: "Ask an owner." });
+    }
+  );
+});
