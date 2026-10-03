@@ -158,13 +158,15 @@ describe("the boot frame's body (D4)", () => {
   it("is an empty answer area and the Steps rule", () => {
     const body = bootBodyLines(100, TRUECOLOR);
     expect(body).toHaveLength(9);
-    // Blank rows are one space each: Ink draws an empty text as no row at all.
-    expect(body.slice(0, 8).every((line) => line === " ")).toBe(true);
+    // From 80 columns the answer area is the split's empty answer pane and its separator (boot--c100).
+    expect(body.slice(0, 8).every((line) => stripAnsi(line) === `${" ".repeat(29)}│`)).toBe(true);
+    // One column: blank rows, one space each (Ink draws an empty text as no row at all).
+    expect(bootBodyLines(79, TRUECOLOR).slice(0, 8).every((line) => line === " ")).toBe(true);
     expectGolden(body[8]!, GOLDEN.steps100);
     expect(stepsRuleLine(100, TRUECOLOR)).toBe(body[8]);
   });
 
-  it("draws the split's empty answer pane and its separator at 120 columns and up (boot--c160)", () => {
+  it("draws the split's empty answer pane and its separator at 80 columns and up (boot--c160)", () => {
     const body = bootBodyLines(160, TRUECOLOR);
     expect(body).toHaveLength(9);
     for (const line of body.slice(0, 8)) {
@@ -172,8 +174,9 @@ describe("the boot frame's body (D4)", () => {
     }
     expect(body[8]).toBe(stepsRuleLine(160, TRUECOLOR));
     // Under the split (one column) the answer area stays blank rows.
-    expect(bootBodyLines(119, TRUECOLOR).slice(0, 8).every((line) => line === " ")).toBe(true);
+    expect(bootBodyLines(79, TRUECOLOR).slice(0, 8).every((line) => line === " ")).toBe(true);
     // The pane follows the layout's 28%, clamped to 26–40 columns.
+    expect(stripAnsi(bootBodyLines(80, TRUECOLOR)[0]!)).toBe(`${" ".repeat(27)}│`);
     expect(stripAnsi(bootBodyLines(120, TRUECOLOR)[0]!)).toBe(`${" ".repeat(34)}│`);
   });
 

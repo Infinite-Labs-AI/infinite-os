@@ -198,12 +198,13 @@ describe("card parts (r4 boxed(), lbl(), K(), PK())", () => {
     const fits = cardBox("Paused ad “Demo B” · Agent proposed · You approved", [], 60, "green", { color: true, theme })[0]!;
     expect(segs(fits)).toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B” · Agent proposed · You approved"], ["", " "], ["green", "─────┐"]]);
     const long = "Paused ad “Demo B · sample copy” · Agent proposed · You approved";
-    // At 60 the title passes the border: it is cut to the card width less 6 and ends in "…", then ` ─┐`.
+    // At 60 the title passes the border: it is cut within the card width less 6, at a word's end
+    // (a separator left at the cut goes with it), and ends in "…", then its rule and `┐`.
     expect(segs(cardBox(long, [], 60, "green", { color: true, theme })[0]!))
-      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed · Y…"], ["", " "], ["green", "─┐"]]);
-    // At 69 the title fits but its rule would not: it is cut by one more cell, so the corner still shows.
+      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed …"], ["", " "], ["green", "────┐"]]);
+    // At 69 the title fits but its rule would not: it is cut, at a word's end, so the corner still shows.
     expect(segs(cardBox(long, [], 69, "green", { color: true, theme })[0]!))
-      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed · You approv…"], ["", " "], ["green", "─┐"]]);
+      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed · You …"], ["", " "], ["green", "───────┐"]]);
     for (const width of [20, 40, 60, 69, 74]) {
       const top = cardBox(long, [], width, "green", { color: true, theme })[0]!;
       expect(displayWidth(top)).toBe(width);
@@ -481,8 +482,8 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     const rows = cardRows(detail(view, { width: 69, caps: OPEN })).map(segs);
     const { blank, bottom } = box(69, "green");
     expect(rows).toEqual([
-      // r4 overruns the 69-wide card by one cell here (N2); the CLI cuts the title so the box closes (run-r2 MUST 3).
-      [["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed · You approv…"], ["", " "], ["green", "─┐"]],
+      // r4 overruns the 69-wide card by one cell here (N2); the CLI cuts the title at a word so the box closes (run-r2 MUST 3).
+      [["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed · You …"], ["", " "], ["green", "───────┐"]],
       row(69, "green", ["dim", "status"], ["", "   on "], ["dim", "→"], ["", " "], ["b", "PAUSED"]),
       row(69, "green", ["dim", "Stopped spending at 10:42"]),
       row(69, "green", ["dim", "Clears the matching Home card"]),

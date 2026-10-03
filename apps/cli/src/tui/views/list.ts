@@ -18,6 +18,7 @@ import { looksNumeric } from "../../formatting/table.js";
 import { displayWidth, padEndCells, truncateCells } from "../lib/display-width.js";
 import {
   cellText,
+  cutAtWord,
   fitLine,
   formatAsOf,
   FootnoteBook,
@@ -298,7 +299,8 @@ function rowLines(
   };
   // Padded, the title takes the gap before the first cell too (r4 `padEnd(22)` in bold on the selection).
   const titleSpan = (row: number, padded: boolean): Span => {
-    const title = truncateCells(titles[row] ?? "", titleWidth);
+    // A long name ends at a word where one ends near (`Hook B · founder …`).
+    const title = cutAtWord(titles[row] ?? "", titleWidth);
     return { text: padded ? padEndCells(title, titleWidth + (kept.length ? GAP.length : 0)) : title, style: row === selected ? "b" : "text" };
   };
 

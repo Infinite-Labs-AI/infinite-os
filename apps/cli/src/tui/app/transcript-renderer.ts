@@ -236,6 +236,25 @@ function workingLine(detail: string, ctx: RenderContext): string {
 }
 
 /**
+ * The working line for a running turn drawn in the turn layout with nothing
+ * in its details pane but r4's `steps only` (a question with no view yet):
+ * while nothing has answered, the answer's place says `⠋ Working…`, as the
+ * transcript does. What the turn says it is doing stays the transcript's note
+ * under it (a turn drawn beside keeps its activity there). Empty once the
+ * answer arrives.
+ */
+export function workingAnswerLines(messages: readonly Msg[], state: TurnState, options: TurnBodyOptions & { nowMs: number }): string[] {
+  const ctx: RenderContext = {
+    busy: true, color: options.color, theme: options.theme, columns: Math.max(1, Math.floor(options.columns)),
+    nowMs: options.nowMs, thinkingMode: options.thinkingMode ?? "truncated"
+  };
+  if (state.streaming.trim() || renderMessages([...messages, ...state.streamSegments], ctx).answered) {
+    return [];
+  }
+  return [workingLine("", ctx)];
+}
+
+/**
  * A running turn's messages as its drawn layout shows them (the turn beside
  * its views while it works, r4 "working"): what is already in the transcript,
  * the finished segments, and the answer still arriving (held open: a span not

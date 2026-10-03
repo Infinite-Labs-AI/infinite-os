@@ -176,7 +176,8 @@ describe("n leaves the dismissed card at once (run-2 M5)", () => {
     const steps: TurnStep[] = [{ id: "c1", name: "mcp__app__propose_pause_entity", label: "waiting for your OK", status: "wait", startedAt: 0, endedAt: 1000, result: "pause 1 ad" }];
     const lines = renderLiveTurn({
       messages: [{ role: "user", text: "pause hook a" }, { role: "assistant", text: "Okay, left it running." }],
-      views: [frame.view], focus: null, width: 100, color: false, theme: DEFAULT_THEME, steps, nowMs: 2000
+      // One column (under 80), so each line of the card is a whole row.
+      views: [frame.view], focus: null, width: 79, color: false, theme: DEFAULT_THEME, steps, nowMs: 2000
     }).lines.map(plain);
     // The head says it at once; the receipt's sentence waits for the app (live run-4 N22).
     expect(lines.some((line) => line.includes("✕ Dismissed"))).toBe(true);
@@ -334,7 +335,8 @@ describe("the dismissed card's last line follows the app's answer (run-3 N22)", 
   const head = pending({ view: cardView as never });
   const drawn = (frame: { view: unknown }) => renderLiveTurn({
     messages: [{ role: "user", text: "pause hook a" }, { role: "assistant", text: "Okay, left it running." }],
-    views: [frame.view as never], focus: null, width: 100, color: false, theme: DEFAULT_THEME
+    // One column (under 80), so each line of the card is a whole row.
+    views: [frame.view as never], focus: null, width: 79, color: false, theme: DEFAULT_THEME
   }).lines.map(plain);
   const appReceipt = (receipt: Record<string, unknown>) => ({
     ok: true, declined: true,

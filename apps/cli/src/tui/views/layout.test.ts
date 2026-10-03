@@ -11,8 +11,8 @@ import { viewFocusAfterTurnDone } from "./focus.js";
 import { answerCarriesTable, detailsPaneWidth, layoutTurn, renderCommittedTurn, renderLiveTurn, turnMaySplit } from "./layout.js";
 import type { ViewRender } from "./types.js";
 
-// The r4 frame body (terminal-r4 `frame()` + the approved layout decision): side by
-// side from 120 columns, one column below. Synthetic data only.
+// The r4 frame body (terminal-r4 `frame()`): side by side from 80 columns, as
+// r4 draws it, one column below. Synthetic data only.
 const theme = INFINITE_R4_THEME;
 const view = (over: Partial<ViewRender> = {}): ViewRender => ({
   head: " Ads running  ✓ Ready", source: "Demo · up to Sep 30", detail: ["row one", "row two"], footnotes: [], keys: [], okKey: null, rowCount: 0, ...over
@@ -23,9 +23,9 @@ const messages: Msg[] = [
 ];
 
 describe("the frame body", () => {
-  it("one column below 120: answer, a blank, a line rule, the details, a blank, then the Steps", () => {
-    const lines = layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 100);
-    expect(lines).toEqual(["❯ q", "", "∞ a", "", "─".repeat(100), " Ads running  ✓ Ready", "Demo · up to Sep 30", "", "row one", "row two", "", `─ Steps ${"─".repeat(92)}`, "  step"]);
+  it("one column below 80: answer, a blank, a line rule, the details, a blank, then the Steps", () => {
+    const lines = layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 79);
+    expect(lines).toEqual(["❯ q", "", "∞ a", "", "─".repeat(79), " Ads running  ✓ Ready", "Demo · up to Sep 30", "", "row one", "row two", "", `─ Steps ${"─".repeat(71)}`, "  step"]);
   });
 
   it("side by side from 120: the answer pane padded to 33, the separator in line, an empty details row ends at the bar", () => {
@@ -49,10 +49,10 @@ describe("the frame body", () => {
 // with it) where it would otherwise go to scrollback. The session asks for it.
 describe("the compact frame body (a finished turn that just misses the window)", () => {
   it("one column: no blank over the rule, under the details' head or over the Steps; nothing else changes", () => {
-    const lines = layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 100, null, { compact: true });
-    expect(lines).toEqual(["❯ q", "", "∞ a", "─".repeat(100), " Ads running  ✓ Ready", "Demo · up to Sep 30", "row one", "row two", `─ Steps ${"─".repeat(92)}`, "  step"]);
+    const lines = layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 79, null, { compact: true });
+    expect(lines).toEqual(["❯ q", "", "∞ a", "─".repeat(79), " Ads running  ✓ Ready", "Demo · up to Sep 30", "row one", "row two", `─ Steps ${"─".repeat(71)}`, "  step"]);
     // Three rows fewer than the r4 frame body.
-    expect(layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 100)).toHaveLength(lines.length + 3);
+    expect(layoutTurn(["❯ q", "", "∞ a"], view(), ["  step"], 79)).toHaveLength(lines.length + 3);
   });
 
   it("side by side: only the blank under the details' head goes", () => {
@@ -62,7 +62,7 @@ describe("the compact frame body (a finished turn that just misses the window)",
 
   it("renderLiveTurn draws it on request, with the same views, keys and Steps", () => {
     const steps: TurnStep[] = [{ id: "c1", name: "list_sample_rows", label: "listing sample rows", status: "ok", startedAt: 0, endedAt: 500, result: "2 rows" }];
-    const input = { messages, views: [], focus: null, steps, width: 100, color: false, theme, details: ["┌─ card ─┐", "└────────┘"] };
+    const input = { messages, views: [], focus: null, steps, width: 79, color: false, theme, details: ["┌─ card ─┐", "└────────┘"] };
     const roomy = renderLiveTurn(input);
     const tight = renderLiveTurn({ ...input, compact: true });
     expect(tight.lines.filter((line) => line.trim())).toEqual(roomy.lines.filter((line) => line.trim()));
@@ -74,13 +74,14 @@ describe("the compact frame body (a finished turn that just misses the window)",
 });
 
 describe("what takes the details pane", () => {
-  it("a pending card handed in sits right of the answer from 120, under it below", () => {
+  it("a pending card handed in sits right of the answer from 80, under it below", () => {
     const card = ["┌─ Pause ad? ─┐", "│ status      │", "└─────────────┘"];
     expect(detailsPaneWidth(160)).toBe(117);
-    expect(detailsPaneWidth(100)).toBe(100);
+    expect(detailsPaneWidth(100)).toBe(69);
+    expect(detailsPaneWidth(79)).toBe(79);
     const wide = renderLiveTurn({ messages, views: [], focus: null, width: 160, color: false, theme, details: card }).lines;
     expect(wide[0]).toBe(`❯ which ads are on?${" ".repeat(21)} │ ┌─ Pause ad? ─┐`);
-    const narrow = renderLiveTurn({ messages, views: [], focus: null, width: 100, color: false, theme, details: card }).lines;
+    const narrow = renderLiveTurn({ messages, views: [], focus: null, width: 79, color: false, theme, details: card }).lines;
     expect(narrow.slice(-3)).toEqual(card);
     expect(narrow.some((line) => line.includes(" │ "))).toBe(false);
   });
@@ -192,7 +193,9 @@ describe("a committed turn keeps every message the transcript draws (one rendere
   });
 
   it("draws the same answer column live", () => {
-    const lines = renderLiveTurn({ messages: turn, views: [], focus: null, width: 80, color: false, theme }).lines;
+    // From 80 columns the answer is the left pane, `steps only` right of it.
+    const lines = renderLiveTurn({ messages: turn, views: [], focus: null, width: 80, color: false, theme }).lines
+      .map((line) => line.split(" │")[0]!.trimEnd());
     expect(lines).toContain("Δ diff");
     expect(lines.some((line) => line.includes("Check the import path"))).toBe(true);
     expect(lines.some((line) => line.includes("Infinite — Acme"))).toBe(true);
@@ -294,7 +297,8 @@ describe("an answer with a table of its own takes the whole width (the split is 
     expect(turnMaySplit(withTable, 140)).toBe(false);
     expect(detailsPaneWidth(140, turnMaySplit(withTable, 140))).toBe(140);
     expect(turnMaySplit(prose, 140)).toBe(true);
-    expect(turnMaySplit(prose, 119)).toBe(false);
+    expect(turnMaySplit(prose, 80)).toBe(true);
+    expect(turnMaySplit(prose, 79)).toBe(false);
   });
 
   it("only the answer's own markdown counts: the question, a tool's output and a diff never do; a table still arriving does", () => {
@@ -411,7 +415,8 @@ describe("a committed turn hides nothing behind a key (scrollback has none)", ()
   it.each([60, 80])("a truncated view at %i says what it shows, never `m for more`", (width) => {
     const tall = fixture("numbers-tall");
     const live = renderLiveTurn({ messages, views: [tall], focus: null, width, color: false, theme }).lines;
-    expect(live).toContain("40 of 100 · First 40 by spend · m for more");
+    // From 80 columns it is in the details pane, right of the answer.
+    expect(live.some((line) => line.endsWith("40 of 100 · First 40 by spend · m for more"))).toBe(true);
     const lines = renderCommittedTurn({ messages, views: [tall], focus: null, width, color: false, theme });
     expect(lines).toContain("40 of 100 · First 40 by spend");
     expect(lines.some((line) => keyWords.test(line))).toBe(false);

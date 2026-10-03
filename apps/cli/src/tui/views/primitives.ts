@@ -283,6 +283,29 @@ export function fitLine(line: string, width: number): string {
   return displayWidth(line) <= max ? line : truncateCells(line, max);
 }
 
+/**
+ * Plain text (a name, a title) cut to `width` cells ending in `…`, at a word's
+ * end where one is near: back to the last space when that keeps at least two
+ * thirds of the room (`Hook B · founder …`), mid-word only when no word ends
+ * near (`Supercalifr…`). Text that fits is returned as is.
+ */
+export function cutAtWord(text: string, width: number): string {
+  const max = Math.max(1, Math.floor(width));
+  if (displayWidth(text) <= max) {
+    return text;
+  }
+  const cut = truncateCells(text, max);
+  const kept = cut.slice(0, -1);
+  const next = Array.from(text)[Array.from(kept).length];
+  if (!kept || next === " ") {
+    return cut;
+  }
+  const end = kept.endsWith(" ") ? kept.length : kept.lastIndexOf(" ");
+  // A separator left dangling at the cut goes with it: `Agent proposed …`, never `Agent proposed · …`.
+  const words = end > 0 ? kept.slice(0, end).replace(/[\s·•|,;:–—-]+$/u, "") : "";
+  return words && displayWidth(words) >= Math.ceil(((max - 1) * 2) / 3) ? `${words} …` : cut;
+}
+
 /** Word-wrap scrubbed text to `width`, hard-breaking words that are too long. */
 export function wrapText(text: string, width: number): string[] {
   if (!text) {

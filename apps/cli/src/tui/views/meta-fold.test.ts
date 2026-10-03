@@ -12,7 +12,7 @@ import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { stripAnsi } from "../lib/text.js";
 import { resolveTheme } from "../theme.js";
 import type { Msg } from "../types.js";
-import { renderCommittedTurn, renderLiveTurn } from "./layout.js";
+import { paneWidths, renderCommittedTurn, renderLiveTurn } from "./layout.js";
 import { metaRepeatLine, metaViewRepeats } from "./meta-fold.js";
 import { renderView } from "./registry.js";
 import type { ViewRenderCtx } from "./types.js";
@@ -87,11 +87,14 @@ const text = (lines: readonly string[]) => lines.map(stripAnsi).join("\n");
 describe("the terminal draws the fold (N27)", () => {
   for (const width of [48, 60, 80, 100, 140]) {
     it(`the later view keeps its rows and our sign-ups, drops the repeats, and says so once (${width} columns)`, () => {
-      for (const lines of [
-        renderLiveTurn({ messages, views: [campaigns(), ads()], focus: null, width, color: false, theme, timeZone: "UTC" }).lines,
-        renderCommittedTurn({ messages, views: [campaigns(), ads()], focus: null, width, color: false, theme, timeZone: "UTC" })
-      ]) {
-        const out = text(lines);
+      // From 80 columns the live views are the details pane, right of the answer: read that pane.
+      const panes = paneWidths(width);
+      const details = (lines: readonly string[]) => panes.wide ? lines.map((line) => stripAnsi(line).slice(panes.left + 3)) : lines;
+      for (const [lines, shown] of [
+        [renderLiveTurn({ messages, views: [campaigns(), ads()], focus: null, width, color: false, theme, timeZone: "UTC" }).lines, details],
+        [renderCommittedTurn({ messages, views: [campaigns(), ads()], focus: null, width, color: false, theme, timeZone: "UTC" }), (all: readonly string[]) => all]
+      ] as const) {
+        const out = text(shown(lines));
         // The line may wrap at a narrow width: it is still ONE line of words, said once.
         expect(out.replace(/\n(?=\S)/gu, " ").split(LINE).length - 1, out).toBe(1);
         const later = out.slice(out.indexOf("Ads by ad"));

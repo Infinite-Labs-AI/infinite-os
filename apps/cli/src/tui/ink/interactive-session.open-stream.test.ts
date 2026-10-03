@@ -117,7 +117,7 @@ describe("T12 in the session (fake TTY, skipped on CI)", () => {
       const input = ttyInput();
       const output = ttyOutput();
       const session = runInkInteractiveSession({
-        columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+        columns: 79, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
         onConfirmAction: (_action, _decision, _fields, stream) => {
           hooks = stream;
           return follow.promise;
@@ -126,7 +126,7 @@ describe("T12 in the session (fake TTY, skipped on CI)", () => {
           return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
         }
       });
-      output.columns = 100;
+      output.columns = 79; // one column (under 80): whole sentences on one row
       const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
       await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "pause it\r");
@@ -156,7 +156,7 @@ describe("T12 in the session (fake TTY, skipped on CI)", () => {
       const input = ttyInput();
       const output = ttyOutput();
       const session = runInkInteractiveSession({
-        columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+        columns: 79, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
         onConfirmAction: async (_action, _decision, _fields, stream) => {
           const receipt = { ok: true, view: RECEIPT_VIEW };
           stream?.onReceipt(receipt);
@@ -166,7 +166,7 @@ describe("T12 in the session (fake TTY, skipped on CI)", () => {
           return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
         }
       });
-      output.columns = 100;
+      output.columns = 79; // one column (under 80): whole sentences on one row
       const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
       await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "pause it\r");
@@ -188,7 +188,7 @@ describe("T12 in the session (fake TTY, skipped on CI)", () => {
       const input = ttyInput();
       const output = ttyOutput();
       const session = runInkInteractiveSession({
-        columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+        columns: 79, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
         onConfirmAction: async (_action, decision) => {
           if (decision === "decline") return { ok: true };
           throw Object.assign(new Error("That budget must be at least 1."), { code: "field_invalid", nothingRan: true });
@@ -197,7 +197,7 @@ describe("T12 in the session (fake TTY, skipped on CI)", () => {
           return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
         }
       });
-      output.columns = 100;
+      output.columns = 79; // one column (under 80): whole sentences on one row
       const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
       await waitFor(() => output.text().includes("Ask Infinite"));
       await sendKeys(input, "pause it\r");
@@ -263,7 +263,7 @@ describe("P33-M2 / S3 in the session (fake TTY, skipped on CI)", () => {
     const input = ttyInput();
     const output = ttyOutput();
     const session = runInkInteractiveSession({
-      columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI", turnStoppable: true,
+      columns: 79, errorOutput: ttyOutput(), input, output, title: "Infinite TUI", turnStoppable: true,
       onConfirmAction: (_action, _decision, _fields, stream) => {
         hooks = stream;
         return follow.promise;
@@ -274,7 +274,7 @@ describe("P33-M2 / S3 in the session (fake TTY, skipped on CI)", () => {
         return extra.onSubmit ? extra.onSubmit(line) : { messages: [{ role: "assistant", text: `SECOND-ANSWER to ${line}` }] };
       }
     });
-    output.columns = 100;
+    output.columns = 79; // one column (under 80): whole sentences on one row
     const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
     await waitFor(() => output.text().includes("Ask Infinite"));
     await sendKeys(input, "pause it\r");

@@ -240,9 +240,9 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     expect(hasTruecolorSgr(`${ESC}[38:2:1:2:3mx`)).toBe(true);
   });
 
-  it("the 100-col body is compared: the --c100 goldens are r4 drawn one column (LAYOUT, split at 120)", () => {
+  it("the 100-col body is compared: the --c100 goldens are r4 drawn side by side (r4 splits at 80)", () => {
     const golden = loadGolden("view-06-change--c100");
-    expect(golden.layout?.wide).toBe(false);
+    expect(golden.layout).toMatchObject({ wide: true, answer_w: 28, details_w: 69 });
     expect(painted.evaluate(golden).regions.find((region) => region.region === "body")?.verdict).toBe("MATCH");
     const answerRow = golden.lines.findIndex((line) => textOf(line).startsWith("∞ Ready."));
     const edited = paintedWith((lines) => lines.map((line, i) => (i === answerRow ? plain("∞ Ready.") : line))).evaluate(golden);

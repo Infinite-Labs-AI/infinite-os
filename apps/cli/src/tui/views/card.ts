@@ -8,7 +8,7 @@ import wrapAnsi from "wrap-ansi";
 
 import type { KeyHint } from "../keys/keymap.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
-import { paint, wrapText } from "./primitives.js";
+import { cutAtWord, paint, wrapText } from "./primitives.js";
 import type { ViewRenderCtx } from "./types.js";
 
 /** A card is never wider than this (r4 `card()`: `Math.min(w, 74)`). */
@@ -69,7 +69,8 @@ function topBorder(title: string, outer: number, tone: CardTone, ctx: PaintCtx):
   }
   // A title too long for the border is cut and ends in "…", so the box always
   // closes (r4's trunc() would drop the corner, leaving the box open: run-r2 MUST 3).
-  const shown = displayWidth(title) <= room ? title : `${cutCells(title, room - 1)}…`;
+  // The cut ends at a word where one ends near (`· Agent …`, never `· Agent pro…`).
+  const shown = cutAtWord(title, room);
   return `${border("┌─")} ${paint(shown, "b", ctx)} ${border(`${"─".repeat(outer - 5 - displayWidth(shown))}┐`)}`;
 }
 
