@@ -1206,7 +1206,7 @@ function headTitleFor(view: Parameters<KindRenderer<"numbers">>[0]): string | un
   return source && ![...wordSet(source)].every((word) => chip.has(word)) ? source : "";
 }
 
-/** The states River's D2 ruling covers (2026-10-03): each may draw compact. */
+/** The states the D2 ruling covers (2026-10-03): each may draw compact. */
 const COMPACT_STATES: ReadonlySet<string> = new Set(["partial", "out_of_date", "not_measured", "nothing_found"]);
 
 /** Whether anything in a body is a real number or a word a cell says (a measured 0 counts); the same walk as the Cmd+L card's. */
@@ -1218,7 +1218,7 @@ function hasMeasured(node: unknown): boolean {
 }
 
 /**
- * D2 (River 2026-10-03, "ok"): a view in partial / out of date / not measured /
+ * D2 (2026-10-03): a view in partial / out of date / not measured /
  * nothing found draws compact (its head and ONE line, the host's state reason,
  * which the frame draws) ONLY when its table would be all dashes: no rows, or
  * every number null. Any real number, a measured 0 included, keeps the table.
