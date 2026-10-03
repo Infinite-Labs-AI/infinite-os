@@ -198,7 +198,9 @@ describe("runJobs with Claude (fake)", () => {
     const result = (await makeRunner(fakes, root).runJobs(jobsInput().input)) as AgentRunResultWithExtras
     expect(readFileSync(join(root, "next.config.mjs"), "utf8")).not.toContain("child_process")
     expect(result.edits.map((edit) => edit.file)).toEqual(["app/page.tsx"])
-    expect(result.blocked.map((block) => [block.itemId, block.reason])).toEqual([["meta_improve:landing", "outside_allowlist"]])
+    // §3x.2 A gate hit is reported, attributed to the item that claimed the file, never a block.
+    expect(result.blocked).toEqual([])
+    expect(result.gateHits.map((hit) => [hit.file, hit.itemIds])).toEqual([["next.config.mjs", ["meta_improve:landing"]]])
   })
 
   it("throws FENCE_TAMPER when the agent writes under node_modules", async () => {

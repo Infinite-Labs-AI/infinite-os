@@ -333,7 +333,15 @@ export interface ChecklistItem {
   /** Set when state is `blocked`. */
   blockedReason?: BlockedReason
   edits?: EditRef[]
+  /**
+   * §3x.2 The wizard's last note on this item (a failed check, a safety-check refusal, a block reason), ≤300 chars,
+   * sanitized like claim notes. Shown in the "Not done" line, the PR checklist and the report's job list.
+   */
+  note?: string
 }
+
+/** §3x.2 The most a `ChecklistItem.note` keeps. */
+export const ITEM_NOTE_MAX_CHARS = 300
 
 // ---------------------------------------------------------------------------------------------
 // §3e.3 The claim channel (MCP stdio server `infinite_tag`)
@@ -633,7 +641,7 @@ const EVIDENCE_SHAPE = oneOf(
 export const CHECKLIST_ITEM_SHAPE = shapeOf<ChecklistItem>()(
   "ChecklistItem",
   ["id", "jobId", "n", "title", "owner", "trigger", "allow", "checks", "state"],
-  ["claim", "blockedReason", "edits"],
+  ["claim", "blockedReason", "edits", "note"],
   {
     trigger: shapeOf<ChecklistItem["trigger"]>()("ChecklistItem.trigger", ["finding", "evidence"], [], { evidence: arrayOf(EVIDENCE_SHAPE) }),
     allow: shapeOf<ChecklistItem["allow"]>()("ChecklistItem.allow", ["files", "create"], []),

@@ -130,7 +130,11 @@ describe("F2: a gate hit on a REMOVED line (an old-file line number) reverts the
     const { root, fence, read } = await begin((r) => write(r, "app/page.tsx", before))
     write(root, "app/page.tsx", after)
     const result = await fence.end({ turnGate: gate })
-    expect(result.blocked.length).toBeGreaterThan(0)
+    // §3x.2 A gate hit is not a block: the hunk is reverted and reported as a gate hit.
+    expect(result.blocked).toEqual([])
+    // The old-file line could sit in either hunk's range, so each such hunk is reverted and reported.
+    expect(result.gateHits.length).toBeGreaterThan(0)
+    expect(new Set(result.gateHits.map((hit) => hit.rule))).toEqual(new Set(["autoconfig_opt_out_removed"]))
     expect(read("app/page.tsx")).toContain("fbq('set', 'autoConfig', false, '123456789012345')")
   })
 

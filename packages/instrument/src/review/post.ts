@@ -168,10 +168,20 @@ export interface FinalCommentInput {
   scanner: Scanner
 }
 
+/**
+ * §3x.2 A job's cell in the PR checklist: a job that did not get done says WHY in the wizard's own words
+ * (`failed: <note>` / `blocked: <note>`), never only a state code ("blocked (outside allowlist)").
+ */
+export function jobStateCell(job: ChecklistItem): string {
+  const state = job.state.replace(/_/g, " ")
+  if ((job.state === "failed" || job.state === "blocked") && job.note) return `${state}: ${job.note}`
+  return `${state}${job.blockedReason ? ` (${job.blockedReason.replace(/_/g, " ")})` : ""}`
+}
+
 /** §3g.4 step 9: the before/after table, the checklist states, declined items with reasons, and what the user decides. */
 export function buildFinalComment(input: FinalCommentInput): string {
   const jobs = input.jobs
-    .map((job) => `| ${escapeCell(job.title)} | ${job.state.replace(/_/g, " ")}${job.blockedReason ? ` (${job.blockedReason.replace(/_/g, " ")})` : ""} |`)
+    .map((job) => `| ${escapeCell(job.title)} | ${escapeCell(jobStateCell(job))} |`)
     .join("\n")
   const declined = input.decisions
     .filter((decision) => decision.action === "DECLINE")

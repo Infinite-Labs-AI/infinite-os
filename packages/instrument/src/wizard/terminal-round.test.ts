@@ -160,9 +160,16 @@ describe("QA #20: the jobs that are not done are named", () => {
         item("A code job", "blocked", "needs_you", "code")
       ])
     ).toEqual([
-      "! Not done: Server-side sign-up event: needs your answer",
-      "! Not done: Remove the second GA4 tag: the agent did not finish it",
-      "! Not done: Join logged-in visitors: the wizard's check did not pass"
+      "! Not done: Server-side sign-up event (needs your answer)",
+      "! Not done: Remove the second GA4 tag (the agent did not finish it)",
+      "! Not done: Join logged-in visitors (the wizard's check did not pass)"
+    ])
+  })
+
+  it("§3x.2 the item's own note is the reason when the wizard kept one (a safety-check refusal is never 'outside the job's files')", () => {
+    const refused = { ...item("Keep previews silent: GA4", "failed"), note: "the wizard's safety check refused app/layout.tsx:29: the edit uses a provider id as a default or fallback value (||, ?? or ?:)" }
+    expect(notDoneLines([refused])).toEqual([
+      "! Not done: Keep previews silent: GA4 (the wizard's safety check refused app/layout.tsx:29: the edit uses a provider id as a default or fallback value (||, ?? or ?:))"
     ])
   })
 
@@ -173,7 +180,7 @@ describe("QA #20: the jobs that are not done are named", () => {
         { ...item("Keep previews silent (existing tags)", "blocked", "agent_blocked"), id: "preview_guard:posthog" },
         { ...item("Keep previews silent (existing tags)", "failed"), id: "preview_guard:meta" }
       ])
-    ).toEqual(["! Not done: Keep previews silent (existing tags) (2 parts): the agent did not finish it", "! Not done: Keep previews silent (existing tags): the wizard's check did not pass"])
+    ).toEqual(["! Not done: Keep previews silent (existing tags) (2 parts: the agent did not finish it)", "! Not done: Keep previews silent (existing tags) (the wizard's check did not pass)"])
   })
 
   it("more than six are counted, and a clean run adds nothing (negative)", () => {

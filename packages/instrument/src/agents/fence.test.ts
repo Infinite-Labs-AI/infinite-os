@@ -217,14 +217,19 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     expect(read("next.config.mjs")).toBe("const nextConfig = {}\n\nexport default nextConfig\n")
     expect(read("app/page.tsx")).toContain("data-conversion")
     expect(result.edits.map((edit) => edit.file)).toEqual(["app/page.tsx"])
-    expect(blockedFor(result, "meta_improve:landing")).toEqual(["outside_allowlist"])
+    // §3x.2 the gate hit is not a block; it is attributed to the item covering the file.
+    expect(blockedFor(result, "meta_improve:landing")).toEqual([])
+    expect(result.gateHits).toEqual([
+      { rule: "turn_gate", file: "next.config.mjs", line: 1, hunk: 0, itemIds: ["meta_improve:landing"], note: "the wizard's safety check refused next.config.mjs:1: child_process in a build-time file" }
+    ])
+    expect(result.attribution).toEqual([{ editId: result.edits[0]!.id, textEditItems: [["meta_improve:landing"]] }])
     expect(result.gate).toHaveLength(1)
   })
 
   it("passes a clean turn through with no blocks (negative)", async () => {
     const { fence } = await setup()
     const result = await fence.end({ turnGate: async () => [] })
-    expect(result).toEqual({ reverted: [], blocked: [], edits: [], gate: [], reportedOutside: [], seal: expect.objectContaining({ root: expect.any(String) }) })
+    expect(result).toEqual({ reverted: [], blocked: [], edits: [], gate: [], gateHits: [], attribution: [], reportedOutside: [], seal: expect.objectContaining({ root: expect.any(String) }) })
   })
 })
 
