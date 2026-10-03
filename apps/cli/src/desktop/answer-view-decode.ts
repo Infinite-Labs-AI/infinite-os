@@ -1,6 +1,7 @@
 import {
   ANSWER_VIEW_KINDS,
   ANSWER_VIEW_LIMITS,
+  ARCHIVE_ASSET_ID_PATTERN,
   ANSWER_VIEW_STATES,
   type AnswerViewV1,
   type CreativeDraftFrameV1,
@@ -65,12 +66,6 @@ export function decodeAnswerView(value: unknown): AnswerViewV1 | null {
 }
 
 /**
- * A picture's archive id: letters, digits and `_ . : -`, at most 128. No `/`,
- * so a URL, a data URI or a file path can never pass as one.
- */
-const ARCHIVE_ASSET_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
-
-/**
  * A change target with its revision 3 fields kept bounded, or dropped whole
  * when malformed (never half-kept):
  * - `path`: an array of 1 to `maxTargetPathParts` strings. Each part is
@@ -79,12 +74,13 @@ const ARCHIVE_ASSET_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
  *   More parts, a non-string part or a part that scrubs to nothing drops the
  *   path: a shortened path would name the wrong parents.
  * - `creativeRef`: rebuilt from its one key, `archiveAssetId`, when that is
- *   an archive id (`ARCHIVE_ASSET_ID`); anything riding along is dropped.
+ *   an archive id (the contract's `ARCHIVE_ASSET_ID_PATTERN`: no `/`, so a URL,
+ *   a data URI or a file path never passes); anything riding along is dropped.
  */
 function cleanChangeTarget(target: Record<string, unknown>): Record<string, unknown> {
   const { path, creativeRef, ...rest } = target;
   const parts = cleanTargetPath(path);
-  const picture = isRecord(creativeRef) && typeof creativeRef.archiveAssetId === "string" && ARCHIVE_ASSET_ID.test(creativeRef.archiveAssetId)
+  const picture = isRecord(creativeRef) && typeof creativeRef.archiveAssetId === "string" && ARCHIVE_ASSET_ID_PATTERN.test(creativeRef.archiveAssetId)
     ? { archiveAssetId: creativeRef.archiveAssetId }
     : null;
   return { ...rest, ...(picture ? { creativeRef: picture } : {}), ...(parts ? { path: parts } : {}) };

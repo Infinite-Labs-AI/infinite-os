@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-  ANSWER_VIEW_CONTRACT_REVISION, ANSWER_VIEW_KINDS, ANSWER_VIEW_LIMITS, ANSWER_VIEW_STATES,
+  ANSWER_VIEW_CONTRACT_REVISION, ANSWER_VIEW_KINDS, ANSWER_VIEW_LIMITS, ANSWER_VIEW_STATES, ARCHIVE_ASSET_ID_PATTERN,
   type AnswerViewV1, type ChangeBodyV1, type TodayLegV1
 } from "./answer-view.js";
 const stripped = (k: string) => { const n = k.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -20,6 +20,12 @@ describe("answer view contract v1", () => {
     const rev2 = { target: { kind: "ad", label: "Hook B" }, rows: [], warnings: [] } satisfies ChangeBodyV1;
     expect(rev3.target.path).toHaveLength(2);
     expect("path" in rev2.target).toBe(false);
+  });
+  it("revision 3: an archive id is one shared pattern, never a URL, a data URI or a path", () => {
+    for (const id of ["asset_1", "asset_0a1b-2c", "a1", "arch:v2.3"]) expect(ARCHIVE_ASSET_ID_PATTERN.test(id)).toBe(true);
+    for (const id of ["", "https://example.test/a.png", "data:image/png;base64,AA", "/Users/example/a.png",
+      "a/b", "_lead", "a".repeat(129), "asset\u001b[31m1", "asset 1"]) expect(ARCHIVE_ASSET_ID_PATTERN.test(id)).toBe(false);
+    expect(ARCHIVE_ASSET_ID_PATTERN.test("a".repeat(128))).toBe(true);
   });
   it("a numbers view keeps today out of the settled leg", () => {
     const view = { v: 1, kind: "numbers", tool: "t", title: "T", state: "ready", asOf: null,
