@@ -116,7 +116,7 @@ describe("the plan model asks ONLY the four decisions", () => {
 
   it("the agent budget line says who pays; no agent → an info line, never an approval", () => {
     const withAgent = buildPlanModel(input({ candidates: [candidate("identify_reset", "auth")] }))
-    expect(withAgent.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "approval", text: "Claude Code: 1 job · Opus 4.8 at xhigh effort · up to 30 turns or 10 min · your Claude plan pays" })
+    expect(withAgent.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "approval", text: "Claude Code: up to 1 job · Opus 4.8 at xhigh effort · up to 30 turns or 10 min · your Claude plan pays" })
     const none = buildPlanModel(input({ candidates: [candidate("identify_reset", "auth")], agent: null }))
     expect(none.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "info" })
   })
@@ -277,7 +277,7 @@ describe("the preview guard's exempt list (§3h.9, R2-21)", () => {
     expect(plan.guard).toEqual({ emit: false, reason: "production_denied", hosts: ["acme.vercel.app"] })
     expect(plan.lines.find((line) => line.id === "preview_guard_managed")).toBeUndefined()
     expect(plan.lines.find((line) => line.id === "preview_guard_blocked")?.text).toBe(
-      "Your live site is served on acme.vercel.app, which the preview guard would silence; add it in Infinite first. No preview guard is added until then."
+      "Your live site is served on acme.vercel.app, which the preview guard would silence; tell the wizard your live domain (--production-host). No preview guard is added until then."
     )
   })
 

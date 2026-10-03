@@ -270,7 +270,17 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
     },
     consentFlag: () => options.consentMode,
     productionDeniedConflict,
-    build: () => checks.build()
+    build: () => checks.build(),
+    // §3y.5: the answered host and a pending claim (the run state), and whether the app offers the claim path.
+    runFacts: () => {
+      let siteClaim = false
+      try {
+        siteClaim = bridge.has("tag.site-claim.v1")
+      } catch {
+        siteClaim = false
+      }
+      return { site: state()?.site ?? null, siteClaim }
+    }
   })
 
   return {

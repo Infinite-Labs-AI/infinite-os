@@ -169,9 +169,11 @@ describe("step plan", () => {
     expect(inPlan).toBeGreaterThan(1)
     const subs = h.ctx.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
     const live = subs.find((text) => /agent jobs? · \d+ decisions? needs? you/.test(text))!
-    expect(Number(/^(\d+) agent jobs?/.exec(live)![1])).toBe(inPlan)
-    // The closing status counts agent jobs too, in the same words.
-    expect((outcome as { status: string }).status).toMatch(/^Plan approved · \d+ lines? · \d+ agent jobs?/)
+    expect(Number(/^Up to (\d+) agent jobs?/.exec(live)![1])).toBe(inPlan)
+    // The closing status counts the jobs that RUN for these answers (§3y.5): never more than the plan's "up to".
+    const status = (outcome as { status: string }).status
+    expect(status).toMatch(/^Plan approved · \d+ lines? · \d+ agent jobs?/)
+    expect(Number(/· (\d+) agent jobs?/.exec(status)![1])).toBeLessThanOrEqual(inPlan)
   })
 })
 

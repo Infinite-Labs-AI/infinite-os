@@ -74,6 +74,7 @@ import {
   planAskPayload,
   resolvePlanAnswers,
   type PlanAgentSummary,
+  type PlanRunFacts,
   type PlanScanFacts,
   type ProductionDeniedConflict,
   type WizardBeforeFacts,
@@ -135,6 +136,11 @@ export interface InstallerOptions {
   consentFlag(): "required" | "not_required" | null
   /** O5's `productionDeniedConflict` (wired at integration). */
   productionDeniedConflict: ProductionDeniedConflict
+  /**
+   * §3y.5: the run facts the runnability rule reads (this run's site state, the `tag.site-claim.v1` capability).
+   * Absent = no answered host and no claim capability.
+   */
+  runFacts?: () => PlanRunFacts | null
   /** O6's `CheckRunner.build` (the build runs sandboxed there). Absent = no build check (said so). */
   build?: () => Promise<BuildResult>
   /** The npm job's spawner (tests pass a fake). */
@@ -349,7 +355,8 @@ export class WizardInstaller implements Installer {
       candidates,
       agent: this.options.agent(),
       consentFlag: this.options.consentFlag(),
-      productionDeniedConflict: this.options.productionDeniedConflict
+      productionDeniedConflict: this.options.productionDeniedConflict,
+      run: this.options.runFacts?.() ?? null
     })
     this.internals.set(model, { scan: wizardScan, keys, before: beforeFacts, candidates, improve })
     return model
