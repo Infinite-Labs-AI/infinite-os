@@ -191,9 +191,11 @@ function quietSaysWhy(view: AnswerViewV1): boolean {
  * retry: a quiet view has no OK key, so not even a safe resend offers one.
  */
 function quietStopRender(view: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
-  const stateFix = stateFixAsk(view);
-  const reconcile = view.state === "outcome_unknown" && !stateFix ? turnAsk(reconcileAsk(view)) : null;
-  const fixAsk = stateFix ?? reconcile;
+  const reconcile = quietReconcileAsk(view);
+  // Not sure it happened: checking comes first (R-IOV-7a), so Enter is the
+  // reconcile step and the state's fix is not an Enter line of its own.
+  const stateFix = reconcile ? null : stateFixAsk(view);
+  const fixAsk = reconcile ?? stateFix;
   const label = reconcile && isRecord(view.reconcile) ? viewText(view.reconcile.label) : "";
   return {
     head: headLine(view, ctx),
@@ -212,6 +214,21 @@ function quietStopRender(view: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
     ...(label ? { fixLabel: label.toLowerCase() } : {}),
     ...openFor(view, null, ctx)
   };
+}
+
+/** An outcome_unknown quiet view's reconcile ask (a NEW user turn), when it has one. */
+function quietReconcileAsk(view: AnswerViewV1): string | null {
+  return view.state === "outcome_unknown" ? turnAsk(reconcileAsk(view)) : null;
+}
+
+/**
+ * The ask Enter sends on a quiet view that stopped (its reconcile step, else
+ * its fix), or null. A quiet view with one takes the keys over a plain read in
+ * its turn (R-IOV-3): its `→` line names Enter, so Enter must reach it.
+ */
+export function quietStopAsk(view: AnswerViewV1): string | null {
+  if (view.kind !== "quiet" || !quietSaysWhy(view)) return null;
+  return quietReconcileAsk(view) ?? stateFixAsk(view);
 }
 
 /** The states a quiet view takes when its call failed (the app's failure view), not a quiet read. */

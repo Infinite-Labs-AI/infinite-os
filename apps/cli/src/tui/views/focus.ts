@@ -29,7 +29,7 @@ import { listOpeningRow } from "./list.js";
 import { managedApproval } from "./managed.js";
 import type { AppOpenTarget } from "./open-target.js";
 import { truncatedMoreAsk, turnAsk, viewText } from "./primitives.js";
-import { renderView } from "./registry.js";
+import { quietStopAsk, renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
 export { turnAsk };
@@ -127,11 +127,18 @@ const EMPTY_FACTS: ViewKeyFacts = {
 };
 
 /**
- * The view the keys act on: the last one that is not quiet (steps only), else
+ * The view the keys act on: the last quiet call that stopped with a step to
+ * take (`quietStopAsk`), else the last one that is not quiet (steps only), else
  * the last. A folded lookup (`foldedLookups`) is not drawn, so it never takes
  * the keys; with every view folded, none does (-1).
  */
 export function focusedViewIndex(views: readonly AnswerViewV1[], folded: ReadonlySet<number> = NONE_FOLDED): number {
+  // A quiet call that stopped with a step to take (`Check first`, its fix) takes the keys first (R-IOV-3).
+  for (let index = views.length - 1; index >= 0; index -= 1) {
+    if (!folded.has(index) && views[index] && quietStopAsk(views[index]!) !== null) {
+      return index;
+    }
+  }
   let last = -1;
   for (let index = views.length - 1; index >= 0; index -= 1) {
     if (folded.has(index)) {

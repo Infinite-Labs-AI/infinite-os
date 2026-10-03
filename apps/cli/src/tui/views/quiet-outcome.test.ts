@@ -2,6 +2,8 @@
 // happened, blocked, out of budget) says so: its head, its reason, its fix,
 // and for outcome_unknown the reconcile step on a key. Never a retry, unless
 // the app dedupes a resend (`safe_resend`). Synthetic views only.
+import { readFileSync } from "node:fs";
+
 import type { AnswerViewV1 } from "@infinite-os/types";
 import { describe, expect, it } from "vitest";
 
@@ -120,5 +122,53 @@ describe("a quiet view that did not do its thing says so (TJ-1)", () => {
     const failed = quiet({ state: "failed", stateReason: { code: "invalid_input", words: "Use a half-open UTC window" } });
     expect(renderView(failed, ctx()).detail).toEqual([]);
     expect(renderView(failed, ctx()).quiet).toBe(true);
+  });
+});
+
+describe("the reconcile step is reachable when the turn has other views (R-IOV-3, R-IOV-7a)", () => {
+  const FIXTURES = new URL("./__fixtures__/", import.meta.url);
+  const listRows = (): AnswerViewV1 =>
+    decodeAnswerView(JSON.parse(readFileSync(new URL("list-rows.json", FIXTURES), "utf8")))!;
+  const messages: Msg[] = [{ role: "user", text: "look it up, then send the note" }, { role: "assistant", text: "I could not tell if it went." }];
+
+  it("[a list, then a quiet outcome_unknown]: the quiet view takes the keys, Enter sends reconcile.ask", () => {
+    const views = [listRows(), UNKNOWN];
+    const state = viewFocusAfterTurnDone(views);
+    expect(state.viewIndex).toBe(1);
+    const engaged = resolveViewKey("", state, { tab: true });
+    expect(viewKeyHints(engaged)).toContainEqual({ key: "enter", label: "check first" });
+    const pressed = resolveViewKey("", engaged, { return: true });
+    expect(pressed.effect).toEqual({ type: "ask", text: "Check whether the note went through before trying it again." });
+    const live = renderLiveTurn({ messages, views, focus: engaged, width: 100, color: false, theme }).lines.join("\n");
+    expect(live).toContain("→ Check first");
+  });
+
+  it("[a list, then a quiet view with nothing to ask]: the list keeps the keys", () => {
+    const views = [listRows(), BLOCKED];
+    expect(viewFocusAfterTurnDone(views).viewIndex).toBe(0);
+  });
+
+  it("[a list, then a quiet hit_limit with a fix]: the quiet view takes the keys, Enter sends its fix", () => {
+    const views = [listRows(), LIMIT];
+    const state = viewFocusAfterTurnDone(views);
+    expect(state.viewIndex).toBe(1);
+    const pressed = resolveViewKey("", resolveViewKey("", state, { tab: true }), { return: true });
+    expect(pressed.effect).toEqual({ type: "ask", text: "what are my limits?" });
+  });
+
+  it("outcome_unknown with a fix AND a reconcile: Enter checks first; the fix draws no keyless action line", () => {
+    const both = quiet({
+      ...UNKNOWN,
+      stateReason: { code: "transport_unknown", words: "The request did not complete.", fix: { label: "Reconnect mail", ask: "reconnect my mail" } }
+    } as unknown as Record<string, unknown>);
+    const render = renderView(both, ctx());
+    expect(render.fixAsk).toBe("Check whether the note went through before trying it again.");
+    expect(render.fixLabel).toBe("check first");
+    const out = text(render);
+    expect(out).toContain("→ Check first");
+    expect(out).not.toContain("→ Reconnect mail");
+    const state = viewFocusAfterTurnDone(both);
+    const pressed = resolveViewKey("", resolveViewKey("", state, { tab: true }), { return: true });
+    expect(pressed.effect).toEqual({ type: "ask", text: "Check whether the note went through before trying it again." });
   });
 });
