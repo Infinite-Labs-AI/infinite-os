@@ -8,7 +8,11 @@
 import type { ReviewChecklistItemId } from "../wizard/contracts/agents.js"
 import { allowEntryMatches } from "../git/commit.js"
 
-export type TriageAction = "FIX" | "DECLINE" | "ANSWER" | "ASK"
+/**
+ * `INFINITE` (§3x.3): a finding on Infinite's own managed code or on the wizard's own change. It is never FIX (the
+ * customer's agent never edits Infinite's runtime); it is replied to honestly and recorded for Infinite to fix.
+ */
+export type TriageAction = "FIX" | "DECLINE" | "ANSWER" | "ASK" | "INFINITE"
 export type AskReason = "conversion_names" | "privacy_text" | "allowlist_widening" | "reviewer_conflict" | "raised_after_decline" | "unlocated" | "ruling_violation"
 
 export interface TriageItem {
@@ -31,6 +35,8 @@ export interface TriageDecision {
   reason: string
   askReason?: AskReason
   ruling?: RulingId
+  /** `INFINITE` only: whose code it is. */
+  label?: "Infinite's own code" | "the wizard's own change"
 }
 
 export type RulingId = "banner_consent" | "ga4_proxy" | "meta_never_list" | "no_deletion"
@@ -94,8 +100,13 @@ export function triageKey(item: Pick<TriageItem, "path" | "item">): string {
 }
 
 export interface TriageContext {
-  /** The run's allowlist union (job `allow.files` ∪ `allow.create`) plus the managed files. */
+  /** The run's allowlist union (job `allow.files` ∪ `allow.create`). §3x.3: never the managed files. */
   allowlist: readonly string[]
+  /**
+   * §3x.3 Whose code a finding is on: Infinite's own managed code, the wizard's own change, or null (the customer's
+   * code, which the normal rules triage). Absent = nothing is Infinite's.
+   */
+  ownership?: (path: string, line: number | null) => "Infinite's own code" | "the wizard's own change" | null
   /** Keys declined in an earlier round (from the review ledger). */
   declinedKeys: ReadonlySet<string>
   /** Check ids that PASSED on the current head (rehearsal, census, static, build). */
@@ -153,6 +164,11 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
         }
       }
       return { item, action: "DECLINE", ruling: ruling.id, reason: ruling.reply }
+    }
+    // §3x.3 Infinite's own code and the wizard's own change are never handed to the customer's agent.
+    const owner = item.path !== null && isRepoRelativePath(item.path) ? (ctx.ownership?.(item.path, item.line) ?? null) : null
+    if (owner !== null) {
+      return { item, action: "INFINITE", label: owner, reason: `This is ${owner} (${item.path}): recorded for Infinite to fix.` }
     }
     if (declinedBefore) {
       return { item, action: "ASK", askReason: "raised_after_decline", reason: "Raised again after the wizard declined it: you decide, so the review never loops." }

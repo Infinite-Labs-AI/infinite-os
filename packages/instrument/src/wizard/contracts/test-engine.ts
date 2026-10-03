@@ -22,8 +22,19 @@ export function fakeClickIdFor(runId: string): string {
   return `${FAKE_CLICK_ID_PREFIX}${runId.replace(/-/g, "").slice(0, 6)}`
 }
 
-/** §3h.3: appended to the default Electron UA. The server lane flags `monitor`; avoids posthog-js's `bot/` block. */
-export const TEST_UA_SUFFIX = " InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)" as const
+/**
+ * §3x.5 (C): the test window is a NORMAL browser in every mode: exactly the reduced Chrome user agent of the same
+ * Chromium, with no app token, no `Electron/` and no suffix. Run 3's window said "analytics monitor", and Meta's pixel
+ * (its fbevents botblocking spider list includes `monitor`) never sent `/tr`. The grader's first rule refuses facts from
+ * any other window (`gradeTestRun`: every tool `undetermined (test_error)`).
+ */
+export const TEST_BROWSER_UA_PATTERN = /^Mozilla\/5\.0 \(Macintosh; Intel Mac OS X 10_15_7\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/\d+\.0\.0\.0 Safari\/537\.36$/
+
+/**
+ * §3x.5: the server-lane probe's own user agent (a plain GET no tag runs on, so it says what it is). The probe alone
+ * carries it; the test window never does.
+ */
+export const TEST_PROBE_USER_AGENT = "InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)" as const
 
 /** §3h.6: the server-lane probe path, `/__infinite_probe/<runId first 12 hex>`. */
 export function serverLaneProbePathFor(runId: string): string {
@@ -250,6 +261,11 @@ export type BeaconStatus = "cancelled" | number
 
 export interface Ga4BeaconFact {
   tid: string
+  /**
+   * §3x.5 (`tag.test.v2`): the GA4 client id (`cid`, shape `^[0-9]{1,20}\.[0-9]{1,20}$`, else null): an extracted id
+   * the report prints so the customer can filter the one normal page view the real visit made in GA4.
+   */
+  cid: string | null
   en: string
   dlHost: string
   transport: "get" | "post" | "beacon"
@@ -289,6 +305,8 @@ export interface MetaTrFact {
   method: string
   status: BeaconStatus
   loadLabel: string
+  /** §3x.5 (`tag.test.v2`): sent after a client-side navigation (as GA4's and PostHog's facts say). */
+  afterNav: boolean
 }
 
 export type MetaConsoleKind = "traffic_permissions_blocked" | "pixel_not_found" | "invalid_pixel_id" | "other"
@@ -374,7 +392,9 @@ export const TEST_PROBLEM_CODES = [
   /** `pii` count > 0 for the lane. */
   "no_pii",
   /** The preview's own URL (`preview_self`) carried a GA4, PostHog or Meta beacon. */
-  "previews_send_data"
+  "previews_send_data",
+  /** §3x.3 (F6): an installed Meta pixel sent its first PageView on load and none after a client-side navigation. */
+  "meta_spa_page_view_missing"
 ] as const
 export type TestProblemCode = (typeof TEST_PROBLEM_CODES)[number]
 
@@ -404,6 +424,8 @@ export interface TestRunFixtureCase {
     envSourcedIds: Array<{ tool: TestTool; envName: string; file: string; line: number }>
     /** Whose Meta pixel the site runs (D10 counts automatic events as `info` for an ADOPTED pixel only). */
     metaPixelOwnership?: "managed" | "adopted"
+    /** §3x.3 (F6): the grader is told the load ran a client-side navigation (Meta's page-change PageView is graded). */
+    spaNavigation?: boolean
   }
   /** Per tool, plus the D10 line (`meta_automatic_events`), which is graded beside the Meta tool, not instead of it. */
   expected: Partial<Record<TestTool, TestRunFixtureExpectation>> & { meta_automatic_events?: TestRunFixtureExpectation }
@@ -467,7 +489,7 @@ export const TEST_RESULT_SHAPE = shapeOf<TestResult>()(
       otherBeacons: arrayOf(shapeOf<OtherBeacon>()("OtherBeacon", ["host", "pathClass", "method", "resourceType", "cancelled"], []))
     }),
     ga4: shapeOf<TestResult["ga4"]>()("Ga4Facts", ["events"], [], {
-      events: arrayOf(shapeOf<Ga4BeaconFact>()("Ga4BeaconFact", ["tid", "en", "dlHost", "transport", "status", "loadLabel", "afterNav"], []))
+      events: arrayOf(shapeOf<Ga4BeaconFact>()("Ga4BeaconFact", ["tid", "cid", "en", "dlHost", "transport", "status", "loadLabel", "afterNav"], []))
     }),
     posthog: shapeOf<TestResult["posthog"]>()("PosthogFacts", ["events", "bootRequests"], [], {
       events: arrayOf(
@@ -483,7 +505,7 @@ export const TEST_RESULT_SHAPE = shapeOf<TestResult>()(
       events: arrayOf(shapeOf<InfiniteEventFact>()("InfiniteEventFact", ["siteSourceKey", "eventName", "eventId", "nav", "status", "loadLabel"], []))
     }),
     meta: shapeOf<TestResult["meta"]>()("MetaFacts", ["configRequests", "tr", "console", "fbc", "fbp"], [], {
-      tr: arrayOf(shapeOf<MetaTrFact>()("MetaTrFact", ["pixelId", "ev", "eid", "method", "status", "loadLabel"], [])),
+      tr: arrayOf(shapeOf<MetaTrFact>()("MetaTrFact", ["pixelId", "ev", "eid", "method", "status", "loadLabel", "afterNav"], [])),
       fbc: shapeOf<TestResult["meta"]["fbc"]>()("MetaFbc", ["present", "value", "domain"], []),
       fbp: shapeOf<TestResult["meta"]["fbp"]>()("MetaFbp", ["present"], [])
     }),
@@ -513,7 +535,7 @@ export const TEST_RUN_FIXTURE_CASE_SHAPE = shapeOf<TestRunFixtureCase>()(
   {
     request: TEST_RUN_REQUEST_SHAPE,
     result: TEST_RESULT_SHAPE,
-    context: shapeOf<TestRunFixtureCase["context"]>()("TestRunFixtureContext", ["consentMode", "installedTools", "envSourcedIds"], ["metaPixelOwnership"], {
+    context: shapeOf<TestRunFixtureCase["context"]>()("TestRunFixtureContext", ["consentMode", "installedTools", "envSourcedIds"], ["metaPixelOwnership", "spaNavigation"], {
       envSourcedIds: arrayOf(
         shapeOf<TestRunFixtureCase["context"]["envSourcedIds"][number]>()("EnvSourcedId", ["tool", "envName", "file", "line"], [])
       )

@@ -7,7 +7,7 @@ import { buildColumn, renderMarkdown, renderTerminal, verdictLine } from "../rep
 import { buildFinalComment, FINAL_COMMENT_MERGE_LINE, FINAL_COMMENT_UPDATED_LINE, withFinalReport } from "../../review/post.js"
 import { PR_MARKERS } from "../contracts/git-host.js"
 import { createScanner } from "../../review/scan.js"
-import { NO_PRODUCTION_HOST_NOTE, REAL_VISIT_DISCLOSURE, WIZARD_REPORT_PATHS, repoLabelFromRemote, step } from "./done.js"
+import { NO_PRODUCTION_HOST_NOTE, WIZARD_REPORT_PATHS, repoLabelFromRemote, step, visitDisclosure } from "./done.js"
 import { buildProvenColumn, provenColumnHasEvidence, provenPendingFor } from "./prove.js"
 
 const AT = "2026-10-02T09:13:00.000Z"
@@ -32,6 +32,7 @@ function finishedState() {
   state.report.proven_live = buildProvenColumn({
     runId: RUN_ID,
     mergeSha: MERGE_SHA,
+    installed: null,
     at: AT,
     keys: keysFixture(),
     expect: { ga4: ["G-ACME000001"], posthog: { projectKey: "phc", apiHost: "https://us.i.posthog.com" }, meta: ["1234567890123456"], infinite: { siteSourceKey: "s", collectPath: "/c" } },
@@ -42,12 +43,24 @@ function finishedState() {
     conversionsWaiting: 0
   })
   state.markers.prove = { infiniteEventIds: ["evt_FAKE0301"], posthogDistinctId: "d", probePath: "/__infinite_probe/7f3c2a91b0de", metaEventIds: [] }
+  const fired = (tool: "infinite" | "ga4" | "posthog" | "meta") => ({ tool, ids: [], connected: true, installed: true, fired: true, ungraded: false, receipt: "verified" as const, receiptReason: null })
+  state.proof = {
+    at: AT,
+    tools: [fired("infinite"), fired("ga4"), fired("posthog"), fired("meta")],
+    laneProbed: true,
+    infinitePageViews: 1,
+    filter: { ga4ClientId: "1234567890.1759500000", posthogDistinctId: "d", metaPageViewAt: "2026-10-02T09:41:00.000Z" },
+    installedUnknown: null
+  }
   return state
 }
 
 describe("done", () => {
+  /** The run as `prove` left it: its proofState PATCH landed as `proven`. */
+  const provenRun = { patchRun: (patch: { checkinOptIn?: boolean }) => runPublic({ proofState: "proven", proofClaimedBy: "tag", ...(patch.checkinOptIn ? { checkinOptIn: true, checkinDueAt: "2026-10-09T09:45:00.000Z" } : {}) }) }
+
   it("PATCHes checkinOptIn first, posts the report once per column phase, then PATCHes `proven`, and says when the check-in is", async () => {
-    const bundle = fakeDeps()
+    const bundle = fakeDeps({ bridge: provenRun })
     const ctx = fakeContext(finishedState(), {}, bundle.clock)
     const outcome = await step.run(ctx, bundle.deps)
     expect(outcome).toEqual({ kind: "ok", status: "Report in Site Settings · 7-day check-in on 9 Oct" })
@@ -55,10 +68,42 @@ describe("done", () => {
     expect(posts.map((call) => call.args[1])).toEqual(["live_today", "in_pr", "proven_live"])
     const report = posts[0]!.args[2] as ReportV2
     expect(report).toMatchObject({ schema: "infinite-tag.report.v2", runId: RUN_ID, site: { repoLabel: "github.com/Acme/acme-store", productionHost: "www.acme-store.com" } })
-    expect(report.notes).toContain(REAL_VISIT_DISCLOSURE)
+    // §3x.5 the disclosure is built from what ran: 1 page view + the probed lane's 2 rows, and how to filter it.
+    expect(report.notes).toContain(
+      "This run's one real visit landed 3 rows in your Infinite ledger, marked as Infinite's test and kept out of your numbers: the page view, the server lane's page request and its probe."
+    )
+    expect(report.notes).toContain("GA4, Meta and PostHog each record it as one normal page view (filter it by: GA4 client id 1234567890.1759500000 · PostHog id d · Meta PageView at 09:41:00Z).")
+    expect(report.verdict).toMatchObject({ state: "properly" })
     const order = bundle.log.calls.filter((call) => call.what === "patchRun" || call.what === "postReport").map((call) => (call.what === "patchRun" ? call.args[1] : `post ${call.args[1] as string}`))
     expect(order).toEqual([{ checkinOptIn: true }, "post live_today", "post in_pr", "post proven_live", { phase: "proven" }])
     expect(ctx.events.filter((event) => event.type === "report")).toHaveLength(3)
+  })
+
+  it("review P2-2: a 'properly' verdict never PATCHes phase proven while the run's proof in Infinite is not proven", async () => {
+    for (const held of ["undetermined", "problem"] as const) {
+      const bundle = fakeDeps({
+        bridge: { patchRun: (patch) => runPublic({ proofState: held, ...(patch.checkinOptIn ? { checkinOptIn: true, checkinDueAt: "2026-10-09T09:45:00.000Z" } : {}) }) }
+      })
+      const ctx = fakeContext(finishedState(), {}, bundle.clock)
+      await step.run(ctx, bundle.deps)
+      const report = bundle.log.calls.find((call) => call.what === "postReport")!.args[2] as ReportV2
+      expect(report.verdict).toMatchObject({ state: "properly" })
+      expect(bundle.log.calls.filter((call) => call.what === "patchRun").map((call) => call.args[1])).toEqual([{ checkinOptIn: true }])
+      const said = ctx.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
+      expect(said).toContain(`! Infinite holds this run's proof as ${held}, so the run is not marked proven`)
+    }
+  })
+
+  it("W20 (§3x.7): the last line names the always-on report card when the app has it, else Site Settings only", async () => {
+    const lastLine = async (capabilities?: readonly string[]) => {
+      const bundle = fakeDeps(capabilities ? { bridge: { capabilities: capabilities as never } } : {})
+      const ctx = fakeContext(finishedState(), {}, bundle.clock)
+      await step.run(ctx, bundle.deps)
+      return (ctx.events.filter((event) => event.type === "step.sub").at(-1)!.fields as { text: string }).text
+    }
+    expect(await lastLine()).toBe("Infinite shows this report now (and in Site Settings › Your site's analytics).")
+    const withoutCard = (await import("../contracts/bridge.js")).TAG_CAPABILITIES.filter((capability) => capability !== "tag.report-card.v1")
+    expect(await lastLine(withoutCard)).toBe("Infinite shows this report in Site Settings › Your site's analytics.")
   })
 
   it("comments the same report on the PR (plain text, no checkbox) and writes it under .infinite/wizard/", async () => {
@@ -150,6 +195,7 @@ function noVisitState(unmeasured?: Parameters<typeof buildProvenColumn>[0]["unme
   state.report.proven_live = buildProvenColumn({
     runId: RUN_ID,
     mergeSha: MERGE_SHA,
+    installed: null,
     at: AT,
     // The workspace never recorded consent: with a visit this would be a problem; without one it is unmeasured.
     keys: { ...keysFixture(), infinite: { ...keysFixture().infinite, consentMode: null } },
@@ -208,6 +254,7 @@ describe("R2-2 / R2-4 (live run 2): Proven live with no real visit and no receip
     const visited = buildProvenColumn({
       runId: RUN_ID,
       mergeSha: MERGE_SHA,
+    installed: null,
       at: AT,
       keys: { ...keysFixture(), infinite: { ...keysFixture().infinite, consentMode: null } },
       expect: { ga4: ["G-ACME000001"] },
@@ -293,5 +340,17 @@ describe("R2-5 (live run 2): the PR's 'what happened' comment carries the final 
     const comments = bundle.log.calls.filter((call) => call.what === "comment")
     expect(comments).toHaveLength(1)
     expect(String(comments[0]!.args[1])).toContain(PR_MARKERS.report(RUN_ID))
+  })
+})
+
+describe("§3x.5 (W13) the disclosure says only what ran", () => {
+  const tool = (name: "infinite" | "ga4" | "posthog" | "meta", fired: boolean) => ({ tool: name, ids: [], connected: name === "infinite", installed: true, fired, ungraded: false, receipt: null, receiptReason: null })
+  it("no server lane: ONE row in the ledger; only the tools that fired are named, with their filter id", () => {
+    const text = visitDisclosure({ at: AT, tools: [tool("infinite", true), tool("ga4", true), tool("meta", false)], laneProbed: false, infinitePageViews: 1, filter: { ga4ClientId: "1234567890.1759500000", posthogDistinctId: null, metaPageViewAt: null }, installedUnknown: null })
+    expect(text).toEqual([
+      "This run's one real visit landed 1 row in your Infinite ledger, marked as Infinite's test and kept out of your numbers: the page view.",
+      "GA4 records it as one normal page view (filter it by: GA4 client id 1234567890.1759500000)."
+    ])
+    expect(text.join(" ")).not.toMatch(/two|bot-flagged|probe/)
   })
 })

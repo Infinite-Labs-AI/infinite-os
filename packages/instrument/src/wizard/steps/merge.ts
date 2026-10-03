@@ -16,6 +16,9 @@ import { isUnsupported } from "../../hosts/other.js"
 import { assertNoAgentAlive, requireRunId, status, sub } from "../../review/context.js"
 import { mergeRequirementLine } from "../../github/rules.js"
 import { parseLedger, REVIEW_LEDGER_PATH } from "../../review/ledger.js"
+import { verdictFactsFor } from "../verdict-facts.js"
+import { incompleteParts } from "../verdict.js"
+import { repoLabelFromRemote } from "./done.js"
 
 const meta = WIZARD_STEP_META.merge
 /** "While the terminal is open": a day of polling, then the run parks (the desktop's watcher carries on). */
@@ -34,6 +37,31 @@ function parked(reason: string, number: number | null): StepOutcome {
       ? `Merge pull request #${number} when you're happy, then run \`npx infinite-tag\` again: it picks up the merge and proves it live.`
       : "Merge the branch when you're happy, then run `npx infinite-tag` again: it picks up the merge and proves it live."
   }
+}
+
+/**
+ * §3x.6 The tag's `in_pr` report reaches Infinite BEFORE the merge (at the merge-ready card, or when a merge is seen
+ * first): its verdict is `not_checked_live` and already names any approved fix not in the code and any open review
+ * blocker. Returns what the PR lacks (the merge card's words), or null.
+ */
+async function postInPrReport(ctx: WizardContext, deps: WizardDeps, runId: string): Promise<string | null> {
+  const state = ctx.state.get()
+  if (!state.report.in_pr) return null
+  const keys = deps.bridge.has("tag.keys.v1") ? await deps.bridge.keys().catch(() => null) : null
+  const report = deps.report.build({
+    runId,
+    tagVersion: deps.tagVersion,
+    site: { repoLabel: repoLabelFromRemote(await deps.git.remoteUrl().catch(() => null), ctx.root), productionHost: keys?.infinite.productionHosts[0] ?? state.site?.productionHost ?? null },
+    columns: { live_today: state.report.live_today, in_pr: state.report.in_pr, proven_live: null },
+    provenLivePending: "deploy",
+    runStartedAt: state.runStartedAt ?? null,
+    day7: null,
+    notes: [],
+    verdictFacts: await verdictFactsFor(ctx, deps)
+  })
+  assertNoAgentAlive(deps, "report post")
+  await deps.bridge.postReport(runId, "in_pr", deps.report.payload(report))
+  return report.verdict ? incompleteParts(report.verdict, state.jobs) : null
 }
 
 async function saveMerge(ctx: WizardContext, deps: WizardDeps, runId: string, mergeSha: string, mergedAt: string | null): Promise<StepOutcome> {
@@ -96,7 +124,7 @@ export async function askWhilePolling(
   deps: WizardDeps,
   github: { readPr(number: number): Promise<PrSummary> },
   number: number,
-  payload: { prUrl: string; number: number; summary: string }
+  payload: { prUrl: string; number: number; summary: string; incomplete?: string }
 ): Promise<{ answer: "open" | "later" | string; pr: PrSummary | null }> {
   const close = new AbortController()
   const stop = new AbortController()
@@ -142,17 +170,21 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     const git = wizardGitExtras(deps.git)
     const head = state.git.headSha
     const baseSha = git ? await git.remoteBranchSha(state.git.base) : null
+    const lacking = await postInPrReport(ctx, deps, runId)
     if (git && head && baseSha && (await git.isAncestor(head, baseSha))) return saveMerge(ctx, deps, runId, baseSha, null)
     const answer = await ctx.ask("merge-ready", {
       prUrl: state.pr.url ?? state.git.branch,
       number: 0,
-      summary: `Merge ${state.git.branch} into ${state.git.base} on your git host.`
+      summary: `Merge ${state.git.branch} into ${state.git.base} on your git host.`,
+      ...(lacking ? { incomplete: lacking } : {})
     })
     return parked(answer === "open" ? "Waiting for you to merge on your git host." : "You chose to merge later.", null)
   }
 
   const number = state.pr.number!
   let pr = await github.readPr(number)
+  // §3x.6: the in-PR report (and its verdict) reaches Infinite before the merge is recorded.
+  const lacking = pr.state === "CLOSED" ? null : await postInPrReport(ctx, deps, runId)
   if (pr.state === "MERGED" && pr.mergeCommitOid) return saveMerge(ctx, deps, runId, pr.mergeCommitOid, pr.mergedAt)
   if (pr.state === "CLOSED") return parked("The pull request was closed without merging. Run `npx infinite-tag` to start a fresh run.", null)
 
@@ -170,7 +202,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   })
   sub(ctx, "merge", `Waiting for you to merge #${number}…`, "pending")
   // §3y.9 (P2-6): GitHub is polled every 30 s WHILE the card is up; a merge seen closes the card (the ask's signal).
-  const seen = await askWhilePolling(ctx, deps, github, number, { prUrl: pr.url, number, summary })
+  const seen = await askWhilePolling(ctx, deps, github, number, { prUrl: pr.url, number, summary, ...(lacking ? { incomplete: lacking } : {}) })
   if (seen.pr?.state === "MERGED" && seen.pr.mergeCommitOid) {
     sub(ctx, "merge", "✓ Merged on GitHub", "ok")
     return saveMerge(ctx, deps, runId, seen.pr.mergeCommitOid, seen.pr.mergedAt)

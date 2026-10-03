@@ -29,6 +29,8 @@ import { openTagBridge } from "../bridge/client.js"
 import { envProxyFetch } from "../checks/live/env-proxy-fetch.js"
 import { registerJobStaticChecks, type JobStaticRunContext } from "../checks/job-static.js"
 import { registerO9Checks } from "../checks/o9.js"
+import { runCensus } from "../checks/census.js"
+import { lexicalStates } from "../lexical-states.js"
 import { createCheckRunner } from "../checks/registry.js"
 import { createGitOps } from "../git/index.js"
 import { createGhClient } from "../github/gh.js"
@@ -54,6 +56,7 @@ import { normalizeHost } from "./contracts/host-deny.js"
 import { WIZARD_PATHS, type WizardRunState } from "./contracts/state.js"
 import { testExpectFromKeys, type TestExpect } from "./contracts/test-engine.js"
 import { nodeWizardFs, systemClock } from "./fs.js"
+import { readInstallManifest } from "../manifest.js"
 import { BEFORE_FACTS_SCHEMA, type BeforeFactsFile } from "./handoff/before-facts.js"
 import { applyKeysChoices, KEYS_RESULT_SCHEMA, type KeysStepResult } from "./handoff/keys-result.js"
 import { createReportBuilder } from "./report.js"
@@ -178,8 +181,68 @@ export function briefFactsFor(root: string, state: Readonly<WizardRunState> | nu
     appRoot: state.appRoot,
     plan: saved?.plan ? briefPlanFrom(saved.plan, saved.approvals) : null,
     connections: keys ? briefConnectionsFrom(keys) : null,
-    previewGuard: previewGuardBrief(saved?.guard ?? null)
+    previewGuard: previewGuardBrief(saved?.guard ?? null),
+    helpers: writtenHelpers(root),
+    guardSites: adoptedInitSites(root, state.appRoot)
   }
+}
+
+const INIT_CALL: Record<"ga4" | "posthog" | "meta", RegExp> = {
+  ga4: /\bgtag\s*\(\s*['"]config['"]/,
+  posthog: /\bposthog\s*\.\s*init\s*\(/,
+  meta: /\bfbq\s*\(\s*['"]init['"]/
+}
+
+/**
+ * §3x.3 (§2.3) Where each adopted GA4 / PostHog / Meta init lives in the CURRENT tree, and whether it sits inside a
+ * template literal (a Next `<Script>{`…`}</Script>` body): the brief then gives the guard escaped for it.
+ */
+export function adoptedInitSites(root: string, appRoot: string): NonNullable<BriefFacts["guardSites"]> {
+  const out: NonNullable<BriefFacts["guardSites"]> = []
+  let census: ReturnType<typeof runCensus>
+  try {
+    census = runCensus({ root, appRoot })
+  } catch (error) {
+    // Review P3-3: never "no adopted tags" (the brief would then give no guard as written, and the agent would escape
+    // a template literal by hand again): the census failure is the run's, named.
+    throw new Error(`the code census could not run (${error instanceof Error ? error.message.slice(0, 120) : String(error).slice(0, 120)}), so the brief cannot say where your existing tags are`)
+  }
+  for (const entry of census.entries) {
+    if (entry.owner !== "adopted" || (entry.tool !== "ga4" && entry.tool !== "posthog" && entry.tool !== "meta")) continue
+    let text: string
+    try {
+      text = readFileSync(join(root, entry.file), "utf8")
+    } catch {
+      continue
+    }
+    const lines = text.split("\n")
+    const lineText = lines[entry.line - 1] ?? ""
+    const column = lineText.search(INIT_CALL[entry.tool])
+    if (column < 0) continue
+    const offset = lines.slice(0, entry.line - 1).reduce((sum, line) => sum + line.length + 1, 0) + column
+    out.push({ tool: entry.tool, file: entry.file, line: entry.line, context: lexicalStates(text)[offset] === 2 ? "template_literal" : "js" })
+  }
+  return out
+}
+
+/**
+ * §3x.3 (B3) The conversion helpers the install really wrote, read from the repo (never assumed from the plan): the
+ * managed module that EXPORTS `infiniteTrack`, or the managed page block that defines the globals. Null = none.
+ */
+export function writtenHelpers(root: string): BriefFacts["helpers"] {
+  const manifest = readInstallManifest(root)
+  if (!manifest) return null
+  for (const file of manifest.files) {
+    let text: string
+    try {
+      text = readFileSync(join(root, file), "utf8")
+    } catch {
+      continue
+    }
+    if (/\.[cm]?[jt]sx?$/.test(file) && /export\s+(?:async\s+)?function\s+infiniteTrack\b|export\s+const\s+infiniteTrack\b/.test(text)) return { module: file }
+    if (/\.html?$/.test(file) && /window\.infiniteTrack\s*=/.test(text)) return { module: null }
+  }
+  return null
 }
 
 export interface DefaultDepsInput extends CreateDepsInput {

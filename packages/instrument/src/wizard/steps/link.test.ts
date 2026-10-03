@@ -282,16 +282,16 @@ describe("step link", () => {
     expect(bridge.calls).toHaveLength(0)
   })
 
-  it("review I2 P2-2: keys 409 foreign_site_hosts/infinite_workspace → a clean stop (LINK_DECLINED, exit 4) with one plain line", async () => {
+  it("§3x.8 (R3-7): keys 409 foreign_site_hosts/infinite_workspace → a clean stop (INFINITE_WORKSPACE, exit 2) naming --relink", async () => {
     const { bridge, harness, deps } = await setup({ link: "remembered", errors: { keys: { code: "foreign_site_hosts", state: "infinite_workspace" } } })
     const outcome = await step.run(harness.ctx, deps)
     expect(outcome).toEqual({
       kind: "failed",
-      code: "INF_WIZ_LINK_DECLINED",
-      message: "This site is linked to Infinite's own workspace. Link it to its own workspace and run npx infinite-tag again.",
+      code: "INF_WIZ_INFINITE_WORKSPACE",
+      message: "This workspace is Infinite's own and cannot take a customer site. Run npx infinite-tag --relink and pick another workspace.",
       next: "halt"
     })
-    expect(exitCodeFor("INF_WIZ_LINK_DECLINED")).toBe(4)
+    expect(exitCodeFor("INF_WIZ_INFINITE_WORKSPACE")).toBe(2)
     expect(bridge.calls.map((call) => call.verb)).toEqual(["status", "link.request", "keys"])
   })
 

@@ -132,7 +132,11 @@ export type ReviewFailure = { error: "unparseable" | "timeout" | "out_of_usage" 
 export interface AgentRunner {
   detect(): Promise<AgentDetectResult>
   runJobs(input: RunJobsInput): Promise<AgentRunResult>
-  review(input: { worktreeDir: string; reviewer: AgentKind; brief: string }): Promise<ReviewResult | ReviewFailure>
+  /**
+   * §3x.3 `onNarrate` (optional): the reviewer's tool beats, narrated like the worker's. Every reviewer event stream is
+   * also kept (0600) at `~/Library/Caches/infinite-tag/<runId>/review-<n>-<agent>.jsonl`, so a slow review can be measured.
+   */
+  review(input: { worktreeDir: string; reviewer: AgentKind; brief: string; onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void }): Promise<ReviewResult | ReviewFailure>
   /** True while any agent child of this run is running (the engine invariant, §3a.9.4). */
   isAgentAlive(): boolean
   killAll(): Promise<void>

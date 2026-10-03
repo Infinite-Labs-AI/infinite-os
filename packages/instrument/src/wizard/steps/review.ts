@@ -5,14 +5,17 @@
 // teammate's only with the user's OK) → resolves only its own fixed threads → re-rehearses → `gh pr ready` + the
 // final comment. With one agent it writes and prints the review brief instead.
 import { createHash, randomBytes } from "node:crypto"
+import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
-import type { AgentKind, ReviewFailure, ReviewResult } from "../contracts/agents.js"
+import type { AgentKind, AgentRunResult, ReviewFailure, ReviewResult } from "../contracts/agents.js"
+import { runExtras } from "../../agents/runner.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
 import type { CheckResult } from "../contracts/jobs.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { verdictFactsFor } from "../verdict-facts.js"
 import { isGloballyDenied } from "../../git/commit.js"
 import { isGitHubAdapter, type GitHubHostAdapter } from "../../hosts/github.js"
 import { isUnsupported } from "../../hosts/other.js"
@@ -20,16 +23,17 @@ import { classifyReview, isReviewResult, parseBriefReview, printedReviewBrief, r
 import { allowlistUnion, assertNoAgentAlive, bestEffortBridge, bridgeStop, manifestFiles, status, sub } from "../../review/context.js"
 import { parseUnifiedDiff } from "../../review/diff.js"
 import { job16Item, restoreFiles, runFixRound, snapshotFiles, verifyFix } from "../../review/fix.js"
-import { parseLedger, recordDecisions, REVIEW_LEDGER_PATH, type ReviewLedger } from "../../review/ledger.js"
+import { openFindings, parseLedger, recordDecisions, REVIEW_LEDGER_PATH, type ReviewLedger } from "../../review/ledger.js"
+import { wizardOwnership, type WizardOwnership } from "../../review/ownership.js"
 import { commentTrust, hasFinalMarker, hasReplyMarker, parseReviewMarker, stripMarkers } from "../../review/markers.js"
-import { AGENT_LABEL, buildFinalComment, buildReply, buildReviewPost, excerpt, redactIdsNotInDiff, safeText, type FixReplyState } from "../../review/post.js"
+import { AGENT_LABEL, buildFinalComment, buildReply, buildReviewPost, excerpt, notFixedReply, redactIdsNotInDiff, safeText, type FixReplyState, type NotFixedOutcome } from "../../review/post.js"
 import { applyRehearsalToJobs, recordRehearsalCells, rehearse } from "../../review/rehearse.js"
 import { mergeRequirementLine } from "../../github/rules.js"
 import { checksSummary } from "../../github/checks.js"
 import { DETERMINISTIC_CHECKS_BY_ITEM, isRepoRelativePath, triage, triageKey, type TriageDecision, type TriageItem } from "../../review/triage.js"
 import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
 import { provenPendingFor } from "./prove.js"
-import { announceRehearsal, commitStop, evidenceUrls, isShipContext, prepareShip, recordClickTests, type ShipContext } from "./rehearsal.js"
+import { announceRehearsal, commitStop, isShipContext, prepareShip, recordClickTests, testPageUrls, type ShipContext } from "./rehearsal.js"
 
 const meta = WIZARD_STEP_META.review
 const REVIEW_INPUT_DIR = ".infinite/review"
@@ -57,10 +61,14 @@ interface Session {
   notes: string[]
   reviewed: boolean
   reviewer: AgentKind | "brief" | null
+  /** §3x.3 Whose code a finding is on (Infinite's runtime, the wizard's own change), and the wizard's own files. */
+  ownership?: WizardOwnership
 }
 
 async function saveLedger(session: Session): Promise<void> {
   const path = join(session.ctx.root, REVIEW_LEDGER_PATH)
+  // §3x.3 The findings that still stand, from the ONE definition (`openFindings`), on every save.
+  session.ledger.openFindings = openFindings(session.ledger, session.ctx.state.get().jobs, session.ownership?.classify)
   await session.deps.fs.mkdirp(join(session.ctx.root, WIZARD_PATHS.dir), 0o700)
   await session.deps.fs.writeTextAtomic(path, `${JSON.stringify(session.ledger, null, 2)}\n`, 0o600)
 }
@@ -72,9 +80,13 @@ async function writeReviewInputs(session: Session, dir: string, diff: string): P
   const keys = session.ship.facts.keys
   const inputDir = join(dir, REVIEW_INPUT_DIR)
   await deps.fs.mkdirp(inputDir, 0o700)
+  const ownership = await sessionOwnership(session)
   const plan = {
     approvedPlanLines: (state.plan?.lines ?? []).filter((line) => line.approved === true).map((line) => line.id),
     allowlist: allowlistUnion(state.jobs),
+    // §3x.3 R1: the wizard's own files (Infinite's managed code, its proof file, .gitignore's Infinite block,
+    // .infinite/install.json) are in scope too; run 3's reviewer flagged the wizard's own next.config.mjs (F1).
+    wizardFiles: ownership.wizardFiles,
     connectedIds: keys
       ? {
           ga4: keys.ga4.streams.map((stream) => stream.measurementId),
@@ -91,10 +103,69 @@ async function writeReviewInputs(session: Session, dir: string, diff: string): P
     inPr: state.report.in_pr ? Object.fromEntries(Object.entries(state.report.in_pr.finishLine).map(([id, cell]) => [id, cell?.state ?? null])) : null
   }
   const names = { diff: `${REVIEW_INPUT_DIR}/diff.patch`, plan: `${REVIEW_INPUT_DIR}/plan.json`, checks: `${REVIEW_INPUT_DIR}/checks.json` }
-  await deps.fs.writeTextAtomic(join(dir, names.diff), diff, 0o600)
+  await deps.fs.writeTextAtomic(join(dir, names.diff), await stubManagedDiff(session, dir, diff), 0o600)
   await deps.fs.writeTextAtomic(join(dir, names.plan), `${JSON.stringify(plan, null, 2)}\n`, 0o600)
   await deps.fs.writeTextAtomic(join(dir, names.checks), `${JSON.stringify(checks, null, 2)}\n`, 0o600)
   return names
+}
+
+/** §3x.3 The run's ownership facts (read once per session from the install receipt and the PR's base commit). */
+async function sessionOwnership(session: Session): Promise<WizardOwnership> {
+  if (!session.ownership) {
+    const base = session.ctx.state.get().git?.baseSha ?? null
+    session.ownership = await wizardOwnership(session.deps, session.ctx.root, async (path) => {
+      if (base === null) return null
+      try {
+        return (await session.ship.git.showFile(base, path)) !== null
+      } catch {
+        return null
+      }
+    })
+  }
+  return session.ownership
+}
+
+/**
+ * §3x.3 (D3) The reviewer reads the CUSTOMER's change, not Infinite's runtime: each Infinite-owned file's hunks in
+ * `diff.patch` become a stub (its path, the tag version, its sha256 and the per-site values it carries). Run 3's
+ * diff was 87% one 31,040-character line of Infinite's runtime. R14 still sees the file in `install.json`.
+ */
+async function stubManagedDiff(session: Session, worktree: string, diff: string): Promise<string> {
+  const ownership = await sessionOwnership(session)
+  const keys = session.ship.facts.keys
+  const site = keys?.infinite
+  const masked = site?.siteSourceKey ? `${site.siteSourceKey.slice(0, 9)}…${site.siteSourceKey.slice(-4)}` : "none"
+  const sections = diff.split(/(?=^diff --git )/m)
+  return sections
+    .map((section) => {
+      const header = /^diff --git a\/(\S+) b\/(\S+)/.exec(section)
+      const path = header?.[2]
+      if (!path || ownership.classify(path, null) !== "Infinite's own code") return section
+      const hunk = section.search(/^@@ /m)
+      const head = hunk < 0 ? section : section.slice(0, hunk)
+      return `${head}@@ -0,0 +1,3 @@\n${managedStubLines(session, worktree, path, masked, site).join("\n")}\n`
+    })
+    .join("")
+}
+
+function managedStubLines(
+  session: Session,
+  worktree: string,
+  path: string,
+  maskedKey: string,
+  site: { productionHosts: readonly string[]; consentMode: string | null; collectPath: string | null } | undefined
+): string[] {
+  let digest = "unreadable"
+  try {
+    digest = createHash("sha256").update(readFileSync(join(worktree, path))).digest("hex")
+  } catch {
+    // the stub still names the file; the reviewer is told the bytes are not shown
+  }
+  return [
+    `+// [infinite-tag managed file ${path}: infinite-tag ${session.deps.tagVersion}, sha256 ${digest}]`,
+    "+// Infinite's own runtime, reviewed in infinite-os; its bytes are not shown here.",
+    `+// Per-site values: siteSourceKey ${maskedKey}, hosts ${(site?.productionHosts ?? []).join(", ") || "none"}, consentMode ${site?.consentMode ?? "unknown"}, collectPath ${site?.collectPath ?? "none"}`
+  ]
 }
 
 /** What one reviewer run gave: a classified review, a blind one (after its one retry), or a failure. */
@@ -126,9 +197,10 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
     // stayed above "Codex is reviewing").
     ctx.emit.emit("narrate", { agent: reviewer, role: "reviewer", text: round > 1 ? "Reading the fix commit (read-only)" : "Reading the pull request (read-only)" })
     const once = async (text: string): Promise<ReviewResult | ReviewFailure> => {
-      let result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: text })
+      const onNarrate = (beat: { agent: AgentKind; role: "reviewer"; text: string }) => ctx.emit.emit("narrate", beat)
+      let result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: text, onNarrate })
       if ("error" in result && result.error === "unparseable") {
-        result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: `${text}\n\nYour previous answer did not match the JSON schema. Return JSON only, exactly matching it.` })
+        result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: `${text}\n\nYour previous answer did not match the JSON schema. Return JSON only, exactly matching it.`, onNarrate })
       }
       // Belt and braces: whatever the runner parsed must match review.schema.json before anything is posted.
       if (!("error" in result) && !isReviewResult(result)) return { error: "unparseable" }
@@ -438,7 +510,14 @@ async function syncHead(session: Session, prevHead: string, newHead: string): Pr
 }
 
 /** Replies on the wizard's own threads (and teammates' OK'd threads); resolves only its own FIXED threads. */
-async function replyAndResolve(session: Session, decisions: readonly TriageDecision[], teammateOk: ReadonlySet<string>, fixSha: string | null, fixState: ReadonlyMap<string, "fixed" | "unverified">): Promise<void> {
+async function replyAndResolve(
+  session: Session,
+  decisions: readonly TriageDecision[],
+  teammateOk: ReadonlySet<string>,
+  fixSha: string | null,
+  fixState: ReadonlyMap<string, "fixed" | "unverified">,
+  notFixed: ReadonlyMap<string, FixReplyState> = new Map()
+): Promise<void> {
   if (!session.github) return
   for (const decision of decisions) {
     const threadId = decision.item.threadId
@@ -448,7 +527,7 @@ async function replyAndResolve(session: Session, decisions: readonly TriageDecis
     // A resumed round never replies twice on the same thread.
     if (session.ctx.state.get().pr?.handledThreadIds.includes(threadId)) continue
     const state = decision.action === "FIX" && fixSha !== null ? fixState.get(threadId) : undefined
-    const fix: FixReplyState | null = decision.action !== "FIX" ? null : state && fixSha ? { kind: state, sha: fixSha } : { kind: "not_fixed" }
+    const fix: FixReplyState | null = decision.action !== "FIX" ? null : state && fixSha ? { kind: state, sha: fixSha } : (notFixed.get(threadId) ?? { kind: "not_fixed" })
     await session.github.reply(threadId, buildReply(session.ship.scanner, decision, fix))
     if (own && state === "fixed") await session.github.resolve(threadId)
     session.ctx.state.update((draft) => {
@@ -534,7 +613,12 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     columns: ctx.state.get().report,
     provenLivePending: provenPendingFor({ state: ctx.state.get(), hostingVercel: ship.facts.hosting?.provider === "vercel", noProve: false, productionHost: ship.facts.productionHost }),
     day7: null,
-    notes: []
+    notes: [],
+    // §3x.6 the ledger is saved first so the verdict reads this session's open findings.
+    verdictFacts: await (async () => {
+      await saveLedger(session)
+      return verdictFactsFor(ctx, deps)
+    })()
   })
   const openFromLedger: TriageDecision[] = session.ledger.open
     .filter((entry) => !session.decisions.some((decision) => decision.action === "ASK" && triageKey(decision.item) === entry.key))
@@ -763,8 +847,11 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
     // Only a decline from an EARLIER round makes an item "raised again": a resumed round re-triages its own
     // review, and its own declines (saved before the park) must stay declines.
     const declinedKeys = new Set(session.ledger.declined.filter((entry) => entry.round < round).map((entry) => entry.key))
+    const ownership = await sessionOwnership(session)
     const triaged = triage(gathered.items, {
-      allowlist: [...allowlistUnion(ctx.state.get().jobs), ...managed],
+      // §3x.3: the customer's agent works inside the jobs' allowlists only; Infinite's own files are never its.
+      allowlist: allowlistUnion(ctx.state.get().jobs),
+      ownership: ownership.classify,
       declinedKeys,
       passingChecks: passingChecks(ctx),
       answerFor: answerFrom(ctx)
@@ -772,9 +859,17 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
     const decisions = await resolveAsks(session, triaged, worker !== null)
     recordDecisions(session.ledger, decisions, round)
     session.decisions.push(...decisions)
+    // §3x.3 A finding on Infinite's own code reaches Infinite through the run's report, never through the agent.
+    for (const decision of decisions.filter((entry) => entry.action === "INFINITE")) {
+      const where = `${decision.item.path ?? "general"}${decision.item.line ? `:${decision.item.line}` : ""}`
+      const note = `Review finding on ${decision.label ?? "Infinite's own code"}: ${decision.item.item ?? "review"} ${where} (${decision.item.severity})`.slice(0, 300)
+      // The report's note is built from the ledger's open findings at `done` (one source); this is the PR's copy.
+      session.notes.push(note)
+    }
     const fixes = decisions.filter((decision) => decision.action === "FIX")
     let fixSha: string | null = null
     const fixState = new Map<string, "fixed" | "unverified">()
+    const notFixed = new Map<string, FixReplyState>()
 
     if (fixes.length > 0 && worker === null) {
       session.notes.push("No worker agent was available, so the valid comments are listed for you to fix.")
@@ -799,8 +894,29 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
         }
       }
       const edited = fix.run.edits.map((edit) => edit.file)
+      // §3x.3 / DECISIONS §1.5 A round that kept no change is said as it happened: no build and no check ran, so
+      // nothing "failed the checks". Review P1-4: the fence's own record decides whether the agent changed anything
+      // the wizard then undid (a stop mid-change, the safety check, a file outside the job), never `edits` alone.
+      if (edited.length === 0) {
+        const { outcome, why } = noKeptChangeOutcome(fix.run)
+        const words = notFixedReply(outcome, why)
+        session.notes.push(`Round ${round}: ${words}`)
+        sub(ctx, "review", `! ${words}`, "warn")
+        for (const decision of fixes) if (decision.item.threadId) notFixed.set(decision.item.threadId, { kind: "not_fixed", outcome, why })
+        await replyAndResolve(session, decisions, gathered.teammateOk, null, fixState, notFixed)
+        await saveLedger(session)
+        await ctx.state.save()
+        break
+      }
       const verified = await verifyFix(ctx, deps, { runId: prepared.runId, items: fix.items, editedFiles: edited })
       let finalItems = verified.items
+      // The real reason a fix did not pass, per thread (the first failing check of its item).
+      for (const [index, decision] of fixes.entries()) {
+        const item = finalItems.find((candidate) => candidate.id === items[index]!.id)
+        const failing = item?.checks.find((check) => check.state === "problem")
+        const why = !verified.buildOk ? "build: the build broke" : failing ? `${failing.id}: ${failing.reason ?? "problem"}` : null
+        if (decision.item.threadId) notFixed.set(decision.item.threadId, { kind: "not_fixed", outcome: "checks_failed", why: why ? why.slice(0, 160) : null })
+      }
       if (!verified.buildOk) {
         // Put the files back: nothing uncommitted stays on the PR branch, and nothing reaches the receipt.
         const leftOver = await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
@@ -846,7 +962,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
             head: fixSha,
             facts: prepared.facts,
             approvedConversions: ctx.state.get().plan?.answers.conversions ?? [],
-            evidenceUrls: evidenceUrls(ctx),
+            evidenceUrls: await testPageUrls(ctx, deps),
             consentRequired: ctx.state.get().plan?.answers.consentMode === "required",
             ghReady: prepared.ghReady
           })
@@ -879,7 +995,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
         draft.jobs = [...draft.jobs.map((job) => finalItems.find((item) => item.id === job.id) ?? job), ...finalItems.filter((item) => !known.has(item.id))]
       })
     }
-    await replyAndResolve(session, decisions, gathered.teammateOk, fixSha, fixState)
+    await replyAndResolve(session, decisions, gathered.teammateOk, fixSha, fixState, notFixed)
     await saveLedger(session)
     await ctx.state.save()
     if (fixSha === null) break
@@ -903,6 +1019,33 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
   const line = [`${final.pr?.number ? `Pull request #${final.pr.number}` : "Branch"}`, who, ...(found ? [found] : []), rehearsalText].join(" · ")
   status(ctx, "review", line)
   return { kind: "ok", status: line }
+}
+
+/**
+ * Review P1-4: why a fix round kept no change, read from the fence's record of the turn (`runExtras`):
+ *   - stopped (timeout, error, no tools) after editing → `undone`, naming what it changed;
+ *   - every change refused by the post-turn gate → `gate_refused`, with the gate's own note;
+ *   - every change undone by the fence (outside the job's files, consent, a file no job owns) → `blocked`, with its note;
+ *   - only when all three are empty → the plain outcome ("ran out of time before changing anything", "without
+ *     changing anything").
+ */
+export function noKeptChangeOutcome(run: AgentRunResult): { outcome: NotFixedOutcome; why: string | null } {
+  const extras = runExtras(run)
+  const stopped = run.outcome === "timeout" ? "the agent ran out of its 5 minutes" : run.outcome === "error" ? "the agent stopped with an error" : run.outcome === "toolless" ? "the agent could not use its tools" : null
+  const changed = [...new Set(run.reverted.filter((path) => !path.startsWith(".git/") && path !== ".git"))]
+  if (stopped && changed.length > 0) return { outcome: "undone", why: `${stopped}; its unfinished change to ${listPaths(changed)} was undone` }
+  if (extras.gateHits.length > 0) return { outcome: "gate_refused", why: [...new Set(extras.gateHits.map((hit) => hit.note))].join("; ") }
+  if (extras.blocked.length > 0 || extras.strays.length > 0) {
+    const notes = [...extras.blocked.map((block) => block.note), ...extras.strays.map((stray) => stray.note)]
+    return { outcome: "blocked", why: [...new Set(notes.map((note) => `the wizard ${note.charAt(0).toLowerCase()}${note.slice(1).replace(/\.$/, "")}`))].join("; ") }
+  }
+  const outcome: NotFixedOutcome = run.outcome === "timeout" ? "timeout" : run.outcome === "toolless" ? "toolless" : run.outcome === "error" ? "error" : "no_change"
+  return { outcome, why: null }
+}
+
+function listPaths(paths: readonly string[]): string {
+  const shown = paths.slice(0, 3).join(", ")
+  return paths.length > 3 ? `${shown} +${paths.length - 3} more` : shown
 }
 
 export const step: WizardStep<"review"> = {

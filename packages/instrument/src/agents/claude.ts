@@ -220,6 +220,8 @@ export type ClaudeStreamEvent =
       model: string | null
     }
   | { kind: "tool_use"; name: string; input: unknown }
+  /** §3x.3 a tool's result came back to the model (it now thinks until its next event). */
+  | { kind: "tool_result" }
   | { kind: "assistant_error"; error: string }
   | { kind: "rate_limit"; event: Record<string, unknown> }
   | {
@@ -262,6 +264,11 @@ export function parseClaudeLine(line: string): ClaudeStreamEvent | null {
     const content = isRecord(event.message) && Array.isArray(event.message.content) ? event.message.content : []
     const toolUse = content.find((block): block is Record<string, unknown> => isRecord(block) && block.type === "tool_use" && typeof block.name === "string")
     if (toolUse) return { kind: "tool_use", name: toolUse.name as string, input: toolUse.input }
+    return { kind: "other" }
+  }
+  if (event.type === "user") {
+    const content = isRecord(event.message) && Array.isArray(event.message.content) ? event.message.content : []
+    if (content.some((block) => isRecord(block) && block.type === "tool_result")) return { kind: "tool_result" }
     return { kind: "other" }
   }
   if (event.type === "rate_limit_event") return { kind: "rate_limit", event }

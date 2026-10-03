@@ -1,5 +1,6 @@
 import { htmlScripts } from "./html-scripts.js"
 import { maskCommentsAndStrings } from "./frameworks/shared.js"
+import { lexicalStates } from "./lexical-states.js"
 import type { ProviderId } from "./types.js"
 
 export interface ProviderInstallEvidence {
@@ -62,11 +63,16 @@ export function providerInstallEvidence(source: string): ProviderInstallEvidence
       /\b(?:window\.)?twq\s*\(\s*["'](?:config|init)["']\s*,\s*(?:["']([A-Za-z0-9]+)["']|[A-Za-z_$])/g
     ]
   ]
+  // §3x.6 (one detector, with the census): a call inside a TEMPLATE literal is an inline `<Script>{`…`}</Script>` body,
+  // which runs; only one inside a quoted string is an example. Run 3's agency Meta pixel lived in such a body, so the
+  // plan said nothing about Meta while the census (and the test load) saw it.
+  const states = html ? null : lexicalStates(raw)
+  const inTemplate = (at: number, length: number) => states !== null && Array.from({ length }, (_, offset) => states[at + offset]).every((state) => state === 2)
   for (const [provider, pattern] of calls) {
     for (const match of text.matchAll(pattern)) {
       // Matching the callable prefix in string-masked code rejects examples stored in strings.
       const prefix = match[0].slice(0, match[0].indexOf("("))
-      if (code.slice(match.index, match.index + prefix.length) === prefix)
+      if (code.slice(match.index, match.index + prefix.length) === prefix || inTemplate(match.index, prefix.length))
         add(provider, match.index, match[1])
     }
   }

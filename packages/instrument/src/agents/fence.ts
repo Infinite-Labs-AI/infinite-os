@@ -63,6 +63,7 @@ import type { ChecklistItem, CheckResult, Claim, TurnDiff, WizardEditRecord } fr
 import { GLOBAL_DENY_GLOBS } from "../wizard/contracts/jobs.js"
 import { git, gitOk, parsePorcelainZ, type StatusEntry } from "./git-exec.js"
 import { matchesAnyGlob, normalizeRelPath } from "./glob.js"
+import { TURN_GATE_RULES, type TurnGateRule } from "../checks/turn-gate.js"
 import { applySomeHunks, hunkLines, hunksOf, hunksToTextEdits, splitLines, type LineHunk } from "./line-diff.js"
 
 export const FENCE_SNAPSHOT_SCHEMA = "infinite-tag.fence-snapshot.v1" as const
@@ -111,7 +112,32 @@ const CONSENT_SPAN_STARTS: ReadonlyArray<{ pattern: RegExp; mode: "call" | "encl
   { pattern: /['"`]consent['"`]\s*,\s*['"`](?:default|update)['"`]/g, mode: "enclosing" }
 ]
 
+/**
+ * `outside_allowlist` = a path outside every allowlist, a global-deny path, a deletion, a token in the diff, git's
+ * own files; `consent_touched` = a consent hunk. A post-turn GATE hit is never a block (§3x.2): it is a `gateHit`.
+ */
 export type FenceBlockReason = "outside_allowlist" | "consent_touched"
+
+/**
+ * §3x.2 One post-turn gate refusal: the hunk was reverted (no forbidden line stays in the tree), and the items it is
+ * attributed to get a failed `turn_gate` S check with `note` (the jobs step decides; the fence blocks nothing for it).
+ * `rule` is the gate's rule id, or `turn_gate` for a gate that could not check the turn (it then reverts every hunk).
+ * `line` is the evidence line (0 when the gate gave none); `hunk` is the hunk's index in the file (-1 = the whole file).
+ */
+export interface FenceGateHit {
+  rule: TurnGateRule | "turn_gate"
+  file: string
+  line: number
+  hunk: number
+  itemIds: string[]
+  note: string
+}
+
+/** §3x.2 For each kept edit, the items each of its text edits is attributed to (same order as `textEdits`). */
+export interface FenceEditAttribution {
+  editId: string
+  textEditItems: string[][]
+}
 
 export interface FenceBlock {
   itemId: string
@@ -120,13 +146,29 @@ export interface FenceBlock {
   note: string
 }
 
+/**
+ * Review P2-3: a path the fence undid that no job owns (no job's files cover it and no claim names it). Only that path
+ * was put back; no job is failed for it (one stray helper file used to block, and undo, every job that claimed done).
+ * The jobs step says it and feeds it back to the agent.
+ */
+export interface FenceStray {
+  path: string
+  note: string
+}
+
 export interface FenceEndResult {
   /** Repo-relative paths whose turn changes were (fully or partly) undone. */
   reverted: string[]
   blocked: FenceBlock[]
+  /** Review P2-3: undone paths that no job owns (each only reverted; never a job's failure). */
+  strays: FenceStray[]
   edits: WizardEditRecord[]
   /** The gate's results on this turn (problems already acted on). */
   gate: CheckResult[]
+  /** §3x.2 The gate's refusals: each hunk reverted, each attributed to the items whose S check it fails. */
+  gateHits: FenceGateHit[]
+  /** §3x.2 Per kept edit, the items each text edit is attributed to (for the per-item undo). */
+  attribution: FenceEditAttribution[]
   /** Report mode only: rejected paths (reverted; the parent agent's bytes kept under `rejectedDir`). */
   reportedOutside: string[]
   /** Report mode only: where the parent agent's bytes of every reverted path were kept. */
@@ -181,6 +223,8 @@ export interface FenceItemAllow {
   jobId: string
   files: string[]
   create: string[]
+  /** §3x.2 The item's trigger evidence lines (repo-relative), for attributing a hunk; absent in older snapshots. */
+  evidence?: Array<{ file: string; line: number }>
 }
 
 interface ManifestEntry {
@@ -282,11 +326,14 @@ export class Fence {
     const marker = join(dir, "heavy.marker")
     await writeFile(marker, `${Date.now()}\n`, { mode: 0o600 })
     const statusBefore = await statusOf(root, heavyDirs)
-    const allow = options.items.map((item) => ({
+    const allow: FenceItemAllow[] = options.items.map((item) => ({
       itemId: item.id,
       jobId: item.jobId,
       files: item.allow.files.map(normalizeRelPath),
-      create: item.allow.create.map(normalizeRelPath)
+      create: item.allow.create.map(normalizeRelPath),
+      evidence: item.trigger.evidence
+        .filter((entry): entry is { file: string; line: number } => "file" in entry && typeof entry.line === "number")
+        .map((entry) => ({ file: normalizeRelPath(entry.file), line: entry.line }))
     }))
 
     const toCopy = new Set<string>()
@@ -461,10 +508,14 @@ export class Fence {
       throw new FenceTamperError(touched.tamper)
     }
     const blocks = new Map<string, FenceBlock>()
+    const strays = new Map<string, FenceStray>()
     const reverted = new Set<string>()
     const reportedOutside: string[] = []
     const block = (rel: string, reason: FenceBlockReason, note: string) => {
-      for (const itemId of this.itemsFor(rel, options.claims ?? [])) {
+      const owners = this.itemsFor(rel, options.claims ?? [])
+      // Review P2-3: no job owns the path, so no job is failed for it: only the path was put back, and the turn says so.
+      if (owners.length === 0 && !strays.has(rel)) strays.set(rel, { path: rel, note })
+      for (const itemId of owners) {
         const key = `${itemId}\u0000${reason}`
         const existing = blocks.get(key)
         if (existing) {
@@ -575,6 +626,7 @@ export class Fence {
 
     // §3f.9: the post-turn gate runs on what is still kept, BEFORE any build or T0.
     let gate: CheckResult[] = []
+    const gateHits: FenceGateHit[] = []
     if (options.turnGate) {
       const diff: TurnDiff = { files: [] }
       for (const candidate of candidates) {
@@ -592,11 +644,20 @@ export class Fence {
       for (const result of gate) {
         if (result.state !== "problem") continue
         const fileEvidence = (result.evidence ?? []).filter((evidence): evidence is { file: string; line: number } => "file" in evidence)
-        const note = `The post-turn check ${result.checkId} found a problem${result.reason ? ` (${result.reason})` : ""}; that change was undone.`
+        const rule = gateRuleOf(result.reason)
+        const words = gateWordsOf(result.reason)
         if (fileEvidence.length === 0) {
+          // A gate that could not say where (a crash: o9 makes it a problem) checked nothing: every hunk goes.
           for (const candidate of candidates) {
             candidate.keep = candidate.keep.map(() => false)
-            block(candidate.rel, "outside_allowlist", note)
+            gateHits.push({
+              rule,
+              file: candidate.rel,
+              line: 0,
+              hunk: -1,
+              itemIds: this.coveringItems(candidate.rel),
+              note: `the wizard's safety check could not check the change to ${candidate.rel}${words ? ` (${words})` : ""}`
+            })
           }
           continue
         }
@@ -609,14 +670,18 @@ export class Fence {
           const hits = candidate.hunks
             .map((hunk, index) => ({ hunk, index }))
             .filter(({ hunk }) => (evidence.line > hunk.bStart && evidence.line <= hunk.bEnd) || (evidence.line > hunk.aStart && evidence.line <= hunk.aEnd))
-          if (hits.length === 0) candidate.keep = candidate.keep.map(() => false)
-          else for (const { index } of hits) candidate.keep[index] = false
-          block(candidate.rel, "outside_allowlist", note)
+          const dropped = hits.length === 0 ? candidate.hunks.map((hunk, index) => ({ hunk, index })) : hits
+          const note = `the wizard's safety check refused ${candidate.rel}:${evidence.line}: ${words || "the edit broke a safety rule"}`
+          for (const { hunk, index } of dropped) {
+            candidate.keep[index] = false
+            gateHits.push({ rule, file: candidate.rel, line: evidence.line, hunk: hits.length === 0 ? -1 : index, itemIds: this.attributeHunk(candidate.rel, hunk, options.claims ?? []), note })
+          }
         }
       }
     }
 
     const edits: WizardEditRecord[] = []
+    const attribution: FenceEditAttribution[] = []
     let editIndex = 0
     for (const candidate of candidates) {
       const absolute = join(root, candidate.rel)
@@ -636,10 +701,15 @@ export class Fence {
       if (keptHunks.length === 0) continue
       const final = await readFile(absolute)
       const textEdits: ManagedTextEdit[] = hunksToTextEdits(candidate.beforeLines, candidate.afterLines, keptHunks)
+      // §3x.2 Every kept hunk is attributed like a gate hit, so the jobs step can undo per item.
+      const textEditItems = keptHunks.map((hunk) => this.attributeHunk(candidate.rel, hunk, options.claims ?? []))
+      const editId = `agent-${manifest.runId.replace(/[^0-9a-f]/gi, "").slice(0, 8) || "run"}-t${manifest.turn}-${editIndex}`
+      attribution.push({ editId, textEditItems })
+      const firstItem = textEditItems.flat()[0]
       edits.push({
-        id: `agent-${manifest.runId.replace(/[^0-9a-f]/gi, "").slice(0, 8) || "run"}-t${manifest.turn}-${editIndex}`,
+        id: editId,
         file: candidate.rel,
-        jobId: this.jobFor(candidate.rel, options.claims ?? []),
+        jobId: (firstItem ? this.manifest.allow.find((entry) => entry.itemId === firstItem)?.jobId : undefined) ?? this.jobFor(candidate.rel, options.claims ?? []),
         planLineId: null,
         by: "agent",
         beforeHash: candidate.before === null ? null : `sha256:${sha256Hex(Buffer.from(candidate.before, "utf8"))}`,
@@ -654,8 +724,11 @@ export class Fence {
     return {
       reverted: [...reverted].sort(),
       blocked: [...blocks.values()],
+      strays: [...strays.values()],
       edits,
       gate,
+      gateHits,
+      attribution,
       reportedOutside: [...new Set(reportedOutside)].sort(),
       seal,
       ...(report ? { rejectedDir } : {})
@@ -857,17 +930,45 @@ export class Fence {
   }
 
   /** Which items a changed path counts against (§3f.6 "blocks its job"). */
+  /**
+   * The items a path belongs to: the items whose files cover it, else the claims that name it. Review P2-3: nobody
+   * else. A path no job owns is a stray (only it is put back); it is never blamed on every `done` claim, or on every
+   * item, whose own files passed.
+   */
   private itemsFor(rel: string, claims: readonly Claim[]): string[] {
     const covering = this.manifest.allow
       .filter((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel)))
       .map((rule) => rule.itemId)
     if (covering.length > 0) return covering
     const known = new Set(this.manifest.allow.map((rule) => rule.itemId))
-    const byFile = claims.filter((claim) => known.has(claim.jobId) && (claim.files ?? []).map(normalizeRelPath).includes(rel)).map((claim) => claim.jobId)
-    if (byFile.length > 0) return [...new Set(byFile)]
-    const done = claims.filter((claim) => known.has(claim.jobId) && claim.status === "done").map((claim) => claim.jobId)
-    if (done.length > 0) return [...new Set(done)]
-    return [...known]
+    return [...new Set(claims.filter((claim) => known.has(claim.jobId) && (claim.files ?? []).map(normalizeRelPath).includes(rel)).map((claim) => claim.jobId))]
+  }
+
+  /** The turn's items whose allowlist covers `rel`. */
+  private coveringItems(rel: string): string[] {
+    return this.manifest.allow.filter((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel))).map((rule) => rule.itemId)
+  }
+
+  /**
+   * §3x.2 Which items one hunk of `rel` belongs to. Candidates are the turn's items whose allowlist covers the file:
+   * (a) those that claimed `done` naming the file (or naming no files); (b) when (a) gives more than one, those whose
+   * trigger evidence in the file lies within the hunk's OLD range ±3 lines (else all of (a)); (c) when (a) is empty,
+   * the candidates whose evidence lies in the hunk, else every candidate.
+   */
+  attributeHunk(rel: string, hunk: LineHunk, claims: readonly Claim[]): string[] {
+    const candidates = this.manifest.allow.filter((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel)))
+    const evidenceIn = (rule: FenceItemAllow, slack: number) =>
+      (rule.evidence ?? []).some((entry) => entry.file === rel && entry.line >= hunk.aStart + 1 - slack && entry.line <= Math.max(hunk.aEnd, hunk.aStart + 1) + slack)
+    const claimedDone = candidates.filter((rule) =>
+      claims.some((claim) => claim.jobId === rule.itemId && claim.status === "done" && (claim.files === undefined || claim.files.length === 0 || claim.files.map(normalizeRelPath).includes(rel)))
+    )
+    if (claimedDone.length === 1) return [claimedDone[0]!.itemId]
+    if (claimedDone.length > 1) {
+      const near = claimedDone.filter((rule) => evidenceIn(rule, 3))
+      return (near.length > 0 ? near : claimedDone).map((rule) => rule.itemId)
+    }
+    const inHunk = candidates.filter((rule) => evidenceIn(rule, 0))
+    return (inHunk.length > 0 ? inHunk : candidates).map((rule) => rule.itemId)
   }
 
   private jobFor(rel: string, claims: readonly Claim[]): string | null {
@@ -878,6 +979,19 @@ export class Fence {
 }
 
 // ---- helpers ----
+
+/** The gate rule a `turn_gate` problem names (`<rule>: the edit …`), or `turn_gate` when it names none. */
+function gateRuleOf(reason: string | undefined): TurnGateRule | "turn_gate" {
+  const head = (reason ?? "").split(":")[0]?.trim() ?? ""
+  return head in TURN_GATE_RULES ? (head as TurnGateRule) : "turn_gate"
+}
+
+/** The gate's words after the rule (`the edit …`), or the whole reason when it names no rule. */
+function gateWordsOf(reason: string | undefined): string {
+  const text = (reason ?? "").trim()
+  const colon = text.indexOf(":")
+  return colon >= 0 && text.slice(0, colon).trim() in TURN_GATE_RULES ? text.slice(colon + 1).trim() : text
+}
 
 function sameOrGlob(pattern: string, rel: string): boolean {
   return pattern.includes("*") ? matchesAnyGlob(rel, [pattern]) : normalizeRelPath(pattern) === rel

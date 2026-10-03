@@ -9,6 +9,7 @@ import { createHash } from "node:crypto"
 
 import { agentJobsUpTo, gateSeededItems, planAsksConsent, resolvePlanAnswers, runnableAgentJobs, withGuardHosts, type WizardPlanModel } from "../../install/plan-model.js"
 import { keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates, savePlanApprovals } from "../../install/step-inputs.js"
+import { withDistinctTitles } from "../../jobs/registry.js"
 import { ASK_CANCELLED, ASK_TIMEOUT } from "../contracts/asks.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
@@ -106,7 +107,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   // registry's `applyApprovals` (its per-target line-kind table); `gateSeededItems` stays defence in depth.
   const seeds = (wizardPlan.seeds ?? []).filter((seed) => !candidates.some((item) => item.id === seed.id))
   const applied = deps.registry.applyApprovals([...candidates, ...seeds], plan, resolved.approvals)
-  const items = withGuardHosts(gateSeededItems(plan, resolved, applied), wizardPlan.guard ?? null)
+  const items = withDistinctTitles(withGuardHosts(gateSeededItems(plan, resolved, applied), wizardPlan.guard ?? null))
   ctx.state.update((state) => {
     state.jobs = items
   })

@@ -1,6 +1,6 @@
 // Review I1 P1-5: the job table's S checks on an agent's edit. Each check gets a passing edit and the
 // failing edit it exists to catch (and an undetermined case where the wizard cannot tell), on a real tree.
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -11,6 +11,9 @@ import { callsOf, jobStaticCheckFunctions, staticPolicyText, topLevelProps, type
 import { createCheckRunner } from "./registry.js"
 import { registerJobStaticChecks, JOB_STATIC_CHECK_IDS } from "./job-static.js"
 import { JOB_TABLE } from "../wizard/contracts/jobs.js"
+import { RUN3_DIR } from "../../test/wizard/run3-fixture.js"
+
+const RUN3_SITE = join(RUN3_DIR, "site-6d16d8f")
 
 const RUN = "7f3c2a91-b0de-4c55-9a11-23456789abcd"
 const ctx: CheckContext = { runId: RUN, now: () => new Date("2026-10-02T10:00:00.000Z") }
@@ -217,5 +220,48 @@ describe("job 14: the privacy paragraph", () => {
     expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": page(text) }, job14, { privacyText: text, newTools: ["ga4", "posthog"] })).state).toBe("pass")
     expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": page("We use Google Analytics.") }, job14, { privacyText: null, newTools: ["ga4", "posthog"] })).reason).toMatch(/posthog/)
     expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": page("We use Google Analytics and PostHog.") }, job14, { privacyText: text, newTools: ["ga4", "posthog"] })).reason).toMatch(/verbatim/)
+  })
+})
+
+describe("§3x.3 (B3, W4) track_after_success: job 10 sends an outcome where it succeeds, never from its link", () => {
+  const SIGNUP_PAGE = "app/signup/page.tsx"
+  const run3Page = readFileSync(join(RUN3_SITE, SIGNUP_PAGE), "utf8")
+  const job10 = (files: string[] = [SIGNUP_PAGE]) => item("conversions_to_tools", "signup", files)
+  const names: JobStaticRunContext = { conversionNames: ["signup"] }
+
+  it("run 3's page with infiniteTrack(\"signup\") inside `if (response.ok)`, before the navigation → pass", async () => {
+    const edited = run3Page.replace(
+      'if (response.ok) window.location.assign("/account")',
+      'if (response.ok) {\n      infiniteTrack("signup")\n      window.location.assign("/account")\n    }'
+    )
+    expect(edited).not.toBe(run3Page)
+    const result = await check("track_after_success", { [SIGNUP_PAGE]: edited }, job10(), names)
+    expect(result).toMatchObject({ state: "pass", evidence: [{ file: SIGNUP_PAGE, line: 19 }] })
+    // infiniteTrackThenNavigate as the navigation itself also passes.
+    const thenNavigate = run3Page.replace('if (response.ok) window.location.assign("/account")', 'if (response.ok) infiniteTrackThenNavigate(null, "/account", "signup")')
+    expect((await check("track_after_success", { [SIGNUP_PAGE]: thenNavigate }, job10(), names)).state).toBe("pass")
+  })
+
+  it("negative: the call on the <Link href=\"/signup\"> that leads to the form is a problem", async () => {
+    const pricing = 'import Link from "next/link"\nexport default function P() {\n  return <Link href="/signup" onClick={() => infiniteTrack("signup")}>Start</Link>\n}\n'
+    const result = await check("track_after_success", { [SIGNUP_PAGE]: run3Page, "app/pricing/page.tsx": pricing }, job10([SIGNUP_PAGE, "app/pricing/page.tsx"]), names)
+    expect(result).toMatchObject({ state: "problem" })
+    expect(result.reason).toMatch(/link or button that leads to the form/)
+  })
+
+  it("negative: missing, outside the success branch, or after the navigation → problem", async () => {
+    expect((await check("track_after_success", { [SIGNUP_PAGE]: run3Page }, job10(), names)).reason).toMatch(/no infiniteTrack\("signup"\)/)
+    const onSubmit = run3Page.replace("event.preventDefault()", 'event.preventDefault()\n    infiniteTrack("signup")')
+    expect((await check("track_after_success", { [SIGNUP_PAGE]: onSubmit }, job10(), names)).reason).toMatch(/not sent inside its success branch/)
+    const after = run3Page.replace('if (response.ok) window.location.assign("/account")', 'if (response.ok) { window.location.assign("/account"); infiniteTrack("signup") }')
+    expect((await check("track_after_success", { [SIGNUP_PAGE]: after }, job10(), names)).state).toBe("problem")
+    // A name the user did not approve is not the conversion.
+    const other = run3Page.replace('if (response.ok) window.location.assign("/account")', 'if (response.ok) { infiniteTrack("lead"); window.location.assign("/account") }')
+    expect((await check("track_after_success", { [SIGNUP_PAGE]: other }, job10(), names)).state).toBe("problem")
+  })
+
+  it("undetermined (never a pass) without the approved names", async () => {
+    const edited = run3Page.replace('if (response.ok) window.location.assign("/account")', 'if (response.ok) { infiniteTrack("signup"); window.location.assign("/account") }')
+    expect((await check("track_after_success", { [SIGNUP_PAGE]: edited }, job10(), {})).state).toBe("undetermined")
   })
 })

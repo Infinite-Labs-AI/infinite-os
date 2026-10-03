@@ -166,7 +166,24 @@ export function artifactsFromKeysDetailed(keys: TagKeys, answers: PlanModel["dec
             ? "multiple_pixels"
             : "not_connected"
   }
-  return { artifacts, skipped }
+
+  return { artifacts: withConversionHelpers(artifacts, answers.conversionNames), skipped }
+}
+
+/**
+ * §3x.3 (B3) THE one place `conversions.helpers` is set (review P3-4: it used to be set here and again in the installer,
+ * so either copy could drift unseen). The helpers are emitted exactly when job 10 is seeded (§3y.5: approved conversion
+ * names, and a tool this install writes or keeps managed), so the brief's "the helpers are already in your repo" is
+ * never false. The installer calls it again on the artifacts it really writes.
+ */
+export function withConversionHelpers<T extends WizardInstallArtifacts>(artifacts: T, conversionNames: readonly string[]): T {
+  const writesTool = artifacts.infinite !== undefined || artifacts.ga4 !== undefined || artifacts.posthog !== undefined || artifacts.meta !== undefined
+  if (conversionNames.length === 0 || !writesTool) {
+    if (artifacts.conversions === undefined) return artifacts
+    const { conversions: _dropped, ...rest } = artifacts
+    return rest as T
+  }
+  return { ...artifacts, conversions: { helpers: true } }
 }
 
 /** `Installer.artifactsFromKeys`: the artifacts only (the skip reasons ride `artifactsFromKeysDetailed`). */

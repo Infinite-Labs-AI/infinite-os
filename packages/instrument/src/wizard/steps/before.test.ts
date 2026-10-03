@@ -129,7 +129,7 @@ describe("step before: call order", () => {
 
   it("the default export is the step the engine runs", () => {
     expect(WIZARD_STEPS.before).toBe(defaultStep)
-    expect(defaultStep.requiredCapabilities).toEqual(["tag.hosting.v1", "tag.keys.v1", "tag.test.v1", "tag.baseline.v1"])
+    expect(defaultStep.requiredCapabilities).toEqual(["tag.hosting.v1", "tag.keys.v1", "tag.test.v2", "tag.baseline.v1"])
   })
 })
 

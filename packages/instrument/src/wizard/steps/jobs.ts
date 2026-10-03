@@ -34,13 +34,30 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
+import { git } from "../../agents/git-exec.js"
+import { reanchorEvidence } from "../../jobs/reanchor.js"
 import { buildVerdict, isBuildOutputPath } from "../../checks/build.js"
-import { disposeSeal, Fence, heavyDirWritesDuring, keepAsFinalSeal, NestedBranchMovedError, sealFinalTree, sealTreeNow, verifySeal, type FenceBlock, type TreeSeal } from "../../agents/fence.js"
+import {
+  disposeSeal,
+  Fence,
+  heavyDirWritesDuring,
+  keepAsFinalSeal,
+  NestedBranchMovedError,
+  sealFinalTree,
+  sealTreeNow,
+  verifySeal,
+  type FenceBlock,
+  type FenceStray,
+  type FenceEditAttribution,
+  type FenceGateHit,
+  type TreeSeal
+} from "../../agents/fence.js"
+import { TURN_GATE_CHECK_ID, TURN_GATE_RULES } from "../../checks/turn-gate.js"
 import { matchesAnyGlob, normalizeRelPath } from "../../agents/glob.js"
 import { finalSealPath, snapshotDir, wizardCacheRoot } from "../../agents/paths.js"
 import { runExtras } from "../../agents/runner.js"
-import { reverseTextEdits } from "../../server-lane/text-edits.js"
-import { applyClaim, applyResults, blockItem, failItem, unblockItem, type Transition } from "../../jobs/state-machine.js"
+import { applyTextEdits, reverseTextEdits } from "../../server-lane/text-edits.js"
+import { applyClaim, applyResults, blockItem, failItem, unblockItem, withNote, type Transition } from "../../jobs/state-machine.js"
 import { sanitizeUntrusted } from "../../agents/sanitize.js"
 import { buildScanner } from "../../review/context.js"
 import type { Scanner } from "../../review/scan.js"
@@ -63,6 +80,7 @@ import type {
 import type { TagKeys } from "../contracts/bridge.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { EVENT_LIMITS } from "../contracts/events.js"
 import { itemT0Scenarios, runItemT0, t0RunParams } from "../item-t0.js"
 
 const META = WIZARD_STEP_META.jobs
@@ -188,13 +206,15 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     const wallLeft = AGENT_LIMITS.jobs.wallMs - (deps.clock.now().getTime() - started)
     if (open.length === 0 || wallLeft <= 0 || turnsLeft <= 0) break
     roundsLeft -= 1
-    const brief = composeBrief(deps.registry.brief(open), feedback)
+    // §3x.3 (§2.2): evidence found on the base commit, mapped through the install's (and earlier rounds') edits.
+    const anchored = await io.reanchored(open)
+    const brief = composeBrief(deps.registry.brief(anchored), feedback)
     const questions: AgentQuestion[] = []
     let result: AgentRunResult
     io.agentTurns += 1
     try {
       result = await deps.agents.runJobs({
-        items: open,
+        items: anchored,
         brief,
         budget: { maxTurns: turnsLeft, wallMs: wallLeft },
         ...(session && sessionId(session) !== "" ? { resume: session } : {}),
@@ -225,8 +245,9 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     }
     turnsLeft -= extras.turnsUsed ?? 0
     for (const incident of extras.incidents) io.sub(`! ${incident}`, "warn")
-    io.bufferEdits(result.edits)
+    io.bufferEdits(result.edits, extras.attribution)
     applyBlocks(io, extras.blocked)
+    const strayLines = sayStrays(io, extras.strays)
 
     if (result.outcome === "out_of_usage") {
       await io.save()
@@ -256,12 +277,13 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
       result.claims,
       [...questions, ...result.questions.filter((question) => !questions.some((seen) => seen.jobId === question.jobId && seen.question === question.question))],
       roundsLeft > 0,
-      seal
+      seal,
+      extras.gateHits
     )
     await disposeSeal(seal)
     if (round.changedAfterTurn) return sealBrokenOutcome(io, round.changedAfterTurn)
     if (round.changedByChecks) return buildTamperOutcome(io, round.changedByChecks)
-    feedback = round.feedback
+    feedback = [...strayLines, ...round.feedback]
     await io.patchClickTested()
     await io.save()
   }
@@ -275,10 +297,36 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   return { kind: "ok", status: io.closing() }
 }
 
+/**
+ * §3x.2 A post-turn gate refusal is an S-check failure of the items it is attributed to (`turn_gate`, a global S
+ * check). Per item: its hits this round, its `turn_gate` result, its note and the feedback line for the next round.
+ */
+function gateHitsByItem(hits: readonly FenceGateHit[]): Map<string, FenceGateHit[]> {
+  const byItem = new Map<string, FenceGateHit[]>()
+  for (const hit of hits) for (const itemId of hit.itemIds) byItem.set(itemId, [...(byItem.get(itemId) ?? []), hit])
+  return byItem
+}
+
+function gateReason(hit: FenceGateHit): string {
+  return hit.rule === "turn_gate" ? `turn_gate: ${hit.note}` : `${hit.rule}: the edit ${TURN_GATE_RULES[hit.rule]}`
+}
+
+export function gateFeedbackLine(itemId: string, hit: FenceGateHit): string {
+  return `- ${itemId}: ${hit.note}. That hunk was undone; the rest of your change was kept. Fix only that line and claim again.`
+}
+
 /** Claims → states, the one batched ask, then the wizard's own pre-deploy checks (§3e.5, the state machine). */
-async function settleRound(io: JobsIo, claims: readonly Claim[], questions: readonly AgentQuestion[], budgetLeft: boolean, seal: TreeSeal | null): Promise<RoundOutcome> {
+async function settleRound(
+  io: JobsIo,
+  claims: readonly Claim[],
+  questions: readonly AgentQuestion[],
+  budgetLeft: boolean,
+  seal: TreeSeal | null,
+  gateHits: readonly FenceGateHit[] = []
+): Promise<RoundOutcome> {
   const feedback: string[] = []
   const toCheck: ChecklistItem[] = []
+  const hitsByItem = gateHitsByItem(gateHits)
   const scan = claims.some((claim) => claim.status === "not_needed") ? await io.scan() : null
   for (const claim of claims) {
     const item = io.item(claim.jobId)
@@ -287,6 +335,16 @@ async function settleRound(io: JobsIo, claims: readonly Claim[], questions: read
     io.put(transition, claim.status === "done" ? sanitizeUntrusted(claim.note, 500) : undefined)
     if (transition.item.state === "claimed") toCheck.push(transition.item)
     else if (claim.status === "not_needed" && transition.item.state === "pending") feedback.push(`- ${item.id}: ${transition.note ?? "the wizard's detector disagrees"}`)
+  }
+  // §3x.2 A gate hit attributed to an item that did not claim done (it is still pending): its note and the
+  // feedback line, so the next round fixes only that line; the budget's end fails it with the same words.
+  for (const [itemId, hits] of hitsByItem) {
+    const current = io.item(itemId)
+    if (!current || current.owner !== "agent" || current.state !== "pending") continue
+    const note = hits.map((hit) => hit.note).join("; ")
+    io.noteFailure(itemId, note)
+    io.put({ item: withNote(structuredClone(current), note), changed: true, by: "wizard", note })
+    for (const hit of hits) feedback.push(gateFeedbackLine(itemId, hit))
   }
 
   // ONE batched pop-up after the turn (never under --yes; never auto-answered).
@@ -320,12 +378,29 @@ async function settleRound(io: JobsIo, claims: readonly Claim[], questions: read
     io.sub("Wizard checking each job itself…", "pending")
     const runId = io.runId()
     for (const item of checkable) {
-      const itemResults = await io.preDeployChecks(item)
+      const hits = hitsByItem.get(item.id) ?? []
+      // §3x.2 `turn_gate` is a global S check: a hit is a problem for the attributed item; an item that already
+      // carries the check (an earlier round's hit) gets this round's pass when nothing of it was refused now.
+      const gateResults: CheckResult[] = hits.map((hit) => ({
+        checkId: TURN_GATE_CHECK_ID,
+        tier: "S",
+        state: "problem",
+        reason: gateReason(hit),
+        ...(hit.line > 0 ? { evidence: [{ file: hit.file, line: hit.line }] } : {}),
+        at: io.deps.clock.now().toISOString(),
+        runId
+      }))
+      const hadGate = (io.item(item.id)?.checks ?? []).some((check) => check.id === TURN_GATE_CHECK_ID && check.tier === "S")
+      if (hits.length === 0 && hadGate) {
+        gateResults.push({ checkId: TURN_GATE_CHECK_ID, tier: "S", state: "pass", reason: "nothing of this job's change was refused this round", at: io.deps.clock.now().toISOString(), runId })
+      }
+      // A refused hunk already sends the item back: its build / T0 would test a change the agent must redo first.
+      const itemResults = [...gateResults, ...(hits.length > 0 ? [] : await io.preDeployChecks(item))]
       results.push(...itemResults)
       if (!runId) continue
       // The state machine decides (B7). The step's in-scope kept edits for this item count as its recorded
       // edits (they reach the receipt when the step settles), never the claim.
-      const current = io.item(item.id)!
+      const current = io.withGateCheck(io.item(item.id)!, hits.length > 0)
       const transition = applyResults(io.withPendingEdits(current), itemResults, runId, { budgetLeft })
       const next: ChecklistItem = { ...transition.item }
       if (current.edits) next.edits = current.edits
@@ -334,10 +409,18 @@ async function settleRound(io: JobsIo, claims: readonly Claim[], questions: read
       const undetermined = itemResults.filter((result) => result.state === "undetermined")
       let note = transition.note
       if (next.state === "pending" || next.state === "failed") {
-        const why = problems.map((result) => `${result.checkId}: ${sanitizeUntrusted(result.reason ?? "problem", 200)}`).join("; ")
+        const others = problems.filter((result) => result.checkId !== TURN_GATE_CHECK_ID)
+        const why = [
+          ...hits.map((hit) => hit.note),
+          ...others.map((result) => `${result.checkId}: ${sanitizeUntrusted(result.reason ?? "problem", 200)}`)
+        ].join("; ")
         io.noteFailure(item.id, why)
-        note = `The wizard's check failed: ${why}`
-        if (next.state === "pending") feedback.push(`- ${item.id}: the wizard's checks failed: ${why}`)
+        note = hits.length > 0 && others.length === 0 ? why : `The wizard's check failed: ${why}`
+        withNote(next, note)
+        if (next.state === "pending") {
+          for (const hit of hits) feedback.push(gateFeedbackLine(item.id, hit))
+          if (others.length > 0) feedback.push(`- ${item.id}: the wizard's checks failed: ${others.map((result) => `${result.checkId}: ${sanitizeUntrusted(result.reason ?? "problem", 200)}`).join("; ")}`)
+        }
       } else if (next.state === "claimed") {
         note = undetermined.length > 0
           ? `The wizard could not check it (${undetermined.map((result) => result.checkId).join(", ")}): ${NOT_CHECKED_NOTE}.`
@@ -431,13 +514,14 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     io.sub(`! ${rejected.length} edit(s) undone: ${rejected.slice(0, 4).join(", ")}${rejected.length > 4 ? ", …" : ""}`, "warn")
     io.sub(`Your agent's versions are kept in ${keptIn ?? "the wizard's snapshot"}`, "info")
   }
-  io.bufferEdits(settled.edits)
+  io.bufferEdits(settled.edits, settled.attribution)
   applyBlocks(io, settled.blocked)
+  sayStrays(io, settled.strays)
   // No claims in nested mode: every still-open seeded job goes through the wizard's own checks.
   const claims: Claim[] = agentItems
     .filter((item) => OPEN_STATES.includes(io.item(item.id)?.state ?? "blocked"))
     .map((item) => ({ jobId: item.id, status: "done", note: "Checked after the parent agent's turn.", at: deps.clock.now().toISOString() }))
-  const round = await settleRound(io, claims, [], false, settled.seal)
+  const round = await settleRound(io, claims, [], false, settled.seal, settled.gateHits)
   await disposeSeal(settled.seal)
   if (round.changedAfterTurn) return sealBrokenOutcome(io, round.changedAfterTurn)
   if (round.changedByChecks) return buildTamperOutcome(io, round.changedByChecks)
@@ -516,6 +600,15 @@ function applyBlocks(io: JobsIo, blocks: readonly FenceBlock[]): void {
   }
 }
 
+/**
+ * Review P2-3: a path the fence undid that no job owns. Only that path was put back and no job is failed for it; the
+ * terminal says it, and the next round's brief tells the agent (returned as feedback lines).
+ */
+function sayStrays(io: JobsIo, strays: readonly FenceStray[]): string[] {
+  for (const stray of strays) io.sub(`! ${stray.note} No job was failed for it.`, "warn")
+  return strays.map((stray) => `- this turn: ${stray.note} Keep each change inside its job's files, and name them in job_claim.`)
+}
+
 function displayHome(path: string, home: string): string {
   return path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path
 }
@@ -556,19 +649,20 @@ const NOT_DONE_NAMED = 6
  * "! Not done: <job> (<why>)" for every agent job that ended blocked or failed; parts of one job that ended the
  * same way are one line ("Improve the existing PostHog (2 parts): …"). Pure, so it is tested alone.
  */
-export function notDoneLines(items: readonly ChecklistItem[]): string[] {
+export function notDoneLines(items: readonly ChecklistItem[], named: number = NOT_DONE_NAMED): string[] {
   const groups = new Map<string, { title: string; why: string; parts: number }>()
   for (const item of items) {
     if (item.owner !== "agent" || (item.state !== "blocked" && item.state !== "failed")) continue
-    const why = item.state === "failed" ? "the wizard's check did not pass" : item.blockedReason ? NOT_DONE_WORDS[item.blockedReason] : "blocked"
+    // §3x.2 The item's own note (the real reason) wins; the generic words only when the wizard kept none.
+    const why = item.note ?? (item.state === "failed" ? "the wizard's check did not pass" : item.blockedReason ? NOT_DONE_WORDS[item.blockedReason] : "blocked")
     const key = `${item.title}\u0000${why}`
     const group = groups.get(key)
     if (group) group.parts += 1
     else groups.set(key, { title: item.title, why, parts: 1 })
   }
   const all = [...groups.values()]
-  const lines = all.slice(0, NOT_DONE_NAMED).map((group) => `! Not done: ${group.title}${group.parts > 1 ? ` (${group.parts} parts)` : ""}: ${group.why}`)
-  const rest = all.slice(NOT_DONE_NAMED).reduce((sum, group) => sum + group.parts, 0)
+  const lines = all.slice(0, named).map((group) => `! Not done: ${group.title} (${group.parts > 1 ? `${group.parts} parts: ` : ""}${group.why})`)
+  const rest = all.slice(named).reduce((sum, group) => sum + group.parts, 0)
   if (rest > 0) lines.push(`! …and ${rest} more not done: the pull request lists every job`)
   return lines
 }
@@ -586,8 +680,11 @@ class JobsIo {
   private keysCache: Promise<TagKeys | null> | null = null
   /** The run-level T0 params (production host, the guard's exempt hosts), read once per step. */
   private t0Params: Promise<Record<string, unknown>> | null = null
-  /** This step's kept agent edits, oldest first, with the item each one counts for (settled at exit). */
-  private pendingEdits: Array<{ edit: WizardEditRecord; itemId: string | null }> = []
+  /**
+   * This step's kept agent edits, oldest first (settled at exit). §3x.2: `textEditItems[i]` = the items text edit
+   * `i` is attributed to; `itemIds` = their union (the items the edit counts for).
+   */
+  private pendingEdits: Array<{ edit: WizardEditRecord; itemIds: string[]; textEditItems: string[][] }> = []
 
   constructor(
     readonly ctx: WizardContext,
@@ -610,7 +707,11 @@ class JobsIo {
     return this.items().find((item) => item.id === id)
   }
 
+  /** Result lines (ok / warn) this step has said: the terminal keeps only `EVENT_LIMITS.subKeptPerStep` of them. */
+  private resultSubs = 0
+
   sub(text: string, tone: "ok" | "warn" | "info" | "pending"): void {
+    if (tone === "ok" || tone === "warn") this.resultSubs += 1
     this.ctx.emit.emit("step.sub", { step: "jobs", text: sanitizeUntrusted(text, 120), tone })
   }
 
@@ -629,7 +730,7 @@ class JobsIo {
 
   /** The item plus this step's kept (in-scope) agent edits for it, which the state machine counts as recorded. */
   withPendingEdits(item: ChecklistItem): ChecklistItem {
-    const mine = this.pendingEdits.filter((entry) => entry.itemId === item.id).map((entry) => ({ editId: entry.edit.id, file: entry.edit.file }))
+    const mine = this.pendingEdits.filter((entry) => entry.itemIds.includes(item.id)).map((entry) => ({ editId: entry.edit.id, file: entry.edit.file }))
     if (mine.length === 0) return item
     return { ...item, edits: [...(item.edits ?? []), ...mine] }
   }
@@ -653,14 +754,42 @@ class JobsIo {
     return this.scanResult
   }
 
-  /** Holds a turn's kept edits until the step knows how each job ended (F5). */
-  bufferEdits(edits: readonly WizardEditRecord[]): void {
+  /** §3x.3 (§2.2) The items with their evidence lines mapped from the base commit to the current tree. */
+  async reanchored(items: readonly ChecklistItem[]): Promise<ChecklistItem[]> {
+    const root = this.ctx.root
+    return reanchorEvidence(
+      items,
+      async (file) => {
+        const shown = await git(root, ["show", `HEAD:${file}`])
+        return shown.code === 0 ? shown.stdout.toString("utf8") : null
+      },
+      (file) => readFile(join(root, file), "utf8").catch(() => null)
+    )
+  }
+
+  /** §3x.2 Adds the global `turn_gate` S check to an item a gate hit is attributed to (once). */
+  withGateCheck(item: ChecklistItem, hit: boolean): ChecklistItem {
+    if (!hit || item.checks.some((check) => check.id === TURN_GATE_CHECK_ID && check.tier === "S")) return item
+    return { ...item, checks: [...item.checks, { id: TURN_GATE_CHECK_ID, tier: "S", state: "undetermined" }] }
+  }
+
+  /**
+   * Holds a turn's kept edits until the step knows how each job ended (F5). §3x.2: the fence attributes every kept
+   * hunk to its items; an edit with no attribution (a caller that gives none) counts for the covering item of its job.
+   */
+  bufferEdits(edits: readonly WizardEditRecord[], attribution: readonly FenceEditAttribution[] = []): void {
     for (const edit of edits) {
+      const attributed = attribution.find((entry) => entry.editId === edit.id)
+      if (attributed && attributed.textEditItems.length === edit.textEdits.length && attributed.textEditItems.every((ids) => ids.length > 0)) {
+        this.pendingEdits.push({ edit, itemIds: [...new Set(attributed.textEditItems.flat())], textEditItems: attributed.textEditItems.map((ids) => [...ids]) })
+        continue
+      }
       const file = normalizeRelPath(edit.file)
       const covers = (entry: ChecklistItem) => entry.allow.files.concat(entry.allow.create).some((pattern) => (pattern.includes("*") ? matchesAnyGlob(file, [pattern]) : normalizeRelPath(pattern) === file))
       const agentJobs = this.items().filter((entry) => entry.jobId === edit.jobId && entry.owner === "agent")
       const item = agentJobs.find(covers) ?? agentJobs[0]
-      this.pendingEdits.push({ edit, itemId: item?.id ?? null })
+      const ids = item ? [item.id] : []
+      this.pendingEdits.push({ edit, itemIds: ids, textEditItems: edit.textEdits.map(() => ids) })
     }
   }
 
@@ -674,33 +803,55 @@ class JobsIo {
     const pending = this.pendingEdits
     this.pendingEdits = []
     if (pending.length === 0) return
-    const drop = (itemId: string | null) => {
-      if (itemId === null) return false
+    const dropped = (itemId: string) => {
       const state = this.item(itemId)?.state
       return state !== undefined && !KEEP_EDIT_STATES.includes(state)
     }
-    const undone = new Set<WizardEditRecord>()
-    for (const { edit, itemId } of [...pending].reverse()) {
-      if (!drop(itemId)) continue
+    // §3x.2 Undo per item: a text edit is reversed only when EVERY item it is attributed to ended dropped.
+    const dropText = (ids: readonly string[]) => ids.length > 0 && ids.every(dropped)
+    const undoneFiles = new Set<string>()
+    const kept: Array<{ edit: WizardEditRecord; itemIds: string[] }> = []
+    for (const entry of [...pending].reverse()) {
+      const { edit, textEditItems } = entry
+      const drop = textEditItems.map(dropText)
+      if (!drop.some(Boolean)) {
+        kept.push({ edit, itemIds: entry.itemIds })
+        continue
+      }
       const path = join(this.ctx.root, edit.file)
       const bytes = await readFile(path).catch(() => null)
       if (bytes === null || `sha256:${createHash("sha256").update(bytes).digest("hex")}` !== edit.afterHash) {
         this.sub(`! Could not undo the agent's edit to ${edit.file} for a job that did not pass (a later edit built on it); it stays for review.`, "warn")
+        kept.push({ edit, itemIds: entry.itemIds })
         continue
       }
-      if (edit.beforeHash === null) await rm(path, { force: true })
-      else await writeFile(path, reverseTextEdits(bytes.toString("utf8"), edit.textEdits))
-      undone.add(edit)
+      undoneFiles.add(edit.file)
+      if (drop.every(Boolean)) {
+        if (edit.beforeHash === null) await rm(path, { force: true })
+        else await writeFile(path, reverseTextEdits(bytes.toString("utf8"), edit.textEdits))
+        continue
+      }
+      // Some of the edit's hunks belong to a job that passed: put the file back to before the edit, then re-apply
+      // only the kept text edits (they are in the original file's coordinates). The record now holds only those.
+      const original = reverseTextEdits(bytes.toString("utf8"), edit.textEdits)
+      const keepEdits = edit.textEdits.filter((_, index) => !drop[index])
+      const rebuilt = applyTextEdits(original, keepEdits)
+      await writeFile(path, rebuilt)
+      const keptItems = [...new Set(textEditItems.filter((_, index) => !drop[index]).flat())]
+      const jobId = keptItems.length > 0 ? (this.item(keptItems[0]!)?.jobId ?? edit.jobId) : edit.jobId
+      kept.push({ edit: { ...edit, jobId, textEdits: keepEdits, afterHash: `sha256:${createHash("sha256").update(rebuilt).digest("hex")}` }, itemIds: keptItems })
     }
-    const kept = pending.filter((entry) => !undone.has(entry.edit))
-    if (undone.size > 0) this.sub(`Undid the agent's edits for jobs that did not pass: ${[...new Set([...undone].map((edit) => edit.file))].slice(0, 4).join(", ")}`, "info")
+    kept.reverse()
+    if (undoneFiles.size > 0) this.sub(`Undid the agent's edits for jobs that did not pass: ${[...undoneFiles].slice(0, 4).join(", ")}`, "info")
     if (kept.length === 0) return
     await this.deps.installer.recordEdits(kept.map((entry) => entry.edit))
     this.ctx.state.update((runState) => {
-      for (const { edit, itemId } of kept) {
-        const item = runState.jobs.find((entry) => entry.id === itemId)
-        if (!item) continue
-        item.edits = [...(item.edits ?? []), { editId: edit.id, file: edit.file }]
+      for (const { edit, itemIds } of kept) {
+        for (const itemId of itemIds) {
+          const item = runState.jobs.find((entry) => entry.id === itemId)
+          if (!item) continue
+          item.edits = [...(item.edits ?? []), { editId: edit.id, file: edit.file }]
+        }
       }
     })
     await this.save()
@@ -886,7 +1037,11 @@ class JobsIo {
    * count "7 blocked" used to be all the terminal said; the names were only in the pull request), then the summary.
    */
   closing(): string {
-    for (const line of notDoneLines(this.items())) this.sub(line, "warn")
+    // The terminal keeps the step's last `subKeptPerStep` result lines, so the closing list never pushes out what was
+    // said before it (an agent reaching for .env is an incident the user must still see): it names fewer jobs and
+    // counts the rest ("…and N more"), which the pull request lists in full.
+    const room = Math.max(1, Math.min(NOT_DONE_NAMED, EVENT_LIMITS.subKeptPerStep - this.resultSubs - 1))
+    for (const line of notDoneLines(this.items(), room)) this.sub(line, "warn")
     return this.summary()
   }
 

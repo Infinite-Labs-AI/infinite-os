@@ -1,0 +1,382 @@
+{
+  "schema": "infinite-tag.plan-approvals.v1",
+  "planHash": "sha256:fc8049e5f8ce56936f3bba454c62de3c9cef8d764d6261e5a61879ca45d83496",
+  "beforeAt": "2026-10-03T14:39:18.521Z",
+  "candidates": [
+    {
+      "id": "duplicates_remove:ga4_config:G-TEST0000000",
+      "jobId": "duplicates_remove",
+      "n": 6,
+      "title": "Remove duplicate tags",
+      "owner": "agent",
+      "trigger": {
+        "finding": "G-TEST0000000 is set up 2 times (app/layout.tsx:27, app/layout.tsx:32)",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 27
+          },
+          {
+            "file": "app/layout.tsx",
+            "line": 32
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "census_one_per_tool",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "census_ga4_config_once",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "one_beacon_per_tool",
+          "tier": "RH",
+          "state": "not_run"
+        },
+        {
+          "id": "one_beacon_per_tool",
+          "tier": "PV",
+          "state": "not_run"
+        }
+      ],
+      "state": "pending"
+    },
+    {
+      "id": "preview_guard:ga4",
+      "jobId": "preview_guard",
+      "n": 7,
+      "title": "Keep previews silent (existing tags)",
+      "owner": "agent",
+      "trigger": {
+        "finding": "The site's own GA4 fires on preview deployments too",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 27
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "adopted_init_guarded",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "preview_self_silent",
+          "tier": "RH",
+          "state": "not_run"
+        }
+      ],
+      "state": "pending"
+    },
+    {
+      "id": "preview_guard:meta",
+      "jobId": "preview_guard",
+      "n": 7,
+      "title": "Keep previews silent (existing tags)",
+      "owner": "agent",
+      "trigger": {
+        "finding": "The site's own Meta pixel fires on preview deployments too",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 41
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "adopted_init_guarded",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "preview_self_silent",
+          "tier": "RH",
+          "state": "not_run"
+        },
+        {
+          "id": "meta_host_matrix",
+          "tier": "T1",
+          "state": "not_run"
+        }
+      ],
+      "state": "pending"
+    },
+    {
+      "id": "conversions_to_tools:signup",
+      "jobId": "conversions_to_tools",
+      "n": 10,
+      "title": "Send conversions to every tool",
+      "owner": "agent",
+      "trigger": {
+        "finding": "signup conversion points found; send the approved signup conversion to every tool",
+        "evidence": [
+          {
+            "file": "app/account/page.tsx",
+            "line": 22
+          },
+          {
+            "file": "app/layout.tsx",
+            "line": 53
+          },
+          {
+            "file": "app/login/page.tsx",
+            "line": 34
+          },
+          {
+            "file": "app/page.tsx",
+            "line": 9
+          },
+          {
+            "file": "app/pricing/page.tsx",
+            "line": 20
+          },
+          {
+            "file": "app/signup/page.tsx",
+            "line": 26
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/account/page.tsx",
+          "app/layout.tsx",
+          "app/login/page.tsx",
+          "app/page.tsx",
+          "app/pricing/page.tsx",
+          "app/signup/page.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "click_test",
+          "tier": "RH",
+          "state": "not_run"
+        },
+        {
+          "id": "no_fbq_standard_on_click",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "first_real_conversion",
+          "tier": "P",
+          "state": "not_run"
+        }
+      ],
+      "state": "pending"
+    },
+    {
+      "id": "setup_check_fixes:provider_census",
+      "jobId": "setup_check_fixes",
+      "n": 11,
+      "title": "Fix the setup-check findings",
+      "owner": "agent",
+      "trigger": {
+        "finding": "Setup check provider_census: INF_SETUP_PROVIDER_DUPLICATE_INIT: GA4 G-TEST...0000 is initialised 2 times in one page (app/layout.tsx:27, app/layout.tsx:32). Every initialisation sends its own page view, so each visit is counted 2 times and every rate built on page views is wrong by that factor. Keep one and delete the others.",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 27
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "setup_rerun_clean",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "click_test",
+          "tier": "RH",
+          "state": "not_run"
+        }
+      ],
+      "state": "pending"
+    }
+  ],
+  "approvals": {
+    "approved": [
+      "consent_mode",
+      "conversion_names",
+      "privacy_text",
+      "install_provider:infinite",
+      "preview_guard_adopted:ga4:init",
+      "remove_duplicate:ga4:ga4_config:G-TEST0000000",
+      "preview_guard_adopted:meta:meta",
+      "agent_budget"
+    ],
+    "declined": [],
+    "edits": {
+      "consent_mode": "not_required",
+      "conversion_names": "signup"
+    }
+  },
+  "privacyText": "We use Infinite (Ultima Inc.) to measure visits. Each page view sends Infinite the page address without its query string, a random visitor id, and your browser's IP address and user agent.",
+  "guard": {
+    "emit": true,
+    "exempt": [
+      "tag-smoke.foundernationtv.com"
+    ],
+    "deny": [
+      "localhost",
+      "127.0.0.1",
+      "::1",
+      "[::1]",
+      "0.0.0.0"
+    ]
+  },
+  "plan": {
+    "hash": "sha256:fc8049e5f8ce56936f3bba454c62de3c9cef8d764d6261e5a61879ca45d83496",
+    "lines": [
+      {
+        "editable": true,
+        "id": "consent_mode",
+        "kind": "consent_mode",
+        "text": "Consent: choose — collect by default, or wait for your cookie banner's yes (covers Infinite only)",
+        "requires": "approval"
+      },
+      {
+        "editable": true,
+        "id": "conversion_names",
+        "kind": "conversion_names",
+        "text": "Conversions: signup",
+        "requires": "approval",
+        "jobIds": [
+          "conversions_to_tools:signup"
+        ]
+      },
+      {
+        "editable": true,
+        "id": "privacy_text",
+        "kind": "privacy_text",
+        "text": "Privacy: 1 drafted lines for your privacy page",
+        "requires": "approval"
+      },
+      {
+        "editable": false,
+        "id": "install_provider:infinite",
+        "kind": "install_provider",
+        "text": "Install Infinite",
+        "requires": "approval",
+        "ownership": "managed"
+      },
+      {
+        "editable": false,
+        "id": "info:infinite_site_file",
+        "kind": "install_provider",
+        "text": "Infinite confirms tag-smoke.foundernationtv.com is yours after your merge, from a one-line file this pull request adds (/.well-known/infinite-site-verification.txt). Until then it records nothing.",
+        "requires": "info"
+      },
+      {
+        "editable": false,
+        "id": "user_action:server_lane",
+        "kind": "user_action",
+        "text": "Server lane (counts visits ad blockers hide): connect your Vercel project in Infinite (Connections › GitHub · Website), then run npx infinite-tag again.",
+        "requires": "user_action"
+      },
+      {
+        "editable": false,
+        "id": "preview_guard_adopted:ga4:init",
+        "kind": "preview_guard_adopted",
+        "text": "GA4: keep preview sites silent. Your existing tag also fires on previews; its start gets the preview check. Production always fires.",
+        "requires": "approval",
+        "ownership": "adopted",
+        "jobIds": [
+          "preview_guard:ga4"
+        ]
+      },
+      {
+        "editable": false,
+        "id": "remove_duplicate:ga4:ga4_config:G-TEST0000000",
+        "kind": "remove_duplicate",
+        "text": "GA4: G-TEST0000000 is set up 2 times in your code, so page views count more than once. Keep one.",
+        "requires": "approval",
+        "ownership": "adopted",
+        "jobIds": [
+          "duplicates_remove:ga4_config:G-TEST0000000"
+        ]
+      },
+      {
+        "editable": false,
+        "id": "preview_guard_adopted:meta:meta",
+        "kind": "preview_guard_adopted",
+        "text": "The site's own Meta pixel fires on preview deployments too",
+        "requires": "approval",
+        "ownership": "adopted",
+        "jobIds": [
+          "preview_guard:meta"
+        ]
+      },
+      {
+        "editable": false,
+        "id": "user_action:connect_posthog",
+        "kind": "user_action",
+        "text": "PostHog: not connected — connect it in Infinite and run the wizard again to add it. No id is made up.",
+        "requires": "user_action"
+      },
+      {
+        "editable": false,
+        "id": "user_action:connect_meta",
+        "kind": "user_action",
+        "text": "Meta: not connected — connect it in Infinite and run the wizard again to add it. No id is made up.",
+        "requires": "user_action"
+      },
+      {
+        "editable": false,
+        "id": "checkin",
+        "kind": "checkin",
+        "text": "Infinite checks your site again 7 days after the deploy and shows you what it finds.",
+        "requires": "info"
+      },
+      {
+        "editable": false,
+        "id": "agent_budget",
+        "kind": "agent_budget",
+        "text": "Claude Code: up to 5 jobs · Opus 4.8 at xhigh effort · up to 30 turns or 10 min · your Claude plan (max) pays",
+        "requires": "approval"
+      }
+    ],
+    "decisions": {
+      "consentMode": null,
+      "conversionNames": [
+        "signup"
+      ],
+      "privacyText": "We use Infinite (Ultima Inc.) to measure visits. Each page view sends Infinite the page address without its query string, a random visitor id, and your browser's IP address and user agent.",
+      "npmInstall": null
+    }
+  }
+}

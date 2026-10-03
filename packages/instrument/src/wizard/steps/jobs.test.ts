@@ -256,10 +256,12 @@ describe("step jobs: questions, usage, fence", () => {
     expect(t.checkCalls.run).toEqual([])
   })
 
-  it("a turn that adds child_process to next.config.mjs → reverted, job blocked, build never called", async () => {
+  it("a turn that adds child_process to next.config.mjs → reverted, the job's turn_gate S check fails with the real reason, build never called (§3x.2)", async () => {
     const gate: CheckRunner["turnGate"] = async (diff) =>
       diff.files.flatMap((file) =>
-        file.added.filter((line) => line.text.includes("child_process")).map((line): CheckResult => ({ checkId: "turn_gate_exec", state: "problem", evidence: [{ file: file.path, line: line.line }], tier: "S", at: "x", runId: STEP_RUN_ID }))
+        file.added
+          .filter((line) => line.text.includes("child_process"))
+          .map((line): CheckResult => ({ checkId: "turn_gate", state: "problem", reason: "child_process: the edit starts a child process", evidence: [{ file: file.path, line: line.line }], tier: "S", at: "x", runId: STEP_RUN_ID }))
       )
     const t = setup({
       scenario: { turns: [{ steps: [{ edit: { path: "next.config.mjs", content: "const { exec } = require('child_process')\nexport default {}\n" } }, claim("meta_improve:landing")] }] },
@@ -268,7 +270,11 @@ describe("step jobs: questions, usage, fence", () => {
     })
     await step.run(t.ctx, t.deps)
     expect(readFileSync(join(t.root, "next.config.mjs"), "utf8")).not.toContain("child_process")
-    expect(stateOf(t.current().jobs, "meta_improve:landing")).toBe("blocked:outside_allowlist")
+    const item = t.current().jobs.find((entry) => entry.id === "meta_improve:landing")!
+    // Never "outside the job's files": the file was allowed; the safety check refused one line.
+    expect(item.blockedReason).not.toBe("outside_allowlist")
+    expect(item.note).toBe("the wizard's safety check refused next.config.mjs:1: the edit starts a child process")
+    expect(item.checks.find((check) => check.id === "turn_gate")).toMatchObject({ tier: "S", state: "problem" })
     expect(t.checkCalls.build).toBe(0)
   })
 

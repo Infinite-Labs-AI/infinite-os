@@ -5,6 +5,7 @@
 // `not_found`.
 import type { GhClient } from "./gh.js"
 import { matchesProject, type RawDeployment, type RawDeploymentStatus } from "./preview.js"
+import { HOST_DENY_V1, normalizeHost } from "../wizard/contracts/host-deny.js"
 
 export interface RawProductionDeployment extends RawDeployment {
   sha?: string
@@ -86,4 +87,29 @@ export async function latestProductionDeployment(gh: GhClient, projectName: stri
 export async function vercelDeploymentSeen(gh: GhClient): Promise<boolean> {
   const rows = await gh.json<RawProductionDeployment[]>(["api", "repos/{owner}/{repo}/deployments?per_page=10"])
   return rows.some((row) => row.creator?.login === "vercel[bot]")
+}
+
+/**
+ * §3x.6 The merge SHA's production deployment's OWN address (its newest successful status's `environment_url`), when that
+ * address is a preview-class host the guard silences (`HOST_DENY_V1`: `*.vercel.app`, `*.netlify.app`, …). The prove step
+ * loads it without sending anything to measure "previews silent" on the deployed code; null = GitHub shows none.
+ */
+export async function productionDeploymentUrl(gh: GhClient, sha: string, projectName: string | null): Promise<string | null> {
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("productionDeploymentUrl needs a full SHA")
+  const rows = await gh.json<RawProductionDeployment[]>(["api", `repos/{owner}/{repo}/deployments?sha=${sha}&per_page=20`])
+  const production = pickProduction(rows, projectName)
+  if (production === null || production.length === 0) return null
+  const newest = [...production].sort((a, b) => Date.parse(b.created_at ?? "") - Date.parse(a.created_at ?? ""))[0]!
+  const statuses = await statusesOf(gh, newest.id)
+  const success = statuses.find((status) => status.state === "success" && typeof status.environment_url === "string" && status.environment_url !== "")
+  if (!success?.environment_url) return null
+  let host: string
+  try {
+    const url = new URL(success.environment_url)
+    if (url.protocol !== "https:") return null
+    host = normalizeHost(url.hostname)
+  } catch {
+    return null
+  }
+  return HOST_DENY_V1.deny.suffix.some((suffix) => host.length > suffix.length && host.endsWith(suffix)) ? `https://${host}/` : null
 }

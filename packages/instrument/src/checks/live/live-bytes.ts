@@ -388,7 +388,7 @@ function censusResult(page: PageBytes, expect: TestExpect, ctx: Ctx): CheckResul
   const skipped = page.bundlesSkipped > 0 ? `; ${page.bundlesSkipped} script(s) not read` : ""
   if (duplicates.length > 0) {
     return checkResult(LIVE_BYTES_CHECK_IDS.census, "problem", "T1", ctx, {
-      reason: `duplicate tags on one page: ${duplicates.join("; ")} — each one double-counts every page view${skipped}`,
+      reason: `duplicate tags on one page: ${duplicates.join("; ")}${skipped}`,
       ...at(page)
     })
   }

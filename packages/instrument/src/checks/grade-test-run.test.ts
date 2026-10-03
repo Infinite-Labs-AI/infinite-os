@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest"
 
 import type { TestResult, TestRunFixtureCase } from "../wizard/contracts/test-engine.js"
 import { TEST_TOOLS } from "../wizard/contracts/test-engine.js"
-import { automaticEventsPerVisitOf, gradeTestRun, gradeTestRunFull, type GradeContext } from "./grade-test-run.js"
+import { automaticEventsPerVisitOf, gradeTestRun, gradeTestRunFull, type GradeContext, NOT_A_BROWSER_DETAIL } from "./grade-test-run.js"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const cases = JSON.parse(readFileSync(join(here, "../../contracts/tag-wizard-v1/test-run.fixtures.json"), "utf8")) as TestRunFixtureCase[]
@@ -24,6 +24,7 @@ function contextOf(fixture: TestRunFixtureCase): GradeContext {
     consentMode: fixture.context.consentMode,
     installedTools: fixture.context.installedTools,
     metaPixelOwnership: fixture.context.metaPixelOwnership ?? null,
+    ...(fixture.context.spaNavigation ? { spaNavigation: true } : {}),
     runId: fixture.request.runId,
     now: NOW
   }
@@ -340,5 +341,46 @@ describe("fix round (review O6): each rule with the fact that flips it", () => {
     expect(full(fixture).tools.posthog.state).toBe("pass")
     fixture.result.posthog.events = [view, { ...view }]
     expect(code(full(fixture).tools.posthog.reason)).toBe("duplicate_page_view")
+  })
+})
+
+describe("§3x.5 (W12) the grader's first rule: a test window that does not look like a normal browser proves nothing", () => {
+  const base = () => clone(cases.find((entry) => entry.id === "dry_live_all_once")!)
+  it("run 3's monitor UA → every tool undetermined (test_error), with the reason said", () => {
+    const fixture = base()
+    fixture.result.environment.ua =
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) InfiniteDev9/0.4.2 Chrome/148.0.7778.280 Electron/42.11.8 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)"
+    const graded = gradeTestRun(fixture.result, fixture.request.expect, "dry_live", contextOf(fixture))
+    for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) {
+      expect(graded[tool].state, tool).toBe("undetermined")
+      expect(graded[tool].reason).toBe(`test_error — ${NOT_A_BROWSER_DETAIL}`)
+    }
+  })
+  it("negative: the reduced Chrome UA grades normally; an Electron token alone is refused too", () => {
+    const fixture = base()
+    expect(gradeTestRun(fixture.result, fixture.request.expect, "dry_live", contextOf(fixture)).meta.state).toBe("pass")
+    fixture.result.environment.ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36"
+    expect(gradeTestRun(fixture.result, fixture.request.expect, "dry_live", contextOf(fixture)).meta.state).toBe("undetermined")
+  })
+})
+
+describe("§3x.3 (W21) Meta on a client-side navigation", () => {
+  const spa = () => clone(cases.find((entry) => entry.id === "dry_live_meta_spa_page_view_missing")!)
+  const meta = (fixture: TestRunFixtureCase) => gradeTestRun(fixture.result, fixture.request.expect, "dry_live", contextOf(fixture)).meta
+  it("no PageView after the page change → problem meta_spa_page_view_missing", () => {
+    expect(code(meta(spa()).reason)).toBe("meta_spa_page_view_missing")
+  })
+  it("exactly one → pass; two → duplicate_page_view", () => {
+    const one = spa()
+    one.result.meta.tr.push({ ...one.result.meta.tr[0]!, afterNav: true })
+    expect(meta(one).state).toBe("pass")
+    const two = spa()
+    two.result.meta.tr.push({ ...two.result.meta.tr[0]!, afterNav: true }, { ...two.result.meta.tr[0]!, afterNav: true })
+    expect(code(meta(two).reason)).toBe("duplicate_page_view")
+  })
+  it("negative: a load that did not navigate is not graded for it", () => {
+    const fixture = spa()
+    delete fixture.context.spaNavigation
+    expect(meta(fixture).state).toBe("pass")
   })
 })

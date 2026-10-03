@@ -3,7 +3,9 @@
 // (a provider id that is not the connection's — e.g. a default — is refused).
 import { describe, expect, it } from "vitest"
 
+import { run3EditedLayout, run3InstalledLayout } from "../../test/wizard/run3-fixture.js"
 import { jsSource } from "../../test/site-code/js-source.js"
+import { diffLines, hunkLines, splitLines } from "../agents/line-diff.js"
 import { FIXED_NOW } from "../../test/wizard/fixture-fetch.js"
 import { renderInfiniteBrowserTag } from "../runtime/infinite-browser.js"
 import { buildServerLaneModuleSource } from "../server-lane/runtime-source.js"
@@ -247,5 +249,98 @@ describe("review I1 P1-3: code the wizard's own build executes is gated like a c
       expect(isServerExecutedFile("components/button.tsx", hostile)).toBe(true)
       expect(performance.now() - started).toBeLessThan(200)
     }
+  })
+})
+
+/** A real line diff of one file, as the fence and the commit gate build it. */
+function realDiff(path: string, before: string, after: string): TurnDiff {
+  const a = splitLines(before)
+  const b = splitLines(after)
+  const added: Array<{ line: number; text: string }> = []
+  const removed: Array<{ line: number; text: string }> = []
+  for (const hunk of diffLines(before, after)) {
+    const lines = hunkLines(a, b, hunk)
+    added.push(...lines.added)
+    removed.push(...lines.removed)
+  }
+  return { files: [{ path, added, removed }] }
+}
+
+describe("§3x.1 the provider-id rules judge what the turn CHANGED (live run 3, W2)", () => {
+  const before = run3InstalledLayout()
+  const after = run3EditedLayout()
+  const NONE: string[] = [] // run 3: a fresh workspace, nothing connected
+  const idRules = (d: TurnDiff, connectionIds: readonly string[] = NONE) =>
+    scanTurnDiff(d, { connectionIds, readFile: () => null }).filter((hit) => hit.rule === "foreign_provider_id" || hit.rule === "fallback_provider_id")
+  const withAfter = (edited: string) => realDiff("app/layout.tsx", before, edited)
+
+  it("row 1: Claude's real run-3 turn (dedupe + the GA4 wrap + the Meta wrap) passes with no connections", () => {
+    expect(idRules(withAfter(after))).toEqual([])
+  })
+
+  it("row 2: a pure dedupe (the run-2 shape) passes", () => {
+    const dedupe = before.replace(/\s*\{\/\* Added later[\s\S]*?ga4-again[\s\S]*?<\/Script>/, "")
+    expect(dedupe).not.toBe(before)
+    expect(idRules(withAfter(dedupe))).toEqual([])
+  })
+
+  it("row 3: a NEW GA4 id is refused, on the line that adds it", () => {
+    const edited = after.replace("gtag('js', new Date());", "gtag('js', new Date());\ngtag('config', 'G-EVIL12345');")
+    const hits = idRules(withAfter(edited))
+    expect(hits.map((hit) => hit.rule)).toEqual(["foreign_provider_id"])
+    expect(edited.split("\n")[(hits[0]?.line ?? 0) - 1]).toContain("G-EVIL12345")
+  })
+
+  it("row 4: `window.GA_ID || '<the site's own id>'` added (unconnected) is a fallback", () => {
+    const edited = after.replace("gtag('js', new Date());", "gtag('js', new Date());\nvar id = window.GA_ID || 'G-TEST0000000';")
+    expect(idRules(withAfter(edited)).map((hit) => hit.rule)).toEqual(["fallback_provider_id"])
+  })
+
+  it("row 5: `process.env.X ?? '<the CONNECTED id>'` is a fallback too (the shipped rule passed it)", () => {
+    const edited = after.replace("gtag('js', new Date());", "gtag('js', new Date());\nvar id = process.env.X ?? 'G-TEST0000000';")
+    expect(idRules(withAfter(edited), ["G-TEST0000000", "1116400780828774"]).map((hit) => hit.rule)).toEqual(["fallback_provider_id"])
+  })
+
+  it("row 6: the Meta init re-typed with another pixel is refused", () => {
+    const edited = after.replace("fbq('init', '1116400780828774');", "fbq('init', '9999999999999999');")
+    expect(idRules(withAfter(edited)).map((hit) => hit.rule)).toEqual(["foreign_provider_id"])
+  })
+
+  it("row 7: one copy removed and a DIFFERENT id added is refused (a dedupe cannot pay for a new id)", () => {
+    const edited = after.replace("gtag('config', 'G-TEST0000000');", "gtag('config', 'G-OTHER99999');")
+    expect(idRules(withAfter(edited)).map((hit) => hit.rule)).toEqual(["foreign_provider_id"])
+  })
+
+  it("row 8: an existing `env || 'G-…'` line re-emitted inside a guard passes; a SECOND copy of it is refused", () => {
+    const old = "const a = 1\nconst id = process.env.GA || 'G-TEST0000000'\ngtag('config', id)\n"
+    const wrapped = "const a = 1\nif (guard(location.hostname)) {\n  const id = process.env.GA || 'G-TEST0000000'\n  gtag('config', id)\n}\n"
+    expect(idRules(realDiff("app/ga.ts", old, wrapped))).toEqual([])
+    const doubled = wrapped.replace("}\n", "}\nconst again = process.env.GA2 || 'G-TEST0000000'\n")
+    // A second copy raises both counters: the fallback AND (unconnected) the id itself.
+    expect(idRules(realDiff("app/ga.ts", old, doubled)).map((hit) => hit.rule).sort()).toEqual(["fallback_provider_id", "foreign_provider_id"])
+  })
+
+  it("moving an init to ANOTHER file raises its count there and is refused", () => {
+    const d: TurnDiff = {
+      files: [
+        { path: "app/layout.tsx", added: [], removed: [{ line: 3, text: "gtag('config', 'G-TEST0000000')" }] },
+        { path: "app/ga.tsx", added: [{ line: 1, text: "gtag('config', 'G-TEST0000000')" }], removed: [] }
+      ]
+    }
+    expect(idRules(d)).toEqual([{ rule: "foreign_provider_id", file: "app/ga.tsx", line: 1 }])
+  })
+
+  it("a connection id that the turn adds plainly passes; a ternary fallback of it does not", () => {
+    expect(idRules(diff("app/x.ts", "gtag('config', 'G-ACME123')"), CONNECTION)).toEqual([])
+    expect(idRules(diff("app/x.ts", "const id = prod ? 'G-ACME123' : undefined"), CONNECTION).map((hit) => hit.rule)).toEqual(["fallback_provider_id"])
+    expect(idRules(diff("app/x.ts", "const id = prod ? undefined : 'G-ACME123'"), CONNECTION).map((hit) => hit.rule)).toEqual(["fallback_provider_id"])
+    // negative: an object key and an optional property are not fallbacks
+    expect(idRules(diff("app/x.ts", "const cfg = { id: 'G-ACME123' }"), CONNECTION)).toEqual([])
+    expect(idRules(diff("app/x.ts", ["type C = { id?: string }", "const cfg: C = { id: 'G-ACME123' }"]), CONNECTION)).toEqual([])
+  })
+
+  it("the commit gate's view (the whole staged change vs HEAD) gets the same answer", () => {
+    const results = turnGate(withAfter(after), { connectionIds: NONE, readFile: () => after }, { runId: "r", now: FIXED_NOW })
+    expect(results.map((result) => result.state)).toEqual(["pass"])
   })
 })

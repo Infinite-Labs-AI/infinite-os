@@ -73,7 +73,7 @@ function column(options: { jobs?: ChecklistItem[]; plan?: typeof PLAN | null; ou
 
 function report(ctx: ReturnType<typeof column>): ReportV2 {
   return buildReport(
-    { runId: RUN_ID, tagVersion: "0.12.0", site: { repoLabel: "github.com/acme/acme-store", productionHost: "acme-store.com" }, columns: ctx.state.get().report, provenLivePending: "deploy", day7: null, notes: [] },
+    { runId: RUN_ID, tagVersion: "0.12.0", site: { repoLabel: "github.com/acme/acme-store", productionHost: "acme-store.com" }, columns: ctx.state.get().report, provenLivePending: "deploy", day7: null, notes: [], verdictFacts: null },
     () => new Date(AT)
   )
 }

@@ -32,6 +32,8 @@
         "tag.meta-relay.v1",
         "tag.uninstall.v1",
         "tag.test.v1",
+        "tag.test.v2",
+        "tag.report-card.v1",
         "tag.test-facts.v1",
         "tag.site-claim.v1"
       ],
@@ -349,7 +351,7 @@
         "startedAt": "2026-10-02T09:10:00.000Z",
         "finishedAt": "2026-10-02T09:11:00.000Z",
         "environment": {
-          "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+          "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
           "automationDetected": false,
           "visibilityState": "visible",
           "blockedBySiteBotRules": false,
@@ -391,6 +393,7 @@
           "events": [
             {
               "tid": "G-FAKE00001",
+              "cid": "1000000018.1759500000",
               "en": "page_view",
               "dlHost": "www.acme-store.com",
               "transport": "post",
@@ -445,7 +448,8 @@
               "eid": null,
               "method": "GET",
               "status": "cancelled",
-              "loadLabel": "home"
+              "loadLabel": "home",
+              "afterNav": false
             }
           ],
           "console": [],
@@ -902,7 +906,7 @@
         "startedAt": "2026-10-02T09:29:00.000Z",
         "finishedAt": "2026-10-02T09:30:00.000Z",
         "environment": {
-          "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+          "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
           "automationDetected": false,
           "visibilityState": "visible",
           "blockedBySiteBotRules": false,
@@ -938,6 +942,7 @@
           "events": [
             {
               "tid": "G-FAKE00001",
+              "cid": "1000000019.1759500000",
               "en": "page_view",
               "dlHost": "www.acme-store.com",
               "transport": "post",
@@ -992,7 +997,8 @@
               "eid": null,
               "method": "GET",
               "status": "cancelled",
-              "loadLabel": "home"
+              "loadLabel": "home",
+              "afterNav": false
             }
           ],
           "console": [],
@@ -1113,7 +1119,7 @@
         "startedAt": "2026-10-02T09:31:00.000Z",
         "finishedAt": "2026-10-02T09:32:00.000Z",
         "environment": {
-          "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+          "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
           "automationDetected": false,
           "visibilityState": "visible",
           "blockedBySiteBotRules": false,
@@ -1428,7 +1434,7 @@
         "startedAt": "2026-10-02T09:40:00.000Z",
         "finishedAt": "2026-10-02T09:41:00.000Z",
         "environment": {
-          "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+          "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
           "automationDetected": false,
           "visibilityState": "visible",
           "blockedBySiteBotRules": false,
@@ -1470,6 +1476,7 @@
           "events": [
             {
               "tid": "G-FAKE00001",
+              "cid": "1000000020.1759500000",
               "en": "page_view",
               "dlHost": "www.acme-store.com",
               "transport": "post",
@@ -1524,7 +1531,8 @@
               "eid": null,
               "method": "GET",
               "status": 200,
-              "loadLabel": "home"
+              "loadLabel": "home",
+              "afterNav": false
             }
           ],
           "console": [],
@@ -2221,15 +2229,14 @@
                 }
               },
               "proven_live": {
-                "value": null,
-                "display": "—",
-                "state": "not_measured",
+                "value": "pass",
+                "display": "preview link sent nothing",
+                "state": "pass",
                 "provenance": {
-                  "source": "wizard_check",
-                  "at": "2026-10-02T09:45:00.000Z",
+                  "source": "desktop_test",
+                  "at": "2026-10-02T09:44:00.000Z",
                   "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
-                },
-                "reason": "needs_7_days"
+                }
               }
             }
           },
@@ -2295,15 +2302,14 @@
                 }
               },
               "proven_live": {
-                "value": null,
-                "display": "—",
-                "state": "not_measured",
+                "value": "pass",
+                "display": "one page view per page change",
+                "state": "pass",
                 "provenance": {
-                  "source": "wizard_check",
-                  "at": "2026-10-02T09:45:00.000Z",
+                  "source": "desktop_test",
+                  "at": "2026-10-02T09:44:00.000Z",
                   "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
-                },
-                "reason": "not_exercised"
+                }
               }
             }
           },
@@ -2641,7 +2647,42 @@
           "Below 50 page views: raw counts shown",
           "Measurement changed: PostHog now goes through /ingest, so counts before and after this pull request are not comparable.",
           "A real visit lands two bot-flagged document rows in your Infinite ledger (the page load and the server-lane probe)."
-        ]
+        ],
+        "verdict": {
+          "state": "properly",
+          "headline": "www.acme-store.com collects analytics properly now · 3 checks wait for real visitors or the 7-day check-in",
+          "reasons": [],
+          "installed": [
+            {
+              "tool": "infinite",
+              "ids": [
+                "site_t...ture"
+              ],
+              "connected": true
+            },
+            {
+              "tool": "ga4",
+              "ids": [
+                "G-FAKE...0001"
+              ],
+              "connected": true
+            },
+            {
+              "tool": "posthog",
+              "ids": [
+                "phc_FA...0000"
+              ],
+              "connected": true
+            },
+            {
+              "tool": "meta",
+              "ids": [
+                "123456...3456"
+              ],
+              "connected": true
+            }
+          ]
+        }
       }
     },
     "status": 201,
@@ -2932,7 +2973,7 @@
         "startedAt": "2026-10-02T09:40:00.000Z",
         "finishedAt": "2026-10-02T09:41:00.000Z",
         "environment": {
-          "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+          "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
           "automationDetected": false,
           "visibilityState": "visible",
           "blockedBySiteBotRules": false,
@@ -2974,6 +3015,7 @@
           "events": [
             {
               "tid": "G-FAKE00001",
+              "cid": "1000000021.1759500000",
               "en": "page_view",
               "dlHost": "www.acme-store.com",
               "transport": "post",
@@ -3028,7 +3070,8 @@
               "eid": null,
               "method": "GET",
               "status": 200,
-              "loadLabel": "home"
+              "loadLabel": "home",
+              "afterNav": false
             }
           ],
           "console": [],

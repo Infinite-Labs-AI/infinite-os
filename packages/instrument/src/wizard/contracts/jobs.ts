@@ -109,6 +109,8 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
       c("S", "meta_event_id_from_helper"),
       c("T1", "meta_traffic_permissions"),
       c("RH", "meta_pixel_once"),
+      // §3x.3 (F6): one PageView per client-side navigation, measured by the rehearsal's page change.
+      c("RH", "meta_spa_page_view"),
       c("T0", "fbc_capture"),
       c("PV", "meta_seen_leaving")
     ],
@@ -167,7 +169,9 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     requiresApprovedLine: ["conversion_names"],
     // T0 click_test for static HTML / Vite, RH click_test for every other framework.
     // §3z.12 §3e.1 (B15): `first_real_conversion` (P) reads baseline(runId, since = the deploy time) on a re-run.
-    checks: [c("T0", "click_test"), c("RH", "click_test"), c("S", "no_fbq_standard_on_click"), c("P", "first_real_conversion")],
+    // §3x.3: an outcome conversion (signup, lead, booking, purchase, trial) carries `track_after_success` instead of
+    // the click test (its success branch cannot run in a no-send load); a click conversion keeps the click test.
+    checks: [c("T0", "click_test"), c("RH", "click_test"), c("S", "no_fbq_standard_on_click"), c("S", "track_after_success"), c("P", "first_real_conversion")],
     donePath: ["done_in_code", "waiting_real_event", "proven"]
   },
   setup_check_fixes: {
@@ -333,7 +337,15 @@ export interface ChecklistItem {
   /** Set when state is `blocked`. */
   blockedReason?: BlockedReason
   edits?: EditRef[]
+  /**
+   * §3x.2 The wizard's last note on this item (a failed check, a safety-check refusal, a block reason), ≤300 chars,
+   * sanitized like claim notes. Shown in the "Not done" line, the PR checklist and the report's job list.
+   */
+  note?: string
 }
+
+/** §3x.2 The most a `ChecklistItem.note` keeps. */
+export const ITEM_NOTE_MAX_CHARS = 300
 
 // ---------------------------------------------------------------------------------------------
 // §3e.3 The claim channel (MCP stdio server `infinite_tag`)
@@ -509,6 +521,11 @@ export interface GradeTestRunContext {
   installedTools: readonly TestTool[] | null
   /** Whose Meta pixel the site runs; null = no Meta pixel (or unknown). */
   metaPixelOwnership: "managed" | "adopted" | null
+  /**
+   * §3x.3 (F6): the load ran a client-side navigation (the request carried `spaNavigation`). Only then is a Meta pixel
+   * with no PageView after it graded `meta_spa_page_view_missing`. Absent = not requested.
+   */
+  spaNavigation?: boolean
 }
 
 export interface CheckRunner {
@@ -633,7 +650,7 @@ const EVIDENCE_SHAPE = oneOf(
 export const CHECKLIST_ITEM_SHAPE = shapeOf<ChecklistItem>()(
   "ChecklistItem",
   ["id", "jobId", "n", "title", "owner", "trigger", "allow", "checks", "state"],
-  ["claim", "blockedReason", "edits"],
+  ["claim", "blockedReason", "edits", "note"],
   {
     trigger: shapeOf<ChecklistItem["trigger"]>()("ChecklistItem.trigger", ["finding", "evidence"], [], { evidence: arrayOf(EVIDENCE_SHAPE) }),
     allow: shapeOf<ChecklistItem["allow"]>()("ChecklistItem.allow", ["files", "create"], []),

@@ -94,10 +94,19 @@ export const SIGNUP_REPORT_LINE = (() => {
   return call + 3
 })()
 
-/** Job 10: the trial link carries the managed conversion attribute. */
+const SIGNUP_SUCCESS = '    if (response.ok) window.location.assign("/")\n'
+/** The import the job's brief names (`helperImport`, DECISIONS §1.3): the managed module's helpers. */
+export const SIGNUP_HELPER_IMPORT = 'import { infiniteTrack } from "../../lib/infinite-analytics"\n'
+/**
+ * Job 10 (DECISIONS §1.3): the signup is tracked in the form's success branch, right after `response.ok` and before
+ * the navigation; never on the link that leads to the form (the runtime already records that click as intent).
+ */
 export function conversionSteps(): Step[] {
-  mustHold("app/page.tsx", '<Link href="/signup">Start free trial</Link>')
-  return [replaceStep("app/page.tsx", '<Link href="/signup">Start free trial</Link>', `<Link href="/signup" data-infinite-conversion="${CONVERSION}">Start free trial</Link>`)]
+  mustHold("app/signup/page.tsx", '"use client"\n', SIGNUP_SUCCESS)
+  return [
+    replaceStep("app/signup/page.tsx", '"use client"\n', `"use client"\n\n${SIGNUP_HELPER_IMPORT}`),
+    replaceStep("app/signup/page.tsx", SIGNUP_SUCCESS, `    if (response.ok) {\n      infiniteTrack("${CONVERSION}")\n      window.location.assign("/")\n    }\n`)
+  ]
 }
 export const CONSENT_LINE = "    window.gtag?.('consent', 'update', { ad_user_data: 'granted' })\n"
 /** NEVER the agent's job: a consent call (the fence reverts the hunk and blocks the job `consent_touched`). */
@@ -151,7 +160,7 @@ export function workerRound1(): Step[] {
     claim(ITEMS.setupFix, "done", "The duplicate GA4 init is gone."),
     claim(ITEMS.identify, "done", "infiniteIdentify after a verified login, infiniteReset on logout."),
     claim(ITEMS.serverConversion, "done", "reportInfiniteOutcome on signup."),
-    claim(ITEMS.conversionsToTools, "done", "The trial link carries the conversion attribute."),
+    claim(ITEMS.conversionsToTools, "done", "infiniteTrack in the signup success branch, before the navigation."),
     claim(ITEMS.posthogProxy, "done", "PostHog now sends through /ingest; rewrite added."),
     claim(ITEMS.posthogDefaults, "done", "Tidied the repo too.", ["README.md", ".env", "package.json", ".infinite/wizard/state.json"]),
     // A claim with no work behind it: the wizard's own check fails, so it is never ticked.

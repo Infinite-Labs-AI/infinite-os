@@ -14,6 +14,9 @@
 import type { CheckResult, CensusResult } from "./contracts/jobs.js"
 import type { BaselineResponseFields, FinishLineInput, ProvenanceSource, Reason, ReportColumnMeta, ReportRowId } from "./contracts/report.js"
 import type { TagKeys } from "./contracts/bridge.js"
+
+/** §3x.6 (A7) The T1 checks that compare a live id with the connection's (finish-line 2's `t1.live_bytes`). */
+const LIVE_ID_CHECKS: ReadonlySet<string> = new Set(["ga4_loader_id", "posthog_live_init", "meta_live_init", "infinite_runtime_once"])
 import type { TestExpect, TestResult, TestTool } from "./contracts/test-engine.js"
 
 /** One reading of a §3i.7 finish-line input (O1 `ColumnFact`). */
@@ -165,11 +168,15 @@ export function liveTodayColumnInput(source: LiveTodaySource): LiveTodayColumnIn
     )
   }
 
-  // T1 readings (2 ids, 4 ad blockers, 8 redirects, 10 CSP).
+  // T1 readings (1 duplicates, 2 ids, 4 ad blockers, 8 redirects, 10 CSP).
   for (const check of source.liveChecks) {
+    // §3x.6 (A7): `byte_census` is the DUPLICATE check (each tool once); the four ID checks are what "IDs match
+    // connections" reads. Run 3 fed the duplicate check into the ID row and dropped the ID checks.
     const input: FinishLineInput | null =
-      check.checkId === "live_bytes" || check.checkId === "byte_census"
-        ? "t1.live_bytes"
+      check.checkId === "byte_census"
+        ? "t1.byte_census"
+        : LIVE_ID_CHECKS.has(check.checkId)
+          ? "t1.live_bytes"
         : check.checkId === "posthog_proxy"
           ? "t1.proxy"
           : check.checkId === "redirect_walk"

@@ -96,7 +96,7 @@ export function realVisitResult(overrides: Partial<TestResult> = {}): TestResult
     startedAt: "2026-10-02T09:40:00.000Z",
     finishedAt: "2026-10-02T09:41:00.000Z",
     environment: {
-      ua: "Electron InfiniteVerifyCheck/1",
+      ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
       automationDetected: false,
       visibilityState: "visible",
       blockedBySiteBotRules: false,
@@ -106,7 +106,7 @@ export function realVisitResult(overrides: Partial<TestResult> = {}): TestResult
     },
     loads: [{ label: "home", url: `https://${HOST}/`, finalUrl: `https://${HOST}/`, status: 200, rendered: true, managedMarkerSeen: true, redirects: [] }],
     requests: { total: 40, cancelled: 0, otherBeacons: [] },
-    ga4: { events: [{ tid: GA4_ID, en: "page_view", dlHost: HOST, transport: "beacon", status: 204, loadLabel: "home", afterNav: false }] },
+    ga4: { events: [{ tid: GA4_ID, cid: "1234567890.1759500000", en: "page_view", dlHost: HOST, transport: "beacon", status: 204, loadLabel: "home", afterNav: false }] },
     posthog: {
       events: [
         {
@@ -125,7 +125,7 @@ export function realVisitResult(overrides: Partial<TestResult> = {}): TestResult
     infinite: { events: [{ siteSourceKey: SITE_SOURCE_KEY, eventName: "page_view", eventId: "evt_FAKE0301", nav: false, status: 202 }] },
     meta: {
       configRequests: [PIXEL_ID],
-      tr: [{ pixelId: PIXEL_ID, ev: "PageView", eid: null, method: "GET", status: 200 }],
+      tr: [{ pixelId: PIXEL_ID, ev: "PageView", eid: null, method: "GET", status: 200, loadLabel: "home", afterNav: false }],
       console: [],
       fbc: { present: false, value: null, domain: null },
       fbp: { present: true }

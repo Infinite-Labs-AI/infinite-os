@@ -29,7 +29,8 @@ export async function writeO8BeforeFile(
     envTargetChecks: [],
     liveChecks: [],
     cmpDetected: null,
-    loginFound: false
+    loginFound: false,
+    spaNavigation: null
   }
   await writeBeforeFactsFile(fs, root, file)
 }

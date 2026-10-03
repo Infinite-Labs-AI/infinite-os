@@ -254,7 +254,7 @@ function undeterminedReasonText(reason: string): string {
 export function metaSnippetCensusMessage(input: FileList & { issues: readonly string[] }): string {
   return (
     `infinite-tag's managed Meta block in ${fileList(input)} is not the shape it writes: ` +
-    `${input.issues.join("; ")}. A duplicated init double-counts every page view, a second capture or ` +
+    `${input.issues.join("; ")}. A duplicated init starts the pixel twice, a second capture or ` +
     `matching accessor means the block was pasted twice (only the first copy runs, so an edited ` +
     `second copy silently does nothing), and a capture after init lets the pixel read \`_fbc\` ` +
     `before this click is in it. Re-run \`npx infinite-tag install\` to rewrite the block, and keep ` +
@@ -291,14 +291,13 @@ export function providerDuplicateInitMessage(input: {
   const where = input.places.join(", ")
   if (input.sameFile) {
     return (
-      `${input.tool} ${maskId(input.id)} is initialised ${input.places.length} times in one page (${where}). Every ` +
-      `initialisation sends its own page view, so each visit is counted ${input.places.length} times and every rate ` +
-      `built on page views is wrong by that factor. Keep one and delete the others.`
+      // §3x.6 (A7): what the code shows; whether page views double is measured by the test load, not claimed here.
+      `${input.tool} ${maskId(input.id)} is initialised ${input.places.length} times in one page (${where}). Keep one and delete the others.`
     )
   }
   return (
     `Worth checking: ${input.tool} ${maskId(input.id)} is initialised in a shared entry that loads on every page AND ` +
-    `again elsewhere (${where}). On any page that renders both, every visit is counted twice. If the second one ` +
+    `again elsewhere (${where}). A page that renders both starts it twice. If the second one ` +
     `never renders on the same page as the first, ignore this line.`
   )
 }
@@ -306,8 +305,8 @@ export function providerDuplicateInitMessage(input: {
 export function providerManagedAndAdoptedMessage(input: { tool: string; managed: string; adopted: string; sameFile: boolean }): string {
   return (
     `${input.sameFile ? "" : "Worth checking: "}${input.tool} is started twice: by infinite-tag's managed code in ` +
-    `${input.managed} and by the site's own code in ${input.adopted}. Two owners of one tool double-count every ` +
-    `page view and fight over its settings. Keep one: a plan line can remove the duplicate the site no longer needs.`
+    `${input.managed} and by the site's own code in ${input.adopted}. Two owners of one tool fight over its settings. ` +
+    `Keep one: a plan line can remove the duplicate the site no longer needs.`
   )
 }
 

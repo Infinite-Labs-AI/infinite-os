@@ -129,3 +129,58 @@ export function detectConversionElements(snapshot: RepoSnapshot): ConversionElem
   }
   return sortFindings(findings)
 }
+
+/** §3x.3 Conversion types whose conversion is an OUTCOME (a success), never the click that leads to the form. */
+export const OUTCOME_CONVERSION_TYPES: ReadonlySet<ConversionType> = new Set<ConversionType>(["signup", "lead", "booking", "purchase", "trial"])
+
+/** The conversion type a page's path names (the same reading as a form's type). */
+function pathConversionType(path: string): ConversionType | null {
+  const lower = path.toLowerCase()
+  if (/sign-?up|register|create-account|join/.test(lower)) return "signup"
+  if (/trial/.test(lower)) return "trial"
+  if (/checkout|purchase|subscribe|buy/.test(lower)) return /subscribe/.test(lower) && /newsletter/.test(lower) ? "lead" : "purchase"
+  if (/contact|lead|waitlist|newsletter/.test(lower)) return "lead"
+  if (/book|demo|schedule/.test(lower)) return "booking"
+  return null
+}
+
+/** A request the page sends to an outcome endpoint (`fetch("/api/signup"`, `axios.post("/api/leads"`). */
+const OUTCOME_REQUEST = /\b(?:fetch|axios\s*\.\s*post|ky\s*\.\s*post)\s*\(\s*["'`]\/api\/([\w/-]+)["'`]/g
+
+/** The success branch: a positive `.ok` check, a `!error` / `!err` check, or the first navigation after an await. */
+const SUCCESS_OK = /\bif\s*\(\s*(?:await\s+)?[\w$.]+\.ok\s*\)/g
+const SUCCESS_NO_ERROR = /\bif\s*\(\s*!\s*(?:error|err|result\.error|res\.error)\s*\)/g
+const NAVIGATION = /\b(?:router\s*\.\s*(?:push|replace)|(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)|redirect)\s*\(|\b(?:window\s*\.\s*)?location\s*\.\s*href\s*=/g
+
+/**
+ * §3x.3 (B3) Pure: where a conversion SUCCEEDS in the browser — the success branch of a form's submit handler (or of
+ * a request to an outcome endpoint). Job 10 calls `infiniteTrack(<name>)` there for outcome conversions (signup,
+ * lead, booking, purchase, trial); the links and buttons that lead to the form are intent, never the conversion.
+ * One finding per (file, type), at the first success line.
+ */
+export function detectConversionSuccessPaths(snapshot: RepoSnapshot): ConversionElementFinding[] {
+  const findings: ConversionElementFinding[] = []
+  for (const [path, text] of snapshot.files) {
+    if (isNonProductPath(path) || !isCodeFile(path) || isServerFile(path, text)) continue
+    const types = new Set<ConversionType>()
+    if (textMatches(text, /<form\b[^>]*>/gi).length > 0) {
+      const type = pathConversionType(path)
+      if (type && OUTCOME_CONVERSION_TYPES.has(type)) types.add(type)
+    }
+    for (const request of textMatches(text, new RegExp(OUTCOME_REQUEST.source, OUTCOME_REQUEST.flags))) {
+      const type = pathConversionType(`/api/${request.match[1] ?? ""}`)
+      if (type && OUTCOME_CONVERSION_TYPES.has(type)) types.add(type)
+    }
+    if (types.size === 0) continue
+    const ok = codeMatches(text, new RegExp(SUCCESS_OK.source, SUCCESS_OK.flags))[0] ?? codeMatches(text, new RegExp(SUCCESS_NO_ERROR.source, SUCCESS_NO_ERROR.flags))[0]
+    let line: number | null = ok?.line ?? null
+    if (line === null) {
+      const awaited = codeMatches(text, /\bawait\b/g)[0]
+      const navigation = codeMatches(text, new RegExp(NAVIGATION.source, NAVIGATION.flags)).find((entry) => awaited !== undefined && entry.index > awaited.index)
+      line = navigation?.line ?? null
+    }
+    if (line === null) continue
+    for (const type of types) findings.push({ file: path, line, detail: `${type} success`, conversionType: type })
+  }
+  return sortFindings(findings)
+}

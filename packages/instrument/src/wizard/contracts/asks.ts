@@ -51,6 +51,8 @@ export const PLAN_LINE_KINDS = [
   "retire_fbc_writer",
   "meta_relay",
   "meta_goal",
+  /** §3x.3 (F6): an adopted Meta pixel that counts only the first page of a visit; the user approves the fix. */
+  "meta_spa_page_views",
   "user_action",
   // B28: the 7-day check-in that follows the deploy (shown only; `checkinOptIn` stays the accepted default).
   "checkin"
@@ -105,6 +107,8 @@ export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue | { mana
   capture_beside_adopted_pixel: "never",
   retire_fbc_writer: "never",
   meta_relay: "never",
+  // §3x.3 (F6): a change to the customer's own Meta tag.
+  meta_spa_page_views: "never",
   // The D16 recommendation: an informational default the user can change.
   meta_goal: "yes",
   // GTM edit, Traffic Permissions, connect a tool, the GA4 page-change setting: shown only.
@@ -167,7 +171,8 @@ export interface AskPayloads {
   plan: { lines: PlanLine[]; decisions: PlanDecisionsPayload }
   "agent-questions": { questions: Array<{ itemId: string; question: string; options?: AskOption[]; why: string }> }
   "teammate-comments": { comments: Array<{ threadId: string; author: string; path: string; line: number | null; excerpt: string }> }
-  "merge-ready": { prUrl: string; number: number; summary: string }
+  /** §3x.6 (R3-6) `incomplete`: what the PR lacks that the plan approved (the in-PR verdict's words); absent = nothing. */
+  "merge-ready": { prUrl: string; number: number; summary: string; incomplete?: string }
   "tty-handover": { reason: "gpg" | "ssh" | "hook"; command: string }
 }
 

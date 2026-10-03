@@ -37,6 +37,7 @@ import {
   posthogCountsNavigations
 } from "./detectors/adopted-tags.js"
 import { detectDuplicates } from "./detectors/duplicates.js"
+import { OUTCOME_CONVERSION_TYPES } from "./detectors/outcomes.js"
 import { isJobScan, scanForJobs, type JobScan } from "./detectors/index.js"
 import { approvedConversionNames, approvedPrivacyText, boundConversionNames } from "./plan-data.js"
 import { repoPath, type RepoSnapshot } from "./repo-files.js"
@@ -95,6 +96,7 @@ export function requiredLineKind(item: Pick<ChecklistItem, "id" | "jobId">): Pla
       if (startsWith("retire_fbc_writer")) return "retire_fbc_writer"
       if (startsWith("autoconfig_off_adopted")) return "autoconfig_off_adopted"
       if (startsWith("capture")) return "capture_beside_adopted_pixel"
+      if (startsWith("spa_page_view")) return "meta_spa_page_views"
       return "improve_additive"
     case "duplicates_remove":
       return "remove_duplicate"
@@ -140,7 +142,9 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   meta_improve: (target) =>
     target === "retire_fbc_writer"
       ? ["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"]
-      : ["S:meta_event_id_from_helper", "T1:meta_traffic_permissions", "RH:meta_pixel_once", "PV:meta_seen_leaving"],
+      : target === "spa_page_view"
+        ? ["RH:meta_spa_page_view"]
+        : ["S:meta_event_id_from_helper", "T1:meta_traffic_permissions", "RH:meta_pixel_once", "PV:meta_seen_leaving"],
   duplicates_remove: (target) => {
     const tool = target.startsWith("ga4") ? "ga4" : target.startsWith("posthog") ? "posthog" : target.startsWith("meta") ? "meta" : null
     const census = tool === "ga4" ? "S:census_ga4_config_once" : tool === "posthog" ? "S:census_posthog_init_once" : tool === "meta" ? "S:census_meta_init_once" : null
@@ -150,6 +154,13 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   // offline engine can load (static HTML / Vite's index.html). A Next component's init is not: there the
   // rehearsal's preview_self load decides (I1b; before, the item carried a T0 check that tested the
   // MANAGED page instead of the agent's edit, so a correct guard could never pass).
+  // §3x.3: an outcome conversion's success branch cannot run in a no-send load (every non-GET is cancelled), so its
+  // checks are the static `track_after_success` and the passive first real conversion; a click conversion keeps the
+  // click test.
+  conversions_to_tools: (target) =>
+    OUTCOME_CONVERSION_TYPES.has(target as ConversionType)
+      ? ["S:no_fbq_standard_on_click", "S:track_after_success", "P:first_real_conversion"]
+      : ["T0:click_test", "RH:click_test", "S:no_fbq_standard_on_click", "P:first_real_conversion"],
   preview_guard: (target, framework) => {
     const t0 = T0_CLICK_FRAMEWORKS.has(framework) ? ["T0:host_matrix"] : []
     return target === "meta"
@@ -175,6 +186,26 @@ interface CandidateInput {
   blockedReason?: BlockedReason
 }
 
+const TOOL_TITLE: Readonly<Record<string, string>> = { ga4: "GA4", posthog: "PostHog", meta: "Meta pixel", infinite: "Infinite" }
+
+/**
+ * §3x.3 A job that can hold several items titles each by its target, so no two items share a title ("Keep previews
+ * silent: GA4" and "Keep previews silent: Meta pixel", never two "Keep previews silent (existing tags)").
+ */
+export function itemTitle(jobId: JobId, target: string): string {
+  const spec = JOB_TABLE[jobId]
+  switch (jobId) {
+    case "preview_guard":
+      return `Keep previews silent: ${TOOL_TITLE[target] ?? target}`
+    case "conversions_to_tools":
+      return `Send the ${target} conversion to every tool`
+    case "server_conversions":
+      return `Report the ${target} conversion from the server`
+    default:
+      return spec.title
+  }
+}
+
 function makeItem(input: CandidateInput, framework: string): ChecklistItem {
   const spec = JOB_TABLE[input.jobId]
   // An agent job with nothing it may touch cannot be done by an agent: it is the user's.
@@ -183,7 +214,7 @@ function makeItem(input: CandidateInput, framework: string): ChecklistItem {
     id: itemId(input.jobId, input.target),
     jobId: input.jobId,
     n: spec.n,
-    title: spec.title,
+    title: itemTitle(input.jobId, input.target),
     owner: "agent",
     trigger: { finding: input.finding, evidence: dedupeEvidence(input.evidence) },
     allow: input.allow,
@@ -384,6 +415,18 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
       })
     }
   }
+  // §3x.3 (F6): the before load navigated once and the site's own Meta pixel sent no PageView for it.
+  const metaSpaMissed = facts.checks.some((check) => check.checkId === "test_run:meta" && check.state === "problem" && (check.reason ?? "").startsWith("meta_spa_page_view_missing"))
+  const adoptedMetaInits = facts.census.entries.filter((entry) => entry.tool === "meta" && entry.owner === "adopted")
+  if (metaSpaMissed && adoptedMetaInits.length > 0) {
+    out.push({
+      jobId: "meta_improve",
+      target: "spa_page_view",
+      finding: "Meta counts only the first page of a visit: the test load's page change sent no PageView",
+      evidence: fileEvidence(adoptedMetaInits),
+      allow: allow(filesOf(adoptedMetaInits))
+    })
+  }
   const hostOnlyWriters = d.fbcWriters.filter((finding) => finding.hostOnly)
   if (hostOnlyWriters.length > 0) {
     out.push({
@@ -444,10 +487,39 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
     })
   }
 
-  // 10 conversions_to_tools (one per conversion type with an element or a handler)
-  const conversionTypes = new Set<ConversionType>([...d.conversionElements.map((finding) => finding.conversionType), ...d.outcomes.map((finding) => finding.conversionType)])
+  // 10 conversions_to_tools (one per conversion type with an element, a handler or a success path).
+  // §3x.3 (B3): for an OUTCOME conversion (signup, lead, booking, purchase, trial) the targets are where it SUCCEEDS
+  // in the browser; the links and buttons that lead to the form are intent (the runtime records those clicks).
+  // Only a download or a custom conversion is the click itself.
+  const conversionTypes = new Set<ConversionType>([
+    ...d.conversionElements.map((finding) => finding.conversionType),
+    ...d.outcomes.map((finding) => finding.conversionType),
+    ...d.successPaths.map((finding) => finding.conversionType)
+  ])
   for (const type of CONVERSION_TYPES) {
     if (!conversionTypes.has(type)) continue
+    if (OUTCOME_CONVERSION_TYPES.has(type)) {
+      const success = d.successPaths.filter((finding) => finding.conversionType === type)
+      out.push(
+        success.length > 0
+          ? {
+              jobId: "conversions_to_tools",
+              target: type,
+              finding: `The ${type} succeeds at ${success.map((finding) => `${finding.file}:${finding.line}`).join(", ")}; send the approved ${type} conversion to every tool there`,
+              evidence: fileEvidence(success),
+              allow: allow(filesOf(success))
+            }
+          : {
+              jobId: "conversions_to_tools",
+              target: type,
+              finding: `No place where a ${type} succeeds was found in the browser code (only links to it); the conversion is not sent from a click`,
+              evidence: fileEvidence([...d.conversionElements, ...d.outcomes].filter((finding) => finding.conversionType === type)),
+              allow: allow([]),
+              blockedReason: "needs_you"
+            }
+      )
+      continue
+    }
     const elements = d.conversionElements.filter((finding) => finding.conversionType === type)
     const handlers = d.outcomes.filter((finding) => finding.conversionType === type)
     out.push({
@@ -544,7 +616,20 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   const items = out.map((input) => makeItem(input, framework))
   const unique = new Map<string, ChecklistItem>()
   for (const item of items) if (!unique.has(item.id)) unique.set(item.id, item)
-  return [...unique.values()].sort((a, b) => a.n - b.n || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  const sorted = [...unique.values()].sort((a, b) => a.n - b.n || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  return withDistinctTitles(sorted)
+}
+
+/**
+ * §3x.3 No two items share a title: any job still holding two items of one title names each by its target. The plan
+ * step runs it again over the detector candidates AND the plan's own improve seeds (a seed is titled by its job).
+ */
+export function withDistinctTitles(items: readonly ChecklistItem[]): ChecklistItem[] {
+  const perJob = new Map<string, number>()
+  for (const item of items) perJob.set(item.jobId, (perJob.get(item.jobId) ?? 0) + 1)
+  return items.map((item) =>
+    item.jobId in JOB_TABLE && item.title === JOB_TABLE[item.jobId as keyof typeof JOB_TABLE].title && (perJob.get(item.jobId) ?? 0) > 1 ? { ...item, title: `${item.title}: ${itemTarget(item)}` } : item
+  )
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -593,7 +678,37 @@ export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: Pla
     }
     out.push(item)
   }
-  return out
+  return withoutCoveredSetupFixes(out)
+}
+
+/** §3x.3 (B4) The setup findings another job fixes: a setup code → the job that owns its fix. */
+const SETUP_CODE_OWNER: ReadonlyArray<{ code: RegExp; jobId: JobId }> = [
+  { code: /INF_SETUP_PROVIDER_DUPLICATE_INIT|DUPLICATE/, jobId: "duplicates_remove" },
+  { code: /HOST_GUARD|PREVIEW/, jobId: "preview_guard" },
+  { code: /CSP/, jobId: "csp" },
+  { code: /REDIRECT|UTM/, jobId: "redirect_utms" }
+]
+
+/**
+ * §3x.3 (B4) Job 11 is not seeded for a setup finding an approved, open item of another job already covers: its code
+ * names that job (a duplicate init → `duplicates_remove`, a missing host guard → `preview_guard`, …) and they point at
+ * the same file. A shared evidence line alone proves nothing (a guard job and a duplicate share the init's line). Run 3's `setup_check_fixes:provider_census`
+ * repeated job 6 and made the agent do one edit for two jobs.
+ */
+function withoutCoveredSetupFixes(items: readonly ChecklistItem[]): ChecklistItem[] {
+  const owners = items.filter((item) => item.jobId !== "setup_check_fixes" && item.state !== "blocked")
+  const fileLines = (item: ChecklistItem) => item.trigger.evidence.filter((entry): entry is { file: string; line: number } => "file" in entry)
+  return items.filter((item) => {
+    if (item.jobId !== "setup_check_fixes") return true
+    const evidence = fileLines(item)
+    const code = /INF_SETUP_[A-Z_]+/.exec(item.trigger.finding)?.[0] ?? ""
+    const byCode = SETUP_CODE_OWNER.filter((entry) => entry.code.test(code)).map((entry) => entry.jobId)
+    const covered = owners.some((owner) => {
+      const ownerLines = fileLines(owner)
+      return byCode.includes(owner.jobId as JobId) && evidence.some((entry) => ownerLines.some((other) => other.file === entry.file))
+    })
+    return !covered
+  })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -642,6 +757,7 @@ export function reverifyNotNeededIn(item: ChecklistItem, scan: JobScan, seed: Re
     case "identify_reset":
       return fresh(fileEvidence(d.auth.login))
     case "conversions_to_tools":
+      if (OUTCOME_CONVERSION_TYPES.has(target as ConversionType)) return fresh(fileEvidence(d.successPaths.filter((finding) => finding.conversionType === target)))
       return fresh(fileEvidence([...d.conversionElements, ...d.outcomes].filter((finding) => finding.conversionType === target)))
     case "meta_improve":
       if (target === "retire_fbc_writer") return fresh(fileEvidence(d.fbcWriters.filter((finding) => finding.hostOnly)))

@@ -9,6 +9,11 @@ import type { Clock } from "../contracts/deps.js"
 import type { GitHostAdapter, GitOps, PrSummary } from "../contracts/git-host.js"
 import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
 import { step } from "./merge.js"
+import { run3Json } from "../../../test/wizard/run3-fixture.js"
+import type { ChecklistItem } from "../contracts/jobs.js"
+import type { ReportV2 } from "../contracts/report.js"
+import { buildColumn, createReportBuilder } from "../report.js"
+import { mergeReadyOverlay } from "../../tui/overlays/merge-ready.js"
 
 const MERGE = "f".repeat(40)
 
@@ -110,5 +115,46 @@ describe("the merge card polls GitHub while it is up (§3y.9)", () => {
     const outcome = await step.run(ctx, deps)
     expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED" })
     expect(ctx.state.get().pr?.mergeSha).toBeNull()
+  })
+})
+
+describe("§3x.6 (W22) run 3 at merge-ready: the card says incomplete, and the in-PR report reaches Infinite first", () => {
+  it("5 approved fixes not in the code → 'Ready to merge, but incomplete' with the verdict's words; the in_pr report is posted before PATCH mergeSha", async () => {
+    const run3 = run3Json<{ jobs: ChecklistItem[] }>("wizard/state.json")
+    const { ctx, deps, bridge } = setup(["OPEN", "MERGED"], (signal) => new Promise((resolve) => signal?.addEventListener("abort", () => resolve("__cancelled__"))))
+    deps.report = createReportBuilder(() => deps.clock.now())
+    ;(deps.git as unknown as { remoteUrl: () => Promise<string> }).remoteUrl = async () => "https://github.com/acme/site.git"
+    ctx.state.update((state) => {
+      state.jobs = run3.jobs.filter((job) => job.jobId !== "review_comments")
+      state.report.in_pr = buildColumn("in_pr", { runId: RUN_ID, meta: { measuredAt: "2026-10-03T05:30:00.000Z", sha: "b".repeat(40) }, facts: [{ input: "rehearsal.graded", state: "problem", at: "2026-10-03T05:30:00.000Z" }], rows: {} })
+    })
+    const outcome = await step.run(ctx, deps)
+    expect(outcome.kind).toBe("ok")
+    const payload = ctx.asks.find((ask) => ask.kind === "merge-ready")!.payload as { number: number; summary: string; incomplete?: string; prUrl: string }
+    expect(payload.incomplete).toBe("5 approved fixes are not in the code (Remove duplicate tags, Keep previews silent (existing tags), Keep previews silent (existing tags) +2 more)")
+    const view = mergeReadyOverlay.render(payload, {}, { sanitize: (text: string) => text, styles: { info: (text: string) => text } } as never)
+    expect(view.heading).toBe("Ready to merge, but incomplete")
+    expect(view.question).toMatch(/^Pull request #2 does not have everything the plan approved: 5 approved fixes are not in the code \(.*\)\. Merging ships only what is in it\./)
+    expect(view.question).not.toContain("Merge it to ship")
+    // The in-PR report (with its not_checked_live verdict) is posted BEFORE the merge is PATCHed.
+    const order = bridge.calls.map((call) => call.verb)
+    expect(order.indexOf("report")).toBeGreaterThanOrEqual(0)
+    expect(order.indexOf("report")).toBeLessThan(order.indexOf("runs.patch"))
+    const posted = bridge.calls.find((call) => call.verb === "report")!.body as { phase: string; report: ReportV2 }
+    expect(posted.phase).toBe("in_pr")
+    expect(posted.report.verdict).toMatchObject({ state: "not_checked_live" })
+    expect(posted.report.verdict!.reasons.map((reason) => reason.kind)).toEqual(["not_live", "approved_fix_missing"])
+  })
+
+  it("negative: a PR with every approved fix done is 'Ready to ship' (no incomplete words)", async () => {
+    const { ctx, deps } = setup(["OPEN", "MERGED"], (signal) => new Promise((resolve) => signal?.addEventListener("abort", () => resolve("__cancelled__"))))
+    deps.report = createReportBuilder(() => deps.clock.now())
+    ;(deps.git as unknown as { remoteUrl: () => Promise<string> }).remoteUrl = async () => "https://github.com/acme/site.git"
+    ctx.state.update((state) => {
+      state.report.in_pr = buildColumn("in_pr", { runId: RUN_ID, meta: { measuredAt: "2026-10-03T05:30:00.000Z", sha: "b".repeat(40) }, facts: [{ input: "rehearsal.graded", state: "pass", at: "2026-10-03T05:30:00.000Z" }], rows: {} })
+    })
+    await step.run(ctx, deps)
+    const payload = ctx.asks.find((ask) => ask.kind === "merge-ready")!.payload as { incomplete?: string }
+    expect(payload.incomplete).toBeUndefined()
   })
 })

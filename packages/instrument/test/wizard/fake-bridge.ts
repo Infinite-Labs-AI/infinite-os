@@ -631,11 +631,13 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           if (patch.mergeSha !== undefined && script.run.mergeSha !== null && script.run.mergeSha !== patch.mergeSha) {
             return fail(res, record, requestId, "invalid_request", { field: "patch.mergeSha", message: "mergeSha is already set for this run." })
           }
-          if (patch.proofState !== undefined && script.run.proofState !== "proving" && script.run.proofState !== patch.proofState) {
+          // §3x.6: the tag may settle, ONCE, a run the desktop left undetermined (the app cannot grade the installed set).
+          const tagSettlesDesktop = patch.proofState !== undefined && reqBody.producer === "tag" && script.run.proofState === "undetermined" && script.run.proofClaimedBy === "desktop"
+          if (patch.proofState !== undefined && !tagSettlesDesktop && script.run.proofState !== "proving" && script.run.proofState !== patch.proofState) {
             return fail(res, record, requestId, "claimed_by_other", { state: script.run.proofState, message: "This run is not being proven; claim it first." })
           }
           // §3z.8 (A10): the proofState PATCH names its producer, which must hold the claim.
-          if (patch.proofState !== undefined && reqBody.producer !== script.run.proofClaimedBy) {
+          if (patch.proofState !== undefined && !tagSettlesDesktop && reqBody.producer !== script.run.proofClaimedBy) {
             return fail(res, record, requestId, "claimed_by_other", { state: script.run.proofState, message: "Only the producer holding the proof claim may set proofState." })
           }
           if (patch.approvedConversions !== undefined && patch.approvedConversions.length > 20) {

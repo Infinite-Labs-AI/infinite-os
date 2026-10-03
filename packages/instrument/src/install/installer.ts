@@ -61,7 +61,7 @@ import type {
 
 import { beforeTextOf, makeEditRecord, refreshFromHead } from "./edits.js"
 import { applyImproveEdit, detectAdoptedFacts, improveLinesFor, withSensitivePaths, type AdoptedFacts } from "./improve.js"
-import { artifactsFromKeys, manifestIdsFor, posthogProxyFor, wizardInstallWorkspaceId, type WizardInstallArtifacts } from "./keys-adapter.js"
+import { artifactsFromKeys, manifestIdsFor, posthogProxyFor, withConversionHelpers, wizardInstallWorkspaceId, type WizardInstallArtifacts } from "./keys-adapter.js"
 import { SERVER_LANE_GUIDE_FILE } from "../server-lane/copy.js"
 import { normalizeAppRelativePath } from "../frameworks/shared.js"
 import { DEFAULT_POSTHOG_PROXY_PATH, INFINITE_API_ORIGIN, infiniteCollectDestination } from "../workspace-artifacts.js"
@@ -466,6 +466,8 @@ export class WizardInstaller implements Installer {
       artifacts.hostGuard = { mode: "deny", exempt: [...model.guard.exempt], deny: [...model.guard.deny] }
     }
     if (approved.has("sensitive_pages:posthog:managed")) artifacts = withSensitivePaths(artifacts, sensitivePathsFor(internals.scan, internals.before))
+    // §3x.3 (B3): the conversion helpers, by the one rule (`withConversionHelpers`), on what this install really writes.
+    artifacts = withConversionHelpers(artifacts, answers.conversions)
     const serverLane = approved.has("server_lane") && artifacts.infinite !== undefined && scan.serverLane !== null
 
     // ---- snapshot everything this install can touch (full rollback on any failure) ----

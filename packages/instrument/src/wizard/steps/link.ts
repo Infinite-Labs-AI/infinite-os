@@ -168,6 +168,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     })
 
     let link: Link | null = null
+    let relinked = false
     // ONE approval window for every attempt (§3a.2 "link approval ≤ 5 min overall").
     const deadline = ctx.now().getTime() + BRIDGE_LIMITS.linkApprovalMs
     for (let attempt = 1; attempt <= MAX_LINK_ATTEMPTS && link === null; attempt++) {
@@ -175,6 +176,14 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
       sub(ctx, "link", "Asking the Infinite app to link this site…", "pending")
       const request = await deps.bridge.requestLink({ code, site, client: { tagVersion: deps.tagVersion } }, { signal: ctx.signal })
       if (request.state === "approved" && request.link) {
+        // §3x.8 `--relink`: forget the remembered link once, then ask the app for a new approval (any workspace).
+        if (ctx.options.relink && !relinked) {
+          relinked = true
+          await deps.bridge.revokeLink(request.link.linkId, { signal: ctx.signal })
+          sub(ctx, "link", `Forgot the link to ${request.link.workspace.name}; asking the Infinite app again…`, "info")
+          attempt -= 1
+          continue
+        }
         link = request.link
         sub(ctx, "link", `✓ Remembered · workspace ${link.workspace.name}`, "ok")
         break

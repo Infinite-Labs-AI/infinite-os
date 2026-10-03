@@ -20,7 +20,9 @@
 // Live checks before the deploy (review P2-1): an item whose path waits for a real event (job 10's click
 // test) reaches `waiting_real_event` only once its live checks pass, and a failing rehearsal check sends
 // an item back to `pending` with the failure (budget left) or to `failed` (budget spent), like a local one.
+import { sanitizeUntrusted } from "../agents/sanitize.js"
 import {
+  ITEM_NOTE_MAX_CHARS,
   JOB_TABLE,
   type BlockedReason,
   type ChecklistItem,
@@ -54,6 +56,13 @@ export interface Transition {
 }
 
 const clone = (item: ChecklistItem): ChecklistItem => JSON.parse(JSON.stringify(item)) as ChecklistItem
+
+/** §3x.2 The item's last wizard note, sanitized and capped like claim notes. */
+export function withNote(item: ChecklistItem, note: string | undefined): ChecklistItem {
+  if (note === undefined || note.trim() === "") return item
+  item.note = sanitizeUntrusted(note, ITEM_NOTE_MAX_CHARS)
+  return item
+}
 
 function donePathOf(item: ChecklistItem): readonly JobItemState[] {
   const spec = (JOB_TABLE as Record<string, { donePath: readonly JobItemState[] } | undefined>)[item.jobId]
@@ -110,6 +119,8 @@ export function applyClaim(
   if (claim.status === "blocked") {
     next.state = "blocked"
     next.blockedReason = "agent_blocked"
+    // §3x.2 The real reason is the agent's own (quoted, sanitized), never a generic "did not finish".
+    withNote(next, claim.note.trim() === "" ? "the agent said it is blocked" : `the agent said it is blocked: ${claim.note}`)
     return { item: next, changed: true, by: "agent_claim", note: "the agent is blocked" }
   }
   const verdict = reverify(item)
@@ -125,7 +136,7 @@ export function applyClaim(
 
 /** The budget is spent (30 turns / 10 minutes, §3f.4) and the item's last wizard check failed: `failed`. */
 export function failItem(item: ChecklistItem, note: string): Transition {
-  const next = clone(item)
+  const next = withNote(clone(item), note)
   next.state = "failed"
   delete next.blockedReason
   return { item: next, changed: item.state !== "failed", by: "wizard", note }
@@ -142,7 +153,7 @@ export function unblockItem(item: ChecklistItem, note: string): Transition {
 
 /** Marks an item blocked with one of the §3e.5 reasons (the fence, the post-turn gate, usage, …). */
 export function blockItem(item: ChecklistItem, reason: BlockedReason, note?: string): Transition {
-  const next = clone(item)
+  const next = withNote(clone(item), note)
   next.state = "blocked"
   next.blockedReason = reason
   return { item: next, changed: item.state !== "blocked" || item.blockedReason !== reason, by: "wizard", ...(note ? { note } : {}) }
@@ -173,6 +184,8 @@ export function applyResults(item: ChecklistItem, results: readonly CheckResult[
     merged = true
   }
   const advanced = advance(next, runId, options)
+  // §3x.2 A check that sent the item back (or failed it) is its note.
+  if (advanced.note && (advanced.item.state === "pending" || advanced.item.state === "failed")) withNote(advanced.item, advanced.note)
   return { item: advanced.item, changed: merged || advanced.item.state !== item.state, by: "wizard", ...(advanced.note ? { note: advanced.note } : {}) }
 }
 

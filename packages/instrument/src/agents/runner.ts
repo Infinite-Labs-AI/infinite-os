@@ -18,8 +18,8 @@
 // one, the turn is retried ONCE with the user's default model at the same effort, and the user is told.
 // Never a provider switch, never Infinite-paid inference, never a real prompt in tests (fakes only).
 import { randomUUID } from "node:crypto"
-import { access, readFile, rm, writeFile } from "node:fs/promises"
-import { basename, join } from "node:path"
+import { access, chmod, open, readFile, rm, writeFile } from "node:fs/promises"
+import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
@@ -56,9 +56,9 @@ import {
 import { buildCodexReviewerArgv, buildCodexWorkerArgv, codexModelRejected, codexUnrecognizedConfig, parseCodexLine } from "./codex.js"
 import { detectAgents, apiKeySourceMatches, resolveCodexRuntime, type DetectedAgents } from "./detect.js"
 import { buildAgentEnv } from "./env.js"
-import { Fence, recoverCrashedTurns, type FenceBlock, type TreeSeal } from "./fence.js"
+import { Fence, recoverCrashedTurns, type FenceBlock, type FenceEditAttribution, type FenceGateHit, type FenceStray, type TreeSeal } from "./fence.js"
 import { assertReviewWorktree } from "./worktree-guard.js"
-import { AGENT_LABEL, claudeToolBeat, codexItemBeat, displayPath, Narrator, type NarrationBeat } from "./narration.js"
+import { AGENT_LABEL, claudeToolBeat, codexItemBeat, displayPath, Narrator, ThinkingTicker, type NarrationBeat } from "./narration.js"
 import { AgentProcessRegistry } from "./process.js"
 import { ensurePrivateDir, repoSecretPaths, resolveRealpath, resolveSensitivePaths, runScratchDir, snapshotDir, wizardCacheRoot } from "./paths.js"
 import { sanitizeUntrusted } from "./sanitize.js"
@@ -89,8 +89,14 @@ export const CODEX_STARTUP_TIMEOUT_MS = 45_000
 
 /** What a `runJobs` result carries beyond §3f.1 (proposed as optional fields in the O3 note). */
 export interface AgentRunExtras {
-  /** Items the fence blocked this turn (outside the allowlist, consent touched, gate hit). */
+  /** Items the fence blocked this turn (outside the allowlist, consent touched). */
   blocked: FenceBlock[]
+  /** Review P2-3: paths the fence undid that no job owns (only reverted; said and fed back, never a job's failure). */
+  strays: FenceStray[]
+  /** §3x.2 The post-turn gate's refusals (each hunk reverted; the jobs step fails the attributed items' S check). */
+  gateHits: FenceGateHit[]
+  /** §3x.2 Per kept edit, the items each of its text edits belongs to. */
+  attribution: FenceEditAttribution[]
   /** Denied reads of secrets (`.env`, `~/.growth-os`, …): each is an incident, not just a count. */
   incidents: string[]
   /** Claude's `num_turns`; null when the agent does not report it (Codex). */
@@ -122,6 +128,9 @@ export function runExtras(result: AgentRunResult, items: readonly { id: string }
   } else blocked = []
   return {
     blocked,
+    strays: Array.isArray(extras.strays) ? extras.strays : [],
+    gateHits: Array.isArray(extras.gateHits) ? extras.gateHits : [],
+    attribution: Array.isArray(extras.attribution) ? extras.attribution : [],
     incidents: Array.isArray(extras.incidents) ? extras.incidents : [],
     turnsUsed: typeof extras.turnsUsed === "number" ? extras.turnsUsed : null,
     modelFallback: extras.modelFallback === true,
@@ -236,7 +245,7 @@ export class AgentRunnerImpl implements AgentRunner {
     const info = await this.infoFor(kind)
     const emptySession: SessionRef = kind === "claude_code" ? { kind: "claude", sessionId: input.resume?.kind === "claude" ? input.resume.sessionId : "" } : { kind: "codex", threadId: input.resume?.kind === "codex" ? input.resume.threadId : "" }
     if (!info) {
-      return { outcome: "error", session: emptySession, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [], blocked: [], incidents: [], turnsUsed: null, modelFallback: false, seal: null }
+      return { outcome: "error", session: emptySession, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [], blocked: [], strays: [], gateHits: [], attribution: [], incidents: [], turnsUsed: null, modelFallback: false, seal: null }
     }
     // A turn a killed wizard left open (its snapshot still on disk) is undone first, so the agent's
     // unvetted edits never become this turn's baseline (review O3 F10).
@@ -314,7 +323,7 @@ export class AgentRunnerImpl implements AgentRunner {
       }
       if (attempt.outcome !== "completed" && attempt.outcome !== "max_turns") {
         const restored = await fence.abort()
-        return { ...base, outcome: attempt.outcome, reverted: restored.restored, edits: [], blocked: [], seal: null }
+        return { ...base, outcome: attempt.outcome, reverted: restored.restored, edits: [], blocked: [], strays: [], gateHits: [], attribution: [], seal: null }
       }
       // §3f.9: the gate runs on the kept diff after EVERY turn, before any build or T0. A heavy-dir write
       // throws FenceTamperError here (the fence has already restored what it could).
@@ -324,7 +333,17 @@ export class AgentRunnerImpl implements AgentRunner {
         secretLiterals: literals(),
         turnGate: (diff) => this.options.checks.turnGate(diff, { connectionIds })
       })
-      return { ...base, outcome: attempt.outcome, reverted: settled.reverted, edits: settled.edits, blocked: settled.blocked, seal: settled.seal }
+      return {
+        ...base,
+        outcome: attempt.outcome,
+        reverted: settled.reverted,
+        edits: settled.edits,
+        blocked: settled.blocked,
+        strays: settled.strays,
+        gateHits: settled.gateHits,
+        attribution: settled.attribution,
+        seal: settled.seal
+      }
     } finally {
       if (!fence.isSettled && !this.interrupted) await fence.abort().catch(() => undefined)
       this.activeFence = null
@@ -333,7 +352,13 @@ export class AgentRunnerImpl implements AgentRunner {
     }
   }
 
-  async review(input: { worktreeDir: string; reviewer: AgentKind; brief: string }): Promise<ReviewResult | ReviewFailure> {
+  /** §3x.3 Where review number `n`'s event stream is kept (0600): `<cache>/<runId>/review-<n>-<agent>.jsonl`. */
+  reviewLogPath(n: number, reviewer: AgentKind): string {
+    const runId = (this.options.runId() ?? "local-run").replace(/[^A-Za-z0-9-]/g, "_")
+    return join(wizardCacheRoot(this.options.home), runId, `review-${n}-${reviewer === "claude_code" ? "claude" : "codex"}.jsonl`)
+  }
+
+  async review(input: { worktreeDir: string; reviewer: AgentKind; brief: string; onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void }): Promise<ReviewResult | ReviewFailure> {
     await assertReviewWorktree(input.worktreeDir, this.options.root)
     const info = await this.infoFor(input.reviewer)
     if (!info) return { error: "unparseable" }
@@ -390,6 +415,10 @@ export class AgentRunnerImpl implements AgentRunner {
       notices.add(text)
       input.onNarrate({ agent: kind, role: "worker", text })
     }
+    // §3x.3 (D1): silence after a tool result is the model thinking, said as `Thinking · N s` (never the last tool's beat).
+    const ticker = new ThinkingTicker(ctx.narrator, () => (this.options.now ?? (() => new Date()))().getTime())
+    const tickTimer = setInterval(() => ticker.tick(), 1_000)
+    tickTimer.unref()
     const state = {
       outcome: null as AgentRunOutcome | null,
       resetsAt: undefined as string | undefined,
@@ -448,10 +477,14 @@ export class AgentRunnerImpl implements AgentRunner {
               }
               return
             case "tool_use": {
+              ticker.acted()
               const beat = claudeToolBeat(event.name, event.input, beatCtx)
               if (beat) ctx.narrator.beat(beat)
               return
             }
+            case "tool_result":
+              ticker.toolReturned()
+              return
             case "assistant_error":
               if (event.error === "rate_limit" || event.error === "billing_error") return stop("out_of_usage")
               return
@@ -524,6 +557,9 @@ export class AgentRunnerImpl implements AgentRunner {
           if (!event) return
           if (event.kind === "thread") state.threadId = event.threadId
           else if (event.kind === "item") {
+            // A finished item hands the result back to the model; a started one is it acting.
+            if (event.phase === "completed") ticker.toolReturned()
+            else ticker.acted()
             const beat = codexItemBeat(event.item, beatCtx)
             if (beat) ctx.narrator.beat(beat)
           } else if (event.kind === "error") {
@@ -552,6 +588,7 @@ export class AgentRunnerImpl implements AgentRunner {
       startup.unref()
       void child.done.then(() => clearTimeout(startup))
       const exit = await child.done
+      clearInterval(tickTimer)
       try {
         state.structured = parseStructuredClaims(await readFile(outputPath, "utf8"))
       } catch {
@@ -564,6 +601,7 @@ export class AgentRunnerImpl implements AgentRunner {
       return finish(exit)
     }
     const exit = await child.done
+    clearInterval(tickTimer)
     return finish(exit)
 
     function finish(exit: { code: number | null; timedOut: boolean; spawnError: Error | null }): AttemptResult {
@@ -592,11 +630,22 @@ export class AgentRunnerImpl implements AgentRunner {
 
   private async reviewAttempt(
     info: AgentInfo,
-    input: { worktreeDir: string; reviewer: AgentKind; brief: string },
+    input: { worktreeDir: string; reviewer: AgentKind; brief: string; onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void },
     scratch: string,
     model: ModelChoice
   ): Promise<{ outcome: "completed" | "out_of_usage" | "timeout" | "error"; review: ReviewResult | null; modelRejected: boolean }> {
     const sensitive = await resolveSensitivePaths({ home: this.options.home, env: this.options.env })
+    // §3x.3 (D3) The reviewer's event stream is kept (0600), so the next slow review can be measured, and its tool
+    // beats are narrated like the worker's (run 3's Codex review left no trace of its 8.5 minutes).
+    const logPath = this.reviewLogPath(this.reviews, input.reviewer)
+    await ensurePrivateDir(dirname(logPath))
+    const log = await open(logPath, "a", 0o600)
+    await chmod(logPath, 0o600)
+    const keep = (line: string) => {
+      void log.appendFile(`${line}\n`).catch(() => undefined)
+    }
+    const narrator = new Narrator({ agent: input.reviewer, role: "reviewer", emit: (beat) => input.onNarrate?.({ agent: beat.agent, role: "reviewer", text: beat.text }), now: () => (this.options.now ?? (() => new Date()))().getTime(), throttleMs: this.options.narrationThrottleMs })
+    const beatCtx = { root: input.worktreeDir, isAllowed: () => true, agent: input.reviewer, jobNumber: () => null }
     let outcome: "completed" | "out_of_usage" | "timeout" | "error" | null = null
     let modelRejected = false
     let structured: unknown = null
@@ -625,8 +674,13 @@ export class AgentRunnerImpl implements AgentRunner {
         stdin: REVIEWER_KICKOFF,
         wallMs: AGENT_LIMITS.reviewer.wallMs,
         onStdoutLine: (line) => {
+          keep(line)
           const event = parseClaudeLine(line)
           if (!event) return
+          if (event.kind === "tool_use") {
+            const beat = claudeToolBeat(event.name, event.input, beatCtx)
+            if (beat) narrator.beat(beat)
+          }
           if (claudeModelRejected(event, model.model)) {
             modelRejected = true
             return stop("error")
@@ -668,7 +722,12 @@ export class AgentRunnerImpl implements AgentRunner {
         stdin: `${input.brief}\n\n${REVIEWER_KICKOFF}\n`,
         wallMs: AGENT_LIMITS.reviewer.wallMs,
         onStdoutLine: (line) => {
+          keep(line)
           const event = parseCodexLine(line)
+          if (event?.kind === "item") {
+            const beat = codexItemBeat(event.item, beatCtx)
+            if (beat) narrator.beat(beat)
+          }
           if (!event || event.kind !== "error") return
           if (codexUsageLimit(event.message)) return stop("out_of_usage")
           if (codexModelRejected(event.message, model.model)) {
@@ -680,6 +739,7 @@ export class AgentRunnerImpl implements AgentRunner {
       })
     }
     const exit = await child.done
+    await log.close().catch(() => undefined)
     if (outputPath) {
       try {
         structured = await readFile(outputPath, "utf8")

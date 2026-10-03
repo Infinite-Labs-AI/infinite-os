@@ -4,6 +4,9 @@
 // (the cloud grades receipts, its own read), not a step.
 //
 // Per tool, first match wins:
+//   0. §3x.5 (C): the test window did not look like a normal browser (its UA is not exactly the reduced Chrome UA)
+//      → every tool `undetermined (test_error)`: a window that announces itself as a monitor is dropped by Meta's
+//      pixel (fbevents botblocking) and GA4's bot filter, so its silence proves nothing (run 3);
 //   1. the environment makes the load ungradable → undetermined: `automation_detected`
 //      (`navigator.webdriver`), `blocked_by_site_bot_rules`, `preview_protected`; and no page actually
 //      loaded (no load rendered with a 2xx/3xx: a 5xx, a 404 preview, a timeout) → `test_error`, because
@@ -39,7 +42,7 @@
 // never a pass and never an "absent").
 import type { CheckResult, CheckTier, EnvSourcedId, Evidence } from "../wizard/contracts/jobs.js"
 import type { TestExpect, TestMode, TestResult, TestTool } from "../wizard/contracts/test-engine.js"
-import { TEST_TOOLS } from "../wizard/contracts/test-engine.js"
+import { TEST_BROWSER_UA_PATTERN, TEST_TOOLS } from "../wizard/contracts/test-engine.js"
 
 /**
  * Everything the grader needs beyond the facts (§3z.12 §3e.7, B11: the three context fields are REQUIRED on
@@ -55,6 +58,8 @@ export interface GradeContext {
   installedTools: readonly TestTool[] | null
   /** Whose Meta pixel the site runs; D10 counts automatic events for an ADOPTED pixel only. null = none / unknown. */
   metaPixelOwnership: "managed" | "adopted" | null
+  /** §3x.3 (F6): the load ran a client-side navigation. */
+  spaNavigation?: boolean
   runId?: string | null
   now?: () => Date
 }
@@ -185,8 +190,26 @@ interface Verdict {
   detail: string
 }
 
+/** §3x.5 The one sentence a non-browser test window gets for every tool. */
+export const NOT_A_BROWSER_DETAIL = "the test window did not look like a normal browser, so its silence proves nothing"
+
+/**
+ * §3x.3 (F6): an installed Meta pixel that sent its first PageView on load, after a client-side navigation: 0 more
+ * PageViews → it counts only the first page of a visit; more than one → doubled. null = not measured / fine.
+ */
+function metaSpaVerdict(result: TestResult, ctx: GradeContext): Verdict | null {
+  if (!ctx.spaNavigation || !(ctx.installedTools ?? []).includes("meta")) return null
+  const onLoad = result.meta.tr.filter((tr) => tr.ev === "PageView" && !tr.afterNav)
+  if (onLoad.length === 0) return null
+  const afterNav = result.meta.tr.filter((tr) => tr.ev === "PageView" && tr.afterNav).length
+  if (afterNav === 0) return { state: "problem", code: "meta_spa_page_view_missing", detail: "Meta counts only the first page of a visit (no PageView after the page change)" }
+  if (afterNav > 1) return { state: "problem", code: "duplicate_page_view", detail: `Meta sent ${afterNav} PageView after one page change` }
+  return null
+}
+
 function gradeTool(tool: TestTool, result: TestResult, expect: TestExpect, mode: TestMode, ctx: GradeContext): Verdict {
   const env = result.environment
+  if (!TEST_BROWSER_UA_PATTERN.test(env.ua)) return { state: "undetermined", code: "test_error", detail: NOT_A_BROWSER_DETAIL }
   if (env.automationDetected) return { state: "undetermined", code: "automation_detected", detail: "navigator.webdriver was true in the test window" }
   if (env.blockedBySiteBotRules) return { state: "undetermined", code: "blocked_by_site_bot_rules", detail: "the site's bot rules refused the test window" }
   if (env.previewProtected) return { state: "undetermined", code: "preview_protected", detail: "the preview is protected; v1 cannot load it" }
@@ -216,6 +239,10 @@ function gradeTool(tool: TestTool, result: TestResult, expect: TestExpect, mode:
   if (tool === "ga4" || tool === "posthog") {
     const duplicates = duplicatePageViews(result, tool)
     if (duplicates.length) return { state: "problem", code: "duplicate_page_view", detail: `${duplicates.join("; ")}: every visit is counted twice` }
+  }
+  if (tool === "meta") {
+    const spa = metaSpaVerdict(result, ctx)
+    if (spa) return spa
   }
   if (beacons === 0) {
     // The seed writes Infinite's own consent key, which Infinite AND a managed Meta pixel read

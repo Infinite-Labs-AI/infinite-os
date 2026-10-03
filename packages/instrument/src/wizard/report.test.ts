@@ -51,7 +51,7 @@ const buildFrom = (columns: Partial<Record<ReportColumnId, ReportColumnSnapshot 
     columns: { live_today: columns.live_today ?? null, in_pr: columns.in_pr ?? null, proven_live: columns.proven_live ?? null },
     provenLivePending: null,
     day7: null,
-    notes: []
+    notes: [], verdictFacts: null
   })
 
 const fact = (input: ColumnFact["input"], state: ColumnFact["state"], extra: Partial<ColumnFact> = {}): ColumnFact => ({ input, state, at: AT, ...extra })
@@ -94,9 +94,11 @@ describe("ReportBuilder.build", () => {
     const wrongSource = structuredClone(columns.live_today)
     wrongSource.finishLine.each_tool_once = { ...wrongSource.finishLine.each_tool_once!, provenance: { ...wrongSource.finishLine.each_tool_once!.provenance, source: "plan_answer" } }
     expect(() => buildFrom({ ...columns, live_today: wrongSource })).toThrow(/§3i.7/)
-    const filled = structuredClone(columns.proven_live)
-    filled.finishLine.spa_page_views = { value: "pass", display: "pass", state: "pass", provenance: { source: "desktop_test", at: AT, runId: RUN } }
-    expect(() => buildFrom({ ...columns, proven_live: filled })).toThrow(/not measured/)
+    // §3x.6: "SPA page views" and "previews silent" are measured after the deploy now; "proof from a real visit" is
+    // still never measured on the live site TODAY.
+    const filled = structuredClone(columns.live_today)
+    filled.finishLine.proof_from_real_visit = { value: "pass", display: "pass", state: "pass", provenance: { source: "cloud_receipt", at: AT, runId: RUN } }
+    expect(() => buildFrom({ ...columns, live_today: filled })).toThrow(/not measured/)
   })
 
   it("an absent column renders every cell as \"—\" with a reason (the proven column waits for the deploy)", () => {
@@ -107,7 +109,7 @@ describe("ReportBuilder.build", () => {
       columns: { live_today: null, in_pr: null, proven_live: null },
       provenLivePending: "deploy",
       day7: null,
-      notes: []
+      notes: [], verdictFacts: null
     })
     for (const row of report.rows) {
       for (const column of REPORT_COLUMN_IDS) {
@@ -127,7 +129,7 @@ describe("ReportBuilder.build", () => {
       columns: { live_today: null, in_pr: null, proven_live: null },
       provenLivePending: "rerun_tag",
       day7: null,
-      notes: []
+      notes: [], verdictFacts: null
     })
     expect(report.columns.proven_live.pending).toBe("rerun_tag")
     for (const row of report.rows) {
@@ -230,7 +232,7 @@ describe("buildColumn (typed inputs → one column)", () => {
         columns: { live_today: snapshots.live_today, in_pr: snapshots.in_pr, proven_live: null },
         provenLivePending: pending,
         day7: null,
-        notes: []
+        notes: [], verdictFacts: null
       })
       const proven = (id: string) => report.finishLine.find((line) => line.id === id)!.cells.proven_live
       expect(proven("ga4_key_events_received")).toMatchObject({ value: null, state: "pending", reason: "needs_7_days", provenance: { source: "cloud_read" } })
@@ -270,6 +272,31 @@ describe("renderers", () => {
     const piped = structuredClone(report)
     piped.rows[1]!.cells.live_today.display = "a | b"
     expect(renderMarkdown(piped)).toContain("a \\| b")
+  })
+
+  it("review P1-3: markdown opens with THE verdict's headline and one line per reason; ungraded says so", () => {
+    expect(report.verdict).toBeNull()
+    expect(renderMarkdown(report).split("\n")[0]).toBe("**www.acme-store.com: not graded yet · run npx infinite-tag to finish the live checks**")
+    const graded = structuredClone(report)
+    graded.verdict = {
+      state: "problems",
+      headline: "acme-store.com does not collect properly yet: 1 approved fix is not in the code (Remove duplicate tags) · Meta pixel sent nothing on the real visit",
+      reasons: [
+        { kind: "approved_fix_missing", count: 1, names: ["Remove duplicate tags"] },
+        { kind: "tool_silent", count: 1, names: ["Meta pixel"] }
+      ],
+      installed: []
+    }
+    const lines = renderMarkdown(graded).split("\n")
+    expect(lines.slice(0, 5)).toEqual([
+      `**${graded.verdict.headline}**`,
+      "",
+      "- Approved fixes the wizard has not confirmed in the code: Remove duplicate tags",
+      "- Sent nothing on the real visit: Meta pixel",
+      ""
+    ])
+    graded.verdict = { state: "properly", headline: "acme-store.com collects analytics properly now", reasons: [], installed: [] }
+    expect(renderMarkdown(graded).split("\n").slice(0, 3)).toEqual(["**acme-store.com collects analytics properly now**", "", "### Before and after · www.acme-store.com"])
   })
 
   it("the terminal table fits the width: three columns at 160, stacked below 140", () => {

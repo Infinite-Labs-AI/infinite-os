@@ -6,7 +6,7 @@ import { runInNewContext } from "node:vm"
 
 import { describe, expect, it } from "vitest"
 
-import { infiniteUnsafeText, UNSAFE_TEXT_SOURCE } from "./scrub.js"
+import { infiniteUnsafeCampaign, infiniteUnsafeText, UNSAFE_CAMPAIGN_SOURCE, UNSAFE_TEXT_SOURCE } from "./scrub.js"
 
 function emitted(value: unknown): boolean {
   return runInNewContext(`${UNSAFE_TEXT_SOURCE}\ninfiniteUnsafeText(value)`, { value }) as boolean
@@ -80,5 +80,60 @@ describe("infiniteUnsafeText", () => {
   it("serializes to plain browser source (no backtick, ${ or </)", () => {
     expect(UNSAFE_TEXT_SOURCE).toMatch(/^function infiniteUnsafeText\(value\)/)
     expect(UNSAFE_TEXT_SOURCE).not.toMatch(/`|\$\{|<\//)
+  })
+})
+
+// W7c (review P1-2): the campaign rule. The SAME table is pinned in 1bu-1's `ingest.test.ts` against the cloud's
+// `campaignValueCarriesPii`, so the tag and the door drop exactly the same campaign values.
+function campaignEmitted(value: unknown): boolean {
+  return runInNewContext(`${UNSAFE_CAMPAIGN_SOURCE}\ninfiniteUnsafeCampaign(value)`, { value }) as boolean
+}
+
+const CAMPAIGN_DROPPED = [
+  "+1 415 555 0100",
+  " 1 415 555 0100",
+  "%2B1%20415%20555%200100",
+  "+14155550100",
+  "(415) 555-0100",
+  "415-555-0100",
+  "4155550100",
+  "14155550100",
+  "call 020 7946 0958",
+  "alice@example.com",
+  "alice%40example.com",
+  "person%252540example.test",
+  "https://private.example.test",
+  "x gclid=SECRET"
+]
+
+const CAMPAIGN_KEPT = [
+  "120211234567890123",
+  "23851234567890123",
+  "120211234567890",
+  "spring_2026_10_03",
+  "2026-10-03",
+  "03-10-2026",
+  "2026 10 03",
+  "summer-sale-2026",
+  "launch_2026",
+  "ad_120211234567890123",
+  "5551234",
+  "9f2a5d41-7c0e-4b2a-9a77-2c0d8e4f6a10",
+  "spring_sale"
+]
+
+describe("infiniteUnsafeCampaign (W7c)", () => {
+  it.each(CAMPAIGN_DROPPED)("drops %j", (value) => {
+    expect(infiniteUnsafeCampaign(value)).toBe(true)
+    expect(campaignEmitted(value)).toBe(true)
+  })
+
+  it.each(CAMPAIGN_KEPT)("keeps %j", (value) => {
+    expect(infiniteUnsafeCampaign(value)).toBe(false)
+    expect(campaignEmitted(value)).toBe(false)
+  })
+
+  it("is plain ES5 the page can carry (no backticks, no template, no closing tag)", () => {
+    expect(UNSAFE_CAMPAIGN_SOURCE).not.toMatch(/`|\$\{|<\//)
   })
 })

@@ -1,0 +1,182 @@
+{
+  "version": 1,
+  "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+  "declined": [],
+  "open": [],
+  "rounds": [
+    {
+      "round": 1,
+      "reviewedSha": "f1abea9a6cc2de3587959cacea7d6a9e4202d17c",
+      "reviewer": "codex",
+      "fixSha": null,
+      "review": {
+        "verdict": "changes_suggested",
+        "summary": "Scope violations, unresolved duplicate and preview tags, PII leakage, and missing navigation/conversion tracking remain. All supplied wizard checks are not_run.",
+        "checklist": [
+          {
+            "item": "R1",
+            "status": "fail",
+            "note": "Six of seven changed files are outside the allowlist. package.json and package-lock.json are unchanged."
+          },
+          {
+            "item": "R2",
+            "status": "fail",
+            "note": "Two gtag config calls remain for G-TEST0000000 despite approved duplicate removal."
+          },
+          {
+            "item": "R3",
+            "status": "fail",
+            "note": "Existing keys remain unchanged, but approved in-place GA4 and Meta preview guards were omitted."
+          },
+          {
+            "item": "R4",
+            "status": "cant_tell",
+            "note": "The plan supplies no connected IDs to validate the hardcoded GA4, Meta, and Infinite identifiers."
+          },
+          {
+            "item": "R5",
+            "status": "fail",
+            "note": "Infinite has a production-host guard; existing GA4 and Meta scripts remain unconditional on previews and localhost."
+          },
+          {
+            "item": "R6",
+            "status": "pass",
+            "note": "Existing consent-default code is unchanged; no cookie banner was edited. not_required is recorded in the runtime configuration."
+          },
+          {
+            "item": "R7",
+            "status": "pass",
+            "note": "No env values, server secrets, or .env files were added; identifiers are public install artifacts."
+          },
+          {
+            "item": "R8",
+            "status": "fail",
+            "note": "UTM values are copied into event properties without filtering email, name, or phone content."
+          },
+          {
+            "item": "R9",
+            "status": "fail",
+            "note": "Meta sends only its initial PageView; client-side navigations emit page views only to Infinite."
+          },
+          {
+            "item": "R10",
+            "status": "pass",
+            "note": "not applicable: no server conversion lane is approved or added; /infinite/ledger forwards browser collection traffic."
+          },
+          {
+            "item": "R11",
+            "status": "pass",
+            "note": "not applicable: PostHog is absent. The only rewrite is for Infinite; no GA4 proxy exists."
+          },
+          {
+            "item": "R12",
+            "status": "pass",
+            "note": "not applicable: no CSP exists in the supplied site configuration."
+          },
+          {
+            "item": "R13",
+            "status": "pass",
+            "note": "No build output or existing generated files were changed, and no dependency was added."
+          },
+          {
+            "item": "R14",
+            "status": "pass",
+            "note": "Managed source/config files appear in files; .gitignore and the verification artifact appear in edits."
+          },
+          {
+            "item": "R15",
+            "status": "cant_tell",
+            "note": "PR text and metric displays are not supplied. verifiedAt is null, and no verification receipts are present."
+          },
+          {
+            "item": "R16",
+            "status": "fail",
+            "note": "Successful signup conversion tracking is missing, and blocked browser storage can stop Infinite collection."
+          }
+        ],
+        "findings": [
+          {
+            "id": "F1",
+            "item": "R1",
+            "severity": "blocker",
+            "path": "next.config.mjs",
+            "line": 1,
+            "body": "This new configuration file is outside the approved allowlist. The same applies to .gitignore, .infinite/install.json, both lib/infinite-analytics files, and public/.well-known/infinite-site-verification.txt. Only app/layout.tsx is allowlisted among the seven changed files.",
+            "suggested_fix": "Restrict the patch to approved paths or obtain an updated approved allowlist covering the six installation artifacts."
+          },
+          {
+            "id": "F2",
+            "item": "R2",
+            "severity": "should",
+            "path": "app/layout.tsx",
+            "line": 33,
+            "body": "The ga4-again script still calls gtag('config', 'G-TEST0000000'), duplicating the config at line 28 for exactly the same ID. Adding Infinite does not implement the approved duplicate removal, so duplicate GA4 page-view configuration remains.",
+            "suggested_fix": "Remove the second GA4 config and redundant loader while retaining the original initialization."
+          },
+          {
+            "id": "F3",
+            "item": "R5",
+            "severity": "should",
+            "path": "app/layout.tsx",
+            "line": 23,
+            "body": "The GA4 loader and config scripts execute unconditionally. Infinite's internal host guard does not guard these separate scripts, so localhost and Vercel preview deployments still load GA4 and send events.",
+            "suggested_fix": "Apply the approved production-host guard to the existing GA4 loader and initialization."
+          },
+          {
+            "id": "F4",
+            "item": "R5",
+            "severity": "should",
+            "path": "app/layout.tsx",
+            "line": 36,
+            "body": "The existing Meta bootstrap, init, and PageView execute on every hostname. The approved Meta preview guard was not applied, and Infinite's guard cannot silence this independent script.",
+            "suggested_fix": "Guard the existing Meta bootstrap and tracking calls with the exact production-host allowlist."
+          },
+          {
+            "id": "F5",
+            "item": "R8",
+            "severity": "blocker",
+            "path": "lib/infinite-analytics.ts",
+            "line": 3,
+            "body": "campaignProperties copies arbitrary UTM values into the initial page-view properties after only removing control characters and truncating. A production visit with ?utm_content=alice%40example.com sends that email as properties.utm_content; phone and name values likewise remain intact.",
+            "suggested_fix": "Omit free-form campaign values or restrict collection to approved campaign identifiers that cannot contain PII."
+          },
+          {
+            "id": "F6",
+            "item": "R9",
+            "severity": "should",
+            "path": "app/layout.tsx",
+            "line": 43,
+            "body": "Meta's PageView runs only when the root-layout script initializes. Next Link navigations retain that layout, and the new history observer sends only Infinite events, so navigating from / to /pricing produces no Meta page view.",
+            "suggested_fix": "Add one Meta page-view call per client-side navigation while preserving exactly one initial PageView."
+          },
+          {
+            "id": "F7",
+            "item": "R16",
+            "severity": "should",
+            "path": "lib/infinite-analytics.ts",
+            "line": 3,
+            "body": "The runtime observes sign_up_click intent but never emits the approved signup conversion after successful account creation. The existing signup form has no data-conversion marker, and neither its successful /api/signup response nor the server handler has conversion instrumentation.",
+            "suggested_fix": "Emit the approved signup conversion exactly once after confirmed account creation, keeping link clicks separate as intent events."
+          },
+          {
+            "id": "F8",
+            "item": "R16",
+            "severity": "should",
+            "path": "lib/infinite-analytics.ts",
+            "line": 3,
+            "body": "emit passes localStorage and sessionStorage into storageId before entering its try/catch. When accessing browser storage throws SecurityError, the fallback never runs: the initial page view aborts inside the swallowed bootstrap error and subsequent event callbacks also fail.",
+            "suggested_fix": "Acquire storage inside the guarded function and fall back to stable in-memory visitor and session IDs when storage is unavailable."
+          }
+        ]
+      }
+    }
+  ],
+  "completeness": {
+    "reviewer": "codex",
+    "state": "incomplete",
+    "unchecked": [
+      "R4",
+      "R15"
+    ]
+  }
+}

@@ -11,9 +11,10 @@ import { REVIEW_SCHEMA } from "../wizard/contracts/agents.js"
 import { PR_MARKERS } from "../wizard/contracts/git-host.js"
 import { classifyReview, isReviewResult, parseBriefReview, printedReviewBrief, READ_CHECK_REDACTED, reviewerBrief } from "./brief.js"
 import type { ReviewResult } from "../wizard/contracts/agents.js"
+import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 import { lineInHunk, parseUnifiedDiff } from "./diff.js"
 import { commentTrust, parseReviewMarker } from "./markers.js"
-import { buildFinalComment, buildPrBody, buildReviewPost, excerpt, neutralizeCheckboxes, neutralizeHtmlComments, redactIdsNotInDiff } from "./post.js"
+import { buildFinalComment, buildPrBody, buildReviewPost, excerpt, jobStateCell, neutralizeCheckboxes, neutralizeHtmlComments, redactIdsNotInDiff } from "./post.js"
 import { collectEnvLiterals, createScanner, mostlyRedacted } from "./scan.js"
 import { triage, type TriageContext, type TriageItem } from "./triage.js"
 
@@ -373,5 +374,19 @@ describe("§3y.7 classifyReview: the read-check nonce", () => {
     expect(JSON.stringify(classifyReview({ ...quoted, summary: `I saw ${NONCE}` }, NONCE).review)).not.toContain(NONCE)
     // No nonce (no read-check this run) redacts nothing.
     expect(classifyReview(quoted, "").review.findings[0]!.body).toContain(NONCE)
+  })
+})
+
+describe("§3x.2 the PR checklist names why a job is not done", () => {
+  const job: Omit<ChecklistItem, "state"> = { id: "preview_guard:ga4", jobId: "preview_guard", n: 7, title: "Keep previews silent: GA4", owner: "agent", trigger: { finding: "", evidence: [] }, allow: { files: [], create: [] }, checks: [] }
+  it("failed / blocked with a note → '<state>: <note>'", () => {
+    expect(jobStateCell({ ...job, state: "failed", note: "the wizard's safety check refused app/layout.tsx:29: the edit uses a provider id as a default or fallback value (||, ?? or ?:)" })).toBe(
+      "failed: the wizard's safety check refused app/layout.tsx:29: the edit uses a provider id as a default or fallback value (||, ?? or ?:)"
+    )
+    expect(jobStateCell({ ...job, state: "blocked", blockedReason: "agent_blocked", note: "the agent said it is blocked: no helpers" })).toBe("blocked: the agent said it is blocked: no helpers")
+  })
+  it("negative: a done job, or one with no note, keeps today's words", () => {
+    expect(jobStateCell({ ...job, state: "done_in_code", note: "old note" })).toBe("done in code")
+    expect(jobStateCell({ ...job, state: "blocked", blockedReason: "needs_you" })).toBe("blocked (needs you)")
   })
 })

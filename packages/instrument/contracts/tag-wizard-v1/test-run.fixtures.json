@@ -43,7 +43,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -85,6 +85,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000001.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -139,7 +140,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -235,7 +237,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -277,6 +279,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000002.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -286,6 +289,7 @@
           },
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000003.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -340,7 +344,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -437,7 +442,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -479,6 +484,7 @@
         "events": [
           {
             "tid": "G-OTHER9999",
+            "cid": "1000000004.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -533,7 +539,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -630,7 +637,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -672,6 +679,7 @@
         "events": [
           {
             "tid": "G-FAKE00002",
+            "cid": "1000000005.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -726,7 +734,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -822,7 +831,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": true,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -864,6 +873,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000006.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -918,7 +928,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -1018,7 +1029,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": true,
@@ -1161,7 +1172,7 @@
       "startedAt": "2026-10-02T09:29:00.000Z",
       "finishedAt": "2026-10-02T09:30:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -1325,7 +1336,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -1478,7 +1489,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -1664,7 +1675,7 @@
       "startedAt": "2026-10-02T09:29:00.000Z",
       "finishedAt": "2026-10-02T09:30:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -1700,6 +1711,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000007.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -1869,7 +1881,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -1911,6 +1923,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000008.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -1965,7 +1978,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -2068,7 +2082,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -2110,6 +2124,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000009.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -2164,7 +2179,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [
@@ -2279,7 +2295,7 @@
       "startedAt": "2026-10-02T09:29:00.000Z",
       "finishedAt": "2026-10-02T09:30:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -2315,6 +2331,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000010.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -2369,7 +2386,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -2484,7 +2502,7 @@
       "startedAt": "2026-10-02T09:31:00.000Z",
       "finishedAt": "2026-10-02T09:32:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -2520,6 +2538,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000011.1759500000",
             "en": "page_view",
             "dlHost": "acme-store-git-infinite-tag-2026-10-02-7f3c2a-acme.vercel.app",
             "transport": "post",
@@ -2642,7 +2661,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -2684,6 +2703,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000012.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -2725,7 +2745,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -2822,7 +2843,7 @@
       "startedAt": "2026-10-02T09:40:00.000Z",
       "finishedAt": "2026-10-02T09:41:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -2864,6 +2885,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000013.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -2918,7 +2940,8 @@
             "eid": null,
             "method": "GET",
             "status": 200,
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -3018,7 +3041,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -3060,6 +3083,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000014.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -3114,7 +3138,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           },
           {
             "pixelId": "1234567890123456",
@@ -3122,7 +3147,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -3224,7 +3250,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -3266,6 +3292,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000015.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -3332,7 +3359,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -3425,7 +3453,7 @@
       "startedAt": "2026-10-02T09:10:00.000Z",
       "finishedAt": "2026-10-02T09:11:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -3467,6 +3495,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000016.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -3521,7 +3550,8 @@
             "eid": null,
             "method": "GET",
             "status": "cancelled",
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -3618,7 +3648,7 @@
       "startedAt": "2026-10-02T09:40:00.000Z",
       "finishedAt": "2026-10-02T09:41:00.000Z",
       "environment": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Infinite/0.4.1 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36 InfiniteVerifyCheck/1 (+https://infinite.fast; analytics monitor)",
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "automationDetected": false,
         "visibilityState": "visible",
         "blockedBySiteBotRules": false,
@@ -3660,6 +3690,7 @@
         "events": [
           {
             "tid": "G-FAKE00001",
+            "cid": "1000000017.1759500000",
             "en": "page_view",
             "dlHost": "www.acme-store.com",
             "transport": "post",
@@ -3714,7 +3745,8 @@
             "eid": null,
             "method": "GET",
             "status": 403,
-            "loadLabel": "home"
+            "loadLabel": "home",
+            "afterNav": false
           }
         ],
         "console": [],
@@ -3768,6 +3800,202 @@
       "meta": {
         "state": "problem",
         "because": "meta_tr_rejected"
+      }
+    }
+  },
+  {
+    "id": "dry_live_meta_spa_page_view_missing",
+    "note": "§3x.3 (F6): the load navigated once (GA4 counted the page change) and the site's Meta pixel sent its PageView on load only: Meta counts only the first page of a visit.",
+    "request": {
+      "protocolVersion": 1,
+      "requestId": "00000000-0000-4000-8000-0000000000f6",
+      "mode": "dry_live",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "productionHost": "acme-store.com",
+      "targets": [
+        {
+          "url": "https://acme-store.com/",
+          "label": "home"
+        }
+      ],
+      "expect": {
+        "ga4": [
+          "G-FAKE00001",
+          "G-FAKE00002"
+        ],
+        "posthog": {
+          "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+          "apiHost": "https://us.i.posthog.com"
+        },
+        "meta": [
+          "1234567890123456"
+        ],
+        "infinite": {
+          "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+          "collectPath": "/infinite/ledger"
+        }
+      },
+      "consentSeed": null,
+      "spaNavigation": {
+        "path": "/pricing"
+      },
+      "deadlineMs": 120000
+    },
+    "result": {
+      "mode": "dry_live",
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "startedAt": "2026-10-02T09:10:00.000Z",
+      "finishedAt": "2026-10-02T09:11:00.000Z",
+      "environment": {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        "automationDetected": false,
+        "visibilityState": "visible",
+        "blockedBySiteBotRules": false,
+        "previewProtected": false,
+        "consentSeeded": false,
+        "cmpDetected": null
+      },
+      "loads": [
+        {
+          "label": "home",
+          "url": "https://acme-store.com/",
+          "finalUrl": "https://www.acme-store.com/",
+          "status": 200,
+          "rendered": true,
+          "managedMarkerSeen": false,
+          "redirects": [
+            {
+              "from": "https://acme-store.com/",
+              "to": "https://www.acme-store.com/",
+              "status": 308
+            }
+          ]
+        }
+      ],
+      "requests": {
+        "total": 64,
+        "cancelled": 5,
+        "otherBeacons": [
+          {
+            "host": "bat.bing.com",
+            "pathClass": "action",
+            "method": "GET",
+            "resourceType": "image",
+            "cancelled": true
+          }
+        ]
+      },
+      "ga4": {
+        "events": [
+          {
+            "tid": "G-FAKE00001",
+            "cid": "1000000001.1759500000",
+            "en": "page_view",
+            "dlHost": "www.acme-store.com",
+            "transport": "post",
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
+          }
+        ]
+      },
+      "posthog": {
+        "events": [
+          {
+            "projectKey": "phc_FAKEtestProjectKeyNotReal000",
+            "event": "$pageview",
+            "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+            "host": "www.acme-store.com",
+            "endpointHost": "us.i.posthog.com",
+            "sameOrigin": false,
+            "libCustomApiHost": false,
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
+          }
+        ],
+        "bootRequests": [
+          {
+            "path": "/flags",
+            "status": 200
+          }
+        ]
+      },
+      "infinite": {
+        "events": [
+          {
+            "siteSourceKey": "site_FAKEacmeStoreSourceKey",
+            "eventName": "site_page_view",
+            "eventId": "evt_FAKE0001",
+            "nav": false,
+            "status": "cancelled",
+            "loadLabel": "home"
+          }
+        ]
+      },
+      "meta": {
+        "configRequests": [
+          "1234567890123456"
+        ],
+        "tr": [
+          {
+            "pixelId": "1234567890123456",
+            "ev": "PageView",
+            "eid": null,
+            "method": "GET",
+            "status": "cancelled",
+            "loadLabel": "home",
+            "afterNav": false
+          }
+        ],
+        "console": [],
+        "fbc": {
+          "present": false,
+          "value": null,
+          "domain": null
+        },
+        "fbp": {
+          "present": true
+        }
+      },
+      "csp": {
+        "violations": []
+      },
+      "clicks": [],
+      "pii": [],
+      "serverLaneProbe": null,
+      "markers": {
+        "infiniteEventIds": [
+          "evt_FAKE0001"
+        ],
+        "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+        "metaEventIds": []
+      }
+    },
+    "context": {
+      "consentMode": "not_required",
+      "installedTools": [
+        "infinite",
+        "ga4",
+        "posthog",
+        "meta"
+      ],
+      "envSourcedIds": [],
+      "spaNavigation": true
+    },
+    "expected": {
+      "infinite": {
+        "state": "pass"
+      },
+      "ga4": {
+        "state": "pass"
+      },
+      "posthog": {
+        "state": "pass"
+      },
+      "meta": {
+        "state": "problem",
+        "because": "meta_spa_page_view_missing"
       }
     }
   }

@@ -5,6 +5,8 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
+import { computeVerdict } from "./verdict.js"
+
 import { gradeReasonCode, gradeWords } from "./before-column.js"
 import { closingScreenWaits, learnFactsFrom, outroWidth } from "./command.js"
 import type { CheckResult, ChecklistItem } from "./contracts/jobs.js"
@@ -72,24 +74,28 @@ describe("F2: the final table never cuts a cell", () => {
 describe("QA #6 and #7: the closing verdict, the duration and ONE run id", () => {
   it("the first line is the verdict, the display id and how long it took; the run id's first 8 are not shown beside it", () => {
     const text = renderTerminal(example, 160, { displayId: "r-49b8", durationMs: 9 * 60_000 })
-    expect(text.split("\n")[0]).toBe("◆ www.acme-store.com collects analytics properly now · 3 checks still wait for real visitors or the 7-day check-in · run r-49b8 · 9 min")
+    expect(text.split("\n")[0]).toBe("◆ www.acme-store.com collects analytics properly now · 3 checks wait for real visitors or the 7-day check-in · run r-49b8 · 9 min")
     expect(text).not.toContain(example.runId.slice(0, 8))
     // With no display id the run id's first 8 are the id (the report alone knows no other).
     expect(renderTerminal(example, 160).split("\n")[0]).toContain(`run ${example.runId.slice(0, 8)}`)
   })
 
-  it("the verdict is only as good as the 'Proven live' column (negatives: a problem, no proof, not checked yet)", () => {
-    expect(verdictLine(example)).toMatch(/collects analytics properly now/)
+  it("the closing line IS the verdict's headline; the verdict reads the columns (negatives: a problem, no proof, not checked yet)", () => {
+    expect(verdictLine(example)).toBe(example.verdict!.headline)
+    const verdictOf = (report: ReportV2) =>
+      computeVerdict({ site: "www.acme-store.com", finishLine: report.finishLine, provenLive: report.columns.proven_live, jobs: [], openFindings: [], tools: null, installedUnknown: null }).headline
     const problem = structuredClone(example)
     problem.finishLine.find((line) => line.id === "each_tool_once")!.cells.proven_live.state = "problem"
-    expect(verdictLine(problem)).toBe('www.acme-store.com: 1 problem left on the live site (the "Proven live" column says which)')
+    expect(verdictOf(problem)).toBe("www.acme-store.com does not collect properly yet: 1 problem on the live site (each tool once)")
     const unproven = structuredClone(example)
     unproven.finishLine.find((line) => line.id === "proof_from_real_visit")!.cells.proven_live.state = "undetermined"
-    expect(verdictLine(unproven)).toBe("www.acme-store.com: no problem found, but the live test could not confirm every tool")
+    expect(verdictOf(unproven)).toBe("www.acme-store.com: the real visit ran, but its receipts are not in")
     const waiting = structuredClone(example)
     waiting.columns.proven_live = { measuredAt: null, sha: null, pending: "deploy" }
-    expect(verdictLine(waiting)).toBe("www.acme-store.com: set up in the pull request · not checked live yet (waiting for the deploy)")
-    for (const report of [problem, unproven, waiting]) expect(verdictLine(report)).not.toMatch(/properly now|verified|proven\b/)
+    expect(verdictOf(waiting)).toBe("www.acme-store.com: set up in the pull request · not checked live yet (waiting for the deploy)")
+    for (const report of [problem, unproven, waiting]) expect(verdictOf(report)).not.toMatch(/properly now|verified|proven\b/)
+    // A report with no verdict (never a tag report) says it was not graded; it never guesses one.
+    expect(verdictLine({ ...example, verdict: null })).toBe("www.acme-store.com: not graded yet · run npx infinite-tag to finish the live checks")
   })
 
   it("the duration is said in the largest honest unit", () => {
@@ -160,10 +166,23 @@ describe("QA #20: the jobs that are not done are named", () => {
         item("A code job", "blocked", "needs_you", "code")
       ])
     ).toEqual([
-      "! Not done: Server-side sign-up event: needs your answer",
-      "! Not done: Remove the second GA4 tag: the agent did not finish it",
-      "! Not done: Join logged-in visitors: the wizard's check did not pass"
+      "! Not done: Server-side sign-up event (needs your answer)",
+      "! Not done: Remove the second GA4 tag (the agent did not finish it)",
+      "! Not done: Join logged-in visitors (the wizard's check did not pass)"
     ])
+  })
+
+  it("§3x.2 the item's own note is the reason when the wizard kept one (a safety-check refusal is never 'outside the job's files')", () => {
+    const refused = { ...item("Keep previews silent: GA4", "failed"), note: "the wizard's safety check refused app/layout.tsx:29: the edit uses a provider id as a default or fallback value (||, ?? or ?:)" }
+    expect(notDoneLines([refused])).toEqual([
+      "! Not done: Keep previews silent: GA4 (the wizard's safety check refused app/layout.tsx:29: the edit uses a provider id as a default or fallback value (||, ?? or ?:))"
+    ])
+  })
+
+  it("the closing list names fewer jobs when the step already said more (the terminal keeps 8 result lines; an incident is never pushed out)", () => {
+    const failed = ["A", "B", "C", "D", "E", "F", "G"].map((name) => ({ ...item(`Job ${name}`, "failed"), id: `job:${name}` }))
+    expect(notDoneLines(failed)).toHaveLength(7)
+    expect(notDoneLines(failed, 5)).toEqual([...["A", "B", "C", "D", "E"].map((name) => `! Not done: Job ${name} (the wizard's check did not pass)`), "! …and 2 more not done: the pull request lists every job"])
   })
 
   it("parts of one job that ended the same way are one line, with how many parts", () => {
@@ -173,7 +192,7 @@ describe("QA #20: the jobs that are not done are named", () => {
         { ...item("Keep previews silent (existing tags)", "blocked", "agent_blocked"), id: "preview_guard:posthog" },
         { ...item("Keep previews silent (existing tags)", "failed"), id: "preview_guard:meta" }
       ])
-    ).toEqual(["! Not done: Keep previews silent (existing tags) (2 parts): the agent did not finish it", "! Not done: Keep previews silent (existing tags): the wizard's check did not pass"])
+    ).toEqual(["! Not done: Keep previews silent (existing tags) (2 parts: the agent did not finish it)", "! Not done: Keep previews silent (existing tags) (the wizard's check did not pass)"])
   })
 
   it("more than six are counted, and a clean run adds nothing (negative)", () => {

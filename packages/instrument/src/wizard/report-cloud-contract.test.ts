@@ -158,6 +158,7 @@ const pass = (id: string): CheckResult => ({ checkId: id, state: "pass", tier: "
 const provenInput = (overrides: Partial<Parameters<typeof buildProvenColumn>[0]> = {}): Parameters<typeof buildProvenColumn>[0] => ({
   runId: RUN_ID,
   mergeSha: MERGE_SHA,
+    installed: null,
   at: "2026-10-02T09:44:00.000Z",
   keys: keysFixture(),
   expect: { ga4: ["G-ACME000001"], posthog: { projectKey: "phc", apiHost: "https://us.i.posthog.com" }, meta: ["1234567890123456"], infinite: { siteSourceKey: "s", collectPath: "/c" } },

@@ -134,7 +134,48 @@ export function buildReviewPost(input: {
  * What happened to a FIX on its thread: `fixed` (committed, and the wizard's checks passed), `unverified`
  * (committed and pushed, but the required checks had not finished), or `not_fixed`.
  */
-export type FixReplyState = { kind: "fixed"; sha: string } | { kind: "unverified"; sha: string } | { kind: "not_fixed" }
+export type FixReplyState =
+  | { kind: "fixed"; sha: string }
+  | { kind: "unverified"; sha: string }
+  | { kind: "not_fixed"; outcome?: NotFixedOutcome; why?: string | null }
+
+/**
+ * §3x.3 / DECISIONS §1.5 Why a FIX stayed open, as it really happened: the round ran out of time, the agent could not use
+ * its tools, it stopped with an error, it finished without a change, or its change failed the wizard's checks.
+ */
+export type NotFixedOutcome = "timeout" | "toolless" | "error" | "no_change" | "checks_failed" | "undone" | "gate_refused" | "blocked"
+
+/**
+ * The one wording of a not-fixed reply (thread reply, run note and terminal line say the same words). Review P1-4: a
+ * round whose change the wizard UNDID is never "before changing anything" / "without changing anything":
+ *   - `undone`: the agent stopped (out of time, an error, no tools) mid-change; `why` = what stopped it and the files;
+ *   - `gate_refused`: the post-turn safety check refused every change; `why` = the gate's own note;
+ *   - `blocked`: the fence undid every change (outside the job's files, consent); `why` = the block's note.
+ */
+export function notFixedReply(outcome: NotFixedOutcome, why?: string | null): string {
+  const said = why ? stripControl(why).slice(0, 200) : null
+  switch (outcome) {
+    case "undone":
+      return `Not fixed: ${said ?? "the agent stopped before it finished"}. It stays open.`
+    case "gate_refused":
+      return `Not fixed: ${said ?? "the wizard's safety check refused the agent's change"}, so the change was undone. It stays open.`
+    case "blocked":
+      return `Not fixed: ${said ?? "the wizard undid the agent's change"}. It stays open.`
+    case "timeout":
+      return "Not fixed: the agent ran out of its 5 minutes before changing anything. It stays open."
+    case "toolless":
+      return "Not fixed: the agent could not use its tools. It stays open."
+    case "error":
+      return "Not fixed: the agent stopped with an error before changing anything. It stays open."
+    case "no_change":
+      return "Not fixed: the agent finished without changing anything. It stays open."
+    case "checks_failed":
+      return `Not fixed this round: the agent's change did not pass the wizard's checks${why ? ` (${stripControl(why).slice(0, 200)})` : ""}. It stays open.`
+  }
+}
+
+/** §3x.3 The label of a finding on Infinite's own files (triage `INFINITE`). */
+export type InfiniteOwnLabel = "Infinite's own code" | "the wizard's own change"
 
 /** The reply on a thread (never re-read as feedback). */
 export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixReplyState | null): string {
@@ -146,7 +187,9 @@ export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixR
         ? `Fixed in ${fix.sha.slice(0, 7)}; the wizard re-ran its checks and the rehearsal on that commit.`
         : fix?.kind === "unverified"
           ? `Changed in ${fix.sha.slice(0, 7)}. The required checks had not finished, so the wizard has not marked it done; it stays open.`
-          : "Not fixed this round: the agent's change did not pass the wizard's checks. It stays open."
+          : notFixedReply(fix?.kind === "not_fixed" ? (fix.outcome ?? "checks_failed") : "checks_failed", fix?.kind === "not_fixed" ? fix.why : null)
+      : decision.action === "INFINITE"
+        ? `This is ${decision.label ?? "Infinite's own code"} (${safeText(scanner, decision.item.path ?? "general")}), which the wizard never hands to your agent. The finding is recorded in this run's report for Infinite to fix.`
       : decision.action === "ASK"
         ? `Waiting on the repo owner: ${safeText(scanner, decision.reason)}`
         : safeText(scanner, decision.reason)
@@ -168,10 +211,20 @@ export interface FinalCommentInput {
   scanner: Scanner
 }
 
+/**
+ * §3x.2 A job's cell in the PR checklist: a job that did not get done says WHY in the wizard's own words
+ * (`failed: <note>` / `blocked: <note>`), never only a state code ("blocked (outside allowlist)").
+ */
+export function jobStateCell(job: ChecklistItem): string {
+  const state = job.state.replace(/_/g, " ")
+  if ((job.state === "failed" || job.state === "blocked") && job.note) return `${state}: ${job.note}`
+  return `${state}${job.blockedReason ? ` (${job.blockedReason.replace(/_/g, " ")})` : ""}`
+}
+
 /** §3g.4 step 9: the before/after table, the checklist states, declined items with reasons, and what the user decides. */
 export function buildFinalComment(input: FinalCommentInput): string {
   const jobs = input.jobs
-    .map((job) => `| ${escapeCell(job.title)} | ${job.state.replace(/_/g, " ")}${job.blockedReason ? ` (${job.blockedReason.replace(/_/g, " ")})` : ""} |`)
+    .map((job) => `| ${escapeCell(job.title)} | ${escapeCell(jobStateCell(job))} |`)
     .join("\n")
   const declined = input.decisions
     .filter((decision) => decision.action === "DECLINE")

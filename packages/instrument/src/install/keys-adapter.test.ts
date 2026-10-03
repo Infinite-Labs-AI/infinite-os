@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 import { fakeKeys, IDS, notConnectedKeys } from "../../test/wizard/o7-fakes.js"
 import type { TagKeys } from "../wizard/contracts/bridge.js"
 
-import { artifactsFromKeys, artifactsFromKeysDetailed, manifestIdsFor, wizardInstallWorkspaceId } from "./keys-adapter.js"
+import { artifactsFromKeys, artifactsFromKeysDetailed, manifestIdsFor, withConversionHelpers, wizardInstallWorkspaceId } from "./keys-adapter.js"
 
 const decided = { consentMode: "not_required" as const, conversionNames: [], privacyText: null, npmInstall: null }
 
@@ -134,5 +134,14 @@ describe("the wizard install's manifest workspaceId and ids (§3e.6, R1-15)", ()
       infinite: { siteSourceKey: IDS.siteSource }
     })
     expect(manifestIdsFor({})).toEqual({ ga4: [], posthog: null, meta: [], infinite: null })
+  })
+})
+
+describe("withConversionHelpers: THE one place conversions.helpers is set (review P3-4)", () => {
+  const infinite = { siteSourceKey: "site_0123456789abcdef0123456789abcdef", consentMode: "not_required" as const, collectPath: "/c", consentStorageKey: "k" }
+  it("helpers exactly when a conversion is approved AND a tool is written; dropped otherwise", () => {
+    expect(withConversionHelpers({ infinite } as never, ["signup"])).toMatchObject({ conversions: { helpers: true } })
+    expect(withConversionHelpers({ infinite } as never, [])).not.toHaveProperty("conversions")
+    expect(withConversionHelpers({ conversions: { helpers: true } } as never, ["signup"])).not.toHaveProperty("conversions")
   })
 })
