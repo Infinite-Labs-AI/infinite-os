@@ -604,6 +604,9 @@ export function InkInteractiveSessionApp({
     initialFocus?.documentOpen && initialPendingConfirmations.length ? { ...CARD_UI_START, documentOpen: true } : CARD_UI_START);
   // The opening focus applies to the first head card only.
   const initialDocumentOpen = useRef(initialFocus?.documentOpen === true);
+  // Where ↑/↓ moved the details pane while the head card waits (W3L2-M2);
+  // null = the pane opens on the card, so what its OK key approves is on screen.
+  const [cardPaneScroll, setCardPaneScroll] = useState<number | null>(null);
   // The latest finished turn's answer views keep their keys (j/k, 1–9, →, m, ?)
   // until the next line is submitted (views/focus.ts). The views themselves live
   // in the turn store (`turnState.views`), cleared when the turn commits.
@@ -970,6 +973,7 @@ export function InkInteractiveSessionApp({
   useLayoutEffect(() => {
     setExplainOpen(false);
     setCardUi(cardUiStart(headConfirmAction));
+    setCardPaneScroll(null);
   }, [headConfirmAction]);
   // The opening focus (`initialFocus.documentOpen`) opens the first head card's documents, once.
   useLayoutEffect(() => {
@@ -1089,6 +1093,7 @@ export function InkInteractiveSessionApp({
         rows: turnRows,
         compact,
         ...(headCardLines ? { details: headCardLines } : {}),
+        ...(headCardLines && cardPaneScroll !== null ? { cardScroll: cardPaneScroll } : {}),
         ...(statusViews.length ? { statusViews } : {}),
         ...(captionOpen ? { captionOpen: true } : {}),
         ...(workingState ? { nowMs: workingClock, running: true } : {}),
@@ -1098,7 +1103,7 @@ export function InkInteractiveSessionApp({
       cache.set(cacheKey, drawn);
       return drawn;
     };
-  }, [agentTitle, captionOpen, clock, columns, headCardLines, headConfirmAction, history, liveKeptSteps, questionSplits, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
+  }, [agentTitle, captionOpen, cardPaneScroll, clock, columns, headCardLines, headConfirmAction, history, liveKeptSteps, questionSplits, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
   // Beside a drawn turn, the transcript carries only what the drawn turn does
   // not show: its Steps are the drawn turn's own strip, and while it runs its
   // arriving answer and calls are in it too, so nothing is drawn twice.
@@ -1107,7 +1112,9 @@ export function InkInteractiveSessionApp({
     [agentTitle, turnState]
   );
   // (end of the drawn turn)
-  const cardKeyCtx = headCard ? headCard.keyCtx : confirmKeys?.ctx ?? null;
+  // The card's keys as the keymap resolves them, before the drawn turn says
+  // whether the card is on screen (`cardKeyCtx`, below, takes its OK key off).
+  const headCardKeyCtx = headCard ? headCard.keyCtx : confirmKeys?.ctx ?? null;
   // While a card field is being typed, the composer takes the keys (Enter sets
   // the value, Esc cancels it); the card itself takes none.
   const cardFieldActive = Boolean(headCard && cardUi.fieldEntry);
@@ -1127,10 +1134,12 @@ export function InkInteractiveSessionApp({
         : !facts && committedFocus
           ? viewKeyHints(committedFocus.state, committedFocus.facts)
           : [];
+    // A card scrolled off screen offers no OK key (W3L2-M2): `n` stays, `p` waits for the card.
+    const cardOff = turn?.cardShown === false;
     const stateHints = headCard
-      ? headCard.keys
+      ? cardOff ? headCard.keys.filter((hint) => !approvesCard(hint)) : headCard.keys
       : confirmKeys
-        ? keyBarHints(confirmKeys.ctx)
+        ? keyBarHints(cardOff ? cardKeysOffScreen(confirmKeys.ctx) : confirmKeys.ctx)
         : viewHints.length
           ? viewHints
           : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
@@ -2097,6 +2106,21 @@ export function InkInteractiveSessionApp({
   liveFactsRef.current = liveTurn?.focused?.facts ?? null;
   const keyHints = keyHintsFor(liveTurn);
   const keyBarRows = keyBarRowCount(keyHints, columns);
+  // The card's keys: its OK key (and `r`, which approves again) only while the
+  // card is on screen (W3L2-M2). Scrolled away, `p` does nothing and `n` still
+  // dismisses: one key never approves a card the user cannot see.
+  const cardKeyCtx = headCardKeyCtx && liveTurn?.cardShown === false ? cardKeysOffScreen(headCardKeyCtx) : headCardKeyCtx;
+  // ↑/↓ (PgUp/PgDn) move the details pane while the card waits, when the pane
+  // is cut: the views above the card stay readable. At either end the key is spent.
+  const scrollCardPane = (key: Key): boolean => {
+    const pane = headCardLines ? liveTurn?.pane : null;
+    if (!pane || !(key.upArrow || key.downArrow || key.pageUp || key.pageDown) || key.ctrl || key.meta) {
+      return false;
+    }
+    const step = key.pageUp || key.pageDown ? Math.max(1, pane.shown) : 1;
+    setCardPaneScroll(key.downArrow || key.pageDown ? pane.above + Math.min(step, pane.below) : pane.above - Math.min(step, pane.above));
+    return true;
+  };
   const liveLatest = useMemo<CommittedEntry | null>(
     () => liveTurn ? { id: "live-turn", lines: liveTurn.lines } : null,
     [liveTurn]
@@ -2313,6 +2337,7 @@ export function InkInteractiveSessionApp({
         onConfirmActionDecline={() => handleCardAction({ type: "dismiss" })}
         onConfirmActionExplain={() => (liveTurn?.folded ? setCaptionOpen(true) : handleCardAction({ type: "explain" }))}
         onConfirmCardKey={handleCardAction}
+        onConfirmPaneKey={scrollCardPane}
         connectConfirmActive={Boolean(pendingConnectConfirm)}
         fieldPromptActive={fieldPromptActive}
         fieldChoiceActive={Boolean(currentConnectField?.choices)}
@@ -3186,6 +3211,7 @@ function InkLineInput({
   onConfirmActionDecline,
   onConfirmActionExplain,
   onConfirmCardKey,
+  onConfirmPaneKey,
   onChoiceCommit,
   onChoiceNext,
   onChoicePrevious,
@@ -3241,6 +3267,8 @@ function InkLineInput({
   onConfirmActionExplain(): void;
   /** Any other card key the keymap resolved (v, 1–9, space, r, e, c); never approves or declines. */
   onConfirmCardKey?(action: KeyAction): void;
+  /** ↑/↓ (PgUp/PgDn) while a card waits: move the cut details pane; true = the key was spent. */
+  onConfirmPaneKey?(key: Key): boolean;
   onChoiceCommit(): void;
   onChoiceNext(): void;
   onChoicePrevious(): void;
@@ -3414,6 +3442,10 @@ function InkLineInput({
     // decline. Guarded BEFORE the plain composer so no keystroke leaks into the
     // input line.
     if (confirmActionActive) {
+      // ↑/↓ move a cut details pane (the card has no use for them); never a decision.
+      if (onConfirmPaneKey?.(key)) {
+        return;
+      }
       const action = confirmKeys ? resolveKey(input, key, confirmKeys) : { type: "none" as const };
       if (action.type === "ok") {
         onConfirmActionApprove();
@@ -3784,6 +3816,16 @@ function composerRowsFor(text: string, columns: number, theme: Theme): number {
 
 /** A card never pages below this many rows, however small the window. */
 const CARD_MIN_ROWS = 6;
+
+/** A card's keys with its approving keys off (W3L2-M2): no OK key, no `r` (which approves again); `n` stays. */
+function cardKeysOffScreen(ctx: KeyContext): KeyContext {
+  return { ...ctx, okKey: null, caps: { ...ctx.caps, retry: false } };
+}
+
+/** A card hint that approves: its OK key, or `r` (sends the approve again). */
+function approvesCard(hint: { key: string; ok?: boolean }): boolean {
+  return hint.ok === true || hint.key === "r";
+}
 
 /**
  * Rows the overlays between the transcript and the composer draw right now
