@@ -66,6 +66,8 @@ export interface ViewKeyFacts {
   more: string | null;
   /** The state's fix ask Enter sends (only when no row has an ask of its own). */
   fixAsk: string | null;
+  /** What the bar calls that ask (`check first` for a reconcile step); absent = `fix`. */
+  fixLabel?: string;
   /** The live region has more lines below (`m` pages it when there is no `more` ask). */
   livePageNext: boolean;
   /** What `c` copies on each selectable row (null = nothing on that row). */
@@ -196,6 +198,7 @@ export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender
     explain: viewText(view.explain) !== "" || (managedApproval(view)?.summary ?? "") !== "" || changeCardSummary(view) !== "",
     more: turnAsk(truncatedMoreAsk(view)),
     fixAsk: turnAsk(render.fixAsk),
+    ...(viewText(render.fixLabel) ? { fixLabel: viewText(render.fixLabel) } : {}),
     livePageNext,
     rowCopies: (render.rowCopies ?? []).map((text) => viewText(text) || null),
     copy: viewText(render.copyText) || null,
@@ -484,7 +487,7 @@ export function viewKeyHints(
     if (facts.rowAsks.some((ask) => ask !== null)) {
       hints.push({ key: "enter", label: "open" });
     } else if (facts.fixAsk) {
-      hints.push({ key: "enter", label: "fix" });
+      hints.push({ key: "enter", label: facts.fixLabel || "fix" });
     }
   }
   if (facts.tabs > 1) hints.push({ key: `1-${Math.min(9, facts.tabs)}`, label: facts.tabNoun || "switch tab" });

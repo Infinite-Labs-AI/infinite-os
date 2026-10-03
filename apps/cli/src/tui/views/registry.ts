@@ -21,6 +21,7 @@ import {
   stateFixAsk,
   stateReasonLines,
   truncationLines,
+  turnAsk,
   viewText
 } from "./primitives.js";
 import { managedApproval, managedApprovalLines, managedSummaryLines } from "./managed.js";
@@ -47,7 +48,7 @@ import { renderChange } from "./change.js";
 import { renderImages } from "./images.js";
 import { renderJob } from "./job.js";
 import { renderLaunch } from "./launch.js";
-import { awaitingApp, isSettledWithoutRunning, reconcileLines } from "./outcome.js";
+import { awaitingApp, isSettledWithoutRunning, reconcileAsk, reconcileLines } from "./outcome.js";
 
 type KindRendererMap = { [K in AnswerViewKind]?: KindRenderer<K> };
 
@@ -82,6 +83,9 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
   const view = printableImagesView(given);
   const shellCtx: ViewRenderCtx = { ...ctx, width: Math.max(1, Math.floor(ctx.width)) };
   const body = renderKindBody(view, shellCtx);
+  if (view.kind === "quiet" && quietSaysWhy(view)) {
+    return quietStopRender(view, shellCtx);
+  }
   if (view.kind === "quiet") {
     // A quiet call that failed (the app's generic failure view: its title is
     // the tool's name, its reason a developer's error) draws nothing of its
@@ -159,6 +163,55 @@ function openFor(view: AnswerViewV1, body: KindRender | null, ctx: ViewRenderCtx
 }
 
 type AppOpenTargetOf = NonNullable<KindRender["openLink"]>;
+
+/**
+ * The states in which a quiet call did NOT do its thing for a reason the
+ * person must read (TJ-1): not sure it happened, blocked, out of budget, not
+ * connected, expired, only in Cmd+L or in the app. Its Steps row alone would
+ * lose the reason (and, for `outcome_unknown`, the reconcile step), so the
+ * view draws its head and reason like any other view. A plain `failed` stays
+ * the app's generic failure view (its reason a developer's, run-2 M6): its
+ * Steps row says it.
+ */
+const QUIET_STOP_STATES: ReadonlySet<string> = new Set([
+  "outcome_unknown", "blocked", "hit_limit", "not_connected", "expired", "cmdl_only", "finish_in_app"
+]);
+
+/** Whether a quiet view stands for a call that stopped for a reason it must show (`QUIET_STOP_STATES`). */
+function quietSaysWhy(view: AnswerViewV1): boolean {
+  return QUIET_STOP_STATES.has(view.state) && (isRecord(view.stateReason) || isRecord(view.reconcile));
+}
+
+/**
+ * A quiet call that stopped (TJ-1, r4 flow-email-04 / flow-images-05): its
+ * head (`stateReason.short`, else the state's words), source, the reason's
+ * sentence and fix, and for `outcome_unknown` the reconcile step on Enter
+ * (`reconcile.ask`, a NEW user turn, named by `reconcile.label`). Never a
+ * retry: a quiet view has no OK key, so not even a safe resend offers one.
+ */
+function quietStopRender(view: AnswerViewV1, ctx: ViewRenderCtx): ViewRender {
+  const stateFix = stateFixAsk(view);
+  const reconcile = view.state === "outcome_unknown" && !stateFix ? turnAsk(reconcileAsk(view)) : null;
+  const fixAsk = stateFix ?? reconcile;
+  const label = reconcile && isRecord(view.reconcile) ? viewText(view.reconcile.label) : "";
+  return {
+    head: headLine(view, ctx),
+    source: sourceLine(view, ctx),
+    detail: [
+      ...explainLines(view, ctx),
+      ...stateReasonLines(view, ctx, stateFix !== null),
+      ...reconcileLines(view, ctx),
+      ...caveatLines(view, ctx)
+    ],
+    footnotes: [],
+    keys: [],
+    okKey: null,
+    rowCount: 0,
+    ...(fixAsk ? { fixAsk } : {}),
+    ...(label ? { fixLabel: label.toLowerCase() } : {}),
+    ...openFor(view, null, ctx)
+  };
+}
 
 /** The states a quiet view takes when its call failed (the app's failure view), not a quiet read. */
 const FAILED_QUIET_STATES: ReadonlySet<string> = new Set(["failed", "blocked", "hit_limit", "outcome_unknown", "not_connected", "expired", "cancelled"]);

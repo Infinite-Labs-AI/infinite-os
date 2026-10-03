@@ -84,6 +84,11 @@ export interface ViewRender {
    * Set by the shell only when no row has an ask of its own.
    */
   fixAsk?: string;
+  /**
+   * What the bar calls Enter's ask when it is not a fix: a quiet call not sure
+   * it happened sends its reconcile step (`check first`). Absent = `fix`.
+   */
+  fixLabel?: string;
   /** What `c` copies on each selectable row (a row's `copy`, else its URL); null = nothing. */
   rowCopies?: readonly (string | null)[];
   /** What `c` copies for the view as a whole (a minted link); used when the row has nothing. */
