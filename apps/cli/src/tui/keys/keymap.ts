@@ -275,8 +275,16 @@ export function keyBarShownHints(hints: readonly KeyHint[], options: KeyBarOptio
     seen.add(hint.key);
     shown.push(hint.barLabel ? { key: hint.key, label: hint.barLabel, ...(hint.ok ? { ok: true } : {}) } : hint);
   }
-  return [...shown, ...ALWAYS_KEY_HINTS.filter((hint) => hint.key !== "tab" || options.sides !== false)];
+  // A view's own `tab` words (`tab then o open`, focus.ts TJ-3) replace `switch side`
+  // in its place, and show whether or not there is a side: tab engages the view.
+  const tabWords = hints.find((hint) => hint.key === "tab" && !hint.chipOnly && hint.label !== TAB_HINT.label);
+  return [
+    ...shown,
+    ...ALWAYS_KEY_HINTS.flatMap((hint) => hint.key !== "tab" ? [hint] : tabWords ? [{ key: "tab", label: tabWords.label }] : options.sides !== false ? [hint] : [])
+  ];
 }
+
+const TAB_HINT = ALWAYS_KEY_HINTS.find((hint) => hint.key === "tab")!;
 
 /**
  * The bar as styled segments (terminal-r4 `K()` / `PK()`): each key a chip

@@ -473,7 +473,7 @@ export function viewKeyHints(
     return [];
   }
   if (state.focus === "composer") {
-    return [{ key: "tab", label: "switch side" }];
+    return [tabHint(state, facts)];
   }
   const hints: KeyHint[] = [];
   if (state.engaged && facts.approve && !state.approvalClosed) {
@@ -505,8 +505,31 @@ export function viewKeyHints(
   if (facts.explain) {
     hints.push({ key: "?", label: state.explainOpen ? "hide" : "what it does", ...(facts.explainInside ? { chipOnly: true } : {}) });
   }
-  hints.push({ key: "tab", label: "switch side" });
+  hints.push(tabHint(state, facts));
   return hints;
+}
+
+/**
+ * The bar's `tab` chip. Before the view is engaged, `o`, `w`, `m` and `c` are
+ * the first letter of a message (an empty prompt never captures a letter, as
+ * in any coding harness), so the resting bar says honestly what tab unlocks:
+ * ONE chip naming the first such key the view offers, by priority o > w > m >
+ * c (`tab then o open in Meta Ads`), in place of `tab switch side`. Engaged,
+ * or with nothing behind the gate, it is `tab switch side`. (TJ-3; r4's
+ * goldens draw `o open` at rest: a deliberate deviation for River's eval.)
+ */
+function tabHint(state: ViewFocusState, facts: ViewKeyFacts): KeyHint {
+  const unlocks = state.engaged && state.focus !== "composer" ? null : gatedKeyHint(state, facts);
+  return { key: "tab", label: unlocks ? `then ${unlocks.key} ${unlocks.label}` : "switch side" };
+}
+
+/** The first key the engagement gate holds back, by priority o > w > m > c (null = none). */
+function gatedKeyHint(state: ViewFocusState, facts: ViewKeyFacts): KeyHint | null {
+  if (facts.open) return { key: "o", label: openBarLabel(facts.open.label) };
+  if (facts.watch) return { key: "w", label: "watch" };
+  if (facts.more || facts.livePageNext) return { key: "m", label: "more" };
+  if (copyTextAt(facts, state.selected)) return { key: "c", label: "copy" };
+  return null;
 }
 
 function defaultFocusCtx(caps: KeyContext["caps"]): ViewRenderCtx {
