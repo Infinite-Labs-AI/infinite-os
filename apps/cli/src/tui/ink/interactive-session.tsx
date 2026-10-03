@@ -1003,11 +1003,15 @@ export function InkInteractiveSessionApp({
   // The card is the latest turn's details, so its budget is the live region's
   // (the window less the inventory, the composer and its rule, the drafts, the
   // key bar, the 2-row margin and the top bar with its rule), less the rows the
-  // turn shows beside it (`rowsBesideHeadCard`).
+  // turn shows beside it (`rowsBesideHeadCard`). The composer counts as the
+  // live region counts it (`reservedRows`): three rows only while a turn runs,
+  // else the rows it draws, so a waiting card is not paged for two rows the
+  // frame does not use (W3L2-M2: at 80x24 the pause card lost its keys to a page).
+  const cardComposerRows = composerRowsFor(inputValue, columns, t);
   const cardRowsAround = rows
     ? (showHomeInventory ? homeInventoryRowCount(columns, homeInventory) : 0)
       + COMPOSER_RULE_ROWS
-      + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(inputValue, columns, t))
+      + (transcriptBusy ? Math.max(DEFAULT_COMPOSER_ROWS, cardComposerRows) : cardComposerRows)
       + draftLines.length
       + 2
       + TOP_BAR_ROWS

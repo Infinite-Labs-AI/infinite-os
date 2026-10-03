@@ -41,8 +41,12 @@ function tallList(): ToolViewFrameV1 {
   return frame(raw, "list65");
 }
 
+/** The pause card with a source line and its target's parents (a path row), as the live card had: 11 rows drawn whole. */
 function pauseCard(): InSessionConfirmationAction {
-  const view = decodeAnswerView(fixtureJson("change-pause-card"));
+  const raw = fixtureJson("change-pause-card");
+  raw.body.target.path = ["Sample campaign · trials", "Sample ad set · broad"];
+  raw.provenance = { source: "Sample · ad", via: "our_db" };
+  const view = decodeAnswerView(raw);
   if (!view) throw new Error("change-pause-card does not decode");
   return {
     turnId: "turn_1", confirmationHandle: "h_1", summary: "Pause ad Demo A",
@@ -68,8 +72,12 @@ describe("a waiting card under a tall view is on screen whenever p is offered (f
       const session = runInkInteractiveSession({
         errorOutput: ttyOutput(cols, rows),
         input,
-        async onSubmitLine(line, _onProgress, _signal, onView) {
+        async onSubmitLine(line, onProgress, _signal, onView) {
           if (line === "/exit") return { exit: true, messages: [] };
+          // Two Steps rows, as the live turn had: a read, then the proposal waiting for the OK.
+          onProgress?.({ type: "tool.start", stage: "tool", message: "list_sample", toolId: "c1", name: "list_sample", words: { label: "checking your campaigns" } } as never);
+          onProgress?.({ type: "tool.complete", stage: "tool", message: "list_sample", toolId: "c1", name: "list_sample", status: "ok", words: { label: "checking your campaigns", result: "65 ads" } } as never);
+          onProgress?.({ type: "tool.complete", stage: "tool", message: "propose_pause", toolId: "c2", name: "propose_pause", status: "requires_confirmation", words: { label: "waiting for your OK", result: "pause on Meta" } } as never);
           onView?.(frame(fixtureJson("numbers-ads"), "week"));
           onView?.(tallList());
           return {
@@ -96,6 +104,11 @@ describe("a waiting card under a tall view is on screen whenever p is offered (f
       expect(offersPause(opened), keyBar(opened)).toBe(true);
       expect(opened.some((row) => row.includes("│ status   on → paused") || /status\s+on → paused/u.test(row))).toBe(true);
       expect(opened.some((row) => /p {2}Pause {4}n {2}dismiss/u.test(row) && !row.startsWith(" p"))).toBe(true);
+      expect(opened.some((row) => row.includes("Sample campaign"))).toBe(true);
+      expect(opened.some((row) => /waiting for your OK\s+━+\s+▣ pause on Meta/u.test(row)), opened.join("\n")).toBe(true);
+      // Whole, never paged: no `page 1 of 2` in it and no `space next page` on the bar.
+      expect(opened.some((row) => /page \d of \d/u.test(row)), opened.join("\n")).toBe(false);
+      expect(keyBar(opened)).not.toContain("next page");
       expect(opened.some((row) => /↑ \d+ above · ↑ PgUp/u.test(row))).toBe(true);
       expect(opened.some((row) => row.startsWith("❯ pause my worst ad"))).toBe(true);
 
