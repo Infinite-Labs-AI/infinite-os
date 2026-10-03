@@ -197,10 +197,12 @@ describe("keyBarHints", () => {
     expect(formatKeyBar(hints)).toBe("p pause   n dismiss");
   });
 
-  it("the bar never carries ? at all: a view or a done card offers `? what it does` inside itself (run-r2 MUST 2)", () => {
+  it("a view's `? what it does` is a key bar key, not a line in the answer (run-2 N12); a card's stays inside the card", () => {
     const viewHints = [{ key: "j k", label: "row" }, { key: "?", label: "what it does" }, { key: "tab", label: "switch side" }];
-    expect(keyBarText(viewHints)).toBe(" j k  row    tab  switch side    /  commands");
-    expect(keyBarText([{ key: "?", label: "what it does" }, { key: "tab", label: "switch side" }])).toBe(" tab  switch side    /  commands");
+    expect(keyBarText(viewHints)).toBe(" j k  row    ?  what it does    tab  switch side    /  commands");
+    expect(keyBarText([{ key: "?", label: "hide" }, { key: "tab", label: "switch side" }])).toBe(" ?  hide    tab  switch side    /  commands");
+    // A card's ? is a chip inside the card only.
+    expect(keyBarText([{ key: "?", label: "what it does", chipOnly: true }, { key: "tab", label: "switch side" }])).toBe(" tab  switch side    /  commands");
   });
 
   it("a card whose yes already went out offers only its OK key: no `n dismiss` (r4 flow-pause-07, run-r2 MUST 2)", () => {

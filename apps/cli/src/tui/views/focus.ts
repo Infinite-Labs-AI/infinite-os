@@ -72,6 +72,8 @@ export interface ViewKeyFacts {
   table?: boolean;
   /** What the tabs are (`1-3 email`, terminal-r4), when every tab is one kind of thing. */
   tabNoun?: string | null;
+  /** The view draws `? what it does` inside itself (a card): `?` is not repeated on the bar. */
+  explainInside?: boolean;
 }
 
 export interface ViewFocusState {
@@ -142,7 +144,8 @@ export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender
     copy: viewText(render.copyText) || null,
     approve: approveFact(render.approvalAsk),
     table: view.kind === "numbers",
-    tabNoun: view.kind === "document" ? documentTabNoun(view.body) : null
+    tabNoun: view.kind === "document" ? documentTabNoun(view.body) : null,
+    ...(render.explainInside ? { explainInside: true } : {})
   };
 }
 
@@ -412,7 +415,10 @@ export function viewKeyHints(
   if (state.engaged && (facts.more || facts.livePageNext)) hints.push({ key: "m", label: "more" });
   if (state.engaged && copyTextAt(facts, state.selected)) hints.push({ key: "c", label: "copy" });
   hints.push(...kindKeys.filter((hint) => HANDLED_KIND_KEYS.has(hint.key)));
-  if (facts.explain) hints.push({ key: "?", label: "what it does" });
+  // `?` is the bar's (run-2 N12), `? hide` while open; a card keeps its own inside it.
+  if (facts.explain) {
+    hints.push({ key: "?", label: state.explainOpen ? "hide" : "what it does", ...(facts.explainInside ? { chipOnly: true } : {}) });
+  }
   hints.push({ key: "tab", label: "switch side" });
   return hints;
 }

@@ -34,7 +34,7 @@ import {
   terminalText,
   type InSessionConfirmationAction
 } from "../../desktop/confirm-in-session.js";
-import { confirmErrorLines, confirmResultLines, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
+import { confirmErrorLines, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
 
 import { turnController } from "../app/turn-controller.js";
 import {
@@ -62,7 +62,7 @@ import {
 import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
 import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, type KeyAction, type KeyContext } from "../keys/keymap.js";
-import { fallbackCardLines, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
+import { fallbackCardLines, declineFrame, fallbackCardRowCount, fieldInvalidMessage, settleConfirmOutcome } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
 import { askedSource, ruleLine, TOP_BAR_ROWS, type TopBarData } from "./top-bar.js";
@@ -1548,8 +1548,31 @@ export function InkInteractiveSessionApp({
         view: { ...working, state: "applying", appliedAt: Date.now() } as AnswerViewV1
       });
     }
+    // r4 "Dismissed" (run-2 M5): a `n` shows the dismissed card and the Steps
+    // row's `· dismissed` in the same frame as the key, in the receipt's place.
+    // The decline is sent once; the app's answer then confirms it (a settled
+    // receipt replaces it in place, a plain ok keeps it) or shows what really
+    // happened instead (another receipt, or the failure's lines).
+    const dismissed = declineFrame(head, decision);
+    if (dismissed) {
+      recordTurnView(dismissed);
+    }
     const dropWorking = () => {
-      if (working) patchTurnState((state) => ({ ...state, views: state.views.filter((frame) => frame.viewId !== workingId) }));
+      if (working || dismissed) patchTurnState((state) => ({ ...state, views: state.views.filter((frame) => frame.viewId !== workingId) }));
+    };
+    // What the app's answer does to that frame is decided by one pure step
+    // (confirm-card.tsx `settleConfirmOutcome`, unit-tested on CI).
+    const settle = (outcome: unknown, thrown: boolean): boolean => {
+      const step = settleConfirmOutcome(head, outcome, { decision, dismissed: dismissed !== null, onCardTurn: onCardTurn(), thrown });
+      if (step.type === "receipt") {
+        // A settled receipt view goes on the turn, drawn as r4 draws it (confirm-card.tsx).
+        recordTurnView(step.frame);
+        return false;
+      }
+      if (step.type === "keep") return false;
+      dropWorking();
+      appendLines(step.lines);
+      return true;
     };
     setConfirmsInFlight((count) => count + 1);
     void (async () => {
@@ -1560,24 +1583,9 @@ export function InkInteractiveSessionApp({
           appendLines(confirmErrorLines(Object.assign(new Error(fieldInvalidMessage(result) ?? ""), { code: "field_invalid" })));
           return;
         }
-        // A settled receipt view goes on the turn, drawn as r4 draws it (confirm-card.tsx).
-        const receipt = receiptViewFrame(head, result);
-        if (receipt && onCardTurn()) {
-          recordTurnView(receipt);
-          return;
-        }
-        dropWorking();
-        appendLines(confirmResultLines(result, decision));
-        afterReceipt(result);
+        if (settle(result, false)) afterReceipt(result);
       } catch (error) {
-        const receipt = fieldInvalidMessage(error) === null ? receiptViewFrame(head, error) : null;
-        if (receipt && onCardTurn()) {
-          recordTurnView(receipt);
-          return;
-        }
-        dropWorking();
-        appendLines(confirmErrorLines(error));
-        if (!refusedField(error)) afterReceipt(error);
+        if (settle(error, true) && !refusedField(error)) afterReceipt(error);
       } finally {
         setConfirmsInFlight((count) => count - 1);
       }
@@ -3374,12 +3382,6 @@ function CreativeDraftLines({ lines, theme, width }: { lines: readonly string[];
       ))}
     </Box>
   );
-}
-
-/** The app's words when it refused a card's answer before anything ran (`field_invalid`). */
-function fieldInvalidMessage(outcome: unknown): string | null {
-  if (!isPlainRecord(outcome) || outcome.code !== "field_invalid") return null;
-  return typeof outcome.message === "string" ? outcome.message : "";
 }
 
 /** A queue entry with no carried answers; with `fieldError`, the app's words for the field. */

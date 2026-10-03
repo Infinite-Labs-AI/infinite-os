@@ -110,6 +110,8 @@ export class InfiniteTurnController {
   private toolProgressTimer: Timer = null;
   private toolTokenAcc = 0;
   private turnTools: string[] = [];
+  /** Calls being prepared (`tool.generating`), by tool name: the working-line words each left. */
+  private preparing = new Map<string, string>();
 
   constructor(now: () => number = Date.now) {
     this.now = now;
@@ -130,7 +132,7 @@ export class InfiniteTurnController {
     }
 
     if (event.type === "tool.generating") {
-      this.recordToolGenerating(event.name);
+      this.recordToolGenerating(event.name, stepWordsOf(event));
       return;
     }
 
@@ -477,11 +479,34 @@ export class InfiniteTurnController {
     this.pulseReasoningStreaming();
   }
 
-  recordToolGenerating(name: string) {
-    // Plain words, never the raw tool id (`drafting list sample rows`).
-    const label = plainToolWords(name);
-    this.pushTrail(`drafting ${label}…`);
-    this.pushActivity(`drafting ${label}`, "info", label);
+  /**
+   * A call the model is still writing. The working line says the step's own
+   * words (the app's, else the generic words from the tool's name: `getting
+   * Meta performance`), never `drafting <tool id words>` (run-2 M6). The call's
+   * start renames it to the start's words and its end takes it off, so no
+   * `• …` bullet is left behind once the turn stops working.
+   */
+  recordToolGenerating(name: string, words?: StepWords | null) {
+    const label = words?.label ?? friendlyStepLabel(name);
+    // The trail line is internal (transient, never drawn by the session): plain words, never the id.
+    this.pushTrail(`drafting ${plainToolWords(name)}…`);
+    this.pushActivity(label, "info", label);
+    this.preparing.set(name, compactPreview(label, 96));
+  }
+
+  /** The working-line words a call being prepared left: renamed to `to` (its start), or taken off (its end). */
+  private settlePreparing(name: string, to?: string) {
+    const said = this.preparing.get(name);
+    if (said === undefined) return;
+    const next = to ? compactPreview(to, 96) : undefined;
+    if (next) this.preparing.set(name, next);
+    else this.preparing.delete(name);
+    patchTurnState((state) => ({
+      ...state,
+      activity: next
+        ? state.activity.map((item) => (item.text === said ? { ...item, text: next } : item))
+        : state.activity.filter((item) => item.text !== said)
+    }));
   }
 
   recordToolProgress(toolId: string, toolName: string, preview: string) {
@@ -546,6 +571,7 @@ export class InfiniteTurnController {
 
     const id = this.callIdFor(toolId, name, "start");
     const label = words?.label ?? friendlyStepLabel(name);
+    this.settlePreparing(name, label);
     const sample = `${name} ${context}`.trim();
 
     this.toolTokenAcc += sample ? estimateTokensRough(sample) : 0;
@@ -572,6 +598,7 @@ export class InfiniteTurnController {
     const id = this.callIdFor(toolId, fallbackName ?? "tool", "complete");
     const started = this.activeTools.find((tool) => tool.id === id);
     const name = started?.name ?? fallbackName ?? "tool";
+    this.settlePreparing(name);
     // A transport may report failure as `status:"error"` with NO error string —
     // the desktop bridge does exactly that, because a tool's error text is raw
     // provider output it must not forward. The outcome reads the STATUS too, or

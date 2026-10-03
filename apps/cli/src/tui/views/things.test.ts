@@ -15,7 +15,7 @@ import type { Msg } from "../types.js";
 import { clipboardSequence, copyTargets } from "./clipboard.js";
 import { documentPageLines } from "./document.js";
 import { focusedViewCtx, resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints, type ViewFocusState } from "./focus.js";
-import { renderLiveTurn } from "./layout.js";
+import { renderCommittedTurn, renderLiveTurn } from "./layout.js";
 import { hasKindRenderer, renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
@@ -565,12 +565,36 @@ describe("quiet in a turn (r4 view-12 `steps only`, run-2 M7)", () => {
     expect(r4Segments(render.head)).toEqual([{ text: "steps only", style: "dim" }]);
   });
 
-  it("a quiet view next to a list keeps the list first in the details pane", () => {
-    const lines = renderLiveTurn({ messages, views: [fixture("quiet-steps"), fixture("list-rows")], focus: null, width: 120, color: false, theme }).lines;
-    const right = lines.filter((line) => line.includes(" │ ")).map((line) => line.slice(line.indexOf(" │ ") + 3));
-    expect(right[0]).toContain("Ads running");
-    expect(right.some((line) => line === "steps only")).toBe(true);
-    expect(right.findIndex((line) => line === "steps only")).toBeGreaterThan(0);
+  it("a quiet view next to a list prints nothing: the list takes the details pane (run-2 M6, no stray `steps only`)", () => {
+    for (const width of [100, 120]) {
+      const lines = renderLiveTurn({ messages, views: [fixture("quiet-steps"), fixture("list-rows")], focus: null, width, color: false, theme }).lines;
+      expect(lines.some((line) => line.includes("Ads running"))).toBe(true);
+      expect(lines.join("\n")).not.toMatch(/steps only|read the writing playbook/u);
+    }
+  });
+
+  it("committed to scrollback, a quiet view prints nothing, even alone (no Steps go with it there)", () => {
+    const lines = renderCommittedTurn({ messages, views: [fixture("quiet-steps")], focus: null, width: 100, color: false, theme });
+    expect(lines.join("\n")).not.toMatch(/steps only|read the writing playbook/u);
+    expect(lines.some((line) => line.startsWith("∞ Here is a draft"))).toBe(true);
+  });
+
+  it("a failed quiet call draws nothing of its own: no tool-name head, no developer error; its Steps row says it in words (run-2 M6)", () => {
+    // The shape of the app's generic failure view: the tool's name as its title and step line, a developer's error as its reason.
+    const failed = withBody("quiet-steps", { stepLine: "Read Subscription Metrics", degraded: true }, {
+      tool: "read_subscription_metrics", title: "Read Subscription Metrics", state: "failed",
+      stateReason: { code: "invalid_input", words: "Use a half-open UTC day window { start, end } as YYYY-MM-DD, start before end" }
+    });
+    const steps = [{ id: "c1", name: "mcp__sample_app__read_subscription_metrics", label: "checking subscriptions", status: "fail" as const, startedAt: 0, endedAt: 500, result: "Use a half-open UTC day window { start, end } as YYYY-MM-DD, start before end" }];
+    for (const width of [60, 100, 160]) {
+      const live = renderLiveTurn({ messages, views: [failed], focus: null, width, color: false, theme, steps }).lines;
+      const committed = renderCommittedTurn({ messages, views: [failed], focus: null, width, color: false, theme, steps });
+      for (const lines of [live, committed]) {
+        const out = lines.join("\n");
+        expect(out).not.toMatch(/Read Subscription Metrics|steps only|half-open|YYYY|\{ start/u);
+        expect(out).toMatch(/checking subscriptions +(?:━+ +)?✗ couldn't/u);
+      }
+    }
   });
 
   it("a quiet view never prints a caveat, an explanation or a state reason", () => {

@@ -23,7 +23,6 @@ import {
   truncationLines,
   viewText
 } from "./primitives.js";
-import { explainChip } from "./card.js";
 import { managedApproval, managedApprovalLines, managedSummaryLines } from "./managed.js";
 import type { KindRender, KindRenderer, ViewRender, ViewRenderCtx } from "./types.js";
 
@@ -83,6 +82,14 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
   const shellCtx: ViewRenderCtx = { ...ctx, width: Math.max(1, Math.floor(ctx.width)) };
   const body = renderKindBody(view, shellCtx);
   if (view.kind === "quiet") {
+    // A quiet call that failed (the app's generic failure view: its title is
+    // the tool's name, its reason a developer's error) draws nothing of its
+    // own: its Steps row says it, with one plain reason (run-2 M6). In
+    // scrollback, where no Steps strip goes with it, a quiet view prints
+    // nothing either (no literal `steps only`).
+    if (shellCtx.scrollback || failedQuiet(view)) {
+      return { head: "", source: null, detail: [], footnotes: [], keys: [], okKey: null, rowCount: 0, quiet: true };
+    }
     // Steps only (r4 view-12): the details pane under a dim `steps only` head,
     // an empty source row, then its line. No title, source, explanation, state
     // reason, truncation or caveats.
@@ -107,9 +114,10 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
       ...(managed ? managedApprovalLines(managed, shellCtx) : []),
       ...reconcileLines(view, shellCtx),
       ...truncationLines(view, shellCtx),
-      ...caveatLines(view, shellCtx),
-      // `?` lives inside the view, never on the key bar (r4: every `? what it does` is in the thing it explains).
-      ...(!body?.offersExplain && (viewText(view.explain) !== "" || (managed?.summary ?? "") !== "") ? ["", explainChip(shellCtx)] : [])
+      ...caveatLines(view, shellCtx)
+      // A view's `? what it does` is a key on the key bar (`? hide` while open),
+      // never a line inside the answer (run-2 N12). A card draws its own inside
+      // itself (r4 `card()`), and the bar leaves it there (`explainInside`).
     ],
     footnotes: body?.footnotes ?? [],
     keys: body?.keys ?? [],
@@ -122,8 +130,17 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     ...(body?.rowCopies ? { rowCopies: body.rowCopies } : {}),
     ...(body?.copyText ? { copyText: body.copyText } : {}),
     ...(fixAsk ? { fixAsk } : {}),
-    ...(managed ? { approvalAsk: { key: managed.key, label: managed.label, ask: managed.ask } } : {})
+    ...(managed ? { approvalAsk: { key: managed.key, label: managed.label, ask: managed.ask } } : {}),
+    ...(body?.offersExplain ? { explainInside: true as const } : {})
   };
+}
+
+/** The states a quiet view takes when its call failed (the app's failure view), not a quiet read. */
+const FAILED_QUIET_STATES: ReadonlySet<string> = new Set(["failed", "blocked", "hit_limit", "outcome_unknown", "not_connected", "expired", "cancelled"]);
+
+/** A quiet view that stands for a failed call: degraded, or in a failure's state. */
+function failedQuiet(view: AnswerViewV1): boolean {
+  return (isRecord(view.body) && view.body.degraded === true) || FAILED_QUIET_STATES.has(view.state);
 }
 
 /** The kinds whose settled receipts draw only an afterword under the state's sentence (outcome.ts). */

@@ -9,7 +9,7 @@ import { canUseInkProgressReporter, InkTranscriptProgressReporter } from "../tui
 import { padEndCells } from "../tui/lib/display-width.js";
 import { stepWordsOf } from "../desktop/step-words.js";
 import { compactPreview } from "../tui/lib/text.js";
-import { friendlyStepLabel, plainToolWords, stepProgressWords } from "../tui/views/steps.js";
+import { friendlyStepLabel, stepProgressWords } from "../tui/views/steps.js";
 import { ansi, colorEnabled, resolveTheme, type Theme } from "../tui/theme.js";
 import type { Msg } from "../tui/types.js";
 import { readMarkdownTableBlock } from "./markdown.js";
@@ -656,7 +656,8 @@ function isMessageCompleteResult(value: unknown): value is { finalMessages: read
 function liveMessage(event: ChatProgressEvent): string {
   if ("type" in event) {
     if (event.type === "tool.generating") {
-      return `drafting ${plainToolWords(event.name)}…`;
+      // The step's own words (run-2 M6), never `drafting <tool words>`.
+      return stepWordsOf(event)?.label ?? friendlyStepLabel(event.name);
     }
     if (event.type === "tool.start") {
       return stepWordsOf(event)?.label ?? (stepProgressWords(event.context) || friendlyStepLabel(event.name));

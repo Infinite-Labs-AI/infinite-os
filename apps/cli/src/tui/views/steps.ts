@@ -255,10 +255,57 @@ export function toolOutcome(input: {
   return { status, result: failed || resultWords(input.summary) || asked };
 }
 
-/** A running call's latest progress, when it reads as words (`1 of 3`); "" for JSON, an id or nothing. */
+/** A running call's latest progress, when it reads as words (`1 of 3`); "" for JSON, an id, arguments or nothing. */
 export function stepProgressWords(preview: string | undefined): string {
   const text = viewText(preview);
-  return text && isDisplayWords(text) ? compactPreview(text, 72) : "";
+  return text && isDisplayWords(text) && !looksLikeArguments(text) ? compactPreview(text, 72) : "";
+}
+
+/**
+ * Call arguments, not words (run-2 M6: `level=ad, nameContains…`): a
+ * `key=value` pair or a camelCase identifier. A person's words have neither.
+ */
+function looksLikeArguments(text: string): boolean {
+  return /[A-Za-z_][\w.]*\s*=/u.test(text) || /\b[a-z]+[A-Z][A-Za-z]*\b/u.test(text);
+}
+
+/**
+ * A reason written for a developer, never shown to a person (run-2 M6: `Use a
+ * half-open UTC day window { start, end } as YYYY-MM-DD…`): code punctuation
+ * (braces, brackets, angle brackets, backticks, `=`), a date or time format
+ * pattern, a code identifier (snake_case, camelCase, a call `f()`), or an
+ * error class or code.
+ */
+export function isDeveloperText(text: string): boolean {
+  return /[{}[\]<>`=\\|]/u.test(text)
+    || /\b(?:YYYY|YY|MM|DD|HH|mm|ss)(?:[-/:](?:YYYY|YY|MM|DD|HH|mm|ss))+\b/u.test(text)
+    || /\b[A-Za-z0-9]+_[A-Za-z0-9_]+\b/u.test(text)
+    || /\b[a-z]+[A-Z][A-Za-z]*\b/u.test(text)
+    || /\w\(\)/u.test(text)
+    || /\b(?:[A-Z][a-z]+)?Error\b|\bE[A-Z]{4,}\b|\bundefined\b|\bnull\b|\bNaN\b/u.test(text);
+}
+
+/** The base form of a step's leading -ing verb (`checking` → `check`, `making` → `make`, `getting` → `get`); null when none. */
+function baseVerb(word: string): string | null {
+  const known = Object.entries(GERUNDS).find(([, ing]) => ing === word)?.[0];
+  if (known) return known;
+  if (!word.endsWith("ing") || word.length < 5) return null;
+  const stem = word.slice(0, -3);
+  return [stem, `${stem}e`].find((candidate) => VERBS.has(candidate)) ?? null;
+}
+
+/**
+ * Why a call failed, in words a person reads (run-2 M6): the reason as it is
+ * when it is plain words; else what the step could not do, from its own
+ * label (`checking subscriptions` → `couldn't check subscriptions`); else
+ * `failed`. Never the developer's error.
+ */
+export function plainFailureReason(reason: string, label: string): string {
+  const said = viewText(reason);
+  if (said && said !== FAILED_WORDS && !isDeveloperText(said)) return said;
+  const [first = "", ...rest] = viewText(label).split(/\s+/u).filter(Boolean);
+  const verb = baseVerb(first.toLowerCase());
+  return verb && rest.length ? `couldn't ${[verb, ...rest].join(" ")}` : FAILED_WORDS;
 }
 
 // ── steps from the trail (when the turn store has none: old transports, the one-shot path) ──
@@ -470,8 +517,10 @@ function stepRowFacts(step: TurnStep, steps: readonly TurnStep[], options: Pick<
       result: status === "run" ? APPLYING_WORDS : resultCase(stateHeadFor(view).words)
     };
   }
-  // A step still waiting says so (unless its label already does).
-  const result = said || (status === "wait" && viewText(step.label) !== WAITING_WORDS ? WAITING_WORDS : "");
+  // A step still waiting says so (unless its label already does); a failed one says why in plain words.
+  const result = status === "fail"
+    ? plainFailureReason(said, viewText(step.label))
+    : said || (status === "wait" && viewText(step.label) !== WAITING_WORDS ? WAITING_WORDS : "");
   return { status, mark, tone, label: viewText(step.label), result };
 }
 

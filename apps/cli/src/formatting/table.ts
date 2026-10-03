@@ -26,14 +26,21 @@ import { ansi, type AnsiRole, type Theme, type ThemeStyle } from "../tui/theme.j
 export type TableAlign = "left" | "right";
 export interface TableColumn { label: string; align?: TableAlign; dropPriority?: number } // 0 = never drop; higher drops first
 export interface TableInput { columns: TableColumn[]; rows: string[][]; total?: string[] }
-/** `role` paints the body cells (default `text`: the terminal's own foreground); borders and bold cells paint themselves. */
-export interface TableOptions { width: number; color: boolean; theme: Theme; role?: AnsiRole }
+/**
+ * `role` paints the body cells (default `text`: the terminal's own foreground); borders and bold cells paint themselves.
+ * `labelMin`: a table too wide for `width` first wraps its FIRST column (the row labels, on their words) to the room
+ * the other columns leave, never narrower than `labelMin`, before any column drops. A long row name (an ad's full
+ * campaign name) then costs lines, not numbers. Absent: a label never wraps (r4 `table()`, markdown tables).
+ */
+export interface TableOptions { width: number; color: boolean; theme: Theme; role?: AnsiRole; labelMin?: number }
 export interface TableRender {
   lines: string[];
   hidden: string[];
   fallback: "record" | null;
   /** The width the table would take with every column shown (what a wider window needs). */
   fullWidth: number;
+  /** Each body row's first line in `lines` and how many lines it takes (a wrapped label takes several). */
+  rowLines: [number, number][];
 }
 
 const NUMBER = String.raw`[+\-−]?[$€£¥]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?[%kKMBx×]?`;
@@ -64,6 +71,19 @@ export function renderTable(input: TableInput, opts: TableOptions): TableRender 
 
   let keep = input.columns.map((_column, index) => index);
   const fullWidth = tableWidth(keep);
+  // Each body row's first-column lines: one, unless a long label wraps (`labelMin`).
+  let labelLines: string[][] = rows.map((row) => [row[0] ?? ""]);
+  const floor = opts.labelMin === undefined ? null : Math.max(1, Math.floor(opts.labelMin));
+  if (floor !== null && columnCount > 1 && fullWidth > width && (widths[0] ?? 0) > floor) {
+    // The room the other columns leave, never under the floor: wrap the labels to it on their words.
+    const room = Math.max(floor, width - (fullWidth - (widths[0] ?? 0)));
+    labelLines = rows.map((row) => wrapLabel(row[0] ?? "", room));
+    widths[0] = Math.max(
+      displayWidth(labels[0] ?? ""),
+      ...labelLines.flat().map((line) => displayWidth(line)),
+      total ? displayWidth(total[0] ?? "") : 0
+    );
+  }
   const hidden: string[] = [];
   const dropOrder = dropCandidates(input.columns);
   for (const candidate of dropOrder) {
@@ -75,7 +95,7 @@ export function renderTable(input: TableInput, opts: TableOptions): TableRender 
   }
 
   if (columnCount === 0 || tableWidth(keep) > width) {
-    return { lines: renderRecords(labels, rows, total, width, opts), hidden: [], fallback: "record", fullWidth };
+    return { lines: renderRecords(labels, rows, total, width, opts), hidden: [], fallback: "record", fullWidth, rowLines: [] };
   }
 
   const right = input.columns.map((column, index) => {
@@ -99,13 +119,20 @@ export function renderTable(input: TableInput, opts: TableOptions): TableRender 
     return `${border("│")}${parts.join(border("│"))}${border("│")}`;
   };
 
-  const lines = [rule("┌", "┬", "┐"), line(labels, true), rule("├", "┼", "┤"), ...rows.map((row) => line(row, false))];
+  const lines = [rule("┌", "┬", "┐"), line(labels, true), rule("├", "┼", "┤")];
+  const rowLines: [number, number][] = [];
+  rows.forEach((row, index) => {
+    // A wrapped label's later lines carry nothing in the other cells.
+    const parts = labelLines[index] ?? [row[0] ?? ""];
+    rowLines.push([lines.length, parts.length]);
+    parts.forEach((part, at) => lines.push(line(at === 0 ? [part, ...row.slice(1)] : [part], false)));
+  });
   if (total) {
     lines.push(rule("├", "┼", "┤"), line(total, true));
   }
   lines.push(rule("└", "┴", "┘"));
 
-  return { lines, hidden, fallback: null, fullWidth };
+  return { lines, hidden, fallback: null, fullWidth, rowLines };
 }
 
 function dropCandidates(columns: readonly TableColumn[]): number[] {
@@ -149,6 +176,34 @@ function renderRecords(
     });
   });
   return lines;
+}
+
+/** A row label on its words: a word moves down whole, and only a word wider than the whole width breaks. */
+function wrapLabel(text: string, width: number): string[] {
+  const out: string[] = [];
+  let current = "";
+  for (const word of text.split(/\s+/u).filter(Boolean)) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (displayWidth(candidate) <= width) {
+      current = candidate;
+      continue;
+    }
+    if (current) out.push(current);
+    current = "";
+    if (displayWidth(word) <= width) {
+      current = word;
+      continue;
+    }
+    for (const char of Array.from(word)) {
+      if (displayWidth(current + char) > width && current) {
+        out.push(current);
+        current = "";
+      }
+      current += char;
+    }
+  }
+  if (current || out.length === 0) out.push(current);
+  return out;
 }
 
 /** Word wrap; a word wider than half the line hard-breaks in place instead of moving down. */

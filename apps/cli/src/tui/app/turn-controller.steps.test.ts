@@ -4,7 +4,7 @@ import { r4Segments, seg } from "../../formatting/r4-segments.test-util.js";
 import { stripAnsi } from "../lib/display-width.js";
 import { INFINITE_R4_THEME } from "../theme.js";
 import { stepStripLines, stepsFromTrail } from "../views/steps.js";
-import { renderInfiniteTranscript } from "./transcript-renderer.js";
+import { besideWorkingTurn, renderInfiniteTranscript } from "./transcript-renderer.js";
 import { InfiniteTurnController, getTurnState, resetTurnState } from "./turn-controller.js";
 
 // The Steps strip fed by live bridge frames (tool.start / tool.complete), with
@@ -207,7 +207,94 @@ describe("what a turn says while a tool is being prepared", () => {
     controller.recordProgressEvent({ type: "tool.generating", stage: "tool", message: RAW, name: RAW } as never);
     const state = getTurnState();
     const said = [...state.activity.map((item) => item.text), ...state.turnTrail].join("\n");
-    expect(said).toContain("list sample rows");
+    // The step's own words (run-2 M6), never `drafting <tool words>`.
+    expect(state.activity.map((item) => item.text)).toEqual(["listing sample rows"]);
     expect(said).not.toMatch(/mcp|Mcp|__|_/u);
+  });
+});
+
+// The live eval's strings (run-2 M6): a tool id, its arguments or a developer
+// error never reach the terminal. Synthetic tool names; the strings are the
+// shapes the live terminal printed.
+describe("no tool ids, arguments or developer errors on screen (run-2 M6)", () => {
+  const META = "mcp__sample_app__get_meta_performance";
+  const PROPOSE = "mcp__sample_app__propose_pause_meta_entity";
+  const SUBS = "mcp__sample_app__read_subscription_metrics";
+  const RAW_ERROR = "Use a half-open UTC day window { start, end } as YYYY-MM-DD, start before end";
+  const screen = () => renderInfiniteTranscript(
+    { messages: [{ role: "user", text: "how are my ads doing?" }], state: getTurnState() },
+    { columns: 100, theme: INFINITE_R4_THEME, nowMs: 2_000, busy: true }
+  );
+
+  afterEach(() => {
+    resetTurnState();
+  });
+
+  it("a tool being prepared: the working line says the step's words, never `drafting <tool>`", () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+    controller.recordProgressEvent({ type: "tool.generating", stage: "tool", message: META, name: META } as never);
+    expect(stripAnsi(screen())).toContain("Working…  · getting Meta performance");
+    expect(stripAnsi(screen())).not.toMatch(/drafting|get meta performance/u);
+    // The app's words win when the frame carries them.
+    resetTurnState();
+    const worded = new InfiniteTurnController(() => 1_000);
+    worded.recordProgressEvent({ type: "tool.generating", stage: "tool", message: META, name: META, words: { label: "checking your ads" } } as never);
+    expect(stripAnsi(screen())).toContain("Working…  · checking your ads");
+  });
+
+  it("once the call starts the working line follows its step, and no `• drafting …` bullet is left behind", () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+    controller.recordProgressEvent({ type: "tool.generating", stage: "tool", message: PROPOSE, name: PROPOSE } as never);
+    controller.recordProgressEvent(start("call-1", PROPOSE, { words: { label: "getting the pause ready" } }));
+    expect(stripAnsi(screen())).toContain("Working…  · getting the pause ready");
+    controller.recordProgressEvent(complete("call-1", PROPOSE, { status: "requires_confirmation", words: { label: "waiting for your OK", result: "pause 1 ad" } }));
+    const after = stripAnsi(renderInfiniteTranscript(
+      { messages: [{ role: "user", text: "pause it" }, { role: "assistant", text: "Ready." }], state: getTurnState() },
+      { columns: 100, theme: INFINITE_R4_THEME, nowMs: 2_000 }
+    ));
+    expect(after).not.toMatch(/•|drafting|propose pause meta entity|proposing pause/u);
+  });
+
+  it("a call running beside a view leaves no `• <step words>` bullet under the question (live T2 shape)", () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+    controller.recordProgressEvent({ type: "tool.generating", stage: "tool", message: PROPOSE, name: PROPOSE } as never);
+    controller.recordProgressEvent(start("call-1", PROPOSE, { words: { label: "getting the pause ready" } }));
+    const state = { ...getTurnState(), views: [{ type: "tool.view", stage: "tool", message: "", viewId: "v1", name: META, view: { kind: "list" } }] } as never;
+    const beside = stripAnsi(renderInfiniteTranscript(
+      { messages: [{ role: "user", text: "pause the worst ad" }], state: besideWorkingTurn(state) },
+      { columns: 100, theme: INFINITE_R4_THEME, nowMs: 2_000, busy: true }
+    ));
+    expect(beside.split("\n").filter((line) => /^\s*•/u.test(line))).toEqual([]);
+    // A warning beside a view still keeps its own line.
+    const warned = { ...getTurnState(), activity: [{ text: "the app is slow to answer", tone: "warn" }], views: [] } as never;
+    expect(stripAnsi(renderInfiniteTranscript(
+      { messages: [{ role: "user", text: "pause the worst ad" }], state: besideWorkingTurn(warned) },
+      { columns: 100, theme: INFINITE_R4_THEME, nowMs: 2_000, busy: true }
+    ))).toContain("• the app is slow to answer");
+  });
+
+  it("a running call never shows its arguments: `level=ad, nameContains…` reads `running`", () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+    controller.recordProgressEvent(start("call-1", META, { context: "level=ad, nameContains=Hook", words: { label: "checking your ads" } }));
+    controller.recordProgressEvent({ type: "tool.progress", stage: "tool", message: META, toolId: "call-1", name: META, preview: "level=ad, nameContains=Hook" } as never);
+    const text = stripAnsi(screen());
+    expect(text).toMatch(/checking your ads +━*╍╍ [⠀-⣿] running$/mu);
+    expect(text).not.toMatch(/level=|nameContain/u);
+  });
+
+  it("a failed call says one plain reason in words: never the developer's error", () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+    controller.recordProgressEvent(start("call-1", SUBS, { words: { label: "checking subscriptions" } }));
+    controller.recordProgressEvent(complete("call-1", SUBS, { status: "error", error: RAW_ERROR, words: { label: "checking subscriptions" } }));
+    const text = stripAnsi(screen());
+    // The row's result column cuts it; the whole reason follows on its own row (r4).
+    expect(text).toMatch(/checking subscriptions +━+ +✗ couldn't check subscr…$/mu);
+    expect(text).toMatch(/^ {4}couldn't check subscriptions$/mu);
+    expect(text).not.toMatch(/half-open|YYYY|\{ start/u);
+    // A reason that is already words for a person stays as it is.
+    resetTurnState();
+    const plain = new InfiniteTurnController(() => 1_000);
+    plain.recordProgressEvent(complete("call-2", SUBS, { status: "error", error: "not allowed", words: { label: "sending to 214" } }));
+    expect(stripAnsi(screen())).toMatch(/sending to 214 +━+ +✗ not allowed$/mu);
   });
 });

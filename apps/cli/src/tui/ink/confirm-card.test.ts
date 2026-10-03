@@ -5,7 +5,9 @@ import type { InSessionConfirmationAction } from "../../desktop/confirm-in-sessi
 import { displayWidth } from "../lib/display-width.js";
 import { confirmCardKeys } from "../keys/keymap.js";
 import { DEFAULT_THEME } from "../theme.js";
-import { ConfirmActionMenu, fallbackCardLines, fallbackCardRowCount, receiptViewFrame } from "./confirm-card.js";
+import { ConfirmActionMenu, DISMISSED_WORDS, declineFrame, dismissedReceiptFrame, fallbackCardLines, fallbackCardRowCount, receiptViewFrame, settleConfirmOutcome } from "./confirm-card.js";
+import { renderLiveTurn } from "../views/layout.js";
+import type { TurnStep } from "../app/turn-store.js";
 import { renderToString } from "./renderer.js";
 
 const ESC = String.fromCharCode(27);
@@ -139,3 +141,103 @@ describe("the receipt a resolved card leaves on its turn", () => {
     expect(receiptViewFrame(pending(), receipt({ receipt: undefined }))).toBeNull();
   });
 });
+
+describe("n leaves the dismissed card at once (run-2 M5)", () => {
+  const approval = { kind: "card", title: "Pause ad “Hook A”?", summary: "Stops its spend.", confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [] };
+  const cardView = {
+    v: 1, kind: "change", tool: "propose_pause_entity", title: "Pause Hook A", state: "needs_yes", asOf: null,
+    provenance: { source: "Ads · ad", via: "our_db" },
+    scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+    body: { target: { kind: "ad", label: "Hook A" }, rows: [{ label: "Status", before: "On", after: "Paused" }], warnings: [] },
+    approval
+  };
+
+  it("is the card's own view, settled as dismissed, in the receipt's place", () => {
+    const frame = dismissedReceiptFrame(pending({ view: cardView as never }));
+    expect(frame).toMatchObject({ type: "tool.view", viewId: "receipt:h_1", name: "propose_pause_entity" });
+    expect(frame?.view.state).toBe("cancelled");
+    expect(frame?.view.stateReason).toEqual({ code: "dismissed", words: DISMISSED_WORDS });
+    expect(frame?.view.approval).toEqual(approval);
+    // The app's settled receipt lands on the same id, so it replaces this one in place.
+    expect(receiptViewFrame(pending({ view: cardView as never }), { ok: true, view: { ...cardView, state: "expired", approval: undefined, stateReason: { code: "expired", words: "This approval expired." } } })?.viewId)
+      .toBe(frame?.viewId);
+  });
+
+  it("a card with no view, or of a kind that draws no receipt, waits for the app's lines", () => {
+    expect(dismissedReceiptFrame(pending())).toBeNull();
+    expect(dismissedReceiptFrame(pending({ view: { ...cardView, kind: "record", body: { fields: [] } } as never }))).toBeNull();
+  });
+
+  it("drawn on its turn, the dismissed card and the Steps row's `· dismissed` are in the same frame", () => {
+    const frame = dismissedReceiptFrame(pending({ view: cardView as never }))!;
+    const steps: TurnStep[] = [{ id: "c1", name: "mcp__app__propose_pause_entity", label: "waiting for your OK", status: "wait", startedAt: 0, endedAt: 1000, result: "pause 1 ad" }];
+    const lines = renderLiveTurn({
+      messages: [{ role: "user", text: "pause hook a" }, { role: "assistant", text: "Okay, left it running." }],
+      views: [frame.view], focus: null, width: 100, color: false, theme: DEFAULT_THEME, steps, nowMs: 2000
+    }).lines.map(plain);
+    expect(lines).toContain(`✕ ${DISMISSED_WORDS}`);
+    expect(lines.find((line) => line.includes("waiting for your OK"))).toMatch(/· dismissed$/u);
+    expect(lines.join("\n")).not.toContain("▣");
+  });
+});
+
+describe("what the app's answer does to a resolved card (CI-runnable M5 wiring)", () => {
+  const approval = { kind: "card", title: "Pause ad “Hook A”?", summary: "Stops its spend.", confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [] };
+  const cardView = {
+    v: 1, kind: "change", tool: "propose_pause_entity", title: "Pause Hook A", state: "needs_yes", asOf: null,
+    scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+    body: { target: { kind: "ad", label: "Hook A" }, rows: [{ label: "Status", before: "On", after: "Paused" }], warnings: [] },
+    approval
+  };
+  const head = pending({ view: cardView as never });
+  const settled = (state: string, words: string) => ({ ok: true, view: { ...cardView, approval: undefined, state, stateReason: { code: state, words } } });
+  const decline = { decision: "decline" as const, dismissed: true, onCardTurn: true, thrown: false };
+
+  it("n leaves the dismissed frame at once, and the session records it before anything is sent", () => {
+    expect(declineFrame(head, "decline")?.viewId).toBe("receipt:h_1");
+    expect(declineFrame(head, "approve")).toBeNull();
+    expect(declineFrame(pending(), "decline")).toBeNull();
+  });
+
+  it("a plain ok keeps the dismissed frame and prints no lines", () => {
+    expect(settleConfirmOutcome(head, { ok: true }, decline)).toEqual({ type: "keep" });
+    expect(settleConfirmOutcome(head, undefined, decline)).toEqual({ type: "keep" });
+  });
+
+  it("a cancelled receipt on a turn that moved on prints nothing", () => {
+    expect(settleConfirmOutcome(head, settled("cancelled", DISMISSED_WORDS), { ...decline, onCardTurn: false })).toEqual({ type: "keep" });
+  });
+
+  it("a settled receipt on the card's turn replaces the frame in place, a different outcome included", () => {
+    const step = settleConfirmOutcome(head, settled("expired", "This approval expired."), decline);
+    expect(step.type).toBe("receipt");
+    expect(step.type === "receipt" && step.frame.viewId).toBe("receipt:h_1");
+    expect(step.type === "receipt" && step.frame.view.state).toBe("expired");
+  });
+
+  it("an expired receipt on a turn that moved on drops the frame and prints the app's lines", () => {
+    const step = settleConfirmOutcome(head, settled("expired", "This approval expired."), { ...decline, onCardTurn: false });
+    expect(step.type).toBe("drop");
+    expect(step.type === "drop" && step.lines.length).toBeGreaterThan(0);
+  });
+
+  it("a thrown error drops the frame and prints the error lines", () => {
+    const step = settleConfirmOutcome(head, new Error("network down"), { ...decline, thrown: true });
+    expect(step.type).toBe("drop");
+    expect(step.type === "drop" && step.lines.map((line) => line.text).join("\n")).toContain("network down");
+  });
+
+  it("a thrown error that carries a settled receipt replaces the frame instead", () => {
+    const error = Object.assign(new Error("x"), settled("expired", "This approval expired."));
+    expect(settleConfirmOutcome(head, error, { ...decline, thrown: true }).type).toBe("receipt");
+    // A refused field is never a receipt.
+    const refused = Object.assign(new Error("x"), { ...settled("expired", "This approval expired."), code: "field_invalid" });
+    expect(settleConfirmOutcome(head, refused, { ...decline, thrown: true }).type).toBe("drop");
+  });
+
+  it("an approve with no receipt of its own prints the receipt lines", () => {
+    const step = settleConfirmOutcome(head, { ok: true, receipt: "Paused." }, { decision: "approve", dismissed: false, onCardTurn: true, thrown: false });
+    expect(step.type).toBe("drop");
+  });
+});
+

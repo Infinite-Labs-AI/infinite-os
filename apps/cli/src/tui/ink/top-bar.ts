@@ -57,11 +57,11 @@ const THROUGH_APP: StyledSegment = ["dim", "through the Infinite app "];
 const SOURCE_ORDER: Readonly<Record<TopBarSourceState, number>> = { missing: 0, broken: 1, connected: 2 };
 
 /**
- * The top bar's segments (r4 row 0): the brand chip, the workspace, then one
- * dot per source, missing and broken ones first. `through the Infinite app`
- * sits on the right only when the whole line fits; otherwise the line is cut
- * at the width from the right (`…` on the segment that does not fit, later
- * ones dropped), as r4 cuts it.
+ * The top bar's segments (r4 row 0): the brand chip, the workspace (`<name>
+ * workspace`), then one dot per source, missing and broken ones first.
+ * `through the Infinite app` sits on the right only when the whole line fits;
+ * otherwise whole sources drop from the right and are counted (`+3 more`)
+ * when the count fits: a source name is never cut mid-word (run-2 N10).
  *
  * The source the turn asked about and found not connected (`asked`) is always
  * drawn, first, in amber: at 60 columns r4 still leads with it and cuts the
@@ -75,8 +75,9 @@ const SOURCE_ORDER: Readonly<Record<TopBarSourceState, number>> = { missing: 0, 
  * what IS connected.
  */
 export function topBarSegments(data: TopBarData | undefined, width: number): StyledSegment[] {
-  const workspace = data?.workspace ? terminalText(data.workspace) : "";
-  const left: StyledSegment[] = [BRAND_CHIP, ["", workspace ? `  ${workspace}   ` : "  "]];
+  const workspace = workspaceWords(data?.workspace);
+  const head: StyledSegment[] = [BRAND_CHIP, ["", workspace ? `  ${workspace}   ` : "  "]];
+  const left: StyledSegment[] = [];
   const sources = [...(data?.sources ?? [])]
     .map((source, index) => ({ ...source, label: terminalText(source.label), index }))
     .filter((source) => source.label)
@@ -94,7 +95,7 @@ export function topBarSegments(data: TopBarData | undefined, width: number): Sty
     left.push(segment(lead));
   }
   const kept = sources.filter((source) => source.state !== "missing").map(segment);
-  let room = total - segmentsWidth(left) - segmentsWidth(kept);
+  let room = total - segmentsWidth(head) - segmentsWidth(left) - segmentsWidth(kept);
   for (const source of missing) {
     if (source === lead) continue;
     const mark = segment(source);
@@ -103,10 +104,42 @@ export function topBarSegments(data: TopBarData | undefined, width: number): Sty
     left.push(mark);
   }
   left.push(...kept);
-  if (data?.throughApp && segmentsWidth(left) + segmentsWidth([THROUGH_APP]) <= total) {
-    return [...padSegments(left, total - segmentsWidth([THROUGH_APP])), THROUGH_APP];
+  const line = [...head, ...left];
+  if (data?.throughApp && segmentsWidth(line) + segmentsWidth([THROUGH_APP]) <= total) {
+    return [...padSegments(line, total - segmentsWidth([THROUGH_APP])), THROUGH_APP];
   }
-  return truncSegments(left, total);
+  // Whole sources only (run-2 N10): a source that does not fit drops, with
+  // every one after it. They are counted (`+3 more`, dim) when that fits;
+  // else, with two cells left, the next one's mark and `…` say there is more
+  // (r4's own cut, `●…`, which shows no letter of a name). A source name is
+  // never cut mid-word; only a window too narrow for the chip and the
+  // workspace cuts the line itself.
+  let used = segmentsWidth(head);
+  const shown: StyledSegment[] = [];
+  for (const mark of left) {
+    if (used + segmentsWidth([mark]) > total) break;
+    shown.push(mark);
+    used += segmentsWidth([mark]);
+  }
+  const next = left[shown.length];
+  const more: StyledSegment[] = [];
+  if (next) {
+    const count: StyledSegment = ["dim", `+${left.length - shown.length} more`];
+    if (used + segmentsWidth([count]) <= total) more.push(count);
+    else if (total - used >= 2) more.push([next[0], `${Array.from(next[1])[0] ?? ""}…`]);
+  }
+  return truncSegments([...head, ...shown, ...more], total);
+}
+
+/**
+ * The workspace as r4 names it: `<name> workspace` (`Infinite workspace`,
+ * never `∞ Infinite  Infinite` beside the brand chip, run-2 N10). A name that
+ * already ends in `workspace` is not said twice. Scrubbed; "" for none.
+ */
+function workspaceWords(name: string | undefined): string {
+  const scrubbed = name ? terminalText(name).trim() : "";
+  if (!scrubbed) return "";
+  return /\bworkspace$/iu.test(scrubbed) ? scrubbed : `${scrubbed} workspace`;
 }
 
 /** A source's name as the bar compares it: scrubbed, lower case, single spaces. */

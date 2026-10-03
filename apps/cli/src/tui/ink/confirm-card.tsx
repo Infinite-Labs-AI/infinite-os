@@ -23,6 +23,7 @@ import React from "react";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { terminalText, type InSessionConfirmationAction } from "../../desktop/confirm-in-session.js";
+import { confirmErrorLines, confirmResultLines, type ConfirmDecision, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
 import { confirmCardKeys, keyBarHints } from "../keys/keymap.js";
 import { colorEnabled, DEFAULT_THEME, type Theme } from "../theme.js";
 import type { ApprovalRender } from "../views/approval.js";
@@ -73,6 +74,87 @@ export function receiptViewFrame(head: InSessionConfirmationAction, outcome: unk
     name: view.tool,
     view: kept
   };
+}
+
+/** What a dismissed card says (r4 flow-pause-09): the same words the app's receipt uses. */
+export const DISMISSED_WORDS = "Dismissed — nothing was executed.";
+
+/**
+ * The dismissed card a `n` leaves on its turn AT ONCE (run-2 M5): the card's
+ * own view, settled as dismissed, in the receipt's place (`receipt:<handle>`),
+ * so the dismissed card and the Steps row's `· dismissed` draw in the same
+ * frame as the key, not 1–10 s later when the app answers. The decline is
+ * still sent once; the app's answer then replaces this in place (or takes it
+ * off, when the decline failed). Null for a card with no view of a receipt
+ * kind: its receipt lines wait for the app.
+ */
+export function dismissedReceiptFrame(head: InSessionConfirmationAction): ToolViewFrameV1 | null {
+  const view = head.view;
+  if (!view || !RECEIPT_KINDS.has(view.kind)) {
+    return null;
+  }
+  return {
+    type: "tool.view",
+    stage: "tool",
+    message: terminalText(view.title),
+    viewId: `receipt:${head.confirmationHandle}`,
+    name: view.tool,
+    view: { ...view, state: "cancelled", stateReason: { code: "dismissed", words: DISMISSED_WORDS } } as typeof view
+  };
+}
+
+/** The frame a decision leaves on its turn the moment it is made: only a `n` leaves one (the dismissed card). */
+export function declineFrame(head: InSessionConfirmationAction, decision: ConfirmDecision): ToolViewFrameV1 | null {
+  return decision === "decline" ? dismissedReceiptFrame(head) : null;
+}
+
+/** The app's words when it refused a card's answer before anything ran (`field_invalid`). */
+export function fieldInvalidMessage(outcome: unknown): string | null {
+  if (!isRecord(outcome) || outcome.code !== "field_invalid") return null;
+  return typeof outcome.message === "string" ? outcome.message : "";
+}
+
+/**
+ * What the app's answer does to a resolved card's frame on its turn (the
+ * working card after a yes, the dismissed card after a `n`):
+ * - `receipt`: a settled receipt view replaces it in place (on the card's turn);
+ * - `keep`: the frame already says it (a `n` the app took with no receipt of
+ *   its own, or a dismissal on a turn that has moved on);
+ * - `drop`: take the frame off and print these lines (the session then shows
+ *   the receipt's object or brings the card back).
+ * A refused field (`field_invalid`) on a resolved answer is the session's to
+ * handle before this, since it puts the card back in front.
+ */
+export type ConfirmSettle =
+  | { type: "receipt"; frame: ToolViewFrameV1 }
+  | { type: "keep" }
+  | { type: "drop"; lines: ConfirmLine[] };
+
+export function settleConfirmOutcome(
+  head: InSessionConfirmationAction,
+  outcome: unknown,
+  opts: { decision: ConfirmDecision; dismissed: boolean; onCardTurn: boolean; thrown: boolean }
+): ConfirmSettle {
+  if (opts.thrown) {
+    const receipt = fieldInvalidMessage(outcome) === null ? receiptViewFrame(head, outcome) : null;
+    if (receipt && opts.onCardTurn) return { type: "receipt", frame: receipt };
+    return { type: "drop", lines: confirmErrorLines(outcome) };
+  }
+  const receipt = receiptViewFrame(head, outcome);
+  if (receipt && opts.onCardTurn) return { type: "receipt", frame: receipt };
+  if (opts.dismissed && !isRecord(isRecord(outcome) ? outcome.view : undefined)) {
+    // The app took the no and sent no receipt of its own: the dismissed card already says it.
+    return { type: "keep" };
+  }
+  if (opts.dismissed && receipt?.view.state === "cancelled") {
+    // The turn moved on, the dismissed card with it: the app agreed, nothing more to print.
+    return { type: "keep" };
+  }
+  return { type: "drop", lines: confirmResultLines(outcome, opts.decision) };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** The lines of the r4 card for a pending write that came without an approval view. */

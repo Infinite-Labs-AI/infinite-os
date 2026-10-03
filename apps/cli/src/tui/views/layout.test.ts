@@ -382,17 +382,19 @@ describe("a committed turn hides nothing behind a key (scrollback has none)", ()
   };
   const keyWords = /→ to see|m for more/u;
 
-  it("a numbers view that drops a column at 60: live it names the key, committed it prints every column", () => {
+  it("a numbers view that drops a column at 60: live it names the key, committed it keeps r4's table and names what it hid in words (run-2 M7)", () => {
     const ads = fixture("numbers-ads");
-    const live = renderLiveTurn({ messages, views: [ads], focus: null, width: 60, color: false, theme }).lines;
+    const live = renderLiveTurn({ messages, views: [ads], focus: viewFocusAfterTurnDone([ads]), width: 60, color: false, theme }).lines;
     expect(live).toContain("+ Impressions · → to see");
     expect(live.some((line) => /Impressions: \d/u.test(line))).toBe(false);
+    // A turn still running has no view keys yet: → does nothing there, so the hint says it in words.
+    expect(renderLiveTurn({ messages, views: [ads], focus: null, width: 60, color: false, theme }).lines).toContain("+ Impressions hidden");
     const lines = renderCommittedTurn({ messages, views: [ads], focus: null, width: 60, color: false, theme });
     expect(lines.some((line) => keyWords.test(line))).toBe(false);
-    // Every row's Impressions, with its value, beside the columns the table kept.
-    expect(lines.filter((line) => /Impressions: [\d,]+/u.test(line)).map((line) => line.trim())).toEqual([
-      "Impressions: 4,000", "Impressions: 3,000", "Impressions: 2,000", "Impressions: 9,000"
-    ]);
+    // ONE bordered table, never label: value records, and the hidden column named.
+    expect(lines.some((line) => /Impressions: [\d,]+/u.test(line))).toBe(false);
+    expect(lines.filter((line) => line.startsWith("┌"))).toHaveLength(1);
+    expect(lines).toContain("+ Impressions hidden");
     for (const kept of ["Spend", "Clicks", "CTR", "Conv", "CPC", "Ad set 01", "Ad set 03", "$40.00"]) {
       expect(lines.some((line) => line.includes(kept))).toBe(true);
     }
