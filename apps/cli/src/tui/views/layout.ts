@@ -152,6 +152,14 @@ export interface LayoutOptions {
   answerScroll?: number;
   /** The keys are on the answer pane (after tab): its more line names ↓ PgDn, not tab. */
   answerKeys?: boolean;
+  /**
+   * The details' last `lines` rows are a write card waiting for its answer
+   * (W3L2-M2). A cut pane opens on it, not at its top: the whole card when it
+   * fits (the views above it cut, with `↑ N above`), else from its title row.
+   * `scroll` is where ↑/↓ moved the pane since (absent = on the card). `follow`
+   * and `paneScroll` (the views' own keys) do not move a pane with a card.
+   */
+  card?: { lines: number; scroll?: number };
 }
 
 /** r4 `frame()` pads the panes to this many rows (`while(wide&&body.length<16)`). */
@@ -173,7 +181,7 @@ function layoutTurnParts(
   width: number,
   style: { color: boolean; theme: Theme } | null,
   options: LayoutOptions
-): { lines: string[]; pane: PaneWindow | null; answerPane: PaneWindow | null; natural: number } {
+): { lines: string[]; pane: PaneWindow | null; answerPane: PaneWindow | null; natural: number; cardShown: boolean | null } {
   const total = Math.max(1, Math.floor(width));
   const all: readonly ViewRender[] = view === null ? [] : isRenderList(view) ? view : [view];
   // A steps-only view speaks only when the turn has nothing else to show
@@ -193,6 +201,8 @@ function layoutTurnParts(
   let pane: PaneWindow | null = null;
   let answerPane: PaneWindow | null = null;
   let natural = 0;
+  // A waiting card is on screen unless a cut pane leaves part of it out (below).
+  let cardShown: boolean | null = options.card && options.card.lines > 0 && renders.length ? true : null;
 
   if (!renders.length) {
     out.push(...answer.map((line) => fitLine(line, total)));
@@ -238,7 +248,12 @@ function layoutTurnParts(
       if (details.length > room) {
         const shown = room - 1;
         let from = Math.floor(options.paneScroll ?? 0);
-        if (followed) {
+        const card = cardShown !== null && options.card ? options.card : null;
+        const cardStart = card ? details.length - card.lines : 0;
+        if (card) {
+          // On the card (W3L2-M2): the whole of it at the pane's foot, or, taller than the pane, from its title row.
+          from = card.scroll !== undefined ? Math.floor(card.scroll) : Math.min(cardStart, details.length - shown);
+        } else if (followed) {
           // Just enough to show the selected row: up to its first line, or down to its last.
           const [start, count] = followed;
           if (start < from) from = start;
@@ -247,6 +262,10 @@ function layoutTurnParts(
         const above = Math.max(0, Math.min(details.length - shown, from));
         const below = details.length - above - shown;
         pane = { above, below, shown };
+        if (card) {
+          // On screen: its title row shown, and its last row too (or, taller than the pane, its title on the top row).
+          cardShown = cardStart >= above && (cardStart + card.lines <= above + shown || cardStart === above);
+        }
         right = [...details.slice(above, above + shown), paneMoreLine(pane, options.paneKeys === true, style)];
       }
       // r4 pads a short pane to 16 rows; never past the room the window gives.
@@ -280,7 +299,7 @@ function layoutTurnParts(
     out.push(stepHeader(total, style ?? { color: false, theme: DEFAULT_THEME }), ...strip.map((line) => fitLine(line, total)));
     natural += strip.length + 1;
   }
-  return { lines: out, pane, answerPane, natural };
+  return { lines: out, pane, answerPane, natural, cardShown };
 }
 
 /**
@@ -356,6 +375,12 @@ export interface LiveTurnInput {
    * `detailsPaneWidth(width)` columns.
    */
   details?: readonly string[];
+  /**
+   * Where ↑/↓ moved a cut details pane while the card in `details` waits (the
+   * first line shown). Absent: the pane opens on the card (W3L2-M2), so what
+   * its OK key approves is on screen.
+   */
+  cardScroll?: number;
   /**
    * Views the turn holds but does not draw as views (the pending write card's
    * own view): a call's Steps status still follows them (needs_yes → ▣).
@@ -454,6 +479,12 @@ export interface LiveTurnRender {
   answerPane: PaneWindow | null;
   /** The caption gate folded part of the answer and the fold is closed: `?` opens it. */
   folded: boolean;
+  /**
+   * The waiting card in `details` is on screen: all of it, or, taller than the
+   * details pane, from its title row (W3L2-M2). The session offers the card's
+   * OK key only then. Null: the turn draws no card.
+   */
+  cardShown: boolean | null;
 }
 
 /** The latest turn with its views, laid out for the live region: side by side from 80 columns. */
@@ -495,7 +526,8 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
     paged: renders.some((render) => (render.pages ?? 0) > 1),
     pane,
     answerPane,
-    folded: drawn.foldedRest !== null && input.captionOpen !== true
+    folded: drawn.foldedRest !== null && input.captionOpen !== true,
+    cardShown: drawn.cardShown
   };
 }
 
@@ -512,9 +544,15 @@ export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
 export function rowsBesideCard(input: Omit<LiveTurnInput, "details" | "rows" | "livePageNext">): number {
   const width = Math.max(1, Math.floor(input.width));
   const drawn = drawLiveTurn({ ...input, details: [CARD_PLACEHOLDER] }, width, undefined, true);
-  const around = drawn.stepRows + drawn.detailRows - 1;
-  // Wide, r4's blank pane row over the Steps rule; one column, the blank and the rule over the details and the blank over the Steps.
-  return drawn.wide ? around + (drawn.stepRows ? 1 : 0) : around + (drawn.answerRows ? 2 : 0) + (drawn.stepRows ? 1 : 0);
+  if (drawn.wide) {
+    // Side by side, the views above the card scroll away above it (the pane
+    // opens on the card, W3L2-M2): the card may take the whole pane but its
+    // `↑ N above` line. Then the Steps, under r4's blank pane row.
+    const above = drawn.detailRows > 1 ? 1 : 0;
+    return drawn.stepRows + (drawn.stepRows ? 1 : 0) + above;
+  }
+  // One column: the other views, the blank and the rule over the details and the blank over the Steps.
+  return drawn.stepRows + drawn.detailRows - 1 + (drawn.answerRows ? 2 : 0) + (drawn.stepRows ? 1 : 0);
 }
 
 /** One details row standing in for the card while its neighbours are measured. */
@@ -678,15 +716,18 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const keysOnPane = Boolean(input.focus && input.focus.engaged && input.focus.focus !== "composer") && !keysOnAnswer;
   // A finished answer is held to the window (live L8), except beside a card still waiting (it pages, as before).
   const answerCut = input.running !== true && !input.details?.length;
+  // A card waiting in the pane: the pane opens on it, and ↑/↓ (the card's own keys, no tab) move it (W3L2-M2).
+  const cardLines = card.length ? input.details!.length : 0;
   const laid = layoutTurnParts(answer, [...drawn, ...card, ...stepsOnly], stepRows, width, { color: input.color, theme: input.theme }, {
     split: wide, steps: withSteps, compact,
     ...(split && frame !== undefined
       ? {
-        maxRows: frame, paneScroll: input.focus?.paneScroll ?? 0, paneKeys: keysOnPane, answerTail: input.running === true,
+        maxRows: frame, paneScroll: input.focus?.paneScroll ?? 0, paneKeys: keysOnPane || cardLines > 0, answerTail: input.running === true,
         answerCut, answerScroll: input.focus?.answerScroll ?? 0, answerKeys: keysOnAnswer
       }
       : {}),
-    ...(split && input.focus?.followRow && focusIndex >= 0 && !folded.has(focusIndex) && renders[focusIndex] ? { follow: renders[focusIndex] } : {})
+    ...(cardLines ? { card: { lines: cardLines, ...(split && input.cardScroll !== undefined ? { scroll: input.cardScroll } : {}) } } : {}),
+    ...(split && !cardLines && input.focus?.followRow && focusIndex >= 0 && !folded.has(focusIndex) && renders[focusIndex] ? { follow: renders[focusIndex] } : {})
   });
   const lines = laid.lines;
   const detailRows = paneRenders([...drawn, ...card])
@@ -694,7 +735,7 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   return {
     renders, lines, focusIndex: folded.has(focusIndex) ? -1 : focusIndex, rows, wide: sideBySide, details: takesPane,
     stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length,
-    pane: laid.pane, answerPane: laid.answerPane, natural: laid.natural, foldedRest
+    pane: laid.pane, answerPane: laid.answerPane, natural: laid.natural, foldedRest, cardShown: laid.cardShown
   };
 }
 

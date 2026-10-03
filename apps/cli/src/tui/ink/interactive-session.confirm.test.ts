@@ -73,9 +73,35 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // Keyed to the head card itself, so a new card never opens with an earlier
     // card's explanation expanded (r4: the explanation stays behind ?), nor with
     // its open document, page or field answers. (A card brought back opens with
-    // only the answers its own entry carries: cardUiStart(entry).)
+    // only the answers its own entry carries: cardUiStart(entry).) A new card
+    // also opens its details pane on itself again (W3L2-M2): no scroll carries over.
     expect(source).toMatch(
-      /useLayoutEffect\(\(\) => \{\n\s+setExplainOpen\(false\);\n\s+setCardUi\(cardUiStart\(headConfirmAction\)\);\n\s+\}, \[headConfirmAction\]\);/u
+      /useLayoutEffect\(\(\) => \{\n\s+setExplainOpen\(false\);\n\s+setCardUi\(cardUiStart\(headConfirmAction\)\);\n\s+setCardPaneScroll\(null\);\n\s+\}, \[headConfirmAction\]\);/u
+    );
+  });
+
+  it("offers a card's OK key only while the drawn turn shows the card (W3L2-M2): both the keymap and the bar", () => {
+    // The keymap: the card's keys lose p (and r) when the card is off screen, and the card takes exactly those keys.
+    expect(source).toContain(
+      "const cardKeyCtx = headCardKeyCtx && liveTurn?.cardShown === false ? cardKeysOffScreen(headCardKeyCtx) : headCardKeyCtx;"
+    );
+    expect(source).toContain("confirmKeys={cardKeyCtx}");
+    expect(source).not.toContain("confirmKeys={headCardKeyCtx}");
+    // The bar: the same rule, for a drawn approval view's hints and for the fallback card's.
+    expect(source).toContain("const cardOff = turn?.cardShown === false;");
+    expect(source).toContain("cardOff ? headCard.keys.filter((hint) => !approvesCard(hint)) : headCard.keys");
+    expect(source).toContain("keyBarHints(cardOff ? cardKeysOffScreen(confirmKeys.ctx) : confirmKeys.ctx)");
+    // One definition, the keymap's (pinned by keymap.test.ts on CI).
+    expect(source).toMatch(/import \{[^}]*\bapprovesCard\b[^}]*\bcardKeysOffScreen\b[^}]*\} from "\.\.\/keys\/keymap\.js";/u);
+    expect(source).not.toContain("function cardKeysOffScreen");
+    expect(source).not.toContain("function approvesCard");
+  });
+
+  it("opens the pane on the card again when the window or the card's height changes (W3R5 review)", () => {
+    // A stored pane row would point into differently wrapped details: p would vanish for no reason on screen.
+    expect(source).toContain("const headCardRowCount = headCardLines?.length ?? 0;");
+    expect(source).toMatch(
+      /useLayoutEffect\(\(\) => \{\n\s+setCardPaneScroll\(null\);\n\s+\}, \[columns, rows, headCardRowCount\]\);/u
     );
   });
 
@@ -162,6 +188,8 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // The head card goes in too: a lookup it folds never takes the keys (lane review SHOULD).
     expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), headCardViewRef.current ? [headCardViewRef.current] : []) : null);");
     expect(handler).toMatch(/const refocusCardTurn = \(\) => \{\s+if \(!onCardTurn\(\)\) return;/u);
+    // The cut pane stays at its foot, on what the card became (W3L2-M2).
+    expect(handler).toContain("setViewFocus((focus) => focus ? { ...focus, paneScroll: PANE_FOOT } : focus);");
     // After the dismissed (or working) frame, after the app's receipt, and when the frame is taken off.
     expect(handler).toContain("if (working || dismissed) refocusCardTurn();");
     // T12: a streamed follow-up's views move the keys too, on the card's turn only.

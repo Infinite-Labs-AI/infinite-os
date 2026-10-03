@@ -17,6 +17,8 @@ import { displayWidth, truncateCells } from "../lib/display-width.js";
 import { sgrAttributes, style } from "../style/sgr.js";
 import type { Tone } from "../style/tokens.js";
 import { ansi, ansiSpan, colorEnabled, themeTokens, type AnsiRole, type Theme, type ThemeStyle } from "../theme.js";
+// A function used at call time only: the cycle with outcome.ts (which imports this file) is safe.
+import { isSettledWithoutRunning } from "./outcome.js";
 import { stateHeadFor, type StateTone } from "./states.js";
 import type { ViewRenderCtx } from "./types.js";
 
@@ -409,11 +411,13 @@ export function shortTitle(view: AnswerViewV1): string {
  * the action and the target's whole name (`Pause sample_video_long_…`): the card's
  * border title says the name, once (W3-ap-pause; r4 flow-pause-*). A title
  * that is not the whole name (r4's `Pause Hook B` for `Hook B · founder POV`)
- * is kept as it is.
+ * is kept as it is. A change that ended without running (dismissed, expired)
+ * draws no card, so its head keeps the name (r4 flow-pause-09 `Pause Hook B
+ * ✕ Dismissed`; live check 2 N2-b), cut by `headLine` at a word's end.
  */
 function headTitle(view: AnswerViewV1): string {
   const title = shortTitle(view);
-  if (view.kind !== "change" || !isRecord(view.body) || !isRecord(view.body.target)) {
+  if (view.kind !== "change" || !isRecord(view.body) || !isRecord(view.body.target) || isSettledWithoutRunning(view)) {
     return title;
   }
   const label = viewText(view.body.target.label);

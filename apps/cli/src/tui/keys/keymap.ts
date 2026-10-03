@@ -252,6 +252,20 @@ export function keyBarHints(ctx: KeyContext): KeyHint[] {
   return hints;
 }
 
+/**
+ * A card's keys while the card is scrolled off screen (W3L2-M2): no OK key and
+ * no `r` (which sends the approve again), so no key approves what the user
+ * cannot see. `n` (a real decline) and the card's other keys stay.
+ */
+export function cardKeysOffScreen(ctx: KeyContext): KeyContext {
+  return { ...ctx, okKey: null, caps: { ...ctx.caps, retry: false } };
+}
+
+/** A card hint that approves: its OK key, or `r` (sends the approve again). */
+export function approvesCard(hint: Pick<KeyHint, "key" | "ok">): boolean {
+  return hint.ok === true || hint.key === "r";
+}
+
 /** How many documents `1`–`9` reach on a card (at most 9). */
 function cardTabs(card: CardKeys): number {
   const tabs = typeof card.tabs === "number" && Number.isFinite(card.tabs) ? Math.floor(card.tabs) : 0;

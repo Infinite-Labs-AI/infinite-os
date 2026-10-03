@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   RESERVED_KEYS,
+  approvesCard,
+  cardKeysOffScreen,
   confirmCardKeys,
   formatKeyBar,
   keyBarHints,
@@ -335,5 +337,49 @@ describe("confirmCardKeys", () => {
     const keys = confirmCardKeys({ summary: "Pause ad", view: { approval: { confirmLabel: "Pause", summary: null } } }, NO_CAPS);
     expect(keys.explainText).toBeNull();
     expect(keys.ctx.explain).toBe(false);
+  });
+});
+
+describe("a card scrolled off screen (W3L2-M2): no key approves what the user cannot see", () => {
+  const ALL_CAPS = { open: true, watch: true, retry: true } as const;
+  const onScreen = card({ okLabel: "Pause", caps: ALL_CAPS, explain: true, card: { view: true } });
+  const offScreen = cardKeysOffScreen(onScreen);
+
+  it("p and r resolve to nothing; n still dismisses, and the other keys keep working", () => {
+    expect(resolveKey("p", {} as Key, onScreen)).toEqual({ type: "ok" });
+    expect(resolveKey("r", {} as Key, onScreen)).toEqual({ type: "retry" });
+    expect(resolveKey("p", {} as Key, offScreen)).toEqual({ type: "none" });
+    expect(resolveKey("r", {} as Key, offScreen)).toEqual({ type: "none" });
+    expect(resolveKey("n", {} as Key, offScreen)).toEqual({ type: "dismiss" });
+    expect(resolveKey("o", {} as Key, offScreen)).toEqual({ type: "open" });
+    expect(resolveKey("w", {} as Key, offScreen)).toEqual({ type: "watch" });
+    expect(resolveKey("v", {} as Key, offScreen)).toEqual({ type: "view" });
+    expect(resolveKey("?", {} as Key, offScreen)).toEqual({ type: "explain" });
+  });
+
+  it("the bar offers no OK key and no r; n dismiss stays", () => {
+    const hints = keyBarHints(offScreen);
+    expect(hints.some((hint) => hint.ok === true)).toBe(false);
+    expect(hints.map((hint) => hint.key)).not.toContain("p");
+    expect(hints.map((hint) => hint.key)).not.toContain("r");
+    expect(hints.map((hint) => hint.key)).toContain("n");
+    expect(keyBarText(keyBarHints(cardKeysOffScreen(card({ okLabel: "Pause" })))))
+      .toBe(" n  dismiss    tab  switch side    /  commands");
+  });
+
+  it("leaves the context it was given untouched", () => {
+    expect(onScreen.okKey).toBe("p");
+    expect(onScreen.caps.retry).toBe(true);
+  });
+
+  it("approvesCard names exactly the approving hints: the OK key and r", () => {
+    expect(keyBarHints(onScreen).filter(approvesCard).map((hint) => hint.key)).toEqual(["p", "r"]);
+    expect(approvesCard({ key: "y", ok: true })).toBe(true);
+    expect(approvesCard({ key: "r" })).toBe(true);
+    for (const key of ["n", "o", "w", "v", "?", "c", "e", "space", "1-3"]) {
+      expect(approvesCard({ key })).toBe(false);
+    }
+    // A drawn approval view's own hints, filtered the same way, keep n.
+    expect(keyBarHints(onScreen).filter((hint) => !approvesCard(hint)).map((hint) => hint.key)).toEqual(["v", "n", "o", "w", "?"]);
   });
 });

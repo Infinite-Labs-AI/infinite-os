@@ -990,6 +990,24 @@ describe("a long name is said once, in the card's title (W3-ap-pause)", () => {
     expect(head).toBe(" Pause Demo B  ▣ Needs your OK");
   });
 
+  // Live check 2, N2-b: once the card is decided its box goes, and with it the
+  // only place the name was. The dismissed head keeps the name (r4 flow-pause-09
+  // `Pause Hook B ✕ Dismissed`), cut at a word's or a name part's end.
+  for (const cols of [51, 69, 100]) {
+    it(`at ${cols} a dismissed card's head names its target, cut at a part's end`, () => {
+      const dismissed = longPause({ state: "cancelled", stateReason: { code: "dismissed", words: "Dismissed — nothing was executed." } });
+      const head = plainText(renderView(dismissed, viewCtx({ width: cols })).head);
+      expect(displayWidth(head)).toBeLessThanOrEqual(cols);
+      expect(head).toMatch(/✕ Dismissed$/u);
+      expect(head).not.toMatch(/^ Pause ad /u);
+      const shown = /^ Pause (\S+) {2}✕/u.exec(head)![1]!;
+      const kept = shown.replace(/…$/u, "");
+      expect(LONG.startsWith(kept), head).toBe(true);
+      expect(kept.length).toBeGreaterThanOrEqual(12);
+      if (shown.endsWith("…")) expect("_-".includes(LONG[kept.length]!), head).toBe(true);
+    });
+  }
+
   it("a head with no room for the whole title is cut at a word's end", () => {
     const view = pause({ title: "Pause the sample ad with a long plain title for the head here" });
     const head = plainText(approvalRender(view, cardCtx({ width: 51 })).head);
