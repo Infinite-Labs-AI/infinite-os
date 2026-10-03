@@ -18,8 +18,12 @@ describe("escapeMarkdownCell", () => {
     expect(escapeMarkdownCell(String.raw`a\|b`)).toBe(String.raw`a\\\|b`)
     expect(escapeMarkdownCell("a|b")).toBe(String.raw`a\|b`)
     expect(escapeMarkdownCell("one\r\ntwo\nthree")).toBe("one two three")
-    // negative: pipes alone (the old escaper) leave `\\|`, an escaped backslash and a LIVE pipe
-    expect(String.raw`a\|b`.replace(/\|/g, "\\|")).toBe(String.raw`a\\|b`)
+    // negative: escaping pipes alone turned `a\|b` into `a\\|b`, an escaped backslash then a LIVE pipe.
+    // A pipe is live when an EVEN run of backslashes precedes it.
+    const livePipes = (text: string) => [...text.matchAll(/(\\*)\|/g)].filter((match) => match[1]!.length % 2 === 0).length
+    expect(livePipes(String.raw`a\\|b`)).toBe(1)
+    expect(livePipes(escapeMarkdownCell(String.raw`a\|b`))).toBe(0)
+    expect(livePipes(escapeMarkdownCell(String.raw`a\\|b|c`))).toBe(0)
   })
 })
 

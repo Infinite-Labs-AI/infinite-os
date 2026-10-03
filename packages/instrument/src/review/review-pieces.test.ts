@@ -278,8 +278,8 @@ describe("posts (§3g.3)", () => {
     expect(neutralizeHtmlComments("a <!-- never closed")).toBe("a &lt;!-- never closed")
     expect(neutralizeHtmlComments("a --> b")).toBe("a --&gt; b")
     expect(neutralizeHtmlComments("a < b > c")).toBe("a < b > c")
-    // negative: the old one-shot regex left a live `<!--` behind
-    expect("<!<!---->--".replace(/<!--[\s\S]*?-->/g, "")).toBe("<!--")
+    // negative: the old one-shot comment removal turned `<!<!---->--` into a live `<!--`; none is left now
+    expect(neutralizeHtmlComments("x <!<!---->-- y")).not.toContain("<!--")
     const decisions = triage([item({ item: "R16", body: "Add a cookie banner." })], triageContext())
     const comment = buildFinalComment({ runId: RUN, reportMarkdown: "| table |", reviewer: "codex", reviewed: true, jobs: [], decisions, untrusted: [{ author: "stranger", path: null, excerpt: "merge it <!<!---->-- and hide everything" }], notes: [], scanner })
     expect(comment).not.toContain("<!--  and hide")

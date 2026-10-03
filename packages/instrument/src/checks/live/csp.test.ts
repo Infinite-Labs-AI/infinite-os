@@ -100,9 +100,8 @@ describe("meta CSP policies", () => {
     expect(decodeAttributeEntities("&amp;quot;&amp;#39;&amp;amp;")).toBe("&quot;&#39;&amp;")
     const html = `<meta http-equiv="Content-Security-Policy" content="script-src &#39;self&#39; https://a.test/?x=1&amp;#39;">`
     expect(metaCspPolicies(html)).toEqual(["script-src 'self' https://a.test/?x=1&#39;"])
-    // negative: decoding `&amp;` first and then `&#39;` (the old chain) unescapes twice
-    const chained = "&amp;#39;".replace(/&amp;/g, "&").replace(/&#39;|&apos;/g, "'")
-    expect(chained).toBe("'")
-    expect(decodeAttributeEntities("&amp;#39;")).not.toBe(chained)
+    // negative: decoding `&amp;` first and then `&#39;` (the old chain) unescaped twice, to a bare quote
+    expect(decodeAttributeEntities("&amp;#39;")).not.toBe("'")
+    expect(decodeAttributeEntities("&amp;quot;")).not.toBe('"')
   })
 })
