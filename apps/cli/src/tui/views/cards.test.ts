@@ -939,6 +939,22 @@ describe("a long name in a card's head is cut to the card (W3-ap-pause)", () => 
     });
   }
 
+  // Review S3: at 60 columns the border cuts the card's title too, so the card's
+  // first rows carry the whole title, wrapped; where the border holds it, nothing is added.
+  for (const cols of [48, 60]) {
+    it(`at ${cols} the whole name is on screen, in the card's first rows`, () => {
+      const lines = approvalRender(longPause(), cardCtx({ width: cols, caps: OPEN })).lines.map(plainText);
+      const inCard = lines.map((line) => line.replace(/^│ ?| ?│$/gu, "").trim()).join("");
+      expect(inCard).toContain(LONG);
+      for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(cols);
+    });
+  }
+
+  it("where the border holds the whole title, the card adds no title row", () => {
+    const lines = approvalRender(longPause(), cardCtx({ width: 140, caps: OPEN })).lines.map(plainText);
+    expect(lines.join("\n").split(LONG).length - 1).toBe(1);
+  });
+
   it("a short name is not cut (r4 flow-pause-01)", () => {
     const head = plainText(approvalRender(pause(), cardCtx({ width: 140 })).head);
     expect(head).toBe(" Pause Demo B  ▣ Needs your OK");
