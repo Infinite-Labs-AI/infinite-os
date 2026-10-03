@@ -94,9 +94,11 @@ describe("ReportBuilder.build", () => {
     const wrongSource = structuredClone(columns.live_today)
     wrongSource.finishLine.each_tool_once = { ...wrongSource.finishLine.each_tool_once!, provenance: { ...wrongSource.finishLine.each_tool_once!.provenance, source: "plan_answer" } }
     expect(() => buildFrom({ ...columns, live_today: wrongSource })).toThrow(/§3i.7/)
-    const filled = structuredClone(columns.proven_live)
-    filled.finishLine.spa_page_views = { value: "pass", display: "pass", state: "pass", provenance: { source: "desktop_test", at: AT, runId: RUN } }
-    expect(() => buildFrom({ ...columns, proven_live: filled })).toThrow(/not measured/)
+    // §3x.6: "SPA page views" and "previews silent" are measured after the deploy now; "proof from a real visit" is
+    // still never measured on the live site TODAY.
+    const filled = structuredClone(columns.live_today)
+    filled.finishLine.proof_from_real_visit = { value: "pass", display: "pass", state: "pass", provenance: { source: "cloud_receipt", at: AT, runId: RUN } }
+    expect(() => buildFrom({ ...columns, live_today: filled })).toThrow(/not measured/)
   })
 
   it("an absent column renders every cell as \"—\" with a reason (the proven column waits for the deploy)", () => {

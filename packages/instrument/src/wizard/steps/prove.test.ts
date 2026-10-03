@@ -15,7 +15,7 @@ import {
 } from "../../../test/wizard/runtime-fakes.js"
 import type { TestRunRequest } from "../contracts/test-engine.js"
 import { createRunState } from "../run-state.js"
-import { PROVE_LIMITS, buildProvenColumn, ownReceipt, proofStateFrom, receiptMarkersFrom, step } from "./prove.js"
+import { PROVE_LIMITS, buildProvenColumn, ownReceipt, receiptMarkersFrom, step } from "./prove.js"
 
 function mergedState() {
   const state = createRunState({ tagVersion: "0.12.0", root: "/repo", appRoot: ".", now: new Date("2026-10-02T09:00:00Z"), displayId: "r-7f3c" })
@@ -223,7 +223,6 @@ describe("prove: the proven_live column is honest", () => {
       receipts: receiptsAll({ infinite: lane("no_receipt") })
     })
     expect(column.finishLine.proof_from_real_visit!.state).toBe("problem")
-    expect(proofStateFrom(column)).toBe("problem")
   })
 
   it("PostHog seen but sent directly (not through the proxy) is a problem for 'survives ad blockers'", () => {
@@ -248,9 +247,18 @@ describe("prove: the proven_live column is honest", () => {
     expect(column.cells.ga4_page_views_per_visit).toMatchObject({ value: 2, state: "problem" })
   })
 
-  it("markers name only what THIS visit observed (no dry-load ids, no unconnected tool)", () => {
+  it("markers name only what THIS visit observed; §3x.5 an installed, UNCONNECTED pixel is marked by the id seen leaving", () => {
     const markers = receiptMarkersFrom(realVisitResult(), { ga4: ["G-ACME000001"] })
-    expect(markers).toEqual({ ga4: { measurementId: "G-ACME000001", seenLeaving: true, httpStatus: 204 }, serverLane: { probePath: "/__infinite_probe/7f3c2a91b0de" } })
+    expect(markers).toEqual({
+      ga4: { measurementId: "G-ACME000001", seenLeaving: true, httpStatus: 204 },
+      // Meta has no connection: its first pixel seen leaving (2xx) gets the `delivering` receipt.
+      metaPixel: { pixelId: "1234567890123456", seenLeaving: true, httpStatus: 200 },
+      serverLane: { probePath: "/__infinite_probe/7f3c2a91b0de" }
+    })
+    // Negative: a CONNECTED tool is marked only by its own id (another id seen leaving is not its receipt).
+    const other = realVisitResult()
+    other.ga4.events = other.ga4.events.map((event) => ({ ...event, tid: "G-SOMEONEELS" }))
+    expect(receiptMarkersFrom(other, { ga4: ["G-ACME000001"] }).ga4).toBeUndefined()
   })
 })
 
@@ -275,7 +283,6 @@ describe("prove: a resume finishes its OWN claim (O1-06)", () => {
     expect((outcome as { status: string }).status).not.toContain("Infinite app")
     const column = ctx.current().report.proven_live!
     expect(column.finishLine.each_tool_once!.state).toBe("pass")
-    expect(proofStateFrom(column)).toBe("proven")
     // The receipts are read with THIS visit's markers.
     const markers = (resumed.log.calls.find((call) => call.what === "postReceipts")!.args[1] as { markers: { infinite?: unknown } }).markers
     expect(markers.infinite).toEqual({ eventIds: ["evt_FAKE0301"] })
@@ -413,7 +420,9 @@ describe("prove: a redirecting home page (review I1 P1-1)", () => {
     const column = ctx.current().report.proven_live!
     expect(column.finishLine.utms_survive_redirects).toMatchObject({ state: "pass", display: "campaign tags kept through every redirect" })
     expect(column.finishLine.csp_allows!.display).not.toMatch(/→|%|->/)
-    expect(bundle.log.calls.find((call) => call.what === "patchRun")!.args[1]).toEqual({ proofState: "proven" })
+    // §3x.6 THE verdict decides the PATCH: the live CSP blocks a tool, a problem on the deployed site (the old rule
+    // read only the proof and once cells and would have said "proven").
+    expect(bundle.log.calls.find((call) => call.what === "patchRun")!.args[1]).toEqual({ proofState: "problem" })
   })
 
   it("an unexpected error after the claim was granted still settles proofState undetermined before it throws (never 24 h of 'proving')", async () => {
@@ -458,5 +467,30 @@ describe("prove: receipts from before the run started are not this run's (§3z.8
     expect(column.cells.live_test_per_tool!.display).not.toContain("verified")
     expect(column.cells.live_test_per_tool!.provenance.receiptAt).toBeUndefined()
     expect(ownReceipt(lane("verified", "2026-10-02T09:30:00.000Z"), "2026-10-02T09:00:00.000Z").state).toBe("verified")
+  })
+})
+
+describe("§3x.5 (W13) no server lane installed: no probe, no lane receipt, no 120 s wait", () => {
+  it("keys `no_secret` → the real visit carries no serverLaneProbe, the receipts ask no serverLane, and polling ends at once", async () => {
+    const noLane = { ...keysFixture(), serverLane: { laneState: "no_secret" as const, envWriteGranted: false } }
+    const settled = receiptsAll({ server_lane: lane("pending") })
+    const bundle = fakeDeps({ bridge: { keys: noLane, receipts: [settled] } })
+    const started = bundle.clock.now().getTime()
+    const { outcome } = await runProve(bundle)
+    expect(outcome.kind).toBe("ok")
+    const request = bundle.log.calls.find((call) => call.what === "startTest" && (call.args[0] as TestRunRequest).mode === "real_visit")!.args[0] as TestRunRequest
+    expect(request.serverLaneProbe).toBeUndefined()
+    const asked = bundle.log.calls.filter((call) => call.what === "postReceipts").map((call) => (call.args[1] as { markers: Record<string, unknown> }).markers)
+    expect(asked.every((markers) => markers.serverLane === undefined)).toBe(true)
+    // The lane's "pending" is not this run's to wait on: one read, no 120 s of polling.
+    expect(asked).toHaveLength(1)
+    expect(bundle.clock.now().getTime() - started).toBeLessThan(15_000)
+  })
+
+  it("negative: an installed lane (a secret set) is probed and its receipt asked for", async () => {
+    const bundle = fakeDeps()
+    await runProve(bundle)
+    const request = bundle.log.calls.find((call) => call.what === "startTest" && (call.args[0] as TestRunRequest).mode === "real_visit")!.args[0] as TestRunRequest
+    expect(request.serverLaneProbe).toEqual({ path: "/__infinite_probe/7f3c2a91b0de" })
   })
 })

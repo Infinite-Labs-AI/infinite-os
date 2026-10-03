@@ -364,7 +364,8 @@ describe("nested-agent mode (§3d.7)", { timeout: 30_000 }, () => {
     expect(readFileSync(join(root, "app/layout.tsx"), "utf8")).not.toContain("execSync")
     expect(git(root, "diff", "--name-only").trim()).toBe("app/api/signup/route.ts")
     const jobStates = Object.fromEntries(second.events().filter((event) => event.t === "job.state").map((event) => [event.itemId, event.state]))
-    expect(jobStates[LAYOUT_ITEM.id]).toBe("blocked")
+    // §3x.2: a refused hunk fails the job's `turn_gate` S check (nested mode has no further round): never "blocked".
+    expect(jobStates[LAYOUT_ITEM.id]).toBe("failed")
   })
 
   it("an answers file carrying consentMode / conversion names is ignored in nested mode and, with no /dev/tty, the run parks NEEDS_ANSWERS", async () => {
@@ -539,7 +540,7 @@ describe("the outro and run.end.reportPath show only THIS run's report (O1-05)",
       columns: ctx.state.get().report,
       provenLivePending: "deploy",
       day7: null,
-      notes: [], verdictFacts: null
+      notes: [], verdictFacts: { jobs: [], openFindings: [], tools: null }
     })
     mkdirSync(join(ctx.root, ".infinite/wizard"), { recursive: true })
     writeFileSync(join(ctx.root, ".infinite/wizard/report.json"), JSON.stringify(deps.report.payload(report)))
@@ -596,7 +597,7 @@ describe("final verify F5: the closing screen waits for a key in a terminal, and
       columns: ctx.state.get().report,
       provenLivePending: "deploy",
       day7: null,
-      notes: [], verdictFacts: null
+      notes: [], verdictFacts: { jobs: [], openFindings: [], tools: null }
     })
     mkdirSync(join(ctx.root, ".infinite/wizard"), { recursive: true })
     writeFileSync(join(ctx.root, ".infinite/wizard/report.json"), JSON.stringify(deps.report.payload(report)))

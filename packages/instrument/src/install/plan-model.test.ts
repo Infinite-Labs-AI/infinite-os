@@ -108,10 +108,11 @@ describe("the plan model asks ONLY the four decisions", () => {
     expect(full.lines.map((line) => line.id)).toEqual(expect.arrayContaining([`install_provider:ga4:${IDS.ga4}`, `install_provider:posthog:${IDS.posthog}`, `install_provider:meta:${IDS.meta}`]))
   })
 
-  it("the server-lane line carries the probe disclosure (§3h.6: TWO bot-flagged rows on the real visit)", () => {
+  it("the server-lane line carries the real-visit disclosure (§3x.5: marked as Infinite's test, one normal page view in each tool)", () => {
     const plan = buildPlanModel(input())
     expect(plan.lines.find((line) => line.id === "server_lane")?.text).toContain(SERVER_LANE_PROBE_DISCLOSURE)
-    expect(SERVER_LANE_PROBE_DISCLOSURE).toMatch(/TWO bot-flagged/)
+    expect(SERVER_LANE_PROBE_DISCLOSURE).toMatch(/marks it as its own test, so it never counts in your Infinite numbers/)
+    expect(SERVER_LANE_PROBE_DISCLOSURE).not.toMatch(/bot-flagged|TWO/)
   })
 
   it("the agent budget line says who pays; no agent → an info line, never an approval", () => {

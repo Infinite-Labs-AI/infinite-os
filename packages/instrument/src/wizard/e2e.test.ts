@@ -194,7 +194,7 @@ function jobStates(run: WizardRun, itemId: string): string[] {
   return states.filter((state, index) => index === 0 || states[index - 1] !== state)
 }
 
-function finalJobs(w: E2eWorld): Array<{ id: string; state: string; blockedReason?: string; edits?: Array<{ file: string }> }> {
+function finalJobs(w: E2eWorld): Array<{ id: string; state: string; blockedReason?: string; note?: string; checks: Array<{ id: string; tier: string; state: string }>; edits?: Array<{ file: string }> }> {
   return JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/state.json"), "utf8")).jobs
 }
 
@@ -305,10 +305,19 @@ describe("the offline end-to-end run (§4.3)", () => {
     // F17: one report per measured column, each stored (201) by the cloud's own parser, and each passes the replay.
     const reports = w.bridge.callsFor("report")
     expect(reports.map((call) => [(call.body as { phase: string }).phase, call.status]), why).toEqual([
+      // §3x.7: the in-PR report before the merge card, then done's full set (in_pr again, now with the verdict).
+      ["in_pr", 201],
       ["live_today", 201],
       ["in_pr", 201],
       ["proven_live", 201]
     ])
+    // §3x.6: ONE verdict from what was measured. Approved fixes the scenario leaves undone (a consent-touching edit, a
+    // claim with no work, blocked guards) make it "problems", so the run is never PATCHed proven.
+    const verdict = (JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/report.json"), "utf8")) as { verdict: { state: string; headline: string; reasons: Array<{ kind: string }> } }).verdict
+    expect(verdict.state).toBe("problems")
+    expect(verdict.headline.startsWith("acme-store.com does not collect properly yet:")).toBe(true)
+    expect(verdict.reasons.map((reason) => reason.kind)).toContain("approved_fix_missing")
+    expect(w.bridge.calls.map(label)).not.toContain("runs.patch(phase)")
     expect(cloudRefusedReports(reports)).toEqual([])
     for (const call of reports) expect((call.body as { report: { columns: { live_today: { sha: unknown } } } }).report.columns.live_today.sha).toBeNull()
     expect(w.tripwire.connections, "something tried to reach a network through the proxy").toEqual([])
@@ -425,6 +434,9 @@ describe("the offline end-to-end run (§4.3)", () => {
       "test.poll",
       "test.start(dry_live:preview_self)",
       "test.poll",
+      // merge (§3x.7): the in-PR report is stored BEFORE the merge card, so the app can show it while the user decides.
+      "keys",
+      "report(in_pr)",
       // merge: the merge commit.
       "runs.patch(mergeSha,mergedAt,phase)",
       // prove: its reads, the deploy of the merge, the proof claim (granted), ONE real visit, receipts,
@@ -436,16 +448,20 @@ describe("the offline end-to-end run (§4.3)", () => {
       "test.start(real_visit:home)",
       "test.poll",
       "receipts",
+      // prove (§3x.6 / DECISIONS §5.2): production after the deploy, with the client-side navigation `before` ran
+      // (nothing sent). The merge's own address is not loaded: Vercel's deploy read names no GitHub deployment URL.
+      "test.start(dry_live:home)",
+      "test.poll",
       // prove: the passive P checks of the jobs now waiting for a real event (8 and 9 are checked since I1's fix round).
       "baseline",
       "runs.patch(proofState)",
-      // done (§3z.12): checkinOptIn FIRST, the report once per measured phase, then the phase.
+      // done (§3z.12): checkinOptIn FIRST, the report once per measured phase. NO `phase: proven`: THE verdict is
+      // "problems" (approved fixes are not in the code), and only "properly" moves the run to proven (§3x.6).
       "runs.patch(checkinOptIn)",
       "keys",
       "report(live_today)",
       "report(in_pr)",
       "report(proven_live)",
-      "runs.patch(phase)",
       "keys",
       "hosting"
     ])
@@ -488,8 +504,11 @@ describe("the offline end-to-end run (§4.3)", () => {
     expect(jobStates(run, ITEMS.duplicates)).toEqual(["claimed/agent_claim", "waiting_deploy/wizard"])
 
     // ---- 7. the post-turn gate: child_process in next.config.mjs never built ----
-    expect(job(ITEMS.posthogProxy)).toMatchObject({ state: "blocked", blockedReason: "outside_allowlist" })
-    expect(run.ofType("job.state").some((event) => event.itemId === ITEMS.posthogProxy && String(event.note).includes("turn_gate"))).toBe(true)
+    // §3x.2: the refused hunk is undone and the job is sent back with the gate's real words (never "outside the job's
+    // files"); the fake agent never fixes it, so it ends failed with that note and an S `turn_gate` problem.
+    expect(job(ITEMS.posthogProxy)).toMatchObject({ state: "failed" })
+    expect(job(ITEMS.posthogProxy).note).toMatch(/the wizard's safety check refused next\.config\.mjs:\d+: the edit starts a child process$/)
+    expect(job(ITEMS.posthogProxy).checks.find((check) => check.id === "turn_gate")).toMatchObject({ tier: "S", state: "problem" })
     expect(headFile("next.config.mjs")).not.toContain("child_process")
     const builds = readJsonl<{ childProcess: boolean }>(join(w.site.repo, ".next/e2e-builds.jsonl"))
     expect(builds.length).toBeGreaterThanOrEqual(2)
@@ -665,7 +684,8 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(readGhState(w.ghState).prs).toHaveLength(1)
     const merged = w.bridge.calls.slice(callsBefore).find((call) => call.verb === "runs.patch" && "mergeSha" in ((call.body as { patch: object }).patch))
     expect((merged!.body as { patch: { mergeSha: string } }).patch.mergeSha).toBe(mergeSha)
-    expect(w.bridge.calls.slice(callsBefore).filter((call) => call.verb === "test.start").map(label)).toEqual(["test.start(real_visit:home)"])
+    // ONE real visit, then §3x.6's post-deploy production load with `before`'s client-side navigation (nothing sent).
+    expect(w.bridge.calls.slice(callsBefore).filter((call) => call.verb === "test.start").map(label)).toEqual(["test.start(real_visit:home)", "test.start(dry_live:home)"])
   })
 
   it("(g) the proof claim is lost → no real visit, receipts read, done (Codex works, Claude reviews)", { timeout: RUN_TIMEOUT }, async () => {
@@ -848,12 +868,12 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
     expect(String(envTargets[0]!.reason)).toContain("POSTHOG_KEY is not a public build-time name")
   })
 
-  it("review I2 P2-2: keys refuses Infinite's own workspace (409 infinite_workspace) → a clean stop at link, exit 4, one plain line", { timeout: RUN_TIMEOUT }, async () => {
+  it("§3x.8 (R3-7): keys refuses Infinite's own workspace (409 infinite_workspace) → a clean stop at link, exit 2, the --relink line", { timeout: RUN_TIMEOUT }, async () => {
     const w = await world({ bridge: { errors: { keys: { code: "foreign_site_hosts", state: "infinite_workspace" } } } })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], timeoutMs: RUN_TIMEOUT })
-    expect(run.code, trace(run)).toBe(4)
-    expect(stepOutcomes(run)).toEqual(["link:failed:INF_WIZ_LINK_DECLINED"])
-    expect(JSON.stringify(run.events)).toContain("This site is linked to Infinite's own workspace. Link it to its own workspace and run npx infinite-tag again.")
+    expect(run.code, trace(run)).toBe(2)
+    expect(stepOutcomes(run)).toEqual(["link:failed:INF_WIZ_INFINITE_WORKSPACE"])
+    expect(JSON.stringify(run.events)).toContain("This workspace is Infinite's own and cannot take a customer site. Run npx infinite-tag --relink and pick another workspace.")
     expect(w.bridge.calls.map(label)).toEqual(["status", "link.request", "link.poll", "keys"])
     expect(remoteBranches(w)).toEqual(["main"])
     expect(agentRuns(w, "claude")).toEqual([])
@@ -1054,10 +1074,18 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
       "keys",
       "runs.get", "conversions",
       "keys", "hosting", "runs.patch(phase,prHeadSha,prNumber,prUrl)", "test.start(rehearsal:home)", "test.poll", "test.start(dry_live:preview_self)", "test.poll", "runs.patch(clickTestedConversions)", "ga4-key-events(sign_up)",
-      "keys", "hosting",
+      // review: the fix round re-rehearses the new head.
+      "keys", "hosting", "test.start(rehearsal:home)", "test.poll", "test.start(dry_live:preview_self)", "test.poll",
+      // merge (§3x.7): the in-PR report before the merge card, then the merge commit.
+      "keys", "report(in_pr)",
       "runs.patch(mergeSha,mergedAt,phase)",
-      "hosting", "keys", "site-prove", "keys", "runs.proof-claim", "test.start(real_visit:home)", "test.poll", "receipts", "baseline", "runs.patch(proofState)",
-      "runs.patch(checkinOptIn)", "keys", "report(live_today)", "report(in_pr)", "report(proven_live)", "runs.patch(phase)", "keys", "hosting"
+      "hosting", "keys", "site-prove", "keys", "runs.proof-claim", "test.start(real_visit:home)", "test.poll", "receipts",
+      // §3x.6 the post-deploy loads: the merge's own GitHub deployment address (the desktop refuses it: the claim is no
+      // longer pending, so nothing ties that origin to this site; open question for the app), then production with
+      // `before`'s client-side navigation.
+      "test.start(dry_live:preview_self)", "test.start(dry_live:home)", "test.poll",
+      "baseline", "runs.patch(proofState)",
+      "runs.patch(checkinOptIn)", "keys", "report(live_today)", "report(in_pr)", "report(proven_live)", "keys", "hosting"
     ])
     expect(labels).not.toContain("site-source")
     expect(labels).not.toContain("hosting.deploy")
@@ -1075,13 +1103,21 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
     expect(receipts.at(-1)).toMatchObject({ state: "verified" })
     expect(Date.parse(String(receipts.at(-1)!.receiptAt))).toBeGreaterThan(Date.parse(FAKE_RUN_STARTED_AT))
     const proofPatch = w.bridge.callsFor("runs.patch").map((call) => (call.body as { patch: { proofState?: string } }).patch.proofState).filter(Boolean)
-    expect(proofPatch).toEqual(["proven"])
-    // The cloud: the claim proven, the source created WITH the reserved key, the run proven.
+    // §3x.6: the run's proofState is THE verdict's. The site claim is proven and Infinite's receipt is verified, but
+    // GA4, PostHog and Meta are not connected and approved fixes are not in the code, so the verdict is "problems":
+    // the run is PATCHed `problem` and never moved to phase proven.
+    expect(proofPatch).toEqual(["problem"])
+    // The cloud: the claim proven, the source created WITH the reserved key.
     expect(w.bridge.script.claim?.state).toBe("proven")
     expect(w.bridge.script.keys.infinite.siteSourceKey).toBe(FAKE_RESERVED_SITE_KEY)
-    expect(w.bridge.script.run.proofState).toBe("proven")
-    expect(w.bridge.script.run.phase).toBe("proven")
-    const report = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/report.json"), "utf8")) as { columns: { proven_live: { pending: string | null; measuredAt: string | null } } }
+    expect(w.bridge.script.run.proofState).toBe("problem")
+    expect(w.bridge.script.run.phase).not.toBe("proven")
+    const report = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/report.json"), "utf8")) as {
+      columns: { proven_live: { pending: string | null; measuredAt: string | null } }
+      verdict: { state: string; reasons: Array<{ kind: string; names: string[] }> }
+    }
+    expect(report.verdict.state).toBe("problems")
+    expect(report.verdict.reasons.find((reason) => reason.kind === "tool_not_connected")?.names).toEqual(["GA4 G-FAKE...0001", "PostHog phc_FA...l000", "Meta 123456...3456"])
     expect(report.columns.proven_live.pending).toBeNull()
     expect(report.columns.proven_live.measuredAt).not.toBeNull()
   })
@@ -1111,11 +1147,13 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
     expect(labels).not.toContain("runs.proof-claim")
     expect(labels.some((entry) => entry.startsWith("test.start(real_visit"))).toBe(false)
     expect(labels.filter((entry) => entry === "site-prove").length).toBeGreaterThanOrEqual(2)
-    // The rehearsal was asked once, refused 400 naming the preview; its preview_self load was not asked.
-    expect(w.bridge.callsFor("test.start").filter((call) => (call.body as { mode: string }).mode === "rehearsal").map((call) => call.status)).toEqual([400])
+    // The rehearsal, and the review's re-rehearsal of the fix head, were each refused 400 naming the preview; no
+    // preview_self load was asked.
+    expect(w.bridge.callsFor("test.start").filter((call) => (call.body as { mode: string }).mode === "rehearsal").map((call) => call.status)).toEqual([400, 400])
     expect(labels).not.toContain("test.start(dry_live:preview_self)")
     const subs = run.ofType("step.sub").map((event) => String(event.text))
-    expect(subs.filter((text) => text.startsWith("Rehearsal:"))).toEqual(["Rehearsal: undetermined (the preview did not serve this pull request's proof file, e.g. it is protected)"])
+    // Once for the rehearsal step, once for the review's re-rehearsal of the fix head: the same honest words.
+    expect(subs.filter((text) => text.startsWith("Rehearsal:"))).toEqual(Array(2).fill("Rehearsal: undetermined (the preview did not serve this pull request's proof file, e.g. it is protected)"))
     expect(subs.some((text) => text.includes("the test window did not finish"))).toBe(false)
   })
 })
@@ -1152,8 +1190,10 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
       saveGhState(w.ghState, state)
       return "open"
     }
-    // No --consent-mode and no consent in the answers: with no host, nothing consent governs is installed.
-    const answers = writeAnswers(w, { ...answersFile(), consentMode: undefined })
+    // With no host, Infinite is not installed; the consent decision is still asked because it governs the Meta
+    // click-id capture beside the site's own pixel (§3x.6: the pixel inside the <Script> template literal is now
+    // seen as adopted, as it was in live run 3), so the answers carry it.
+    const answers = writeAnswers(w)
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond, timeoutMs: RUN_TIMEOUT })
     const why = trace(run)
     const outcomes = stepOutcomes(run)
@@ -1206,7 +1246,7 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
     expect(w.tripwire.connections).toEqual([])
   })
 
-  it("no live address (the user says it isn't live yet): no consent or conversion question, and Proven live holds no pass and no problem", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
+  it("no live address (the user says it isn't live yet): no conversion question, consent only for the Meta click-id capture, and Proven live holds no pass and no problem", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
     // No agents: this world is about the plan and the report, not the jobs (they would need conversions it withholds).
     const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_NO_AGENTS: "1" } })
     const asked: Array<{ kind: string; payload: unknown }> = []
@@ -1221,8 +1261,9 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
       saveGhState(w.ghState, state)
       return "open"
     }
-    // No --consent-mode and no consent in the answers: a plan that asks no consent must not park on it.
-    const answers = writeAnswers(w, { ...answersFile(), consentMode: undefined })
+    // The consent decision is asked ONLY for what it governs here: the Meta click-id capture beside the site's own
+    // pixel (§3x.6 one detector: the pixel inside the <Script> template literal is adopted). The answers carry it.
+    const answers = writeAnswers(w)
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond, timeoutMs: RUN_TIMEOUT })
     const why = trace(run)
     const outcomes = stepOutcomes(run)
@@ -1231,7 +1272,8 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
 
     // R2-6: nothing consent or the conversion names govern can be installed, so neither is asked or pre-checked.
     const planAsk = run.ofType("ask.open").find((event) => event.kind === "plan")!.payload as { lines: Array<{ id: string; kind: string; requires: string }> }
-    expect(planAsk.lines.some((line) => line.kind === "consent_mode")).toBe(false)
+    expect(planAsk.lines.some((line) => line.kind === "consent_mode")).toBe(true)
+    expect(planAsk.lines.some((line) => line.kind === "capture_beside_adopted_pixel")).toBe(true)
     expect(planAsk.lines.some((line) => line.kind === "conversion_names")).toBe(false)
     expect(w.bridge.calls.map(label)).not.toContain("runs.patch(approvedConversions)")
     expect(w.bridge.calls.map(label)).not.toContain("conversions")

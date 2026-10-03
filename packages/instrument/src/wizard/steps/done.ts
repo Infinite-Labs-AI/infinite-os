@@ -51,7 +51,7 @@ export const DEFAULT_CHECKIN_OPT_IN = true
  * bot-flagged document rows" with no server lane installed). Infinite's rows are its marked test, kept out of the
  * customer's numbers; GA4, Meta and PostHog each record one normal page view, and the ids to filter it by are printed.
  */
-export function visitDisclosure(proof: RunProofState): string | null {
+export function visitDisclosure(proof: RunProofState): string[] {
   const rows = proof.infinitePageViews + (proof.laneProbed ? 2 : 0)
   const parts: string[] = []
   if (rows > 0) {
@@ -59,25 +59,18 @@ export function visitDisclosure(proof: RunProofState): string | null {
     parts.push(`This run's one real visit landed ${rows} row${rows === 1 ? "" : "s"} in your Infinite ledger, marked as Infinite's test and kept out of your numbers: ${what}.`)
   }
   const fired = new Set(proof.tools.filter((tool) => tool.fired).map((tool) => tool.tool))
+  // Only the tools that fired are named; the filters in DECISIONS §4.2's order (GA4, PostHog, Meta).
+  const named = (["ga4", "meta", "posthog"] as const).filter((tool) => fired.has(tool)).map((tool) => (tool === "ga4" ? "GA4" : tool === "meta" ? "Meta" : "PostHog"))
   const filters: string[] = []
-  const named: string[] = []
-  if (fired.has("ga4")) {
-    named.push("GA4")
-    if (proof.filter.ga4ClientId) filters.push(`GA4 client id ${proof.filter.ga4ClientId}`)
-  }
-  if (fired.has("meta")) {
-    named.push("Meta")
-    if (proof.filter.metaPageViewAt) filters.push(`Meta PageView at ${proof.filter.metaPageViewAt.slice(11, 19)}Z`)
-  }
-  if (fired.has("posthog")) {
-    named.push("PostHog")
-    if (proof.filter.posthogDistinctId) filters.push(`PostHog id ${proof.filter.posthogDistinctId}`)
-  }
+  if (fired.has("ga4") && proof.filter.ga4ClientId) filters.push(`GA4 client id ${proof.filter.ga4ClientId}`)
+  if (fired.has("posthog") && proof.filter.posthogDistinctId) filters.push(`PostHog id ${proof.filter.posthogDistinctId}`)
+  if (fired.has("meta") && proof.filter.metaPageViewAt) filters.push(`Meta PageView at ${proof.filter.metaPageViewAt.slice(11, 19)}Z`)
   if (named.length > 0) {
     const who = named.length === 1 ? named[0]! : `${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}`
     parts.push(`${who} ${named.length === 1 ? "records" : "each record"} it as one normal page view${filters.length > 0 ? ` (filter it by: ${filters.join(" · ")})` : ""}.`)
   }
-  return parts.length > 0 ? parts.join(" ") : null
+  // One note each (a report note is at most 300 characters).
+  return parts
 }
 /** R2-4: why "Proven live" is empty when no live address is known, and the one thing that finishes it. */
 export const NO_PRODUCTION_HOST_NOTE =
@@ -105,8 +98,7 @@ function notesFor(ctx: WizardContext, report: Pick<ReportV2, "rows">, facts: Ver
     })
   )
   if (hasSmallShare) notes.push(SAMPLE_FLOOR_NOTE)
-  const disclosure = state.proof ? visitDisclosure(state.proof) : null
-  if (disclosure) notes.push(disclosure)
+  if (state.proof) notes.push(...visitDisclosure(state.proof))
   // §3x.3 A review finding on Infinite's own code reaches Infinite through this report (never the customer's agent).
   for (const finding of facts.openFindings) {
     if (!finding.label) continue

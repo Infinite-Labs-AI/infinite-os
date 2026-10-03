@@ -16,7 +16,10 @@ describe("provider census", () => {
     const result = checkProviderCensus({ files: files({ "index.html": page(GTAG("G-ABC123") + GTAG("G-ABC123")) }) })
     expect(result.state).toBe("problem")
     expect(result.findings[0]).toMatchObject({ code: "INF_SETUP_PROVIDER_DUPLICATE_INIT", confidence: "certain", file: "index.html", line: 1 })
-    expect(result.findings[0]!.message).toContain("counted 2 times")
+    // §3x.6 (A7): what the code shows, never an unmeasured claim about page views.
+    expect(result.findings[0]!.message).toContain("is initialised 2 times in one page")
+    expect(result.findings[0]!.message).toContain("Keep one and delete the others.")
+    expect(result.findings[0]!.message).not.toMatch(/counted|double-count/)
   })
 
   it("does not flag one init per page across a multi-page static site (negative)", () => {

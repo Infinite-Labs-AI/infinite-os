@@ -130,7 +130,11 @@ export function fakeBridge(options: { keys?: TagKeys; hosting?: TagHosting; resu
     },
     getRun: notUsed("getRun"),
     postReceipts: notUsed("postReceipts"),
-    postReport: notUsed("postReport"),
+    // §3x.6: the merge step posts the tag's in-PR report (with its verdict) before the merge is recorded.
+    async postReport(runId, phase, report) {
+      calls.push({ verb: "report", body: { runId, phase, report } })
+      return { ...env, id: "rep_fake", phase, storedAt: "2026-10-02T10:00:00.000Z", echo: { schema: report.schema, runId } }
+    },
     baseline: notUsed("baseline"),
     ensureSiteSource: notUsed("ensureSiteSource"),
     declareConversions: notUsed("declareConversions"),

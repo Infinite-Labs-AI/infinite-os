@@ -424,6 +424,8 @@ export interface TestRunFixtureCase {
     envSourcedIds: Array<{ tool: TestTool; envName: string; file: string; line: number }>
     /** Whose Meta pixel the site runs (D10 counts automatic events as `info` for an ADOPTED pixel only). */
     metaPixelOwnership?: "managed" | "adopted"
+    /** §3x.3 (F6): the grader is told the load ran a client-side navigation (Meta's page-change PageView is graded). */
+    spaNavigation?: boolean
   }
   /** Per tool, plus the D10 line (`meta_automatic_events`), which is graded beside the Meta tool, not instead of it. */
   expected: Partial<Record<TestTool, TestRunFixtureExpectation>> & { meta_automatic_events?: TestRunFixtureExpectation }
@@ -533,7 +535,7 @@ export const TEST_RUN_FIXTURE_CASE_SHAPE = shapeOf<TestRunFixtureCase>()(
   {
     request: TEST_RUN_REQUEST_SHAPE,
     result: TEST_RESULT_SHAPE,
-    context: shapeOf<TestRunFixtureCase["context"]>()("TestRunFixtureContext", ["consentMode", "installedTools", "envSourcedIds"], ["metaPixelOwnership"], {
+    context: shapeOf<TestRunFixtureCase["context"]>()("TestRunFixtureContext", ["consentMode", "installedTools", "envSourcedIds"], ["metaPixelOwnership", "spaNavigation"], {
       envSourcedIds: arrayOf(
         shapeOf<TestRunFixtureCase["context"]["envSourcedIds"][number]>()("EnvSourcedId", ["tool", "envName", "file", "line"], [])
       )

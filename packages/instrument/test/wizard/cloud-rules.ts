@@ -88,11 +88,12 @@ const fixed = (state: "pending" | "info", sources: Source[], reason?: Reason): R
 
 /** The cloud's FINISH_LINE_RULES (§3i.7 as the cloud enforces it). */
 const FINISH_LINE_RULES: Record<FinishLineId, Record<Column, Rule>> = {
-  each_tool_once: { live_today: src("desktop_test", "wizard_check"), in_pr: src("desktop_test", "wizard_check"), proven_live: src("desktop_test") },
+  // §3x.6: production's own bytes after the deploy (wizard_check) beside the real visit.
+  each_tool_once: { live_today: src("desktop_test", "wizard_check"), in_pr: src("desktop_test", "wizard_check"), proven_live: src("desktop_test", "wizard_check") },
   ids_match_connections: { live_today: src("wizard_check", "desktop_test"), in_pr: src("desktop_test"), proven_live: src("desktop_test") },
-  previews_silent: { live_today: src("cloud_read"), in_pr: src("wizard_check", "desktop_test"), proven_live: dash("needs_7_days") },
+  previews_silent: { live_today: src("cloud_read"), in_pr: src("wizard_check", "desktop_test"), proven_live: src("desktop_test") },
   survives_ad_blockers: { live_today: src("wizard_check", "cloud_read"), in_pr: src("desktop_test", "wizard_check"), proven_live: src("cloud_receipt") },
-  spa_page_views: { live_today: src("desktop_test"), in_pr: src("desktop_test"), proven_live: dash("not_exercised") },
+  spa_page_views: { live_today: src("desktop_test"), in_pr: src("desktop_test"), proven_live: src("desktop_test") },
   conversions_server_side: { live_today: src("cloud_read"), in_pr: src("wizard_check"), proven_live: fixed("pending", ["cloud_read"]) },
   identity_joined: { live_today: src("wizard_check"), in_pr: src("wizard_check"), proven_live: fixed("pending", ["cloud_read"]) },
   utms_survive_redirects: { live_today: src("wizard_check"), in_pr: src("wizard_check", "desktop_test"), proven_live: src("wizard_check") },
@@ -252,7 +253,7 @@ function parseOrThrow(raw: unknown, ctx: CloudReportContext): void {
   if ((ctx.producer as string) === "cloud" !== (ctx.phase === "day7")) refuse("producer", "the day7 report comes only from the cloud, and the cloud writes only day7")
 
   if (new TextEncoder().encode(JSON.stringify(raw)).byteLength > CLOUD_MAX_REPORT_JSON_BYTES) refuse("report", `the report may be at most ${CLOUD_MAX_REPORT_JSON_BYTES} bytes`)
-  const r = object(raw, "report", ["schema", "runId", "tagVersion", "generatedAt", "site", "columns", "rows", "day7", "finishLine", "notes"])
+  const r = object(raw, "report", ["schema", "runId", "tagVersion", "generatedAt", "site", "columns", "rows", "day7", "finishLine", "notes", "verdict"])
   if (r.schema !== CLOUD_REPORT_SCHEMA) refuse("report.schema", `report.schema must be "${CLOUD_REPORT_SCHEMA}"`)
   if (r.runId !== ctx.runId) refuse("report.runId", "report.runId must be this run's id")
 
@@ -296,6 +297,30 @@ function parseOrThrow(raw: unknown, ctx: CloudReportContext): void {
     if (item.n !== FINISH_LINE_IDS.indexOf(id) + 1) refuse(`report.finishLine[${i}].n`, `${id} is check number ${FINISH_LINE_IDS.indexOf(id) + 1}`)
     finishLine.push({ id, cells: parseColumnCells(item.cells, `report.finishLine[${i}].cells`, ctx.runId, ctx.startedAt) })
   })
+
+  // §3x.6 the verdict: required on every tag report, null on the desktop's partial; the refusals 1bu-1 mirrors.
+  if (ctx.producer === "tag" && (r.verdict === null || r.verdict === undefined)) refuse("report.verdict", "a tag report carries its verdict")
+  if (ctx.producer === "desktop" && r.verdict !== null) refuse("report.verdict", "a desktop partial report carries no verdict")
+  if (r.verdict !== null && r.verdict !== undefined) {
+    const verdict = object(r.verdict, "report.verdict", ["state", "headline", "reasons", "installed"])
+    const state = enumOf(verdict.state, "report.verdict.state", ["properly", "problems", "unconfirmed", "not_checked_live"] as const)
+    text(verdict.headline, "report.verdict.headline", 600)
+    if (/\b(?:verified|proven)\b/i.test(verdict.headline as string)) refuse("report.verdict.headline", 'a verdict headline never says "verified" or "proven"')
+    if (!Array.isArray(verdict.reasons)) refuse("report.verdict.reasons", "reasons is a list")
+    const kinds = (verdict.reasons as unknown[]).map((entry, i) => {
+      const reason = object(entry, `report.verdict.reasons[${i}]`, ["kind", "count", "names"])
+      return enumOf(reason.kind, `report.verdict.reasons[${i}].kind`, ["live_problem", "approved_fix_missing", "review_blocker_open", "tool_silent", "tool_without_receipt", "tool_not_connected", "earlier_problem_unchecked", "not_live"] as const)
+    })
+    const finish = Array.isArray(r.finishLine) ? (r.finishLine as Array<{ id?: unknown; cells?: { proven_live?: { state?: unknown } } }>) : []
+    if (state === "properly") {
+      if (finish.some((line) => line.cells?.proven_live?.state === "problem")) refuse("report.verdict.state", '"properly" with a Proven-live problem cell')
+      if (finish.find((line) => line.id === "proof_from_real_visit")?.cells?.proven_live?.state !== "pass") refuse("report.verdict.state", '"properly" without a passing proof from the real visit')
+      if (kinds.length > 0) refuse("report.verdict.reasons", '"properly" with reasons')
+    }
+    if (state === "problems" && !kinds.some((kind) => ["live_problem", "approved_fix_missing", "review_blocker_open", "tool_silent", "tool_without_receipt"].includes(kind))) {
+      refuse("report.verdict.state", '"problems" without a problems-class reason')
+    }
+  }
 
   const day7 = object(r.day7, "report.day7", ["measuredAt", "window", "cell"])
   nullableInstant(day7.measuredAt, "report.day7.measuredAt")
