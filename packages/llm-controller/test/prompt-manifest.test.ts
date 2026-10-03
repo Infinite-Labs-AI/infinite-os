@@ -4,8 +4,8 @@ import { assembleInfiniteOsPrompt } from "../src/prompt-assembler.js";
 
 describe("action manifest description deduplication", () => {
   const actions = createInfiniteOsRegistry({}).list();
-  function manifest(modelProvider: "codex" | "claude") {
-    const prompt = assembleInfiniteOsPrompt({ actions, workspaceId: "synthetic", surface: "desktop", modelProvider });
+  function manifest(modelProvider: "codex" | "claude", toolSchemas = actions.map((a) => ({ name: a.id, summary: a.summary }))) {
+    const prompt = assembleInfiniteOsPrompt({ actions, toolSchemas, workspaceId: "synthetic", surface: "desktop", modelProvider });
     return JSON.parse(prompt.split("Typed Infinite OS action manifest:\n")[1]!.split("\n")[0]!);
   }
 
@@ -25,5 +25,11 @@ describe("action manifest description deduplication", () => {
 
   it("retains descriptions for the non-Codex manifest", () => {
     expect(manifest("claude").map((a: { summary: string }) => a.summary)).toEqual(actions.map((a) => a.summary));
+  });
+
+  it("keeps unique prose when no matching actual schema description is supplied", () => {
+    expect(manifest("codex", []).map((a: { summary: string }) => a.summary)).toEqual(actions.map((a) => a.summary));
+    const different = actions.map((a) => ({ name: a.id, summary: "A different schema description" }));
+    expect(manifest("codex", different).map((a: { summary: string }) => a.summary)).toEqual(actions.map((a) => a.summary));
   });
 });
