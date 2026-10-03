@@ -73,9 +73,10 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // Keyed to the head card itself, so a new card never opens with an earlier
     // card's explanation expanded (r4: the explanation stays behind ?), nor with
     // its open document, page or field answers. (A card brought back opens with
-    // only the answers its own entry carries: cardUiStart(entry).)
+    // only the answers its own entry carries: cardUiStart(entry).) A new card
+    // also opens its details pane on itself again (W3L2-M2): no scroll carries over.
     expect(source).toMatch(
-      /useLayoutEffect\(\(\) => \{\n\s+setExplainOpen\(false\);\n\s+setCardUi\(cardUiStart\(headConfirmAction\)\);\n\s+\}, \[headConfirmAction\]\);/u
+      /useLayoutEffect\(\(\) => \{\n\s+setExplainOpen\(false\);\n\s+setCardUi\(cardUiStart\(headConfirmAction\)\);\n\s+setCardPaneScroll\(null\);\n\s+\}, \[headConfirmAction\]\);/u
     );
   });
 
