@@ -143,6 +143,18 @@ describe("the reconcile step is reachable when the turn has other views (R-IOV-3
     expect(live).toContain("→ Check first");
   });
 
+  it("[a list with more rows, then a quiet outcome_unknown]: the list names no m key it no longer has", () => {
+    const list = listRows();
+    const paged = { ...list, body: { ...(list.body as unknown as Record<string, unknown>), truncated: { shown: 2, total: 3, more: { label: "More", ask: "show all of them" } } } } as unknown as AnswerViewV1;
+    const engaged = resolveViewKey("", viewFocusAfterTurnDone([paged, UNKNOWN]), { tab: true });
+    const live = renderLiveTurn({ messages, views: [paged, UNKNOWN], focus: engaged, width: 100, color: false, theme }).lines.join("\n");
+    expect(live).toMatch(/2 of 3/u);
+    expect(live).not.toContain("m for more");
+    // Alone, the list keeps its keys and says m.
+    const alone = renderLiveTurn({ messages, views: [paged], focus: viewFocusAfterTurnDone(paged), width: 100, color: false, theme }).lines.join("\n");
+    expect(alone).toContain("m for more");
+  });
+
   it("[a list, then a quiet view with nothing to ask]: the list keeps the keys", () => {
     const views = [listRows(), BLOCKED];
     expect(viewFocusAfterTurnDone(views).viewIndex).toBe(0);

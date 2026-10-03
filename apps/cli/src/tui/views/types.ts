@@ -55,6 +55,8 @@ export interface ViewRenderCtx {
    * acts, unless `scrollback`.
    */
   columnKey?: boolean;
+  /** Another view of this finished turn has the keys (R-IOV-3): this one names no key (`m for more`). */
+  keysElsewhere?: boolean;
   /**
    * What this view repeats of an earlier view of the same read in its turn
    * (N27, `meta-fold.ts`): those parts are not drawn again, and ONE dim line

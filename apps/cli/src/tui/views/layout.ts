@@ -393,7 +393,11 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const renders = input.views.map((view, index) =>
     renderView(view, view.kind !== "quiet" && index === focusIndex && input.focus && split
       ? { ...focusedViewCtx(input.focus, base), ...folds(index) }
-      : { ...plainCtx, selected: openingRow(view), columnKey: false, ...answered(index), ...folds(index) }));
+      : {
+        ...plainCtx, selected: openingRow(view), columnKey: false,
+        ...(split && input.focus && focusIndex >= 0 && index !== focusIndex ? { keysElsewhere: true } : {}),
+        ...answered(index), ...folds(index)
+      }));
   // Scrollback has no keys, so nothing may stay behind one. A view with tabs
   // (a document's versions) prints every tab, in order, under the one head,
   // and a list or compare table that dropped columns (`→`) prints every row
