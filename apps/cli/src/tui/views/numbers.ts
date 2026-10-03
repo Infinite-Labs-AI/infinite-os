@@ -16,7 +16,8 @@
 // Columns drop in r4's order (the renderer owns it; ColumnV1 has no priority):
 // reach before cost-per before outcomes before clicks, while spend and rates
 // never drop (`DROP_PRIORITY`); any other column drops from the right, after
-// those. A long row name wraps in its cell before a number drops. A table says
+// those. A long row name is cut with … before a number drops, one line per row
+// (run-3 N18), and shows whole on →, like a hidden column. A table says
 // which columns it hid: `+ CPM · → to see` where `→` works (the live turn's
 // focused view; `→` then shows them as records), `+ CPM hidden` where it does
 // not (scrollback, a view the keys are not on). Scrollback keeps the table.
@@ -136,20 +137,22 @@ export function cellTableLines(raw: CellTableInput, ctx: ViewRenderCtx, draw: Me
   const hiddenIndexes = dropped.some((index) => !dash(index))
     ? [...all.filter((index) => dash(index) && !dropped.includes(index)), ...dropped]
     : dropped;
-  draw.hidden += hiddenIndexes.length;
+  const keep = all.filter((index) => !hiddenIndexes.includes(index));
+  // A row name cut with … (run-3 N18) is shown whole on → (the records), like a hidden column.
+  const cut = trial.fallback !== "record" && !hiddenIndexes.length
+    && renderTable(tableInput(input, labels, keep, new FootnoteBook()), tableOptions(ctx)).labelsCut;
+  draw.hidden += hiddenIndexes.length + (cut ? 1 : 0);
 
-  if (trial.fallback === "record" || (ctx.showHiddenColumns && hiddenIndexes.length)) {
+  if (trial.fallback === "record" || (ctx.showHiddenColumns && (hiddenIndexes.length || cut))) {
     return recordLines(input, labels, ctx, draw.notes);
   }
-  const keep = all.filter((index) => !hiddenIndexes.includes(index));
   const table = renderTable(tableInput(input, labels, keep, draw.notes), tableOptions(ctx));
   if (table.fallback === "record") {
     return recordLines(input, labels, ctx, draw.notes);
   }
   const lines = [...table.lines];
   // r4 draws a table with nothing selected; once the user moves (j/k), the
-  // selected row sits on the selection background, its borders kept (every
-  // line of a row whose name wrapped).
+  // selected row sits on the selection background, its borders kept.
   const selected = ctx.engaged ? selectedRow(input) : null;
   const span = selected === null ? undefined : table.rowLines[selected];
   if (span) {
@@ -303,9 +306,9 @@ function withUnmeasuredFirst(input: CellTableInput): CellTableInput {
 }
 
 /**
- * A row name wraps in its cell before a number drops, down to 30% of the pane
- * (at least 16 columns); a column that dropped before a wider one comes back
- * when it fits after all (run-3 N19).
+ * A row name is cut with … before a number drops, down to 30% of the pane (at
+ * least 16 columns; run-3 N18); a column that dropped before a wider one comes
+ * back when it fits after all (run-3 N19).
  */
 function tableOptions(ctx: ViewRenderCtx) {
   return { width: ctx.width, color: ctx.color, theme: ctx.theme, labelMin: Math.max(16, Math.floor(ctx.width * 0.3)), refill: true };

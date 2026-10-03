@@ -72,19 +72,17 @@ describe("numbers, the live shape: one bordered table per block, never records (
     }
   });
 
-  it("the r4 look at 100: the one-row table wraps its long name, names what it hid, and has no Total", () => {
+  it("the r4 look at 100: the one-row table cuts its long name to one line, names what it hid, and has no Total (run-3 N18)", () => {
     const detail = draw(live()).detail;
     const at = detail.indexOf("Sep 28 – Oct 1");
-    expect(detail.slice(at, at + 9)).toEqual([
+    expect(detail.slice(at, at + 7)).toEqual([
       "Sep 28 – Oct 1",
-      "┌────────────────────────┬───────────────────────┬─────────┬─────────────┬────────────┬────────────┐",
-      "│                        │ Status                │   Spent │ Link clicks │ CTR (link) │ CPC (link) │",
-      "├────────────────────────┼───────────────────────┼─────────┼─────────────┼────────────┼────────────┤",
-      "│ Sample · Trials · US · │ Numbers not confirmed │ $212.40 │          47 │      5.87% │      $4.52 │",
-      "│ 2026-09-01 —           │                       │         │             │            │            │",
-      "│ sample_b1_trial_us     │                       │         │             │            │            │",
-      "└────────────────────────┴───────────────────────┴─────────┴─────────────┴────────────┴────────────┘",
-      "+ ROAS, Cost per result, Results, Impressions, CPM · → to see"
+      "┌─────────────────────────────────────┬───────────────────────┬─────────┬─────────────┬────────────┐",
+      "│                                     │ Status                │   Spent │ Link clicks │ CTR (link) │",
+      "├─────────────────────────────────────┼───────────────────────┼─────────┼─────────────┼────────────┤",
+      "│ Sample · Trials · US · 2026-09-01…  │ Numbers not confirmed │ $212.40 │          47 │      5.87% │",
+      "└─────────────────────────────────────┴───────────────────────┴─────────┴─────────────┴────────────┘",
+      "+ ROAS, Cost per result, Results, Impressions, CPM, CPC (link) · → to see"
     ]);
     expect(detail.some((line) => /│ Total /u.test(line))).toBe(false);
   });
@@ -92,14 +90,12 @@ describe("numbers, the live shape: one bordered table per block, never records (
   it("the r4 look at 60: the same table keeps spend, link clicks and the rate, and names the rest (run-3 N19)", () => {
     const detail = draw(live(), { width: 60 }).detail;
     const at = detail.indexOf("Sep 28 – Oct 1");
-    expect(detail.slice(at + 1, at + 10)).toEqual([
-      "┌────────────────────┬─────────┬─────────────┬────────────┐",
-      "│                    │   Spent │ Link clicks │ CTR (link) │",
-      "├────────────────────┼─────────┼─────────────┼────────────┤",
-      "│ Sample · Trials ·  │ $212.40 │          47 │      5.87% │",
-      "│ US · 2026-09-01 —  │         │             │            │",
-      "│ sample_b1_trial_us │         │             │            │",
-      "└────────────────────┴─────────┴─────────────┴────────────┘",
+    expect(detail.slice(at + 1, at + 8)).toEqual([
+      "┌─────────────────────┬─────────┬─────────────┬────────────┐",
+      "│                     │   Spent │ Link clicks │ CTR (link) │",
+      "├─────────────────────┼─────────┼─────────────┼────────────┤",
+      "│ Sample · Trials…    │ $212.40 │          47 │      5.87% │",
+      "└─────────────────────┴─────────┴─────────────┴────────────┘",
       "+ ROAS, Cost per result, Results, Impressions, CPM, CPC",
       "(link), Status · → to see"
     ]);
@@ -183,7 +179,8 @@ describe("numbers: which columns a narrow table keeps, and one Results column (r
     const view = edited((body) => {
       body.legs.settled.rows[0].cells.results = { value: 1 };
     });
-    const details = detailsOf(liveTurn([view], 140), 140);
+    // Scrollback is one column at 140: the table has the room for both.
+    const details = committedTurn([view], 140);
     const at = details.indexOf("Sep 28 – Oct 1");
     const cells = header(details, at);
     expect(cells.filter((cell) => /^Results?$/u.test(cell))).toEqual(["Results"]);
@@ -196,6 +193,48 @@ describe("numbers: which columns a narrow table keeps, and one Results column (r
   it("→ shows the folded column as one record line", () => {
     const records = draw(live(), { width: 60, showHiddenColumns: true }).detail;
     expect(records.filter((line) => /^\s*Results?: /u.test(line))).toEqual([expect.stringMatching(/^ {2}Results: —\S* trial$/u)]);
+  });
+});
+
+// Live re-check run 3, N18: the campaign's long name wrapped to 3 lines in
+// its table at 60 and 100. It is cut with … to its column, one line per row,
+// and shown whole on → (the records).
+describe("numbers: a long row name is one line, cut with … (run-3 N18)", () => {
+  const NAME = "Sample · Trials · US · 2026-09-01 — sample_b1_trial_us";
+  /** A table row whose label cell has words and every other cell is blank: a wrapped name's later line. */
+  const wrapped = (line: string) => {
+    const cells = line.split("│").slice(1, -1).map((cell) => cell.trim());
+    return line.startsWith("│") && cells.length > 1 && cells[0] !== "" && cells.slice(1).every((cell) => cell === "");
+  };
+
+  it.each([60, 100, 140])("at %i, live and committed, no table row takes a second line, and the cut name ends in …", (width) => {
+    for (const [lines, split] of [[liveTurn([live()], width), true], [committedTurn([live()], width), false]] as const) {
+      const details = detailsOf(lines, width, split);
+      expect(details.filter(wrapped)).toEqual([]);
+      const row = details.find((line) => line.startsWith("│ Sample"));
+      expect(row, details.join("\n")).toBeDefined();
+      if (!row!.includes(NAME)) expect(row!.split("│")[1]!.trim()).toMatch(/[^\s·—]…$/u);
+    }
+  });
+
+  it("→ shows the whole name in the records", () => {
+    const records = draw(live(), { width: 60, showHiddenColumns: true }).detail;
+    expect(records).toContain(NAME);
+  });
+
+  it("a table that cuts a name but hides no column still offers →, and → shows the name whole", () => {
+    const table = {
+      columns: [{ label: "New trials", unit: "count" as const, dropPriority: 0 }],
+      rows: [{ label: "New trials since spend began in this window (Sep 28)", cells: [{ value: 1 }] }],
+      currency: null
+    };
+    const draw1 = { notes: new FootnoteBook(), hidden: 0 };
+    const lines = cellTableLines(table, ctx({ width: 40 }), draw1);
+    expect(lines[3]).toBe("│ New trials since spend… │          1 │");
+    expect(draw1.hidden).toBe(1);
+    expect(lines.some((line) => line.startsWith("+ "))).toBe(false);
+    const whole = cellTableLines(table, ctx({ width: 40, showHiddenColumns: true }), { notes: new FootnoteBook(), hidden: 0 });
+    expect(whole.join(" ")).toContain("New trials since spend began in this window (Sep 28)");
   });
 });
 
@@ -333,8 +372,8 @@ describe("numbers, the live shape: empty and unmeasured sections (run-2 M7)", ()
 describe("numbers: `→ to see` only where → works (run-2 M7)", () => {
   it("the live turn's focused view names the key; committed to scrollback it names what is hidden, in words", () => {
     const hint = (lines: readonly string[]) => lines.filter((line) => line.includes("Cost per result, Results"));
-    expect(hint(liveTurn([live()], 100))).toEqual(["+ ROAS, Cost per result, Results, Impressions, CPM · → to see"]);
-    expect(hint(committedTurn([live()], 100))).toEqual(["+ ROAS, Cost per result, Results, Impressions, CPM hidden"]);
+    expect(hint(liveTurn([live()], 100))).toEqual(["+ ROAS, Cost per result, Results, Impressions, CPM, CPC (link) · → to see"]);
+    expect(hint(committedTurn([live()], 100))).toEqual(["+ ROAS, Cost per result, Results, Impressions, CPM, CPC (link) hidden"]);
     expect(committedTurn([live()], 100).join("\n")).not.toContain("→");
   });
 
@@ -344,8 +383,8 @@ describe("numbers: `→ to see` only where → works (run-2 M7)", () => {
     const hints = lines.filter((line) => line.startsWith("+ ROAS, Cost per result"));
     // The first view is not focused (the keys are on the last one).
     expect(hints).toEqual([
-      "+ ROAS, Cost per result, Results, Impressions, CPM hidden",
-      "+ ROAS, Cost per result, Results, Impressions, CPM · → to see"
+      "+ ROAS, Cost per result, Results, Impressions, CPM, CPC (link) hidden",
+      "+ ROAS, Cost per result, Results, Impressions, CPM, CPC (link) · → to see"
     ]);
   });
 
