@@ -1,4 +1,6 @@
 // Lane O4: the GitHub adapter against the stateful fake gh (test/wizard/bin/gh). Never the real GitHub.
+import { readFileSync, statSync } from "node:fs"
+
 import { afterEach, describe, expect, it } from "vitest"
 
 import { createFakeGh, type FakeGh } from "../../test/wizard/fake-gh-harness.js"
@@ -82,6 +84,29 @@ describe("the GitHub adapter (§3g.2)", () => {
     const found = await adapter.findPr("infinite/tag/2026-10-02-7f3c2a")
     expect(found).toMatchObject({ number: 42 })
     expect(await adapter.findPr("infinite/tag/2026-10-02-000000")).toBeNull()
+  })
+
+  it("review P2-2: a read-only gh call never writes the state file, so a merge written meanwhile is never overwritten", async () => {
+    const { adapter, gh, fx } = setup()
+    fx.write(".infinite/wizard/pr-body.md", "body\n")
+    await adapter.createDraftPr({ base: "main", head: "infinite/tag/2026-10-02-7f3c2a", title: "t", bodyFile: ".infinite/wizard/pr-body.md" })
+    const bytes = readFileSync(gh.statePath, "utf8")
+    const inode = statSync(gh.statePath).ino
+    await adapter.readPr(42)
+    await adapter.findPr("infinite/tag/2026-10-02-7f3c2a")
+    // Nothing changed: the file is the same bytes AND the same file (a rename would give a new inode).
+    expect(readFileSync(gh.statePath, "utf8")).toBe(bytes)
+    expect(statSync(gh.statePath).ino).toBe(inode)
+    // The calls are still recorded (append-only, beside the state).
+    expect(gh.read().calls.map((call) => call.argv.slice(0, 2).join(" ")).slice(-2)).toEqual(["pr view", "pr list"])
+    // The merge poller's race, for real: many `gh pr view` processes in flight while the test merges the PR.
+    const polls = Array.from({ length: 12 }, () => adapter.readPr(42))
+    gh.update((state) => {
+      Object.assign(state.prs![0]!, { state: "MERGED", mergeCommit: { oid: SHA }, mergedAt: "2026-10-02T10:00:00Z" })
+    })
+    await Promise.all(polls)
+    expect(gh.read().prs[0]).toMatchObject({ state: "MERGED" })
+    expect(await adapter.readPr(42)).toMatchObject({ state: "MERGED", mergeCommitOid: SHA })
   })
 
   it("opens a ready PR with the [review pending] prefix when drafts are not supported", async () => {

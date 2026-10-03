@@ -1,13 +1,19 @@
 /* global process */
 // A fake `gh` for lane O4's tests (and I1's offline E2E). It keeps its state in the JSON file named by
-// FAKE_GH_STATE, records every call (argv + stdin) there, and answers the subset of gh the wizard uses:
+// FAKE_GH_STATE, appends every call (argv + stdin) to `<FAKE_GH_STATE>.calls.jsonl`, and answers the subset of gh
+// the wizard uses:
 //   auth status, repo view, pr list/create/view/ready/checks/comment/update-branch,
 //   api (deployments, deployment statuses, branch rules), api graphql (addPullRequestReview, reviewThreads,
 //   addPullRequestReviewThreadReply, resolveReviewThread).
 // A PR's headRefOid is read from the bare remote (FAKE_GH_REMOTE), so it follows real pushes. `pr merge` and any
 // unknown command fail loudly. No network, ever.
+//
+// Review P2-2: a READ (pr view, pr list, api …) never writes the state file. Only a command that changes the state
+// saves it, atomically (a temp file renamed over it). Before, every call rewrote the whole file, so a `gh pr view`
+// from the merge poller (every ~25 ms under E2E_FAST_CLOCK) could overwrite the MERGED state a test had just written,
+// and the run hung until its timeout depending on test order. The call log is append-only for the same reason.
 import { execFileSync } from "node:child_process"
-import { readFileSync, writeFileSync } from "node:fs"
+import { appendFileSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { isAbsolute, join } from "node:path"
 
 const statePath = process.env.FAKE_GH_STATE
@@ -16,7 +22,7 @@ if (!statePath) {
   process.exit(2)
 }
 const state = JSON.parse(readFileSync(statePath, "utf8"))
-state.calls ??= []
+delete state.calls
 state.prs ??= []
 state.threads ??= []
 state.deployments ??= []
@@ -32,10 +38,18 @@ try {
 } catch {
   stdin = ""
 }
-state.calls.push({ argv, stdin: stdin === "" ? null : stdin })
+appendFileSync(`${statePath}.calls.jsonl`, `${JSON.stringify({ argv, stdin: stdin === "" ? null : stdin })}\n`)
 
+/** Set by every command that changes the state; only then is the file written. */
+let dirty = false
+function changed() {
+  dirty = true
+}
 function save() {
-  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`)
+  if (!dirty) return
+  const temp = `${statePath}.${process.pid}.tmp`
+  writeFileSync(temp, `${JSON.stringify(state, null, 2)}\n`)
+  renameSync(temp, statePath)
 }
 function out(value) {
   save()
@@ -54,6 +68,7 @@ function flag(name) {
 function nextId(prefix) {
   const id = `${prefix}_${state.nextId}`
   state.nextId += 1
+  changed()
   return id
 }
 function headOf(pr) {
@@ -137,6 +152,7 @@ if (group === "pr") {
     const body = bodyFile === "-" ? stdin : readFileSync(isAbsolute(bodyFile) ? bodyFile : join(process.cwd(), bodyFile), "utf8")
     const number = state.nextPrNumber
     state.nextPrNumber += 1
+    changed()
     const repo = state.repo?.nameWithOwner ?? "acme/acme-store"
     const pr = {
       number,
@@ -162,10 +178,12 @@ if (group === "pr") {
   if (sub === "view") out(prView(pr, flag("--json")))
   if (sub === "ready") {
     pr.isDraft = false
+    changed()
     out("")
   }
   if (sub === "comment") {
     pr.comments.push({ author: { login: state.login }, authorAssociation: "OWNER", body: stdin })
+    changed()
     out(`${pr.url}#issuecomment-1\n`)
   }
   if (sub === "update-branch") {
@@ -185,6 +203,7 @@ if (group === "pr") {
       git(["update-ref", `refs/heads/${pr.headRefName}`, merge])
     }
     pr.mergeStateStatus = "CLEAN"
+    changed()
     out("")
   }
   if (sub === "checks") {
@@ -207,6 +226,7 @@ if (group === "api") {
       const threads = variables.threads ?? []
       if (state.rejectInlineThreads && threads.length > 0) fail("GraphQL: Line could not be resolved (addPullRequestReview) HTTP 422")
       const reviewId = nextId("PRR")
+      changed()
       pr.reviews.push({ id: reviewId, author: { login: state.login }, authorAssociation: "OWNER", body: variables.body, state: "COMMENTED", commitOID: variables.sha })
       for (const thread of threads) {
         state.threads.push({
@@ -257,12 +277,14 @@ if (group === "api") {
       const thread = state.threads.find((candidate) => candidate.id === variables.thread)
       if (!thread) fail("GraphQL: Could not resolve thread")
       thread.comments.push({ author: state.login, authorAssociation: "OWNER", body: variables.body })
+      changed()
       out({ data: { addPullRequestReviewThreadReply: { comment: { id: nextId("PRRC") } } } })
     }
     if (query.includes("resolveReviewThread(")) {
       const thread = state.threads.find((candidate) => candidate.id === variables.thread)
       if (!thread) fail("GraphQL: Could not resolve thread")
       thread.isResolved = true
+      changed()
       out({ data: { resolveReviewThread: { thread: { id: thread.id, isResolved: true } } } })
     }
     fail("fake gh: unknown graphql document")

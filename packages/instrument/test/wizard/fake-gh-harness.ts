@@ -1,8 +1,9 @@
 // Drives the fake `gh` (test/wizard/bin/gh → fake-gh.mjs) from a test: its JSON state file, the env that puts it
 // first on PATH, and helpers to read what the wizard sent it.
-import { readFileSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+
+import { readFakeGhState, writeFakeGhState } from "./fake-gh-state.js"
 
 export const FAKE_GH_BIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "bin")
 
@@ -39,7 +40,7 @@ export interface FakeGh {
 
 export function createFakeGh(input: { dir: string; remote: string; env: Record<string, string>; state?: FakeGhState }): FakeGh {
   const statePath = join(input.dir, "fake-gh-state.json")
-  writeFileSync(statePath, `${JSON.stringify({ login: "acme-dev", authOk: true, ...input.state }, null, 2)}\n`)
+  writeFakeGhState(statePath, { login: "acme-dev", authOk: true, ...input.state })
   const nodeDir = dirname(process.execPath)
   const env = {
     ...input.env,
@@ -48,10 +49,7 @@ export function createFakeGh(input: { dir: string; remote: string; env: Record<s
     FAKE_GH_REMOTE: input.remote,
     FAKE_GH_NODE: process.execPath
   }
-  const read = () => {
-    const parsed = JSON.parse(readFileSync(statePath, "utf8"))
-    return { calls: [], prs: [], threads: [], ...parsed }
-  }
+  const read = () => ({ prs: [], threads: [], ...readFakeGhState(statePath) }) as ReturnType<FakeGh["read"]>
   return {
     statePath,
     env,
@@ -59,7 +57,7 @@ export function createFakeGh(input: { dir: string; remote: string; env: Record<s
     update(mutate) {
       const state = read()
       mutate(state)
-      writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`)
+      writeFakeGhState(statePath, state)
     },
     traffic() {
       return read()
