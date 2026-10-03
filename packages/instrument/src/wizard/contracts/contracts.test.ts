@@ -499,6 +499,17 @@ describe("bridge-verbs.fixtures.json (§3a)", () => {
     expect(testExpectFromKeys({ ...keys, meta: { status: "connected", pixels: [] } }).meta).toBeUndefined()
   })
 
+  it("§3y.2: while a claim is pending, expect.infinite is the claim's reserved key (a cloud answer); the keys win once proven", () => {
+    const keys = fixtures.find((f) => f.verb === "keys" && f.status === 200)!.response as KeysResponse
+    const fresh: KeysResponse = { ...keys, infinite: { status: "not_provisioned", siteSourceKey: null, productionHosts: [], consentMode: null, consentStorageKey: null, collectPath: null } }
+    const claim = { siteSourceKey: "site_fa4e000000000000000000000000c1a1", collectPath: "/infinite/ledger", state: "pending_proof" }
+    expect(testExpectFromKeys(fresh).infinite).toBeUndefined()
+    expect(testExpectFromKeys(fresh, claim).infinite).toEqual({ siteSourceKey: claim.siteSourceKey, collectPath: "/infinite/ledger" })
+    // NEGATIVE: a proven (or expired) claim is never consulted; a ready source always wins over a claim.
+    expect(testExpectFromKeys(fresh, { ...claim, state: "proven" }).infinite).toBeUndefined()
+    expect(testExpectFromKeys(keys, claim).infinite?.siteSourceKey).toBe(keys.infinite.siteSourceKey)
+  })
+
   it("the story is internally consistent: lane state, relay availability, and only click-tested GA4 key events", () => {
     const keys = fixtures.find((f) => f.verb === "keys" && f.status === 200)!.response as KeysResponse
     const laneStatus = fixtures.find((f) => f.verb === "server-lane.status" && f.status === 200)!.response as { laneState: string }

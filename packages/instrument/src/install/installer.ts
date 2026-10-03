@@ -68,9 +68,11 @@ import { DEFAULT_POSTHOG_PROXY_PATH, INFINITE_API_ORIGIN, infiniteCollectDestina
 import { hasExactNextConfigRewrites, type ManagedProxySpec } from "../frameworks/vercel-config.js"
 import { isManagedInfiniteFile } from "../frameworks/managed-files.js"
 import { findLockfile, runNpmJob } from "./npm.js"
+import { proofFileBlockedText, proofFileTarget } from "./proof-file.js"
 import {
   buildPlanModel,
   DECISION_LINE_IDS,
+  lineFactsFor,
   planAskPayload,
   resolvePlanAnswers,
   type PlanAgentSummary,
@@ -326,6 +328,14 @@ export class WizardInstaller implements Installer {
     const served = siteServing(wizardScan, beforeFacts, keys)
     const improve = improveLinesFor(wizardScan.facts, { framework: wizardScan.framework, keys, sensitivePaths, vercelServed: served.vercelServed })
     const managed = new Set<ProviderId>((wizardScan.manifest?.providers ?? []) as ProviderId[])
+    const run = this.options.runFacts?.() ?? null
+    // §3y.2: on the claim path the proof file must be served at the site's root; a static site that builds into
+    // another directory cannot be, so Infinite's line says where to put it (before anything is approved).
+    let infiniteBlocked = served.infiniteBlocked
+    if (!infiniteBlocked && run?.siteClaim && keys.infinite.status !== "ready" && !lineFactsFor({ keys, before: beforeFacts, scan: { serverLane: wizardScan.serverLane } as PlanScanFacts, run }).vercelServesHost) {
+      const target = proofFileTarget(wizardScan.root, wizardScan.appRoot, wizardScan.framework)
+      if ("blocked" in target) infiniteBlocked = proofFileBlockedText(target.blocked)
+    }
     const facts: PlanScanFacts = {
       framework: wizardScan.framework,
       managedProviders: [...managed],
@@ -338,7 +348,7 @@ export class WizardInstaller implements Installer {
       sensitivePaths,
       appRoot: wizardScan.appRoot,
       posthogProxy: served.posthogProxy,
-      infiniteBlocked: served.infiniteBlocked,
+      infiniteBlocked,
       nextConfigRewrites: nextConfigRewritesNeeded(wizardScan, keys),
       // Review I1 P1-2: an installer blocker is said on the plan screen, before anything is approved or written.
       installBlocked: this.dryInstallFailure(
@@ -356,7 +366,7 @@ export class WizardInstaller implements Installer {
       agent: this.options.agent(),
       consentFlag: this.options.consentFlag(),
       productionDeniedConflict: this.options.productionDeniedConflict,
-      run: this.options.runFacts?.() ?? null
+      run
     })
     this.internals.set(model, { scan: wizardScan, keys, before: beforeFacts, candidates, improve })
     return model

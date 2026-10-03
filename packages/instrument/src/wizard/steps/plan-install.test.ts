@@ -1,5 +1,8 @@
 // Steps `plan` and `install` (lane O7), run against fakes (bridge, registry, agents) and a real
 // fixture site on disk. No network, no agent, no cloud.
+import { existsSync } from "node:fs"
+import { join } from "node:path"
+
 import { afterEach, describe, expect, it } from "vitest"
 
 import {
@@ -27,7 +30,7 @@ import type { WizardBeforeFacts } from "../../install/plan-model.js"
 import { readInstallManifest } from "../../manifest.js"
 import type { AskPayloads } from "../contracts/asks.js"
 import type { ChecklistItem } from "../contracts/jobs.js"
-import type { RunPatch, SiteSourceBody } from "../contracts/bridge.js"
+import type { ClaimPublic, RunPatch, SiteClaimBody, SiteClaimResponse, SiteSourceBody } from "../contracts/bridge.js"
 import type { WizardDeps } from "../contracts/deps.js"
 
 import { GITIGNORE_FENCE_BLOCK } from "../../harness/outputs.js"
@@ -42,6 +45,7 @@ interface Harness {
   deps: WizardDeps
   patches: RunPatch[]
   siteSourceCalls: SiteSourceBody[]
+  claimCalls: SiteClaimBody[]
   agentAlive: { value: boolean }
 }
 
@@ -52,12 +56,18 @@ async function setup(input: {
   consentFlag?: "required" | "not_required" | null
   before?: WizardBeforeFacts
   siteSourceError?: { code: string; state?: string; retryable?: boolean }
+  /** §3y.2: the app offers `tag.site-claim.v1` and answers `site-claim` with this (absent = an older app). */
+  claim?: SiteClaimResponse
+  /** §3y.1: this run's answered production host. */
+  answeredHost?: string
 }): Promise<Harness> {
   const root = makeSite(input.files)
   const ctx = fakeContext({ root, answers: input.answers, options: { consentMode: input.consentFlag ?? null } })
   ctx.state.update((state) => {
     state.jobs = input.candidates ?? []
+    if (input.answeredHost) state.site = { productionHost: input.answeredHost, source: "answer", decidedAt: "2026-10-03T05:00:00.000Z" }
   })
+  const claimCalls: SiteClaimBody[] = []
   const patches: RunPatch[] = []
   const siteSourceCalls: SiteSourceBody[] = []
   const agentAlive = { value: false }
@@ -67,14 +77,20 @@ async function setup(input: {
     agent: () => ({ worker: "claude_code", whoPays: { payer: "plan", label: "your Claude plan pays" } }),
     consentFlag: () => input.consentFlag ?? null,
     productionDeniedConflict: fakeProductionDeniedConflict,
-    build: async () => ({ ok: true, failureSignature: [], durationMs: 1 })
+    build: async () => ({ ok: true, failureSignature: [], durationMs: 1 }),
+    runFacts: () => ({ site: ctx.stateValue().site ?? null, siteClaim: input.claim !== undefined })
   })
   const deps = fakeDeps({
     installer,
     registry: fakeRegistry(),
     agents: { isAgentAlive: () => agentAlive.value } as WizardDeps["agents"],
     bridge: {
-      has: () => true,
+      has: (capability: string) => capability !== "tag.site-claim.v1" || input.claim !== undefined,
+      siteClaim: async (body: Omit<SiteClaimBody, "protocolVersion" | "requestId">) => {
+        claimCalls.push({ protocolVersion: 1, requestId: "x", ...body })
+        if (input.siteSourceError) throw Object.assign(new Error(input.siteSourceError.code), input.siteSourceError)
+        return input.claim!
+      },
       patchRun: async (_runId: string, patch: RunPatch) => {
         patches.push(patch)
         return {} as never
@@ -87,7 +103,7 @@ async function setup(input: {
     }
   })
   await writeBeforeFacts(deps.fs, root, IDS.run, input.before ?? fakeBefore())
-  return { ctx, deps, patches, siteSourceCalls, agentAlive }
+  return { ctx, deps, patches, siteSourceCalls, claimCalls, agentAlive }
 }
 
 /** The answer a user gives by approving every approval line and picking a consent mode. */
@@ -270,6 +286,89 @@ describe("step install", () => {
     expect((await installStep.run(ctx, h.deps)).kind).toBe("ok")
     expect(read(ctx.root, "index.html")).not.toContain(IDS.siteSource)
     expect(readInstallManifest(ctx.root)!.ids?.infinite).toBeNull()
+  })
+})
+
+describe("§3y.2 the site-file claim at install (IO-3)", () => {
+  const RESERVED = "site_fa4e000000000000000000000000c1a1"
+  const BODY = "infinite-site-verification: isv_FAKEacmeProofToken0000\n"
+  const freshKeys = () => ({ ...fakeKeys(), infinite: { status: "not_provisioned" as const, siteSourceKey: null, productionHosts: [], consentMode: null, consentStorageKey: null, collectPath: null } })
+  const pendingClaim = (hosts: string[]): ClaimPublic => ({
+    hosts,
+    siteSourceKey: RESERVED,
+    consentMode: "not_required",
+    collectPath: "/infinite/ledger",
+    consentStorageKey: "infinite_analytics_consent",
+    proofPath: "/.well-known/infinite-site-verification.txt",
+    proofBody: BODY,
+    state: "pending_proof",
+    provenHosts: [],
+    lastCheck: null,
+    expiresAt: "2026-11-01T09:20:00.000Z"
+  })
+  /** A fresh workspace: no site source, no Vercel connection in Infinite (the repo's own vercel.json says Vercel serves it). */
+  const freshBefore = () => fakeBefore({ keys: freshKeys(), hosting: { provider: "none", vercel: null }, observedProductionHost: null })
+  const runPlanAndInstall = async (h: Harness) => {
+    const ctx = h.ctx
+    ctx.ask = (async (kind: never, payload: never) => {
+      ctx.asks.push({ kind, payload })
+      return approveAllFrom(ctx)
+    }) as typeof ctx.ask
+    await planStep.run(ctx, h.deps)
+    return installStep.run(ctx, h.deps)
+  }
+
+  it("pending_proof: the managed tag carries the RESERVED key and the proof file is written where the site serves it, recorded as the wizard's", async () => {
+    const h = await setup({ files: { "index.html": STATIC_HTML, "vercel.json": "{}\n" }, consentFlag: "not_required", answers: [], before: freshBefore(), answeredHost: "fresh-acme.com", claim: { protocolVersion: 1, requestId: "x", state: "pending_proof", siteSource: null, claim: pendingClaim(["fresh-acme.com"]) } })
+    const outcome = await runPlanAndInstall(h)
+    expect(outcome.kind).toBe("ok")
+    expect(h.siteSourceCalls).toEqual([])
+    expect(h.claimCalls).toEqual([{ protocolVersion: 1, requestId: "x", runId: IDS.run, productionHosts: ["fresh-acme.com"], consentMode: "not_required" }])
+    // The plan said how the domain is confirmed, right under the Infinite line.
+    const lines = (h.ctx.asks[0]!.payload as AskPayloads["plan"]).lines
+    expect(lines.find((line) => line.id === "info:infinite_site_file")?.text).toContain("/.well-known/infinite-site-verification.txt")
+    expect(read(h.ctx.root, "index.html")).toContain(RESERVED)
+    expect(read(h.ctx.root, ".well-known/infinite-site-verification.txt")).toBe(BODY)
+    const receipt = readInstallManifest(h.ctx.root)!
+    expect(receipt.ids?.infinite).toEqual({ siteSourceKey: RESERVED })
+    expect(receipt.edits!.find((edit) => edit.file === ".well-known/infinite-site-verification.txt")).toMatchObject({ by: "wizard", planLineId: "install_provider:infinite", jobId: null })
+    expect(h.ctx.stateValue().site?.claim).toMatchObject({ siteSourceKey: RESERVED, state: "pending_proof", hosts: ["fresh-acme.com"] })
+  })
+
+  it("ready: the claim verb answers the source (hosts verified) and the install is exactly the site-source path; no proof file", async () => {
+    const h = await setup({
+      files: { "index.html": STATIC_HTML },
+      consentFlag: "not_required",
+      answers: [],
+      claim: { protocolVersion: 1, requestId: "x", state: "ready", siteSource: { siteSourceKey: IDS.siteSource, productionHosts: ["acme-store.com"], consentMode: "not_required", created: false }, claim: null }
+    })
+    expect((await runPlanAndInstall(h)).kind).toBe("ok")
+    expect(h.claimCalls).toHaveLength(1)
+    expect(read(h.ctx.root, "index.html")).toContain(IDS.siteSource)
+    expect(existsSync(join(h.ctx.root, ".well-known/infinite-site-verification.txt"))).toBe(false)
+    expect(h.ctx.stateValue().site?.claim).toBeUndefined()
+  })
+
+  it("NEGATIVE: a static site whose vercel.json builds into another directory → the Infinite line is a user_action naming it; nothing is claimed", async () => {
+    const h = await setup({ files: { "index.html": STATIC_HTML, "vercel.json": JSON.stringify({ outputDirectory: "dist" }) }, consentFlag: "not_required", answers: [], before: freshBefore(), answeredHost: "fresh-acme.com", claim: { protocolVersion: 1, requestId: "x", state: "pending_proof", siteSource: null, claim: pendingClaim(["fresh-acme.com"]) } })
+    await runPlanAndInstall(h)
+    const lines = (h.ctx.asks[0]!.payload as AskPayloads["plan"]).lines
+    expect(lines.some((line) => line.id === "install_provider:infinite")).toBe(false)
+    expect(lines.find((line) => line.id === "user_action:infinite_blocked")?.text).toBe("Infinite: your site builds into dist; put .well-known/infinite-site-verification.txt there, then run again.")
+    expect(h.claimCalls).toEqual([])
+    expect(read(h.ctx.root, "index.html")).not.toContain(RESERVED)
+  })
+
+  it("NEGATIVE: an older app (no tag.site-claim.v1) and no Vercel connection serving the host → no Infinite line to approve, no tag", async () => {
+    const h = await setup({ files: { "index.html": STATIC_HTML, "vercel.json": "{}\n" }, consentFlag: "not_required", answers: [], before: freshBefore(), answeredHost: "fresh-acme.com" })
+    await runPlanAndInstall(h)
+    const lines = (h.ctx.asks[0]!.payload as AskPayloads["plan"]).lines
+    expect(lines.some((line) => line.id === "install_provider:infinite")).toBe(false)
+    expect(lines.find((line) => line.id === "user_action:infinite")?.text).toBe(
+      "Infinite: update the Infinite app (or connect your website in Infinite › Connections › GitHub · Website) so it can confirm fresh-acme.com; then run again."
+    )
+    expect(h.siteSourceCalls).toEqual([])
+    expect(readInstallManifest(h.ctx.root)?.ids?.infinite ?? null).toBeNull()
   })
 })
 
