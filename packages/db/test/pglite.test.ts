@@ -140,8 +140,7 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(firstRun).toContain("0082_stripe_checkout_sessions.sql");
     expect(firstRun).toContain("0083_remove_dead_x_metrics.sql");
 
-    // Idempotent: a second boot re-applies zero (the `rows.length` gate, not the pg `rowCount`
-    // gate, makes this true on PGlite).
+    // Idempotent: a second boot re-applies zero from the applied-ID snapshot.
     const secondRun = await runMigrations(url);
     expect(secondRun).toEqual([]);
   });

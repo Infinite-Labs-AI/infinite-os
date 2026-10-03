@@ -73,9 +73,35 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // Keyed to the head card itself, so a new card never opens with an earlier
     // card's explanation expanded (r4: the explanation stays behind ?), nor with
     // its open document, page or field answers. (A card brought back opens with
-    // only the answers its own entry carries: cardUiStart(entry).)
+    // only the answers its own entry carries: cardUiStart(entry).) A new card
+    // also opens its details pane on itself again (W3L2-M2): no scroll carries over.
     expect(source).toMatch(
-      /useLayoutEffect\(\(\) => \{\n\s+setExplainOpen\(false\);\n\s+setCardUi\(cardUiStart\(headConfirmAction\)\);\n\s+\}, \[headConfirmAction\]\);/u
+      /useLayoutEffect\(\(\) => \{\n\s+setExplainOpen\(false\);\n\s+setCardUi\(cardUiStart\(headConfirmAction\)\);\n\s+setCardPaneScroll\(null\);\n\s+\}, \[headConfirmAction\]\);/u
+    );
+  });
+
+  it("offers a card's OK key only while the drawn turn shows the card (W3L2-M2): both the keymap and the bar", () => {
+    // The keymap: the card's keys lose p (and r) when the card is off screen, and the card takes exactly those keys.
+    expect(source).toContain(
+      "const cardKeyCtx = headCardKeyCtx && liveTurn?.cardShown === false ? cardKeysOffScreen(headCardKeyCtx) : headCardKeyCtx;"
+    );
+    expect(source).toContain("confirmKeys={cardKeyCtx}");
+    expect(source).not.toContain("confirmKeys={headCardKeyCtx}");
+    // The bar: the same rule, for a drawn approval view's hints and for the fallback card's.
+    expect(source).toContain("const cardOff = turn?.cardShown === false;");
+    expect(source).toContain("cardOff ? headCard.keys.filter((hint) => !approvesCard(hint)) : headCard.keys");
+    expect(source).toContain("keyBarHints(cardOff ? cardKeysOffScreen(confirmKeys.ctx) : confirmKeys.ctx)");
+    // One definition, the keymap's (pinned by keymap.test.ts on CI).
+    expect(source).toMatch(/import \{[^}]*\bapprovesCard\b[^}]*\bcardKeysOffScreen\b[^}]*\} from "\.\.\/keys\/keymap\.js";/u);
+    expect(source).not.toContain("function cardKeysOffScreen");
+    expect(source).not.toContain("function approvesCard");
+  });
+
+  it("opens the pane on the card again when the window or the card's height changes (W3R5 review)", () => {
+    // A stored pane row would point into differently wrapped details: p would vanish for no reason on screen.
+    expect(source).toContain("const headCardRowCount = headCardLines?.length ?? 0;");
+    expect(source).toMatch(
+      /useLayoutEffect\(\(\) => \{\n\s+setCardPaneScroll\(null\);\n\s+\}, \[columns, rows, headCardRowCount\]\);/u
     );
   });
 
@@ -94,7 +120,8 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(handler.indexOf("setPendingConfirmActions((current) => current.slice(1))"))
       .toBeLessThan(handler.indexOf("onConfirmAction?.(head"));
     // Both decisions reach the app: a decline is a real "no", not a local note.
-    expect(handler).toContain("onConfirmAction?.(head, decision, fields)");
+    // T12: plus the stream's hooks (the receipt, then the follow-up), the same one call.
+    expect(handler).toContain("onConfirmAction?.(head, decision, fields, streamHooks)");
     expect(handler).not.toContain('if (decision === "decline")');
   });
 
@@ -107,7 +134,8 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // (confirm-card.tsx settleConfirmOutcome: receipt view on the turn, keep, or lines).
     expect(handler).toContain("settleConfirmOutcome(head, outcome, { decision, dismissed: dismissed !== null, onCardTurn: onCardTurn(), thrown })");
     expect(handler).toContain("if (settle(result, false)) afterReceipt(result);");
-    expect(handler).toContain("if (settle(error, true) && !refusedField(error)) afterReceipt(error);");
+    // A thrown error settles through confirm-stream.ts `confirmStreamSteps`' settle step (T12).
+    expect(handler).toContain("if (settle(step.outcome, true) && !refusedField(step.outcome)) afterReceipt(step.outcome);");
     expect(handler).toContain("recordTurnView(step.frame);");
     expect(handler).toContain("appendLines(step.lines);");
     expect(cardSource).toContain("confirmResultLines(outcome, opts.decision)");
@@ -157,11 +185,15 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
       source.indexOf("const resolveConfirmAction"),
       source.indexOf("useEffect(() => {\n    // Don't drain")
     );
-    expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);");
+    // The head card goes in too: a lookup it folds never takes the keys (lane review SHOULD).
+    expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), headCardViewRef.current ? [headCardViewRef.current] : []) : null);");
     expect(handler).toMatch(/const refocusCardTurn = \(\) => \{\s+if \(!onCardTurn\(\)\) return;/u);
+    // The cut pane stays at its foot, on what the card became (W3L2-M2).
+    expect(handler).toContain("setViewFocus((focus) => focus ? { ...focus, paneScroll: PANE_FOOT } : focus);");
     // After the dismissed (or working) frame, after the app's receipt, and when the frame is taken off.
     expect(handler).toContain("if (working || dismissed) refocusCardTurn();");
-    expect(handler.split("refocusCardTurn();").length - 1).toBe(3);
+    // T12: a streamed follow-up's views move the keys too, on the card's turn only.
+    expect(handler.split("refocusCardTurn();").length - 1).toBe(4);
   });
 
   it("a no the app took with no receipt of its own leaves the dismissed card, now sent (run-3 N22, CI-visible)", () => {
@@ -465,14 +497,15 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
   );
 
   it.skipIf(process.env.CI === "true")(
-    "a dismissal the app took reads ✕ Dismissed — nothing was executed., then Sent to the app",
+    "a dismissal the app took reads ✕ Dismissed — nothing was executed., and no Sent to the app under it (live T4)",
     { timeout: 30_000 },
     async () => {
       const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
         receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
       const { input, output, session, before } = await answer("n", { ok: true, view: dismissed });
-      await waitFor(() => output.text().slice(before).includes("Sent to the app"), 4_000, output.text);
-      expect(output.text().slice(before)).toContain("✕ Dismissed — nothing was executed.");
+      await waitFor(() => output.text().slice(before).includes("✕ Dismissed — nothing was executed."), 4_000, output.text);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(output.text().slice(before)).not.toContain("Sent to the app");
       await sendKeys(input, "/exit\r");
       await session;
     }
@@ -558,7 +591,8 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
         expect(lastFrame()).toContain("Okay, left it running.");
         expect(lastFrame()).not.toContain("Ready. It stops spending");
         confirm.resolve({ ok: true, declined: true, askedCaption: ASKED, dismissedCaption: "Okay, left it running.", view: dismissed });
-        await waitFor(() => lastFrame().includes("Sent to the app"), 4_000, lastFrame);
+        await waitFor(() => !lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
+        expect(lastFrame()).not.toContain("Sent to the app");
         expect(lastFrame()).toContain("Okay, left it running.");
         expect(lastFrame()).not.toContain("Ready. It stops spending");
         await sendKeys(input, "/exit\r");
@@ -603,14 +637,14 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
   );
 
   // Live re-check run 3, N22: `Sent to the app` was drawn at `n` and never
-  // changed. In flight it says `Sending to the app…`; the app's answer makes it
-  // `Sent to the app`, with a receipt of its own or without one.
+  // changed. In flight it says `Sending to the app…`; the app's answer leaves
+  // the receipt line alone (live T4: no `Sent to the app`), with a receipt of its own or without one.
   for (const [what, answer] of [
     ["the app's dismissed receipt", "receipt"],
     ["a plain ok", "plain"]
   ] as const) {
     it.skipIf(process.env.CI === "true")(
-      `n: Sending to the app… until the app answers, then Sent to the app (${what})`,
+      `n: Sending to the app… until the app answers, then the receipt line alone (${what})`,
       { timeout: 30_000 },
       async () => {
         const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
@@ -632,9 +666,12 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
         await sendKeys(input, "n");
         await waitFor(() => lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
         expect(lastFrame()).not.toContain("Sent to the app");
+        // Live run-4 N22: until the app answers, the receipt's sentence is not claimed.
+        expect(lastFrame()).not.toContain("Dismissed — nothing was executed.");
         confirm.resolve(answer === "receipt" ? { ok: true, declined: true, view: dismissed } : { ok: true });
-        await waitFor(() => lastFrame().includes("Sent to the app"), 4_000, lastFrame);
+        await waitFor(() => lastFrame().includes("Dismissed — nothing was executed."), 4_000, lastFrame);
         expect(lastFrame()).not.toContain("Sending");
+        expect(lastFrame()).not.toContain("Sent to the app");
         expect(lastFrame()).toContain("Dismissed — nothing was executed.");
         await sendKeys(input, "/exit\r");
         await session;
@@ -684,12 +721,12 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
       await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
       expect(lastFrame()).toContain("what it does");
       await sendKeys(input, "n");
-      await waitFor(() => lastFrame().includes("Dismissed — nothing was executed."), 4_000, lastFrame);
+      await waitFor(() => lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
       expect(lastFrame()).not.toContain("what it does");
       expect(lastFrame()).toMatch(/tab\s+switch side\s+\/\s+commands/u);
       confirm.resolve({ ok: true, declined: true, view: dismissed });
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      expect(lastFrame()).toContain("Dismissed — nothing was executed.");
+      await waitFor(() => lastFrame().includes("Dismissed — nothing was executed."), 4_000, lastFrame);
+      expect(lastFrame()).not.toContain("what it does");
       expect(lastFrame()).not.toContain("what it does");
       await sendKeys(input, "/exit\r");
       await session;

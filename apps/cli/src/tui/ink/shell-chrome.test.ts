@@ -158,13 +158,15 @@ describe("the boot frame's body (D4)", () => {
   it("is an empty answer area and the Steps rule", () => {
     const body = bootBodyLines(100, TRUECOLOR);
     expect(body).toHaveLength(9);
-    // Blank rows are one space each: Ink draws an empty text as no row at all.
-    expect(body.slice(0, 8).every((line) => line === " ")).toBe(true);
+    // From 80 columns the answer area is the split's empty answer pane and its separator (boot--c100).
+    expect(body.slice(0, 8).every((line) => stripAnsi(line) === `${" ".repeat(29)}│`)).toBe(true);
+    // One column: blank rows, one space each (Ink draws an empty text as no row at all).
+    expect(bootBodyLines(79, TRUECOLOR).slice(0, 8).every((line) => line === " ")).toBe(true);
     expectGolden(body[8]!, GOLDEN.steps100);
     expect(stepsRuleLine(100, TRUECOLOR)).toBe(body[8]);
   });
 
-  it("draws the split's empty answer pane and its separator at 120 columns and up (boot--c160)", () => {
+  it("draws the split's empty answer pane and its separator at 80 columns and up (boot--c160)", () => {
     const body = bootBodyLines(160, TRUECOLOR);
     expect(body).toHaveLength(9);
     for (const line of body.slice(0, 8)) {
@@ -172,8 +174,9 @@ describe("the boot frame's body (D4)", () => {
     }
     expect(body[8]).toBe(stepsRuleLine(160, TRUECOLOR));
     // Under the split (one column) the answer area stays blank rows.
-    expect(bootBodyLines(119, TRUECOLOR).slice(0, 8).every((line) => line === " ")).toBe(true);
+    expect(bootBodyLines(79, TRUECOLOR).slice(0, 8).every((line) => line === " ")).toBe(true);
     // The pane follows the layout's 28%, clamped to 26–40 columns.
+    expect(stripAnsi(bootBodyLines(80, TRUECOLOR)[0]!)).toBe(`${" ".repeat(27)}│`);
     expect(stripAnsi(bootBodyLines(120, TRUECOLOR)[0]!)).toBe(`${" ".repeat(34)}│`);
   });
 
@@ -236,6 +239,49 @@ describe("the key bar (region-keybar-*, the last row)", () => {
     const line = stripAnsi(keyBarLine(card("p", "Pause", { explain: true }), 30, TRUECOLOR));
     expect(line).toHaveLength(30);
     expect(line.endsWith("…")).toBe(true);
+  });
+
+  // S2 (round 5): a composite view engaged at 80 cut its bar at `tab switch si…`, so the way to the answer side was unreadable.
+  const composite: KeyHint[] = [
+    { key: "j k", label: "row" },
+    { key: "↑ ↓", label: "scroll" },
+    { key: "1-3", label: "level" },
+    { key: "→", label: "columns" },
+    { key: "o", label: "open in Meta Ads" },
+    { key: "?", label: "what it does" },
+    { key: "tab", label: "switch side" }
+  ];
+
+  it("drops lower keys first so o open and tab switch side stay whole at 80 (S2)", () => {
+    const line = stripAnsi(keyBarLine(composite, 80, TRUECOLOR));
+    expect([...line].length).toBeLessThanOrEqual(80);
+    expect(line).toContain(" tab  switch side");
+    expect(line).toContain(" o  open in Meta Ads");
+    expect(line).toContain(" ↑ ↓  scroll");
+    expect(line).not.toContain("…");
+    // `/ commands` goes first, then the keys at the end of the bar (`?` before `→`).
+    expect(line).not.toContain("commands");
+    expect(line).not.toContain("what it does");
+  });
+
+  it("keeps the order of the keys that stay", () => {
+    const line = stripAnsi(keyBarLine(composite, 80, TRUECOLOR));
+    const order = [" j k ", " ↑ ↓ ", " o ", " tab "].map((key) => line.indexOf(key));
+    expect(order.every((at) => at >= 0)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it("still cuts only the tail when every kept key fits (the r4 c60 bars keep their `/` chip)", () => {
+    const line = stripAnsi(keyBarLine(card("p", "pause", { caps: { open: true, watch: false, retry: false } }), 60, TRUECOLOR));
+    expect(line).toBe(" p  pause    n  dismiss    o  open    tab  switch side    / ");
+    const cut = stripAnsi(keyBarLine([{ key: "j k", label: "row" }, { key: "→", label: "columns" }, { key: "o", label: "open" }], 60, TRUECOLOR));
+    // r4 view-01-numbers--c60, as drawn.
+    expect(cut).toBe(" j k  row    →  columns    o  open    tab  switch side    / ");
+  });
+
+  it("drops nothing when the bar fits", () => {
+    const line = stripAnsi(keyBarLine(composite, 140, TRUECOLOR));
+    expect(line.trimEnd().endsWith(" ?  what it does    tab  switch side    /  commands")).toBe(true);
   });
 
   it("prints chips as same-width brackets when plain", () => {

@@ -11,11 +11,19 @@
 // running is an AMBER card titled with the approval's words; one that ended
 // without running (dismissed, expired, changed elsewhere, blocked) draws no
 // rows, only what the shell says and the afterword (`outcome.ts`).
+//
+// The target's parents (contract revision 3, `target.path`: "Sample campaign ›
+// Sample ad set") print as ONE dim line under the target in every state:
+// first in a card (its title names the target), under the bold target line,
+// or, when nothing is drawn of the object, first under the head and source.
+// The target's picture (`target.creativeRef`) is Cmd+L's: never drawn here.
 import type { AnswerViewEnvelopeV1, AnswerViewV1 } from "@infinite-os/types";
 
 import { beforeAfter, cardBody, cardBox, cardWidth, chipRows, fieldRows, paragraphIn, setTo, type CardTone, type FieldRow } from "./card.js";
+import { displayWidth } from "../lib/display-width.js";
+import { openKeyLabel } from "./open-target.js";
 import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
-import { cellText, FootnoteBook, isRecord, paint, viewText, wrapText } from "./primitives.js";
+import { cellText, cutAtWord, FootnoteBook, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
 
 /** The words a done change's card adds after its title: who proposed it and who said yes. */
@@ -39,8 +47,77 @@ const OPEN_CARD_STATES = new Set(["needs_yes", "needs_answer", "applying", "outc
 export function renderChange(view: AnswerViewEnvelopeV1<"change">, ctx: ViewRenderCtx): KindRender {
   const notes = new FootnoteBook();
   const detail = changeViewLines(view, ctx, notes);
+  // A settled change draws no object: its path leads the details, under the head.
+  const path = isSettledWithoutRunning(view) ? targetPathLine(view.body, ctx.width, ctx) : null;
   // A card ends with its own `? what it does` (r4 `card()`), the view's explanation included.
-  return { detail, footnotes: notes.lines(), keys: [], okKey: null, rowCount: 0, ...(drawnAsCard(view) ? { offersExplain: true } : {}) };
+  return {
+    detail, footnotes: notes.lines(), keys: [], okKey: null, rowCount: 0,
+    ...(path ? { lead: [path] } : {}),
+    ...(drawnAsCard(view) ? { offersExplain: true } : {})
+  };
+}
+
+/** The separator between a target's parents (cmdl-r2 `pauseObj`). */
+const PATH_SEPARATOR = " › ";
+
+/**
+ * A change target's parents as one dim line (`Sample campaign › Sample ad
+ * set`), cut to `width` with `…` at a word's or a name part's end (never a
+ * name broken mid-word where a part ends near); null when the target has no path. Read
+ * defensively and scrubbed, like every body field. Never a picture.
+ */
+export function targetPathLine(body: unknown, width: number, ctx: Pick<ViewRenderCtx, "color" | "theme">): string | null {
+  const target = isRecord(body) && isRecord(body.target) ? body.target : null;
+  const path: unknown[] = Array.isArray(target?.path) ? target.path : [];
+  const parts = path.map((part) => viewText(part)).filter(Boolean);
+  return parts.length ? paint(fitPath(parts, Math.max(1, Math.floor(width))), "dim", ctx) : null;
+}
+
+/** An outer part is never cut shorter than this (its first letters and `…`), or they all fold into one `…`. */
+const MIN_OUTER_PART = 6;
+
+/**
+ * A path cut to `width` from its OUTER parts first (TJ-7): the nearest parent
+ * (the last part, the ad set) is what names the target's place, so it keeps
+ * its leading words. The outer parts share what is left fairly (a short one
+ * gives its spare cells to the others), each cut with `…`; when even that
+ * does not fit, they fold into one `…` and the nearest parent is cut at its
+ * end.
+ */
+function fitPath(parts: readonly string[], width: number): string {
+  const whole = parts.join(PATH_SEPARATOR);
+  if (displayWidth(whole) <= width || parts.length === 1) {
+    return cutAtWord(whole, width);
+  }
+  const nearest = parts[parts.length - 1]!;
+  const outer = parts.slice(0, -1);
+  const budget = width - displayWidth(nearest) - PATH_SEPARATOR.length * outer.length;
+  if (budget >= MIN_OUTER_PART * outer.length) {
+    return [...fairCut(outer, budget), nearest].join(PATH_SEPARATOR);
+  }
+  return cutAtWord(`…${PATH_SEPARATOR}${nearest}`, width);
+}
+
+/** Cut `parts` to share `budget` cells: an equal share each, a short part's spare going to the rest. */
+function fairCut(parts: readonly string[], budget: number): string[] {
+  const shares = parts.map(() => 0);
+  let left = budget;
+  let open = parts.map((_part, index) => index);
+  while (open.length && left >= open.length) {
+    const share = Math.floor(left / open.length);
+    const still: number[] = [];
+    for (const index of open) {
+      const give = Math.min(displayWidth(parts[index]!) - shares[index]!, share);
+      shares[index] = shares[index]! + give;
+      left -= give;
+      if (displayWidth(parts[index]!) > shares[index]!) still.push(index);
+    }
+    // Every open part took its whole share: nothing is spare to hand on.
+    if (still.length === open.length) break;
+    open = still;
+  }
+  // A short share still ends at a word where one ends at all (`Sample …`, never `Sample camp…`).
+  return parts.map((part, index) => cutAtWord(part, Math.max(1, shares[index]!), 1 / 3));
 }
 
 /** Whether the change is drawn as a card: done, or still open with a card approval (or running its yes). */
@@ -71,6 +148,7 @@ function changeViewLines(view: AnswerViewV1, ctx: ViewRenderCtx, notes: Footnote
     const title = receipt ? [base, titled ? shortProvenance(provenance) : APPROVED_SUFFIX].filter(Boolean).join(" · ") : rawTitle;
     const facts = receipt ? [viewText(receipt.sentence), titled ? "" : provenance].filter(Boolean) : [];
     return changeCard(view, title, "green", [
+      ...pathRows(body, ctx),
       ...cardRows(body, approval, ctx, notes),
       ...facts.flatMap((fact) => paragraphIn(fact, cardInner(ctx), "dim", ctx))
     ], ctx);
@@ -83,7 +161,7 @@ function changeViewLines(view: AnswerViewV1, ctx: ViewRenderCtx, notes: Footnote
     const working = view.state === "applying"
       ? ["", `${paint(`◑ Working…${stopwatch(view)}`, "cyan", ctx)}  ${paint("· after 20 s it says it's still running", "dim", ctx)}`, "", ""]
       : [];
-    return changeCard(view, title, "amber", [...cardRows(body, approval, ctx, notes), ...working], ctx);
+    return changeCard(view, title, "amber", [...pathRows(body, ctx), ...cardRows(body, approval, ctx, notes), ...working], ctx);
   }
   return changeLines(view.body, ctx, notes);
 }
@@ -100,14 +178,14 @@ function changeCard(view: AnswerViewV1, title: string, tone: CardTone, content: 
   const inner = cardInner(ctx);
   const link = isRecord(view.appLink) ? view.appLink : null;
   const chips = ctx.caps.open && link
-    ? chipRows([{ key: "o", label: viewText(link.label, "open in the app") }], null, inner, ctx)
+    ? chipRows([{ key: "o", label: openKeyLabel(viewText(link.label)) }], null, inner, ctx)
     : [];
   // A view's own explain is printed by the shell under the view; the approval's
   // summary (the `?` text Cmd+L shows) has no other place, so it opens inside.
   const own = viewText(view.explain);
   const summary = own ? "" : changeCardSummary(view);
   const opened = ctx.explainOpen && summary ? ["", ...wrapText(summary, inner)] : [];
-  return cardBox(title, cardBody([...content, ...opened], chips, own !== "" || summary !== "", ctx), ctx.width, tone, ctx);
+  return cardBox(title, cardBody([...content, ...opened], chips, own !== "" || summary !== "", ctx, ctx.explainOpen), ctx.width, tone, ctx);
 }
 
 /**
@@ -120,6 +198,12 @@ export function changeCardSummary(view: AnswerViewV1): string {
   }
   const approval = isRecord(view.approval) && view.approval.kind === "card" ? view.approval : null;
   return viewText(approval?.summary);
+}
+
+/** The target's path as a card's first row (its title names the target), or nothing. */
+function pathRows(body: Record<string, unknown>, ctx: ViewRenderCtx): string[] {
+  const line = targetPathLine(body, cardInner(ctx), ctx);
+  return line ? [line] : [];
 }
 
 /** The width inside a card drawn at `ctx.width`. */
@@ -159,14 +243,21 @@ function plainRows(body: Record<string, unknown>): FieldRow[] {
   return rows.filter(isRecord).map((row) => ({ label: viewText(row.label), value: viewText(row.after) }));
 }
 
-/** The change body as lines (no card): the target, its rows, its effect, warnings. */
-export function changeLines(body: unknown, ctx: ViewRenderCtx, notes: FootnoteBook): string[] {
+/**
+ * The change body as lines (no card): the target and its path, its rows, its
+ * effect, warnings. `path: false` when the caller already drew the path.
+ */
+export function changeLines(body: unknown, ctx: ViewRenderCtx, notes: FootnoteBook, options: { path?: boolean } = {}): string[] {
   const record = isRecord(body) ? body : {};
   const lines: string[] = [];
   const target = isRecord(record.target) ? record.target : {};
   const label = viewText(target.label);
   if (label) {
     lines.push(...paragraphIn(label, ctx.width, "b", ctx));
+  }
+  const path = options.path === false ? null : targetPathLine(record, ctx.width, ctx);
+  if (path) {
+    lines.push(path);
   }
   lines.push(...fieldRows(changeRows(record, ctx, notes), ctx.width, ctx));
   const effect = viewText(record.effect);
@@ -206,7 +297,9 @@ function changeValue(row: Record<string, unknown>, notes: FootnoteBook, ctx: Vie
   // A null after prints its reason, never a made-up value.
   const reason = cellText({ text: null, ...(isRecord(row.reason) ? { reason: row.reason as never } : {}) }, "text", null, notes);
   if (!("before" in row) || row.before === undefined) {
-    return `${paint("set to", "dim", ctx)} ${reason}`;
+    // A reason shown as words is the row's whole value (`kept as it is`), never `set to kept as it is`.
+    const words = isRecord(row.reason) && row.reason.show === "words";
+    return words ? reason : `${paint("set to", "dim", ctx)} ${reason}`;
   }
   return `${typeof row.before === "string" ? viewText(row.before) : "—"} ${paint("→", "dim", ctx)} ${reason}`;
 }

@@ -2,13 +2,13 @@
   "v": 1,
   "kind": "record",
   "tool": "read_item",
-  "title": "Ad · Hook B",
+  "title": "Ad · Demo B",
   "state": "ready",
   "asOf": "2026-01-15T10:40:00Z",
   "provenance": { "source": "Demo source", "via": "our_db" },
   "scope": { "workspaceName": "Demo", "crossWorkspace": false },
   "caveats": [],
-  "next": [{ "label": "Pause it", "ask": "pause hook b" }],
+  "next": [{ "label": "Pause it", "ask": "pause demo b" }],
   "body": {
     "fields": [
       { "label": "Campaign", "value": { "text": "Demo trials" } },

@@ -30,6 +30,7 @@
  * `renderConfirmationCard` writes them.
  */
 
+import type { DesktopConfirmResult, DesktopProgressFrame } from "../desktop-app-client.js";
 import type { AnswerViewV1, ApprovalFieldAnswerV1 } from "@infinite-os/types";
 
 import {
@@ -128,6 +129,12 @@ export interface InSessionConfirmationClient {
     /** Answers to the card's `approval.fields` (needs `confirm.fields.v1`). */
     fields?: Record<string, ApprovalFieldAnswerV1>;
     signal?: AbortSignal;
+    /** confirm.stream.v1 (T12): stream the receipt, then the follow-up, when the Desktop can. */
+    stream?: boolean;
+    /** Streamed only: the receipt the moment it arrives. */
+    onReceipt?: (receipt: DesktopConfirmResult) => void;
+    /** Streamed only: each follow-up progress frame after the receipt. */
+    onProgress?: (frame: DesktopProgressFrame) => void;
   }): Promise<unknown>;
 }
 

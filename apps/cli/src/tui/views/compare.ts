@@ -5,7 +5,7 @@
 // and the terminal never marks an arm, whatever `namesWinner` says (the
 // sentence names the winner when there is one). The grade is not printed as
 // words: without a sentence there is no verdict line at all.
-import type { UnitV1 } from "@infinite-os/types";
+import type { AnswerViewV1, UnitV1 } from "@infinite-os/types";
 
 import { displayWidth } from "../lib/display-width.js";
 import {
@@ -50,11 +50,14 @@ function rangeText(interval: unknown, unit: UnitV1): string {
   return `${signed(low)} to ${signed(high)}${levelText}`;
 }
 
-/** The unit of a difference: the metric its label names, else a plain number. */
+/**
+ * The unit of a difference: the metric its label names, else the sole
+ * measure's, else a count (as Cmd+L reads it, cmdl-numbers).
+ */
 function differenceUnit(label: string, metrics: readonly MetricRow[]): UnitV1 {
   const name = label.toLowerCase();
   const match = metrics.find((metric) => metric.label.toLowerCase() === name || metric.key.toLowerCase() === name);
-  return match?.unit ?? "ratio";
+  return match?.unit ?? (metrics.length === 1 ? metrics[0]!.unit : "count");
 }
 
 /** `1.7–5.3%`: an arm's likely range in its metric's unit (the decimals the bounds need). */
@@ -154,10 +157,11 @@ function compareBodyLines(body: Record<string, unknown>, ctx: ViewRenderCtx, dra
         units: [undefined, unit]
       };
     });
-    const methods = [...new Set(differences.map((difference) => viewText(difference.method)).filter(Boolean))];
+    const methods = rangeMethods(differences);
     blocks.push([
       ...cellTableLines({ columns, rows, currency: null }, ctx, draw),
-      ...(methods.length ? wrapText(`Range method: ${methods.join(", ")}`, ctx.width).map((line) => paint(line, "muted", ctx)) : [])
+      // How the range was worked out is an analyst's note: behind `?` (W3-cmp-youtube, W3-cmp-analysis).
+      ...(methods.length && ctx.explainOpen ? wrapText(`Range method: ${methods.join(", ")}`, ctx.width).map((line) => paint(line, "muted", ctx)) : [])
     ]);
   }
 
@@ -245,3 +249,15 @@ export const renderCompare: KindRenderer<"compare"> = (view, ctx): KindRender =>
     ...(draw.hidden ? { hiddenColumns: draw.hidden } : {})
   };
 };
+
+/** How each difference's range was worked out, once each (the analyst's note behind `?`). */
+function rangeMethods(differences: readonly unknown[]): string[] {
+  return [...new Set(differences.filter(isRecord).map((difference) => viewText(difference.method)).filter(Boolean))];
+}
+
+/** Whether a compare view has a range method to show: then `?` is offered for it (R-IOV-6). */
+export function compareHasRangeMethod(view: AnswerViewV1): boolean {
+  if (view.kind !== "compare" || !isRecord(view.body)) return false;
+  const differences = Array.isArray(view.body.differences) ? view.body.differences : [];
+  return rangeMethods(differences).length > 0;
+}

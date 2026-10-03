@@ -181,7 +181,7 @@ export function fieldInvalidMessage(outcome: unknown): string | null {
 export type ConfirmSettle =
   | { type: "receipt"; frame: ToolViewFrameV1 }
   | { type: "keep" }
-  | { type: "drop"; lines: ConfirmLine[] };
+  | { type: "drop"; lines: ConfirmLine[]; notSentTool?: string };
 
 export function settleConfirmOutcome(
   head: InSessionConfirmationAction,
@@ -191,7 +191,12 @@ export function settleConfirmOutcome(
   if (opts.thrown) {
     const receipt = fieldInvalidMessage(outcome) === null ? receiptViewFrame(head, outcome) : null;
     if (receipt && opts.onCardTurn) return { type: "receipt", frame: receipt };
-    return { type: "drop", lines: confirmErrorLines(outcome) };
+    // A refusal the app proved never left (`nothingRan`) on the card's turn:
+    // the row that waited for its OK says `✗ not sent` with the lines (S4).
+    // A refused field on an approve is not one: that card comes back in front.
+    const cardComesBack = opts.decision === "approve" && fieldInvalidMessage(outcome) !== null;
+    const notSent = opts.onCardTurn && !cardComesBack && head.view && isRecord(outcome) && outcome.nothingRan === true;
+    return { type: "drop", lines: confirmErrorLines(outcome), ...(notSent ? { notSentTool: head.view!.tool } : {}) };
   }
   const receipt = receiptViewFrame(head, outcome);
   if (receipt && opts.onCardTurn) return { type: "receipt", frame: receipt };
@@ -228,7 +233,7 @@ export function fallbackCardLines(
   );
   const explain = explainText ? ["", ...wrapText(terminalText(explainText), inner)] : [];
   const chips = chipRows(keyBarHints(keys.ctx).filter((hint) => hint.key !== "?"), keys.ctx.okKey, inner, ctx);
-  return cardBox(summary || UNNAMED_WRITE, cardBody([...rows, ...explain], chips, keys.ctx.explain === true, ctx), width, "amber", ctx);
+  return cardBox(summary || UNNAMED_WRITE, cardBody([...rows, ...explain], chips, keys.ctx.explain === true, ctx, explainText !== null), width, "amber", ctx);
 }
 
 /** Rows the card for a pending write without a view takes (the live region reserves them). */

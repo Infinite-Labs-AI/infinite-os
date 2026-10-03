@@ -5,14 +5,29 @@
  * Key rule: no key may end in "token", contain "credential", or equal a host-private key.
  */
 // ---- contract body (vendored verbatim into 1bu-1; edit only in infinite-os) ----
-export const ANSWER_VIEW_CONTRACT_REVISION = 2 as const;
+export const ANSWER_VIEW_CONTRACT_REVISION = 3 as const;   // rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail; AnswerViewEnvelopeV1.scope.account; StateReasonV1.step
 export const RESULT_VIEW_CAPABILITY = "result.view.v1" as const;
 export const CONFIRM_FIELDS_CAPABILITY = "confirm.fields.v1" as const;
 export const CONFIRM_STREAM_CAPABILITY = "confirm.stream.v1" as const;
 export const APP_OPEN_CAPABILITY = "app.open.v1" as const;
 export const ANSWER_VIEW_LIMITS = {
   maxRows: 200, maxCellChars: 500, maxTextChars: 2_000, maxDocumentChars: 64_000, maxFrameBytes: 262_144,
+  // A change target's parents; rev 3. A part longer than maxTargetPathPartChars is cut to it, ending in "…";
+  // more than maxTargetPathParts parts (or any part not a string, or empty once cleaned) withholds the whole path.
+  maxTargetPathParts: 4, maxTargetPathPartChars: 120,
+  // Short host words; rev 3: ListBodyV1.nameLabel, RecordBodyV1.status.word, LeaderV1.detail, StateReasonV1.step. A longer string is cut to
+  // maxShortTextChars, ending in "…"; a value not a string, or empty once cleaned, is withheld (the field is dropped);
+  // a status whose tone is not one of StatusWordV1's tones is withheld.
+  maxShortTextChars: 80,
+  // The host's account handles; rev 3: AnswerViewEnvelopeV1.scope.account. Each part matches ARCHIVE_ASSET_ID_PATTERN's
+  // character rule and is at most maxHostHandleChars; a part that is bad or missing withholds the whole slot, never half.
+  maxHostHandleChars: 128,
 } as const;
+/** rev 3: a CreativeRefV1.archiveAssetId is an archive id: letters, digits and `_ . : -`, at most 128; no '/', never a URL or path.
+ *  It never starts with a URL scheme (http, https, javascript, data, mailto, file, blob, vbscript, ftp; any case) and a ':'.
+ *  Each letter is spelled in both cases, not with the `i` flag: under `iu` the letter class would also admit U+017F and U+212A. */
+export const ARCHIVE_ASSET_ID_PATTERN =
+  /^(?![Hh][Tt][Tt][Pp][Ss]?:|[Jj][Aa][Vv][Aa][Ss][Cc][Rr][Ii][Pp][Tt]:|[Dd][Aa][Tt][Aa]:|[Mm][Aa][Ii][Ll][Tt][Oo]:|[Ff][Ii][Ll][Ee]:|[Bb][Ll][Oo][Bb]:|[Vv][Bb][Ss][Cc][Rr][Ii][Pp][Tt]:|[Ff][Tt][Pp]:)[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 
 export const ANSWER_VIEW_KINDS = [
   "numbers", "list", "record", "document", "images", "change",
@@ -37,7 +52,10 @@ export interface AppLinkV1 { place: string; label: string; params?: Record<strin
 /** The message a client sends as a NEW user turn. Clients never call tools directly. */
 export interface NextStepV1 { label: string; ask: string }
 /** short: the head's words in place of the generic state words ("Changed on Meta", "1 not measured"); words: the full sentence. */
-export interface StateReasonV1 { code: string; words: string; short?: string; fix?: { label: string; appLink?: AppLinkV1; ask?: string } }
+export interface StateReasonV1 {
+  code: string; words: string; short?: string; fix?: { label: string; appLink?: AppLinkV1; ask?: string };
+  step?: string;  // the Steps row's short word for this state, in host words ("not allowed", "limit"); drawn verbatim, never derived from codes; bounds as maxShortTextChars; rev 3
+}
 export interface ProvenanceV1 { source: string; via: "our_db" | "live_read" | "this_mac" | "server"; verdictsBy?: string }
 export interface CostV1 {
   usd: number | null; estimate: boolean;
@@ -80,7 +98,7 @@ export interface ReconcileV1 { label: string; ask: string }
 
 // ── bodies ──
 /** A picture by reference only (Cmd+L's CreativeThumb reads our archive by id). Never a URL. The terminal ignores it. */
-export interface CreativeRefV1 { archiveAssetId: string }
+export interface CreativeRefV1 { archiveAssetId: string }   // an archive id (ARCHIVE_ASSET_ID_PATTERN): never a URL or path; rev 3
 /** tone "bad": the host flags this value as the one to look at ("0 trials"); renderers draw it in the warn colour. rev 2 */
 export interface CellV1 { value: number | null; reason?: ReasonV1; untrusted?: true; tone?: "bad" }      // money in MAJOR units; percent in points
 export interface TextCellV1 { text: string | null; reason?: ReasonV1; untrusted?: true; tone?: "bad" }
@@ -102,7 +120,10 @@ export interface TodayLegV1 extends NumbersLegV1 {
   final: false; asOf: IsoTime;
   refresh?: { status: "fresh" | "still_running" | "held" | "failed" | "skipped"; retryAt?: IsoTime };
 }
-export interface LeaderV1 { measure: { key: string; label: string }; rowId: string; rowLabel: string; value: CellV1 }
+export interface LeaderV1 {
+  measure: { key: string; label: string }; rowId: string; rowLabel: string; value: CellV1;
+  detail?: string;  // one short context line from the host, drawn under the leader's name ("$12.34 spent", "5 of 40 impressions"); words are data, never computed by a renderer; rev 3
+}
 export type SectionV1 =
   | { title: string; kind: "numbers"; body: NumbersBodyV1 } | { title: string; kind: "list"; body: ListBodyV1 }
   | { title: string; kind: "record"; body: RecordBodyV1 } | { title: string; kind: "health"; body: HealthBodyV1 };
@@ -122,6 +143,7 @@ export interface ListRowV1 {
 }
 export interface ListBodyV1 {
   layout: "rows" | "log" | "groups" | "files";
+  nameLabel?: string;  // the row-name column's header ("Ad", "Ad set", "Campaign"); rev 3
   currency?: string | null;                               // money cells' currency; rev 2
   selected?: string;                                      // the row id the list opens on (the one the answer is about); rev 2
   columns: { key: string; label: string; unit?: UnitV1 }[]; rows: ListRowV1[];
@@ -130,7 +152,8 @@ export interface ListBodyV1 {
   omitted?: { count: number; reason: string }; truncated?: TruncationV1;
 }
 export interface RecordBodyV1 {
-  title?: string; currency?: string | null;               // the thing's full name ("Ad “Hook B · founder POV”"); money's currency; rev 2
+  title?: string; currency?: string | null;               // the thing's full name ("Ad “Demo B · sample copy”"); money's currency; rev 2
+  status?: StatusWordV1;  // the thing's own status for the head chip ("Active" ok, "Paused" muted); rev 3
   fields: { label: string; value: CellV1 | TextCellV1; unit?: UnitV1 }[]; creativeRef?: CreativeRefV1;
   history?: { at: IsoTime; from: string | null; to: string | null; who: string | null; source?: string }[];
   rule?: { summary: string; channel: string; schedule: string; nextRunAt: IsoTime | null;
@@ -151,7 +174,11 @@ export interface ImagesBodyV1 {
   eta?: { startedAtMs: number; etaMs: number | null };
 }
 export interface ChangeBodyV1 {
-  target: { kind: string; id?: string; label: string };
+  target: {
+    kind: string; id?: string; label: string;
+    creativeRef?: CreativeRefV1;   // the target's picture, by archive reference (never a URL); the terminal ignores it; rev 3
+    path?: string[];               // the target's parents, outermost first (["Campaign", "Ad set"]); bounds in ANSWER_VIEW_LIMITS; rev 3
+  };
   rows: { label: string; before?: string | null; after: string | null; reason?: ReasonV1 }[]; // no `before` = "set to"
   effect?: string; warnings: string[];
   staleBefore?: { label: string; ours: string; live: string };
@@ -219,7 +246,10 @@ export interface AnswerViewEnvelopeV1<K extends AnswerViewKind = AnswerViewKind>
   state: AnswerViewState; stateReason?: StateReasonV1;
   outcome?: OutcomeV1; retry?: RetryV1; // writes: explicit, never parsed from messages
   asOf: IsoTime | null; provenance?: ProvenanceV1;
-  scope: { workspaceName: string; crossWorkspace: boolean };
+  scope: {
+    workspaceName: string; crossWorkspace: boolean;
+    account?: { project: string; source: string };   // the host's opaque handles for the workspace and the connected source the numbers came from, so a redraw or re-read of an OLD answer uses its own account, never the one selected now; each part matches ARCHIVE_ASSET_ID_PATTERN's character rule, at most maxHostHandleChars (128); a bad or missing part withholds the whole slot; host-only; the terminal ignores it; a public bridge may drop it; rev 3
+  };
   cost?: CostV1; caveats: string[];    // server words, printed verbatim
   next?: NextStepV1[]; appLink?: AppLinkV1; untrusted?: true;
   approval?: ApprovalV1; receipt?: ReceiptV1; reconcile?: ReconcileV1;

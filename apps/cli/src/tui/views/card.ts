@@ -8,7 +8,7 @@ import wrapAnsi from "wrap-ansi";
 
 import type { KeyHint } from "../keys/keymap.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
-import { paint, wrapText } from "./primitives.js";
+import { cutAtWord, paint, wrapWords } from "./primitives.js";
 import type { ViewRenderCtx } from "./types.js";
 
 /** A card is never wider than this (r4 `card()`: `Math.min(w, 74)`). */
@@ -69,7 +69,8 @@ function topBorder(title: string, outer: number, tone: CardTone, ctx: PaintCtx):
   }
   // A title too long for the border is cut and ends in "…", so the box always
   // closes (r4's trunc() would drop the corner, leaving the box open: run-r2 MUST 3).
-  const shown = displayWidth(title) <= room ? title : `${cutCells(title, room - 1)}…`;
+  // The cut ends at a word where one ends near (`· Agent …`, never `· Agent pro…`).
+  const shown = cutAtWord(title, room);
   return `${border("┌─")} ${paint(shown, "b", ctx)} ${border(`${"─".repeat(outer - 5 - displayWidth(shown))}┐`)}`;
 }
 
@@ -126,17 +127,17 @@ export function fieldRows(rows: readonly FieldRow[], width: number, ctx: PaintCt
   if (valueWidth < 8) {
     return shown.flatMap((row) => [
       ...(row.label ? [paint(fitPainted(row.label, max), "dim", ctx)] : []),
-      ...wrapText(row.value, max)
+      ...wrapUrl(row.value, max)
     ]);
   }
   const indent = " ".repeat(column);
   return shown.flatMap((row) => {
     if (displayWidth(row.label) + 2 > column) {
-      const values = row.value ? wrapText(row.value, valueWidth) : [];
+      const values = row.value ? wrapUrl(row.value, valueWidth) : [];
       return [paint(fitPainted(row.label, max), "dim", ctx), ...values.map((value) => `${indent}${value}`)];
     }
     const label = row.label;
-    const values = row.value ? wrapText(row.value, valueWidth) : [""];
+    const values = row.value ? wrapUrl(row.value, valueWidth) : [""];
     const pad = " ".repeat(Math.max(0, column - displayWidth(label)));
     return values.map((value, index) =>
       index === 0
@@ -185,9 +186,13 @@ export function chipRows(hints: readonly KeyHint[], okKey: string | null, width:
   return rows;
 }
 
-/** `?  what it does` (r4: every card ends with it), when `?` has something to show. */
-export function explainChip(ctx: PaintCtx): string {
-  return `${paint(" ? ", "key", ctx)} ${paint("what it does", "dim", ctx)}`;
+/**
+ * `?  what it does` (r4: every card ends with it), when `?` has something to
+ * show; `?  hide` while the explanation is open (live run-4 N12), as a view's
+ * `?` says on the key bar.
+ */
+export function explainChip(ctx: PaintCtx, open = false): string {
+  return `${paint(" ? ", "key", ctx)} ${paint(open ? "hide" : "what it does", "dim", ctx)}`;
 }
 
 /** A link in words: cyan, underlined, with `↗` (r4 `link()`). */
@@ -197,25 +202,64 @@ export function linkWords(words: string, ctx: PaintCtx): string {
 
 /**
  * The inside of a card (r4 `card()`): the content, then the key chips after a
- * blank row, then `?  what it does` after another, when the card offers `?`.
+ * blank row, then `?  what it does` after another, when the card offers `?`
+ * (`?  hide` while `explainOpen`).
  */
 export function cardBody(
   content: readonly string[],
   chips: readonly string[],
   explain: boolean,
-  ctx: PaintCtx
+  ctx: PaintCtx,
+  explainOpen = false
 ): string[] {
   const lines = [...content];
   if (chips.length) {
     lines.push("", ...chips);
   }
   if (explain) {
-    lines.push("", explainChip(ctx));
+    lines.push("", explainChip(ctx, explainOpen));
   }
   return lines;
 }
 
-/** Wrap a painted paragraph to `width` and paint each line in one style. */
+/** A value that is one URL and nothing else (no colour, no spaces). */
+const URL_ONLY = /^[a-z][a-z0-9+.-]*:\/\/\S+$/iu;
+
+/**
+ * Wrap a URL at its separators (`/ ? & = .`), never mid-token (W3-ap-link): a
+ * line breaks after a separator; only a token longer than the whole line is
+ * cut where it must be. Any other text wraps as words (`wrapWords`).
+ */
+export function wrapUrl(text: string, width: number): string[] {
+  const max = Math.max(1, Math.floor(width));
+  if (!URL_ONLY.test(text) || displayWidth(text) <= max) {
+    // Words wrap as words; a name too long for the line breaks at one of its parts, never mid-word.
+    return wrapWords(text, max);
+  }
+  const tokens = text.split(/(?<=[/?&=.])/u).filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+  for (const token of tokens) {
+    if (displayWidth(line) + displayWidth(token) <= max) {
+      line += token;
+      continue;
+    }
+    if (line) lines.push(line);
+    line = "";
+    // A token wider than the whole line is cut where it must be.
+    let rest = token;
+    while (displayWidth(rest) > max) {
+      const head = cutCells(rest, max);
+      lines.push(head);
+      rest = rest.slice(head.length);
+    }
+    line = rest;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+/** Wrap a paragraph to `width` (a long name at its parts, `wrapWords`) and paint each line in one style. */
 export function paragraphIn(text: string, width: number, style: Parameters<typeof paint>[1], ctx: PaintCtx): string[] {
-  return wrapText(text, width).map((line) => paint(line, style, ctx));
+  return wrapWords(text, width).map((line) => paint(line, style, ctx));
 }

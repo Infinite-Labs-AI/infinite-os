@@ -10,6 +10,8 @@ import type { AnswerViewEnvelopeV1, AnswerViewKind } from "@infinite-os/types";
 
 import type { KeyContext, KeyHint } from "../keys/keymap.js";
 import type { Theme } from "../theme.js";
+import type { MetaRepeats } from "./meta-fold.js";
+import type { AppOpenTarget } from "./open-target.js";
 
 export interface ViewRenderCtx {
   /** The columns the view may use (the details pane, or the full width when stacked). */
@@ -53,6 +55,14 @@ export interface ViewRenderCtx {
    * acts, unless `scrollback`.
    */
   columnKey?: boolean;
+  /** Another view of this finished turn has the keys (R-IOV-3): this one names no key (`m for more`). */
+  keysElsewhere?: boolean;
+  /**
+   * What this view repeats of an earlier view of the same read in its turn
+   * (N27, `meta-fold.ts`): those parts are not drawn again, and ONE dim line
+   * names them. Set by the turn's layout; absent = the view draws whole.
+   */
+  repeats?: MetaRepeats;
 }
 
 /** One view, drawn. `layout.ts` stacks head, source, detail, then footnotes. */
@@ -83,6 +93,11 @@ export interface ViewRender {
    * Set by the shell only when no row has an ask of its own.
    */
   fixAsk?: string;
+  /**
+   * What the bar calls Enter's ask when it is not a fix: a quiet call not sure
+   * it happened sends its reconcile step (`check first`). Absent = `fix`.
+   */
+  fixLabel?: string;
   /** What `c` copies on each selectable row (a row's `copy`, else its URL); null = nothing. */
   rowCopies?: readonly (string | null)[];
   /** What `c` copies for the view as a whole (a minted link); used when the row has nothing. */
@@ -100,6 +115,22 @@ export interface ViewRender {
   quiet?: true;
   /** The view draws `? what it does` inside itself (a card): the key bar does not repeat it. */
   explainInside?: true;
+  /**
+   * The place `o` opens in the app (app.open.v1), only when the session can
+   * open places (`caps.open`): the one the view marks `(o)`. A kind sets null
+   * when it decided there is none here (the shell then adds none).
+   */
+  openLink?: AppOpenTarget | null;
+  /** What the bar calls that place (`o  Open in Library`); the link's own label. */
+  openLabel?: string;
+  /** What `w` asks as a NEW user turn (a job's watch step), only when the session can watch. */
+  watchAsk?: string;
+  /**
+   * Where the selected row is drawn in `detail`: its first line and how many
+   * lines it takes. A cut details pane scrolls to keep it on screen after j/k.
+   * Absent when the view draws no selected row.
+   */
+  selectedLines?: readonly [start: number, count: number];
 }
 
 /**
@@ -108,10 +139,23 @@ export interface ViewRender {
  * kind can drop or reword them.
  */
 export type KindRender = Omit<ViewRender, "head" | "source" | "fixAsk" | "quiet"> & {
+  /**
+   * Lines the shell prints first in the details, right under the head and the
+   * source, before the explanation and the state's sentence: what names the
+   * view's object when the body draws no object (a settled change's target
+   * path, contract revision 3).
+   */
+  lead?: string[];
   /** The body follows the state's sentence on the next row, with no blank between them (r4 receipts, partial images). */
   joinsReason?: boolean;
   /** The body draws `? what it does` itself (a card), so the shell does not add it. */
   offersExplain?: boolean;
+  /**
+   * The words in the head's title chip, when the view's own title only repeats
+   * the state chip's (`n of m days are in` beside `◐ n of m days in`); "" for
+   * no title chip. The shell still draws the head and its state words.
+   */
+  headTitle?: string;
 };
 
 export type KindRenderer<K extends AnswerViewKind> = (view: AnswerViewEnvelopeV1<K>, ctx: ViewRenderCtx) => KindRender;

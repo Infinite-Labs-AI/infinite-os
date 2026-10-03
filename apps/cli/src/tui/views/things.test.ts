@@ -80,36 +80,36 @@ describe("list (r4 view-02 row grammar, run-2 M8)", () => {
   it("no column-header row: each cell carries its unit (money with its currency, a count with its noun)", () => {
     const render = draw(withCurrency(), { width: 80 });
     expect(render.detail.some((line) => /Spend\s+Trials/u.test(line))).toBe(false);
-    const hookA = render.detail.find((line) => line.includes("Hook A"))!;
+    const hookA = render.detail.find((line) => line.includes("Demo A"))!;
     expect(hookA).toContain("$100.00");
     expect(hookA).toMatch(/3 trials$/u);
-    expect(render.detail.find((line) => line.includes("Hook C"))).toMatch(/1 trial$/u);
+    expect(render.detail.find((line) => line.includes("Demo C"))).toMatch(/1 trial$/u);
     // A null is still a dash with its footnote, never 0 and never "— trials".
-    expect(render.detail.find((line) => line.includes("Hook C"))).toContain("—¹");
+    expect(render.detail.find((line) => line.includes("Demo C"))).toContain("—¹");
   });
 
-  it("the selected row's details are one dim line under the rows (r4 `Hook B · since Sep 24 · …`)", () => {
+  it("the selected row's details are one dim line under the rows (r4 `Demo B · since Jan 02 · …`)", () => {
     const v = withBody("list-rows", {
       rows: [
-        { id: "ad_1", title: "Hook A", cells: {} },
-        { id: "ad_2", title: "Hook B", cells: {}, detail: [{ label: "since", value: { text: "Hook B · since Sep 24 · Broad" } }, { label: "budget", value: { text: "$30/day" } }] }
+        { id: "ad_1", title: "Demo A", cells: {} },
+        { id: "ad_2", title: "Demo B", cells: {}, detail: [{ label: "since", value: { text: "Demo B · since Jan 02 · Alpha" } }, { label: "budget", value: { text: "$10/day" } }] }
       ]
     });
     const render = draw(v, { selected: 1 });
-    expect(render.detail.at(-1)).toBe("Hook B · since Sep 24 · Broad · budget $30/day");
+    expect(render.detail.at(-1)).toBe("Demo B · since Jan 02 · Alpha · budget $10/day");
   });
 });
 
 describe("list: r4 view-02 (run-r2 MUST 1)", () => {
-  // r4's three ads, synthetic: Hook B is the flagged row and its `0 trials` the bad cell.
+  // r4's three ads, synthetic: Demo B is the flagged row and its `0 trials` the bad cell.
   const hooks = (over: Record<string, unknown> = {}) => withBody("list-rows", {
     currency: "USD",
     columns: [{ key: "spend", label: "Spend 7d", unit: "money" }, { key: "ctr", label: "CTR", unit: "percent" }, { key: "trials", label: "Trials", unit: "count" }],
     rows: [
-      { id: "ad_a", title: "Hook A · demo loop", status: { word: "on", tone: "ok" }, cells: { spend: { value: 18.2 }, ctr: { value: 1.32 }, trials: { value: 3 } } },
-      { id: "ad_c", title: "Hook C · pricing", status: { word: "on", tone: "ok" }, cells: { spend: { value: 15.75 }, ctr: { value: 1.05 }, trials: { value: 1 } } },
-      { id: "ad_b", title: "Hook B · founder POV", status: { word: "on", tone: "ok" }, cells: { spend: { value: 12.4 }, ctr: { value: 0.41 }, trials: { value: 0, tone: "bad" } },
-        detail: [{ label: "since", value: { text: "Hook B · since Sep 24 · Broad · US · 25–54" } }] }
+      { id: "ad_a", title: "Demo A · sample 01", status: { word: "on", tone: "ok" }, cells: { spend: { value: 22.22 }, ctr: { value: 2.22 }, trials: { value: 3 } } },
+      { id: "ad_c", title: "Demo C · promo 3", status: { word: "on", tone: "ok" }, cells: { spend: { value: 11.11 }, ctr: { value: 1.11 }, trials: { value: 1 } } },
+      { id: "ad_b", title: "Demo B · sample copy", status: { word: "on", tone: "ok" }, cells: { spend: { value: 12.34 }, ctr: { value: 0.12 }, trials: { value: 0, tone: "bad" } },
+        detail: [{ label: "since", value: { text: "Demo B · since Jan 02 · Sample ad set" } }] }
     ],
     ...over
   });
@@ -119,8 +119,8 @@ describe("list: r4 view-02 (run-r2 MUST 1)", () => {
     const opening = viewFocusAfterTurnDone(v);
     expect(opening.selected).toBe(2);
     const detail = draw(v, { width: 100, selected: opening.selected }).detail;
-    expect(detail.filter((line) => line.startsWith("▸"))).toEqual([expect.stringContaining("Hook B · founder POV")]);
-    expect(detail).toContain("Hook B · since Sep 24 · Broad · US · 25–54");
+    expect(detail.filter((line) => line.startsWith("▸"))).toEqual([expect.stringContaining("Demo B · sample copy")]);
+    expect(detail).toContain("Demo B · since Jan 02 · Sample ad set");
     // No `selected`, or one naming no row: the first row, as before.
     expect(viewFocusAfterTurnDone(hooks()).selected).toBe(0);
     expect(viewFocusAfterTurnDone(hooks({ selected: "nope" })).selected).toBe(0);
@@ -129,20 +129,20 @@ describe("list: r4 view-02 (run-r2 MUST 1)", () => {
   it("pads cells to r4's widths: money right in 8, a percent right in 6, a count with its noun left", () => {
     const rows = draw(hooks({ selected: "ad_b" }), { width: 100, selected: 2 }).detail.filter((line) => /^(?:  |▸ )● /u.test(line));
     expect(rows).toEqual([
-      "  ● on  Hook A · demo loop      $18.20   1.32%  3 trials",
-      "  ● on  Hook C · pricing        $15.75   1.05%  1 trial",
-      expect.stringMatching(/^▸ ● on  Hook B · founder POV    \$12\.40   0\.41%  0 trials\s*$/u)
+      "  ● on  Demo A · sample 01      $22.22   2.22%  3 trials",
+      "  ● on  Demo C · promo 3        $11.11   1.11%  1 trial",
+      expect.stringMatching(/^▸ ● on  Demo B · sample copy    \$12\.34   0\.12%  0 trials\s*$/u)
     ]);
   });
 
   it("a cell the view marks `tone: \"bad\"` is amber (r4 `0 trials`), on the selection too", () => {
     const painted = draw(hooks({ selected: "ad_b" }), { width: 100, selected: 2, color: true, theme: INFINITE_R4_THEME }).detail.map(r4Segments);
-    const hookB = painted.find((row) => row.some((part) => part.text.includes("Hook B")))!;
+    const hookB = painted.find((row) => row.some((part) => part.text.includes("Demo B")))!;
     expect(hookB.find((part) => part.text.includes("0 trials"))?.style).toBe("amber sel");
     const unselected = draw(hooks({ selected: "ad_b" }), { width: 100, selected: 0, color: true, theme: INFINITE_R4_THEME }).detail.map(r4Segments);
-    const plainB = unselected.find((row) => row.some((part) => part.text.includes("Hook B")))!;
+    const plainB = unselected.find((row) => row.some((part) => part.text.includes("Demo B")))!;
     expect(plainB.find((part) => part.text.includes("0 trials"))?.style).toBe("amber");
-    const hookA = unselected.find((row) => row.some((part) => part.text.includes("Hook A")))!;
+    const hookA = unselected.find((row) => row.some((part) => part.text.includes("Demo A")))!;
     expect(hookA.some((part) => part.style.includes("amber"))).toBe(false);
   });
 });
@@ -150,17 +150,17 @@ describe("list: r4 view-02 (run-r2 MUST 1)", () => {
 describe("list", () => {
   it("status comes first (`● on`), then the title, then the cells", () => {
     const render = draw(fixture("list-rows"));
-    const hookA = render.detail.find((line) => line.includes("Hook A"))!;
+    const hookA = render.detail.find((line) => line.includes("Demo A"))!;
     expect(hookA.slice(2).startsWith("● on")).toBe(true);
-    expect(hookA.indexOf("● on")).toBeLessThan(hookA.indexOf("Hook A"));
+    expect(hookA.indexOf("● on")).toBeLessThan(hookA.indexOf("Demo A"));
     // ListBodyV1 carries no currency (contract v1), so money prints as an amount.
     expect(hookA).toContain("100.00");
-    expect(render.detail.find((line) => line.includes("Hook C"))).toContain("● off");
+    expect(render.detail.find((line) => line.includes("Demo C"))).toContain("● off");
   });
 
   it("a null cell is a dash with a footnote, never 0", () => {
     const render = draw(fixture("list-rows"));
-    const hookC = render.detail.find((line) => line.includes("Hook C"))!;
+    const hookC = render.detail.find((line) => line.includes("Demo C"))!;
     expect(hookC).toContain("—¹");
     expect(hookC).not.toMatch(/\$0\.00/u);
     expect(render.footnotes).toEqual(["¹ not synced yet"]);
@@ -168,7 +168,7 @@ describe("list", () => {
 
   it("the selected row gets ▸, and j/k move it", () => {
     const v = fixture("list-rows");
-    const marked = (render: ViewRender) => render.detail.filter((line) => line.startsWith("▸")).map((line) => line.includes("Hook B") ? "B" : line.includes("Hook A") ? "A" : "C");
+    const marked = (render: ViewRender) => render.detail.filter((line) => line.startsWith("▸")).map((line) => line.includes("Demo B") ? "B" : line.includes("Demo A") ? "A" : "C");
     expect(marked(draw(v))).toEqual(["A"]);
     expect(marked(draw(v, { selected: 1 }))).toEqual(["B"]);
     const down = pressAll(v, [press("j")]);
@@ -179,13 +179,13 @@ describe("list", () => {
   });
 
   it("enter on a row sends the row's next ask as a NEW turn, never a tool call", () => {
-    const v = withBody("list-rows", {}, { next: [{ label: "Pause Hook B", ask: "pause hook b" }] });
+    const v = withBody("list-rows", {}, { next: [{ label: "Pause Demo B", ask: "pause demo b" }] });
     const render = draw(v, { selected: 3 });
     expect(render.rowCount).toBe(4);
-    expect(render.rowAsks).toEqual([null, null, null, "pause hook b"]);
-    expect(render.detail.find((line) => line.startsWith("▸"))).toContain("→ Pause Hook B");
+    expect(render.rowAsks).toEqual([null, null, null, "pause demo b"]);
+    expect(render.detail.find((line) => line.startsWith("▸"))).toContain("→ Pause Demo B");
     const onNext = pressAll(v, [press("j"), press("j"), press("j"), press("", { return: true })]);
-    expect(onNext.effect).toEqual({ type: "ask", text: "pause hook b" });
+    expect(onNext.effect).toEqual({ type: "ask", text: "pause demo b" });
     // A data row with no ask of its own: Enter sends nothing.
     const onRow = pressAll(v, [press("j"), press("", { return: true })]);
     expect(onRow.effect).toBeNull();
@@ -197,18 +197,18 @@ describe("list", () => {
       body: {
         layout: "rows", columns: [], total: 2, shown: 2,
         rows: [
-          { id: "ad_1", title: "Hook A", cells: {} },
-          { id: "ad_2", title: "Hook B", cells: {}, detail: [{ label: "Audience", value: { text: "Broad · 25–54" } }] }
+          { id: "ad_1", title: "Demo A", cells: {} },
+          { id: "ad_2", title: "Demo B", cells: {}, detail: [{ label: "Audience", value: { text: "Sample group" } }] }
         ]
       }
     });
-    expect(text(draw(v))).not.toContain("Broad · 25–54");
-    expect(draw(v, { selected: 1 }).detail.some((line) => line.includes("Audience") && line.includes("Broad · 25–54"))).toBe(true);
+    expect(text(draw(v))).not.toContain("Sample group");
+    expect(draw(v, { selected: 1 }).detail.some((line) => line.includes("Audience") && line.includes("Sample group"))).toBe(true);
   });
 
   it("a log row with `who: null` prints `who: unknown`", () => {
     const render = draw(fixture("list-log"));
-    const unknown = render.detail.find((line) => line.includes("Hook B status"))!;
+    const unknown = render.detail.find((line) => line.includes("Demo B status"))!;
     expect(unknown).toContain("on → paused");
     expect(unknown).toContain("who: unknown");
     expect(render.detail.find((line) => line.includes("Ad set 01 budget"))).toContain("by Sam");
@@ -238,15 +238,15 @@ describe("list", () => {
       body: {
         layout: "groups", columns: [], rows: [], total: 3, shown: 3,
         groups: [
-          { label: "Needs you", reason: "spending with no trials", rows: [{ id: "ad_1", title: "Hook A", cells: {} }] },
-          { label: "Fine", rows: [{ id: "ad_2", title: "Hook B", cells: {} }, { id: "ad_3", title: "Hook C", cells: {} }] }
+          { label: "Needs you", reason: "spending with no trials", rows: [{ id: "ad_1", title: "Demo A", cells: {} }] },
+          { label: "Fine", rows: [{ id: "ad_2", title: "Demo B", cells: {} }, { id: "ad_3", title: "Demo C", cells: {} }] }
         ]
       }
     });
     const render = draw(v, { selected: 2 });
     expect(render.rowCount).toBe(3);
     expect(render.detail).toContain("Needs you · spending with no trials");
-    expect(render.detail.find((line) => line.startsWith("▸"))).toContain("Hook C");
+    expect(render.detail.find((line) => line.startsWith("▸"))).toContain("Demo C");
   });
 
   it("columns that do not fit drop from the right and → shows them as records", () => {
@@ -264,7 +264,7 @@ describe("list", () => {
       kind: "list",
       body: {
         layout: "rows", columns: [], total: 2, shown: 2,
-        rows: [{ id: "ad_1", title: "Hook A", cells: {} }, { id: "ad_2", title: "Hook B", cells: {}, copy: "ad_2" }]
+        rows: [{ id: "ad_1", title: "Demo A", cells: {} }, { id: "ad_2", title: "Demo B", cells: {}, copy: "ad_2" }]
       }
     });
     expect(draw(v).rowCopies).toEqual([null, "ad_2"]);
@@ -306,11 +306,11 @@ describe("record", () => {
   it("its next steps are selectable rows Enter sends as a new turn", () => {
     const v = fixture("record-ad");
     const render = draw(v);
-    expect(render.rowAsks).toEqual(["pause hook b"]);
+    expect(render.rowAsks).toEqual(["pause demo b"]);
     // r4 `Next: pause it`; the selection shows once the view is engaged.
     expect(render.detail.at(-1)).toBe("Next: Pause it");
     expect(draw(v, { engaged: true }).detail.find((line) => line.startsWith("▸"))).toContain("Next: Pause it");
-    expect(pressAll(v, [press("", { tab: true }), press("", { return: true })]).effect).toEqual({ type: "ask", text: "pause hook b" });
+    expect(pressAll(v, [press("", { tab: true }), press("", { return: true })]).effect).toEqual({ type: "ask", text: "pause demo b" });
   });
 
   it("a rule prints its schedule words verbatim", () => {
@@ -503,7 +503,7 @@ describe("a document page fits the live region", () => {
   // The rows the session gives the latest turn: the live cap minus the top rule and one status row.
   const budgetAt = (rows: number) => liveBodyRows(rows, DEFAULT_COMPOSER_ROWS, DEFAULT_KEY_BAR_ROWS, 1, false);
 
-  // Under 120 columns the answer, a rule and the steps stack on top of the view;
+  // Under 80 columns the answer, a rule and the steps stack on top of the view;
   // at 24 rows that chrome alone is taller than the live region, so they start at 30.
   for (const [width, rowsList] of [[120, [24, 30, 40]], [100, [30, 40]], [60, [30, 40]]] as const) {
     for (const rows of rowsList) {
@@ -541,12 +541,13 @@ describe("quiet in a turn (r4 view-12 `steps only`, run-2 M7)", () => {
 
   it("a quiet view takes the details pane under a dim `steps only` head, never its title, source or state words", () => {
     const quiet = withBody("quiet-steps", {}, { title: "Read playbook", provenance: { source: "Playbooks", via: "our_db" } });
-    // Below 120: the answer, a blank and a rule, then `steps only`, a blank source row, a blank, the line.
-    const narrow = renderLiveTurn({ messages, views: [quiet], focus: null, width: 100, color: false, theme }).lines;
-    const answer = narrow.findIndex((line) => line.startsWith("∞ Here is a draft"));
-    expect(narrow.slice(answer + 1, answer + 6)).toEqual(["", "─".repeat(100), "steps only", "", ""]);
-    expect(narrow[answer + 6]).toBe("read the writing playbook");
-    // From 120: side by side, `steps only` on the question's row.
+    // Below 80: the answer, a blank and a rule, then `steps only`, a blank source row, a blank, the line.
+    const narrow = renderLiveTurn({ messages, views: [quiet], focus: null, width: 79, color: false, theme }).lines;
+    expect(narrow.some((line) => line.startsWith("∞ Here is a draft"))).toBe(true);
+    const rule = narrow.indexOf("─".repeat(79));
+    expect(narrow.slice(rule - 1, rule + 4)).toEqual(["", "─".repeat(79), "steps only", "", ""]);
+    expect(narrow[rule + 4]).toBe("read the writing playbook");
+    // From 80: side by side, `steps only` on the question's row.
     const wide = renderLiveTurn({ messages, views: [quiet], focus: null, width: 160, color: false, theme }).lines;
     expect(wide[0]).toMatch(/^❯ write the trial email +│ steps only$/u);
     expect(wide.some((line) => /│ read the writing playbook$/u.test(line))).toBe(true);
@@ -591,9 +592,14 @@ describe("quiet in a turn (r4 view-12 `steps only`, run-2 M7)", () => {
       const committed = renderCommittedTurn({ messages, views: [failed], focus: null, width, color: false, theme, steps });
       for (const lines of [live, committed]) {
         const out = lines.join("\n");
-        expect(out).not.toMatch(/Read Subscription Metrics|steps only|half-open|YYYY|\{ start/u);
+        expect(out).not.toMatch(/Read Subscription Metrics|half-open|YYYY|\{ start/u);
         expect(out).toMatch(/checking subscriptions +(?:━+ +)?✗ couldn't/u);
       }
+      // Nothing of its own in the details pane: from 80 columns (r4 always splits) it is
+      // r4's bare `steps only`, as for any turn with nothing else to show; never in scrollback.
+      expect(live.some((line) => line.includes("│ steps only"))).toBe(width >= 80);
+      expect(live.filter((line) => line.includes("steps only"))).toHaveLength(width >= 80 ? 1 : 0);
+      expect(committed.join("\n")).not.toContain("steps only");
     }
   });
 
@@ -730,5 +736,120 @@ describe("clipboard", () => {
     const sequence = clipboardSequence("a\u001b]0;x\u0007b");
     const payload = sequence.slice("\u001b]52;c;".length, -1);
     expect(Buffer.from(payload, "base64").toString("utf8")).toBe("ab");
+  });
+});
+
+// Contract revision 3: a list may name its row-name column (`nameLabel`) and a
+// record may carry its own status (r4 view-02 / view-03; Cmd+L r2 draws the
+// same words as the list head cell and the record's head chip).
+describe("rev 3: a list's name column head and a record's own status", () => {
+  /** Two money columns: not r4's self-describing row grammar, so the header row draws. */
+  const headed = (body: Record<string, unknown> = {}) => withBody("list-rows", {
+    columns: [{ key: "spend", label: "Spend", unit: "money" }, { key: "cpc", label: "CPC", unit: "money" }, { key: "trials", label: "Trials", unit: "count" }],
+    ...body
+  });
+
+  it("the name column's head reads nameLabel, over the row titles", () => {
+    const render = draw(headed({ nameLabel: "Ad" }));
+    const header = render.detail[0]!;
+    const firstRow = render.detail[1]!;
+    expect(header.indexOf("Ad")).toBe(firstRow.indexOf("Demo A"));
+    expect(header).toMatch(/Spend/u);
+    // The value columns' heads stay where they were without it.
+    const without = draw(headed()).detail[0]!;
+    expect(without.slice(without.indexOf("Spend") - 2)).toBe(header.slice(header.indexOf("Spend") - 2));
+    expect(without.trimStart().startsWith("Spend")).toBe(true);
+  });
+
+  it("a short-name list widens its name column to fit the head, as a value column fits its label", () => {
+    const rows = ["US", "EU", "UK"].map((title, index) => ({
+      id: `c_${index}`, title, status: { word: "on", tone: "ok" },
+      cells: { spend: { value: 100 + index }, cpc: { value: 1.5 }, trials: { value: index } }
+    }));
+    for (const width of [60, 100]) {
+      const render = draw(headed({ nameLabel: "Campaign", rows }), { width });
+      const header = render.detail[0]!;
+      const firstRow = render.detail[1]!;
+      expect(header, `@${width}`).toContain("Campaign");
+      expect(header, `@${width}`).not.toContain("…");
+      expect(header.indexOf("Campaign"), `@${width}`).toBe(firstRow.indexOf("US"));
+      // Each value head still ends over its own right-aligned column.
+      const firstCell = /US\s+(\S+)/u.exec(firstRow)!;
+      expect(header.indexOf("Spend") + "Spend".length, `@${width}`).toBe(firstCell.index + firstCell[0].length);
+    }
+    // The same rule keeps "Ad set" whole over an ad set named "Alpha".
+    const alpha = [{ id: "s_1", title: "Alpha", cells: { spend: { value: 10 }, cpc: { value: 1 }, trials: { value: 1 } } }];
+    expect(draw(headed({ nameLabel: "Ad set", rows: alpha })).detail[0]).toContain("Ad set");
+  });
+
+  it("a long nameLabel is cut only where the pane cannot fit it, never pushing a line past the pane", () => {
+    const label = "Ad name as the host words it in a header far longer than any pane has room for at all";
+    for (const width of [48, 60, 100, 140]) {
+      const render = draw(headed({ nameLabel: label }), { width });
+      const header = render.detail[0]!;
+      expect(header, `@${width}`).toContain("…");
+      expect(header, `@${width}`).toMatch(/Spend/u);
+      expect(allLines(render).filter((line) => line.length > width), `@${width}`).toEqual([]);
+    }
+    // With room, a mid-length head is drawn whole.
+    expect(draw(headed({ nameLabel: "Ad name as the host words it" }), { width: 100 }).detail[0]).toContain("Ad name as the host words it");
+  });
+
+  it("a self-describing list draws no head, so nameLabel never widens its name column", () => {
+    const rows = ["US", "EU"].map((title, index) => ({ id: `c_${index}`, title, cells: { spend: { value: 10 }, trials: { value: index } } }));
+    expect(draw(withBody("list-rows", { nameLabel: "Campaign name", rows, currency: "USD" })).detail)
+      .toEqual(draw(withBody("list-rows", { rows, currency: "USD" })).detail);
+  });
+
+  it("r4's self-describing rows keep no header row, with or without nameLabel", () => {
+    expect(draw(withBody("list-rows", { nameLabel: "Ad", currency: "USD" })).detail).toEqual(draw(withBody("list-rows", { currency: "USD" })).detail);
+  });
+
+  it("the record's head line shows its status word first, the way a list row does", () => {
+    const render = draw(withBody("record-ad", { title: "Ad “Demo B · sample copy”", status: { word: "Paused", tone: "muted" } }));
+    expect(render.detail[0]).toBe("● Paused  Ad “Demo B · sample copy”");
+    expect(render.detail[1]).toBe("");
+    // Without a title the status still shows, on its own line.
+    expect(draw(withBody("record-ad", { status: { word: "Active", tone: "ok" } })).detail.slice(0, 2)).toEqual(["● Active", ""]);
+  });
+
+  it("the status word is drawn in its tone", () => {
+    const ok = draw(withBody("record-ad", { title: "Ad “Demo B”", status: { word: "Active", tone: "ok" } }), { color: true }).detail[0]!;
+    expect(ok).toContain(ansiFg(theme, "success"));
+    expect(stripAnsi(ok)).toBe("● Active  Ad “Demo B”");
+    const bad = draw(withBody("record-ad", { title: "Ad “Demo B”", status: { word: "Rejected", tone: "bad" } }), { color: true }).detail[0]!;
+    expect(bad).toContain(ansiFg(theme, "error"));
+  });
+
+  it("a status with a tone the contract does not name never draws", () => {
+    const render = draw(withBody("record-ad", { title: "Ad “Demo B”", status: { word: "Loud", tone: "neon" } }));
+    expect(render.detail[0]).toBe("Ad “Demo B”");
+    expect(text(render)).not.toContain("Loud");
+  });
+
+  it("renderer withholds a status with an unknown tone even when the view skipped the decoder", () => {
+    const base = JSON.parse(readFileSync(`${FIXTURES}record-ad.json`, "utf8")) as Record<string, unknown>;
+    const raw = {
+      ...base,
+      body: { ...(base.body as Record<string, unknown>), title: "Ad “Demo B”", status: { word: "Loud", tone: "neon" } }
+    } as unknown as AnswerViewV1;
+    const render = draw(raw);
+    expect(render.detail[0]).toBe("Ad “Demo B”");
+    expect(text(render)).not.toContain("Loud");
+  });
+
+  it("a record without status draws as before", () => {
+    expect(draw(withBody("record-ad", { title: "Ad “Demo B”" })).detail[0]).toBe("Ad “Demo B”");
+  });
+
+  it("a long title with a status wraps under the title, never wider than the pane", () => {
+    const title = "Ad “Demo B · sample copy · a much longer name than the pane holds at sixty”";
+    for (const width of [48, 60, 100, 140]) {
+      const render = draw(withBody("record-ad", { title, status: { word: "Paused", tone: "muted" } }), { width });
+      expect(render.detail[0]!.startsWith("● Paused  Ad “Demo B")).toBe(true);
+      expect(allLines(render).filter((line) => line.length > width), `@${width}`).toEqual([]);
+      const words = render.detail.slice(0, render.detail.indexOf("")).map((line, index) => (index === 0 ? line.slice(10) : line.trimStart())).join(" ");
+      expect(words).toBe(title);
+    }
   });
 });

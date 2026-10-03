@@ -70,6 +70,9 @@ describe("the write card for a desktop that sends no approval view (r4 card)", (
     const open = fallbackCardLines(pending(), "Stops this ad's spend until you turn it back on.", 80, DEFAULT_THEME);
     expect(open.map(plain).join("\n")).toContain("│ Stops this ad's spend until you turn it back on.");
     expect(open.length).toBe(closed.length + 2);
+    // Open, the chip says `? hide`; closed, `? what it does` (live run-4 N12).
+    expect(plain(open[open.length - 2]!)).toBe(`│  ?  hide${" ".repeat(63)}│`);
+    expect(plain(closed[closed.length - 2]!)).toBe(`│  ?  what it does${" ".repeat(55)}│`);
     expect(fallbackCardRowCount(pending(), null, 80)).toBe(closed.length);
     expect(fallbackCardRowCount(pending(), "Stops this ad's spend until you turn it back on.", 80)).toBe(open.length);
   });
@@ -173,9 +176,12 @@ describe("n leaves the dismissed card at once (run-2 M5)", () => {
     const steps: TurnStep[] = [{ id: "c1", name: "mcp__app__propose_pause_entity", label: "waiting for your OK", status: "wait", startedAt: 0, endedAt: 1000, result: "pause 1 ad" }];
     const lines = renderLiveTurn({
       messages: [{ role: "user", text: "pause hook a" }, { role: "assistant", text: "Okay, left it running." }],
-      views: [frame.view], focus: null, width: 100, color: false, theme: DEFAULT_THEME, steps, nowMs: 2000
+      // One column (under 80), so each line of the card is a whole row.
+      views: [frame.view], focus: null, width: 79, color: false, theme: DEFAULT_THEME, steps, nowMs: 2000
     }).lines.map(plain);
-    expect(lines).toContain(`✕ ${DISMISSED_WORDS}`);
+    // The head says it at once; the receipt's sentence waits for the app (live run-4 N22).
+    expect(lines.some((line) => line.includes("✕ Dismissed"))).toBe(true);
+    expect(lines).toContain("Sending to the app…");
     expect(lines.find((line) => line.includes("waiting for your OK"))).toMatch(/· dismissed$/u);
     expect(lines.join("\n")).not.toContain("▣");
   });
@@ -233,6 +239,23 @@ describe("what the app's answer does to a resolved card (CI-runnable M5 wiring)"
     // A refused field is never a receipt.
     const refused = Object.assign(new Error("x"), { ...settled("expired", "This approval expired."), code: "field_invalid" });
     expect(settleConfirmOutcome(head, refused, { ...decline, thrown: true }).type).toBe("drop");
+  });
+
+  it("a refusal the app proved never left names the tool whose waiting row says not sent (S4)", () => {
+    const refused = Object.assign(new Error("The card is gone."), { code: "card_gone", nothingRan: true as const });
+    const step = settleConfirmOutcome(head, refused, { decision: "approve", dismissed: false, onCardTurn: true, thrown: true });
+    expect(step.type).toBe("drop");
+    expect(step.type === "drop" && step.notSentTool).toBe("propose_pause_entity");
+    expect(step.type === "drop" && step.lines.map((line) => line.text).join("\n")).toContain("✗ Not sent");
+    // Off the card's turn, the row went with it; an error without the mark is not a not-sent.
+    const moved = settleConfirmOutcome(head, refused, { decision: "approve", dismissed: false, onCardTurn: false, thrown: true });
+    expect(moved.type === "drop" && moved.notSentTool).toBeUndefined();
+    const unsure = settleConfirmOutcome(head, new Error("network down"), { decision: "approve", dismissed: false, onCardTurn: true, thrown: true });
+    expect(unsure.type === "drop" && unsure.notSentTool).toBeUndefined();
+    // A refused field brings the card back in front: its row still waits.
+    const field = Object.assign(new Error("Budget is above the cap."), { code: "field_invalid", nothingRan: true as const });
+    const back = settleConfirmOutcome(head, field, { decision: "approve", dismissed: false, onCardTurn: true, thrown: true });
+    expect(back.type === "drop" && back.notSentTool).toBeUndefined();
   });
 
   it("an approve with no receipt of its own prints the receipt lines", () => {
@@ -312,53 +335,83 @@ describe("the dismissed card's last line follows the app's answer (run-3 N22)", 
   const head = pending({ view: cardView as never });
   const drawn = (frame: { view: unknown }) => renderLiveTurn({
     messages: [{ role: "user", text: "pause hook a" }, { role: "assistant", text: "Okay, left it running." }],
-    views: [frame.view as never], focus: null, width: 100, color: false, theme: DEFAULT_THEME
+    // One column (under 80), so each line of the card is a whole row.
+    views: [frame.view as never], focus: null, width: 79, color: false, theme: DEFAULT_THEME
   }).lines.map(plain);
   const appReceipt = (receipt: Record<string, unknown>) => ({
     ok: true, declined: true,
     view: { ...cardView, approval: undefined, state: "cancelled", receipt: { sentence: DISMISSED_WORDS, tone: "ok", revertible: false, ...receipt } }
   });
 
-  it("while the no is on its way: `Sending to the app…`, never `Sent`", () => {
+  // Live run-4, N22: the line under the dismissed card never changed once the
+  // app had recorded the no. While the no is on its way the card claims only
+  // what the terminal knows (`Sending to the app…`); the receipt's sentence
+  // ("Dismissed — nothing was executed.") is the app's, so it appears the
+  // moment the app's answer arrives, streamed or not, as r4's last frame.
+  it("while the no is on its way: `Sending to the app…` alone, no receipt yet, never `Sent`", () => {
     const lines = drawn(dismissedReceiptFrame(head)!);
-    expect(lines).toContain(`✕ ${DISMISSED_WORDS}`);
+    expect(lines.some((line) => line.includes("✕ Dismissed"))).toBe(true);
     expect(lines).toContain("Sending to the app…");
+    expect(lines.join("\n")).not.toContain(DISMISSED_WORDS);
     expect(lines.join("\n")).not.toContain("Sent to the app");
   });
 
-  it("the app's receipt replaces it in place: `Sent to the app`, as r4's last frame", () => {
+  it("the moment the app's answer arrives, the line turns into the decline receipt (N22)", () => {
+    const before = drawn(dismissedReceiptFrame(head)!);
+    const step = settleConfirmOutcome(head, appReceipt({}), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
+    const after = drawn(step.type === "receipt" ? step.frame : { view: null });
+    expect(after).not.toEqual(before);
+    const sentence = after.indexOf(`✕ ${DISMISSED_WORDS}`);
+    expect(sentence).toBeGreaterThanOrEqual(0);
+    // Live T4: the receipt line alone, no afterword under it.
+    expect(after.join("\n")).not.toContain("Sent to the app");
+    expect(after.join("\n")).not.toContain("Sending");
+  });
+
+  it("a streamed receipt is the same answer: `{ ...result, view }` turns it into the receipt too (N22)", () => {
+    const streamed = { ...appReceipt({}), followUp: { turnId: "t2", message: "", actionCalls: [] } };
+    const step = settleConfirmOutcome(head, streamed, { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
+    expect(step.type).toBe("receipt");
+    expect(drawn(step.type === "receipt" ? step.frame : { view: null })).toContain(`✕ ${DISMISSED_WORDS}`);
+  });
+
+  it("the app's receipt replaces it in place: the receipt line, no `Sent to the app` (live T4)", () => {
     const step = settleConfirmOutcome(head, appReceipt({}), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
     expect(step.type).toBe("receipt");
     const lines = drawn(step.type === "receipt" ? step.frame : { view: null });
-    expect(lines).toContain("Sent to the app");
+    expect(lines).toContain(`✕ ${DISMISSED_WORDS}`);
+    expect(lines.join("\n")).not.toContain("Sent to the app");
     expect(lines.join("\n")).not.toContain("Sending");
   });
 
   // Lane review: a provenance line is a fact of the receipt (who proposed, a
   // side effect such as `Clears the matching Home card`), never a delivery
-  // word. It is drawn as its own dim line under `Sent to the app`.
-  it("a receipt's provenance line is its own line under `Sent to the app`, never in its place", () => {
+  // word. It is drawn as its own dim line under the receipt line.
+  it("a receipt's provenance line is its own line under the receipt line, never a delivery word", () => {
     const step = settleConfirmOutcome(head, appReceipt({ provenanceLine: "Clears the matching Home card" }), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
     const lines = drawn(step.type === "receipt" ? step.frame : { view: null });
-    const sent = lines.indexOf("Sent to the app");
-    expect(sent).toBeGreaterThanOrEqual(0);
-    expect(lines[sent + 1]).toBe("Clears the matching Home card");
+    const sentence = lines.indexOf(`✕ ${DISMISSED_WORDS}`);
+    expect(sentence).toBeGreaterThanOrEqual(0);
+    expect(lines[sentence + 1]).toBe("Clears the matching Home card");
+    expect(lines.join("\n")).not.toContain("Sent to the app");
     expect(lines.join("\n")).not.toContain("Sending");
   });
 
-  it("an app that took the no with no receipt of its own: the same card, now sent", () => {
+  it("an app that took the no with no receipt of its own: the same card, now sent, with the receipt's sentence", () => {
     const frame = dismissedReceiptFrame(head)!;
     const sent = dismissalSent(frame);
     expect(sent.viewId).toBe(frame.viewId);
-    expect(drawn(sent)).toContain("Sent to the app");
+    expect(drawn(sent).join("\n")).not.toContain("Sent to the app");
+    expect(drawn(sent)).toContain(`✕ ${DISMISSED_WORDS}`);
     expect(drawn(sent).join("\n")).not.toContain("Sending");
   });
 
-  it("printed into scrollback, where nothing follows the answer, it says what was done: sent", () => {
+  it("printed into scrollback, where nothing follows the answer: the dismissed line alone, no afterword", () => {
     const lines = renderCommittedTurn({
       messages: [{ role: "user", text: "pause hook a" }], views: [dismissedReceiptFrame(head)!.view], focus: null, width: 100, color: false, theme: DEFAULT_THEME
     }).map(plain);
-    expect(lines).toContain("Sent to the app");
+    expect(lines.some((line) => line.includes("✕ Dismissed"))).toBe(true);
+    expect(lines.join("\n")).not.toContain("Sent to the app");
     expect(lines.join("\n")).not.toContain("Sending");
   });
 });

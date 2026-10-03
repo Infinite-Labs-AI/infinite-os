@@ -14,19 +14,19 @@
     "picturesInApp": true,
     "results": [
       {
-        "name": "Hook A",
+        "name": "Demo A",
         "level": "ad",
         "id": "ad_1",
         "status": "done"
       },
       {
-        "name": "Hook B",
+        "name": "Demo B",
         "level": "ad",
         "status": "failed",
         "error": "Rejected by review"
       },
       {
-        "name": "Hook C",
+        "name": "Demo C",
         "level": "ad",
         "status": "unknown"
       }

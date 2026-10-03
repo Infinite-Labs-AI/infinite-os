@@ -32,7 +32,7 @@ import { compactPreview, defuseTrailStructure, parseToolTrailResultLine, splitTo
 import { ansi, type Theme, type ThemeStyle } from "../theme.js";
 import type { Msg } from "../types.js";
 import { shortOkVerb } from "../keys/keymap.js";
-import { viewText, wrapText } from "./primitives.js";
+import { cutAtWord, viewText, wrapText } from "./primitives.js";
 import { isChangedOnProvider, stateHeadFor } from "./states.js";
 
 /** r4's result column. */
@@ -413,6 +413,7 @@ const STATE_STATUS: Partial<Record<AnswerViewState, StepStatus>> = {
  */
 export function stepStatusForView(view: Pick<AnswerViewV1, "state" | "outcome" | "stateReason">): StepStatus | null {
   if (isChangedOnProvider(view)) return "old";
+  if (isOutcomeUnknown(view)) return "unk";
   return STATE_STATUS[view.state] ?? null;
 }
 
@@ -445,11 +446,105 @@ export function refineStepStatus(
   views: readonly AnswerViewV1[],
   steps: readonly TurnStep[] = [step]
 ): StepStatus {
+  if (refusedReadView(step, views, steps)) return "off";
+  const settled = failedCallSettledBy(step, views, steps);
+  if (settled) return settled.status;
   const view = viewDrawnBy(step, views, steps);
   if (!view) return step.status;
   if (step.status === "wait" && (view.state === "applying" || view.state === "working")) return "run";
   return stepStatusForView(view) ?? "ok";
 }
+
+/**
+ * The states of a read that did not run here for a reason that is not a
+ * failure: the source is not connected, or only Cmd+L can do it. The desktop
+ * reports such a refused read as a failed call (`status: "error"`), so only
+ * its view can say it (TJ-10, r4 flow-numbers-05 `· not connected`).
+ */
+const REFUSED_READ_STATES: ReadonlySet<string> = new Set(["not_connected", "cmdl_only"]);
+
+/**
+ * The one view that stands for a failed call, when it says the read was
+ * refused rather than failed (`REFUSED_READ_STATES`): exactly one view of the
+ * call's tool and exactly one call of it in the turn, so there is no doubt
+ * whose view it is. Else undefined, and the call keeps its own ✗.
+ */
+function refusedReadView(step: TurnStep, views: readonly AnswerViewV1[], steps: readonly TurnStep[]): AnswerViewV1 | undefined {
+  if (step.status !== "fail") return undefined;
+  const matches = views.filter((view) => drewView(step, view));
+  if (matches.length !== 1 || !REFUSED_READ_STATES.has(matches[0]!.state)) return undefined;
+  return steps.filter((other) => drewView(other, matches[0]!)).length === 1 ? matches[0] : undefined;
+}
+
+/**
+ * The words a refused call says (r4's step rows `✗ not allowed` and `✗ limit`).
+ * The host decides the word and sends it as `stateReason.step` (rev 3): it is
+ * drawn as sent, never derived from codes. With none sent, a view that hit a
+ * limit says `limit`; a blocked one says its head's short words (`needs your
+ * OK`), else its plain state word (`blocked`). A blocked view is not always a
+ * refusal (an address waiting for the person's OK, a thing that cannot be
+ * changed), so `not allowed` is said only when the host said it. A frame
+ * carries no refusal code and the transport's own words for a refusal are
+ * generic (`didn't go through`), so the view wins. Never parsed out of text.
+ */
+function refusalWords(view: AnswerViewV1): string | undefined {
+  const step = typeof view.stateReason?.step === "string" ? viewText(view.stateReason.step) : "";
+  if (step) return step;
+  if (view.state === "hit_limit") return LIMIT_STEP_WORDS;
+  return view.state === "blocked" ? viewRowWords(view) : undefined;
+}
+
+/** What a row says when its view hit a limit and the host sent no word of its own. */
+const LIMIT_STEP_WORDS = "limit";
+
+/**
+ * The one view that stands for a call: the view it drew (`viewDrawnBy`), else,
+ * for a failed call, exactly one view of its tool with exactly one call of it
+ * in the turn, so there is no doubt whose view it is.
+ */
+function viewStandingFor(step: TurnStep, views: readonly AnswerViewV1[], steps: readonly TurnStep[]): AnswerViewV1 | undefined {
+  const drawn = viewDrawnBy(step, views, steps);
+  if (drawn || step.status !== "fail") return drawn;
+  const matches = views.filter((view) => drewView(step, view));
+  if (matches.length !== 1) return undefined;
+  return steps.filter((other) => drewView(other, matches[0]!)).length === 1 ? matches[0] : undefined;
+}
+
+/**
+ * Whether a view says no one knows if its write landed: an outcome-unknown
+ * state, or a failed one whose outcome is unknown. Never `✗` (failed / not
+ * sent): the write may have landed, and a retry could send it twice.
+ */
+function isOutcomeUnknown(view: Pick<AnswerViewV1, "state" | "outcome">): boolean {
+  return view.state === "outcome_unknown" || (view.state === "failed" && view.outcome === "unknown");
+}
+
+/**
+ * A failed call whose one standing view (`viewStandingFor`) says something
+ * other than a failure: the write may have landed (`?`), or there was nothing
+ * to change (`·`). The desktop bridge sends an uncertain write as a failed
+ * call (`status: "error"` with a "not sure" summary), so only its view can
+ * say it was not a failure. Else undefined, and the call keeps its own ✗.
+ */
+function failedCallSettledBy(
+  step: TurnStep,
+  views: readonly AnswerViewV1[],
+  steps: readonly TurnStep[]
+): { view: AnswerViewV1; status: "unk" | "off" } | undefined {
+  if (step.status !== "fail") return undefined;
+  const view = viewStandingFor(step, views, steps);
+  if (!view) return undefined;
+  if (isOutcomeUnknown(view)) return { view, status: "unk" };
+  return view.state === "no_change" ? { view, status: "off" } : undefined;
+}
+
+/** A view's state words for a Steps row: its head's words, and an unknown outcome says it is not sure, whatever its state. */
+function viewRowWords(view: AnswerViewV1): string {
+  return resultCase(stateHeadFor(isOutcomeUnknown(view) ? { ...view, state: "outcome_unknown" } : view).words);
+}
+
+/** The statuses a view refines a finished call to that carry no words of their own: the row says its view's (never a lone mark). */
+const VIEW_WORDED: ReadonlySet<StepStatus> = new Set<StepStatus>(["unk", "off", "part", "old"]);
 
 /** What a row that waited says while its card is being applied (r4 `pausing on Meta ⠋ running`). */
 const APPLYING_WORDS = "running";
@@ -479,6 +574,22 @@ function resultCase(words: string): string {
     return words;
   }
   return `${first.charAt(0).toLowerCase()}${words.slice(1)}`;
+}
+
+/** What a row that waited for an OK says once the app proved its card never left. */
+export const NOT_SENT_STEP_WORDS = "not sent";
+
+/**
+ * The steps once the app refused a card before anything ran (its `notSent`
+ * mark, no receipt view): the one call of the card's tool that waited for an
+ * OK is `✗ not sent` (S4), so its row never stays `▣` after the receipt line
+ * says `✗ Not sent`. Two waiting calls of the tool cannot be told apart, and no
+ * waiting call has nothing to settle: the steps stay as they are.
+ */
+export function settleNotSentStep<S extends readonly TurnStep[]>(steps: S, tool: string): S | TurnStep[] {
+  const waiting = steps.filter((step) => step.status === "wait" && drewView(step, { tool }));
+  if (waiting.length !== 1) return steps;
+  return steps.map((step): TurnStep => (step === waiting[0] ? { ...step, status: "fail", result: NOT_SENT_STEP_WORDS } : step));
 }
 
 /** Only a call that finished, or waits for the person, has a view to follow. */
@@ -528,19 +639,39 @@ function stepRowFacts(step: TurnStep, steps: readonly TurnStep[], options: Pick<
   const { glyph, tone } = GLYPHS[status];
   const mark = status === "run" ? SPINNER[Math.floor(Math.max(0, now - step.startedAt) / SPINNER_MS) % SPINNER.length]! : glyph;
   const said = viewText(step.result);
+  const refused = refusedReadView(step, options.views ?? [], steps);
+  if (refused) {
+    // A refused read says what its view says (`· not connected`), never the transport's failure words.
+    return { status, mark, tone, label: viewText(step.label), result: resultCase(stateHeadFor(refused).words) };
+  }
+  const settled = failedCallSettledBy(step, options.views ?? [], steps);
+  if (settled) {
+    // A failed call whose view says it may have landed, or changed nothing, says what its view says (`? not sure it happened`), never the transport's failure words.
+    return { status, mark, tone, label: viewText(step.label), result: viewRowWords(settled.view) };
+  }
   if (step.status === "wait" && view && status !== "wait") {
     // The card it waited on has moved on: the row says what is being done, then how the card ended.
     const acted = status !== "off" && viewText(step.label) === WAITING_WORDS ? appliedLabel(said, view) : null;
     return {
       status, mark, tone,
       label: acted ?? viewText(step.label),
-      result: status === "run" ? APPLYING_WORDS : resultCase(stateHeadFor(view).words)
+      result: status === "run" ? APPLYING_WORDS : viewRowWords(view)
     };
+  }
+  const standing = viewStandingFor(step, options.views ?? [], steps);
+  const refusal = status === "fail" && standing ? refusalWords(standing) : undefined;
+  if (refusal) {
+    // A refused call says the host's step word for its view (`✗ not allowed`, `✗ limit`, `✗ needs your OK`).
+    return { status, mark, tone, label: viewText(step.label), result: refusal };
   }
   // A step still waiting says so (unless its label already does); a failed one says why in plain words.
   const result = status === "fail"
     ? plainFailureReason(said, viewText(step.label))
-    : said || (status === "wait" && viewText(step.label) !== WAITING_WORDS ? WAITING_WORDS : "");
+    : said || (status === "wait" && viewText(step.label) !== WAITING_WORDS
+      // A view that asks a question waits for an answer, not for an OK (TJ-10).
+      ? (view?.state === "needs_answer" ? WAITING_ANSWER_WORDS : WAITING_WORDS)
+      // Never a lone mark: a row its view refined (?, ·, ◐, ⧗) with no words of its own says its view's (`not sure it happened`, `nothing to change`, `4 of 5 days in`).
+      : view && VIEW_WORDED.has(status) ? viewRowWords(view) : "");
   return { status, mark, tone, label: viewText(step.label), result };
 }
 
@@ -563,7 +694,8 @@ export function stepRowLines(steps: readonly TurnStep[], options: StepStripOptio
     const running = status === "run" || status === "bg";
     const bar = (running ? `${"━".repeat(Math.max(1, b - 2))}╍╍` : "━".repeat(b)).slice(0, Math.max(1, gantt - a));
     const barTone: ThemeStyle = status === "ok" ? "dim" : status === "fail" ? "red" : status === "stopped" ? "dim" : "cyan";
-    const label = padEndCells(cut(words, labelWidth), labelWidth);
+    // r4's cut length (the column less one, then `…`), at a word's end where one is near (half the column).
+    const label = padEndCells(cutAtWord(words, labelWidth, 1 / 2), labelWidth);
     const segments: (readonly [string, ThemeStyle])[] = [
       [`  ${label} ${" ".repeat(a)}`, "text"],
       [bar, barTone],

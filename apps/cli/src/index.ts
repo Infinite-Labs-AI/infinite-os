@@ -81,6 +81,7 @@ import {
 } from "./tui/ink/interactive-session.js";
 import { runInfiniteWelcome } from "./tui/ink/infinite-welcome.js";
 import type { TopBarData, TopBarSource } from "./tui/ink/top-bar.js";
+import { confirmThroughRunner } from "./tui/ink/follow-up-turn.js";
 import { linkAbortSignals } from "./tui/ink/turn-abort.js";
 import { appendPersistentInputHistory, loadPersistentInputHistory } from "./tui/ink/input-history.js";
 import { resolveCliRenderSurface, usesTranscriptRenderSurface } from "./tui/runtime/render-surface.js";
@@ -1813,14 +1814,19 @@ async function runDesktopInteractiveEntry(
       // (handles are per-boot); `confirm` is single-use per handle.
       // `fields` (a card's answered values, e.g. a daily budget) go only to a
       // Desktop that takes them; the client refuses them elsewhere.
-      onConfirmAction: (action, decision, fields) =>
-        runner.confirm({
-          turnId: action.turnId,
-          confirmationHandle: action.confirmationHandle,
-          decision,
-          ...(fields && Object.keys(fields).length ? { fields } : {}),
-          signal: turnAbort.signal
-        }),
+      // A card with a view streams its confirm when the app can (confirm.stream.v1):
+      // the receipt first, then the agent's follow-up, in the same turn (T12).
+      // The follow-up's frames go where a normal turn's go (P33-S3), on the
+      // follow-up's own signal linked to the session's (P33-M2); the session
+      // arms Esc on it only after the receipt, so a stop ends the follow-up
+      // and never the write. `confirmThroughRunner` (follow-up-turn.ts) is
+      // unit-tested with a fake runner.
+      onConfirmAction: (action, decision, fields, stream) =>
+        confirmThroughRunner(runner, { action, decision, fields, stream, turnSignal: turnAbort.signal }),
+      // `o` and `w` on the views follow what the app negotiated (app.open.v1);
+      // `o` opens places through the app, never a browser.
+      appCaps: () => runner.caps(),
+      onOpenAppLink: (target) => runner.openPlace(target),
       // Esc stops the running turn and Ctrl-C stops it instead of quitting:
       // aborting the turn's signal drops the `/v1/turn` request, and the
       // bridge stops the app turn on disconnect.

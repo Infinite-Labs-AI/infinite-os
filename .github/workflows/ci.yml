@@ -115,6 +115,7 @@ jobs:
           packages/llm-controller/test/interactive-task-recovery.test.ts
           packages/llm-controller/test/interactive-turn-profile.test.ts
           packages/llm-controller/test/codex-tool-wire.test.ts
+          packages/llm-controller/test/prompt-manifest.test.ts
           packages/llm-controller/test/codex-routing.test.ts
           packages/metadata
           packages/runtime

@@ -13,12 +13,15 @@ import { stdin, stdout, stderr } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { infiniteOsHome } from "@infinite-os/config";
 import {
+  APP_OPEN_CAPABILITY,
   CONFIRM_FIELDS_CAPABILITY,
+  CONFIRM_STREAM_CAPABILITY,
   GENERAL_MARKETING_PROFILE,
   INTERACTIVE_WORKSPACE_CAPABILITY,
   LEGACY_GROWTH_OPERATOR_PROFILE,
   RESULT_VIEW_CAPABILITY,
   type AnswerViewV1,
+  type AppOpenRequestV1,
   type ApprovalFieldAnswerV1,
   type InteractiveWorkspaceRequestV1,
   type InteractiveWorkspaceStatusV1,
@@ -87,7 +90,16 @@ export class DesktopAppClientError extends Error {
      * expired card, a write that was not sent, one that may have happened).
      * Only `confirm()` sets it, and only when the view decoded.
      */
-    public readonly view?: AnswerViewV1
+    public readonly view?: AnswerViewV1,
+    /**
+     * The card was not done: a refusal with no receipt view that the app
+     * marked `notSent: true` (a streamed `error` frame, a streamed failed
+     * receipt frame, or a plain confirm's failed answer), or a streamed
+     * `error` whose code is refused before anything resolves
+     * (`field_invalid`, `receipt_view_unavailable`). Never set when the
+     * outcome is unknown, nor when a receipt view speaks for itself.
+     */
+    public readonly nothingRan?: true
   ) {
     super(message);
     this.name = "DesktopAppClientError";
@@ -166,7 +178,26 @@ export interface DesktopTurnResult {
 export type DesktopConfirmResult = Record<string, unknown> & {
   ok: true;
   view?: AnswerViewV1;
+  /**
+   * confirm.stream.v1 only: the agent's follow-up after the receipt (its
+   * `done` frame), in the same turn as the card. Absent on a plain confirm.
+   */
+  followUp?: DesktopTurnResult;
+  /**
+   * confirm.stream.v1 only: the follow-up failed or was cut off AFTER the
+   * receipt. The receipt still stands (the write is done); this is only the
+   * follow-up's error.
+   */
+  followUpError?: { code: string; message: string };
 };
+
+/** What `/v1/open` (app.open.v1) did with a place: the app-link router's status. */
+export type AppOpenStatus = "opened" | "wrong_workspace" | "signed_out" | "unavailable";
+export interface AppOpenResult {
+  /** True only when the app opened the place (`status === "opened"`). */
+  ok: boolean;
+  status: AppOpenStatus;
+}
 
 export interface DesktopAppClient {
   /**
@@ -192,6 +223,16 @@ export interface DesktopAppClient {
   readonly stepWordsCapable: boolean;
   /** Whether the Desktop negotiated `confirm.fields.v1` (descriptor ∧ status). */
   readonly confirmFieldsCapable: boolean;
+  /**
+   * Whether the Desktop negotiated `app.open.v1` (descriptor ∧ status): `o`
+   * opens a place in the app through `/v1/open`. False until `status()`.
+   */
+  readonly appOpenCapable: boolean;
+  /**
+   * Whether the Desktop negotiated `confirm.stream.v1` (descriptor ∧ status):
+   * a card's confirm can stream its receipt, then the agent's follow-up.
+   */
+  readonly confirmStreamCapable: boolean;
   /** Negotiated only when descriptor and status both advertise the v1 contract. */
   readonly interactiveWorkspace: InteractiveWorkspaceStatusV1 | undefined;
   status(): Promise<DesktopStatus>;
@@ -217,7 +258,24 @@ export interface DesktopAppClient {
     decision: "approve" | "decline";
     fields?: Record<string, ApprovalFieldAnswerV1>;
     signal?: AbortSignal;
+    /**
+     * Ask for the streamed confirm (confirm.stream.v1): sent only when the
+     * Desktop negotiated it AND views (the bridge streams only a card from a
+     * turn that accepted views). Otherwise the plain JSON confirm runs.
+     */
+    stream?: boolean;
+    /** Streamed only: the receipt, the moment it arrives (before the follow-up). */
+    onReceipt?: (receipt: DesktopConfirmResult) => void;
+    /** Streamed only: each follow-up progress frame after the receipt, in order. */
+    onProgress?: (frame: DesktopProgressFrame) => void;
   }): Promise<DesktopConfirmResult>;
+  /**
+   * Open a place in the app (`o`; app.open.v1): `{ protocolVersion: 1,
+   * place, params }` and nothing else, never a URL. Navigation only. Throws
+   * `desktop_update_required` before sending anything on a Desktop without
+   * the capability.
+   */
+  openPlace(request: AppOpenRequestV1, options?: { signal?: AbortSignal }): Promise<AppOpenResult>;
 }
 
 interface DesktopAppEnv {
@@ -411,8 +469,12 @@ function createClientFromDescriptor(
   let viewsCapable = false;
   let stepWordsCapable = false;
   let confirmFieldsCapable = false;
+  let appOpenCapable = false;
+  let confirmStreamCapable = false;
   let interactiveWorkspace: InteractiveWorkspaceStatusV1 | undefined;
   let statusCapabilities: string[] = [];
+  const negotiated = (status: DesktopStatus, capability: string) =>
+    descriptor.capabilities.includes(capability) && status.capabilities.includes(capability);
 
   return {
     get sessionCapable() {
@@ -427,6 +489,12 @@ function createClientFromDescriptor(
     get confirmFieldsCapable() {
       return confirmFieldsCapable;
     },
+    get appOpenCapable() {
+      return appOpenCapable;
+    },
+    get confirmStreamCapable() {
+      return confirmStreamCapable;
+    },
     get interactiveWorkspace() {
       return interactiveWorkspace;
     },
@@ -437,6 +505,8 @@ function createClientFromDescriptor(
       viewsCapable = false;
       stepWordsCapable = false;
       confirmFieldsCapable = false;
+      appOpenCapable = false;
+      confirmStreamCapable = false;
       interactiveWorkspace = undefined;
       statusCapabilities = [];
       const deadline = createRequestDeadline(undefined, requestTimeoutMs);
@@ -470,6 +540,8 @@ function createClientFromDescriptor(
         confirmFieldsCapable =
           descriptor.capabilities.includes(CONFIRM_FIELDS_CAPABILITY) &&
           status.capabilities.includes(CONFIRM_FIELDS_CAPABILITY);
+        appOpenCapable = negotiated(status, APP_OPEN_CAPABILITY);
+        confirmStreamCapable = negotiated(status, CONFIRM_STREAM_CAPABILITY);
         if (
           status.ready &&
           descriptor.capabilities.includes(INTERACTIVE_WORKSPACE_CAPABILITY) &&
@@ -585,6 +657,15 @@ function createClientFromDescriptor(
         );
       }
       const requestId = randomId();
+      if (input.stream === true && confirmStreamCapable && viewsCapable) {
+        return await streamConfirmation(
+          descriptor,
+          fetchImpl,
+          requestTimeoutMs,
+          requestId,
+          { ...input, ...(fields ? { fields } : {}) }
+        );
+      }
       const sendConfirmation = async () => {
         const deadline = createRequestDeadline(input.signal, requestTimeoutMs);
         try {
@@ -650,7 +731,8 @@ function createClientFromDescriptor(
           "desktop_confirmation_failed",
           "Desktop could not resolve the confirmation."
         );
-        throw new DesktopAppClientError(error.code, error.message, failureView);
+        // The app's own pre-send mark proves nothing left; a receipt view, when there is one, says it instead.
+        throw new DesktopAppClientError(error.code, error.message, failureView, !failureView && refusalNotSent(payload) ? true : undefined);
       }
       const executionFailure = findNestedExecutionFailure(payload);
       if (executionFailure) {
@@ -662,8 +744,262 @@ function createClientFromDescriptor(
         );
       }
       return decodeConfirmView(payload as DesktopConfirmResult);
+    },
+
+    async openPlace(request, options = {}) {
+      if (!appOpenCapable) {
+        throw new DesktopAppClientError(
+          "desktop_update_required",
+          "Opening places from the terminal needs a newer Infinite Desktop. Update Desktop and try again."
+        );
+      }
+      const place = nonEmptyString(request.place);
+      if (!place) {
+        throw new DesktopAppClientError(
+          "desktop_app_usage",
+          "There is no app place to open here."
+        );
+      }
+      // Only string params cross, and never a URL: the place and its params
+      // are the whole request (the bridge strips app-link URLs and refuses
+      // any other key).
+      const params = isRecord(request.params)
+        ? Object.fromEntries(
+            Object.entries(request.params).filter(
+              (entry): entry is [string, string] => typeof entry[1] === "string"
+            )
+          )
+        : undefined;
+      const requestId = randomId();
+      const deadline = createRequestDeadline(options.signal, requestTimeoutMs);
+      try {
+        const response = await authenticatedFetch(
+          descriptor,
+          fetchImpl,
+          "/v1/open",
+          {
+            method: "POST",
+            signal: deadline.signal,
+            headers: {
+              accept: "application/json",
+              "content-type": "application/json",
+              "x-request-id": requestId
+            },
+            body: JSON.stringify({
+              protocolVersion: PROTOCOL_VERSION,
+              requestId,
+              place,
+              ...(params && Object.keys(params).length ? { params } : {})
+            })
+          },
+          deadline
+        );
+        const payload = unwrapData(await deadline.race(readJsonResponse(response)));
+        const status = isRecord(payload) && typeof payload.status === "string" && APP_OPEN_STATUSES.has(payload.status)
+          ? (payload.status as AppOpenStatus)
+          : "unavailable";
+        return { ok: status === "opened", status };
+      } catch (error) {
+        throw mapDeadlineError(error, deadline);
+      } finally {
+        deadline.dispose();
+      }
     }
   };
+}
+
+const APP_OPEN_STATUSES: ReadonlySet<string> = new Set<AppOpenStatus>([
+  "opened",
+  "wrong_workspace",
+  "signed_out",
+  "unavailable"
+]);
+
+/**
+ * Stream errors before any receipt that prove nothing was sent by their code
+ * alone: a card's answer refused before anything resolves (`field_invalid`)
+ * and a receipt view that could not be built before anything resolves
+ * (`receipt_view_unavailable`). Every other code proves nothing by itself.
+ * The bridge's refusal frame passes ANY no-receipt result's own code through,
+ * and the app trusts each of its not-sent codes (its ledger's
+ * NOT_SENT_OUTCOME_CODES: `stale_turn_context`, `local_provider_busy`, …) only
+ * together with its own pre-send mark, which can come after the write was
+ * handed to the executor. So the terminal says "Not sent" only when the frame
+ * carries that mark (`notSent: true`, see `refusalNotSent`) or the code
+ * is one of these; anything else keeps the neutral `! <app's words>` (not sure
+ * it happened). An older desktop never sends the mark, so its refusals read as
+ * unsure, which is the honest answer. This is an allowlist, never a denylist.
+ */
+const STREAM_NOT_RUN_CODES: ReadonlySet<string> = new Set([
+  "field_invalid",
+  "receipt_view_unavailable"
+]);
+
+/** The app's own pre-send mark on a refusal (`notSent: true`, beside its code, or on its `error`): a literal true only. */
+function refusalNotSent(data: unknown): boolean {
+  const source = isRecord(data) && isRecord(data.error) ? data.error : data;
+  return isRecord(source) && source.notSent === true;
+}
+
+/**
+ * confirm.stream.v1: `/v1/confirm` with `stream: true` answers NDJSON. The
+ * first frame that counts is the `action.receipt` (`{ ...result, view }` is
+ * exactly what a plain confirm answers); then the agent's follow-up frames;
+ * then one terminal frame. An `error` after the receipt never undoes it; an
+ * `error` with no receipt before it means nothing ran only when the app marks
+ * it `notSent` or its code proves it (STREAM_NOT_RUN_CODES); any other is unsure. A stream lost
+ * before its receipt is an unknown outcome, never a retry.
+ */
+async function streamConfirmation(
+  descriptor: DesktopBridgeDescriptor,
+  fetchImpl: typeof fetch,
+  requestTimeoutMs: number,
+  requestId: string,
+  input: Parameters<DesktopAppClient["confirm"]>[0]
+): Promise<DesktopConfirmResult> {
+  let receipt: DesktopConfirmResult | undefined;
+  let receiptFailure: DesktopAppClientError | undefined;
+  const onFrame = (frame: DesktopProgressFrame) => {
+    const data = frame.data;
+    if (!receipt && !receiptFailure) {
+      // Only the first receipt counts; anything before it (a queued note) is not the follow-up.
+      if (isRecord(data) && data.type === "action.receipt") {
+        const outcome = receiptOutcome(data);
+        if (outcome instanceof DesktopAppClientError) {
+          receiptFailure = outcome;
+        } else {
+          receipt = outcome;
+          input.onReceipt?.(outcome);
+        }
+      }
+      return;
+    }
+    input.onProgress?.(frame);
+  };
+  const deadline = createRequestDeadline(input.signal, requestTimeoutMs);
+  let terminal: { kind: "done" | "error"; data: unknown } | undefined;
+  let lost: unknown;
+  try {
+    const response = await authenticatedFetch(
+      descriptor,
+      fetchImpl,
+      "/v1/confirm",
+      {
+        method: "POST",
+        signal: deadline.signal,
+        headers: {
+          accept: "application/x-ndjson",
+          "content-type": "application/json",
+          "x-request-id": requestId
+        },
+        body: JSON.stringify({
+          protocolVersion: PROTOCOL_VERSION,
+          requestId,
+          turnId: input.turnId,
+          confirmationHandle: input.confirmationHandle,
+          decision: input.decision,
+          ...(input.fields ? { fields: input.fields } : {}),
+          stream: true
+        })
+      },
+      deadline
+    );
+    // The write keeps a plain confirm's lack of a deadline once accepted; the
+    // bridge bounds the follow-up itself.
+    deadline.clearTimer();
+    assertContentType(response, "application/x-ndjson");
+    terminal = await deadline.race(readFrames(response, requestId, onFrame));
+  } catch (error) {
+    lost = mapDeadlineError(error, deadline);
+  } finally {
+    deadline.dispose();
+  }
+
+  const settled = receipt ?? receiptFailure;
+  if (!settled) {
+    if (lost !== undefined) {
+      // Nothing was answered: a typed refusal before the stream (4xx) keeps its code; a lost stream is unknown.
+      if (lost instanceof DesktopAppClientError && !STREAM_LOSS_CODES.has(lost.code)) throw lost;
+      throw confirmationOutcomeUnknown();
+    }
+    if (terminal?.kind === "error") {
+      const error = remotePayloadError(
+        terminal.data,
+        "desktop_confirmation_failed",
+        "Desktop could not resolve the confirmation."
+      );
+      throw new DesktopAppClientError(
+        error.code,
+        error.message,
+        undefined,
+        refusalNotSent(terminal.data) || STREAM_NOT_RUN_CODES.has(error.code) ? true : undefined
+      );
+    }
+    // A `done` with no receipt before it: the bridge never sends one, so what happened is not known.
+    throw confirmationOutcomeUnknown();
+  }
+
+  let followUp: DesktopTurnResult | undefined;
+  let followUpError: { code: string; message: string } | undefined;
+  if (lost !== undefined) {
+    followUpError = errorWords(lost, "desktop_stream_invalid", "The follow-up stopped before it finished.");
+  } else if (terminal?.kind === "error") {
+    const error = remotePayloadError(terminal.data, "desktop_turn_failed", "The follow-up could not finish.");
+    followUpError = { code: error.code, message: error.message };
+  } else if (terminal?.kind === "done") {
+    try {
+      followUp = parseDoneData(terminal.data);
+    } catch (error) {
+      followUpError = errorWords(error, "desktop_response_invalid", "The follow-up's answer could not be read.");
+    }
+  }
+  if (receiptFailure) throw receiptFailure;
+  return {
+    ...receipt!,
+    ...(followUp ? { followUp } : {}),
+    ...(followUpError ? { followUpError } : {})
+  };
+}
+
+/** Transport losses (no answer at all), as opposed to a typed refusal the bridge sent. */
+const STREAM_LOSS_CODES: ReadonlySet<string> = new Set([
+  "desktop_unreachable",
+  "desktop_stream_invalid",
+  "desktop_stream_missing_terminal",
+  "desktop_stream_sequence",
+  "desktop_stream_request_mismatch",
+  "desktop_stream_trailing_frame",
+  "desktop_protocol_incompatible",
+  "desktop_response_invalid"
+]);
+
+function errorWords(error: unknown, code: string, message: string): { code: string; message: string } {
+  return error instanceof DesktopAppClientError
+    ? { code: error.code, message: error.message }
+    : { code, message };
+}
+
+/**
+ * A receipt frame as a plain confirm's answer: `{ ...result, view }`, checked
+ * the same way (a failed resolution carries its code and view).
+ */
+function receiptOutcome(data: Record<string, unknown>): DesktopConfirmResult | DesktopAppClientError {
+  const payload: Record<string, unknown> = { ...(isRecord(data.result) ? data.result : {}), view: data.view };
+  const view = decodeAnswerView(payload.view) ?? undefined;
+  if (payload.ok !== true) {
+    const error = remotePayloadError(payload, "desktop_confirmation_failed", "Desktop could not resolve the confirmation.");
+    // As a plain confirm's failure: the app's pre-send mark proves nothing left, unless a receipt view says it.
+    return new DesktopAppClientError(error.code, error.message, view, !view && refusalNotSent(payload) ? true : undefined);
+  }
+  const executionFailure = findNestedExecutionFailure(payload);
+  if (executionFailure) {
+    return new DesktopAppClientError(
+      executionFailure.code ?? "desktop_confirmation_execution_failed",
+      executionFailure.message ?? "Desktop accepted the confirmation but could not execute the action.",
+      view
+    );
+  }
+  return decodeConfirmView(payload as DesktopConfirmResult);
 }
 
 export async function runDesktopAppCommand(
@@ -1043,6 +1379,27 @@ async function readTurnStream(
   requestId: string,
   onProgress?: (frame: DesktopProgressFrame) => void
 ): Promise<DesktopTurnResult> {
+  const terminal = await readFrames(response, requestId, onProgress);
+  if (terminal.kind === "error") {
+    throw remotePayloadError(
+      terminal.data,
+      "desktop_turn_failed",
+      "Infinite Desktop could not complete the turn."
+    );
+  }
+  return parseDoneData(terminal.data);
+}
+
+/**
+ * Read an NDJSON stream (a turn, or a streamed confirm): every frame checked
+ * (protocol, request id, sequence, size), progress handed on in order, and
+ * exactly one terminal frame returned.
+ */
+async function readFrames(
+  response: Response,
+  requestId: string,
+  onProgress?: (frame: DesktopProgressFrame) => void
+): Promise<{ kind: "done" | "error"; data: unknown }> {
   if (!response.body) {
     throw new DesktopAppClientError(
       "desktop_stream_invalid",
@@ -1167,14 +1524,7 @@ async function readTurnStream(
       "Infinite Desktop ended the turn without a terminal frame."
     );
   }
-  if (terminal.kind === "error") {
-    throw remotePayloadError(
-      terminal.data,
-      "desktop_turn_failed",
-      "Infinite Desktop could not complete the turn."
-    );
-  }
-  return parseDoneData(terminal.data);
+  return terminal;
 }
 
 function parseDoneData(value: unknown): DesktopTurnResult {

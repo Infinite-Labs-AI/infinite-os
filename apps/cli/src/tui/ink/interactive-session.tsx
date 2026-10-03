@@ -35,16 +35,21 @@ import {
   type InSessionConfirmationAction
 } from "../../desktop/confirm-in-session.js";
 import { confirmErrorLines, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
+import { appOpenLines } from "../../desktop/app-open.js";
+import { confirmStreamSteps } from "../../desktop/confirm-stream.js";
+import { type ConfirmStreamHooks, createFollowUpAbort, createFollowUpStream, followUpNote, lineWaits, offTurnViewLines, runningBarHints, runningTurnAbort } from "./follow-up-turn.js";
 
 import { turnController } from "../app/turn-controller.js";
 import {
   clearTurnViews,
+  closeRunningSteps,
   getTurnState,
   patchTurnState,
   recordCreativeDraft,
   recordTurnView,
   subscribeTurnState,
-  type TurnState
+  type TurnState,
+  type TurnStep
 } from "../app/turn-store.js";
 import { TYPING_IDLE_MS } from "../config/timing.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
@@ -61,7 +66,7 @@ import {
 } from "./home-inventory.js";
 import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
-import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, type KeyAction, type KeyContext } from "../keys/keymap.js";
+import { approvesCard, cardKeysOffScreen, confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, type KeyAction, type KeyContext } from "../keys/keymap.js";
 import { fallbackCardLines, declineFrame, dismissalSent, fallbackCardRowCount, fieldInvalidMessage, messagesAfterDecline, settleConfirmOutcome } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
@@ -87,15 +92,25 @@ import {
   type LivePageDirection
 } from "./transcript-static.js";
 import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
-import { resolveViewKey, turnAsk, viewFocusAfterTurnDone, viewKeyHints, type ViewFocusState } from "../views/focus.js";
+import {
+  answerOnlyFacts,
+  committedViewFacts,
+  resolveViewKey,
+  turnAsk,
+  viewFocusAfterTurnDone,
+  viewKeyHints,
+  type ViewFocusState,
+  type ViewKeyFacts
+} from "../views/focus.js";
 import { clipboardSequence, copyTargets, copyThroughPbcopy } from "../views/clipboard.js";
-import { detailsPaneWidth, renderCommittedTurn, renderLiveTurn, rowsBesideCard, turnMaySplit, type LiveTurnRender } from "../views/layout.js";
+import { detailsPaneWidth, isQuestionTurn, paneWidths, renderCommittedTurn, renderLiveTurn, rowsBesideCard, turnMaySplit, type LiveTurnRender } from "../views/layout.js";
 import { besideWorkingTurn, workingTurnMessages, workingTurnSteps, type InfiniteTranscriptInput } from "../app/transcript-renderer.js";
 import {
   approvalRender,
   cancelCardField,
   CARD_UI_START,
   cardKeyStep,
+  cardOpenLink,
   cardUiStart,
   commitCardField,
   receiptDetailLines,
@@ -104,6 +119,8 @@ import {
   type CardUiState
 } from "../views/approval.js";
 import { creativeDraftLine } from "../views/images.js";
+import { settleNotSentStep } from "../views/steps.js";
+import type { AppOpenTarget } from "../views/open-target.js";
 
 /**
  * The first-run inventory shown above the boot frame on the empty home screen
@@ -308,8 +325,25 @@ export interface InkInteractiveSessionAppProps {
   onConfirmAction?(
     action: InSessionConfirmationAction,
     decision: "approve" | "decline",
-    fields?: Record<string, ApprovalFieldAnswerV1>
+    fields?: Record<string, ApprovalFieldAnswerV1>,
+    /**
+     * confirm.stream.v1 (T12): the receipt the moment it arrives, then the
+     * agent's follow-up views, in the same turn. A caller without the stream
+     * ignores these and resolves with the plain answer.
+     */
+    stream?: ConfirmStreamHooks
   ): Promise<unknown>;
+  /**
+   * The desktop's capabilities for the view keys, read when a turn's views
+   * take their keys: `open` (app.open.v1, the `o` key) and `watch` (`w` on a
+   * job). Absent = an old desktop: neither key is offered.
+   */
+  appCaps?: () => KeyContext["caps"];
+  /**
+   * `o`: open this place in the app through the desktop's /v1/open (place +
+   * params, never a URL, never a browser). Resolves with the app's answer.
+   */
+  onOpenAppLink?(target: AppOpenTarget): Promise<unknown>;
   /**
    * The running turn's own short reason, said in the composer's note in place
    * of the generic timer `4s` (terminal-r4 `❯ Ask Infinite… (the pause
@@ -343,6 +377,9 @@ export interface InkInteractiveSessionAppProps {
    */
   turnStoppable?: boolean;
 }
+
+/** What a streamed confirm hands the session before it resolves (T12); built by follow-up-turn.ts. */
+export type { ConfirmStreamHooks } from "./follow-up-turn.js";
 
 export interface InkInteractiveSessionRunOptions extends InkInteractiveSessionAppProps {
   errorOutput?: NodeJS.WriteStream;
@@ -483,6 +520,8 @@ export function InkInteractiveSessionApp({
   onRememberInput,
   onSubmitLine,
   onConfirmAction,
+  appCaps,
+  onOpenAppLink,
   busyNote,
   promptPlaceholder = COMPOSER_PLACEHOLDER,
   requiresConfirmation,
@@ -498,6 +537,11 @@ export function InkInteractiveSessionApp({
   // One turn-abort per session: each turn arms a fresh signal (Esc / Ctrl-C
   // stop it) and disarms it when the turn settles.
   const [turnAbort] = useState<TurnAbort>(() => createTurnAbort());
+  // A streamed yes's follow-up, from its receipt to its terminal frame, is the
+  // running turn (P33-M2, follow-up-turn.ts): its own stop, armed at the
+  // receipt. Esc / Ctrl-C stop the running turn first, else the follow-up.
+  const [followUpAbort] = useState(() => createFollowUpAbort());
+  const [stopAbort] = useState<TurnAbort>(() => runningTurnAbort(turnAbort, followUpAbort));
   const liveColumns = useTerminalColumns(88);
   const columns = columnsOverride ?? liveColumns;
   const liveRows = useTerminalRows();
@@ -545,25 +589,47 @@ export function InkInteractiveSessionApp({
   // Confirms sent to the app and not yet answered. They hold the queued-line drain
   // like an open card does, so the receipt lands on the turn its card came from.
   const [confirmsInFlight, setConfirmsInFlight] = useState(0);
+  // Streamed follow-ups running after their receipt, and since when (the composer's note).
+  const [followUps, setFollowUps] = useState<{ count: number; startedAt: number } | null>(null);
+  const followUpRunning = followUps !== null;
   // `?` on the head card toggles its explanation (the terminal can't hover).
   const [explainOpen, setExplainOpen] = useState(false);
+  // The caption gate's fold on the latest turn (round 4): an answer that comes
+  // with a view shows two sentences and `… more (?)`; `?` opens the rest here,
+  // until the next line. Scrollback always prints the rest under the view.
+  const [captionOpen, setCaptionOpen] = useState(false);
   // A head card WITH an approval view keeps its own key state (views/approval.ts):
   // `?`, the open document, its tab and page, and the field answers so far.
   const [cardUi, setCardUi] = useState<CardUiState>(() =>
     initialFocus?.documentOpen && initialPendingConfirmations.length ? { ...CARD_UI_START, documentOpen: true } : CARD_UI_START);
   // The opening focus applies to the first head card only.
   const initialDocumentOpen = useRef(initialFocus?.documentOpen === true);
+  // Where ↑/↓ moved the details pane while the head card waits (W3L2-M2);
+  // null = the pane opens on the card, so what its OK key approves is on screen.
+  const [cardPaneScroll, setCardPaneScroll] = useState<number | null>(null);
   // The latest finished turn's answer views keep their keys (j/k, 1–9, →, m, ?)
   // until the next line is submitted (views/focus.ts). The views themselves live
   // in the turn store (`turnState.views`), cleared when the turn commits.
   // Views already on the turn when the session opens take their keys, like a
   // finished turn's (a list on the row its view names).
+  // The view keys the desktop supports (`o` app.open.v1, `w`), read when a turn's views take their keys.
+  const appCapsRef = useRef(appCaps);
+  appCapsRef.current = appCaps;
+  const viewCaps = useCallback((): KeyContext["caps"] => appCapsRef.current?.() ?? NO_KEY_CAPS, []);
   const [viewFocus, setViewFocus] = useState<ViewFocusState | null>(() => {
     const views = getTurnState().views;
-    return views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null;
+    const cards = initialPendingConfirmations.flatMap((action) => (action.view ? [action.view] : []));
+    return views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), cards.slice(0, 1)) : null;
   });
   const viewFocusRef = useRef(viewFocus);
   viewFocusRef.current = viewFocus;
+  // A finished turn that went whole to scrollback (below 80 columns, or a
+  // window too short to hold its panes) keeps its view focusable until the
+  // next question (live L8): tab, then `o` still opens its place. Only the
+  // keys that need no live draw (`committedViewFacts`).
+  const [committedFocus, setCommittedFocus] = useState<{ state: ViewFocusState; facts: ViewKeyFacts } | null>(null);
+  // What the latest live turn's focused view offered when last drawn, for that commit.
+  const liveFactsRef = useRef<ViewKeyFacts | null>(null);
   // The rows the live turn was last drawn to, so the turn commits to scrollback
   // with the same document pages the user was reading.
   const liveTurnRowsRef = useRef<number | undefined>(undefined);
@@ -592,6 +658,17 @@ export function InkInteractiveSessionApp({
   const [activeFieldTick, setActiveFieldTick] = useState(0);
   const [queuedLines, setQueuedLines] = useState<readonly string[]>([]);
   const [turnState, setTurnState] = useState<TurnState>(() => getTurnState());
+  // A finished turn too tall for the live region goes whole into scrollback,
+  // but its Steps strip stays live under it, as r4 keeps the strip under the
+  // turn on screen (live run-4 N12), until the next line commits it (only
+  // its calls that did not end clean print then). The views its calls drew
+  // go with it, so each row keeps the status its view gave it.
+  const [keptSteps, setKeptSteps] = useState<{ steps: readonly TurnStep[]; views: readonly AnswerViewV1[] } | null>(null);
+  const keptStepsRef = useRef(keptSteps);
+  keptStepsRef.current = keptSteps;
+  // The head write card's view, for a turn that goes up while the card stays live:
+  // a lookup of the card's own target is folded out of scrollback too (live run-4 N11).
+  const headCardViewRef = useRef<AnswerViewV1 | null>(null);
   // The not-connected source of a turn that already went to scrollback (see `topBarData`).
   const [askedAfterCommit, setAskedAfterCommit] = useState<string | null>(null);
   const typingIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -650,27 +727,39 @@ export function InkInteractiveSessionApp({
   // submitted; only then is it printed once into scrollback through <Static>, at
   // the current width. The home inventory goes with the first commit.
   //
-  // One exception (River: "like a normal coding harness"): a FINISHED turn that
+  // One exception (the design ask: "like a normal coding harness"): a FINISHED turn that
   // does not fit the live region is never paged. It goes whole into scrollback
   // the moment it finishes (`"overflow"`, see `finishedOverflow` below), and
   // only the frame stays live. A write card still waiting for its answer stays
   // live with the turn's Steps (`keepCard`): only the question, the answer and
   // the other views go up.
-  const commitLiveTurn = useCallback((why: "submit" | "overflow", keepCard = false) => {
+  const commitLiveTurn = useCallback((why: "submit" | "overflow", keepCard = false, keepStripLive = false) => {
     commitSeq.current += 1;
     const turn = historyRef.current;
-    const { views, steps } = getTurnState();
+    const { views, steps: storeSteps } = getTurnState();
+    // The strip an earlier overflow kept live is this turn's, until the next line.
+    const kept = storeSteps.length ? null : keptStepsRef.current;
+    const steps = kept ? kept.steps : storeSteps;
+    const statusViews = [...(kept ? kept.views : []), ...(keepCard && headCardViewRef.current ? [headCardViewRef.current] : [])];
     const focus = viewFocusRef.current;
-    // Scrollback is ONE column at any width (River, 2026-10-02): the question,
+    // Scrollback is ONE column at any width (layout decision, 2026-10-02): the question,
     // the answer, its views underneath, under a thin rule.
     // `redraw` draws it again at another width (a width change reprints scrollback).
     // A call that did not end clean keeps its row under the answer (a failed
     // step never disappears with the Steps strip). While a card still waits,
-    // the turn's calls stay live under it and print when that is committed.
-    const stepsStayLive = keepCard && steps.length > 0;
+    // or the turn went up only for being too tall, the turn's calls stay live
+    // and print when that is committed. A strip too tall for the resting
+    // frame (`keepStripLive` false) goes up with the turn: its unsettled
+    // calls print under the answer now.
+    const keepStrip = why === "overflow" && steps.length > 0 && !keepCard && keepStripLive;
+    const stepsStayLive = why === "overflow" && steps.length > 0 && (keepCard || keepStrip);
+    const nextKept = keepStrip ? { steps, views: [...statusViews, ...views.map((frame) => frame.view)] } : null;
+    keptStepsRef.current = nextKept;
+    setKeptSteps(nextKept);
     const drawTurn = (width: number) => renderCommittedTurn({
       messages: turn,
       views: views.map((frame) => frame.view),
+      ...(statusViews.length ? { statusViews: [...statusViews] } : {}),
       focus,
       steps,
       stepsStayLive,
@@ -714,6 +803,13 @@ export function InkInteractiveSessionApp({
     // The store's listener is subscribed in an effect; a commit in the first
     // frame's layout effect (a session that opens on a tall turn) runs before it.
     setTurnState(getTurnState());
+    // Sent up for its height, the turn's view keeps the keys that need no live draw (live L8).
+    const offered = why === "overflow" && focus && focus.viewIndex >= 0 && liveFactsRef.current
+      ? committedViewFacts(liveFactsRef.current)
+      : null;
+    setCommittedFocus(offered && (offered.open || offered.watch || offered.more || offered.fixAsk || offered.copy)
+      ? { state: { ...focus!, focus: focus!.detailsFocus, engaged: false, answerFocus: false, typedAhead: "", handled: false, effect: null }, facts: offered }
+      : null);
     setViewFocus(null);
     setLiveOffset(null);
   }, [agentTitle, columns, homeCommitted, homeInventory, t]);
@@ -812,18 +908,22 @@ export function InkInteractiveSessionApp({
     ? (typeof busyNote === "function" ? busyNote() : busyNote)?.trim() || viewReason
     : null;
   const composerNote = [
-    busyReason ?? (busy ? formatBusyNote({ nowMs: clock, state: turnState, turnStartedAt: busyStartedAt }) : null),
+    busyReason
+      ?? (busy
+        ? formatBusyNote({ nowMs: clock, state: turnState, turnStartedAt: busyStartedAt })
+        : followUps ? followUpNote(followUps.startedAt, clock) : null),
     ...formatQueuedStatus(queuedLines)
   ].filter((part): part is string => Boolean(part)).join(" · ");
   // The head card's keys: its named OK key, `n`, and `?` (keymap.ts owns the rules).
   // `o`/`w`/`r` stay off until app links, watch and retry land (T12, T11).
   const headConfirmAction = pendingConfirmActions[0] ?? null;
+  headCardViewRef.current = headConfirmAction?.view ?? null;
   const confirmKeys = useMemo(
     () => headConfirmAction ? confirmCardKeys(headConfirmAction, NO_KEY_CAPS) : null,
     [headConfirmAction]
   );
   // The latest turn with answer views is drawn in the r4 layout (answer left,
-  // details right from 120 columns, Steps below) as the live region's latest
+  // details right from 80 columns, Steps below) as the live region's latest
   // lines, at the transcript's width; the transcript then carries only what
   // the drawn turn does not show. A turn still running is drawn the same way
   // (r4's working frames): the answer arriving (held open) beside the views
@@ -839,7 +939,7 @@ export function InkInteractiveSessionApp({
   const workingState = busy ? turnState : null;
   const workingClock = busy ? clock : 0;
   // The head write card is the turn's last details (r4 "Needs your OK"):
-  // beside the answer from 120 columns, under the answer and a rule below
+  // beside the answer from 80 columns, under the answer and a rule below
   // that, the Steps under it. It is drawn at the details pane's width.
   // A turn whose answer has a table of its own stays one column at any width,
   // so its card is drawn at the whole width, under the answer.
@@ -873,6 +973,7 @@ export function InkInteractiveSessionApp({
   useLayoutEffect(() => {
     setExplainOpen(false);
     setCardUi(cardUiStart(headConfirmAction));
+    setCardPaneScroll(null);
   }, [headConfirmAction]);
   // The opening focus (`initialFocus.documentOpen`) opens the first head card's documents, once.
   useLayoutEffect(() => {
@@ -902,11 +1003,15 @@ export function InkInteractiveSessionApp({
   // The card is the latest turn's details, so its budget is the live region's
   // (the window less the inventory, the composer and its rule, the drafts, the
   // key bar, the 2-row margin and the top bar with its rule), less the rows the
-  // turn shows beside it (`rowsBesideHeadCard`).
+  // turn shows beside it (`rowsBesideHeadCard`). The composer counts as the
+  // live region counts it (`reservedRows`): three rows only while a turn runs,
+  // else the rows it draws, so a waiting card is not paged for two rows the
+  // frame does not use (W3L2-M2: at 80x24 the pause card lost its keys to a page).
+  const cardComposerRows = composerRowsFor(inputValue, columns, t);
   const cardRowsAround = rows
     ? (showHomeInventory ? homeInventoryRowCount(columns, homeInventory) : 0)
       + COMPOSER_RULE_ROWS
-      + Math.max(DEFAULT_COMPOSER_ROWS, composerRowsFor(inputValue, columns, t))
+      + (transcriptBusy ? Math.max(DEFAULT_COMPOSER_ROWS, cardComposerRows) : cardComposerRows)
       + draftLines.length
       + 2
       + TOP_BAR_ROWS
@@ -925,7 +1030,8 @@ export function InkInteractiveSessionApp({
       page: cardUi.page,
       explainOpen: cardUi.explainOpen,
       showHiddenColumns: false,
-      caps: NO_KEY_CAPS,
+      // A card's `o` opens its place when the desktop can (app.open.v1); retry is the card's own.
+      caps: { ...NO_KEY_CAPS, open: viewCaps().open },
       ui: cardUi,
       fieldsCapable: headConfirmAction.confirmFieldsCapable === true,
       ...(headConfirmAction.sentFields ? { sentFields: headConfirmAction.sentFields } : {}),
@@ -953,15 +1059,32 @@ export function InkInteractiveSessionApp({
         : null,
     [cardPaneWidth, confirmKeys, explainOpen, headCard, headConfirmAction, t]
   );
+  // The pane opens on the card again when the window or the card's height
+  // changes (`v` documents, `?`, a page): a stored pane row would point into
+  // differently wrapped details, and `p` would leave the bar for no reason on screen.
+  const headCardRowCount = headCardLines?.length ?? 0;
+  useLayoutEffect(() => {
+    setCardPaneScroll(null);
+  }, [columns, rows, headCardRowCount]);
+  // The strip a tall finished turn left live (see `keptSteps`): only while no other turn runs or has calls.
+  // A streamed follow-up is the card's turn still running: the kept strip stays hidden while it runs.
+  const liveKeptSteps = !busy && !followUpRunning && !turnSteps.length ? keptSteps : null;
+  // A question with no view or card yet is drawn in the turn layout too once
+  // the window is wide enough to split (r4 always splits): its details pane
+  // is r4's `steps only`. Narrower, or a command's output, the transcript draws it.
+  const questionSplits = turnSplits && isQuestionTurn(history);
   const renderTurnAt = useMemo(() => {
-    if (!turnViews.length && !headCardLines) {
+    if (!turnViews.length && !headCardLines && !liveKeptSteps && !questionSplits) {
       return null;
     }
     const messages = workingState ? workingTurnMessages(history, workingState, agentTitle) : history;
     // A call still running says how far it is (its latest progress), busy or not.
-    const steps = workingState
-      ? workingTurnSteps(messages, workingState, workingClock)
-      : turnSteps.some((step) => step.endedAt === null) ? workingTurnSteps(messages, getTurnState(), clock) : turnSteps;
+    const steps = liveKeptSteps
+      ? liveKeptSteps.steps
+      : workingState
+        ? workingTurnSteps(messages, workingState, workingClock)
+        : turnSteps.some((step) => step.endedAt === null) ? workingTurnSteps(messages, getTurnState(), clock) : turnSteps;
+    const statusViews = [...(headConfirmAction?.view ? [headConfirmAction.view] : []), ...(liveKeptSteps?.views ?? [])];
     const cache = new Map<string, LiveTurnRender>();
     // `compact`: without the blank rows around the details (see `compactTurn` below).
     return (turnRows: number | undefined, compact = false): LiveTurnRender => {
@@ -981,13 +1104,17 @@ export function InkInteractiveSessionApp({
         rows: turnRows,
         compact,
         ...(headCardLines ? { details: headCardLines } : {}),
-        ...(headConfirmAction?.view ? { statusViews: [headConfirmAction.view] } : {}),
-        ...(workingState ? { nowMs: workingClock } : {})
+        ...(headCardLines && cardPaneScroll !== null ? { cardScroll: cardPaneScroll } : {}),
+        ...(statusViews.length ? { statusViews } : {}),
+        ...(captionOpen ? { captionOpen: true } : {}),
+        ...(workingState ? { nowMs: workingClock, running: true } : {}),
+        // A question with nothing for the details pane yet says `Working…` in the answer's place.
+        ...(workingState && !turnViews.length && !headCardLines ? { working: workingState } : {})
       });
       cache.set(cacheKey, drawn);
       return drawn;
     };
-  }, [agentTitle, clock, columns, headCardLines, headConfirmAction, history, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
+  }, [agentTitle, captionOpen, cardPaneScroll, clock, columns, headCardLines, headConfirmAction, history, liveKeptSteps, questionSplits, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
   // Beside a drawn turn, the transcript carries only what the drawn turn does
   // not show: its Steps are the drawn turn's own strip, and while it runs its
   // arriving answer and calls are in it too, so nothing is drawn twice.
@@ -996,7 +1123,9 @@ export function InkInteractiveSessionApp({
     [agentTitle, turnState]
   );
   // (end of the drawn turn)
-  const cardKeyCtx = headCard ? headCard.keyCtx : confirmKeys?.ctx ?? null;
+  // The card's keys as the keymap resolves them, before the drawn turn says
+  // whether the card is on screen (`cardKeyCtx`, below, takes its OK key off).
+  const headCardKeyCtx = headCard ? headCard.keyCtx : confirmKeys?.ctx ?? null;
   // While a card field is being typed, the composer takes the keys (Enter sets
   // the value, Esc cancels it); the card itself takes none.
   const cardFieldActive = Boolean(headCard && cardUi.fieldEntry);
@@ -1005,21 +1134,34 @@ export function InkInteractiveSessionApp({
   // bar is the composer's: `esc stop` while a stoppable turn runs (the only key
   // that works then), nothing when idle.
   const keyHintsFor = (turn: LiveTurnRender | null) => {
-    const viewHints = turn?.focused && viewFocus && !confirmKeys && inputValue.length === 0
-      && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt
-      ? viewKeyHints(viewFocus, turn.focused.facts, turn.focused.render.keys)
-      : [];
-    return headCard
-      ? headCard.keys
+    // While a streamed follow-up runs the view keys rest, as during any running turn.
+    const quiet = !confirmKeys && inputValue.length === 0
+      && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt && !followUpRunning;
+    const facts = liveTurnFacts(turn);
+    const viewHints = !quiet
+      ? []
+      : facts && viewFocus
+        ? viewKeyHints(viewFocus, facts, turn?.focused?.render.keys ?? [])
+        : !facts && committedFocus
+          ? viewKeyHints(committedFocus.state, committedFocus.facts)
+          : [];
+    // A card scrolled off screen offers no OK key (W3L2-M2): `n` stays, `p` waits for the card.
+    const cardOff = turn?.cardShown === false;
+    const stateHints = headCard
+      ? cardOff ? headCard.keys.filter((hint) => !approvesCard(hint)) : headCard.keys
       : confirmKeys
-        ? keyBarHints(confirmKeys.ctx)
+        ? keyBarHints(cardOff ? cardKeysOffScreen(confirmKeys.ctx) : confirmKeys.ctx)
         : viewHints.length
           ? viewHints
           : keyBarHints({ focus: "composer", busy: busy && turnStoppable, okKey: null, caps: NO_KEY_CAPS });
+    // The caption gate's fold (round 4): while the keys are not on the view, `?` opens the folded answer.
+    const hints = turn?.folded && !keysOnView(viewFocus) && inputValue.length === 0 && !cardFieldActive
+      && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt
+      ? [{ key: "?", label: "more" }, ...stateHints.filter((hint) => hint.key !== "?")]
+      : stateHints;
+    // A follow-up running: `esc stop` first, once (D6), before any card's keys.
+    return runningBarHints(hints, followUpRunning && turnStoppable);
   };
-  // The home inventory shows ONCE, on the empty home screen (no transcript yet)
-  // and only when the CLI supplied its data. The first submitted line commits it
-  // into scrollback with the first turn (`commitLatestTurn`), so it never repeats.
   const completions = useMemo(
     () => getCompletions?.(inputValue).slice(0, 6) ?? [],
     [getCompletions, inputValue]
@@ -1087,6 +1229,7 @@ export function InkInteractiveSessionApp({
     appendMessages([{
       kind: "slash",
       role: "system",
+      turnNote: true,
       text: `queued: "${previewQueuedLine(line)}"`
     }]);
   }, [appendMessages, rememberInputLine]);
@@ -1097,6 +1240,8 @@ export function InkInteractiveSessionApp({
     let sawFinalMessage = false;
     // The turn ends waiting on a write card: it opens where the card is.
     let endsOnCard = false;
+    // The card this turn ends on: a lookup of its target is folded, and never takes the keys.
+    let turnCard: AnswerViewV1 | null = null;
     // Freeze the active-project label now and stamp it onto this turn's
     // answers, so switching projects later never relabels them.
     const turnTitle = getAgentTitle?.();
@@ -1164,6 +1309,7 @@ export function InkInteractiveSessionApp({
       if (result.pendingConfirmations && result.pendingConfirmations.length > 0) {
         setPendingConfirmActions(result.pendingConfirmations);
         endsOnCard = true;
+        turnCard = result.pendingConfirmations[0]?.view ?? null;
       }
     } catch (error) {
       // A stopped turn rejects with whatever the transport makes of the abort
@@ -1180,9 +1326,11 @@ export function InkInteractiveSessionApp({
           appendMessages(stampAgentTitle(partial, turnTitle));
         }
       }
+      // The turn's own note, not a command's output: a question keeps its layout as it ends.
       appendMessages([{
         kind: "slash",
         role: "system",
+        turnNote: true,
         text: stoppedLine ?? `error: ${error instanceof Error ? error.message : String(error)}`
       }]);
     } finally {
@@ -1191,15 +1339,16 @@ export function InkInteractiveSessionApp({
       setBusy(false);
       setBusyStartedAt(undefined);
       // A finished turn opens at its top; a tall one is paged from there. One
-      // that waits on a write card opens on the card: below 120 columns the
+      // that waits on a write card opens on the card: below 80 columns the
       // card follows the answer, so a tall turn opens at its end (the card,
       // the Steps), and PgUp pages back up through the answer.
       setLiveOffset(endsOnCard && !splitTurnRef.current ? null : 0);
       // Its views stay live and take their keys until the next line is submitted.
+      // A turn with no view keeps a focus too: its answer pane may be cut to the window (live L8).
       const views = getTurnState().views;
-      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
+      setViewFocus(viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), turnCard ? [turnCard] : []));
     }
-  }, [appendMessages, getAgentTitle, onSubmitLine, requestExit, turnAbort]);
+  }, [appendMessages, getAgentTitle, onSubmitLine, requestExit, turnAbort, viewCaps]);
 
   // ── In-chat /connect wizard (#20) ───────────────────────────────────────────
   // The final "Connect <Provider> / Cancel" step. Kept SEPARATE from
@@ -1545,10 +1694,15 @@ export function InkInteractiveSessionApp({
     // the turn's latest view, so the keys move to it, as they do when a turn
     // ends: the bar shows only keys that work now (run-3 N20: `? what it does`
     // stayed after `n`, from the view above the card). Only on the card's turn.
+    // The card's turn after its key: the views take the keys again, and a cut
+    // details pane stays at its foot, where the card was and what it became
+    // (the working card, the receipt, `✕ Dismissed`) now is (W3L2-M2: the pane
+    // opened on the card; it must not jump back to the views' top).
     const refocusCardTurn = () => {
       if (!onCardTurn()) return;
       const views = getTurnState().views;
-      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
+      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps(), headCardViewRef.current ? [headCardViewRef.current] : []) : null);
+      setViewFocus((focus) => focus ? { ...focus, paneScroll: PANE_FOOT } : focus);
     };
     const working = decision === "approve" && head.view?.kind === "change" && isPlainRecord(head.view.approval) ? head.view : null;
     if (working) {
@@ -1609,26 +1763,116 @@ export function InkInteractiveSessionApp({
       }
       restoreCaption();
       dropWorking();
+      // The app proved the card never left: the row that waited for its OK says so (S4).
+      const notSentTool = step.notSentTool;
+      if (notSentTool) patchTurnState((state) => ({ ...state, steps: settleNotSentStep(state.steps, notSentTool) }));
       appendLines(step.lines);
       return true;
+    };
+    // The app's answer to the card: a plain confirm's result, or a streamed
+    // confirm's receipt (confirm.stream.v1), which arrives before the follow-up.
+    let answered = false;
+    const onAnswer = (result: unknown) => {
+      if (answered) return;
+      answered = true;
+      if (refusedField(result)) {
+        dropWorking();
+        appendLines(confirmErrorLines(Object.assign(new Error(fieldInvalidMessage(result) ?? ""), { code: "field_invalid" })));
+        return;
+      }
+      if (settle(result, false)) afterReceipt(result);
+    };
+    // T12: after the receipt, the agent's follow-up goes on the card's own turn:
+    // its views, Steps and image drafts as they come, then its answer and any
+    // card it proposed. Its error never undoes the receipt; it only adds the
+    // follow-up's words. From the receipt to the end of the call the follow-up
+    // is the running turn (P33-M2): typed lines wait, the bar offers `esc stop`,
+    // and Esc / Ctrl-C abort this controller, which ends only the follow-up.
+    // The stop is armed by the receipt only (createFollowUpStream, CI-tested):
+    // before it, Esc and Ctrl-C never touch the yes's request.
+    const label = head.summary;
+    const followUpStream = createFollowUpStream(followUpAbort, {
+      onReceipt: onAnswer,
+      onArmed: () => setFollowUps((current) => ({ count: (current?.count ?? 0) + 1, startedAt: current?.startedAt ?? Date.now() })),
+      onView: (frame) => {
+        if (!onCardTurn()) {
+          // Off its turn the view still prints, labelled, under the live turn; never dropped.
+          appendMessages(offTurnViewLines(frame.view, label, transcriptColumns(columns), t)
+            .map((text) => ({ kind: "slash", role: "system", text }) as Msg));
+          return;
+        }
+        recordTurnView(frame);
+        refocusCardTurn();
+      },
+      // A call's row and an image draft go only on the card's own turn (another turn has its own).
+      onStep: (event) => {
+        if (onCardTurn()) turnController.recordProgressEvent(event);
+      },
+      onCreativeDraft: (frame) => {
+        if (onCardTurn()) recordCreativeDraft(frame);
+      }
+    });
+    const followUp = followUpStream.controller;
+    const streamHooks: ConfirmStreamHooks = followUpStream.hooks;
+    // When the call ends, what happens and in what order is one pure step list
+    // (confirm-stream.ts `confirmStreamSteps`, unit-tested on CI): the receipt
+    // settled once, then the follow-up's answer, its error words, its cards.
+    // Off the card's turn they print as lines labelled with whose follow-up they are.
+    const runSteps = (end: Parameters<typeof confirmStreamSteps>[0], stopped: boolean) => {
+      const options = { answered, confirmFieldsCapable: head.confirmFieldsCapable === true, onCardTurn: onCardTurn(), label, stopped, width: transcriptColumns(columns) };
+      for (const step of confirmStreamSteps(end, options)) {
+        switch (step.type) {
+          case "settle":
+            if (step.thrown) {
+              if (settle(step.outcome, true) && !refusedField(step.outcome)) afterReceipt(step.outcome);
+            } else onAnswer(step.outcome);
+            break;
+          case "message":
+            appendMessages([{ role: "assistant", text: step.text }]);
+            break;
+          case "lines":
+            appendLines(step.lines);
+            break;
+          case "queue":
+            setPendingConfirmActions((current) => [...current, ...step.pending]);
+            break;
+        }
+      }
+    };
+    // The follow-up's end: disarm its stop, close the calls it left running on
+    // the card's turn (stopped, or no result came back), and say whether the user stopped it.
+    let followUpEnded = false;
+    const endFollowUp = (): boolean => {
+      const stopped = followUpAbort.end(followUp);
+      if (!followUpStream.armed() || followUpEnded) return stopped;
+      followUpEnded = true;
+      if (onCardTurn()) {
+        if (stopped) closeRunningSteps("stopped", Date.now());
+        turnController.reset();
+      }
+      setFollowUps((current) => (current && current.count > 1 ? { ...current, count: current.count - 1 } : null));
+      return stopped;
     };
     setConfirmsInFlight((count) => count + 1);
     void (async () => {
       try {
-        const result = await onConfirmAction?.(head, decision, fields);
-        if (refusedField(result)) {
-          dropWorking();
-          appendLines(confirmErrorLines(Object.assign(new Error(fieldInvalidMessage(result) ?? ""), { code: "field_invalid" })));
-          return;
-        }
-        if (settle(result, false)) afterReceipt(result);
+        const result = await onConfirmAction?.(head, decision, fields, streamHooks);
+        runSteps({ type: "resolved", result }, endFollowUp());
       } catch (error) {
-        if (settle(error, true) && !refusedField(error)) afterReceipt(error);
+        runSteps({ type: "rejected", error }, endFollowUp());
       } finally {
         setConfirmsInFlight((count) => count - 1);
       }
     })();
-  }, [appendMessages, columns, onConfirmAction, pendingConfirmActions, t]);
+  }, [appendMessages, columns, followUpAbort, onConfirmAction, pendingConfirmActions, t]);
+
+  // `o` (T12): ask the app to open a place (the desktop's /v1/open). Navigation
+  // only: nothing is written, no browser opens, and the line says what the app did.
+  const openAppPlace = useCallback((target: AppOpenTarget | null) => {
+    if (!target || !onOpenAppLink) return;
+    const say = (lines: readonly string[]) => appendMessages(lines.map((text) => ({ kind: "slash", role: "system", text }) as Msg));
+    void onOpenAppLink(target).then((answer) => say(appOpenLines(answer)), (error: unknown) => say(appOpenLines(error instanceof Error ? error : new Error(""))));
+  }, [appendMessages, onOpenAppLink]);
 
   // One key on the head card, already resolved by the keymap. With an approval
   // view the card's own step decides (views/approval.ts); an old desktop's card
@@ -1653,8 +1897,10 @@ export function InkInteractiveSessionApp({
       // The app was told once; nothing more is sent.
       setPendingConfirmActions((current) => current.slice(1));
       appendMessages([{ kind: "slash", role: "system", text: "Closed — nothing more was sent." }]);
+    } else if (step.effect?.type === "open") {
+      openAppPlace(headConfirmAction?.view ? cardOpenLink(headConfirmAction.view) : null);
     }
-  }, [appendMessages, cardUi, headCard, resolveConfirmAction]);
+  }, [appendMessages, cardUi, headCard, headConfirmAction, openAppPlace, resolveConfirmAction]);
 
   // Enter while a card field is open sets its value (never approves); a value
   // that does not fit keeps the field open with a hint.
@@ -1692,6 +1938,9 @@ export function InkInteractiveSessionApp({
   }, [busy, confirmsInFlight, pendingConfirmActions, pendingConnectConfirm, pendingFieldPrompt, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
 
   const submitLine = useCallback((rawLine: string) => {
+    // A new line ends the keys of the turn that went to scrollback (live L8), and the open fold.
+    setCommittedFocus(null);
+    setCaptionOpen(false);
     if (cardFieldActive) {
       // The line is the card field's value, not a message (and never history).
       commitCardFieldValue(rawLine);
@@ -1710,14 +1959,15 @@ export function InkInteractiveSessionApp({
       return;
     }
 
-    if (busy) {
+    // A streamed follow-up is the running turn too: the line waits for it (P33-M2).
+    if (lineWaits({ busy, followUpRunning })) {
       queueBusyLine(line);
       return;
     }
 
     rememberInputLine(line);
     runSubmittedLine(line);
-  }, [busy, cardFieldActive, commitCardFieldValue, queueBusyLine, rememberInputLine, requestExit, runSubmittedLine]);
+  }, [busy, cardFieldActive, commitCardFieldValue, followUpRunning, queueBusyLine, rememberInputLine, requestExit, runSubmittedLine]);
 
   // The composer row shows the ACTIVE wizard field's value when a free-text field
   // is being collected: masked (bullets ×length) for secret fields, plain for the
@@ -1795,10 +2045,14 @@ export function InkInteractiveSessionApp({
   // live window pages with) less the key bar. The key bar's hints come from the
   // drawn turn (a document's `space next page`), so draw, count the bar, and
   // draw again when the bar's height differs from the guess.
-  const drawTurnWith = (reserved: number, compact = false): { turn: LiveTurnRender | null; turnRows: number | undefined } => {
+  const drawTurnWith = (
+    reserved: number,
+    compact = false,
+    render: ((turnRows: number | undefined, compact?: boolean) => LiveTurnRender) | null = renderTurnAt
+  ): { turn: LiveTurnRender | null; turnRows: number | undefined } => {
     let turn: LiveTurnRender | null = null;
     let turnRows: number | undefined;
-    if (renderTurnAt) {
+    if (render) {
       let barRows = DEFAULT_KEY_BAR_ROWS;
       for (let pass = 0; pass < 3; pass += 1) {
         turnRows = inkLatestTurnRows({
@@ -1813,7 +2067,7 @@ export function InkInteractiveSessionApp({
           transcript: idleTranscript,
           turnStartedAt: busyStartedAt
         });
-        turn = renderTurnAt(turnRows, compact);
+        turn = render(turnRows, compact);
         const drawnBarRows = keyBarRowCount(keyHintsFor(turn), columns);
         if (drawnBarRows === barRows) {
           break;
@@ -1865,8 +2119,24 @@ export function InkInteractiveSessionApp({
   const compactTurn = finished && renderTurnAt !== null && pagedAtRest(false) && wholeCompactAtRest();
   const { turn: liveTurn, turnRows: liveTurnRows } = drawTurnWith(reservedRows, compactTurn);
   liveTurnRowsRef.current = liveTurnRows;
+  liveFactsRef.current = liveTurn?.focused?.facts ?? null;
   const keyHints = keyHintsFor(liveTurn);
   const keyBarRows = keyBarRowCount(keyHints, columns);
+  // The card's keys: its OK key (and `r`, which approves again) only while the
+  // card is on screen (W3L2-M2). Scrolled away, `p` does nothing and `n` still
+  // dismisses: one key never approves a card the user cannot see.
+  const cardKeyCtx = headCardKeyCtx && liveTurn?.cardShown === false ? cardKeysOffScreen(headCardKeyCtx) : headCardKeyCtx;
+  // ↑/↓ (PgUp/PgDn) move the details pane while the card waits, when the pane
+  // is cut: the views above the card stay readable. At either end the key is spent.
+  const scrollCardPane = (key: Key): boolean => {
+    const pane = headCardLines ? liveTurn?.pane : null;
+    if (!pane || !(key.upArrow || key.downArrow || key.pageUp || key.pageDown) || key.ctrl || key.meta) {
+      return false;
+    }
+    const step = key.pageUp || key.pageDown ? Math.max(1, pane.shown) : 1;
+    setCardPaneScroll(key.downArrow || key.pageDown ? pane.above + Math.min(step, pane.below) : pane.above - Math.min(step, pane.above));
+    return true;
+  };
   const liveLatest = useMemo<CommittedEntry | null>(
     () => liveTurn ? { id: "live-turn", lines: liveTurn.lines } : null,
     [liveTurn]
@@ -1874,7 +2144,7 @@ export function InkInteractiveSessionApp({
   const turnTranscript = liveTurn ? idleTranscript : transcript;
   const layoutOf = (latest: CommittedEntry | null, shown: InfiniteTranscriptInput) => layoutAt(latest, shown, reservedRows, keyBarRows);
   const turnLayout = layoutOf(liveLatest, turnTranscript);
-  // A finished turn never pages (River: "it should just work like a normal
+  // A finished turn never pages (the design ask: "it should just work like a normal
   // coding harness"). While a turn runs, a tall one shows its tail (`N lines
   // above`). Once it is finished and still taller than the live region, the
   // WHOLE turn goes into scrollback at once (one column, nothing cut, no
@@ -1891,9 +2161,40 @@ export function InkInteractiveSessionApp({
   if (finishedOverflow && reservedRows !== restingReservedRows) {
     finishedOverflow = pagedAtRest(compactTurn);
   }
+  // The Steps strip a turn that goes up keeps live (see `keptSteps`) only
+  // when the strip alone is whole in the RESTING frame, under its header: a
+  // finished turn never pages, its strip neither. A strip taller than that
+  // goes up with the turn, and only its calls that did not end clean print
+  // under the answer (lane review MUST).
+  const keptStripFitsAtRest = (): boolean => {
+    const steps = turnSteps.length ? turnSteps : keptSteps?.steps ?? [];
+    if (!steps.length) {
+      return false;
+    }
+    const statusViews = [...(turnSteps.length ? [] : keptSteps?.views ?? []), ...turnViews.map((frame) => frame.view)];
+    const drawStrip = (turnRows: number | undefined): LiveTurnRender => renderLiveTurn({
+      messages: [],
+      views: [],
+      focus: null,
+      steps,
+      width: transcriptColumns(columns),
+      color: colorEnabled(t),
+      theme: t,
+      rows: turnRows,
+      ...(statusViews.length ? { statusViews } : {})
+    });
+    const strip = drawTurnWith(restingReservedRows, false, drawStrip).turn;
+    return strip !== null && !layoutAt(
+      { id: "live-turn", lines: strip.lines },
+      idleTranscript,
+      restingReservedRows,
+      keyBarRowCount(keyHintsFor(strip), columns)
+    ).window.paged;
+  };
   useLayoutEffect(() => {
     if (finishedOverflow) {
-      commitLiveTurn("overflow", pendingConfirmActions.length > 0);
+      const keepCard = pendingConfirmActions.length > 0;
+      commitLiveTurn("overflow", keepCard, !keepCard && keptStripFitsAtRest());
     }
   });
   // The frame in which the overflow is found draws the turn nowhere (the commit
@@ -1902,6 +2203,20 @@ export function InkInteractiveSessionApp({
   const liveLatestShown = finishedOverflow ? null : liveLatest;
   const liveTranscript = finishedOverflow ? idleTranscript : turnTranscript;
   const liveLayout = finishedOverflow ? layoutOf(null, idleTranscript) : turnLayout;
+  // The pane the keys are on, marked on the rule under the top bar (live L8):
+  // the answer pane after tab switched sides, the details pane while a view is engaged.
+  const panesNow = paneWidths(transcriptColumns(columns));
+  const markSide = viewFocus && liveTurn && !finishedOverflow && panesNow.wide && turnSplits
+    ? viewFocus.answerFocus
+      ? "answer"
+      : viewFocus.engaged && viewFocus.focus !== "composer" && liveTurn.details ? "view" : null
+    : null;
+  const ruleMark = useMemo(
+    () => markSide === "answer"
+      ? { from: 0, to: panesNow.left }
+      : markSide === "view" ? { from: panesNow.left + 3, to: panesNow.left + 3 + panesNow.right } : null,
+    [markSide, panesNow.left, panesNow.right]
+  );
   // The boot frame is r4's frame as drawn (D4), its key bar included: `tab
   // switch side`, then `/ commands`. After it the bar offers `tab switch side`
   // only while the turn on screen has details to switch to.
@@ -1917,12 +2232,24 @@ export function InkInteractiveSessionApp({
   // One key on the latest turn's views (only reached with an empty composer and
   // no card or picker open). `false` = the key goes on to the composer.
   const handleViewKey = (input: string, key: Key): boolean => {
-    if (!viewFocus || !liveTurn?.focused) {
+    // `?` opens the caption gate's fold while the keys are not on the view (round 4);
+    // on the view (after tab), `?` stays its explanation.
+    if (input === "?" && !key.ctrl && !key.meta && liveTurn?.folded && !keysOnView(viewFocus)) {
+      setCaptionOpen(true);
+      return true;
+    }
+    const drawnFacts = liveTurnFacts(liveTurn);
+    let next: ViewFocusState;
+    if (viewFocus && drawnFacts) {
+      next = resolveViewKey(input, viewFocus, key, { ...drawnFacts, livePageNext: liveLayout.window.hiddenBelow > 0 });
+      setViewFocus(next);
+    } else if (!drawnFacts && committedFocus) {
+      // The last turn went to scrollback whole: its view still takes tab and `o` (live L8).
+      next = resolveViewKey(input, committedFocus.state, key, committedFocus.facts);
+      setCommittedFocus({ ...committedFocus, state: next });
+    } else {
       return false;
     }
-    const facts = { ...liveTurn.focused.facts, livePageNext: liveLayout.window.hiddenBelow > 0 };
-    const next = resolveViewKey(input, viewFocus, key, facts);
-    setViewFocus(next);
     if (next.effect?.type === "ask") {
       // `next` and `more` are NEW user turns, never direct tool calls and never
       // slash commands (`turnAsk` drops an ask that starts with `/`).
@@ -1936,6 +2263,8 @@ export function InkInteractiveSessionApp({
       return true;
     } else if (next.effect?.type === "page_live") {
       pageLive("next");
+    } else if (next.effect?.type === "open") {
+      openAppPlace(next.effect.target);
     } else if (next.effect?.type === "copy") {
       const targets = copyTargets(process.env, process.platform);
       if (targets.osc52 && sessionStdout?.isTTY) {
@@ -1989,6 +2318,7 @@ export function InkInteractiveSessionApp({
         showComposer={false}
         theme={t}
         topBar={topBarData}
+        ruleMark={ruleMark}
         transcript={liveTranscript}
         turnStartedAt={busyStartedAt}
       />
@@ -2011,7 +2341,7 @@ export function InkInteractiveSessionApp({
       <CreativeDraftLines lines={draftLines} theme={t} width={columns} />
       {composerRuleRows ? <AnsiLine line={ruleLine(columns, t)} /> : null}
       <InkLineInput
-        busy={busy}
+        busy={busy || followUpRunning}
         completionActive={completions.length > 0}
         rowsBelow={completions.length + keyBarRows}
         cursor={inputCursor}
@@ -2021,8 +2351,9 @@ export function InkInteractiveSessionApp({
         onCardFieldCancel={() => setCardUi((ui) => cancelCardField(ui))}
         onConfirmActionApprove={() => handleCardAction({ type: "ok" })}
         onConfirmActionDecline={() => handleCardAction({ type: "dismiss" })}
-        onConfirmActionExplain={() => handleCardAction({ type: "explain" })}
+        onConfirmActionExplain={() => (liveTurn?.folded ? setCaptionOpen(true) : handleCardAction({ type: "explain" }))}
         onConfirmCardKey={handleCardAction}
+        onConfirmPaneKey={scrollCardPane}
         connectConfirmActive={Boolean(pendingConnectConfirm)}
         fieldPromptActive={fieldPromptActive}
         fieldChoiceActive={Boolean(currentConnectField?.choices)}
@@ -2055,7 +2386,7 @@ export function InkInteractiveSessionApp({
         row={composerRow}
         selectionActive={Boolean(pendingSelection)}
         theme={t}
-        turnAbort={turnAbort}
+        turnAbort={stopAbort}
         turnStoppable={turnStoppable}
         value={activeFieldComposer ? connectComposerValue : inputValue}
         valueIsMasked={Boolean(activeFieldComposer)}
@@ -2071,6 +2402,20 @@ export function InkInteractiveSessionApp({
       <KeyBar hints={keyHints} sides={bootFrameDrawn || (Boolean(liveTurn?.details) && !finishedOverflow)} theme={t} width={columns} />
     </Box>
   );
+}
+
+/** Whether the keys are on the view (tab engaged it, not the answer side): there `?` is its explanation. */
+function keysOnView(focus: ViewFocusState | null): boolean {
+  return Boolean(focus && focus.engaged && focus.focus !== "composer" && !focus.answerFocus);
+}
+
+/** What the latest live turn offers the keys: its focused view's facts, else its cut answer pane's (live L8). */
+function liveTurnFacts(turn: LiveTurnRender | null): ViewKeyFacts | null {
+  if (!turn) return null;
+  if (turn.focused) return turn.focused.facts;
+  return turn.answerPane
+    ? answerOnlyFacts({ above: turn.answerPane.above, below: turn.answerPane.below, page: turn.answerPane.shown })
+    : null;
 }
 
 export function appendInputHistory(
@@ -2882,6 +3227,7 @@ function InkLineInput({
   onConfirmActionDecline,
   onConfirmActionExplain,
   onConfirmCardKey,
+  onConfirmPaneKey,
   onChoiceCommit,
   onChoiceNext,
   onChoicePrevious,
@@ -2937,6 +3283,8 @@ function InkLineInput({
   onConfirmActionExplain(): void;
   /** Any other card key the keymap resolved (v, 1–9, space, r, e, c); never approves or declines. */
   onConfirmCardKey?(action: KeyAction): void;
+  /** ↑/↓ (PgUp/PgDn) while a card waits: move the cut details pane; true = the key was spent. */
+  onConfirmPaneKey?(key: Key): boolean;
   onChoiceCommit(): void;
   onChoiceNext(): void;
   onChoicePrevious(): void;
@@ -3110,6 +3458,10 @@ function InkLineInput({
     // decline. Guarded BEFORE the plain composer so no keystroke leaks into the
     // input line.
     if (confirmActionActive) {
+      // ↑/↓ move a cut details pane (the card has no use for them); never a decision.
+      if (onConfirmPaneKey?.(key)) {
+        return;
+      }
       const action = confirmKeys ? resolveKey(input, key, confirmKeys) : { type: "none" as const };
       if (action.type === "ok") {
         onConfirmActionApprove();
@@ -3480,6 +3832,9 @@ function composerRowsFor(text: string, columns: number, theme: Theme): number {
 
 /** A card never pages below this many rows, however small the window. */
 const CARD_MIN_ROWS = 6;
+
+/** A details pane's scroll past any end: the layout holds it to the pane's last page (its foot). */
+const PANE_FOOT = Number.MAX_SAFE_INTEGER;
 
 /**
  * Rows the overlays between the transcript and the composer draw right now

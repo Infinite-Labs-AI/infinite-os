@@ -26,21 +26,21 @@
             "children": [
               {
                 "level": "ad",
-                "name": "Hook A",
+                "name": "Demo A",
                 "fields": [],
                 "status": "new",
                 "children": []
               },
               {
                 "level": "ad",
-                "name": "Hook B",
+                "name": "Demo B",
                 "fields": [],
                 "status": "new",
                 "children": []
               },
               {
                 "level": "ad",
-                "name": "Hook C",
+                "name": "Demo C",
                 "fields": [],
                 "status": "new",
                 "children": []
