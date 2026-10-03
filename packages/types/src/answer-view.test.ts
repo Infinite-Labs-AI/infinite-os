@@ -1,11 +1,25 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ANSWER_VIEW_KINDS, ANSWER_VIEW_STATES, type AnswerViewV1, type TodayLegV1 } from "./answer-view.js";
+import {
+  ANSWER_VIEW_CONTRACT_REVISION, ANSWER_VIEW_KINDS, ANSWER_VIEW_LIMITS, ANSWER_VIEW_STATES,
+  type AnswerViewV1, type ChangeBodyV1, type TodayLegV1
+} from "./answer-view.js";
 const stripped = (k: string) => { const n = k.toLowerCase().replace(/[^a-z0-9]/g, "");
   return n.endsWith("token") || n.includes("credential") || n === "confirmationid"; };
 describe("answer view contract v1", () => {
   it("has 12 kinds and 24 states", () => {
     expect(ANSWER_VIEW_KINDS).toHaveLength(12); expect(ANSWER_VIEW_STATES).toHaveLength(24);
+  });
+  it("revision 3: a change target may name its picture by reference and its parents (both optional)", () => {
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(3);
+    expect(ANSWER_VIEW_LIMITS.maxTargetPathParts).toBe(4);
+    expect(ANSWER_VIEW_LIMITS.maxTargetPathPartChars).toBeGreaterThan(0);
+    const rev3 = { target: { kind: "ad", id: "ad_1", label: "Hook B", creativeRef: { archiveAssetId: "asset_1" },
+      path: ["Example campaign", "Example ad set"] }, rows: [{ label: "status", before: "on", after: "PAUSED" }], warnings: [] } satisfies ChangeBodyV1;
+    // A revision 2 body (no picture, no path) is still a valid body.
+    const rev2 = { target: { kind: "ad", label: "Hook B" }, rows: [], warnings: [] } satisfies ChangeBodyV1;
+    expect(rev3.target.path).toHaveLength(2);
+    expect("path" in rev2.target).toBe(false);
   });
   it("a numbers view keeps today out of the settled leg", () => {
     const view = { v: 1, kind: "numbers", tool: "t", title: "T", state: "ready", asOf: null,

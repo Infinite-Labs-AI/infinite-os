@@ -5,13 +5,14 @@
  * Key rule: no key may end in "token", contain "credential", or equal a host-private key.
  */
 // ---- contract body (vendored verbatim into 1bu-1; edit only in infinite-os) ----
-export const ANSWER_VIEW_CONTRACT_REVISION = 2 as const;
+export const ANSWER_VIEW_CONTRACT_REVISION = 3 as const;   // rev 3: ChangeBodyV1.target.creativeRef + .path
 export const RESULT_VIEW_CAPABILITY = "result.view.v1" as const;
 export const CONFIRM_FIELDS_CAPABILITY = "confirm.fields.v1" as const;
 export const CONFIRM_STREAM_CAPABILITY = "confirm.stream.v1" as const;
 export const APP_OPEN_CAPABILITY = "app.open.v1" as const;
 export const ANSWER_VIEW_LIMITS = {
   maxRows: 200, maxCellChars: 500, maxTextChars: 2_000, maxDocumentChars: 64_000, maxFrameBytes: 262_144,
+  maxTargetPathParts: 4, maxTargetPathPartChars: 120,   // a change target's parents; rev 3
 } as const;
 
 export const ANSWER_VIEW_KINDS = [
@@ -151,7 +152,11 @@ export interface ImagesBodyV1 {
   eta?: { startedAtMs: number; etaMs: number | null };
 }
 export interface ChangeBodyV1 {
-  target: { kind: string; id?: string; label: string };
+  target: {
+    kind: string; id?: string; label: string;
+    creativeRef?: CreativeRefV1;   // the target's picture, by archive reference (never a URL); the terminal ignores it; rev 3
+    path?: string[];               // the target's parents, outermost first (["Campaign", "Ad set"]); at most 4; rev 3
+  };
   rows: { label: string; before?: string | null; after: string | null; reason?: ReasonV1 }[]; // no `before` = "set to"
   effect?: string; warnings: string[];
   staleBefore?: { label: string; ours: string; live: string };
