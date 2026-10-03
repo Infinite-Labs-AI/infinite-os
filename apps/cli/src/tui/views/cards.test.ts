@@ -315,6 +315,18 @@ describe("the approval card, as r4 draws it", () => {
     expect(plain).toContain("│ expires Oct 1, 10:59");
   });
 
+  it("while ? is open the chip says `? hide`, and `? what it does` again once closed (live run-4 N12)", () => {
+    const view = pause({ appLink: undefined });
+    const closed = approvalRender(view, cardCtx({ width: 69 }));
+    const open = cardKeyStep(resolveKey("?", {} as Key, closed.keyCtx), closed, CARD_UI_START).ui;
+    const opened = approvalRender(view, cardCtx({ width: 69, ui: open }));
+    const rows = cardRows(opened.lines);
+    expect(segs(rows[rows.length - 2]!)).toEqual(row(69, "amber", ["key", " ? "], ["", " "], ["dim", "hide"]));
+    expect(opened.lines.join("\n")).not.toContain("what it does");
+    const shut = cardKeyStep(resolveKey("?", {} as Key, opened.keyCtx), opened, open).ui;
+    expect(approvalRender(view, cardCtx({ width: 69, ui: shut })).lines.join("\n")).toContain("what it does");
+  });
+
   it("a generic write (target pending_write) shows the app's rows as label  value", () => {
     const view = decode({
       kind: "change", tool: "propose_thing", title: "Change to approve", state: "needs_yes",
@@ -552,6 +564,8 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     const open = cardRows(detail(view, { explainOpen: true })).map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
     expect(open.join("\n")).toContain("│ Stops this ad's spend until you turn it back on.");
     expect(open.length).toBe(closed.length + 2);
+    // Open, the chip says `? hide` (live run-4 N12).
+    expect(open[open.length - 2]).toBe(`│  ?  hide${" ".repeat(63)}│`);
     // ? works on the turn view: the focus facts offer it.
     expect(viewKeyFacts(view, renderView(view, viewCtx())).explain).toBe(true);
   });
