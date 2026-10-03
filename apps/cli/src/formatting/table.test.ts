@@ -185,7 +185,7 @@ describe("renderTable: the r4 look", () => {
   });
 });
 
-describe("renderTable: a long row label wraps before the numbers drop (live M7)", () => {
+describe("renderTable: a long row label is cut with … before the numbers drop (live M7, run-3 N18)", () => {
   const name = "Sample · Trials · US · 2026-09-01 — sample_b1_trial_us";
   const wide: TableInput = {
     columns: [{ label: "" }, { label: "Spent", dropPriority: 0 }, { label: "Impressions", dropPriority: 4 },
@@ -193,40 +193,106 @@ describe("renderTable: a long row label wraps before the numbers drop (live M7)"
     rows: [[name, "$120.00", "1,000", "40", "4.00%"], ["Short one", "$8.00", "90", "3", "3.33%"]]
   };
 
-  it("with labelMin, a label too wide for the numbers wraps on its words inside its cell, and no number drops", () => {
+  it("with labelMin, a label too wide for the numbers is cut at the room the numbers leave, one line per row, and no number drops", () => {
     const t = renderTable(wide, { width: 80, color: false, theme: resolveTheme(), labelMin: 20 });
     expect(t.hidden).toEqual([]);
+    expect(t.lines.every((line) => displayWidth(line) === 80)).toBe(true);
     expect(t.lines).toEqual([
-      "┌────────────────────────┬─────────┬─────────────┬─────────────┬────────────┐",
-      "│                        │   Spent │ Impressions │ Link clicks │ CTR (link) │",
-      "├────────────────────────┼─────────┼─────────────┼─────────────┼────────────┤",
-      "│ Sample · Trials · US · │ $120.00 │       1,000 │          40 │      4.00% │",
-      "│ 2026-09-01 —           │         │             │             │            │",
-      "│ sample_b1_trial_us     │         │             │             │            │",
-      "│ Short one              │   $8.00 │          90 │           3 │      3.33% │",
-      "└────────────────────────┴─────────┴─────────────┴─────────────┴────────────┘"
+      "┌───────────────────────────┬─────────┬─────────────┬─────────────┬────────────┐",
+      "│                           │   Spent │ Impressions │ Link clicks │ CTR (link) │",
+      "├───────────────────────────┼─────────┼─────────────┼─────────────┼────────────┤",
+      "│ Sample · Trials · US · 2… │ $120.00 │       1,000 │          40 │      4.00% │",
+      "│ Short one                 │   $8.00 │          90 │           3 │      3.33% │",
+      "└───────────────────────────┴─────────┴─────────────┴─────────────┴────────────┘"
     ]);
-    expect(t.rowLines).toEqual([[3, 3], [6, 1]]);
+    expect(t.rowLines).toEqual([[3, 1], [4, 1]]);
+    expect(t.labelsCut).toBe(true);
   });
 
-  it("narrower than the label's floor, it wraps to the floor and the lowest numbers drop", () => {
+  it("narrower than the label's floor, it is cut at the floor and the lowest numbers drop", () => {
     const t = renderTable(wide, { width: 60, color: false, theme: resolveTheme(), labelMin: 20 });
     expect(t.hidden).toEqual(["Impressions", "Link clicks"]);
     expect(t.lines.every((line) => displayWidth(line) <= 60)).toBe(true);
-    expect(t.lines).toContain("│ Sample · Trials · US │ $120.00 │      4.00% │");
-    expect(t.lines.join("\n")).toContain("sample_b1_trial_us");
+    expect(t.lines).toContain("│ Sample · Trials · US · 2026-09-0… │ $120.00 │      4.00% │");
+    expect(t.lines.filter((line) => line.startsWith("│ ")).length).toBe(3);
   });
 
-  it("a table that fits as it is never wraps (the r4 goldens keep one line per row)", () => {
+  it("a table that fits as it is never cuts (the r4 goldens keep the whole name)", () => {
     const t = renderTable(wide, { width: 120, color: false, theme: resolveTheme(), labelMin: 20 });
     expect(t.lines.filter((line) => line.includes(name))).toHaveLength(1);
     expect(t.rowLines).toEqual([[3, 1], [4, 1]]);
+    expect(t.labelsCut).toBe(false);
   });
 
-  it("without labelMin the label never wraps (markdown tables keep r4's drop rule)", () => {
+  it("a cut never ends on a separator before its …", () => {
+    const one: TableInput = { columns: [{ label: "" }, { label: "Spent", dropPriority: 0 }], rows: [[name, "$1.00"]] };
+    for (const width of [20, 24, 26, 28, 32, 36, 40]) {
+      const t = renderTable(one, { width, color: false, theme: resolveTheme(), labelMin: 8 });
+      const label = t.lines[3]!.split("│")[1]!.trim();
+      expect(label.endsWith("…"), `${width}: ${label}`).toBe(true);
+      expect(label, `${width}`).not.toMatch(/[\s·—–-]…$/u);
+      expect(t.lines.every((line) => displayWidth(line) <= width)).toBe(true);
+    }
+    expect(renderTable(one, { width: 31, color: false, theme: resolveTheme(), labelMin: 8 }).lines[3]).toBe("│ Sample · Trials…    │ $1.00 │");
+  });
+
+  // Lane review: names that share a start (one week's campaigns) cut to the
+  // same words. Those rows keep their start and their end around … instead,
+  // so they can still be told apart; a cut that is already unique is unchanged.
+  it("two names that share a start and cut alike keep their ends instead (… in the middle)", () => {
+    const twins: TableInput = {
+      columns: [{ label: "" }, { label: "Spent", dropPriority: 0 }],
+      rows: [
+        ["Sample · Trials · US · 2026-09-23 — sample_b1_starttrial_us", "$1.00"],
+        ["Sample · Trials · US · 2026-09-24 — sample_b2_signup_us", "$2.00"],
+        ["Short one", "$3.00"]
+      ]
+    };
+    for (const width of [32, 40, 48, 56]) {
+      const t = renderTable(twins, { width, color: false, theme: resolveTheme(), labelMin: 8 });
+      const labels = t.lines.filter((line) => line.startsWith("│ ")).slice(1).map((line) => line.split("│")[1]!.trim());
+      expect(new Set(labels).size, `${width}: ${labels.join(" | ")}`).toBe(3);
+      // Where the start-cuts clash (up to the dates), the ends are kept; past that the start-cut is unique already.
+      const tail = width <= 40 ? /^Sample\b.*….*_us$/u : /^Sample · Trials · US · 2026-09-2[34]\b[^…]*…$/u;
+      expect(labels[0], `${width}`).toMatch(tail);
+      expect(labels[1], `${width}`).toMatch(tail);
+      expect(labels[2]).toBe("Short one");
+      expect(labels[0], `${width}`).not.toMatch(/[\s·—–-]…|…[\s·—–-]/u);
+      expect(t.lines.every((line) => displayWidth(line) <= width)).toBe(true);
+      expect(t.labelsCut).toBe(true);
+    }
+    // A cut that is unique already keeps its start (the r4 cut).
+    const one = renderTable({ ...twins, rows: [twins.rows[0]!, ["Short one", "$3.00"]] }, { width: 40, color: false, theme: resolveTheme(), labelMin: 8 });
+    expect(one.lines[3]!.split("│")[1]!.trim()).toMatch(/^Sample · Trials · US[^…]*…$/u);
+  });
+
+  it("without labelMin the label is never cut (markdown tables keep r4's drop rule)", () => {
     const t = renderTable(wide, { width: 100, color: false, theme: resolveTheme() });
     expect(t.lines.filter((line) => line.includes(name))).toHaveLength(1);
     expect(t.hidden).toEqual(["Impressions"]);
+    expect(t.labelsCut).toBe(false);
+  });
+});
+
+describe("renderTable: refill brings back a column that fits after a wider one dropped (run-3 N19)", () => {
+  // `Link clicks` (priority 1) drops before the unprioritized, wide `Status`;
+  // once Status is gone too, Link clicks fits again.
+  const input: TableInput = {
+    columns: [{ label: "" }, { label: "Status" }, { label: "Spent", dropPriority: 0 },
+      { label: "Link clicks", dropPriority: 1 }, { label: "CTR (link)", dropPriority: 0 }],
+    rows: [["Hook A", "Numbers not confirmed", "$212.40", "47", "5.87%"]]
+  };
+
+  it("with refill, the dropped column that fits comes back; the one that cannot stays hidden", () => {
+    const t = renderTable(input, { width: 50, color: false, theme: resolveTheme(), refill: true });
+    expect(t.hidden).toEqual(["Status"]);
+    expect(t.lines[1]).toBe("│        │   Spent │ Link clicks │ CTR (link) │");
+    expect(t.lines.every((line) => displayWidth(line) <= 50)).toBe(true);
+  });
+
+  it("without refill, r4's drop rule as is (markdown tables)", () => {
+    const t = renderTable(input, { width: 50, color: false, theme: resolveTheme() });
+    expect(t.hidden).toEqual(["Link clicks", "Status"]);
   });
 });
 

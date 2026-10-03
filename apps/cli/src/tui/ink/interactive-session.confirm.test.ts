@@ -128,6 +128,50 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(handler.split("onConfirmAction?.(").length - 1).toBe(1);
   });
 
+  it("a no the app took swaps the line over the card on the card's turn only (run-3 M5, CI-visible)", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction"),
+      source.indexOf("useEffect(() => {\n    // Don't drain")
+    );
+    expect(handler).toContain('if (decision === "decline" && onCardTurn()) setHistory((current) => messagesAfterDecline(current, outcome));');
+    // With the dismissed receipt it answered with, or when it kept the dismissed card; never on a thrown answer.
+    expect(handler).toMatch(/recordTurnView\(step\.frame\);\s+refocusCardTurn\(\);\s+if \(!thrown && step\.frame\.view\.state === "cancelled"\) captionDeclined\(outcome\);/u);
+    expect(handler).toMatch(/if \(step\.type === "keep"\) \{\s+if \(!thrown\) \{[^}]*captionDeclined\(outcome\);/u);
+  });
+
+  it("a card that carries the app's captions changes the line at the key, and puts it back when the no did not land (M5 review, CI-visible)", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction"),
+      source.indexOf("useEffect(() => {\n    // Don't drain")
+    );
+    // At the key: the swap comes before the decline is sent, with the dismissed card.
+    expect(handler).toContain("const early = decision === \"decline\" && dismissed && onCardTurn() ? head.captions ?? null : null;");
+    expect(handler.indexOf("if (early) setHistory(")).toBeGreaterThan(-1);
+    expect(handler.indexOf("if (early) setHistory(")).toBeLessThan(handler.indexOf("onConfirmAction?.(head"));
+    // Put back when the app did not take the no: a failure's lines, a thrown answer, or another receipt.
+    expect(handler.split("restoreCaption();").length - 1).toBe(3);
+  });
+
+  it("the keys move to the card's frame on its turn, so the bar shows only keys that work now (run-3 N20, CI-visible)", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction"),
+      source.indexOf("useEffect(() => {\n    // Don't drain")
+    );
+    expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);");
+    expect(handler).toMatch(/const refocusCardTurn = \(\) => \{\s+if \(!onCardTurn\(\)\) return;/u);
+    // After the dismissed (or working) frame, after the app's receipt, and when the frame is taken off.
+    expect(handler).toContain("if (working || dismissed) refocusCardTurn();");
+    expect(handler.split("refocusCardTurn();").length - 1).toBe(3);
+  });
+
+  it("a no the app took with no receipt of its own leaves the dismissed card, now sent (run-3 N22, CI-visible)", () => {
+    const handler = source.slice(
+      source.indexOf("const resolveConfirmAction"),
+      source.indexOf("useEffect(() => {\n    // Don't drain")
+    );
+    expect(handler).toContain("if (dismissed && onCardTurn()) recordTurnView(dismissalSent(dismissed));");
+  });
+
   it("scrubs the un-redacted summary through terminalText before rendering", () => {
     // The card (confirm-card.tsx) runs the summary through terminalText; the
     // details are redacted upstream and scrubbed again as they become rows;
@@ -434,13 +478,233 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
     }
   );
 
+  // Live re-check run 3, M5: the line over the card was the app's pre-OK
+  // words ("Ready. It stops spending once you say OK.") and stayed after `n`.
+  // The app's answer to the no carries its words after a no; the line becomes
+  // them when the app's dismissed receipt lands.
+  for (const columns of [60, 100, 140]) {
+    it.skipIf(process.env.CI === "true")(
+      `n, then the app's no: the line over the card reads Okay, left it running. (${columns} columns)`,
+      { timeout: 30_000 },
+      async () => {
+        const ASKED = "Ready. It stops spending once you say OK.";
+        const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
+          receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
+        const input = ttyInput();
+        const output = ttyOutput();
+        output.columns = columns;
+        output.rows = 40;
+        const session = runInkInteractiveSession({
+          columns,
+          errorOutput: ttyOutput(),
+          input,
+          output,
+          title: "Infinite TUI",
+          onConfirmAction: async () => ({ ok: true, declined: true, askedCaption: ASKED, dismissedCaption: "Okay, left it running.", view: dismissed }),
+          async onSubmitLine(): Promise<InkInteractiveLineResult> {
+            return { messages: [{ role: "assistant", text: ASKED }], pendingConfirmations: [CARD] };
+          }
+        });
+        await waitFor(() => output.text().includes("Ask Infinite"));
+        await sendKeys(input, "pause it\r");
+        // From 120 columns the answer is the left pane (40 columns): the line wraps after "spending".
+        await waitFor(() => stripAnsi(output.text()).includes("Ready. It stops spending"), 4_000, output.text);
+        const before = output.text().length;
+        await sendKeys(input, "n");
+        await waitFor(() => stripAnsi(output.text().slice(before)).includes("Okay, left it running."), 4_000, () => stripAnsi(output.text().slice(before)));
+        const after = stripAnsi(output.text().slice(before));
+        expect(after).toContain("Dismissed — nothing was executed.");
+        // Nothing redraws the pre-OK line once the app's words are on screen.
+        expect(after.slice(after.indexOf("Okay, left it running."))).not.toContain("Ready. It stops spending");
+        await sendKeys(input, "/exit\r");
+        await session;
+        resetTurnState();
+      }
+    );
+  }
+
+  // Lane review (M5): with the captions on the card, the line changes in the
+  // frame `n` is pressed in, beside the dismissed card, before the app answers.
+  for (const columns of [60, 100, 140]) {
+    it.skipIf(process.env.CI === "true")(
+      `n on a card with the app's captions: Okay, left it running. in the key's frame (${columns} columns)`,
+      { timeout: 30_000 },
+      async () => {
+        const ASKED = "Ready. It stops spending once you say OK.";
+        const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
+          receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
+        const confirm = deferred<unknown>();
+        const input = ttyInput();
+        const output = ttyOutput();
+        output.columns = columns;
+        output.rows = 40;
+        const session = runInkInteractiveSession({
+          columns, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+          onConfirmAction: () => confirm.promise,
+          async onSubmitLine(): Promise<InkInteractiveLineResult> {
+            return {
+              messages: [{ role: "assistant", text: ASKED }],
+              pendingConfirmations: [{ ...CARD, captions: { asked: ASKED, dismissed: "Okay, left it running." } }]
+            };
+          }
+        });
+        const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+        await waitFor(() => output.text().includes("Ask Infinite"));
+        await sendKeys(input, "pause it\r");
+        await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+        await sendKeys(input, "n");
+        // The app has not answered: the new line and the dismissed card are in one frame.
+        await waitFor(() => lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
+        expect(lastFrame()).toContain("Okay, left it running.");
+        expect(lastFrame()).not.toContain("Ready. It stops spending");
+        confirm.resolve({ ok: true, declined: true, askedCaption: ASKED, dismissedCaption: "Okay, left it running.", view: dismissed });
+        await waitFor(() => lastFrame().includes("Sent to the app"), 4_000, lastFrame);
+        expect(lastFrame()).toContain("Okay, left it running.");
+        expect(lastFrame()).not.toContain("Ready. It stops spending");
+        await sendKeys(input, "/exit\r");
+        await session;
+        resetTurnState();
+      }
+    );
+  }
+
+  it.skipIf(process.env.CI === "true")(
+    "a no that did not land puts the app's line over the card back",
+    { timeout: 30_000 },
+    async () => {
+      const ASKED = "Ready. It stops spending once you say OK.";
+      const confirm = deferred<unknown>();
+      const input = ttyInput();
+      const output = ttyOutput();
+      const session = runInkInteractiveSession({
+        columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+        onConfirmAction: () => confirm.promise,
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          return {
+            messages: [{ role: "assistant", text: ASKED }],
+            pendingConfirmations: [{ ...CARD, captions: { asked: ASKED, dismissed: "Okay, left it running." } }]
+          };
+        }
+      });
+      output.columns = 100;
+      const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+      await sendKeys(input, "n");
+      await waitFor(() => lastFrame().includes("Okay, left it running."), 4_000, lastFrame);
+      confirm.reject(Object.assign(new Error("Desktop is not reachable."), { code: "desktop_unreachable" }));
+      await waitFor(() => lastFrame().includes("Ready. It stops spending"), 4_000, lastFrame);
+      expect(lastFrame()).not.toContain("Okay, left it running.");
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
+    }
+  );
+
+  // Live re-check run 3, N22: `Sent to the app` was drawn at `n` and never
+  // changed. In flight it says `Sending to the app…`; the app's answer makes it
+  // `Sent to the app`, with a receipt of its own or without one.
+  for (const [what, answer] of [
+    ["the app's dismissed receipt", "receipt"],
+    ["a plain ok", "plain"]
+  ] as const) {
+    it.skipIf(process.env.CI === "true")(
+      `n: Sending to the app… until the app answers, then Sent to the app (${what})`,
+      { timeout: 30_000 },
+      async () => {
+        const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
+          receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
+        const confirm = deferred<unknown>();
+        const input = ttyInput();
+        const output = ttyOutput();
+        const session = runInkInteractiveSession({
+          columns: 80, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+          onConfirmAction: () => confirm.promise,
+          async onSubmitLine(): Promise<InkInteractiveLineResult> {
+            return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+          }
+        });
+        const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+        await waitFor(() => output.text().includes("Ask Infinite"));
+        await sendKeys(input, "pause it\r");
+        await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+        await sendKeys(input, "n");
+        await waitFor(() => lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
+        expect(lastFrame()).not.toContain("Sent to the app");
+        confirm.resolve(answer === "receipt" ? { ok: true, declined: true, view: dismissed } : { ok: true });
+        await waitFor(() => lastFrame().includes("Sent to the app"), 4_000, lastFrame);
+        expect(lastFrame()).not.toContain("Sending");
+        expect(lastFrame()).toContain("Dismissed — nothing was executed.");
+        await sendKeys(input, "/exit\r");
+        await session;
+        resetTurnState();
+      }
+    );
+  }
+
+  // Live re-check run 3, N20: after `n` the bar kept `? what it does` (the
+  // list view's, above the card) where r4's dismissed frame offers only
+  // `tab switch side  / commands`: the keys stay on the newest view, the
+  // dismissed card, which has none.
+  it.skipIf(process.env.CI === "true")(
+    "after n the key bar is r4's dismissed bar: no ? what it does, while in flight and after the app's answer",
+    { timeout: 30_000 },
+    async () => {
+      const list = {
+        type: "tool.view", stage: "tool", message: "Ads", viewId: "list_1", name: "list_items",
+        view: {
+          v: 1, kind: "list", tool: "list_items", title: "Ads", state: "ready", asOf: null,
+          explain: "Our stored copy of the account.",
+          scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+          body: { layout: "rows", columns: [], rows: [{ id: "ad_1", title: "Ad 01", status: { word: "on", tone: "ok" }, cells: {} }] }
+        }
+      };
+      const dismissed = { ...RECEIPT_VIEW, title: "Pause ad", state: "cancelled", outcome: undefined,
+        receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } };
+      const confirm = deferred<unknown>();
+      const input = ttyInput();
+      const output = ttyOutput();
+      const session = runInkInteractiveSession({
+        columns: 100,
+        errorOutput: ttyOutput(),
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: () => confirm.promise,
+        async onSubmitLine(_line, _progress, _signal, onView): Promise<InkInteractiveLineResult> {
+          onView?.(list as never);
+          return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+        }
+      });
+      output.columns = 100;
+      const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+      expect(lastFrame()).toContain("what it does");
+      await sendKeys(input, "n");
+      await waitFor(() => lastFrame().includes("Dismissed — nothing was executed."), 4_000, lastFrame);
+      expect(lastFrame()).not.toContain("what it does");
+      expect(lastFrame()).toMatch(/tab\s+switch side\s+\/\s+commands/u);
+      confirm.resolve({ ok: true, declined: true, view: dismissed });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(lastFrame()).toContain("Dismissed — nothing was executed.");
+      expect(lastFrame()).not.toContain("what it does");
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
+    }
+  );
+
   // A receipt belongs to the turn its card came from: a line queued while that
   // turn was busy waits for the confirm, and a line typed while the confirm is
   // in flight starts a new turn that the receipt never lands on.
   function deferred<T>() {
     let resolve!: (value: T) => void;
-    const promise = new Promise<T>((done) => { resolve = done; });
-    return { promise, resolve };
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+    return { promise, resolve, reject };
   }
 
   it.skipIf(process.env.CI === "true")(

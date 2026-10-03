@@ -62,7 +62,7 @@ import {
 import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
 import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, type KeyAction, type KeyContext } from "../keys/keymap.js";
-import { fallbackCardLines, declineFrame, fallbackCardRowCount, fieldInvalidMessage, settleConfirmOutcome } from "./confirm-card.js";
+import { fallbackCardLines, declineFrame, dismissalSent, fallbackCardRowCount, fieldInvalidMessage, messagesAfterDecline, settleConfirmOutcome } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
 import { askedSource, ruleLine, TOP_BAR_ROWS, type TopBarData } from "./top-bar.js";
@@ -1541,6 +1541,15 @@ export function InkInteractiveSessionApp({
     // holds the receipt's place (`receipt:<handle>`): a settled receipt view
     // replaces it in place; anything else takes it off the turn.
     const workingId = `receipt:${head.confirmationHandle}`;
+    // The card's frame on its turn (working, dismissed, the app's receipt) is
+    // the turn's latest view, so the keys move to it, as they do when a turn
+    // ends: the bar shows only keys that work now (run-3 N20: `? what it does`
+    // stayed after `n`, from the view above the card). Only on the card's turn.
+    const refocusCardTurn = () => {
+      if (!onCardTurn()) return;
+      const views = getTurnState().views;
+      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
+    };
     const working = decision === "approve" && head.view?.kind === "change" && isPlainRecord(head.view.approval) ? head.view : null;
     if (working) {
       recordTurnView({
@@ -1557,8 +1566,26 @@ export function InkInteractiveSessionApp({
     if (dismissed) {
       recordTurnView(dismissed);
     }
+    if (working || dismissed) refocusCardTurn();
     const dropWorking = () => {
-      if (working || dismissed) patchTurnState((state) => ({ ...state, views: state.views.filter((frame) => frame.viewId !== workingId) }));
+      if (!working && !dismissed) return;
+      patchTurnState((state) => ({ ...state, views: state.views.filter((frame) => frame.viewId !== workingId) }));
+      refocusCardTurn();
+    };
+    // A no the app took (run-3 M5): the line over the card becomes the app's
+    // words after a no ("Okay, left it running."), in the same update as the
+    // receipt it answered with, and only on the card's own turn.
+    const captionDeclined = (outcome: unknown) => {
+      if (decision === "decline" && onCardTurn()) setHistory((current) => messagesAfterDecline(current, outcome));
+    };
+    // A card that carries the app's captions changes the line at the key, in
+    // the dismissed card's frame (r4 flow-pause-09). A no that does not land
+    // (a failure, a thrown answer, another receipt) puts the app's line back;
+    // the receipt-time swap above then finds nothing left to change.
+    const early = decision === "decline" && dismissed && onCardTurn() ? head.captions ?? null : null;
+    if (early) setHistory((current) => messagesAfterDecline(current, { ok: true, askedCaption: early.asked, dismissedCaption: early.dismissed }));
+    const restoreCaption = () => {
+      if (early && onCardTurn()) setHistory((current) => messagesAfterDecline(current, { ok: true, askedCaption: early.dismissed, dismissedCaption: early.asked }));
     };
     // What the app's answer does to that frame is decided by one pure step
     // (confirm-card.tsx `settleConfirmOutcome`, unit-tested on CI).
@@ -1567,9 +1594,20 @@ export function InkInteractiveSessionApp({
       if (step.type === "receipt") {
         // A settled receipt view goes on the turn, drawn as r4 draws it (confirm-card.tsx).
         recordTurnView(step.frame);
+        refocusCardTurn();
+        if (!thrown && step.frame.view.state === "cancelled") captionDeclined(outcome);
+        else restoreCaption();
         return false;
       }
-      if (step.type === "keep") return false;
+      if (step.type === "keep") {
+        if (!thrown) {
+          // The app took the no and sent no receipt of its own: the dismissed card, now sent (run-3 N22).
+          if (dismissed && onCardTurn()) recordTurnView(dismissalSent(dismissed));
+          captionDeclined(outcome);
+        } else restoreCaption();
+        return false;
+      }
+      restoreCaption();
       dropWorking();
       appendLines(step.lines);
       return true;

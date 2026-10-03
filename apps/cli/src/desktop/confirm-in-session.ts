@@ -87,6 +87,13 @@ export interface InSessionConfirmationAction {
   sentFields?: Record<string, ApprovalFieldAnswerV1>;
   /** A card put back after the app refused its answer (`field_invalid`): the app's words. */
   fieldError?: string;
+  /**
+   * The app's line over this card (`asked`, "Ready. It stops spending once you
+   * say OK.") and its words once the person said no (`dismissed`, "Okay, left
+   * it running."), sent with the card (run-3 M5). With them, `n` changes the
+   * line in the same frame as the key. Scrubbed before printing.
+   */
+  captions?: { asked: string; dismissed: string };
 }
 
 /**

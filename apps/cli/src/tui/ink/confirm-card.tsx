@@ -99,13 +99,66 @@ export function dismissedReceiptFrame(head: InSessionConfirmationAction): ToolVi
     message: terminalText(view.title),
     viewId: `receipt:${head.confirmationHandle}`,
     name: view.tool,
-    view: { ...view, state: "cancelled", stateReason: { code: "dismissed", words: DISMISSED_WORDS } } as typeof view
+    // `sending` (renderer-local, never sent, like the working card's `appliedAt`):
+    // the no is on its way, so the card says `Sending to the app…` (run-3 N22).
+    view: { ...view, state: "cancelled", stateReason: { code: "dismissed", words: DISMISSED_WORDS }, sending: true } as unknown as typeof view
   };
+}
+
+/** The dismissed card once the app took the no and sent no receipt of its own: the same card, now sent. */
+export function dismissalSent(frame: ToolViewFrameV1): ToolViewFrameV1 {
+  const { sending: _sending, ...view } = frame.view as typeof frame.view & { sending?: unknown };
+  void _sending;
+  return { ...frame, view: view as typeof frame.view };
 }
 
 /** The frame a decision leaves on its turn the moment it is made: only a `n` leaves one (the dismissed card). */
 export function declineFrame(head: InSessionConfirmationAction, decision: ConfirmDecision): ToolViewFrameV1 | null {
   return decision === "decline" ? dismissedReceiptFrame(head) : null;
+}
+
+/**
+ * The line a declined card's turn gets when the app sent no words of its own
+ * (an older desktop) and the turn said nothing: it claims nothing about what
+ * still runs or spends.
+ */
+export const DECLINED_FALLBACK_CAPTION = "Okay, nothing changed.";
+
+/** One of the app's lines, scrubbed, or "" when it sent none. */
+function appLine(value: unknown): string {
+  return typeof value === "string" ? terminalText(value).trim() : "";
+}
+
+/**
+ * The turn's messages once the app took its card's `n` (live re-check run 3,
+ * M5; r4 flow-pause-09, and Cmd+L after Dismiss). The app sends the line it put
+ * over the card (`askedCaption`, "Ready. It stops spending once you say OK.")
+ * and its words after a no (`dismissedCaption`, "Okay, left it running.").
+ * The line is swapped only when the turn's one answer IS the app's line, so
+ * the model's own words always stay. A desktop that sends neither gives a turn
+ * that said nothing the neutral line, and leaves any words alone. A no the app
+ * did not take, or a turn whose question already went to scrollback, keeps
+ * its messages as they are (the same array).
+ */
+export function messagesAfterDecline<M extends { role: string; text: string }>(messages: readonly M[], outcome: unknown): readonly M[] {
+  if (!isRecord(outcome) || outcome.ok !== true) return messages;
+  let question = -1;
+  messages.forEach((message, index) => {
+    if (message.role === "user") question = index;
+  });
+  if (question < 0) return messages;
+  const answers = messages.map((message, index) => ({ message, index })).filter(({ message, index }) => index > question && message.role === "assistant");
+  const dismissed = appLine(outcome.dismissedCaption);
+  if (dismissed) {
+    const asked = appLine(outcome.askedCaption);
+    const only = answers.length === 1 ? answers[0]! : null;
+    if (!asked || !only || terminalText(only.message.text).trim() !== asked) return messages;
+    return messages.map((message, index) => (index === only.index ? { ...message, text: dismissed } : message));
+  }
+  if (answers.some(({ message }) => message.text.trim())) return messages;
+  const first = answers[0];
+  if (first) return messages.map((message, index) => (index === first.index ? { ...message, text: DECLINED_FALLBACK_CAPTION } : message));
+  return [...messages.slice(0, question + 1), { role: "assistant", text: DECLINED_FALLBACK_CAPTION } as M, ...messages.slice(question + 1)];
 }
 
 /** The app's words when it refused a card's answer before anything ran (`field_invalid`). */

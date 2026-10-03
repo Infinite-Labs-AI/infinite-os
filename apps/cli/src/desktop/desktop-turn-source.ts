@@ -396,6 +396,12 @@ function parsePendingConfirmations(
     // that does not decode is left off; the redacted summary + details above
     // still carry the card.
     const view = decodeAnswerView(value.view);
+    // The app's line over the card and its words after a no (run-3 M5): both, or neither.
+    const asked = nonEmptyString(value.askedCaption);
+    const declined = nonEmptyString(value.dismissedCaption);
+    const captions = asked && declined
+      ? { asked: boundedTerminalText(asked, MAX_CONFIRMATION_VALUE_CHARS), dismissed: boundedTerminalText(declined, MAX_CONFIRMATION_VALUE_CHARS) }
+      : null;
     pending.push({
       turnId: turnId ?? "",
       confirmationHandle,
@@ -404,7 +410,8 @@ function parsePendingConfirmations(
       ...(appSummary ? {} : { summaryFromTool: true as const }),
       confirmationDetails,
       confirmFieldsCapable,
-      ...(view ? { view } : {})
+      ...(view ? { view } : {}),
+      ...(captions ? { captions } : {})
     });
   }
   if (pending.length > 0 && !turnId) {

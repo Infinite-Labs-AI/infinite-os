@@ -5,8 +5,8 @@ import type { InSessionConfirmationAction } from "../../desktop/confirm-in-sessi
 import { displayWidth } from "../lib/display-width.js";
 import { confirmCardKeys } from "../keys/keymap.js";
 import { DEFAULT_THEME } from "../theme.js";
-import { ConfirmActionMenu, DISMISSED_WORDS, declineFrame, dismissedReceiptFrame, fallbackCardLines, fallbackCardRowCount, receiptViewFrame, settleConfirmOutcome } from "./confirm-card.js";
-import { renderLiveTurn } from "../views/layout.js";
+import { ConfirmActionMenu, DECLINED_FALLBACK_CAPTION, DISMISSED_WORDS, declineFrame, dismissalSent, dismissedReceiptFrame, fallbackCardLines, fallbackCardRowCount, messagesAfterDecline, receiptViewFrame, settleConfirmOutcome } from "./confirm-card.js";
+import { renderCommittedTurn, renderLiveTurn } from "../views/layout.js";
 import type { TurnStep } from "../app/turn-store.js";
 import { renderToString } from "./renderer.js";
 
@@ -241,3 +241,124 @@ describe("what the app's answer does to a resolved card (CI-runnable M5 wiring)"
   });
 });
 
+
+// Live re-check run 3, M5: after `n` the line over the card still read the
+// app's pre-OK words ("Ready. It stops spending once you say OK.") where r4
+// flow-pause-09 and Cmd+L say "Okay, left it running.". The app sends both
+// lines with the decline (`askedCaption`, `dismissedCaption`); only the app's
+// own line is swapped, never the model's words.
+describe("the line over a declined card (run-3 M5)", () => {
+  const ASKED = "Ready. It stops spending once you say OK.";
+  const DISMISSED = "Okay, left it running.";
+  const turn = (answer: string) => [
+    { role: "user" as const, text: "pause hook b" },
+    { role: "assistant" as const, text: answer }
+  ];
+  const declined = { ok: true, declined: true, askedCaption: ASKED, dismissedCaption: DISMISSED };
+
+  it("the app's line over the card becomes the app's words after a no", () => {
+    expect(messagesAfterDecline(turn(ASKED), declined)).toEqual(turn(DISMISSED));
+    // Each kind says its own words (a daily budget: "Okay, kept the budget as it is.").
+    expect(messagesAfterDecline(turn("Ready. It saves $10 a day once you say OK."), {
+      ...declined, askedCaption: "Ready. It saves $10 a day once you say OK.", dismissedCaption: "Okay, kept the budget as it is."
+    })).toEqual(turn("Okay, kept the budget as it is."));
+  });
+
+  it("never swaps the model's own words", () => {
+    const own = turn("Hook B spent $12.40 with no trials. Pause it?");
+    expect(messagesAfterDecline(own, declined)).toBe(own);
+    // More than one answer message is the model's, even when one repeats the line.
+    const twice = [...turn(ASKED), { role: "assistant" as const, text: "More words." }];
+    expect(messagesAfterDecline(twice, declined)).toBe(twice);
+  });
+
+  it("a desktop that sends no words of its own: a turn that said nothing gets the neutral line; any words stay", () => {
+    const plain = { ok: true, declined: true };
+    expect(messagesAfterDecline(turn(""), plain)).toEqual(turn(DECLINED_FALLBACK_CAPTION));
+    expect(messagesAfterDecline([{ role: "user", text: "pause hook b" }], plain)).toEqual(turn(DECLINED_FALLBACK_CAPTION));
+    const asked = turn(ASKED);
+    expect(messagesAfterDecline(asked, plain)).toBe(asked);
+    // Neutral: it claims nothing about what still runs or spends.
+    expect(DECLINED_FALLBACK_CAPTION).not.toMatch(/running|spend|paus/iu);
+  });
+
+  it("a no the app did not take, or a turn already in scrollback, changes nothing", () => {
+    const asked = turn(ASKED);
+    expect(messagesAfterDecline(asked, { ...declined, ok: false })).toBe(asked);
+    expect(messagesAfterDecline(asked, new Error("network down"))).toBe(asked);
+    expect(messagesAfterDecline(asked, undefined)).toBe(asked);
+    const gone: { role: "user" | "assistant"; text: string }[] = [];
+    expect(messagesAfterDecline(gone, declined)).toBe(gone);
+  });
+
+  it("the app's words are scrubbed like every app line", () => {
+    const esc = String.fromCharCode(27);
+    const out = messagesAfterDecline(turn(ASKED), { ...declined, dismissedCaption: `${esc}[31mOkay, left it running.${esc}[0m` });
+    expect(out[1]?.text).toBe(DISMISSED);
+  });
+});
+
+// Live re-check run 3, N22: `Sent to the app` was drawn the moment `n` was
+// pressed and never changed. While the no is on its way the dismissed card
+// says so; once the app answers it reads r4's last frame (`Sent to the app`),
+// or the app's own word when its receipt carries one.
+describe("the dismissed card's last line follows the app's answer (run-3 N22)", () => {
+  const cardView = {
+    v: 1, kind: "change", tool: "propose_pause_entity", title: "Pause Hook A", state: "needs_yes", asOf: null,
+    scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+    body: { target: { kind: "ad", label: "Hook A" }, rows: [{ label: "Status", before: "On", after: "Paused" }], warnings: [] },
+    approval: { kind: "card", title: "Pause ad “Hook A”?", summary: "Stops its spend.", confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [] }
+  };
+  const head = pending({ view: cardView as never });
+  const drawn = (frame: { view: unknown }) => renderLiveTurn({
+    messages: [{ role: "user", text: "pause hook a" }, { role: "assistant", text: "Okay, left it running." }],
+    views: [frame.view as never], focus: null, width: 100, color: false, theme: DEFAULT_THEME
+  }).lines.map(plain);
+  const appReceipt = (receipt: Record<string, unknown>) => ({
+    ok: true, declined: true,
+    view: { ...cardView, approval: undefined, state: "cancelled", receipt: { sentence: DISMISSED_WORDS, tone: "ok", revertible: false, ...receipt } }
+  });
+
+  it("while the no is on its way: `Sending to the app…`, never `Sent`", () => {
+    const lines = drawn(dismissedReceiptFrame(head)!);
+    expect(lines).toContain(`✕ ${DISMISSED_WORDS}`);
+    expect(lines).toContain("Sending to the app…");
+    expect(lines.join("\n")).not.toContain("Sent to the app");
+  });
+
+  it("the app's receipt replaces it in place: `Sent to the app`, as r4's last frame", () => {
+    const step = settleConfirmOutcome(head, appReceipt({}), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
+    expect(step.type).toBe("receipt");
+    const lines = drawn(step.type === "receipt" ? step.frame : { view: null });
+    expect(lines).toContain("Sent to the app");
+    expect(lines.join("\n")).not.toContain("Sending");
+  });
+
+  // Lane review: a provenance line is a fact of the receipt (who proposed, a
+  // side effect such as `Clears the matching Home card`), never a delivery
+  // word. It is drawn as its own dim line under `Sent to the app`.
+  it("a receipt's provenance line is its own line under `Sent to the app`, never in its place", () => {
+    const step = settleConfirmOutcome(head, appReceipt({ provenanceLine: "Clears the matching Home card" }), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
+    const lines = drawn(step.type === "receipt" ? step.frame : { view: null });
+    const sent = lines.indexOf("Sent to the app");
+    expect(sent).toBeGreaterThanOrEqual(0);
+    expect(lines[sent + 1]).toBe("Clears the matching Home card");
+    expect(lines.join("\n")).not.toContain("Sending");
+  });
+
+  it("an app that took the no with no receipt of its own: the same card, now sent", () => {
+    const frame = dismissedReceiptFrame(head)!;
+    const sent = dismissalSent(frame);
+    expect(sent.viewId).toBe(frame.viewId);
+    expect(drawn(sent)).toContain("Sent to the app");
+    expect(drawn(sent).join("\n")).not.toContain("Sending");
+  });
+
+  it("printed into scrollback, where nothing follows the answer, it says what was done: sent", () => {
+    const lines = renderCommittedTurn({
+      messages: [{ role: "user", text: "pause hook a" }], views: [dismissedReceiptFrame(head)!.view], focus: null, width: 100, color: false, theme: DEFAULT_THEME
+    }).map(plain);
+    expect(lines).toContain("Sent to the app");
+    expect(lines.join("\n")).not.toContain("Sending");
+  });
+});

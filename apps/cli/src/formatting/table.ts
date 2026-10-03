@@ -1,5 +1,5 @@
 import { terminalText } from "../desktop/confirm-in-session.js";
-import { displayWidth, padEndCells } from "../tui/lib/display-width.js";
+import { displayWidth, padEndCells, truncateCells } from "../tui/lib/display-width.js";
 import { ansi, type AnsiRole, type Theme, type ThemeStyle } from "../tui/theme.js";
 
 /**
@@ -28,19 +28,25 @@ export interface TableColumn { label: string; align?: TableAlign; dropPriority?:
 export interface TableInput { columns: TableColumn[]; rows: string[][]; total?: string[] }
 /**
  * `role` paints the body cells (default `text`: the terminal's own foreground); borders and bold cells paint themselves.
- * `labelMin`: a table too wide for `width` first wraps its FIRST column (the row labels, on their words) to the room
- * the other columns leave, never narrower than `labelMin`, before any column drops. A long row name (an ad's full
- * campaign name) then costs lines, not numbers. Absent: a label never wraps (r4 `table()`, markdown tables).
+ * `labelMin`: a table too wide for `width` first cuts its FIRST column (the row labels, with …) to the room the
+ * other columns leave, never narrower than `labelMin`, before any column drops; once the columns are chosen the
+ * labels grow into the room that is left. A long row name (an ad's full campaign name) then costs its end, not a
+ * number, and each row stays one line (run-3 N18: a name wrapped to 3 lines). Absent: a label is never cut (r4
+ * `table()`, markdown tables).
+ * `refill`: after the drops, a dropped column comes back when it fits after all (it went before a wider column that
+ * had to go too), the most kept first. Absent: r4 `table()`'s drop rule as is (markdown tables).
  */
-export interface TableOptions { width: number; color: boolean; theme: Theme; role?: AnsiRole; labelMin?: number }
+export interface TableOptions { width: number; color: boolean; theme: Theme; role?: AnsiRole; labelMin?: number; refill?: boolean }
 export interface TableRender {
   lines: string[];
   hidden: string[];
   fallback: "record" | null;
   /** The width the table would take with every column shown (what a wider window needs). */
   fullWidth: number;
-  /** Each body row's first line in `lines` and how many lines it takes (a wrapped label takes several). */
+  /** Each body row's line in `lines` and how many lines it takes (one: a long label is cut, never wrapped). */
   rowLines: [number, number][];
+  /** Whether a row label was cut with … to fit (`labelMin`): the whole label is not on screen. */
+  labelsCut: boolean;
 }
 
 const NUMBER = String.raw`[+\-−]?[$€£¥]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?[%kKMBx×]?`;
@@ -71,31 +77,46 @@ export function renderTable(input: TableInput, opts: TableOptions): TableRender 
 
   let keep = input.columns.map((_column, index) => index);
   const fullWidth = tableWidth(keep);
-  // Each body row's first-column lines: one, unless a long label wraps (`labelMin`).
-  let labelLines: string[][] = rows.map((row) => [row[0] ?? ""]);
+  // A long row label (`labelMin`) is cut with … rather than drop a number: it
+  // takes the room the other columns leave, never under the floor, while the
+  // columns are chosen; then it grows into whatever room is left.
   const floor = opts.labelMin === undefined ? null : Math.max(1, Math.floor(opts.labelMin));
-  if (floor !== null && columnCount > 1 && fullWidth > width && (widths[0] ?? 0) > floor) {
-    // The room the other columns leave, never under the floor: wrap the labels to it on their words.
-    const room = Math.max(floor, width - (fullWidth - (widths[0] ?? 0)));
-    labelLines = rows.map((row) => wrapLabel(row[0] ?? "", room));
-    widths[0] = Math.max(
-      displayWidth(labels[0] ?? ""),
-      ...labelLines.flat().map((line) => displayWidth(line)),
-      total ? displayWidth(total[0] ?? "") : 0
-    );
+  const fullLabel = widths[0] ?? 0;
+  const labelFloor = Math.max(displayWidth(labels[0] ?? ""), total ? displayWidth(total[0] ?? "") : 0);
+  const cuttable = floor !== null && columnCount > 1 && fullWidth > width && fullLabel > floor;
+  if (cuttable) {
+    widths[0] = Math.max(labelFloor, floor, width - (fullWidth - fullLabel));
   }
-  const hidden: string[] = [];
+  const dropped: number[] = [];
   const dropOrder = dropCandidates(input.columns);
   for (const candidate of dropOrder) {
     if (tableWidth(keep) <= width || keep.length <= 2) {
       break;
     }
     keep = keep.filter((index) => index !== candidate);
-    hidden.push(labels[candidate] ?? "");
+    dropped.push(candidate);
   }
+  // A column dropped before a wider one that had to go too may fit after all:
+  // the last dropped (the most kept) comes back first, so a column is hidden
+  // only when the table cannot hold it (live re-check run 3, N19: the measured
+  // Link clicks dropped before a wide Status, then fit beside what was left).
+  for (const candidate of opts.refill ? [...dropped].reverse() : []) {
+    const back = [...keep, candidate].sort((a, b) => a - b);
+    if (tableWidth(back) <= width) {
+      keep = back;
+      dropped.splice(dropped.indexOf(candidate), 1);
+    }
+  }
+  const hidden = dropped.map((index) => labels[index] ?? "");
+  if (cuttable) {
+    widths[0] = Math.min(fullLabel, Math.max(widths[0] ?? 0, width - (tableWidth(keep) - (widths[0] ?? 0))));
+  }
+  // Each body row's label on one line, cut with … to its column (run-3 N18).
+  const rowLabels = distinctCuts(rows.map((row) => row[0] ?? ""), widths[0] ?? 0);
+  const labelsCut = rowLabels.some((label, index) => label !== (rows[index]?.[0] ?? ""));
 
   if (columnCount === 0 || tableWidth(keep) > width) {
-    return { lines: renderRecords(labels, rows, total, width, opts), hidden: [], fallback: "record", fullWidth, rowLines: [] };
+    return { lines: renderRecords(labels, rows, total, width, opts), hidden: [], fallback: "record", fullWidth, rowLines: [], labelsCut: false };
   }
 
   const right = input.columns.map((column, index) => {
@@ -122,17 +143,15 @@ export function renderTable(input: TableInput, opts: TableOptions): TableRender 
   const lines = [rule("┌", "┬", "┐"), line(labels, true), rule("├", "┼", "┤")];
   const rowLines: [number, number][] = [];
   rows.forEach((row, index) => {
-    // A wrapped label's later lines carry nothing in the other cells.
-    const parts = labelLines[index] ?? [row[0] ?? ""];
-    rowLines.push([lines.length, parts.length]);
-    parts.forEach((part, at) => lines.push(line(at === 0 ? [part, ...row.slice(1)] : [part], false)));
+    rowLines.push([lines.length, 1]);
+    lines.push(line([rowLabels[index] ?? "", ...row.slice(1)], false));
   });
   if (total) {
     lines.push(rule("├", "┼", "┤"), line(total, true));
   }
   lines.push(rule("└", "┴", "┘"));
 
-  return { lines, hidden, fallback: null, fullWidth, rowLines };
+  return { lines, hidden, fallback: null, fullWidth, rowLines, labelsCut };
 }
 
 function dropCandidates(columns: readonly TableColumn[]): number[] {
@@ -178,33 +197,47 @@ function renderRecords(
   return lines;
 }
 
-/** A row label on its words: a word moves down whole, and only a word wider than the whole width breaks. */
-function wrapLabel(text: string, width: number): string[] {
-  const out: string[] = [];
-  let current = "";
-  for (const word of text.split(/\s+/u).filter(Boolean)) {
-    const candidate = current ? `${current} ${word}` : word;
-    if (displayWidth(candidate) <= width) {
-      current = candidate;
-      continue;
-    }
-    if (current) out.push(current);
-    current = "";
-    if (displayWidth(word) <= width) {
-      current = word;
-      continue;
-    }
-    for (const char of Array.from(word)) {
-      if (displayWidth(current + char) > width && current) {
-        out.push(current);
-        current = "";
-      }
-      current += char;
-    }
-  }
-  if (current || out.length === 0) out.push(current);
-  return out;
+/** A row label cut with … to `width` cells; a cut that ends on a separator drops it (`Trials ·…` → `Trials…`). */
+function cutLabel(text: string, width: number): string {
+  if (displayWidth(text) <= width) return text;
+  const cut = truncateCells(text, Math.max(1, width));
+  if (!cut.endsWith("…")) return cut;
+  const chars = Array.from(cut.slice(0, -1));
+  let end = chars.length;
+  while (end > 0 && SEPARATORS.has(chars[end - 1]!)) end -= 1;
+  return `${(end > 0 ? chars.slice(0, end) : chars).join("")}…`;
 }
+
+/**
+ * Each label cut to `width`. Names that share a start (one week's campaigns:
+ * `… · 2026-09-23 — b1_starttrial_us`) can cut to the same words; those rows
+ * keep their start AND their end around … instead, so they can still be told
+ * apart. A cut that is unique already keeps its start.
+ */
+function distinctCuts(texts: readonly string[], width: number): string[] {
+  const cuts = texts.map((text) => cutLabel(text, width));
+  const clashes = (index: number) => cuts.some((cut, other) =>
+    other !== index && cut === cuts[index] && texts[other] !== texts[index]);
+  return cuts.map((cut, index) => (clashes(index) ? cutMiddle(texts[index]!, width) : cut));
+}
+
+/** A label cut in the middle to `width` cells: its start and its end around …, never a separator beside the …. */
+function cutMiddle(text: string, width: number): string {
+  if (displayWidth(text) <= width) return text;
+  const chars = Array.from(text);
+  const room = Math.max(2, width) - 1;
+  const headRoom = Math.floor(room / 2);
+  let head = 0;
+  for (let used = 0; head < chars.length && used + displayWidth(chars[head]!) <= headRoom; head += 1) used += displayWidth(chars[head]!);
+  let tail = chars.length;
+  for (let used = 0; tail > head && used + displayWidth(chars[tail - 1]!) <= room - headRoom; tail -= 1) used += displayWidth(chars[tail - 1]!);
+  while (head > 0 && SEPARATORS.has(chars[head - 1]!)) head -= 1;
+  while (tail < chars.length && SEPARATORS.has(chars[tail]!)) tail += 1;
+  return `${chars.slice(0, head).join("")}…${chars.slice(tail).join("")}`;
+}
+
+/** What a cut label never ends on before its …: spaces and the separators names are built with. */
+const SEPARATORS: ReadonlySet<string> = new Set([" ", "\t", "·", "—", "–", "-", "|", "/", ",", ":", ";"]);
 
 /** Word wrap; a word wider than half the line hard-breaks in place instead of moving down. */
 function wrapPlain(text: string, width: number): string[] {

@@ -46,7 +46,9 @@ export function isSettledWithoutRunning(view: AnswerViewV1): boolean {
  * The lines a settled write prints under its sentence (r4 receipts):
  * - the app's receipt sentence with the state's glyph, in its tone, when the
  *   view carries no state reason (the shell prints a reason itself);
- * - `Sent to the app` under a dismissal the app took;
+ * - under a dismissal, `Sending to the app…` while the no is on its way, then
+ *   `Sent to the app` (r4's last frame, run-3 N22), with the receipt's
+ *   provenance line, if any, as its own dim line under it;
  * - `Nothing ran.` when nothing was sent and there is no fix to point at;
  * - `Nothing was proposed.` when a limit stopped it before any card.
  */
@@ -60,13 +62,28 @@ export function afterwordLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[]
     lines.push(...wrapText(`${head.glyph} ${sentence}`, ctx.width).map((line) => paint(line, toneRole(head.tone), ctx)));
   }
   if (view.state === "cancelled" && (receipt || reason?.code === "dismissed")) {
-    lines.push(paint("Sent to the app", "dim", ctx));
+    lines.push(paint(dismissalAfterword(view, ctx), "dim", ctx));
+    // A provenance line is a fact of the receipt (who proposed, a side effect),
+    // never the delivery word: its own dim line under it, as change.ts draws it.
+    const provenance = viewText(receipt?.provenanceLine);
+    if (provenance) lines.push(...wrapText(provenance, ctx.width).map((line) => paint(line, "dim", ctx)));
   } else if (view.outcome === "not_sent" && !(reason && isRecord(reason.fix))) {
     lines.push(paint("Nothing ran.", "dim", ctx));
   } else if (view.state === "hit_limit" && view.outcome === undefined && !receipt) {
     lines.push(paint("Nothing was proposed.", "dim", ctx));
   }
   return lines;
+}
+
+/**
+ * What a dismissal's last line says. The session marks the dismissed card it
+ * draws at `n` as `sending` (renderer-local) until the app answers; then the
+ * app's receipt (or the same card, unmarked) says it was sent. Scrollback is
+ * printed once and follows no answer: the no was sent.
+ */
+function dismissalAfterword(view: AnswerViewV1, ctx: ViewRenderCtx): string {
+  if ((view as { sending?: unknown }).sending === true && ctx.scrollback !== true) return "Sending to the app…";
+  return "Sent to the app";
 }
 
 /** The reconcile ask (a NEW user turn), when the view carries one. */
