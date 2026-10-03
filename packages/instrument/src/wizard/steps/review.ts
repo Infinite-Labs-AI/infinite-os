@@ -32,7 +32,7 @@ import { checksSummary } from "../../github/checks.js"
 import { DETERMINISTIC_CHECKS_BY_ITEM, isRepoRelativePath, triage, triageKey, type TriageDecision, type TriageItem } from "../../review/triage.js"
 import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
 import { provenPendingFor } from "./prove.js"
-import { announceRehearsal, commitStop, evidenceUrls, isShipContext, prepareShip, recordClickTests, type ShipContext } from "./rehearsal.js"
+import { announceRehearsal, commitStop, isShipContext, prepareShip, recordClickTests, testPageUrls, type ShipContext } from "./rehearsal.js"
 
 const meta = WIZARD_STEP_META.review
 const REVIEW_INPUT_DIR = ".infinite/review"
@@ -960,7 +960,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
             head: fixSha,
             facts: prepared.facts,
             approvedConversions: ctx.state.get().plan?.answers.conversions ?? [],
-            evidenceUrls: evidenceUrls(ctx),
+            evidenceUrls: await testPageUrls(ctx, deps),
             consentRequired: ctx.state.get().plan?.answers.consentMode === "required",
             ghReady: prepared.ghReady
           })

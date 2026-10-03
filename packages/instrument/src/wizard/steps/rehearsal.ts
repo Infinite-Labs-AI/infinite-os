@@ -13,6 +13,7 @@ import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../cont
 import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { readBeforeFactsFile } from "../handoff/before-facts.js"
 import { verdictFactsFor } from "../verdict-facts.js"
 import type { TestTool } from "../contracts/test-engine.js"
 import { wizardGitExtras, type WizardGitOps } from "../../git/index.js"
@@ -53,6 +54,19 @@ export function evidenceUrls(ctx: WizardContext): string[] {
     .get()
     .jobs.flatMap((job) => job.trigger.evidence)
     .flatMap((evidence) => ("url" in evidence ? [evidence.url] : []))
+}
+
+/**
+ * The production pages a test may load beyond home: the page `before`'s dry load navigated to, then the jobs' URL
+ * evidence (DECISIONS §1.7 / §5.2). Since job 10 is seeded from the success branch in code (§1.3) it carries no URL,
+ * so without `before`'s page no rehearsal or post-deploy load ever ran a client-side navigation and the Meta
+ * page-change check could never be measured.
+ */
+export async function testPageUrls(ctx: WizardContext, deps: Pick<WizardDeps, "fs">): Promise<string[]> {
+  const before = await readBeforeFactsFile(deps.fs, ctx.root, ctx.runId)
+  // The page `before` navigated to comes FIRST, so a rehearsal's client-side navigation is the one `before` measured.
+  const navigated = before?.spaNavigation && before.productionHost ? [`https://${before.productionHost}${before.spaNavigation.path}`] : []
+  return [...navigated, ...evidenceUrls(ctx)]
 }
 
 /** Emits the per-tool `check.result` events and the design's sub-status lines for one rehearsal. */
@@ -332,7 +346,7 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     head,
     facts,
     approvedConversions: approved,
-    evidenceUrls: evidenceUrls(ctx),
+    evidenceUrls: await testPageUrls(ctx, deps),
     consentRequired: state.plan?.answers.consentMode === "required",
     ghReady: prepared.ghReady
   })

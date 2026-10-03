@@ -48,7 +48,8 @@ function factsFile(runId: string): BeforeFactsFile {
     envTargetChecks: [],
     liveChecks: [],
     cmpDetected: null,
-    loginFound: true
+    loginFound: true,
+    spaNavigation: null
   }
 }
 

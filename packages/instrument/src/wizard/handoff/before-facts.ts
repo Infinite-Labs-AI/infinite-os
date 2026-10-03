@@ -46,6 +46,11 @@ export interface BeforeFactsFile {
   cmpDetected: TestResult["environment"]["cmpDetected"]
   /** A login exists (auth detector): job 9 and the identity row apply. */
   loginFound: boolean
+  /**
+   * §3x.3 / §5.2 (F6): the client-side navigation the dry load ran (an SPA framework with a page beyond home), or null.
+   * The rehearsal and the post-deploy load run the SAME navigation, so before and after measure the same thing.
+   */
+  spaNavigation: { path: string } | null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -80,7 +85,9 @@ export async function readBeforeFactsFile(fs: WizardFs, root: string, runId: str
     baseline: isRecord(facts.baseline) ? (facts.baseline as unknown as BaselineResponseFields) : null,
     baselineBuild: isRecord(facts.baselineBuild) ? (facts.baselineBuild as unknown as BuildResult) : null
   }
-  return { ...(parsed as unknown as BeforeFactsFile), facts: normalized }
+  const spa = parsed.spaNavigation
+  const spaNavigation = isRecord(spa) && typeof spa.path === "string" ? { path: spa.path } : null
+  return { ...(parsed as unknown as BeforeFactsFile), facts: normalized, spaNavigation }
 }
 
 /** The part of the file the `keys` step reads. */

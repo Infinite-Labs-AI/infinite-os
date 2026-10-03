@@ -80,7 +80,8 @@ export {
 // ---------------------------------------------------------------------------------------------
 
 const TOOL_LABEL: Record<TestTool, string> = { infinite: "Infinite", ga4: "GA4", posthog: "PostHog", meta: "Meta pixel" }
-const SPA_FRAMEWORKS: ReadonlySet<string> = new Set(["next-app-router", "next-pages-router", "vite-react"])
+/** Frameworks whose page changes are client-side: a test load runs one `spaNavigation` there (before and after the deploy). */
+export const SPA_FRAMEWORKS: ReadonlySet<string> = new Set(["next-app-router", "next-pages-router", "vite-react"])
 
 /** The bridge error code of a thrown bridge error (lane O2's `BridgeError {status, code, retryable}`), else null. */
 export function bridgeErrorCode(error: unknown): BridgeErrorCode | null {
@@ -526,12 +527,14 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         let grades: Partial<Record<TestTool, CheckResult>> | null = null
         const dryChecks: CheckResult[] = []
         let dryRequestedSpa = false
+        let spaNavigation: { path: string } | null = null
         if (productionHost === null) {
           sub("! No production domain is known yet; the live test is skipped", "warn")
           dryChecks.push(syntheticCheck("dry_live", "undetermined", "no production domain", at(), runId))
         } else {
           const request = beforeDryLiveRequest({ requestId: newRequestId(), runId, productionHost, pages: jobScan.detections.pages, framework: scan.framework, keys, expect })
           dryRequestedSpa = request.spaNavigation !== undefined
+          spaNavigation = request.spaNavigation ?? null
           const errors = testRequestModeErrors(request, (host) => host === productionHost || host.endsWith(`.${productionHost}`) || productionHost.endsWith(`.${host}`))
           if (request.clicks || request.fakeClickId || errors.length > 0) throw new Error(`before built an invalid dry_live request: ${errors.join("; ")}`)
           sub(`Test load of ${productionHost} (nothing sent)…`, "pending")
@@ -600,7 +603,9 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           envTargetChecks,
           liveChecks,
           cmpDetected: dryLive?.environment.cmpDetected ?? cmpDetectedStatic,
-          loginFound
+          loginFound,
+          // Only a navigation that was measured (a dry load that came back) is one to repeat.
+          spaNavigation: dryLive ? spaNavigation : null
         }
         await writeBeforeFactsFile(deps.fs, ctx.root, factsFile)
         const duplicates = detectDuplicates(census, dryLive)

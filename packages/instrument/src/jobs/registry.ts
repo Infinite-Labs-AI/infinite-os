@@ -617,10 +617,19 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   const unique = new Map<string, ChecklistItem>()
   for (const item of items) if (!unique.has(item.id)) unique.set(item.id, item)
   const sorted = [...unique.values()].sort((a, b) => a.n - b.n || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-  // §3x.3 No two items share a title: any job still holding two items of one title names each by its target.
-  const counts = new Map<string, number>()
-  for (const item of sorted) counts.set(item.title, (counts.get(item.title) ?? 0) + 1)
-  return sorted.map((item) => ((counts.get(item.title) ?? 0) > 1 ? { ...item, title: `${item.title}: ${itemTarget(item)}` } : item))
+  return withDistinctTitles(sorted)
+}
+
+/**
+ * §3x.3 No two items share a title: any job still holding two items of one title names each by its target. The plan
+ * step runs it again over the detector candidates AND the plan's own improve seeds (a seed is titled by its job).
+ */
+export function withDistinctTitles(items: readonly ChecklistItem[]): ChecklistItem[] {
+  const perJob = new Map<string, number>()
+  for (const item of items) perJob.set(item.jobId, (perJob.get(item.jobId) ?? 0) + 1)
+  return items.map((item) =>
+    item.jobId in JOB_TABLE && item.title === JOB_TABLE[item.jobId as keyof typeof JOB_TABLE].title && (perJob.get(item.jobId) ?? 0) > 1 ? { ...item, title: `${item.title}: ${itemTarget(item)}` } : item
+  )
 }
 
 // ---------------------------------------------------------------------------------------------

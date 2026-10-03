@@ -42,7 +42,8 @@ import { bridgeErrorCode, bridgeErrorState } from "../bridge-errors.js"
 import { gradeReasonCode, gradeWords } from "../before-column.js"
 import { buildColumn, type ColumnFact, type RowCellInput } from "../report.js"
 import { productionMatcher, rehearsalTargets, runDesktopTest } from "../../review/rehearse.js"
-import { evidenceUrls } from "./rehearsal.js"
+import { testPageUrls } from "./rehearsal.js"
+import { readBeforeFactsFile } from "../handoff/before-facts.js"
 import { HOST_DENY_V1, normalizeHost } from "../contracts/host-deny.js"
 import type { RunProofState } from "../contracts/state.js"
 import type { VerdictToolFact } from "../contracts/report.js"
@@ -394,11 +395,16 @@ function noVisitReceipts(runId: string, at: string): ReceiptsResponseFields {
   return { runId, phase: "proven_live", checkedAt: at, lanes: Object.fromEntries(RECEIPT_LANES.map((lane) => [lane, { ...unknown }])) as ReceiptsResponseFields["lanes"] }
 }
 
+/** The receipt lane each marker asks about. */
+const MARKER_LANES: Record<keyof ReceiptMarkers, ReceiptLane> = { infinite: "infinite", posthog: "posthog", ga4: "ga4", metaPixel: "meta_pixel", serverLane: "server_lane", metaCapi: "meta_capi" }
+
 async function readReceipts(ctx: WizardContext, deps: WizardDeps, runId: string, markers: ReceiptMarkers): Promise<ReceiptsResponseFields> {
   const started = deps.clock.now().getTime()
+  // §3x.5 (E): only the lanes this run asked about are waited on (a lane with no marker is not this run's to wait for).
+  const asked = new Set((Object.keys(markers) as Array<keyof ReceiptMarkers>).map((key) => MARKER_LANES[key]))
   for (;;) {
     const response = await deps.bridge.postReceipts(runId, { phase: "proven_live", markers, waitMs: RECEIPT_LIMITS.defaultWaitMs })
-    const pending = Object.values(response.lanes).some((lane) => lane.state === "pending")
+    const pending = (Object.entries(response.lanes) as Array<[ReceiptLane, LaneReceipt]>).some(([lane, receipt]) => asked.has(lane) && receipt.state === "pending")
     if (!pending || deps.clock.now().getTime() - started >= RECEIPT_LIMITS.defaultWaitMs) return response
     await deps.clock.sleep(RECEIPT_LIMITS.pollIntervalMs, ctx.signal)
   }
@@ -1083,6 +1089,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   // the PATCH): the cloud answers 409 to it like to anyone's, so the saved record tells them apart.
   let ownClaim: ProveVisitRecord | null = null
   let patchProofState = false
+  let settleDesktop = false
   // R2-4: true only while the Infinite app itself holds this run's proof claim (it then makes the visit).
   let appProving = false
   // Review-2 P3-3: with no production host there is no visit to make, so the proof is never claimed. The run stays
@@ -1108,6 +1115,9 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
       // Still `proving` under this run's own claim: the PATCH never landed, so this run sends it now.
       patchProofState = ownClaim !== null && (proofState === "proving" || proofState === null)
       appProving = ownClaim === null && (proofState === "proving" || proofState === null)
+      // §3x.6: the app proved the run but could not grade the installed set (`undetermined`): this run grades its
+      // stored facts and settles it once (the cloud accepts that from the tag only while the desktop left it so).
+      settleDesktop = ownClaim === null && proofState === "undetermined"
       claimNote = ownClaim
         ? "this run's own visit, from before the resume"
         : proofState === "proving" || proofState === null
@@ -1244,11 +1254,19 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     })
     await ctx.state.save()
 
-    if (patchProofState || ownClaim) {
+    if (patchProofState || ownClaim || settleDesktop) {
       // §3x.6 THE verdict decides the PATCH (properly → proven, problems → problem, else undetermined).
       proofState = visitError ? "undetermined" : await verdictProofState(ctx, deps, runId)
       // §3z.8 (A10): the proofState PATCH names its producer, which holds the claim.
       if (patchProofState) await deps.bridge.patchRun(runId, { proofState }, { producer: "tag" })
+      else if (settleDesktop && visit !== null && proofState !== "undetermined") {
+        try {
+          await deps.bridge.patchRun(runId, { proofState }, { producer: "tag" })
+        } catch (error) {
+          if (bridgeErrorCode(error) !== "claimed_by_other") throw error
+          ctx.emit.emit("step.sub", { step: "prove", text: "Infinite kept the app's own result for this run (it was settled already).", tone: "info" })
+        }
+      }
     }
   } catch (error) {
     if (patchProofState && proofState === null) {
@@ -1367,8 +1385,8 @@ async function measureAfterDeploy(
 
   // Production with one client-side navigation (allowed against production; nothing is sent).
   let deployedDry: PostDeployLoad = { kind: "none", reason: "not_exercised" }
-  const targets = rehearsalTargets(productionHost, evidenceUrls(ctx))
-  const secondPath = targets[1] ? new URL(targets[1].url).pathname : null
+  // The SAME navigation `before` measured (an SPA framework with a page beyond home), so before and after compare.
+  const secondPath = (await readBeforeFactsFile(deps.fs, ctx.root, ctx.runId))?.spaNavigation?.path ?? null
   if (secondPath) {
     ctx.emit.emit("step.sub", { step: "prove", text: `A page change on ${productionHost} (nothing sent)…`, tone: "pending" })
     const loaded = await runDesktopTest(ctx, deps, "prove", {
@@ -1398,7 +1416,7 @@ function isDeniedHost(host: string): boolean {
  * §3x.6 What the real visit measured of every tool under test, and the ids the customer filters its one normal page
  * view by (§3x.5): written to the run state for THE verdict and the disclosure.
  */
-function proofFactsFromVisit(
+export function proofFactsFromVisit(
   visit: NonNullable<ProvenColumnInput["visit"]>,
   receipts: ReceiptsResponseFields,
   installed: readonly TestTool[] | null,

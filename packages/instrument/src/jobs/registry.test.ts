@@ -15,7 +15,7 @@ import { buildBrief } from "./briefs.js"
 import { jobScanFrom } from "./detectors/index.js"
 import { snapshotFromFiles } from "./repo-files.js"
 import { briefConnectionsFrom, briefPlanFrom } from "./plan-data.js"
-import { applyApprovalsTo, createJobRegistry, newlyInstalledTools, requiredLineKind, seedCandidatesFrom } from "./registry.js"
+import { applyApprovalsTo, createJobRegistry, newlyInstalledTools, requiredLineKind, seedCandidatesFrom, withDistinctTitles } from "./registry.js"
 import { fixtureKeys } from "../../test/wizard/o8/fixtures.js"
 import { run3File, run3Json } from "../../test/wizard/run3-fixture.js"
 import { reanchorEvidence } from "./reanchor.js"
@@ -570,6 +570,14 @@ describe("§3x.3 live run 3: job 10 targets the success, job 11 is not a second 
     expect(items.filter((item) => item.jobId === "preview_guard").map((item) => item.title)).toEqual(["Keep previews silent: GA4", "Keep previews silent: Meta pixel"])
     expect(items.find((item) => item.id === "conversions_to_tools:signup")!.title).toBe("Send the signup conversion to every tool")
     expect(new Set(items.map((item) => item.title)).size).toBe(items.length)
+  })
+
+  it("titles: a plan seed titled by its job is named by its target beside the detector items of that job", () => {
+    const item = (id: string, title: string): ChecklistItem => ({ id, jobId: "posthog_improve", n: 3, title, owner: "agent", trigger: { finding: id, evidence: [] }, allow: { files: [], create: [] }, checks: [], state: "pending" })
+    const titled = withDistinctTitles([item("posthog_improve:proxy", "Improve the existing PostHog: proxy"), item("posthog_improve:defaults", "Improve the existing PostHog")])
+    expect(titled.map((entry) => entry.title)).toEqual(["Improve the existing PostHog: proxy", "Improve the existing PostHog: defaults"])
+    // One item of a job keeps the job's own title.
+    expect(withDistinctTitles([item("posthog_improve:defaults", "Improve the existing PostHog")])[0]!.title).toBe("Improve the existing PostHog")
   })
 
   it("W4: the brief names the import from the job's file and says the helpers exist; without helpers it refuses", () => {

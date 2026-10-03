@@ -79,6 +79,7 @@ import type {
 import type { TagKeys } from "../contracts/bridge.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { EVENT_LIMITS } from "../contracts/events.js"
 import { itemT0Scenarios, runItemT0, t0RunParams } from "../item-t0.js"
 
 const META = WIZARD_STEP_META.jobs
@@ -636,7 +637,7 @@ const NOT_DONE_NAMED = 6
  * "! Not done: <job> (<why>)" for every agent job that ended blocked or failed; parts of one job that ended the
  * same way are one line ("Improve the existing PostHog (2 parts): …"). Pure, so it is tested alone.
  */
-export function notDoneLines(items: readonly ChecklistItem[]): string[] {
+export function notDoneLines(items: readonly ChecklistItem[], named: number = NOT_DONE_NAMED): string[] {
   const groups = new Map<string, { title: string; why: string; parts: number }>()
   for (const item of items) {
     if (item.owner !== "agent" || (item.state !== "blocked" && item.state !== "failed")) continue
@@ -648,8 +649,8 @@ export function notDoneLines(items: readonly ChecklistItem[]): string[] {
     else groups.set(key, { title: item.title, why, parts: 1 })
   }
   const all = [...groups.values()]
-  const lines = all.slice(0, NOT_DONE_NAMED).map((group) => `! Not done: ${group.title} (${group.parts > 1 ? `${group.parts} parts: ` : ""}${group.why})`)
-  const rest = all.slice(NOT_DONE_NAMED).reduce((sum, group) => sum + group.parts, 0)
+  const lines = all.slice(0, named).map((group) => `! Not done: ${group.title} (${group.parts > 1 ? `${group.parts} parts: ` : ""}${group.why})`)
+  const rest = all.slice(named).reduce((sum, group) => sum + group.parts, 0)
   if (rest > 0) lines.push(`! …and ${rest} more not done: the pull request lists every job`)
   return lines
 }
@@ -694,7 +695,11 @@ class JobsIo {
     return this.items().find((item) => item.id === id)
   }
 
+  /** Result lines (ok / warn) this step has said: the terminal keeps only `EVENT_LIMITS.subKeptPerStep` of them. */
+  private resultSubs = 0
+
   sub(text: string, tone: "ok" | "warn" | "info" | "pending"): void {
+    if (tone === "ok" || tone === "warn") this.resultSubs += 1
     this.ctx.emit.emit("step.sub", { step: "jobs", text: sanitizeUntrusted(text, 120), tone })
   }
 
@@ -1020,7 +1025,11 @@ class JobsIo {
    * count "7 blocked" used to be all the terminal said; the names were only in the pull request), then the summary.
    */
   closing(): string {
-    for (const line of notDoneLines(this.items())) this.sub(line, "warn")
+    // The terminal keeps the step's last `subKeptPerStep` result lines, so the closing list never pushes out what was
+    // said before it (an agent reaching for .env is an incident the user must still see): it names fewer jobs and
+    // counts the rest ("…and N more"), which the pull request lists in full.
+    const room = Math.max(1, Math.min(NOT_DONE_NAMED, EVENT_LIMITS.subKeptPerStep - this.resultSubs - 1))
+    for (const line of notDoneLines(this.items(), room)) this.sub(line, "warn")
     return this.summary()
   }
 

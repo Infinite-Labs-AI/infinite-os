@@ -363,7 +363,8 @@ export async function writeBeforeFacts(fs: WizardFs, root: string, runId: string
     envTargetChecks: [],
     liveChecks: [],
     cmpDetected: null,
-    loginFound: false
+    loginFound: false,
+    spaNavigation: null
   })
 }
 
