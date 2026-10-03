@@ -144,6 +144,12 @@ export type KindRender = Omit<ViewRender, "head" | "source" | "fixAsk" | "quiet"
   joinsReason?: boolean;
   /** The body draws `? what it does` itself (a card), so the shell does not add it. */
   offersExplain?: boolean;
+  /**
+   * The words in the head's title chip, when the view's own title only repeats
+   * the state chip's (`6 of 7 days are in` beside `◐ 6 of 7 days in`); "" for
+   * no title chip. The shell still draws the head and its state words.
+   */
+  headTitle?: string;
 };
 
 export type KindRenderer<K extends AnswerViewKind> = (view: AnswerViewEnvelopeV1<K>, ctx: ViewRenderCtx) => KindRender;
