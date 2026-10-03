@@ -134,3 +134,58 @@ describe("a kpis window's 'as of' that repeats the source line's is said once (W
     expect(lines(renderView(other, ctx()))).toContain("Now · Jan 15 · not final · as of 17:00");
   });
 });
+
+// Wave 3 r2 (W3-num-gads): the head's chip already says `stateReason.short`
+// (`◐ 4 of 5 days in`); a title that only says the same words again
+// (`4 of 5 days are in`) gives way to what the numbers are of, the source.
+describe("the head does not say the chip's words twice (W3-num-gads)", () => {
+  const partial = (title: string, short: string | null) => numbers({
+    layout: "table", currency: "USD", columns: [SPEND],
+    legs: {
+      settled: {
+        window: { from: "2026-01-08", to: "2026-01-14", tz: "UTC", label: "Jan 8–14" }, final: true, asOf: "2026-01-15T06:00:00Z",
+        rows: [{ id: "c1", label: "Campaign one", cells: { spend: { value: 10 } } }]
+      }
+    }
+  }, {
+    title, state: "partial",
+    stateReason: { code: "partial_coverage", words: "Jan 12 is not in yet.", ...(short ? { short } : {}) }
+  });
+
+  for (const width of [60, 100, 140]) {
+    it(`a title that repeats the short gives way to the source (${width} columns)`, () => {
+      const head = lines(renderView(partial("4 of 5 days are in", "4 of 5 days in"), ctx({ width })))[0]!;
+      expect(head).toContain("◐ 4 of 5 days in");
+      expect(head.match(/4 of 5 days/gu) ?? []).toHaveLength(1);
+      expect(head).toContain("Demo ads");
+    });
+  }
+
+  it("a title with words of its own stays", () => {
+    const head = lines(renderView(partial("Ads since launch", "4 of 5 days in"), ctx()))[0]!;
+    expect(head).toContain("Ads since launch");
+    expect(head).toContain("◐ 4 of 5 days in");
+  });
+
+  it("a title that holds the chip's words and words of its own stays whole (review S1)", () => {
+    const head = lines(renderView(partial("Spend by campaign, 4 of 5 days in", "4 of 5 days in"), ctx()))[0]!;
+    expect(head).toContain("Spend by campaign");
+    expect(head).toContain("◐ 4 of 5 days in");
+    const short = lines(renderView(partial("Clicks in the last days", "In"), ctx()))[0]!;
+    expect(short).toContain("Clicks in the last days");
+    expect(short).toContain("◐ In");
+  });
+
+  it("with no short, the chip says the generic words and the title stays", () => {
+    const head = lines(renderView(partial("4 of 5 days are in", null), ctx()))[0]!;
+    expect(head).toContain("4 of 5 days are in");
+    expect(head).toContain("◐ Partial");
+  });
+
+  it("with no source either, the head is the chip alone", () => {
+    const view = numbers({ layout: "kpis", columns: [SPEND], legs: { settled: { window: { from: "2026-01-14", to: "2026-01-14", tz: "UTC", label: "Jan 14" }, final: true, rows: [{ id: "t", label: "Total", cells: { spend: { value: 0 } } }] } } },
+      { title: "2 of 3 days are in", state: "partial", provenance: undefined, stateReason: { code: "partial_coverage", words: "One day is not in yet.", short: "2 of 3 days in" } });
+    const head = lines(renderView(view, ctx()))[0]!;
+    expect(head.trim()).toBe("◐ 2 of 3 days in");
+  });
+});

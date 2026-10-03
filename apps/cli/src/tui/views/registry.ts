@@ -107,7 +107,7 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
   // A tool that asks twice: its approval waits on this view (never the confirm queue).
   const managed = ctx.approvalClosed ? null : managedApproval(view);
   return {
-    head: headLine(view, shellCtx),
+    head: headLine(body?.headTitle !== undefined ? { ...view, title: body.headTitle } : view, shellCtx),
     source: sourceLine(view, shellCtx),
     detail: [
       ...(body?.lead ?? []),

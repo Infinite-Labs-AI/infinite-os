@@ -152,6 +152,11 @@ const DEFAULT_PAGE_ROWS = 12;
 const UPDATE_FOR_FIELDS = "Update the Infinite app to set a value here";
 const LIVE_STATES = new Set(["needs_yes", "needs_answer"]);
 
+/** The cells a card's top border gives its title (`┌─ ` + title + ` ─┐`, as `cardBox` draws it). */
+function titleRoom(cardOuter: number): number {
+  return cardOuter - 6;
+}
+
 /**
  * Draw the card for an approval view at `ctx.width`, with the card's own key
  * context. Every string from the view is scrubbed; no line is wider than
@@ -196,10 +201,13 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   const explain = summary !== "" || detailRows.length > 0;
   const expires = live ? formatAsOf(approval.expiresAt, ctx.timeZone) : null;
   const docWidth = Math.max(8, Math.min(DOCUMENT_MAX_WIDTH, paneWidth));
+  const title = viewText(approval.title) || viewText(view.title);
 
   // ── above the card: the head (· viewing while a document is open) and the source ──
   const paneCtx: ViewRenderCtx = { ...ctx, width: paneWidth };
-  const head = headLine(view, paneCtx);
+  // The head is never wider than the card under it (W3-ap-pause): a long name is
+  // cut with `…` in the head only; the card's title keeps it whole where it fits.
+  const head = headLine(view, { ...paneCtx, width });
   const source = sourceLine(view, paneCtx);
   const prelude = [
     documentOpen ? viewingHead(head, paneWidth, ctx) : head,
@@ -221,6 +229,11 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
     const object = cardObject(view, approval, innerCtx, notes);
     // A change's target path (contract revision 3): the card's first row, dim, under its title.
     const path = view.kind === "change" ? targetPathLine(view.body, inner, ctx) : null;
+    if (displayWidth(title) > titleRoom(width)) {
+      // The border cuts a long title (a narrow pane, a long ad name): the card's
+      // first rows say it whole, wrapped, so the full name is always on screen.
+      top.push(...paragraphIn(title, inner, "b", ctx));
+    }
     if (path) {
       top.push(path);
     }
@@ -316,7 +329,6 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   const { keyCtx, keys, paged } = drawn;
   const pages = paged.pages;
   const tone: CardTone = view.state === "done" ? "green" : "amber";
-  const title = viewText(approval.title) || viewText(view.title);
   const detail = documentOpen
     ? paged.lines.map((line) => fitPainted(line, docWidth))
     : cardBox(title, paged.lines, width, tone, ctx);

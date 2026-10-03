@@ -81,6 +81,40 @@ describe("health: read, not browsed (TJ-4)", () => {
   });
 });
 
+describe("the fix label prints once (W3-health-sources, W3T-open)", () => {
+  const sameWords = (fixLabel: string, placeLabel: string) => health({
+    items: [
+      { id: "a", name: "Site analytics", state: "ok" },
+      { id: "b", name: "Payments", state: "error", blocker: "3 syncs in a row failed", fix: { label: fixLabel, appLink: { place: "sample.place", label: placeLabel } } }
+    ]
+  }, { appLink: { place: "sample.place", label: "Open Sample place" } });
+
+  for (const width of [60, 100, 140]) {
+    it(`a place that repeats the label is not printed again (${width} columns)`, () => {
+      const out = lines(renderView(sameWords("Open Sample place", "Open Sample place"), ctx({ width, caps: OPEN })));
+      const fix = out.filter((line) => line.startsWith("Fix it:"));
+      expect(fix).toEqual(["Fix it: Open Sample place ↗  (o)"]);
+      expect(out.join("\n").match(/Open Sample place/gu) ?? []).toHaveLength(1);
+    });
+
+    it(`a place the label already names is not printed again (${width} columns)`, () => {
+      const out = lines(renderView(sameWords("Open Sample place", "Sample place"), ctx({ width, caps: OPEN })));
+      expect(out.filter((line) => line.startsWith("Fix it:"))).toEqual(["Fix it: Open Sample place ↗  (o)"]);
+    });
+
+    it(`a place with its own words still follows (o) (r4 view-10, ${width} columns)`, () => {
+      const out = lines(renderView(sameWords("Reconnect payments", "Sample place, in the app"), ctx({ width, caps: OPEN })));
+      expect(out.filter((line) => line.startsWith("Fix it:"))).toEqual(["Fix it: Reconnect payments ↗  (o) · Sample place, in the app"]);
+    });
+  }
+
+  it("o still opens that fix (when o works is unchanged)", () => {
+    const render = renderView(sameWords("Open Sample place", "Open Sample place"), ctx({ caps: OPEN }));
+    expect(render.openLink).toEqual({ place: "sample.place" });
+    expect(render.openLabel).toBe("Open Sample place");
+  });
+});
+
 describe("a one-column table with no header label is a plain list (W3-health-scopes)", () => {
   const store = health({
     items: [{ id: "store", name: "Demo store", state: "ok" }],

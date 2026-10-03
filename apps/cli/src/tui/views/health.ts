@@ -39,6 +39,20 @@ const STEP_GLYPHS: Record<string, { glyph: string; role: ItemTone }> = {
   unreadable: { glyph: "?", role: "muted" }
 };
 
+/**
+ * `(o) · <place>` after a fix, or just `(o)` when the place only repeats the
+ * fix's own label (W3-health-sources: `Open <place> ↗  (o) · Open <place>`
+ * printed the label twice). A place with words of its own (r4 view-10:
+ * `<fix> ↗  (o) · <place>, in the app`) keeps them.
+ */
+function fixOpenHint(label: string, appLink: unknown): string {
+  const words = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const place = isRecord(appLink) ? words(viewText(appLink.label)) : "";
+  const named = words(label);
+  if (place && (named === place || ` ${named} `.includes(` ${place} `) || ` ${place} `.includes(` ${named} `))) return "(o)";
+  return openHint(appLink);
+}
+
 /** The label of a fix `o` can open (it has an app link), else null. */
 function openableFix(fix: unknown): string | null {
   return isRecord(fix) && isRecord(fix.appLink) ? viewText(fix.label) || null : null;
@@ -136,7 +150,7 @@ export function healthBodyLines(
     const lead = "Fix it: ";
     if (ctx.caps.open && isRecord(fix.appLink)) {
       const inner = { ...ctx, width: Math.max(1, ctx.width - lead.length) };
-      return [`${paint(lead, "muted", ctx)}${linkLine(label, inner, index === target ? openHint(fix.appLink) : "")}`];
+      return [`${paint(lead, "muted", ctx)}${linkLine(label, inner, index === target ? fixOpenHint(label, fix.appLink) : "")}`];
     }
     return wrapText(`${lead}${label}`, ctx.width).map((line) => paint(line, "muted", ctx));
   }));

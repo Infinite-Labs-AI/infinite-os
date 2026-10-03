@@ -46,6 +46,7 @@ import {
   viewText,
   wrapText
 } from "./primitives.js";
+import { stateHeadFor } from "./states.js";
 import type { KindRender, KindRenderer, ViewRenderCtx } from "./types.js";
 
 // ── small guards: a decoded view vouches only for its envelope ──
@@ -1178,6 +1179,33 @@ function sourceWordsLines(view: Parameters<KindRenderer<"numbers">>[0], ctx: Vie
   return source && via ? wrapText(`Source: ${source}, ${via}`, ctx.width).map((line) => paint(line, "muted", ctx)) : [];
 }
 
+/** A text's words, lower case, for telling whether one says another again. */
+function wordSet(text: string): Set<string> {
+  return new Set(text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+}
+
+/** Words a title may add to its chip's and still only repeat it (`n of m days are in` beside `n of m days in`). */
+const LINKING_WORDS: ReadonlySet<string> = new Set(["are", "is"]);
+
+/**
+ * The head's title when the view's own only repeats its state chip (W3-num-gads:
+ * `n of m days are in` beside `◐ n of m days in`): what the numbers are of, the
+ * source (r4 flow-numbers-03 names the subject in the title chip), or no title
+ * at all. Undefined (the view's title stands) when there is no short, or the
+ * title has words of its own (any word that is not the chip's, past `are` / `is`).
+ */
+function headTitleFor(view: Parameters<KindRenderer<"numbers">>[0]): string | undefined {
+  const reason = asRecord(view.stateReason);
+  const short = typeof reason.short === "string" ? stateHeadFor(view).words : "";
+  if (!short) return undefined;
+  const title = wordSet(viewText(view.title));
+  const chip = wordSet(short);
+  // Only a title that says nothing past the chip's words (and a linking `are` / `is`) gives way.
+  if (!title.size || ![...title].every((word) => chip.has(word) || LINKING_WORDS.has(word))) return undefined;
+  const source = viewText(asRecord(view.provenance).source);
+  return source && ![...wordSet(source)].every((word) => chip.has(word)) ? source : "";
+}
+
 export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender => {
   const asOf = typeof view.asOf === "string" ? Date.parse(view.asOf) : Number.NaN;
   const draw: MeasureDraw = {
@@ -1186,6 +1214,7 @@ export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender =>
   };
   const body = numbersBodyLines(asRecord(view.body), ctx, draw, false, "", view as AnswerViewV1);
   const source = draw.legendDrawn ? sourceWordsLines(view, ctx) : [];
+  const headTitle = headTitleFor(view);
   const detail = source.length ? [...body, "", ...source] : body;
   return {
     detail,
@@ -1195,6 +1224,7 @@ export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender =>
     // r4: a ready table is browsed by row (`j k row`); one that carries a state
     // (not measured, partial, out of date…) is read, not browsed (flow-numbers-02: no keys).
     rowCount: view.state === "ready" ? selectableRows(asRecord(view.body)) : 0,
-    ...(draw.hidden ? { hiddenColumns: draw.hidden } : {})
+    ...(draw.hidden ? { hiddenColumns: draw.hidden } : {}),
+    ...(headTitle !== undefined ? { headTitle } : {})
   };
 };

@@ -92,11 +92,12 @@ export class DesktopAppClientError extends Error {
      */
     public readonly view?: AnswerViewV1,
     /**
-     * Set only on a streamed confirm (confirm.stream.v1) that ended in an
-     * `error` before any receipt that the app marked `notSent: true`, or
-     * whose code is refused before anything resolves (`field_invalid`,
-     * `receipt_view_unavailable`): the card was not done. Never set when the
-     * outcome is unknown.
+     * The card was not done: a refusal with no receipt view that the app
+     * marked `notSent: true` (a streamed `error` frame, a streamed failed
+     * receipt frame, or a plain confirm's failed answer), or a streamed
+     * `error` whose code is refused before anything resolves
+     * (`field_invalid`, `receipt_view_unavailable`). Never set when the
+     * outcome is unknown, nor when a receipt view speaks for itself.
      */
     public readonly nothingRan?: true
   ) {
@@ -730,7 +731,8 @@ function createClientFromDescriptor(
           "desktop_confirmation_failed",
           "Desktop could not resolve the confirmation."
         );
-        throw new DesktopAppClientError(error.code, error.message, failureView);
+        // The app's own pre-send mark proves nothing left; a receipt view, when there is one, says it instead.
+        throw new DesktopAppClientError(error.code, error.message, failureView, !failureView && refusalNotSent(payload) ? true : undefined);
       }
       const executionFailure = findNestedExecutionFailure(payload);
       if (executionFailure) {
@@ -822,8 +824,8 @@ const APP_OPEN_STATUSES: ReadonlySet<string> = new Set<AppOpenStatus>([
  * and the app trusts each of its not-sent codes (its ledger's
  * NOT_SENT_OUTCOME_CODES: `stale_turn_context`, `local_provider_busy`, …) only
  * together with its own pre-send mark, which can come after the write was
- * handed to the executor. So the terminal says "Not done" only when the frame
- * carries that mark (`notSent: true`, see `streamRefusalNotSent`) or the code
+ * handed to the executor. So the terminal says "Not sent" only when the frame
+ * carries that mark (`notSent: true`, see `refusalNotSent`) or the code
  * is one of these; anything else keeps the neutral `! <app's words>` (not sure
  * it happened). An older desktop never sends the mark, so its refusals read as
  * unsure, which is the honest answer. This is an allowlist, never a denylist.
@@ -833,8 +835,8 @@ const STREAM_NOT_RUN_CODES: ReadonlySet<string> = new Set([
   "receipt_view_unavailable"
 ]);
 
-/** The app's own pre-send mark on a refusal frame (`notSent: true`, beside its code, or on its `error`). */
-function streamRefusalNotSent(data: unknown): boolean {
+/** The app's own pre-send mark on a refusal (`notSent: true`, beside its code, or on its `error`): a literal true only. */
+function refusalNotSent(data: unknown): boolean {
   const source = isRecord(data) && isRecord(data.error) ? data.error : data;
   return isRecord(source) && source.notSent === true;
 }
@@ -930,7 +932,7 @@ async function streamConfirmation(
         error.code,
         error.message,
         undefined,
-        streamRefusalNotSent(terminal.data) || STREAM_NOT_RUN_CODES.has(error.code) ? true : undefined
+        refusalNotSent(terminal.data) || STREAM_NOT_RUN_CODES.has(error.code) ? true : undefined
       );
     }
     // A `done` with no receipt before it: the bridge never sends one, so what happened is not known.
@@ -986,7 +988,8 @@ function receiptOutcome(data: Record<string, unknown>): DesktopConfirmResult | D
   const view = decodeAnswerView(payload.view) ?? undefined;
   if (payload.ok !== true) {
     const error = remotePayloadError(payload, "desktop_confirmation_failed", "Desktop could not resolve the confirmation.");
-    return new DesktopAppClientError(error.code, error.message, view);
+    // As a plain confirm's failure: the app's pre-send mark proves nothing left, unless a receipt view says it.
+    return new DesktopAppClientError(error.code, error.message, view, !view && refusalNotSent(payload) ? true : undefined);
   }
   const executionFailure = findNestedExecutionFailure(payload);
   if (executionFailure) {

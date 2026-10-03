@@ -174,7 +174,7 @@ describe("T12 in the session (fake TTY, skipped on CI)", () => {
       await sendKeys(input, "p");
       await waitFor(() => lastFrame().includes("The follow-up stopped: The follow-up could not finish."), 4_000, lastFrame);
       expect(lastFrame()).toContain("Stopped spending at 10:42");
-      expect(lastFrame()).not.toMatch(/Not done|nothing ran/iu);
+      expect(lastFrame()).not.toMatch(/Not sent|Not done|nothing ran/iu);
       await sendKeys(input, "/exit\r");
       await session;
       resetTurnState();
@@ -203,7 +203,7 @@ describe("T12 in the session (fake TTY, skipped on CI)", () => {
       await sendKeys(input, "pause it\r");
       await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
       await sendKeys(input, "p");
-      await waitFor(() => lastFrame().includes("Not done: That budget must be at least 1."), 4_000, lastFrame);
+      await waitFor(() => lastFrame().includes("Not sent: That budget must be at least 1."), 4_000, lastFrame);
       // The card is back in front for a corrected answer, never a receipt.
       expect(lastFrame()).toContain("Pause ad 01?");
       expect(lastFrame()).not.toContain("Stopped spending at 10:42");
@@ -426,7 +426,7 @@ describe("P33-M2 / S3 in the session (fake TTY, skipped on CI)", () => {
       run.follow.resolve({ ok: true, view: RECEIPT_VIEW, followUpError: { code: "desktop_turn_detached", message: "detached" } });
       await waitFor(() => run.lastFrame().includes("Stopped the follow-up."), 4_000, run.lastFrame);
       expect(run.lastFrame()).toContain("Stopped spending at 10:42");
-      expect(run.lastFrame()).not.toMatch(/Not done|following up/u);
+      expect(run.lastFrame()).not.toMatch(/Not sent|Not done|following up/u);
       expect(run.keyBar()).not.toContain("esc");
       await sendKeys(run.input, "/exit\r");
       await run.session;
