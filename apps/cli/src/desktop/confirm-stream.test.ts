@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 
 import { appOpenLines } from "./app-open.js";
 import { confirmErrorLines } from "./confirm-result-lines.js";
-import { confirmStreamSteps, followUpOutcome, followUpViewFrame } from "./confirm-stream.js";
+import { confirmStreamSteps, followUpFrameRoute, followUpOutcome, followUpViewFrame } from "./confirm-stream.js";
+import { INFINITE_R4_THEME } from "../tui/theme.js";
+import { renderCommittedTurn } from "../tui/views/layout.js";
 
 function receiptView(overrides: Record<string, unknown> = {}) {
   return {
@@ -55,11 +57,65 @@ describe("the follow-up after a streamed yes", () => {
     expect(outcome.message).toBe("Done.");
   });
 
+  // P33-M1: the answer is prose for the markdown renderer, never one collapsed line.
+  it("keeps every line break, and still drops ESC, OSC and bidi controls", () => {
+    const esc = String.fromCharCode(27);
+    const bel = String.fromCharCode(7);
+    const message = `${esc}]8;;https://x.test${bel}Paused.${esc}]8;;${bel} Here is what changed:\r\n\n- Ad one: ${esc}[1mpaused${esc}[0m\n- Ad two:‮ still on\n`;
+    const outcome = followUpOutcome({ ok: true, followUp: { message, actionCalls: [] } }, { confirmFieldsCapable: true });
+    expect(outcome.message.split("\n")).toEqual(["Paused. Here is what changed:", "", "- Ad one: paused", "- Ad two:  still on"]);
+    expect(outcome.message).not.toMatch(/[\u001b\u0007‮\r]/u);
+  });
+
+  it("draws a list and a table exactly as a normal turn's answer draws the same text", () => {
+    const text = "Paused. Here is what changed:\n\n- Ad one: paused\n- Ad two: still on\n\n| Ad | Spend |\n|---|---|\n| Ad one | $12 |\n| Ad two | $30 |\n\nWant the ad set paused too?";
+    const follow = followUpOutcome({ ok: true, followUp: { message: text, actionCalls: [] } }, { confirmFieldsCapable: true });
+    const draw = (answer: string) => renderCommittedTurn({
+      messages: [{ role: "user", text: "pause hook b" }, { role: "assistant", text: answer }],
+      views: [], focus: null, width: 100, color: false, theme: INFINITE_R4_THEME
+    });
+    const followUpLines = draw(follow.message);
+    expect(followUpLines).toEqual(draw(text));
+    expect(followUpLines.filter((line) => line.includes("•"))).toHaveLength(2);
+    expect(followUpLines.some((line) => line.includes("┌"))).toBe(true);
+    expect(followUpLines.some((line) => /│ Ad one │\s+\$12 │/u.test(line))).toBe(true);
+  });
+
   it("only a follow-up's decoded view frames go on the turn", () => {
     const frame = { protocolVersion: 1 as const, requestId: "r", sequence: 2, kind: "progress" as const, data: { type: "tool.view", stage: "tool", message: "", viewId: "v1", name: "read_ads", view: receiptView({ state: "ready", receipt: undefined }) } };
     expect(followUpViewFrame(frame)?.viewId).toBe("v1");
     expect(followUpViewFrame({ ...frame, data: { type: "message.delta", text: "x" } })).toBeNull();
     expect(followUpViewFrame({ ...frame, data: { type: "tool.view", view: { kind: "carousel" } } })).toBeNull();
+  });
+});
+
+// P33-S3: the follow-up's frames go where a normal turn's go (its views, its Steps, its drafts).
+describe("where a follow-up's progress frames go (followUpFrameRoute)", () => {
+  const base = { protocolVersion: 1 as const, requestId: "r", sequence: 3, kind: "progress" as const };
+
+  it("a call's start and end become Steps events, with the app's step words decoded", () => {
+    const start = followUpFrameRoute({ ...base, data: { type: "tool.start", stage: "tool", message: "", toolId: "c1", name: "list_ads", context: "", words: { label: "checking your ad set" } } });
+    expect(start).toMatchObject({ type: "step", event: { type: "tool.start", toolId: "c1", name: "list_ads", words: { label: "checking your ad set" } } });
+    const done = followUpFrameRoute({ ...base, data: { type: "tool.complete", stage: "tool", message: "", toolId: "c1", name: "list_ads", status: "ok" } });
+    expect(done).toMatchObject({ type: "step", event: { type: "tool.complete", toolId: "c1" } });
+    expect(followUpFrameRoute({ ...base, data: { type: "tool.progress", stage: "tool", message: "2 of 3", toolId: "c1", name: "list_ads" } }))
+      .toMatchObject({ type: "step", event: { type: "tool.progress" } });
+  });
+
+  it("an image draft goes to the draft lines, rebuilt from its allowlist (no brief, no URL)", () => {
+    const route = followUpFrameRoute({ ...base, data: {
+      type: "creative.draft", runId: "run_1", status: "running", count: 3, format: "png", aspectRatio: "4:5", quality: "high",
+      brief: "secret brief", imageUrl: "https://x.test/a.png"
+    } });
+    expect(route?.type).toBe("draft");
+    expect(JSON.stringify(route)).not.toMatch(/secret brief|https:/u);
+  });
+
+  it("a view goes to the turn's views; streamed text and unknown frames are dropped", () => {
+    expect(followUpFrameRoute({ ...base, data: { type: "tool.view", stage: "tool", message: "", viewId: "v1", name: "read_ads", view: receiptView({ state: "ready", receipt: undefined }) } })?.type).toBe("view");
+    expect(followUpFrameRoute({ ...base, data: { type: "message.delta", stage: "message", message: "x", text: "x" } })).toBeNull();
+    expect(followUpFrameRoute({ ...base, data: { delta: "x" } })).toBeNull();
+    expect(followUpFrameRoute({ ...base, data: { type: "creative.draft", runId: "" } })).toBeNull();
   });
 });
 
@@ -105,6 +161,44 @@ describe("the session's ordered steps when a confirm ends (confirmStreamSteps)",
   it("a throw after the receipt adds only the follow-up's error words: the receipt stays done", () => {
     const steps = confirmStreamSteps({ type: "rejected", error: new Error("The stream closed.") }, { answered: true, confirmFieldsCapable: true });
     expect(steps).toEqual([{ type: "lines", lines: [{ tone: "warn", text: "! The follow-up stopped: The stream closed." }] }]);
+  });
+
+  // P33-M2: a follow-up that ends after the card's turn went up never answers another question.
+  it("off the card's turn, the follow-up's answer is labelled lines, never an assistant message", () => {
+    const result = { ...FOLLOW, followUp: { ...FOLLOW.followUp, message: "It stopped spending.\n\n- Ad one: paused", actionCalls: [] } };
+    const steps = confirmStreamSteps({ type: "resolved", result }, { answered: true, confirmFieldsCapable: true, onCardTurn: false, label: "Pause ad 01" });
+    expect(steps.map((step) => step.type)).toEqual(["lines"]);
+    const lines = steps[0]!.type === "lines" ? steps[0]!.lines.map((line) => line.text) : [];
+    expect(lines).toEqual(["↳ The follow-up to “Pause ad 01”:", "  It stopped spending.", "", "  - Ad one: paused"]);
+    expect(steps.some((step) => step.type === "message")).toBe(false);
+  });
+
+  it("off the card's turn, a card the follow-up proposed is queued only after a line says whose it is", () => {
+    const steps = confirmStreamSteps({ type: "resolved", result: FOLLOW }, { answered: true, confirmFieldsCapable: true, onCardTurn: false, label: "Pause ad 01" });
+    expect(steps.map((step) => step.type)).toEqual(["lines", "lines", "queue"]);
+    const said = steps[1]!.type === "lines" ? steps[1]!.lines.map((line) => line.text) : [];
+    expect(said).toEqual(["↳ The follow-up to “Pause ad 01” asks for your OK on a new card."]);
+    expect(steps[2]).toMatchObject({ type: "queue", pending: [expect.objectContaining({ confirmationHandle: "h-2" })] });
+  });
+
+  it("off the card's turn, the follow-up's error words say whose follow-up stopped", () => {
+    const steps = confirmStreamSteps({ type: "rejected", error: new Error("The stream closed.") }, { answered: true, confirmFieldsCapable: true, onCardTurn: false, label: "Pause ad 01" });
+    expect(steps).toEqual([{ type: "lines", lines: [
+      { tone: "muted", text: "↳ The follow-up to “Pause ad 01”:" },
+      { tone: "warn", text: "! The follow-up stopped: The stream closed." }
+    ] }]);
+  });
+
+  it("on the card's turn (the default) nothing is labelled", () => {
+    const steps = confirmStreamSteps({ type: "resolved", result: FOLLOW }, { answered: true, confirmFieldsCapable: true, onCardTurn: true, label: "Pause ad 01" });
+    expect(steps.map((step) => step.type)).toEqual(["message", "queue"]);
+  });
+
+  it("a follow-up the user stopped (Esc) says so, and never re-decides the change", () => {
+    const stopped = { ok: true, view: receiptView(), followUpError: { code: "desktop_turn_detached", message: "The request was detached." } };
+    const steps = confirmStreamSteps({ type: "resolved", result: stopped }, { answered: true, confirmFieldsCapable: true, stopped: true });
+    expect(steps).toEqual([{ type: "lines", lines: [{ tone: "muted", text: "■ Stopped the follow-up. Anything already running in the app may still finish." }] }]);
+    expect(steps.some((step) => step.type === "settle")).toBe(false);
   });
 
   it("a throw with no receipt settles the card from the error (field_invalid keeps it live there), nothing else", () => {
