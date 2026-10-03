@@ -2,10 +2,12 @@
 // (a null is a dash with a footnote, never 0), its history (`when  from → to ·
 // by who`, a null who is `who: unknown`), an alert rule's schedule, and the
 // view's next steps as selectable rows (Enter sends the ask as a NEW turn).
-// A `creativeRef` is a picture: the terminal never draws one.
-import type { CellV1, TextCellV1 } from "@infinite-os/types";
+// A `creativeRef` is a picture: the terminal never draws one. The thing's own
+// `status` (rev 3) leads its name line, drawn the way a list row's status is.
+import type { CellV1, StatusWordV1, TextCellV1 } from "@infinite-os/types";
 
-import { cellText, fitLine, formatAsOf, FootnoteBook, isRecord, paint, viewText, wrapText } from "./primitives.js";
+import { displayWidth } from "../lib/display-width.js";
+import { cellText, fitLine, formatAsOf, FootnoteBook, isRecord, paint, toneRole, viewText, wrapText } from "./primitives.js";
 import {
   bodyOf,
   changeText,
@@ -25,6 +27,10 @@ import type { KindRenderer, ViewRenderCtx } from "./types.js";
 
 /** Record labels pad to at least this many cells, so the values start where r4's do. */
 const RECORD_LABEL_CELLS = 12;
+/** The name never gets narrower than this beside the status; narrower, the status takes its own line. */
+const MIN_NAME_CELLS = 12;
+const GAP = "  ";
+const STATUS_TONES: ReadonlySet<string> = new Set<StatusWordV1["tone"]>(["ok", "warn", "bad", "muted"]);
 
 export const renderRecord: KindRenderer<"record"> = (view, ctx) => {
   const body = bodyOf(view);
@@ -33,10 +39,11 @@ export const renderRecord: KindRenderer<"record"> = (view, ctx) => {
   const selected = clampIndex(ctx.selected, steps.length);
   const lines: string[] = [];
 
-  // r4: the thing's full name in bold first (`Ad “Hook B · founder POV”`), when the view gives it.
-  const title = viewText(body.title);
-  if (title) {
-    lines.push(...wrapText(title, ctx.width).map((line) => paint(line, "b", ctx)), "");
+  // r4: the thing's full name in bold first (`Ad “Hook B · founder POV”`), when the view gives it,
+  // after its own status (`● Paused  `, rev 3) in the status tone.
+  const head = headLines(viewText(body.title), statusWord(body.status), ctx);
+  if (head.length) {
+    lines.push(...head, "");
   }
   const currency = typeof body.currency === "string" ? body.currency : null;
   const fields = recordsOf(body.fields).map((field) => {
@@ -63,6 +70,35 @@ export const renderRecord: KindRenderer<"record"> = (view, ctx) => {
     rowAsks: steps.map((step) => step.ask)
   };
 };
+
+/** The record's own status (rev 3), when it has a word and one of the contract's tones. */
+function statusWord(value: unknown): { word: string; tone: StatusWordV1["tone"] } | null {
+  if (!isRecord(value) || typeof value.tone !== "string" || !STATUS_TONES.has(value.tone)) return null;
+  const word = viewText(value.word);
+  return word ? { word, tone: value.tone as StatusWordV1["tone"] } : null;
+}
+
+/**
+ * The name line: `● Paused  Ad “Hook B”`, the status word in its tone (as a
+ * list row draws it) and the name in bold, wrapped under itself. Too narrow
+ * for both, the status takes its own line above the name.
+ */
+function headLines(title: string, status: ReturnType<typeof statusWord>, ctx: ViewRenderCtx): string[] {
+  const bold = (line: string) => paint(line, "b", ctx);
+  if (!status) {
+    return wrapText(title, ctx.width).map(bold);
+  }
+  const chip = `● ${status.word}`;
+  const shown = paint(fitLine(chip, ctx.width), toneRole(status.tone), ctx);
+  const indent = displayWidth(chip) + GAP.length;
+  if (!title) {
+    return [shown];
+  }
+  if (ctx.width - indent < MIN_NAME_CELLS) {
+    return [shown, ...wrapText(title, ctx.width).map(bold)];
+  }
+  return wrapText(title, ctx.width - indent).map((line, index) => (index === 0 ? `${shown}${GAP}${bold(line)}` : `${" ".repeat(indent)}${bold(line)}`));
+}
 
 /**
  * r4 `Next: pause it`: each next step after a dim `Next:`. Once the user

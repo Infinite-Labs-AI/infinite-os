@@ -110,7 +110,7 @@ export const renderList: KindRenderer<"list"> = (view, ctx) => {
     }
   } else {
     const currency = typeof body.currency === "string" ? body.currency : null;
-    const drawn = rowLines(rows, columns, selected, ctx, notes, currency);
+    const drawn = rowLines(rows, columns, selected, ctx, notes, currency, viewText(body.nameLabel));
     hiddenColumns = drawn.hidden.length;
     // Top rows first, then each group under its label and reason.
     lines.push(...drawn.header, ...drawn.rows.slice(0, top.length).flat());
@@ -207,7 +207,8 @@ function rowLines(
   selected: number,
   ctx: ViewRenderCtx,
   notes: FootnoteBook,
-  currency: string | null = null
+  currency: string | null = null,
+  nameLabel = ""
 ): { header: string[]; rows: string[][]; hidden: string[] } {
   const width = Math.max(1, Math.floor(ctx.width));
   const titles = rows.map((row) => viewText(row.title));
@@ -296,8 +297,10 @@ function rowLines(
     };
   }
 
+  // The name column's head is the view's `nameLabel` ("Ad"; rev 3), cut to the column so the value heads never move.
+  const nameHead = padEndCells(truncateCells(nameLabel, titleWidth), titleWidth);
   const header = !bare && kept.length && kept.some((index) => columns[index]?.label)
-    ? [paint(fitLine(`${" ".repeat(fixed + titleWidth)}${kept.map((index) => `${GAP}${align(columns[index]?.label ?? "", index)}`).join("")}`.trimEnd(), width), "muted", ctx)]
+    ? [paint(fitLine(`${" ".repeat(fixed)}${nameHead}${kept.map((index) => `${GAP}${align(columns[index]?.label ?? "", index)}`).join("")}`.trimEnd(), width), "muted", ctx)]
     : [];
   return {
     header,

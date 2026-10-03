@@ -732,3 +732,79 @@ describe("clipboard", () => {
     expect(Buffer.from(payload, "base64").toString("utf8")).toBe("ab");
   });
 });
+
+// Contract revision 3: a list may name its row-name column (`nameLabel`) and a
+// record may carry its own status (r4 view-02 / view-03; Cmd+L r2 draws the
+// same words as the list head cell and the record's head chip).
+describe("rev 3: a list's name column head and a record's own status", () => {
+  /** Two money columns: not r4's self-describing row grammar, so the header row draws. */
+  const headed = (body: Record<string, unknown> = {}) => withBody("list-rows", {
+    columns: [{ key: "spend", label: "Spend", unit: "money" }, { key: "cpc", label: "CPC", unit: "money" }, { key: "trials", label: "Trials", unit: "count" }],
+    ...body
+  });
+
+  it("the name column's head reads nameLabel, over the row titles", () => {
+    const render = draw(headed({ nameLabel: "Ad" }));
+    const header = render.detail[0]!;
+    const firstRow = render.detail[1]!;
+    expect(header.indexOf("Ad")).toBe(firstRow.indexOf("Hook A"));
+    expect(header).toMatch(/Spend/u);
+    // The value columns' heads stay where they were without it.
+    const without = draw(headed()).detail[0]!;
+    expect(without.slice(without.indexOf("Spend") - 2)).toBe(header.slice(header.indexOf("Spend") - 2));
+    expect(without.trimStart().startsWith("Spend")).toBe(true);
+  });
+
+  it("a long nameLabel is cut to the name column, so the value heads never move", () => {
+    const render = draw(headed({ nameLabel: "Ad name as the host words it" }));
+    const without = draw(headed()).detail[0]!;
+    const header = render.detail[0]!;
+    expect(header.indexOf("Spend")).toBe(without.indexOf("Spend"));
+    expect(header).toContain("…");
+    for (const width of [48, 60, 100, 140]) {
+      const lines = allLines(draw(headed({ nameLabel: "Ad name as the host words it" }), { width }));
+      expect(lines.filter((line) => line.length > width), `@${width}`).toEqual([]);
+    }
+  });
+
+  it("r4's self-describing rows keep no header row, with or without nameLabel", () => {
+    expect(draw(withBody("list-rows", { nameLabel: "Ad", currency: "USD" })).detail).toEqual(draw(withBody("list-rows", { currency: "USD" })).detail);
+  });
+
+  it("the record's head line shows its status word first, the way a list row does", () => {
+    const render = draw(withBody("record-ad", { title: "Ad “Hook B · founder POV”", status: { word: "Paused", tone: "muted" } }));
+    expect(render.detail[0]).toBe("● Paused  Ad “Hook B · founder POV”");
+    expect(render.detail[1]).toBe("");
+    // Without a title the status still shows, on its own line.
+    expect(draw(withBody("record-ad", { status: { word: "Active", tone: "ok" } })).detail.slice(0, 2)).toEqual(["● Active", ""]);
+  });
+
+  it("the status word is drawn in its tone", () => {
+    const ok = draw(withBody("record-ad", { title: "Ad “Hook B”", status: { word: "Active", tone: "ok" } }), { color: true }).detail[0]!;
+    expect(ok).toContain(ansiFg(theme, "success"));
+    expect(stripAnsi(ok)).toBe("● Active  Ad “Hook B”");
+    const bad = draw(withBody("record-ad", { title: "Ad “Hook B”", status: { word: "Rejected", tone: "bad" } }), { color: true }).detail[0]!;
+    expect(bad).toContain(ansiFg(theme, "error"));
+  });
+
+  it("a status with a tone the contract does not name never draws", () => {
+    const render = draw(withBody("record-ad", { title: "Ad “Hook B”", status: { word: "Loud", tone: "neon" } }));
+    expect(render.detail[0]).toBe("Ad “Hook B”");
+    expect(text(render)).not.toContain("Loud");
+  });
+
+  it("a record without status draws as before", () => {
+    expect(draw(withBody("record-ad", { title: "Ad “Hook B”" })).detail[0]).toBe("Ad “Hook B”");
+  });
+
+  it("a long title with a status wraps under the title, never wider than the pane", () => {
+    const title = "Ad “Hook B · founder POV · a much longer name than the pane holds at sixty”";
+    for (const width of [48, 60, 100, 140]) {
+      const render = draw(withBody("record-ad", { title, status: { word: "Paused", tone: "muted" } }), { width });
+      expect(render.detail[0]!.startsWith("● Paused  Ad “Hook B")).toBe(true);
+      expect(allLines(render).filter((line) => line.length > width), `@${width}`).toEqual([]);
+      const words = render.detail.slice(0, render.detail.indexOf("")).map((line, index) => (index === 0 ? line.slice(10) : line.trimStart())).join(" ");
+      expect(words).toBe(title);
+    }
+  });
+});

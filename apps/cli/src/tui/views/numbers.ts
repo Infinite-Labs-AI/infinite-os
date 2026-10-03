@@ -432,6 +432,8 @@ function selectedRow(input: CellTableInput): number | null {
 
 /** Rows a record view expands (every value) around the selected one; the rest print their label. */
 const RECORD_WINDOW = 12;
+/** A leader's detail line sits under the leader's name when that leaves at least this many cells; else it indents 2. */
+const LEADER_DETAIL_MIN_CELLS = 16;
 
 /**
  * Each row as its label, then `  Column: value` lines (the narrow-table record
@@ -1021,7 +1023,13 @@ export function numbersBodyLines(body: Record<string, unknown>, ctx: ViewRenderC
     const row = viewText(leader.rowLabel);
     if (!label || !row) return [];
     const value = drawCell(leader.value as TableCell, column ?? { label: "", unit: "count" }, currency, draw.notes);
-    return wrapText(`${label} · ${row} · ${value}`, ctx.width);
+    const head = wrapText(`${label} · ${row} · ${value}`, ctx.width);
+    // rev 3: the host's one context line (`$189.32 spent`), dim under the name, cut to the width (never wrapped).
+    const detail = viewText(leader.detail);
+    if (!detail) return head;
+    const under = displayWidth(`${label} · `);
+    const indent = head.length === 1 && ctx.width - under >= LEADER_DETAIL_MIN_CELLS ? under : Math.min(2, Math.max(0, ctx.width - 1));
+    return [...head, `${" ".repeat(indent)}${paint(fitLine(detail, ctx.width - indent), "muted", ctx)}`];
   });
   blocks.push(leaders);
 
