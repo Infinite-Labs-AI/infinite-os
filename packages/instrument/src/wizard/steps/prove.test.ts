@@ -14,8 +14,9 @@ import {
   type FakeDepsBundle
 } from "../../../test/wizard/runtime-fakes.js"
 import type { TestRunRequest } from "../contracts/test-engine.js"
+import { PREVIEW_REFUSED } from "../../review/rehearse.js"
 import { createRunState } from "../run-state.js"
-import { PROVE_LIMITS, buildProvenColumn, ownReceipt, receiptMarkersFrom, step } from "./prove.js"
+import { PROVE_LIMITS, buildProvenColumn, ownReceipt, receiptMarkersFrom, step, unloaded } from "./prove.js"
 
 function mergedState() {
   const state = createRunState({ tagVersion: "0.12.0", root: "/repo", appRoot: ".", now: new Date("2026-10-02T09:00:00Z"), displayId: "r-7f3c" })
@@ -492,5 +493,34 @@ describe("§3x.5 (W13) no server lane installed: no probe, no lane receipt, no 1
     await runProve(bundle)
     const request = bundle.log.calls.find((call) => call.what === "startTest" && (call.args[0] as TestRunRequest).mode === "real_visit")!.args[0] as TestRunRequest
     expect(request.serverLaneProbe).toEqual({ path: "/__infinite_probe/7f3c2a91b0de" })
+  })
+})
+
+describe("review P1-5: a post-deploy load the app refused is said as refused, never a test error", () => {
+  it("preview_refused → not exercised, in the app's words; busy → not exercised; other codes → test_error with the code only", () => {
+    expect(unloaded(PREVIEW_REFUSED, "the merge's own deployment address")).toEqual({
+      kind: "none",
+      reason: "not_exercised",
+      said: "the Infinite app refused to load the merge's own deployment address: it could not tie that address to this site"
+    })
+    expect(unloaded("busy", "the page change after the deploy")).toMatchObject({ reason: "not_exercised" })
+    expect(unloaded("deadline", "the page change after the deploy")).toEqual({ kind: "none", reason: "test_error", said: "the page change after the deploy could not be loaded (deadline)" })
+    // The desktop's free-text failure message never becomes a cell display.
+    expect(unloaded("Window crashed: renderer gone → 0x0", "x").said).toBe("x could not be loaded (the test did not finish)")
+  })
+})
+
+describe("review P1-6: a merge tree that cannot be read is named, never swallowed", () => {
+  it("the census error is said, carried into state.proof, and the run is not PATCHed proven", async () => {
+    const bundle = fakeDeps()
+    bundle.deps.git.worktreeAddDetached = async () => {
+      throw new Error("fatal: invalid reference: 9f8e7d6")
+    }
+    const { ctx } = await runProve(bundle)
+    const why = `the merge commit ${MERGE_SHA.slice(0, 7)}'s files could not be read (fatal: invalid reference: 9f8e7d6)`
+    expect(subs(ctx)).toContain(`! ${why}: a tool that is installed but sent nothing cannot be named, so this run cannot be called proper`)
+    expect(ctx.state.get().proof?.installedUnknown).toBe(why)
+    const patched = bundle.log.calls.filter((call) => call.what === "patchRun").map((call) => (call.args[1] as { proofState?: string }).proofState)
+    expect(patched).not.toContain("proven")
   })
 })

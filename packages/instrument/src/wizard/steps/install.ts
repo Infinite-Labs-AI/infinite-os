@@ -83,7 +83,7 @@ export async function writeProofFile(
   ctx: WizardContext,
   deps: WizardDeps,
   scan: { appRoot: string; framework: string },
-  claim: Pick<ClaimPublic, "proofBody">
+  claim: Pick<ClaimPublic, "proofBody"> & Partial<Pick<ClaimPublic, "state">>
 ): Promise<string | null> {
   const target = proofFileTarget(ctx.root, scan.appRoot, scan.framework)
   if (!("path" in target) || !isProofBody(claim.proofBody)) return null
@@ -96,7 +96,13 @@ export async function writeProofFile(
   if (runId !== null) {
     await deps.installer.recordEdits([makeEditRecord({ file: target.path, before, after: claim.proofBody, jobId: null, planLineId: PROOF_FILE_PLAN_LINE_ID, by: "wizard", runId })])
   }
-  sub(ctx, `✓ Wrote ${target.path} (Infinite reads it after your merge to confirm the domain)`, "ok")
+  sub(
+    ctx,
+    claim.state === "proven"
+      ? `✓ Wrote ${target.path} (your domain is confirmed; previews serve it so the Infinite app can test them)`
+      : `✓ Wrote ${target.path} (Infinite reads it after your merge to confirm the domain)`,
+    "ok"
+  )
   return target.path
 }
 
@@ -201,6 +207,10 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   // ---- the site source + the consent answer: ONLY behind an approved Infinite line (P2-20) ----
   const installInfinite = check.lines.some((line) => line.kind === "install_provider" && line.id.startsWith("install_provider:infinite") && approved.has(line.id))
   let claim: ClaimPublic | null = null
+  // Review P1-5: the claim whose proof line this install keeps in the repo. A pending claim's (the proof the merge
+  // must serve), and on the verified-source path the workspace's PROVEN claim's: every PR preview and merge deployment
+  // then serves the same line, which is how the app ties a preview address to this site without a Vercel connection.
+  let proofClaim: ClaimPublic | null = null
   // An Infinite install always comes with the consent line (the plan asks it whenever Infinite can be installed).
   if (installInfinite && consentMode === null) {
     return { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "The plan's consent mode is unanswered.", resumeHint: PARK_HINT }
@@ -223,6 +233,12 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
           source = answer.state === "ready" ? answer.siteSource : null
           claim = answer.state === "pending_proof" ? answer.claim : null
           if (!source && !claim) throw new Error("site-claim answered neither a site source nor a claim")
+          if (source) {
+            // The verified path: the workspace's proven claim on these hosts, if it has one (a source verified through
+            // a Vercel connection has none, and the app accepts its previews through that connection instead).
+            const held = (await deps.bridge.readSiteClaim({ signal: ctx.signal })).claim
+            if (held && held.state === "proven" && isProofBody(held.proofBody) && hosts.some((entry) => held.hosts.includes(entry))) proofClaim = held
+          }
         } else {
           const answer = await deps.bridge.ensureSiteSource({ productionHosts: hosts, consentMode }, { signal: ctx.signal })
           source = { siteSourceKey: answer.siteSourceKey, productionHosts: answer.productionHosts, consentMode: answer.consentMode, created: answer.created }
@@ -255,6 +271,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
               }
             }
             const pending = claim
+            proofClaim = claim
             ctx.state.update((current) => {
               current.site = {
                 ...(current.site ?? { productionHost: host, source: "answer" as const, decidedAt: ctx.now().toISOString() }),
@@ -283,6 +300,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
           // installed (its key is never written into this site), one user line, and the other tools go on.
           keys = { ...keys, infinite: { ...keys.infinite, status: "not_provisioned", siteSourceKey: null } }
           claim = null
+          proofClaim = null
           const line =
             code === "invalid_request"
               ? `Prove ${hosts[0] ?? "your domain"} in Infinite (Site Settings), then run npx infinite-tag again; Infinite's tag is not installed this run`
@@ -316,7 +334,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   for (const warning of result.warnings ?? []) sub(ctx, warning.length > 120 ? `${warning.slice(0, 117)}…` : warning, "warn")
   await recordGitignoreFence(ctx, deps)
   // §3y.2: the claim's ONE managed file, recorded as the wizard's own edit (the PR carries it; uninstall removes it).
-  if (claim) await writeProofFile(ctx, deps, scan, claim)
+  if (proofClaim) await writeProofFile(ctx, deps, scan, proofClaim)
 
   // ---- open jobs: a manual edit is job 2, never "installed"; it passes the ONE seeding gate (B13) ----
   const openJobs = deps.registry.applyApprovals(

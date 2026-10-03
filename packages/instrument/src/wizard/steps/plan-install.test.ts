@@ -58,6 +58,8 @@ async function setup(input: {
   siteSourceError?: { code: string; state?: string; retryable?: boolean }
   /** §3y.2: the app offers `tag.site-claim.v1` and answers `site-claim` with this (absent = an older app). */
   claim?: SiteClaimResponse
+  /** Review P1-5: the workspace's newest claim (`site-claim-read`); absent = none. */
+  heldClaim?: ClaimPublic | null
   /** §3y.1: this run's answered production host. */
   answeredHost?: string
 }): Promise<Harness> {
@@ -91,6 +93,7 @@ async function setup(input: {
         if (input.siteSourceError) throw Object.assign(new Error(input.siteSourceError.code), input.siteSourceError)
         return input.claim!
       },
+      readSiteClaim: async () => ({ protocolVersion: 1, requestId: "x", claim: input.heldClaim ?? null }),
       patchRun: async (_runId: string, patch: RunPatch) => {
         patches.push(patch)
         return {} as never
@@ -347,6 +350,39 @@ describe("§3y.2 the site-file claim at install (IO-3)", () => {
     expect(read(h.ctx.root, "index.html")).toContain(IDS.siteSource)
     expect(existsSync(join(h.ctx.root, ".well-known/infinite-site-verification.txt"))).toBe(false)
     expect(h.ctx.stateValue().site?.claim).toBeUndefined()
+  })
+
+  it("review P1-5: ready with the workspace's PROVEN claim on these hosts → the proof file stays in the repo, so previews serve it", async () => {
+    const proven: ClaimPublic = { ...pendingClaim(["acme-store.com"]), state: "proven", provenHosts: ["acme-store.com"], siteSourceKey: IDS.siteSource }
+    const h = await setup({
+      files: { "index.html": STATIC_HTML },
+      consentFlag: "not_required",
+      answers: [],
+      claim: { protocolVersion: 1, requestId: "x", state: "ready", siteSource: { siteSourceKey: IDS.siteSource, productionHosts: ["acme-store.com"], consentMode: "not_required", created: false }, claim: null },
+      heldClaim: proven
+    })
+    expect((await runPlanAndInstall(h)).kind).toBe("ok")
+    expect(read(h.ctx.root, ".well-known/infinite-site-verification.txt")).toBe(BODY)
+    expect(readInstallManifest(h.ctx.root)!.edits!.find((edit) => edit.file === ".well-known/infinite-site-verification.txt")).toMatchObject({ by: "wizard", planLineId: "install_provider:infinite", jobId: null })
+    // The run's own claim state is untouched: the source is ready, nothing is pending.
+    expect(h.ctx.stateValue().site?.claim).toBeUndefined()
+  })
+
+  it("review P1-5 NEGATIVE: a proven claim on OTHER hosts, or an expired one, writes no proof file", async () => {
+    for (const held of [
+      { ...pendingClaim(["other-site.com"]), state: "proven" as const, provenHosts: ["other-site.com"] },
+      { ...pendingClaim(["acme-store.com"]), state: "expired" as const }
+    ]) {
+      const h = await setup({
+        files: { "index.html": STATIC_HTML },
+        consentFlag: "not_required",
+        answers: [],
+        claim: { protocolVersion: 1, requestId: "x", state: "ready", siteSource: { siteSourceKey: IDS.siteSource, productionHosts: ["acme-store.com"], consentMode: "not_required", created: false }, claim: null },
+        heldClaim: held
+      })
+      expect((await runPlanAndInstall(h)).kind).toBe("ok")
+      expect(existsSync(join(h.ctx.root, ".well-known/infinite-site-verification.txt"))).toBe(false)
+    }
   })
 
   it("NEGATIVE: a static site whose vercel.json builds into another directory → the Infinite line is a user_action naming it; nothing is claimed", async () => {

@@ -56,8 +56,11 @@ function finishedState() {
 }
 
 describe("done", () => {
+  /** The run as `prove` left it: its proofState PATCH landed as `proven`. */
+  const provenRun = { patchRun: (patch: { checkinOptIn?: boolean }) => runPublic({ proofState: "proven", proofClaimedBy: "tag", ...(patch.checkinOptIn ? { checkinOptIn: true, checkinDueAt: "2026-10-09T09:45:00.000Z" } : {}) }) }
+
   it("PATCHes checkinOptIn first, posts the report once per column phase, then PATCHes `proven`, and says when the check-in is", async () => {
-    const bundle = fakeDeps()
+    const bundle = fakeDeps({ bridge: provenRun })
     const ctx = fakeContext(finishedState(), {}, bundle.clock)
     const outcome = await step.run(ctx, bundle.deps)
     expect(outcome).toEqual({ kind: "ok", status: "Report in Site Settings · 7-day check-in on 9 Oct" })
@@ -74,6 +77,21 @@ describe("done", () => {
     const order = bundle.log.calls.filter((call) => call.what === "patchRun" || call.what === "postReport").map((call) => (call.what === "patchRun" ? call.args[1] : `post ${call.args[1] as string}`))
     expect(order).toEqual([{ checkinOptIn: true }, "post live_today", "post in_pr", "post proven_live", { phase: "proven" }])
     expect(ctx.events.filter((event) => event.type === "report")).toHaveLength(3)
+  })
+
+  it("review P2-2: a 'properly' verdict never PATCHes phase proven while the run's proof in Infinite is not proven", async () => {
+    for (const held of ["undetermined", "problem"] as const) {
+      const bundle = fakeDeps({
+        bridge: { patchRun: (patch) => runPublic({ proofState: held, ...(patch.checkinOptIn ? { checkinOptIn: true, checkinDueAt: "2026-10-09T09:45:00.000Z" } : {}) }) }
+      })
+      const ctx = fakeContext(finishedState(), {}, bundle.clock)
+      await step.run(ctx, bundle.deps)
+      const report = bundle.log.calls.find((call) => call.what === "postReport")!.args[2] as ReportV2
+      expect(report.verdict).toMatchObject({ state: "properly" })
+      expect(bundle.log.calls.filter((call) => call.what === "patchRun").map((call) => call.args[1])).toEqual([{ checkinOptIn: true }])
+      const said = ctx.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
+      expect(said).toContain(`! Infinite holds this run's proof as ${held}, so the run is not marked proven`)
+    }
   })
 
   it("W20 (§3x.7): the last line names the always-on report card when the app has it, else Site Settings only", async () => {

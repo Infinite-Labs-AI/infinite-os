@@ -213,9 +213,13 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
     ctx.emit.emit("report", { phase, report: payload })
   }
 
-  // 3. `proven` only once Infinite holds this run's report, and only when THE verdict is "properly" (§3x.6).
+  // 3. `proven` only once Infinite holds this run's report, only when THE verdict is "properly" (§3x.6), and only when
+  // the run's proof in Infinite reads `proven` (review P2-2: prove's proofState PATCH may have been refused, or another
+  // producer settled the run; the phase never says proven beside a `problem` or `undetermined` proof).
   if (report.verdict && proofStateOf(report.verdict) === "proven") {
-    await deps.bridge.patchRun(runId, { phase: "proven" })
+    const held = optedIn.run.proofState
+    if (held === "proven") await deps.bridge.patchRun(runId, { phase: "proven" })
+    else ctx.emit.emit("step.sub", { step: "done", text: `! Infinite holds this run's proof as ${held}, so the run is not marked proven`, tone: "warn" })
   }
 
   // 4. The files, then the PR comment (last: a failure there loses nothing).

@@ -41,7 +41,7 @@ import {
 import { bridgeErrorCode, bridgeErrorState } from "../bridge-errors.js"
 import { gradeReasonCode, gradeWords } from "../before-column.js"
 import { buildColumn, type ColumnFact, type RowCellInput } from "../report.js"
-import { productionMatcher, rehearsalTargets, runDesktopTest } from "../../review/rehearse.js"
+import { PREVIEW_REFUSED, productionMatcher, rehearsalTargets, runDesktopTest } from "../../review/rehearse.js"
 import { testPageUrls } from "./rehearsal.js"
 import { readBeforeFactsFile } from "../handoff/before-facts.js"
 import { HOST_DENY_V1, normalizeHost } from "../contracts/host-deny.js"
@@ -477,7 +477,19 @@ export function t1Words(check: Pick<CheckResult, "checkId" | "state">): string {
 }
 
 /** §3x.6 One post-deploy no-send load: graded, or not measured with the reason. */
-export type PostDeployLoad = { kind: "graded"; result: TestResult; grades: Record<TestTool, CheckResult> } | { kind: "none"; reason: Reason }
+export type PostDeployLoad =
+  | { kind: "graded"; result: TestResult; grades: Record<TestTool, CheckResult> }
+  /** `said`: what stopped the load in words (review P1-5: a refused address is said as refused, never a "test error"). */
+  | { kind: "none"; reason: Reason; said?: string }
+
+/** Review P1-5: a post-deploy load that returned no result, as what really happened (runDesktopTest's own error). */
+export function unloaded(error: string | null, what: string): Extract<PostDeployLoad, { kind: "none" }> {
+  if (error === PREVIEW_REFUSED) return { kind: "none", reason: "not_exercised", said: `the Infinite app refused to load ${what}: it could not tie that address to this site` }
+  if (error === "busy") return { kind: "none", reason: "not_exercised", said: `${what} was not loaded: the Infinite app's test window was busy` }
+  // A bridge code is a fixed snake_case word; the desktop's free-text failure message never becomes a cell display.
+  const code = error !== null && /^[a-z][a-z_]{1,39}$/.test(error) ? error : "the test did not finish"
+  return { kind: "none", reason: "test_error", said: `${what} could not be loaded (${code})` }
+}
 
 export interface ProvenColumnInput {
   runId: string
@@ -724,7 +736,7 @@ function postDeployFacts(post: NonNullable<ProvenColumnInput["postDeploy"]>, ins
     })
   }
   if (post.mergePreview.kind === "none") {
-    facts.push({ input: "merge_preview.graded", state: "undetermined", display: "the merge's own deployment address was not loaded", at, reason: post.mergePreview.reason })
+    facts.push({ input: "merge_preview.graded", state: "undetermined", display: post.mergePreview.said ?? "the merge's own deployment address was not loaded", at, reason: post.mergePreview.reason })
   } else {
     for (const tool of ["ga4", "posthog", "meta"] as const) {
       const grade = post.mergePreview.grades[tool]
@@ -742,7 +754,7 @@ function postDeployFacts(post: NonNullable<ProvenColumnInput["postDeploy"]>, ins
     }
   }
   if (post.deployedDry.kind === "none") {
-    facts.push({ input: "deployed_dry.spa_navigation", state: "undetermined", display: "no page change was measured after the deploy", at, reason: post.deployedDry.reason })
+    facts.push({ input: "deployed_dry.spa_navigation", state: "undetermined", display: post.deployedDry.said ?? "no page change was measured after the deploy", at, reason: post.deployedDry.reason })
   } else {
     facts.push(...spaFacts(post.deployedDry.result, post.deployedDry.grades, installed, expect, at))
   }
@@ -1265,7 +1277,9 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
           await deps.bridge.patchRun(runId, { proofState }, { producer: "tag" })
         } catch (error) {
           if (bridgeErrorCode(error) !== "claimed_by_other") throw error
-          ctx.emit.emit("step.sub", { step: "prove", text: "Infinite kept the app's own result for this run (it was settled already).", tone: "info" })
+          // Review P2-2: the earlier result may be the app's or another tag run's; say what Infinite holds, not whose.
+          const held = bridgeErrorState(error)
+          ctx.emit.emit("step.sub", { step: "prove", text: `! Infinite kept the result it already holds for this run${held ? ` (${held})` : ""}; this run's verdict (${proofState}) was not stored`, tone: "warn" })
         }
       }
     }
@@ -1393,7 +1407,7 @@ async function measureAfterDeploy(
       ? loaded.result.environment.previewProtected
         ? { kind: "none", reason: "preview_protected" }
         : { kind: "graded", result: loaded.result, grades: await deps.checks.gradeTestRun(loaded.result, expect, "dry_live", input.gradeCtx(loaded.result)) }
-      : { kind: "none", reason: "test_error" }
+      : unloaded(loaded.error, "the merge's own deployment address")
   }
 
   // Production with one client-side navigation (allowed against production; nothing is sent).
@@ -1414,7 +1428,7 @@ async function measureAfterDeploy(
     })
     deployedDry = loaded.result
       ? { kind: "graded", result: loaded.result, grades: await deps.checks.gradeTestRun(loaded.result, expect, "dry_live", { ...input.gradeCtx(loaded.result), spaNavigation: true }) }
-      : { kind: "none", reason: "test_error" }
+      : unloaded(loaded.error, "the page change after the deploy")
   }
   return { byteCensus, mergePreview, deployedDry }
 }
