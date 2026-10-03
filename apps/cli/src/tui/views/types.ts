@@ -108,6 +108,13 @@ export interface ViewRender {
  * kind can drop or reword them.
  */
 export type KindRender = Omit<ViewRender, "head" | "source" | "fixAsk" | "quiet"> & {
+  /**
+   * Lines the shell prints first in the details, right under the head and the
+   * source, before the explanation and the state's sentence: what names the
+   * view's object when the body draws no object (a settled change's target
+   * path, contract revision 3).
+   */
+  lead?: string[];
   /** The body follows the state's sentence on the next row, with no blank between them (r4 receipts, partial images). */
   joinsReason?: boolean;
   /** The body draws `? what it does` itself (a card), so the shell does not add it. */
