@@ -611,13 +611,15 @@ interface NumbersColumn extends CellTableColumn {
  * r4's drop order for the ads measures (`table()` priorities: Impressions 4,
  * CPC 3, Conv 2, Clicks 1): the higher drops first; 0 never drops (spend and
  * the rates a reader judges by). Keyed by the column's key; any other column
- * drops from the right after these (`renderTable`).
+ * drops from the right after these (`renderTable`). Of the two click counts,
+ * all clicks go before link clicks, the one `CTR (link)` and `CPC (link)` are
+ * of (live run-4 N19: a tie dropped the right-hand Link clicks first).
  */
 const DROP_PRIORITY: Readonly<Record<string, number>> = {
   impressions: 4, reach: 4, frequency: 4,
   cpc: 3, cpclink: 3, cpm: 3, cpa: 3, cpl: 3, costper: 3, costperresult: 3, costperconversion: 3,
   conv: 2, conversions: 2, purchases: 2, purchasevalue: 2, results: 2, result: 2, leads: 2, registrations: 2, trials: 2,
-  clicks: 1, linkclicks: 1,
+  clicks: 1, linkclicks: 0.5,
   spend: 0, spent: 0, ctr: 0, ctrlink: 0, roas: 0
 };
 
