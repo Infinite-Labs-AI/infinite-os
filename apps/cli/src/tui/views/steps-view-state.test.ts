@@ -66,7 +66,9 @@ describe("a step follows the one view that stands for it (TJ-10)", () => {
 // does. Its typed state sets the row's words (r4 `✗ not allowed`, `✗ limit`),
 // and a row never ends in a lone mark (`?`, `·`).
 describe("a step's words come from the view that stands for it (W3 r2)", () => {
-  const quiet = (tool: string, state: string, extra: Record<string, unknown> = {}) => view(tool, state, { kind: "quiet", ...extra });
+  // A blocked view carries the host's step word the way the host sends it (rev 3 `stateReason.step`).
+  const quiet = (tool: string, state: string, extra: Record<string, unknown> = {}) =>
+    view(tool, state, { kind: "quiet", ...(state === "blocked" ? { stateReason: { code: "role_required", words: "A sample sentence.", step: "not allowed" } } : {}), ...extra });
 
   it("a refused call whose view is blocked says `✗ not allowed`, never the transport's generic words", () => {
     const [row] = rows([step({ status: "fail", result: "didn't go through" })], [quiet("read_metrics", "blocked")]);
@@ -240,4 +242,59 @@ describe("the row that waited for a card the app did not send", () => {
     const steps = [step({ status: "ok", result: "" })];
     expect(settleNotSentStep(steps, "propose_pause_entity")).toBe(steps);
   });
+});
+
+// Wave 3 r3 (io-term, judge round 2 "what remains"): a blocked view is not
+// always a refusal. The host decides the Steps word and sends it as
+// `stateReason.step` (rev 3); the terminal draws it verbatim and never says
+// `not allowed` unless the host did. The same table is pinned on the host side,
+// so the terminal and Cmd+L say the same step word for one view.
+describe("a blocked or limited row says the host's step word (W3 r3 parity)", () => {
+  const quiet = (state: string, stateReason?: Record<string, unknown>) =>
+    view("read_metrics", state, { kind: "quiet", ...(stateReason ? { stateReason } : {}) });
+  const word = (status: "fail" | "ok", target: AnswerViewV1) => rows([step({ status, result: "didn't go through" })], [target])[0]!;
+  const PARITY: ReadonlyArray<readonly [string, AnswerViewV1, string]> = [
+    ["blocked, a refusal code with step `not allowed`", quiet("blocked", { code: "role_required", words: "A sample sentence.", step: "not allowed" }), "not allowed"],
+    ["blocked, no step, short `needs your OK`", quiet("blocked", { code: "needs_person_ok", words: "A sample sentence.", short: "needs your OK" }), "needs your OK"],
+    ["blocked, no step, no short", quiet("blocked", { code: "sample_code", words: "A sample sentence." }), "blocked"],
+    ["blocked, no stateReason at all", quiet("blocked"), "blocked"],
+    ["hit_limit with step `limit`", quiet("hit_limit", { code: "sample_cap", words: "A sample sentence.", step: "limit" }), "limit"],
+    ["hit_limit, no step", quiet("hit_limit", { code: "sample_cap", words: "A sample sentence." }), "limit"]
+  ];
+
+  for (const [name, target, expected] of PARITY) {
+    for (const status of ["fail", "ok"] as const) {
+      it(`${name} → ✗ ${expected} (call ${status})`, () => {
+        const row = word(status, target);
+        expect(row).toMatch(new RegExp(`✗ ${expected}$`, "u"));
+        expect(row).not.toContain("didn't go through");
+      });
+    }
+  }
+
+  it("never says `not allowed` unless the host said it", () => {
+    for (const [, target, expected] of PARITY) {
+      if (expected !== "not allowed") expect(word("fail", target)).not.toContain("not allowed");
+    }
+  });
+
+  it("the host's step wins over a short and is drawn as sent", () => {
+    const row = word("fail", quiet("blocked", { code: "sample_code", words: "A sample sentence.", short: "Sample short", step: "Sample Step" }));
+    expect(row).toMatch(/✗ Sample Step$/u);
+  });
+
+  it("in scrollback, a blocked row keeps the host's word", () => {
+    const kept = unsettledStepLines([step({ status: "fail", result: "didn't go through" })], {
+      width: 100, color: false, theme, views: [quiet("blocked", { code: "needs_person_ok", words: "A sample sentence.", short: "needs your OK" })]
+    });
+    expect(kept).toEqual([expect.stringMatching(/✗ needs your OK$/u)]);
+  });
+
+  for (const width of [60, 100, 140]) {
+    it(`fits ${width} columns`, () => {
+      for (const [, target] of PARITY) {
+        for (const line of rows([step({ status: "fail", result: "" })], [target], width)) expect(line.length).toBeLessThanOrEqual(width);
+      }
+    });
+  }
 });

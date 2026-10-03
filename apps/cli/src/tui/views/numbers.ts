@@ -1206,7 +1206,58 @@ function headTitleFor(view: Parameters<KindRenderer<"numbers">>[0]): string | un
   return source && ![...wordSet(source)].every((word) => chip.has(word)) ? source : "";
 }
 
+/** The states the D2 ruling covers (2026-10-03): each may draw compact. */
+const COMPACT_STATES: ReadonlySet<string> = new Set(["partial", "out_of_date", "not_measured", "nothing_found"]);
+
+/** Whether anything in a body is a real number or a word a cell says (a measured 0 counts); the same walk as the Cmd+L card's. */
+function hasMeasured(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hasMeasured);
+  if (!isRecord(node)) return false;
+  // A text cell is measured words even when empty (the same rule as the Cmd+L card).
+  if (finite(node.value) !== null || typeof node.text === "string" || finite(node.count) !== null) return true;
+  return Object.values(node).some(hasMeasured);
+}
+
+/**
+ * Whether a numbers body holds anything compact would hide: a measured
+ * number, or a composite section that is not numbers and draws something (a
+ * list's rows, a health item, a record's fields are content, never dashes).
+ * A numbers section counts only by its own measured numbers.
+ */
+function bodyHasContent(body: Record<string, unknown>, ctx: ViewRenderCtx): boolean {
+  const { sections, ...rest } = body;
+  if (hasMeasured(rest)) return true;
+  return asList(sections).filter(isRecord).some((section) => section.kind === "numbers"
+    ? hasMeasured(section.body)
+    : sectionLines([section], ctx, { notes: new FootnoteBook(), hidden: 0 }).length > 0);
+}
+
+/**
+ * D2 (2026-10-03): a view in partial / out of date / not measured /
+ * nothing found draws compact (its head and ONE line, the host's state reason,
+ * which the frame draws) ONLY when its table would be all dashes: no rows, or
+ * every number null. Any real number, a measured 0 included, keeps the table.
+ * With no state reason words there is no line to stand in for the dashes, so
+ * they stay with their reasons. The day strip stays (it says which days are
+ * in, never a number). A composite's list, health or record section is content,
+ * so it keeps the body. Reads the cells and the state; computes nothing.
+ */
+function drawsCompact(view: AnswerViewV1, ctx: ViewRenderCtx): boolean {
+  return COMPACT_STATES.has(view.state) && Boolean(viewText(view.stateReason?.words)) && !bodyHasContent(asRecord(view.body), ctx);
+}
+
 export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender => {
+  if (drawsCompact(view as AnswerViewV1, ctx)) {
+    // Compact: no table of dashes and no footnotes; only the day strip stays, which says which days are in, never a number (r4 flow-numbers-03).
+    const body = asRecord(view.body);
+    const legs = asRecord(body.legs);
+    const spend = numbersColumns(body).some((column) => column.key.toLowerCase() === "spend");
+    const headTitle = headTitleFor(view);
+    return {
+      detail: coverageLines(legs, ctx, true, spend), footnotes: [], keys: [], okKey: null, rowCount: 0,
+      ...(headTitle !== undefined ? { headTitle } : {})
+    };
+  }
   const asOf = typeof view.asOf === "string" ? Date.parse(view.asOf) : Number.NaN;
   const draw: MeasureDraw = {
     notes: new FootnoteBook(), hidden: 0, reasonSaid: isRecord(view.stateReason), viewTitle: viewText(view.title),

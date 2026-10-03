@@ -249,7 +249,9 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
       if (words) footer.push("", ...arrowLines(words, canOpen, inner, ctx));
     }
     if (fields.length) {
-      footer.push("", ...fieldLines(fields, ui, innerCtx));
+      footer.push("", ...fieldLines(fields, ui, innerCtx, {
+        here: (field) => !live || fillableHere(field, ctx.fieldsCapable), canOpen, updateSaysIt: blockedByUpdate
+      }));
     }
     if (blockedByUpdate) {
       footer.push(...paragraphIn(UPDATE_FOR_FIELDS, inner, "amber", ctx));
@@ -538,6 +540,10 @@ function cardOk(
     // Never approve with the frozen value when the user's answer can't be sent.
     return fields.some((field) => field.required) ? null : { type: "approve" };
   }
+  if (fields.some((field) => field.required && !fillableHere(field, fieldsCapable))) {
+    // A required value no answer typed here can give: no OK that would ask for it forever (it is set in the app).
+    return null;
+  }
   const missing = fields.find((field) => field.required && !answers[field.key]);
   if (missing) {
     return { type: "ask_field", field: missing };
@@ -594,11 +600,46 @@ function tabNounOf(documents: readonly CardDocument[]): { tabNoun?: string } {
   return nouns.size === 1 && noun ? { tabNoun: noun } : {};
 }
 
-function fieldLines(fields: readonly ApprovalFieldV1[], ui: CardUiState, ctx: ViewRenderCtx): string[] {
+/**
+ * What a field can say for itself on this card: whether it can be answered
+ * here, whether `o` opens the card in the app, and whether the card's amber
+ * `Update the Infinite app …` line already says what to do (then the field row
+ * gives no second instruction).
+ */
+interface FieldLineFacts { here: (field: ApprovalFieldV1) => boolean; canOpen: boolean; updateSaysIt: boolean }
+
+/** Where a field the terminal cannot fill is set, in r4's words (`↗ … in the app  (o)`): `(o)` only when o opens it. */
+const SET_IN_APP_WORDS = "set it in the app";
+
+/**
+ * Whether a typed answer here can fill a field: the app takes answers from
+ * the terminal, and the field is one it can type (an amount or one of its
+ * options; one of a choice's options; a line of text). A choice with no
+ * options, or an input this terminal does not know, cannot be answered here.
+ */
+function fillableHere(field: ApprovalFieldV1, fieldsCapable: boolean): boolean {
+  if (!fieldsCapable) return false;
+  if (field.input === "money_per_day") return acceptsAmount(field) || fieldOptions(field).length > 0;
+  if (field.input === "choice") return fieldOptions(field).length > 0;
+  return field.input === "text";
+}
+
+function fieldLines(fields: readonly ApprovalFieldV1[], ui: CardUiState, ctx: ViewRenderCtx, facts: FieldLineFacts): string[] {
   const lines: string[] = [];
   for (const field of fields) {
     const answer = ui.answers[field.key];
     const current = field.current === null || field.current === undefined ? "" : fieldValue(field, field.current);
+    if (!answer && !facts.here(field)) {
+      // ONE line. The value OK would write is always shown (an optional field's OK writes it as it is),
+      // then where it is set. Never `OK asks for a value` (no OK sets it here), never options that cannot
+      // be typed, and no second instruction under the card's amber update line.
+      const where = facts.updateSaysIt ? "" : `${SET_IN_APP_WORDS}${facts.canOpen ? "  (o)" : ""}`;
+      const value = current
+        ? `now ${current}${where ? paint(` · ${where}`, "dim", ctx) : ""}`
+        : paint(where || "—", "dim", ctx);
+      lines.push(...fieldRows([{ label: viewText(field.label, field.key), value }], ctx.width, ctx));
+      continue;
+    }
     const value = ui.fieldEntry?.key === field.key
       ? paint(`▸ type ${fieldHint(field).replace(/^Type:? /u, "")}, then Enter`, "cb", ctx)
       : answer

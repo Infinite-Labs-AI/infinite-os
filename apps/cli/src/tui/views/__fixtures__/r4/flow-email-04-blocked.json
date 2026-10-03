@@ -85,7 +85,8 @@
         },
         "stateReason": {
           "code": "role_required",
-          "words": "Only a workspace owner or admin can send emails. Ask an owner or admin."
+          "words": "Only a workspace owner or admin can send emails. Ask an owner or admin.",
+          "step": "not allowed"
         }
       }
     ],
