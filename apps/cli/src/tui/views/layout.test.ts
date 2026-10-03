@@ -515,6 +515,51 @@ describe("a lookup of the card's own target folds into its Steps row (live run-4
     expect(committed).toContain("Dismissed");
   });
 
+  // Lane review SHOULD: a card whose target has no id must not fold by name
+  // a list that holds two different things under that name: a wrong pick on
+  // a Meta write stays visible.
+  const noIdCard = () => {
+    const card = fixture("change-pause-card") as Extract<ReturnType<typeof fixture>, { kind: "change" }>;
+    const { id: _id, ...target } = card.body.target as Record<string, unknown>;
+    return { ...card, body: { ...card.body, target } } as unknown as ReturnType<typeof fixture>;
+  };
+  const sameNamed = () => {
+    const list = lookup(["ad_1", "ad_2"]);
+    return { ...list, body: { ...list.body, rows: list.body.rows.map((row) => ({ ...row, title: "Hook A" })) } };
+  };
+
+  it("two same-named rows with different ids and a card target with no id: the list is drawn", () => {
+    const views = [sameNamed()];
+    const drawn = renderLiveTurn({ messages: turn, views, focus: viewFocusAfterTurnDone(views), width: 100, color: false, theme, details: card, statusViews: [noIdCard()], steps, nowMs: 600 });
+    expect(drawn.lines.join("\n")).toContain("Sample ads");
+  });
+
+  it("a one-row list and a card target with no id still fold by name", () => {
+    const views = [lookup(["ad_1"])];
+    const drawn = renderLiveTurn({ messages: turn, views, focus: viewFocusAfterTurnDone(views), width: 100, color: false, theme, details: card, statusViews: [noIdCard()], steps, nowMs: 600 });
+    expect(drawn.lines.join("\n")).not.toContain("Sample ads");
+  });
+
+  it("a card target with an id never folds a row by name alone", () => {
+    const list = lookup(["ad_1"]);
+    const views = [{ ...list, body: { ...list.body, rows: list.body.rows.map((row) => ({ ...row, id: "ad_9" })) } }];
+    const drawn = renderLiveTurn({ messages: turn, views, focus: viewFocusAfterTurnDone(views), width: 100, color: false, theme, details: card, statusViews: [fixture("change-pause-card")], steps, nowMs: 600 });
+    expect(drawn.lines.join("\n")).toContain("Sample ads");
+  });
+
+  // Lane review SHOULD: the keys go to a view that is drawn, never to a folded lookup.
+  it("a numbers view, then the folded lookup, with the card waiting: the keys are the numbers view's", () => {
+    const views = [fixture("numbers-ads"), lookup(["ad_1"])];
+    const statusViews = [fixture("change-pause-card")];
+    const focus = viewFocusAfterTurnDone(views, undefined, statusViews);
+    expect(focus.viewIndex).toBe(0);
+    const drawn = renderLiveTurn({ messages: turn, views, focus, width: 100, color: false, theme, details: card, statusViews, steps, nowMs: 600 });
+    expect(drawn.lines.join("\n")).not.toContain("Sample ads");
+    expect(drawn.focused).not.toBeNull();
+    // With no focus yet (a turn still running), the drawn focus is the numbers view's too.
+    expect(renderLiveTurn({ messages: turn, views, focus: null, width: 100, color: false, theme, details: card, statusViews, steps, nowMs: 600 }).focused).not.toBeNull();
+  });
+
   it("a card still waiting when its turn goes up folds the lookup out of scrollback too", () => {
     const views = [lookup(["ad_1"])];
     const committed = renderCommittedTurn({ messages: turn, views, statusViews: [fixture("change-pause-card")], focus: null, width: 100, color: false, theme, steps, stepsStayLive: true }).join("\n");

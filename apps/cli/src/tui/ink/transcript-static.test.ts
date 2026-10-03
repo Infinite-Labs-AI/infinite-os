@@ -264,7 +264,9 @@ describe("the session wires the live cap (CI-run)", () => {
     // A finished turn that misses by its blank rows is drawn without them before it is given up.
     expect(rule).toContain("const compactTurn = finished && renderTurnAt !== null && pagedAtRest(false) && wholeCompactAtRest();");
     expect(rule).toContain("drawTurnWith(restingReservedRows, compact)");
-    expect(rule).toContain('commitLiveTurn("overflow", pendingConfirmActions.length > 0)');
+    expect(rule).toContain("const keepCard = pendingConfirmActions.length > 0;");
+    // The Steps strip stays live only when it is whole in the resting frame (a finished turn never pages, lane review MUST).
+    expect(rule).toContain('commitLiveTurn("overflow", keepCard, !keepCard && keptStripFitsAtRest())');
     expect(rule).toContain("const liveLatestShown = finishedOverflow ? null : liveLatest;");
   });
 

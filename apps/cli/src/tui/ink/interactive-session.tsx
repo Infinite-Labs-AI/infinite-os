@@ -561,7 +561,8 @@ export function InkInteractiveSessionApp({
   // finished turn's (a list on the row its view names).
   const [viewFocus, setViewFocus] = useState<ViewFocusState | null>(() => {
     const views = getTurnState().views;
-    return views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null;
+    const cards = initialPendingConfirmations.flatMap((action) => (action.view ? [action.view] : []));
+    return views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS, cards.slice(0, 1)) : null;
   });
   const viewFocusRef = useRef(viewFocus);
   viewFocusRef.current = viewFocus;
@@ -668,7 +669,7 @@ export function InkInteractiveSessionApp({
   // only the frame stays live. A write card still waiting for its answer stays
   // live with the turn's Steps (`keepCard`): only the question, the answer and
   // the other views go up.
-  const commitLiveTurn = useCallback((why: "submit" | "overflow", keepCard = false) => {
+  const commitLiveTurn = useCallback((why: "submit" | "overflow", keepCard = false, keepStripLive = false) => {
     commitSeq.current += 1;
     const turn = historyRef.current;
     const { views, steps: storeSteps } = getTurnState();
@@ -683,9 +684,11 @@ export function InkInteractiveSessionApp({
     // A call that did not end clean keeps its row under the answer (a failed
     // step never disappears with the Steps strip). While a card still waits,
     // or the turn went up only for being too tall, the turn's calls stay live
-    // and print when that is committed.
-    const stepsStayLive = why === "overflow" && steps.length > 0;
-    const keepStrip = stepsStayLive && !keepCard;
+    // and print when that is committed. A strip too tall for the resting
+    // frame (`keepStripLive` false) goes up with the turn: its unsettled
+    // calls print under the answer now.
+    const keepStrip = why === "overflow" && steps.length > 0 && !keepCard && keepStripLive;
+    const stepsStayLive = why === "overflow" && steps.length > 0 && (keepCard || keepStrip);
     const nextKept = keepStrip ? { steps, views: [...statusViews, ...views.map((frame) => frame.view)] } : null;
     keptStepsRef.current = nextKept;
     setKeptSteps(nextKept);
@@ -1125,6 +1128,8 @@ export function InkInteractiveSessionApp({
     let sawFinalMessage = false;
     // The turn ends waiting on a write card: it opens where the card is.
     let endsOnCard = false;
+    // The card this turn ends on: a lookup of its target is folded, and never takes the keys.
+    let turnCard: AnswerViewV1 | null = null;
     // Freeze the active-project label now and stamp it onto this turn's
     // answers, so switching projects later never relabels them.
     const turnTitle = getAgentTitle?.();
@@ -1192,6 +1197,7 @@ export function InkInteractiveSessionApp({
       if (result.pendingConfirmations && result.pendingConfirmations.length > 0) {
         setPendingConfirmActions(result.pendingConfirmations);
         endsOnCard = true;
+        turnCard = result.pendingConfirmations[0]?.view ?? null;
       }
     } catch (error) {
       // A stopped turn rejects with whatever the transport makes of the abort
@@ -1225,7 +1231,7 @@ export function InkInteractiveSessionApp({
       setLiveOffset(endsOnCard && !splitTurnRef.current ? null : 0);
       // Its views stay live and take their keys until the next line is submitted.
       const views = getTurnState().views;
-      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
+      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS, turnCard ? [turnCard] : []) : null);
     }
   }, [appendMessages, getAgentTitle, onSubmitLine, requestExit, turnAbort]);
 
@@ -1576,7 +1582,7 @@ export function InkInteractiveSessionApp({
     const refocusCardTurn = () => {
       if (!onCardTurn()) return;
       const views = getTurnState().views;
-      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
+      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS, headCardViewRef.current ? [headCardViewRef.current] : []) : null);
     };
     const working = decision === "approve" && head.view?.kind === "change" && isPlainRecord(head.view.approval) ? head.view : null;
     if (working) {
@@ -1823,10 +1829,14 @@ export function InkInteractiveSessionApp({
   // live window pages with) less the key bar. The key bar's hints come from the
   // drawn turn (a document's `space next page`), so draw, count the bar, and
   // draw again when the bar's height differs from the guess.
-  const drawTurnWith = (reserved: number, compact = false): { turn: LiveTurnRender | null; turnRows: number | undefined } => {
+  const drawTurnWith = (
+    reserved: number,
+    compact = false,
+    render: ((turnRows: number | undefined, compact?: boolean) => LiveTurnRender) | null = renderTurnAt
+  ): { turn: LiveTurnRender | null; turnRows: number | undefined } => {
     let turn: LiveTurnRender | null = null;
     let turnRows: number | undefined;
-    if (renderTurnAt) {
+    if (render) {
       let barRows = DEFAULT_KEY_BAR_ROWS;
       for (let pass = 0; pass < 3; pass += 1) {
         turnRows = inkLatestTurnRows({
@@ -1841,7 +1851,7 @@ export function InkInteractiveSessionApp({
           transcript: idleTranscript,
           turnStartedAt: busyStartedAt
         });
-        turn = renderTurnAt(turnRows, compact);
+        turn = render(turnRows, compact);
         const drawnBarRows = keyBarRowCount(keyHintsFor(turn), columns);
         if (drawnBarRows === barRows) {
           break;
@@ -1919,9 +1929,40 @@ export function InkInteractiveSessionApp({
   if (finishedOverflow && reservedRows !== restingReservedRows) {
     finishedOverflow = pagedAtRest(compactTurn);
   }
+  // The Steps strip a turn that goes up keeps live (see `keptSteps`) only
+  // when the strip alone is whole in the RESTING frame, under its header: a
+  // finished turn never pages, its strip neither. A strip taller than that
+  // goes up with the turn, and only its calls that did not end clean print
+  // under the answer (lane review MUST).
+  const keptStripFitsAtRest = (): boolean => {
+    const steps = turnSteps.length ? turnSteps : keptSteps?.steps ?? [];
+    if (!steps.length) {
+      return false;
+    }
+    const statusViews = [...(turnSteps.length ? [] : keptSteps?.views ?? []), ...turnViews.map((frame) => frame.view)];
+    const drawStrip = (turnRows: number | undefined): LiveTurnRender => renderLiveTurn({
+      messages: [],
+      views: [],
+      focus: null,
+      steps,
+      width: transcriptColumns(columns),
+      color: colorEnabled(t),
+      theme: t,
+      rows: turnRows,
+      ...(statusViews.length ? { statusViews } : {})
+    });
+    const strip = drawTurnWith(restingReservedRows, false, drawStrip).turn;
+    return strip !== null && !layoutAt(
+      { id: "live-turn", lines: strip.lines },
+      idleTranscript,
+      restingReservedRows,
+      keyBarRowCount(keyHintsFor(strip), columns)
+    ).window.paged;
+  };
   useLayoutEffect(() => {
     if (finishedOverflow) {
-      commitLiveTurn("overflow", pendingConfirmActions.length > 0);
+      const keepCard = pendingConfirmActions.length > 0;
+      commitLiveTurn("overflow", keepCard, !keepCard && keptStripFitsAtRest());
     }
   });
   // The frame in which the overflow is found draws the turn nowhere (the commit

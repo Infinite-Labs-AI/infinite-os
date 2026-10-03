@@ -24,7 +24,7 @@ const pinnedEnv = vi.hoisted(() => {
 
 import type { ToolViewFrameV1 } from "@infinite-os/types";
 
-import { recordTurnView, resetTurnState } from "../../app/turn-store.js";
+import { patchTurnState, recordTurnView, resetTurnState } from "../../app/turn-store.js";
 import { renderInkInteractiveSessionToString } from "../../ink/interactive-session.js";
 import { ansiToSegmentLines } from "./ansi-to-segments.js";
 import { compareRegion, goldenRegionRows, type RegionName } from "./compare.js";
@@ -87,4 +87,52 @@ describe("a finished turn that went up whole keeps r4's Steps strip in the frame
       expect(frame.map((line) => textOf(line).trimEnd()).filter(Boolean)).toHaveLength(7);
     });
   }
+});
+
+// Lane review MUST: a kept strip taller than the resting frame would page
+// under a finished turn (`▲ 13 lines above · PgUp`) and lose its `─ Steps`
+// header, though a finished turn never pages. Such a strip goes up with the
+// turn, as before: only its calls that did not end clean print, under the
+// answer, once.
+describe("a Steps strip too tall for the resting frame goes up with the turn, never paged", () => {
+  const answer = Array.from({ length: 60 }, (_, index) => `answer line ${index}`).join("\n");
+  const drawSteps = (count: number, failAt: number | null) => {
+    resetTurnState();
+    patchTurnState((state) => ({
+      ...state,
+      steps: Array.from({ length: count }, (_, index) => ({
+        id: `c${index}`,
+        name: `tool_${index}`,
+        label: `checking source ${index}`,
+        status: index === failAt ? "fail" as const : "ok" as const,
+        startedAt: FIXED_CLOCK - 20_000 + index * 500,
+        endedAt: FIXED_CLOCK - 19_000 + index * 500,
+        result: index === failAt ? "could not reach it" : `${index} rows`
+      }))
+    }));
+    return ansiToSegmentLines(renderInkInteractiveSessionToString({
+      columns: 80,
+      rows: ROWS,
+      onSubmitLine: async () => ({ messages: [] }),
+      initialMessages: [{ role: "user", text: "check every source" }, { role: "assistant", text: answer }]
+    })).map((line) => textOf(line).trimEnd());
+  };
+
+  it("20 calls, one failed, in a 16-row window: no pager, and the failed row once, under the answer", () => {
+    const text = drawSteps(20, 7);
+    expect(text.some((line) => /lines above|PgUp|more lines/u.test(line))).toBe(false);
+    const failed = text.filter((line) => line.includes("checking source 7 "));
+    expect(failed).toHaveLength(1);
+    expect(text.indexOf(failed[0]!)).toBeGreaterThan(text.findIndex((line) => line.includes("answer line 59")));
+    // A clean call of a strip that went up is not printed.
+    expect(text.some((line) => line.includes("checking source 3 "))).toBe(false);
+  });
+
+  it("4 clean calls still keep their strip in the frame, under its header", () => {
+    const text = drawSteps(4, null);
+    expect(text.some((line) => /lines above|PgUp|more lines/u.test(line))).toBe(false);
+    const frame = text.slice(text.map((line) => line.startsWith(" ∞ Infinite")).lastIndexOf(true));
+    expect(frame.some((line) => line.startsWith("─ Steps"))).toBe(true);
+    expect(frame.filter((line) => line.includes("checking source "))).toHaveLength(4);
+  });
 });

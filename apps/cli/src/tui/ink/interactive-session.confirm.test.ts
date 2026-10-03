@@ -157,7 +157,8 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
       source.indexOf("const resolveConfirmAction"),
       source.indexOf("useEffect(() => {\n    // Don't drain")
     );
-    expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);");
+    // The head card goes in too: a lookup it folds never takes the keys (lane review SHOULD).
+    expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS, headCardViewRef.current ? [headCardViewRef.current] : []) : null);");
     expect(handler).toMatch(/const refocusCardTurn = \(\) => \{\s+if \(!onCardTurn\(\)\) return;/u);
     // After the dismissed (or working) frame, after the app's receipt, and when the frame is taken off.
     expect(handler).toContain("if (working || dismissed) refocusCardTurn();");
