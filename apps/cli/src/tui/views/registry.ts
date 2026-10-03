@@ -24,6 +24,7 @@ import {
   viewText
 } from "./primitives.js";
 import { managedApproval, managedApprovalLines, managedSummaryLines } from "./managed.js";
+import { appOpenTarget } from "./open-target.js";
 import type { KindRender, KindRenderer, ViewRender, ViewRenderCtx } from "./types.js";
 
 // ── kind renderers ──
@@ -46,7 +47,7 @@ import { renderChange } from "./change.js";
 import { renderImages } from "./images.js";
 import { renderJob } from "./job.js";
 import { renderLaunch } from "./launch.js";
-import { isSettledWithoutRunning, reconcileLines } from "./outcome.js";
+import { awaitingApp, isSettledWithoutRunning, reconcileLines } from "./outcome.js";
 
 type KindRendererMap = { [K in AnswerViewKind]?: KindRenderer<K> };
 
@@ -109,8 +110,9 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
       ...explainLines(view, shellCtx),
       ...managedSummaryLines(managed, shellCtx),
       // A settled write's afterword ("Nothing ran.") follows its sentence on the next row (r4 receipts).
+      // A dismissal still on its way says only that (N22): its sentence waits for the app's answer.
       ...(body?.joinsReason || (AFTERWORD_KINDS.has(view.kind) && isSettledWithoutRunning(view))
-        ? [...stateReasonLines(view, shellCtx, fixAsk !== null), ...(body?.detail ?? [])]
+        ? [...(awaitingApp(view, shellCtx) ? [] : stateReasonLines(view, shellCtx, fixAsk !== null)), ...(body?.detail ?? [])]
         : blankBetween(stateReasonLines(view, shellCtx, fixAsk !== null), body?.detail ?? [])),
       ...(managed ? managedApprovalLines(managed, shellCtx) : []),
       ...reconcileLines(view, shellCtx),
@@ -132,9 +134,31 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
     ...(body?.copyText ? { copyText: body.copyText } : {}),
     ...(fixAsk ? { fixAsk } : {}),
     ...(managed ? { approvalAsk: { key: managed.key, label: managed.label, ask: managed.ask } } : {}),
-    ...(body?.offersExplain ? { explainInside: true as const } : {})
+    ...(body?.offersExplain ? { explainInside: true as const } : {}),
+    ...openFor(view, body, shellCtx),
+    ...(body?.watchAsk ? { watchAsk: body.watchAsk } : {})
   };
 }
+
+/**
+ * The place `o` opens (T12, app.open.v1), only when the session can open
+ * places: the kind's own (a job's landing, a list row's, a health fix), else
+ * the state's fix link, else the view's own link. A kind that decided there is
+ * none (null) gets none. Never a URL: place and params only.
+ */
+function openFor(view: AnswerViewV1, body: KindRender | null, ctx: ViewRenderCtx): { openLink?: AppOpenTargetOf; openLabel?: string } {
+  if (!ctx.caps.open) return {};
+  if (body && body.openLink !== undefined) {
+    return body.openLink ? { openLink: body.openLink, openLabel: body.openLabel || "open" } : {};
+  }
+  const fix = isRecord(view.stateReason) && isRecord(view.stateReason.fix) ? view.stateReason.fix : null;
+  const link = fix && isRecord(fix.appLink) ? fix.appLink : isRecord(view.appLink) ? view.appLink : null;
+  const target = appOpenTarget(link);
+  if (!target) return {};
+  return { openLink: target, openLabel: viewText(fix && isRecord(fix.appLink) ? fix.label : link?.label) || viewText(link?.label) || "open" };
+}
+
+type AppOpenTargetOf = NonNullable<KindRender["openLink"]>;
 
 /** The states a quiet view takes when its call failed (the app's failure view), not a quiet read. */
 const FAILED_QUIET_STATES: ReadonlySet<string> = new Set(["failed", "blocked", "hit_limit", "outcome_unknown", "not_connected", "expired", "cancelled"]);

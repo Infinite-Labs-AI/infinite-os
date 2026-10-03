@@ -35,6 +35,8 @@ import {
   type InSessionConfirmationAction
 } from "../../desktop/confirm-in-session.js";
 import { confirmErrorLines, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
+import { appOpenLines } from "../../desktop/app-open.js";
+import { confirmStreamSteps } from "../../desktop/confirm-stream.js";
 
 import { turnController } from "../app/turn-controller.js";
 import {
@@ -96,6 +98,7 @@ import {
   cancelCardField,
   CARD_UI_START,
   cardKeyStep,
+  cardOpenLink,
   cardUiStart,
   commitCardField,
   receiptDetailLines,
@@ -104,6 +107,7 @@ import {
   type CardUiState
 } from "../views/approval.js";
 import { creativeDraftLine } from "../views/images.js";
+import type { AppOpenTarget } from "../views/open-target.js";
 
 /**
  * The first-run inventory shown above the boot frame on the empty home screen
@@ -308,8 +312,25 @@ export interface InkInteractiveSessionAppProps {
   onConfirmAction?(
     action: InSessionConfirmationAction,
     decision: "approve" | "decline",
-    fields?: Record<string, ApprovalFieldAnswerV1>
+    fields?: Record<string, ApprovalFieldAnswerV1>,
+    /**
+     * confirm.stream.v1 (T12): the receipt the moment it arrives, then the
+     * agent's follow-up views, in the same turn. A caller without the stream
+     * ignores these and resolves with the plain answer.
+     */
+    stream?: ConfirmStreamHooks
   ): Promise<unknown>;
+  /**
+   * The desktop's capabilities for the view keys, read when a turn's views
+   * take their keys: `open` (app.open.v1, the `o` key) and `watch` (`w` on a
+   * job). Absent = an old desktop: neither key is offered.
+   */
+  appCaps?: () => KeyContext["caps"];
+  /**
+   * `o`: open this place in the app through the desktop's /v1/open (place +
+   * params, never a URL, never a browser). Resolves with the app's answer.
+   */
+  onOpenAppLink?(target: AppOpenTarget): Promise<unknown>;
   /**
    * The running turn's own short reason, said in the composer's note in place
    * of the generic timer `4s` (terminal-r4 `❯ Ask Infinite… (the pause
@@ -342,6 +363,14 @@ export interface InkInteractiveSessionAppProps {
    * turns cannot be aborted): Esc does nothing and Ctrl-C quits, as before.
    */
   turnStoppable?: boolean;
+}
+
+/** What a streamed confirm hands the session before it resolves (T12). */
+export interface ConfirmStreamHooks {
+  /** The card's receipt (a plain confirm's answer), before the follow-up. */
+  onReceipt(result: unknown): void;
+  /** A view from the agent's follow-up, for the card's own turn. */
+  onView(frame: ToolViewFrameV1): void;
 }
 
 export interface InkInteractiveSessionRunOptions extends InkInteractiveSessionAppProps {
@@ -483,6 +512,8 @@ export function InkInteractiveSessionApp({
   onRememberInput,
   onSubmitLine,
   onConfirmAction,
+  appCaps,
+  onOpenAppLink,
   busyNote,
   promptPlaceholder = COMPOSER_PLACEHOLDER,
   requiresConfirmation,
@@ -558,9 +589,13 @@ export function InkInteractiveSessionApp({
   // in the turn store (`turnState.views`), cleared when the turn commits.
   // Views already on the turn when the session opens take their keys, like a
   // finished turn's (a list on the row its view names).
+  // The view keys the desktop supports (`o` app.open.v1, `w`), read when a turn's views take their keys.
+  const appCapsRef = useRef(appCaps);
+  appCapsRef.current = appCaps;
+  const viewCaps = useCallback((): KeyContext["caps"] => appCapsRef.current?.() ?? NO_KEY_CAPS, []);
   const [viewFocus, setViewFocus] = useState<ViewFocusState | null>(() => {
     const views = getTurnState().views;
-    return views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null;
+    return views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps()) : null;
   });
   const viewFocusRef = useRef(viewFocus);
   viewFocusRef.current = viewFocus;
@@ -925,7 +960,8 @@ export function InkInteractiveSessionApp({
       page: cardUi.page,
       explainOpen: cardUi.explainOpen,
       showHiddenColumns: false,
-      caps: NO_KEY_CAPS,
+      // A card's `o` opens its place when the desktop can (app.open.v1); retry is the card's own.
+      caps: { ...NO_KEY_CAPS, open: viewCaps().open },
       ui: cardUi,
       fieldsCapable: headConfirmAction.confirmFieldsCapable === true,
       ...(headConfirmAction.sentFields ? { sentFields: headConfirmAction.sentFields } : {}),
@@ -1197,9 +1233,9 @@ export function InkInteractiveSessionApp({
       setLiveOffset(endsOnCard && !splitTurnRef.current ? null : 0);
       // Its views stay live and take their keys until the next line is submitted.
       const views = getTurnState().views;
-      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
+      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps()) : null);
     }
-  }, [appendMessages, getAgentTitle, onSubmitLine, requestExit, turnAbort]);
+  }, [appendMessages, getAgentTitle, onSubmitLine, requestExit, turnAbort, viewCaps]);
 
   // ── In-chat /connect wizard (#20) ───────────────────────────────────────────
   // The final "Connect <Provider> / Cancel" step. Kept SEPARATE from
@@ -1548,7 +1584,7 @@ export function InkInteractiveSessionApp({
     const refocusCardTurn = () => {
       if (!onCardTurn()) return;
       const views = getTurnState().views;
-      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);
+      setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps()) : null);
     };
     const working = decision === "approve" && head.view?.kind === "change" && isPlainRecord(head.view.approval) ? head.view : null;
     if (working) {
@@ -1612,23 +1648,73 @@ export function InkInteractiveSessionApp({
       appendLines(step.lines);
       return true;
     };
+    // The app's answer to the card: a plain confirm's result, or a streamed
+    // confirm's receipt (confirm.stream.v1), which arrives before the follow-up.
+    let answered = false;
+    const onAnswer = (result: unknown) => {
+      if (answered) return;
+      answered = true;
+      if (refusedField(result)) {
+        dropWorking();
+        appendLines(confirmErrorLines(Object.assign(new Error(fieldInvalidMessage(result) ?? ""), { code: "field_invalid" })));
+        return;
+      }
+      if (settle(result, false)) afterReceipt(result);
+    };
+    // T12: after the receipt, the agent's follow-up goes on the card's own turn:
+    // its views as they come, then its answer and any card it proposed. Its
+    // error never undoes the receipt; it only adds the follow-up's words.
+    const streamHooks: ConfirmStreamHooks = {
+      onReceipt: onAnswer,
+      onView: (frame) => {
+        if (!onCardTurn()) return;
+        recordTurnView(frame);
+        refocusCardTurn();
+      }
+    };
+    // When the call ends, what happens and in what order is one pure step list
+    // (confirm-stream.ts `confirmStreamSteps`, unit-tested on CI): the receipt
+    // settled once, then the follow-up's answer, its error words, its cards.
+    const runSteps = (end: Parameters<typeof confirmStreamSteps>[0]) => {
+      for (const step of confirmStreamSteps(end, { answered, confirmFieldsCapable: head.confirmFieldsCapable === true })) {
+        switch (step.type) {
+          case "settle":
+            if (step.thrown) {
+              if (settle(step.outcome, true) && !refusedField(step.outcome)) afterReceipt(step.outcome);
+            } else onAnswer(step.outcome);
+            break;
+          case "message":
+            appendMessages([{ role: "assistant", text: step.text }]);
+            break;
+          case "lines":
+            appendLines(step.lines);
+            break;
+          case "queue":
+            setPendingConfirmActions((current) => [...current, ...step.pending]);
+            break;
+        }
+      }
+    };
     setConfirmsInFlight((count) => count + 1);
     void (async () => {
       try {
-        const result = await onConfirmAction?.(head, decision, fields);
-        if (refusedField(result)) {
-          dropWorking();
-          appendLines(confirmErrorLines(Object.assign(new Error(fieldInvalidMessage(result) ?? ""), { code: "field_invalid" })));
-          return;
-        }
-        if (settle(result, false)) afterReceipt(result);
+        const result = await onConfirmAction?.(head, decision, fields, streamHooks);
+        runSteps({ type: "resolved", result });
       } catch (error) {
-        if (settle(error, true) && !refusedField(error)) afterReceipt(error);
+        runSteps({ type: "rejected", error });
       } finally {
         setConfirmsInFlight((count) => count - 1);
       }
     })();
   }, [appendMessages, columns, onConfirmAction, pendingConfirmActions, t]);
+
+  // `o` (T12): ask the app to open a place (the desktop's /v1/open). Navigation
+  // only: nothing is written, no browser opens, and the line says what the app did.
+  const openAppPlace = useCallback((target: AppOpenTarget | null) => {
+    if (!target || !onOpenAppLink) return;
+    const say = (lines: readonly string[]) => appendMessages(lines.map((text) => ({ kind: "slash", role: "system", text }) as Msg));
+    void onOpenAppLink(target).then((answer) => say(appOpenLines(answer)), (error: unknown) => say(appOpenLines(error instanceof Error ? error : new Error(""))));
+  }, [appendMessages, onOpenAppLink]);
 
   // One key on the head card, already resolved by the keymap. With an approval
   // view the card's own step decides (views/approval.ts); an old desktop's card
@@ -1653,8 +1739,10 @@ export function InkInteractiveSessionApp({
       // The app was told once; nothing more is sent.
       setPendingConfirmActions((current) => current.slice(1));
       appendMessages([{ kind: "slash", role: "system", text: "Closed — nothing more was sent." }]);
+    } else if (step.effect?.type === "open") {
+      openAppPlace(headConfirmAction?.view ? cardOpenLink(headConfirmAction.view) : null);
     }
-  }, [appendMessages, cardUi, headCard, resolveConfirmAction]);
+  }, [appendMessages, cardUi, headCard, headConfirmAction, openAppPlace, resolveConfirmAction]);
 
   // Enter while a card field is open sets its value (never approves); a value
   // that does not fit keeps the field open with a hint.
@@ -1936,6 +2024,8 @@ export function InkInteractiveSessionApp({
       return true;
     } else if (next.effect?.type === "page_live") {
       pageLive("next");
+    } else if (next.effect?.type === "open") {
+      openAppPlace(next.effect.target);
     } else if (next.effect?.type === "copy") {
       const targets = copyTargets(process.env, process.platform);
       if (targets.osc52 && sessionStdout?.isTTY) {

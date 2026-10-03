@@ -175,7 +175,9 @@ describe("n leaves the dismissed card at once (run-2 M5)", () => {
       messages: [{ role: "user", text: "pause hook a" }, { role: "assistant", text: "Okay, left it running." }],
       views: [frame.view], focus: null, width: 100, color: false, theme: DEFAULT_THEME, steps, nowMs: 2000
     }).lines.map(plain);
-    expect(lines).toContain(`✕ ${DISMISSED_WORDS}`);
+    // The head says it at once; the receipt's sentence waits for the app (live run-4 N22).
+    expect(lines.some((line) => line.includes("✕ Dismissed"))).toBe(true);
+    expect(lines).toContain("Sending to the app…");
     expect(lines.find((line) => line.includes("waiting for your OK"))).toMatch(/· dismissed$/u);
     expect(lines.join("\n")).not.toContain("▣");
   });
@@ -319,11 +321,35 @@ describe("the dismissed card's last line follows the app's answer (run-3 N22)", 
     view: { ...cardView, approval: undefined, state: "cancelled", receipt: { sentence: DISMISSED_WORDS, tone: "ok", revertible: false, ...receipt } }
   });
 
-  it("while the no is on its way: `Sending to the app…`, never `Sent`", () => {
+  // Live run-4, N22: the line under the dismissed card never changed once the
+  // app had recorded the no. While the no is on its way the card claims only
+  // what the terminal knows (`Sending to the app…`); the receipt's sentence
+  // ("Dismissed — nothing was executed.") is the app's, so it appears the
+  // moment the app's answer arrives, streamed or not, as r4's last frame.
+  it("while the no is on its way: `Sending to the app…` alone, no receipt yet, never `Sent`", () => {
     const lines = drawn(dismissedReceiptFrame(head)!);
-    expect(lines).toContain(`✕ ${DISMISSED_WORDS}`);
+    expect(lines.some((line) => line.includes("✕ Dismissed"))).toBe(true);
     expect(lines).toContain("Sending to the app…");
+    expect(lines.join("\n")).not.toContain(DISMISSED_WORDS);
     expect(lines.join("\n")).not.toContain("Sent to the app");
+  });
+
+  it("the moment the app's answer arrives, the line turns into the decline receipt (N22)", () => {
+    const before = drawn(dismissedReceiptFrame(head)!);
+    const step = settleConfirmOutcome(head, appReceipt({}), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
+    const after = drawn(step.type === "receipt" ? step.frame : { view: null });
+    expect(after).not.toEqual(before);
+    const sentence = after.indexOf(`✕ ${DISMISSED_WORDS}`);
+    expect(sentence).toBeGreaterThanOrEqual(0);
+    expect(after[sentence + 1]).toBe("Sent to the app");
+    expect(after.join("\n")).not.toContain("Sending");
+  });
+
+  it("a streamed receipt is the same answer: `{ ...result, view }` turns it into the receipt too (N22)", () => {
+    const streamed = { ...appReceipt({}), followUp: { turnId: "t2", message: "", actionCalls: [] } };
+    const step = settleConfirmOutcome(head, streamed, { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
+    expect(step.type).toBe("receipt");
+    expect(drawn(step.type === "receipt" ? step.frame : { view: null })).toContain(`✕ ${DISMISSED_WORDS}`);
   });
 
   it("the app's receipt replaces it in place: `Sent to the app`, as r4's last frame", () => {
@@ -346,11 +372,12 @@ describe("the dismissed card's last line follows the app's answer (run-3 N22)", 
     expect(lines.join("\n")).not.toContain("Sending");
   });
 
-  it("an app that took the no with no receipt of its own: the same card, now sent", () => {
+  it("an app that took the no with no receipt of its own: the same card, now sent, with the receipt's sentence", () => {
     const frame = dismissedReceiptFrame(head)!;
     const sent = dismissalSent(frame);
     expect(sent.viewId).toBe(frame.viewId);
     expect(drawn(sent)).toContain("Sent to the app");
+    expect(drawn(sent)).toContain(`✕ ${DISMISSED_WORDS}`);
     expect(drawn(sent).join("\n")).not.toContain("Sending");
   });
 

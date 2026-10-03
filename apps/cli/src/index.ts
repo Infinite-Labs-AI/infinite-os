@@ -47,6 +47,7 @@ import {
   type DesktopStatus
 } from "./desktop-app-client.js";
 import { desktopTopBarData } from "./desktop/status-connections.js";
+import { followUpViewFrame } from "./desktop/confirm-stream.js";
 import { resolveMode, type ModeDeps, type ModeIo } from "./desktop/mode-router.js";
 import {
   createDesktopSessionTurnRunner,
@@ -1813,14 +1814,30 @@ async function runDesktopInteractiveEntry(
       // (handles are per-boot); `confirm` is single-use per handle.
       // `fields` (a card's answered values, e.g. a daily budget) go only to a
       // Desktop that takes them; the client refuses them elsewhere.
-      onConfirmAction: (action, decision, fields) =>
+      // A card with a view streams its confirm when the app can (confirm.stream.v1):
+      // the receipt first, then the agent's follow-up, in the same turn (T12).
+      onConfirmAction: (action, decision, fields, stream) =>
         runner.confirm({
           turnId: action.turnId,
           confirmationHandle: action.confirmationHandle,
           decision,
           ...(fields && Object.keys(fields).length ? { fields } : {}),
-          signal: turnAbort.signal
+          signal: turnAbort.signal,
+          ...(stream && action.view && runner.streamCapable()
+            ? {
+                stream: true,
+                onReceipt: (receipt) => stream.onReceipt(receipt),
+                onProgress: (frame) => {
+                  const view = followUpViewFrame(frame);
+                  if (view) stream.onView(view);
+                }
+              }
+            : {})
         }),
+      // `o` and `w` on the views follow what the app negotiated (app.open.v1);
+      // `o` opens places through the app, never a browser.
+      appCaps: () => runner.caps(),
+      onOpenAppLink: (target) => runner.openPlace(target),
       // Esc stops the running turn and Ctrl-C stops it instead of quitting:
       // aborting the turn's signal drops the `/v1/turn` request, and the
       // bridge stops the app turn on disconnect.

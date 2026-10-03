@@ -27,6 +27,7 @@ import { DEFAULT_THEME, type Theme } from "../theme.js";
 import { changeCardSummary } from "./change.js";
 import { listOpeningRow } from "./list.js";
 import { managedApproval } from "./managed.js";
+import type { AppOpenTarget } from "./open-target.js";
 import { truncatedMoreAsk, turnAsk, viewText } from "./primitives.js";
 import { renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
@@ -46,7 +47,12 @@ export type ViewKeyEffect =
    * acted on the view before it was engaged turned out to start a message
    * (`j` then `u` is "ju…", never "u…").
    */
-  | { type: "type"; text: string };
+  | { type: "type"; text: string }
+  /**
+   * Open this place in the app (`o`, app.open.v1): the desktop's /v1/open with
+   * place + params, never a browser and never a URL.
+   */
+  | { type: "open"; target: AppOpenTarget };
 
 /** What the focused view offers right now (from its current render). */
 export interface ViewKeyFacts {
@@ -74,6 +80,10 @@ export interface ViewKeyFacts {
   tabNoun?: string | null;
   /** The view draws `? what it does` inside itself (a card): `?` is not repeated on the bar. */
   explainInside?: boolean;
+  /** The place `o` opens and what the bar calls it (only when the session can open places). */
+  open?: { target: AppOpenTarget; label: string } | null;
+  /** What `w` asks as a new user turn (a job's watch step; only when the session can watch). */
+  watch?: string | null;
 }
 
 export interface ViewFocusState {
@@ -143,6 +153,8 @@ export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender
     rowCopies: (render.rowCopies ?? []).map((text) => viewText(text) || null),
     copy: viewText(render.copyText) || null,
     approve: approveFact(render.approvalAsk),
+    open: render.openLink ? { target: render.openLink, label: viewText(render.openLabel) || "open in the app" } : null,
+    watch: turnAsk(render.watchAsk),
     table: view.kind === "numbers",
     tabNoun: view.kind === "document" ? documentTabNoun(view.body) : null,
     ...(render.explainInside ? { explainInside: true } : {})
@@ -182,7 +194,9 @@ export function hasViewKeys(facts: ViewKeyFacts): boolean {
     || facts.fixAsk !== null
     || facts.copy !== null
     || facts.rowCopies.some((text) => text !== null)
-    || facts.approve !== null;
+    || facts.approve !== null
+    || Boolean(facts.open)
+    || Boolean(facts.watch);
 }
 
 /** What `c` copies at this selection: the row's own text, else the view's. */
@@ -321,6 +335,17 @@ export function resolveViewKey(
  */
 export const HANDLED_KIND_KEYS: ReadonlySet<string> = new Set<string>();
 
+/**
+ * The composer bar's word for `o`, as r4 draws it: `open`, or `open in <place>`
+ * when the link names itself that way (flow-images `o open in Library`). Never
+ * a link's raw label (`Posts`, `Connect the store`): those read as the place,
+ * not the key, and stay on the view's own `(o)` line.
+ */
+function openBarLabel(label: string): string {
+  const named = /^open in\s+(.+)$/iu.exec(label.trim());
+  return named ? `open in ${named[1]}` : "open";
+}
+
 function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKeyFacts): ViewFocusState {
   // Every key that acts engages the view.
   const handled = (patch: Partial<ViewFocusState>): ViewFocusState => ({ ...state, engaged: true, ...patch, handled: true });
@@ -367,11 +392,19 @@ function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKe
       const text = copyTextAt(facts, state.selected);
       return text ? handled({ effect: { type: "copy", text } }) : state;
     }
+    case "open":
+      // Unengaged, `o` is the first letter of a message ("ok…", "open…").
+      // Engaged, it asks the app to open the place the view marks `(o)`.
+      return state.engaged && facts.open ? handled({ effect: { type: "open", target: facts.open.target } }) : state;
+    case "watch":
+      // Unengaged, `w` is the first letter of a message ("what…"). Engaged, a
+      // job that can say it finished sends its watch step as a new turn.
+      return state.engaged && facts.watch ? handled({ effect: { type: "ask", text: facts.watch } }) : state;
     case "switch_pane":
       return { ...state, focus: "composer", engaged: false, handled: true };
     default:
-      // ok/dismiss belong to approval cards; open/watch/retry/edit/view
-      // arrive with the renderers and capabilities that give them meaning.
+      // ok/dismiss belong to approval cards; retry/edit/view arrive with the
+      // renderers and capabilities that give them meaning.
       return state;
   }
 }
@@ -414,6 +447,10 @@ export function viewKeyHints(
   }
   if (state.engaged && (facts.more || facts.livePageNext)) hints.push({ key: "m", label: "more" });
   if (state.engaged && copyTextAt(facts, state.selected)) hints.push({ key: "c", label: "copy" });
+  // `o` and `w` from the facts (T12), so the bar and the resolver agree; once engaged, as `m` and `c`.
+  // r4 draws them `w watch` then `o open` (view-08-job); the link's own words stay on its in-view line.
+  if (state.engaged && facts.watch) hints.push({ key: "w", label: "watch" });
+  if (state.engaged && facts.open) hints.push({ key: "o", label: openBarLabel(facts.open.label) });
   hints.push(...kindKeys.filter((hint) => HANDLED_KIND_KEYS.has(hint.key)));
   // `?` is the bar's (run-2 N12), `? hide` while open; a card keeps its own inside it.
   if (facts.explain) {

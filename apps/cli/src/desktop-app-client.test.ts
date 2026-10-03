@@ -18,6 +18,7 @@ import {
   runDesktopAppCommand,
   type DesktopBridgeDescriptor
 } from "./desktop-app-client.js";
+import { confirmErrorLines } from "./desktop/confirm-result-lines.js";
 import {
   CONFIRM_FIELDS_CAPABILITY,
   GENERAL_MARKETING_PROFILE,
@@ -2606,5 +2607,291 @@ describe("resolveLiveBridge", () => {
     expect(() => resolveLiveBridge(fixture.env)).toThrowError(
       expect.objectContaining({ code: "desktop_descriptor_unsafe" })
     );
+  });
+});
+
+// T12 (P3.3): `o` opens app places through /v1/open (app.open.v1), and a yes
+// on a card streams its receipt, then the agent's follow-up, in the same turn
+// (confirm.stream.v1). Synthetic data only.
+describe("app.open.v1 and confirm.stream.v1 (T12)", () => {
+  const OPEN_CAPABILITY = "app.open.v1";
+  const STREAM_CAPABILITY = "confirm.stream.v1";
+  const ALL = [...CAPABILITIES, RESULT_VIEW_CAPABILITY, CONFIRM_FIELDS_CAPABILITY, OPEN_CAPABILITY, STREAM_CAPABILITY];
+
+  function frame(sequence: number, kind: string, data: unknown, requestId = "stream-1") {
+    return JSON.stringify({ protocolVersion: 1, requestId, sequence, kind, data });
+  }
+
+  function receiptFrame(sequence: number, result: Record<string, unknown> = { ok: true, receipt: "Paused ad “Hook B”" }) {
+    return frame(sequence, "progress", {
+      type: "action.receipt",
+      stage: "tool",
+      message: "",
+      confirmationHandle: "opaque-confirm-1",
+      view: receiptView(),
+      result
+    });
+  }
+
+  function harness(options: {
+    descriptor?: string[];
+    status?: string[];
+    respond?: (path: string, body: Record<string, unknown>) => Response;
+  } = {}) {
+    const fixture = createBridgeHome(descriptor({ capabilities: options.descriptor ?? ALL }));
+    roots.push(fixture.root);
+    const calls: { path: string; body: Record<string, unknown>; headers: Record<string, string> }[] = [];
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/status") return jsonResponse(status({ capabilities: options.status ?? ALL }));
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      calls.push({ path, body, headers: Object.fromEntries(new Headers(init?.headers).entries()) });
+      return options.respond?.(path, body) ?? jsonResponse({ ok: true });
+    }) as typeof fetch;
+    const client = createDesktopAppClient(fixture.env, { fetchImpl, randomId: () => "stream-1" });
+    return { client, calls };
+  }
+
+  it.each([
+    ["only the descriptor", ALL, CAPABILITIES, false],
+    ["only the status", CAPABILITIES, ALL, false],
+    ["both descriptor and status", ALL, ALL, true]
+  ])("negotiates app.open.v1 and confirm.stream.v1 only when %s advertise them", async (_label, descriptorCaps, statusCaps, capable) => {
+    const { client } = harness({ descriptor: descriptorCaps, status: statusCaps });
+    expect(client.appOpenCapable).toBe(false);
+    expect(client.confirmStreamCapable).toBe(false);
+    await client.status();
+    expect(client.appOpenCapable).toBe(capable);
+    expect(client.confirmStreamCapable).toBe(capable);
+  });
+
+  it("opens a place with { protocolVersion: 1, place, params } and never sends or reads a url", async () => {
+    const { client, calls } = harness({
+      respond: () => jsonResponse({ protocolVersion: 1, requestId: "stream-1", ok: true, status: "opened" })
+    });
+    await client.status();
+    const opened = await client.openPlace({
+      protocolVersion: 1,
+      place: "creative.library",
+      params: { tab: "saved" },
+      // A url on the link is never forwarded (the bridge strips it; the CLI never reads it).
+      ...({ url: "infinite://open/v1?place=elsewhere" } as Record<string, string>)
+    });
+    expect(opened).toEqual({ ok: true, status: "opened" });
+    expect(calls).toEqual([
+      expect.objectContaining({
+        path: "/v1/open",
+        body: { protocolVersion: 1, requestId: "stream-1", place: "creative.library", params: { tab: "saved" } }
+      })
+    ]);
+    expect(JSON.stringify(calls)).not.toContain("infinite://");
+  });
+
+  it("a place with no params opens with place alone", async () => {
+    const { client, calls } = harness({
+      respond: () => jsonResponse({ protocolVersion: 1, requestId: "stream-1", ok: false, status: "wrong_workspace" })
+    });
+    await client.status();
+    expect(await client.openPlace({ protocolVersion: 1, place: "ads.meta" })).toEqual({ ok: false, status: "wrong_workspace" });
+    expect(calls[0]?.body).toEqual({ protocolVersion: 1, requestId: "stream-1", place: "ads.meta" });
+  });
+
+  it("refuses to open on a desktop without app.open.v1 and sends nothing", async () => {
+    const { client, calls } = harness({ descriptor: CAPABILITIES, status: CAPABILITIES });
+    await client.status();
+    await expect(client.openPlace({ protocolVersion: 1, place: "ads.meta" })).rejects.toMatchObject({
+      code: "desktop_update_required"
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("reads an unknown open status as unavailable, never as opened", async () => {
+    const { client } = harness({
+      respond: () => jsonResponse({ protocolVersion: 1, requestId: "stream-1", ok: true, status: "teleported" })
+    });
+    await client.status();
+    expect(await client.openPlace({ protocolVersion: 1, place: "ads.meta" })).toEqual({ ok: false, status: "unavailable" });
+  });
+
+  it("without confirm.stream.v1 a confirm stays one JSON call, exactly as before", async () => {
+    const without = ALL.filter((capability) => capability !== STREAM_CAPABILITY);
+    const { client, calls } = harness({ descriptor: without, status: without, respond: () => jsonResponse({ ok: true, view: receiptView() }) });
+    await client.status();
+    const onReceipt = vi.fn();
+    const result = await client.confirm({
+      turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true, onReceipt
+    });
+    expect(calls[0]?.body).toEqual({
+      protocolVersion: 1, requestId: "stream-1", turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve"
+    });
+    expect(calls[0]?.headers.accept).toBe("application/json");
+    expect(result).toEqual({ ok: true, view: receiptView() });
+    expect(result).not.toHaveProperty("followUp");
+    expect(onReceipt).not.toHaveBeenCalled();
+  });
+
+  it("a streamed confirm hands the receipt over first, then the follow-up's frames, then its answer", async () => {
+    const order: string[] = [];
+    const { client, calls } = harness({
+      respond: () => ndjsonResponse([
+        receiptFrame(1),
+        frame(2, "progress", { type: "message.delta", stage: "message", message: "It", text: "It" }),
+        frame(3, "done", { turnId: "turn-2", message: "It stopped spending. Want the ad set paused too?", actionCalls: [] })
+      ])
+    });
+    await client.status();
+    const result = await client.confirm({
+      turnId: "turn-1",
+      confirmationHandle: "opaque-confirm-1",
+      decision: "approve",
+      stream: true,
+      onReceipt: (receipt) => order.push(`receipt:${String(receipt.receipt)}:${receipt.view?.state}`),
+      onProgress: (progress) => order.push(`progress:${progress.sequence}`)
+    });
+    expect(calls[0]?.body).toEqual({
+      protocolVersion: 1, requestId: "stream-1", turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true
+    });
+    expect(calls[0]?.headers.accept).toBe("application/x-ndjson");
+    expect(order).toEqual(["receipt:Paused ad “Hook B”:done", "progress:2"]);
+    expect(result).toMatchObject({ ok: true, receipt: "Paused ad “Hook B”", view: receiptView() });
+    expect(result.followUp).toEqual({ turnId: "turn-2", message: "It stopped spending. Want the ad set paused too?", actionCalls: [] });
+    expect(result).not.toHaveProperty("followUpError");
+  });
+
+  it("streams only a card that carried a view: without views negotiated it confirms plainly", async () => {
+    const noViews = ALL.filter((capability) => capability !== RESULT_VIEW_CAPABILITY);
+    const { client, calls } = harness({ descriptor: noViews, status: noViews });
+    await client.status();
+    await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true });
+    expect(calls[0]?.body).not.toHaveProperty("stream");
+  });
+
+  it.each(["field_invalid", "confirmation_not_found"])(
+    "a streamed %s error with no receipt rejects as not done, never as a receipt",
+    async (code) => {
+      const { client } = harness({
+        respond: () => ndjsonResponse([frame(1, "error", { code, message: "That budget must be at least 1." })])
+      });
+      await client.status();
+      const onReceipt = vi.fn();
+      const error = await client.confirm({
+        turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true, onReceipt
+      }).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ name: "DesktopAppClientError", code, message: "That budget must be at least 1.", nothingRan: true });
+      expect((error as DesktopAppClientError).view).toBeUndefined();
+      expect(onReceipt).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    "dispatch_uncertain",
+    "meta_api_error",
+    "ledger_unreachable",
+    "some_new_ledger_code",
+    // The app trusts these as not-sent only with a pre-send mark the stream frame does not carry.
+    "invalid_request",
+    "budget_choice_required",
+    "daemon_timeout"
+  ])(
+    "a streamed %s error with no receipt never claims nothing ran: only proven not-sent codes do",
+    async (code) => {
+      const { client } = harness({
+        respond: () => ndjsonResponse([
+          frame(1, "error", { code, message: "Infinite already started this change and couldn't confirm the result." })
+        ])
+      });
+      await client.status();
+      const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
+        .catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ name: "DesktopAppClientError", code });
+      expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
+      const lines = confirmErrorLines(error);
+      expect(lines[0]?.text).not.toMatch(/Not done|✗/);
+      expect(lines[0]?.text).toContain("Infinite already started this change");
+    }
+  );
+
+  it.each([
+    "receipt_view_unavailable",
+    "confirmation_expired",
+    "confirmation_spent",
+    "stale_turn_context",
+    "desktop_not_ready",
+    "recovery_pending",
+    "unsafe_tool_blocked",
+    "local_provider_busy"
+  ])("a streamed %s error with no receipt is a proven not-sent refusal: nothing ran", async (code) => {
+    const { client } = harness({
+      respond: () => ndjsonResponse([frame(1, "error", { code, message: "Nothing was executed." })])
+    });
+    await client.status();
+    const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code, nothingRan: true });
+  });
+
+  it("an error with no receipt the bridge cannot vouch for (receipt_unavailable) never says nothing ran", async () => {
+    const { client } = harness({
+      respond: () => ndjsonResponse([frame(1, "error", { code: "receipt_unavailable", message: "Check it in the app before trying again." })])
+    });
+    await client.status();
+    const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "receipt_unavailable" });
+    expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
+  });
+
+  it("an error after the receipt keeps the receipt done and adds the follow-up's error", async () => {
+    const { client } = harness({
+      respond: () => ndjsonResponse([
+        receiptFrame(1),
+        frame(2, "error", { code: "turn_failed", message: "The follow-up could not finish." })
+      ])
+    });
+    await client.status();
+    const result = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true });
+    expect(result).toMatchObject({ ok: true, view: { state: "done" } });
+    expect(result.followUpError).toEqual({ code: "turn_failed", message: "The follow-up could not finish." });
+    expect(result).not.toHaveProperty("followUp");
+  });
+
+  it("a stream lost before its receipt is an unknown outcome; lost after it, the receipt stands", async () => {
+    const before = harness({ respond: () => ndjsonResponse([]) });
+    await before.client.status();
+    await expect(before.client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true }))
+      .rejects.toMatchObject({ code: "desktop_confirmation_outcome_unknown" });
+
+    const after = harness({ respond: () => ndjsonResponse([receiptFrame(1)]) });
+    await after.client.status();
+    const result = await after.client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true });
+    expect(result).toMatchObject({ ok: true, view: { state: "done" } });
+    expect(result.followUpError?.code).toBe("desktop_stream_missing_terminal");
+  });
+
+  it("a streamed decline's receipt carries the app's lines, as a plain decline does", async () => {
+    const { client } = harness({
+      respond: () => ndjsonResponse([
+        receiptFrame(1, { ok: true, declined: true, askedCaption: "Ready.", dismissedCaption: "Okay, left it running." }),
+        frame(2, "done", { turnId: "turn-1", message: "", actionCalls: [] })
+      ])
+    });
+    await client.status();
+    const result = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "decline", stream: true });
+    expect(result).toMatchObject({ ok: true, declined: true, askedCaption: "Ready.", dismissedCaption: "Okay, left it running." });
+  });
+
+  it("a receipt whose result failed rejects with its code and view after the stream ends", async () => {
+    const expired = receiptView({ state: "expired", receipt: { sentence: "This card expired.", tone: "warn", revertible: false } });
+    const { client } = harness({
+      respond: () => ndjsonResponse([
+        frame(1, "progress", { type: "action.receipt", stage: "tool", message: "", confirmationHandle: "opaque-confirm-1", view: expired, result: { ok: false, code: "confirmation_not_found", message: "Expired." } }),
+        frame(2, "done", { turnId: "turn-1", message: "", actionCalls: [] })
+      ])
+    });
+    await client.status();
+    const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "confirmation_not_found", view: { state: "expired" } });
+    expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
   });
 });

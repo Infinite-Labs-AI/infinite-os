@@ -1,0 +1,275 @@
+// T12 (P3.3) in the session: `o` opens a place through the app (never a
+// browser), the view keys follow what the app negotiated, and a streamed yes
+// shows the receipt, then the agent's follow-up answer, in the same turn.
+// Structural guards run on CI; the fake-TTY flows are skipped there.
+import { readFileSync } from "node:fs";
+import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
+import type { ToolViewFrameV1 } from "@infinite-os/types";
+import { describe, expect, it, vi } from "vitest";
+
+import type { InSessionConfirmationAction } from "../../desktop/confirm-in-session.js";
+import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
+import { resetTurnState } from "../app/turn-store.js";
+import { runInkInteractiveSession, type ConfirmStreamHooks, type InkInteractiveLineResult } from "./interactive-session.js";
+
+const source = readFileSync(fileURLToPath(new URL("./interactive-session.tsx", import.meta.url)), "utf8");
+const indexSource = readFileSync(fileURLToPath(new URL("../../index.ts", import.meta.url)), "utf8");
+const stripAnsi = (value: string) => value.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[A-Za-z]`, "g"), "");
+
+describe("T12 wiring (CI-runnable)", () => {
+  it("the view keys take the app's negotiated caps, never a fixed none", () => {
+    expect(source.match(/viewFocusAfterTurnDone\(views\.map\(\(frame\) => frame\.view\), viewCaps\(\)\)/gu)?.length).toBe(3);
+    expect(source).not.toMatch(/viewFocusAfterTurnDone\([^)]*\), NO_KEY_CAPS\)/u);
+    expect(indexSource).toContain("appCaps: () => runner.caps(),");
+  });
+
+  it("`o` goes to the app's /v1/open, never a browser or a URL", () => {
+    expect(source).toContain("openAppPlace(next.effect.target);");
+    expect(source).toContain("openAppPlace(headConfirmAction?.view ? cardOpenLink(headConfirmAction.view) : null);");
+    expect(source).toContain("void onOpenAppLink(target).then(");
+    expect(indexSource).toContain("onOpenAppLink: (target) => runner.openPlace(target),");
+    const handler = source.slice(source.indexOf("const openAppPlace"), source.indexOf("const handleCardAction"));
+    expect(handler).not.toMatch(/openExternal|xdg-open|spawn|exec|\.url\b/u);
+  });
+
+  it("a streamed receipt settles the card once, before the follow-up; the follow-up goes on the card's turn", () => {
+    const handler = source.slice(source.indexOf("const resolveConfirmAction"), source.indexOf("const openAppPlace"));
+    expect(handler).toContain("onReceipt: onAnswer,");
+    expect(handler).toContain("if (answered) return;");
+    // The order of what happens when the call ends is confirm-stream.ts `confirmStreamSteps` (unit-tested there);
+    // the session runs every step it returns, and each step does its one thing.
+    expect(handler).toContain("const result = await onConfirmAction?.(head, decision, fields, streamHooks);\n        runSteps({ type: \"resolved\", result });");
+    expect(handler).toMatch(/\} catch \(error\) \{\s+runSteps\(\{ type: "rejected", error \}\);/u);
+    expect(handler).toContain("for (const step of confirmStreamSteps(end, { answered, confirmFieldsCapable: head.confirmFieldsCapable === true })) {");
+    expect(handler).toMatch(/case "settle":\s+if \(step\.thrown\) \{\s+if \(settle\(step\.outcome, true\) && !refusedField\(step\.outcome\)\) afterReceipt\(step\.outcome\);\s+\} else onAnswer\(step\.outcome\);\s+break;/u);
+    expect(handler).toMatch(/case "message":\s+appendMessages\(\[\{ role: "assistant", text: step\.text \}\]\);\s+break;/u);
+    expect(handler).toMatch(/case "lines":\s+appendLines\(step\.lines\);\s+break;/u);
+    expect(handler).toMatch(/case "queue":\s+setPendingConfirmActions\(\(current\) => \[\.\.\.current, \.\.\.step\.pending\]\);\s+break;/u);
+    // The follow-up's views land only on the card's own turn.
+    expect(handler).toMatch(/onView: \(frame\) => \{\s+if \(!onCardTurn\(\)\) return;\s+recordTurnView\(frame\);/u);
+    // The client streams only a card that carried a view, and only from an app that can.
+    expect(indexSource).toContain("...(stream && action.view && runner.streamCapable()");
+  });
+});
+
+const RECEIPT_VIEW = {
+  v: 1, kind: "change", tool: "propose_pause_entity", title: "Paused ad 01", state: "done", asOf: null,
+  scope: { workspaceName: "W", crossWorkspace: false }, caveats: [],
+  body: { target: { kind: "ad", label: "Ad 01" }, rows: [{ label: "status", before: "on", after: "PAUSED" }], warnings: [] },
+  outcome: "applied", receipt: { sentence: "Stopped spending at 10:42", tone: "ok", revertible: true }
+};
+const CARD = {
+  turnId: "t1",
+  confirmationHandle: "h1",
+  summary: "Pause ad 01",
+  confirmationDetails: [],
+  view: {
+    ...RECEIPT_VIEW, title: "Pause ad", state: "needs_yes", outcome: undefined, receipt: undefined,
+    approval: { kind: "card", title: "Pause ad 01?", summary: "Stops spend.", confirmLabel: "Pause", dismissLabel: "Dismiss", rows: [] }
+  }
+} as unknown as InSessionConfirmationAction;
+
+describe("T12 in the session (fake TTY, skipped on CI)", () => {
+  it.skipIf(process.env.CI === "true")(
+    "a streamed yes shows the receipt, then the agent's follow-up answer, in the same turn",
+    { timeout: 30_000 },
+    async () => {
+      const follow = deferred<unknown>();
+      let hooks: ConfirmStreamHooks | undefined;
+      const input = ttyInput();
+      const output = ttyOutput();
+      const session = runInkInteractiveSession({
+        columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+        onConfirmAction: (_action, _decision, _fields, stream) => {
+          hooks = stream;
+          return follow.promise;
+        },
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+        }
+      });
+      output.columns = 100;
+      const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+      await sendKeys(input, "p");
+      await waitFor(() => hooks !== undefined, 4_000, lastFrame);
+      const receipt = { ok: true, view: RECEIPT_VIEW };
+      hooks!.onReceipt(receipt);
+      // The receipt is on the turn before the follow-up has said anything.
+      await waitFor(() => lastFrame().includes("Stopped spending at 10:42"), 4_000, lastFrame);
+      expect(lastFrame()).not.toContain("It stopped spending. Want the ad set paused too?");
+      follow.resolve({ ...receipt, followUp: { turnId: "t2", message: "It stopped spending. Want the ad set paused too?", actionCalls: [] } });
+      await waitFor(() => lastFrame().includes("It stopped spending. Want the ad set paused too?"), 4_000, lastFrame);
+      // Same turn: the question, the receipt and the follow-up are on screen together, the receipt once.
+      expect(lastFrame()).toContain("pause it");
+      expect(lastFrame().split("Stopped spending at 10:42").length - 1).toBe(1);
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "a follow-up that fails after the receipt keeps the receipt done and adds its error",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput();
+      const session = runInkInteractiveSession({
+        columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+        onConfirmAction: async (_action, _decision, _fields, stream) => {
+          const receipt = { ok: true, view: RECEIPT_VIEW };
+          stream?.onReceipt(receipt);
+          return { ...receipt, followUpError: { code: "turn_failed", message: "The follow-up could not finish." } };
+        },
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+        }
+      });
+      output.columns = 100;
+      const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+      await sendKeys(input, "p");
+      await waitFor(() => lastFrame().includes("The follow-up stopped: The follow-up could not finish."), 4_000, lastFrame);
+      expect(lastFrame()).toContain("Stopped spending at 10:42");
+      expect(lastFrame()).not.toMatch(/Not done|nothing ran/iu);
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "a streamed error with no receipt (field_invalid) is not done, and the card stays live",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput();
+      const session = runInkInteractiveSession({
+        columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+        onConfirmAction: async (_action, decision) => {
+          if (decision === "decline") return { ok: true };
+          throw Object.assign(new Error("That budget must be at least 1."), { code: "field_invalid", nothingRan: true });
+        },
+        async onSubmitLine(): Promise<InkInteractiveLineResult> {
+          return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [CARD] };
+        }
+      });
+      output.columns = 100;
+      const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause it\r");
+      await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+      await sendKeys(input, "p");
+      await waitFor(() => lastFrame().includes("Not done: That budget must be at least 1."), 4_000, lastFrame);
+      // The card is back in front for a corrected answer, never a receipt.
+      expect(lastFrame()).toContain("Pause ad 01?");
+      expect(lastFrame()).not.toContain("Stopped spending at 10:42");
+      // The live card still takes its keys: `n` is a real decline.
+      await sendKeys(input, "n");
+      await waitFor(() => !lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
+    }
+  );
+
+  it.skipIf(process.env.CI === "true")(
+    "`o` on a view asks the app to open its place and says what the app did",
+    { timeout: 30_000 },
+    async () => {
+      const raw = JSON.parse(readFileSync(fileURLToPath(new URL("../views/__fixtures__/images-done.json", import.meta.url)), "utf8"));
+      const frame = { type: "tool.view", stage: "tool", message: "", viewId: "img", name: raw.tool, view: decodeAnswerView(raw)! } as ToolViewFrameV1;
+      const opened: unknown[] = [];
+      const input = ttyInput();
+      const output = ttyOutput();
+      const session = runInkInteractiveSession({
+        columns: 100, errorOutput: ttyOutput(), input, output, title: "Infinite TUI",
+        appCaps: () => ({ open: true, watch: true, retry: false }),
+        onOpenAppLink: async (target) => {
+          opened.push(target);
+          return { ok: true, status: "opened" };
+        },
+        async onSubmitLine(_line, _progress, _signal, onView): Promise<InkInteractiveLineResult> {
+          onView?.(frame);
+          return { messages: [{ role: "assistant", text: "Here they are." }] };
+        }
+      });
+      output.columns = 100;
+      const lastFrame = () => stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "show the images\r");
+      await waitFor(() => lastFrame().includes("Here they are."), 4_000, lastFrame);
+      await sendKeys(input, "\t");
+      await waitFor(() => lastFrame().includes("Open in Library"), 4_000, lastFrame);
+      await sendKeys(input, "o");
+      await waitFor(() => opened.length === 1, 4_000, lastFrame);
+      expect(opened).toEqual([{ place: "creative.library", params: { ids: "img_1,img_2,img_3" } }]);
+      await waitFor(() => lastFrame().includes("Opened in the app."), 4_000, lastFrame);
+      await sendKeys(input, "/exit\r");
+      await session;
+      resetTurnState();
+    }
+  );
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function ttyInput() {
+  const stream = new PassThrough() as PassThrough & NodeJS.ReadStream & {
+    isTTY: boolean;
+    ref: () => void;
+    setRawMode: (enabled: boolean) => void;
+    unref: () => void;
+  };
+  stream.isTTY = true;
+  stream.ref = vi.fn();
+  stream.setRawMode = vi.fn();
+  stream.unref = vi.fn();
+  return stream;
+}
+
+function ttyOutput() {
+  const chunks: string[] = [];
+  const stream = new PassThrough() as PassThrough & NodeJS.WriteStream & {
+    columns: number;
+    isTTY: boolean;
+    rows: number;
+    text: () => string;
+  };
+  stream.columns = 80;
+  stream.rows = 40;
+  stream.isTTY = true;
+  stream.on("data", (chunk) => chunks.push(String(chunk)));
+  stream.text = () => chunks.join("");
+  return stream;
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 4_000, debug?: () => string) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(predicate(), debug?.()).toBe(true);
+}
+
+async function sendKeys(input: NodeJS.WritableStream, keys: string) {
+  for (const key of keys) {
+    input.write(key);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}

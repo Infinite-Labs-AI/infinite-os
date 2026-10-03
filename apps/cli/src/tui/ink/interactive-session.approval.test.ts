@@ -435,9 +435,12 @@ describe("n shows the dismissed card at once (run-2 M5, fake TTY; skipped on CI)
       await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
       const before = output.text().length;
       await sendKeys(input, "n");
-      // The app has not answered: the dismissed card and the row's `· dismissed` are already drawn.
-      await waitFor(() => stripAnsi(output.text().slice(before)).includes("✕ Dismissed — nothing was executed."), 4_000, output.text);
+      // The app has not answered: the dismissed card and the row's `· dismissed` are already drawn
+      // (its receipt sentence waits for the app's answer, live run-4 N22).
+      await waitFor(() => stripAnsi(output.text().slice(before)).includes("Sending to the app…"), 4_000, output.text);
       const drawn = stripAnsi(output.text().slice(before));
+      expect(drawn).toContain("✕ Dismissed");
+      expect(drawn).not.toContain("✕ Dismissed — nothing was executed.");
       const row = drawn.split(/\r?\n/u).filter((line) => line.includes("waiting for your OK")).at(-1) ?? "";
       expect(row).toMatch(/· dismissed/u);
       expect(row).not.toContain("▣");
@@ -464,13 +467,14 @@ describe("n shows the dismissed card at once (run-2 M5, fake TTY; skipped on CI)
       await sendKeys(input, "pause hook a\r");
       await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
       await sendKeys(input, "n");
-      await waitFor(() => stripAnsi(output.text()).includes("✕ Dismissed — nothing was executed."), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("Sending to the app…"), 4_000, output.text);
       const pending = card("change-pause-card");
       const settled = output.text().length;
       answer({ ok: true, view: { ...pending.view!, approval: undefined, state: "expired", stateReason: { code: "expired", words: "This approval expired before the no." } } });
       await waitFor(() => stripAnsi(output.text().slice(settled)).includes("This approval expired before the no."), 4_000, output.text);
       const after = stripAnsi(output.text().slice(settled));
-      expect(after.lastIndexOf("This approval expired before the no.")).toBeGreaterThan(after.lastIndexOf("Dismissed — nothing was executed."));
+      expect(after.lastIndexOf("This approval expired before the no.")).toBeGreaterThan(after.lastIndexOf("Sending to the app…"));
+      expect(after).not.toContain("Dismissed — nothing was executed.");
       await sendKeys(input, "/exit\r");
       await session;
     }

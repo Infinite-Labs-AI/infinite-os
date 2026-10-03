@@ -56,6 +56,7 @@ import {
   wrapText
 } from "./primitives.js";
 import { stateHeadFor } from "./states.js";
+import { appOpenTarget, type AppOpenTarget } from "./open-target.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
 /** The card's own key state: what is open, which document, which page, and the answers so far. */
@@ -184,7 +185,7 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   const detailRows = readRows(approval.detailRows);
   const blockedByUpdate = live && !ctx.fieldsCapable && fields.some((field) => field.required);
   // `o` (and the body's "(o)") only when the desktop opens app links AND the card has one.
-  const canOpen = ctx.caps.open && hasAppLink(view, finishInApp);
+  const canOpen = ctx.caps.open && hasAppLink(view, finishInApp) && cardOpenLink(view) !== null;
   const innerCtx: ViewRenderCtx = { ...ctx, width: inner, caps: { ...ctx.caps, open: canOpen } };
   const sentFields = ctx.sentFields && Object.keys(ctx.sentFields).length ? { ...ctx.sentFields } : undefined;
 
@@ -559,6 +560,19 @@ function hasAppLink(view: AnswerViewV1, finishInApp: Record<string, unknown> | n
   if (finishInApp && isRecord(finishInApp.appLink)) return true;
   if (isRecord(view.appLink)) return true;
   return view.kind === "job" && isRecord(view.body) && isRecord(view.body.landsAt);
+}
+
+/**
+ * The place a card's `o` opens (T12, app.open.v1): where the card says to
+ * finish it, else the view's own link, else where a job lands. Place and
+ * params only, never the link's URL.
+ */
+export function cardOpenLink(view: AnswerViewV1): AppOpenTarget | null {
+  const approval: Record<string, unknown> = isRecord(view.approval) ? view.approval : {};
+  const finishInApp = isRecord(approval.finishInApp) ? approval.finishInApp : null;
+  if (finishInApp && isRecord(finishInApp.appLink)) return appOpenTarget(finishInApp.appLink);
+  if (isRecord(view.appLink)) return appOpenTarget(view.appLink);
+  return view.kind === "job" && isRecord(view.body) ? appOpenTarget(view.body.landsAt) : null;
 }
 
 /** The noun the document tabs share ("Email 1", "Email 2" → `1-2 email`); none when they differ. */

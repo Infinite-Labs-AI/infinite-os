@@ -94,7 +94,8 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(handler.indexOf("setPendingConfirmActions((current) => current.slice(1))"))
       .toBeLessThan(handler.indexOf("onConfirmAction?.(head"));
     // Both decisions reach the app: a decline is a real "no", not a local note.
-    expect(handler).toContain("onConfirmAction?.(head, decision, fields)");
+    // T12: plus the stream's hooks (the receipt, then the follow-up), the same one call.
+    expect(handler).toContain("onConfirmAction?.(head, decision, fields, streamHooks)");
     expect(handler).not.toContain('if (decision === "decline")');
   });
 
@@ -107,7 +108,8 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // (confirm-card.tsx settleConfirmOutcome: receipt view on the turn, keep, or lines).
     expect(handler).toContain("settleConfirmOutcome(head, outcome, { decision, dismissed: dismissed !== null, onCardTurn: onCardTurn(), thrown })");
     expect(handler).toContain("if (settle(result, false)) afterReceipt(result);");
-    expect(handler).toContain("if (settle(error, true) && !refusedField(error)) afterReceipt(error);");
+    // A thrown error settles through confirm-stream.ts `confirmStreamSteps`' settle step (T12).
+    expect(handler).toContain("if (settle(step.outcome, true) && !refusedField(step.outcome)) afterReceipt(step.outcome);");
     expect(handler).toContain("recordTurnView(step.frame);");
     expect(handler).toContain("appendLines(step.lines);");
     expect(cardSource).toContain("confirmResultLines(outcome, opts.decision)");
@@ -157,11 +159,12 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
       source.indexOf("const resolveConfirmAction"),
       source.indexOf("useEffect(() => {\n    // Don't drain")
     );
-    expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);");
+    expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps()) : null);");
     expect(handler).toMatch(/const refocusCardTurn = \(\) => \{\s+if \(!onCardTurn\(\)\) return;/u);
     // After the dismissed (or working) frame, after the app's receipt, and when the frame is taken off.
     expect(handler).toContain("if (working || dismissed) refocusCardTurn();");
-    expect(handler.split("refocusCardTurn();").length - 1).toBe(3);
+    // T12: a streamed follow-up's views move the keys too, on the card's turn only.
+    expect(handler.split("refocusCardTurn();").length - 1).toBe(4);
   });
 
   it("a no the app took with no receipt of its own leaves the dismissed card, now sent (run-3 N22, CI-visible)", () => {
@@ -632,6 +635,8 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
         await sendKeys(input, "n");
         await waitFor(() => lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
         expect(lastFrame()).not.toContain("Sent to the app");
+        // Live run-4 N22: until the app answers, the receipt's sentence is not claimed.
+        expect(lastFrame()).not.toContain("Dismissed — nothing was executed.");
         confirm.resolve(answer === "receipt" ? { ok: true, declined: true, view: dismissed } : { ok: true });
         await waitFor(() => lastFrame().includes("Sent to the app"), 4_000, lastFrame);
         expect(lastFrame()).not.toContain("Sending");
@@ -684,12 +689,12 @@ describe("receipts on the turn (r4 receipts; fake TTY, skipped on CI)", () => {
       await waitFor(() => lastFrame().includes("Pause ad 01?"), 4_000, lastFrame);
       expect(lastFrame()).toContain("what it does");
       await sendKeys(input, "n");
-      await waitFor(() => lastFrame().includes("Dismissed — nothing was executed."), 4_000, lastFrame);
+      await waitFor(() => lastFrame().includes("Sending to the app…"), 4_000, lastFrame);
       expect(lastFrame()).not.toContain("what it does");
       expect(lastFrame()).toMatch(/tab\s+switch side\s+\/\s+commands/u);
       confirm.resolve({ ok: true, declined: true, view: dismissed });
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      expect(lastFrame()).toContain("Dismissed — nothing was executed.");
+      await waitFor(() => lastFrame().includes("Dismissed — nothing was executed."), 4_000, lastFrame);
+      expect(lastFrame()).not.toContain("what it does");
       expect(lastFrame()).not.toContain("what it does");
       await sendKeys(input, "/exit\r");
       await session;

@@ -82,8 +82,18 @@ export function afterwordLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[]
  * printed once and follows no answer: the no was sent.
  */
 function dismissalAfterword(view: AnswerViewV1, ctx: ViewRenderCtx): string {
-  if ((view as { sending?: unknown }).sending === true && ctx.scrollback !== true) return "Sending to the app…";
-  return "Sent to the app";
+  return awaitingApp(view, ctx) ? "Sending to the app…" : "Sent to the app";
+}
+
+/**
+ * The dismissed card the session drew at `n`, while the no is still on its way
+ * (renderer-local `sending`; scrollback follows no answer, so never there).
+ * Until the app answers, the card claims only that it is sending: the
+ * receipt's sentence is the app's to give (live run-4 N22), and it appears
+ * the moment the answer arrives, streamed or not.
+ */
+export function awaitingApp(view: AnswerViewV1, ctx: ViewRenderCtx): boolean {
+  return (view as { sending?: unknown }).sending === true && ctx.scrollback !== true;
 }
 
 /** The reconcile ask (a NEW user turn), when the view carries one. */

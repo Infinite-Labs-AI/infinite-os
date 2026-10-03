@@ -17,6 +17,7 @@ import { linkWords, paragraphIn } from "./card.js";
 import { labelValueLines } from "./change.js";
 import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
 import { formatAsOf, formatSeconds, isRecord, paint, viewText, wrapText } from "./primitives.js";
+import { appOpenTarget } from "./open-target.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
 
 /** Lines of command output kept per stream (the tail the app already cut). */
@@ -44,13 +45,19 @@ const RUNS_WHERE: Record<string, string> = {
 
 export function renderJob(view: AnswerViewEnvelopeV1<"job">, ctx: ViewRenderCtx): KindRender {
   const body: Record<string, unknown> = isRecord(view.body) ? view.body : {};
+  const keys = jobKeys(body, ctx);
+  // `o` opens where it lands; `w` asks the job's own watch step (T12).
+  const lands = keys.some((hint) => hint.key === "o") ? appOpenTarget(body.landsAt) : null;
+  const watch = keys.some((hint) => hint.key === "w") && isRecord(body.watch) ? viewText(body.watch.ask) : "";
   return {
     detail: isSettledWithoutRunning(view) ? afterwordLines(view, ctx) : jobLines(view.body, ctx),
     footnotes: [],
-    keys: jobKeys(body, ctx),
+    keys,
     okKey: null,
     // The steps tick off on their own; nothing follows a selection, so j/k select nothing (r4: no `j k`).
-    rowCount: 0
+    rowCount: 0,
+    ...(lands ? { openLink: lands, openLabel: viewText(isRecord(body.landsAt) ? body.landsAt.label : "") || "open" } : {}),
+    ...(watch ? { watchAsk: watch } : {})
   };
 }
 
