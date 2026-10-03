@@ -240,6 +240,23 @@ describe("what the app's answer does to a resolved card (CI-runnable M5 wiring)"
     expect(settleConfirmOutcome(head, refused, { ...decline, thrown: true }).type).toBe("drop");
   });
 
+  it("a refusal the app proved never left names the tool whose waiting row says not sent (S4)", () => {
+    const refused = Object.assign(new Error("The card is gone."), { code: "card_gone", nothingRan: true as const });
+    const step = settleConfirmOutcome(head, refused, { decision: "approve", dismissed: false, onCardTurn: true, thrown: true });
+    expect(step.type).toBe("drop");
+    expect(step.type === "drop" && step.notSentTool).toBe("propose_pause_entity");
+    expect(step.type === "drop" && step.lines.map((line) => line.text).join("\n")).toContain("✗ Not sent");
+    // Off the card's turn, the row went with it; an error without the mark is not a not-sent.
+    const moved = settleConfirmOutcome(head, refused, { decision: "approve", dismissed: false, onCardTurn: false, thrown: true });
+    expect(moved.type === "drop" && moved.notSentTool).toBeUndefined();
+    const unsure = settleConfirmOutcome(head, new Error("network down"), { decision: "approve", dismissed: false, onCardTurn: true, thrown: true });
+    expect(unsure.type === "drop" && unsure.notSentTool).toBeUndefined();
+    // A refused field brings the card back in front: its row still waits.
+    const field = Object.assign(new Error("Budget is above the cap."), { code: "field_invalid", nothingRan: true as const });
+    const back = settleConfirmOutcome(head, field, { decision: "approve", dismissed: false, onCardTurn: true, thrown: true });
+    expect(back.type === "drop" && back.notSentTool).toBeUndefined();
+  });
+
   it("an approve with no receipt of its own prints the receipt lines", () => {
     const step = settleConfirmOutcome(head, { ok: true, receipt: "Paused." }, { decision: "approve", dismissed: false, onCardTurn: true, thrown: false });
     expect(step.type).toBe("drop");

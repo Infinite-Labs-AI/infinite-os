@@ -8,7 +8,7 @@ import type { AnswerViewV1 } from "@infinite-os/types";
 import { describe, expect, it } from "vitest";
 
 import type { TurnStep } from "../app/turn-store.js";
-import { refineStepStatus, stepRowLines, toolOutcome, unsettledStepLines } from "./steps.js";
+import { NOT_SENT_STEP_WORDS, refineStepStatus, settleNotSentStep, stepRowLines, toolOutcome, unsettledStepLines } from "./steps.js";
 import { resolveTheme } from "../theme.js";
 
 const theme = resolveTheme({});
@@ -208,4 +208,36 @@ describe("the view's state wins over the wire's failure (W3 r2 review)", () => {
       }
     });
   }
+});
+
+// S4 (round 2 reassembly): a card the app proved never left (its `notSent`
+// mark, no receipt view) takes its frame off the turn and prints
+// `✗ Not sent: …`; the row that waited for its OK says so too, never `▣`.
+describe("the row that waited for a card the app did not send", () => {
+  const waiting = (over: Partial<TurnStep> = {}) =>
+    step({ id: "w1", name: "mcp__sample_app__propose_pause_entity", label: "waiting for your OK", status: "wait", result: "pause 1 ad", ...over });
+
+  it("says `✗ not sent`, never the waiting mark", () => {
+    const settled = settleNotSentStep([waiting()], "propose_pause_entity");
+    expect(settled[0]).toMatchObject({ status: "fail", result: NOT_SENT_STEP_WORDS });
+    const [row] = rows(settled, []);
+    expect(row).toMatch(/✗ not sent$/u);
+    expect(row).not.toContain("▣");
+  });
+
+  it("leaves every other call's row as it is", () => {
+    const read = step({ status: "ok", result: "3 rows" });
+    const settled = settleNotSentStep([read, waiting()], "propose_pause_entity");
+    expect(settled[0]).toBe(read);
+  });
+
+  it("two calls of the tool waiting: no telling which card it was, both rows stay", () => {
+    const steps = [waiting({ id: "a" }), waiting({ id: "b" })];
+    expect(settleNotSentStep(steps, "propose_pause_entity")).toBe(steps);
+  });
+
+  it("no call of the tool waiting: the steps stay", () => {
+    const steps = [step({ status: "ok", result: "" })];
+    expect(settleNotSentStep(steps, "propose_pause_entity")).toBe(steps);
+  });
 });

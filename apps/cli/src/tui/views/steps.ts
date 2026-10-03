@@ -566,6 +566,22 @@ function resultCase(words: string): string {
   return `${first.charAt(0).toLowerCase()}${words.slice(1)}`;
 }
 
+/** What a row that waited for an OK says once the app proved its card never left. */
+export const NOT_SENT_STEP_WORDS = "not sent";
+
+/**
+ * The steps once the app refused a card before anything ran (its `notSent`
+ * mark, no receipt view): the one call of the card's tool that waited for an
+ * OK is `✗ not sent` (S4), so its row never stays `▣` after the receipt line
+ * says `✗ Not sent`. Two waiting calls of the tool cannot be told apart, and no
+ * waiting call has nothing to settle: the steps stay as they are.
+ */
+export function settleNotSentStep<S extends readonly TurnStep[]>(steps: S, tool: string): S | TurnStep[] {
+  const waiting = steps.filter((step) => step.status === "wait" && drewView(step, { tool }));
+  if (waiting.length !== 1) return steps;
+  return steps.map((step): TurnStep => (step === waiting[0] ? { ...step, status: "fail", result: NOT_SENT_STEP_WORDS } : step));
+}
+
 /** Only a call that finished, or waits for the person, has a view to follow. */
 function canFollowView(step: TurnStep): boolean {
   return step.status === "ok" || step.status === "wait";

@@ -110,6 +110,7 @@ import {
   type CardUiState
 } from "../views/approval.js";
 import { creativeDraftLine } from "../views/images.js";
+import { settleNotSentStep } from "../views/steps.js";
 import type { AppOpenTarget } from "../views/open-target.js";
 
 /**
@@ -1691,6 +1692,9 @@ export function InkInteractiveSessionApp({
       }
       restoreCaption();
       dropWorking();
+      // The app proved the card never left: the row that waited for its OK says so (S4).
+      const notSentTool = step.notSentTool;
+      if (notSentTool) patchTurnState((state) => ({ ...state, steps: settleNotSentStep(state.steps, notSentTool) }));
       appendLines(step.lines);
       return true;
     };

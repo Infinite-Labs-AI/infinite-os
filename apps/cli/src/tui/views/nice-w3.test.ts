@@ -56,7 +56,7 @@ describe("a list's label column takes the free width first (TJ-13, W3-list-ready
 
 describe("card rows and URLs wrap where a reader expects (W3-ap-send, W3-ap-link)", () => {
   it("a URL wraps after / ? & = ., never inside a word", () => {
-    const url = "https://shop.example.test/pricing?utm_source=newsletter&utm_medium=email&utm_campaign=october-launch";
+    const url = "https://shop.example.test/pricing?utm_source=newsletter&utm_medium=email&utm_campaign=harvest-launch";
     const rows = wrapUrl(url, 30);
     expect(rows.join("")).toBe(url);
     for (const row of rows) {
@@ -66,10 +66,10 @@ describe("card rows and URLs wrap where a reader expects (W3-ap-send, W3-ap-link
   });
 
   it("a card's URL row wraps at its separators under its value column", () => {
-    const out = fieldRows([{ label: "to", value: "https://shop.example.test/pricing?utm_source=newsletter&utm_medium=email&utm_campaign=october-launch" }], 56, plain);
+    const out = fieldRows([{ label: "to", value: "https://shop.example.test/pricing?utm_source=newsletter&utm_medium=email&utm_campaign=harvest-launch" }], 56, plain);
     expect(out.length).toBeGreaterThan(1);
     for (const line of out.slice(1)) expect(line.startsWith("         ")).toBe(true);
-    expect(out.map((line) => line.trim()).join("").replace(/^to\s*/u, "")).toBe("https://shop.example.test/pricing?utm_source=newsletter&utm_medium=email&utm_campaign=october-launch");
+    expect(out.map((line) => line.trim()).join("").replace(/^to\s*/u, "")).toBe("https://shop.example.test/pricing?utm_source=newsletter&utm_medium=email&utm_campaign=harvest-launch");
   });
 
   it("a numbered draft row wraps under its words, never under its number (60 columns)", () => {

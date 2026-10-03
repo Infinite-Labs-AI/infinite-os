@@ -481,6 +481,46 @@ describe("n shows the dismissed card at once (run-2 M5, fake TTY; skipped on CI)
   );
 });
 
+describe("a card the app did not send (S4, fake TTY; skipped on CI)", () => {
+  const PROPOSE = "mcp__sample_app__propose_pause_entity";
+
+  it.skipIf(process.env.CI === "true")(
+    "after p, a refusal the app marks not sent settles the waiting row to `✗ not sent`, beside the receipt line",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput(100, 40);
+      const session = runInkInteractiveSession({
+        columns: 100,
+        errorOutput: ttyOutput(),
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: async () => {
+          throw Object.assign(new Error("The card is gone."), { code: "card_gone", nothingRan: true });
+        },
+        async onSubmitLine(_line, onProgress): Promise<InkInteractiveLineResult> {
+          onProgress({ type: "tool.complete", stage: "tool", message: PROPOSE, toolId: "call-1", name: PROPOSE, status: "requires_confirmation", words: { label: "waiting for your OK", result: "pause 1 ad" } } as never);
+          return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [card("change-pause-card")] };
+        }
+      });
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause demo a\r");
+      await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
+      const before = output.text().length;
+      await sendKeys(input, "p");
+      await waitFor(() => stripAnsi(output.text().slice(before)).includes("✗ Not sent: The card is gone."), 4_000, output.text);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const lastFrame = stripAnsi(output.text().split(`${ESC}[?2026h`).at(-1) ?? "");
+      const row = lastFrame.split(/\r?\n/u).filter((line) => line.includes("waiting for your OK")).at(-1) ?? "";
+      expect(row).toMatch(/✗ not sent/u);
+      expect(row).not.toContain("▣");
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+});
+
 describe("a tall card in a running session (fake TTY; skipped on CI like the other PTY tests)", () => {
   /** A launch of `sets` ad sets with 3 ads each (synthetic names). */
   function tallLaunch(sets: number): InSessionConfirmationAction {
