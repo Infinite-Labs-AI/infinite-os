@@ -898,13 +898,15 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     const note = "the wizard's safety check refused app/layout.tsx:2: the edit starts a child process"
     const w = await opened({
       reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the existing init in place instead.", suggested_fix: "Keep one init." }]), review([])],
-      fix: (input) => ({
-        outcome: "ok",
-        edits: [],
-        reverted: ["app/layout.tsx"],
-        blocked: [],
-        gateHits: [{ rule: "turn_gate", file: "app/layout.tsx", line: 2, hunk: 0, itemIds: [input.items[0]!.id], note }]
-      }),
+      fix: (input) =>
+        ({
+          outcome: "completed",
+          edits: [],
+          reverted: ["app/layout.tsx"],
+          blocked: [],
+          strays: [],
+          gateHits: [{ rule: "turn_gate", file: "app/layout.tsx", line: 2, hunk: 0, itemIds: [input.items[0]!.id], note }]
+        }) as Partial<AgentRunResult>,
       answers: { "teammate-comments": { actOn: [] } }
     })
     expectOk(await reviewStep.run(w.ctx, w.deps))
@@ -913,16 +915,19 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(thread.comments[1]!.body).not.toMatch(/without changing anything/)
   })
 
-  it("review P1-4: a round whose every change was outside the job's files says the block's words", async () => {
+  it("review P1-4 / P2-3: a round whose every change was a file no job owns says the fence's words", async () => {
     const w = await opened({
       reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the existing init in place instead.", suggested_fix: "Keep one init." }]), review([])],
-      fix: (input) => ({
-        outcome: "ok",
-        edits: [],
-        reverted: ["lib/helper.ts"],
-        blocked: [{ itemId: input.items[0]!.id, reason: "outside_allowlist", paths: ["lib/helper.ts"], note: "Undid the change to lib/helper.ts: a new file no job may create." }],
-        gateHits: []
-      }),
+      // Review P2-3: a file no job owns is a stray (the item is not blocked), and the reply still names it.
+      fix: () =>
+        ({
+          outcome: "completed",
+          edits: [],
+          reverted: ["lib/helper.ts"],
+          blocked: [],
+          strays: [{ path: "lib/helper.ts", note: "Undid the change to lib/helper.ts: a new file no job may create." }],
+          gateHits: []
+        }) as Partial<AgentRunResult>,
       answers: { "teammate-comments": { actOn: [] } }
     })
     expectOk(await reviewStep.run(w.ctx, w.deps))

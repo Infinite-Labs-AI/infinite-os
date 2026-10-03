@@ -47,6 +47,7 @@ import {
   sealTreeNow,
   verifySeal,
   type FenceBlock,
+  type FenceStray,
   type FenceEditAttribution,
   type FenceGateHit,
   type TreeSeal
@@ -246,6 +247,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     for (const incident of extras.incidents) io.sub(`! ${incident}`, "warn")
     io.bufferEdits(result.edits, extras.attribution)
     applyBlocks(io, extras.blocked)
+    const strayLines = sayStrays(io, extras.strays)
 
     if (result.outcome === "out_of_usage") {
       await io.save()
@@ -281,7 +283,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     await disposeSeal(seal)
     if (round.changedAfterTurn) return sealBrokenOutcome(io, round.changedAfterTurn)
     if (round.changedByChecks) return buildTamperOutcome(io, round.changedByChecks)
-    feedback = round.feedback
+    feedback = [...strayLines, ...round.feedback]
     await io.patchClickTested()
     await io.save()
   }
@@ -514,6 +516,7 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   }
   io.bufferEdits(settled.edits, settled.attribution)
   applyBlocks(io, settled.blocked)
+  sayStrays(io, settled.strays)
   // No claims in nested mode: every still-open seeded job goes through the wizard's own checks.
   const claims: Claim[] = agentItems
     .filter((item) => OPEN_STATES.includes(io.item(item.id)?.state ?? "blocked"))
@@ -595,6 +598,15 @@ function applyBlocks(io: JobsIo, blocks: readonly FenceBlock[]): void {
     if (!item) continue
     io.put(blockItem(item, block.reason, block.note))
   }
+}
+
+/**
+ * Review P2-3: a path the fence undid that no job owns. Only that path was put back and no job is failed for it; the
+ * terminal says it, and the next round's brief tells the agent (returned as feedback lines).
+ */
+function sayStrays(io: JobsIo, strays: readonly FenceStray[]): string[] {
+  for (const stray of strays) io.sub(`! ${stray.note} No job was failed for it.`, "warn")
+  return strays.map((stray) => `- this turn: ${stray.note} Keep each change inside its job's files, and name them in job_claim.`)
 }
 
 function displayHome(path: string, home: string): string {

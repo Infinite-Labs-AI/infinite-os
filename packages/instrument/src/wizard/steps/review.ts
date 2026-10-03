@@ -1025,7 +1025,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
  * Review P1-4: why a fix round kept no change, read from the fence's record of the turn (`runExtras`):
  *   - stopped (timeout, error, no tools) after editing → `undone`, naming what it changed;
  *   - every change refused by the post-turn gate → `gate_refused`, with the gate's own note;
- *   - every change undone by the fence (outside the job's files, consent) → `blocked`, with the block's note;
+ *   - every change undone by the fence (outside the job's files, consent, a file no job owns) → `blocked`, with its note;
  *   - only when all three are empty → the plain outcome ("ran out of time before changing anything", "without
  *     changing anything").
  */
@@ -1035,8 +1035,9 @@ export function noKeptChangeOutcome(run: AgentRunResult): { outcome: NotFixedOut
   const changed = [...new Set(run.reverted.filter((path) => !path.startsWith(".git/") && path !== ".git"))]
   if (stopped && changed.length > 0) return { outcome: "undone", why: `${stopped}; its unfinished change to ${listPaths(changed)} was undone` }
   if (extras.gateHits.length > 0) return { outcome: "gate_refused", why: [...new Set(extras.gateHits.map((hit) => hit.note))].join("; ") }
-  if (extras.blocked.length > 0) {
-    return { outcome: "blocked", why: [...new Set(extras.blocked.map((block) => `the wizard ${block.note.charAt(0).toLowerCase()}${block.note.slice(1).replace(/\.$/, "")}`))].join("; ") }
+  if (extras.blocked.length > 0 || extras.strays.length > 0) {
+    const notes = [...extras.blocked.map((block) => block.note), ...extras.strays.map((stray) => stray.note)]
+    return { outcome: "blocked", why: [...new Set(notes.map((note) => `the wizard ${note.charAt(0).toLowerCase()}${note.slice(1).replace(/\.$/, "")}`))].join("; ") }
   }
   const outcome: NotFixedOutcome = run.outcome === "timeout" ? "timeout" : run.outcome === "toolless" ? "toolless" : run.outcome === "error" ? "error" : "no_change"
   return { outcome, why: null }

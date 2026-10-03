@@ -56,7 +56,7 @@ import {
 import { buildCodexReviewerArgv, buildCodexWorkerArgv, codexModelRejected, codexUnrecognizedConfig, parseCodexLine } from "./codex.js"
 import { detectAgents, apiKeySourceMatches, resolveCodexRuntime, type DetectedAgents } from "./detect.js"
 import { buildAgentEnv } from "./env.js"
-import { Fence, recoverCrashedTurns, type FenceBlock, type FenceEditAttribution, type FenceGateHit, type TreeSeal } from "./fence.js"
+import { Fence, recoverCrashedTurns, type FenceBlock, type FenceEditAttribution, type FenceGateHit, type FenceStray, type TreeSeal } from "./fence.js"
 import { assertReviewWorktree } from "./worktree-guard.js"
 import { AGENT_LABEL, claudeToolBeat, codexItemBeat, displayPath, Narrator, ThinkingTicker, type NarrationBeat } from "./narration.js"
 import { AgentProcessRegistry } from "./process.js"
@@ -91,6 +91,8 @@ export const CODEX_STARTUP_TIMEOUT_MS = 45_000
 export interface AgentRunExtras {
   /** Items the fence blocked this turn (outside the allowlist, consent touched). */
   blocked: FenceBlock[]
+  /** Review P2-3: paths the fence undid that no job owns (only reverted; said and fed back, never a job's failure). */
+  strays: FenceStray[]
   /** §3x.2 The post-turn gate's refusals (each hunk reverted; the jobs step fails the attributed items' S check). */
   gateHits: FenceGateHit[]
   /** §3x.2 Per kept edit, the items each of its text edits belongs to. */
@@ -126,6 +128,7 @@ export function runExtras(result: AgentRunResult, items: readonly { id: string }
   } else blocked = []
   return {
     blocked,
+    strays: Array.isArray(extras.strays) ? extras.strays : [],
     gateHits: Array.isArray(extras.gateHits) ? extras.gateHits : [],
     attribution: Array.isArray(extras.attribution) ? extras.attribution : [],
     incidents: Array.isArray(extras.incidents) ? extras.incidents : [],
@@ -242,7 +245,7 @@ export class AgentRunnerImpl implements AgentRunner {
     const info = await this.infoFor(kind)
     const emptySession: SessionRef = kind === "claude_code" ? { kind: "claude", sessionId: input.resume?.kind === "claude" ? input.resume.sessionId : "" } : { kind: "codex", threadId: input.resume?.kind === "codex" ? input.resume.threadId : "" }
     if (!info) {
-      return { outcome: "error", session: emptySession, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [], blocked: [], gateHits: [], attribution: [], incidents: [], turnsUsed: null, modelFallback: false, seal: null }
+      return { outcome: "error", session: emptySession, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [], blocked: [], strays: [], gateHits: [], attribution: [], incidents: [], turnsUsed: null, modelFallback: false, seal: null }
     }
     // A turn a killed wizard left open (its snapshot still on disk) is undone first, so the agent's
     // unvetted edits never become this turn's baseline (review O3 F10).
@@ -320,7 +323,7 @@ export class AgentRunnerImpl implements AgentRunner {
       }
       if (attempt.outcome !== "completed" && attempt.outcome !== "max_turns") {
         const restored = await fence.abort()
-        return { ...base, outcome: attempt.outcome, reverted: restored.restored, edits: [], blocked: [], gateHits: [], attribution: [], seal: null }
+        return { ...base, outcome: attempt.outcome, reverted: restored.restored, edits: [], blocked: [], strays: [], gateHits: [], attribution: [], seal: null }
       }
       // §3f.9: the gate runs on the kept diff after EVERY turn, before any build or T0. A heavy-dir write
       // throws FenceTamperError here (the fence has already restored what it could).
@@ -336,6 +339,7 @@ export class AgentRunnerImpl implements AgentRunner {
         reverted: settled.reverted,
         edits: settled.edits,
         blocked: settled.blocked,
+        strays: settled.strays,
         gateHits: settled.gateHits,
         attribution: settled.attribution,
         seal: settled.seal

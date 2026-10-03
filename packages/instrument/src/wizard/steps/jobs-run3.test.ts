@@ -196,6 +196,36 @@ describe("W3 a refused line fails only the job it belongs to, with the real reas
   })
 })
 
+describe("review P2-3: one stray file no longer throws away the turn's correct work", () => {
+  it("a helper file no job may create is undone ALONE; jobs 6 and 7 stay done and their edit is kept; the agent is told", async () => {
+    const edited = run3EditedLayout()
+    // Run 3's real edit plus a helper file the agent invented (claims name app/layout.tsx only).
+    const t = setup(
+      {
+        turns: [
+          {
+            steps: [
+              { edit: { path: "app/layout.tsx", content: edited } },
+              { edit: { path: "lib/guard-helper.ts", content: "export const guard = true\n" } },
+              claim(JOB6),
+              claim(GA4_GUARD),
+              claim(META_GUARD)
+            ]
+          }
+        ]
+      },
+      run3Items([JOB6, GA4_GUARD, META_GUARD])
+    )
+    await step.run(t.ctx, t.deps)
+    const jobs = t.current().jobs
+    for (const id of [JOB6, GA4_GUARD, META_GUARD]) expect(DONE, id).toContain(jobs.find((item) => item.id === id)!.state)
+    expect(readFileSync(join(t.root, "app/layout.tsx"), "utf8")).toBe(edited)
+    expect(() => readFileSync(join(t.root, "lib/guard-helper.ts"), "utf8")).toThrow()
+    const said = t.events.events.filter((event) => event.type === "step.sub").map((event) => String(event.fields.text))
+    expect(said).toContain("! Undid the change to lib/guard-helper.ts: a new file no job may create. No job was failed for it.")
+  })
+})
+
 it("the fixture is the real run (sanity: the dir and the edit exist)", () => {
   expect(RUN3_DIR).toMatch(/fixtures\/run3$/)
   expect(run3EditedLayout()).toContain("tag-smoke.foundernationtv.com")

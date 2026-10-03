@@ -146,10 +146,22 @@ export interface FenceBlock {
   note: string
 }
 
+/**
+ * Review P2-3: a path the fence undid that no job owns (no job's files cover it and no claim names it). Only that path
+ * was put back; no job is failed for it (one stray helper file used to block, and undo, every job that claimed done).
+ * The jobs step says it and feeds it back to the agent.
+ */
+export interface FenceStray {
+  path: string
+  note: string
+}
+
 export interface FenceEndResult {
   /** Repo-relative paths whose turn changes were (fully or partly) undone. */
   reverted: string[]
   blocked: FenceBlock[]
+  /** Review P2-3: undone paths that no job owns (each only reverted; never a job's failure). */
+  strays: FenceStray[]
   edits: WizardEditRecord[]
   /** The gate's results on this turn (problems already acted on). */
   gate: CheckResult[]
@@ -496,10 +508,14 @@ export class Fence {
       throw new FenceTamperError(touched.tamper)
     }
     const blocks = new Map<string, FenceBlock>()
+    const strays = new Map<string, FenceStray>()
     const reverted = new Set<string>()
     const reportedOutside: string[] = []
     const block = (rel: string, reason: FenceBlockReason, note: string) => {
-      for (const itemId of this.itemsFor(rel, options.claims ?? [])) {
+      const owners = this.itemsFor(rel, options.claims ?? [])
+      // Review P2-3: no job owns the path, so no job is failed for it: only the path was put back, and the turn says so.
+      if (owners.length === 0 && !strays.has(rel)) strays.set(rel, { path: rel, note })
+      for (const itemId of owners) {
         const key = `${itemId}\u0000${reason}`
         const existing = blocks.get(key)
         if (existing) {
@@ -708,6 +724,7 @@ export class Fence {
     return {
       reverted: [...reverted].sort(),
       blocked: [...blocks.values()],
+      strays: [...strays.values()],
       edits,
       gate,
       gateHits,
@@ -913,17 +930,18 @@ export class Fence {
   }
 
   /** Which items a changed path counts against (§3f.6 "blocks its job"). */
+  /**
+   * The items a path belongs to: the items whose files cover it, else the claims that name it. Review P2-3: nobody
+   * else. A path no job owns is a stray (only it is put back); it is never blamed on every `done` claim, or on every
+   * item, whose own files passed.
+   */
   private itemsFor(rel: string, claims: readonly Claim[]): string[] {
     const covering = this.manifest.allow
       .filter((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel)))
       .map((rule) => rule.itemId)
     if (covering.length > 0) return covering
     const known = new Set(this.manifest.allow.map((rule) => rule.itemId))
-    const byFile = claims.filter((claim) => known.has(claim.jobId) && (claim.files ?? []).map(normalizeRelPath).includes(rel)).map((claim) => claim.jobId)
-    if (byFile.length > 0) return [...new Set(byFile)]
-    const done = claims.filter((claim) => known.has(claim.jobId) && claim.status === "done").map((claim) => claim.jobId)
-    if (done.length > 0) return [...new Set(done)]
-    return [...known]
+    return [...new Set(claims.filter((claim) => known.has(claim.jobId) && (claim.files ?? []).map(normalizeRelPath).includes(rel)).map((claim) => claim.jobId))]
   }
 
   /** The turn's items whose allowlist covers `rel`. */

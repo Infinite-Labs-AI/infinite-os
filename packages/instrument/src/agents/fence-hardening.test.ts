@@ -41,7 +41,7 @@ describe("F1: the fence never runs agent-planted git config, and undoes agent co
     expect(existsSync(sentinel)).toBe(false)
     expect(read(".git/config")).not.toContain("fsmonitor")
     expect(result.reverted).toContain(".git/config")
-    expect(result.blocked.map((block) => block.reason)).toContain("outside_allowlist")
+    expect(result.strays.map((stray) => stray.path)).toContain(".git/config")
   })
 
   it("…nor in abort() (out of usage, timeout, SIGINT)", async () => {
@@ -69,7 +69,7 @@ describe("F1: the fence never runs agent-planted git config, and undoes agent co
     expect(existsSync(join(root, ".git/hooks/reference-transaction"))).toBe(false)
   })
 
-  it("an agent commit is undone: HEAD back, the committed file outside the allowlist deleted, the job blocked", async () => {
+  it("an agent commit is undone: HEAD back, the committed file outside the allowlist deleted, said as a stray (review P2-3)", async () => {
     const { root, fence } = await begin()
     const headBefore = runGit(root, ["rev-parse", "HEAD"]).trim()
     write(root, "lib/evil.ts", "export const evil = 1\n")
@@ -79,7 +79,7 @@ describe("F1: the fence never runs agent-planted git config, and undoes agent co
     expect(runGit(root, ["rev-parse", "HEAD"]).trim()).toBe(headBefore)
     expect(existsSync(join(root, "lib/evil.ts"))).toBe(false)
     expect(result.reverted).toContain(".git/refs/heads/main")
-    expect(result.blocked.length).toBeGreaterThan(0)
+    expect(result.strays.map((stray) => stray.path)).toEqual(expect.arrayContaining([".git/refs/heads/main", "lib/evil.ts"]))
     expect(result.edits).toEqual([])
   })
 
