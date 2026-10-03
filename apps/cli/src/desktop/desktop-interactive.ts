@@ -7,6 +7,7 @@ import {
 } from "@infinite-os/types";
 import {
   DesktopAppClientError,
+  type AppOpenResult,
   type DesktopAppClient,
   type DesktopProgressFrame,
   type DesktopStatus
@@ -322,6 +323,19 @@ export interface DesktopSessionTurnRunner {
    * JSON (its `view` already decoded in place) — no wrapper.
    */
   confirm: InSessionConfirmationClient["confirm"];
+  /**
+   * The view keys the last turn's Desktop supports (T12): `open` when it
+   * negotiated app.open.v1, `watch` when it sends views (a job's watch step is
+   * a new turn). Both false before any turn.
+   */
+  caps(): { open: boolean; watch: boolean; retry: boolean };
+  /** Whether the last turn's Desktop can stream a card's confirm (confirm.stream.v1 with views). */
+  streamCapable(): boolean;
+  /**
+   * `o`: open a place in the app through the last turn's Desktop (its views
+   * named the place; navigation only, never a URL).
+   */
+  openPlace(target: { place: string; params?: Record<string, string> }): Promise<AppOpenResult>;
 }
 
 /**
@@ -356,6 +370,30 @@ export function createDesktopSessionTurnRunner(
 
   return {
     sessionId: () => sessionId,
+
+    caps: () => ({
+      open: lastClient?.appOpenCapable === true,
+      watch: lastClient?.viewsCapable === true,
+      retry: false
+    }),
+
+    streamCapable: () => lastClient?.confirmStreamCapable === true && lastClient.viewsCapable === true,
+
+    openPlace(target) {
+      if (!lastClient) {
+        return Promise.reject(
+          new DesktopAppClientError(
+            "desktop_app_usage",
+            "No Desktop turn has run in this session to open a place from."
+          )
+        );
+      }
+      return lastClient.openPlace({
+        protocolVersion: 1,
+        place: target.place,
+        ...(target.params ? { params: target.params } : {})
+      });
+    },
 
     confirm(input) {
       // Confirmation handles are minted by the boot that ran the turn; resolve

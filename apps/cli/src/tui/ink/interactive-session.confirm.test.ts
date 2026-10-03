@@ -94,7 +94,8 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     expect(handler.indexOf("setPendingConfirmActions((current) => current.slice(1))"))
       .toBeLessThan(handler.indexOf("onConfirmAction?.(head"));
     // Both decisions reach the app: a decline is a real "no", not a local note.
-    expect(handler).toContain("onConfirmAction?.(head, decision, fields)");
+    // T12: plus the stream's hooks (the receipt, then the follow-up), the same one call.
+    expect(handler).toContain("onConfirmAction?.(head, decision, fields, streamHooks)");
     expect(handler).not.toContain('if (decision === "decline")');
   });
 
@@ -157,11 +158,12 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
       source.indexOf("const resolveConfirmAction"),
       source.indexOf("useEffect(() => {\n    // Don't drain")
     );
-    expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), NO_KEY_CAPS) : null);");
+    expect(handler).toContain("setViewFocus(views.length ? viewFocusAfterTurnDone(views.map((frame) => frame.view), viewCaps()) : null);");
     expect(handler).toMatch(/const refocusCardTurn = \(\) => \{\s+if \(!onCardTurn\(\)\) return;/u);
     // After the dismissed (or working) frame, after the app's receipt, and when the frame is taken off.
     expect(handler).toContain("if (working || dismissed) refocusCardTurn();");
-    expect(handler.split("refocusCardTurn();").length - 1).toBe(3);
+    // T12: a streamed follow-up's views move the keys too, on the card's turn only.
+    expect(handler.split("refocusCardTurn();").length - 1).toBe(4);
   });
 
   it("a no the app took with no receipt of its own leaves the dismissed card, now sent (run-3 N22, CI-visible)", () => {
