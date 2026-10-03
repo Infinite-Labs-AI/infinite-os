@@ -44,7 +44,8 @@ import {
   recordCreativeDraft,
   recordTurnView,
   subscribeTurnState,
-  type TurnState
+  type TurnState,
+  type TurnStep
 } from "../app/turn-store.js";
 import { TYPING_IDLE_MS } from "../config/timing.js";
 import { displayWidth, truncateCells } from "../lib/display-width.js";
@@ -592,6 +593,14 @@ export function InkInteractiveSessionApp({
   const [activeFieldTick, setActiveFieldTick] = useState(0);
   const [queuedLines, setQueuedLines] = useState<readonly string[]>([]);
   const [turnState, setTurnState] = useState<TurnState>(() => getTurnState());
+  // A finished turn too tall for the live region goes whole into scrollback,
+  // but its Steps strip stays live under it, as r4 keeps the strip under the
+  // turn on screen (live run-4 N12), until the next line commits it (only
+  // its calls that did not end clean print then). The views its calls drew
+  // go with it, so each row keeps the status its view gave it.
+  const [keptSteps, setKeptSteps] = useState<{ steps: readonly TurnStep[]; views: readonly AnswerViewV1[] } | null>(null);
+  const keptStepsRef = useRef(keptSteps);
+  keptStepsRef.current = keptSteps;
   // The not-connected source of a turn that already went to scrollback (see `topBarData`).
   const [askedAfterCommit, setAskedAfterCommit] = useState<string | null>(null);
   const typingIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -659,18 +668,28 @@ export function InkInteractiveSessionApp({
   const commitLiveTurn = useCallback((why: "submit" | "overflow", keepCard = false) => {
     commitSeq.current += 1;
     const turn = historyRef.current;
-    const { views, steps } = getTurnState();
+    const { views, steps: storeSteps } = getTurnState();
+    // The strip an earlier overflow kept live is this turn's, until the next line.
+    const kept = storeSteps.length ? null : keptStepsRef.current;
+    const steps = kept ? kept.steps : storeSteps;
+    const statusViews = kept ? kept.views : [];
     const focus = viewFocusRef.current;
     // Scrollback is ONE column at any width (River, 2026-10-02): the question,
     // the answer, its views underneath, under a thin rule.
     // `redraw` draws it again at another width (a width change reprints scrollback).
     // A call that did not end clean keeps its row under the answer (a failed
     // step never disappears with the Steps strip). While a card still waits,
-    // the turn's calls stay live under it and print when that is committed.
-    const stepsStayLive = keepCard && steps.length > 0;
+    // or the turn went up only for being too tall, the turn's calls stay live
+    // and print when that is committed.
+    const stepsStayLive = why === "overflow" && steps.length > 0;
+    const keepStrip = stepsStayLive && !keepCard;
+    const nextKept = keepStrip ? { steps, views: [...statusViews, ...views.map((frame) => frame.view)] } : null;
+    keptStepsRef.current = nextKept;
+    setKeptSteps(nextKept);
     const drawTurn = (width: number) => renderCommittedTurn({
       messages: turn,
       views: views.map((frame) => frame.view),
+      ...(statusViews.length ? { statusViews: [...statusViews] } : {}),
       focus,
       steps,
       stepsStayLive,
@@ -953,15 +972,20 @@ export function InkInteractiveSessionApp({
         : null,
     [cardPaneWidth, confirmKeys, explainOpen, headCard, headConfirmAction, t]
   );
+  // The strip a tall finished turn left live (see `keptSteps`): only while no other turn runs or has calls.
+  const liveKeptSteps = !busy && !turnSteps.length ? keptSteps : null;
   const renderTurnAt = useMemo(() => {
-    if (!turnViews.length && !headCardLines) {
+    if (!turnViews.length && !headCardLines && !liveKeptSteps) {
       return null;
     }
     const messages = workingState ? workingTurnMessages(history, workingState, agentTitle) : history;
     // A call still running says how far it is (its latest progress), busy or not.
-    const steps = workingState
-      ? workingTurnSteps(messages, workingState, workingClock)
-      : turnSteps.some((step) => step.endedAt === null) ? workingTurnSteps(messages, getTurnState(), clock) : turnSteps;
+    const steps = liveKeptSteps
+      ? liveKeptSteps.steps
+      : workingState
+        ? workingTurnSteps(messages, workingState, workingClock)
+        : turnSteps.some((step) => step.endedAt === null) ? workingTurnSteps(messages, getTurnState(), clock) : turnSteps;
+    const statusViews = [...(headConfirmAction?.view ? [headConfirmAction.view] : []), ...(liveKeptSteps?.views ?? [])];
     const cache = new Map<string, LiveTurnRender>();
     // `compact`: without the blank rows around the details (see `compactTurn` below).
     return (turnRows: number | undefined, compact = false): LiveTurnRender => {
@@ -981,13 +1005,13 @@ export function InkInteractiveSessionApp({
         rows: turnRows,
         compact,
         ...(headCardLines ? { details: headCardLines } : {}),
-        ...(headConfirmAction?.view ? { statusViews: [headConfirmAction.view] } : {}),
+        ...(statusViews.length ? { statusViews } : {}),
         ...(workingState ? { nowMs: workingClock } : {})
       });
       cache.set(cacheKey, drawn);
       return drawn;
     };
-  }, [agentTitle, clock, columns, headCardLines, headConfirmAction, history, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
+  }, [agentTitle, clock, columns, headCardLines, headConfirmAction, history, liveKeptSteps, t, turnSteps, turnViews, viewFocus, workingClock, workingState]);
   // Beside a drawn turn, the transcript carries only what the drawn turn does
   // not show: its Steps are the drawn turn's own strip, and while it runs its
   // arriving answer and calls are in it too, so nothing is drawn twice.

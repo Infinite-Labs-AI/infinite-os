@@ -528,7 +528,7 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
     frame("tool.complete", "call-2", { status: "error", words: { label: "reading today", result: "not synced yet" } });
   };
 
-  it.skipIf(process.env.CI === "true")("two calls, the second fails, then a 200-line answer: the failed row is under the answer in scrollback, the clean one is not", { timeout: 30_000 }, async () => {
+  it.skipIf(process.env.CI === "true")("two calls, the second fails, then a 200-line answer: the answer goes up whole, its Steps strip stays live (live run-4 N12); the next line prints the failed row under the answer, the clean one never", { timeout: 30_000 }, async () => {
     resetTurnState();
     const input = ttyInput();
     const output = ttyOutput();
@@ -555,21 +555,31 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
     await waitFor(() => /reading today\s+━+\s+✗ not synced yet/u.test(stripAnsi(output.text())), 4_000, output.text);
     finish();
     await waitFor(() => output.text().includes("alpha line 50"), 4_000, output.text);
-    await waitFor(() => scrollbackRows(output.text()).some((row) => row.trimEnd() === FAILED_ROW), 4_000, output.text);
+    await waitFor(() => {
+      const now = scrollbackRows(output.text());
+      return !now.some((row) => /lines above/u.test(row)) && now.some((row) => /alpha line 199\s*$/u.test(row));
+    }, 4_000, output.text);
+    await new Promise((resolve) => setTimeout(resolve, 200));
     const rows = scrollbackRows(output.text()).map((row) => row.trimEnd());
     const last = rows.findIndex((row) => /alpha line 199$/u.test(row));
-    // Under the answer: a blank row, the failed call with its reason, then the turn's rule and the frame.
-    expect(rows.slice(last + 1).filter(Boolean)).toEqual([
-      FAILED_ROW, "─".repeat(80), " ∞ Infinite", "─".repeat(80), "❯ Ask Infinite…", " /  commands"
-    ]);
-    expect(rows[last + 1]).toBe("");
-    // The clean call and the strip itself are gone with the live turn.
-    expect(rows.some((row) => row.includes("reading the last 200 days"))).toBe(false);
-    expect(rows.some((row) => row.includes("─ Steps"))).toBe(false);
+    // The answer went up whole; right under it the turn's rule, then the frame,
+    // which keeps the finished turn's Steps strip (r4 keeps it under the turn
+    // on screen) until the next line: both calls, bars and all.
+    const after = rows.slice(last + 1).filter(Boolean);
+    expect(after.slice(0, 4)).toEqual(["─".repeat(80), " ∞ Infinite", "─".repeat(80), `─ Steps ${"─".repeat(72)}`]);
+    expect(after[4]).toMatch(/^ {2}reading the last 20…\s+━+\s+✓ 200 days$/u);
+    expect(after[5]).toMatch(/^ {2}reading today\s+━+\s+✗ not synced yet$/u);
+    expect(after.slice(6)).toEqual(["─".repeat(80), "❯ Ask Infinite…", " /  commands"]);
+    expect(rows).not.toContain(FAILED_ROW);
     expect(rows.some((row) => /more lines|lines above/u.test(row))).toBe(false);
     await sendKeys(input, "/exit\r");
     await session;
-    expect(scrollbackRows(output.text()).filter((row) => row.trimEnd() === FAILED_ROW)).toHaveLength(1);
+    // The next line (here: leaving) commits the strip: the failed call's row,
+    // once, under the answer; the clean call and the strip itself go with the live turn.
+    const final = scrollbackRows(output.text()).map((row) => row.trimEnd());
+    expect(final.filter((row) => row === FAILED_ROW)).toHaveLength(1);
+    expect(final.findIndex((row) => row === FAILED_ROW)).toBeGreaterThan(final.findIndex((row) => /alpha line 199$/u.test(row)));
+    expect(final.slice(final.findIndex((row) => row === FAILED_ROW) + 1).some((row) => row.includes("─ Steps"))).toBe(false);
   });
 
   it.skipIf(process.env.CI === "true")("a turn that fits keeps its Steps live; the next line commits it with the failed row only", { timeout: 30_000 }, async () => {

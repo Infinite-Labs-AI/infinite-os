@@ -213,13 +213,17 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(health.some((row) => /more lines|lines above/u.test(row))).toBe(false);
 
     // The numbers view does not fit even compact: whole in scrollback, in r4's own spacing, the frame under it.
+    // The frame keeps the turn's Steps strip until the next line (r4 flow-numbers-01; live run-4 N12).
     const numbers = draw("view-01-numbers");
     expect(numbers[0]).toBe("❯ google ads since launch?");
     const rule = numbers.findIndex((row) => row === "─".repeat(80));
     expect(numbers[rule - 1]).toBe("");
-    expect(numbers.slice(-5, -1)).toEqual(["─".repeat(80), " ∞ Infinite", "─".repeat(80), "❯ Ask Infinite…"]);
+    expect(numbers.slice(-8, -1)).toEqual([
+      "─".repeat(80), " ∞ Infinite", "─".repeat(80), `─ Steps ${"─".repeat(72)}`,
+      "  checking Google Ads  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✓ 3 campaigns", "─".repeat(80), "❯ Ask Infinite…"
+    ]);
     expect(numbers.at(-1)).toBe(" /  commands");
-    expect(numbers.some((row) => row.startsWith("─ Steps"))).toBe(false);
+    expect(numbers.filter((row) => row.startsWith("─ Steps"))).toHaveLength(1);
   });
 
   it("the desktop entry forwards each tool.view and creative.draft frame to the session", () => {
