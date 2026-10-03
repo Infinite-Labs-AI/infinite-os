@@ -3,7 +3,7 @@
 // and the final comment. Statuses are plain text the wizard owns: a literal `- [ ]` (which anyone can tick) is
 // never posted. On a public repo, a provider ID that is not already in the diff is shown as `<id>`.
 import { sanitizeUntrustedBlock } from "../agents/sanitize.js"
-import type { AgentKind, ReviewResult } from "../wizard/contracts/agents.js"
+import { AGENT_LIMITS, type AgentKind, type ReviewResult } from "../wizard/contracts/agents.js"
 import { FORBIDDEN_CHECKBOX, PR_MARKERS } from "../wizard/contracts/git-host.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 import { lineInHunk, type DiffFile } from "./diff.js"
@@ -152,6 +152,9 @@ export type NotFixedOutcome = "timeout" | "toolless" | "error" | "no_change" | "
  *   - `gate_refused`: the post-turn safety check refused every change; `why` = the gate's own note;
  *   - `blocked`: the fence undid every change (outside the job's files, consent); `why` = the block's note.
  */
+/** The fix round's time budget in whole minutes, as every reply says it. */
+export const FIX_ROUND_MINUTES = Math.round(AGENT_LIMITS.reviewFix.wallMsPerRound / 60_000)
+
 export function notFixedReply(outcome: NotFixedOutcome, why?: string | null): string {
   const said = why ? stripControl(why).slice(0, 200) : null
   switch (outcome) {
@@ -162,7 +165,7 @@ export function notFixedReply(outcome: NotFixedOutcome, why?: string | null): st
     case "blocked":
       return `Not fixed: ${said ?? "the wizard undid the agent's change"}. It stays open.`
     case "timeout":
-      return "Not fixed: the agent ran out of its 5 minutes before changing anything. It stays open."
+      return `Not fixed: the agent ran out of its ${FIX_ROUND_MINUTES} minutes before changing anything. It stays open.`
     case "toolless":
       return "Not fixed: the agent could not use its tools. It stays open."
     case "error":
@@ -242,7 +245,7 @@ export function buildFinalComment(input: FinalCommentInput): string {
           ? `Reviewed by ${agentLabel} (incomplete: ${input.completeness.unchecked.join(", ")} not checked). A review is an opinion; only a receipt from this run means "proven".`
           : `Reviewed by ${agentLabel}. A review is an opinion; only a receipt from this run means "proven".`
   const text = [
-    "**infinite-tag: what happened**",
+    FINAL_COMMENT_TITLE,
     review,
     input.reportMarkdown.trim(),
     jobs ? `**Checklist (the wizard's own checks, never the agent's word)**\n\n| Job | State |\n|---|---|\n${jobs}` : "",
@@ -275,13 +278,34 @@ const AFTER_REPORT = ["\n\n**Checklist (the wizard's own checks", "\n\n**Decline
  * the body holds no report table (nothing is guessed).
  */
 export function withFinalReport(body: string, reportMarkdown: string): string | null {
-  const start = body.indexOf("### Before and after")
-  if (start < 0) return null
-  const ends = AFTER_REPORT.map((marker) => body.indexOf(marker, start)).filter((index) => index > start)
+  // R4-4 (live run 4): the report starts at its HEADLINE (the paragraph after the review sentence), not at its table.
+  // Splicing from "### Before and after" kept the merge-time headline and reasons ("set up in the pull request · not
+  // checked live yet") above the final verdict: two contradicting headlines in one comment.
+  const table = body.indexOf("### Before and after")
+  if (table < 0) return null
+  const start = reportStartIn(body)
+  if (start === null || start > table) return null
+  const ends = AFTER_REPORT.map((marker) => body.indexOf(marker, table)).filter((index) => index > table)
   if (ends.length === 0) return null
   const end = Math.min(...ends)
   const spliced = `${body.slice(0, start)}${neutralizeCheckboxes(reportMarkdown.trim())}${body.slice(end)}`
   return spliced.replace(`\n\n${FINAL_COMMENT_MERGE_LINE}`, `\n\n${FINAL_COMMENT_UPDATED_LINE}`)
+}
+
+/** The comment's title line (`buildFinalComment`'s first paragraph). */
+export const FINAL_COMMENT_TITLE = "**infinite-tag: what happened**"
+
+/**
+ * Where the report begins in a posted "what happened" comment: `buildFinalComment` writes the title, ONE review
+ * sentence, then the report (its headline first). Null when the body is not in that shape (nothing is guessed).
+ */
+function reportStartIn(body: string): number | null {
+  const title = body.indexOf(FINAL_COMMENT_TITLE)
+  if (title < 0) return null
+  const reviewStart = body.indexOf("\n\n", title + FINAL_COMMENT_TITLE.length)
+  if (reviewStart < 0) return null
+  const reviewEnd = body.indexOf("\n\n", reviewStart + 2)
+  return reviewEnd < 0 ? null : reviewEnd + 2
 }
 
 export function excerpt(text: string, max = 160): string {

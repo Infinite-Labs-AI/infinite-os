@@ -161,9 +161,16 @@ export function liveTodayColumnInput(source: LiveTodaySource): LiveTodayColumnIn
   }
   if (source.census.entries.length > 0) {
     const repeated = source.repeatedInits
+    // R4-13 (live run 4): "GA4 set up 2 times (problem)" sat next to "GA4 page views per visit 1". Both were true: gtag
+    // drops a second config of the SAME id, so the copy cost code, not data. Said only when this load measured it.
+    const ga4PerVisit = ga4PageViewsPerVisit(source.dryLive)
+    const words = (entry: (typeof repeated)[number]) =>
+      entry.tool === "ga4" && ga4PerVisit === 1
+        ? `${TOOL_LABEL[entry.tool]} set up ${entry.count} times with the same ID (GA4 still counted 1 page view per visit: the copy costs code, not data)`
+        : `${TOOL_LABEL[entry.tool]} set up ${entry.count} times`
     facts.push(
       repeated.length > 0
-        ? { input: "census", state: "problem", display: repeated.map((entry) => `${TOOL_LABEL[entry.tool]} set up ${entry.count} times`).join(", "), at }
+        ? { input: "census", state: "problem", display: repeated.map(words).join(", "), at }
         : { input: "census", state: "pass", display: "one setup per tool in the code", at }
     )
   }
@@ -267,6 +274,14 @@ export function liveTodayColumnInput(source: LiveTodaySource): LiveTodayColumnIn
   }
 }
 
+/** The most GA4 page views one load of the no-send test sent (its first page; a page change is not counted); null = no load. */
+function ga4PageViewsPerVisit(dry: LiveTodaySource["dryLive"]): number | null {
+  if (!dry) return null
+  const perLoad = new Map<string, number>()
+  for (const event of dry.ga4.events) if (event.en === "page_view" && !event.afterNav) perLoad.set(event.loadLabel, (perLoad.get(event.loadLabel) ?? 0) + 1)
+  return Math.max(0, ...perLoad.values())
+}
+
 function consentWords(mode: "not_required" | "required"): string {
   return mode === "required" ? "ask first (consent required)" : "collect by default"
 }
@@ -296,9 +311,7 @@ function rowsFor(
     const held = heldOrUnknown("ga4")
     if (held) rows.ga4_page_views_per_visit = held
     else {
-      const perLoad = new Map<string, number>()
-      for (const event of dry.ga4.events) if (event.en === "page_view" && !event.afterNav) perLoad.set(event.loadLabel, (perLoad.get(event.loadLabel) ?? 0) + 1)
-      const most = Math.max(0, ...perLoad.values())
+      const most = ga4PageViewsPerVisit(dry)!
       rows.ga4_page_views_per_visit = { value: most, display: String(most), state: most === 1 ? "pass" : "problem", source: "desktop_test", at, ...(grades.ga4 ? { checkId: grades.ga4.checkId } : {}) }
     }
   }

@@ -91,6 +91,8 @@ export function requiredLineKind(item: Pick<ChecklistItem, "id" | "jobId">): Pla
       if (startsWith("sensitive_pages")) return "sensitive_pages"
       return "improve_additive"
     case "ga4_improve":
+      // R4-8: GA4's page-change page_view is its own line (a change to the customer's own tag, approved by the user).
+      if (startsWith("spa_page_view")) return "ga4_spa_page_views"
       return "improve_additive"
     case "meta_improve":
       if (startsWith("retire_fbc_writer")) return "retire_fbc_writer"
@@ -125,6 +127,23 @@ const NEXT_FRAMEWORKS: ReadonlySet<string> = new Set(["next-app-router", "next-p
 /** Every Next config file name Next reads. */
 const NEXT_CONFIG_NAMES: readonly string[] = ["next.config.js", "next.config.mjs", "next.config.ts", "next.config.cjs"]
 
+/**
+ * R4-8: the dry load really changed page in the app (its `spaNavigation`): some tool sent after the change, or a load
+ * ended on another page than it started. Exported for the plan's line and its tests.
+ */
+export function dryNavigated(dry: NonNullable<BeforeFacts["dryLive"]>): boolean {
+  if (dry.ga4.events.some((event) => event.afterNav) || dry.posthog.events.some((event) => event.afterNav) || dry.meta.tr.some((tr) => tr.afterNav)) return true
+  if (dry.infinite.events.some((event) => event.nav)) return true
+  const pathOf = (url: string | null | undefined) => {
+    try {
+      return url ? new URL(url).pathname : null
+    } catch {
+      return null
+    }
+  }
+  return dry.loads.some((load) => load.finalUrl !== null && load.finalUrl !== undefined && pathOf(load.finalUrl) !== null && pathOf(load.finalUrl) !== pathOf(load.url))
+}
+
 /** Third-party hosts a tag needs through the CSP. */
 const TAG_HOSTS = /(?:^|\.)(?:googletagmanager\.com|google-analytics\.com|analytics\.google\.com|posthog\.com|facebook\.net|facebook\.com|doubleclick\.net)$/i
 
@@ -138,9 +157,17 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
     target === "proxy"
       ? ["S:posthog_config", ...(framework.startsWith("next") ? ["S:next_rewrites_exact"] : []), "RH:posthog_via_proxy_once", "PV:posthog_distinct_id_receipt"]
       : ["S:posthog_config", "PV:posthog_distinct_id_receipt"],
-  ga4_improve: (target) => (target === "id" ? ["T1:ga4_loader_id", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"] : ["RH:ga4_one_page_view", "PV:ga4_seen_leaving"]),
+  // R4-8: a page-change page_view is proven by the rehearsal's own page change (one GA4 page_view after it, never two).
+  ga4_improve: (target) =>
+    target === "id"
+      ? ["T1:ga4_loader_id", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
+      : target === "spa_page_view"
+        ? ["RH:ga4_spa_page_view", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
+        : ["RH:ga4_one_page_view", "PV:ga4_seen_leaving"],
+  // R4-2: the capture beside an adopted pixel is checked like the writer it replaces: one `_fbc`, holding the last
+  // click, on the page as the agent left it (`item-t0.ts` builds that page from the job's files).
   meta_improve: (target) =>
-    target === "retire_fbc_writer"
+    target === "retire_fbc_writer" || target === "capture"
       ? ["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"]
       : target === "spa_page_view"
         ? ["RH:meta_spa_page_view"]
@@ -167,6 +194,11 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
       ? ["S:adopted_init_guarded", ...t0, "RH:preview_self_silent", "T1:meta_host_matrix"]
       : ["S:adopted_init_guarded", ...t0, "RH:preview_self_silent"]
   }
+}
+
+/** The checks one item of `jobId` / `target` carries on `framework` (the plan's improve seeds use this too). */
+export function itemChecksFor(jobId: JobId, target: string, framework: string): ChecklistItem["checks"] {
+  return checksFor(jobId, target, framework)
 }
 
 function checksFor(jobId: JobId, target: string, framework: string): ChecklistItem["checks"] {
@@ -386,7 +418,10 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
     const dry = facts.dryLive
     if (SPA_FRAMEWORKS.has(framework) && dry !== null) {
       const adoptedIds = new Set(adoptedGa4.map((entry) => entry.id).filter((id): id is string => id !== null))
-      const navigationObserved = dry.ga4.events.some((event) => event.afterNav) || dry.infinite.events.some((event) => event.nav)
+      // R4-8 (live run 4): the page change is observed by ANY tool that sent after it, or by the load itself ending on
+      // another page. Run 4's site had only GA4 and Meta: Meta's page-change PageView proved the navigation, GA4 sent
+      // nothing for it, and this read only GA4 and Infinite, so the plan never offered the fix the headline named.
+      const navigationObserved = dryNavigated(dry)
       const firstPageView = dry.ga4.events.some((event) => !event.afterNav && event.en === "page_view" && adoptedIds.has(event.tid))
       const pageViewAfterNav = dry.ga4.events.some((event) => event.afterNav && event.en === "page_view" && adoptedIds.has(event.tid))
       if (navigationObserved && firstPageView && !pageViewAfterNav) {

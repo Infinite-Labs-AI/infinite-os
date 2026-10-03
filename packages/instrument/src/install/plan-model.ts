@@ -14,7 +14,7 @@
 //   • the server-lane line carries the probe disclosure (§3h.6);
 //   • nothing here is computed from agent output.
 import { automaticEventsPerVisitOf } from "../checks/grade-test-run.js"
-import { applyApprovalsTo, requiredLineKind } from "../jobs/registry.js"
+import { applyApprovalsTo, itemChecksFor, requiredLineKind } from "../jobs/registry.js"
 import { createHash } from "node:crypto"
 
 import type { ImproveLine, ImproveLineKind, ProviderId } from "../types.js"
@@ -809,7 +809,9 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       target = line({
         id: `${kind}:${provider ?? "site"}:${targetName}`,
         kind,
-        text: measured ?? item.trigger.finding,
+        // R4-8 (live run 4): the headline named GA4's missed page changes and no line offered the fix; the line says
+        // the change the user approves (the finding stays the job's "Why").
+        text: kind === "ga4_spa_page_views" ? GA4_SPA_LINE_TEXT : (measured ?? item.trigger.finding),
         requires: "approval",
         ownership: "adopted"
       })
@@ -826,7 +828,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   for (const entry of improveLines) {
     const planLine = lines.find((candidateLine) => candidateLine.id === entry.id)
     if (!planLine || (planLine.jobIds?.length ?? 0) > 0) continue
-    const seed = seedForImproveLine(entry, scan.appRoot ?? ".")
+    const seed = seedForImproveLine(entry, scan.appRoot ?? ".", scan.framework)
     if (!seed || takenIds.has(seed.id)) continue
     takenIds.add(seed.id)
     seeds.push(seed)
@@ -1002,6 +1004,9 @@ function duplicateTextFor(findings: readonly DuplicateFinding[], provider: Provi
   return null
 }
 
+/** R4-8: the approvable line for an adopted GA4 that misses client-side page changes. */
+export const GA4_SPA_LINE_TEXT = "GA4: send one page_view per page change in your app (today GA4 counts only the first page of each visit)."
+
 /** The job + target an improve line's own item uses (null: the line's change is all code, or no job fits). */
 function seedJobFor(entry: ImproveLine): { jobId: JobId; target: string } | null {
   switch (entry.kind) {
@@ -1031,7 +1036,7 @@ function seedJobFor(entry: ImproveLine): { jobId: JobId; target: string } | null
   }
 }
 
-function seedForImproveLine(entry: ImproveLine, appRoot: string): ChecklistItem | null {
+function seedForImproveLine(entry: ImproveLine, appRoot: string, framework: string): ChecklistItem | null {
   const job = seedJobFor(entry)
   if (!job) return null
   const spec = JOB_TABLE[job.jobId]
@@ -1044,7 +1049,9 @@ function seedForImproveLine(entry: ImproveLine, appRoot: string): ChecklistItem 
     owner: "agent",
     trigger: { finding: entry.text, evidence: file && entry.evidence ? [{ file, line: entry.evidence.line }] : [] },
     allow: { files: file ? [file] : [], create: [] },
-    checks: spec.checks.map((check) => ({ id: check.checkId, tier: check.tier, state: "not_run" as const })),
+    // R4-2: the item's OWN checks (its target's), never every check of its job: run 4's capture item carried the
+    // whole Meta table and was graded by checks about other targets.
+    checks: itemChecksFor(job.jobId, job.target, framework),
     state: "pending"
   }
 }

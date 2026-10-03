@@ -232,7 +232,9 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
     try {
       // B29: every string the wizard posts goes through the §3g.5 secret scan (tokens, keys, env values).
       const facts = await loadRunFacts(deps, ctx.state.get().site ?? null)
-      const scanner = buildScanner(ctx, deps, facts.connectionIds)
+      // R4-9: the ids the real visit read from the site's own code are public too (an unconnected Meta pixel's id).
+      const siteIds = (ctx.state.get().proof?.tools ?? []).flatMap((tool) => tool.ids)
+      const scanner = buildScanner(ctx, deps, [...new Set([...facts.connectionIds, ...siteIds])])
       const safeReport = safeText(scanner, markdown)
       // R2-5 (live run 2): the "what happened" comment posted at merge time said "Proven live: —" for good. It now
       // carries THIS report (the terminal's and the app's), edited in place; a new comment only when there is none.

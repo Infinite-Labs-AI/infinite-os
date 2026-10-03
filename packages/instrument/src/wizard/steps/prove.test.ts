@@ -524,3 +524,45 @@ describe("review P1-6: a merge tree that cannot be read is named, never swallowe
     expect(patched).not.toContain("proven")
   })
 })
+
+describe("R4-3 (live run 4): a CONNECTED GA4 is asked, and its answer is the word", () => {
+  const GA4_AT = "2026-10-02T09:40:20.000Z"
+
+  it("GA4's realtime lane counted the visit → 'received' in the terminal, the per-tool fact and the GA4 row; the wizard re-asked while it was pending", async () => {
+    const bundle = fakeDeps({
+      bridge: {
+        receipts: [
+          receiptsAll({ ga4: lane("pending", null, "ga4_realtime") }),
+          receiptsAll({ ga4: lane("verified", GA4_AT, "ga4_realtime") })
+        ]
+      }
+    })
+    const { ctx } = await runProve(bundle)
+    expect(bundle.log.names("bridge").filter((name) => name === "bridge.postReceipts")).toHaveLength(2)
+    expect(subs(ctx)).toContain("✓ GA4 · received (GA4's realtime report counted it)")
+    expect(subs(ctx).join("\n")).not.toContain("GA4 · sent (seen leaving)")
+    const column = ctx.current().report.proven_live!
+    expect(column.cells.ga4_page_views_per_visit).toMatchObject({ display: "1 · received", state: "pass" })
+    expect(ctx.current().proof!.tools.find((tool) => tool.tool === "ga4")).toMatchObject({ connected: true, receipt: "verified" })
+  })
+
+  it("GA4 counted other page views in the same minutes → said so; never 'received' on a guess", async () => {
+    const bundle = fakeDeps({ bridge: { receipts: [receiptsAll({ ga4: { state: "delivering", receiptAt: null, reason: "ga4_realtime_busy", provenance: "ga4_realtime" } })] } })
+    const { ctx } = await runProve(bundle)
+    expect(subs(ctx)).toContain("✓ GA4 · sent (seen leaving) · GA4 counted other page views in the same minutes, so this visit cannot be singled out")
+    expect(JSON.stringify(ctx.current().report.proven_live)).not.toContain("received (GA4")
+  })
+
+  it("negative: GA4 NOT connected → 'sent (seen leaving)' is the honest word (Infinite cannot ask GA4)", async () => {
+    const keys = keysFixture({ ga4: { status: "not_connected", propertyLabel: null, streams: [] } as never })
+    const bundle = fakeDeps({ bridge: { keys, receipts: [receiptsAll({ ga4: lane("delivering", null, "desktop_test") })] } })
+    const { ctx } = await runProve(bundle)
+    expect(subs(ctx)).toContain("✓ GA4 · sent (seen leaving)")
+    expect(subs(ctx).join("\n")).not.toContain("received (GA4")
+  })
+
+  it("a connected Meta pixel says why it cannot be confirmed now (Meta reports by the hour)", async () => {
+    const { ctx } = await runProve(fakeDeps())
+    expect(subs(ctx)).toContain("✓ Meta · sent (seen leaving) · Meta reports only by the hour, so this visit cannot be confirmed now")
+  })
+})

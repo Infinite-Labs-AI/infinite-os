@@ -26,7 +26,7 @@ import { job16Item, restoreFiles, runFixRound, snapshotFiles, verifyFix } from "
 import { openFindings, parseLedger, recordDecisions, REVIEW_LEDGER_PATH, type ReviewLedger } from "../../review/ledger.js"
 import { wizardOwnership, type WizardOwnership } from "../../review/ownership.js"
 import { commentTrust, hasFinalMarker, hasReplyMarker, parseReviewMarker, stripMarkers } from "../../review/markers.js"
-import { AGENT_LABEL, buildFinalComment, buildReply, buildReviewPost, excerpt, notFixedReply, redactIdsNotInDiff, safeText, type FixReplyState, type NotFixedOutcome } from "../../review/post.js"
+import { AGENT_LABEL, buildFinalComment, buildReply, buildReviewPost, excerpt, FIX_ROUND_MINUTES, notFixedReply, redactIdsNotInDiff, safeText, type FixReplyState, type NotFixedOutcome } from "../../review/post.js"
 import { applyRehearsalToJobs, recordRehearsalCells, rehearse } from "../../review/rehearse.js"
 import { mergeRequirementLine } from "../../github/rules.js"
 import { checksSummary } from "../../github/checks.js"
@@ -409,10 +409,12 @@ async function gatherItems(session: Session, review: ReviewResult, round: number
   return { items, teammateOk, ownThreadByFinding }
 }
 
-function passingChecks(ctx: WizardContext): Set<string> {
+function passingChecks(ctx: WizardContext, head: string): Set<string> {
   const state = ctx.state.get()
   const out = new Set<string>()
   for (const job of state.jobs) for (const check of job.checks) if (check.state === "pass") out.add(check.id)
+  // R4-5: the rehearsal of THIS commit decides too, whether or not a job carries the check.
+  for (const check of state.rehearsalChecks ?? []) if (check.state === "pass" && check.sha === head) out.add(check.checkId)
   for (const cell of Object.values(state.report.in_pr?.finishLine ?? {})) {
     if (cell?.state === "pass" && cell.provenance.checkId) out.add(cell.provenance.checkId)
   }
@@ -853,8 +855,9 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       allowlist: allowlistUnion(ctx.state.get().jobs),
       ownership: ownership.classify,
       declinedKeys,
-      passingChecks: passingChecks(ctx),
-      answerFor: answerFrom(ctx)
+      passingChecks: passingChecks(ctx, head),
+      answerFor: answerFrom(ctx),
+      serverLaneInstalled: session.ship.facts.keys ? session.ship.facts.keys.serverLane.laneState !== "no_secret" : null
     })
     const decisions = await resolveAsks(session, triaged, worker !== null)
     recordDecisions(session.ledger, decisions, round)
@@ -968,7 +971,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
           })
           announceRehearsal(ctx, "review", outcome, prepared.runId)
           recordRehearsalCells(ctx, outcome, { head: fixSha, runId: prepared.runId, keys: prepared.facts.keys })
-          applyRehearsalToJobs(ctx, deps, outcome, prepared.runId)
+          applyRehearsalToJobs(ctx, deps, outcome, prepared.runId, fixSha)
           sub(ctx, "review", outcome.state === "graded" ? "✓ Rehearsal re-run on the new commit" : "Rehearsal on the new commit: undetermined", outcome.state === "graded" ? "ok" : "warn")
           // Only conversions not already sent this run are PATCHed (append-only), and only those get GA4 key events.
           const already = new Set(session.ledger.clickTested ?? [])
@@ -1031,7 +1034,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
  */
 export function noKeptChangeOutcome(run: AgentRunResult): { outcome: NotFixedOutcome; why: string | null } {
   const extras = runExtras(run)
-  const stopped = run.outcome === "timeout" ? "the agent ran out of its 5 minutes" : run.outcome === "error" ? "the agent stopped with an error" : run.outcome === "toolless" ? "the agent could not use its tools" : null
+  const stopped = run.outcome === "timeout" ? `the agent ran out of its ${FIX_ROUND_MINUTES} minutes` : run.outcome === "error" ? "the agent stopped with an error" : run.outcome === "toolless" ? "the agent could not use its tools" : null
   const changed = [...new Set(run.reverted.filter((path) => !path.startsWith(".git/") && path !== ".git"))]
   if (stopped && changed.length > 0) return { outcome: "undone", why: `${stopped}; its unfinished change to ${listPaths(changed)} was undone` }
   if (extras.gateHits.length > 0) return { outcome: "gate_refused", why: [...new Set(extras.gateHits.map((hit) => hit.note))].join("; ") }

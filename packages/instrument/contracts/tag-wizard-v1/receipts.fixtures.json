@@ -309,5 +309,161 @@
         }
       }
     }
+  },
+  {
+    "id": "ga4_realtime_received",
+    "note": "R4-3: GA4 is connected. The cloud asks the GA4 realtime lane /api/analytics/verify uses: a page_view in the minutes since the visit began and none in the minutes before it, so GA4 received this visit (verified, provenance ga4_realtime, receiptAt = the read). The Meta pixel stays delivering: Meta reports only by the hour.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:42:00.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:30.000Z",
+          "reason": null,
+          "provenance": "ga4_realtime"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "ga4_realtime_busy",
+    "note": "R4-3: GA4 is connected, but realtime also counted page views in the minutes before the visit, so this visit cannot be singled out: delivering (seen leaving), reason ga4_realtime_busy. Never verified on a guess.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:42:00.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "ga4_realtime_busy",
+          "provenance": "ga4_realtime"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
   }
 ]

@@ -80,5 +80,9 @@ describe("W15 / W16 at step level (review P2-6)", () => {
     expect(run.patches.some((patch) => patch.phase === "proven")).toBe(false)
     expect(run.markdown.split("\n")[0]).toBe(`**${report.verdict!.headline}**`)
     expect(run.markdown).toContain("- Sending, but its ID is not checked (not connected in Infinite): GA4 G-ACME...0001, Meta 123456...3456")
+    // R4-9 (live run 4): the PR comment said "Meta [redacted: phone]". The pixel id the real visit read from the site's
+    // code is a public id, masked or not.
+    expect(run.comment).toContain("Meta 123456...3456")
+    expect(run.comment).not.toContain("[redacted: phone]")
   })
 })

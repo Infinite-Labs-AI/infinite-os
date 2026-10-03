@@ -1,9 +1,17 @@
 // §3h.7 of the wizard build plan (run-scoped receipts, `POST /v1/runs/:runId/receipts` → the cloud)
 // as code.
 //
-// NORMATIVE. A receipt state is the cloud's OWN read (ledger rows, a PostHog query, the relay ledger),
-// never a grade of desktop facts. "verified" needs a receipt at or after the run's server start.
-// GA4 and the Meta pixel are never `verified` (no per-visit read exists): `delivering` at best.
+// NORMATIVE. A receipt state is the cloud's OWN read (ledger rows, a PostHog query, GA4's realtime report, the relay
+// ledger), never a grade of desktop facts. "verified" needs a receipt at or after the run's server start.
+//
+// R4-3 (live run 4, amends §3h.7): with GA4 CONNECTED, the cloud asks the GA4 realtime lane `/api/analytics/verify`
+// uses (the workspace's own grant) for the `page_view` of the run's visit. GA4 realtime is minute-bucketed and carries
+// no event id, so the lane is `verified` (provenance `ga4_realtime`, receiptAt = the read) only when realtime counts a
+// page_view in the minutes since the visit began AND counted none in the minutes before it (else this visit cannot be
+// singled out: `delivering` with reason `ga4_realtime_busy`); `pending` while it has not shown up yet; `no_receipt`
+// reason `ga4_realtime_none` once the wait ends with a 2xx beacon GA4 never counted; `delivering` reason
+// `ga4_realtime_unavailable` when the report could not be read. Without a GA4 connection: `delivering` (seen leaving).
+// The Meta pixel is never `verified` (Meta reports only by the hour): `delivering` at best.
 import { shapeOf } from "./shape.js"
 
 export const RECEIPT_LANES = ["infinite", "posthog", "ga4", "meta_pixel", "server_lane", "meta_capi"] as const
@@ -12,11 +20,15 @@ export type ReceiptLane = (typeof RECEIPT_LANES)[number]
 export const RECEIPT_STATES = ["verified", "delivering", "pending", "no_receipt", "not_verifiable", "undetermined"] as const
 export type ReceiptState = (typeof RECEIPT_STATES)[number]
 
-export const RECEIPT_PROVENANCE = ["cloud_ledger", "posthog_query", "desktop_test", "relay_ledger"] as const
+export const RECEIPT_PROVENANCE = ["cloud_ledger", "posthog_query", "desktop_test", "relay_ledger", "ga4_realtime"] as const
 export type ReceiptProvenance = (typeof RECEIPT_PROVENANCE)[number]
 
 export const RECEIPT_PHASES = ["proven_live", "day7"] as const
 export type ReceiptPhase = (typeof RECEIPT_PHASES)[number]
+
+/** R4-3: the reason codes the cloud's GA4 realtime read gives the `ga4` lane (anything else is shown as no reason). */
+export const GA4_REALTIME_REASONS = ["ga4_realtime_busy", "ga4_realtime_none", "ga4_realtime_unavailable"] as const
+export type Ga4RealtimeReason = (typeof GA4_REALTIME_REASONS)[number]
 
 /** What the cloud stores per receipt (a hash of the marker, never a raw id). */
 export const RECEIPT_MARKER_KINDS = ["event_id", "distinct_id", "probe_path", "seen_leaving", "meta_event_id", "none"] as const

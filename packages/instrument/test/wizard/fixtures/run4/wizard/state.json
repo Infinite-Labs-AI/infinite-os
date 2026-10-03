@@ -1,0 +1,1315 @@
+{
+  "schema": "infinite-tag.wizard-state.v1",
+  "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+  "displayId": "r-3f0d",
+  "createdAt": "2026-10-03T20:42:36.742Z",
+  "tagVersion": "0.12.0",
+  "root": "/home/user/Github/infinite-tag-smoke-site",
+  "appRoot": ".",
+  "link": {
+    "linkId": "lk_f04OpG5T2zcOmG5RCj_WpA",
+    "workspaceName": "Tag smoke test 3",
+    "approvedAt": "2026-10-03T20:43:41.759Z",
+    "runtimeVariant": "dev9"
+  },
+  "steps": {
+    "link": {
+      "outcome": "ok",
+      "inputHash": "sha256:584bf050dbb7fe4a5ed3c406603db6a2bef41514383b36620b50d6ed71e514f4",
+      "at": "2026-10-03T20:43:43.655Z"
+    },
+    "agent": {
+      "outcome": "ok",
+      "inputHash": "sha256:73b81c39ceb3deb5f53f95e28d407c5809432d1d7bafd0a63b6f97307c547638",
+      "at": "2026-10-03T20:43:45.134Z"
+    },
+    "before": {
+      "outcome": "ok",
+      "inputHash": "sha256:894464540c386380078c0691033642c94126839f96523a207f5e1b167ecc401d",
+      "at": "2026-10-03T20:44:19.802Z"
+    },
+    "keys": {
+      "outcome": "ok",
+      "inputHash": "sha256:a1c48ef1c0c2d98124058151cafab7d4449d966ebb2158079ddae1ab967f438c",
+      "at": "2026-10-03T20:44:21.249Z"
+    },
+    "plan": {
+      "outcome": "ok",
+      "inputHash": "sha256:591ede983755e8c0a00abc19c18954e6d0f2a6fc0fa9c07a931d3d8da223074a",
+      "at": "2026-10-03T20:44:58.589Z"
+    },
+    "install": {
+      "outcome": "ok",
+      "inputHash": "sha256:86664b13a07ebaeaba48a09cb3a0fffbad636fbd59b022bd4c0e12da7eb8b2f0",
+      "at": "2026-10-03T20:45:03.325Z"
+    },
+    "jobs": {
+      "outcome": "failed",
+      "inputHash": "sha256:3ce9cf433d94e5e3e873a4d64ab8d6814ab031173994d7a2729c201dab7de35e",
+      "at": "2026-10-03T20:55:08.216Z",
+      "code": "INF_WIZ_AGENT_TIMEOUT"
+    },
+    "settings": {
+      "outcome": "ok",
+      "inputHash": "sha256:163f1314e90a00cd2170ca0756135da3d7f377ba9d790ce59c1773b43a6029d6",
+      "at": "2026-10-03T20:55:10.161Z"
+    },
+    "rehearsal": {
+      "outcome": "ok",
+      "inputHash": "sha256:1fdcaae51ba13e77d15271347188cee8886363c885939016b23bd7563371b529",
+      "at": "2026-10-03T20:55:55.992Z"
+    },
+    "review": {
+      "outcome": "ok",
+      "inputHash": "sha256:173c536fbb3299e00f79a3c8cfef5045a7289314dded003c2754725cf149260c",
+      "at": "2026-10-03T21:07:15.800Z"
+    },
+    "merge": {
+      "outcome": "ok",
+      "inputHash": "sha256:3f2c65d05a4668121f53a8450cb5a529dc489d912e061639c6f3a89022db072e",
+      "at": "2026-10-03T21:07:51.157Z"
+    },
+    "prove": {
+      "outcome": "ok",
+      "inputHash": "sha256:4f17aa28a94353728ba8208c6625b38e2d06a7141ddcb65fd74864dfcfb97003",
+      "at": "2026-10-03T21:08:34.846Z"
+    },
+    "done": {
+      "outcome": "ok",
+      "inputHash": "sha256:f4570e55cc76423b01a629834c7b3bd7aa8f9fd3f718e656505c1da45ad60373",
+      "at": "2026-10-03T21:08:43.860Z"
+    }
+  },
+  "agent": {
+    "worker": "claude_code",
+    "reviewer": "codex",
+    "workerSession": {
+      "kind": "claude",
+      "sessionId": "78e1280a-3695-4eb4-83d5-739ca9577cd0"
+    },
+    "whoPays": {
+      "worker": {
+        "payer": "plan",
+        "label": "your Claude plan (max) pays"
+      },
+      "reviewer": {
+        "payer": "plan",
+        "label": "your ChatGPT plan pays"
+      }
+    },
+    "models": {
+      "worker": {
+        "model": "claude-opus-4-8",
+        "effort": "xhigh",
+        "fallback": false
+      },
+      "reviewer": {
+        "model": "gpt-6.1-sol",
+        "effort": "xhigh",
+        "fallback": false
+      }
+    }
+  },
+  "git": {
+    "base": "main",
+    "baseSource": "default_branch",
+    "branch": "infinite/tag/2026-10-03-854839",
+    "baseSha": "b7c8347157f273419b6a510179f19b59c3932597",
+    "headSha": "5e6f3f3bb56b5363e8a9ed85541f3af852731047"
+  },
+  "pr": {
+    "host": "github",
+    "number": 5,
+    "url": "https://github.com/AlchemistChaos/infinite-tag-smoke-site/pull/5",
+    "nodeId": "PR_kwDOU5pYlM8AAAABGehR7g",
+    "isDraft": false,
+    "round": 1,
+    "reviewedSha": "5e6f3f3bb56b5363e8a9ed85541f3af852731047",
+    "handledThreadIds": [
+      "PRRT_kwDOU5pYlM6ornQy",
+      "PRRT_kwDOU5pYlM6ornQ4",
+      "PRRT_kwDOU5pYlM6ornQ9",
+      "PRRT_kwDOU5pYlM6ornRD",
+      "PRRT_kwDOU5pYlM6ornRG"
+    ],
+    "mergeSha": "4aae09ef02a6c87953efd48535e746c0e6f53a16"
+  },
+  "plan": {
+    "hash": "sha256:9abab2d6c29f5707451b291a2d4d78d99650e4a7072575e34f89fab7be98855f",
+    "answers": {
+      "consentMode": "not_required",
+      "conversions": [
+        "signup"
+      ],
+      "privacyApproved": true,
+      "npmInstall": null,
+      "metaGoal": "StartTrial"
+    },
+    "lines": [
+      {
+        "id": "consent_mode",
+        "approved": true
+      },
+      {
+        "id": "conversion_names",
+        "approved": true
+      },
+      {
+        "id": "privacy_text",
+        "approved": true
+      },
+      {
+        "id": "install_provider:infinite",
+        "approved": true
+      },
+      {
+        "id": "user_action:server_lane",
+        "approved": null
+      },
+      {
+        "id": "preview_guard_adopted:ga4:init",
+        "approved": true
+      },
+      {
+        "id": "capture_beside_adopted_pixel:meta:capture",
+        "approved": true
+      },
+      {
+        "id": "autoconfig_off_adopted:meta:autoconfig",
+        "approved": true
+      },
+      {
+        "id": "preview_guard_adopted:meta:init",
+        "approved": true
+      },
+      {
+        "id": "remove_duplicate:ga4:ga4_config:G-8YB9G7SJE7",
+        "approved": true
+      },
+      {
+        "id": "meta_goal",
+        "approved": true
+      },
+      {
+        "id": "user_action:meta_traffic_permissions",
+        "approved": null
+      },
+      {
+        "id": "user_action:connect_posthog",
+        "approved": null
+      },
+      {
+        "id": "user_action:connect_meta",
+        "approved": null
+      },
+      {
+        "id": "checkin",
+        "approved": null
+      },
+      {
+        "id": "agent_budget",
+        "approved": true
+      }
+    ]
+  },
+  "jobs": [
+    {
+      "id": "duplicates_remove:ga4_config:G-8YB9G7SJE7",
+      "jobId": "duplicates_remove",
+      "n": 6,
+      "title": "Remove duplicate tags",
+      "owner": "agent",
+      "trigger": {
+        "finding": "G-8YB9G7SJE7 is set up 2 times (app/layout.tsx:27, app/layout.tsx:32)",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 27
+          },
+          {
+            "file": "app/layout.tsx",
+            "line": 32
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "census_one_per_tool",
+          "tier": "S",
+          "state": "pass",
+          "at": "2026-10-03T20:52:39.429Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "every tool starts once per page"
+        },
+        {
+          "id": "census_ga4_config_once",
+          "tier": "S",
+          "state": "pass",
+          "at": "2026-10-03T20:52:39.432Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "GA4 starts at most once per page"
+        },
+        {
+          "id": "one_beacon_per_tool",
+          "tier": "RH",
+          "state": "undetermined",
+          "at": "2026-10-03T20:55:55.991Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "not_connected"
+        },
+        {
+          "id": "one_beacon_per_tool",
+          "tier": "PV",
+          "state": "not_run"
+        }
+      ],
+      "state": "waiting_deploy",
+      "claim": {
+        "status": "done",
+        "note": "Removed the contractor's duplicate GA4 (the second gtag/js loader + the ga4-again config script). Kept the single init at app/layout.tsx (gtag('config','G-8YB9G7SJE7')).",
+        "at": "2026-10-03T20:52:13.311Z"
+      },
+      "edits": [
+        {
+          "editId": "agent-85483904-t1-0",
+          "file": "app/layout.tsx"
+        }
+      ]
+    },
+    {
+      "id": "preview_guard:ga4",
+      "jobId": "preview_guard",
+      "n": 7,
+      "title": "Keep previews silent: GA4",
+      "owner": "agent",
+      "trigger": {
+        "finding": "The site's own GA4 fires on preview deployments too Production hosts that must ALWAYS fire (exempt first): tag-smoke.foundernationtv.com. Silence only these preview hosts: localhost, 127.0.0.1, ::1, [::1], 0.0.0.0, .localhost, .local, .vercel.app, .netlify.app, .pages.dev.",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 27
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "adopted_init_guarded",
+          "tier": "S",
+          "state": "pass",
+          "at": "2026-10-03T20:52:39.436Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "INF_SETUP_HOST_GUARD_PRESENT: The site's GA4 at app/layout.tsx:29 starts behind a host check, so previews stay silent."
+        },
+        {
+          "id": "preview_self_silent",
+          "tier": "RH",
+          "state": "pass",
+          "at": "2026-10-03T20:55:55.991Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+        }
+      ],
+      "state": "proven",
+      "claim": {
+        "status": "done",
+        "note": "Wrapped the kept GA4 init gtag('config','G-8YB9G7SJE7') in the exact guardAsWritten host-guard expression (if (<guard>) { ... }). The guardAt line-33 init was removed by the duplicates job, so only the kept init is guarded.",
+        "at": "2026-10-03T20:52:15.686Z"
+      },
+      "edits": [
+        {
+          "editId": "agent-85483904-t1-0",
+          "file": "app/layout.tsx"
+        }
+      ]
+    },
+    {
+      "id": "preview_guard:meta",
+      "jobId": "preview_guard",
+      "n": 7,
+      "title": "Keep previews silent: Meta pixel",
+      "owner": "agent",
+      "trigger": {
+        "finding": "The site's own Meta pixel fires on preview deployments too Production hosts that must ALWAYS fire (exempt first): tag-smoke.foundernationtv.com. Silence only these preview hosts: localhost, 127.0.0.1, ::1, [::1], 0.0.0.0, .localhost, .local, .vercel.app, .netlify.app, .pages.dev.",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 41
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "adopted_init_guarded",
+          "tier": "S",
+          "state": "pass",
+          "at": "2026-10-03T20:52:39.438Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "INF_SETUP_HOST_GUARD_PRESENT: The site's Meta pixel at app/layout.tsx:60 starts behind a host check, so previews stay silent."
+        },
+        {
+          "id": "preview_self_silent",
+          "tier": "RH",
+          "state": "pass",
+          "at": "2026-10-03T20:55:55.991Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+        },
+        {
+          "id": "meta_host_matrix",
+          "tier": "T1",
+          "state": "not_run"
+        }
+      ],
+      "state": "done_in_code",
+      "claim": {
+        "status": "done",
+        "note": "Wrapped only the Meta bootstrap (fbevents loader, fbq('set','autoConfig',false,...), fbq('init'), first fbq('track','PageView')) in the metaGuardRecipe IIFE with the exact guard. On a preview it defines an inert __infiniteSilenced fbq and returns. autoConfig stays false. The _fbc capture is left outside/before the wrapper.",
+        "at": "2026-10-03T20:52:18.184Z"
+      },
+      "edits": [
+        {
+          "editId": "agent-85483904-t1-0",
+          "file": "app/layout.tsx"
+        }
+      ]
+    },
+    {
+      "id": "conversions_to_tools:signup",
+      "jobId": "conversions_to_tools",
+      "n": 10,
+      "title": "Send the signup conversion to every tool",
+      "owner": "agent",
+      "trigger": {
+        "finding": "The signup succeeds at app/signup/page.tsx:18; send the approved signup conversion to every tool there",
+        "evidence": [
+          {
+            "file": "app/signup/page.tsx",
+            "line": 18
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/signup/page.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "no_fbq_standard_on_click",
+          "tier": "S",
+          "state": "pass",
+          "at": "2026-10-03T20:52:39.439Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "no standard Meta conversion fires from a click handler"
+        },
+        {
+          "id": "track_after_success",
+          "tier": "S",
+          "state": "pass",
+          "at": "2026-10-03T20:52:39.440Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "app/signup/page.tsx:19 sends the signup after it succeeds"
+        },
+        {
+          "id": "first_real_conversion",
+          "tier": "P",
+          "state": "not_run"
+        }
+      ],
+      "state": "waiting_real_event",
+      "claim": {
+        "status": "done",
+        "note": "On signup success (response.ok at app/signup/page.tsx:19) call infiniteTrackThenNavigate(event, \"/account\", \"signup\") — fires the approved \"signup\" conversion to PostHog+GA4 then navigates. Imported from ../../lib/infinite-analytics. No fbq on click.",
+        "at": "2026-10-03T20:52:20.497Z"
+      },
+      "edits": [
+        {
+          "editId": "agent-85483904-t1-1",
+          "file": "app/signup/page.tsx"
+        }
+      ]
+    },
+    {
+      "id": "meta_improve:capture",
+      "jobId": "meta_improve",
+      "n": 5,
+      "title": "Improve the existing Meta pixel",
+      "owner": "agent",
+      "trigger": {
+        "finding": "Meta: save the ad-click id (_fbc) on landing pages beside your existing pixel, so conversions can be matched to the ad. Adds a small script; your pixel itself is unchanged.",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 41
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "click_id_capture",
+          "tier": "S",
+          "state": "pass",
+          "at": "2026-10-03T20:52:39.441Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "INF_SETUP_CLICK_ID_PRESENT: A Meta pixel initialises in app/layout.tsx, a shared entry that loads on every route, so it is present on the first page a visitor lands on and can read `fbclid` into `_fbc` there. That is the setup being right; it is not proof a cookie was written — a pixel blocked by Traffic Permissions writes no `_fbp`/`_fbc` at all, which is what the `meta` verification lane checks separately."
+        },
+        {
+          "id": "meta_event_id_from_helper",
+          "tier": "S",
+          "state": "pass",
+          "at": "2026-10-03T20:52:39.442Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "every Meta event id in page code comes from the server's metaEventId"
+        },
+        {
+          "id": "meta_traffic_permissions",
+          "tier": "T1",
+          "state": "not_run"
+        },
+        {
+          "id": "meta_pixel_once",
+          "tier": "RH",
+          "state": "undetermined",
+          "at": "2026-10-03T20:55:55.991Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "not_connected — meta fires but has no connection to compare its id with"
+        },
+        {
+          "id": "meta_spa_page_view",
+          "tier": "RH",
+          "state": "undetermined",
+          "at": "2026-10-03T20:55:55.991Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "not_connected — meta fires but has no connection to compare its id with"
+        },
+        {
+          "id": "fbc_capture",
+          "tier": "T0",
+          "state": "problem",
+          "at": "2026-10-03T20:52:39.525Z",
+          "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+          "reason": "no_fbc_capture — a landing with an fbclid wrote no _fbc cookie"
+        },
+        {
+          "id": "meta_seen_leaving",
+          "tier": "PV",
+          "state": "not_run"
+        }
+      ],
+      "state": "blocked",
+      "claim": {
+        "status": "done",
+        "note": "Added a small _fbc capture script beside the existing pixel: reads fbclid from the URL, writes the _fbc cookie (fb.1.<ts>.<fbclid>, never overwriting an existing one) and sets window.infiniteMetaClickId. Runs on every host, placed before and outside the guarded bootstrap. The pixel itself is unchanged; no event id built in the page.",
+        "at": "2026-10-03T20:52:22.806Z"
+      },
+      "note": "The agent ran out of time; its edits were undone.",
+      "blockedReason": "agent_blocked",
+      "edits": [
+        {
+          "editId": "agent-85483904-t1-0",
+          "file": "app/layout.tsx"
+        }
+      ]
+    }
+  ],
+  "markers": {
+    "before": {
+      "infiniteEventIds": [],
+      "posthogDistinctId": null,
+      "probePath": null,
+      "metaEventIds": []
+    },
+    "rehearsal": {
+      "infiniteEventIds": [
+        "603f8ef2-0514-47c8-a735-6056acc55772",
+        "2b48ff4f-d95e-4248-8d3c-fc8a47cff8cd",
+        "59631db8-fb2a-4bc5-8374-7c3189f91f7b"
+      ],
+      "posthogDistinctId": null,
+      "metaEventIds": []
+    },
+    "prove": {
+      "infiniteEventIds": [
+        "e6cb64d0-249c-4f24-b2a5-d479c9630533"
+      ],
+      "posthogDistinctId": null,
+      "probePath": null,
+      "metaEventIds": []
+    }
+  },
+  "report": {
+    "live_today": {
+      "meta": {
+        "measuredAt": "2026-10-03T20:44:19.785Z",
+        "sha": null
+      },
+      "cells": {
+        "ga4_page_views_per_visit": {
+          "value": 1,
+          "display": "1",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:ga4"
+          }
+        },
+        "posthog_route": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        },
+        "meta_pixel": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        },
+        "preview_share": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "read_failed"
+        },
+        "server_conversions": {
+          "value": 0,
+          "display": "0 in 7 days",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "ga4_key_events": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "read_failed"
+        },
+        "consent_setting": {
+          "value": "not_required",
+          "display": "collect by default",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "live_test_per_tool": {
+          "value": "1/2",
+          "display": "1 of 2 tools fire once (nothing sent)",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "checks_passing": {
+          "value": "3/9",
+          "display": "3 pass · 4 problems · 2 unknown · 5 not testable of 14",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        }
+      },
+      "finishLine": {
+        "each_tool_once": {
+          "value": "problem",
+          "display": "GA4 set up 2 times",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "ids_match_connections": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "infinite_runtime_once"
+          }
+        },
+        "previews_silent": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "survives_ad_blockers": {
+          "value": "problem",
+          "display": "server lane not receiving",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "spa_page_views": {
+          "value": "unknown",
+          "display": "no page change observed",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "conversions_server_side": {
+          "value": "problem",
+          "display": "0 sent from the server in 7 days",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "identity_joined": {
+          "value": "info",
+          "display": "no login found",
+          "state": "info",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "utms_survive_redirects": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:18.725Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "redirect_walk"
+          }
+        },
+        "consent_recorded": {
+          "value": "pass",
+          "display": "collect by default",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "csp_allows": {
+          "value": "unknown",
+          "display": "unknown",
+          "state": "undetermined",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:18.726Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "csp_header"
+          }
+        },
+        "ga4_key_events_received": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "no_pii": {
+          "value": "pass",
+          "display": "no personal data in any request",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "proof_from_real_visit": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "keeps_being_checked": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        }
+      }
+    },
+    "in_pr": {
+      "meta": {
+        "measuredAt": "2026-10-03T20:55:55.990Z",
+        "sha": "5e6f3f3bb56b5363e8a9ed85541f3af852731047"
+      },
+      "cells": {
+        "consent_setting": {
+          "value": "not_required",
+          "display": "\"collect by default\" recorded",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "ga4_page_views_per_visit": {
+          "value": "1",
+          "display": "1",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:ga4"
+          }
+        },
+        "posthog_route": {
+          "value": "info",
+          "display": "not installed",
+          "state": "info",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:posthog"
+          }
+        },
+        "meta_pixel": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        },
+        "live_test_per_tool": {
+          "value": "2/3",
+          "display": "rehearsal: 2 of 3 tools fire once, right ID (nothing sent)",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "preview_share": {
+          "value": "silent",
+          "display": "guard added · the preview link sent nothing",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "preview_self_silent"
+          }
+        },
+        "checks_passing": {
+          "value": "5/9",
+          "display": "5 pass · 0 problems · 4 unknown · 5 not testable of 14",
+          "state": "undetermined",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        }
+      },
+      "finishLine": {
+        "consent_recorded": {
+          "value": "not_required",
+          "display": "\"collect by default\" recorded",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "keeps_being_checked": {
+          "value": "pass",
+          "display": "7-day check-in is on",
+          "state": "pass",
+          "provenance": {
+            "source": "plan_answer",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "each_tool_once": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "one_beacon_per_tool"
+          },
+          "reason": "not_connected"
+        },
+        "ids_match_connections": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        },
+        "previews_silent": {
+          "value": "pass",
+          "display": "preview link sent nothing",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "preview_self_silent"
+          }
+        },
+        "survives_ad_blockers": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "posthog_via_proxy_once"
+          },
+          "reason": "not_connected"
+        },
+        "spa_page_views": {
+          "value": "pass",
+          "display": "one page view per navigation",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "csp_allows": {
+          "value": "0",
+          "display": "no CSP violation",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "no_csp_violation"
+          }
+        },
+        "no_pii": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        }
+      }
+    },
+    "proven_live": {
+      "meta": {
+        "measuredAt": "2026-10-03T21:08:33.998Z",
+        "sha": "4aae09ef02a6c87953efd48535e746c0e6f53a16"
+      },
+      "cells": {
+        "consent_setting": {
+          "value": "not_required",
+          "display": "collect by default",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "preview_share": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "needs_7_days"
+        },
+        "ga4_key_events": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "needs_7_days"
+        },
+        "server_conversions": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "live_test_per_tool": {
+          "value": "3 of 3",
+          "display": "3 of 3 fire: 1 verified (receipts from this visit) · 2 seen leaving",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "receiptAt": "2026-10-03T21:08:14.264Z"
+          }
+        },
+        "ga4_page_views_per_visit": {
+          "value": 1,
+          "display": "1 · sent (seen leaving)",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "ga4_seen_leaving"
+          }
+        },
+        "meta_pixel": {
+          "value": "sending",
+          "display": "sending (seen leaving) · ID not checked: not connected in Infinite",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "meta_seen_leaving"
+          }
+        },
+        "posthog_route": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        },
+        "checks_passing": {
+          "value": "7/13",
+          "display": "7 pass · 1 problem · 5 unknown · 1 not testable of 14",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        }
+      },
+      "finishLine": {
+        "each_tool_once": {
+          "value": "pass",
+          "display": "Infinite pixel: fires once",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:infinite"
+          }
+        },
+        "ids_match_connections": {
+          "value": "unknown",
+          "display": "Meta: ID not checked: not connected in Infinite",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:meta"
+          },
+          "reason": "not_connected"
+        },
+        "previews_silent": {
+          "value": "pass",
+          "display": "GA4: silent on the merge's own deployment address",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:ga4"
+          }
+        },
+        "survives_ad_blockers": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "spa_page_views": {
+          "value": "problem",
+          "display": "GA4: misses page changes",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:ga4"
+          }
+        },
+        "conversions_server_side": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "waiting_real_event"
+        },
+        "identity_joined": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "waiting_real_event"
+        },
+        "utms_survive_redirects": {
+          "value": "pass",
+          "display": "campaign tags kept through every redirect",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:19.114Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "redirect_walk"
+          }
+        },
+        "consent_recorded": {
+          "value": "pass",
+          "display": "collect by default",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "csp_allows": {
+          "value": "pass",
+          "display": "no CSP violation",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "ga4_key_events_received": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "needs_7_days"
+        },
+        "no_pii": {
+          "value": "pass",
+          "display": "no personal data in any request",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "proof_from_real_visit": {
+          "value": "pass",
+          "display": "Infinite pixel: receipt for this visit",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "receiptAt": "2026-10-03T21:08:14.264Z"
+          }
+        },
+        "keeps_being_checked": {
+          "value": "pending",
+          "display": "7-day check-in on 10 Oct",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:35.662Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    }
+  },
+  "snapshot": null,
+  "runStartedAt": "2026-10-03T20:43:45.060Z",
+  "site": {
+    "productionHost": "tag-smoke.foundernationtv.com",
+    "source": "infinite",
+    "decidedAt": "2026-10-03T20:43:48.208Z"
+  },
+  "proof": {
+    "at": "2026-10-03T21:08:34.000Z",
+    "tools": [
+      {
+        "tool": "infinite",
+        "ids": [
+          "site_c1bc78d179a6bd7cee9f40fb6acf7acb"
+        ],
+        "connected": true,
+        "installed": true,
+        "fired": true,
+        "ungraded": false,
+        "receipt": "verified",
+        "receiptReason": null
+      },
+      {
+        "tool": "ga4",
+        "ids": [
+          "G-8YB9G7SJE7"
+        ],
+        "connected": true,
+        "installed": true,
+        "fired": true,
+        "ungraded": false,
+        "receipt": "delivering",
+        "receiptReason": "seen leaving with HTTP 204"
+      },
+      {
+        "tool": "meta",
+        "ids": [
+          "1116400780828774"
+        ],
+        "connected": false,
+        "installed": true,
+        "fired": true,
+        "ungraded": false,
+        "receipt": "delivering",
+        "receiptReason": "seen leaving with HTTP 200"
+      }
+    ],
+    "laneProbed": false,
+    "infinitePageViews": 1,
+    "filter": {
+      "ga4ClientId": "1505848303.1791061694",
+      "posthogDistinctId": null,
+      "metaPageViewAt": "2026-10-03T21:08:17.964Z"
+    },
+    "installedUnknown": null
+  }
+}

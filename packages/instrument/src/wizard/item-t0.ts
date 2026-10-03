@@ -16,6 +16,8 @@ import type { WizardContext, WizardDeps } from "./contracts/deps.js"
 import type { ChecklistItem, CheckResult, JobCheckSpec, T0Scenario } from "./contracts/jobs.js"
 import { readBeforeFactsFile } from "./handoff/before-facts.js"
 import { loadPlanApprovals } from "../install/step-inputs.js"
+import { pageSourceFromFiles } from "../t0/inline-scripts.js"
+import type { T0PageSource } from "../t0/protocol.js"
 
 /** The reason a T0 scenario the wizard cannot build for an item carries (undetermined). */
 export const T0_UNBUILDABLE_PREFIX = "test_error — the offline test could not be set up for this job"
@@ -31,6 +33,24 @@ export async function t0RunParams(ctx: Pick<WizardContext, "root" | "runId" | "s
 }
 
 const GUARDED_TARGETS: ReadonlySet<string> = new Set(["ga4", "posthog", "meta"])
+/**
+ * R4-2: jobs on an ADOPTED tool whose offline test must load the site's own page as the agent left it (the job's files'
+ * inline scripts), never the managed page built from Infinite's keys (run 4: Meta not connected → a managed page with no
+ * capture → "wrote no _fbc cookie" while production, running the agent's code, wrote it).
+ */
+const ADOPTED_PAGE_JOBS: ReadonlySet<string> = new Set(["meta_improve"])
+
+/** The page the adopted job's files put on the browser, or why it cannot be known without running them. */
+async function adoptedPage(item: ChecklistItem, io: { fs: Pick<WizardDeps["fs"], "readText">; root: string }): Promise<{ source: T0PageSource } | { sourceError: string }> {
+  const files: Array<{ file: string; source: string }> = []
+  for (const file of item.allow.files) {
+    const source = await io.fs.readText(join(io.root, file))
+    if (source === null) return { sourceError: `${file} is unreadable` }
+    files.push({ file, source })
+  }
+  const built = pageSourceFromFiles(files)
+  return built.ok ? { source: built.source } : { sourceError: built.reason }
+}
 
 /**
  * One T0 scenario per spec: the item's own fields plus the run-level params. A preview-guard job (7) on an
@@ -46,6 +66,7 @@ export async function itemT0Scenarios(
   const target = item.id.slice(item.id.indexOf(":") + 1)
   const page = item.allow.files.find((file) => /\.html?$/i.test(file))
   const html = item.jobId === "preview_guard" && page ? await io.fs.readText(join(io.root, page)) : null
+  const adopted = ADOPTED_PAGE_JOBS.has(item.jobId) && specs.length > 0 ? await adoptedPage(item, io) : null
   return specs.map((spec) => ({
     id: `${item.id}:${spec.checkId}`,
     checkId: spec.checkId,
@@ -55,7 +76,8 @@ export async function itemT0Scenarios(
       jobId: item.jobId,
       target,
       files: [...item.allow.files],
-      ...(spec.checkId === "host_matrix" && html !== null ? { source: { html }, ...(GUARDED_TARGETS.has(target) ? { tools: [target] } : {}) } : {})
+      ...(spec.checkId === "host_matrix" && html !== null ? { source: { html }, ...(GUARDED_TARGETS.has(target) ? { tools: [target] } : {}) } : {}),
+      ...(adopted ?? {})
     }
   }))
 }

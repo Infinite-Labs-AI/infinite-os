@@ -183,8 +183,17 @@ export function briefFactsFor(root: string, state: Readonly<WizardRunState> | nu
     connections: keys ? briefConnectionsFrom(keys) : null,
     previewGuard: previewGuardBrief(saved?.guard ?? null),
     helpers: writtenHelpers(root),
-    guardSites: adoptedInitSites(root, state.appRoot)
+    guardSites: adoptedInitSites(root, state.appRoot),
+    consentMode: state.plan?.answers.consentMode ?? null,
+    managedFiles: readInstallManifest(root)?.files ?? null
   }
+}
+
+/** The public id an adopted init names, as written (a literal only; a variable is never resolved here). */
+const INIT_ID: Record<"ga4" | "posthog" | "meta", RegExp> = {
+  ga4: /\bgtag\s*\(\s*['"]config['"]\s*,\s*['"](G-[A-Z0-9]{4,20})['"]/,
+  posthog: /\bposthog\s*\.\s*init\s*\(\s*['"](phc_[A-Za-z0-9]{10,80})['"]/,
+  meta: /\bfbq\s*\(\s*['"]init['"]\s*,\s*['"](\d{15,16})['"]/
 }
 
 const INIT_CALL: Record<"ga4" | "posthog" | "meta", RegExp> = {
@@ -220,7 +229,8 @@ export function adoptedInitSites(root: string, appRoot: string): NonNullable<Bri
     const column = lineText.search(INIT_CALL[entry.tool])
     if (column < 0) continue
     const offset = lines.slice(0, entry.line - 1).reduce((sum, line) => sum + line.length + 1, 0) + column
-    out.push({ tool: entry.tool, file: entry.file, line: entry.line, context: lexicalStates(text)[offset] === 2 ? "template_literal" : "js" })
+    const publicId = INIT_ID[entry.tool].exec(lineText)?.[1]
+    out.push({ tool: entry.tool, file: entry.file, line: entry.line, context: lexicalStates(text)[offset] === 2 ? "template_literal" : "js", ...(publicId ? { publicId } : {}) })
   }
   return out
 }

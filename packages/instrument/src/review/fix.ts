@@ -72,7 +72,7 @@ export interface FixRoundResult {
   items: ChecklistItem[]
 }
 
-/** Runs one bounded fix round (≤15 turns / 5 minutes, §3f.4) over the given items. */
+/** Runs one bounded fix round (`AGENT_LIMITS.reviewFix`, §3f.4) over the given items. */
 export async function runFixRound(
   ctx: WizardContext,
   deps: WizardDeps,

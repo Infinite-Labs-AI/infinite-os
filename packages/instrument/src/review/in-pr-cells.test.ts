@@ -9,7 +9,7 @@ import { REPORT_ROWS, type ReportV2 } from "../wizard/contracts/report.js"
 import type { TestTool } from "../wizard/contracts/test-engine.js"
 import { buildReport, renderMarkdown, renderTerminal } from "../wizard/report.js"
 import { preMergeCells } from "./in-pr-cells.js"
-import { recordGa4KeyEventCells, recordRehearsalCells, type RehearsalOutcome } from "./rehearse.js"
+import { recordGa4KeyEventCells, recordRehearsalCells, rehearsalCells, rehearsalCountWords, rehearsalToolCount, type RehearsalOutcome } from "./rehearse.js"
 
 const HEAD = "a".repeat(40)
 const AT = "2026-10-02T10:00:00.000Z"
@@ -199,5 +199,26 @@ describe("F12: the 'In this pull request' column is filled from the wizard's own
     expect(inPr(report(ctx)).ga4_key_events.display).toBe("3 marked as key events (click test passed)")
     recordGa4KeyEventCells(ctx, 3, RUN_ID, "all")
     expect(inPr(report(ctx)).ga4_key_events.display).toBe("3 marked as key events (click test passed)")
+  })
+})
+
+describe("R4-10 (live run 4): ONE rehearsal count, in the terminal and the report alike", () => {
+  // Run 4: Infinite and GA4 pass, Meta fires but is not connected (undetermined), PostHog is not on the site (info).
+  const run4 = outcome({
+    grades: { infinite: grade("infinite", "pass"), ga4: grade("ga4", "pass"), meta: grade("meta", "undetermined", "not_connected — meta fires but has no connection to compare its id with"), posthog: grade("posthog", "info", "not_installed") },
+    expectedTools: ["infinite", "ga4"],
+    installedTools: ["infinite", "ga4", "meta"]
+  })
+
+  it("2 of 3: a tool that is not on the site is not counted, in the cell and in the terminal's words", () => {
+    const count = rehearsalToolCount(run4)
+    expect(count).toEqual({ passing: 2, tested: 3, problem: false })
+    expect(rehearsalCells(run4, { head: HEAD, at: AT, runId: RUN_ID }).cells.live_test_per_tool).toMatchObject({ display: "rehearsal: 2 of 3 tools fire once, right ID (nothing sent)" })
+    expect(`rehearsal: ${rehearsalCountWords(count)} · nothing sent`).toBe("rehearsal: 2 of 3 tools fire once, right ID · nothing sent")
+  })
+
+  it("negative: counting every graded tool is what run 4's terminal said (2 of 4)", () => {
+    expect(Object.values(run4.grades).length).toBe(4)
+    expect(rehearsalToolCount(run4).tested).not.toBe(4)
   })
 })

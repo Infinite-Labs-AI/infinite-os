@@ -53,6 +53,8 @@ export const PLAN_LINE_KINDS = [
   "meta_goal",
   /** §3x.3 (F6): an adopted Meta pixel that counts only the first page of a visit; the user approves the fix. */
   "meta_spa_page_views",
+  /** R4-8: an adopted GA4 that sends no page_view on a client-side page change; the user approves the fix. */
+  "ga4_spa_page_views",
   "user_action",
   // B28: the 7-day check-in that follows the deploy (shown only; `checkinOptIn` stays the accepted default).
   "checkin"
@@ -109,6 +111,8 @@ export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue | { mana
   meta_relay: "never",
   // §3x.3 (F6): a change to the customer's own Meta tag.
   meta_spa_page_views: "never",
+  // R4-8: a change to the customer's own GA4 tag.
+  ga4_spa_page_views: "never",
   // The D16 recommendation: an informational default the user can change.
   meta_goal: "yes",
   // GTM edit, Traffic Permissions, connect a tool, the GA4 page-change setting: shown only.

@@ -524,7 +524,8 @@ describe("the offline end-to-end run (§4.3)", () => {
     // §3x.2: the refused hunk is undone and the job is sent back with the gate's real words (never "outside the job's
     // files"); the fake agent never fixes it, so it ends failed with that note and an S `turn_gate` problem.
     expect(job(ITEMS.posthogProxy)).toMatchObject({ state: "failed" })
-    expect(job(ITEMS.posthogProxy).note).toMatch(/the wizard's safety check refused next\.config\.mjs:\d+: the edit starts a child process$/)
+    // R4-1: the note also says where the job's change is now (its other edit, to app/providers.tsx, was undone).
+    expect(job(ITEMS.posthogProxy).note).toMatch(/the wizard's safety check refused next\.config\.mjs:\d+: the edit starts a child process\. Its change was undone \(app\/providers\.tsx\)\.$/)
     expect(job(ITEMS.posthogProxy).checks.find((check) => check.id === "turn_gate")).toMatchObject({ tier: "S", state: "problem" })
     expect(headFile("next.config.mjs")).not.toContain("child_process")
     const builds = readJsonl<{ childProcess: boolean }>(join(w.site.repo, ".next/e2e-builds.jsonl"))

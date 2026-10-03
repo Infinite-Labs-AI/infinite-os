@@ -108,11 +108,18 @@ export function missingApprovedFixes(jobs: readonly ChecklistItem[]): ChecklistI
  * Review P2-5: the approved-fix clause, split by what the wizard knows. A pending, blocked or failed item is NOT in the
  * code; a `claimed` item IS in the code but the wizard could not check it. Both keep the run `problems`.
  */
-export function approvedFixClauses(missing: readonly Pick<ChecklistItem, "state" | "title">[]): string[] {
-  const notIn = missing.filter((item) => item.state !== "claimed").map((item) => item.title)
+export function approvedFixClauses(missing: readonly Pick<ChecklistItem, "state" | "title" | "edits">[]): string[] {
+  // R4-1 (live run 4): an item that did not pass but whose change stayed in the tree (it shares lines with a job that
+  // passed, or a later edit built on it) IS in the code; run 4 called its shipped `_fbc` capture "not in the code".
+  const inTree = (item: Pick<ChecklistItem, "edits">) => (item.edits?.length ?? 0) > 0
+  const notIn = missing.filter((item) => item.state !== "claimed" && !inTree(item)).map((item) => item.title)
+  const failedIn = missing.filter((item) => item.state !== "claimed" && inTree(item)).map((item) => item.title)
   const unchecked = missing.filter((item) => item.state === "claimed").map((item) => item.title)
   const parts: string[] = []
   if (notIn.length > 0) parts.push(`${notIn.length} approved ${plural(notIn.length, "fix is", "fixes are")} not in the code (${listNames(notIn)})`)
+  if (failedIn.length > 0) {
+    parts.push(`${failedIn.length} approved ${plural(failedIn.length, "fix is", "fixes are")} in the code but did not pass the wizard's checks (${listNames(failedIn)})`)
+  }
   if (unchecked.length > 0) {
     parts.push(`${unchecked.length} approved ${plural(unchecked.length, "fix is", "fixes are")} in the code but the wizard could not check ${plural(unchecked.length, "it", "them")} (${listNames(unchecked)})`)
   }

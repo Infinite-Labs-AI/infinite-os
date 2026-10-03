@@ -413,7 +413,7 @@ describe("W6 §3x.3 live run 3's review: Infinite's own files never go to the cu
   it("the not-fixed reply says what happened", () => {
     const decision = { item: { source: "reviewer", threadId: "t", findingId: "F2", item: "R2", severity: "should", path: "app/layout.tsx", line: 33, body: "x", suggestedFix: null }, action: "FIX", reason: "" } as const
     const scanner = createScanner({ literals: [], allowedIds: [] })
-    expect(buildReply(scanner, decision, { kind: "not_fixed", outcome: "timeout" })).toMatch(/^Not fixed: the agent ran out of its 5 minutes before changing anything\. It stays open\./)
+    expect(buildReply(scanner, decision, { kind: "not_fixed", outcome: "timeout" })).toMatch(/^Not fixed: the agent ran out of its 10 minutes before changing anything\. It stays open\./)
     expect(buildReply(scanner, decision, { kind: "not_fixed", outcome: "toolless" })).toMatch(/^Not fixed: the agent could not use its tools\. It stays open\./)
     expect(buildReply(scanner, decision, { kind: "not_fixed", outcome: "error" })).toMatch(/^Not fixed: the agent stopped with an error before changing anything\. It stays open\./)
     expect(buildReply(scanner, decision, { kind: "not_fixed", outcome: "checks_failed", why: "census_ga4_config_once: GA4 G-TEST0000000 is configured 2 times" })).toMatch(

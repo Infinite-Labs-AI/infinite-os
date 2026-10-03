@@ -58,6 +58,7 @@ import { finalSealPath, snapshotDir, wizardCacheRoot } from "../../agents/paths.
 import { runExtras } from "../../agents/runner.js"
 import { applyTextEdits, reverseTextEdits } from "../../server-lane/text-edits.js"
 import { applyClaim, applyResults, blockItem, failItem, unblockItem, withNote, type Transition } from "../../jobs/state-machine.js"
+import { ITEM_NOTE_MAX_CHARS } from "../contracts/jobs.js"
 import { sanitizeUntrusted } from "../../agents/sanitize.js"
 import { buildScanner } from "../../review/context.js"
 import type { Scanner } from "../../review/scan.js"
@@ -212,6 +213,13 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     const questions: AgentQuestion[] = []
     let result: AgentRunResult
     io.agentTurns += 1
+    // R4-6: a clear progress line. Run 4's terminal read "Thinking · 254 s" with nothing saying how much of the budget
+    // was gone or how many jobs were claimed; the thinking beat now carries both.
+    const claimedNow = new Set<string>()
+    const progress = (text: string) =>
+      /^Thinking · /.test(text)
+        ? `${text} · ${claimedNow.size} of ${open.length} claimed · ${minutesWords(deps.clock.now().getTime() - started)} of ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min`
+        : text
     try {
       result = await deps.agents.runJobs({
         items: anchored,
@@ -219,10 +227,10 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
         budget: { maxTurns: turnsLeft, wallMs: wallLeft },
         ...(session && sessionId(session) !== "" ? { resume: session } : {}),
         // The claim's `job.state` is emitted ONCE, when the step applies it after the turn (review I1 P3-3).
-        onClaim: () => undefined,
+        onClaim: (claim) => void claimedNow.add(claim.jobId),
         onAsk: (question) => questions.push(question),
         onProgress: () => undefined,
-        onNarrate: (beat) => ctx.emit.emit("narrate", beat)
+        onNarrate: (beat) => ctx.emit.emit("narrate", { ...beat, text: progress(beat.text) })
       })
     } catch (error) {
       if (isTamper(error)) {
@@ -255,20 +263,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
       return { kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE", reason: `Out of usage: its edits were undone; ${line}`, resumeHint: line }
     }
     if (result.outcome === "toolless" || result.outcome === "timeout" || result.outcome === "error") {
-      const reason: BlockedReason = result.outcome === "toolless" ? "toolless" : "agent_blocked"
-      // Only this turn's jobs: a job an earlier round already left `claimed` keeps its state and its edits.
-      for (const item of open) {
-        const current = io.item(item.id)
-        if (current?.state === "pending") io.put(blockItem(current, reason, stoppedNote(result.outcome)))
-      }
-      await io.save()
-      // §3z.4 (B6): a generic agent error is AGENT_FAILED, never "toolless".
-      return {
-        kind: "failed",
-        code: result.outcome === "timeout" ? "INF_WIZ_AGENT_TIMEOUT" : result.outcome === "toolless" ? "INF_WIZ_AGENT_TOOLLESS" : "INF_WIZ_AGENT_FAILED",
-        message: stoppedNote(result.outcome),
-        next: "continue"
-      }
+      return await stoppedTurnOutcome(io, open, result)
     }
 
     const seal = extras.seal
@@ -291,9 +286,11 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   // Budget spent: an item still pending after a failed check is failed; one the agent never finished is blocked.
   for (const item of io.items().filter((entry) => entry.owner === "agent" && entry.state === "pending")) {
     const failure = io.lastFailure(item.id)
-    io.put(failure ? failItem(item, `Out of rounds: ${failure}`) : blockItem(item, "agent_blocked", "The agent did not finish this job within 30 turns or 10 minutes."))
+    io.put(failure ? failItem(item, `Out of rounds: ${failure}`) : blockItem(item, "agent_blocked", `The agent did not finish this job within ${AGENT_LIMITS.jobs.maxTurns} turns or ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} minutes.`))
   }
   await io.save()
+  // R4-1: the edits settle BEFORE the closing lines, so "Not done" says where each change is now.
+  await io.settleEdits()
   return { kind: "ok", status: io.closing() }
 }
 
@@ -622,10 +619,60 @@ function sessionId(session: SessionRef): string {
   return session.kind === "claude" ? session.sessionId : session.threadId
 }
 
-function stoppedNote(outcome: AgentRunResult["outcome"]): string {
-  if (outcome === "toolless") return "The agent could not reach the wizard's checklist tools; its edits were undone."
-  if (outcome === "timeout") return "The agent ran out of time; its edits were undone."
-  return "The agent stopped with an error; its edits were undone."
+/** Elapsed time in whole minutes for the progress line ("0" under a minute, then "1", "2", …). */
+export function minutesWords(ms: number): string {
+  return String(Math.max(0, Math.floor(ms / 60_000)))
+}
+
+/** What stopped the agent's turn, in the user's words (never a claim about which edits survived). */
+export function stoppedWords(outcome: AgentRunResult["outcome"]): string {
+  if (outcome === "toolless") return "The agent could not reach the wizard's checklist tools"
+  if (outcome === "timeout") return "The agent ran out of time"
+  return "The agent stopped with an error"
+}
+
+/**
+ * R4-1 (live run 4): a turn that ended toolless, out of time or with an error. The runner's `fence.abort()` undid ONLY
+ * that turn's edits; every edit an earlier round kept is still in the tree, and the pull request commits that tree.
+ * Run 4 stamped the open job "its edits were undone" while its `_fbc` capture (kept from round 1, sharing lines with two
+ * kept jobs) shipped. Now each open job's state comes from the wizard's own checks on the tree as it stands:
+ *   - kept edits in its files that no check of it has seen yet → the item's S/B/T0 checks run now on that tree (pass →
+ *     done in code; problem → failed; a job with no such check needs its own recorded edits, else it stays unchecked);
+ *   - a check that already failed on this same tree (the aborted turn changed nothing that survived) → failed, with that
+ *     check's reason;
+ *   - nothing of it in the tree → blocked, "before finishing this job".
+ * The words say only what happened: the aborted turn's edits are named as undone only when the fence restored some. What
+ * happens to a failed job's earlier edits is said once `settleEdits` has done it (undone, or kept and why).
+ */
+async function stoppedTurnOutcome(io: JobsIo, open: readonly ChecklistItem[], result: AgentRunResult): Promise<StepOutcome> {
+  const words = stoppedWords(result.outcome)
+  const reason: BlockedReason = result.outcome === "toolless" ? "toolless" : "agent_blocked"
+  const undone = result.reverted.length > 0 ? `; its unfinished edits from that turn (${result.reverted.slice(0, 3).join(", ")}${result.reverted.length > 3 ? ", …" : ""}) were undone` : ""
+  const at = io.deps.clock.now().toISOString()
+  const unchecked = open.filter((item) => io.item(item.id)?.state === "pending" && io.hasKeptEditsIn(item) && io.lastFailure(item.id) === undefined)
+  if (unchecked.length > 0) {
+    const claims: Claim[] = unchecked.map((item) => ({ jobId: item.id, status: "done", note: `${words}; the wizard checked the change it had left in the code.`, at }))
+    const round = await settleRound(io, claims, [], false, null)
+    if (round.changedByChecks) return buildTamperOutcome(io, round.changedByChecks)
+    await io.patchClickTested()
+  }
+  for (const item of open) {
+    const current = io.item(item.id)
+    if (current?.state !== "pending") continue
+    const failure = io.lastFailure(item.id)
+    io.put(failure !== undefined ? failItem(current, `${words} before fixing it${undone}. The wizard's check failed: ${failure}`) : blockItem(current, reason, `${words} before finishing this job${undone}.`))
+  }
+  await io.save()
+  // The edits settle before the closing lines, so each "Not done" line says where that job's change is now.
+  await io.settleEdits()
+  // §3z.4 (B6): a generic agent error is AGENT_FAILED, never "toolless". The line says what IS done (run 4's "its
+  // edits were undone" read as if nothing survived while 4 of 5 jobs were kept).
+  return {
+    kind: "failed",
+    code: result.outcome === "timeout" ? "INF_WIZ_AGENT_TIMEOUT" : result.outcome === "toolless" ? "INF_WIZ_AGENT_TOOLLESS" : "INF_WIZ_AGENT_FAILED",
+    message: `${words} · ${io.closing()}`,
+    next: "continue"
+  }
 }
 
 function isTamper(error: unknown): boolean {
@@ -728,6 +775,16 @@ class JobsIo {
     this.ctx.emit.emit("job.state", { itemId: next.id, state: next.state, by, ...(note ? { note: sanitizeUntrusted(note, 500) } : {}) })
   }
 
+  /**
+   * R4-1: this step holds a kept (not yet settled) agent edit to one of the item's files. The fence credits a hunk to the
+   * jobs that CLAIMED that file, so an unclaimed job's own change can be in the tree under another job's name; its own
+   * checks on the tree decide either way.
+   */
+  hasKeptEditsIn(item: Pick<ChecklistItem, "id" | "allow">): boolean {
+    const files = new Set([...item.allow.files, ...item.allow.create].map(normalizeRelPath))
+    return this.pendingEdits.some((entry) => entry.itemIds.includes(item.id) || files.has(normalizeRelPath(entry.edit.file)))
+  }
+
   /** The item plus this step's kept (in-scope) agent edits for it, which the state machine counts as recorded. */
   withPendingEdits(item: ChecklistItem): ChecklistItem {
     const mine = this.pendingEdits.filter((entry) => entry.itemIds.includes(item.id)).map((entry) => ({ editId: entry.edit.id, file: entry.edit.file }))
@@ -811,10 +868,19 @@ class JobsIo {
     const dropText = (ids: readonly string[]) => ids.length > 0 && ids.every(dropped)
     const undoneFiles = new Set<string>()
     const kept: Array<{ edit: WizardEditRecord; itemIds: string[] }> = []
+    // R4-1: a dropped item whose change stays in the tree (and so in the pull request) says so, with why; one whose
+    // change was undone says that. Never one without the other (run 4 said "undone" of a change that shipped).
+    const stays = new Map<string, string>()
+    const undoneFor = new Map<string, Set<string>>()
+    const stay = (ids: readonly string[], why: string) => {
+      for (const id of ids) if (dropped(id) && !stays.has(id)) stays.set(id, why)
+    }
     for (const entry of [...pending].reverse()) {
       const { edit, textEditItems } = entry
       const drop = textEditItems.map(dropText)
       if (!drop.some(Boolean)) {
+        // Every hunk is kept: a dropped item named on a hunk shares it with a job that passed.
+        stay(entry.itemIds, `it shares lines in ${edit.file} with a job that passed`)
         kept.push({ edit, itemIds: entry.itemIds })
         continue
       }
@@ -822,10 +888,18 @@ class JobsIo {
       const bytes = await readFile(path).catch(() => null)
       if (bytes === null || `sha256:${createHash("sha256").update(bytes).digest("hex")}` !== edit.afterHash) {
         this.sub(`! Could not undo the agent's edit to ${edit.file} for a job that did not pass (a later edit built on it); it stays for review.`, "warn")
+        stay(entry.itemIds, `a later edit to ${edit.file} built on it`)
         kept.push({ edit, itemIds: entry.itemIds })
         continue
       }
       undoneFiles.add(edit.file)
+      textEditItems.forEach((ids, index) => {
+        if (!drop[index]) {
+          stay(ids, `it shares lines in ${edit.file} with a job that passed`)
+          return
+        }
+        for (const id of ids) undoneFor.set(id, new Set([...(undoneFor.get(id) ?? []), edit.file]))
+      })
       if (drop.every(Boolean)) {
         if (edit.beforeHash === null) await rm(path, { force: true })
         else await writeFile(path, reverseTextEdits(bytes.toString("utf8"), edit.textEdits))
@@ -843,7 +917,11 @@ class JobsIo {
     }
     kept.reverse()
     if (undoneFiles.size > 0) this.sub(`Undid the agent's edits for jobs that did not pass: ${[...undoneFiles].slice(0, 4).join(", ")}`, "info")
-    if (kept.length === 0) return
+    this.sayWhereChangesAre(stays, undoneFor)
+    if (kept.length === 0) {
+      await this.save()
+      return
+    }
     await this.deps.installer.recordEdits(kept.map((entry) => entry.edit))
     this.ctx.state.update((runState) => {
       for (const { edit, itemIds } of kept) {
@@ -855,6 +933,27 @@ class JobsIo {
       }
     })
     await this.save()
+  }
+
+  /**
+   * R4-1: a job that did not pass says where its change is now: still in the tree (so in the pull request), and why it
+   * could not be undone; or undone. Appended to the item's own note (the real reason it did not pass stays first).
+   */
+  private sayWhereChangesAre(stays: ReadonlyMap<string, string>, undoneFor: ReadonlyMap<string, ReadonlySet<string>>): void {
+    const ids = new Set([...stays.keys(), ...undoneFor.keys()])
+    if (ids.size === 0) return
+    this.ctx.state.update((runState) => {
+      for (const id of ids) {
+        const item = runState.jobs.find((entry) => entry.id === id)
+        if (!item) continue
+        const why = stays.get(id)
+        const where = why !== undefined ? `Its change stays in the pull request (${why}).` : `Its change was undone (${[...(undoneFor.get(id) ?? [])].slice(0, 3).join(", ")}).`
+        // The note is capped: the reason is shortened, never the sentence that says where the change is.
+        const room = ITEM_NOTE_MAX_CHARS - where.length - 2
+        const reason = item.note ? item.note.replace(/[.\s]+$/, "") : ""
+        withNote(item, reason ? `${reason.length > room ? `${reason.slice(0, Math.max(0, room - 1))}…` : reason}. ${where}` : where)
+      }
+    })
   }
 
   private scannerPromise: Promise<Scanner> | null = null

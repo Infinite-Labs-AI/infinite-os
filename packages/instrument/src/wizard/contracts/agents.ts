@@ -147,10 +147,20 @@ export interface AgentRunner {
   secretLiterals?(): readonly string[]
 }
 
-/** §3f.4 limits. */
+/**
+ * §3f.4 limits, set from MEASURED customer-model timings (R4-6; the models stay Opus 4.8 xhigh / gpt-6.1-sol xhigh,
+ * River). Live run 4, Claude Code 2.1.288, claude-opus-4-8 at xhigh, 5 small jobs on a 60-line layout:
+ *   - jobs round 1: 7 min 31 s from the kickoff to its structured output (25 tool calls; 5 min 33 s before the first
+ *     edit, 4 min 14 s of it one thinking stretch after reading the 56 KB managed module the brief now says not to open);
+ *   - jobs round 2 (one failed check to fix): cut by the old 10-minute total at 2 min 27 s, mid-thought;
+ *   - review fix round: cut by the old 5 minutes with no edit (16 tool calls looking for code no agent may change; the
+ *     triage now never hands it such a finding).
+ * So: a first round of ~8 minutes plus a full fix round of the same size (20 minutes, 50 turns in all), and a fix round
+ * of 10 minutes / 25 turns (a whole xhigh read-think-edit cycle, measured at ~6 minutes before the first edit).
+ */
 export const AGENT_LIMITS = {
-  jobs: { maxTurns: 30, wallMs: 10 * 60_000, maxResumeRounds: 3 },
-  reviewFix: { maxRounds: 2, maxTurnsPerRound: 15, wallMsPerRound: 5 * 60_000 },
+  jobs: { maxTurns: 50, wallMs: 20 * 60_000, maxResumeRounds: 3 },
+  reviewFix: { maxRounds: 2, maxTurnsPerRound: 25, wallMsPerRound: 10 * 60_000 },
   reviewer: { claudeMaxTurns: 25, wallMs: 10 * 60_000 },
   /** SIGTERM to the process group, then SIGKILL after this. */
   killGraceMs: 1_000,

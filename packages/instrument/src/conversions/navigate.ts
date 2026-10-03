@@ -21,9 +21,11 @@
 //   - An already-prevented click on an ANCHOR passed as the target (a delegated listener running after a
 //     router took the click) is left alone entirely, as infinite.fast did (L516).
 //   - `preventDefault` to HOLD a click ONLY when GA4 actually STARTED (L516). Here that is the marker the
-//     managed GA4 snippet sets after its preview guard passes (`window.__infiniteGa4Lane`), never
-//     `typeof gtag`: an adopted gtag stub with no loader (a guarded preview, a consent-mode site) has a
-//     `gtag` function that never calls back, and would hold every click for a full second (F15).
+//     managed GA4 snippet sets after its preview guard passes (`window.__infiniteGa4Lane`), or — for the site's
+//     OWN (adopted) GA4 — gtag.js itself having loaded (`window.google_tag_manager`), never `typeof gtag`: an
+//     adopted gtag stub with no loader (a guarded preview, a consent-mode site) has a `gtag` function that never
+//     calls back, and would hold every click for a full second (F15). Live run 4 (Codex F5): with only the
+//     marker, an adopted GA4 was never waited for, so a conversion followed by a navigation could be lost.
 //   - `event_callback: follow` plus `event_timeout: 1000` (L530), and a `setTimeout(follow, 1000)`
 //     backstop (L532): the visitor never waits more than one second for analytics.
 //   - Follow ONCE (L519-524): a callback that fires twice, or the backstop after the callback, cannot
@@ -98,15 +100,19 @@ export function trackThenNavigateSource(): string {
     "    var clean = infiniteCleanProps(props);",
     "    try { if (window.posthog && typeof window.posthog.capture === 'function') window.posthog.capture(name, infiniteCopy(clean)); } catch (_error) {}",
     `    var lane = window.${GA4_LANE_MARKER};`,
-    "    var started = !!(lane && typeof lane.id === 'string') && typeof window.gtag === 'function';",
+    "    var ours = !!(lane && typeof lane.id === 'string');",
+    "    // R4-5: the site's OWN GA4 started too once gtag.js itself loaded (it defines google_tag_manager); a stub with no",
+    "    // loader (a guarded preview, consent not given) never calls back, so it still holds nothing (F15).",
+    "    var loaded = !!(window.google_tag_manager && typeof window.google_tag_manager === 'object');",
+    "    var started = typeof window.gtag === 'function' && (ours || loaded);",
     "    if (!started) {",
-    "      // GA4 did not start here (or is not ours): send what we can, hold nothing.",
+    "      // GA4 did not start here: send what we can, hold nothing.",
     "      try { if (typeof window.gtag === 'function') window.gtag('event', name, infiniteCopy(clean)); } catch (_error) {}",
     "      leave();",
     "      return;",
     "    }",
     "    var params = infiniteCopy(clean);",
-    "    params.send_to = lane.id;",
+    "    if (ours) params.send_to = lane.id;",
     "    if (sameTab) {",
     "      params.event_callback = follow;",
     `      params.event_timeout = ${NAVIGATION_BUDGET_MS};`,

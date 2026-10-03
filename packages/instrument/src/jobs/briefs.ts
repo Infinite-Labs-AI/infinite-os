@@ -19,6 +19,7 @@ import type { ChecklistItem, JobId } from "../wizard/contracts/jobs.js"
 import { GLOBAL_DENY_TEXT } from "./allow.js"
 import { OUTCOME_CONVERSION_TYPES } from "./detectors/outcomes.js"
 import { boundConversionNames, type BriefConnections, type BriefPlan } from "./plan-data.js"
+import { buildMetaClickIdCaptureScript } from "../providers/meta-browser/click-id.js"
 
 /** The facts a brief carries: the framework (installer scan) and the approved plan's data. */
 export interface BriefFacts {
@@ -49,7 +50,56 @@ export interface BriefFacts {
    * Next `<Script>{`…`}</Script>` body) needs the guard ESCAPED for that literal. Run 3's agent spent its long thinking
    * call working out that `\s` must be written `\\s` there.
    */
-  guardSites?: Array<{ tool: "ga4" | "posthog" | "meta"; file: string; line: number; context: "js" | "template_literal" }> | null
+  guardSites?: Array<{ tool: "ga4" | "posthog" | "meta"; file: string; line: number; context: "js" | "template_literal"; publicId?: string }> | null
+  /** R4-6: the consent mode the user approved (the `_fbc` capture waits for the same consent as Infinite). */
+  consentMode?: "not_required" | "required" | null
+  /**
+   * R4-6: the files the install wrote and Infinite owns (`.infinite/install.json` `files`). Run 4's agent read the 56 KB
+   * managed module, then thought for 4.2 minutes before its first edit; the brief now says what those files offer, and
+   * that they are never opened or edited.
+   */
+  managedFiles?: string[] | null
+}
+
+/**
+ * R4-6 (live run 4): the `_fbc` capture an agent pastes beside an adopted Meta pixel, AS WRITTEN for where the pixel lives:
+ * a Next `<Script>` element (its body escaped for a template literal) or an HTML `<script>` block. The bytes are the
+ * managed capture (`buildMetaClickIdCaptureScript`, last click wins, one cookie on Meta's scope), never a hand-made one:
+ * run 4's agent wrote its own, which kept the FIRST click.
+ */
+export function capturePasteAsWritten(context: "component" | "html", consentMode: "not_required" | "required"): string {
+  const capture = buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: consentMode } })
+  if (context === "html") return `<script>\n${capture}\n</script>`
+  return `<Script id="infinite-meta-click-id" strategy="afterInteractive">{\`${escapeForTemplateLiteral(capture)}\`}</Script>`
+}
+
+/**
+ * R4-8 (live run 4): one GA4 `page_view` per client-side page change, for an adopted GA4 on a single-page app. It follows
+ * the History API (what a Next / Vite router uses) and never sends on the first load (the site's `gtag('config')`
+ * already did). ES5 with no backtick or `${`, so it goes into a template literal escaped like the guard.
+ */
+export const GA4_PAGE_CHANGE_SCRIPT = [
+  "(function () {",
+  "  if (window.__infiniteGa4PageChange) return;",
+  "  window.__infiniteGa4PageChange = true;",
+  "  var last = location.pathname + location.search;",
+  "  function pageChanged() {",
+  "    var next = location.pathname + location.search;",
+  "    if (next === last) return;",
+  "    last = next;",
+  "    if (typeof window.gtag === 'function') window.gtag('event', 'page_view', { page_location: location.href, page_title: document.title });",
+  "  }",
+  "  ['pushState', 'replaceState'].forEach(function (method) {",
+  "    var original = history[method];",
+  "    history[method] = function () { var result = original.apply(this, arguments); pageChanged(); return result; };",
+  "  });",
+  "  window.addEventListener('popstate', pageChanged);",
+  "})();"
+].join("\n")
+
+/** R4-6: the one line that turns Meta's automatic events off on pixel `pixelId`, placed right before its init. */
+export function autoConfigOffLine(pixelId: string): string {
+  return `fbq('set', 'autoConfig', false, '${pixelId}');`
 }
 
 /** §3x.3 (§2.3) Text escaped for the inside of a template literal: `\` → `\\`, a backtick and `${` escaped. */
@@ -97,8 +147,12 @@ export const TARGET_GISTS: Readonly<Record<string, string>> = {
   "posthog_improve:proxy": "Here: route PostHog through `/ingest` (`api_host: '/ingest'` + the exact rewrite) and set `ui_host` from the connection's region.",
   "posthog_improve:history_change": "Here: set `capture_pageview: 'history_change'` so single-page navigations are counted.",
   "ga4_improve:id": "Here: make the configured measurement id the connection's id, only where the plan line says so.",
-  "ga4_improve:spa_page_view": "Here: send a `page_view` on single-page navigations, as the plan line names.",
+  "ga4_improve:spa_page_view":
+    "Here: paste `pageViewOnPageChange.pasteAsWritten` from Plan data exactly, as the next statement after `pageViewOnPageChange.insertAfter`, inside the same script and block (so any preview guard around it covers it too). It sends one page_view per page change and never on the first load. Change nothing else.",
   "meta_improve:mirror": "Here: move the browser standard conversions named below onto `infiniteMetaMirror(metaEventId)`.",
+  "meta_improve:capture":
+    "Here: paste `capture.pasteAsWritten` from Plan data exactly, as its own element right before `capture.insertBefore`. It is Infinite's capture (last click wins), already escaped for that file; never write your own, never host-guard it, never change the pixel.",
+  "meta_improve:autoconfig_off_adopted": "Here: put `autoConfigOff.lineAsWritten` from Plan data on its own line right before `autoConfigOff.insertBefore`. Change nothing else.",
   "meta_improve:retire_fbc_writer":
     "Here: retire the hand-written `_fbc` writer named below (it writes a host-only cookie that shadows Meta's own). Remove only that write; the managed capture replaces it."
 }
@@ -161,6 +215,14 @@ export const NEVER_LIST: readonly string[] = [
   "Never edit build output (dist, build, .next, out, node_modules)."
 ]
 
+/**
+ * R4-6: what the conversion helpers do, so no agent opens the managed module to find out. Facts of the helpers' own code
+ * (`conversions/*.ts`): GA4 + PostHog only, never Meta, never Infinite's ledger (Infinite counts a conversion from the
+ * server lane's `reportInfiniteOutcome`, never from the page).
+ */
+export const HELPER_API =
+  "Helper API: `infiniteTrack(name, props?)` sends one named event to GA4 and PostHog (never Meta, never Infinite's ledger: Infinite counts conversions from your server). `infiniteTrackThenNavigate(event, href, name, props?)` does the same, waits for GA4 at most 1 s, then navigates to href (call it in place of your own navigation). `infiniteIdentify(accountId)` / `infiniteReset()` for PostHog. `infiniteMetaMirror(metaEventName, metaEventId)` fires the browser twin of a server Meta event, only with the id the server returned."
+
 /** The operator rules: appended to the worker's system prompt for every jobs turn. */
 export function operatorRules(facts: BriefFacts): string {
   return [
@@ -180,6 +242,14 @@ export function operatorRules(facts: BriefFacts): string {
             : "The conversion helpers are already on every page as globals (`window.infiniteTrack`, `window.infiniteTrackThenNavigate`, `window.infiniteIdentify`, `window.infiniteReset`, `window.infiniteMetaMirror`). Never re-implement them."
         ]
       : []),
+    // R4-6 (live run 4): the agent opened the 56 KB managed module and thought 4.2 minutes before its first edit.
+    ...(facts.managedFiles && facts.managedFiles.length > 0
+      ? [
+          `Infinite's own files (never open or edit them; everything you need from them is in this brief): ${JSON.stringify(facts.managedFiles.map(inertText))}.`,
+          ...(facts.helpers ? [HELPER_API] : [])
+        ]
+      : []),
+    "Each job below says exactly what to change and where (its Plan data holds any text to paste as written). Make that change, then claim it; do not re-derive it.",
     "When a job is finished, blocked, or not needed, claim it with `job_claim`. Your claim is not the result: the wizard runs its own checks before it ticks anything.",
     "Questions about consent, conversion names, privacy text, the banner or npm installs are already decided in the plan; do not ask them. Where a job carries plan data (conversion names, the privacy paragraph, the guard expression, connection IDs), use exactly that data; never choose your own.",
     // §3y.10 (P3-10, P3-13).
@@ -255,11 +325,37 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
     }
     case "ga4_improve": {
       if (!facts.connections) return new Error(`the brief for ${item.id} needs the connections' public IDs`)
-      return { connectedGa4MeasurementIds: facts.connections.ga4MeasurementIds }
+      const data: Record<string, unknown> = { connectedGa4MeasurementIds: facts.connections.ga4MeasurementIds }
+      if (target === "spa_page_view") {
+        // R4-8: the exact bytes, escaped for where the site's GA4 config lives, and the exact place.
+        const site = (facts.guardSites ?? []).find((entry) => entry.tool === "ga4" && item.allow.files.includes(entry.file))
+        if (!site) return new Error(`the brief for ${item.id} needs where the adopted GA4 config is`)
+        data.pageViewOnPageChange = {
+          insertAfter: `gtag('config'${site.publicId ? `, '${site.publicId}'` : ""}) at ${site.file}:${site.line}`,
+          pasteAsWritten: site.context === "template_literal" ? escapeForTemplateLiteral(GA4_PAGE_CHANGE_SCRIPT) : GA4_PAGE_CHANGE_SCRIPT
+        }
+      }
+      return data
     }
     case "meta_improve": {
       if (!facts.connections) return new Error(`the brief for ${item.id} needs the connections' public IDs`)
-      return { connectedMetaPixelIds: facts.connections.metaPixelIds }
+      const data: Record<string, unknown> = { connectedMetaPixelIds: facts.connections.metaPixelIds }
+      const site = (facts.guardSites ?? []).find((entry) => entry.tool === "meta" && item.allow.files.includes(entry.file))
+      if (target === "capture") {
+        // R4-6: the exact bytes and the exact place; the agent never writes its own capture.
+        if (!site) return new Error(`the brief for ${item.id} needs where the adopted Meta pixel starts`)
+        if (facts.consentMode !== "not_required" && facts.consentMode !== "required") return new Error(`the brief for ${item.id} needs the approved consent mode`)
+        const html = /\.html?$/i.test(site.file)
+        data.capture = {
+          insertBefore: `the ${html ? "<script>" : "<Script>"} element that holds fbq('init') at ${site.file}:${site.line}`,
+          pasteAsWritten: capturePasteAsWritten(html ? "html" : "component", facts.consentMode)
+        }
+      }
+      if (target === "autoconfig_off_adopted") {
+        if (!site?.publicId) return new Error(`the brief for ${item.id} needs the adopted pixel's id`)
+        data.autoConfigOff = { insertBefore: `fbq('init', '${site.publicId}') at ${site.file}:${site.line}`, lineAsWritten: autoConfigOffLine(site.publicId) }
+      }
+      return data
     }
     default:
       return {}

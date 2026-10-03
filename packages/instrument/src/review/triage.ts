@@ -88,10 +88,44 @@ export const DETERMINISTIC_CHECKS_BY_ITEM: Partial<Record<ReviewChecklistItemId,
   R2: ["census_one_per_tool", "census_posthog_init_once", "census_ga4_config_once", "census_meta_init_once", "one_beacon_per_tool"],
   R4: ["ga4_loader_id", "meta_pixel_once", "ids_match_connections"],
   R5: ["host_matrix", "preview_self_silent", "adopted_init_guarded", "meta_host_matrix"],
-  R9: ["ga4_one_page_view"],
+  // R4-5: per tool, the rehearsal's own page-change counts (`spaChecksNamed` keeps the ones the finding is about).
+  R9: ["ga4_spa_page_view", "meta_spa_page_view"],
   R11: ["posthog_via_proxy_once", "next_rewrites_exact"],
   R12: ["csp_hosts", "no_csp_violation"],
   R13: ["build_green_or_baseline", "build"]
+}
+
+/**
+ * R4-5 (live run 4): the review fix round spent its whole budget on three findings no customer agent can fix — Infinite's
+ * helper never waiting for an adopted GA4 (`__infiniteGa4Lane`), "the signup never reaches Infinite's collector" (by
+ * design: Infinite counts conversions from the server lane), and a wrong "Meta lacks SPA page views". Each is now decided
+ * here, by what it names, before any agent sees it.
+ */
+/** Infinite's own helper / runtime internals: a finding about them is Infinite's code, whichever line it sits on. */
+export const INFINITE_INTERNALS = /\b__infinite[A-Za-z0-9_]+\b|\blib\/infinite-analytics(?:-client)?\b|\bbootstrapSource\b|\binfinite-analytics-client\b/
+/** "The page never sends the conversion to Infinite": Infinite's design (the server lane counts it), not a bug. */
+export const INFINITE_PAGE_CONVERSION =
+  /\b(?:never|not|no)\b[^.\n]{0,80}\bInfinite(?:'s)?\s+(?:collector|ledger|lane)\b|\bInfinite(?:'s)?\s+(?:collector|ledger|lane)\b[^.\n]{0,60}\b(?:never|not|no)\b/i
+const PAGE_SIDE = /\binfiniteTrack|\bhelper\b|\bbrowser\b|\bclient\b|\bpage\b|\bruntime\b/i
+
+/** The reply to "the page never sends the conversion to Infinite", with this run's server lane said as it is. */
+export function infinitePageConversionReply(serverLaneInstalled: boolean | null | undefined): string {
+  const lane =
+    serverLaneInstalled === true
+      ? " This run's server lane is installed; the server conversion job wires it."
+      : serverLaneInstalled === false
+        ? " This run did not install the server lane, so Infinite has no conversion from this site yet: connect your Vercel project in Infinite and run npx infinite-tag again."
+        : ""
+  return `Not changed: Infinite counts a conversion from your server (the server lane's reportInfiniteOutcome), never from the page; the page helpers send it to GA4 and PostHog only, by design.${lane}`
+}
+
+/** R4-5: R9 (SPA page views) is decided per tool the finding names, by that tool's own page-change check. */
+export function spaChecksNamed(text: string): string[] {
+  const out: string[] = []
+  if (/\bGA4\b|\bgtag\b|\bGoogle Analytics\b|\bpage_view\b/i.test(text)) out.push("ga4_spa_page_view")
+  if (/\bMeta\b|\bfbq\b|\bPageView\b|\bpixel\b/i.test(text)) out.push("meta_spa_page_view")
+  if (/\bPostHog\b|\$pageview/i.test(text)) out.push("posthog_spa_page_view")
+  return out
 }
 
 /** A finding's identity across rounds (wording changes between reviews; the file and item do not). */
@@ -113,6 +147,8 @@ export interface TriageContext {
   passingChecks: ReadonlySet<string>
   /** Answers for ANSWER items, from receipts and check states; null when nothing measured answers it. */
   answerFor(item: TriageItem): string | null
+  /** R4-5: the run's server lane is installed (the site has its secret); null/absent = unknown. */
+  serverLaneInstalled?: boolean | null
 }
 
 /** A plain repo-relative path: not absolute, no `..` segment, no backslash or control character. */
@@ -165,10 +201,19 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
       }
       return { item, action: "DECLINE", ruling: ruling.id, reason: ruling.reply }
     }
+    // R4-5: Infinite's design, said with the real reason (never a FIX the agent cannot make).
+    if (INFINITE_PAGE_CONVERSION.test(text) && PAGE_SIDE.test(text)) {
+      if (declinedBefore) return { item, action: "ASK", askReason: "raised_after_decline", reason: `${infinitePageConversionReply(ctx.serverLaneInstalled)} It was raised again after the wizard declined it: you decide, outside the wizard.` }
+      return { item, action: "DECLINE", reason: infinitePageConversionReply(ctx.serverLaneInstalled) }
+    }
     // §3x.3 Infinite's own code and the wizard's own change are never handed to the customer's agent.
     const owner = item.path !== null && isRepoRelativePath(item.path) ? (ctx.ownership?.(item.path, item.line) ?? null) : null
     if (owner !== null) {
       return { item, action: "INFINITE", label: owner, reason: `This is ${owner} (${item.path}): recorded for Infinite to fix.` }
+    }
+    // R4-5: a finding about Infinite's helper or runtime internals is Infinite's code, even on the customer's call line.
+    if (INFINITE_INTERNALS.test(text)) {
+      return { item, action: "INFINITE", label: "Infinite's own code", reason: `This is about Infinite's own helper code (${(INFINITE_INTERNALS.exec(text)?.[0] ?? "its runtime").slice(0, 60)}), which your agent never edits: recorded for Infinite to fix.` }
     }
     if (declinedBefore) {
       return { item, action: "ASK", askReason: "raised_after_decline", reason: "Raised again after the wizard declined it: you decide, so the review never loops." }
@@ -202,9 +247,12 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
         reason: `Fixing this means editing ${item.path}, which is outside the files this run may change: you decide.`
       }
     }
-    const deterministic = item.item ? DETERMINISTIC_CHECKS_BY_ITEM[item.item] ?? [] : []
+    // R4-5: an R9 finding is decided only by the page-change checks of the tools it names, and only when EVERY one passed.
+    const named = item.item === "R9" ? spaChecksNamed(text) : null
+    const deterministic = named ?? (item.item ? DETERMINISTIC_CHECKS_BY_ITEM[item.item] ?? [] : [])
     const passed = deterministic.filter((checkId) => ctx.passingChecks.has(checkId))
-    if (passed.length > 0 && item.severity !== "blocker") {
+    const decides = named === null ? passed.length > 0 : named.length > 0 && passed.length === named.length
+    if (decides && item.severity !== "blocker") {
       return {
         item,
         action: "DECLINE",

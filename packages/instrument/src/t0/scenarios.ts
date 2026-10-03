@@ -156,6 +156,9 @@ export function pageSourceFromArtifacts(artifacts: WorkspaceInstallArtifacts, bo
 }
 
 function pageSource(params: Readonly<Record<string, unknown>>, artifacts: WorkspaceInstallArtifacts): T0PageSource {
+  // R4-2: an adopted tool's job whose page could not be read from its files is never tested on the managed page instead.
+  const sourceError = optStr(params, "sourceError")
+  if (sourceError !== undefined) throw new T0ScenarioError(`the page could not be built from the job's files: ${sourceError}`)
   return sourceParam(params) ?? pageSourceFromArtifacts(artifacts, optStr(params, "bodyHtml"))
 }
 

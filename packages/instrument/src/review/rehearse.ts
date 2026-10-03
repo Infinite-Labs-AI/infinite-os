@@ -70,6 +70,12 @@ export interface RehearsalOutcome {
     /** GA4 page views on one page load (the most over the loads; a navigation's own page view is not counted): the
      *  rehearsal's beacons, recorded and cancelled. Null when no GA4 beacon was seen. */
     ga4PageViewsPerLoad?: number | null
+    /**
+     * R4-8: per tool, the page views it sent AFTER the rehearsal's one client-side page change (GA4 `page_view`, Meta
+     * `PageView`), read off the rehearsal's own beacons; null = the tool sent nothing at all on the rehearsal. Absent
+     * when no page change ran. The SPA half never waits on a connection (run 4's Meta SPA check read "not connected").
+     */
+    spaPageViews?: { ga4: number | null; meta: number | null }
   }
   /** The tools the connections expect (from the keys) and the tools the census found in the PR's tree. A cell is
    *  `pass` only when every one of these graded pass; one undetermined tool makes it undetermined. */
@@ -337,6 +343,7 @@ export async function rehearse(
     facts: {
       posthogSameOrigin: posthogEvents.length === 0 ? null : posthogEvents.every((event) => event.sameOrigin),
       ga4PageViewsPerLoad: ga4PageViewsPerLoad(rehearsal.result),
+      ...(secondPath !== null ? { spaPageViews: spaPageViewsOf(rehearsal.result) } : {}),
       ...cspCounts(rehearsal.result.csp.violations, expect)
     },
     spaExercised: secondPath !== null,
@@ -421,7 +428,7 @@ type Grades = Partial<Record<TestTool, CheckResult>>
  * and every tool that actually fired (graded pass or problem). A tool that is neither connected nor installed and
  * sent nothing (`info`, not installed) is left out.
  */
-function consideredTools(outcome: RehearsalOutcome, grades: Grades, among: readonly TestTool[] = TOOLS): TestTool[] {
+function consideredTools(outcome: Pick<RehearsalOutcome, "expectedTools" | "installedTools">, grades: Grades, among: readonly TestTool[] = TOOLS): TestTool[] {
   const named = new Set([...(outcome.expectedTools ?? []), ...(outcome.installedTools ?? [])])
   return among.filter((tool) => named.has(tool) || grades[tool]?.state === "pass" || grades[tool]?.state === "problem")
 }
@@ -498,14 +505,21 @@ export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string;
     finishLine.survives_ad_blockers = makeCell("problem", "problem", `PostHog: ${reasonCode(posthog).replace(/_/g, " ") || "problem"}`, at, runId, undefined, "posthog_via_proxy_once")
   }
   if (outcome.spaExercised) {
-    // §3x.3 (F6): a Meta pixel that missed the page change is a problem here too; the pass still reads GA4 and PostHog.
+    // §3x.3 (F6) + R4-8: a tool that missed the page change (or counted it twice) is a problem here, from the same
+    // counts the per-tool RH checks read; the pass still reads GA4 and PostHog's own grades.
+    const spa = outcome.facts.spaPageViews
+    const missed = spa ? (["ga4", "meta"] as const).filter((tool) => spa[tool] === 0) : []
+    const twice = spa ? (["ga4", "meta"] as const).filter((tool) => (spa[tool] ?? 0) > 1) : []
     const metaMissed = grades.meta?.state === "problem" && reasonCode(grades.meta) === "meta_spa_page_view_missing"
-    finishLine.spa_page_views = finishCell(
-      metaMissed ? { state: "problem" } : aggregate(outcome, grades, ["duplicate_page_view"], ["ga4", "posthog"]),
-      { pass: "one page view per navigation", problem: "a navigation counts twice" },
-      at,
-      runId
-    )
+    finishLine.spa_page_views =
+      missed.length > 0 || metaMissed
+        ? makeCell("problem", "problem", `${(missed.length > 0 ? missed : ["meta" as const]).map((tool) => (tool === "ga4" ? "GA4" : "Meta")).join(" and ")} sends nothing on a page change`, at, runId)
+        : finishCell(
+            twice.length > 0 ? { state: "problem" } : aggregate(outcome, grades, ["duplicate_page_view"], ["ga4", "posthog"]),
+            { pass: "one page view per navigation", problem: "a navigation counts twice" },
+            at,
+            runId
+          )
   } else {
     finishLine.spa_page_views = makeCell("not_measured", null, NULL_DISPLAY, at, runId, "not_exercised")
   }
@@ -560,13 +574,40 @@ export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string;
         : row("posthog")
   cells.meta_pixel = row("meta")
   // "Live test per tool": before the merge the live test is the rehearsal (every beacon recorded and cancelled).
-  const tested = consideredTools(outcome, grades).filter((tool) => grades[tool] && grades[tool]!.state !== "info")
-  if (tested.length > 0) {
-    const passing = tested.filter((tool) => grades[tool]!.state === "pass").length
-    const state: CellState = tested.some((tool) => grades[tool]!.state === "problem") ? "problem" : passing === tested.length ? "pass" : "undetermined"
-    cells.live_test_per_tool = makeCell(state, `${passing}/${tested.length}`, `rehearsal: ${passing} of ${tested.length} tools fire once, right ID (nothing sent)`, at, runId)
+  const count = rehearsalToolCount(outcome)
+  if (count.tested > 0) {
+    const state: CellState = count.problem ? "problem" : count.passing === count.tested ? "pass" : "undetermined"
+    cells.live_test_per_tool = makeCell(state, `${count.passing}/${count.tested}`, `rehearsal: ${rehearsalCountWords(count)} (nothing sent)`, at, runId)
   }
   return { cells, finishLine }
+}
+
+/** R4-8: per tool, the page views sent after the rehearsal's page change (null = the tool sent nothing at all). */
+export function spaPageViewsOf(result: TestResult): { ga4: number | null; meta: number | null } {
+  return {
+    ga4: result.ga4.events.length === 0 ? null : result.ga4.events.filter((event) => event.afterNav && event.en === "page_view").length,
+    meta: result.meta.tr.length === 0 ? null : result.meta.tr.filter((tr) => tr.afterNav && tr.ev === "PageView").length
+  }
+}
+
+/**
+ * R4-10 (live run 4): THE rehearsal count, for the terminal, report.md, the PR comment and the app alike. The terminal
+ * counted every graded tool ("2 of 4", PostHog's `info` = not installed included) while the report counted the tools the
+ * rehearsal considered ("2 of 3"). A tool that is not on the site (`info`) is not "tested".
+ */
+export function rehearsalToolCount(outcome: Pick<RehearsalOutcome, "grades" | "expectedTools" | "installedTools">): { passing: number; tested: number; problem: boolean } {
+  const grades = outcome.grades
+  const tested = consideredTools(outcome, grades).filter((tool) => grades[tool] && grades[tool]!.state !== "info")
+  return {
+    passing: tested.filter((tool) => grades[tool]!.state === "pass").length,
+    tested: tested.length,
+    problem: tested.some((tool) => grades[tool]!.state === "problem")
+  }
+}
+
+/** The count's words, the same everywhere: "2 of 3 tools fire once, right ID". */
+export function rehearsalCountWords(count: { passing: number; tested: number }): string {
+  return `${count.passing} of ${count.tested} ${count.tested === 1 ? "tool fires" : "tools fire"} once, right ID`
 }
 
 /**
@@ -597,12 +638,23 @@ export function rehearsalCheckResults(outcome: RehearsalOutcome, input: { at: st
     const state = grade.state === "problem" && problemCodes !== null && !problemCodes.includes(reasonCode(grade)) ? "undetermined" : grade.state
     shared.push({ checkId, tier: "RH", state, ...(grade.reason ? { reason: grade.reason } : {}), at: input.at, runId: input.runId })
   }
-  // §3x.3 (F6) job 5's `spa_page_view` target: the rehearsal navigated once, and Meta sent its page-change PageView.
-  const meta = outcome.grades.meta
-  if (outcome.spaExercised && meta && meta.state !== "info") {
-    const code = reasonCode(meta)
-    const state = meta.state === "pass" ? "pass" : meta.state === "problem" && (code === "meta_spa_page_view_missing" || code === "duplicate_page_view") ? "problem" : "undetermined"
-    shared.push({ checkId: "meta_spa_page_view", tier: "RH", state, ...(meta.reason ? { reason: meta.reason } : {}), at: input.at, runId: input.runId })
+  // §3x.3 (F6) job 5's and R4-8 job 4's `spa_page_view` targets: the rehearsal navigated once; each tool must send exactly
+  // ONE page view for it. Counted off the rehearsal's beacons, so an unconnected tool is graded too (its id is another
+  // check's business): run 4's Meta SPA check read "not connected" while Meta had sent its page-change PageView.
+  const spa = outcome.spaExercised ? outcome.facts.spaPageViews : undefined
+  if (spa) {
+    const spaChecks: Array<["ga4" | "meta", string, string]> = [
+      ["ga4", "ga4_spa_page_view", "page_view"],
+      ["meta", "meta_spa_page_view", "PageView"]
+    ]
+    for (const [tool, checkId, what] of spaChecks) {
+      const count = spa[tool]
+      if (count === null) continue
+      const state = count === 1 ? "pass" : "problem"
+      const reason =
+        count === 1 ? `one ${what} after the page change` : count === 0 ? `${tool}_spa_page_view_missing — no ${what} after the page change` : `duplicate_page_view — ${count} ${what}s after one page change`
+      shared.push({ checkId, tier: "RH", state, reason, at: input.at, runId: input.runId })
+    }
   }
   for (const [name, verdict] of outcome.clickVerdicts ?? []) {
     clicks.set(name, { checkId: "click_test", tier: "RH", state: verdict.state, ...(verdict.reason ? { reason: verdict.reason } : {}), at: input.at, runId: input.runId })
@@ -717,8 +769,14 @@ function conversionKey(value: string): string {
  * item gets the `click_test` of ITS conversion only (its target, compared without case or separators, to the
  * click's label). The registry's state machine decides each item's state; nothing is the agent's word.
  */
-export function applyRehearsalToJobs(ctx: WizardContext, deps: Pick<WizardDeps, "registry">, outcome: RehearsalOutcome, runId: string): void {
+export function applyRehearsalToJobs(ctx: WizardContext, deps: Pick<WizardDeps, "registry">, outcome: RehearsalOutcome, runId: string, sha: string): void {
   const { shared, clicks } = rehearsalCheckResults(outcome, { at: ctx.now().toISOString(), runId })
+  // R4-5: the rehearsal's own results, kept whole for the review's triage (a check no job carries still decides).
+  ctx.state.update((state) => {
+    state.rehearsalChecks = shared
+      .filter((result): result is typeof result & { state: "pass" | "problem" | "undetermined" } => result.state === "pass" || result.state === "problem" || result.state === "undetermined")
+      .map((result) => ({ checkId: result.checkId, state: result.state, sha }))
+  })
   if (shared.length === 0 && clicks.size === 0) return
   const byKey = new Map([...clicks].map(([name, result]) => [conversionKey(name), result]))
   const changes: Array<{ itemId: string; state: ChecklistItem["state"] }> = []

@@ -345,6 +345,38 @@ describe("infiniteTrackThenNavigate", () => {
     expect(p.vm.assigned).toEqual([])
   })
 
+  it("R4-5 (live run 4, Codex F5): the site's OWN GA4 whose gtag.js loaded IS waited for (callback, then go), with no send_to", async () => {
+    const p = page({ ga4: "adopted", callback: "once" })
+    p.vm.window.google_tag_manager = { "G-8YB9G7SJE7": {} }
+    p.call("infiniteTrackThenNavigate(null, '/account', 'signup')")
+    const params = p.gtagCalls[0]![2] as Record<string, unknown>
+    expect(p.gtagCalls[0]!.slice(0, 2)).toEqual(["event", "signup"])
+    expect(typeof params.event_callback).toBe("function")
+    expect(params.event_timeout).toBe(1000)
+    expect(params).not.toHaveProperty("send_to")
+    expect(p.vm.assigned).toEqual(["https://acme.com/account"])
+    await p.vm.advance(2000)
+    expect(p.vm.assigned).toEqual(["https://acme.com/account"])
+  })
+
+  it("R4-5: a loaded adopted GA4 that never calls back releases the navigation at 1 s, never later", async () => {
+    const p = page({ ga4: "adopted", callback: "never" })
+    p.vm.window.google_tag_manager = { "G-8YB9G7SJE7": {} }
+    p.call("infiniteTrackThenNavigate(null, '/account', 'signup')")
+    expect(p.vm.assigned).toEqual([])
+    await p.vm.advance(999)
+    expect(p.vm.assigned).toEqual([])
+    await p.vm.advance(2)
+    expect(p.vm.assigned).toEqual(["https://acme.com/account"])
+  })
+
+  it("negative (live run 4): with no lane marker and no loaded gtag.js, the conversion goes out unheld and the page leaves at once", async () => {
+    const p = page({ ga4: "adopted", callback: "never" })
+    p.call("infiniteTrackThenNavigate(null, '/account', 'signup')")
+    expect(plain(p.gtagCalls)).toEqual([["event", "signup", {}]])
+    expect(p.vm.assigned).toEqual(["https://acme.com/account"])
+  })
+
   it("negative: keying the hold off `typeof gtag` (the old rule) would hold the adopted click for a full second", async () => {
     const p = page({ ga4: "adopted", callback: "never" })
     p.vm.window.__infiniteGa4Lane = { id: "G-ADOPTED" } // what the old heuristic effectively assumed

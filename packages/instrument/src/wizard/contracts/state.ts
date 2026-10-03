@@ -170,6 +170,12 @@ export interface WizardRunState {
    * filters the one normal page view by. Written by `prove`; THE verdict reads it (`done`, a resumed `prove`).
    */
   proof?: RunProofState
+  /**
+   * R4-5 (optional, additive): the rehearsal's own RH check results on the commit it rehearsed (the page-change counts,
+   * one page view per load…), whether or not a job carries the check. The review's triage reads them: run 4's wrong
+   * "Meta lacks SPA page views" went to the agent although the rehearsal had seen Meta's page-change PageView.
+   */
+  rehearsalChecks?: Array<{ checkId: string; state: "pass" | "problem" | "undetermined"; sha: string }>
 }
 
 /** §3x.6 The real visit's per-tool facts and the ids to filter it by (§3x.5 disclosure). */
@@ -246,8 +252,9 @@ export const WIZARD_RUN_STATE_SHAPE = shapeOf<WizardRunState>()(
     "report",
     "snapshot"
   ],
-  ["runStartedAt", "site", "proof"],
+  ["runStartedAt", "site", "proof", "rehearsalChecks"],
   {
+    rehearsalChecks: arrayOf(shapeOf<NonNullable<WizardRunState["rehearsalChecks"]>[number]>()("RunState.rehearsalCheck", ["checkId", "state", "sha"], [])),
     proof: shapeOf<RunProofState>()("RunState.proof", ["at", "tools", "laneProbed", "infinitePageViews", "filter", "installedUnknown"], [], {
       tools: arrayOf(
         shapeOf<VerdictToolFact>()("RunState.proof.tool", ["tool", "ids", "connected", "installed", "fired", "ungraded", "receipt", "receiptReason"], [])

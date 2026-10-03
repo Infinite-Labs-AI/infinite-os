@@ -15,6 +15,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 
+import { maskIdentifier } from "../checks/result.js"
+
 export type ScanKind =
   | "bridge_token"
   | "mcp_token"
@@ -47,7 +49,10 @@ export interface ScanLiteral {
 
 export interface ScannerOptions {
   literals: readonly ScanLiteral[]
-  /** The connection's public ids (Meta pixel ids, GA4 ids, …): never a phone or an env-value hit. */
+  /**
+   * The public ids the run knows (the connections' and the ids read from the site's own code: Meta pixel ids, GA4
+   * ids, …), in full: never a phone or an env-value hit, and neither is their masked form.
+   */
   allowedIds: readonly string[]
 }
 
@@ -110,6 +115,10 @@ export interface Scanner {
 export function createScanner(options: ScannerOptions): Scanner {
   const allowed = new Set(options.allowedIds.filter((id) => id.length > 0))
   const allowedDigits = new Set(options.allowedIds.map(digitsOf).filter((digits) => digits.length >= 7))
+  // R4-9 (live run 4): reports show a public id MASKED (`111640...8774`), and that shape — digits around dots — reads as
+  // a written phone number; the PR comment printed "Meta [redacted: phone]". Only the masked form of an id the run
+  // itself knows (a connection id or an id read from the site's own code) is exempt: exact text, nothing near it.
+  const allowedMasked = new Set(options.allowedIds.filter((id) => digitsOf(id).length >= 7).map(maskIdentifier))
   const literals = options.literals
     .filter((literal) => literal.value.length >= 8 && !allowed.has(literal.value))
     .sort((a, b) => b.value.length - a.value.length)
@@ -144,7 +153,7 @@ export function createScanner(options: ScannerOptions): Scanner {
       const digits = digitsOf(match)
       if (digits.length < 7 || digits.length > 16) return match
       if (inside(protectedSpans, offset, offset + match.length)) return match
-      if (allowedDigits.has(digits) || allowed.has(match.trim())) return match
+      if (allowedDigits.has(digits) || allowed.has(match.trim()) || allowedMasked.has(match.trim())) return match
       // A plain run of 15-16 digits with no separators or `+` is an id shape (a Meta pixel or ad id), not a
       // written phone number.
       if (digits.length >= 15 && /^\d+$/.test(match)) return match

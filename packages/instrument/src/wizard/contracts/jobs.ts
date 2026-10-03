@@ -96,7 +96,8 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     n: 4,
     title: "Improve the existing GA4",
     requiresApprovedLine: ["improve_additive"],
-    checks: [c("T1", "ga4_loader_id"), c("RH", "ga4_one_page_view"), c("PV", "ga4_seen_leaving")],
+    // R4-8: one GA4 page_view per client-side page change, measured by the rehearsal's page change.
+    checks: [c("T1", "ga4_loader_id"), c("RH", "ga4_one_page_view"), c("RH", "ga4_spa_page_view"), c("PV", "ga4_seen_leaving")],
     donePath: ["done_in_code", "waiting_deploy", "proven"]
   },
   meta_improve: {

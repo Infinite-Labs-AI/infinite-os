@@ -26,7 +26,7 @@ import type { WizardGitOps } from "../contracts/git-host.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import type { CheckResult } from "../contracts/jobs.js"
 import { TEST_TOOLS } from "../contracts/test-engine.js"
-import { RECEIPT_LANES, RECEIPT_LIMITS, type LaneReceipt, type ReceiptLane, type ReceiptMarkers, type ReceiptsResponseFields } from "../contracts/receipts.js"
+import { GA4_REALTIME_REASONS, RECEIPT_LANES, RECEIPT_LIMITS, type Ga4RealtimeReason, type LaneReceipt, type ReceiptLane, type ReceiptMarkers, type ReceiptsResponseFields } from "../contracts/receipts.js"
 import { REASONS, type Reason, type ReportColumnSnapshot } from "../contracts/report.js"
 import { WIZARD_PATHS, type WizardRunState } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
@@ -420,6 +420,32 @@ const RECEIPT_TEXT: Record<LaneReceipt["state"], string> = {
   undetermined: "unknown"
 }
 
+/** R4-3: fixed words per GA4 realtime reason (a cloud reason is never shown as free text). */
+const GA4_REALTIME_WORDS: Record<Ga4RealtimeReason, string> = {
+  ga4_realtime_busy: "sent (seen leaving) · GA4 counted other page views in the same minutes, so this visit cannot be singled out",
+  ga4_realtime_none: "sent (seen leaving), but GA4's realtime report never counted it",
+  ga4_realtime_unavailable: "sent (seen leaving) · GA4's realtime report could not be read"
+}
+
+/**
+ * R4-3 (live run 4): what a tool's receipt says, in the user's words. A CONNECTED tool is asked: GA4's realtime report
+ * ("received") and PostHog's query ("received"); "sent (seen leaving)" is said only of a tool Infinite cannot ask (not
+ * connected), or of Meta, which reports only by the hour. Run 4 printed "GA4 · sent (seen leaving)" while GA4 was
+ * connected and its realtime report had the visit 10 s later.
+ */
+export function receiptWords(tool: TestTool, lane: LaneReceipt, connected: boolean): string {
+  if (lane.state === "verified") {
+    if (lane.provenance === "ga4_realtime") return "received (GA4's realtime report counted it)"
+    if (lane.provenance === "posthog_query") return "received (PostHog has this visit)"
+    return RECEIPT_TEXT.verified
+  }
+  const ga4Reason = (GA4_REALTIME_REASONS as readonly string[]).includes(lane.reason ?? "") ? (lane.reason as Ga4RealtimeReason) : null
+  if (tool === "ga4" && ga4Reason !== null && (lane.state === "delivering" || lane.state === "no_receipt")) return GA4_REALTIME_WORDS[ga4Reason]
+  if (lane.state === "delivering" && connected && tool === "meta") return "sent (seen leaving) · Meta reports only by the hour, so this visit cannot be confirmed now"
+  if (lane.state === "pending" && connected && tool === "ga4") return "not in GA4's realtime report yet"
+  return RECEIPT_TEXT[lane.state]
+}
+
 // ---------------------------------------------------------------------------------------------
 // 4. The column
 // ---------------------------------------------------------------------------------------------
@@ -453,12 +479,12 @@ export function ownReceipt(lane: LaneReceipt, runStartedAt: string | null): Lane
   return Date.parse(lane.receiptAt) < Date.parse(runStartedAt) ? { ...lane, state: "undetermined", receiptAt: null } : lane
 }
 
-function receiptFact(lane: LaneReceipt, input: ColumnFact["input"], at: string, label: string): ColumnFact {
+function receiptFact(lane: LaneReceipt, input: ColumnFact["input"], at: string, label: string, words: string = RECEIPT_TEXT[lane.state]): ColumnFact {
   const fired = lane.state === "verified" || lane.state === "delivering"
   return {
     input,
     state: fired ? "pass" : lane.state === "no_receipt" ? "problem" : "undetermined",
-    display: `${label}: ${RECEIPT_TEXT[lane.state]}`,
+    display: `${label}: ${words}`,
     at,
     ...(lane.state === "verified" && lane.receiptAt ? { receiptAt: lane.receiptAt } : {})
   }
@@ -641,7 +667,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
       : { value: null, state: "not_measured", source: "wizard_check", at, reason: "not_exercised" }
   rows.live_test_per_tool = liveTestRow(proofLanes, receipts, at)
   if (visit) {
-    rows.ga4_page_views_per_visit = ga4PageViewsRow(visit, expect, input.installed, at)
+    rows.ga4_page_views_per_visit = ga4PageViewsRow(visit, expect, input.installed, at, receipts.lanes.ga4)
     rows.meta_pixel = metaPixelRow(visit, expect, input.installed, at)
   } else {
     rows.ga4_page_views_per_visit = { value: null, state: "pending", source: "desktop_test", at, reason: "pending_open_infinite" }
@@ -720,8 +746,9 @@ function toolReceiptFact(tool: TestTool, visit: ProvenColumnInput["visit"], lane
   if (lane.state === "not_verifiable" && input.expect[tool] === undefined && fired) {
     return { input: "receipts.per_tool", state: "undetermined", display: `${label}: fires (${NOT_CONNECTED_WORDS})`, at, reason: "not_connected" }
   }
-  if (lane.state === "pending") return { input: "receipts.per_tool", state: "pending", display: `${label}: ${RECEIPT_TEXT.pending}`, at }
-  return receiptFact(lane, "receipts.per_tool", at, label)
+  const connected = input.expect[tool] !== undefined
+  if (lane.state === "pending") return { input: "receipts.per_tool", state: "pending", display: `${label}: ${receiptWords(tool, lane, connected)}`, at }
+  return receiptFact(lane, "receipts.per_tool", at, label, receiptWords(tool, lane, connected))
 }
 
 /** §3x.6 The post-deploy measurements as facts: production's own bytes, the merge's own deployment, a page change. */
@@ -806,7 +833,7 @@ function liveTestRow(lanes: Array<[ReceiptLane, string]>, receipts: ReceiptsResp
   }
 }
 
-function ga4PageViewsRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect: TestExpect, installed: readonly TestTool[] | null, at: string): RowCellInput {
+function ga4PageViewsRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect: TestExpect, installed: readonly TestTool[] | null, at: string, lane: LaneReceipt): RowCellInput {
   // §3x.6: an installed GA4 with no connection is measured too (its ID just cannot be compared).
   if (!expect.ga4) {
     if (!(installed ?? []).includes("ga4") && visit.result.ga4.events.length === 0) return { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" }
@@ -829,10 +856,14 @@ function ga4PageViewsRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect:
     return { value: null, state: "undetermined", source: "desktop_test", at, checkId: "ga4_seen_leaving", reason: reportReason(gradeReasonCode(grade)) }
   }
   const sent = views.some((event) => typeof event.status === "number" && event.status >= 200 && event.status < 300)
+  // R4-3: GA4 is connected, so GA4 itself was asked; its answer is the cell's word (never "seen leaving" over a receipt).
+  const received = lane.state === "verified" && lane.provenance === "ga4_realtime" && lane.receiptAt !== null
+  const word = received ? " · received" : sent ? ` · ${receiptWords("ga4", lane, true)}` : ""
   return {
     value: views.length,
-    display: `${views.length}${sent ? " · sent (seen leaving)" : ""}`,
+    display: `${views.length}${word}`,
     state: views.length === 1 ? "pass" : "problem",
+    // The count is the visit's own measure; the word is GA4's answer (the receipt is the per-tool fact's).
     source: "desktop_test",
     at,
     checkId: "ga4_seen_leaving"
@@ -1220,7 +1251,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   for (const tool of toolsUnderTest(expect, installed, visit?.result ?? null)) {
     const lane = receipts.lanes[TOOL_LANES[tool]]
     const fired = lane.state === "verified" || lane.state === "delivering"
-    ctx.emit.emit("step.sub", { step: "prove", text: `${fired ? "✓" : "·"} ${TOOL_LABELS[tool]} · ${RECEIPT_TEXT[lane.state]}`, tone: fired ? "ok" : "warn" })
+    ctx.emit.emit("step.sub", { step: "prove", text: `${fired ? "✓" : "·"} ${TOOL_LABELS[tool]} · ${receiptWords(tool, lane, expect[tool] !== undefined)}`, tone: fired ? "ok" : "warn" })
   }
 
   // Review I1 P1-1: once this run holds the claim, nothing between here and the PATCH may leave the cloud run

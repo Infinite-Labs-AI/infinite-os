@@ -1,0 +1,264 @@
+{
+  "version": 1,
+  "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+  "declined": [
+    {
+      "key": "app/layout.tsx|R5",
+      "reason": "Not changed: the wizard's own checks preview_self_silent, adopted_init_guarded passed on this commit, and its checks outrank a reviewer's opinion.",
+      "round": 1
+    }
+  ],
+  "open": [],
+  "rounds": [
+    {
+      "round": 1,
+      "reviewedSha": "5e6f3f3bb56b5363e8a9ed85541f3af852731047",
+      "reviewer": "codex",
+      "fixSha": null,
+      "review": {
+        "verdict": "changes_suggested",
+        "summary": "Host guards allow unknown hosts, Meta lacks SPA page views, and signup reporting is incomplete. GA4 delivery can also be lost during redirect. Production collection remains unproven.",
+        "checklist": [
+          {
+            "item": "R1",
+            "status": "pass",
+            "note": "All eight changed files are allowlisted or wizardFiles. No unrelated changes or package changes."
+          },
+          {
+            "item": "R2",
+            "status": "pass",
+            "note": "One GA4 loader/config and one Meta init remain. The removed GA4 duplicate used the same ID. Live beacon counts remain undetermined."
+          },
+          {
+            "item": "R3",
+            "status": "pass",
+            "note": "Existing GA4 and Meta initialization is edited in place, with their IDs preserved."
+          },
+          {
+            "item": "R4",
+            "status": "fail",
+            "note": "GA4 and Infinite match the plan, but Meta pixel 1116400780828774 is absent from connectedIds.meta, which is empty."
+          },
+          {
+            "item": "R5",
+            "status": "fail",
+            "note": "The adopted GA4 and Meta guards reject listed development hosts but allow every other unknown host, including custom preview hosts."
+          },
+          {
+            "item": "R6",
+            "status": "pass",
+            "note": "The existing consent-default snippet is unchanged, and the recorded mode matches not_required."
+          },
+          {
+            "item": "R7",
+            "status": "pass",
+            "note": "No secrets, environment values, server keys, or .env files are added. Tracking IDs and the verification artifact are public identifiers."
+          },
+          {
+            "item": "R8",
+            "status": "pass",
+            "note": "The signup event receives no form properties. Account emails and passwords are not passed to analytics, and there are no application identify calls."
+          },
+          {
+            "item": "R9",
+            "status": "fail",
+            "note": "Meta sends only its initial PageView. Infinite's history instrumentation does not send Meta page views; GA4's remote history settings cannot be checked offline."
+          },
+          {
+            "item": "R10",
+            "status": "pass",
+            "note": "not applicable: no server conversion lane is approved or installed. The browser signup event follows a successful API response; clicks are not reported as server outcomes."
+          },
+          {
+            "item": "R11",
+            "status": "pass",
+            "note": "not applicable: PostHog is not connected or installed. The only rewrite serves Infinite, and there is no GA4 proxy."
+          },
+          {
+            "item": "R12",
+            "status": "pass",
+            "note": "not applicable: no CSP exists in the supplied site files."
+          },
+          {
+            "item": "R13",
+            "status": "pass",
+            "note": "No generated/build output or dependency manifests are changed. No runtime dependency is added."
+          },
+          {
+            "item": "R14",
+            "status": "pass",
+            "note": "Managed files and application edits are recorded through files, contentHashes, configOwnership, or reversible textEdits."
+          },
+          {
+            "item": "R15",
+            "status": "cant_tell",
+            "note": "The PR title/body and its measurement display were not supplied. verifiedAt is null, and production conversion checks have not run."
+          },
+          {
+            "item": "R16",
+            "status": "fail",
+            "note": "Successful signup is never sent to the connected Infinite collector, and the GA4 navigation wait is bypassed because its lane marker is never initialized."
+          }
+        ],
+        "findings": [
+          {
+            "id": "F1",
+            "item": "R4",
+            "severity": "should",
+            "path": "app/layout.tsx",
+            "line": 59,
+            "body": "Meta configuration and reporting target pixel 1116400780828774, but the approved plan has connectedIds.meta: []. This destination has no matching connected ID, so its account routing cannot be certified against the plan.",
+            "suggested_fix": "Confirm the retained pixel is intended and connect/record that ID in the approved plan before certifying Meta collection. Preserve the existing ID unless a replacement is explicitly approved."
+          },
+          {
+            "id": "F2",
+            "item": "R5",
+            "severity": "should",
+            "path": "app/layout.tsx",
+            "line": 28,
+            "body": "The hostname guard returns true after checking its development-host exclusions. An unknown custom preview or staging hostname therefore initializes GA4; the identical Meta guard also permits it. The configured production host is tag-smoke.foundernationtv.com, but the guard does not restrict collection to that host.",
+            "suggested_fix": "Allow only explicitly configured production hosts after normalization, and return false for every other host in both adopted guards."
+          },
+          {
+            "id": "F3",
+            "item": "R9",
+            "severity": "should",
+            "path": "app/layout.tsx",
+            "line": 61,
+            "body": "This is the only Meta PageView call, and the root Script does not rerun on Next.js Link navigation. The managed history listener emits only Infinite's site_page_view. Navigating from home to pricing to signup therefore produces no additional Meta page views.",
+            "suggested_fix": "Add a production-guarded route-change PageView for the existing pixel, with initial-load deduplication so the bootstrap and navigation hook cannot double count."
+          },
+          {
+            "id": "F4",
+            "item": "R16",
+            "severity": "should",
+            "path": "app/signup/page.tsx",
+            "line": 19,
+            "body": "infiniteTrackThenNavigate sends the signup event only through GA4/PostHog. It never calls Infinite's collector, while the native runtime emits only page views and click/submit intent events. Successful account creation consequently produces no approved signup outcome in the connected Infinite lane.",
+            "suggested_fix": "Use a supported Infinite success-event path after response.ok, keeping the approved signup outcome separate from click intent."
+          },
+          {
+            "id": "F5",
+            "item": "R16",
+            "severity": "should",
+            "path": "app/layout.tsx",
+            "line": 29,
+            "body": "The adopted GA4 configuration never sets window.__infiniteGa4Lane, and nothing else in the checkout sets it. The signup helper therefore always takes its unstarted-lane branch: it queues gtag('event', 'signup') and immediately calls location.assign. Its event_callback and bounded wait never execute, so navigation can abandon the conversion before dispatch.",
+            "suggested_fix": "Initialize the connected GA4 lane inside the production-only configuration branch, or explicitly wait for the adopted tag's event callback with a bounded navigation fallback."
+          }
+        ]
+      }
+    }
+  ],
+  "completeness": {
+    "reviewer": "codex",
+    "state": "incomplete",
+    "unchecked": [
+      "R15"
+    ]
+  },
+  "openFindings": [
+    {
+      "findingId": "F1",
+      "item": "R4",
+      "severity": "should",
+      "path": "app/layout.tsx",
+      "line": 59,
+      "label": "the wizard's own change"
+    },
+    {
+      "findingId": "F2",
+      "item": "R5",
+      "severity": "should",
+      "path": "app/layout.tsx",
+      "line": 28,
+      "label": null
+    },
+    {
+      "findingId": "F3",
+      "item": "R9",
+      "severity": "should",
+      "path": "app/layout.tsx",
+      "line": 61,
+      "label": null
+    },
+    {
+      "findingId": "F4",
+      "item": "R16",
+      "severity": "should",
+      "path": "app/signup/page.tsx",
+      "line": 19,
+      "label": null
+    },
+    {
+      "findingId": "F5",
+      "item": "R16",
+      "severity": "should",
+      "path": "app/layout.tsx",
+      "line": 29,
+      "label": null
+    }
+  ],
+  "findings": [
+    {
+      "key": "app/layout.tsx|R4",
+      "findingId": "F1",
+      "item": "R4",
+      "severity": "should",
+      "path": "app/layout.tsx",
+      "line": 59,
+      "action": "INFINITE",
+      "ruling": null,
+      "label": "the wizard's own change",
+      "round": 1
+    },
+    {
+      "key": "app/layout.tsx|R5",
+      "findingId": "F2",
+      "item": "R5",
+      "severity": "should",
+      "path": "app/layout.tsx",
+      "line": 28,
+      "action": "DECLINE",
+      "ruling": null,
+      "label": null,
+      "round": 1
+    },
+    {
+      "key": "app/layout.tsx|R9",
+      "findingId": "F3",
+      "item": "R9",
+      "severity": "should",
+      "path": "app/layout.tsx",
+      "line": 61,
+      "action": "FIX",
+      "ruling": null,
+      "label": null,
+      "round": 1
+    },
+    {
+      "key": "app/signup/page.tsx|R16",
+      "findingId": "F4",
+      "item": "R16",
+      "severity": "should",
+      "path": "app/signup/page.tsx",
+      "line": 19,
+      "action": "FIX",
+      "ruling": null,
+      "label": null,
+      "round": 1
+    },
+    {
+      "key": "app/layout.tsx|R16",
+      "findingId": "F5",
+      "item": "R16",
+      "severity": "should",
+      "path": "app/layout.tsx",
+      "line": 29,
+      "action": "FIX",
+      "ruling": null,
+      "label": null,
+      "round": 1
+    }
+  ]
+}

@@ -95,6 +95,7 @@ import {
   type GitOps,
   type KeysResponse,
   type ReceiptsFixtureCase,
+  GA4_REALTIME_REASONS,
   type ReportV2,
   type TestRunFixtureCase,
   type TestResult,
@@ -756,7 +757,7 @@ describe("receipts.fixtures.json (§3h.7)", () => {
     for (const testCase of cases) expect(shapeErrors(testCase, RECEIPTS_FIXTURE_CASE_SHAPE), testCase.id).toEqual([])
   })
 
-  it("verified only with a receipt at or after the run's server start; GA4 and the Meta pixel are never verified", () => {
+  it("verified only with a receipt at or after the run's server start; GA4 only from its realtime read (R4-3); the Meta pixel never", () => {
     for (const testCase of cases) {
       for (const [lane, receipt] of Object.entries(testCase.response.lanes)) {
         if (receipt.state === "verified") {
@@ -764,9 +765,14 @@ describe("receipts.fixtures.json (§3h.7)", () => {
           expect(Date.parse(receipt.receiptAt!) >= Date.parse(testCase.runStartedAt), `${testCase.id}.${lane}`).toBe(true)
         }
       }
-      expect(testCase.response.lanes.ga4.state).not.toBe("verified")
+      const ga4 = testCase.response.lanes.ga4
+      if (ga4.state === "verified") expect(ga4.provenance, testCase.id).toBe("ga4_realtime")
+      if (ga4.provenance === "ga4_realtime" && ga4.reason !== null) expect(GA4_REALTIME_REASONS as readonly string[], testCase.id).toContain(ga4.reason)
       expect(testCase.response.lanes.meta_pixel.state).not.toBe("verified")
     }
+    // R4-3: the received case and the busy case are both pinned.
+    expect(cases.find((testCase) => testCase.id === "ga4_realtime_received")?.response.lanes.ga4).toMatchObject({ state: "verified", provenance: "ga4_realtime" })
+    expect(cases.find((testCase) => testCase.id === "ga4_realtime_busy")?.response.lanes.ga4).toMatchObject({ state: "delivering", reason: "ga4_realtime_busy" })
   })
 
   it("every case asks only for the markers the story's real visit observed (never a dry load's)", () => {

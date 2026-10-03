@@ -38,7 +38,7 @@ import {
 import { hookFixItem, runFixRound } from "../../review/fix.js"
 import { buildPrBody } from "../../review/post.js"
 import { parseLedger, REVIEW_LEDGER_PATH } from "../../review/ledger.js"
-import { applyRehearsalToJobs, recordGa4KeyEventCells, recordRehearsalCells, rehearsalLines, rehearse, type RehearsalOutcome } from "../../review/rehearse.js"
+import { applyRehearsalToJobs, recordGa4KeyEventCells, recordRehearsalCells, rehearsalCountWords, rehearsalLines, rehearsalToolCount, rehearse, type RehearsalOutcome } from "../../review/rehearse.js"
 import type { Scanner } from "../../review/scan.js"
 import { ensurePr, failed, pushBranch, stageAndCommit, type CommitResult } from "../../review/ship.js"
 
@@ -352,7 +352,7 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   })
   announceRehearsal(ctx, "rehearsal", outcome, runId)
   recordRehearsalCells(ctx, outcome, { head, runId, keys: facts.keys })
-  applyRehearsalToJobs(ctx, deps, outcome, runId)
+  applyRehearsalToJobs(ctx, deps, outcome, runId, head)
 
   // The names the rehearsal's click test proved (append-only union), after the tests (§3z.12 order).
   const prState = ctx.state.get().pr
@@ -366,13 +366,13 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   await recordClickTests(ctx, deps, { step: "rehearsal", runId, outcome, approved })
   await ctx.state.save()
 
-  const graded = Object.values(outcome.grades)
-  const passing = graded.filter((result) => result?.state === "pass").length
+  // R4-10: the one count the report's "Live test per tool" cell uses (never every graded tool).
+  const count = rehearsalToolCount(outcome)
   const prLabel = prState?.number ? `Pull request #${prState.number}` : "Branch pushed"
   const line =
     outcome.state === "undetermined"
       ? `${prLabel} · rehearsal undetermined (${outcome.reason?.replace(/_/g, " ")})`
-      : `${prLabel} · rehearsal: ${passing} of ${graded.length} tools fire correctly · nothing sent`
+      : `${prLabel} · rehearsal: ${rehearsalCountWords(count)} · nothing sent`
   status(ctx, "rehearsal", line)
   return { kind: "ok", status: line }
 }
