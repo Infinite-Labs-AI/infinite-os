@@ -55,28 +55,28 @@ describe("the answer column (no box, the whole window)", () => {
 
 describe("a streamed answer never shows an open marker (eval M4)", () => {
   it("holds a half-received bold span while streaming", () => {
-    const state = { ...getTurnState(), streaming: "Try the **Cold brew car" };
+    const state = { ...getTurnState(), streaming: "Try the **Demo item car" };
     const out = renderInfiniteTranscript({ state }, { columns: 80, theme });
-    expect(out).toBe("∞ Try the Cold brew car");
+    expect(out).toBe("∞ Try the Demo item car");
   });
 
   it("draws the span bold once it closes", () => {
-    const state = { ...getTurnState(), streaming: "Try the **Cold brew carousel**" };
+    const state = { ...getTurnState(), streaming: "Try the **Demo item carousel**" };
     const out = renderInfiniteTranscript({ state }, { columns: 80, theme, color: true });
-    expect(stripAnsi(out)).toBe("∞ Try the Cold brew carousel");
+    expect(stripAnsi(out)).toBe("∞ Try the Demo item carousel");
     // r4's b token (bold white) once the span closes (run-2 N3).
-    expect(out.split("\n").map(r4Segments).flat()).toContainEqual({ text: "Cold brew carousel", style: "b" });
+    expect(out.split("\n").map(r4Segments).flat()).toContainEqual({ text: "Demo item carousel", style: "b" });
   });
 
   it("a stopped turn keeps its partial answer without the marker", () => {
     resetTurnState();
     const controller = new InfiniteTurnController(() => 1_000);
     controller.recordProgressEvent({ type: "message.start", stage: "message", message: "" });
-    controller.recordProgressEvent({ type: "message.delta", stage: "message", message: "", text: "Pause **Cold brew car" });
+    controller.recordProgressEvent({ type: "message.delta", stage: "message", message: "", text: "Pause **Demo item car" });
     const partial = controller.stoppedTranscript();
     // The words are kept as written (copy and history see them whole); the open marker is held when drawn.
-    expect(partial.at(-1)).toEqual({ role: "assistant", text: "Pause **Cold brew car", partial: true });
-    expect(renderInfiniteTranscript({ messages: partial }, { columns: 80, theme })).toBe("∞ Pause Cold brew car");
+    expect(partial.at(-1)).toEqual({ role: "assistant", text: "Pause **Demo item car", partial: true });
+    expect(renderInfiniteTranscript({ messages: partial }, { columns: 80, theme })).toBe("∞ Pause Demo item car");
     controller.reset();
   });
 
@@ -196,7 +196,7 @@ describe("a running turn with views is drawn in the r4 layout while it works", (
   };
   const working = (): TurnState => ({
     ...getTurnState(),
-    streaming: "Two are on; pausing **Cold brew car",
+    streaming: "Two are on; pausing **Demo item car",
     steps: [
       { id: "c1", name: "list_meta_entities", label: "listing meta entities", status: "ok", startedAt: 0, endedAt: 400, result: "3 ads" },
       { id: "c2", name: "pause_entity", label: "pausing entity", status: "run", startedAt: 400, endedAt: null, result: "" }
@@ -206,15 +206,15 @@ describe("a running turn with views is drawn in the r4 layout while it works", (
 
   it("puts the arriving answer left of the view at 160, held open, with the running call's progress in the Steps", () => {
     const state = working();
-    const history: Msg[] = [{ role: "user", text: "pause the cold brew ad" }];
+    const history: Msg[] = [{ role: "user", text: "pause the demo item ad" }];
     const messages = workingTurnMessages(history, state);
     const lines = renderLiveTurn({
       messages, views: [listView()], focus: null, width: 160, color: false, theme,
       steps: workingTurnSteps(messages, state, 900), nowMs: 900
     }).lines;
     // The view head at the plain tier is R3's bracketed title chip.
-    expect(lines[0]).toMatch(/^❯ pause the cold brew ad +│ \[Ads running\] ✓ Ready/u);
-    expect(lines.join("\n")).toContain("∞ Two are on; pausing Cold");
+    expect(lines[0]).toMatch(/^❯ pause the demo item ad +│ \[Ads running\] ✓ Ready/u);
+    expect(lines.join("\n")).toContain("∞ Two are on; pausing Demo");
     expect(lines.join("\n")).not.toContain("**");
     expect(lines.some((line) => /^ {2}pausing entity +━*╍╍ [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] waiting for Meta$/u.test(line))).toBe(true);
     expect(lines.filter((line) => line.startsWith("─ Steps ")).length).toBe(1);
@@ -223,7 +223,7 @@ describe("a running turn with views is drawn in the r4 layout while it works", (
   it("the transcript beside it keeps nothing the drawn turn already shows", () => {
     const beside = besideWorkingTurn({ ...working(), todos: [{ id: "t1", content: "Check the ad set", status: "in_progress" }] });
     const out = renderInfiniteTranscript({ messages: [], state: beside }, { columns: 160, theme, nowMs: 900 });
-    expect(out).not.toContain("Cold brew");
+    expect(out).not.toContain("Demo item");
     expect(out).not.toContain("─ Steps");
     expect(out).toContain("Check the ad set");
   });

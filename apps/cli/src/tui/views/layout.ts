@@ -1,4 +1,4 @@
-// The r4 turn layout (terminal-r4 `frame()`; River's layout decision of
+// The r4 turn layout (terminal-r4 `frame()`; the approved layout decision of
 // 2026-10-02): the CURRENT turn, in a window at least 120 columns wide, puts
 // the answer on the left, the view's details on the right and the Steps strip
 // below. Narrower, and for every turn committed to scrollback, the turn is ONE
@@ -44,7 +44,7 @@ import type { ViewRender, ViewRenderCtx } from "./types.js";
 
 export { stepLabelWidth } from "./steps.js";
 
-/** At this width and up, the current turn's answer and details sit side by side (River, 2026-10-02). */
+/** At this width and up, the current turn's answer and details sit side by side (layout decision, 2026-10-02). */
 export const SPLIT_MIN_COLUMNS = 120;
 export const PANE_SEPARATOR = " │ ";
 /** The answer pane's widest (28% of the window, clamped to 26–40). */

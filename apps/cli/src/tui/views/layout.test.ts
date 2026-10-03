@@ -11,7 +11,7 @@ import { viewFocusAfterTurnDone } from "./focus.js";
 import { answerCarriesTable, detailsPaneWidth, layoutTurn, renderCommittedTurn, renderLiveTurn, turnMaySplit } from "./layout.js";
 import type { ViewRender } from "./types.js";
 
-// The r4 frame body (terminal-r4 `frame()` + River's layout decision): side by
+// The r4 frame body (terminal-r4 `frame()` + the approved layout decision): side by
 // side from 120 columns, one column below. Synthetic data only.
 const theme = INFINITE_R4_THEME;
 const view = (over: Partial<ViewRender> = {}): ViewRender => ({
@@ -154,7 +154,7 @@ describe("a committed turn keeps the calls that did not end clean (a failed step
   it("reads the calls from the tool trail when the turn store has none", () => {
     const trail: Msg[] = [
       turn[0]!,
-      { kind: "trail", role: "system", text: "", tools: ["checking GA4 (0.4s) :: 3 pages ✓", "Pause Entity(\"Hook B\") (1.0s) :: refused ✗"] },
+      { kind: "trail", role: "system", text: "", tools: ["checking GA4 (0.4s) :: 3 pages ✓", "Pause Entity(\"Demo B\") (1.0s) :: refused ✗"] },
       turn[1]!
     ];
     const lines = renderCommittedTurn({ messages: trail, views: [], focus: null, width: 100, color: false, theme });
@@ -242,7 +242,7 @@ describe("an answer with a table of its own takes the whole width (the split is 
     "| --- | ---: | ---: | ---: | ---: | --- |",
     "| Spring demo, hook 3 | $1,284.50 | 42 | 3.41 | $30.58 | Strongest hook; watch for fatigue next week |",
     "| Founder story, 30s | $612.00 | 1 | 0.29 | $612.00 | One purchase so far: the pause candidate |",
-    "| Cold brew carousel | $938.25 | 19 | 2.12 | $49.38 | Steady |"
+    "| Demo item carousel | $123.45 | 19 | 2.12 | $12.34 | Steady |"
   ].join("\n");
   const withTable: Msg[] = [
     { role: "user", text: "how did the ads do?" },
@@ -477,16 +477,16 @@ describe("a lookup of the card's own target folds into its Steps row (live run-4
     { id: "c1", name: "list_sample_entities", label: "checking your campaigns", status: "ok", startedAt: 0, endedAt: 500, result: "1 ad" },
     { id: "c2", name: "propose_pause_entity", label: "waiting for your OK", status: "wait", startedAt: 500, endedAt: 600, result: "pause 1 ad" }
   ];
-  const card = ["┌─ Pause ad “Hook A”? ─┐", "│  p  Pause    n  dismiss │", "└──────────────────────┘"];
-  const turn: Msg[] = [{ role: "user", text: "pause hook a" }, { role: "assistant", text: "Ready. It stops spending once you say OK." }];
+  const card = ["┌─ Pause ad “Demo A”? ─┐", "│  p  Pause    n  dismiss │", "└──────────────────────┘"];
+  const turn: Msg[] = [{ role: "user", text: "pause demo a" }, { role: "assistant", text: "Ready. It stops spending once you say OK." }];
 
   it.each([60, 100, 160])("at %i, with the card waiting: the card and the Steps, never the lookup's head or row", (width) => {
     const views = [lookup(["ad_1"])];
     const drawn = renderLiveTurn({ messages: turn, views, focus: viewFocusAfterTurnDone(views), width, color: false, theme, details: card, statusViews: [fixture("change-pause-card")], steps, nowMs: 600 });
     const text = drawn.lines.join("\n");
     expect(text).not.toContain("Sample ads");
-    expect(drawn.lines.some((line) => /│\s*Hook A\b|^\s*▸?\s*●?\s*on\s+Hook A/u.test(line))).toBe(false);
-    expect(text).toContain("┌─ Pause ad “Hook A”? ─┐");
+    expect(drawn.lines.some((line) => /│\s*Demo A\b|^\s*▸?\s*●?\s*on\s+Demo A/u.test(line))).toBe(false);
+    expect(text).toContain("┌─ Pause ad “Demo A”? ─┐");
     expect(drawn.lines.some((line) => /checking your campaigns\s+━+\s+✓ 1 ad/u.test(line))).toBe(true);
     // The keys are the card's: the folded list offers none.
     expect(drawn.focused).toBeNull();
@@ -525,7 +525,7 @@ describe("a lookup of the card's own target folds into its Steps row (live run-4
   };
   const sameNamed = () => {
     const list = lookup(["ad_1", "ad_2"]);
-    return { ...list, body: { ...list.body, rows: list.body.rows.map((row) => ({ ...row, title: "Hook A" })) } };
+    return { ...list, body: { ...list.body, rows: list.body.rows.map((row) => ({ ...row, title: "Demo A" })) } };
   };
 
   it("two same-named rows with different ids and a card target with no id: the list is drawn", () => {

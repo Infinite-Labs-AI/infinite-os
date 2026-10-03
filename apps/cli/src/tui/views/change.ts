@@ -12,8 +12,8 @@
 // without running (dismissed, expired, changed elsewhere, blocked) draws no
 // rows, only what the shell says and the afterword (`outcome.ts`).
 //
-// The target's parents (contract revision 3, `target.path`: "Spring trials ›
-// Broad · US · 25-54") print as ONE dim line under the target in every state:
+// The target's parents (contract revision 3, `target.path`: "Sample campaign ›
+// Sample ad set") print as ONE dim line under the target in every state:
 // first in a card (its title names the target), under the bold target line,
 // or, when nothing is drawn of the object, first under the head and source.
 // The target's picture (`target.creativeRef`) is Cmd+L's: never drawn here.
@@ -60,8 +60,8 @@ export function renderChange(view: AnswerViewEnvelopeV1<"change">, ctx: ViewRend
 const PATH_SEPARATOR = " › ";
 
 /**
- * A change target's parents as one dim line (`Spring trials › Broad · US ·
- * 25-54`), cut to `width` with `…`; null when the target has no path. Read
+ * A change target's parents as one dim line (`Sample campaign › Sample ad
+ * set`), cut to `width` with `…`; null when the target has no path. Read
  * defensively and scrubbed, like every body field. Never a picture.
  */
 export function targetPathLine(body: unknown, width: number, ctx: Pick<ViewRenderCtx, "color" | "theme">): string | null {

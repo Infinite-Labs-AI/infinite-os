@@ -65,13 +65,13 @@ describe("a day not verified is a dash with its own words (TJ-8 / N30)", () => {
 });
 
 describe("rows that share a long name prefix say it once (N28)", () => {
-  const prefix = "Demo YouTube packaging test 4f2a91c0 ";
+  const prefix = "Sample tests with a long shared name ";
   const view = numbers({
     layout: "table", currency: "USD", rowLabel: "Campaign", columns: [SPEND, CLICKS],
     legs: {
       settled: {
         window: { from: "2026-01-01", to: "2026-01-14", tz: "UTC", label: "Since launch" }, final: true, asOf: "2026-01-15T06:00:00Z",
-        rows: ["variant-1", "variant-2", "variant-4"].map((name, index) => ({
+        rows: ["version-1", "version-2", "version-4"].map((name, index) => ({
           id: `r${index}`, label: `${prefix}${name}`, cells: { spend: { value: 14 + index }, clicks: { value: 40 + index } }
         })),
         totals: { spend: { value: 45 }, clicks: { value: 123 } }
@@ -83,11 +83,11 @@ describe("rows that share a long name prefix say it once (N28)", () => {
     it(`each row shows the part that tells it apart; the prefix is said once (${width} columns)`, () => {
       const out = lines(renderView(view, ctx({ width })));
       const table = out.filter((line) => line.startsWith("│"));
-      for (const name of ["variant-1", "variant-2", "variant-4"]) {
+      for (const name of ["version-1", "version-2", "version-4"]) {
         expect(table.some((line) => line.includes(`… ${name}`)), name).toBe(true);
       }
-      expect(table.join("\n")).not.toContain("packaging");
-      expect(out.filter((line) => line.includes("Demo YouTube packaging test 4f2a91c0"))).toHaveLength(1);
+      expect(table.join("\n")).not.toContain("shared");
+      expect(out.filter((line) => line.includes("Sample tests with a long shared name"))).toHaveLength(1);
       expect(table.some((line) => line.includes("Total"))).toBe(true);
       for (const line of out) expect(line.length, line).toBeLessThanOrEqual(width);
     });
@@ -95,17 +95,17 @@ describe("rows that share a long name prefix say it once (N28)", () => {
 
   it("→ shows every row's whole name", () => {
     const out = lines(renderView(view, ctx({ width: 60, showHiddenColumns: true }))).join("\n");
-    expect(out).toContain(`${prefix}variant-2`);
+    expect(out).toContain(`${prefix}version-2`);
   });
 
   it("short names, or names with no long shared start, stay as they are", () => {
     const short = numbers({
       layout: "table", currency: "USD", columns: [SPEND],
       legs: { settled: { window: { from: "2026-01-01", to: "2026-01-14", tz: "UTC", label: "Since launch" }, final: true,
-        rows: [{ id: "a", label: "Hook A", cells: { spend: { value: 1 } } }, { id: "b", label: "Hook B", cells: { spend: { value: 2 } } }] } }
+        rows: [{ id: "a", label: "Demo A", cells: { spend: { value: 1 } } }, { id: "b", label: "Demo B", cells: { spend: { value: 2 } } }] } }
     });
     const out = lines(renderView(short, ctx())).join("\n");
-    expect(out).toContain("│ Hook A");
+    expect(out).toContain("│ Demo A");
     expect(out).not.toContain("…");
   });
 });

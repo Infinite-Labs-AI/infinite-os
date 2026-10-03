@@ -116,7 +116,7 @@ export interface TodayLegV1 extends NumbersLegV1 {
 }
 export interface LeaderV1 {
   measure: { key: string; label: string }; rowId: string; rowLabel: string; value: CellV1;
-  detail?: string;  // one short context line from the host, drawn under the leader's name ("$189.32 spent", "51 of 357 impressions"); words are data, never computed by a renderer; rev 3
+  detail?: string;  // one short context line from the host, drawn under the leader's name ("$12.34 spent", "5 of 40 impressions"); words are data, never computed by a renderer; rev 3
 }
 export type SectionV1 =
   | { title: string; kind: "numbers"; body: NumbersBodyV1 } | { title: string; kind: "list"; body: ListBodyV1 }
@@ -146,7 +146,7 @@ export interface ListBodyV1 {
   omitted?: { count: number; reason: string }; truncated?: TruncationV1;
 }
 export interface RecordBodyV1 {
-  title?: string; currency?: string | null;               // the thing's full name ("Ad “Hook B · founder POV”"); money's currency; rev 2
+  title?: string; currency?: string | null;               // the thing's full name ("Ad “Demo B · sample copy”"); money's currency; rev 2
   status?: StatusWordV1;  // the thing's own status for the head chip ("Active" ok, "Paused" muted); rev 3
   fields: { label: string; value: CellV1 | TextCellV1; unit?: UnitV1 }[]; creativeRef?: CreativeRefV1;
   history?: { at: IsoTime; from: string | null; to: string | null; who: string | null; source?: string }[];

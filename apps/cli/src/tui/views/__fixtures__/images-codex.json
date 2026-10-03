@@ -18,17 +18,17 @@
     "items": [
       {
         "id": "img_1",
-        "label": "Hook A",
+        "label": "Demo A",
         "status": "done"
       },
       {
         "id": "img_2",
-        "label": "Hook B",
+        "label": "Demo B",
         "status": "drawing"
       },
       {
         "id": "img_3",
-        "label": "Hook C",
+        "label": "Demo C",
         "status": "queued"
       }
     ],
