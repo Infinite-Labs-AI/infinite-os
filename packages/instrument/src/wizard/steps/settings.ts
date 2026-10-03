@@ -20,6 +20,10 @@ import { isBridgeError } from "../../bridge/errors.js"
 import { bridgeFailureLine, bridgeFailureOutcome, missingCapabilities, protocolOutcome } from "../../bridge/outcomes.js"
 import { hashInputs, sub } from "../../bridge/step-kit.js"
 import { readKeysResult } from "../handoff/keys-result.js"
+import { readBeforeFactsFile } from "../handoff/before-facts.js"
+import { lineFactsFor, lineRunnable, RUNNABILITY_TEXT, type PlanScanFacts } from "../../install/plan-model.js"
+import type { TagHosting } from "../contracts/bridge.js"
+import { hardStopOutcome, isTransientBridgeFailure } from "../../bridge/outcomes.js"
 
 const META = WIZARD_STEP_META.settings
 
@@ -91,9 +95,46 @@ function pieceLine(ctx: WizardContext, error: unknown, piece: string): boolean {
   return true
 }
 
-async function provisionServerLane(ctx: WizardContext, deps: WizardDeps): Promise<"saved" | "needs_you" | "skipped"> {
+/** Why the server lane is not offered, in the words of its plan line (§3y.5), for the one sub line. */
+function notOfferedReason(line: string): string {
+  if (line === RUNNABILITY_TEXT.serverLaneNoScope) return "Vercel env writes are not allowed in Infinite"
+  return "Infinite has no Vercel connection serving this site"
+}
+
+/**
+ * §3y.6: the server lane is provisioned only when its line was approved AND it can still run on a FRESH hosting
+ * read (the source is verified, Infinite hosting is Vercel, env writes are allowed). Every refusal is one line.
+ */
+async function serverLaneStillRunnable(ctx: WizardContext, deps: WizardDeps): Promise<{ ok: true } | { ok: false; line: string }> {
+  let hosting: TagHosting
+  try {
+    const answer = await deps.bridge.hosting(undefined, { signal: ctx.signal })
+    hosting = { provider: answer.provider, vercel: answer.vercel }
+  } catch (error) {
+    if (hardStopOutcome(error) !== null) throw error
+    return { ok: false, line: RUNNABILITY_TEXT.serverLaneNoConnection }
+  }
+  const runId = ctx.runId ?? ctx.state.get().runId
+  const before = await readBeforeFactsFile(deps.fs, ctx.root, runId)
+  // `before`'s keys for this run (what the plan was built from); a fresh process without them reads the keys.
+  const keys = before?.facts.keys ?? (await deps.bridge.keys({ signal: ctx.signal }))
+  const facts = lineFactsFor({
+    keys,
+    before: { census: { entries: [], envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }, dryLive: null, checks: [], observedProductionHost: null, ...(before?.facts ?? {}), keys, hosting },
+    scan: { serverLane: { targetLabel: "server lane", installPackages: [] } } as unknown as PlanScanFacts,
+    run: { site: ctx.state.get().site ?? null, siteClaim: false }
+  })
+  return lineRunnable("server_lane", facts)
+}
+
+async function provisionServerLane(ctx: WizardContext, deps: WizardDeps): Promise<"saved" | "needs_you" | "skipped" | "not_offered"> {
   const approval = lineApproval(ctx, "server_lane")
   if (approval !== true) {
+    const userAction = (ctx.state.get().plan?.lines ?? []).some((line) => line.id === "user_action:server_lane")
+    if (userAction) {
+      sub(ctx, "settings", "Server lane: not offered (Infinite has no Vercel connection serving this site, or no env-write permission)", "info")
+      return "not_offered"
+    }
     // Writing env vars to the customer's Vercel production needs the user's yes on the plan line.
     const why =
       approval === false
@@ -103,6 +144,11 @@ async function provisionServerLane(ctx: WizardContext, deps: WizardDeps): Promis
           : "the plan has no server lane for this site"
     sub(ctx, "settings", `Server lane: nothing saved on Vercel (${why})`, "info")
     return "skipped"
+  }
+  const runnable = await serverLaneStillRunnable(ctx, deps)
+  if (!runnable.ok) {
+    sub(ctx, "settings", `Server lane: not offered (${notOfferedReason(runnable.line)})`, "info")
+    return "not_offered"
   }
   sub(ctx, "settings", "Saving the server-lane settings on Vercel…", "pending")
   try {
@@ -133,7 +179,13 @@ async function enableMetaRelay(ctx: WizardContext, deps: WizardDeps): Promise<"o
     if (approval === false) sub(ctx, "settings", "Meta server events: not switched on (you said no to it in the plan)", "info")
     return "skipped"
   }
-  const status = await deps.bridge.metaRelayStatus({ signal: ctx.signal })
+  let status: MetaRelayStatusResponse
+  try {
+    status = await deps.bridge.metaRelayStatus({ signal: ctx.signal })
+  } catch (error) {
+    if (pieceLine(ctx, error, "Meta server events")) return "needs_you"
+    throw error
+  }
   // §3z.7 (A23): bind when the line is approved AND (available OR not yet rolled out): at switch-on the
   // site already works, with no re-run. Any other reason (no pixel, Infinite's dataset, not production) waits.
   const notRolledOut = !status.available && status.reason === "not_rolled_out"
@@ -222,12 +274,16 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     const keyEventNames = approved.filter((name) => clickTested.has(name))
     let marked: string[] = []
     if (keyEventNames.length > 0) {
-      const response = await deps.bridge.markGa4KeyEvents({ runId, names: keyEventNames }, { signal: ctx.signal })
-      marked = [...response.created, ...response.alreadyExisted]
-      if (marked.length > 0) {
-        sub(ctx, "settings", `GA4 key events: marked for ${marked.length} conversion${marked.length === 1 ? "" : "s"} (click test passed)`, "ok")
+      try {
+        const response = await deps.bridge.markGa4KeyEvents({ runId, names: keyEventNames }, { signal: ctx.signal })
+        marked = [...response.created, ...response.alreadyExisted]
+        if (marked.length > 0) {
+          sub(ctx, "settings", `GA4 key events: marked for ${marked.length} conversion${marked.length === 1 ? "" : "s"} (click test passed)`, "ok")
+        }
+        for (const refused of response.refused) sub(ctx, "settings", `! GA4 key event not marked for ${refused.name} (${refused.reason})`, "warn")
+      } catch (error) {
+        if (!pieceLine(ctx, error, "GA4 key events")) throw error
       }
-      for (const refused of response.refused) sub(ctx, "settings", `! GA4 key event not marked for ${refused.name} (${refused.reason})`, "warn")
     } else if (approved.length > 0) {
       sub(ctx, "settings", "GA4 key events: none yet (each is marked once its click test passes)", "info")
     }
@@ -236,7 +292,13 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     const relay = await enableMetaRelay(ctx, deps)
 
     const parts = [
-      serverLane === "saved" ? "Vercel: settings saved" : serverLane === "needs_you" ? "Vercel: needs your permission in Infinite" : "Vercel: skipped",
+      serverLane === "saved"
+        ? "Vercel: settings saved"
+        : serverLane === "needs_you"
+          ? "Vercel: needs your permission in Infinite"
+          : serverLane === "not_offered"
+            ? "Server lane: needs Vercel connected in Infinite"
+            : "Vercel: skipped",
       `${declared.length} conversion${declared.length === 1 ? "" : "s"} declared`
     ]
     if (marked.length > 0) parts.push(`${marked.length} GA4 key event${marked.length === 1 ? "" : "s"}`)
@@ -246,6 +308,14 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   } catch (error) {
     const outcome = outcomeFor(error)
     if (outcome) return outcome
+    // §3y.6: a bridge 4xx never crashes the step (a re-run would only fail the same way): one line, and on.
+    if (!isTransientBridgeFailure(error)) {
+      const line = bridgeFailureLine(error, "Infinite settings")
+      if (line !== null) {
+        sub(ctx, "settings", `! ${line}`, "warn")
+        return { kind: "ok", status: line }
+      }
+    }
     throw error
   }
 }
