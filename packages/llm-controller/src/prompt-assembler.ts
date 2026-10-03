@@ -47,7 +47,9 @@ export function assembleInfiniteOsPrompt(input: PromptAssemblyInput): string {
     id: action.id,
     authority: action.authority,
     category: action.category,
-    summary: action.summary,
+    // Codex receives this exact prose in each function tool's description too. Keep the
+    // manifest's authority/provenance map without duplicating the schema's description.
+    ...(input.modelProvider === "codex" ? {} : { summary: action.summary }),
     provenancePolicy: action.provenancePolicy,
     recommendedNextActions: action.recommendedNextActions
   }));
