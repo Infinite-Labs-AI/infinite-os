@@ -8,8 +8,8 @@
 //
 // It also says what a settled write left behind (terminal-r4 receipts): a
 // view that ended without running anything draws no object, only its
-// sentence and one dim afterword ("Nothing ran.", "Sent to the app",
-// "Nothing was proposed.").
+// sentence and at most one dim afterword ("Nothing ran.", "Nothing was
+// proposed.", or `Sending to the app…` while a no is still on its way).
 import type { AnswerViewV1 } from "@infinite-os/types";
 
 import { isRecord, paint, toneRole, viewText, wrapText } from "./primitives.js";
@@ -46,9 +46,11 @@ export function isSettledWithoutRunning(view: AnswerViewV1): boolean {
  * The lines a settled write prints under its sentence (r4 receipts):
  * - the app's receipt sentence with the state's glyph, in its tone, when the
  *   view carries no state reason (the shell prints a reason itself);
- * - under a dismissal, `Sending to the app…` while the no is on its way, then
- *   `Sent to the app` (r4's last frame, run-3 N22), with the receipt's
- *   provenance line, if any, as its own dim line under it;
+ * - under a dismissal, `Sending to the app…` only while the no is on its way
+ *   (run-3 N22); once the app has it, nothing (live T4: a declined card shows
+ *   only its receipt line; r4 flow-pause-09 draws `Sent to the app` there, a
+ *   deliberate deviation, style/golden/decisions.ts T4). The receipt's
+ *   provenance line, if any, is its own dim line;
  * - `Nothing ran.` when nothing was sent and there is no fix to point at;
  * - `Nothing was proposed.` when a limit stopped it before any card.
  */
@@ -62,7 +64,7 @@ export function afterwordLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[]
     lines.push(...wrapText(`${head.glyph} ${sentence}`, ctx.width).map((line) => paint(line, toneRole(head.tone), ctx)));
   }
   if (view.state === "cancelled" && (receipt || reason?.code === "dismissed")) {
-    lines.push(paint(dismissalAfterword(view, ctx), "dim", ctx));
+    if (awaitingApp(view, ctx)) lines.push(paint("Sending to the app…", "dim", ctx));
     // A provenance line is a fact of the receipt (who proposed, a side effect),
     // never the delivery word: its own dim line under it, as change.ts draws it.
     const provenance = viewText(receipt?.provenanceLine);
@@ -73,16 +75,6 @@ export function afterwordLines(view: AnswerViewV1, ctx: ViewRenderCtx): string[]
     lines.push(paint("Nothing was proposed.", "dim", ctx));
   }
   return lines;
-}
-
-/**
- * What a dismissal's last line says. The session marks the dismissed card it
- * draws at `n` as `sending` (renderer-local) until the app answers; then the
- * app's receipt (or the same card, unmarked) says it was sent. Scrollback is
- * printed once and follows no answer: the no was sent.
- */
-function dismissalAfterword(view: AnswerViewV1, ctx: ViewRenderCtx): string {
-  return awaitingApp(view, ctx) ? "Sending to the app…" : "Sent to the app";
 }
 
 /**

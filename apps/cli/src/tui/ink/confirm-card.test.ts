@@ -363,7 +363,8 @@ describe("the dismissed card's last line follows the app's answer (run-3 N22)", 
     expect(after).not.toEqual(before);
     const sentence = after.indexOf(`✕ ${DISMISSED_WORDS}`);
     expect(sentence).toBeGreaterThanOrEqual(0);
-    expect(after[sentence + 1]).toBe("Sent to the app");
+    // Live T4: the receipt line alone, no afterword under it.
+    expect(after.join("\n")).not.toContain("Sent to the app");
     expect(after.join("\n")).not.toContain("Sending");
   });
 
@@ -374,23 +375,25 @@ describe("the dismissed card's last line follows the app's answer (run-3 N22)", 
     expect(drawn(step.type === "receipt" ? step.frame : { view: null })).toContain(`✕ ${DISMISSED_WORDS}`);
   });
 
-  it("the app's receipt replaces it in place: `Sent to the app`, as r4's last frame", () => {
+  it("the app's receipt replaces it in place: the receipt line, no `Sent to the app` (live T4)", () => {
     const step = settleConfirmOutcome(head, appReceipt({}), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
     expect(step.type).toBe("receipt");
     const lines = drawn(step.type === "receipt" ? step.frame : { view: null });
-    expect(lines).toContain("Sent to the app");
+    expect(lines).toContain(`✕ ${DISMISSED_WORDS}`);
+    expect(lines.join("\n")).not.toContain("Sent to the app");
     expect(lines.join("\n")).not.toContain("Sending");
   });
 
   // Lane review: a provenance line is a fact of the receipt (who proposed, a
   // side effect such as `Clears the matching Home card`), never a delivery
-  // word. It is drawn as its own dim line under `Sent to the app`.
-  it("a receipt's provenance line is its own line under `Sent to the app`, never in its place", () => {
+  // word. It is drawn as its own dim line under the receipt line.
+  it("a receipt's provenance line is its own line under the receipt line, never a delivery word", () => {
     const step = settleConfirmOutcome(head, appReceipt({ provenanceLine: "Clears the matching Home card" }), { decision: "decline", dismissed: true, onCardTurn: true, thrown: false });
     const lines = drawn(step.type === "receipt" ? step.frame : { view: null });
-    const sent = lines.indexOf("Sent to the app");
-    expect(sent).toBeGreaterThanOrEqual(0);
-    expect(lines[sent + 1]).toBe("Clears the matching Home card");
+    const sentence = lines.indexOf(`✕ ${DISMISSED_WORDS}`);
+    expect(sentence).toBeGreaterThanOrEqual(0);
+    expect(lines[sentence + 1]).toBe("Clears the matching Home card");
+    expect(lines.join("\n")).not.toContain("Sent to the app");
     expect(lines.join("\n")).not.toContain("Sending");
   });
 
@@ -398,16 +401,17 @@ describe("the dismissed card's last line follows the app's answer (run-3 N22)", 
     const frame = dismissedReceiptFrame(head)!;
     const sent = dismissalSent(frame);
     expect(sent.viewId).toBe(frame.viewId);
-    expect(drawn(sent)).toContain("Sent to the app");
+    expect(drawn(sent).join("\n")).not.toContain("Sent to the app");
     expect(drawn(sent)).toContain(`✕ ${DISMISSED_WORDS}`);
     expect(drawn(sent).join("\n")).not.toContain("Sending");
   });
 
-  it("printed into scrollback, where nothing follows the answer, it says what was done: sent", () => {
+  it("printed into scrollback, where nothing follows the answer: the dismissed line alone, no afterword", () => {
     const lines = renderCommittedTurn({
       messages: [{ role: "user", text: "pause hook a" }], views: [dismissedReceiptFrame(head)!.view], focus: null, width: 100, color: false, theme: DEFAULT_THEME
     }).map(plain);
-    expect(lines).toContain("Sent to the app");
+    expect(lines.some((line) => line.includes("✕ Dismissed"))).toBe(true);
+    expect(lines.join("\n")).not.toContain("Sent to the app");
     expect(lines.join("\n")).not.toContain("Sending");
   });
 });

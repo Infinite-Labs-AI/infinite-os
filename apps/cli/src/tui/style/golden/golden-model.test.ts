@@ -161,7 +161,9 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     "flow-pause-02-working--c60", "flow-pause-02-working--c100", "flow-pause-02-working--c160",
     "flow-images-02-making-them--c60", "flow-images-02-making-them--c100", "flow-images-02-making-them--c160",
     "flow-images-06-with-your-codex--c60", "flow-images-06-with-your-codex--c100", "flow-images-06-with-your-codex--c160",
-    "flow-images-07-cmd-l-only--c60", "flow-images-07-cmd-l-only--c100", "flow-images-07-cmd-l-only--c160", "region-keybar-busy"
+    "flow-images-07-cmd-l-only--c60", "flow-images-07-cmd-l-only--c100", "flow-images-07-cmd-l-only--c160", "region-keybar-busy",
+    // T4: r4 draws `Sent to the app` under the dismissed card; the decision drops it.
+    "flow-pause-09-dismissed--c60", "flow-pause-09-dismissed--c100", "flow-pause-09-dismissed--c160"
   ]);
 
   it("matches every frame and line-region golden; fails exactly the decided ones", () => {

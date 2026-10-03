@@ -447,10 +447,11 @@ describe("n shows the dismissed card at once (run-2 M5, fake TTY; skipped on CI)
       expect(decisions).toEqual(["decline"]);
       answer({ ok: true });
       await new Promise((resolve) => setTimeout(resolve, 300));
-      // A plain ok: no second "Dismissed" line printed under it; the card now says it was sent (run-3 N22).
+      // A plain ok: no second "Dismissed" line printed under it, and no afterword under it (live T4).
       const lastFrame = stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
       expect(lastFrame.match(/✕ Dismissed — nothing was executed\./gu)).toHaveLength(1);
-      expect(lastFrame).toContain("Sent to the app");
+      expect(lastFrame).not.toContain("Sent to the app");
+      expect(lastFrame).not.toContain("Sending to the app");
       expect(decisions).toEqual(["decline"]);
       await sendKeys(input, "/exit\r");
       await session;

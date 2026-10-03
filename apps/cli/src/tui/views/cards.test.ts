@@ -586,20 +586,29 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     expect(viewKeyFacts(view, renderView(view, viewCtx())).explain).toBe(false);
   });
 
-  it("dismissed (flow-pause-09): the sentence, then `Sent to the app` in dim, and no rows", () => {
+  // Live T4 (round 4): a dismissed card shows only its receipt line. r4's
+  // flow-pause-09 draws a dim `Sent to the app` under it; that afterword is
+  // dropped on purpose (style/golden/decisions.ts T4).
+  it("dismissed (flow-pause-09): the sentence alone, no `Sent to the app`, and no rows", () => {
     const fromApp = receiptView({ state: "cancelled", receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } });
     expect(detail(fromApp).map(segs)).toEqual([
-      [["dim", "✕ Dismissed — nothing was executed."]],
-      [["dim", "Sent to the app"]]
+      [["dim", "✕ Dismissed — nothing was executed."]]
     ]);
-    // With the words as its state reason, the shell prints the sentence; the body adds only the afterword.
+    // With the words as its state reason, the shell prints the sentence; the body adds nothing.
     const withReason = receiptView({ state: "cancelled", stateReason: { code: "dismissed", words: "Dismissed — nothing was executed." } });
     const out = detail(withReason).map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
     expect(out.filter((line) => line.includes("Dismissed — nothing was executed."))).toHaveLength(1);
-    expect(out.at(-1)).toBe("Sent to the app");
-    // The afterword follows its sentence on the next row: no blank between them (r4, run-2 M9).
-    expect(out).toEqual(["✕ Dismissed — nothing was executed.", "Sent to the app"]);
+    expect(out).toEqual(["✕ Dismissed — nothing was executed."]);
+    expect(out.join("\n")).not.toContain("Sent to the app");
     expect(out.join("\n")).not.toContain("PAUSED");
+  });
+
+  it("expired and declined cards show only their receipt line, never `Sent to the app`", () => {
+    for (const state of ["expired", "cancelled"] as const) {
+      const view = receiptView({ state, receipt: { sentence: "Nothing was executed.", tone: "ok", revertible: false } });
+      const out = detail(view).map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
+      expect(out.join("\n"), state).not.toMatch(/Sen[dt]\w* to the app/u);
+    }
   });
 
   it("changed on Meta (flow-pause-06, failed + not_sent): no rows, and `Nothing ran.` in dim", () => {
