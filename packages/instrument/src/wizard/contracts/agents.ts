@@ -198,6 +198,11 @@ export interface CodexPermissionInput {
    * `:project_roots`). `readOnly` (worker only): `<root>/.git`. Default: none.
    */
   repoDenies?: { none: readonly string[]; readOnly?: readonly string[] }
+  /**
+   * §3y.7 (reviewer only): realpaths re-allowed READ right after `:project_roots` (the review worktree under
+   * `~/Library/Caches/…`, which the `$HOME` deny would otherwise cover). Ignored for the worker.
+   */
+  readRoots?: readonly string[]
 }
 
 function isUnder(child: string, parent: string): boolean {
@@ -260,6 +265,13 @@ export function codexPermissionArgs(input: CodexPermissionInput): string[] {
     entries.push([path, "read"])
   }
   entries.push([":project_roots", CODEX_READ_CONFINEMENT.projectRootsAccess[input.role]])
+  // §3y.7: the reviewer's own worktree, explicitly readable (belt and braces next to `-C`); never for the worker.
+  for (const path of input.role === "reviewer" ? (input.readRoots ?? []) : []) {
+    assertProfilePath("readRoots", path)
+    if (seen.has(path)) continue
+    seen.add(path)
+    entries.push([path, "read"])
+  }
   // Repo secrets after `:project_roots`, so the more specific entry is the last word (B20). I3's zero-prompt
   // probe confirms a file-level "none" holds inside the project root; if it does not, the worker is not spawned.
   for (const path of repoReadOnly) {

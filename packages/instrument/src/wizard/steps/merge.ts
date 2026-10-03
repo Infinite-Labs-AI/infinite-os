@@ -4,6 +4,7 @@
 // (`mergeCommit.oid`, never the head SHA: a squash merge does not contain it) is saved and PATCHed as the run's
 // `mergeSha`. ESC / "later" → parked (exit 3); a re-run picks the PR back up.
 import { createHash } from "node:crypto"
+import { join } from "node:path"
 
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
@@ -13,6 +14,7 @@ import { isGitHubAdapter } from "../../hosts/github.js"
 import { isUnsupported } from "../../hosts/other.js"
 import { assertNoAgentAlive, requireRunId, status, sub } from "../../review/context.js"
 import { mergeRequirementLine } from "../../github/rules.js"
+import { parseLedger, REVIEW_LEDGER_PATH } from "../../review/ledger.js"
 
 const meta = WIZARD_STEP_META.merge
 /** "While the terminal is open": a day of polling, then the run parks (the desktop's watcher carries on). */
@@ -52,6 +54,22 @@ async function saveMerge(ctx: WizardContext, deps: WizardDeps, runId: string, me
  * "Pull request #N is ready." and "Merge it to ship." (the overlay adds both, so they are never said here);
  * every further line is a detail row shown under it (the design's "branch → base" and "N files changed").
  */
+/**
+ * §3y.7: the merge card's review words, from the review ledger's completeness: a blind review is "No second review
+ * (<agent> could not read the files)", an incomplete one names how many items were not checked.
+ */
+export async function reviewSentence(ctx: Pick<WizardContext, "root">, deps: Pick<WizardDeps, "fs">, runId: string, reviewer: string | null): Promise<string> {
+  const label = reviewer === "codex" ? "Codex" : reviewer === "claude_code" ? "Claude Code" : null
+  if (!label) return "No second review"
+  const completeness = parseLedger(await deps.fs.readText(join(ctx.root, REVIEW_LEDGER_PATH)), runId).completeness
+  if (completeness?.state === "blind") return `No second review (${label} could not read the files)`
+  if (completeness?.state === "incomplete") {
+    const count = completeness.unchecked.length
+    return `Review incomplete (${label} could not check ${count} item${count === 1 ? "" : "s"})`
+  }
+  return `Reviewed by ${label}`
+}
+
 export function mergeSummary(input: { sentence: string; branch: string; base: string; filesChanged: number | null; checks: string }): string {
   const files = input.filesChanged === null ? null : `${input.filesChanged} file${input.filesChanged === 1 ? "" : "s"} changed`
   return [input.sentence, `${input.branch} → ${input.base}`, [files, input.checks].filter(Boolean).join(" · ")].filter(Boolean).join("\n")
@@ -99,7 +117,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const rules = await github.rules(state.git.base)
   const requirement = isUnsupported(rules) ? null : mergeRequirementLine({ reviewDecision: pr.reviewDecision, ...rules })
   const once = state.report.in_pr?.finishLine.each_tool_once?.state
-  const reviewed = state.agent?.reviewer === "codex" ? "Reviewed by Codex" : state.agent?.reviewer === "claude_code" ? "Reviewed by Claude Code" : "No second review"
+  const reviewed = await reviewSentence(ctx, deps, runId, state.agent?.reviewer ?? null)
   const rehearsal = once === "pass" ? "rehearsal passed" : once === "problem" ? "rehearsal found a problem" : "rehearsal undetermined"
   const summary = mergeSummary({
     sentence: [`${reviewed} · ${rehearsal}.`, requirement].filter(Boolean).join(" "),

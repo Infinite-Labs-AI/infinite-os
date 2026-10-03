@@ -650,7 +650,9 @@ export class AgentRunnerImpl implements AgentRunner {
         codexBinDir: runtime.codexBinDir,
         codexInstallRoot: runtime.codexInstallRoot,
         // B20: the repo's own secrets ("none") and, for the worker, .git read-only.
-        repoDenies: await repoSecretPaths(input.worktreeDir)
+        repoDenies: await repoSecretPaths(input.worktreeDir),
+        // §3y.7: the review worktree is readable even under the $HOME deny (it lives in ~/Library/Caches/…).
+        readRoots: [await resolveRealpath(input.worktreeDir)]
       })
       const schemaPath = join(scratch, "review.schema.json")
       await writeFile(schemaPath, schemaFileText(REVIEW_SCHEMA), { mode: 0o600 })

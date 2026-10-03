@@ -24,6 +24,11 @@ export interface ReviewLedger {
   }>
   /** Conversions already sent to the run as `clickTestedConversions` (a fix round PATCHes only new ones). */
   clickTested?: string[]
+  /**
+   * §3y.7: how complete the latest second review was (the merge card and the final comment say the same word).
+   * `blind` = the reviewer could not read the files (no review was posted).
+   */
+  completeness?: { reviewer: string; state: "complete" | "incomplete" | "blind"; unchecked: string[] }
 }
 
 export function emptyLedger(runId: string): ReviewLedger {

@@ -211,6 +211,24 @@ describe("Codex argv (§3f.3 + §3f.7)", () => {
     expect(argv.join(" ")).not.toContain("mcp_servers")
   })
 
+  it("§3y.7: the reviewer's worktree is re-allowed READ right after :project_roots (the $HOME deny covers ~/Library/Caches); never the worker", () => {
+    const input = {
+      homeRealpath: "/Users/u",
+      sensitiveRealpaths: ["/Users/u/.growth-os"],
+      codexBinDir: "/Users/u/.local/bin",
+      codexInstallRoot: "/Users/u/.codex/packages/standalone/releases/0.160.0",
+      repoDenies: { none: ["/Users/u/Library/Caches/infinite-tag-review/wt/.env"] },
+      readRoots: ["/Users/u/Library/Caches/infinite-tag-review/wt"]
+    }
+    const reviewer = codexPermissionArgs({ role: "reviewer", ...input })[3]!
+    expect(reviewer).toBe(
+      'permissions.infinite_tag_ro.filesystem={":root"="read", "/Users/u"="none", "/Users/u/.local/bin"="read", "/Users/u/.codex/packages/standalone/releases/0.160.0"="read", ":project_roots"="read", "/Users/u/Library/Caches/infinite-tag-review/wt"="read", "/Users/u/Library/Caches/infinite-tag-review/wt/.env"="none"}'
+    )
+    const worker = codexPermissionArgs({ role: "worker", ...input })[3]!
+    expect(worker).not.toContain("infinite-tag-review/wt\"=\"read")
+    expect(() => codexPermissionArgs({ role: "reviewer", ...input, readRoots: ["relative/path"] })).toThrow(/not an absolute path/)
+  })
+
   it("refuses a Codex argv without the profile, or with -s / sandbox_mode (negatives)", () => {
     const base = { repo: "/repo", model: { model: null, effort: "x" }, node: "n", cliPath: "c", outputPath: "o", schemaPath: "s" }
     expect(() => buildCodexWorkerArgv({ ...base, permissionArgs: [] })).toThrow(/missing default_permissions profile/)
