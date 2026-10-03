@@ -119,4 +119,45 @@ describe("D2: a numbers view goes compact only when its table would be all dashe
     expect(out.join("\n")).not.toContain("—¹");
     expect(out.join("\n")).not.toContain("¹ not synced yet");
   });
+  // A composite's other sections are not numbers: a list's row names or a
+  // health item's state are content, so the body stays even when every number
+  // is null. A numbers section of all nulls stays quiet as before.
+  const nullRows = [row("c1", "Ad A", NULL("not in yet"), NULL("not in yet"))];
+  const listSection = {
+    kind: "list", title: "Sample list",
+    body: { layout: "rows", columns: [], rows: [{ id: "r1", title: "Sample row one", cells: {} }], total: 1, shown: 1 }
+  };
+  const healthSection = {
+    kind: "health", title: "Sample sources",
+    body: { items: [{ id: "s1", name: "Sample source", state: "needs_you", blocker: "Sample blocker words" }] }
+  };
+  for (const width of [60, 100, 140]) {
+    it(`a composite whose list section has rows keeps its body (${width} columns)`, () => {
+      const view = numbers("partial", nullRows, reason("partial", "No day of this window is in yet."), { layout: "composite", sections: [listSection] });
+      const out = lines(renderView(view, ctx(width))).join("\n");
+      expect(out).toContain("Sample row one");
+    });
+  }
+
+  it("a composite whose health section has an item keeps its body", () => {
+    const view = numbers("partial", nullRows, reason("partial", "No day of this window is in yet."), { layout: "composite", sections: [healthSection] });
+    expect(lines(renderView(view, ctx(100))).join("\n")).toContain("Sample source");
+  });
+
+  it("a composite whose sections are all-null numbers still goes compact", () => {
+    const numbersSection = {
+      kind: "numbers", title: "Sample section",
+      body: { layout: "table", currency: "USD", columns: [SPEND], rowLabel: "Campaign", legs: { settled: { window: WINDOW, final: true, rows: [{ id: "x", label: "Ad B", cells: { spend: NULL("not in yet") } }] } } }
+    };
+    const view = numbers("partial", nullRows, reason("partial", "No day of this window is in yet."), { layout: "composite", sections: [numbersSection] });
+    const out = lines(renderView(view, ctx(100))).join("\n");
+    expect(out).toContain("No day of this window is in yet.");
+    expect(out).not.toContain("—");
+    expect(out).not.toContain("Ad B");
+  });
+
+  it("a text cell counts as measured even when empty, the same rule as the Cmd+L card", () => {
+    const view = numbers("partial", [row("c1", "Ad A", NULL("not in yet"), { text: "" })], reason("partial", "No day of this window is in yet."));
+    expect(lines(renderView(view, ctx(100))).join("\n")).toContain("Ad A");
+  });
 });
