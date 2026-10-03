@@ -76,9 +76,13 @@ async function scanStaged(git: WizardGitOps, scanner: Scanner): Promise<ScanHit[
   return hits
 }
 
-/** Runs the post-turn gate over the staged, agent-touchable (non-managed) files; unstages each one with a hit. */
+/**
+ * Runs the post-turn gate over the staged, agent-touchable (non-managed) files; unstages each one with a hit.
+ * §3y.8 (P2-5): `.infinite/install.json` is the wizard's OWN receipt — never turn-gated (its `textEdits` quote the
+ * code an edit removed, e.g. a duplicate `G-…` id that is not a connection id), still secret-scanned.
+ */
 async function gateStaged(input: CommitInput): Promise<string[]> {
-  const managed = new Set(input.managed)
+  const managed = new Set([...input.managed, INSTALL_MANIFEST_PATH])
   const files = parseUnifiedDiff(await input.git.stagedDiff()).filter((file) => !managed.has(file.path) && file.added.length > 0)
   if (files.length === 0) return []
   const results = await input.deps.checks.turnGate({ files: files.map((file) => ({ path: file.path, added: file.added, removed: file.removed })) }, { connectionIds: input.connectionIds })
@@ -120,6 +124,8 @@ export async function stageAndCommit(input: CommitInput): Promise<CommitResult> 
   }
   const stillStaged = (await git.statusEntries()).filter((entry) => entry.x !== " " && entry.x !== "?" && entry.x !== "!")
   if (stillStaged.length === 0) return { kind: "nothing", leftOut: set.leftOut, blocked }
+  // §3y.8: the commit line counts what IS in the commit (staged minus held back, minus scan-blocked).
+  const committed = [...new Set(stillStaged.map((entry) => entry.path))].sort()
   const trailers: Record<string, string> = { [COMMIT_TRAILERS.run]: input.runId }
   if (input.round !== null) trailers[COMMIT_TRAILERS.reviewRound] = String(input.round)
 
@@ -172,7 +178,7 @@ export async function stageAndCommit(input: CommitInput): Promise<CommitResult> 
       sha = follow.sha
     }
   }
-  return { kind: "committed", sha, staged: set.stage, leftOut: set.leftOut, blocked, receiptRefreshSha }
+  return { kind: "committed", sha, staged: committed, leftOut: set.leftOut, blocked, receiptRefreshSha }
 }
 
 /** Writes the commit message (with the run trailers) to `.infinite/wizard/commit-message.txt`; returns the command. */
