@@ -87,6 +87,12 @@ export interface ViewKeyFacts {
   open?: { target: AppOpenTarget; label: string } | null;
   /** What `w` asks as a new user turn (a job's watch step; only when the session can watch). */
   watch?: string | null;
+  /**
+   * The details pane is cut to the window (a split turn taller than it): the
+   * lines above and below what it shows, and how many it shows (a page). Once
+   * engaged, ↓/↑ scroll it a line and PgDn/PgUp a page.
+   */
+  pane?: { above: number; below: number; page: number } | null;
 }
 
 export interface ViewFocusState {
@@ -98,6 +104,8 @@ export interface ViewFocusState {
   selected: number;
   tab: number;
   page: number;
+  /** The first line the details pane shows when it is cut to the window (`facts.pane`); absent = its top. */
+  paneScroll?: number;
   explainOpen: boolean;
   showHiddenColumns: boolean;
   caps: KeyContext["caps"];
@@ -255,7 +263,13 @@ export function hasViewKeys(facts: ViewKeyFacts): boolean {
     || facts.rowCopies.some((text) => text !== null)
     || facts.approve !== null
     || Boolean(facts.open)
-    || Boolean(facts.watch);
+    || Boolean(facts.watch)
+    || paneCut(facts);
+}
+
+/** Whether the details pane is cut to the window, so ↓/↑ scroll it once engaged. */
+function paneCut(facts: ViewKeyFacts): boolean {
+  return Boolean(facts.pane && (facts.pane.above > 0 || facts.pane.below > 0));
 }
 
 /** What `c` copies at this selection: the row's own text, else the view's. */
@@ -366,6 +380,14 @@ export function resolveViewKey(
     if (key.upArrow || key.downArrow) {
       return base;
     }
+  }
+  // A details pane cut to the window: ↓/↑ scroll it a line, PgDn/PgUp a page
+  // (j/k still move the row). At either end the key is spent, never a row move.
+  if (paneCut(facts) && (key.downArrow || key.upArrow || key.pageDown || key.pageUp) && !key.ctrl && !key.meta) {
+    const pane = facts.pane!;
+    const step = key.pageDown || key.pageUp ? Math.max(1, pane.page) : 1;
+    const paneScroll = key.downArrow || key.pageDown ? pane.above + Math.min(step, pane.below) : pane.above - Math.min(step, pane.above);
+    return { ...base, engaged: true, paneScroll, handled: true };
   }
   const action = resolveKey(input, asKey(key), { focus: state.focus, busy: false, okKey: null, caps: state.caps });
   const next = applyViewAction(action, base, facts);
@@ -492,6 +514,7 @@ export function viewKeyHints(
     hints.push({ key: facts.approve.key, label: facts.approve.label, ok: true }, { key: "n", label: "dismiss" });
   }
   if (facts.rowCount > 1) hints.push({ key: "j k", label: facts.table ? "row" : "move" });
+  if (state.engaged && paneCut(facts)) hints.push({ key: "↑ ↓", label: "scroll" });
   if (state.engaged) {
     if (facts.rowAsks.some((ask) => ask !== null)) {
       hints.push({ key: "enter", label: "open" });

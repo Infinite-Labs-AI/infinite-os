@@ -915,50 +915,75 @@ describe("the change target's path (contract revision 3) where no golden covers 
   }
 });
 
-// Wave 3 r2 (W3-ap-pause): a long name never makes the head longer than the
-// card under it (r4 `card()`: at most 74 wide). The head stays one line, its
-// state words whole; the name is cut with `…` in the head only, and the whole
-// name stays in the card.
-describe("a long name in a card's head is cut to the card (W3-ap-pause)", () => {
-  const LONG = "sample_video_long_name_for_the_head_test_alpha_bravo_x";
+// Wave 3 r2 / term-split-80 (W3-ap-pause): a change card says its target's
+// name ONCE, in the card's border title (r4 flow-pause-*). The head is the
+// action and the kind (`Pause ad`) when the view's title is the action and the
+// whole name; the border cuts a long name at a word or name-part end with `…`;
+// the body starts with the path and the rows; the whole name is behind `?`.
+// Never a name broken mid-word in the card.
+describe("a long name is said once, in the card's title (W3-ap-pause)", () => {
+  const LONG = "sample_video_long-name_for_the_head_test_alpha_bravo_x";
   const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
-  const longPause = () => pause({
+  const longPause = (over: Record<string, unknown> = {}) => pause({
     title: `Pause ${LONG}`,
-    body: { ...PAUSE_BODY, target: { kind: "ad", id: "ad_demo_long", label: LONG } },
-    approval: { ...PAUSE_APPROVAL, title: `Pause ad “${LONG}”?` }
+    body: { ...PAUSE_BODY, target: { kind: "ad", id: "ad_demo_long", label: LONG, path: ["Sample campaign", "Sample ad set"] } },
+    approval: { ...PAUSE_APPROVAL, title: `Pause ad “${LONG}”?`, rows: [{ label: "Ad", value: LONG }], summary: null },
+    ...over
   });
+  const NAME_PART = /sample_video|long-name|alpha_bravo/u;
 
-  for (const cols of [60, 100, 140]) {
-    it(`at ${cols} the head is one line no wider than the card, state words whole`, () => {
+  for (const cols of [51, 60, 69, 100]) {
+    it(`at ${cols}: the head is the action and the kind; the name is in the card once, cut at a part's end`, () => {
       const render = approvalRender(longPause(), cardCtx({ width: cols, caps: OPEN }));
-      const head = plainText(render.head);
-      expect(head.includes("\n")).toBe(false);
-      expect(displayWidth(head)).toBeLessThanOrEqual(Math.min(cols, 74));
-      expect(head).toMatch(/^ Pause sample_video.*… +▣ Needs your OK$/u);
-      // Where the card is wide enough for it, the whole name stays in the card's title.
-      if (cols >= 100) expect(render.lines.map(plainText).join("\n")).toContain(LONG);
+      expect(plainText(render.head)).toBe(" Pause ad  ▣ Needs your OK");
+      const lines = render.lines.map(plainText);
+      for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(cols);
+      expect(lines.filter((line) => NAME_PART.test(line)), lines.join("\n")).toHaveLength(1);
+      const top = lines.find((line) => line.startsWith("┌─ "))!;
+      const shown = /┌─ Pause ad “(.+?)(?:”\?)? ─+┐$/u.exec(top)![1]!;
+      if (shown.endsWith("…")) {
+        const kept = shown.slice(0, -1);
+        expect(LONG.startsWith(kept), shown).toBe(true);
+        // Cut where a name part ends: the next character was a separator.
+        expect("_-".includes(LONG[kept.length]!), shown).toBe(true);
+      } else {
+        expect(shown).toBe(LONG);
+      }
+      // The body starts with the path, then the rows.
+      const inside = cardRows(render.lines).slice(1).map((line) => plainText(line).replace(/^│ ?| ?│$/gu, "").trim());
+      expect(inside[0]).toBe("Sample campaign › Sample ad set");
+      expect(inside[1]).toMatch(/^status +on → PAUSED$/u);
     });
   }
 
-  // Review S3: at 60 columns the border cuts the card's title too, so the card's
-  // first rows carry the whole title, wrapped; where the border holds it, nothing is added.
-  for (const cols of [48, 60]) {
-    it(`at ${cols} the whole name is on screen, in the card's first rows`, () => {
-      const lines = approvalRender(longPause(), cardCtx({ width: cols, caps: OPEN })).lines.map(plainText);
-      const inCard = lines.map((line) => line.replace(/^│ ?| ?│$/gu, "").trim()).join("");
-      expect(inCard).toContain(LONG);
+  for (const cols of [51, 60]) {
+    it(`at ${cols} the whole name is behind ?, never broken mid-word`, () => {
+      const lines = approvalRender(longPause(), cardCtx({ width: cols, caps: OPEN, ui: { ...CARD_UI_START, explainOpen: true } })).lines.map(plainText);
+      const inCard = lines.map((line) => line.replace(/^│ ?| ?│$/gu, "").trim());
+      expect(inCard.join(" ")).toContain(LONG.slice(0, 20));
+      // Each wrapped piece of the name ends at a part's end (a separator), never mid-part.
+      const pieces = inCard.filter((line) => NAME_PART.test(line) && !line.startsWith("┌"));
+      expect(pieces.join("").replace(/^Pause ad “|”\?$/gu, "")).toContain(LONG);
+      for (const piece of pieces.slice(0, -1)) expect(/[_\-\s]$/u.test(piece) || /[“]$/u.test(piece), piece).toBe(true);
       for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(cols);
     });
   }
 
-  it("where the border holds the whole title, the card adds no title row", () => {
+  it("where the border holds the whole title, the name is still said once", () => {
     const lines = approvalRender(longPause(), cardCtx({ width: 140, caps: OPEN })).lines.map(plainText);
     expect(lines.join("\n").split(LONG).length - 1).toBe(1);
   });
 
-  it("a short name is not cut (r4 flow-pause-01)", () => {
+  it("a short name keeps r4's head (flow-pause-01): the view's title is not the action and the whole name", () => {
     const head = plainText(approvalRender(pause(), cardCtx({ width: 140 })).head);
     expect(head).toBe(" Pause Demo B  ▣ Needs your OK");
+  });
+
+  it("a head with no room for the whole title is cut at a word's end", () => {
+    const view = pause({ title: "Pause the sample ad with a long plain title for the head here" });
+    const head = plainText(approvalRender(view, cardCtx({ width: 51 })).head);
+    expect(displayWidth(head)).toBeLessThanOrEqual(51);
+    expect(head).toBe(" Pause the sample ad with a long …  ▣ Needs your OK");
   });
 });
 

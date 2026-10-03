@@ -1063,7 +1063,7 @@ export function InkInteractiveSessionApp({
         compact,
         ...(headCardLines ? { details: headCardLines } : {}),
         ...(statusViews.length ? { statusViews } : {}),
-        ...(workingState ? { nowMs: workingClock } : {}),
+        ...(workingState ? { nowMs: workingClock, running: true } : {}),
         // A question with nothing for the details pane yet says `Working…` in the answer's place.
         ...(workingState && !turnViews.length && !headCardLines ? { working: workingState } : {})
       });

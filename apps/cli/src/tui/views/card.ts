@@ -8,7 +8,7 @@ import wrapAnsi from "wrap-ansi";
 
 import type { KeyHint } from "../keys/keymap.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
-import { cutAtWord, paint, wrapText } from "./primitives.js";
+import { cutAtWord, paint, wrapWords } from "./primitives.js";
 import type { ViewRenderCtx } from "./types.js";
 
 /** A card is never wider than this (r4 `card()`: `Math.min(w, 74)`). */
@@ -228,12 +228,13 @@ const URL_ONLY = /^[a-z][a-z0-9+.-]*:\/\/\S+$/iu;
 /**
  * Wrap a URL at its separators (`/ ? & = .`), never mid-token (W3-ap-link): a
  * line breaks after a separator; only a token longer than the whole line is
- * cut where it must be. Any other text wraps as words.
+ * cut where it must be. Any other text wraps as words (`wrapWords`).
  */
 export function wrapUrl(text: string, width: number): string[] {
   const max = Math.max(1, Math.floor(width));
   if (!URL_ONLY.test(text) || displayWidth(text) <= max) {
-    return wrapText(text, max);
+    // Words wrap as words; a name too long for the line breaks at one of its parts, never mid-word.
+    return wrapWords(text, max);
   }
   const tokens = text.split(/(?<=[/?&=.])/u).filter(Boolean);
   const lines: string[] = [];
@@ -258,7 +259,7 @@ export function wrapUrl(text: string, width: number): string[] {
   return lines;
 }
 
-/** Wrap a painted paragraph to `width` and paint each line in one style. */
+/** Wrap a paragraph to `width` (a long name at its parts, `wrapWords`) and paint each line in one style. */
 export function paragraphIn(text: string, width: number, style: Parameters<typeof paint>[1], ctx: PaintCtx): string[] {
-  return wrapText(text, width).map((line) => paint(line, style, ctx));
+  return wrapWords(text, width).map((line) => paint(line, style, ctx));
 }

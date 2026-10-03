@@ -7,7 +7,8 @@ import { INFINITE_R4_THEME } from "../theme.js";
 import type { Msg } from "../types.js";
 import { cardBox } from "./card.js";
 import { isQuestionTurn, layoutTurn, paneWidths, renderCommittedTurn, renderLiveTurn, SPLIT_MIN_COLUMNS, turnMaySplit } from "./layout.js";
-import { cutAtWord } from "./primitives.js";
+import { cutAtWord, wrapWords } from "./primitives.js";
+import { stepRowLines } from "./steps.js";
 import type { ViewRender } from "./types.js";
 
 // The current turn sits side by side exactly where terminal-r4's `frame()`
@@ -215,6 +216,24 @@ describe("a long name in a narrow details pane is cut at a word's end, with …"
     expect(cutAtWord("Hook B", 18)).toBe("Hook B");
     expect(cutAtWord("Supercalifragilisticexpialidocious", 12)).toBe("Supercalifr…");
     expect(cutAtWord("ab Supercalifragilistic", 12)).toBe("ab Supercal…");
+  });
+
+  it("a name with no space near is cut where one of its parts ends, never mid-part", () => {
+    expect(cutAtWord("sample_video_long-name_for_the_test", 20)).toBe("sample_video_long…");
+    expect(cutAtWord("Pause ad “sample_video_long-name_for_the_test”?", 30)).toBe("Pause ad “sample_video_long…");
+    // The cut lands right before a separator: the part is whole.
+    expect(cutAtWord("alpha_bravo_charlie", 12)).toBe("alpha_bravo…");
+  });
+
+  it("a long name wraps at its parts, never mid-word; words that fit wrap as words", () => {
+    expect(wrapWords("Pause ad “sample_video_long-name_for_the_test”?", 24)).toEqual(["Pause ad “sample_video_", "long-name_for_the_test”?"]);
+    expect(wrapWords("Hook B · founder POV", 10)).toEqual(["Hook B ·", "founder", "POV"]);
+  });
+
+  it("a Steps label at 80 keeps r4's cut length and ends at a word", () => {
+    const steps = [{ id: "s1", name: "t", label: "checking the campaigns and ad sets", status: "ok" as const, startedAt: 0, endedAt: 1, result: "3 ads" }];
+    const [row] = stepRowLines(steps, { width: 80, color: false, theme });
+    expect(row!.slice(0, 22)).toBe("  checking the …      ");
   });
 
   it("a card's title in its top border ends at a word, and the box still closes", () => {

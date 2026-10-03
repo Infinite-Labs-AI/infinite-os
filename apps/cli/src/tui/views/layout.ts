@@ -15,6 +15,15 @@
 // bordered table, and the details follow under it. A table small enough for
 // the pane keeps the split.
 //
+// A turn TALLER than the window keeps the split too (layout decision,
+// 2026-10-03): given the rows the live region has for it, the panes are held
+// to them. The details pane shows the view from its top (or where ↓/↑ scrolled
+// it, after tab) and its last row says `↓ N more · tab, then ↓`; while the turn
+// runs, an answer taller than the room shows its newest lines. A short pane is
+// padded as r4's frame() pads it (16 rows, as the window allows), and a blank
+// pane row always sits over the Steps rule. Committed to scrollback the turn
+// is written whole, in one column, as before.
+//
 // Every line this returns fits its width: the panes are laid out to their own
 // widths first, and each line is cut to fit as a last resort.
 import type { AnswerViewV1 } from "@infinite-os/types";
@@ -96,8 +105,56 @@ export function layoutTurn(
   steps: readonly string[],
   width: number,
   style: { color: boolean; theme: Theme } | null = null,
-  options: { split?: boolean; steps?: boolean; compact?: boolean } = {}
+  options: LayoutOptions = {}
 ): string[] {
+  return layoutTurnParts(answer, view, steps, width, style, options).lines;
+}
+
+export interface LayoutOptions {
+  split?: boolean;
+  steps?: boolean;
+  compact?: boolean;
+  /**
+   * The rows the whole turn may take (the live region's room for it). When
+   * split, the panes are held to it: the answer pane keeps its newest lines,
+   * the details pane shows `paneScroll` onward with a dim `↓ N more` line, and
+   * a short pane is padded as r4's `frame()` pads it (to 16 rows at most).
+   * Undefined: no cap and no padding (only the blank pane row over the Steps).
+   */
+  maxRows?: number;
+  /** The first details line shown when the details pane is cut (clamped). */
+  paneScroll?: number;
+  /** The keys are on the details pane (after tab): the more line names ↓ PgDn, not tab. */
+  paneKeys?: boolean;
+  /**
+   * The turn is still running: an answer taller than the room keeps its newest
+   * lines in the answer pane. A FINISHED answer taller than the room is not
+   * held (the answer pane cannot scroll): the turn is drawn whole, and the
+   * session sends it whole to scrollback, as any finished turn too tall to stay.
+   */
+  answerTail?: boolean;
+}
+
+/** r4 `frame()` pads the panes to this many rows (`while(wide&&body.length<16)`). */
+export const PANE_MIN_ROWS = 16;
+/** Fewer pane rows than this and a tall turn is drawn as it was, uncapped (the window is too short to split it usefully). */
+const PANE_CAP_FLOOR = 4;
+
+/** Where a cut details pane stands: lines above and below what it shows, and how many it shows. */
+export interface PaneWindow {
+  above: number;
+  below: number;
+  shown: number;
+}
+
+function layoutTurnParts(
+  answer: readonly string[],
+  view: ViewRender | readonly ViewRender[] | null,
+  steps: readonly string[],
+  width: number,
+  style: { color: boolean; theme: Theme } | null,
+  options: LayoutOptions
+): { lines: string[]; pane: PaneWindow | null; natural: number } {
   const total = Math.max(1, Math.floor(width));
   const all: readonly ViewRender[] = view === null ? [] : isRenderList(view) ? view : [view];
   // A steps-only view speaks only when the turn has nothing else to show
@@ -112,6 +169,10 @@ export function layoutTurn(
   const panes = paneWidths(total);
   const wide = panes.wide && options.split !== false;
   const compact = options.compact === true;
+  // `steps: false` (a turn committed to scrollback, D1) draws no Steps strip at all.
+  const strip = options.steps === false ? [] : [...steps, ...quietSteps];
+  let pane: PaneWindow | null = null;
+  let natural = 0;
 
   if (!renders.length) {
     out.push(...answer.map((line) => fitLine(line, total)));
@@ -122,12 +183,34 @@ export function layoutTurn(
     ]);
     if (wide) {
       const separator = rule(PANE_SEPARATOR);
-      const rows = Math.max(answer.length, details.length);
-      for (let index = 0; index < rows; index += 1) {
-        const right = details[index] ?? "";
+      const row = (left: string, right: string) => right
+        ? `${padEndCells(fitLine(left, panes.left), panes.left)}${separator}${fitLine(right, panes.right)}`
         // r4 `side()`: the separator on every row; an empty details row ends at the bar.
-        out.push(right ? `${padEndCells(fitLine(answer[index] ?? "", panes.left), panes.left)}${separator}${fitLine(right, panes.right)}`
-          : `${padEndCells(fitLine(answer[index] ?? "", panes.left), panes.left)}${rule(PANE_SEPARATOR.trimEnd())}`);
+        : `${padEndCells(fitLine(left, panes.left), panes.left)}${rule(PANE_SEPARATOR.trimEnd())}`;
+      // r4 leaves a blank pane row over the Steps rule, so it never sits right under the last line.
+      const gap = strip.length ? 1 : 0;
+      natural = Math.max(answer.length, details.length) + gap;
+      const capacity = options.maxRows === undefined ? undefined : Math.floor(options.maxRows) - (strip.length ? strip.length + 1 : 0);
+      const capped = capacity !== undefined && capacity - gap >= PANE_CAP_FLOOR
+        && (options.answerTail === true || answer.length <= capacity - gap);
+      const room = capped ? capacity - gap : Number.POSITIVE_INFINITY;
+      // A tall answer keeps its newest lines (what is arriving, or the end of what it said).
+      const left = answer.length > room ? answer.slice(answer.length - room) : answer;
+      let right = details;
+      if (details.length > room) {
+        const shown = room - 1;
+        const above = Math.max(0, Math.min(details.length - shown, Math.floor(options.paneScroll ?? 0)));
+        const below = details.length - above - shown;
+        pane = { above, below, shown };
+        right = [...details.slice(above, above + shown), paneMoreLine(pane, options.paneKeys === true, style)];
+      }
+      // r4 pads a short pane to 16 rows; never past the room the window gives.
+      const rows = Math.max(left.length, right.length, capped ? Math.min(PANE_MIN_ROWS, room + gap) : 0);
+      for (let index = 0; index < rows; index += 1) {
+        out.push(row(left[index] ?? "", right[index] ?? ""));
+      }
+      if (gap && (left[rows - 1] ?? "") + (right[rows - 1] ?? "") !== "") {
+        out.push(row("", ""));
       }
     } else {
       // The rule parts the answer from the details; a turn with no answer
@@ -140,16 +223,31 @@ export function layoutTurn(
     }
   }
 
-  // `steps: false` (a turn committed to scrollback, D1) draws no Steps strip at all.
-  const strip = options.steps === false ? [] : [...steps, ...quietSteps];
+  if (!(renders.length && wide)) {
+    natural = out.length;
+  }
   if (strip.length) {
     // One column: a blank row between the details and the Steps (r4 stacked frame).
     if (renders.length && !wide && !compact) {
       out.push("");
+      natural += 1;
     }
     out.push(stepHeader(total, style ?? { color: false, theme: DEFAULT_THEME }), ...strip.map((line) => fitLine(line, total)));
+    natural += strip.length + 1;
   }
-  return out;
+  return { lines: out, pane, natural };
+}
+
+/**
+ * The dim last row of a cut details pane: how much is below and how to reach
+ * it (`↓ 12 more · tab, then ↓`; once the keys are on the pane, `↓ PgDn`), or,
+ * scrolled to its end, how much is above.
+ */
+function paneMoreLine(pane: PaneWindow, keysOnPane: boolean, style: { color: boolean; theme: Theme } | null): string {
+  const words = pane.below > 0
+    ? `↓ ${pane.below} more · ${keysOnPane ? "↓ PgDn" : "tab, then ↓"}`
+    : `↑ ${pane.above} above · ↑ PgUp`;
+  return style ? paint(words, "dim", style) : words;
 }
 
 /**
@@ -199,6 +297,12 @@ export interface LiveTurnInput {
    * the transcript's `⠋ Working…` line (at `nowMs`).
    */
   working?: TurnState;
+  /**
+   * The turn is still running (its answer may still be arriving): split and
+   * held to `rows`, an answer taller than the room shows its newest lines. A
+   * finished turn whose answer alone is taller is drawn whole (see `LayoutOptions.answerTail`).
+   */
+  running?: boolean;
   /**
    * Lines already drawn for the details pane, after the views: the turn's
    * pending write card (its head, source and box), so it takes the right pane
@@ -287,42 +391,57 @@ export interface LiveTurnRender {
   details: boolean;
   /** A view pages inside itself (a long document's `space next page`): the turn is not whole on screen. */
   paged: boolean;
+  /**
+   * The details pane is cut to the window (a split turn taller than it): what
+   * it shows and what is above and below. Null when the pane is whole.
+   */
+  pane: PaneWindow | null;
 }
 
 /** The latest turn with its views, laid out for the live region: side by side from 80 columns. */
 export function renderLiveTurn(input: LiveTurnInput): LiveTurnRender {
   const width = Math.max(1, Math.floor(input.width));
   const budget = typeof input.rows === "number" && Number.isFinite(input.rows) ? Math.max(1, Math.floor(input.rows)) : undefined;
-  let drawn = drawLiveTurn(input, width, budget, true);
+  let drawn = drawLiveTurn(input, width, budget, true, true, budget);
   // The views start from the whole budget; while the turn is taller than it,
   // give the views that many rows fewer (a document then pages smaller). Stops
   // when the turn fits or stops shrinking (a long answer, a page at its floor).
+  // Measured uncapped (`natural`): a split turn is held to the budget anyway,
+  // its details pane cut with `↓ N more`, but a document still pages to fit.
   for (let pass = 0; budget !== undefined && pass < 3; pass += 1) {
-    const overflow = drawn.lines.length - budget;
+    const overflow = drawn.natural - budget;
     if (overflow <= 0 || drawn.rows === undefined || drawn.rows - overflow < 1) {
       break;
     }
-    const next = drawLiveTurn(input, width, drawn.rows - overflow, true);
-    if (next.lines.length >= drawn.lines.length) {
+    const next = drawLiveTurn(input, width, drawn.rows - overflow, true, true, budget);
+    if (next.natural >= drawn.natural) {
       break;
     }
     drawn = next;
   }
-  const { renders, lines, focusIndex } = drawn;
+  const { renders, lines, focusIndex, pane } = drawn;
   const focusedRender = renders[focusIndex];
   return {
     lines,
     focused: focusedRender
-      ? { render: focusedRender, facts: viewKeyFacts(input.views[focusIndex], focusedRender, input.livePageNext ?? false) }
+      ? {
+        render: focusedRender,
+        facts: {
+          ...viewKeyFacts(input.views[focusIndex], focusedRender, input.livePageNext ?? false),
+          ...(pane ? { pane: { above: pane.above, below: pane.below, page: pane.shown } } : {})
+        }
+      }
       : null,
     details: drawn.details,
-    paged: renders.some((render) => (render.pages ?? 0) > 1)
+    paged: renders.some((render) => (render.pages ?? 0) > 1),
+    pane
   };
 }
 
 /**
  * The rows a live turn shows WITH its pending card, besides the card, at
- * `width`: the other views in the details pane and the Steps, plus, below
+ * `width`: the other views in the details pane and the Steps (with the blank
+ * pane row over them from 80 columns), plus, below
  * 80 columns, the blank and the rule over the details and the blank over
  * the Steps. The question and the answer are not counted: from 80 they sit
  * beside the card, and below it a tall answer pages away above it (the turn
@@ -333,7 +452,8 @@ export function rowsBesideCard(input: Omit<LiveTurnInput, "details" | "rows" | "
   const width = Math.max(1, Math.floor(input.width));
   const drawn = drawLiveTurn({ ...input, details: [CARD_PLACEHOLDER] }, width, undefined, true);
   const around = drawn.stepRows + drawn.detailRows - 1;
-  return drawn.wide ? around : around + (drawn.answerRows ? 2 : 0) + (drawn.stepRows ? 1 : 0);
+  // Wide, r4's blank pane row over the Steps rule; one column, the blank and the rule over the details and the blank over the Steps.
+  return drawn.wide ? around + (drawn.stepRows ? 1 : 0) : around + (drawn.answerRows ? 2 : 0) + (drawn.stepRows ? 1 : 0);
 }
 
 /** One details row standing in for the card while its neighbours are measured. */
@@ -375,8 +495,12 @@ export function renderCommittedTurn(input: CommittedTurnInput): string[] {
 /** A row budget no view reaches: a committed turn is drawn whole. */
 const ALL_ROWS = Number.MAX_SAFE_INTEGER;
 
-/** One draw of the turn, its views given at most `rows` rows; `split` allows the side-by-side layout; `withSteps` draws the Steps strip. */
-function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefined, split: boolean, withSteps = true) {
+/**
+ * One draw of the turn, its views given at most `rows` rows; `split` allows the
+ * side-by-side layout; `withSteps` draws the Steps strip; `frame` holds a split
+ * turn to that many rows (see `LayoutOptions.maxRows`).
+ */
+function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefined, split: boolean, withSteps = true, frame?: number) {
   const panes = paneWidths(width);
   // An answer with a table of its own keeps the whole width (see the header).
   const wide = split && turnMaySplit(input.messages, width);
@@ -464,12 +588,18 @@ function drawLiveTurn(input: LiveTurnInput, width: number, rows: number | undefi
   const sideBySide = wide && (takesPane || stepsOnly.length > 0);
   const answer = leftAnswer.length ? leftAnswer : answerAt(sideBySide ? panes.left : width);
   const compact = input.compact === true;
-  const lines = layoutTurn(answer, [...drawn, ...card, ...stepsOnly], stepRows, width, { color: input.color, theme: input.theme }, { split: wide, steps: withSteps, compact });
+  const keysOnPane = Boolean(input.focus && input.focus.engaged && input.focus.focus !== "composer");
+  const laid = layoutTurnParts(answer, [...drawn, ...card, ...stepsOnly], stepRows, width, { color: input.color, theme: input.theme }, {
+    split: wide, steps: withSteps, compact,
+    ...(split && frame !== undefined ? { maxRows: frame, paneScroll: input.focus?.paneScroll ?? 0, paneKeys: keysOnPane, answerTail: input.running === true } : {})
+  });
+  const lines = laid.lines;
   const detailRows = paneRenders([...drawn, ...card])
     .reduce((sum, render, index) => sum + (index > 0 ? 1 : 0) + viewLines(render, sideBySide ? panes.right : width, compact).length, 0);
   return {
     renders, lines, focusIndex: folded.has(focusIndex) ? -1 : focusIndex, rows, wide: sideBySide, details: takesPane,
-    stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length
+    stepRows: stepRows.length ? stepRows.length + 1 : 0, detailRows, answerRows: answer.length,
+    pane: laid.pane, natural: laid.natural
   };
 }
 

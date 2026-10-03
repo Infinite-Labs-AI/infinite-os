@@ -243,7 +243,7 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     expect(barOf(plain)).toBe(" ∞ Infinite   Infinite workspace   ⊘ Shopify ● GA4 ● Stripe ● PostHog ● Meta");
   });
 
-  it("in a 79x24 window a finished turn that misses by its blank rows stays live, compact; at 80x24 it sits side by side; a taller one still goes whole to scrollback", () => {
+  it("in a 79x24 window a finished turn that misses by its blank rows stays live, compact; at 80x24 it sits side by side, a taller one too, its details pane cut to the window", () => {
     const r4 = (screen: string) => {
       const fixture = JSON.parse(readFileSync(fileURLToPath(new URL(`../views/__fixtures__/r4/${screen}.json`, import.meta.url)), "utf8"));
       const view = decodeAnswerView(fixture.turn.views[0]);
@@ -280,23 +280,29 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
     const split = draw("view-10-health");
     expect(split[2]).toMatch(/^❯ is everything +│ {2}Connections {2}✓ Ready$/u);
     const splitStrip = split.findIndex((row) => row.startsWith("─ Steps"));
-    expect(split[splitStrip - 1]).toMatch(/^ +│ Fix it: Reconnect Shopify$/u);
+    // r4 pads the panes (to 16 rows, as the window allows): a blank pane row sits over the Steps rule.
+    expect(split.some((row) => /^ +│ Fix it: Reconnect Shopify$/u.test(row))).toBe(true);
+    expect(split[splitStrip - 1]).toMatch(/^ +│$/u);
     expect(split.slice(2, splitStrip).every((row) => row.includes("│"))).toBe(true);
     expect(split.at(-1)).toBe(" tab  switch side    /  commands");
     expect(split.every((row) => [...row].length <= 80)).toBe(true);
     expect(split.some((row) => /more lines|lines above/u.test(row))).toBe(false);
 
-    // The numbers view does not fit even compact: whole in scrollback, in r4's own spacing, the frame under it.
-    // The frame keeps the turn's Steps strip until the next line (r4 flow-numbers-01; live run-4 N12).
+    // The numbers view is taller than the window: from 80 it stays split (layout decision, 2026-10-03),
+    // the question on screen, the details pane cut with `↓ N more`, r4's frame whole around it.
     const numbers = draw("view-01-numbers");
-    expect(numbers[0]).toBe("❯ google ads since launch?");
-    const rule = numbers.findIndex((row) => row === "─".repeat(80));
-    expect(numbers[rule - 1]).toBe("");
-    expect(numbers.slice(-8, -1)).toEqual([
-      "─".repeat(80), " ∞ Infinite", "─".repeat(80), `─ Steps ${"─".repeat(72)}`,
-      "  checking Google Ads  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✓ 3 campaigns", "─".repeat(80), "❯ Ask Infinite…"
+    expect(numbers[0]).toContain("∞ Infinite");
+    expect(numbers[2]).toMatch(/^❯ google ads since +│ {2}Google Ads since launch {2}✓ Ready$/u);
+    const numbersStrip = numbers.findIndex((row) => row.startsWith("─ Steps"));
+    expect(numbers.slice(2, numbersStrip).every((row) => row.includes("│"))).toBe(true);
+    expect(numbers[numbersStrip - 2]).toMatch(/^ +│ ↓ \d+ more · tab, then ↓$/u);
+    expect(numbers[numbersStrip - 1]).toMatch(/^ +│$/u);
+    expect(numbers.slice(numbersStrip, numbersStrip + 2)).toEqual([
+      `─ Steps ${"─".repeat(72)}`, "  checking Google Ads  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ ✓ 3 campaigns"
     ]);
-    expect(numbers.at(-1)).toBe(" /  commands");
+    expect(numbers.length).toBeLessThanOrEqual(23);
+    expect(numbers.every((row) => [...row].length <= 80)).toBe(true);
+    expect(numbers.some((row) => /more lines|lines above/u.test(row))).toBe(false);
     expect(numbers.filter((row) => row.startsWith("─ Steps"))).toHaveLength(1);
   });
 
