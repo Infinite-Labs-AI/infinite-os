@@ -83,7 +83,7 @@ const MIGRATION_LOCK_OBJID = 1260977462;
 export async function runMigrations(databaseUrl: string): Promise<string[]> {
   // Desktop path: a `pglite://`/`file:`/bare-path URL selects the embedded
   // single-connection WASM Postgres. The migration loop differs only in adapter
-  // mechanics (no pg.Client, `rows.length` instead of `rowCount`, `exec` for the
+  // mechanics (no pg.Client, `exec` for the
   // multi-statement SQL bodies) — same schema_migrations table, same per-file
   // transactional apply, same idempotency.
   //
@@ -132,15 +132,13 @@ export async function runMigrations(databaseUrl: string): Promise<string[]> {
           applied_at timestamptz not null default now()
         )
       `);
+      // Read once INSIDE the lock: a preceding migrator may have committed while
+      // this connection waited. The lock excludes other migrators until we finish.
+      const existing = await client.query<{ id: string }>("select id from schema_migrations");
+      const appliedIds = new Set(existing.rows.map((row) => row.id));
       const applied: string[] = [];
       for (const migration of loadMigrations()) {
-        // Re-read the ledger inside the lock so we don't double-apply a migration
-        // that another daemon just committed while we were waiting for the lock.
-        const existing = await client.query(
-          "select id from schema_migrations where id = $1",
-          [migration.id]
-        );
-        if (existing.rowCount) {
+        if (appliedIds.has(migration.id)) {
           continue;
         }
         await client.query("begin");
@@ -150,6 +148,7 @@ export async function runMigrations(databaseUrl: string): Promise<string[]> {
             migration.id
           ]);
           await client.query("commit");
+          appliedIds.add(migration.id);
           applied.push(migration.id);
         } catch (error) {
           await client.query("rollback");
