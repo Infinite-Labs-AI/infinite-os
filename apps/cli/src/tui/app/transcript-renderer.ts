@@ -266,10 +266,14 @@ function isBesideTurn(state: TurnState): boolean {
  * The turn state the transcript keeps beside a running turn drawn with its
  * views: what the drawn turn already shows (its segments, the answer arriving,
  * its calls and Steps) is taken out, so nothing prints twice; thinking, todos,
- * subagents and the latest activity stay under it.
+ * subagents and the latest activity stay under it. An info line that only
+ * repeats a step the drawn turn's Steps strip shows (a call's words, renamed
+ * from its preparing line) is taken out too: r4 draws no `• <step>` bullet.
  */
 export function besideWorkingTurn(state: TurnState): BesideTurnState {
   const segmentsThink = state.streamSegments.some((msg) => msg.thinking?.trim());
+  const stepWords = new Set(state.steps.map((step) => compactPreview(step.label, 96)));
+  const activity = state.activity.filter((item) => !(item.tone === "info" && stepWords.has(item.text)));
   return {
     ...state,
     beside: true,
@@ -279,7 +283,7 @@ export function besideWorkingTurn(state: TurnState): BesideTurnState {
     streamPendingTools: [],
     tools: [],
     reasoning: segmentsThink ? "" : state.reasoning,
-    activity: state.streaming.trim() ? [] : state.activity
+    activity: state.streaming.trim() ? [] : activity
   };
 }
 

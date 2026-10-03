@@ -4,7 +4,7 @@ import { r4Segments, seg } from "../../formatting/r4-segments.test-util.js";
 import { stripAnsi } from "../lib/display-width.js";
 import { INFINITE_R4_THEME } from "../theme.js";
 import { stepStripLines, stepsFromTrail } from "../views/steps.js";
-import { renderInfiniteTranscript } from "./transcript-renderer.js";
+import { besideWorkingTurn, renderInfiniteTranscript } from "./transcript-renderer.js";
 import { InfiniteTurnController, getTurnState, resetTurnState } from "./turn-controller.js";
 
 // The Steps strip fed by live bridge frames (tool.start / tool.complete), with
@@ -253,6 +253,24 @@ describe("no tool ids, arguments or developer errors on screen (run-2 M6)", () =
       { columns: 100, theme: INFINITE_R4_THEME, nowMs: 2_000 }
     ));
     expect(after).not.toMatch(/•|drafting|propose pause meta entity|proposing pause/u);
+  });
+
+  it("a call running beside a view leaves no `• <step words>` bullet under the question (live T2 shape)", () => {
+    const controller = new InfiniteTurnController(() => 1_000);
+    controller.recordProgressEvent({ type: "tool.generating", stage: "tool", message: PROPOSE, name: PROPOSE } as never);
+    controller.recordProgressEvent(start("call-1", PROPOSE, { words: { label: "getting the pause ready" } }));
+    const state = { ...getTurnState(), views: [{ type: "tool.view", stage: "tool", message: "", viewId: "v1", name: META, view: { kind: "list" } }] } as never;
+    const beside = stripAnsi(renderInfiniteTranscript(
+      { messages: [{ role: "user", text: "pause the worst ad" }], state: besideWorkingTurn(state) },
+      { columns: 100, theme: INFINITE_R4_THEME, nowMs: 2_000, busy: true }
+    ));
+    expect(beside.split("\n").filter((line) => /^\s*•/u.test(line))).toEqual([]);
+    // A warning beside a view still keeps its own line.
+    const warned = { ...getTurnState(), activity: [{ text: "the app is slow to answer", tone: "warn" }], views: [] } as never;
+    expect(stripAnsi(renderInfiniteTranscript(
+      { messages: [{ role: "user", text: "pause the worst ad" }], state: besideWorkingTurn(warned) },
+      { columns: 100, theme: INFINITE_R4_THEME, nowMs: 2_000, busy: true }
+    ))).toContain("• the app is slow to answer");
   });
 
   it("a running call never shows its arguments: `level=ad, nameContains…` reads `running`", () => {
