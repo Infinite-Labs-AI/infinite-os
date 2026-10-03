@@ -662,6 +662,47 @@ describe("a failed step survives the commit to scrollback (fake TTY; skipped on 
   });
 });
 
+// The app's note that THIS turn paused its background work (a typed
+// `status.update`, `background_paused`, its words in `message` only) is the
+// turn's working line while it runs and goes when the turn ends (r4 has no
+// such row; live run-3 N15 saw it stay in Cmd+L's transcript). Synthetic words.
+describe("a turn's own status note goes when the turn ends (fake TTY; skipped on CI like the other PTY tests)", () => {
+  const NOTE = "Paused sample background work to answer you";
+  for (const [name, text] of [["a short answer that stays live", "Short answer."], ["a tall answer that goes up whole", Array.from({ length: 60 }, (_, i) => `beta line ${i}`).join("\n")]] as const) {
+    it.skipIf(process.env.CI === "true")(`${name}: the note is the working line, then nowhere`, { timeout: 30_000 }, async () => {
+      resetTurnState();
+      const input = ttyInput();
+      const output = ttyOutput();
+      let finish: () => void = () => {};
+      const session = runInkInteractiveSession({
+        errorOutput: ttyOutput(),
+        input,
+        async onSubmitLine(line, onProgress) {
+          if (line === "/exit") return { exit: true, messages: [] };
+          onProgress?.({ type: "status.update", stage: "status", status: "background_paused", message: NOTE } as never);
+          await new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          return { messages: [{ role: "assistant", text }] };
+        },
+        output,
+        title: "Infinite TUI"
+      });
+      await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
+      await sendKeys(input, "first\r");
+      await waitFor(() => stripAnsi(output.text()).includes(NOTE), 4_000, output.text);
+      const mark = output.text().length;
+      finish();
+      await waitFor(() => stripAnsi(output.text().slice(mark)).includes(text.split("\n")[0]!), 4_000, output.text);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(scrollbackRows(output.text()).filter((row) => row.includes(NOTE))).toEqual([]);
+      await sendKeys(input, "/exit\r");
+      await session;
+      expect(scrollbackRows(output.text()).filter((row) => row.includes(NOTE))).toEqual([]);
+    });
+  }
+});
+
 // What scrollback keeps: Ink writes each <Static> chunk once, ahead of the live
 // frame it then redraws (erasing the previous frame with cursor moves + erase).
 // Replaying the stream on a tiny screen model (rows, a cursor, erase) keeps the
