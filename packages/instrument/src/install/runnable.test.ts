@@ -6,9 +6,11 @@ import { describe, expect, it } from "vitest"
 import { candidate, fakeBefore, fakeHosting, fakeKeys, fakeProductionDeniedConflict, notConnectedKeys } from "../../test/wizard/o7-fakes.js"
 import { PLAN_LINE_KINDS, type PlanLineKind } from "../wizard/contracts/asks.js"
 import type { TagHosting } from "../wizard/contracts/bridge.js"
+import { buildHostGuardExpression, classifyHost, productionDeniedConflict } from "../host-guard.js"
 import {
   agentJobsAfterApprovals,
   buildPlanModel,
+  guardDecision,
   lineRunnable,
   resolvePlanAnswers,
   RUNNABILITY_TEXT,
@@ -224,5 +226,35 @@ describe("ONE count of the agent jobs (P2-8)", () => {
     const fullN = agentJobsAfterApprovals(input.candidates, plan.seeds, plan, full.approvals).length
     const lessN = agentJobsAfterApprovals(input.candidates, plan.seeds, plan, less.approvals).length
     expect(lessN).toBe(fullN - 1)
+  })
+})
+
+describe("live run 2: the preview guard exempts exactly the accepted <project>.vercel.app production host", () => {
+  const ALIAS = "acme-store.vercel.app"
+  const decide = (runProductionHost: string | null, observed: string | null) =>
+    guardDecision({
+      keys: freshKeys(),
+      hosting: NO_HOSTING,
+      observedProductionHost: observed,
+      runProductionHost,
+      newGuardedTools: ["ga4"],
+      adoptedGuardWanted: false,
+      productionDeniedConflict
+    })
+
+  it("the alias is exempt (fires), every other *.vercel.app stays silent, exempt first", () => {
+    const guard = decide(ALIAS, ALIAS)
+    expect(guard).toEqual({ emit: true, exempt: [ALIAS], deny: expect.any(Array) })
+    if (!guard.emit) return
+    expect(classifyHost(ALIAS, guard)).toBe("exempt")
+    for (const preview of ["acme-store-git-infinite-tag-acme.vercel.app", "acme-store-a1b2c3d4e-acme.vercel.app", "other.vercel.app"]) {
+      expect(classifyHost(preview, guard), preview).toBe("denied")
+    }
+    // The emitted expression lists the alias first in its exempt array (the same order as the TS twin).
+    expect(buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny })).toContain(`"${ALIAS}"`)
+  })
+
+  it("NEGATIVE: the alias observed on the live site but never accepted as the run's host would be silenced → no guard", () => {
+    expect(decide(null, ALIAS)).toEqual({ emit: false, reason: "production_denied", hosts: [ALIAS] })
   })
 })
