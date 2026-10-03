@@ -50,11 +50,14 @@ function rangeText(interval: unknown, unit: UnitV1): string {
   return `${signed(low)} to ${signed(high)}${levelText}`;
 }
 
-/** The unit of a difference: the metric its label names, else a plain number. */
+/**
+ * The unit of a difference: the metric its label names, else the sole
+ * measure's, else a count (as Cmd+L reads it, cmdl-numbers).
+ */
 function differenceUnit(label: string, metrics: readonly MetricRow[]): UnitV1 {
   const name = label.toLowerCase();
   const match = metrics.find((metric) => metric.label.toLowerCase() === name || metric.key.toLowerCase() === name);
-  return match?.unit ?? "ratio";
+  return match?.unit ?? (metrics.length === 1 ? metrics[0]!.unit : "count");
 }
 
 /** `1.7–5.3%`: an arm's likely range in its metric's unit (the decimals the bounds need). */
@@ -157,7 +160,8 @@ function compareBodyLines(body: Record<string, unknown>, ctx: ViewRenderCtx, dra
     const methods = [...new Set(differences.map((difference) => viewText(difference.method)).filter(Boolean))];
     blocks.push([
       ...cellTableLines({ columns, rows, currency: null }, ctx, draw),
-      ...(methods.length ? wrapText(`Range method: ${methods.join(", ")}`, ctx.width).map((line) => paint(line, "muted", ctx)) : [])
+      // How the range was worked out is an analyst's note: behind `?` (W3-cmp-youtube, W3-cmp-analysis).
+      ...(methods.length && ctx.explainOpen ? wrapText(`Range method: ${methods.join(", ")}`, ctx.width).map((line) => paint(line, "muted", ctx)) : [])
     ]);
   }
 

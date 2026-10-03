@@ -120,7 +120,10 @@ export function documentListLines(documents: unknown, ctx: ViewRenderCtx): strin
   const list: unknown[] = Array.isArray(documents) ? documents : [];
   return list.filter(isRecord).flatMap((doc, index) => {
     const words = [viewText(doc.slot), viewText(doc.subject)].filter(Boolean).join(" · ");
-    return wrapText(`${index + 1}  ${words || "—"}`, ctx.width);
+    // Wrapped under its words with a hanging indent, never under its number (W3-ap-send).
+    const lead = `${index + 1}  `;
+    return wrapText(words || "—", Math.max(1, ctx.width - lead.length))
+      .map((line, row) => `${row === 0 ? lead : " ".repeat(lead.length)}${line}`);
   });
 }
 
