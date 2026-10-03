@@ -187,14 +187,32 @@ export function fakeGit(log: CallLog, options: FakeGitOptions = {}) {
 }
 
 /** `defaultBranch: "THROW"` = a host CLI that is installed but not signed in. */
-export function fakeHost(log: CallLog, defaultBranch: string | null = "main"): GitHostAdapter {
+export function fakeHost(
+  log: CallLog,
+  defaultBranch: string | null = "main",
+  /** The newest successful GitHub "Production" deployment the host ask reads (null = none). */
+  latestProduction: { sha: string; createdAt: string; environmentUrl: string | null; environment: string | null } | null = null
+): GitHostAdapter {
   return strict<GitHostAdapter>("host", {
     kind: "github",
     async repoFacts() {
       log.push("host.repoFacts")
       if (defaultBranch === "THROW") throw new Error("gh: not logged in")
       return { isPrivate: true, defaultBranch, viewerPermission: "WRITE" }
-    }
+    },
+    // The deploy reads (`deploymentReader`): only the newest production deployment is read by `before`.
+    ...({
+      async productionDeployment() {
+        throw new Error("host.productionDeployment must not be called by before")
+      },
+      async latestProductionDeployment() {
+        log.push("host.latestProductionDeployment")
+        return latestProduction
+      },
+      async vercelDeploymentSeen() {
+        throw new Error("host.vercelDeploymentSeen must not be called by before")
+      }
+    } as Partial<GitHostAdapter>)
   })
 }
 

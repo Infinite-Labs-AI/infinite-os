@@ -59,8 +59,18 @@ export async function productionDeploymentForSha(gh: GhClient, sha: string, proj
   return { state: deploymentState(await statusesOf(gh, newest.id)) }
 }
 
+/** The newest successful production deployment: its SHA, time, and the URL + environment Vercel wrote on it. */
+export interface LatestProductionDeployment {
+  sha: string
+  createdAt: string
+  /** The success status's `environment_url` (Vercel: the deployment URL, never the alias); null when absent. */
+  environmentUrl?: string | null
+  /** `Production`, or `Production – <project>` in a monorepo. */
+  environment?: string | null
+}
+
 /** The newest SUCCESSFUL production deployment (its SHA and time), or null. */
-export async function latestProductionDeployment(gh: GhClient, projectName: string | null): Promise<{ sha: string; createdAt: string } | null> {
+export async function latestProductionDeployment(gh: GhClient, projectName: string | null): Promise<LatestProductionDeployment | null> {
   const environments = ["Production", ...(projectName ? [`Production – ${projectName}`] : [])]
   const rows: RawProductionDeployment[] = []
   for (const environment of environments) {
@@ -71,7 +81,11 @@ export async function latestProductionDeployment(gh: GhClient, projectName: stri
   const newestFirst = [...production].sort((a, b) => Date.parse(b.created_at ?? "") - Date.parse(a.created_at ?? ""))
   for (const row of newestFirst) {
     if (!row.sha || !/^[0-9a-f]{40}$/.test(row.sha)) continue
-    if (deploymentState(await statusesOf(gh, row.id)) === "ready") return { sha: row.sha, createdAt: row.created_at ?? "" }
+    const statuses = await statusesOf(gh, row.id)
+    if (deploymentState(statuses) !== "ready") continue
+    const success = statuses.find((status) => status.state === "success")
+    const environmentUrl = typeof success?.environment_url === "string" && success.environment_url.length > 0 ? success.environment_url : null
+    return { sha: row.sha, createdAt: row.created_at ?? "", environmentUrl, environment: row.environment ?? null }
   }
   return null
 }

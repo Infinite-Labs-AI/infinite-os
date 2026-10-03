@@ -5,7 +5,7 @@ import { prChecks, type PrCheck } from "../github/checks.js"
 import type { GhClient } from "../github/gh.js"
 import { comment, createDraftPr, findPr, markReady, readPr, updateBranch } from "../github/pr.js"
 import { previewUrlForSha } from "../github/preview.js"
-import { latestProductionDeployment, productionDeploymentForSha, vercelDeploymentSeen, type GhDeployState } from "../github/deployments.js"
+import { latestProductionDeployment, productionDeploymentForSha, vercelDeploymentSeen, type GhDeployState, type LatestProductionDeployment } from "../github/deployments.js"
 import { ghAuthStatus, ghRepoFacts, type GhRepoFacts } from "../github/repo.js"
 import { postCommentReview } from "../github/review.js"
 import { baseRules } from "../github/rules.js"
@@ -30,7 +30,7 @@ export interface GitHubHostAdapter extends GitHostAdapter, GitHostAdapterExtras 
   /** §3y.4: the merge SHA's production deployment (GitHub Deployments; the linked project picks in a monorepo). */
   productionDeployment(sha: string): Promise<{ state: GhDeployState }>
   /** §3y.4: the newest successful production deployment, or null. */
-  latestProductionDeployment(): Promise<{ sha: string; createdAt: string } | null>
+  latestProductionDeployment(): Promise<LatestProductionDeployment | null>
   /** §3y.4: the repo has a deployment by `vercel[bot]` (a Vercel signal without an Infinite connection). */
   vercelDeploymentSeen(): Promise<boolean>
 }
@@ -38,7 +38,7 @@ export interface GitHubHostAdapter extends GitHostAdapter, GitHostAdapterExtras 
 /** The deploy reads a host offers (§3y.4): the GitHub adapter's, or none (another host, or a test fake). */
 export interface DeploymentReader {
   productionDeployment(sha: string): Promise<{ state: GhDeployState }>
-  latestProductionDeployment(): Promise<{ sha: string; createdAt: string } | null>
+  latestProductionDeployment(): Promise<LatestProductionDeployment | null>
   vercelDeploymentSeen(): Promise<boolean>
   setPreviewProject?(projectName: string | null): void
 }

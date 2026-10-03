@@ -38,6 +38,20 @@ describe("renderFrame", () => {
     for (const line of lines) expect(visibleWidth(line)).toBeLessThan(120)
   })
 
+  it("R2-3: a long sub-status (the refused-host reason) wraps in full; it is never cut at 120 characters", () => {
+    const at = "2026-10-03T08:28:40.000Z"
+    const reason =
+      '! infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app is a Vercel preview address (a branch or deployment URL). Give your production address: your own domain or infinite-tag-smoke-site.vercel.app, or choose "It isn\'t live yet".'
+    expect(reason.length).toBeGreaterThan(120)
+    const snapshot = midRunSnapshot({ currentStep: "before", steps: stepRows({ link: { state: "ok" }, agent: { state: "ok" }, before: { state: "running", subs: [{ text: reason, tone: "warn", at }] } }) })
+    for (const width of [80, 120]) {
+      const text = plain(frame({ snapshot, width })).replace(/\s+/g, " ")
+      expect(text, `width ${width}`).toContain("or choose \"It isn't live yet\".")
+      expect(text).not.toContain("collects o …")
+      for (const line of frame({ snapshot, width })) expect(visibleWidth(line)).toBeLessThan(width)
+    }
+  })
+
   it("70 columns: the Learn card is dropped and no line runs past the screen", () => {
     const lines = frame({ width: 70 })
     expect(plain(lines)).toMatchSnapshot()

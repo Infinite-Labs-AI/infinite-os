@@ -202,7 +202,7 @@ describe("the GitHub adapter (§3g.2)", () => {
       deployments: [
         // Vercel's preview of the same SHA is never production.
         { id: 11, sha: SHA, environment: "Preview", creator: "vercel[bot]", created_at: "2026-10-03T05:40:00Z", statuses: [{ state: "success", environment_url: "https://x-git.vercel.app" }] },
-        { id: 12, sha: SHA, environment: "Production", production_environment: false, creator: "vercel[bot]", created_at: "2026-10-03T05:47:00Z", statuses: [{ state: "success", environment_url: "https://site.vercel.app" }, { state: "in_progress" }] },
+        { id: 12, sha: SHA, environment: "Production", production_environment: false, creator: "vercel[bot]", created_at: "2026-10-03T05:47:00Z", statuses: [{ state: "success", environment_url: "https://site-mix177n53-chaos-edge.vercel.app" }, { state: "in_progress" }] },
         { id: 13, sha: OTHER, environment: "Production", production_environment: false, creator: "vercel[bot]", created_at: "2026-10-03T06:10:00Z", statuses: [{ state: "failure" }] }
       ]
     })
@@ -210,7 +210,8 @@ describe("the GitHub adapter (§3g.2)", () => {
     expect(await adapter.productionDeployment(OTHER)).toEqual({ state: "failed" })
     expect(await adapter.productionDeployment("d".repeat(40))).toEqual({ state: "not_found" })
     // The newest SUCCESSFUL production deployment (the failed newer one is skipped).
-    expect(await adapter.latestProductionDeployment()).toEqual({ sha: SHA, createdAt: "2026-10-03T05:47:00Z" })
+    // It carries the deployment URL Vercel wrote (the live smoke's shape), from which the alias candidate comes.
+    expect(await adapter.latestProductionDeployment()).toEqual({ sha: SHA, createdAt: "2026-10-03T05:47:00Z", environmentUrl: "https://site-mix177n53-chaos-edge.vercel.app", environment: "Production" })
     expect(await adapter.vercelDeploymentSeen()).toBe(true)
   })
 

@@ -64,6 +64,7 @@ function setup(options: {
   files?: Record<string, string>
   fsFiles?: Record<string, string>
   defaultBranch?: string | null
+  latestProduction?: Parameters<typeof fakeHost>[2]
   clockStepMs?: number
   ctx?: Partial<import("../contracts/deps.js").WizardContext>
 } = {}): Setup {
@@ -75,7 +76,7 @@ function setup(options: {
   const fs = memoryFs(log, { "/repo/.env": SITE[".env"], ...(options.fsFiles ?? {}) })
   const { ctx, events } = context(state, log, options.ctx ?? {})
   const registry = spyRegistry(log, createJobRegistry({ briefFacts: () => null }))
-  const wizardDeps = deps({ bridge: bridge.client, git: git.git, host: fakeHost(log, options.defaultBranch === undefined ? "main" : options.defaultBranch), checks: checks.checks, installer: fakeInstaller(log), registry, fs: fs.fs })
+  const wizardDeps = deps({ bridge: bridge.client, git: git.git, host: fakeHost(log, options.defaultBranch === undefined ? "main" : options.defaultBranch, options.latestProduction ?? null), checks: checks.checks, installer: fakeInstaller(log), registry, fs: fs.fs })
   if (options.clockStepMs) {
     let now = Date.parse("2026-10-02T09:05:00.000Z")
     wizardDeps.clock = { now: () => new Date((now += options.clockStepMs!)), sleep: async () => {} }
@@ -417,7 +418,7 @@ describe("step before: the live-site address (§3y.1)", () => {
     const s = setup({
       ...unknownHost(),
       fsFiles: {
-        "/repo/public/CNAME": "acme-store.vercel.app\n",
+        "/repo/public/CNAME": "acme-store-git-main-acme.vercel.app\n",
         "/repo/app/layout.tsx": 'export const metadata = { metadataBase: new URL("https://www.acme-store.com") }\n',
         "/repo/public/robots.txt": "User-agent: *\nSitemap: https://acme-store.com/sitemap.xml\n"
       },
@@ -439,15 +440,44 @@ describe("step before: the live-site address (§3y.1)", () => {
 
   it("a typed address that is not a domain, then a preview address, is refused twice and read as 'not live yet'", async () => {
     const asked: Asked = []
-    const s = setup({ ...unknownHost(), ctx: { ask: answering(asked, ["__type__", "not a host", "shop.vercel.app"]) } })
+    const s = setup({ ...unknownHost(), ctx: { ask: answering(asked, ["__type__", "not a host", "shop-git-main-acme.vercel.app"]) } })
     await s.run()
     expect(asked.map((entry) => entry.kind)).toEqual(["single", "text", "text"])
     expect(asked[0]!.payload.default).toBe("__type__")
+    // R2-3: the re-ask carries the refusal's reason (the sub line hides behind the popup).
+    expect(asked[2]!.payload.question).toMatch(/^not a host isn't a domain name /)
     const subs = s.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
     expect(subs).toContain("! not a host isn't a domain name")
-    expect(subs.some((text) => text.startsWith("! shop.vercel.app is a preview-style address"))).toBe(true)
+    expect(subs.some((text) => text.startsWith("! shop-git-main-acme.vercel.app is a Vercel preview address"))).toBe(true)
     expect(s.state.site).toMatchObject({ productionHost: null, source: "answer" })
     expect(s.bridge.sentTests).toEqual([])
+  })
+
+  it("live run 2: the site's Vercel production alias (from GitHub's Production deployment) is offered, accepted and tested", async () => {
+    const asked: Asked = []
+    const s = setup({
+      ...unknownHost(),
+      latestProduction: { sha: "a".repeat(40), createdAt: "2026-10-03T08:20:00Z", environmentUrl: "https://infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app", environment: "Production" },
+      ctx: { ask: answering(asked, ["infinite-tag-smoke-site.vercel.app"]) }
+    })
+    const outcome = await s.run()
+    expect(outcome.kind).toBe("ok")
+    expect(asked[0]!.payload.options!.map((option) => option.label)).toEqual([
+      "infinite-tag-smoke-site.vercel.app  (from your Vercel production deployments)",
+      "Type another address",
+      "It isn't live yet"
+    ])
+    expect(asked[0]!.payload.default).toBe("infinite-tag-smoke-site.vercel.app")
+    expect(s.state.site).toMatchObject({ productionHost: "infinite-tag-smoke-site.vercel.app", source: "answer" })
+    expect(s.bridge.sentTests.map((test) => test.productionHost)).toEqual(["infinite-tag-smoke-site.vercel.app"])
+  })
+
+  it("NEGATIVE: a typed Vercel deployment URL is refused; the production alias typed next is the host", async () => {
+    const asked: Asked = []
+    const s = setup({ ...unknownHost(), ctx: { ask: answering(asked, ["__type__", "infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app", "infinite-tag-smoke-site.vercel.app"]) } })
+    await s.run()
+    expect(asked[2]!.payload.question).toContain("is a Vercel preview address")
+    expect(s.state.site).toMatchObject({ productionHost: "infinite-tag-smoke-site.vercel.app" })
   })
 
   it("--yes never answers it: no ask, no host, no park, nothing saved", async () => {

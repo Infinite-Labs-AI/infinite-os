@@ -4,7 +4,17 @@ import { describe, expect, it } from "vitest"
 
 import type { TagHosting, TagKeys } from "./contracts/bridge.js"
 import { parseWizardArgs } from "./command.js"
-import { askProductionHost, isPreviewShapedHost, parseHostInput, repoHostCandidates, resolveProductionHost } from "./site-host.js"
+import {
+  askProductionHost,
+  candidateLabel,
+  hostRefusalLine,
+  isPreviewShapedHost,
+  isVercelPreviewShape,
+  parseHostInput,
+  repoHostCandidates,
+  resolveProductionHost,
+  vercelProductionAliasFrom
+} from "./site-host.js"
 
 function fsOf(files: Record<string, string>) {
   return { readText: async (path: string) => files[path] ?? null }
@@ -38,7 +48,8 @@ describe("resolveProductionHost (§3y.1 precedence)", () => {
 
   it("NEGATIVE: nothing known → undecided (the one ask), and a preview-shaped flag is never a host", () => {
     expect(resolveProductionHost({ keys: keysWith([]), hosting: hostingWith([]) })).toEqual({ host: null, source: null, decided: false })
-    expect(resolveProductionHost({ keys: keysWith([]), hosting: hostingWith([]), flag: "acme.vercel.app" }).decided).toBe(false)
+    expect(resolveProductionHost({ keys: keysWith([]), hosting: hostingWith([]), flag: "acme-git-main-team.vercel.app" }).decided).toBe(false)
+    expect(resolveProductionHost({ keys: keysWith([]), hosting: hostingWith([]), flag: "acme-a1b2c3d4e-team.vercel.app" }).decided).toBe(false)
   })
 })
 
@@ -49,7 +60,7 @@ describe("parseHostInput", () => {
     expect(parseHostInput("acme.com/pricing")).toEqual({ ok: true, host: "acme.com" })
     expect(parseHostInput("not a host")).toMatchObject({ ok: false, reason: "not_host" })
     expect(parseHostInput("localhost")).toMatchObject({ ok: false, reason: "not_host" })
-    for (const preview of ["shop.vercel.app", "shop.netlify.app", "shop.pages.dev", "app.localhost"]) {
+    for (const preview of ["shop-git-main-acme.vercel.app", "shop-a1b2c3d4e-acme.vercel.app", "a.shop.vercel.app", "shop.netlify.app", "shop.pages.dev", "app.localhost"]) {
       expect(parseHostInput(preview), preview).toMatchObject({ ok: false, reason: "preview" })
       expect(isPreviewShapedHost(preview)).toBe(true)
     }
@@ -62,7 +73,7 @@ describe("repoHostCandidates (hints only; read-only)", () => {
       "/r/apps/web/public/CNAME": "cname-host.com\n",
       "/r/apps/web/src/app/layout.tsx": "export const metadata = { metadataBase: new URL('https://meta-base.com') }",
       "/r/apps/web/next-sitemap.config.js": "module.exports = { siteUrl: 'https://sitemap-host.com' }",
-      "/r/apps/web/public/robots.txt": "Sitemap: https://acme.vercel.app/sitemap.xml\nSitemap: https://robots-host.com/s.xml",
+      "/r/apps/web/public/robots.txt": "Sitemap: https://acme-git-main-team.vercel.app/sitemap.xml\nSitemap: https://robots-host.com/s.xml",
       "/r/apps/web/index.html": '<meta content="https://og-host.com/" property="og:url">',
       "/r/apps/web/package.json": JSON.stringify({ homepage: "https://cname-host.com" }),
       "/r/apps/web/.env": "NEXT_PUBLIC_SITE_URL=https://env-host.com"
@@ -104,11 +115,84 @@ describe("--production-host", () => {
   it("is validated like the typed answer; a bad value is a usage error", () => {
     const ok = parseWizardArgs(["--production-host", "https://Acme.com"], "/r")
     expect(ok.ok && ok.value.options.productionHost).toBe("acme.com")
-    const preview = parseWizardArgs(["--production-host", "acme.vercel.app"], "/r")
+    const preview = parseWizardArgs(["--production-host", "acme-git-main-team.vercel.app"], "/r")
     expect(preview.ok).toBe(false)
-    expect(!preview.ok && preview.message).toContain("preview-style address")
+    expect(!preview.ok && preview.message).toContain("Vercel preview address")
+    const netlify = parseWizardArgs(["--production-host", "acme.netlify.app"], "/r")
+    expect(!netlify.ok && netlify.message).toContain("preview-style address")
+    // A Vercel production alias is the user's explicit answer (live run 2): accepted.
+    const alias = parseWizardArgs(["--production-host", "https://infinite-tag-smoke-site.vercel.app"], "/r")
+    expect(alias.ok && alias.value.options.productionHost).toBe("infinite-tag-smoke-site.vercel.app")
     const bad = parseWizardArgs(["--production-host", "nope"], "/r")
     expect(!bad.ok && bad.message).toContain("isn't a domain name")
     expect(parseWizardArgs(["--production-host"], "/r").ok).toBe(false)
+  })
+})
+
+describe("a Vercel production alias is a production host (live run 2)", () => {
+  it("<project>.vercel.app is accepted; branch aliases, deployment URLs and nested hosts stay preview-shaped", () => {
+    for (const alias of ["infinite-tag-smoke-site.vercel.app", "acme.vercel.app", "acme-chaos-edge.vercel.app", "my-marketing-site.vercel.app"]) {
+      expect(parseHostInput(alias), alias).toEqual({ ok: true, host: alias })
+      expect(isPreviewShapedHost(alias), alias).toBe(false)
+    }
+    // NEGATIVES: Vercel's preview shapes never answer the ask.
+    for (const preview of [
+      "infinite-tag-smoke-site-git-infinite-tag-2026-10-03-chaos-edge.vercel.app",
+      "infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app",
+      "infinite-tag-smoke-site-4v41bifkj-chaos-edge.vercel.app",
+      "www.acme.vercel.app"
+    ]) {
+      expect(isVercelPreviewShape(preview), preview).toBe(true)
+      expect(parseHostInput(preview), preview).toMatchObject({ ok: false, reason: "preview" })
+    }
+  })
+
+  it("a refused Vercel preview names the alias to give instead, in full", () => {
+    const line = hostRefusalLine({ reason: "preview", shown: "infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app" })
+    expect(line).toContain("infinite-tag-smoke-site.vercel.app")
+    expect(line).toContain("Vercel preview address")
+    expect(hostRefusalLine({ reason: "preview", shown: "acme-git-main-team.vercel.app" })).toContain("acme.vercel.app")
+  })
+
+  it("the GitHub Production deployment URL (live smoke shape) names the alias; a monorepo environment names the project", () => {
+    expect(vercelProductionAliasFrom("https://infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app")).toBe("infinite-tag-smoke-site.vercel.app")
+    expect(vercelProductionAliasFrom(null, "Production – web")).toBe("web.vercel.app")
+    // NEGATIVES: a custom domain or an unshaped URL names nothing.
+    expect(vercelProductionAliasFrom("https://acme.com")).toBeNull()
+    expect(vercelProductionAliasFrom("https://acme.vercel.app")).toBeNull()
+    expect(vercelProductionAliasFrom("not a url")).toBeNull()
+    expect(vercelProductionAliasFrom(null, "Production")).toBeNull()
+  })
+
+  it("the alias is offered as a candidate, labelled with where it came from", async () => {
+    const candidates = await repoHostCandidates("/r", ".", fsOf({}), { vercelProductionAlias: "infinite-tag-smoke-site.vercel.app" })
+    expect(candidates).toEqual([{ host: "infinite-tag-smoke-site.vercel.app", source: "vercel_production", file: null }])
+    expect(candidateLabel(candidates[0]!)).toBe("infinite-tag-smoke-site.vercel.app  (from your Vercel production deployments)")
+  })
+})
+
+describe("a refused typed address: the re-ask says why (R2-3)", () => {
+  it("the second text question starts with the refusal's reason; a second refusal is 'not live yet'", async () => {
+    const asked: Array<{ kind: string; payload: { question?: string } }> = []
+    const answers: unknown[] = ["__type__", "acme-git-main-team.vercel.app", "acme.netlify.app"]
+    const ctx = { ask: (async (kind: string, payload: { question?: string }) => {
+      asked.push({ kind, payload })
+      return answers.shift()
+    }) as never }
+    const said: string[] = []
+    expect(await askProductionHost(ctx, [], (text) => said.push(text))).toBeNull()
+    const texts = asked.filter((entry) => entry.kind === "text").map((entry) => entry.payload.question ?? "")
+    expect(texts).toHaveLength(2)
+    expect(texts[0]).toBe("Your live site's address (for example acme.com):")
+    expect(texts[1]).toContain("acme-git-main-team.vercel.app is a Vercel preview address")
+    expect(texts[1]).toContain("acme.vercel.app")
+    expect(texts[1]).toMatch(/Your live site's address \(for example acme\.com\):$/)
+    expect(said).toHaveLength(2)
+  })
+
+  it("a production alias typed after a refusal is the host", async () => {
+    const answers: unknown[] = ["__type__", "acme-a1b2c3d4e-team.vercel.app", "https://acme.vercel.app/"]
+    const ctx = { ask: (async () => answers.shift()) as never }
+    expect(await askProductionHost(ctx, [], () => undefined)).toBe("acme.vercel.app")
   })
 })

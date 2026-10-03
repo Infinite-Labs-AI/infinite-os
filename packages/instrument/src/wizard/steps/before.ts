@@ -47,7 +47,8 @@ import { wizardBranchName } from "../contracts/git-host.js"
 import { wizardGitExtras } from "../../git/index.js"
 import { buildColumn } from "../report.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
-import { askProductionHost, hostDecidedLines, repoHostCandidates, resolveProductionHost } from "../site-host.js"
+import { deploymentReader } from "../../hosts/github.js"
+import { askProductionHost, hostDecidedLines, repoHostCandidates, resolveProductionHost, vercelProductionAliasFrom } from "../site-host.js"
 import { blockingDirtyPaths, dirtyTreeMessage, resetStaleReceipt } from "../leftovers.js"
 import { homedir } from "node:os"
 import {
@@ -198,7 +199,12 @@ export async function decideProductionHost(
     }
     const facts = await deps.host.repoFacts().catch(() => null)
     const homepageUrl = facts && !("unsupported" in facts) ? (facts.homepageUrl ?? null) : null
-    const candidates = await repoHostCandidates(ctx.root, ctx.appRoot, deps.fs, { homepageUrl })
+    // A Vercel site often serves production on `<project>.vercel.app`: the newest GitHub "Production" deployment
+    // names the project (read-only, the same reads `prove` makes later). A candidate only; the user confirms it.
+    const reader = deploymentReader(deps.host)
+    const latest = reader ? await reader.latestProductionDeployment().catch(() => null) : null
+    const vercelProductionAlias = latest ? vercelProductionAliasFrom(latest.environmentUrl ?? null, latest.environment ?? null) : null
+    const candidates = await repoHostCandidates(ctx.root, ctx.appRoot, deps.fs, { homepageUrl, vercelProductionAlias })
     host = await askProductionHost(ctx, candidates, (text, tone) => sub(text, tone))
     source = "answer"
   }

@@ -17,7 +17,8 @@ export const WIZARD_EVENT_ENVELOPE_KEYS = ["v", "t", "at"] as const
 
 /** Text caps and the sub-status throttle (§3d.2). */
 export const EVENT_LIMITS = {
-  subTextMaxChars: 120,
+  /** Live run 2 (R2-3): 120 cut a refusal mid-word; the frame wraps a sub over up to 4 rows instead. */
+  subTextMaxChars: 240,
   statusTextMaxChars: 160,
   narrateTextMaxChars: 120,
   /** step.sub: at most one per this many ms per step… */

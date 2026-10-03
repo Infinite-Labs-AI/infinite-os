@@ -8,8 +8,16 @@
 //   5. else ONE ask in `before`. Repo hints only pre-fill that ask; they never answer it.
 //
 // Honesty rules: a host from the repo is a CANDIDATE the user confirms (never a guess shipped silently); a
-// preview-shaped host (`*.vercel.app`, `*.netlify.app`, `*.pages.dev`, localhost…) is never accepted, so the
-// preview guard and the production host can never disagree; `.env*` files are never read for this.
+// preview-shaped host (a Vercel branch or deployment URL, `*.netlify.app`, `*.pages.dev`, localhost…) is never
+// accepted; `.env*` files are never read for this.
+//
+// Live run 2 (R2-3 of the round): real customers often serve production on their Vercel project's alias
+// `<project>.vercel.app`. That ONE host is accepted when the user names it (an answer, a picked candidate or
+// `--production-host`) and it has no preview shape. Vercel's preview shapes stay refused: a branch alias
+// (`<project>-git-<branch>-<team>.vercel.app`) and a deployment URL (`<project>-<9-char hash>-<team>.vercel.app`).
+// The GitHub "Production" deployment's URL (always a deployment URL) names the project, so the wizard offers
+// `<project>.vercel.app` as a candidate. The preview guard exempts exactly the accepted host (exempt first, D3),
+// so every other `*.vercel.app` stays silent.
 import { join } from "node:path"
 
 import { ASK_CANCELLED, ASK_TIMEOUT } from "./contracts/asks.js"
@@ -26,10 +34,81 @@ export const HOST_TEXT_QUESTION = "Your live site's address (for example acme.co
 export const HOST_TYPE_VALUE = "__type__"
 export const HOST_NONE_VALUE = "__none__"
 
-/** True for a host the §3h.9 deny list silences (a preview or a local address). */
-export function isPreviewShapedHost(host: string): boolean {
+export const VERCEL_APP_SUFFIX = ".vercel.app"
+
+/** True for a host the §3h.9 deny list matches (a preview, a local address, or any `*.vercel.app`). */
+export function isDenyListedHost(host: string): boolean {
   const normalized = normalizeHost(host)
   return HOST_DENY_V1.deny.exact.includes(normalized) || HOST_DENY_V1.deny.suffix.some((suffix) => normalized.endsWith(suffix))
+}
+
+/** One `<label>.vercel.app` label, or null for any other host (incl. a nested `a.b.vercel.app`). */
+function vercelLabel(host: string): string | null {
+  const normalized = normalizeHost(host)
+  if (!normalized.endsWith(VERCEL_APP_SUFFIX)) return null
+  const label = normalized.slice(0, -VERCEL_APP_SUFFIX.length)
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label) ? label : null
+}
+
+/**
+ * Vercel's deployment-URL label: `<project>-<hash>-<team>`, the hash being 9 lowercase letters/digits with at least
+ * one digit, between the project and the team. Returns the project part, or null when the label has no such shape.
+ * The LAST hash-shaped segment is the hash (a team slug never holds a 9-character segment with a digit in practice).
+ */
+export function vercelDeploymentProject(label: string): string | null {
+  const parts = label.split("-")
+  for (let index = parts.length - 2; index >= 1; index -= 1) {
+    const part = parts[index]!
+    if (/^[a-z0-9]{9}$/.test(part) && /[0-9]/.test(part)) return parts.slice(0, index).join("-")
+  }
+  return null
+}
+
+/** A Vercel PREVIEW shape: a branch alias (`-git-`), a deployment URL (`-<hash>-`), or a nested `*.vercel.app`. */
+export function isVercelPreviewShape(host: string): boolean {
+  const normalized = normalizeHost(host)
+  if (!normalized.endsWith(VERCEL_APP_SUFFIX)) return false
+  const label = vercelLabel(normalized)
+  if (label === null) return true
+  return label.includes("-git-") || vercelDeploymentProject(label) !== null
+}
+
+/** A `*.vercel.app` host that can be a project's production alias: one label and no preview shape. */
+export function isVercelProductionAliasShape(host: string): boolean {
+  const normalized = normalizeHost(host)
+  return normalized.endsWith(VERCEL_APP_SUFFIX) && !isVercelPreviewShape(normalized)
+}
+
+/**
+ * True for a host that can never be the production host: deny-listed (§3h.9) and NOT a Vercel production alias
+ * shape. `acme.vercel.app` is not preview-shaped; `acme-git-main-team.vercel.app`, `acme-a1b2c3d4e-team.vercel.app`,
+ * `*.netlify.app`, `*.pages.dev` and localhost are.
+ */
+export function isPreviewShapedHost(host: string): boolean {
+  return isDenyListedHost(host) && !isVercelProductionAliasShape(host)
+}
+
+/**
+ * The production alias a GitHub "Production" deployment URL names: Vercel writes the deployment URL
+ * (`<project>-<hash>-<team>.vercel.app`) as `environment_url`, never the alias, so the alias is `<project>.vercel.app`.
+ * A monorepo's environment `Production – <project>` names the project directly. Null when neither tells.
+ */
+export function vercelProductionAliasFrom(environmentUrl: string | null, environment: string | null = null): string | null {
+  const named = environment ? /^production\s*[–-]\s*([a-z0-9][a-z0-9._-]*)$/i.exec(environment.trim())?.[1] : undefined
+  let project: string | null = named ? named.toLowerCase().replace(/[._]/g, "-") : null
+  if (project === null && environmentUrl) {
+    let hostname: string
+    try {
+      hostname = new URL(environmentUrl).hostname
+    } catch {
+      return null
+    }
+    const label = vercelLabel(hostname)
+    project = label ? vercelDeploymentProject(label) : null
+  }
+  if (!project) return null
+  const alias = `${project}${VERCEL_APP_SUFFIX}`
+  return HOST_PATTERN.test(alias) && isVercelProductionAliasShape(alias) ? alias : null
 }
 
 /**
@@ -54,11 +133,16 @@ export function parseHostInput(raw: string): { ok: true; host: string } | { ok: 
   return { ok: true, host }
 }
 
-/** The line a refused typed address gets (DECISIONS §1.1 copy). */
+/** The line a refused typed address gets (DECISIONS §1.1 copy; a Vercel preview names the alias to give instead). */
 export function hostRefusalLine(refusal: { reason: "not_host" | "preview"; shown: string }): string {
-  return refusal.reason === "not_host"
-    ? `! ${refusal.shown} isn't a domain name`
-    : `! ${refusal.shown} is a preview-style address (Vercel, Netlify, Cloudflare Pages); Infinite collects only on your own domain. Add one in your host, or choose "It isn't live yet".`
+  if (refusal.reason === "not_host") return `! ${refusal.shown} isn't a domain name`
+  if (refusal.shown.endsWith(VERCEL_APP_SUFFIX)) {
+    const label = vercelLabel(refusal.shown)
+    const project = label ? (label.includes("-git-") ? label.slice(0, label.indexOf("-git-")) : vercelDeploymentProject(label)) : null
+    const alias = project ? `${project}${VERCEL_APP_SUFFIX}` : "<project>.vercel.app"
+    return `! ${refusal.shown} is a Vercel preview address (a branch or deployment URL). Give your production address: your own domain or ${alias}, or choose "It isn't live yet".`
+  }
+  return `! ${refusal.shown} is a preview-style address (Netlify, Cloudflare Pages or a local address); Infinite collects only on your live address. Add your domain in your host, or choose "It isn't live yet".`
 }
 
 export interface ResolvedHost {
@@ -101,11 +185,12 @@ export type HostCandidateSource =
   | "html_canonical"
   | "package_homepage"
   | "github_homepage"
+  | "vercel_production"
 
 export interface HostCandidate {
   host: string
   source: HostCandidateSource
-  /** Repo-relative file the hint came from; null for the GitHub repo's homepage. */
+  /** Repo-relative file the hint came from; null for the GitHub repo's homepage and Vercel's production deployment. */
   file: string | null
 }
 
@@ -138,7 +223,7 @@ export async function repoHostCandidates(
   root: string,
   appRoot: string,
   fs: Pick<WizardFs, "readText">,
-  repo: { homepageUrl?: string | null } | null = null
+  repo: { homepageUrl?: string | null; vercelProductionAlias?: string | null } | null = null
 ): Promise<HostCandidate[]> {
   const app = appRoot === "." || appRoot === "" ? "" : appRoot
   const rel = (file: string) => (app ? `${app}/${file}` : file)
@@ -216,6 +301,8 @@ export async function repoHostCandidates(
   }
   // github_homepage
   if (repo?.homepageUrl) push(hostOfUrl(repo.homepageUrl), "github_homepage", null)
+  // vercel_production: the alias the repo's newest successful GitHub "Production" deployment names (Vercel's).
+  if (repo?.vercelProductionAlias) push(repo.vercelProductionAlias, "vercel_production", null)
   return out
 }
 
@@ -224,7 +311,13 @@ export async function repoHostCandidates(
 // ---------------------------------------------------------------------------------------------
 
 export function candidateLabel(candidate: HostCandidate): string {
-  return `${candidate.host}  (from ${candidate.file ?? "your GitHub repo"})`
+  const from = candidate.file ?? (candidate.source === "vercel_production" ? "your Vercel production deployments" : "your GitHub repo")
+  return `${candidate.host}  (from ${from})`
+}
+
+/** The re-asked text question: the refusal's reason first, so the user sees why (R2-3: it went to a hidden sub line). */
+export function hostReaskQuestion(refusalLine: string): string {
+  return `${refusalLine.replace(/^! /, "")} ${HOST_TEXT_QUESTION}`
 }
 
 /**
@@ -248,18 +341,24 @@ export async function askProductionHost(
     default: shown[0]?.host ?? HOST_TYPE_VALUE
   })
   if (answer === ASK_CANCELLED || answer === ASK_TIMEOUT || answer === HOST_NONE_VALUE) return null
+  let question = HOST_TEXT_QUESTION
+  let attempts = 2
   if (answer !== HOST_TYPE_VALUE) {
     const parsed = parseHostInput(String(answer))
     if (parsed.ok) return parsed.host
-    say(hostRefusalLine(parsed), "warn")
-    return null
+    const line = hostRefusalLine(parsed)
+    say(line, "warn")
+    question = hostReaskQuestion(line)
+    attempts = 1
   }
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const typed = await ctx.ask("text", { question: HOST_TEXT_QUESTION, maxLength: 253 })
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const typed = await ctx.ask("text", { question, maxLength: 253 })
     if (typed === ASK_CANCELLED || typed === ASK_TIMEOUT) return null
     const parsed = parseHostInput(String(typed))
     if (parsed.ok) return parsed.host
-    say(hostRefusalLine(parsed), "warn")
+    const line = hostRefusalLine(parsed)
+    say(line, "warn")
+    question = hostReaskQuestion(line)
   }
   return null
 }

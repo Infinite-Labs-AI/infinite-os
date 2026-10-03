@@ -13,7 +13,7 @@ import { bridgeErrorCode, keysOnly, loadPlanApprovals, loadPlanInputs, planCandi
 import { bridgeFailureLine, bridgeFailureOutcome, bridgeFailureState, hardStopOutcome } from "../../bridge/outcomes.js"
 import { makeEditRecord } from "../../install/edits.js"
 import { isProofBody, PROOF_FILE_PLAN_LINE_ID, proofFileTarget } from "../../install/proof-file.js"
-import { resolveProductionHost } from "../site-host.js"
+import { isPreviewShapedHost, resolveProductionHost } from "../site-host.js"
 import { GITIGNORE_FENCE_START } from "../../harness/outputs.js"
 import { wizardGitExtras } from "../../git/index.js"
 import type { InstallerApplyResult } from "../contracts/jobs.js"
@@ -50,7 +50,12 @@ function denied(host: string): boolean {
  */
 export function siteSourceHosts(keys: TagKeys, hint: string | null, observed: string | null): string[] {
   const listed = keys.infinite.productionHosts.map(normalizeHost).filter((host) => host !== "")
-  const extra = [...(hint ? [hint] : []), ...(observed ? [observed] : [])].map(normalizeHost).filter((host) => host !== "" && !denied(host))
+  // The run's resolved production host (`hint`) was accepted by `parseHostInput` / Infinite: a Vercel production
+  // alias (`acme.vercel.app`) passes; a preview shape never does. The observed host joins only when it is not
+  // deny-shaped, or when it IS that same accepted host.
+  const run = hint && !isPreviewShapedHost(hint) ? [normalizeHost(hint)] : []
+  const seen = observed ? normalizeHost(observed) : ""
+  const extra = [...run, ...(seen && (!denied(seen) || run.includes(seen)) ? [seen] : [])].filter((host) => host !== "")
   return [...new Set([...listed, ...extra])].slice(0, MAX_SITE_SOURCE_HOSTS)
 }
 
