@@ -505,6 +505,8 @@ const DELETE_PROJECT_WORKSPACE_TABLES: readonly string[] = [
   "stripe_invoice_lines",
   "stripe_invoices",
   "stripe_invoice_sync_state",
+  "stripe_checkout_sessions",
+  "stripe_checkout_session_sync_state",
   "stripe_prices",
   "stripe_products",
   "stripe_subscriptions",

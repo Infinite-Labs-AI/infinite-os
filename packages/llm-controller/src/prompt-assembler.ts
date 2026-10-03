@@ -268,6 +268,18 @@ function appRoutingGuidance(availableLike: (name: string) => boolean, unionTurn:
       meta
         ? "- 'Leads', 'new leads' or 'audit leads' -> list_audit_leads: an audit lead is its own step, never a signup or registration. Meta's 'leads' result is Meta's claim; read it with get_meta_performance only when the person asks about Meta ads."
         : "- 'Leads', 'new leads' or 'audit leads' -> list_audit_leads: an audit lead is its own step, never a signup or registration."
+    ] : []),
+    // The engine has no X metrics or views: the user's own posts and the creators they track are the app's reads.
+    ...(availableLike("list_my_x_posts") || availableLike("search_x_corpus") ? [
+      "- X (Twitter): "
+        + [
+          availableLike("list_my_x_posts") ? "the user's own posts ('my best tweet', 'my latest post', their engagement) -> list_my_x_posts" : undefined,
+          availableLike("search_x_corpus") ? "tracked creators and their posts -> search_x_corpus" : undefined
+        ].filter(Boolean).join("; ")
+        + ". The engine has no X metrics; never answer an X question from run_metric_query or run_breakdown_query, and never call X disconnected or not syncing because of that."
+    ] : []),
+    ...(availableLike("report_capability_gap") ? [
+      "- When the honest answer is that you can't do what was asked (no tool, metric or data for it), call report_capability_gap with what was asked before you reply, then say so plainly."
     ] : [])
   ];
 }

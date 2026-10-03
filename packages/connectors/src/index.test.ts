@@ -10824,13 +10824,32 @@ function oauthFakeDb(options: {
   };
 }
 
+type MockFetchHandler = (url: string, init: RequestInit) => Response | Promise<Response>;
+
+// Every Stripe sync now also lists `/v1/checkout/sessions` (stripe-checkout-sessions.ts). Handlers
+// written before that lane model an account with NO Checkout sessions; only a handler registered
+// here sees those requests itself.
+const CHECKOUT_SESSION_AWARE_HANDLERS = new WeakSet<MockFetchHandler>();
+function servesCheckoutSessions(handler: MockFetchHandler): MockFetchHandler {
+  CHECKOUT_SESSION_AWARE_HANDLERS.add(handler);
+  return handler;
+}
+
 async function withMockFetch(
-  handler: (url: string, init: RequestInit) => Response | Promise<Response>,
+  handler: MockFetchHandler,
   fn: () => Promise<void>
 ) {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
-    handler(String(input), init ?? {})) as typeof fetch;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (
+      !CHECKOUT_SESSION_AWARE_HANDLERS.has(handler)
+      && new URL(url).pathname === "/v1/checkout/sessions"
+    ) {
+      return Promise.resolve(jsonResponse({ object: "list", data: [], has_more: false }));
+    }
+    return handler(url, init ?? {});
+  }) as typeof fetch;
   try {
     await fn();
   } finally {
@@ -11445,20 +11464,74 @@ function stripeCredentialDb(): InfiniteOsDb {
 describe("Stripe connect-time permission probe", () => {
   it("probes every endpoint the sync reads and passes when the key covers them all", async () => {
     const paths: string[] = [];
-    await withMockFetch(async (url) => {
+    let result: unknown;
+    await withMockFetch(servesCheckoutSessions(async (url) => {
       paths.push(new URL(url).pathname);
       return jsonResponse({ data: [], has_more: false });
-    }, async () => {
-      await expect(
-        connectorFor("stripe").testConnection(stripeCredentialDb(), request("stripe"))
-      ).resolves.toMatchObject({ ok: true, mode: "live", provider: "stripe" });
+    }), async () => {
+      result = await connectorFor("stripe").testConnection(stripeCredentialDb(), request("stripe"));
     });
+    expect(result).toEqual({ ok: true, mode: "live", provider: "stripe" });
     expect(paths.sort()).toEqual([
+      "/v1/checkout/sessions",
       "/v1/customers",
       "/v1/events",
       "/v1/invoices",
       "/v1/subscriptions"
     ]);
+  });
+
+  it("ADMITS a key missing Checkout Sessions: Read and returns the typed capability gap", async () => {
+    await withMockFetch(servesCheckoutSessions(async (url) => {
+      if (url.includes("/v1/checkout/sessions")) {
+        return errorResponse(stripeMorePermissionsBody("Checkout Sessions", "checkout_session_read"), 403);
+      }
+      return jsonResponse({ data: [], has_more: false });
+    }), async () => {
+      await expect(
+        connectorFor("stripe").testConnection(stripeCredentialDb(), request("stripe"))
+      ).resolves.toEqual({
+        ok: true,
+        mode: "live",
+        provider: "stripe",
+        capabilityGaps: [{
+          capability: "stripe_checkout_sessions",
+          reason: "missing_permission",
+          permission: "Checkout Sessions: Read"
+        }]
+      });
+    });
+  });
+
+  it("still refuses a key missing a REQUIRED permission, even when Checkout is missing too", async () => {
+    await withMockFetch(servesCheckoutSessions(async (url) => {
+      if (url.includes("/v1/checkout/sessions")) {
+        return errorResponse(stripeMorePermissionsBody("Checkout Sessions", "checkout_session_read"), 403);
+      }
+      if (url.includes("/v1/events")) {
+        return errorResponse(stripeMorePermissionsBody("Events", "event_read"), 403);
+      }
+      return jsonResponse({ data: [], has_more: false });
+    }), async () => {
+      await expect(
+        connectorFor("stripe").testConnection(stripeCredentialDb(), request("stripe"))
+      ).rejects.toThrow("Stripe restricted key is missing permission: Events: Read.");
+    });
+  });
+
+  it("fails the probe on a NON-permission Checkout failure instead of reporting a gap", async () => {
+    await withMockFetch(servesCheckoutSessions(async (url) => {
+      if (url.includes("/v1/checkout/sessions")) {
+        return errorResponse({ error: { message: "boom", type: "api_error" } }, 400);
+      }
+      return jsonResponse({ data: [], has_more: false });
+    }), async () => {
+      const failure = await connectorFor("stripe")
+        .testConnection(stripeCredentialDb(), request("stripe"))
+        .then(() => null, (error: unknown) => error as Error);
+      expect(failure).not.toBeNull();
+      expect(failure?.message).toContain("/v1/checkout/sessions");
+    });
   });
 
   it("rejects a key missing Events: Read with a clean, actionable message", async () => {
