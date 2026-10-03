@@ -8,6 +8,7 @@ import type { AnswerViewV1 } from "@infinite-os/types";
 
 import { terminalText } from "../../desktop/terminal-text.js";
 import type { Theme } from "../theme.js";
+import { paneWidths } from "../views/layout.js";
 import {
   padSegments,
   paintSegments,
@@ -163,13 +164,26 @@ export function askedSource(views: readonly Pick<AnswerViewV1, "state" | "proven
 }
 
 /** A thin rule across the width, in the `line` grey. */
-export function ruleLine(width: number, theme: Theme): string {
-  return paintSegments([["line", "─".repeat(Math.max(1, Math.floor(width)))]], theme);
+export function ruleLine(width: number, theme: Theme, mark?: RuleMark | null): string {
+  const total = Math.max(1, Math.floor(width));
+  if (!mark) {
+    return paintSegments([["line", "─".repeat(total)]], theme);
+  }
+  // The focused pane's part of the rule (live L8): heavy, in the accent, so it reads without colour too.
+  const from = Math.max(0, Math.min(total, Math.floor(mark.from)));
+  const to = Math.max(from, Math.min(total, Math.floor(mark.to)));
+  return paintSegments([["line", "─".repeat(from)], ["cyan", "━".repeat(to - from)], ["line", "─".repeat(total - to)]], theme);
+}
+
+/** The columns of the rule under the top bar that mark the pane the keys are on. */
+export interface RuleMark {
+  from: number;
+  to: number;
 }
 
 /** The top bar and the rule under it, painted at the theme's tier. */
-export function topBarLines(data: TopBarData | undefined, width: number, theme: Theme): string[] {
-  return [paintSegments(topBarSegments(data, width), theme), ruleLine(width, theme)];
+export function topBarLines(data: TopBarData | undefined, width: number, theme: Theme, mark?: RuleMark | null): string[] {
+  return [paintSegments(topBarSegments(data, width), theme), ruleLine(width, theme, mark)];
 }
 
 /** `─ Steps ─────`: the rule the Steps strip hangs from (the boot frame draws it with no steps). */
@@ -190,22 +204,15 @@ export function bootBodyLines(width: number, theme: Theme, rows: number = BOOT_B
 }
 
 /**
- * The split layout's threshold (River, 2026-10-02: the answer and its details
- * sit side by side at 120 columns and up). Mirrors R2's `SPLIT_MIN_COLUMNS` in
- * views/layout.ts; use that one once both lanes are merged.
- */
-const BOOT_SPLIT_MIN_COLUMNS = 120;
-
-/**
- * One row of the boot frame's empty answer area. In the split layout it is the
- * empty answer pane (28% of the width, clamped to 26–40 columns, as the
- * layout's `paneWidths`) and the separator's `│`; one column, a blank row.
+ * One row of the boot frame's empty answer area. In the split layout (from
+ * 80 columns, as r4's `frame()` and the turn layout's `paneWidths`) it is the
+ * empty answer pane (28% of the width, clamped to 26–40 columns) and the
+ * separator's `│`; one column, a blank row.
  */
 function bootAnswerRow(width: number, theme: Theme): string {
-  const total = Math.max(1, Math.floor(width));
-  if (total < BOOT_SPLIT_MIN_COLUMNS) {
+  const panes = paneWidths(width);
+  if (!panes.wide) {
     return " ";
   }
-  const answerWidth = Math.max(26, Math.min(40, Math.floor(total * 0.28)));
-  return paintSegments([["", " ".repeat(answerWidth + 1)], ["line", "│"]], theme);
+  return paintSegments([["", " ".repeat(panes.left + 1)], ["line", "│"]], theme);
 }

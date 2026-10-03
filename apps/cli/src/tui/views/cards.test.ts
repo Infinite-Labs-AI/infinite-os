@@ -15,7 +15,7 @@ import { sgrParams } from "../style/sgr.js";
 import type { Token } from "../style/tokens.js";
 import { DEFAULT_THEME } from "../theme.js";
 import { approvalRender, CARD_UI_START, cardKeyStep, type ApprovalRenderCtx, type CardUiState } from "./approval.js";
-import { cardBox, chipRows, fieldRows, beforeAfter } from "./card.js";
+import { cardBox, chipRows, fieldRows, beforeAfter, paragraphIn } from "./card.js";
 import { viewKeyFacts } from "./focus.js";
 import { renderView } from "./registry.js";
 import type { ViewRenderCtx } from "./types.js";
@@ -150,26 +150,26 @@ function decode(raw: Record<string, unknown>): AnswerViewV1 {
 }
 
 const PAUSE_BODY = {
-  target: { kind: "ad", id: "ad_hook_b", label: "Hook B · founder POV" },
+  target: { kind: "ad", id: "ad_demo_b", label: "Demo B · sample copy" },
   rows: [{ label: "status", before: "on", after: "PAUSED" }],
   effect: "Stops spending",
   warnings: []
 };
 const PAUSE_APPROVAL = {
   kind: "card", turnId: "turn_r4", handle: "h_pause",
-  title: "Pause ad “Hook B · founder POV”?",
+  title: "Pause ad “Demo B · sample copy”?",
   summary: "Stops this ad's spend until you turn it back on.",
   confirmLabel: "Pause", dismissLabel: "Dismiss",
-  doneTitle: "Paused ad “Hook B · founder POV”",
-  rows: [{ label: "Ad", value: "Hook B · founder POV" }],
+  doneTitle: "Paused ad “Demo B · sample copy”",
+  rows: [{ label: "Ad", value: "Demo B · sample copy" }],
   expiresAt: "2026-10-01T10:59:00Z"
 };
 
 function pause(over: Record<string, unknown> = {}): AnswerViewV1 {
   return decode({
-    kind: "change", tool: "propose_pause_entity", title: "Pause Hook B", state: "needs_yes",
+    kind: "change", tool: "propose_pause_entity", title: "Pause Demo B", state: "needs_yes",
     provenance: { source: "Meta · ad", via: "our_db" },
-    appLink: { place: "ads.meta", label: "open in Meta Ads", params: { ad: "ad_hook_b" } },
+    appLink: { place: "ads.meta", label: "open in Meta Ads", params: { ad: "ad_demo_b" } },
     body: PAUSE_BODY, approval: PAUSE_APPROVAL, ...over
   });
 }
@@ -195,15 +195,16 @@ describe("card parts (r4 boxed(), lbl(), K(), PK())", () => {
   });
 
   it("a title too long for the border is cut so the box always closes: ` ─┐` stays (run-r2 MUST 3)", () => {
-    const fits = cardBox("Paused ad “Hook B” · Agent proposed · You approved", [], 60, "green", { color: true, theme })[0]!;
-    expect(segs(fits)).toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B” · Agent proposed · You approved"], ["", " "], ["green", "─────┐"]]);
-    const long = "Paused ad “Hook B · founder POV” · Agent proposed · You approved";
-    // At 60 the title passes the border: it is cut to the card width less 6 and ends in "…", then ` ─┐`.
+    const fits = cardBox("Paused ad “Demo B” · Agent proposed · You approved", [], 60, "green", { color: true, theme })[0]!;
+    expect(segs(fits)).toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B” · Agent proposed · You approved"], ["", " "], ["green", "─────┐"]]);
+    const long = "Paused ad “Demo B · sample copy” · Agent proposed · You approved";
+    // At 60 the title passes the border: it is cut within the card width less 6, at a word's end
+    // (a separator left at the cut goes with it), and ends in "…", then its rule and `┐`.
     expect(segs(cardBox(long, [], 60, "green", { color: true, theme })[0]!))
-      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B · founder POV” · Agent proposed · Y…"], ["", " "], ["green", "─┐"]]);
-    // At 69 the title fits but its rule would not: it is cut by one more cell, so the corner still shows.
+      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed …"], ["", " "], ["green", "────┐"]]);
+    // At 69 the title fits but its rule would not: it is cut, at a word's end, so the corner still shows.
     expect(segs(cardBox(long, [], 69, "green", { color: true, theme })[0]!))
-      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B · founder POV” · Agent proposed · You approv…"], ["", " "], ["green", "─┐"]]);
+      .toEqual([["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed · You …"], ["", " "], ["green", "───────┐"]]);
     for (const width of [20, 40, 60, 69, 74]) {
       const top = cardBox(long, [], width, "green", { color: true, theme })[0]!;
       expect(displayWidth(top)).toBe(width);
@@ -228,8 +229,8 @@ describe("card parts (r4 boxed(), lbl(), K(), PK())", () => {
 
   it("field labels pad to at most 14 (r4 9–14): a longer label sits on its own row, the value under the column (run-2 N6)", () => {
     const plain = { color: false, theme };
-    expect(fieldRows([{ label: "Ad", value: "Hook A" }, { label: "Spend, last 7 days", value: "$40.00" }], 60, plain)).toEqual([
-      "Ad       Hook A",
+    expect(fieldRows([{ label: "Ad", value: "Demo A" }, { label: "Spend, last 7 days", value: "$40.00" }], 60, plain)).toEqual([
+      "Ad       Demo A",
       "Spend, last 7 days",
       "         $40.00"
     ]);
@@ -261,7 +262,7 @@ describe("the approval card, as r4 draws it", () => {
     const render = approvalRender(view, cardCtx({ width: 69 }));
     const { blank, bottom } = box(69, "amber");
     expect(cardRows(render.lines).map(segs)).toEqual([
-      [["amber", "┌─"], ["", " "], ["b", "Pause ad “Hook B · founder POV”?"], ["", " "], ["amber", "────────────────────────────────┐"]],
+      [["amber", "┌─"], ["", " "], ["b", "Pause ad “Demo B · sample copy”?"], ["", " "], ["amber", "────────────────────────────────┐"]],
       row(69, "amber", ["dim", "status"], ["", "   on "], ["dim", "→"], ["", " "], ["b", "PAUSED"]),
       blank,
       row(69, "amber", ["pk", " p "], ["", " "], ["b", "Pause"], ["", "   "], ["key", " n "], ["", " dismiss"]),
@@ -276,7 +277,7 @@ describe("the approval card, as r4 draws it", () => {
     const render = approvalRender(pause(), cardCtx({ width: 100, caps: OPEN }));
     const { blank, bottom } = box(74, "amber");
     expect(cardRows(render.lines).map(segs)).toEqual([
-      [["amber", "┌─"], ["", " "], ["b", "Pause ad “Hook B · founder POV”?"], ["", " "], ["amber", "─────────────────────────────────────┐"]],
+      [["amber", "┌─"], ["", " "], ["b", "Pause ad “Demo B · sample copy”?"], ["", " "], ["amber", "─────────────────────────────────────┐"]],
       row(74, "amber", ["dim", "status"], ["", "   on "], ["dim", "→"], ["", " "], ["b", "PAUSED"]),
       blank,
       row(74, "amber", ["pk", " p "], ["", " "], ["b", "Pause"], ["", "   "], ["key", " n "], ["", " dismiss   "], ["key", " o "], ["", " open in Meta Ads"]),
@@ -289,11 +290,11 @@ describe("the approval card, as r4 draws it", () => {
   it("the head and the source line sit above the card, then a blank row (flow-pause-01)", () => {
     const render = approvalRender(pause(), cardCtx());
     const plain = render.lines.map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
-    expect(plain[0]).toContain("Pause Hook B");
+    expect(plain[0]).toContain("Pause Demo B");
     expect(plain[0]).toContain("▣ Needs your OK");
     expect(segs(render.lines[1]!)).toEqual([["dim", "Meta · ad"]]);
     expect(plain[2]).toBe("");
-    expect(plain[3]!.startsWith("┌─ Pause ad “Hook B · founder POV”? ")).toBe(true);
+    expect(plain[3]!.startsWith("┌─ Pause ad “Demo B · sample copy”? ")).toBe(true);
     // The border carries approval.title, never the tool's name.
     expect(plain.join("\n")).not.toContain("propose_pause_entity");
   });
@@ -301,7 +302,7 @@ describe("the approval card, as r4 draws it", () => {
   it("the card does not repeat what its title says: no target line, no Ad row, no effect line", () => {
     const plain = approvalRender(pause(), cardCtx()).lines.map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
     const inside = plain.slice(plain.findIndex((line) => line.startsWith("┌")));
-    expect(inside.join("\n")).not.toMatch(/│ Hook B · founder POV/u);
+    expect(inside.join("\n")).not.toMatch(/│ Demo B · sample copy/u);
     expect(inside.join("\n")).not.toMatch(/│ Ad /u);
     expect(inside.join("\n")).not.toContain("Stops spending");
     expect(inside.join("\n")).not.toContain("expires");
@@ -313,6 +314,18 @@ describe("the approval card, as r4 draws it", () => {
     const plain = approvalRender(view, cardCtx({ ui })).lines.map((line) => line.replace(/\u001b\[[0-9;]*m/gu, "")).join("\n");
     expect(plain).toContain("│ Stops this ad's spend until you turn it back on.");
     expect(plain).toContain("│ expires Oct 1, 10:59");
+  });
+
+  it("while ? is open the chip says `? hide`, and `? what it does` again once closed (live run-4 N12)", () => {
+    const view = pause({ appLink: undefined });
+    const closed = approvalRender(view, cardCtx({ width: 69 }));
+    const open = cardKeyStep(resolveKey("?", {} as Key, closed.keyCtx), closed, CARD_UI_START).ui;
+    const opened = approvalRender(view, cardCtx({ width: 69, ui: open }));
+    const rows = cardRows(opened.lines);
+    expect(segs(rows[rows.length - 2]!)).toEqual(row(69, "amber", ["key", " ? "], ["", " "], ["dim", "hide"]));
+    expect(opened.lines.join("\n")).not.toContain("what it does");
+    const shut = cardKeyStep(resolveKey("?", {} as Key, opened.keyCtx), opened, open).ui;
+    expect(approvalRender(view, cardCtx({ width: 69, ui: shut })).lines.join("\n")).toContain("what it does");
   });
 
   it("a generic write (target pending_write) shows the app's rows as label  value", () => {
@@ -361,18 +374,18 @@ describe("the approval card, as r4 draws it", () => {
       appLink: { place: "ads.meta", label: "previews", params: { adset: "adset_broad" } },
       body: {
         tree: [{
-          level: "campaign", name: "Infinite trials", fields: [], status: "existing",
+          level: "campaign", name: "Sample campaign", fields: [], status: "existing",
           children: [{
-            level: "adset", name: "Broad · US · 25–54", fields: [], status: "existing",
+            level: "adset", name: "Sample ad set", fields: [], status: "existing",
             children: ["Explained", "Your audit", "3 fixes"].map((name) => ({ level: "ad", name, fields: [], status: "new", children: [] }))
           }]
         }],
         picturesInApp: true
       },
       approval: {
-        ...PAUSE_APPROVAL, handle: "h_launch", title: "Launch 3 ads into “Broad · US · 25–54”?", summary: "Creates 3 paused ads in this ad set.",
+        ...PAUSE_APPROVAL, handle: "h_launch", title: "Launch 3 ads into “Sample ad set”?", summary: "Creates 3 paused ads in this ad set.",
         confirmLabel: "Launch 3 ads", effect: "Lands PAUSED on Meta — nothing spends until you activate it.",
-        rows: [{ label: "Ad set", value: "Broad · US · 25–54" }]
+        rows: [{ label: "Ad set", value: "Sample ad set" }]
       }
     });
     const rows = cardRows(approvalRender(view, cardCtx({ caps: OPEN })).lines).map(segs);
@@ -380,14 +393,16 @@ describe("the approval card, as r4 draws it", () => {
     expect(rows.slice(1, 8)).toEqual([
       row(74, "amber", ["dim", "Lands PAUSED on Meta — nothing spends until you activate it."]),
       blank,
-      row(74, "amber", ["", "Campaign  "], ["b", "Infinite trials"]),
-      row(74, "amber", ["", "└ Ad set  "], ["b", "Broad · US · 25–54"]),
+      row(74, "amber", ["", "Campaign  "], ["b", "Sample campaign"]),
+      row(74, "amber", ["", "└ Ad set  "], ["b", "Sample ad set"]),
       row(74, "amber", ["", "  └ Ads   "], ["gb", "NEW"], ["", " "], ["b", "Explained · Your audit · 3 fixes"]),
       blank,
       // r4 says "See the Facebook previews in the app"; the terminal keeps its generic words.
       row(74, "amber", ["blue", "↗"], ["", " Pictures show in the app.  "], ["dim", "(o)"])
     ]);
-    expect(rows[9]).toEqual(row(74, "amber", ["pk", " l "], ["", " "], ["b", "Launch 3 ads"], ["", "   "], ["key", " n "], ["", " dismiss   "], ["key", " o "], ["", " previews"]));
+    // r4 view-07 draws `o previews` here; the card's `o` chip says what the bar says (live T4, one o label):
+    // `open in <place>` when the link names itself so, else `open` (views/open-target.ts openKeyLabel).
+    expect(rows[9]).toEqual(row(74, "amber", ["pk", " l "], ["", " "], ["b", "Launch 3 ads"], ["", "   "], ["key", " n "], ["", " dismiss   "], ["key", " o "], ["", " open"]));
   });
 });
 
@@ -469,8 +484,8 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     const rows = cardRows(detail(view, { width: 69, caps: OPEN })).map(segs);
     const { blank, bottom } = box(69, "green");
     expect(rows).toEqual([
-      // r4 overruns the 69-wide card by one cell here (N2); the CLI cuts the title so the box closes (run-r2 MUST 3).
-      [["green", "┌─"], ["", " "], ["b", "Paused ad “Hook B · founder POV” · Agent proposed · You approv…"], ["", " "], ["green", "─┐"]],
+      // r4 overruns the 69-wide card by one cell here (N2); the CLI cuts the title at a word so the box closes (run-r2 MUST 3).
+      [["green", "┌─"], ["", " "], ["b", "Paused ad “Demo B · sample copy” · Agent proposed · You …"], ["", " "], ["green", "───────┐"]],
       row(69, "green", ["dim", "status"], ["", "   on "], ["dim", "→"], ["", " "], ["b", "PAUSED"]),
       row(69, "green", ["dim", "Stopped spending at 10:42"]),
       row(69, "green", ["dim", "Clears the matching Home card"]),
@@ -507,18 +522,18 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
 
   it("a receipt view from the app (no approval left, the done title as its title) gets the same green card", () => {
     const view = receiptView({
-      title: "Paused ad “Hook B · founder POV”", state: "done", outcome: "applied",
+      title: "Paused ad “Demo B · sample copy”", state: "done", outcome: "applied",
       receipt: { sentence: "Paused.", tone: "ok", revertible: false }
     });
     const top = segs(cardRows(detail(view))[0]!);
-    expect(top[2]).toEqual(["b", "Paused ad “Hook B · founder POV” · Agent proposed · You approved"]);
+    expect(top[2]).toEqual(["b", "Paused ad “Demo B · sample copy” · Agent proposed · You approved"]);
     expect(top[0]).toEqual(["green", "┌─"]);
   });
 
   it("applying (flow-pause-02): an amber card titled with the approval's words, then ◑ Working… in cyan", () => {
-    const view = pause({ state: "applying", approval: { ...PAUSE_APPROVAL, title: "Pausing ad “Hook B · founder POV”…" } });
+    const view = pause({ state: "applying", approval: { ...PAUSE_APPROVAL, title: "Pausing ad “Demo B · sample copy”…" } });
     const rows = cardRows(detail(view)).map(segs);
-    expect(rows[0]![2]).toEqual(["b", "Pausing ad “Hook B · founder POV”…"]);
+    expect(rows[0]![2]).toEqual(["b", "Pausing ad “Demo B · sample copy”…"]);
     expect(rows[0]![0]).toEqual(["amber", "┌─"]);
     expect(rows).toContainEqual(row(74, "amber", ["cyan", "◑ Working…"], ["", "  "], ["dim", "· after 20 s it says it's still running"]));
     // flow-pause-02: the working card still ends with `? what it does` (the approval's summary).
@@ -527,7 +542,7 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
 
   it("applying since the yes (run-2 M9): the stopwatch counts the seconds since it was sent, and r4's spacing", () => {
     const sent = Date.parse("2026-10-01T10:43:56Z");
-    const view = { ...pause({ state: "applying", approval: { ...PAUSE_APPROVAL, title: "Pausing ad “Hook B · founder POV”…" } }), appliedAt: sent } as unknown as AnswerViewV1;
+    const view = { ...pause({ state: "applying", approval: { ...PAUSE_APPROVAL, title: "Pausing ad “Demo B · sample copy”…" } }), appliedAt: sent } as unknown as AnswerViewV1;
     const now = Date.now;
     Date.now = () => Date.parse("2026-10-01T10:44:00Z");
     try {
@@ -552,6 +567,8 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     const open = cardRows(detail(view, { explainOpen: true })).map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
     expect(open.join("\n")).toContain("│ Stops this ad's spend until you turn it back on.");
     expect(open.length).toBe(closed.length + 2);
+    // Open, the chip says `? hide` (live run-4 N12).
+    expect(open[open.length - 2]).toBe(`│  ?  hide${" ".repeat(63)}│`);
     // ? works on the turn view: the focus facts offer it.
     expect(viewKeyFacts(view, renderView(view, viewCtx())).explain).toBe(true);
   });
@@ -571,20 +588,29 @@ describe("receipts and settled states (r4 Pause an ad)", () => {
     expect(viewKeyFacts(view, renderView(view, viewCtx())).explain).toBe(false);
   });
 
-  it("dismissed (flow-pause-09): the sentence, then `Sent to the app` in dim, and no rows", () => {
+  // Live T4 (round 4): a dismissed card shows only its receipt line. r4's
+  // flow-pause-09 draws a dim `Sent to the app` under it; that afterword is
+  // dropped on purpose (style/golden/decisions.ts T4).
+  it("dismissed (flow-pause-09): the sentence alone, no `Sent to the app`, and no rows", () => {
     const fromApp = receiptView({ state: "cancelled", receipt: { sentence: "Dismissed — nothing was executed.", tone: "ok", revertible: false } });
     expect(detail(fromApp).map(segs)).toEqual([
-      [["dim", "✕ Dismissed — nothing was executed."]],
-      [["dim", "Sent to the app"]]
+      [["dim", "✕ Dismissed — nothing was executed."]]
     ]);
-    // With the words as its state reason, the shell prints the sentence; the body adds only the afterword.
+    // With the words as its state reason, the shell prints the sentence; the body adds nothing.
     const withReason = receiptView({ state: "cancelled", stateReason: { code: "dismissed", words: "Dismissed — nothing was executed." } });
     const out = detail(withReason).map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
     expect(out.filter((line) => line.includes("Dismissed — nothing was executed."))).toHaveLength(1);
-    expect(out.at(-1)).toBe("Sent to the app");
-    // The afterword follows its sentence on the next row: no blank between them (r4, run-2 M9).
-    expect(out).toEqual(["✕ Dismissed — nothing was executed.", "Sent to the app"]);
+    expect(out).toEqual(["✕ Dismissed — nothing was executed."]);
+    expect(out.join("\n")).not.toContain("Sent to the app");
     expect(out.join("\n")).not.toContain("PAUSED");
+  });
+
+  it("expired and declined cards show only their receipt line, never `Sent to the app`", () => {
+    for (const state of ["expired", "cancelled"] as const) {
+      const view = receiptView({ state, receipt: { sentence: "Nothing was executed.", tone: "ok", revertible: false } });
+      const out = detail(view).map((line) => line.replace(/\u001b\[[0-9;]*m/gu, ""));
+      expect(out.join("\n"), state).not.toMatch(/Sen[dt]\w* to the app/u);
+    }
   });
 
   it("changed on Meta (flow-pause-06, failed + not_sent): no rows, and `Nothing ran.` in dim", () => {
@@ -847,4 +873,250 @@ describe("job (r4 Job)", () => {
     const bare = renderView(running([{ id: "s3", label: "Draft", state: "now" }]), viewCtx({ width: 24 })).detail.map(plainText);
     expect(bare).toContain("⠋ Draft         4 of 7");
   });
+});
+
+// ── the target's path (contract revision 3), outside the r4 goldens ──
+
+describe("the change target's path (contract revision 3) where no golden covers it", () => {
+  const PATH = ["Sample campaign", "Sample ad set"];
+  const PATH_WORDS = "Sample campaign › Sample ad set";
+  const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
+  const MANAGED = {
+    kind: "operation_managed", title: "Pause this ad?", summary: "Stops its spend.",
+    confirmLabel: "Pause", dismissLabel: "Dismiss", ask: "Yes, pause it"
+  };
+  const plain = (approval: Record<string, unknown> | undefined) => decode({
+    kind: "change", tool: "propose_pause_entity", title: "Pause Demo B", state: "needs_yes",
+    provenance: { source: "Meta · ad", via: "our_db" },
+    body: { ...PAUSE_BODY, target: { kind: "ad", label: "Demo B", path: PATH } },
+    ...(approval ? { approval } : {})
+  });
+
+  for (const [name, approval] of [["an operation_managed approval", MANAGED], ["no approval", undefined]] as const) {
+    for (const cols of [60, 100, 140]) {
+      it(`a plain change (${name}) at ${cols}: the row under the bold target is the path, one dim run, nothing wider than ${cols}`, () => {
+        const lines = renderView(plain(approval), viewCtx({ width: cols })).detail;
+        const at = lines.findIndex((line) => JSON.stringify(segs(line)) === JSON.stringify([["b", "Demo B"]]));
+        expect(at).toBeGreaterThanOrEqual(0);
+        expect(segs(lines[at + 1]!)).toEqual([["dim", PATH_WORDS]]);
+        expect(lines.filter((line) => plainText(line).includes(PATH_WORDS))).toHaveLength(1);
+        for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(cols);
+      });
+    }
+  }
+
+  const cardWith = (target: Record<string, unknown>, rows: unknown[]) => decode({
+    kind: "change", tool: "propose_pause_entity", title: "Pause Demo B", state: "needs_yes",
+    provenance: { source: "Meta · ad", via: "our_db" },
+    body: { ...PAUSE_BODY, target: { ...target, path: PATH }, rows },
+    approval: { kind: "card", turnId: "turn_r4", handle: "h_pause", title: "Pause ad?", summary: null,
+      confirmLabel: "Pause", dismissLabel: "Dismiss", expiresAt: "2026-10-01T10:59:00Z" }
+  });
+
+  for (const [name, view] of [
+    ["no rows", () => cardWith({ kind: "ad", label: "Demo B" }, [])],
+    ["a pending_write target", () => cardWith({ kind: "pending_write", label: "Demo B" }, [{ label: "status", after: "PAUSED" }])]
+  ] as const) {
+    for (const cols of [60, 100, 140]) {
+      it(`a waiting card with ${name} at ${cols} draws the path exactly once`, () => {
+        const lines = approvalRender(view(), cardCtx({ width: cols })).lines.map(plainText);
+        expect(lines.join("\n").split(PATH_WORDS).length - 1).toBe(1);
+      });
+    }
+  }
+});
+
+// Wave 3 r2 / term-split-80 (W3-ap-pause): a change card says its target's
+// name ONCE, in the card's border title (r4 flow-pause-*). The head is the
+// action and the kind (`Pause ad`) when the view's title is the action and the
+// whole name; the border cuts a long name at a word or name-part end with `…`;
+// the body starts with the path and the rows; the whole name is behind `?`.
+// Never a name broken mid-word in the card.
+describe("a long name is said once, in the card's title (W3-ap-pause)", () => {
+  const LONG = "sample_video_long-name_for_the_head_test_alpha_bravo_x";
+  const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
+  const longPause = (over: Record<string, unknown> = {}) => pause({
+    title: `Pause ${LONG}`,
+    body: { ...PAUSE_BODY, target: { kind: "ad", id: "ad_demo_long", label: LONG, path: ["Sample campaign", "Sample ad set"] } },
+    approval: { ...PAUSE_APPROVAL, title: `Pause ad “${LONG}”?`, rows: [{ label: "Ad", value: LONG }], summary: null },
+    ...over
+  });
+  const NAME_PART = /sample_video|long-name|alpha_bravo/u;
+
+  for (const cols of [51, 60, 69, 100]) {
+    it(`at ${cols}: the head is the action and the kind; the name is in the card once, cut at a part's end`, () => {
+      const render = approvalRender(longPause(), cardCtx({ width: cols, caps: OPEN }));
+      expect(plainText(render.head)).toBe(" Pause ad  ▣ Needs your OK");
+      const lines = render.lines.map(plainText);
+      for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(cols);
+      expect(lines.filter((line) => NAME_PART.test(line)), lines.join("\n")).toHaveLength(1);
+      const top = lines.find((line) => line.startsWith("┌─ "))!;
+      const shown = /┌─ Pause ad “(.+?)(?:”\?)? ─+┐$/u.exec(top)![1]!;
+      if (shown.endsWith("…")) {
+        const kept = shown.slice(0, -1);
+        expect(LONG.startsWith(kept), shown).toBe(true);
+        // Cut where a name part ends: the next character was a separator.
+        expect("_-".includes(LONG[kept.length]!), shown).toBe(true);
+      } else {
+        expect(shown).toBe(LONG);
+      }
+      // The body starts with the path, then the rows.
+      const inside = cardRows(render.lines).slice(1).map((line) => plainText(line).replace(/^│ ?| ?│$/gu, "").trim());
+      expect(inside[0]).toBe("Sample campaign › Sample ad set");
+      expect(inside[1]).toMatch(/^status +on → PAUSED$/u);
+    });
+  }
+
+  for (const cols of [51, 60]) {
+    it(`at ${cols} the whole name is behind ?, never broken mid-word`, () => {
+      const lines = approvalRender(longPause(), cardCtx({ width: cols, caps: OPEN, ui: { ...CARD_UI_START, explainOpen: true } })).lines.map(plainText);
+      const inCard = lines.map((line) => line.replace(/^│ ?| ?│$/gu, "").trim());
+      expect(inCard.join(" ")).toContain(LONG.slice(0, 20));
+      // Each wrapped piece of the name ends at a part's end (a separator), never mid-part.
+      const pieces = inCard.filter((line) => NAME_PART.test(line) && !line.startsWith("┌"));
+      expect(pieces.join("").replace(/^Pause ad “|”\?$/gu, "")).toContain(LONG);
+      for (const piece of pieces.slice(0, -1)) expect(/[_\-\s]$/u.test(piece) || /[“]$/u.test(piece), piece).toBe(true);
+      for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(cols);
+    });
+  }
+
+  it("where the border holds the whole title, the name is still said once", () => {
+    const lines = approvalRender(longPause(), cardCtx({ width: 140, caps: OPEN })).lines.map(plainText);
+    expect(lines.join("\n").split(LONG).length - 1).toBe(1);
+  });
+
+  it("a short name keeps r4's head (flow-pause-01): the view's title is not the action and the whole name", () => {
+    const head = plainText(approvalRender(pause(), cardCtx({ width: 140 })).head);
+    expect(head).toBe(" Pause Demo B  ▣ Needs your OK");
+  });
+
+  // Live check 2, N2-b: once the card is decided its box goes, and with it the
+  // only place the name was. The dismissed head keeps the name (r4 flow-pause-09
+  // `Pause Hook B ✕ Dismissed`), cut at a word's or a name part's end.
+  for (const cols of [51, 69, 100]) {
+    it(`at ${cols} a dismissed card's head names its target, cut at a part's end`, () => {
+      const dismissed = longPause({ state: "cancelled", stateReason: { code: "dismissed", words: "Dismissed — nothing was executed." } });
+      const head = plainText(renderView(dismissed, viewCtx({ width: cols })).head);
+      expect(displayWidth(head)).toBeLessThanOrEqual(cols);
+      expect(head).toMatch(/✕ Dismissed$/u);
+      expect(head).not.toMatch(/^ Pause ad /u);
+      const shown = /^ Pause (\S+) {2}✕/u.exec(head)![1]!;
+      const kept = shown.replace(/…$/u, "");
+      expect(LONG.startsWith(kept), head).toBe(true);
+      expect(kept.length).toBeGreaterThanOrEqual(12);
+      if (shown.endsWith("…")) expect("_-".includes(LONG[kept.length]!), head).toBe(true);
+    });
+  }
+
+  it("a head with no room for the whole title is cut at a word's end", () => {
+    const view = pause({ title: "Pause the sample ad with a long plain title for the head here" });
+    const head = plainText(approvalRender(view, cardCtx({ width: 51 })).head);
+    expect(displayWidth(head)).toBeLessThanOrEqual(51);
+    expect(head).toBe(" Pause the sample ad with a long …  ▣ Needs your OK");
+  });
+});
+
+// Wave 3 r2 (W3-chg-xpub): an operation_managed approval says where its OK is
+// given, never a key that does nothing: here, once the view is engaged (tab,
+// then its key), or in the app when the view says it finishes there.
+describe("an operation_managed approval says where its OK is given (W3-chg-xpub)", () => {
+  const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
+  const publish = (approval: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => decode({
+    kind: "change", tool: "publish_sample_post", title: "Publish sample post", state: "needs_yes",
+    provenance: { source: "Sample network", via: "server" },
+    body: { target: { kind: "post", label: "Sample post" }, rows: [{ label: "Status", before: "Draft", after: "Published" }], warnings: [] },
+    approval: {
+      kind: "operation_managed", title: "Publish “Sample post”?", summary: "This draft goes live.",
+      confirmLabel: "Publish", dismissLabel: "Dismiss", rows: [], ask: "Yes, publish the sample post now.", ...approval
+    },
+    ...extra
+  });
+  const out = (view: AnswerViewV1, over: Partial<ViewRenderCtx> = {}) => {
+    const render = renderView(view, viewCtx({ color: false, ...over }));
+    return [render.head, ...render.detail].map(plainText);
+  };
+
+  for (const cols of [60, 100, 140]) {
+    it(`at rest it says the OK is here, behind tab, with the key that sends it (${cols} columns)`, () => {
+      const lines = out(publish(), { width: cols });
+      expect(lines).toContain("OK it here: tab, then p (Publish)");
+      for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(cols);
+    });
+  }
+
+  it("the key it names is the key that sends the ask", () => {
+    const render = renderView(publish(), viewCtx({ color: false }));
+    expect(render.approvalAsk).toEqual({ key: "p", label: "Publish", ask: "Yes, publish the sample post now." });
+  });
+
+  it("engaged, the key bar has the key, so the line drops `tab`", () => {
+    expect(out(publish(), { engaged: true })).toContain("OK it here: p (Publish)");
+  });
+
+  it("in scrollback, or with the keys on another view, it names no key", () => {
+    for (const over of [{ scrollback: true }, { keysElsewhere: true }]) {
+      expect(out(publish(), over).join("\n")).not.toMatch(/OK it here/u);
+    }
+  });
+
+  it("a view that finishes in the app says so in the app's own words", () => {
+    const view = publish({ finishInApp: { words: "Finish it in Sample drafts", appLink: { place: "sample.drafts", label: "Sample drafts" } } });
+    const lines = out(view);
+    expect(lines).toContain("Finish it in Sample drafts");
+    expect(lines.join("\n")).not.toMatch(/OK it here|↗/u);
+    const open = out(publish(
+      { finishInApp: { words: "Finish it in Sample drafts", appLink: { place: "sample.drafts", label: "Sample drafts" } } },
+      { appLink: { place: "sample.drafts", label: "Sample drafts" } }
+    ), { caps: OPEN });
+    expect(open).toContain("Finish it in Sample drafts ↗  (o)");
+  });
+
+  it("an ask that is a command offers no key and no line", () => {
+    expect(out(publish({ ask: "/publish" })).join("\n")).not.toMatch(/OK it here/u);
+  });
+});
+
+// Review of 4b5acc2 (2026-10-03): a name never breaks mid-word anywhere in a
+// card, so the two paths that wrap card text (a field row's value and a card
+// paragraph) each get a test that goes red on a plain hard wrap.
+describe("a long name in a card's rows and paragraphs breaks only after one of its parts", () => {
+  const NAME = "sample_video_confession_ads-manager_na_dark_captions_v3";
+  const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
+  const strip = (line: string) => plainText(line).replace(/^│ ?| ?│$/gu, "").trim();
+  /** Each line that ends inside the name ends right after a separator; the pieces join back into the whole name. */
+  function expectWholeParts(lines: readonly string[]) {
+    const words = lines.map(strip).filter(Boolean);
+    for (const line of words) {
+      const last = line.split(/\s+/u).at(-1)!;
+      if (NAME.includes(last) && !NAME.endsWith(last)) {
+        expect(/[_./-]$/u.test(last), `${last} (in ${JSON.stringify(words)})`).toBe(true);
+      }
+    }
+    expect(words.join(" ").replace(/([_./-]) /gu, "$1")).toContain(NAME);
+  }
+
+  for (const width of [12, 24, 30, 41]) {
+    it(`a field row's value at ${width} columns`, () => {
+      const lines = fieldRows([{ label: "Ad", value: NAME }], width, { color: true, theme });
+      for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(width);
+      expectWholeParts(lines.map((line) => plainText(line).replace(/^Ad\s*/u, "")));
+    });
+
+    it(`a card paragraph at ${width} columns`, () => {
+      const lines = paragraphIn(`Also stops ${NAME} today.`, width, "dim", { color: true, theme });
+      for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(width);
+      expectWholeParts(lines);
+    });
+  }
+
+  for (const cols of [51, 60]) {
+    it(`a waiting card's warning at ${cols}: inside the box, the name breaks only at its parts`, () => {
+      const view = pause({ body: { ...PAUSE_BODY, warnings: [`Also stops ${NAME} today.`] } });
+      const box = cardRows(approvalRender(view, cardCtx({ width: cols, caps: OPEN })).lines);
+      for (const line of box) expect(displayWidth(line)).toBeLessThanOrEqual(cols);
+      const warning = box.map(strip).filter((line) => line.startsWith("! Also") || /^[a-z0-9_.\/-]+( today\.)?$/u.test(line));
+      expect(warning.length, box.map(plainText).join("\n")).toBeGreaterThan(1);
+      expectWholeParts(warning.map((line) => line.replace(/^! /u, "")));
+    });
+  }
 });

@@ -10,7 +10,7 @@ import { toInkColor } from "../style/sgr.js";
 import { colorEnabled, resolveTheme, type Theme } from "../theme.js";
 import { composerLine } from "./composer-line.js";
 import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
-import { BOOT_BODY_ROWS, TOP_BAR_ROWS, bootBodyLines, ruleLine, topBarLines, type TopBarData } from "./top-bar.js";
+import { BOOT_BODY_ROWS, TOP_BAR_ROWS, bootBodyLines, ruleLine, topBarLines, type RuleMark, type TopBarData } from "./top-bar.js";
 import {
   DEFAULT_COMPOSER_ROWS,
   DEFAULT_KEY_BAR_ROWS,
@@ -96,6 +96,8 @@ export interface InkTranscriptAppProps {
   theme?: Theme;
   /** The top bar's workspace and sources (D1). Without it the bar is the brand chip alone. */
   topBar?: TopBarData;
+  /** The columns of the rule under the top bar to mark: the pane the keys are on (live L8). */
+  ruleMark?: RuleMark | null;
   transcript?: InfiniteTranscriptInput;
   turnStartedAt?: number;
 }
@@ -151,6 +153,7 @@ export function InkTranscriptApp({
   staticKey = 0,
   theme,
   topBar,
+  ruleMark,
   transcript,
   turnStartedAt
 }: InkTranscriptAppProps) {
@@ -182,7 +185,7 @@ export function InkTranscriptApp({
     width
   }), [bootFrame, composerRows, emptyLive, keyBarRows, latest, livePage, rows, showComposer, t, transcriptLines, width]);
   const hint = livePageHint(live.window, { spacePages: livePageSpace });
-  const header = useMemo(() => topBarLines(topBar, width, t), [t, topBar, width]);
+  const header = useMemo(() => topBarLines(topBar, width, t, ruleMark), [ruleMark, t, topBar, width]);
   const rule = useMemo(() => ruleLine(width, t), [t, width]);
   // <Static> wants a mutable array type; it only reads it.
   const committed = committedProp as CommittedEntry[];

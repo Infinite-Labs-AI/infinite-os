@@ -73,7 +73,7 @@ describe("approval card", () => {
     expect(text(render.lines)).toContain("[p] Pause   [n] dismiss");
     const noExplain = approvalRender({ ...fixture("change-pause-card"), approval: { ...fixture("change-pause-card").approval!, summary: null } } as AnswerViewV1, cardCtx());
     expect(formatKeyBar(noExplain.keys)).toBe("p pause   n dismiss");
-    expect(text(render.lines)).toContain("Pause ad “Hook A”?");
+    expect(text(render.lines)).toContain("Pause ad “Demo A”?");
     expect(text(render.lines)).toContain("on → paused");
   });
 
@@ -166,6 +166,8 @@ describe("money field", () => {
     const view = fixture("change-budget-field");
     const render = approvalRender(view, cardCtx({ fieldsCapable: false }));
     expect(text(render.lines)).toContain("Update the Infinite app to set a value here");
+    // One instruction: the field row never also says to set it in the app.
+    expect(text(render.lines)).not.toContain("set it in the app");
     expect(render.okKey).toBeNull();
     expect(formatKeyBar(render.keys)).toBe("n dismiss");
     const { effects, ui } = drive(view, [press("l"), press("y"), press("", { return: true })], { fieldsCapable: false });
@@ -230,7 +232,7 @@ describe("outcome unknown", () => {
       state: "outcome_unknown",
       outcome: "unknown",
       retry,
-      reconcile: { label: "Check Ads for the result", ask: "did the pause of Hook A land?" }
+      reconcile: { label: "Check Ads for the result", ask: "did the pause of Demo A land?" }
     }) as AnswerViewV1;
   // The desktop's only retryable shape: certain nothing ran (receipt-view failed()).
   const notSent = (base = fixture("change-pause-card")) =>
@@ -340,9 +342,9 @@ describe("receipt detail", () => {
   it("a partial launch receipt lists each item: ✓, ✗ with its reason, ? for unknown", () => {
     const lines = receiptDetailLines({ ok: false, view: fixture("launch-results") }, viewCtx());
     const out = text(lines);
-    expect(out).toMatch(/✓ Hook A/u);
-    expect(out).toMatch(/✗ Hook B · Rejected by review/u);
-    expect(out).toMatch(/\? Hook C/u);
+    expect(out).toMatch(/✓ Demo A/u);
+    expect(out).toMatch(/✗ Demo B · Rejected by review/u);
+    expect(out).toMatch(/\? Demo C/u);
     // The reconcile step is the receipt line's, not repeated here.
     expect(out).not.toContain("Check what landed");
     expect(lines.every((line) => displayWidth(line) <= 72)).toBe(true);
@@ -411,8 +413,8 @@ describe("images", () => {
   it("madeWith your_codex prints $0 to Infinite, from cost.whoPays", () => {
     const out = text(renderView(fixture("images-codex"), viewCtx()).detail);
     expect(out).toContain("$0 to Infinite");
-    expect(out).toMatch(/⠋ 2 {2}Hook B/u);
-    expect(out).toMatch(/· 3 {2}Hook C/u);
+    expect(out).toMatch(/⠋ 2 {2}Demo B/u);
+    expect(out).toMatch(/· 3 {2}Demo C/u);
     const paidByInfinite = { ...fixture("images-codex"), cost: { usd: 0.5, estimate: true, whoPays: "infinite" } } as AnswerViewV1;
     expect(text(renderView(paidByInfinite, viewCtx()).detail)).not.toContain("$0 to Infinite");
   });
@@ -443,15 +445,15 @@ describe("launch", () => {
     expect(campaign).toBeGreaterThanOrEqual(0);
     expect(out[campaign + 1]).toMatch(/└ Ad set {2}Ad set 01/u);
     // r4: what the launch creates is marked NEW.
-    expect(out[campaign + 2]).toMatch(/ {2}└ Ads {3}NEW Hook A · Hook B · Hook C/u);
+    expect(out[campaign + 2]).toMatch(/ {2}└ Ads {3}NEW Demo A · Demo B · Demo C/u);
     expect(render.okKey).toBe("l");
   });
 
   it("results.status unknown prints as ?", () => {
     const out = text(renderView(fixture("launch-results"), viewCtx()).detail);
-    expect(out).toMatch(/✓ Hook A/u);
-    expect(out).toMatch(/✗ Hook B · Rejected by review/u);
-    expect(out).toMatch(/\? Hook C/u);
+    expect(out).toMatch(/✓ Demo A/u);
+    expect(out).toMatch(/✗ Demo B · Rejected by review/u);
+    expect(out).toMatch(/\? Demo C/u);
     expect(out).toContain("Check what landed");
   });
 });
@@ -586,8 +588,8 @@ describe("change", () => {
     const out = text(renderView(fixture("change-budget-field"), viewCtx()).detail);
     expect(out).toMatch(/daily budget +\$40\.00 → you choose/u);
     const setTo = { ...fixture("change-pause-card") } as AnswerViewV1;
-    (setTo.body as { rows: unknown[] }).rows = [{ label: "name", after: "Hook A2" }];
-    expect(text(renderView(setTo, viewCtx()).detail)).toMatch(/name +set to Hook A2/u);
+    (setTo.body as { rows: unknown[] }).rows = [{ label: "name", after: "Demo A2" }];
+    expect(text(renderView(setTo, viewCtx()).detail)).toMatch(/name +set to Demo A2/u);
   });
 });
 

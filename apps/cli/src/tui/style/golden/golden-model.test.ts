@@ -161,7 +161,9 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     "flow-pause-02-working--c60", "flow-pause-02-working--c100", "flow-pause-02-working--c160",
     "flow-images-02-making-them--c60", "flow-images-02-making-them--c100", "flow-images-02-making-them--c160",
     "flow-images-06-with-your-codex--c60", "flow-images-06-with-your-codex--c100", "flow-images-06-with-your-codex--c160",
-    "flow-images-07-cmd-l-only--c60", "flow-images-07-cmd-l-only--c100", "flow-images-07-cmd-l-only--c160", "region-keybar-busy"
+    "flow-images-07-cmd-l-only--c60", "flow-images-07-cmd-l-only--c100", "flow-images-07-cmd-l-only--c160", "region-keybar-busy",
+    // T4: r4 draws `Sent to the app` under the dismissed card; the decision drops it.
+    "flow-pause-09-dismissed--c60", "flow-pause-09-dismissed--c100", "flow-pause-09-dismissed--c160"
   ]);
 
   it("matches every frame and line-region golden; fails exactly the decided ones", () => {
@@ -240,9 +242,9 @@ describe("the evaluator passes r4 itself (a renderer that prints the golden)", (
     expect(hasTruecolorSgr(`${ESC}[38:2:1:2:3mx`)).toBe(true);
   });
 
-  it("the 100-col body is compared: the --c100 goldens are r4 drawn one column (LAYOUT, split at 120)", () => {
+  it("the 100-col body is compared: the --c100 goldens are r4 drawn side by side (r4 splits at 80)", () => {
     const golden = loadGolden("view-06-change--c100");
-    expect(golden.layout?.wide).toBe(false);
+    expect(golden.layout).toMatchObject({ wide: true, answer_w: 28, details_w: 69 });
     expect(painted.evaluate(golden).regions.find((region) => region.region === "body")?.verdict).toBe("MATCH");
     const answerRow = golden.lines.findIndex((line) => textOf(line).startsWith("∞ Ready."));
     const edited = paintedWith((lines) => lines.map((line, i) => (i === answerRow ? plain("∞ Ready.") : line))).evaluate(golden);

@@ -750,6 +750,54 @@ describe("createDesktopSessionTurnRunner", () => {
     // The same raw shape onConfirmAction hands to the receipt renderer: no wrapper.
     expect(result).toBe(raw);
   });
+
+  // T12 (P3.3): the view keys follow what the last turn's app negotiated, and
+  // `o` opens through that same app (place + params; never a URL).
+  it("caps and openPlace follow the last turn's Desktop (app.open.v1, confirm.stream.v1)", async () => {
+    const openPlace = vi.fn(async () => ({ ok: true, status: "opened" }));
+    const client = {
+      sessionCapable: true,
+      viewsCapable: true,
+      appOpenCapable: true,
+      confirmStreamCapable: true,
+      status: vi.fn(async () => statusFor({ rev: "rev-1" })),
+      turn: vi.fn(async () => ({ message: "ok", actionCalls: [] })),
+      confirm: vi.fn(async () => ({ ok: true })),
+      openPlace
+    } as unknown as DesktopAppClient;
+    const runner = createDesktopSessionTurnRunner({
+      resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client })
+    });
+    // Before any turn: no app to open places in, nothing to stream.
+    expect(runner.caps()).toEqual({ open: false, watch: false, retry: false });
+    expect(runner.streamCapable()).toBe(false);
+    await expect(runner.openPlace({ place: "ads.meta" })).rejects.toMatchObject({ code: "desktop_app_usage" });
+
+    await runner.turn("hello");
+    expect(runner.caps()).toEqual({ open: true, watch: true, retry: false });
+    expect(runner.streamCapable()).toBe(true);
+    expect(await runner.openPlace({ place: "creative.library", params: { ids: "a,b" } })).toEqual({ ok: true, status: "opened" });
+    expect(openPlace).toHaveBeenCalledWith({ protocolVersion: 1, place: "creative.library", params: { ids: "a,b" } });
+  });
+
+  it("an old Desktop offers neither `o` nor a stream", async () => {
+    const client = {
+      sessionCapable: true,
+      viewsCapable: false,
+      appOpenCapable: false,
+      confirmStreamCapable: true,
+      status: vi.fn(async () => statusFor({ rev: "rev-1" })),
+      turn: vi.fn(async () => ({ message: "ok", actionCalls: [] })),
+      confirm: vi.fn(async () => ({ ok: true }))
+    } as unknown as DesktopAppClient;
+    const runner = createDesktopSessionTurnRunner({
+      resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client })
+    });
+    await runner.turn("hello");
+    expect(runner.caps()).toEqual({ open: false, watch: false, retry: false });
+    // A stream needs views: the bridge streams only a card from a turn that accepted them.
+    expect(runner.streamCapable()).toBe(false);
+  });
 });
 
 // Synthetic change view written from the contract (open-core: no real data).

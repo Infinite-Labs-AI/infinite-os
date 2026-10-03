@@ -13,14 +13,15 @@ import type { AnswerViewEnvelopeV1 } from "@infinite-os/types";
 
 import type { KeyHint } from "../keys/keymap.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
-import { linkWords, paragraphIn } from "./card.js";
+import { fitPainted, linkWords, paragraphIn } from "./card.js";
 import { labelValueLines } from "./change.js";
 import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
 import { formatAsOf, formatSeconds, isRecord, paint, viewText, wrapText } from "./primitives.js";
+import { appOpenTarget } from "./open-target.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
 
-/** Lines of command output kept per stream (the tail the app already cut). */
-const MAX_TAIL_LINES = 8;
+/** The most rows a command's output takes (TJ-12): its last lines, after one `… n more lines` row. */
+const MAX_OUTPUT_ROWS = 6;
 const MAX_FILES = 12;
 
 const STEP_MARK: Record<string, { glyph: string; token: "gb" | "cb" | "dim" | "red" | "amber" }> = {
@@ -44,13 +45,19 @@ const RUNS_WHERE: Record<string, string> = {
 
 export function renderJob(view: AnswerViewEnvelopeV1<"job">, ctx: ViewRenderCtx): KindRender {
   const body: Record<string, unknown> = isRecord(view.body) ? view.body : {};
+  const keys = jobKeys(body, ctx);
+  // `o` opens where it lands; `w` asks the job's own watch step (T12).
+  const lands = keys.some((hint) => hint.key === "o") ? appOpenTarget(body.landsAt) : null;
+  const watch = keys.some((hint) => hint.key === "w") && isRecord(body.watch) ? viewText(body.watch.ask) : "";
   return {
     detail: isSettledWithoutRunning(view) ? afterwordLines(view, ctx) : jobLines(view.body, ctx),
     footnotes: [],
-    keys: jobKeys(body, ctx),
+    keys,
     okKey: null,
     // The steps tick off on their own; nothing follows a selection, so j/k select nothing (r4: no `j k`).
-    rowCount: 0
+    rowCount: 0,
+    ...(lands ? { openLink: lands, openLabel: viewText(isRecord(body.landsAt) ? body.landsAt.label : "") || "open" } : {}),
+    ...(watch ? { watchAsk: watch } : {})
   };
 }
 
@@ -75,7 +82,9 @@ export function jobLines(body: unknown, ctx: ViewRenderCtx): string[] {
     ? { finished: record.progress.finished, of: record.progress.of }
     : null;
   const running = steps.find((step) => step.state === "now");
-  const label = viewText(record.label);
+  const command = isRecord(record.command) ? record.command : null;
+  // A label that is only the command line is said once, as the command (`$ …`, TJ-12).
+  const label = command && viewText(record.label) === commandLine(command) ? "" : viewText(record.label);
   // The progress goes on the running step's bar; with no running step it follows the name.
   const head = [label, progress && !running ? `${progress.finished} of ${progress.of}` : ""].filter(Boolean).join(" · ");
   if (head) {
@@ -96,13 +105,16 @@ export function jobLines(body: unknown, ctx: ViewRenderCtx): string[] {
   const soFar = record.phase === "running" && Number.isFinite(startedMs) && Date.now() >= startedMs
     ? `${formatSeconds(Math.floor((Date.now() - startedMs) / 1000))} so far`
     : "";
-  const whereWords = [soFar, eta, record.outlivesTurn === true ? "keeps going while you chat" : "", where]
+  // A job that is done or failed has stopped: it no longer keeps going (W3-job-done).
+  const stopped = record.phase === "done" || record.phase === "failed" || record.phase === "cancelled";
+  const whereWords = [soFar, eta, record.outlivesTurn === true && !stopped ? "keeps going while you chat" : "", where]
     .filter(Boolean)
     .join(" · ");
   if (whereWords) {
     lines.push("", ...paragraphIn(whereWords, ctx.width, "dim", ctx));
   }
-  const landsAt = isRecord(record.landsAt) ? viewText(record.landsAt.label) : "";
+  // `Lands in:` names the place: a link labelled `Open in Email Campaigns` lands in `Email Campaigns`.
+  const landsAt = isRecord(record.landsAt) ? placeName(viewText(record.landsAt.label)) : "";
   if (landsAt) {
     if (!whereWords) lines.push("");
     lines.push(fitLanding(`${paint("Lands in:", "dim", ctx)} ${linkWords(landsAt, ctx)}${ctx.caps.open ? `  ${paint("(o)", "dim", ctx)}` : ""}`, landsAt, ctx));
@@ -114,7 +126,6 @@ export function jobLines(body: unknown, ctx: ViewRenderCtx): string[] {
     lines.push(paint("Publishes on its own when done.", "dim", ctx));
   }
 
-  const command = isRecord(record.command) ? record.command : null;
   if (command) {
     lines.push(...commandLines(command, ctx));
   }
@@ -191,10 +202,21 @@ function minutesWords(ms: number): string {
   return minutes === 1 ? "1 min" : `${minutes} min`;
 }
 
-function commandLines(command: Record<string, unknown>, ctx: ViewRenderCtx): string[] {
+/** `Open in Email Campaigns` → `Email Campaigns`: the place, without the link's verb. */
+function placeName(label: string): string {
+  const named = /^open in\s+(.+)$/iu.exec(label);
+  return named ? named[1]!.trim() : label;
+}
+
+/** The command as one line (its argv joined), scrubbed. */
+function commandLine(command: Record<string, unknown>): string {
   const argv: unknown[] = Array.isArray(command.argv) ? command.argv : [];
+  return argv.map((arg) => viewText(arg)).filter(Boolean).join(" ");
+}
+
+function commandLines(command: Record<string, unknown>, ctx: ViewRenderCtx): string[] {
   const lines: string[] = [];
-  const line = argv.map((arg) => viewText(arg)).filter(Boolean).join(" ");
+  const line = commandLine(command);
   if (line) {
     lines.push(...wrapText(`$ ${line}`, ctx.width));
   }
@@ -206,16 +228,29 @@ function commandLines(command: Record<string, unknown>, ctx: ViewRenderCtx): str
   if (ended) {
     lines.push(paint(ended, command.exitCode === 0 ? "dim" : "amber", ctx));
   }
-  for (const [stream, role] of [["stdoutTail", "dim"], ["stderrTail", "amber"]] as const) {
+  // The output, ONE row per line (TJ-12): each line clipped to the width with `…`, the `│`
+  // gutter on every row, at most MAX_OUTPUT_ROWS rows. Past that, the last lines stay (an
+  // error is said last) under one `… n more lines` row.
+  const output = (["stdoutTail", "stderrTail"] as const).flatMap((stream) => {
     const raw = typeof command[stream] === "string" ? command[stream] : "";
-    const tail = raw.split(/\r?\n/u).map((part) => viewText(part)).filter(Boolean).slice(-MAX_TAIL_LINES);
-    for (const part of tail) {
-      lines.push(...wrapText(`│ ${part}`, ctx.width).map((wrapped) => paint(wrapped, role, ctx)));
-    }
-  }
-  if (command.truncated === true) {
+    const role = stream === "stderrTail" ? "amber" as const : "dim" as const;
+    return raw.split(/\r?\n/u).map((part) => viewText(part)).filter(Boolean).map((text) => ({ text, role }));
+  });
+  const room = Math.max(1, ctx.width - 2);
+  const row = (text: string) => `│ ${fitPainted(text, room)}`;
+  // The app may have cut the output before it got here (`truncated`): then more is missing
+  // than the terminal hid, so the count is a floor (`5+ more lines`, R-IOV-5), and a marker
+  // row is always drawn, within the cap.
+  const cut = command.truncated === true;
+  const capped = output.length > MAX_OUTPUT_ROWS || (cut && output.length >= MAX_OUTPUT_ROWS);
+  const kept = capped ? output.slice(-(MAX_OUTPUT_ROWS - 1)) : output;
+  const hidden = output.length - kept.length;
+  if (hidden > 0) {
+    lines.push(paint(row(cut ? `… ${hidden}+ more lines` : `… ${hidden} more ${hidden === 1 ? "line" : "lines"}`), "dim", ctx));
+  } else if (cut) {
     lines.push(paint("│ …", "dim", ctx));
   }
+  lines.push(...kept.map((part) => paint(row(part.text), part.role, ctx)));
   return lines;
 }
 

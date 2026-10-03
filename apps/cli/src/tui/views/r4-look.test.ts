@@ -477,10 +477,10 @@ describe("selection outside the list (SPEC §4 Arrows)", () => {
     const idle = renderView(fixture("numbers-week-today"), ctx({ selected: 2 }));
     expect(idle.detail.map(seg).some((line) => line.includes("▸") || line.includes("sel"))).toBe(false);
     const render = renderView(fixture("numbers-week-today"), ctx({ selected: 2, engaged: true }));
-    const row = render.detail.map(seg).find((line) => line.includes("Hook C"))!;
+    const row = render.detail.map(seg).find((line) => line.includes("Demo C"))!;
     expect(row).not.toContain("▸");
     expect(row).toContain("sel");
-    expect(render.detail.map(seg).find((line) => line.includes("Hook A"))!).not.toContain("sel");
+    expect(render.detail.map(seg).find((line) => line.includes("Demo A"))!).not.toContain("sel");
   });
 
   it("a numbers record's selected heading leads with the bold cyan ▸", () => {
@@ -488,10 +488,10 @@ describe("selection outside the list (SPEC §4 Arrows)", () => {
     expect(render.detail.map(seg)).toContain("{cb}▸{} {b}Ad set 02");
   });
 
-  it("a health row picked for o leads with the bold cyan ▸", () => {
+  it("health rows are read, not browsed: no ▸ on any row, whatever is selected (TJ-4, r4 view-10)", () => {
     const view = JSON.parse(JSON.stringify(fixture("health-connections"))) as AnswerViewV1;
     (view.body as unknown as { items: Record<string, unknown>[] }).items[3]!.fix = { label: "Sign in to email", appLink: { place: "connections", label: "Connections" } };
     const render = renderView(view, ctx({ selected: 3 }));
-    expect(render.detail.map(seg).find((line) => line.includes("Email"))!.startsWith("{cb}▸")).toBe(true);
+    expect(render.detail.map(seg).some((line) => line.includes("▸"))).toBe(false);
   });
 });

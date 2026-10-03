@@ -115,7 +115,7 @@ describe("state heads (the shared state-word table)", () => {
     expect(stateHeadFor({ state: "partial", stateReason: { code: "p", words: "w", short: "y".repeat(32) } as never }).words).toBe("y".repeat(32));
   });
 
-  // D3 (River, 2026-10-02): the head is the glyph plus `stateReason.short ?? generic`, as round 4 draws it.
+  // D3 (design decision, 2026-10-02): the head is the glyph plus `stateReason.short ?? generic`, as round 4 draws it.
   it("the needs-you heads take the bold amber ask tone; Cmd+L-only takes its own bold blue", () => {
     expect(STATE_HEAD.needs_yes.tone).toBe("ask");
     expect(STATE_HEAD.needs_answer.tone).toBe("ask");
@@ -191,13 +191,13 @@ describe("cells: a null is never 0", () => {
     expect(cellText({ value: 2.5 }, "ratio", null, notes)).toBe("2.5");
     expect(cellText({ value: 123 }, "seconds", null, notes)).toBe("2:03");
     expect(cellText({ value: 45 }, "seconds", null, notes)).toBe("45 s");
-    expect(cellText({ text: "Hook A" }, "text", null, notes)).toBe("Hook A");
+    expect(cellText({ text: "Demo A" }, "text", null, notes)).toBe("Demo A");
     expect(notes.lines()).toEqual([]);
   });
 
   it("scrubs terminal control and bidi characters out of cell text and reasons", () => {
     const notes = new FootnoteBook();
-    expect(cellText({ text: "Hook\u001b[2J A‮" }, "text", null, notes)).toBe("Hook A");
+    expect(cellText({ text: "Demo\u001b[2J A‮" }, "text", null, notes)).toBe("Demo A");
     expect(cellText({ value: null, reason: { code: "x", words: "New\u001b]0;t\u0007", show: "words" } }, "count", null, notes)).toBe("New");
   });
 });
@@ -298,14 +298,16 @@ describe("the view shell", () => {
 });
 
 describe("the r4 layout", () => {
-  it("is one column under 120 columns and splits at 120+ (River, 2026-10-02)", () => {
-    expect(layoutTurn(["a"], fakeRender, [], 119).some((l) => l.includes(" │ "))).toBe(false);
-    expect(layoutTurn(["a"], fakeRender, [], 120).some((l) => l.includes(" │ "))).toBe(true);
+  it("is one column under 80 columns and splits at 80+ (r4 `frame()`: wide=W>=80)", () => {
+    expect(layoutTurn(["a"], fakeRender, [], 79).some((l) => l.includes(" │ "))).toBe(false);
+    expect(layoutTurn(["a"], fakeRender, [], 80).some((l) => l.includes(" │ "))).toBe(true);
     expect(layoutTurn(["a"], fakeRender, [], 160, null, { split: false }).some((l) => l.includes(" │ "))).toBe(false);
   });
 
   it("the answer pane is 28% of the width, clamped to 26–40", () => {
-    expect(paneWidths(119).wide).toBe(false);
+    expect(paneWidths(79).wide).toBe(false);
+    expect(paneWidths(80)).toEqual({ wide: true, left: 26, right: 51 });
+    expect(paneWidths(100)).toEqual({ wide: true, left: 28, right: 69 });
     expect(paneWidths(120)).toEqual({ wide: true, left: 33, right: 84 });
     expect(paneWidths(160)).toEqual({ wide: true, left: 40, right: 117 });
     expect(paneWidths(200)).toEqual({ wide: true, left: 40, right: 157 });
@@ -544,10 +546,10 @@ describe("view focus: the latest turn keeps its keys until the next submit", () 
     const engaged = resolveViewKey("", s0, { tab: true });
     expect(resolveViewKey("", engaged, { return: true }).effect).toBeNull();
     const list = listViewFixture();
-    const withSlash = { ...list, next: [{ label: "Quit", ask: "/quit" }, { label: "Pause", ask: "pause Hook A" }] } as AnswerViewV1;
+    const withSlash = { ...list, next: [{ label: "Quit", ask: "/quit" }, { label: "Pause", ask: "pause Demo A" }] } as AnswerViewV1;
     const facts = viewKeyFacts(withSlash, renderView(withSlash, ctx()));
     expect(facts.rowAsks).not.toContain("/quit");
-    expect(facts.rowAsks).toContain("pause Hook A");
+    expect(facts.rowAsks).toContain("pause Demo A");
     const more = { ...list, body: { ...(list.body as unknown as Record<string, unknown>), truncated: { shown: 3, total: 9, more: { label: "more", ask: "/exit" } } } } as AnswerViewV1;
     expect(viewKeyFacts(more, renderView(more, ctx())).more).toBeNull();
   });

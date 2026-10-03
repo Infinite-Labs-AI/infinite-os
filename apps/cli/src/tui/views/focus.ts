@@ -25,10 +25,12 @@ import { printableImagesView } from "../../desktop/image-url-cut.js";
 import { resolveKey, type FocusKind, type KeyAction, type KeyContext, type KeyHint } from "../keys/keymap.js";
 import { DEFAULT_THEME, type Theme } from "../theme.js";
 import { changeCardSummary } from "./change.js";
+import { compareHasRangeMethod } from "./compare.js";
 import { listOpeningRow } from "./list.js";
 import { managedApproval } from "./managed.js";
+import { openKeyLabel, type AppOpenTarget } from "./open-target.js";
 import { truncatedMoreAsk, turnAsk, viewText } from "./primitives.js";
-import { renderView } from "./registry.js";
+import { quietStopAsk, renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
 export { turnAsk };
@@ -46,7 +48,12 @@ export type ViewKeyEffect =
    * acted on the view before it was engaged turned out to start a message
    * (`j` then `u` is "ju…", never "u…").
    */
-  | { type: "type"; text: string };
+  | { type: "type"; text: string }
+  /**
+   * Open this place in the app (`o`, app.open.v1): the desktop's /v1/open with
+   * place + params, never a browser and never a URL.
+   */
+  | { type: "open"; target: AppOpenTarget };
 
 /** What the focused view offers right now (from its current render). */
 export interface ViewKeyFacts {
@@ -60,6 +67,8 @@ export interface ViewKeyFacts {
   more: string | null;
   /** The state's fix ask Enter sends (only when no row has an ask of its own). */
   fixAsk: string | null;
+  /** What the bar calls that ask (`check first` for a reconcile step); absent = `fix`. */
+  fixLabel?: string;
   /** The live region has more lines below (`m` pages it when there is no `more` ask). */
   livePageNext: boolean;
   /** What `c` copies on each selectable row (null = nothing on that row). */
@@ -74,6 +83,22 @@ export interface ViewKeyFacts {
   tabNoun?: string | null;
   /** The view draws `? what it does` inside itself (a card): `?` is not repeated on the bar. */
   explainInside?: boolean;
+  /** The place `o` opens and what the bar calls it (only when the session can open places). */
+  open?: { target: AppOpenTarget; label: string } | null;
+  /** What `w` asks as a new user turn (a job's watch step; only when the session can watch). */
+  watch?: string | null;
+  /**
+   * The details pane is cut to the window (a split turn taller than it): the
+   * lines above and below what it shows, and how many it shows (a page). Once
+   * engaged, ↓/↑ scroll it a line and PgDn/PgUp a page.
+   */
+  pane?: { above: number; below: number; page: number } | null;
+  /**
+   * The answer pane is cut to the window (a finished split turn whose answer
+   * is taller than it, live L8): tab moves the keys to it, and ↓/↑ (PgDn/PgUp)
+   * scroll it there.
+   */
+  answerPane?: { above: number; below: number; page: number } | null;
 }
 
 export interface ViewFocusState {
@@ -85,6 +110,21 @@ export interface ViewFocusState {
   selected: number;
   tab: number;
   page: number;
+  /** The first line the details pane shows when it is cut to the window (`facts.pane`); absent = its top. */
+  paneScroll?: number;
+  /**
+   * The keys are on the ANSWER pane (tab switched sides, live L8): ↓/↑ scroll
+   * it, `o` still opens the view's place, tab goes back to the view, Esc leaves.
+   */
+  answerFocus?: boolean;
+  /** The first line the answer pane shows when it is cut (`facts.answerPane`); absent = its top. */
+  answerScroll?: number;
+  /**
+   * j/k moved the row last: a cut pane scrolls from `paneScroll` just enough
+   * to show the selected row. ↓/↑ (PgDn/PgUp) clear it, so a scroll is never
+   * pulled back to the row.
+   */
+  followRow?: boolean;
   explainOpen: boolean;
   showHiddenColumns: boolean;
   caps: KeyContext["caps"];
@@ -114,14 +154,68 @@ const EMPTY_FACTS: ViewKeyFacts = {
   rowCopies: [], copy: null, approve: null
 };
 
-/** The view the keys act on: the last one that is not quiet (steps only), else the last. */
-export function focusedViewIndex(views: readonly AnswerViewV1[]): number {
+/**
+ * The view the keys act on: the last quiet call that stopped with a step to
+ * take (`quietStopAsk`), else the last one that is not quiet (steps only), else
+ * the last. A folded lookup (`foldedLookups`) is not drawn, so it never takes
+ * the keys; with every view folded, none does (-1).
+ */
+export function focusedViewIndex(views: readonly AnswerViewV1[], folded: ReadonlySet<number> = NONE_FOLDED): number {
+  // A quiet call that stopped with a step to take (`Check first`, its fix) takes the keys first (R-IOV-3).
   for (let index = views.length - 1; index >= 0; index -= 1) {
-    if (views[index]?.kind !== "quiet") {
+    if (!folded.has(index) && views[index] && quietStopAsk(views[index]!) !== null) {
       return index;
     }
   }
-  return views.length - 1;
+  let last = -1;
+  for (let index = views.length - 1; index >= 0; index -= 1) {
+    if (folded.has(index)) {
+      continue;
+    }
+    if (views[index]?.kind !== "quiet") {
+      return index;
+    }
+    if (last < 0) {
+      last = index;
+    }
+  }
+  return last;
+}
+
+const NONE_FOLDED: ReadonlySet<number> = new Set();
+
+/**
+ * The views that are only a lookup of a write card's own target: a list whose
+ * every row is the thing a change card in the turn acts on, with nothing more
+ * behind it. r4 draws the card alone and the lookup as its Steps row
+ * (`checking your campaigns ✓ 1 ad`), so such a list is not drawn while the
+ * card is on its turn (waiting, working or answered). `all` is every view of
+ * the turn, the cards drawn as details included. A list with any other row,
+ * or more than it shows, stays a view.
+ *
+ * A row is the target by its id when the target has one. A target with no id
+ * matches by name only a list of ONE row: two different things under the
+ * same name stay visible beside a write (a wrong pick on a write is never hidden).
+ */
+export function foldedLookups(views: readonly AnswerViewV1[], all: readonly AnswerViewV1[]): ReadonlySet<number> {
+  const targets = all.flatMap((view) => {
+    if (view.kind !== "change" || !isPlainRecord(view.body) || !isPlainRecord(view.body.target)) return [];
+    const { id, label } = view.body.target;
+    return [{ id: typeof id === "string" && id ? id : null, label: typeof label === "string" && label ? label : null }];
+  });
+  const folded = new Set<number>();
+  if (!targets.length) return folded;
+  views.forEach((view, index) => {
+    if (view.kind !== "list" || !isPlainRecord(view.body)) return;
+    const body = view.body as Record<string, unknown>;
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    const groups = Array.isArray(body.groups) ? body.groups : [];
+    const more = (typeof body.total === "number" && body.total > rows.length) || isPlainRecord(body.omitted) || isPlainRecord(body.truncated);
+    const isTarget = (row: unknown) => isPlainRecord(row) && targets.some((target) =>
+      target.id !== null ? row.id === target.id : rows.length === 1 && target.label !== null && row.title === target.label);
+    if (rows.length && !groups.length && !more && rows.every(isTarget)) folded.add(index);
+  });
+  return folded;
 }
 
 /** Facts for the focused view, read from its current render (width-dependent, e.g. dropped columns). */
@@ -136,13 +230,17 @@ export function viewKeyFacts(given: AnswerViewV1 | undefined, render: ViewRender
     tabs: count(render.tabs),
     pages: count(render.pages),
     hiddenColumns: count(render.hiddenColumns),
-    explain: viewText(view.explain) !== "" || (managedApproval(view)?.summary ?? "") !== "" || changeCardSummary(view) !== "",
+    explain: viewText(view.explain) !== "" || (managedApproval(view)?.summary ?? "") !== "" || changeCardSummary(view) !== ""
+      || compareHasRangeMethod(view),
     more: turnAsk(truncatedMoreAsk(view)),
     fixAsk: turnAsk(render.fixAsk),
+    ...(viewText(render.fixLabel) ? { fixLabel: viewText(render.fixLabel) } : {}),
     livePageNext,
     rowCopies: (render.rowCopies ?? []).map((text) => viewText(text) || null),
     copy: viewText(render.copyText) || null,
     approve: approveFact(render.approvalAsk),
+    open: render.openLink ? { target: render.openLink, label: viewText(render.openLabel) || "open" } : null,
+    watch: turnAsk(render.watchAsk),
     table: view.kind === "numbers",
     tabNoun: view.kind === "document" ? documentTabNoun(view.body) : null,
     ...(render.explainInside ? { explainInside: true } : {})
@@ -182,7 +280,67 @@ export function hasViewKeys(facts: ViewKeyFacts): boolean {
     || facts.fixAsk !== null
     || facts.copy !== null
     || facts.rowCopies.some((text) => text !== null)
-    || facts.approve !== null;
+    || facts.approve !== null
+    || Boolean(facts.open)
+    || Boolean(facts.watch)
+    || paneCut(facts);
+}
+
+/** Whether the details pane is cut to the window, so ↓/↑ scroll it once engaged. */
+function paneCut(facts: ViewKeyFacts): boolean {
+  return Boolean(facts.pane && (facts.pane.above > 0 || facts.pane.below > 0));
+}
+
+/** Whether the answer pane is cut to the window, so tab can put the keys on it (live L8). */
+export function answerCut(facts: ViewKeyFacts): boolean {
+  return Boolean(facts.answerPane && (facts.answerPane.above > 0 || facts.answerPane.below > 0));
+}
+
+/** The facts of a turn with no view to focus: only what its answer pane offers. */
+export function answerOnlyFacts(answerPane: ViewKeyFacts["answerPane"], livePageNext = false): ViewKeyFacts {
+  return { ...EMPTY_FACTS, livePageNext, ...(answerPane ? { answerPane } : {}) };
+}
+
+/**
+ * What a view still offers once its turn went to scrollback whole (below 80
+ * columns, or a window too short to hold the panes; live L8): only the keys
+ * that need no live draw, `o`, `w`, `m`, `c` and its fix (Enter). Rows, tabs,
+ * pages, columns and `?` acted on a drawing that scrollback no longer redraws.
+ */
+export function committedViewFacts(facts: ViewKeyFacts): ViewKeyFacts {
+  return {
+    ...EMPTY_FACTS,
+    more: facts.more,
+    fixAsk: facts.fixAsk,
+    ...(facts.fixLabel ? { fixLabel: facts.fixLabel } : {}),
+    copy: facts.copy,
+    ...(facts.open ? { open: facts.open } : {}),
+    ...(facts.watch ? { watch: facts.watch } : {})
+  };
+}
+
+/** The keys on the answer pane (live L8). */
+function resolveAnswerKey(input: string, state: ViewFocusState, key: Partial<Key>, facts: ViewKeyFacts, base: ViewFocusState): ViewFocusState {
+  const leave = { ...base, answerFocus: false, focus: "composer" as const, engaged: false };
+  if (key.ctrl || key.meta) return base;
+  if (key.tab) {
+    // Back to the view's side when it has keys; otherwise the composer.
+    return state.viewIndex >= 0 && hasViewKeys(facts)
+      ? { ...base, answerFocus: false, focus: state.detailsFocus, engaged: true, handled: true }
+      : { ...leave, handled: true };
+  }
+  if (key.escape) return { ...leave, handled: true };
+  if (key.downArrow || key.upArrow || key.pageDown || key.pageUp) {
+    const pane = facts.answerPane;
+    if (!pane || !answerCut(facts)) return { ...base, handled: true };
+    const step = key.pageDown || key.pageUp ? Math.max(1, pane.page) : 1;
+    const answerScroll = key.downArrow || key.pageDown ? pane.above + Math.min(step, pane.below) : pane.above - Math.min(step, pane.above);
+    return { ...base, answerScroll, handled: true };
+  }
+  // `o` opens the view's place from either side (the layout decision: tab first, then o).
+  if (input === "o" && facts.open) return { ...base, handled: true, effect: { type: "open", target: facts.open.target } };
+  // Any other printable key starts a message: the composer takes it.
+  return typesIntoComposer(input, key) ? leave : base;
 }
 
 /** What `c` copies at this selection: the row's own text, else the view's. */
@@ -196,10 +354,12 @@ export function copyTextAt(facts: ViewKeyFacts, selected: number): string | null
  */
 export function viewFocusAfterTurnDone(
   views: AnswerViewV1 | readonly AnswerViewV1[],
-  caps: KeyContext["caps"] = NO_VIEW_CAPS
+  caps: KeyContext["caps"] = NO_VIEW_CAPS,
+  statusViews: readonly AnswerViewV1[] = []
 ): ViewFocusState {
   const list = asViewList(views);
-  const viewIndex = focusedViewIndex(list);
+  // `statusViews`: the turn's views drawn elsewhere (a card waiting as details), which can fold a lookup.
+  const viewIndex = focusedViewIndex(list, foldedLookups(list, [...list, ...statusViews]));
   const view = list[viewIndex];
   const facts = view ? viewKeyFacts(view, renderView(view, defaultFocusCtx(caps))) : EMPTY_FACTS;
   const detailsFocus = view?.kind === "document" ? "document" : "rows";
@@ -207,7 +367,7 @@ export function viewFocusAfterTurnDone(
     viewIndex,
     focus: hasViewKeys(facts) ? detailsFocus : "composer",
     detailsFocus,
-    // A list opens on the row its view names (r4 view-02: the flagged Hook B).
+    // A list opens on the row its view names (r4 view-02: the flagged Demo B).
     selected: view ? Math.min(openingRow(view), Math.max(0, facts.rowCount - 1)) : 0,
     tab: 0,
     page: 0,
@@ -259,11 +419,22 @@ export function resolveViewKey(
   facts: ViewKeyFacts = state.facts
 ): ViewFocusState {
   const base: ViewFocusState = { ...state, facts, typedAhead: "", handled: false, effect: null };
+  if (state.answerFocus) {
+    return resolveAnswerKey(input, state, key, facts, base);
+  }
   if (state.focus === "composer" || state.viewIndex < 0) {
     if (key.tab && !key.shift && state.viewIndex >= 0 && hasViewKeys(facts)) {
       return { ...base, focus: state.detailsFocus, engaged: true, handled: true };
     }
+    // No view keys, but an answer cut to the window: tab puts the keys on it (live L8).
+    if (key.tab && !key.shift && answerCut(facts)) {
+      return { ...base, answerFocus: true, engaged: true, handled: true };
+    }
     return base;
+  }
+  // Esc leaves the view: the keys go back to the composer (live L8).
+  if (key.escape && state.engaged && !key.ctrl && !key.meta) {
+    return { ...base, focus: "composer", engaged: false, handled: true };
   }
   // A capital letter is the start of a message (the keymap folds case, so
   // `M` would otherwise ask for more and `K` would move).
@@ -291,6 +462,14 @@ export function resolveViewKey(
     if (key.upArrow || key.downArrow) {
       return base;
     }
+  }
+  // A details pane cut to the window: ↓/↑ scroll it a line, PgDn/PgUp a page
+  // (j/k still move the row). At either end the key is spent, never a row move.
+  if (paneCut(facts) && (key.downArrow || key.upArrow || key.pageDown || key.pageUp) && !key.ctrl && !key.meta) {
+    const pane = facts.pane!;
+    const step = key.pageDown || key.pageUp ? Math.max(1, pane.page) : 1;
+    const paneScroll = key.downArrow || key.pageDown ? pane.above + Math.min(step, pane.below) : pane.above - Math.min(step, pane.above);
+    return { ...base, engaged: true, paneScroll, followRow: false, handled: true };
   }
   const action = resolveKey(input, asKey(key), { focus: state.focus, busy: false, okKey: null, caps: state.caps });
   const next = applyViewAction(action, base, facts);
@@ -321,6 +500,9 @@ export function resolveViewKey(
  */
 export const HANDLED_KIND_KEYS: ReadonlySet<string> = new Set<string>();
 
+/** The composer bar's word for `o`: the same words as a card's `o` chip (`openKeyLabel`). */
+const openBarLabel = openKeyLabel;
+
 function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKeyFacts): ViewFocusState {
   // Every key that acts engages the view.
   const handled = (patch: Partial<ViewFocusState>): ViewFocusState => ({ ...state, engaged: true, ...patch, handled: true });
@@ -331,7 +513,9 @@ function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKe
       }
       const selected = clamp(state.selected + action.delta, 0, facts.rowCount - 1);
       // A move that moves nothing types (`k` on the first row starts "keep…").
-      return selected === state.selected ? state : handled({ selected });
+      // In a cut pane the row stays on screen: the pane scrolls from where it stands now.
+      const follow = facts.pane ? { paneScroll: facts.pane.above, followRow: true } : {};
+      return selected === state.selected ? state : handled({ selected, ...follow });
     }
     case "enter": {
       if (!state.engaged) {
@@ -367,11 +551,22 @@ function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKe
       const text = copyTextAt(facts, state.selected);
       return text ? handled({ effect: { type: "copy", text } }) : state;
     }
+    case "open":
+      // Unengaged, `o` is the first letter of a message ("ok…", "open…").
+      // Engaged, it asks the app to open the place the view marks `(o)`.
+      return state.engaged && facts.open ? handled({ effect: { type: "open", target: facts.open.target } }) : state;
+    case "watch":
+      // Unengaged, `w` is the first letter of a message ("what…"). Engaged, a
+      // job that can say it finished sends its watch step as a new turn.
+      return state.engaged && facts.watch ? handled({ effect: { type: "ask", text: facts.watch } }) : state;
     case "switch_pane":
-      return { ...state, focus: "composer", engaged: false, handled: true };
+      // The other side: the answer pane when it is cut to the window (live L8), else the composer.
+      return answerCut(facts)
+        ? { ...state, answerFocus: true, engaged: true, handled: true }
+        : { ...state, focus: "composer", engaged: false, handled: true };
     default:
-      // ok/dismiss belong to approval cards; open/watch/retry/edit/view
-      // arrive with the renderers and capabilities that give them meaning.
+      // ok/dismiss belong to approval cards; retry/edit/view arrive with the
+      // renderers and capabilities that give them meaning.
       return state;
   }
 }
@@ -387,22 +582,27 @@ export function viewKeyHints(
   facts: ViewKeyFacts = state.facts,
   kindKeys: readonly KeyHint[] = []
 ): KeyHint[] {
+  if (state.answerFocus) {
+    return answerKeyHints(facts);
+  }
   if (state.viewIndex < 0 || !hasViewKeys(facts)) {
-    return [];
+    // Nothing on the view, but an answer cut to the window: tab switches to it.
+    return answerCut(facts) ? [{ key: "tab", label: "switch side" }] : [];
   }
   if (state.focus === "composer") {
-    return [{ key: "tab", label: "switch side" }];
+    return [tabHint(state, facts)];
   }
   const hints: KeyHint[] = [];
   if (state.engaged && facts.approve && !state.approvalClosed) {
     hints.push({ key: facts.approve.key, label: facts.approve.label, ok: true }, { key: "n", label: "dismiss" });
   }
   if (facts.rowCount > 1) hints.push({ key: "j k", label: facts.table ? "row" : "move" });
+  if (state.engaged && paneCut(facts)) hints.push({ key: "↑ ↓", label: "scroll" });
   if (state.engaged) {
     if (facts.rowAsks.some((ask) => ask !== null)) {
       hints.push({ key: "enter", label: "open" });
     } else if (facts.fixAsk) {
-      hints.push({ key: "enter", label: "fix" });
+      hints.push({ key: "enter", label: facts.fixLabel || "fix" });
     }
   }
   if (facts.tabs > 1) hints.push({ key: `1-${Math.min(9, facts.tabs)}`, label: facts.tabNoun || "switch tab" });
@@ -414,13 +614,49 @@ export function viewKeyHints(
   }
   if (state.engaged && (facts.more || facts.livePageNext)) hints.push({ key: "m", label: "more" });
   if (state.engaged && copyTextAt(facts, state.selected)) hints.push({ key: "c", label: "copy" });
+  // `o` and `w` from the facts (T12), so the bar and the resolver agree; once engaged, as `m` and `c`.
+  // r4 draws them `w watch` then `o open` (view-08-job); the link's own words stay on its in-view line.
+  if (state.engaged && facts.watch) hints.push({ key: "w", label: "watch" });
+  if (state.engaged && facts.open) hints.push({ key: "o", label: openBarLabel(facts.open.label) });
   hints.push(...kindKeys.filter((hint) => HANDLED_KIND_KEYS.has(hint.key)));
   // `?` is the bar's (run-2 N12), `? hide` while open; a card keeps its own inside it.
   if (facts.explain) {
     hints.push({ key: "?", label: state.explainOpen ? "hide" : "what it does", ...(facts.explainInside ? { chipOnly: true } : {}) });
   }
-  hints.push({ key: "tab", label: "switch side" });
+  hints.push(tabHint(state, facts));
   return hints;
+}
+
+/** The bar with the keys on the answer pane (live L8): `↑ ↓ scroll`, `o open …`, `tab switch side`. */
+function answerKeyHints(facts: ViewKeyFacts): KeyHint[] {
+  return [
+    ...(answerCut(facts) ? [{ key: "↑ ↓", label: "scroll" }] : []),
+    ...(facts.open ? [{ key: "o", label: openBarLabel(facts.open.label) }] : []),
+    { key: "tab", label: "switch side" }
+  ];
+}
+
+/**
+ * The bar's `tab` chip. Before the view is engaged, `o`, `w`, `m` and `c` are
+ * the first letter of a message (an empty prompt never captures a letter, as
+ * in any coding harness), so the resting bar says honestly what tab unlocks:
+ * ONE chip naming the first such key the view offers, by priority o > w > m >
+ * c (`tab then o open in Meta Ads`), in place of `tab switch side`. Engaged,
+ * or with nothing behind the gate, it is `tab switch side`. (TJ-3; r4's
+ * goldens draw `o open` at rest: a deliberate deviation for the visual eval.)
+ */
+function tabHint(state: ViewFocusState, facts: ViewKeyFacts): KeyHint {
+  const unlocks = state.engaged && state.focus !== "composer" ? null : gatedKeyHint(state, facts);
+  return { key: "tab", label: unlocks ? `then ${unlocks.key} ${unlocks.label}` : "switch side" };
+}
+
+/** The first key the engagement gate holds back, by priority o > w > m > c (null = none). */
+function gatedKeyHint(state: ViewFocusState, facts: ViewKeyFacts): KeyHint | null {
+  if (facts.open) return { key: "o", label: openBarLabel(facts.open.label) };
+  if (facts.watch) return { key: "w", label: "watch" };
+  if (facts.more || facts.livePageNext) return { key: "m", label: "more" };
+  if (copyTextAt(facts, state.selected)) return { key: "c", label: "copy" };
+  return null;
 }
 
 function defaultFocusCtx(caps: KeyContext["caps"]): ViewRenderCtx {

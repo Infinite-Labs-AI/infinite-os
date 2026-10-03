@@ -25,8 +25,8 @@ function card(name: string, over: Partial<InSessionConfirmationAction> = {}): In
   return {
     turnId: "turn_1",
     confirmationHandle: "h_1",
-    summary: "Pause ad Hook A",
-    confirmationDetails: [{ label: "Ad", value: "Hook A" }],
+    summary: "Pause ad Demo A",
+    confirmationDetails: [{ label: "Ad", value: "Demo A" }],
     confirmFieldsCapable: true,
     view,
     ...over
@@ -42,7 +42,7 @@ describe("the write card draws its approval view (CI-runnable)", () => {
       initialPendingConfirmations: [card("change-pause-card")],
       onSubmitLine: async () => ({ messages: [] })
     }));
-    expect(out).toContain("Pause ad “Hook A”?");
+    expect(out).toContain("Pause ad “Demo A”?");
     expect(out).toContain("│ status   on → paused");
     // The keys as chips inside the card (the key bar's own drawing is R1's).
     expect(out).toContain("│  p  Pause    n  dismiss");
@@ -70,8 +70,8 @@ describe("the write card draws its approval view (CI-runnable)", () => {
       onSubmitLine: async () => ({ messages: [] })
     }));
     // The same r4 card, from the details: the summary in the border, the rows, the keys inside.
-    expect(out).toContain("┌─ Pause ad Hook A ─");
-    expect(out).toContain("│ Ad       Hook A");
+    expect(out).toContain("┌─ Pause ad Demo A ─");
+    expect(out).toContain("│ Ad       Demo A");
     expect(out).toContain("│  y  Confirm    n  dismiss");
     expect(out).not.toContain("Approve this write? —");
   });
@@ -117,7 +117,7 @@ describe("the write card draws its approval view (CI-runnable)", () => {
 });
 
 describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", () => {
-  const messages = [{ role: "user" as const, text: "pause hook a" }, { role: "assistant" as const, text: "Ready. It stops spending once you say OK." }];
+  const messages = [{ role: "user" as const, text: "pause demo a" }, { role: "assistant" as const, text: "Ready. It stops spending once you say OK." }];
   const rowsOf = (columns: number, pending: InSessionConfirmationAction) => stripAnsi(renderInkInteractiveSessionToString({
     columns,
     initialMessages: messages,
@@ -125,13 +125,13 @@ describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", 
     onSubmitLine: async () => ({ messages: [] })
   })).split("\n");
 
-  it("from 120 columns: the head and the card take the right pane, beside the answer, and the Steps come after", () => {
+  it("from 80 columns: the head and the card take the right pane, beside the answer, and the Steps come after", () => {
     const rows = rowsOf(160, card("change-pause-card"));
-    const question = rows.findIndex((row) => row.startsWith("❯ pause hook a"));
+    const question = rows.findIndex((row) => row.startsWith("❯ pause demo a"));
     expect(question).toBeGreaterThan(0);
     // The question row carries the separator and the card's head on its right.
-    expect(rows[question]).toMatch(/^❯ pause hook a +│ /u);
-    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Hook A”?"));
+    expect(rows[question]).toMatch(/^❯ pause demo a +│ /u);
+    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Demo A”?"));
     // Right of the 40-column answer pane and its ` │ ` separator.
     expect(rows[top]!.indexOf("┌")).toBe(43);
     expect(rows[top]!.slice(40, 43)).toBe(" │ ");
@@ -141,22 +141,22 @@ describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", 
     if (steps >= 0) expect(steps).toBeGreaterThan(bottom);
   });
 
-  it("under 120 columns: the answer, a blank and a rule, then the head and the card, then the Steps", () => {
-    const rows = rowsOf(100, card("change-pause-card"));
+  it("under 80 columns: the answer, a blank and a rule, then the head and the card, then the Steps", () => {
+    const rows = rowsOf(79, card("change-pause-card"));
     const answer = rows.findIndex((row) => row.startsWith("∞ Ready."));
     expect(rows[answer + 1]).toBe("");
-    expect(rows[answer + 2]).toBe("─".repeat(100));
+    expect(rows[answer + 2]).toBe("─".repeat(79));
     expect(rows[answer + 3]).toContain("Pause");
-    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Hook A”?"));
+    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Demo A”?"));
     expect(top).toBeGreaterThan(answer + 2);
-    const ruleUnderTurn = rows.findIndex((row, index) => index > top && row === "─".repeat(100));
+    const ruleUnderTurn = rows.findIndex((row, index) => index > top && row === "─".repeat(79));
     expect(ruleUnderTurn).toBeGreaterThan(top);
   });
 
   it("an old desktop's card (no view) takes the same place", () => {
     const old = card("change-pause-card", { view: undefined });
     const rows = rowsOf(160, old);
-    const top = rows.findIndex((row) => row.includes("┌─ Pause ad Hook A"));
+    const top = rows.findIndex((row) => row.includes("┌─ Pause ad Demo A"));
     expect(top).toBeGreaterThanOrEqual(0);
     expect(rows[top]!.indexOf("┌")).toBe(43);
   });
@@ -365,10 +365,10 @@ describe("the yes is working (run-2 M9: r4 flow-pause-02, fake TTY; skipped on C
     { timeout: 30_000 },
     async () => {
       const input = ttyInput();
-      const output = ttyOutput();
+      const output = ttyOutput(100);
       let answer: (value: unknown) => void = () => {};
       const pending = card("change-pause-card");
-      const done = { ...pending.view!, approval: undefined, state: "done", outcome: "applied", title: "Paused ad “Hook A”",
+      const done = { ...pending.view!, approval: undefined, state: "done", outcome: "applied", title: "Paused ad “Demo A”",
         receipt: { sentence: "Paused.", tone: "ok", revertible: false } };
       const session = runInkInteractiveSession({
         columns: 100,
@@ -382,7 +382,7 @@ describe("the yes is working (run-2 M9: r4 flow-pause-02, fake TTY; skipped on C
         }
       });
       await waitFor(() => output.text().includes("Ask Infinite"));
-      await sendKeys(input, "pause hook a\r");
+      await sendKeys(input, "pause demo a\r");
       await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
       const before = output.text().length;
       await sendKeys(input, "p");
@@ -431,23 +431,27 @@ describe("n shows the dismissed card at once (run-2 M5, fake TTY; skipped on CI)
       let answer: (value: unknown) => void = () => {};
       const { input, output, decisions, session } = dismissSession(() => new Promise((resolve) => { answer = resolve; }));
       await waitFor(() => output.text().includes("Ask Infinite"));
-      await sendKeys(input, "pause hook a\r");
+      await sendKeys(input, "pause demo a\r");
       await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
       const before = output.text().length;
       await sendKeys(input, "n");
-      // The app has not answered: the dismissed card and the row's `· dismissed` are already drawn.
-      await waitFor(() => stripAnsi(output.text().slice(before)).includes("✕ Dismissed — nothing was executed."), 4_000, output.text);
+      // The app has not answered: the dismissed card and the row's `· dismissed` are already drawn
+      // (its receipt sentence waits for the app's answer, live run-4 N22).
+      await waitFor(() => stripAnsi(output.text().slice(before)).includes("Sending to the app…"), 4_000, output.text);
       const drawn = stripAnsi(output.text().slice(before));
+      expect(drawn).toContain("✕ Dismissed");
+      expect(drawn).not.toContain("✕ Dismissed — nothing was executed.");
       const row = drawn.split(/\r?\n/u).filter((line) => line.includes("waiting for your OK")).at(-1) ?? "";
       expect(row).toMatch(/· dismissed/u);
       expect(row).not.toContain("▣");
       expect(decisions).toEqual(["decline"]);
       answer({ ok: true });
       await new Promise((resolve) => setTimeout(resolve, 300));
-      // A plain ok: no second "Dismissed" line printed under it; the card now says it was sent (run-3 N22).
+      // A plain ok: no second "Dismissed" line printed under it, and no afterword under it (live T4).
       const lastFrame = stripAnsi(output.text().split(`${String.fromCharCode(27)}[?2026h`).at(-1) ?? "");
       expect(lastFrame.match(/✕ Dismissed — nothing was executed\./gu)).toHaveLength(1);
-      expect(lastFrame).toContain("Sent to the app");
+      expect(lastFrame).not.toContain("Sent to the app");
+      expect(lastFrame).not.toContain("Sending to the app");
       expect(decisions).toEqual(["decline"]);
       await sendKeys(input, "/exit\r");
       await session;
@@ -461,16 +465,57 @@ describe("n shows the dismissed card at once (run-2 M5, fake TTY; skipped on CI)
       let answer: (value: unknown) => void = () => {};
       const { input, output, session } = dismissSession(() => new Promise((resolve) => { answer = resolve; }));
       await waitFor(() => output.text().includes("Ask Infinite"));
-      await sendKeys(input, "pause hook a\r");
+      await sendKeys(input, "pause demo a\r");
       await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
       await sendKeys(input, "n");
-      await waitFor(() => stripAnsi(output.text()).includes("✕ Dismissed — nothing was executed."), 4_000, output.text);
+      await waitFor(() => stripAnsi(output.text()).includes("Sending to the app…"), 4_000, output.text);
       const pending = card("change-pause-card");
       const settled = output.text().length;
       answer({ ok: true, view: { ...pending.view!, approval: undefined, state: "expired", stateReason: { code: "expired", words: "This approval expired before the no." } } });
       await waitFor(() => stripAnsi(output.text().slice(settled)).includes("This approval expired before the no."), 4_000, output.text);
       const after = stripAnsi(output.text().slice(settled));
-      expect(after.lastIndexOf("This approval expired before the no.")).toBeGreaterThan(after.lastIndexOf("Dismissed — nothing was executed."));
+      expect(after.lastIndexOf("This approval expired before the no.")).toBeGreaterThan(after.lastIndexOf("Sending to the app…"));
+      expect(after).not.toContain("Dismissed — nothing was executed.");
+      await sendKeys(input, "/exit\r");
+      await session;
+    }
+  );
+});
+
+describe("a card the app did not send (S4, fake TTY; skipped on CI)", () => {
+  const PROPOSE = "mcp__sample_app__propose_pause_entity";
+
+  it.skipIf(process.env.CI === "true")(
+    "after p, a refusal the app marks not sent settles the waiting row to `✗ not sent`, beside the receipt line",
+    { timeout: 30_000 },
+    async () => {
+      const input = ttyInput();
+      const output = ttyOutput(100, 40);
+      const session = runInkInteractiveSession({
+        columns: 100,
+        errorOutput: ttyOutput(),
+        input,
+        output,
+        title: "Infinite TUI",
+        onConfirmAction: async () => {
+          throw Object.assign(new Error("The card is gone."), { code: "card_gone", nothingRan: true });
+        },
+        async onSubmitLine(_line, onProgress): Promise<InkInteractiveLineResult> {
+          onProgress({ type: "tool.complete", stage: "tool", message: PROPOSE, toolId: "call-1", name: PROPOSE, status: "requires_confirmation", words: { label: "waiting for your OK", result: "pause 1 ad" } } as never);
+          return { messages: [{ role: "assistant", text: "Ready." }], pendingConfirmations: [card("change-pause-card")] };
+        }
+      });
+      await waitFor(() => output.text().includes("Ask Infinite"));
+      await sendKeys(input, "pause demo a\r");
+      await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
+      const before = output.text().length;
+      await sendKeys(input, "p");
+      await waitFor(() => stripAnsi(output.text().slice(before)).includes("✗ Not sent: The card is gone."), 4_000, output.text);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const lastFrame = stripAnsi(output.text().split(`${ESC}[?2026h`).at(-1) ?? "");
+      const row = lastFrame.split(/\r?\n/u).filter((line) => line.includes("waiting for your OK")).at(-1) ?? "";
+      expect(row).toMatch(/✗ not sent/u);
+      expect(row).not.toContain("▣");
       await sendKeys(input, "/exit\r");
       await session;
     }

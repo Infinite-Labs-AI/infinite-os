@@ -30,11 +30,12 @@
 //   nothing measured is one dim line saying why; an empty section is nothing;
 // - ONE day strip per view; no verdict-source note (r4 draws none);
 // - a period that ended before the view's day is never `not final`.
-import type { CellV1, TextCellV1, UnitV1 } from "@infinite-os/types";
+import type { AnswerViewV1, CellV1, TextCellV1, UnitV1 } from "@infinite-os/types";
 
 import { renderTable, type TableColumn } from "../../formatting/table.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
 import { healthBodyLines } from "./health.js";
+import { metaRepeatLine } from "./meta-fold.js";
 import {
   cellText,
   fitLine,
@@ -43,8 +44,10 @@ import {
   isRecord,
   paint,
   viewText,
-  wrapText
+  wrapText,
+  wrapWords
 } from "./primitives.js";
+import { stateHeadFor } from "./states.js";
 import type { KindRender, KindRenderer, ViewRenderCtx } from "./types.js";
 
 // ── small guards: a decoded view vouches only for its envelope ──
@@ -81,6 +84,35 @@ export interface MeasureDraw {
   stripDrawn?: boolean;
   /** The instant the view is as of (else now): a window that ended before its day is past, never `not final`. */
   refMs?: number;
+  /** The shared name start a table already said once (N28): a second leg's table does not say it again. */
+  prefixSaid?: string;
+  /** The selected row's lines as the table drew them (on the selection background): the view finds them in its detail. */
+  selectedRow?: readonly string[];
+}
+
+/** A shared name start is said once only when it is at least this long (cells). */
+const MIN_SHARED_PREFIX = 12;
+
+/**
+ * The start every name shares, cut back to a word (it ends at a space, `_`,
+ * `-`, `·` or `/`), when it is long enough to be worth saying once and every
+ * name has something after it (N28: `Sample tests with a long shared name version-1`,
+ * `… version-2`). "" otherwise, and always for fewer than two names.
+ */
+export function sharedNamePrefix(names: readonly string[]): string {
+  if (names.length < 2) return "";
+  let prefix = names[0]!;
+  for (const name of names.slice(1)) {
+    let at = 0;
+    while (at < prefix.length && at < name.length && prefix[at] === name[at]) at += 1;
+    prefix = prefix.slice(0, at);
+  }
+  // A word ends at a space first (`… version-2`, never `… 2`); a name with no spaces at `_ - · /`.
+  const space = prefix.lastIndexOf(" ");
+  const cut = space >= 0 ? space : Math.max(...["_", "-", "·", "/"].map((separator) => prefix.lastIndexOf(separator)));
+  prefix = cut >= 0 ? prefix.slice(0, cut + 1) : "";
+  if (displayWidth(prefix) < MIN_SHARED_PREFIX) return "";
+  return names.every((name) => name.slice(prefix.length).trim() !== "") ? prefix : "";
 }
 
 // ── tables of cells ──
@@ -100,6 +132,8 @@ export type TableCell = CellV1 | TextCellV1 | string | null | undefined;
 
 export interface CellTableRow {
   label: string;
+  /** The row's whole name, when `label` shows only the part that tells it apart (N28): → shows this. */
+  fullLabel?: string;
   cells: TableCell[];
   /** Per-cell units that override the column's (a differences table mixes units). */
   units?: (UnitV1 | undefined)[];
@@ -139,8 +173,10 @@ export function cellTableLines(raw: CellTableInput, ctx: ViewRenderCtx, draw: Me
     : dropped;
   const keep = all.filter((index) => !hiddenIndexes.includes(index));
   // A row name cut with … (run-3 N18) is shown whole on → (the records), like a hidden column.
-  const cut = trial.fallback !== "record" && !hiddenIndexes.length
-    && renderTable(tableInput(input, labels, keep, new FootnoteBook()), tableOptions(ctx)).labelsCut;
+  // A name said in part (its shared start said once above, N28) is whole on → too.
+  const cut = (trial.fallback !== "record" && !hiddenIndexes.length
+    && renderTable(tableInput(input, labels, keep, new FootnoteBook()), tableOptions(ctx)).labelsCut)
+    || input.rows.some((row) => row.fullLabel !== undefined && row.fullLabel !== row.label);
   draw.hidden += hiddenIndexes.length + (cut ? 1 : 0);
 
   if (trial.fallback === "record" || (ctx.showHiddenColumns && (hiddenIndexes.length || cut))) {
@@ -160,6 +196,7 @@ export function cellTableLines(raw: CellTableInput, ctx: ViewRenderCtx, draw: Me
     for (let line = span[0]; line < span[0] + span[1]; line += 1) {
       if (lines[line] !== undefined) lines[line] = paint(lines[line]!, "sel", ctx);
     }
+    draw.selectedRow = lines.slice(span[0], span[0] + span[1]);
   }
   if (hiddenIndexes.length) {
     const named = hiddenIndexes.map((index) => labels[index + 1]).filter(Boolean).join(", ");
@@ -432,6 +469,8 @@ function selectedRow(input: CellTableInput): number | null {
 
 /** Rows a record view expands (every value) around the selected one; the rest print their label. */
 const RECORD_WINDOW = 12;
+/** A leader's detail line sits under the leader's name when that leaves at least this many cells; else it indents 2. */
+const LEADER_DETAIL_MIN_CELLS = 16;
 
 /**
  * Each row as its label, then `  Column: value` lines (the narrow-table record
@@ -461,7 +500,7 @@ function recordLines(input: CellTableInput, labels: readonly string[], ctx: View
     }
     const mark = selected === null ? "" : recordIndex === selected ? paint("▸ ", "cb", ctx) : "  ";
     const markWidth = selected === null ? 0 : 2;
-    lines.push(...wrapText(viewText(record.label), Math.max(1, ctx.width - markWidth)).map((line, index) =>
+    lines.push(...wrapText(viewText(record.fullLabel ?? record.label), Math.max(1, ctx.width - markWidth)).map((line, index) =>
       `${index === 0 ? mark : " ".repeat(markWidth)}${paint(line, "b", ctx)}`));
     if (!open) {
       return;
@@ -563,7 +602,7 @@ const REFRESH_WORDS: Record<string, string> = {
  * HH:MM` while its window still holds unsettled days). Today: `Today · not
  * final · as of 18:30`: a today leg is never final, whatever it says.
  */
-function legTitle(leg: Leg, isToday: boolean, ctx: ViewRenderCtx, refMs?: number, withWindow = true): string {
+function legTitle(leg: Leg, isToday: boolean, ctx: ViewRenderCtx, refMs?: number, withWindow = true, kpis = false): string {
   const window = asRecord(leg.window);
   // A period that ended before the day the data was read (the leg's own as-of,
   // else the view's) is settled: never `not final`. No read time: the
@@ -572,7 +611,10 @@ function legTitle(leg: Leg, isToday: boolean, ctx: ViewRenderCtx, refMs?: number
   const legMs = typeof leg.asOf === "string" ? Date.parse(leg.asOf) : Number.NaN;
   const ref = Number.isFinite(legMs) ? legMs : refMs;
   const final = !isToday && (leg.final === true || (ref !== undefined && endedBefore(window, ref)));
-  const asOf = clockTime(leg.asOf, ctx.timeZone);
+  // A kpis leg read at the view's own instant: the source line right above says `as of` (W3-num-zero).
+  // A table's window keeps it (r4 `Today · not final · as of 18:30` names the leg's own read).
+  const sameAsSource = kpis && !isToday && Number.isFinite(legMs) && legMs === refMs;
+  const asOf = sameAsSource ? null : clockTime(leg.asOf, ctx.timeZone);
   const refresh = asRecord(leg.refresh);
   const refreshWords = isToday && typeof refresh.status === "string" ? REFRESH_WORDS[refresh.status] : undefined;
   const retryAt = refreshWords ? clockTime(refresh.retryAt, ctx.timeZone) : null;
@@ -611,15 +653,24 @@ interface NumbersColumn extends CellTableColumn {
  * r4's drop order for the ads measures (`table()` priorities: Impressions 4,
  * CPC 3, Conv 2, Clicks 1): the higher drops first; 0 never drops (spend and
  * the rates a reader judges by). Keyed by the column's key; any other column
- * drops from the right after these (`renderTable`).
+ * drops from the right after these (`renderTable`). Of the two click counts,
+ * all clicks go before link clicks, the one `CTR (link)` and `CPC (link)` are
+ * of (live run-4 N19: a tie dropped the right-hand Link clicks first).
  */
 const DROP_PRIORITY: Readonly<Record<string, number>> = {
   impressions: 4, reach: 4, frequency: 4,
   cpc: 3, cpclink: 3, cpm: 3, cpa: 3, cpl: 3, costper: 3, costperresult: 3, costperconversion: 3,
   conv: 2, conversions: 2, purchases: 2, purchasevalue: 2, results: 2, result: 2, leads: 2, registrations: 2, trials: 2,
-  clicks: 1, linkclicks: 1,
+  clicks: 1, linkclicks: 0.5,
   spend: 0, spent: 0, ctr: 0, ctrlink: 0, roas: 0
 };
+
+/**
+ * The row's status word (`On`, `Paused`) drops after all clicks and before link
+ * clicks: its row's records still show it (→), and a narrow table keeps the
+ * click count its rate is of (live run-4 N19: `On` stayed, Link clicks went).
+ */
+const STATUS_DROP = 0.75;
 
 /** A column key as `DROP_PRIORITY` knows it: lower case, no `_` or `-` (`linkClicks`, `link_clicks` → `linkclicks`). */
 function dropKey(key: string): string {
@@ -647,7 +698,8 @@ function legLines(
   columns: NumbersColumn[],
   ctx: ViewRenderCtx,
   draw: MeasureDraw,
-  heading = ""
+  heading = "",
+  withSteps = true
 ): string[] {
   const layout = body.layout;
   const currency = typeof body.currency === "string" ? body.currency : null;
@@ -667,10 +719,11 @@ function legLines(
   const totals = !isToday ? legTotals : rows.length ? null : legTotals;
   // j/k select the settled leg's rows (the today leg's rows are the same things, not final).
   const selected = !isToday && !nested ? ctx.selected : null;
-  const steps = asList(leg.steps).filter(isRecord);
+  // A later read that repeats the earlier one's funnel draws it once, above (N27).
+  const steps = withSteps ? asList(leg.steps).filter(isRecord) : [];
   // A section's totals with no rows are ONE table row named by its days (r4: every section is a table).
   const totalsRow = nested && !rows.length && totals !== null && layout !== "steps";
-  const legWords = untitled ? "" : legTitle(leg, isToday, ctx, draw.refMs, !totalsRow);
+  const legWords = untitled ? "" : legTitle(leg, isToday, ctx, draw.refMs, !totalsRow, !nested && layout === "kpis");
   // A section's heading and its leg's title share one line (`Our sign-ups · Sep 28 – Oct 2 · not final`).
   const title = [heading, legWords].filter(Boolean).join(" · ");
   const lines = title ? wrapText(title, ctx.width).map((line) => paint(line, "b", ctx)) : [];
@@ -692,16 +745,27 @@ function legLines(
   } else if (rows.length) {
     const hasStatus = rows.some((row) => isRecord(row.status) && viewText(row.status.word) !== "");
     const tableColumns: CellTableColumn[] = [
-      ...(hasStatus ? [{ label: "Status", unit: "text" as const }] : []),
+      ...(hasStatus ? [{ label: "Status", unit: "text" as const, dropPriority: STATUS_DROP }] : []),
       ...columns
     ];
     const cellsOf = (cells: Record<string, unknown>, status: unknown): TableCell[] => [
       ...(hasStatus ? [isRecord(status) ? viewText(status.word) : ""] : []),
       ...columns.map((column) => cells[column.key] as TableCell)
     ];
+    // A long start every row shares is said once above the table; each row shows the rest (N28).
+    const names = rows.map((row) => rowName(row.label));
+    const shared = sharedNamePrefix(names);
+    if (shared && draw.prefixSaid !== shared) {
+      values.push(...wrapText(`Each name starts “${shared.trimEnd()}”`, ctx.width).map((line) => paint(line, "muted", ctx)));
+      draw.prefixSaid = shared;
+    }
     values.push(...cellTableLines({
       columns: tableColumns,
-      rows: rows.map((row) => ({ label: rowName(row.label), cells: cellsOf(asRecord(row.cells), row.status) })),
+      rows: rows.map((row, index) => ({
+        label: shared ? `… ${names[index]!.slice(shared.length)}` : names[index]!,
+        ...(shared ? { fullLabel: names[index]! } : {}),
+        cells: cellsOf(asRecord(row.cells), row.status)
+      })),
       // One row is its own total: a Total row prints only under two or more.
       total: totals && rows.length > 1 ? { label: "Total", cells: cellsOf(totals, null) } : null,
       currency,
@@ -788,6 +852,8 @@ const COVERAGE_MARKS: Record<string, CoverageMark> = {
   zero: { glyph: "·", words: "zero", role: "muted", legend: "·····" },
   not_measured: { glyph: "—", words: "not measured", role: "muted" },
   not_synced: { glyph: "░", words: "not synced", role: "hatch" },
+  // Not verified is not a measured day either: a dash with its own words, never `?` (TJ-8 / N30).
+  not_verified: { glyph: "—", words: "not verified", role: "muted" },
   unknown: { glyph: "?", words: "unknown", role: "muted" }
 };
 const TODAY_MARK: CoverageMark = { glyph: "◌", words: "today, not synced yet", role: "warning" };
@@ -878,7 +944,8 @@ function coverageLines(legs: Record<string, unknown>, ctx: ViewRenderCtx, reason
     return lines;
   }
   const used = new Map<string, string>();
-  for (const day of days) used.set(day.mark.glyph, `${day.mark.legend ?? day.mark.glyph} ${day.mark.words}`);
+  // Keyed by the mark's glyph AND words: two marks may share a glyph (`—` not measured, `—` not verified).
+  for (const day of days) used.set(`${day.mark.glyph} ${day.mark.words}`, `${day.mark.legend ?? day.mark.glyph} ${day.mark.words}`);
   const legend = [...used.values()].join("   ");
   lines.push(...wrapText(legend, Math.max(1, ctx.width - legendIndent.length)).map((line) => `${legendIndent}${paint(line, "muted", ctx)}`));
   return lines;
@@ -967,11 +1034,51 @@ function listSectionLines(body: Record<string, unknown>, ctx: ViewRenderCtx, dra
     const empty = viewText(body.emptyWords);
     return empty ? wrapText(empty, ctx.width).map((line) => paint(line, "muted", ctx)) : [];
   }
+  if (columns.length <= 1 && !columns.some((column) => column.label)) {
+    // No columns, or one with no header label (a list of names): a plain list, never a
+    // boxed table with an empty header (W3-health-scopes). A row's one value, then its
+    // status word, follow its name. Two or more columns stay a table (R-IOV-2): a plain
+    // list would drop their values.
+    const column = columns[0];
+    const values = column
+      ? rows.map((row) => drawCell(asRecord(row.cells)[column.key] as TableCell, { label: "", unit: column.unit }, null, draw.notes))
+      : [];
+    return plainListLines(rows, values, ctx);
+  }
   return cellTableLines({
     columns,
     rows: rows.map((row) => ({ label: viewText(row.title), cells: columns.map((column) => asRecord(row.cells)[column.key] as TableCell) })),
     currency: null
   }, ctx, draw);
+}
+
+/**
+ * `Dawn       Live`: each row's name, padded to the longest, then its one value
+ * (`values`, drawn cells: unmeasured stays `—` with its note) and its status word in its tone.
+ */
+function plainListLines(rows: readonly Record<string, unknown>[], values: readonly string[], ctx: ViewRenderCtx): string[] {
+  const names = rows.map((row) => viewText(row.title));
+  const words = rows.map((row) => (isRecord(row.status) ? viewText(row.status.word) : ""));
+  const nameWidth = Math.min(Math.max(0, ...names.map(displayWidth)), Math.max(1, Math.floor(ctx.width / 2)));
+  const valueWidth = Math.max(0, ...values.map(displayWidth));
+  return rows.flatMap((row, index) => {
+    const word = words[index]!;
+    const name = names[index]!;
+    const value = values[index] ?? "";
+    if (!word && !value) return wrapText(name, ctx.width);
+    const tone = isRecord(row.status) && (row.status.tone === "bad" || row.status.tone === "warn") ? "warning" : "muted";
+    const valuePart = value ? (word ? padEndCells(value, valueWidth) : value) : "";
+    const tail = [valuePart, word ? paint(word, tone, ctx) : ""].filter(Boolean).join("  ");
+    const tailWidth = displayWidth(valuePart) + (valuePart && word ? 2 : 0) + displayWidth(word);
+    if (displayWidth(name) <= nameWidth && nameWidth + 2 + tailWidth <= ctx.width) {
+      return [`${padEndCells(name, nameWidth)}  ${tail}`];
+    }
+    return [
+      ...wrapText(name, ctx.width),
+      ...(value ? wrapText(value, Math.max(1, ctx.width - 2)).map((line) => `  ${line}`) : []),
+      ...(word ? wrapText(word, Math.max(1, ctx.width - 2)).map((line) => `  ${paint(line, tone, ctx)}`) : [])
+    ];
+  });
 }
 
 function recordSectionLines(body: Record<string, unknown>, ctx: ViewRenderCtx, notes: FootnoteBook): string[] {
@@ -984,19 +1091,28 @@ function recordSectionLines(body: Record<string, unknown>, ctx: ViewRenderCtx, n
 // ── the body ──
 
 /** A numbers body, drawn. `nested`: inside a composite (its own sections never draw). */
-export function numbersBodyLines(body: Record<string, unknown>, ctx: ViewRenderCtx, draw: MeasureDraw, nested = false, heading = ""): string[] {
+export function numbersBodyLines(
+  body: Record<string, unknown>,
+  ctx: ViewRenderCtx,
+  draw: MeasureDraw,
+  nested = false,
+  heading = "",
+  view: AnswerViewV1 | null = null
+): string[] {
   const columns = numbersColumns(body);
   const currency = typeof body.currency === "string" ? body.currency : null;
   const blocks: string[][] = [];
   const legs = isRecord(body.legs) ? body.legs : null;
+  // What an earlier read of the same account in this turn already drew (N27): not drawn again.
+  const repeats = nested ? undefined : ctx.repeats;
   if (legs && isRecord(legs.settled)) {
-    blocks.push(legLines(legs.settled, false, nested, body, columns, ctx, draw, heading));
+    blocks.push(legLines(legs.settled, false, nested, body, columns, ctx, draw, heading, repeats?.settledSummary !== true));
   }
-  if (legs && isRecord(legs.today)) {
+  if (legs && isRecord(legs.today) && repeats?.today !== true) {
     blocks.push(legLines(legs.today, true, nested, body, columns, ctx, draw, isRecord(legs.settled) ? "" : heading));
   }
   const legsDrew = blocks.some((block) => block.length);
-  if (legs && !draw.stripDrawn) {
+  if (legs && !draw.stripDrawn && repeats?.settledSummary !== true) {
     // ONE day strip per view: a section's own strip would repeat the same days.
     const strip = coverageLines(legs, ctx, draw.reasonSaid === true, columns.some((column) => column.key.toLowerCase() === "spend"));
     // The legend is drawn when no state reason already says which days are in.
@@ -1012,13 +1128,26 @@ export function numbersBodyLines(body: Record<string, unknown>, ctx: ViewRenderC
     const row = viewText(leader.rowLabel);
     if (!label || !row) return [];
     const value = drawCell(leader.value as TableCell, column ?? { label: "", unit: "count" }, currency, draw.notes);
-    return wrapText(`${label} · ${row} · ${value}`, ctx.width);
+    // A long row name breaks after one of its parts, never mid-word (`wrapWords`).
+    const head = wrapWords(`${label} · ${row} · ${value}`, ctx.width);
+    // rev 3: the host's one context line (a spend context line), dim under the name, cut to the width (never wrapped).
+    const detail = viewText(leader.detail);
+    if (!detail) return head;
+    const under = displayWidth(`${label} · `);
+    const indent = head.length === 1 && ctx.width - under >= LEADER_DETAIL_MIN_CELLS ? under : Math.min(2, Math.max(0, ctx.width - 1));
+    return [...head, `${" ".repeat(indent)}${paint(fitLine(detail, ctx.width - indent), "muted", ctx)}`];
   });
   blocks.push(leaders);
 
+  // ONE dim line in place of everything folded (N27), worded as the app words it.
+  const repeatLine = repeats && view ? metaRepeatLine(view, repeats) : null;
+  if (repeatLine) {
+    blocks.push(wrapText(repeatLine, ctx.width).map((line) => paint(line, "muted", ctx)));
+  }
   // No verdict-source note: r4 draws none, and the rows' own words carry each verdict.
   if (!nested) {
-    blocks.push(sectionLines(body.sections, ctx, draw));
+    const folded = new Set(repeats?.sections ?? []);
+    blocks.push(sectionLines(asList(body.sections).filter((_section, index) => !folded.has(index)), ctx, draw));
   }
   if (heading && !legsDrew && blocks.some((block) => block.length)) {
     // A section whose legs drew nothing but has a strip or leaders still says what it is, once.
@@ -1055,15 +1184,96 @@ function sourceWordsLines(view: Parameters<KindRenderer<"numbers">>[0], ctx: Vie
   return source && via ? wrapText(`Source: ${source}, ${via}`, ctx.width).map((line) => paint(line, "muted", ctx)) : [];
 }
 
+/** A text's words, lower case, for telling whether one says another again. */
+function wordSet(text: string): Set<string> {
+  return new Set(text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+}
+
+/** Words a title may add to its chip's and still only repeat it (`n of m days are in` beside `n of m days in`). */
+const LINKING_WORDS: ReadonlySet<string> = new Set(["are", "is"]);
+
+/**
+ * The head's title when the view's own only repeats its state chip (W3-num-gads:
+ * `n of m days are in` beside `◐ n of m days in`): what the numbers are of, the
+ * source (r4 flow-numbers-03 names the subject in the title chip), or no title
+ * at all. Undefined (the view's title stands) when there is no short, or the
+ * title has words of its own (any word that is not the chip's, past `are` / `is`).
+ */
+function headTitleFor(view: Parameters<KindRenderer<"numbers">>[0]): string | undefined {
+  const reason = asRecord(view.stateReason);
+  const short = typeof reason.short === "string" ? stateHeadFor(view).words : "";
+  if (!short) return undefined;
+  const title = wordSet(viewText(view.title));
+  const chip = wordSet(short);
+  // Only a title that says nothing past the chip's words (and a linking `are` / `is`) gives way.
+  if (!title.size || ![...title].every((word) => chip.has(word) || LINKING_WORDS.has(word))) return undefined;
+  const source = viewText(asRecord(view.provenance).source);
+  return source && ![...wordSet(source)].every((word) => chip.has(word)) ? source : "";
+}
+
+/** The states the D2 ruling covers (2026-10-03): each may draw compact. */
+const COMPACT_STATES: ReadonlySet<string> = new Set(["partial", "out_of_date", "not_measured", "nothing_found"]);
+
+/** Whether anything in a body is a real number or a word a cell says (a measured 0 counts); the same walk as the Cmd+L card's. */
+function hasMeasured(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hasMeasured);
+  if (!isRecord(node)) return false;
+  // A text cell is measured words even when empty (the same rule as the Cmd+L card).
+  if (finite(node.value) !== null || typeof node.text === "string" || finite(node.count) !== null) return true;
+  return Object.values(node).some(hasMeasured);
+}
+
+/**
+ * Whether a numbers body holds anything compact would hide: a measured
+ * number, or a composite section that is not numbers and draws something (a
+ * list's rows, a health item, a record's fields are content, never dashes).
+ * A numbers section counts only by its own measured numbers.
+ */
+function bodyHasContent(body: Record<string, unknown>, ctx: ViewRenderCtx): boolean {
+  const { sections, ...rest } = body;
+  if (hasMeasured(rest)) return true;
+  return asList(sections).filter(isRecord).some((section) => section.kind === "numbers"
+    ? hasMeasured(section.body)
+    : sectionLines([section], ctx, { notes: new FootnoteBook(), hidden: 0 }).length > 0);
+}
+
+/**
+ * D2 (2026-10-03): a view in partial / out of date / not measured /
+ * nothing found draws compact (its head and ONE line, the host's state reason,
+ * which the frame draws) ONLY when its table would be all dashes: no rows, or
+ * every number null. Any real number, a measured 0 included, keeps the table.
+ * With no state reason words there is no line to stand in for the dashes, so
+ * they stay with their reasons. The day strip stays (it says which days are
+ * in, never a number). A composite's list, health or record section is content,
+ * so it keeps the body. Reads the cells and the state; computes nothing.
+ */
+function drawsCompact(view: AnswerViewV1, ctx: ViewRenderCtx): boolean {
+  return COMPACT_STATES.has(view.state) && Boolean(viewText(view.stateReason?.words)) && !bodyHasContent(asRecord(view.body), ctx);
+}
+
 export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender => {
+  if (drawsCompact(view as AnswerViewV1, ctx)) {
+    // Compact: no table of dashes and no footnotes; only the day strip stays, which says which days are in, never a number (r4 flow-numbers-03).
+    const body = asRecord(view.body);
+    const legs = asRecord(body.legs);
+    const spend = numbersColumns(body).some((column) => column.key.toLowerCase() === "spend");
+    const headTitle = headTitleFor(view);
+    return {
+      detail: coverageLines(legs, ctx, true, spend), footnotes: [], keys: [], okKey: null, rowCount: 0,
+      ...(headTitle !== undefined ? { headTitle } : {})
+    };
+  }
   const asOf = typeof view.asOf === "string" ? Date.parse(view.asOf) : Number.NaN;
   const draw: MeasureDraw = {
     notes: new FootnoteBook(), hidden: 0, reasonSaid: isRecord(view.stateReason), viewTitle: viewText(view.title),
     ...(Number.isFinite(asOf) ? { refMs: asOf } : {})
   };
-  const body = numbersBodyLines(asRecord(view.body), ctx, draw);
+  const body = numbersBodyLines(asRecord(view.body), ctx, draw, false, "", view as AnswerViewV1);
   const source = draw.legendDrawn ? sourceWordsLines(view, ctx) : [];
+  const headTitle = headTitleFor(view);
   const detail = source.length ? [...body, "", ...source] : body;
+  // Where the selected row landed (a cut pane follows it on j/k).
+  const selectedAt = draw.selectedRow?.length ? detail.indexOf(draw.selectedRow[0]!) : -1;
   return {
     detail,
     footnotes: draw.notes.lines().flatMap((line) => wrapText(line, ctx.width).map((part) => paint(part, "muted", ctx))),
@@ -1072,6 +1282,8 @@ export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender =>
     // r4: a ready table is browsed by row (`j k row`); one that carries a state
     // (not measured, partial, out of date…) is read, not browsed (flow-numbers-02: no keys).
     rowCount: view.state === "ready" ? selectableRows(asRecord(view.body)) : 0,
-    ...(draw.hidden ? { hiddenColumns: draw.hidden } : {})
+    ...(draw.hidden ? { hiddenColumns: draw.hidden } : {}),
+    ...(headTitle !== undefined ? { headTitle } : {}),
+    ...(selectedAt >= 0 ? { selectedLines: [selectedAt, draw.selectedRow!.length] as const } : {})
   };
 };

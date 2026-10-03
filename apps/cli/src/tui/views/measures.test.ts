@@ -58,7 +58,7 @@ describe("numbers: legs", () => {
     expect(detail[today - 1]).toBe("");
     // Two boxes: one per leg, never one table across both.
     expect(detail.filter((line) => line.startsWith("┌"))).toHaveLength(2);
-    expect(detail.slice(settled, today).join("\n")).toContain("Hook A");
+    expect(detail.slice(settled, today).join("\n")).toContain("Demo A");
     expect(detail.slice(today).join("\n")).toContain("$5.00");
   });
 
@@ -131,7 +131,7 @@ describe("numbers: legs", () => {
 
   it("a null cell prints a dash with a footnote, a words reason prints in place, never 0", () => {
     const render = draw(fixture("numbers-week-today"));
-    const hookC = render.detail.find((line) => line.includes("Hook C")) ?? "";
+    const hookC = render.detail.find((line) => line.includes("Demo C")) ?? "";
     expect(hookC).toContain("—¹");
     expect(hookC).toContain("New");
     expect(hookC).not.toMatch(/\b0\b|\$0\.00/u);
@@ -148,12 +148,12 @@ describe("numbers: rows", () => {
     const painted = (selected: number) => draw(fixture("numbers-week-today"), { selected, engaged: true, color: true, theme: INFINITE_R4_THEME });
     const third = painted(2).detail.map(r4Segments);
     const rowWith = (name: string) => third.find((row) => row.some((part) => part.text.includes(name)))!;
-    expect(rowWith("Hook C").every((part) => part.style.split(" ").includes("sel"))).toBe(true);
-    expect(rowWith("Hook A").some((part) => part.style.split(" ").includes("sel"))).toBe(false);
+    expect(rowWith("Demo C").every((part) => part.style.split(" ").includes("sel"))).toBe(true);
+    expect(rowWith("Demo A").some((part) => part.style.split(" ").includes("sel"))).toBe(false);
     // The borders stay: no ▸ is drawn into a table, and every line keeps its width.
     const plain = draw(fixture("numbers-week-today"), { selected: 2, engaged: true }).detail;
     expect(plain.some((line) => line.includes("▸"))).toBe(false);
-    expect(plain.find((line) => line.includes("Hook C"))).toMatch(/^│ Hook C /u);
+    expect(plain.find((line) => line.includes("Demo C"))).toMatch(/^│ Demo C /u);
     const widths = new Set(plain.filter((line) => /^[│┌├└]/u.test(line)).slice(0, 8).map(displayWidth));
     expect(widths.size).toBe(1);
   });
@@ -231,7 +231,7 @@ describe("numbers: steps beside rows and totals", () => {
       body.legs.settled.steps = funnel();
     }));
     const detail = render.detail;
-    const hookA = detail.findIndex((line) => line.includes("Hook A"));
+    const hookA = detail.findIndex((line) => line.includes("Demo A"));
     const signup = detail.findIndex((line) => /^App signup +127 of 176$/u.test(line));
     expect(hookA).toBeGreaterThan(0);
     expect(signup).toBeGreaterThan(hookA);
@@ -252,11 +252,26 @@ describe("numbers: steps beside rows and totals", () => {
 describe("numbers: leaders", () => {
   it("print one line per measure, and never a winner", () => {
     const render = draw(fixture("numbers-week-today"));
-    expect(render.detail).toContain("Most clicks · Hook A · 41");
-    expect(render.detail).toContain("Most trials · Hook B · 2");
-    expect(render.detail).toContain("Lowest cost per trial · Hook B · $20.00");
+    expect(render.detail).toContain("Most clicks · Demo A · 41");
+    expect(render.detail).toContain("Most trials · Demo B · 2");
+    expect(render.detail).toContain("Lowest cost per trial · Demo B · $20.00");
     expect(text(render)).not.toMatch(/winner/iu);
   });
+
+  // Review of 4b5acc2 (W3-num-meta at 80): a leader's long row name moves to
+  // its own line or breaks after one of its parts, never mid-word.
+  for (const width of [30, 40, 51, 60]) {
+    it(`a long row name breaks only after one of its parts (${width} columns)`, () => {
+      const NAME = "sample_video_confession_ads-manager_na_dark_captions_v3";
+      const render = draw(edited("numbers-week-today", (body) => { body.leaders[0].rowLabel = NAME; }), { width });
+      const at = render.detail.findIndex((line) => line.startsWith("Most clicks"));
+      const block = render.detail.slice(at, render.detail.indexOf("", at) === -1 ? undefined : render.detail.indexOf("", at));
+      for (const line of block) expect(displayWidth(line)).toBeLessThanOrEqual(width);
+      const pieces = block.join(" ").split(/\s+/u).filter((word) => NAME.includes(word) && word.length > 2);
+      for (const piece of pieces.slice(0, -1)) expect(/[_./-]$/u.test(piece), `${piece} in ${JSON.stringify(block)}`).toBe(true);
+      expect(pieces.join("")).toBe(NAME);
+    });
+  }
 });
 
 describe("numbers: the coverage strip", () => {
@@ -557,37 +572,29 @@ describe("health", () => {
     expect(detail.find((line) => line.startsWith("✗ Email"))).toMatch(/sign-in expired/u);
   });
 
-  it("with two fixes to open, j/k picks which one o opens", () => {
+  it("with two fixes to open, o opens the first, and no row is selectable (TJ-4: r4 has no j k on health)", () => {
     const view = edited("health-connections", (body) => {
       body.items[3].fix = { label: "Sign in to email", appLink: { place: "connections", label: "Connections" } };
     });
-    // On a row with no fix, o opens nothing.
-    expect(draw(view, { caps: OPEN }).keys).toEqual([]);
-    expect(text(draw(view, { caps: OPEN }))).not.toContain("(o)");
-    const first = draw(view, { caps: OPEN, selected: 2 });
-    expect(first.rowCount).toBe(4);
-    expect(first.detail).toContain("Fix it: Connect the store ↗  (o) · Connections");
-    expect(first.detail).toContain("Fix it: Sign in to email ↗");
-    const last = draw(view, { caps: OPEN, selected: 3 });
-    expect(last.detail).toContain("Fix it: Connect the store ↗");
-    expect(last.detail).toContain("Fix it: Sign in to email ↗  (o) · Connections");
-    expect(last.keys).toEqual([{ key: "o", label: "Sign in to email" }]);
-    expect(last.detail.find((line) => line.includes("Email"))).toMatch(/^▸ /u);
+    for (const selected of [0, 2, 3]) {
+      const drawn = draw(view, { caps: OPEN, selected });
+      expect(drawn.rowCount).toBe(0);
+      expect(drawn.detail).toContain("Fix it: Connect the store ↗  (o) · Connections");
+      expect(drawn.detail).toContain("Fix it: Sign in to email ↗");
+      expect(drawn.keys).toEqual([{ key: "o", label: "Connect the store" }]);
+      expect(text(drawn)).not.toContain("▸");
+    }
   });
 
-  it("with fixes to select, the resume place never claims o (o stays with the selected row)", () => {
+  it("an item fix holds o before the resume place; with no item fix, the resume place takes o", () => {
     const view = edited("health-connections", (body) => {
       body.items[3].fix = { label: "Sign in to email", appLink: { place: "connections", label: "Connections" } };
       body.resume = { appLink: { place: "onboarding", label: "Resume setup" } };
     });
-    const onOk = draw(view, { caps: OPEN, selected: 1 });
-    expect(onOk.keys).toEqual([]);
-    expect(onOk.detail).toContain("→ Resume setup");
-    expect(text(onOk)).not.toContain("(o)");
-    const onFix = draw(view, { caps: OPEN, selected: 2 });
-    expect(onFix.keys).toEqual([{ key: "o", label: "Connect the store" }]);
-    expect(onFix.detail).toContain("→ Resume setup");
-    // Nothing to select and no fix: the resume place takes o.
+    const drawn = draw(view, { caps: OPEN, selected: 1 });
+    expect(drawn.keys).toEqual([{ key: "o", label: "Connect the store" }]);
+    expect(drawn.detail).toContain("→ Resume setup");
+    // No fix: the resume place takes o.
     const resumeOnly = draw(edited("health-connections", (body) => {
       delete body.items[2].fix;
       body.resume = { appLink: { place: "onboarding", label: "Resume setup" } };
@@ -602,14 +609,14 @@ describe("health", () => {
 describe("measures: scrubbed and within the pane", () => {
   it("scrubs escape and bidi characters from every body string", () => {
     const view = edited("numbers-week-today", (body) => {
-      body.legs.settled.rows[0].label = "Hook\u001b[2J A‮";
-      body.leaders[0].rowLabel = "Hook\u001b]8;;x\u0007 A";
+      body.legs.settled.rows[0].label = "Demo\u001b[2J A‮";
+      body.leaders[0].rowLabel = "Demo\u001b]8;;x\u0007 A";
       body.leaders[0].measure.label = "Most⁦ clicks";
       body.legs.settled.window.label = "Last\u0000 7 days";
     });
     const out = text(draw(view));
     expect(out).not.toMatch(/[\u001b\u0000\u0007‮⁦]/u);
-    expect(out).toContain("Most clicks · Hook A · 41");
+    expect(out).toContain("Most clicks · Demo A · 41");
     const health = edited("health-connections", (body) => {
       body.items[2].name = "Store\u001b[31m";
       body.items[2].fix.label = "Connect⁧ it";
@@ -635,5 +642,50 @@ describe("measures: scrubbed and within the pane", () => {
       const color = draw(fixture(name), { color: true, caps: OPEN });
       expect(color.detail.map(strip)).toEqual(plain.detail);
     }
+  });
+});
+
+// Contract revision 3: a leader may carry one short context line from the
+// host (r2 meta-03, a spend context line), drawn dim under the leader's name.
+describe("numbers: a leader's detail line (rev 3)", () => {
+  const withDetail = (detail: string, index = 0) => edited("numbers-week-today", (body) => { body.leaders[index].detail = detail; });
+
+  it("prints under the leader's name, dim, one line", () => {
+    const render = draw(withDetail("$12.34 spent"));
+    const at = render.detail.indexOf("Most clicks · Demo A · 41");
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(render.detail[at + 1]).toBe(`${" ".repeat("Most clicks · ".length)}$12.34 spent`);
+    expect(render.detail[at + 2]).toBe("Most trials · Demo B · 2");
+    const color = draw(withDetail("$12.34 spent"), { color: true });
+    const line = color.detail[color.detail.findIndex((entry) => entry.includes("Demo A · 41")) + 1]!;
+    expect(line).toContain(paint("$12.34 spent", "muted", ctx({ color: true })));
+  });
+
+  it("a leader without detail draws as before", () => {
+    const before = draw(fixture("numbers-week-today")).detail;
+    const after = draw(withDetail("5 of 40 impressions", 1)).detail;
+    const at = after.indexOf("Most trials · Demo B · 2");
+    expect([...after.slice(0, at + 1), ...after.slice(at + 2)]).toEqual(before);
+  });
+
+  it("is fitted to the width, never wraps, and never touches the table, at every width", () => {
+    const long = "5 of 40 impressions, and a much longer context line that runs past the pane";
+    for (const width of [48, 60, 80, 100, 140]) {
+      const plain = draw(fixture("numbers-week-today"), { width });
+      const render = draw(withDetail(long), { width });
+      expect(lines(render).filter((line) => displayWidth(line) > width), `@${width}`).toEqual([]);
+      const at = render.detail.findIndex((line) => line.startsWith("Most clicks"));
+      // Everything above the leaders (the table, the strip) is exactly as without the detail.
+      expect(render.detail.slice(0, at)).toEqual(plain.detail.slice(0, at));
+      // One line only: the next leader follows it.
+      expect(render.detail[at + 2]?.startsWith("Most trials")).toBe(true);
+      expect(render.detail[at + 1]!.trim().startsWith("5 of 40 impressions")).toBe(true);
+    }
+  });
+
+  it("scrubs escape and bidi characters from the detail", () => {
+    const out = text(draw(withDetail("$12.34\u001b[2J spent‮")));
+    expect(out).not.toMatch(/[\u001b‮]/u);
+    expect(out).toContain("$12.34 spent");
   });
 });

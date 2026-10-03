@@ -12,6 +12,7 @@ import type { AnswerViewEnvelopeV1, AnswerViewV1 } from "@infinite-os/types";
 
 import { chipRows, paragraphIn } from "./card.js";
 import { labelValueLines, warningLines } from "./change.js";
+import { openKeyLabel } from "./open-target.js";
 import { afterwordLines, isSettledWithoutRunning } from "./outcome.js";
 import { cellText, FootnoteBook, isRecord, paint, viewText, wrapText } from "./primitives.js";
 import type { KindRender, ViewRenderCtx } from "./types.js";
@@ -48,7 +49,7 @@ function launchViewLines(view: AnswerViewV1, ctx: ViewRenderCtx, notes: Footnote
     const body = isRecord(view.body) ? view.body : {};
     const link = isRecord(view.appLink) ? view.appLink : null;
     const chips = ctx.caps.open && link
-      ? chipRows([{ key: "o", label: viewText(link.label, "open in the app") }], null, ctx.width, ctx)
+      ? chipRows([{ key: "o", label: openKeyLabel(viewText(link.label)) }], null, ctx.width, ctx)
       : [];
     return [
       ...paragraphIn(`✓ ${sentence}`, ctx.width, "gb", ctx),
@@ -120,7 +121,10 @@ export function documentListLines(documents: unknown, ctx: ViewRenderCtx): strin
   const list: unknown[] = Array.isArray(documents) ? documents : [];
   return list.filter(isRecord).flatMap((doc, index) => {
     const words = [viewText(doc.slot), viewText(doc.subject)].filter(Boolean).join(" · ");
-    return wrapText(`${index + 1}  ${words || "—"}`, ctx.width);
+    // Wrapped under its words with a hanging indent, never under its number (W3-ap-send).
+    const lead = `${index + 1}  `;
+    return wrapText(words || "—", Math.max(1, ctx.width - lead.length))
+      .map((line, row) => `${row === 0 ? lead : " ".repeat(lead.length)}${line}`);
   });
 }
 
@@ -165,7 +169,7 @@ function treeLines(nodes: readonly unknown[], depth: number, ctx: ViewRenderCtx)
   }
   const lines: string[] = [];
   const records = nodes.filter(isRecord);
-  // Leaf siblings of one level fold onto one line: "└ Ads   Hook A · Hook B".
+  // Leaf siblings of one level fold onto one line: "└ Ads   Demo A · Demo B".
   const leaves = records.filter((node) => !hasChildren(node));
   const foldable = leaves.length > 1 && leaves.length === records.length
     && leaves.every((node) => node.level === leaves[0]?.level);

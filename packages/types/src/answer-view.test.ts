@@ -1,11 +1,93 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ANSWER_VIEW_KINDS, ANSWER_VIEW_STATES, type AnswerViewV1, type TodayLegV1 } from "./answer-view.js";
+import {
+  ANSWER_VIEW_CONTRACT_REVISION, ANSWER_VIEW_KINDS, ANSWER_VIEW_LIMITS, ANSWER_VIEW_STATES, ARCHIVE_ASSET_ID_PATTERN,
+  type AnswerViewEnvelopeV1, type AnswerViewV1, type ChangeBodyV1, type LeaderV1, type ListBodyV1, type RecordBodyV1,
+  type StateReasonV1, type TodayLegV1
+} from "./answer-view.js";
 const stripped = (k: string) => { const n = k.toLowerCase().replace(/[^a-z0-9]/g, "");
   return n.endsWith("token") || n.includes("credential") || n === "confirmationid"; };
 describe("answer view contract v1", () => {
   it("has 12 kinds and 24 states", () => {
     expect(ANSWER_VIEW_KINDS).toHaveLength(12); expect(ANSWER_VIEW_STATES).toHaveLength(24);
+  });
+  it("revision 3: a change target may name its picture by reference and its parents (both optional)", () => {
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(3);
+    expect(ANSWER_VIEW_LIMITS.maxTargetPathParts).toBe(4);
+    expect(ANSWER_VIEW_LIMITS.maxTargetPathPartChars).toBeGreaterThan(0);
+    const rev3 = { target: { kind: "ad", id: "ad_1", label: "Demo B", creativeRef: { archiveAssetId: "asset_1" },
+      path: ["Example campaign", "Example ad set"] }, rows: [{ label: "status", before: "on", after: "PAUSED" }], warnings: [] } satisfies ChangeBodyV1;
+    // A revision 2 body (no picture, no path) is still a valid body.
+    const rev2 = { target: { kind: "ad", label: "Demo B" }, rows: [], warnings: [] } satisfies ChangeBodyV1;
+    expect(rev3.target.path).toHaveLength(2);
+    expect("path" in rev2.target).toBe(false);
+  });
+  it("revision 3: an archive id is one shared pattern, never a URL, a data URI or a path", () => {
+    for (const id of ["asset_1", "asset_0a1b-2c", "a1", "arch:v2.3"]) expect(ARCHIVE_ASSET_ID_PATTERN.test(id)).toBe(true);
+    for (const id of ["", "https://example.test/a.png", "data:image/png;base64,AA", "/Users/example/a.png",
+      "a/b", "_lead", "a".repeat(129), "asset\u001b[31m1", "asset 1"]) expect(ARCHIVE_ASSET_ID_PATTERN.test(id)).toBe(false);
+    expect(ARCHIVE_ASSET_ID_PATTERN.test("a".repeat(128))).toBe(true);
+  });
+  it("revision 3: an archive id never starts with a URL scheme, in any case", () => {
+    for (const id of ["https:example.test", "javascript:void", "mailto:a", "http:a", "HTTPS:example.test", "Javascript:void",
+      "data:a", "file:a", "blob:a", "vbscript:a", "ftp:a", "MailTo:a"]) expect(ARCHIVE_ASSET_ID_PATTERN.test(id), id).toBe(false);
+    // Real-shaped archive ids still pass, including ones that hold a ':' or start with a scheme's letters.
+    for (const id of ["asset_gallery_hook_b", "meta:1202:thumb.v2", "thumb-1", "asset_c4", "asset-1",
+      "0f8e2a4c-5b6d-4e7f-8a9b-0c1d2e3f4a5b", "https_asset", "datastore:a", "files:a", "mailtox:a", "blob1:a"]) {
+      expect(ARCHIVE_ASSET_ID_PATTERN.test(id), id).toBe(true);
+    }
+  });
+  it("revision 3: a list may name its row-name column, a record its own status, a leader its context line", () => {
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(3);
+    expect(ANSWER_VIEW_LIMITS.maxShortTextChars).toBe(80);
+    const list = { layout: "rows", nameLabel: "Ad", columns: [], rows: [], total: 0, shown: 0 } satisfies ListBodyV1;
+    const record = { title: "Demo B", status: { word: "Paused", tone: "muted" }, fields: [] } satisfies RecordBodyV1;
+    const leader = { measure: { key: "ctr", label: "CTR" }, rowId: "ad_1", rowLabel: "Demo B", value: { value: 2.1 },
+      detail: "5 of 40 impressions" } satisfies LeaderV1;
+    // All three are optional: a body without them is still valid.
+    const oldList = { layout: "rows", columns: [], rows: [], total: 0, shown: 0 } satisfies ListBodyV1;
+    const oldRecord = { fields: [] } satisfies RecordBodyV1;
+    const oldLeader = { measure: { key: "ctr", label: "CTR" }, rowId: "ad_1", rowLabel: "Demo B", value: { value: null } } satisfies LeaderV1;
+    expect([list.nameLabel, record.status.word, leader.detail]).toEqual(["Ad", "Paused", "5 of 40 impressions"]);
+    expect(["nameLabel" in oldList, "status" in oldRecord, "detail" in oldLeader]).toEqual([false, false, false]);
+  });
+  it("revision 3: the contract source documents the new fields and the short-text rule", () => {
+    const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 3 as const;.*ListBodyV1\.nameLabel; RecordBodyV1\.status; LeaderV1\.detail/);
+    expect(src).toMatch(/nameLabel\?: string;.*rev 3/);
+    expect(src).toMatch(/status\?: StatusWordV1;.*rev 3/);
+    expect(src).toMatch(/detail\?: string;.*rev 3/);
+  });
+  it("revision 3: an answer may name its host's account handles and a state reason its step word (both optional)", () => {
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(3);
+    expect(ANSWER_VIEW_LIMITS.maxHostHandleChars).toBe(128);
+    const scope = { workspaceName: "Demo", crossWorkspace: false,
+      account: { project: "proj_demo", source: "src_demo" } } satisfies AnswerViewEnvelopeV1["scope"];
+    const reason = { code: "role_needed", words: "Only an owner or admin can do this.", short: "Not allowed",
+      step: "not allowed" } satisfies StateReasonV1;
+    // A view built without them is unchanged: both are optional.
+    const oldScope = { workspaceName: "Demo", crossWorkspace: false } satisfies AnswerViewEnvelopeV1["scope"];
+    const oldReason = { code: "role_needed", words: "Only an owner or admin can do this." } satisfies StateReasonV1;
+    expect(["account" in oldScope, "step" in oldReason]).toEqual([false, false]);
+    expect(reason.step.length).toBeLessThanOrEqual(ANSWER_VIEW_LIMITS.maxShortTextChars);
+    // The handles share the archive id's character rule (one pattern, no second regex) and its bound.
+    for (const handle of [scope.account.project, scope.account.source, "0f8e2a4c-5b6d-4e7f-8a9b-0c1d2e3f4a5b",
+      "a".repeat(ANSWER_VIEW_LIMITS.maxHostHandleChars)]) expect(ARCHIVE_ASSET_ID_PATTERN.test(handle), handle).toBe(true);
+    for (const handle of ["", "proj demo", "proj/demo", "https://example.com/p", "a".repeat(ANSWER_VIEW_LIMITS.maxHostHandleChars + 1)]) {
+      expect(ARCHIVE_ASSET_ID_PATTERN.test(handle), handle).toBe(false);
+    }
+    // A full view carries both and still holds no stripped key.
+    const view = { v: 1, kind: "quiet", tool: "t", title: "T", state: "blocked", stateReason: reason, asOf: null,
+      scope, caveats: [], body: { stepLine: "not allowed" } } satisfies AnswerViewV1;
+    expect(view.scope.account).toEqual({ project: "proj_demo", source: "src_demo" });
+  });
+  it("revision 3: the contract source documents the account handles and the step word", () => {
+    const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 3 as const;.*AnswerViewEnvelopeV1\.scope\.account; StateReasonV1\.step/);
+    expect(src).toMatch(/account\?: \{ project: string; source: string \};.*host-only; the terminal ignores it.*rev 3$/m);
+    expect(src).toMatch(/step\?: string;.*rev 3$/m);
+    expect(src).toMatch(/maxHostHandleChars: 128/);
+    expect(src).toMatch(/Short host words; rev 3:.*StateReasonV1\.step/);
   });
   it("a numbers view keeps today out of the settled leg", () => {
     const view = { v: 1, kind: "numbers", tool: "t", title: "T", state: "ready", asOf: null,

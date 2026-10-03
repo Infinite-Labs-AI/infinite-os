@@ -39,7 +39,7 @@ import {
   paragraphIn,
   type CardTone
 } from "./card.js";
-import { changeLines, changeNotes, changeRows, labelValueLines, warningLines } from "./change.js";
+import { changeLines, changeNotes, changeRows, labelValueLines, targetPathLine, warningLines } from "./change.js";
 import { imagesLines } from "./images.js";
 import { jobLines } from "./job.js";
 import { launchLines, launchWarningLines } from "./launch.js";
@@ -53,9 +53,11 @@ import {
   paint,
   sourceLine,
   viewText,
-  wrapText
+  wrapText,
+  wrapWords
 } from "./primitives.js";
 import { stateHeadFor } from "./states.js";
+import { appOpenTarget, openKeyLabel, type AppOpenTarget } from "./open-target.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
 /** The card's own key state: what is open, which document, which page, and the answers so far. */
@@ -151,6 +153,11 @@ const DEFAULT_PAGE_ROWS = 12;
 const UPDATE_FOR_FIELDS = "Update the Infinite app to set a value here";
 const LIVE_STATES = new Set(["needs_yes", "needs_answer"]);
 
+/** The cells a card's top border gives its title (`┌─ ` + title + ` ─┐`, as `cardBox` draws it). */
+function titleRoom(cardOuter: number): number {
+  return cardOuter - 6;
+}
+
 /**
  * Draw the card for an approval view at `ctx.width`, with the card's own key
  * context. Every string from the view is scrubbed; no line is wider than
@@ -184,21 +191,30 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   const detailRows = readRows(approval.detailRows);
   const blockedByUpdate = live && !ctx.fieldsCapable && fields.some((field) => field.required);
   // `o` (and the body's "(o)") only when the desktop opens app links AND the card has one.
-  const canOpen = ctx.caps.open && hasAppLink(view, finishInApp);
+  const canOpen = ctx.caps.open && hasAppLink(view, finishInApp) && cardOpenLink(view) !== null;
   const innerCtx: ViewRenderCtx = { ...ctx, width: inner, caps: { ...ctx.caps, open: canOpen } };
   const sentFields = ctx.sentFields && Object.keys(ctx.sentFields).length ? { ...ctx.sentFields } : undefined;
 
   const ok = cardOk(view, fields, ui.answers, ctx.fieldsCapable, sentFields);
   const fieldPrompt = ok?.type === "ask_field" ? ok.field : undefined;
   const documentOpen = ui.documentOpen && documents.length > 0;
-  // `?` shows what the card does: the app's summary, its detail rows, when it expires.
-  const explain = summary !== "" || detailRows.length > 0;
-  const expires = live ? formatAsOf(approval.expiresAt, ctx.timeZone) : null;
   const docWidth = Math.max(8, Math.min(DOCUMENT_MAX_WIDTH, paneWidth));
+  const title = viewText(approval.title) || viewText(view.title);
+  // The card says its target's name once, in its border title (W3-ap-pause).
+  // A title the border cuts (a long ad name, a narrow pane) is said whole
+  // behind `?`, unless the app's summary already says it.
+  const titleCut = displayWidth(title) > titleRoom(width);
+  const wholeTitle = titleCut && !summary.includes(title) ? title : "";
+  // `?` shows what the card does: the whole title when the border cut it, the app's summary, its detail rows, when it expires.
+  const explain = summary !== "" || detailRows.length > 0 || wholeTitle !== "";
+  const expires = live ? formatAsOf(approval.expiresAt, ctx.timeZone) : null;
 
   // ── above the card: the head (· viewing while a document is open) and the source ──
   const paneCtx: ViewRenderCtx = { ...ctx, width: paneWidth };
-  const head = headLine(view, paneCtx);
+  // The head is never wider than the card under it (W3-ap-pause). It says the
+  // action and the kind when the view's title is the action and the whole name
+  // (`headLine`): the name is said once, in the card's border title.
+  const head = headLine(view, { ...paneCtx, width });
   const source = sourceLine(view, paneCtx);
   const prelude = [
     documentOpen ? viewingHead(head, paneWidth, ctx) : head,
@@ -218,19 +234,26 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   } else {
     const effect = viewText(approval.effect);
     const object = cardObject(view, approval, innerCtx, notes);
+    // A change's target path (contract revision 3): the card's first row, dim, under its title.
+    const path = view.kind === "change" ? targetPathLine(view.body, inner, ctx) : null;
+    if (path) {
+      top.push(path);
+    }
     if (effect) {
       top.push(...paragraphIn(effect, inner, "dim", ctx), ...(object.length ? [""] : []));
     }
     middle.push(...object);
     if (ui.explainOpen && explain) {
-      middle.push("", ...explainLines(summary, detailRows, expires, innerCtx));
+      middle.push("", ...explainLines(summary, detailRows, expires, innerCtx, wholeTitle));
     }
     if (finishInApp) {
       const words = viewText(finishInApp.words);
       if (words) footer.push("", ...arrowLines(words, canOpen, inner, ctx));
     }
     if (fields.length) {
-      footer.push("", ...fieldLines(fields, ui, innerCtx));
+      footer.push("", ...fieldLines(fields, ui, innerCtx, {
+        here: (field) => !live || fillableHere(field, ctx.fieldsCapable), canOpen, updateSaysIt: blockedByUpdate
+      }));
     }
     if (blockedByUpdate) {
       footer.push(...paragraphIn(UPDATE_FOR_FIELDS, inner, "amber", ctx));
@@ -243,7 +266,7 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   }
   footer.push(...reconcileLines(view, documentOpen ? { ...innerCtx, width: docWidth } : innerCtx));
   if (documentOpen && ui.explainOpen && explain) {
-    footer.push("", ...explainLines(summary, detailRows, expires, { ...innerCtx, width: docWidth }));
+    footer.push("", ...explainLines(summary, detailRows, expires, { ...innerCtx, width: docWidth }, wholeTitle));
   }
   if (notes.size) {
     footer.push("", ...notes.lines().flatMap((line) => paragraphIn(line, inner, "dim", ctx)));
@@ -255,6 +278,8 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   // action's own, read from the card's title ("Pause ad …?" → p).
   const resendWorded = offersResend(view) && /^check again\b/iu.test(confirmLabel);
   const okKey = ok ? okKeyFor(resendWorded ? viewText(approval.title) || confirmLabel : confirmLabel) : null;
+  // `o`'s words, the same on the card's key line and on the bar (live T4).
+  const openWords = openKeyLabel(appLinkLabel(view, finishInApp));
   const keysFor = (paging: boolean): { keyCtx: KeyContext; keys: KeyHint[] } => {
     const keyCtx: KeyContext = {
       focus: "card",
@@ -276,21 +301,20 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
     };
     const keys: KeyHint[] = ui.fieldEntry
       ? [{ key: "enter", label: "set" }, { key: "esc", label: "cancel" }]
-      : keyBarHints(keyCtx);
+      : keyBarHints(keyCtx).map((hint) => (hint.key === "o" ? { ...hint, label: openWords } : hint));
     return { keyCtx, keys };
   };
-  const openLabel = appLinkLabel(view, finishInApp);
   const chromeRows = prelude.length + (documentOpen ? 0 : BOX_ROWS);
   const draw = (paging: boolean) => {
     const { keyCtx, keys } = keysFor(paging);
     const chips = chipRows(
-      cardChips(keys, documentOpen, openLabel, ui.fieldEntry ? null : keyCtx.okKey),
+      cardChips(keys, documentOpen, ui.fieldEntry ? null : keyCtx.okKey),
       ui.fieldEntry ? null : keyCtx.okKey,
       documentOpen ? docWidth : inner,
       ctx
     );
     const after = documentOpen ? [] : linkAfterLines(view, innerCtx);
-    const tail = [...cardBody([], chips, false, ctx), ...(after.length ? ["", ...after] : []), ...cardBody([], [], explain && !documentOpen && !ui.fieldEntry, ctx)];
+    const tail = [...cardBody([], chips, false, ctx), ...(after.length ? ["", ...after] : []), ...cardBody([], [], explain && !documentOpen && !ui.fieldEntry, ctx, ui.explainOpen)];
     const paged = pageCardBody({
       top,
       middle,
@@ -310,7 +334,6 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
   const { keyCtx, keys, paged } = drawn;
   const pages = paged.pages;
   const tone: CardTone = view.state === "done" ? "green" : "amber";
-  const title = viewText(approval.title) || viewText(view.title);
   const detail = documentOpen
     ? paged.lines.map((line) => fitPainted(line, docWidth))
     : cardBox(title, paged.lines, width, tone, ctx);
@@ -520,6 +543,10 @@ function cardOk(
     // Never approve with the frozen value when the user's answer can't be sent.
     return fields.some((field) => field.required) ? null : { type: "approve" };
   }
+  if (fields.some((field) => field.required && !fillableHere(field, fieldsCapable))) {
+    // A required value no answer typed here can give: no OK that would ask for it forever (it is set in the app).
+    return null;
+  }
   const missing = fields.find((field) => field.required && !answers[field.key]);
   if (missing) {
     return { type: "ask_field", field: missing };
@@ -556,6 +583,19 @@ function hasAppLink(view: AnswerViewV1, finishInApp: Record<string, unknown> | n
   return view.kind === "job" && isRecord(view.body) && isRecord(view.body.landsAt);
 }
 
+/**
+ * The place a card's `o` opens (T12, app.open.v1): where the card says to
+ * finish it, else the view's own link, else where a job lands. Place and
+ * params only, never the link's URL.
+ */
+export function cardOpenLink(view: AnswerViewV1): AppOpenTarget | null {
+  const approval: Record<string, unknown> = isRecord(view.approval) ? view.approval : {};
+  const finishInApp = isRecord(approval.finishInApp) ? approval.finishInApp : null;
+  if (finishInApp && isRecord(finishInApp.appLink)) return appOpenTarget(finishInApp.appLink);
+  if (isRecord(view.appLink)) return appOpenTarget(view.appLink);
+  return view.kind === "job" && isRecord(view.body) ? appOpenTarget(view.body.landsAt) : null;
+}
+
 /** The noun the document tabs share ("Email 1", "Email 2" → `1-2 email`); none when they differ. */
 function tabNounOf(documents: readonly CardDocument[]): { tabNoun?: string } {
   const nouns = new Set(documents.map((doc) => doc.slot.replace(/\s*\d+$/u, "").trim().toLowerCase()));
@@ -563,11 +603,46 @@ function tabNounOf(documents: readonly CardDocument[]): { tabNoun?: string } {
   return nouns.size === 1 && noun ? { tabNoun: noun } : {};
 }
 
-function fieldLines(fields: readonly ApprovalFieldV1[], ui: CardUiState, ctx: ViewRenderCtx): string[] {
+/**
+ * What a field can say for itself on this card: whether it can be answered
+ * here, whether `o` opens the card in the app, and whether the card's amber
+ * `Update the Infinite app …` line already says what to do (then the field row
+ * gives no second instruction).
+ */
+interface FieldLineFacts { here: (field: ApprovalFieldV1) => boolean; canOpen: boolean; updateSaysIt: boolean }
+
+/** Where a field the terminal cannot fill is set, in r4's words (`↗ … in the app  (o)`): `(o)` only when o opens it. */
+const SET_IN_APP_WORDS = "set it in the app";
+
+/**
+ * Whether a typed answer here can fill a field: the app takes answers from
+ * the terminal, and the field is one it can type (an amount or one of its
+ * options; one of a choice's options; a line of text). A choice with no
+ * options, or an input this terminal does not know, cannot be answered here.
+ */
+function fillableHere(field: ApprovalFieldV1, fieldsCapable: boolean): boolean {
+  if (!fieldsCapable) return false;
+  if (field.input === "money_per_day") return acceptsAmount(field) || fieldOptions(field).length > 0;
+  if (field.input === "choice") return fieldOptions(field).length > 0;
+  return field.input === "text";
+}
+
+function fieldLines(fields: readonly ApprovalFieldV1[], ui: CardUiState, ctx: ViewRenderCtx, facts: FieldLineFacts): string[] {
   const lines: string[] = [];
   for (const field of fields) {
     const answer = ui.answers[field.key];
     const current = field.current === null || field.current === undefined ? "" : fieldValue(field, field.current);
+    if (!answer && !facts.here(field)) {
+      // ONE line. The value OK would write is always shown (an optional field's OK writes it as it is),
+      // then where it is set. Never `OK asks for a value` (no OK sets it here), never options that cannot
+      // be typed, and no second instruction under the card's amber update line.
+      const where = facts.updateSaysIt ? "" : `${SET_IN_APP_WORDS}${facts.canOpen ? "  (o)" : ""}`;
+      const value = current
+        ? `now ${current}${where ? paint(` · ${where}`, "dim", ctx) : ""}`
+        : paint(where || "—", "dim", ctx);
+      lines.push(...fieldRows([{ label: viewText(field.label, field.key), value }], ctx.width, ctx));
+      continue;
+    }
     const value = ui.fieldEntry?.key === field.key
       ? paint(`▸ type ${fieldHint(field).replace(/^Type:? /u, "")}, then Enter`, "cb", ctx)
       : answer
@@ -810,7 +885,7 @@ function cardObject(view: AnswerViewV1, approval: Record<string, unknown>, ctx: 
       const target = isRecord(body.target) ? body.target : {};
       const changes = changeRows(body, ctx, notes);
       if (target.kind === "pending_write" || !changes.length) {
-        return rows.length ? appRows() : changeLines(view.body, ctx, notes);
+        return rows.length ? appRows() : changeLines(view.body, ctx, notes, { path: false });
       }
       return [...fieldRows(changes, ctx.width, ctx), ...changeNotes(body, ctx)];
     }
@@ -835,15 +910,17 @@ function cardObject(view: AnswerViewV1, approval: Record<string, unknown>, ctx: 
   }
 }
 
-/** What `?` opens: the app's summary, its detail rows, and when the card expires. */
+/** What `?` opens: the card's whole title when its border cut it, the app's summary, its detail rows, and when the card expires. */
 function explainLines(
   summary: string,
   detailRows: readonly { label: string; value: string }[],
   expires: string | null,
-  ctx: ViewRenderCtx
+  ctx: ViewRenderCtx,
+  wholeTitle = ""
 ): string[] {
   return [
-    ...(summary ? wrapText(summary, ctx.width) : []),
+    ...(wholeTitle ? wrapWords(wholeTitle, ctx.width).map((line) => paint(line, "b", ctx)) : []),
+    ...(summary ? wrapWords(summary, ctx.width) : []),
     ...(detailRows.length ? fieldRows(detailRows, ctx.width, ctx) : []),
     ...(expires ? [paint(`expires ${expires}`, "dim", ctx)] : [])
   ];
@@ -872,14 +949,12 @@ function appLinkLabel(view: AnswerViewV1, finishInApp: Record<string, unknown> |
 
 /**
  * The chips the card draws: every key the bar offers but `?` (it has its own
- * row), `o` named after the place it opens. With a document open the OK key
+ * row), `o` in the bar's words (named after the place it opens). With a document open the OK key
  * leads, then the document keys, then `n` (r4 "Viewing the email"); `v close`
  * stays in the key bar only, so the chips keep to one row under the page.
  */
-function cardChips(keys: readonly KeyHint[], documentOpen: boolean, openLabel: string, okKey: string | null): KeyHint[] {
-  const chips = keys
-    .filter((hint) => hint.key !== "?")
-    .map((hint) => (hint.key === "o" && openLabel ? { ...hint, label: openLabel } : hint));
+function cardChips(keys: readonly KeyHint[], documentOpen: boolean, okKey: string | null): KeyHint[] {
+  const chips = keys.filter((hint) => hint.key !== "?");
   if (!documentOpen) {
     return chips;
   }

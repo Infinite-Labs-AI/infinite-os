@@ -18,6 +18,7 @@ import {
   section,
   stringsOf
 } from "./things.js";
+import { appOpenTarget } from "./open-target.js";
 import type { KindRender, KindRenderer, ViewRenderCtx } from "./types.js";
 
 /** ` c  copy`: the key chip, a space, the label. */
@@ -58,9 +59,14 @@ export const renderLink: KindRenderer<"link"> = (view, ctx) => {
     }
   } else {
     const address = viewText(body.shortUrl) || viewText(body.url);
+    const tagged = viewText(body.finalUrl);
     if (address && body.minted === true) {
       lines.push(copyLine(address, ctx));
       copyText = address;
+    } else if (view.state === "preview" && tagged) {
+      // A preview (W3-link-preview): nothing was made, but the tagged URL it shows is real
+      // words to paste. `c` copies it; its `to` row says it, so no bare base URL above.
+      copyText = tagged;
     } else if (address) {
       lines.push(paint(fitLine(address, width), "muted", ctx));
     }
@@ -81,13 +87,16 @@ export const renderLink: KindRenderer<"link"> = (view, ctx) => {
   }
   section(lines, nextStepLines(steps, 0, selected, ctx));
 
+  // `o` opens an app place the link names (T12), only when the session can open places.
+  const place = body.target === "app_place" && ctx.caps.open ? appOpenTarget(body.appPlace) : null;
   const render: KindRender = {
     detail: lines,
     footnotes: [],
     keys: [],
     okKey: null,
     rowCount: steps.length,
-    rowAsks: steps.map((step) => step.ask)
+    rowAsks: steps.map((step) => step.ask),
+    ...(place ? { openLink: place, openLabel: viewText(isRecord(body.appPlace) ? body.appPlace.label : "") || "open" } : {})
   };
   return copyText ? { ...render, copyText } : render;
 };

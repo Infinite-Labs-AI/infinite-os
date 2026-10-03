@@ -10,7 +10,7 @@
 // as a record. `omitted`, `filterWords` and `emptyWords` print verbatim.
 //
 // The list opens on the row the view names (`body.selected`, r4 view-02 opens
-// on the flagged Hook B, so its details show at once), and a cell the view
+// on the flagged Demo B, so its details show at once), and a cell the view
 // marks `tone: "bad"` is amber (r4 `0 trials`).
 import type { AnswerViewV1, CellV1, TextCellV1, UnitV1 } from "@infinite-os/types";
 
@@ -18,6 +18,7 @@ import { looksNumeric } from "../../formatting/table.js";
 import { displayWidth, padEndCells, truncateCells } from "../lib/display-width.js";
 import {
   cellText,
+  cutAtWord,
   fitLine,
   formatAsOf,
   FootnoteBook,
@@ -47,6 +48,7 @@ import {
   type Fields,
   type Span
 } from "./things.js";
+import { appOpenTarget } from "./open-target.js";
 import type { KindRenderer, ViewRenderCtx } from "./types.js";
 
 interface Column {
@@ -88,6 +90,8 @@ export const renderList: KindRenderer<"list"> = (view, ctx) => {
   const rowCount = rows.length + steps.length;
   const selected = clampIndex(ctx.selected, rowCount);
   const lines: string[] = [];
+  // Where the selected row lands in `lines` (a cut pane follows it on j/k).
+  let selectedLines: [number, number] | null = null;
 
   const filterWords = viewText(body.filterWords);
   if (filterWords) {
@@ -101,21 +105,35 @@ export const renderList: KindRenderer<"list"> = (view, ctx) => {
       lines.push(...wrapText(emptyWords, ctx.width));
     }
   } else if (body.layout === "log") {
-    lines.push(...logLines(top, 0, selected, ctx));
+    const pushLog = (part: readonly Fields[], first: number) => part.forEach((row, offset) => {
+      const drawnRow = logLines([row], first + offset, selected, ctx);
+      if (first + offset === selected) selectedLines = [lines.length, drawnRow.length];
+      lines.push(...drawnRow);
+    });
+    pushLog(top, 0);
     let index = top.length;
     for (const group of groups) {
-      lines.push(...groupHead(group.label, group.reason, ctx), ...logLines(group.rows, index, selected, ctx));
+      lines.push(...groupHead(group.label, group.reason, ctx));
+      pushLog(group.rows, index);
       index += group.rows.length;
     }
   } else {
     const currency = typeof body.currency === "string" ? body.currency : null;
-    const drawn = rowLines(rows, columns, selected, ctx, notes, currency);
+    const drawn = rowLines(rows, columns, selected, ctx, notes, currency, viewText(body.nameLabel));
     hiddenColumns = drawn.hidden.length;
     // Top rows first, then each group under its label and reason.
-    lines.push(...drawn.header, ...drawn.rows.slice(0, top.length).flat());
+    const pushRows = (first: number, end: number) => {
+      for (let at = first; at < end; at += 1) {
+        if (at === selected) selectedLines = [lines.length, drawn.rows[at]!.length];
+        lines.push(...drawn.rows[at]!);
+      }
+    };
+    lines.push(...drawn.header);
+    pushRows(0, top.length);
     let index = top.length;
     for (const group of groups) {
-      lines.push(...groupHead(group.label, group.reason, ctx), ...drawn.rows.slice(index, index + group.rows.length).flat());
+      lines.push(...groupHead(group.label, group.reason, ctx));
+      pushRows(index, index + group.rows.length);
       index += group.rows.length;
     }
     if (drawn.hidden.length && !ctx.showHiddenColumns) {
@@ -137,15 +155,22 @@ export const renderList: KindRenderer<"list"> = (view, ctx) => {
   section(lines, nextStepLines(steps, rows.length, selected, ctx));
 
   const copies = rows.map((row) => viewText(row.copy) || viewText(row.url) || null);
+  // `o` opens the selected row's place (marked `(o)` under it), only when the session can open places (T12).
+  const rowLink = chosen && ctx.caps.open && isRecord(chosen.appLink) ? chosen.appLink : null;
+  const rowTarget = rowLink && viewText(rowLink.label) ? appOpenTarget(rowLink) : null;
   return {
     detail: lines,
     footnotes: notes.lines(),
     keys: [],
     okKey: null,
+    // Rows with places own `o` (the selected one, or none); otherwise the view's own link does.
+    ...(rows.some((row) => isRecord(row.appLink)) ? { openLink: rowTarget } : {}),
+    ...(rowTarget && rowLink ? { openLabel: viewText(rowLink.label) } : {}),
     rowCount,
     rowAsks: [...rows.map(() => null), ...steps.map((step) => step.ask)],
     ...(copies.some((copy) => copy !== null) ? { rowCopies: [...copies, ...steps.map(() => null)] } : {}),
-    ...(hiddenColumns ? { hiddenColumns } : {})
+    ...(hiddenColumns ? { hiddenColumns } : {}),
+    ...(selectedLines ? { selectedLines } : {})
   };
 };
 
@@ -173,7 +198,7 @@ function statusText(row: Fields): { text: string; tone: ReturnType<typeof toneRo
 }
 
 /**
- * r4's row grammar (`● on  Hook A · demo loop  $18.20  1.32%  3 trials`)
+ * r4's row grammar (`● on  Demo A · sample 01  $22.22  2.22%  3 trials`)
  * needs no header when every cell says what it is: at most one money column
  * (with its currency) and one percent column, and counts that carry their
  * column's noun. Anything else keeps the header row.
@@ -200,7 +225,8 @@ function rowLines(
   selected: number,
   ctx: ViewRenderCtx,
   notes: FootnoteBook,
-  currency: string | null = null
+  currency: string | null = null,
+  nameLabel = ""
 ): { header: string[]; rows: string[][]; hidden: string[] } {
   const width = Math.max(1, Math.floor(ctx.width));
   const titles = rows.map((row) => viewText(row.title));
@@ -242,7 +268,28 @@ function rowLines(
       padded.forEach((cellWidth, index) => { columnWidths[index] = cellWidth; });
     }
   }
-  const titleWidth = Math.max(1, Math.min(longestTitle, width - fixed - used(kept)));
+  // A header row draws only for a non-self-describing list with a labelled value column left.
+  const headed = !bare && kept.length > 0 && kept.some((index) => columns[index]?.label);
+  // When it draws, the name column fits its head ("Campaign"; rev 3) the way a value
+  // column fits its label, so the head is cut only when the pane has no room for it.
+  const nameWidth = headed ? displayWidth(nameLabel) : 0;
+  const wantTitle = Math.max(longestTitle, nameWidth);
+  let titleWidth = Math.max(1, Math.min(wantTitle, width - fixed - used(kept)));
+  // The label column takes the free width before it is cut (TJ-13: `No email on th…` beside a
+  // 53-cell text column): the widest text columns give way first, each down to its own label
+  // (or MIN_TITLE_CELLS), their cells cut with `…`. A number is never cut.
+  for (const index of [...kept].sort((a, b) => (columnWidths[b] ?? 0) - (columnWidths[a] ?? 0))) {
+    const need = wantTitle - titleWidth;
+    if (need <= 0) break;
+    // A text column that reads as numbers (right-aligned below) is not words to cut.
+    if (columns[index]!.unit !== "text" || cells.every((row) => !row[index] || looksNumeric(row[index] ?? ""))) continue;
+    const floor = Math.max(MIN_TITLE_CELLS, displayWidth(columns[index]!.label));
+    const take = Math.min(need, (columnWidths[index] ?? 0) - floor);
+    if (take <= 0) continue;
+    columnWidths[index] = (columnWidths[index] ?? 0) - take;
+    for (const row of cells) row[index] = truncateCells(row[index] ?? "", columnWidths[index]!);
+    titleWidth += take;
+  }
   // A count that carries its noun (`3 trials`) reads left-aligned, as r4 prints it.
   const right = columns.map((column, index) =>
     !(bare && column.unit === "count") && (column.unit !== "text" || cells.every((row) => !row[index] || looksNumeric(row[index] ?? "")))
@@ -269,7 +316,8 @@ function rowLines(
   };
   // Padded, the title takes the gap before the first cell too (r4 `padEnd(22)` in bold on the selection).
   const titleSpan = (row: number, padded: boolean): Span => {
-    const title = truncateCells(titles[row] ?? "", titleWidth);
+    // A long name ends at a word where one ends near (`Hook B · founder …`).
+    const title = cutAtWord(titles[row] ?? "", titleWidth);
     return { text: padded ? padEndCells(title, titleWidth + (kept.length ? GAP.length : 0)) : title, style: row === selected ? "b" : "text" };
   };
 
@@ -289,8 +337,10 @@ function rowLines(
     };
   }
 
-  const header = !bare && kept.length && kept.some((index) => columns[index]?.label)
-    ? [paint(fitLine(`${" ".repeat(fixed + titleWidth)}${kept.map((index) => `${GAP}${align(columns[index]?.label ?? "", index)}`).join("")}`.trimEnd(), width), "muted", ctx)]
+  // The name column's head is the view's `nameLabel` ("Ad"; rev 3), cut only past the room the pane has.
+  const nameHead = padEndCells(truncateCells(nameLabel, titleWidth), titleWidth);
+  const header = headed
+    ? [paint(fitLine(`${" ".repeat(fixed)}${nameHead}${kept.map((index) => `${GAP}${align(columns[index]?.label ?? "", index)}`).join("")}`.trimEnd(), width), "muted", ctx)]
     : [];
   return {
     header,
@@ -333,8 +383,8 @@ function logLines(rows: readonly Fields[], first: number, selected: number, ctx:
 }
 
 /**
- * The selected row's details: one dim line (r4 `Hook B · since Sep 24 ·
- * Broad · US · 25–54`), each detail as its value, or `label value` when the
+ * The selected row's details: one dim line (r4 `Demo B · since Jan 02 ·
+ * Sample ad set`), each detail as its value, or `label value` when the
  * value does not already say what it is; then its URL, and its app place
  * when `o` can open it.
  */

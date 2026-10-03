@@ -353,7 +353,7 @@ const URI_OBFUSCATING_CHAR_RE_GLOBAL = /(?:[^\S ]|\p{Cc}|\p{Cf})/gu;
  * throws (mirrors the one-shot parser — a confirmation is unresolvable without
  * both), so the caller surfaces the error rather than a partial/unsafe card.
  */
-function parsePendingConfirmations(
+export function parsePendingConfirmations(
   actionCalls: unknown[] | undefined,
   turnId: string | undefined,
   confirmFieldsCapable: boolean
