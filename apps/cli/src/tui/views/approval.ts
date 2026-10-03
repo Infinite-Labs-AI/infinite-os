@@ -563,7 +563,7 @@ function hasAppLink(view: AnswerViewV1, finishInApp: Record<string, unknown> | n
  * params only, never the link's URL.
  */
 export function cardOpenLink(view: AnswerViewV1): AppOpenTarget | null {
-  const approval = isRecord(view.approval) ? view.approval : {};
+  const approval: Record<string, unknown> = isRecord(view.approval) ? view.approval : {};
   const finishInApp = isRecord(approval.finishInApp) ? approval.finishInApp : null;
   if (finishInApp && isRecord(finishInApp.appLink)) return appOpenTarget(finishInApp.appLink);
   if (isRecord(view.appLink)) return appOpenTarget(view.appLink);
