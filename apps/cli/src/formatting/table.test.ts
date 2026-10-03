@@ -230,6 +230,28 @@ describe("renderTable: a long row label wraps before the numbers drop (live M7)"
   });
 });
 
+describe("renderTable: refill brings back a column that fits after a wider one dropped (run-3 N19)", () => {
+  // `Link clicks` (priority 1) drops before the unprioritized, wide `Status`;
+  // once Status is gone too, Link clicks fits again.
+  const input: TableInput = {
+    columns: [{ label: "" }, { label: "Status" }, { label: "Spent", dropPriority: 0 },
+      { label: "Link clicks", dropPriority: 1 }, { label: "CTR (link)", dropPriority: 0 }],
+    rows: [["Hook A", "Numbers not confirmed", "$212.40", "47", "5.87%"]]
+  };
+
+  it("with refill, the dropped column that fits comes back; the one that cannot stays hidden", () => {
+    const t = renderTable(input, { width: 50, color: false, theme: resolveTheme(), refill: true });
+    expect(t.hidden).toEqual(["Status"]);
+    expect(t.lines[1]).toBe("│        │   Spent │ Link clicks │ CTR (link) │");
+    expect(t.lines.every((line) => displayWidth(line) <= 50)).toBe(true);
+  });
+
+  it("without refill, r4's drop rule as is (markdown tables)", () => {
+    const t = renderTable(input, { width: 50, color: false, theme: resolveTheme() });
+    expect(t.hidden).toEqual(["Link clicks", "Status"]);
+  });
+});
+
 describe("looksNumeric", () => {
   it.each(["$1,234.50", "1.22%", "−3", "-3", "9,790", "—", "1.2k", "0", "+4", "€12", "—¹", "2.5x"])("%s is numeric", (cell) => {
     expect(looksNumeric(cell)).toBe(true);

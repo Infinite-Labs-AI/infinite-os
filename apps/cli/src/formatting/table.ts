@@ -31,8 +31,10 @@ export interface TableInput { columns: TableColumn[]; rows: string[][]; total?: 
  * `labelMin`: a table too wide for `width` first wraps its FIRST column (the row labels, on their words) to the room
  * the other columns leave, never narrower than `labelMin`, before any column drops. A long row name (an ad's full
  * campaign name) then costs lines, not numbers. Absent: a label never wraps (r4 `table()`, markdown tables).
+ * `refill`: after the drops, a dropped column comes back when it fits after all (it went before a wider column that
+ * had to go too), the most kept first. Absent: r4 `table()`'s drop rule as is (markdown tables).
  */
-export interface TableOptions { width: number; color: boolean; theme: Theme; role?: AnsiRole; labelMin?: number }
+export interface TableOptions { width: number; color: boolean; theme: Theme; role?: AnsiRole; labelMin?: number; refill?: boolean }
 export interface TableRender {
   lines: string[];
   hidden: string[];
@@ -84,15 +86,27 @@ export function renderTable(input: TableInput, opts: TableOptions): TableRender 
       total ? displayWidth(total[0] ?? "") : 0
     );
   }
-  const hidden: string[] = [];
+  const dropped: number[] = [];
   const dropOrder = dropCandidates(input.columns);
   for (const candidate of dropOrder) {
     if (tableWidth(keep) <= width || keep.length <= 2) {
       break;
     }
     keep = keep.filter((index) => index !== candidate);
-    hidden.push(labels[candidate] ?? "");
+    dropped.push(candidate);
   }
+  // A column dropped before a wider one that had to go too may fit after all:
+  // the last dropped (the most kept) comes back first, so a column is hidden
+  // only when the table cannot hold it (live re-check run 3, N19: the measured
+  // Link clicks dropped before a wide Status, then fit beside what was left).
+  for (const candidate of opts.refill ? [...dropped].reverse() : []) {
+    const back = [...keep, candidate].sort((a, b) => a - b);
+    if (tableWidth(back) <= width) {
+      keep = back;
+      dropped.splice(dropped.indexOf(candidate), 1);
+    }
+  }
+  const hidden = dropped.map((index) => labels[index] ?? "");
 
   if (columnCount === 0 || tableWidth(keep) > width) {
     return { lines: renderRecords(labels, rows, total, width, opts), hidden: [], fallback: "record", fullWidth, rowLines: [] };

@@ -102,6 +102,8 @@ export interface CellTableRow {
   cells: TableCell[];
   /** Per-cell units that override the column's (a differences table mixes units). */
   units?: (UnitV1 | undefined)[];
+  /** Per-cell words drawn after the value: what one of it is (`—¹ trial`), from a column folded into it. */
+  nouns?: (string | undefined)[];
 }
 
 export interface CellTableInput {
@@ -122,12 +124,18 @@ export interface CellTableInput {
  * only for a cell that is drawn, so no mark points at a hidden column.
  */
 export function cellTableLines(raw: CellTableInput, ctx: ViewRenderCtx, draw: MeasureDraw): string[] {
-  const input = withFixedDigits(withoutUncarried(raw));
+  const input = withUnmeasuredFirst(withFixedDigits(withNounsFolded(withoutUncarried(raw))));
   const labels = [viewText(input.rowLabel), ...input.columns.map((column) => viewText(column.label))];
   const all = input.columns.map((_column, index) => index);
   // Pass 1 (a scratch book): which columns fit at this width.
   const trial = renderTable(tableInput(input, labels, all, new FootnoteBook()), tableOptions(ctx));
-  const hiddenIndexes = trial.fallback === "record" ? [] : hiddenColumnIndexes(labels, trial.hidden);
+  const dropped = trial.fallback === "record" ? [] : hiddenColumnIndexes(labels, trial.hidden);
+  // A column with nothing measured never stays while a measured one is hidden,
+  // not even in room only it fits: it is named with the rest, first.
+  const dash = (index: number) => input.columns[index]?.dropPriority === UNMEASURED_DROP;
+  const hiddenIndexes = dropped.some((index) => !dash(index))
+    ? [...all.filter((index) => dash(index) && !dropped.includes(index)), ...dropped]
+    : dropped;
   draw.hidden += hiddenIndexes.length;
 
   if (trial.fallback === "record" || (ctx.showHiddenColumns && hiddenIndexes.length)) {
@@ -221,16 +229,86 @@ function withoutUncarried(input: CellTableInput): CellTableInput {
     return true;
   });
   if (keep.every(Boolean)) return input;
+  return pickColumns(input, keep);
+}
+
+/** The table with only the columns `keep` marks (cells, units and nouns follow their columns). */
+function pickColumns(input: CellTableInput, keep: readonly boolean[]): CellTableInput {
   const pick = <T,>(list: readonly T[]) => list.filter((_item, index) => keep[index]);
   const row = (entry: CellTableRow): CellTableRow => ({
-    ...entry, cells: pick(entry.cells), ...(entry.units ? { units: pick(entry.units) } : {})
+    ...entry,
+    cells: pick(entry.cells),
+    ...(entry.units ? { units: pick(entry.units) } : {}),
+    ...(entry.nouns ? { nouns: pick(entry.nouns) } : {})
   });
   return { ...input, columns: pick(input.columns), rows: input.rows.map(row), total: input.total ? row(input.total) : input.total };
 }
 
-/** A row name wraps in its cell before a number drops, down to 30% of the pane (at least 16 columns). */
+/**
+ * A count and the words for what one of it is, in ONE column (live re-check
+ * run 3, N19: `Results` and `Result` side by side). A text column labelled as
+ * the singular of a number column's label (`Result` beside `Results`) names
+ * that column's unit: its words follow the number in the number's cell
+ * (`—¹ trial`), under the number's label, and the text column is not drawn.
+ */
+function withNounsFolded(input: CellTableInput): CellTableInput {
+  const folded = new Map<number, number>();
+  input.columns.forEach((column, index) => {
+    if (column.unit !== "text") return;
+    const label = viewText(column.label).toLowerCase();
+    if (!label) return;
+    const count = input.columns.findIndex((other, at) =>
+      other.unit !== "text" && !folded.has(at) && viewText(other.label).toLowerCase() === `${label}s`);
+    if (count >= 0) folded.set(count, index);
+  });
+  if (!folded.size) return input;
+  const fold = (entry: CellTableRow): CellTableRow => {
+    const nouns = entry.cells.map((_cell, index) => {
+      const from = folded.get(index);
+      const noun = from === undefined ? null : textOf(entry.cells[from]);
+      return noun ? viewText(noun) || undefined : entry.nouns?.[index];
+    });
+    return { ...entry, nouns };
+  };
+  const nounColumns = new Set(folded.values());
+  return pickColumns(
+    { ...input, rows: input.rows.map(fold), total: input.total ? fold(input.total) : input.total },
+    input.columns.map((_column, index) => !nounColumns.has(index))
+  );
+}
+
+/** Above every drop priority: a column with nothing measured drops first. */
+const UNMEASURED_DROP = 9;
+
+/** A cell that holds no measured value: a null number or text (a dash or the reason's words), or nothing. */
+function unmeasured(cell: TableCell): boolean {
+  if (cell === undefined || cell === null) return true;
+  if (typeof cell === "string") return false;
+  const value = "value" in cell ? cell.value : "text" in cell ? cell.text : null;
+  return value === null || value === undefined;
+}
+
+/**
+ * When a table must drop columns, a column with nothing measured in any row
+ * (every cell a dash) goes before any measured one (live re-check run 3, N19:
+ * an all-dash ROAS stayed while the measured Link clicks dropped at 60). It is
+ * named with the rest (`+ ROAS · → to see`). A table that fits keeps it.
+ */
+function withUnmeasuredFirst(input: CellTableInput): CellTableInput {
+  const rows = [...input.rows, ...(input.total ? [input.total] : [])];
+  if (!rows.length) return input;
+  const columns = input.columns.map((column, index) =>
+    rows.every((row) => unmeasured(row.cells[index])) ? { ...column, dropPriority: UNMEASURED_DROP } : column);
+  return { ...input, columns };
+}
+
+/**
+ * A row name wraps in its cell before a number drops, down to 30% of the pane
+ * (at least 16 columns); a column that dropped before a wider one comes back
+ * when it fits after all (run-3 N19).
+ */
 function tableOptions(ctx: ViewRenderCtx) {
-  return { width: ctx.width, color: ctx.color, theme: ctx.theme, labelMin: Math.max(16, Math.floor(ctx.width * 0.3)) };
+  return { width: ctx.width, color: ctx.color, theme: ctx.theme, labelMin: Math.max(16, Math.floor(ctx.width * 0.3)), refill: true };
 }
 
 /** The fraction digits `value` needs (at most 2): 1.5 → 1, 1.25 → 2, 3 → 0. */
@@ -277,7 +355,7 @@ function tableInput(input: CellTableInput, labels: readonly string[], keep: read
     ...keep.map((index) => {
       const column = columnFor(input.columns[index]!, entry, index);
       // A Total has no words of its own for a text column (a status, a result's noun): blank, never a dash.
-      return isTotal && column.unit === "text" && entry.cells[index] === undefined ? "" : drawCell(entry.cells[index], column, input.currency, notes);
+      return isTotal && column.unit === "text" && entry.cells[index] === undefined ? "" : drawRowCell(input, entry, index, notes);
     })
   ];
   return {
@@ -299,6 +377,13 @@ function hiddenColumnIndexes(labels: readonly string[], hidden: readonly string[
     }
   }
   return out;
+}
+
+/** One row's cell as drawn: its value, then the words for what one of it is (a folded noun), if any. */
+function drawRowCell(input: CellTableInput, row: CellTableRow, index: number, notes: FootnoteBook): string {
+  const value = drawCell(row.cells[index], columnFor(input.columns[index]!, row, index), input.currency, notes);
+  const noun = row.nouns?.[index];
+  return noun ? `${value} ${noun}` : value;
 }
 
 function columnFor(column: CellTableColumn, row: CellTableRow, index: number): CellTableColumn {
@@ -366,8 +451,8 @@ function recordLines(input: CellTableInput, labels: readonly string[], ctx: View
     if (!open) {
       return;
     }
-    input.columns.forEach((column, index) => {
-      const value = drawCell(record.cells[index], columnFor(column, record, index), input.currency, notes);
+    input.columns.forEach((_column, index) => {
+      const value = drawRowCell(input, record, index, notes);
       const indent = " ".repeat(markWidth + 2);
       lines.push(...wrapText(`${labels[index + 1]}: ${value}`, Math.max(1, ctx.width - indent.length)).map((line) => `${indent}${line}`));
     });

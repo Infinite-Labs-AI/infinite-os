@@ -14,6 +14,8 @@ import { resolveTheme } from "../theme.js";
 import type { Msg } from "../types.js";
 import { viewFocusAfterTurnDone, viewKeyHints } from "./focus.js";
 import { paneWidths, renderCommittedTurn, renderLiveTurn } from "./layout.js";
+import { cellTableLines } from "./numbers.js";
+import { FootnoteBook } from "./primitives.js";
 import { renderView } from "./registry.js";
 import type { ViewRender, ViewRenderCtx } from "./types.js";
 
@@ -75,31 +77,31 @@ describe("numbers, the live shape: one bordered table per block, never records (
     const at = detail.indexOf("Sep 28 – Oct 1");
     expect(detail.slice(at, at + 9)).toEqual([
       "Sep 28 – Oct 1",
-      "┌────────────────────────┬───────────────────────┬─────────┬─────────────┬────────────┬──────┐",
-      "│                        │ Status                │   Spent │ Link clicks │ CTR (link) │ ROAS │",
-      "├────────────────────────┼───────────────────────┼─────────┼─────────────┼────────────┼──────┤",
-      "│ Sample · Trials · US · │ Numbers not confirmed │ $212.40 │          47 │      5.87% │   —¹ │",
-      "│ 2026-09-01 —           │                       │         │             │            │      │",
-      "│ sample_b1_trial_us     │                       │         │             │            │      │",
-      "└────────────────────────┴───────────────────────┴─────────┴─────────────┴────────────┴──────┘",
-      "+ Impressions, Cost per result, CPM, CPC (link), Result, Results · → to see"
+      "┌────────────────────────┬───────────────────────┬─────────┬─────────────┬────────────┬────────────┐",
+      "│                        │ Status                │   Spent │ Link clicks │ CTR (link) │ CPC (link) │",
+      "├────────────────────────┼───────────────────────┼─────────┼─────────────┼────────────┼────────────┤",
+      "│ Sample · Trials · US · │ Numbers not confirmed │ $212.40 │          47 │      5.87% │      $4.52 │",
+      "│ 2026-09-01 —           │                       │         │             │            │            │",
+      "│ sample_b1_trial_us     │                       │         │             │            │            │",
+      "└────────────────────────┴───────────────────────┴─────────┴─────────────┴────────────┴────────────┘",
+      "+ ROAS, Cost per result, Results, Impressions, CPM · → to see"
     ]);
     expect(detail.some((line) => /│ Total /u.test(line))).toBe(false);
   });
 
-  it("the r4 look at 60: the same table keeps spend, the rate and ROAS, and names the rest", () => {
+  it("the r4 look at 60: the same table keeps spend, link clicks and the rate, and names the rest (run-3 N19)", () => {
     const detail = draw(live(), { width: 60 }).detail;
     const at = detail.indexOf("Sep 28 – Oct 1");
     expect(detail.slice(at + 1, at + 10)).toEqual([
-      "┌────────────────────────┬─────────┬────────────┬──────┐",
-      "│                        │   Spent │ CTR (link) │ ROAS │",
-      "├────────────────────────┼─────────┼────────────┼──────┤",
-      "│ Sample · Trials · US · │ $212.40 │      5.87% │   —¹ │",
-      "│ 2026-09-01 —           │         │            │      │",
-      "│ sample_b1_trial_us     │         │            │      │",
-      "└────────────────────────┴─────────┴────────────┴──────┘",
-      "+ Impressions, Cost per result, CPM, CPC (link), Result,",
-      "Results, Link clicks, Status · → to see"
+      "┌────────────────────┬─────────┬─────────────┬────────────┐",
+      "│                    │   Spent │ Link clicks │ CTR (link) │",
+      "├────────────────────┼─────────┼─────────────┼────────────┤",
+      "│ Sample · Trials ·  │ $212.40 │          47 │      5.87% │",
+      "│ US · 2026-09-01 —  │         │             │            │",
+      "│ sample_b1_trial_us │         │             │            │",
+      "└────────────────────┴─────────┴─────────────┴────────────┘",
+      "+ ROAS, Cost per result, Results, Impressions, CPM, CPC",
+      "(link), Status · → to see"
     ]);
   });
 
@@ -111,10 +113,10 @@ describe("numbers, the live shape: one bordered table per block, never records (
       "┌────────┬────────┬─────────────┬─────────────┬────────────┬───────────────┬────────────────┐",
       "│        │  Spent │ Impressions │ Link clicks │ CTR (link) │ Registrations │ Website trials │",
       "├────────┼────────┼─────────────┼─────────────┼────────────┼───────────────┼────────────────┤",
-      "│ Sep 28 │ $28.10 │         110 │           9 │      8.18% │            —³ │             —² │",
-      "│ Sep 29 │ $61.20 │         240 │          12 │      5.00% │            —³ │             —² │",
-      "│ Sep 30 │ $63.50 │         231 │          11 │      4.76% │             1 │             —² │",
-      "│ Oct 1  │ $59.60 │         220 │          15 │      6.82% │            —³ │             —² │",
+      "│ Sep 28 │ $28.10 │         110 │           9 │      8.18% │            —³ │             —¹ │",
+      "│ Sep 29 │ $61.20 │         240 │          12 │      5.00% │            —³ │             —¹ │",
+      "│ Sep 30 │ $63.50 │         231 │          11 │      4.76% │             1 │             —¹ │",
+      "│ Oct 1  │ $59.60 │         220 │          15 │      6.82% │            —³ │             —¹ │",
       "└────────┴────────┴─────────────┴─────────────┴────────────┴───────────────┴────────────────┘"
     ]);
     expect(details.join("\n")).not.toMatch(/2026-09-28|Day\b/u);
@@ -125,10 +127,75 @@ describe("numbers, the live shape: one bordered table per block, never records (
     expect(detail).toContain("Our sign-ups · Sep 28 – Oct 2 (today so far) · not final");
     expect(detail).toContain("Billing trials · Sep 28 – Oct 1 (UTC days)");
     const prior = detail.indexOf("Prior 4 days");
-    expect(detail[prior + 4]).toBe("│ Sep 24 – 27 │ $171.30 │         121 │      8.06% │             1 │             —² │   —¹ │");
+    expect(detail[prior + 4]).toBe("│ Sep 24 – 27 │ $171.30 │         121 │      8.06% │      $1.42 │             1 │         0 │");
     // `New trials` once per row, never as a heading over its own column.
     expect(detail.filter((line) => /New trials\b/u.test(line) && !line.startsWith("│"))).toEqual([]);
     expect(detail).toContain("│ New trials                                │                    1 │");
+  });
+});
+
+// Live re-check run 3, N19: at 60 an all-dash ROAS column stayed while the
+// measured Link clicks was hidden; at 140 `Results` (the count) and `Result`
+// (what one result is) sat side by side.
+describe("numbers: which columns a narrow table keeps, and one Results column (run-3 N19)", () => {
+  const header = (lines: readonly string[], at: number) =>
+    lines.slice(at).find((line) => line.startsWith("│"))!.split("│").map((cell) => cell.trim()).filter(Boolean);
+
+  it("at 60 a column with nothing measured drops before any measured column, and is named", () => {
+    const detail = draw(live(), { width: 60 }).detail;
+    const at = detail.indexOf("Sep 28 – Oct 1");
+    expect(header(detail, at)).toContain("Link clicks");
+    expect(header(detail, at)).not.toContain("ROAS");
+    const hidden = detail.slice(at).join(" ").match(/\+ ([^·]+) · → to see/u)?.[1] ?? "";
+    expect(hidden).toContain("ROAS");
+    expect(hidden).not.toContain("Link clicks");
+    // The prior period too: its all-dash ROAS never stays while measured columns are hidden.
+    expect(header(detail, detail.indexOf("Prior 4 days"))).not.toContain("ROAS");
+  });
+
+  it("a measured column that never drops still never drops; a table that fits keeps its unmeasured columns", () => {
+    const view = edited((body) => {
+      body.legs.settled.rows[0].cells.roas = { value: 0.84 };
+    });
+    const detail = draw(view, { width: 60 }).detail;
+    expect(header(detail, detail.indexOf("Sep 28 – Oct 1"))).toContain("ROAS");
+    // A table that fits drops nothing: the all-dash ROAS is drawn, with its mark.
+    const table = {
+      columns: [{ label: "Spent", unit: "money" as const, dropPriority: 0 }, { label: "ROAS", unit: "ratio" as const, dropPriority: 0 }],
+      rows: [{ label: "Hook A", cells: [{ value: 12.4 }, { value: null, reason: { code: "no_value", words: "no purchase value counted" } }] }],
+      currency: "USD"
+    };
+    const notes = new FootnoteBook();
+    const lines = cellTableLines(table, ctx({ width: 60 }), { notes, hidden: 0 });
+    expect(lines[1]).toBe("│        │  Spent │ ROAS │");
+    expect(lines[3]).toBe("│ Hook A │ $12.40 │   —¹ │");
+    expect(notes.lines()).toEqual(["¹ no purchase value counted"]);
+  });
+
+  it("a column dropped before a wider one that had to go too comes back when it fits", () => {
+    const detail = draw(live(), { width: 60 }).detail;
+    const at = detail.indexOf("Sep 28 – Oct 1");
+    // The wide Status (it drops last) had to go; the measured Link clicks fits beside what is left.
+    expect(header(detail, at)).toEqual(["Spent", "Link clicks", "CTR (link)"]);
+  });
+
+  it("at 140 the count and its noun are ONE column, headed by the count's label", () => {
+    const view = edited((body) => {
+      body.legs.settled.rows[0].cells.results = { value: 1 };
+    });
+    const details = detailsOf(liveTurn([view], 140), 140);
+    const at = details.indexOf("Sep 28 – Oct 1");
+    const cells = header(details, at);
+    expect(cells.filter((cell) => /^Results?$/u.test(cell))).toEqual(["Results"]);
+    const row = details.slice(at).find((line) => line.includes("Sample · Trials"))!;
+    expect(row).toMatch(/│ +1 trial │/u);
+    // Nothing names a `Result` column it hid.
+    expect(details.join("\n")).not.toMatch(/\bResult\b(?!s)/u);
+  });
+
+  it("→ shows the folded column as one record line", () => {
+    const records = draw(live(), { width: 60, showHiddenColumns: true }).detail;
+    expect(records.filter((line) => /^\s*Results?: /u.test(line))).toEqual([expect.stringMatching(/^ {2}Results: —\S* trial$/u)]);
   });
 });
 
@@ -159,7 +226,7 @@ describe("numbers, the live shape: what is drawn (run-2 M7)", () => {
       "CTR (link)   8.94%",
       "CPC (link)   $2.43",
       "CPM          $217.32",
-      "ROAS         —¹"
+      "ROAS         —²"
     ]);
     expect(all(render).join("\n")).not.toContain("did not carry");
   });
@@ -187,7 +254,7 @@ describe("numbers, the live shape: what is drawn (run-2 M7)", () => {
 
   it("footnotes: one line per reason, and only for marks the view shows", () => {
     const render = draw(live());
-    expect(render.footnotes).toEqual(["¹ no purchase value counted", "² the provider hasn't confirmed the count", "³ none credited yet"]);
+    expect(render.footnotes).toEqual(["¹ the provider hasn't confirmed the count", "² no purchase value counted", "³ none credited yet"]);
     const shown = render.detail.join("\n");
     for (const mark of ["¹", "²", "³"]) expect(shown).toContain(mark);
   });
@@ -265,20 +332,20 @@ describe("numbers, the live shape: empty and unmeasured sections (run-2 M7)", ()
 
 describe("numbers: `→ to see` only where → works (run-2 M7)", () => {
   it("the live turn's focused view names the key; committed to scrollback it names what is hidden, in words", () => {
-    const hint = (lines: readonly string[]) => lines.filter((line) => line.includes("Cost per result, CPM"));
-    expect(hint(liveTurn([live()], 100))).toEqual(["+ Impressions, Cost per result, CPM, CPC (link), Result, Results · → to see"]);
-    expect(hint(committedTurn([live()], 100))).toEqual(["+ Impressions, Cost per result, CPM, CPC (link), Result, Results hidden"]);
+    const hint = (lines: readonly string[]) => lines.filter((line) => line.includes("Cost per result, Results"));
+    expect(hint(liveTurn([live()], 100))).toEqual(["+ ROAS, Cost per result, Results, Impressions, CPM · → to see"]);
+    expect(hint(committedTurn([live()], 100))).toEqual(["+ ROAS, Cost per result, Results, Impressions, CPM hidden"]);
     expect(committedTurn([live()], 100).join("\n")).not.toContain("→");
   });
 
   it("a view the keys are not on names what it hid in words too", () => {
     const other = edited((_body, view) => { view.title = "Another read"; });
     const lines = liveTurn([live(), other], 100);
-    const hints = lines.filter((line) => line.startsWith("+ Impressions, Cost per result"));
+    const hints = lines.filter((line) => line.startsWith("+ ROAS, Cost per result"));
     // The first view is not focused (the keys are on the last one).
     expect(hints).toEqual([
-      "+ Impressions, Cost per result, CPM, CPC (link), Result, Results hidden",
-      "+ Impressions, Cost per result, CPM, CPC (link), Result, Results · → to see"
+      "+ ROAS, Cost per result, Results, Impressions, CPM hidden",
+      "+ ROAS, Cost per result, Results, Impressions, CPM · → to see"
     ]);
   });
 
