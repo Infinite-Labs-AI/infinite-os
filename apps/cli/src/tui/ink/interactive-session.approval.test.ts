@@ -25,8 +25,8 @@ function card(name: string, over: Partial<InSessionConfirmationAction> = {}): In
   return {
     turnId: "turn_1",
     confirmationHandle: "h_1",
-    summary: "Pause ad Hook A",
-    confirmationDetails: [{ label: "Ad", value: "Hook A" }],
+    summary: "Pause ad Demo A",
+    confirmationDetails: [{ label: "Ad", value: "Demo A" }],
     confirmFieldsCapable: true,
     view,
     ...over
@@ -42,7 +42,7 @@ describe("the write card draws its approval view (CI-runnable)", () => {
       initialPendingConfirmations: [card("change-pause-card")],
       onSubmitLine: async () => ({ messages: [] })
     }));
-    expect(out).toContain("Pause ad “Hook A”?");
+    expect(out).toContain("Pause ad “Demo A”?");
     expect(out).toContain("│ status   on → paused");
     // The keys as chips inside the card (the key bar's own drawing is R1's).
     expect(out).toContain("│  p  Pause    n  dismiss");
@@ -70,8 +70,8 @@ describe("the write card draws its approval view (CI-runnable)", () => {
       onSubmitLine: async () => ({ messages: [] })
     }));
     // The same r4 card, from the details: the summary in the border, the rows, the keys inside.
-    expect(out).toContain("┌─ Pause ad Hook A ─");
-    expect(out).toContain("│ Ad       Hook A");
+    expect(out).toContain("┌─ Pause ad Demo A ─");
+    expect(out).toContain("│ Ad       Demo A");
     expect(out).toContain("│  y  Confirm    n  dismiss");
     expect(out).not.toContain("Approve this write? —");
   });
@@ -117,7 +117,7 @@ describe("the write card draws its approval view (CI-runnable)", () => {
 });
 
 describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", () => {
-  const messages = [{ role: "user" as const, text: "pause hook a" }, { role: "assistant" as const, text: "Ready. It stops spending once you say OK." }];
+  const messages = [{ role: "user" as const, text: "pause demo a" }, { role: "assistant" as const, text: "Ready. It stops spending once you say OK." }];
   const rowsOf = (columns: number, pending: InSessionConfirmationAction) => stripAnsi(renderInkInteractiveSessionToString({
     columns,
     initialMessages: messages,
@@ -127,11 +127,11 @@ describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", 
 
   it("from 120 columns: the head and the card take the right pane, beside the answer, and the Steps come after", () => {
     const rows = rowsOf(160, card("change-pause-card"));
-    const question = rows.findIndex((row) => row.startsWith("❯ pause hook a"));
+    const question = rows.findIndex((row) => row.startsWith("❯ pause demo a"));
     expect(question).toBeGreaterThan(0);
     // The question row carries the separator and the card's head on its right.
-    expect(rows[question]).toMatch(/^❯ pause hook a +│ /u);
-    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Hook A”?"));
+    expect(rows[question]).toMatch(/^❯ pause demo a +│ /u);
+    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Demo A”?"));
     // Right of the 40-column answer pane and its ` │ ` separator.
     expect(rows[top]!.indexOf("┌")).toBe(43);
     expect(rows[top]!.slice(40, 43)).toBe(" │ ");
@@ -147,7 +147,7 @@ describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", 
     expect(rows[answer + 1]).toBe("");
     expect(rows[answer + 2]).toBe("─".repeat(100));
     expect(rows[answer + 3]).toContain("Pause");
-    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Hook A”?"));
+    const top = rows.findIndex((row) => row.includes("┌─ Pause ad “Demo A”?"));
     expect(top).toBeGreaterThan(answer + 2);
     const ruleUnderTurn = rows.findIndex((row, index) => index > top && row === "─".repeat(100));
     expect(ruleUnderTurn).toBeGreaterThan(top);
@@ -156,7 +156,7 @@ describe("the waiting card is the turn's details (run-2 M1: r4 Needs your OK)", 
   it("an old desktop's card (no view) takes the same place", () => {
     const old = card("change-pause-card", { view: undefined });
     const rows = rowsOf(160, old);
-    const top = rows.findIndex((row) => row.includes("┌─ Pause ad Hook A"));
+    const top = rows.findIndex((row) => row.includes("┌─ Pause ad Demo A"));
     expect(top).toBeGreaterThanOrEqual(0);
     expect(rows[top]!.indexOf("┌")).toBe(43);
   });
@@ -368,7 +368,7 @@ describe("the yes is working (run-2 M9: r4 flow-pause-02, fake TTY; skipped on C
       const output = ttyOutput();
       let answer: (value: unknown) => void = () => {};
       const pending = card("change-pause-card");
-      const done = { ...pending.view!, approval: undefined, state: "done", outcome: "applied", title: "Paused ad “Hook A”",
+      const done = { ...pending.view!, approval: undefined, state: "done", outcome: "applied", title: "Paused ad “Demo A”",
         receipt: { sentence: "Paused.", tone: "ok", revertible: false } };
       const session = runInkInteractiveSession({
         columns: 100,
@@ -382,7 +382,7 @@ describe("the yes is working (run-2 M9: r4 flow-pause-02, fake TTY; skipped on C
         }
       });
       await waitFor(() => output.text().includes("Ask Infinite"));
-      await sendKeys(input, "pause hook a\r");
+      await sendKeys(input, "pause demo a\r");
       await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
       const before = output.text().length;
       await sendKeys(input, "p");
@@ -431,7 +431,7 @@ describe("n shows the dismissed card at once (run-2 M5, fake TTY; skipped on CI)
       let answer: (value: unknown) => void = () => {};
       const { input, output, decisions, session } = dismissSession(() => new Promise((resolve) => { answer = resolve; }));
       await waitFor(() => output.text().includes("Ask Infinite"));
-      await sendKeys(input, "pause hook a\r");
+      await sendKeys(input, "pause demo a\r");
       await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
       const before = output.text().length;
       await sendKeys(input, "n");
@@ -464,7 +464,7 @@ describe("n shows the dismissed card at once (run-2 M5, fake TTY; skipped on CI)
       let answer: (value: unknown) => void = () => {};
       const { input, output, session } = dismissSession(() => new Promise((resolve) => { answer = resolve; }));
       await waitFor(() => output.text().includes("Ask Infinite"));
-      await sendKeys(input, "pause hook a\r");
+      await sendKeys(input, "pause demo a\r");
       await waitFor(() => stripAnsi(output.text()).includes("p  Pause"), 4_000, output.text);
       await sendKeys(input, "n");
       await waitFor(() => stripAnsi(output.text()).includes("Sending to the app…"), 4_000, output.text);

@@ -15,20 +15,20 @@ import type { ViewRender, ViewRenderCtx } from "./types.js";
 
 const theme = resolveTheme({});
 const plain = { color: false, theme };
-const OUTER = "Spring trials · prospecting · broad audiences";
-const NEAREST = "Broad · US 21+ · 2026-09-23 — test_b1_broad_v2";
-const body = (path: string[]) => ({ target: { kind: "ad", id: "a1", label: "Hook B", path } });
+const OUTER = "Sample campaign · prospecting · wide audience";
+const NEAREST = "Alpha · Sample 1 · 2026-01-01 — test_x1_sample";
+const body = (path: string[]) => ({ target: { kind: "ad", id: "a1", label: "Demo B", path } });
 
 describe("targetPathLine cuts the outer parts first (TJ-7)", () => {
   it("a path that fits prints whole", () => {
-    expect(targetPathLine(body(["Spring", "Broad"]), 60, plain)).toBe("Spring › Broad");
+    expect(targetPathLine(body(["Spring", "Alpha"]), 60, plain)).toBe("Spring › Alpha");
   });
 
   it("the nearest parent stays whole while the outer part is cut", () => {
     const line = targetPathLine(body([OUTER, NEAREST]), 72, plain)!;
     expect(displayWidth(line)).toBeLessThanOrEqual(72);
     expect(line.endsWith(` › ${NEAREST}`)).toBe(true);
-    expect(line.startsWith("Spring")).toBe(true);
+    expect(line.startsWith("Sample")).toBe(true);
     expect(line).toContain("…");
   });
 
@@ -42,7 +42,7 @@ describe("targetPathLine cuts the outer parts first (TJ-7)", () => {
   it("too narrow for the outer parts: they fold to … and the nearest parent keeps its leading words", () => {
     const line = targetPathLine(body([OUTER, NEAREST]), 40, plain)!;
     expect(displayWidth(line)).toBeLessThanOrEqual(40);
-    expect(line.startsWith("… › Broad · US 21+")).toBe(true);
+    expect(line.startsWith("… › Alpha · Sample 1")).toBe(true);
     expect(line.endsWith("…")).toBe(true);
   });
 
@@ -50,18 +50,18 @@ describe("targetPathLine cuts the outer parts first (TJ-7)", () => {
     it(`never wider than ${width} columns, and never loses the nearest parent's first word`, () => {
       const line = targetPathLine(body(["A", OUTER, NEAREST]), width, plain)!;
       expect(displayWidth(line)).toBeLessThanOrEqual(width);
-      if (width >= 12) expect(line).toContain("Bro");
+      if (width >= 12) expect(line).toContain("Alp");
     });
   }
 });
 
 function change(raw: Record<string, unknown>): AnswerViewV1 {
   const decoded = decodeAnswerView({
-    v: 1, kind: "change", tool: "pause_item", title: "Pause Hook B", state: "no_change", asOf: null,
+    v: 1, kind: "change", tool: "pause_item", title: "Pause Demo B", state: "no_change", asOf: null,
     provenance: { source: "Ads · ad", via: "our_db" },
     scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [],
-    stateReason: { code: "already", words: "Our stored copy shows Hook B already paused." },
-    body: { target: { kind: "ad", id: "a1", label: "Hook B", path: [OUTER, NEAREST] }, rows: [] },
+    stateReason: { code: "already", words: "Our stored copy shows Demo B already paused." },
+    body: { target: { kind: "ad", id: "a1", label: "Demo B", path: [OUTER, NEAREST] }, rows: [] },
     ...raw
   });
   if (!decoded) throw new Error("test view does not decode");
@@ -79,7 +79,7 @@ describe("the no_change head's path line (TJ-7, flow-pause-05)", () => {
     it(`keeps the ad set's leading words at ${width} columns`, () => {
       const out = lines(renderView(change({}), ctx({ width })));
       const path = out.find((line) => line.includes(" › "))!;
-      expect(path).toContain("Broad");
+      expect(path).toContain("Alpha");
       for (const line of out) expect(displayWidth(line), line).toBeLessThanOrEqual(width);
     });
   }

@@ -103,14 +103,14 @@ describe("a follow-up view that lands after a new line went up", () => {
   const view = decodeAnswerView({
     v: 1, kind: "change", tool: "pause_entity", title: "Pause the ad set", state: "done", asOf: null,
     scope: { workspaceName: "Example Co", crossWorkspace: false }, caveats: [],
-    receipt: { sentence: "Paused ad set “Broad”", tone: "ok", revertible: true },
-    body: { target: { kind: "adset", label: "Broad" }, rows: [{ label: "status", before: "on", after: "PAUSED" }], warnings: [] }
+    receipt: { sentence: "Paused ad set “Alpha”", tone: "ok", revertible: true },
+    body: { target: { kind: "adset", label: "Alpha" }, rows: [{ label: "status", before: "on", after: "PAUSED" }], warnings: [] }
   }) as AnswerViewV1;
 
   it("prints as lines labelled with whose follow-up it is, never dropped", () => {
     const lines = offTurnViewLines(view, "Pause ad 01", 100, INFINITE_R4_THEME);
     expect(lines[0]).toBe("↳ The follow-up to “Pause ad 01”:");
-    expect(lines.join("\n")).toContain("Paused ad set “Broad”");
+    expect(lines.join("\n")).toContain("Paused ad set “Alpha”");
     expect(lines.slice(1).every((line) => line === "" || line.startsWith("  "))).toBe(true);
     expect(lines.join("\n")).not.toMatch(/\u001b/u);
   });
@@ -191,7 +191,7 @@ describe("a card's confirm through the runner (confirmThroughRunner)", () => {
   const VIEW = {
     v: 1, kind: "change", tool: "pause_entity", title: "Pause", state: "ready", asOf: null,
     scope: { workspaceName: "Example Co", crossWorkspace: false }, caveats: [],
-    body: { target: { kind: "ad", label: "Hook B" }, rows: [], warnings: [] }
+    body: { target: { kind: "ad", label: "Demo B" }, rows: [], warnings: [] }
   };
   const CARD = { turnId: "t1", confirmationHandle: "h1", summary: "Pause ad 01", confirmationDetails: [], view: VIEW } as unknown as InSessionConfirmationAction;
 

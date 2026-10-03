@@ -39,7 +39,7 @@ export const renderRecord: KindRenderer<"record"> = (view, ctx) => {
   const selected = clampIndex(ctx.selected, steps.length);
   const lines: string[] = [];
 
-  // r4: the thing's full name in bold first (`Ad “Hook B · founder POV”`), when the view gives it,
+  // r4: the thing's full name in bold first (`Ad “Demo B · sample copy”`), when the view gives it,
   // after its own status (`● Paused  `, rev 3) in the status tone.
   const head = headLines(viewText(body.title), statusWord(body.status), ctx);
   if (head.length) {
@@ -79,7 +79,7 @@ function statusWord(value: unknown): { word: string; tone: StatusWordV1["tone"] 
 }
 
 /**
- * The name line: `● Paused  Ad “Hook B”`, the status word in its tone (as a
+ * The name line: `● Paused  Ad “Demo B”`, the status word in its tone (as a
  * list row draws it) and the name in bold, wrapped under itself. Too narrow
  * for both, the status takes its own line above the name.
  */

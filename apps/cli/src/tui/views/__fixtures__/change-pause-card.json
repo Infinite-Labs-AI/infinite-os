@@ -14,7 +14,7 @@
     "target": {
       "kind": "ad",
       "id": "ad_1",
-      "label": "Hook A"
+      "label": "Demo A"
     },
     "rows": [
       {
@@ -30,14 +30,14 @@
     "kind": "card",
     "turnId": "turn_1",
     "handle": "h_1",
-    "title": "Pause ad “Hook A”?",
+    "title": "Pause ad “Demo A”?",
     "summary": "Stops this ad's spend until you turn it back on.",
     "confirmLabel": "Pause",
     "dismissLabel": "Dismiss",
     "rows": [
       {
         "label": "Ad",
-        "value": "Hook A"
+        "value": "Demo A"
       }
     ],
     "expiresAt": "2026-01-15T11:10:00Z"

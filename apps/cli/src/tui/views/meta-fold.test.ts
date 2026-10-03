@@ -96,7 +96,7 @@ describe("the terminal draws the fold (N27)", () => {
         expect(out.replace(/\n(?=\S)/gu, " ").split(LINE).length - 1, out).toBe(1);
         const later = out.slice(out.indexOf("Ads by ad"));
         // Its own rows and our sign-ups stay.
-        expect(later).toContain("Hook A");
+        expect(later).toContain("Demo A");
         expect(later).toContain("Our sign-ups");
         // The repeats are gone from it: the day strip, the funnel, today's block, By day, Prior, the caveats.
         expect(later).not.toMatch(/Days Sep 25|\nBy day\n|\nPrior 6 days\n|Spend +\$12\.50|Trials come from|of 120/u);
@@ -137,12 +137,12 @@ describe("our sign-ups' today leg is its own block, never summed (N26)", () => {
       const after = out.slice(head);
       const today = after.findIndex((line) => /Oct 1 so far · not final · as of 18:30/u.test(line));
       expect(today).toBeGreaterThan(0);
-      // Settled Hook B has 4 registrations, today 0: never a summed 4 + 0 shown as today's, never 3 + 2 = 5 for Hook A.
+      // Settled Demo B has 4 registrations, today 0: never a summed 4 + 0 shown as today's, never 3 + 2 = 5 for Demo A.
       const settledBlock = after.slice(0, today).join("\n");
       const todayBlock = after.slice(today).join("\n");
-      expect(settledBlock).toMatch(/Hook A[^\n]*3[^\n]*2/u);
-      expect(todayBlock).toMatch(/Hook A[^\n]*2[^\n]*0/u);
-      expect(out.join("\n")).not.toMatch(/Hook A[^\n]*\b5\b/u);
+      expect(settledBlock).toMatch(/Demo A[^\n]*3[^\n]*2/u);
+      expect(todayBlock).toMatch(/Demo A[^\n]*2[^\n]*0/u);
+      expect(out.join("\n")).not.toMatch(/Demo A[^\n]*\b5\b/u);
       expect(todayBlock).not.toContain("Total");
     });
   }

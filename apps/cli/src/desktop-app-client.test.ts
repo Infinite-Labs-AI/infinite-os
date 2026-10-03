@@ -1079,8 +1079,8 @@ function receiptView(overrides: Record<string, unknown> = {}) {
     asOf: null,
     scope: { workspaceName: "Example Co", crossWorkspace: false },
     caveats: [],
-    receipt: { sentence: "Paused ad “Hook B”", tone: "ok", revertible: true },
-    body: { target: { kind: "ad", label: "Hook B" }, rows: [], warnings: [] },
+    receipt: { sentence: "Paused ad “Demo B”", tone: "ok", revertible: true },
+    body: { target: { kind: "ad", label: "Demo B" }, rows: [], warnings: [] },
     ...overrides
   };
 }
@@ -1267,7 +1267,7 @@ describe("answer view negotiation (result.view.v1, confirm.fields.v1)", () => {
       fetchImpl: (async () =>
         jsonResponse({
           ok: true,
-          receipt: "Paused ad “Hook B”",
+          receipt: "Paused ad “Demo B”",
           runId: "run-1",
           view
         })) as typeof fetch
@@ -1281,12 +1281,12 @@ describe("answer view negotiation (result.view.v1, confirm.fields.v1)", () => {
 
     expect(result).toEqual({
       ok: true,
-      receipt: "Paused ad “Hook B”",
+      receipt: "Paused ad “Demo B”",
       runId: "run-1",
       view
     });
     expect(result).not.toHaveProperty("raw");
-    expect(result.view?.receipt?.sentence).toBe("Paused ad “Hook B”");
+    expect(result.view?.receipt?.sentence).toBe("Paused ad “Demo B”");
   });
 
   it("turns an undecodable confirm view into undefined and keeps the rest of the JSON", async () => {
@@ -2622,7 +2622,7 @@ describe("app.open.v1 and confirm.stream.v1 (T12)", () => {
     return JSON.stringify({ protocolVersion: 1, requestId, sequence, kind, data });
   }
 
-  function receiptFrame(sequence: number, result: Record<string, unknown> = { ok: true, receipt: "Paused ad “Hook B”" }) {
+  function receiptFrame(sequence: number, result: Record<string, unknown> = { ok: true, receipt: "Paused ad “Demo B”" }) {
     return frame(sequence, "progress", {
       type: "action.receipt",
       stage: "tool",
@@ -2752,8 +2752,8 @@ describe("app.open.v1 and confirm.stream.v1 (T12)", () => {
       protocolVersion: 1, requestId: "stream-1", turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true
     });
     expect(calls[0]?.headers.accept).toBe("application/x-ndjson");
-    expect(order).toEqual(["receipt:Paused ad “Hook B”:done", "progress:2"]);
-    expect(result).toMatchObject({ ok: true, receipt: "Paused ad “Hook B”", view: receiptView() });
+    expect(order).toEqual(["receipt:Paused ad “Demo B”:done", "progress:2"]);
+    expect(result).toMatchObject({ ok: true, receipt: "Paused ad “Demo B”", view: receiptView() });
     expect(result.followUp).toEqual({ turnId: "turn-2", message: "It stopped spending. Want the ad set paused too?", actionCalls: [] });
     expect(result).not.toHaveProperty("followUpError");
   });

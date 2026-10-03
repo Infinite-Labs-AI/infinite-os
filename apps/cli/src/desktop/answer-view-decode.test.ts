@@ -127,8 +127,8 @@ describe("decodeAnswerView: change target picture and path (revision 3)", () => 
     ((decodeAnswerView(value)?.body as { target: Record<string, unknown> }).target);
 
   it("keeps a well-formed path and picture reference", () => {
-    const target = targetOf(changeView({ path: ["Example campaign", "Broad · US · 25-54"], creativeRef: { archiveAssetId: "asset_0a1b-2c" } }));
-    expect(target.path).toEqual(["Example campaign", "Broad · US · 25-54"]);
+    const target = targetOf(changeView({ path: ["Example campaign", "Sample ad set"], creativeRef: { archiveAssetId: "asset_0a1b-2c" } }));
+    expect(target.path).toEqual(["Example campaign", "Sample ad set"]);
     expect(target.creativeRef).toEqual({ archiveAssetId: "asset_0a1b-2c" });
   });
 
@@ -259,8 +259,8 @@ describe("decodeAnswerView: nameLabel, record status and leader detail (revision
   it("keeps well-formed short words as they came", () => {
     expect(bodyOf(view("list", listBody({ nameLabel: "Ad" }))).nameLabel).toBe("Ad");
     expect(bodyOf(view("record", recordBody({ status: { word: "Paused", tone: "muted" } }))).status).toEqual({ word: "Paused", tone: "muted" });
-    const leaders = bodyOf(view("numbers", numbersBody([leader({ detail: "51 of 357 impressions" })]))).leaders as Record<string, unknown>[];
-    expect(leaders[0]!.detail).toBe("51 of 357 impressions");
+    const leaders = bodyOf(view("numbers", numbersBody([leader({ detail: "5 of 40 impressions" })]))).leaders as Record<string, unknown>[];
+    expect(leaders[0]!.detail).toBe("5 of 40 impressions");
   });
 
   it.each([
@@ -291,7 +291,7 @@ describe("decodeAnswerView: nameLabel, record status and leader detail (revision
   it("scrubs controls and bidi characters and collapses whitespace", () => {
     expect(bodyOf(view("list", listBody({ nameLabel: " Ad\u001b[31m set‮ \n" }))).nameLabel).toBe("Ad set");
     expect((bodyOf(view("record", recordBody({ status: { word: "\u0007Active⁦", tone: "ok" } }))).status as { word: string }).word).toBe("Active");
-    expect((bodyOf(view("numbers", numbersBody([leader({ detail: "$189.32\tspent‏" })]))).leaders as { detail: string }[])[0]!.detail).toBe("$189.32 spent");
+    expect((bodyOf(view("numbers", numbersBody([leader({ detail: "$12.34\tspent‏" })]))).leaders as { detail: string }[])[0]!.detail).toBe("$12.34 spent");
   });
 
   it.each([

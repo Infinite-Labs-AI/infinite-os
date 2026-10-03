@@ -14,10 +14,10 @@ describe("answer view contract v1", () => {
     expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(3);
     expect(ANSWER_VIEW_LIMITS.maxTargetPathParts).toBe(4);
     expect(ANSWER_VIEW_LIMITS.maxTargetPathPartChars).toBeGreaterThan(0);
-    const rev3 = { target: { kind: "ad", id: "ad_1", label: "Hook B", creativeRef: { archiveAssetId: "asset_1" },
+    const rev3 = { target: { kind: "ad", id: "ad_1", label: "Demo B", creativeRef: { archiveAssetId: "asset_1" },
       path: ["Example campaign", "Example ad set"] }, rows: [{ label: "status", before: "on", after: "PAUSED" }], warnings: [] } satisfies ChangeBodyV1;
     // A revision 2 body (no picture, no path) is still a valid body.
-    const rev2 = { target: { kind: "ad", label: "Hook B" }, rows: [], warnings: [] } satisfies ChangeBodyV1;
+    const rev2 = { target: { kind: "ad", label: "Demo B" }, rows: [], warnings: [] } satisfies ChangeBodyV1;
     expect(rev3.target.path).toHaveLength(2);
     expect("path" in rev2.target).toBe(false);
   });
@@ -40,14 +40,14 @@ describe("answer view contract v1", () => {
     expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(3);
     expect(ANSWER_VIEW_LIMITS.maxShortTextChars).toBe(80);
     const list = { layout: "rows", nameLabel: "Ad", columns: [], rows: [], total: 0, shown: 0 } satisfies ListBodyV1;
-    const record = { title: "Hook B", status: { word: "Paused", tone: "muted" }, fields: [] } satisfies RecordBodyV1;
-    const leader = { measure: { key: "ctr", label: "CTR" }, rowId: "ad_1", rowLabel: "Hook B", value: { value: 2.1 },
-      detail: "51 of 357 impressions" } satisfies LeaderV1;
+    const record = { title: "Demo B", status: { word: "Paused", tone: "muted" }, fields: [] } satisfies RecordBodyV1;
+    const leader = { measure: { key: "ctr", label: "CTR" }, rowId: "ad_1", rowLabel: "Demo B", value: { value: 2.1 },
+      detail: "5 of 40 impressions" } satisfies LeaderV1;
     // All three are optional: a body without them is still valid.
     const oldList = { layout: "rows", columns: [], rows: [], total: 0, shown: 0 } satisfies ListBodyV1;
     const oldRecord = { fields: [] } satisfies RecordBodyV1;
-    const oldLeader = { measure: { key: "ctr", label: "CTR" }, rowId: "ad_1", rowLabel: "Hook B", value: { value: null } } satisfies LeaderV1;
-    expect([list.nameLabel, record.status.word, leader.detail]).toEqual(["Ad", "Paused", "51 of 357 impressions"]);
+    const oldLeader = { measure: { key: "ctr", label: "CTR" }, rowId: "ad_1", rowLabel: "Demo B", value: { value: null } } satisfies LeaderV1;
+    expect([list.nameLabel, record.status.word, leader.detail]).toEqual(["Ad", "Paused", "5 of 40 impressions"]);
     expect(["nameLabel" in oldList, "status" in oldRecord, "detail" in oldLeader]).toEqual([false, false, false]);
   });
   it("revision 3: the contract source documents the new fields and the short-text rule", () => {

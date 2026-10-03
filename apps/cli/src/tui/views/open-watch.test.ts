@@ -193,7 +193,7 @@ describe("`o` on an approval card", () => {
 // the view is engaged `o`, `w`, `m` and `c` are the first letter of a message;
 // the resting bar says so honestly: `tab` with what it then unlocks, in place
 // of `tab switch side`. (r4 view-01/08/10 and flow-pause-03 draw `o open` at
-// rest; this deviation goes to River's visual eval.)
+// rest; this deviation goes to the visual eval.)
 describe("the resting bar names what tab unlocks (TJ-3)", () => {
   const tabChip = (state: ViewFocusState, v: AnswerViewV1) => hints(state, v).filter((hint) => hint.key === "tab");
 

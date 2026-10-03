@@ -703,7 +703,7 @@ export function InkInteractiveSessionApp({
   // submitted; only then is it printed once into scrollback through <Static>, at
   // the current width. The home inventory goes with the first commit.
   //
-  // One exception (River: "like a normal coding harness"): a FINISHED turn that
+  // One exception (the design ask: "like a normal coding harness"): a FINISHED turn that
   // does not fit the live region is never paged. It goes whole into scrollback
   // the moment it finishes (`"overflow"`, see `finishedOverflow` below), and
   // only the frame stays live. A write card still waiting for its answer stays
@@ -718,7 +718,7 @@ export function InkInteractiveSessionApp({
     const steps = kept ? kept.steps : storeSteps;
     const statusViews = [...(kept ? kept.views : []), ...(keepCard && headCardViewRef.current ? [headCardViewRef.current] : [])];
     const focus = viewFocusRef.current;
-    // Scrollback is ONE column at any width (River, 2026-10-02): the question,
+    // Scrollback is ONE column at any width (layout decision, 2026-10-02): the question,
     // the answer, its views underneath, under a thin rule.
     // `redraw` draws it again at another width (a width change reprints scrollback).
     // A call that did not end clean keeps its row under the answer (a failed
@@ -2050,7 +2050,7 @@ export function InkInteractiveSessionApp({
   const turnTranscript = liveTurn ? idleTranscript : transcript;
   const layoutOf = (latest: CommittedEntry | null, shown: InfiniteTranscriptInput) => layoutAt(latest, shown, reservedRows, keyBarRows);
   const turnLayout = layoutOf(liveLatest, turnTranscript);
-  // A finished turn never pages (River: "it should just work like a normal
+  // A finished turn never pages (the design ask: "it should just work like a normal
   // coding harness"). While a turn runs, a tall one shows its tail (`N lines
   // above`). Once it is finished and still taller than the live region, the
   // WHOLE turn goes into scrollback at once (one column, nothing cut, no

@@ -92,8 +92,8 @@ const MIN_SHARED_PREFIX = 12;
 /**
  * The start every name shares, cut back to a word (it ends at a space, `_`,
  * `-`, `·` or `/`), when it is long enough to be worth saying once and every
- * name has something after it (N28: `Demo packaging test 4f2a91c0 variant-1`,
- * `… variant-2`). "" otherwise, and always for fewer than two names.
+ * name has something after it (N28: `Sample tests with a long shared name version-1`,
+ * `… version-2`). "" otherwise, and always for fewer than two names.
  */
 export function sharedNamePrefix(names: readonly string[]): string {
   if (names.length < 2) return "";
@@ -103,7 +103,7 @@ export function sharedNamePrefix(names: readonly string[]): string {
     while (at < prefix.length && at < name.length && prefix[at] === name[at]) at += 1;
     prefix = prefix.slice(0, at);
   }
-  // A word ends at a space first (`… variant-2`, never `… 2`); a name with no spaces at `_ - · /`.
+  // A word ends at a space first (`… version-2`, never `… 2`); a name with no spaces at `_ - · /`.
   const space = prefix.lastIndexOf(" ");
   const cut = space >= 0 ? space : Math.max(...["_", "-", "·", "/"].map((separator) => prefix.lastIndexOf(separator)));
   prefix = cut >= 0 ? prefix.slice(0, cut + 1) : "";
@@ -1124,7 +1124,7 @@ export function numbersBodyLines(
     if (!label || !row) return [];
     const value = drawCell(leader.value as TableCell, column ?? { label: "", unit: "count" }, currency, draw.notes);
     const head = wrapText(`${label} · ${row} · ${value}`, ctx.width);
-    // rev 3: the host's one context line (`$189.32 spent`), dim under the name, cut to the width (never wrapped).
+    // rev 3: the host's one context line (a spend context line), dim under the name, cut to the width (never wrapped).
     const detail = viewText(leader.detail);
     if (!detail) return head;
     const under = displayWidth(`${label} · `);

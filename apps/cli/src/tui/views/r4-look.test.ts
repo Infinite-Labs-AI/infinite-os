@@ -477,10 +477,10 @@ describe("selection outside the list (SPEC §4 Arrows)", () => {
     const idle = renderView(fixture("numbers-week-today"), ctx({ selected: 2 }));
     expect(idle.detail.map(seg).some((line) => line.includes("▸") || line.includes("sel"))).toBe(false);
     const render = renderView(fixture("numbers-week-today"), ctx({ selected: 2, engaged: true }));
-    const row = render.detail.map(seg).find((line) => line.includes("Hook C"))!;
+    const row = render.detail.map(seg).find((line) => line.includes("Demo C"))!;
     expect(row).not.toContain("▸");
     expect(row).toContain("sel");
-    expect(render.detail.map(seg).find((line) => line.includes("Hook A"))!).not.toContain("sel");
+    expect(render.detail.map(seg).find((line) => line.includes("Demo A"))!).not.toContain("sel");
   });
 
   it("a numbers record's selected heading leads with the bold cyan ▸", () => {

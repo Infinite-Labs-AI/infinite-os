@@ -54,7 +54,7 @@
     "rows": [
      {
       "id": "a1",
-      "label": "Hook A",
+      "label": "Demo A",
       "cells": {
        "spend": {
         "value": 60
@@ -69,7 +69,7 @@
      },
      {
       "id": "a2",
-      "label": "Hook B",
+      "label": "Demo B",
       "cells": {
        "spend": {
         "value": 45
@@ -84,7 +84,7 @@
      },
      {
       "id": "a3",
-      "label": "Hook C",
+      "label": "Demo C",
       "cells": {
        "spend": {
         "value": 30
@@ -586,7 +586,7 @@
        "rows": [
         {
          "id": "a1",
-         "label": "Hook A",
+         "label": "Demo A",
          "cells": {
           "registrations": {
            "value": 3
@@ -598,7 +598,7 @@
         },
         {
          "id": "a2",
-         "label": "Hook B",
+         "label": "Demo B",
          "cells": {
           "registrations": {
            "value": 4
@@ -622,7 +622,7 @@
        "rows": [
         {
          "id": "a1",
-         "label": "Hook A",
+         "label": "Demo A",
          "cells": {
           "registrations": {
            "value": 2
@@ -634,7 +634,7 @@
         },
         {
          "id": "a2",
-         "label": "Hook B",
+         "label": "Demo B",
          "cells": {
           "registrations": {
            "value": 0

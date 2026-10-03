@@ -75,8 +75,8 @@ describe("the session draws the latest turn's answer views (CI-runnable)", () =>
       initialMessages: [{ role: "user", text: "which ads are on?" }, { role: "assistant", text: "Two are on." }],
       onSubmitLine: async () => ({ messages: [] })
     }));
-    expect(out).toMatch(/^▸ ● on +Hook B/mu);
-    expect(out).not.toMatch(/^▸ ● on +Hook A/mu);
+    expect(out).toMatch(/^▸ ● on +Demo B/mu);
+    expect(out).not.toMatch(/^▸ ● on +Demo A/mu);
   });
 
   it("the turn's Steps strip is drawn once, from the turn store's calls", () => {
@@ -375,11 +375,11 @@ describe("a running turn's views (r4 working frames)", () => {
         }
         onView?.(listFrame());
         onProgress?.({ type: "message.start", stage: "message", message: "" });
-        onProgress?.({ type: "message.delta", stage: "message", message: "", text: "Two are on; pausing **Cold brew car" });
+        onProgress?.({ type: "message.delta", stage: "message", message: "", text: "Two are on; pausing **Demo item car" });
         await new Promise<void>((resolve) => {
           finish = resolve;
         });
-        return { messages: [{ role: "assistant", text: "Two are on; paused **Cold brew carousel**." }] };
+        return { messages: [{ role: "assistant", text: "Two are on; paused **Demo item carousel**." }] };
       },
       output,
       title: "Infinite TUI"
@@ -387,11 +387,11 @@ describe("a running turn's views (r4 working frames)", () => {
 
     await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "which ads are on?\r");
-    await waitFor(() => /∞ Two are on; pausing Cold brew car +│/u.test(stripAnsi(output.text())), 4_000, output.text);
+    await waitFor(() => /∞ Two are on; pausing Demo item car +│/u.test(stripAnsi(output.text())), 4_000, output.text);
     expect(stripAnsi(output.text())).toMatch(/❯ which ads are on\? +│ +Ads running/u);
-    expect(stripAnsi(output.text())).not.toContain("**Cold");
+    expect(stripAnsi(output.text())).not.toContain("**Demo");
     finish();
-    await waitFor(() => /∞ Two are on; paused Cold brew +│/u.test(stripAnsi(output.text())), 4_000, output.text);
+    await waitFor(() => /∞ Two are on; paused Demo item +│/u.test(stripAnsi(output.text())), 4_000, output.text);
     await sendKeys(input, "/exit\r");
     await session;
   });

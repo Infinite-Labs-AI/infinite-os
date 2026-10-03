@@ -14,8 +14,8 @@ function receiptView(overrides: Record<string, unknown> = {}) {
   return {
     v: 1, kind: "change", tool: "pause_entity", title: "Pause", state: "done", asOf: null,
     scope: { workspaceName: "Example Co", crossWorkspace: false }, caveats: [],
-    receipt: { sentence: "Paused ad “Hook B”", tone: "ok", revertible: true },
-    body: { target: { kind: "ad", label: "Hook B" }, rows: [], warnings: [] },
+    receipt: { sentence: "Paused ad “Demo B”", tone: "ok", revertible: true },
+    body: { target: { kind: "ad", label: "Demo B" }, rows: [], warnings: [] },
     ...overrides
   };
 }
@@ -72,7 +72,7 @@ describe("the follow-up after a streamed yes", () => {
     const text = "Paused. Here is what changed:\n\n- Ad one: paused\n- Ad two: still on\n\n| Ad | Spend |\n|---|---|\n| Ad one | $12 |\n| Ad two | $30 |\n\nWant the ad set paused too?";
     const follow = followUpOutcome({ ok: true, followUp: { message: text, actionCalls: [] } }, { confirmFieldsCapable: true });
     const draw = (answer: string) => renderCommittedTurn({
-      messages: [{ role: "user", text: "pause hook b" }, { role: "assistant", text: answer }],
+      messages: [{ role: "user", text: "pause demo b" }, { role: "assistant", text: answer }],
       views: [], focus: null, width: 100, color: false, theme: INFINITE_R4_THEME
     });
     const followUpLines = draw(follow.message);

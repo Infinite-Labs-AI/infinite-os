@@ -56,7 +56,7 @@
         "rows": [
           {
             "id": "ad_1",
-            "label": "Hook A",
+            "label": "Demo A",
             "cells": {
               "spend": {
                 "value": 60
@@ -74,7 +74,7 @@
           },
           {
             "id": "ad_2",
-            "label": "Hook B",
+            "label": "Demo B",
             "cells": {
               "spend": {
                 "value": 40
@@ -92,7 +92,7 @@
           },
           {
             "id": "ad_3",
-            "label": "Hook C",
+            "label": "Demo C",
             "cells": {
               "spend": {
                 "value": null,
@@ -190,7 +190,7 @@
         "rows": [
           {
             "id": "ad_1",
-            "label": "Hook A",
+            "label": "Demo A",
             "cells": {
               "spend": {
                 "value": 5
@@ -213,7 +213,7 @@
           },
           {
             "id": "ad_2",
-            "label": "Hook B",
+            "label": "Demo B",
             "cells": {
               "spend": {
                 "value": 3
@@ -258,7 +258,7 @@
           "label": "Most clicks"
         },
         "rowId": "ad_1",
-        "rowLabel": "Hook A",
+        "rowLabel": "Demo A",
         "value": {
           "value": 41
         }
@@ -269,7 +269,7 @@
           "label": "Most trials"
         },
         "rowId": "ad_2",
-        "rowLabel": "Hook B",
+        "rowLabel": "Demo B",
         "value": {
           "value": 2
         }
@@ -280,7 +280,7 @@
           "label": "Lowest cost per trial"
         },
         "rowId": "ad_2",
-        "rowLabel": "Hook B",
+        "rowLabel": "Demo B",
         "value": {
           "value": 20
         }
