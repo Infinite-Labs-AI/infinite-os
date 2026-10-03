@@ -471,9 +471,11 @@ describe("copy in a running session (fake TTY; skipped on CI like the other PTY 
     await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
     await sendKeys(input, "make a link\r");
     await waitFor(() => /https:\/\/go\.example\.com\/abc1/u.test(stripAnsi(output.text())), 4_000, output.text);
-    // Unengaged, `c` would type: the body offers no `c copy` yet.
-    expect(stripAnsi(output.text())).not.toContain("c copy");
-    expect(stripAnsi(output.text())).not.toContain("c  copy");
+    // Unengaged, `c` would type: the body offers no `c copy` yet, and the bar
+    // says only that tab unlocks it (TJ-3: `tab then c copy`).
+    expect(stripAnsi(output.text())).not.toContain("abc1   c  copy");
+    expect(stripAnsi(output.text())).not.toContain(" c  copy");
+    await waitFor(() => stripAnsi(output.text()).includes("tab  then c copy"), 4_000, output.text);
     const osc52 = `${ESC}]52;c;${Buffer.from("https://go.example.com/abc1").toString("base64")}\u0007`;
     expect(output.text()).not.toContain(osc52);
     await sendKeys(input, "\t");

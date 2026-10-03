@@ -2766,7 +2766,7 @@ describe("app.open.v1 and confirm.stream.v1 (T12)", () => {
     expect(calls[0]?.body).not.toHaveProperty("stream");
   });
 
-  it.each(["field_invalid", "confirmation_not_found"])(
+  it.each(["field_invalid", "receipt_view_unavailable"])(
     "a streamed %s error with no receipt rejects as not done, never as a receipt",
     async (code) => {
       const { client } = harness({
@@ -2811,23 +2811,53 @@ describe("app.open.v1 and confirm.stream.v1 (T12)", () => {
     }
   );
 
-  it.each([
-    "receipt_view_unavailable",
+  // P33-S1: the code alone never proves nothing ran; the app's pre-send mark (notSent) does.
+  const APP_NOT_SENT_CODES = [
+    "confirmation_not_found",
     "confirmation_expired",
     "confirmation_spent",
     "stale_turn_context",
     "desktop_not_ready",
     "recovery_pending",
     "unsafe_tool_blocked",
-    "local_provider_busy"
-  ])("a streamed %s error with no receipt is a proven not-sent refusal: nothing ran", async (code) => {
+    "local_provider_busy",
+    "daemon_timeout",
+    "invalid_request",
+    "budget_choice_required"
+  ];
+
+  it.each(APP_NOT_SENT_CODES)("a streamed %s error WITHOUT the app's notSent mark is unsure, never 'nothing ran'", async (code) => {
     const { client } = harness({
-      respond: () => ndjsonResponse([frame(1, "error", { code, message: "Nothing was executed." })])
+      respond: () => ndjsonResponse([frame(1, "error", { code, message: "Check it in the app before trying again." })])
+    });
+    await client.status();
+    const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code });
+    expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
+    expect(confirmErrorLines(error)[0]?.text).not.toMatch(/Not done|✗/u);
+  });
+
+  it.each(APP_NOT_SENT_CODES)("a streamed %s error WITH the app's notSent mark is a proven not-sent refusal: nothing ran", async (code) => {
+    const { client } = harness({
+      respond: () => ndjsonResponse([frame(1, "error", { code, message: "Nothing was executed.", notSent: true })])
     });
     await client.status();
     const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
       .catch((caught: unknown) => caught);
     expect(error).toMatchObject({ code, nothingRan: true });
+  });
+
+  it("the mark counts only as a literal true (a string or 1 is unsure)", async () => {
+    for (const notSent of ["true", 1, null]) {
+      const { client } = harness({
+        respond: () => ndjsonResponse([frame(1, "error", { code: "stale_turn_context", message: "Workspace changed.", notSent })])
+      });
+      await client.status();
+      const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
+        .catch((caught: unknown) => caught);
+      expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
+    }
   });
 
   it("an error with no receipt the bridge cannot vouch for (receipt_unavailable) never says nothing ran", async () => {

@@ -93,9 +93,10 @@ export class DesktopAppClientError extends Error {
     public readonly view?: AnswerViewV1,
     /**
      * Set only on a streamed confirm (confirm.stream.v1) that ended in an
-     * `error` before any receipt, with a code the bridge sends when nothing
-     * ran (`field_invalid`, `confirmation_not_found`, …): the card was not
-     * done. Never set when the outcome is unknown.
+     * `error` before any receipt that the app marked `notSent: true`, or
+     * whose code is refused before anything resolves (`field_invalid`,
+     * `receipt_view_unavailable`): the card was not done. Never set when the
+     * outcome is unknown.
      */
     public readonly nothingRan?: true
   ) {
@@ -813,40 +814,38 @@ const APP_OPEN_STATUSES: ReadonlySet<string> = new Set<AppOpenStatus>([
 ]);
 
 /**
- * Stream errors before any receipt that prove nothing was sent: the only
- * codes for which the terminal may say "Not done". The bridge's refusal frame
- * passes ANY no-receipt result's own code through (`{ code, message }`), so a
- * write that may have gone out (`dispatch_uncertain`, a provider or ledger
- * failure after the send, a code added later) can arrive here too; those keep
- * the neutral `! <app's words>`. This is an allowlist, never a denylist.
- *
- * It mirrors the app's not-sent codes (its ledger's NOT_SENT_OUTCOME_CODES)
- * plus the card's own field / expired / spent refusals, MINUS the codes the
- * app itself trusts as not-sent only together with a pre-send mark that the
- * stream frame does not carry (`daemon_timeout`, `invalid_request`,
- * `budget_choice_required`, the analysis-save refusals): from here those may
- * be a server's refusal after the send, so they stay unknown.
+ * Stream errors before any receipt that prove nothing was sent by their code
+ * alone: a card's answer refused before anything resolves (`field_invalid`)
+ * and a receipt view that could not be built before anything resolves
+ * (`receipt_view_unavailable`). Every other code proves nothing by itself.
+ * The bridge's refusal frame passes ANY no-receipt result's own code through,
+ * and the app trusts each of its not-sent codes (its ledger's
+ * NOT_SENT_OUTCOME_CODES: `stale_turn_context`, `local_provider_busy`, …) only
+ * together with its own pre-send mark, which can come after the write was
+ * handed to the executor. So the terminal says "Not done" only when the frame
+ * carries that mark (`notSent: true`, see `streamRefusalNotSent`) or the code
+ * is one of these; anything else keeps the neutral `! <app's words>` (not sure
+ * it happened). An older desktop never sends the mark, so its refusals read as
+ * unsure, which is the honest answer. This is an allowlist, never a denylist.
  */
 const STREAM_NOT_RUN_CODES: ReadonlySet<string> = new Set([
   "field_invalid",
-  "confirmation_not_found",
-  "receipt_view_unavailable",
-  "confirmation_expired",
-  "confirmation_spent",
-  "stale_turn_context",
-  "desktop_not_ready",
-  "recovery_pending",
-  "unsafe_tool_blocked",
-  "local_provider_busy"
+  "receipt_view_unavailable"
 ]);
+
+/** The app's own pre-send mark on a refusal frame (`notSent: true`, beside its code, or on its `error`). */
+function streamRefusalNotSent(data: unknown): boolean {
+  const source = isRecord(data) && isRecord(data.error) ? data.error : data;
+  return isRecord(source) && source.notSent === true;
+}
 
 /**
  * confirm.stream.v1: `/v1/confirm` with `stream: true` answers NDJSON. The
  * first frame that counts is the `action.receipt` (`{ ...result, view }` is
  * exactly what a plain confirm answers); then the agent's follow-up frames;
  * then one terminal frame. An `error` after the receipt never undoes it; an
- * `error` with no receipt before it means nothing ran only when its code
- * proves it (STREAM_NOT_RUN_CODES); any other code is unsure. A stream lost
+ * `error` with no receipt before it means nothing ran only when the app marks
+ * it `notSent` or its code proves it (STREAM_NOT_RUN_CODES); any other is unsure. A stream lost
  * before its receipt is an unknown outcome, never a retry.
  */
 async function streamConfirmation(
@@ -931,7 +930,7 @@ async function streamConfirmation(
         error.code,
         error.message,
         undefined,
-        STREAM_NOT_RUN_CODES.has(error.code) ? true : undefined
+        streamRefusalNotSent(terminal.data) || STREAM_NOT_RUN_CODES.has(error.code) ? true : undefined
       );
     }
     // A `done` with no receipt before it: the bridge never sends one, so what happened is not known.

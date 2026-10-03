@@ -12,10 +12,30 @@ const STATUS_WORDS: Record<string, string> = {
   unavailable: `! ${CANNOT_OPEN}`
 };
 
+/**
+ * The errors whose words are written for the user (the terminal's own, or the
+ * app's readiness answer): an old desktop, nothing to open, the app not
+ * running, not answering, not ready or signed out. Every other code
+ * (`invalid_request`, `app_open_failed`, `capability_unavailable`, one added
+ * later, or none) carries the bridge's developer words ("place must be a
+ * registered app place."), so `o` says only that the app can't open it.
+ */
+const USER_WORD_CODES: ReadonlySet<string> = new Set([
+  "desktop_update_required",
+  "desktop_app_usage",
+  "desktop_not_running",
+  "desktop_unreachable",
+  "desktop_not_ready",
+  "desktop_auth_failed"
+]);
+
 /** One line for `/v1/open`'s answer, or for the error it threw. */
 export function appOpenLines(outcome: unknown): string[] {
   if (outcome instanceof Error) {
-    const message = boundedTerminalText(outcome.message, MAX_LINE_CHARS);
+    const code = (outcome as { code?: unknown }).code;
+    const message = typeof code === "string" && USER_WORD_CODES.has(code)
+      ? boundedTerminalText(outcome.message, MAX_LINE_CHARS)
+      : "";
     return [`! ${message || CANNOT_OPEN}`];
   }
   const status = typeof outcome === "object" && outcome !== null ? (outcome as { status?: unknown }).status : undefined;

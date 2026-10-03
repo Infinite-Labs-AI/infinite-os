@@ -7,10 +7,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { Key } from "ink";
 import type { AnswerViewV1 } from "@infinite-os/types";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
-import type { KeyContext } from "../keys/keymap.js";
+import type { DesktopAppClient, DesktopStatus } from "../../desktop-app-client.js";
+import { createDesktopSessionTurnRunner } from "../../desktop/desktop-interactive.js";
+import { keyBarText, type KeyContext } from "../keys/keymap.js";
 import { resolveTheme } from "../theme.js";
 import { approvalRender, cardKeyStep, cardOpenLink, cardUiStart } from "./approval.js";
 import { resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints, type ViewFocusState } from "./focus.js";
@@ -183,5 +185,100 @@ describe("`o` on an approval card", () => {
     const old = approvalRender(v, { ...ctx(OLD), ui, fieldsCapable: true });
     expect(old.keyCtx.caps.open).toBe(false);
     expect(old.keys.map((hint) => hint.key)).not.toContain("o");
+  });
+});
+
+// TJ-3 + W3-list-ready (plan owner's decision): the engagement gate stays, as
+// in a normal coding harness an empty prompt never captures a letter. Before
+// the view is engaged `o`, `w`, `m` and `c` are the first letter of a message;
+// the resting bar says so honestly: `tab` with what it then unlocks, in place
+// of `tab switch side`. (r4 view-01/08/10 and flow-pause-03 draw `o open` at
+// rest; this deviation goes to River's visual eval.)
+describe("the resting bar names what tab unlocks (TJ-3)", () => {
+  const tabChip = (state: ViewFocusState, v: AnswerViewV1) => hints(state, v).filter((hint) => hint.key === "tab");
+
+  it("a finished turn with an openable view: one tab chip naming `o`, and the drawn bar says it", () => {
+    const v = images();
+    const state = focus(v, NEW);
+    expect(state.engaged).toBe(false);
+    expect(tabChip(state, v)).toEqual([{ key: "tab", label: "then o open in Library" }]);
+    const bar = keyBarText(hints(state, v));
+    expect(bar).toContain(" tab  then o open in Library");
+    expect(bar).not.toContain("switch side");
+  });
+
+  it("`o` typed unengaged goes into the composer; after tab, `o` opens the place", () => {
+    const v = images();
+    const start = focus(v, NEW);
+    const typed = press(start, v, "o");
+    expect(typed.effect).toBeNull();
+    expect(typed.focus).toBe("composer");
+    const tabbed = press(start, v, "", { tab: true });
+    expect(tabbed.engaged).toBe(true);
+    expect(press(tabbed, v, "o").effect).toEqual({ type: "open", target: { place: "creative.library", params: { ids: "img_1,img_2,img_3" } } });
+  });
+
+  it("in composer focus (a letter typed, then cleared) the chip says the same", () => {
+    const v = images();
+    const composer = press(focus(v, NEW), v, "x");
+    expect(composer.focus).toBe("composer");
+    expect(hints(composer, v)).toEqual([{ key: "tab", label: "then o open in Library" }]);
+  });
+
+  it("priority o > w > m > c: a running job names `o` first, then `w` without an app place", () => {
+    const v = job();
+    expect(tabChip(focus(v, NEW), v)).toEqual([{ key: "tab", label: "then o open" }]);
+    const { landsAt: _landsAt, ...bodyWithoutPlace } = raw("job-running").body as Record<string, unknown>;
+    const noPlace = view({ ...raw("job-running"), body: bodyWithoutPlace });
+    expect(tabChip(focus(noPlace, NEW), noPlace)).toEqual([{ key: "tab", label: "then w watch" }]);
+  });
+
+  it("once engaged the bar is the keys themselves and `tab switch side` again", () => {
+    const v = images();
+    expect(tabChip(engaged(v, NEW), v)).toEqual([{ key: "tab", label: "switch side" }]);
+  });
+
+  it("a view with nothing behind the gate keeps `tab switch side`", () => {
+    for (const name of ["list-rows", "numbers-ads"]) {
+      const v = view(raw(name));
+      expect(tabChip(focus(v, OLD), v)).toEqual([{ key: "tab", label: "switch side" }]);
+    }
+    // Without app.open.v1 the images' place is not behind the gate: no `o` is named.
+    const v = images();
+    expect(hints(focus(v, OLD), v).map((hint) => hint.label).join(" ")).not.toContain("then o");
+  });
+});
+
+// P33-N2: a Wave 2 desktop (views, but neither app.open.v1 nor confirm.stream.v1)
+// gains `w watch` on a job: caps.watch is viewsCapable. Pinned on purpose; the
+// PR body says so. It sends the job's own watch ask as a new turn; no `o`.
+describe("`w` on a views-only (Wave 2) desktop", () => {
+  it("the runner offers watch without open or a stream, and the job's `w` sends its ask", async () => {
+    const status = {
+      service: "infinite-desktop-cmdl", bootId: "boot-1", protocol: { min: 1, max: 1 },
+      capabilities: ["status.v1", "turn.ndjson.v1", "confirm.v1"], ready: true, contextRevision: "rev-1",
+      provider: { id: "codex", model: "model-x" }, workspace: { id: "ws-1", name: "Demo" }
+    } as unknown as DesktopStatus;
+    const client = {
+      sessionCapable: true,
+      viewsCapable: true,
+      appOpenCapable: false,
+      confirmStreamCapable: false,
+      status: vi.fn(async () => status),
+      turn: vi.fn(async () => ({ message: "ok", actionCalls: [] })),
+      confirm: vi.fn(async () => ({ ok: true }))
+    } as unknown as DesktopAppClient;
+    const runner = createDesktopSessionTurnRunner({ resolveBridge: () => ({ descriptor: { bootId: "boot-1" }, client }) as never });
+    await runner.turn("hello");
+    const caps = runner.caps();
+    expect(caps).toEqual({ open: false, watch: true, retry: false });
+    expect(runner.streamCapable()).toBe(false);
+    const v = job();
+    const state = engaged(v, caps);
+    expect(hints(state, v).map((hint) => `${hint.key} ${hint.label}`)).toEqual(["w watch", "tab switch side"]);
+    expect(press(state, v, "w").effect).toEqual({ type: "ask", text: "how is the blog post going?" });
+    expect(press(state, v, "o").effect).toBeNull();
+    // At rest the chip names `w` (nothing to open on this desktop).
+    expect(hints(focus(v, caps), v).filter((hint) => hint.key === "tab")).toEqual([{ key: "tab", label: "then w watch" }]);
   });
 });
