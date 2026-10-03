@@ -23,12 +23,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { resetTurnState } from "../app/turn-store.js";
 import { runInkInteractiveSession, type InkInteractiveLineResult } from "./interactive-session.js";
+import { segmentsWidth } from "../lib/styled-segments.js";
+import { topBarSegments, type TopBarData } from "./top-bar.js";
 import { VtBuffer } from "./vt-buffer.test-util.js";
 
 const SYNC_START = "\u001b[?2026h";
 const SYNC_END = "\u001b[?2026l";
 
-const TOP_BAR = {
+const TOP_BAR: TopBarData = {
   workspace: "Demo workspace",
   sources: [
     { label: "Sample ads", state: "connected" as const },
@@ -36,6 +38,23 @@ const TOP_BAR = {
     { label: "Sample site", state: "connected" as const }
   ]
 };
+
+/**
+ * A synthetic top bar that fills exactly `cols` columns (live T5's bar ended
+ * on its last cell, `… ● <source> ` at 100): the brief's first named cause, a
+ * bar as wide as the window that wraps and leaves the eraser one row short.
+ */
+function windowWideTopBar(cols: number): TopBarData {
+  const sources: { label: string; state: "connected" }[] = [];
+  const width = () => segmentsWidth(topBarSegments({ ...TOP_BAR, sources }, cols));
+  // `● Sample N ` is 11 cells; stop while a last source of 8+ letters still fits.
+  while (cols - width() >= 11 + 14) sources.push({ label: `Sample ${sources.length + 1}`, state: "connected" });
+  const room = cols - width() - 3;
+  sources.push({ label: `Sample ${"w".repeat(Math.max(1, room - 7))}`, state: "connected" });
+  const bar = { ...TOP_BAR, sources };
+  if (segmentsWidth(topBarSegments(bar, cols)) !== cols) throw new Error(`the wide top bar is not ${cols} columns`);
+  return bar;
+}
 
 function tallListFrame(count: number): ToolViewFrameV1 {
   const raw = JSON.parse(readFileSync(fileURLToPath(new URL("../views/__fixtures__/list-rows.json", import.meta.url)), "utf8"));
@@ -64,11 +83,14 @@ type Progress = Parameters<Parameters<typeof runInkInteractiveSession>[0]["onSub
 describe("a streamed turn leaves no copy of the frame in scrollback (live T5; fake TTY, skipped on CI)", () => {
   // 140x40 is live T1-140's window (its running frame drew 40 rows + the cursor's: 7 top bars in scrollback);
   // 100x16 is short enough that the panes are not held to the window.
-  const sizes: readonly (readonly [number, number])[] = [[100, 40], [80, 24], [140, 44], [79, 24], [140, 40], [100, 16]];
-  for (const [cols, rows] of sizes) {
+  // A top bar exactly as wide as the window (S3, live T5's own bar) at 100 and 80.
+  const sizes: readonly (readonly [number, number, boolean?])[] = [
+    [100, 40], [80, 24], [140, 44], [79, 24], [140, 40], [100, 16], [100, 40, true], [80, 24, true]
+  ];
+  for (const [cols, rows, wideBar = false] of sizes) {
     for (const withView of [false, true]) {
       it.skipIf(process.env.CI === "true")(
-        `${cols}x${rows}${withView ? ", with a tall view" : ""}: two streamed turns, each once, one top bar at the bottom`,
+        `${cols}x${rows}${wideBar ? ", a top bar as wide as the window" : ""}${withView ? ", with a tall view" : ""}: two streamed turns, each once, one top bar at the bottom`,
         { timeout: 60_000 },
         async () => {
           const input = ttyInput();
@@ -81,7 +103,7 @@ describe("a streamed turn leaves no copy of the frame in scrollback (live T5; fa
             input,
             output,
             title: "Infinite TUI",
-            topBar: TOP_BAR,
+            topBar: wideBar ? windowWideTopBar(cols) : TOP_BAR,
             turnStoppable: true,
             onSubmitLine(line, onProgress, _signal, onView) {
               if (line === "/exit") return Promise.resolve({ exit: true, messages: [] });
@@ -123,6 +145,8 @@ describe("a streamed turn leaves no copy of the frame in scrollback (live T5; fa
           const bars = all.flatMap((row, index) => (row.includes("Demo workspace") ? [index] : []));
           expect(bars, dump).toHaveLength(1);
           expect(bars[0]!, dump).toBeGreaterThanOrEqual(all.length - rows);
+          // On one row: the rule is right under it, never a wrapped piece of the bar.
+          expect(all[bars[0]! + 1]!.startsWith("─"), dump).toBe(true);
           // Each earlier turn once: its question and its first and last sentences.
           for (const question of ["first question", "second question"]) {
             expect(all.filter((row) => row.startsWith(`❯ ${question}`)), `${question}\n${dump}`).toHaveLength(1);
