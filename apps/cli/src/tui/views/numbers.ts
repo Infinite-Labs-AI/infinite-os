@@ -1027,10 +1027,16 @@ function listSectionLines(body: Record<string, unknown>, ctx: ViewRenderCtx, dra
     const empty = viewText(body.emptyWords);
     return empty ? wrapText(empty, ctx.width).map((line) => paint(line, "muted", ctx)) : [];
   }
-  if (!columns.some((column) => column.label)) {
-    // One column with no header label (a list of names): a plain list, never a
-    // boxed table with an empty header (W3-health-scopes). A row's status word follows its name.
-    return plainListLines(rows, ctx);
+  if (columns.length <= 1 && !columns.some((column) => column.label)) {
+    // No columns, or one with no header label (a list of names): a plain list, never a
+    // boxed table with an empty header (W3-health-scopes). A row's one value, then its
+    // status word, follow its name. Two or more columns stay a table (R-IOV-2): a plain
+    // list would drop their values.
+    const column = columns[0];
+    const values = column
+      ? rows.map((row) => drawCell(asRecord(row.cells)[column.key] as TableCell, { label: "", unit: column.unit }, null, draw.notes))
+      : [];
+    return plainListLines(rows, values, ctx);
   }
   return cellTableLines({
     columns,
@@ -1039,20 +1045,32 @@ function listSectionLines(body: Record<string, unknown>, ctx: ViewRenderCtx, dra
   }, ctx, draw);
 }
 
-/** `Dawn       Live`: each row's name, padded to the longest, then its status word in its tone. */
-function plainListLines(rows: readonly Record<string, unknown>[], ctx: ViewRenderCtx): string[] {
+/**
+ * `Dawn       Live`: each row's name, padded to the longest, then its one value
+ * (`values`, drawn cells: unmeasured stays `—` with its note) and its status word in its tone.
+ */
+function plainListLines(rows: readonly Record<string, unknown>[], values: readonly string[], ctx: ViewRenderCtx): string[] {
   const names = rows.map((row) => viewText(row.title));
   const words = rows.map((row) => (isRecord(row.status) ? viewText(row.status.word) : ""));
   const nameWidth = Math.min(Math.max(0, ...names.map(displayWidth)), Math.max(1, Math.floor(ctx.width / 2)));
+  const valueWidth = Math.max(0, ...values.map(displayWidth));
   return rows.flatMap((row, index) => {
     const word = words[index]!;
     const name = names[index]!;
-    if (!word) return wrapText(name, ctx.width);
+    const value = values[index] ?? "";
+    if (!word && !value) return wrapText(name, ctx.width);
     const tone = isRecord(row.status) && (row.status.tone === "bad" || row.status.tone === "warn") ? "warning" : "muted";
-    if (displayWidth(name) <= nameWidth && nameWidth + 2 + displayWidth(word) <= ctx.width) {
-      return [`${padEndCells(name, nameWidth)}  ${paint(word, tone, ctx)}`];
+    const valuePart = value ? (word ? padEndCells(value, valueWidth) : value) : "";
+    const tail = [valuePart, word ? paint(word, tone, ctx) : ""].filter(Boolean).join("  ");
+    const tailWidth = displayWidth(valuePart) + (valuePart && word ? 2 : 0) + displayWidth(word);
+    if (displayWidth(name) <= nameWidth && nameWidth + 2 + tailWidth <= ctx.width) {
+      return [`${padEndCells(name, nameWidth)}  ${tail}`];
     }
-    return [...wrapText(name, ctx.width), ...wrapText(word, Math.max(1, ctx.width - 2)).map((line) => `  ${paint(line, tone, ctx)}`)];
+    return [
+      ...wrapText(name, ctx.width),
+      ...(value ? wrapText(value, Math.max(1, ctx.width - 2)).map((line) => `  ${line}`) : []),
+      ...(word ? wrapText(word, Math.max(1, ctx.width - 2)).map((line) => `  ${paint(line, tone, ctx)}`) : [])
+    ];
   });
 }
 

@@ -109,3 +109,42 @@ describe("a one-column table with no header label is a plain list (W3-health-sco
     });
   }
 });
+
+describe("a headerless list section never drops a cell value (R-IOV-2)", () => {
+  const section = (columns: unknown[], cells: Record<string, unknown>, status?: unknown) => health({
+    items: [{ id: "store", name: "Demo store", state: "ok" }],
+    sections: [{
+      title: "Roles", kind: "list",
+      body: { layout: "rows", columns, rows: [{ id: "r1", title: "Alpha", cells, ...(status ? { status } : {}) }], total: 1, shown: 1 }
+    }]
+  }, { title: "Store" });
+
+  for (const width of [48, 60, 100, 140]) {
+    it(`two unlabelled columns keep $12 and 7 (${width} columns)`, () => {
+      const view = section(
+        [{ key: "spend", label: "", unit: "money" }, { key: "clicks", label: "", unit: "count" }],
+        { spend: { value: 12 }, clicks: { value: 7 } }
+      );
+      const out = lines(renderView(view, ctx({ width }))).join("\n");
+      expect(out).toMatch(/12/u);
+      expect(out).toMatch(/\b7\b/u);
+      for (const line of out.split("\n")) expect(line.length, line).toBeLessThanOrEqual(width);
+    });
+
+    it(`one unlabelled column prints its value beside the name (${width} columns)`, () => {
+      const view = section([{ key: "clicks", label: "", unit: "count" }], { clicks: { value: 7 } }, { word: "Live", tone: "ok" });
+      const out = lines(renderView(view, ctx({ width })));
+      expect(out.join("\n")).not.toMatch(/[┌├└│]/u);
+      const at = out.indexOf("Roles");
+      expect(out[at + 1]).toMatch(/^Alpha +7 +Live$/u);
+    });
+
+    it(`one unlabelled column keeps an unmeasured value as — with its reason (${width} columns)`, () => {
+      const view = section([{ key: "clicks", label: "", unit: "count" }], { clicks: { value: null, reason: { code: "not_synced", words: "not synced yet", show: "dash" } } });
+      const out = lines(renderView(view, ctx({ width }))).join("\n");
+      expect(out).toMatch(/Alpha +—/u);
+      expect(out).toContain("not synced yet");
+      expect(out).not.toMatch(/Alpha +0\b/u);
+    });
+  }
+});
