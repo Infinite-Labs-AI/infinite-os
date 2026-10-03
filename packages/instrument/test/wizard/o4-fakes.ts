@@ -150,6 +150,9 @@ export function fakeBridge(options: { keys?: TagKeys; hosting?: TagHosting; resu
     enableMetaRelay: notUsed("enableMetaRelay"),
     removeServerLaneEnv: notUsed("removeServerLaneEnv"),
     disableSiteSource: notUsed("disableSiteSource"),
+    siteClaim: notUsed("siteClaim"),
+    readSiteClaim: notUsed("readSiteClaim"),
+    proveSite: notUsed("proveSite"),
     async startTest(request) {
       calls.push({ verb: `test.${request.mode}`, body: request })
       testRequests.push(request)

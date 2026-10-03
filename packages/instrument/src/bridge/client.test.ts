@@ -245,6 +245,12 @@ describe("strict decoding (fixture-driven transport)", () => {
         return client.removeServerLaneEnv()
       case "uninstall.disable-site-source":
         return client.disableSiteSource()
+      case "site-claim":
+        return client.siteClaim(withoutEnvelope(body) as never)
+      case "site-claim-read":
+        return client.readSiteClaim()
+      case "site-prove":
+        return client.proveSite()
       case "test.start":
         return client.startTest(withoutEnvelope(body) as never)
       case "test.poll":

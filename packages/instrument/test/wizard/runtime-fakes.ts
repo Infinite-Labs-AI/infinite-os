@@ -11,6 +11,8 @@ import {
   type KeysResponse,
   type HostingResponse,
   type RunPatch,
+  type SiteClaimResponse,
+  type SiteProveResponse,
   type TagBridgeClient,
   type TagCapability,
   type TestRunPollResponse,
@@ -203,6 +205,10 @@ export interface FakeBridgeScript {
   reportEcho?: (phase: string, runId: string) => { schema: string; runId: string }
   /** §3z.9 (A21): the real-visit facts the desktop stored (absent → 404 not_found). */
   storedFacts?: TestResult
+  /** §3y.2: the `site-prove` answers in order (the last one repeats); absent → `none`. */
+  siteProve?: Array<Omit<SiteProveResponse, "protocolVersion" | "requestId">>
+  /** §3y.2: the `site-claim` answer (absent → ready with the fixture source). */
+  siteClaim?: Omit<SiteClaimResponse, "protocolVersion" | "requestId">
 }
 
 export function createFakeBridge(log: CallLog, script: FakeBridgeScript = {}): TagBridgeClient & { linkId: string | null } {
@@ -210,6 +216,7 @@ export function createFakeBridge(log: CallLog, script: FakeBridgeScript = {}): T
   let deployIndex = 0
   let pollIndex = 0
   let receiptsIndex = 0
+  let proveIndex = 0
   const descriptor: BridgeDescriptor = {
     schemaVersion: 1,
     service: "infinite-desktop-tag",
@@ -347,6 +354,23 @@ export function createFakeBridge(log: CallLog, script: FakeBridgeScript = {}): T
     async disableSiteSource() {
       record("disableSiteSource")
       return envelope({ disabled: true as const })
+    },
+    async siteClaim(body: unknown) {
+      record("siteClaim", body)
+      return envelope(
+        script.siteClaim ?? { state: "ready" as const, siteSource: { siteSourceKey: SITE_SOURCE_KEY, productionHosts: [HOST], consentMode: "not_required" as const, created: true }, claim: null }
+      )
+    },
+    async readSiteClaim() {
+      record("readSiteClaim")
+      return envelope({ claim: script.siteClaim?.claim ?? null })
+    },
+    async proveSite() {
+      record("proveSite")
+      const answers = script.siteProve ?? [{ state: "none" as const, hosts: [], siteSource: null }]
+      const answer = answers[Math.min(proveIndex, answers.length - 1)]!
+      proveIndex += 1
+      return envelope(answer)
     },
     async startTest(body: unknown) {
       record("startTest", body)

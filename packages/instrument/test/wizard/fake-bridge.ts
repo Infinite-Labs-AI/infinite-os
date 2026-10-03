@@ -49,7 +49,9 @@ import {
   type BridgeRuntime,
   type BridgeVerbFixture,
   type BridgeVerbId,
+  type ClaimPublic,
   type DeployStatusResponse,
+  type ProveOutcome,
   type Link,
   type MetaRelayStatusResponse,
   type TagHosting,
@@ -148,6 +150,16 @@ export interface FakeBridgeScript {
   hangUpAfter: BridgeVerbId[]
   /** §3z.9 (A21): the real-visit facts the desktop proof watcher stored for the run (null → 404 not_found). */
   storedFacts: TestResult | null
+  /**
+   * §3y.2/§3y.3: the workspace's site-file claim as the cloud holds it (null = none). `site-claim` creates it when
+   * no host is verified or served by the Vercel connection; `site-prove` proves it only while `siteFileServed`
+   * is true (the test flips it when the merge deploys), creating the source with the RESERVED key, exactly as
+   * the cloud does, and handing a merged, undeployed run to `pending_desktop`.
+   */
+  claim: ClaimPublic | null
+  siteFileServed: boolean
+  /** What `site-prove` reports per host while the file is not served. */
+  siteFileOutcome: ProveOutcome
 }
 
 export interface FakeBridgeCall {
@@ -234,8 +246,25 @@ function defaultScript(): FakeBridgeScript {
     metaRelay: relay as unknown as FakeBridgeScript["metaRelay"],
     errors: {},
     hangUpAfter: [],
-    storedFacts: null
+    storedFacts: null,
+    claim: null,
+    siteFileServed: false,
+    siteFileOutcome: "not_served"
   }
+}
+
+/** The fake cloud's reserved key and proof token (fixture-shaped, obviously fake). */
+export const FAKE_RESERVED_SITE_KEY = "site_fa4e000000000000000000000000c1a1"
+export const FAKE_PROOF_BODY = "infinite-site-verification: isv_FAKEacmeProofToken0000\n"
+
+/** The cloud's verified-host rule as the fake applies it: the source's hosts, or the Vercel connection's domains. */
+function verifiedHosts(script: FakeBridgeScript): Set<string> {
+  const hosts = new Set<string>()
+  if (script.keys.infinite.status === "ready") for (const host of script.keys.infinite.productionHosts) hosts.add(normalizeHost(host))
+  if (script.hosting.provider === "vercel" && script.hosting.vercel) {
+    for (const host of [...script.hosting.vercel.productionDomains, ...script.hosting.vercel.productionAliases]) hosts.add(normalizeHost(host))
+  }
+  return hosts
 }
 
 /** The run phases in order (§3b: `phase` only moves forward; `abandoned` from any unfinished phase). */
@@ -603,6 +632,59 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           return ok(strip(fixtureResponse("uninstall.remove-env")))
         case "uninstall.disable-site-source":
           return ok({ disabled: true })
+        case "site-claim": {
+          const hosts = (reqBody.productionHosts as string[]).map(normalizeHost)
+          const consentMode = reqBody.consentMode as ClaimPublic["consentMode"]
+          const verified = verifiedHosts(script)
+          if (hosts.every((host) => verified.has(host) || verified.has(host.replace(/^www\./, "")) || verified.has(`www.${host}`))) {
+            return ok({
+              state: "ready",
+              siteSource: { siteSourceKey: script.keys.infinite.siteSourceKey ?? "site_FAKEacmeStoreSourceKey", productionHosts: hosts, consentMode, created: script.keys.infinite.status !== "ready" },
+              claim: null
+            })
+          }
+          if (script.keys.infinite.status === "ready") return fail(res, record, requestId, "invalid_request", { field: "productionHosts", state: "unverified_host" })
+          // At most ONE pending claim: a repeat keeps its token and key and replaces the hosts and consent.
+          script.claim = {
+            hosts,
+            siteSourceKey: script.claim?.siteSourceKey ?? FAKE_RESERVED_SITE_KEY,
+            consentMode,
+            collectPath: "/infinite/ledger",
+            consentStorageKey: "infinite_analytics_consent",
+            proofPath: "/.well-known/infinite-site-verification.txt",
+            proofBody: script.claim?.proofBody ?? FAKE_PROOF_BODY,
+            state: "pending_proof",
+            provenHosts: [],
+            lastCheck: script.claim?.lastCheck ?? null,
+            expiresAt: "2026-11-01T09:20:00.000Z"
+          }
+          return ok({ state: "pending_proof", siteSource: null, claim: structuredClone(script.claim) })
+        }
+        case "site-claim-read":
+          return ok({ claim: script.claim ? structuredClone(script.claim) : null })
+        case "site-prove": {
+          const claim = script.claim
+          if (!claim) return ok({ state: "none", hosts: [], siteSource: null })
+          const source = (created: boolean) => ({ siteSourceKey: claim.siteSourceKey, productionHosts: claim.provenHosts, consentMode: claim.consentMode, created })
+          if (claim.state === "proven") return ok({ state: "proven", hosts: claim.provenHosts.map((host) => ({ host, outcome: "proven" })), siteSource: source(false) })
+          const at = "2026-10-02T10:03:00.000Z"
+          if (!script.siteFileServed) {
+            claim.lastCheck = { at, outcome: script.siteFileOutcome }
+            return ok({ state: "pending", hosts: claim.hosts.map((host) => ({ host, outcome: script.siteFileOutcome })), siteSource: null })
+          }
+          // Proven: the source is created WITH the reserved key; ingest accepts it from now on.
+          claim.state = "proven"
+          claim.provenHosts = [...claim.hosts]
+          claim.lastCheck = { at, outcome: "proven" }
+          script.keys = {
+            ...script.keys,
+            infinite: { status: "ready", siteSourceKey: claim.siteSourceKey, productionHosts: [...claim.hosts], consentMode: claim.consentMode, consentStorageKey: claim.consentStorageKey, collectPath: claim.collectPath }
+          }
+          if (script.run.mergeSha !== null && script.run.deployedAt === null) {
+            script.run = { ...script.run, deployedSha: script.run.mergeSha, deployedAt: at, proofState: script.run.proofState === "pending" ? "pending_desktop" : script.run.proofState }
+          }
+          return ok({ state: "proven", hosts: claim.hosts.map((host) => ({ host, outcome: "proven" })), siteSource: source(true) })
+        }
         case "test.start": {
           const request = reqBody as unknown as TestRunRequest
           const modeErrors = testRequestModeErrors(request, productionOrSibling(request.productionHost))

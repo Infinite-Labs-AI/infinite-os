@@ -46,6 +46,11 @@ import {
   REVIEW_SCHEMA,
   STATE_CHANGING_VERBS,
   TAG_CAPABILITIES,
+  CLAIM_PUBLIC_SHAPE,
+  PROVE_OUTCOMES,
+  RESERVED_SITE_KEY_PATTERN,
+  SITE_PROOF_BODY_PATTERN,
+  SITE_PROOF_PATH,
   TEST_INFO_CODES,
   TEST_PROBLEM_CODES,
   TEST_RUN_FIXTURE_CASE_SHAPE,
@@ -200,11 +205,12 @@ describe("shapeErrors (the key-list check every fixture goes through)", () => {
 })
 
 describe("the status fixture row (review I2 P3-6)", () => {
-  it("advertises the same 16 protocol-1 capabilities as the descriptor (tag.test-facts.v1 included)", () => {
+  it("advertises the same 17 protocol-1 capabilities as the descriptor (tag.test-facts.v1 and tag.site-claim.v1 included)", () => {
     const status = readJson<BridgeVerbFixture[]>("bridge-verbs.fixtures.json").find((f) => f.verb === "status" && f.status === 200)!
     const capabilities = (status.response as { capabilities: string[] }).capabilities
     expect(capabilities).toEqual([...TAG_CAPABILITIES])
     expect(capabilities).toContain("tag.test-facts.v1")
+    expect(capabilities).toContain("tag.site-claim.v1")
     expect(capabilities).toEqual(readJson<{ capabilities: string[] }>("bridge-descriptor.example.json").capabilities)
   })
 })
@@ -331,6 +337,38 @@ describe("bridge-verbs.fixtures.json (§3a)", () => {
     for (const row of fixtures.filter((f) => f.verb === "runs.patch" && (f.request as { patch?: { proofState?: string } } | null)?.patch?.proofState)) {
       expect((row.request as { producer?: string }).producer).toBe("tag")
     }
+  })
+
+  it("§3y.2 rows: site-claim answers exactly one of source / claim, the claim's key is reserved-shaped and its proof body exact", () => {
+    const claimRows = fixtures.filter((f) => f.verb === "site-claim" && f.status === 200)
+    expect(claimRows.map((row) => (row.response as { state: string }).state).sort()).toEqual(["pending_proof", "ready"])
+    for (const row of claimRows) {
+      const response = row.response as { state: string; siteSource: unknown; claim: unknown }
+      expect((response.siteSource === null) !== (response.claim === null), row.path).toBe(true)
+      expect(response.state === "ready" ? response.siteSource : response.claim).not.toBeNull()
+    }
+    const claims = fixtures.flatMap((f) => {
+      const response = f.response as { claim?: { siteSourceKey: string; proofBody: string; proofPath: string; state: string } | null }
+      return response.claim ? [response.claim] : []
+    })
+    expect(claims.length).toBeGreaterThanOrEqual(2)
+    for (const claim of claims) {
+      expect(claim.siteSourceKey).toMatch(RESERVED_SITE_KEY_PATTERN)
+      expect(claim.proofBody).toMatch(SITE_PROOF_BODY_PATTERN)
+      expect(claim.proofPath).toBe(SITE_PROOF_PATH)
+    }
+    // A proven prove answer carries the source WITH the reserved key; pending and none carry no source.
+    const proves = fixtures.filter((f) => f.verb === "site-prove" && f.status === 200).map((f) => f.response as { state: string; siteSource: { siteSourceKey: string } | null; hosts: Array<{ outcome: string }> })
+    expect(proves.map((p) => p.state).sort()).toEqual(["none", "pending", "proven"])
+    for (const prove of proves) {
+      expect(prove.siteSource === null, prove.state).toBe(prove.state !== "proven")
+      for (const host of prove.hosts) expect(PROVE_OUTCOMES).toContain(host.outcome)
+    }
+    expect(proves.find((p) => p.state === "proven")!.siteSource!.siteSourceKey).toBe(claims[0]!.siteSourceKey)
+    // Negative: the shape refuses a claim answer that adds a field (the tag decodes strictly).
+    const pending = claimRows.find((row) => (row.response as { state: string }).state === "pending_proof")!
+    expect(shapeErrors({ ...(pending.response as object), extra: true }, BRIDGE_VERBS["site-claim"].response).join()).toContain('unknown key "extra"')
+    expect(shapeErrors({ ...((pending.response as { claim: object }).claim), token: "x" }, CLAIM_PUBLIC_SHAPE).join()).toContain('unknown key "token"')
   })
 
   it("negative: a provision-env body that asks for a production redeploy does not type-check as protocol 1", () => {
@@ -494,6 +532,8 @@ describe("bridge-verbs.fixtures.json (§3a)", () => {
         "conversions",
         "meta-relay.enable",
         "site-source",
+        "site-claim",
+        "site-prove",
         "uninstall.remove-env",
         "uninstall.disable-site-source",
         "runs.proof-claim",
@@ -874,7 +914,7 @@ describe("codes (§3d.5)", () => {
     const expected: Record<number, string[]> = {
       1: ["APPLY_ROLLED_BACK", "AGENT_TOOLLESS", "AGENT_TIMEOUT", "PUSH_REFUSED", "PR_CREATE_FAILED", "REVIEW_UNPARSEABLE", "PROOF_INCOMPLETE", "BRANCH_FAILED", "FENCE_TAMPER", "AGENT_FAILED"],
       2: ["NOT_BUILT", "NOT_MAC", "UNSUPPORTED_PLATFORM", "NO_GIT", "DIRTY_TREE", "BRIDGE_PROTOCOL", "LOCKED", "RUNTIME_MISMATCH"],
-      3: ["NEEDS_ANSWERS", "MERGE_PARKED", "AGENT_OUT_OF_USAGE", "DEPLOY_TIMEOUT", "PREVIEW_NOT_FOUND", "SITE_LOCKED", "INFINITE_UNAVAILABLE", "DEV_SERVER_RUNNING"],
+      3: ["NEEDS_ANSWERS", "MERGE_PARKED", "AGENT_OUT_OF_USAGE", "DEPLOY_TIMEOUT", "PREVIEW_NOT_FOUND", "SITE_LOCKED", "INFINITE_UNAVAILABLE", "DEV_SERVER_RUNNING", "DEPLOY_FAILED", "HOST_UNCONFIRMED"],
       4: ["NO_APP", "SIGNED_OUT", "SUBSCRIPTION_REQUIRED", "LINK_DECLINED", "LINK_EXPIRED"]
     }
     for (const [exit, codes] of Object.entries(expected)) {

@@ -60,7 +60,12 @@ export const TAG_CAPABILITIES = [
   "tag.uninstall.v1",
   "tag.test.v1",
   /** §3z.9 (A21): `GET /v1/test/facts?runId=` — the real-visit facts the desktop proof watcher stored. */
-  "tag.test-facts.v1"
+  "tag.test-facts.v1",
+  /**
+   * §3y.2: the site-file claim (`site-claim`, `site-claim-read`, `site-prove`). A fresh workspace with no
+   * verified host and no Vercel connection proves its domain with a file the pull request serves.
+   */
+  "tag.site-claim.v1"
 ] as const
 export type TagCapability = (typeof TAG_CAPABILITIES)[number]
 
@@ -537,6 +542,72 @@ export interface SiteSourceResponse extends BridgeEnvelope {
   created: boolean
 }
 
+// ---------------------------------------------------------------------------------------------
+// §3y.2 The site-file claim (capability `tag.site-claim.v1`)
+// ---------------------------------------------------------------------------------------------
+
+/** The one path the cloud fetches on each claimed host (§3y.3). */
+export const SITE_PROOF_PATH = "/.well-known/infinite-site-verification.txt" as const
+/** The proof file's exact body: `infinite-site-verification: isv_<22 base64url>\n` (public by design). */
+export const SITE_PROOF_BODY_PATTERN = /^infinite-site-verification: isv_[A-Za-z0-9_-]{22}\n$/
+/** A reserved site key: the same format as `analytics_site_sources.public_key`. */
+export const RESERVED_SITE_KEY_PATTERN = /^site_[0-9a-f]{32}$/
+
+/** What one proof attempt found on one host (§3y.3). `not_checked` = no attempt yet. */
+export type ProveOutcome = "proven" | "not_served" | "wrong_token" | "redirects_elsewhere" | "unreachable" | "blocked" | "not_checked"
+export const PROVE_OUTCOMES: readonly ProveOutcome[] = ["proven", "not_served", "wrong_token", "redirects_elsewhere", "unreachable", "blocked", "not_checked"]
+
+/** The workspace's claim on its hosts, the same object in every §3y.2 verb. Nothing is collected before the proof. */
+export interface ClaimPublic {
+  hosts: string[]
+  /** `^site_[0-9a-f]{32}$`, reserved: ingest refuses it until the proof creates the source with it. */
+  siteSourceKey: string
+  consentMode: ConsentMode
+  collectPath: string
+  consentStorageKey: string
+  proofPath: typeof SITE_PROOF_PATH
+  /** Exactly `infinite-site-verification: isv_<22 base64url>\n`. */
+  proofBody: string
+  state: "pending_proof" | "proven" | "expired"
+  provenHosts: string[]
+  lastCheck: { at: string; outcome: ProveOutcome } | null
+  expiresAt: string
+}
+
+/** §3a.6 `site-source`'s response fields, as the claim verbs carry them. */
+export interface SiteSourceFields {
+  siteSourceKey: string
+  productionHosts: string[]
+  consentMode: ConsentMode
+  created: boolean
+}
+
+export interface SiteClaimBody extends BridgeEnvelope {
+  runId: string
+  /** At most 10. The desktop adds `sharedAcknowledged` from the link record, exactly as for `site-source`. */
+  productionHosts: string[]
+  consentMode: ConsentMode
+}
+
+/** Exactly one of `siteSource` (`ready`) and `claim` (`pending_proof`) is non-null. */
+export interface SiteClaimResponse extends BridgeEnvelope {
+  state: "ready" | "pending_proof"
+  siteSource: SiteSourceFields | null
+  claim: ClaimPublic | null
+}
+
+/** The workspace's newest claim in any state, or null. */
+export interface SiteClaimReadResponse extends BridgeEnvelope {
+  claim: ClaimPublic | null
+}
+
+/** `none` = no claim; an already-proven claim answers `proven` with its source (idempotent). */
+export interface SiteProveResponse extends BridgeEnvelope {
+  state: "proven" | "pending" | "none"
+  hosts: Array<{ host: string; outcome: ProveOutcome }>
+  siteSource: SiteSourceFields | null
+}
+
 /** §3b `CONVERSION_TYPES`. Subscribe = `type:"custom"`, `label:"Subscribe"`. */
 export const CONVERSION_TYPES = ["signup", "lead", "booking", "purchase", "trial", "download", "custom"] as const
 export type ConversionType = (typeof CONVERSION_TYPES)[number]
@@ -685,6 +756,9 @@ export const BRIDGE_VERB_IDS = [
   "meta-relay.enable",
   "uninstall.remove-env",
   "uninstall.disable-site-source",
+  "site-claim",
+  "site-claim-read",
+  "site-prove",
   "test.start",
   "test.poll",
   "test.cancel",
@@ -893,6 +967,23 @@ const SITE_SOURCE_RESPONSE_SHAPE = shapeOf<SiteSourceResponse>()(
   [...ENVELOPE, "siteSourceKey", "productionHosts", "consentMode", "created"],
   []
 )
+const SITE_SOURCE_FIELDS_SHAPE = shapeOf<SiteSourceFields>()("SiteSourceFields", ["siteSourceKey", "productionHosts", "consentMode", "created"], [])
+export const CLAIM_PUBLIC_SHAPE = shapeOf<ClaimPublic>()(
+  "ClaimPublic",
+  ["hosts", "siteSourceKey", "consentMode", "collectPath", "consentStorageKey", "proofPath", "proofBody", "state", "provenHosts", "lastCheck", "expiresAt"],
+  [],
+  { lastCheck: nullable(shapeOf<NonNullable<ClaimPublic["lastCheck"]>>()("ClaimPublic.lastCheck", ["at", "outcome"], [])) }
+)
+const SITE_CLAIM_BODY_SHAPE = shapeOf<SiteClaimBody>()("SiteClaimBody", [...ENVELOPE, "runId", "productionHosts", "consentMode"], [])
+const SITE_CLAIM_RESPONSE_SHAPE = shapeOf<SiteClaimResponse>()("SiteClaimResponse", [...ENVELOPE, "state", "siteSource", "claim"], [], {
+  siteSource: nullable(SITE_SOURCE_FIELDS_SHAPE),
+  claim: nullable(CLAIM_PUBLIC_SHAPE)
+})
+const SITE_CLAIM_READ_RESPONSE_SHAPE = shapeOf<SiteClaimReadResponse>()("SiteClaimReadResponse", [...ENVELOPE, "claim"], [], { claim: nullable(CLAIM_PUBLIC_SHAPE) })
+const SITE_PROVE_RESPONSE_SHAPE = shapeOf<SiteProveResponse>()("SiteProveResponse", [...ENVELOPE, "state", "hosts", "siteSource"], [], {
+  hosts: arrayOf(shapeOf<SiteProveResponse["hosts"][number]>()("SiteProveHost", ["host", "outcome"], [])),
+  siteSource: nullable(SITE_SOURCE_FIELDS_SHAPE)
+})
 const CONVERSIONS_BODY_SHAPE = shapeOf<ConversionsBody>()("ConversionsBody", [...ENVELOPE, "runId", "conversions"], [], {
   conversions: arrayOf(shapeOf<ConversionDeclaration>()("ConversionDeclaration", ["name", "type", "dedupe"], ["label"]))
 })
@@ -973,6 +1064,9 @@ export const BRIDGE_VERBS = {
   "meta-relay.enable": { verb: "meta-relay.enable", method: "POST", path: "/v1/meta-relay", query: [], capability: "tag.meta-relay.v1", linkScoped: true, paid: true, successStatus: 200, request: META_RELAY_ENABLE_BODY_SHAPE, response: META_RELAY_STATUS_RESPONSE_SHAPE, stateChanging: true },
   "uninstall.remove-env": { verb: "uninstall.remove-env", method: "POST", path: "/v1/server-lane/remove-env", query: [], capability: "tag.uninstall.v1", linkScoped: true, paid: true, successStatus: 200, request: EMPTY_BODY_SHAPE, response: REMOVE_ENV_RESPONSE_SHAPE, stateChanging: true },
   "uninstall.disable-site-source": { verb: "uninstall.disable-site-source", method: "POST", path: "/v1/site-source/disable", query: [], capability: "tag.uninstall.v1", linkScoped: true, paid: true, successStatus: 200, request: EMPTY_BODY_SHAPE, response: DISABLE_SITE_SOURCE_RESPONSE_SHAPE, stateChanging: true },
+  "site-claim": { verb: "site-claim", method: "POST", path: "/v1/site-source/claim", query: [], capability: "tag.site-claim.v1", linkScoped: true, paid: true, successStatus: 200, request: SITE_CLAIM_BODY_SHAPE, response: SITE_CLAIM_RESPONSE_SHAPE, stateChanging: true },
+  "site-claim-read": { verb: "site-claim-read", method: "GET", path: "/v1/site-source/claim", query: [], capability: "tag.site-claim.v1", linkScoped: true, paid: true, successStatus: 200, request: null, response: SITE_CLAIM_READ_RESPONSE_SHAPE, stateChanging: false },
+  "site-prove": { verb: "site-prove", method: "POST", path: "/v1/site-source/prove", query: [], capability: "tag.site-claim.v1", linkScoped: true, paid: true, successStatus: 200, request: EMPTY_BODY_SHAPE, response: SITE_PROVE_RESPONSE_SHAPE, stateChanging: true },
   "test.start": { verb: "test.start", method: "POST", path: "/v1/test/runs", query: [], capability: "tag.test.v1", linkScoped: true, paid: true, successStatus: 202, request: TEST_RUN_REQUEST_SHAPE, response: TEST_RUN_START_RESPONSE_SHAPE, stateChanging: false },
   "test.poll": { verb: "test.poll", method: "GET", path: "/v1/test/runs/:testRunId", query: ["wait"], capability: "tag.test.v1", linkScoped: true, paid: true, successStatus: 200, request: null, response: TEST_RUN_POLL_RESPONSE_SHAPE, stateChanging: false },
   "test.cancel": { verb: "test.cancel", method: "POST", path: "/v1/test/runs/:testRunId/cancel", query: [], capability: "tag.test.v1", linkScoped: true, paid: true, successStatus: 200, request: EMPTY_BODY_SHAPE, response: TEST_RUN_CANCEL_RESPONSE_SHAPE, stateChanging: false },
@@ -1014,7 +1108,7 @@ export function matchBridgeVerb(method: string, pathWithQuery: string): BridgeVe
   return null
 }
 
-/** The verbs that change state (`provision-env`, `ga4/key-events`, `conversions`, `meta-relay` POST, `site-source`, `uninstall`, `proof-claim`; plus `link.revoke`). */
+/** The verbs that change state (`provision-env`, `ga4/key-events`, `conversions`, `meta-relay` POST, `site-source`, `site-claim`, `site-prove`, `uninstall`, `proof-claim`; plus `link.revoke`). */
 export const STATE_CHANGING_VERBS: readonly BridgeVerbId[] = BRIDGE_VERB_IDS.filter((id) => BRIDGE_VERBS[id].stateChanging)
 
 /** One cross-repo fixture row: `contracts/tag-wizard-v1/bridge-verbs.fixtures.json`. */
@@ -1080,6 +1174,12 @@ export interface TagBridgeClient {
   enableMetaRelay(body: WithoutEnvelope<MetaRelayEnableBody>, options?: BridgeCallOptions): Promise<MetaRelayStatusResponse>
   removeServerLaneEnv(options?: BridgeCallOptions): Promise<RemoveEnvResponse>
   disableSiteSource(options?: BridgeCallOptions): Promise<DisableSiteSourceResponse>
+  /** §3y.2 (`tag.site-claim.v1`): the site source when the hosts are verified, else a pending claim. */
+  siteClaim(body: WithoutEnvelope<SiteClaimBody>, options?: BridgeCallOptions): Promise<SiteClaimResponse>
+  /** §3y.2: the workspace's newest claim, in any state. */
+  readSiteClaim(options?: BridgeCallOptions): Promise<SiteClaimReadResponse>
+  /** §3y.2: ask the cloud to fetch the proof file now (the desktop never asserts a proof). */
+  proveSite(options?: BridgeCallOptions): Promise<SiteProveResponse>
 
   startTest(body: WithoutEnvelope<TestRunRequest>, options?: BridgeCallOptions): Promise<TestRunStartResponse>
   pollTest(testRunId: string, waitSeconds: number, options?: BridgeCallOptions): Promise<TestRunPollResponse>
@@ -1143,5 +1243,6 @@ export const BRIDGE_SHAPES = {
   link: LINK_SHAPE,
   vercelHosting: VERCEL_HOSTING_SHAPE,
   runPublic: WIZARD_RUN_PUBLIC_SHAPE,
-  runPatch: RUN_PATCH_SHAPE
+  runPatch: RUN_PATCH_SHAPE,
+  claimPublic: CLAIM_PUBLIC_SHAPE
 } as const

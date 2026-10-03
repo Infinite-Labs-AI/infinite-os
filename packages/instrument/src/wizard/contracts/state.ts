@@ -84,6 +84,30 @@ export interface AgentModelRecord {
   fallback: boolean
 }
 
+/** §3y.1 / §3y.2: the site-file claim this run holds (the cloud's answer; never a repo value). */
+export interface SiteClaimState {
+  hosts: string[]
+  siteSourceKey: string
+  collectPath: string
+  consentStorageKey: string
+  proofPath: "/.well-known/infinite-site-verification.txt"
+  state: "pending_proof" | "proven"
+  provenAt?: string
+}
+
+/**
+ * §3y.1: the production host this run uses and where it came from (Infinite, `--production-host`, or the user's
+ * answer to the one `before` ask). A null host = "it isn't live yet": the run never asks again.
+ */
+export interface SiteState {
+  productionHost: string | null
+  source: "infinite" | "flag" | "answer"
+  decidedAt: string
+  /** §3y.4: the repo shows a Vercel signal (Infinite hosting, `.vercel/*`, or a `vercel[bot]` deployment); read once per run. */
+  vercelSignal?: boolean
+  claim?: SiteClaimState
+}
+
 export interface WizardRunState {
   schema: typeof WIZARD_STATE_SCHEMA
   /** The cloud run id; null until the `agent` step creates it. */
@@ -139,6 +163,8 @@ export interface WizardRunState {
   report: { live_today: ReportColumnSnapshot | null; in_pr: ReportColumnSnapshot | null; proven_live: ReportColumnSnapshot | null }
   /** `~/Library/Caches/infinite-tag/snapshots/<runId>/<turn>` (outside the repo and $TMPDIR). */
   snapshot: { dir: string } | null
+  /** §3y.1 (optional, additive; schema stays v1): the production host and the site-file claim. */
+  site?: SiteState
 }
 
 // ---- the store snapshot (lane O1 publishes it; lane O2's TTY and JSON UIs read it) ----
@@ -202,8 +228,11 @@ export const WIZARD_RUN_STATE_SHAPE = shapeOf<WizardRunState>()(
     "report",
     "snapshot"
   ],
-  ["runStartedAt"],
+  ["runStartedAt", "site"],
   {
+    site: shapeOf<SiteState>()("RunState.site", ["productionHost", "source", "decidedAt"], ["vercelSignal", "claim"], {
+      claim: shapeOf<SiteClaimState>()("RunState.site.claim", ["hosts", "siteSourceKey", "collectPath", "consentStorageKey", "proofPath", "state"], ["provenAt"])
+    }),
     link: nullable(shapeOf<NonNullable<WizardRunState["link"]>>()("RunState.link", ["linkId", "workspaceName", "approvedAt", "runtimeVariant"], [])),
     steps: recordOf(shapeOf<StepRecord>()("StepRecord", ["outcome", "inputHash", "at"], ["code"])),
     agent: nullable(shapeOf<NonNullable<WizardRunState["agent"]>>()("RunState.agent", ["worker", "reviewer", "workerSession", "whoPays"], ["models"], {
