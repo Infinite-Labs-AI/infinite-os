@@ -72,6 +72,7 @@ import { proofFileBlockedText, proofFileTarget } from "./proof-file.js"
 import {
   buildPlanModel,
   DECISION_LINE_IDS,
+  planAsksConsent,
   lineFactsFor,
   planAskPayload,
   resolvePlanAnswers,
@@ -430,7 +431,8 @@ export class WizardInstaller implements Installer {
     const root = scan.root
     const runId = this.requireRunId()
     const answers = resolvePlanAnswers(plan, approvals, { consentFlag: this.options.consentFlag() })
-    if (answers.consentMode === null) throw new Error("apply needs an answered consent mode (the run parks at `plan` without one).")
+    // R2-6: a plan that does not ask consent installs nothing consent governs (no Infinite, no managed tag, no capture).
+    if (answers.consentMode === null && planAsksConsent(plan)) throw new Error("apply needs an answered consent mode (the run parks at `plan` without one).")
     const approved = new Set(answers.lines.filter((entry) => entry.approved === true).map((entry) => entry.id))
     const warnings: string[] = [...scan.warnings]
     const served = siteServing(scan, internals.before, keys)
@@ -449,7 +451,7 @@ export class WizardInstaller implements Installer {
         continue
       }
       if (!previous?.providers.includes(tool)) continue
-      const kept = keptArtifact(tool, previous, keys, answers.consentMode)
+      const kept = answers.consentMode === null ? "the plan has no consent answer for it" : keptArtifact(tool, previous, keys, answers.consentMode)
       if (typeof kept === "string") {
         return this.failed(artifacts, warnings, `${TOOL_LABEL[tool]} is already installed here and its update was not approved, but ${kept}. Approve "Update ${TOOL_LABEL[tool]}", or remove it with uninstall first.`, false)
       }

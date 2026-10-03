@@ -58,19 +58,26 @@ function vercelLabel(host: string): string | null {
 export function vercelDeploymentProject(label: string): string | null {
   const parts = label.split("-")
   for (let index = parts.length - 2; index >= 1; index -= 1) {
-    const part = parts[index]!
-    if (/^[a-z0-9]{9}$/.test(part) && /[0-9]/.test(part)) return parts.slice(0, index).join("-")
+    if (VERCEL_DEPLOYMENT_HASH.test(parts[index]!)) return parts.slice(0, index).join("-")
   }
   return null
 }
 
-/** A Vercel PREVIEW shape: a branch alias (`-git-`), a deployment URL (`-<hash>-`), or a nested `*.vercel.app`. */
+/** Vercel's deployment hash segment: 9 lowercase letters/digits with at least one digit. */
+const VERCEL_DEPLOYMENT_HASH = /^(?=[a-z0-9]*\d)[a-z0-9]{9}$/
+
+/**
+ * A Vercel PREVIEW shape: a branch alias (any `-git-`), a deployment URL (a label segment after the first that is the
+ * 9-character hash with a digit), or a nested / malformed `*.vercel.app`. The SAME rule as 1bu-1's
+ * `isVercelProductionAliasShape` (`src/lib/analytics/wizard/host-deny.ts`): the tag and the cloud classify one host
+ * the same way. Fail closed: a team slug that looks like a hash is refused too (such a site uses its own domain).
+ */
 export function isVercelPreviewShape(host: string): boolean {
   const normalized = normalizeHost(host)
   if (!normalized.endsWith(VERCEL_APP_SUFFIX)) return false
   const label = vercelLabel(normalized)
   if (label === null) return true
-  return label.includes("-git-") || vercelDeploymentProject(label) !== null
+  return label.includes("-git-") || label.split("-").slice(1).some((segment) => VERCEL_DEPLOYMENT_HASH.test(segment))
 }
 
 /** A `*.vercel.app` host that can be a project's production alias: one label and no preview shape. */

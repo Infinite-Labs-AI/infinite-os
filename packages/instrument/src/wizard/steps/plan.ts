@@ -7,7 +7,7 @@
 // (INF_WIZ_NEEDS_ANSWERS, exit 3): `install` cannot create the site source without it.
 import { createHash } from "node:crypto"
 
-import { agentJobsUpTo, gateSeededItems, resolvePlanAnswers, runnableAgentJobs, withGuardHosts, type WizardPlanModel } from "../../install/plan-model.js"
+import { agentJobsUpTo, gateSeededItems, planAsksConsent, resolvePlanAnswers, runnableAgentJobs, withGuardHosts, type WizardPlanModel } from "../../install/plan-model.js"
 import { keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates, savePlanApprovals } from "../../install/step-inputs.js"
 import { ASK_CANCELLED, ASK_TIMEOUT } from "../contracts/asks.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
@@ -45,7 +45,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const saved = ctx.state.get().plan
   const savedFile = await loadPlanApprovals(ctx, deps)
   let answer =
-    saved && saved.hash === plan.hash && saved.answers.consentMode !== null && savedFile?.planHash === plan.hash ? savedFile.approvals : null
+    saved && saved.hash === plan.hash && (saved.answers.consentMode !== null || !planAsksConsent(plan)) && savedFile?.planHash === plan.hash ? savedFile.approvals : null
   if (!answer) {
     const asked = await deps.installer.planAsk(plan)
     const reply = await ctx.ask("plan", asked)
@@ -87,7 +87,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     plan: { hash: plan.hash, lines: plan.lines, decisions: plan.decisions }
   })
 
-  if (resolved.consentMode === null) {
+  // R2-6: a plan that does not ask consent (nothing it governs is installed or recorded) needs no answer.
+  if (resolved.consentMode === null && planAsksConsent(plan)) {
     await ctx.state.save()
     return {
       kind: "parked",

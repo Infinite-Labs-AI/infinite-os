@@ -64,6 +64,7 @@ import { shapeErrors } from "../../src/wizard/contracts/shape.js"
 import type { ReceiptsResponseFields } from "../../src/wizard/contracts/receipts.js"
 import { testRequestModeErrors, type TestMode, type TestResult, type TestRunFixtureCase, type TestRunRequest } from "../../src/wizard/contracts/test-engine.js"
 import { normalizeHost } from "../../src/wizard/contracts/host-deny.js"
+import { isPreviewShapedHost } from "../../src/wizard/site-host.js"
 import { cloudPatchRefusal, parseCloudReport } from "./cloud-rules.js"
 
 const CONTRACTS_DIR = new URL("../../contracts/tag-wizard-v1/", import.meta.url)
@@ -361,11 +362,14 @@ export function refusedPreviewField(
   if (hosting.provider === "none" && hosting.vercel === null) {
     // `verifyByPendingClaim`: the pending claim is the only proof left (every origin already passed the shape check).
     const claim = pending.claim
+    // 1bu-1 a7042d367a: an origin that is one of the claim's OWN hosts (a `<project>.vercel.app` production alias)
+    // is never a preview: it serves the token once the merge deploys, so a rehearsal there would grade production.
+    const claimHosts = new Set((claim?.hosts ?? []).map(normalizeHost))
     const ok =
       claim !== null &&
       claim.state === "pending_proof" &&
       PROOF_LINE.test(claim.proofBody.trim()) &&
-      previews.every((row) => isVercelPreviewOrigin(row.origin.replace(/\/$/, ""))) &&
+      previews.every((row) => isVercelPreviewOrigin(row.origin.replace(/\/$/, "")) && !claimHosts.has(normalizeHost(new URL(row.origin).hostname))) &&
       pending.previewServesClaimProof
     return ok ? null : previews[0]!.field
   }
@@ -723,6 +727,9 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
           return ok({ disabled: true })
         case "site-claim": {
           const hosts = (reqBody.productionHosts as string[]).map(normalizeHost)
+          // 1bu-1 a7042d367a (`writeSiteClaim`): a preview-shaped host is refused before any write; a Vercel
+          // production alias (`<project>.vercel.app`) is not preview-shaped and gets a claim like any domain.
+          if (hosts.some(isPreviewShapedHost)) return fail(res, record, requestId, "invalid_request", { field: "productionHosts", state: "unverified_host" })
           const consentMode = reqBody.consentMode as ClaimPublic["consentMode"]
           const verified = verifiedHosts(script)
           if (hosts.every((host) => verified.has(host) || verified.has(host.replace(/^www\./, "")) || verified.has(`www.${host}`))) {

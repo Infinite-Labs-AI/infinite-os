@@ -1120,6 +1120,148 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
   })
 })
 
+/** Live run 2: the smoke site's only host is its Vercel project's PRODUCTION alias, never a custom domain. */
+const VERCEL_ALIAS = "acme-store.vercel.app"
+
+/** The fresh site, served on the alias: every production load (and its final URL) is on `acme-store.vercel.app`. */
+function aliasTestResultFor(request: TestRunRequest): TestResult | undefined {
+  const result = freshTestResultFor(request)
+  if (!result) return result
+  if (request.mode === "dry_live" && request.targets[0]?.label === "preview_self") return result
+  return JSON.parse(JSON.stringify(result).replace(/:\/\/(?:www\.)?acme-store\.com/g, `://${VERCEL_ALIAS}`)) as TestResult
+}
+
+/** The live site's routes on the alias too (the T1 reads after the deploy go there). */
+function serveLiveSiteOnAlias(w: E2eWorld): void {
+  const path = join(w.site.base, "live-site.json")
+  const routes = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>
+  for (const [url, page] of Object.entries(routes)) routes[url.replace(/^https:\/\/(?:www\.)?acme-store\.com/, `https://${VERCEL_ALIAS}`)] = page
+  writeFileSync(path, JSON.stringify(routes))
+}
+
+describe("live run 2: production on <project>.vercel.app, and a run with no real visit", () => {
+  it("a fresh workspace whose only host is the production alias reaches proven_live through the site-file claim", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
+    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: aliasTestResultFor } })
+    serveLiveSiteOnAlias(w)
+    // GitHub already shows Vercel's earlier production deployment of main: its URL is a deployment URL (never the
+    // alias), from which the host ask offers `acme-store.vercel.app`. No CNAME, no custom domain anywhere.
+    const mainSha = bareGit(w.site.bare, "rev-parse", "main")
+    const gh = readGhState(w.ghState) as unknown as { deployments: unknown[] }
+    gh.deployments.push({ id: 7050, sha: mainSha, environment: "Production", production_environment: false, creator: "vercel[bot]", created_at: "2026-10-02T08:00:00Z", statuses: [{ state: "success", environment_url: "https://acme-store-a1b2c3d4e-acme.vercel.app" }] })
+    saveGhState(w.ghState, gh)
+    const asked: Array<{ kind: string; payload: unknown }> = []
+    const respond = (ask: { kind: string; payload: unknown }) => {
+      asked.push(ask)
+      const payload = ask.payload as { question?: string; default?: string; number?: number }
+      if (ask.kind === "single" && payload.question?.startsWith("Which address is your live site?")) return payload.default
+      if (ask.kind !== "merge-ready") return undefined
+      const sha = mergePullRequest(w.site, w.ghState, payload.number!)
+      const state = readGhState(w.ghState) as unknown as { deployments: unknown[] }
+      state.deployments.push(productionDeployment(7151, sha, "success"))
+      saveGhState(w.ghState, state)
+      w.bridge.script.siteFileServed = true
+      return "open"
+    }
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond, timeoutMs: RUN_TIMEOUT })
+    const why = trace(run)
+    expect(run.code, why).toBe(0)
+    expect(stepOutcomes(run), why).toEqual(["link:ok", "agent:ok", "before:ok", "keys:ok", "plan:ok", "install:ok", "jobs:ok", "settings:ok", "rehearsal:ok", "review:ok", "merge:ok", "prove:ok", "done:ok"])
+    expect(w.tripwire.connections).toEqual([])
+
+    // The ask offered the alias from Vercel's production deployment, and it was accepted (never "preview-style").
+    const hostAsk = asked.find((ask) => (ask.payload as { question?: string }).question?.startsWith("Which address is your live site?"))!
+    expect((hostAsk.payload as { options: Array<{ label: string; value: string }> }).options[0]).toEqual({ label: `${VERCEL_ALIAS}  (from your Vercel production deployments)`, value: VERCEL_ALIAS })
+    const subs = run.ofType("step.sub").map((event) => String(event.text))
+    expect(subs).toContain(`✓ Live site: ${VERCEL_ALIAS} (you said)`)
+    expect(subs.some((text) => text.includes("preview-style") || text.includes("Vercel preview address"))).toBe(false)
+
+    // The claim names exactly the alias; the PR carries the proof file and the reserved key.
+    const claimCall = w.bridge.callsFor("site-claim")[0]!
+    expect((claimCall.body as { productionHosts: string[] }).productionHosts).toEqual([VERCEL_ALIAS])
+    expect(claimCall.status).toBe(200)
+    const head = headOfBranch(w)!
+    expect(bareShow(w.site.bare, head.head, "public/.well-known/infinite-site-verification.txt")).toBe(FAKE_PROOF_BODY)
+
+    // The rehearsal ran on the PR's preview (a branch alias), never on the production alias itself.
+    const rehearsalStart = w.bridge.callsFor("test.start").find((call) => (call.body as { mode: string }).mode === "rehearsal")!
+    expect(rehearsalStart.status).toBe(202)
+    expect((rehearsalStart.body as { rehearsal: { previewOrigin: string }; productionHost: string }).rehearsal.previewOrigin).toBe("https://acme-store-git-infinite-tag-acme.vercel.app")
+    expect((rehearsalStart.body as { productionHost: string }).productionHost).toBe(VERCEL_ALIAS)
+
+    // Prove: deployed (GitHub), the alias confirmed by its proof file, ONE real visit ON the alias, a verified receipt.
+    expect(subs.some((text) => text.includes(`${VERCEL_ALIAS} confirmed`))).toBe(true)
+    const visits = w.bridge.callsFor("test.start").filter((call) => (call.body as { mode: string }).mode === "real_visit")
+    expect(visits).toHaveLength(1)
+    expect((visits[0]!.body as { productionHost: string }).productionHost).toBe(VERCEL_ALIAS)
+    expect(run.ofType("receipt").filter((event) => event.lane === "infinite").at(-1)).toMatchObject({ state: "verified" })
+    expect(w.bridge.script.claim?.state).toBe("proven")
+    expect(w.bridge.script.keys.infinite.productionHosts).toEqual([VERCEL_ALIAS])
+    expect(w.bridge.script.run.proofState).toBe("proven")
+    expect(w.bridge.script.run.phase).toBe("proven")
+    const report = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/report.json"), "utf8")) as { site: { productionHost: string }; columns: { proven_live: { pending: string | null; measuredAt: string | null } } }
+    expect(report.site.productionHost).toBe(VERCEL_ALIAS)
+    expect(report.columns.proven_live).toMatchObject({ pending: null })
+    expect(report.columns.proven_live.measuredAt).not.toBeNull()
+  })
+
+  it("no live address (the user says it isn't live yet): no consent or conversion question, and Proven live holds no pass and no problem", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
+    // No agents: this world is about the plan and the report, not the jobs (they would need conversions it withholds).
+    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_NO_AGENTS: "1" } })
+    const asked: Array<{ kind: string; payload: unknown }> = []
+    const respond = (ask: { kind: string; payload: unknown }) => {
+      asked.push(ask)
+      const payload = ask.payload as { question?: string; number?: number }
+      if (ask.kind === "single" && payload.question?.startsWith("Which address is your live site?")) return "__none__"
+      if (ask.kind !== "merge-ready") return undefined
+      const sha = mergePullRequest(w.site, w.ghState, payload.number!)
+      const state = readGhState(w.ghState) as unknown as { deployments: unknown[] }
+      state.deployments.push(productionDeployment(7161, sha, "success"))
+      saveGhState(w.ghState, state)
+      return "open"
+    }
+    // No --consent-mode and no consent in the answers: a plan that asks no consent must not park on it.
+    const answers = writeAnswers(w, { ...answersFile(), consentMode: undefined })
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond, timeoutMs: RUN_TIMEOUT })
+    const why = trace(run)
+    const outcomes = stepOutcomes(run)
+    expect(outcomes.slice(0, 5), why).toEqual(["link:ok", "agent:ok", "before:ok", "keys:ok", "plan:ok"])
+    expect(outcomes.at(-1), why).toBe("done:ok")
+
+    // R2-6: nothing consent or the conversion names govern can be installed, so neither is asked or pre-checked.
+    const planAsk = run.ofType("ask.open").find((event) => event.kind === "plan")!.payload as { lines: Array<{ id: string; kind: string; requires: string }> }
+    expect(planAsk.lines.some((line) => line.kind === "consent_mode")).toBe(false)
+    expect(planAsk.lines.some((line) => line.kind === "conversion_names")).toBe(false)
+    expect(w.bridge.calls.map(label)).not.toContain("runs.patch(approvedConversions)")
+    expect(w.bridge.calls.map(label)).not.toContain("conversions")
+    expect(w.bridge.calls.map(label)).not.toContain("site-claim")
+
+    // R2-2: no visit, no receipt → the Proven live column counts no pass and no problem; the headline says why.
+    expect(w.bridge.calls.map(label).some((entry) => entry.startsWith("test.start(real_visit"))).toBe(false)
+    const report = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/report.json"), "utf8")) as {
+      columns: { proven_live: { pending: string | null } }
+      rows: Array<{ id: string; cells: Record<string, { state: string; display: string }> }>
+      finishLine: Array<{ id: string; cells: Record<string, { state: string }> }>
+      notes: string[]
+    }
+    for (const line of report.finishLine) expect(["pass", "problem"], line.id).not.toContain(line.cells.proven_live!.state)
+    for (const row of report.rows) expect(["pass", "problem"], row.id).not.toContain(row.cells.proven_live!.state)
+    // R2-4: nothing in Infinite can finish it (no host to visit), so never "open Infinite".
+    expect(report.columns.proven_live.pending).toBe("rerun_tag")
+    expect(report.notes.some((note) => note.includes("--production-host"))).toBe(true)
+    const markdown = readFileSync(join(w.site.repo, ".infinite/wizard/report.md"), "utf8")
+    expect(markdown).not.toContain("open Infinite")
+    const everything = [...run.ofType("run.end"), ...run.ofType("step.sub"), ...run.ofType("step.done")].map((event) => JSON.stringify(event)).join("\n")
+    expect(everything).not.toMatch(/problems? left on the live site/)
+
+    // R2-5: the PR's "what happened" comment was edited to carry this final report (one report everywhere).
+    const pr = (readGhState(w.ghState) as unknown as { prs: Array<{ comments: Array<{ body: string; edited?: boolean }> }> }).prs[0]!
+    const final = pr.comments.find((comment) => comment.body.includes("**infinite-tag: what happened**"))!
+    expect(final.edited).toBe(true)
+    expect(final.body).toContain("Updated after the live check")
+    expect(pr.comments.filter((comment) => comment.body.includes("### Before and after"))).toHaveLength(1)
+  })
+})
+
 describe("§3y.7 the second reviewer: blind or incomplete is said, never 'nothing to change'", () => {
   /** The live run's Codex: no file read, every item cant_tell, changes_suggested, no finding. */
   const blindReview = () => ({

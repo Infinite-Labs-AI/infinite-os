@@ -23,7 +23,7 @@ import { SITE_PROOF_PATH, type ProveOutcome, type SiteProveResponse, type TagKey
 import type { WizardGitOps } from "../contracts/git-host.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import type { CheckResult } from "../contracts/jobs.js"
-import { RECEIPT_LIMITS, type LaneReceipt, type ReceiptLane, type ReceiptMarkers, type ReceiptsResponseFields } from "../contracts/receipts.js"
+import { RECEIPT_LANES, RECEIPT_LIMITS, type LaneReceipt, type ReceiptLane, type ReceiptMarkers, type ReceiptsResponseFields } from "../contracts/receipts.js"
 import { REASONS, type Reason, type ReportColumnSnapshot } from "../contracts/report.js"
 import { WIZARD_PATHS, type WizardRunState } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
@@ -364,6 +364,15 @@ export function receiptMarkersFrom(result: TestResult, expect: TestExpect): Rece
 // ---------------------------------------------------------------------------------------------
 // 3. Receipts
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * R2-2: the receipts of a run that held the proof claim and made NO visit: nobody visited for this run (the claim
+ * keeps the app out), so no receipt can be this run's. Every lane is unknown; nothing is read.
+ */
+function noVisitReceipts(runId: string, at: string): ReceiptsResponseFields {
+  const unknown = { state: "undetermined" as const, receiptAt: null, reason: null, provenance: "cloud_ledger" as const }
+  return { runId, phase: "proven_live", checkedAt: at, lanes: Object.fromEntries(RECEIPT_LANES.map((lane) => [lane, { ...unknown }])) as ReceiptsResponseFields["lanes"] }
+}
 
 async function readReceipts(ctx: WizardContext, deps: WizardDeps, runId: string, markers: ReceiptMarkers): Promise<ReceiptsResponseFields> {
   const started = deps.clock.now().getTime()
@@ -995,7 +1004,9 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     }
   }
 
-  const receipts = await readReceipts(ctx, deps, runId, markers)
+  // A lane with no marker reads the run's STORED receipt (the app's visit, for a lost claim). With the claim held and
+  // no visit made, there is none to read (R2-2).
+  const receipts = won && visit === null ? noVisitReceipts(runId, deps.clock.now().toISOString()) : await readReceipts(ctx, deps, runId, markers)
   for (const [lane, receipt] of Object.entries(receipts.lanes) as Array<[ReceiptLane, LaneReceipt]>) {
     ctx.emit.emit("receipt", { lane, state: receipt.state, receiptAt: receipt.receiptAt, runId })
   }

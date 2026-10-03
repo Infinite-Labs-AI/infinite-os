@@ -158,7 +158,9 @@ export function configRewriteJobs(deferred: ReadonlyArray<{ path: string; snippe
 
 async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const state = ctx.state.get()
-  if (!state.plan || state.plan.answers.consentMode === null) {
+  // R2-6: the consent answer is required only when the plan asked it (it is left out when nothing it governs exists).
+  const asksConsent = state.plan?.lines.some((line) => line.id === DECISION_LINE_IDS.consentMode) ?? false
+  if (!state.plan || (state.plan.answers.consentMode === null && asksConsent)) {
     return { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "The plan's consent mode is unanswered.", resumeHint: PARK_HINT }
   }
   const consentMode = state.plan.answers.consentMode
@@ -207,7 +209,11 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   // ---- the site source + the consent answer: ONLY behind an approved Infinite line (P2-20) ----
   const installInfinite = check.lines.some((line) => line.kind === "install_provider" && line.id.startsWith("install_provider:infinite") && approved.has(line.id))
   let claim: ClaimPublic | null = null
-  if (installInfinite) {
+  // An Infinite install always comes with the consent line (the plan asks it whenever Infinite can be installed).
+  if (installInfinite && consentMode === null) {
+    return { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "The plan's consent mode is unanswered.", resumeHint: PARK_HINT }
+  }
+  if (installInfinite && consentMode !== null) {
     // §3y.1: the one production host (Infinite's, this run's answer, or the flag); repo hints never answer it.
     const host = resolveProductionHost({ keys, hosting: inputs.hosting, site: ctx.state.get().site ?? null }).host
     const hosts = siteSourceHosts(keys, host, inputs.before.observedProductionHost)

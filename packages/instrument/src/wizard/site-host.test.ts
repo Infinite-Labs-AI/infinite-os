@@ -140,7 +140,9 @@ describe("a Vercel production alias is a production host (live run 2)", () => {
       "infinite-tag-smoke-site-git-infinite-tag-2026-10-03-chaos-edge.vercel.app",
       "infinite-tag-smoke-site-mix177n53-chaos-edge.vercel.app",
       "infinite-tag-smoke-site-4v41bifkj-chaos-edge.vercel.app",
-      "www.acme.vercel.app"
+      "www.acme.vercel.app",
+      // 1bu-1's rule exactly (fail closed): a hash-shaped LAST segment is a deployment URL too.
+      "acme-a1b2c3d4e.vercel.app"
     ]) {
       expect(isVercelPreviewShape(preview), preview).toBe(true)
       expect(parseHostInput(preview), preview).toMatchObject({ ok: false, reason: "preview" })

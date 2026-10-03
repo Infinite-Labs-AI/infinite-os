@@ -155,7 +155,8 @@ describe("the Infinite line (DECISIONS §1.6 table)", () => {
 describe("job 10 is seeded only when this install emits the conversion helpers (P3-13)", () => {
   it("installs neither Infinite nor a connected tool → no job-10 item, one user_action line naming the conversions", () => {
     const plan = buildPlanModel(freshInput())
-    expect(plan.withheld).toEqual(["conversions_to_tools:signup"])
+    // R2-6: job 8 reports through Infinite, which this run cannot install either, so it is withheld with job 10.
+    expect(plan.withheld).toEqual(["server_conversions:signup", "conversions_to_tools:signup"])
     expect(plan.lines.find((line) => line.id === "user_action:conversions_unwired")?.text).toBe(RUNNABILITY_TEXT.conversionsUnwired(["signup"]))
     const all = resolvePlanAnswers(plan, { approved: approvable(plan).map((line) => line.id), declined: [], edits: { consent_mode: "not_required" } }, { consentFlag: null })
     const seeded = seedItemsAfterApprovals(freshInput().candidates, plan.seeds, plan, all.approvals)
@@ -166,6 +167,32 @@ describe("job 10 is seeded only when this install emits the conversion helpers (
     const plan = buildPlanModel(freshInput({ run: { site: answered("fresh-acme.com"), siteClaim: true } }))
     expect(plan.withheld).toEqual([])
     expect(plan.lines.some((line) => line.id === "user_action:conversions_unwired")).toBe(false)
+  })
+})
+
+describe("R2-6 (live run 2): a decision that governs nothing this run is not asked or pre-checked", () => {
+  it("the live run's world (no host, GA4 adopted twice, nothing installable): no consent line, no conversion line", () => {
+    const plan = buildPlanModel(freshInput())
+    expect(plan.lines.some((line) => line.kind === "consent_mode")).toBe(false)
+    expect(plan.lines.some((line) => line.kind === "conversion_names")).toBe(false)
+    // The one honest line about conversions stays, and the duplicate GA4 fix is still offered.
+    expect(plan.lines.find((line) => line.id === "user_action:conversions_unwired")?.requires).toBe("user_action")
+    expect(approvable(plan).some((line) => line.jobIds?.some((id) => id.startsWith("duplicates_remove")))).toBe(true)
+    // Nothing to answer: approving the plan needs no consent and declares no conversion.
+    const all = resolvePlanAnswers(plan, { approved: approvable(plan).map((line) => line.id), declined: [], edits: {} }, { consentFlag: null })
+    expect(all.consentMode).toBeNull()
+    expect(all.conversions).toEqual([])
+  })
+
+  it("NEGATIVE: Infinite can be installed (host + claim) → both decisions are asked", () => {
+    const plan = buildPlanModel(freshInput({ run: { site: answered("fresh-acme.com"), siteClaim: true } }))
+    expect(plan.lines.find((line) => line.kind === "consent_mode")?.requires).toBe("approval")
+    expect(plan.lines.find((line) => line.kind === "conversion_names")?.requires).toBe("approval")
+  })
+
+  it("NEGATIVE: an existing Infinite source (nothing new to install) still asks consent (it is recorded on the source)", () => {
+    const plan = buildPlanModel(freshInput({ keys: fakeKeys(), before: fakeBefore() }))
+    expect(plan.lines.some((line) => line.kind === "consent_mode")).toBe(true)
   })
 })
 

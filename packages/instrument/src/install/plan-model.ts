@@ -522,6 +522,11 @@ export function planHash(lines: readonly PlanLine[], decisions: PlanModel["decis
   return `sha256:${createHash("sha256").update(JSON.stringify({ lines, decisions }), "utf8").digest("hex")}`
 }
 
+/** R2-6: true when the plan asks the consent decision (it is left out when nothing it governs exists this run). */
+export function planAsksConsent(plan: Pick<PlanModel, "lines">): boolean {
+  return plan.lines.some((line) => line.kind === "consent_mode")
+}
+
 export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   const { keys, before, scan } = input
   const lines: PlanLine[] = []
@@ -532,14 +537,22 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   const serverLaneApprovable = serverLaneRule.ok && scan.serverLane !== null && tools.includes("infinite")
   // §3y.5 (P3-13): job 10 is seeded only when this install emits the conversion helpers (a new or managed tool).
   const helpersEmitted = tools.length > 0 || scan.managedProviders.length > 0
-  const withheldItems = helpersEmitted ? [] : input.candidates.filter((item) => item.jobId === "conversions_to_tools")
+  const infiniteRecordable = tools.includes("infinite") || scan.managedProviders.includes("infinite") || keys.infinite.status === "ready"
+  // R2-6: job 8 reports through Infinite (`reportInfiniteOutcome`): with no helper emitted AND no Infinite to report
+  // to, it is withheld with job 10 (one user_action line), so the conversion decision governs nothing this run.
+  const withheldItems = helpersEmitted
+    ? []
+    : input.candidates.filter((item) => item.jobId === "conversions_to_tools" || (!infiniteRecordable && item.jobId === "server_conversions"))
   const withheld = withheldItems.map((item) => item.id)
   const candidates = input.candidates.filter((item) => !withheld.includes(item.id))
 
   // ---- the four decisions ----
+  // R2-6 (live run 2): a decision is asked only when something it governs can be installed or recorded this run.
+  // Consent governs Infinite's collection (an install, a managed tag, or a site source it is recorded on) and the
+  // consent gate of the managed tags and the Meta click-id capture. Conversion names govern the conversion jobs, the
+  // emitted helpers and Infinite's declared conversions. Neither is asked, or pre-checked, when none of that exists.
   const consentProposed = input.consentFlag ?? keys.infinite.consentMode ?? null
-  lines.push(
-    line({
+  const consentLine = line({
       id: DECISION_LINE_IDS.consentMode,
       kind: "consent_mode",
       text:
@@ -551,20 +564,22 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       requires: "approval",
       editable: true
     })
-  )
+  lines.push(consentLine)
   // The names are the user's decision for Infinite whatever runs this time (a withheld job-10 type still names one).
   const conversionNames = proposedConversionNames(input.candidates)
   const conversionJobs = candidates.filter((item) => item.jobId === "server_conversions" || item.jobId === "conversions_to_tools").map((item) => item.id)
-  lines.push(
-    line({
-      id: DECISION_LINE_IDS.conversionNames,
-      kind: "conversion_names",
-      text: conversionNames.length > 0 ? `Conversions: ${conversionNames.join(" · ")}` : "Conversions: none found — add names, or skip",
-      requires: "approval",
-      editable: true,
-      ...(conversionJobs.length > 0 ? { jobIds: conversionJobs } : {})
-    })
-  )
+  if (conversionJobs.length > 0 || helpersEmitted || infiniteRecordable) {
+    lines.push(
+      line({
+        id: DECISION_LINE_IDS.conversionNames,
+        kind: "conversion_names",
+        text: conversionNames.length > 0 ? `Conversions: ${conversionNames.join(" · ")}` : "Conversions: none found — add names, or skip",
+        requires: "approval",
+        editable: true,
+        ...(conversionJobs.length > 0 ? { jobIds: conversionJobs } : {})
+      })
+    )
+  }
   const privacyText = draftPrivacyParagraph(tools, serverLaneApprovable)
   if (privacyText) {
     const privacyJobs = candidates.filter((item) => item.jobId === "privacy_paragraph").map((item) => item.id)
@@ -869,6 +884,10 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   if (withheldItems.length > 0) {
     lines.push(line({ id: "user_action:conversions_unwired", kind: "user_action", text: RUNNABILITY_TEXT.conversionsUnwired(proposedConversionNames(withheldItems)), requires: "user_action" }))
   }
+
+  // R2-6: the consent line stays only when it governs something on THIS plan (see above).
+  const consentGoverns = infiniteRecordable || helpersEmitted || lines.some((entry) => entry.kind === "capture_beside_adopted_pixel")
+  if (!consentGoverns) lines.splice(lines.indexOf(consentLine), 1)
 
   // ---- B28: the 7-day check-in (on by default, BUILD-PLAN §1.4; the plan says so, nothing to answer) ----
   lines.push(
