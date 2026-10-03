@@ -238,12 +238,16 @@ function commandLines(command: Record<string, unknown>, ctx: ViewRenderCtx): str
   });
   const room = Math.max(1, ctx.width - 2);
   const row = (text: string) => `│ ${fitPainted(text, room)}`;
-  const kept = output.length > MAX_OUTPUT_ROWS ? output.slice(-(MAX_OUTPUT_ROWS - 1)) : output;
+  // The app may have cut the output before it got here (`truncated`): then more is missing
+  // than the terminal hid, so the count is a floor (`5+ more lines`, R-IOV-5), and a marker
+  // row is always drawn, within the cap.
+  const cut = command.truncated === true;
+  const capped = output.length > MAX_OUTPUT_ROWS || (cut && output.length >= MAX_OUTPUT_ROWS);
+  const kept = capped ? output.slice(-(MAX_OUTPUT_ROWS - 1)) : output;
   const hidden = output.length - kept.length;
   if (hidden > 0) {
-    lines.push(paint(row(`… ${hidden} more ${hidden === 1 ? "line" : "lines"}`), "dim", ctx));
-  } else if (command.truncated === true && output.length < MAX_OUTPUT_ROWS) {
-    // The app cut the output before it got here: say so, within the cap.
+    lines.push(paint(row(cut ? `… ${hidden}+ more lines` : `… ${hidden} more ${hidden === 1 ? "line" : "lines"}`), "dim", ctx));
+  } else if (cut) {
     lines.push(paint("│ …", "dim", ctx));
   }
   lines.push(...kept.map((part) => paint(row(part.text), part.role, ctx)));

@@ -47,7 +47,8 @@ describe("command output (TJ-12)", () => {
       const out = lines(renderView(FAILED, ctx({ width })));
       const block = out.filter((line) => line.startsWith("│"));
       expect(block.length).toBeLessThanOrEqual(6);
-      expect(block.some((line) => /^│ … \d+ more lines?$/u.test(line))).toBe(true);
+      // The app had already cut this output (truncated): the count is a floor, never exact (R-IOV-5).
+      expect(block.some((line) => /^│ … \d+\+ more lines$/u.test(line))).toBe(true);
       // The last lines are what matter for an error: they stay.
       expect(block.at(-1)).toContain("Invalid data found");
       expect(block.find((line) => line.startsWith("│ xxx"))?.endsWith("…") ?? true).toBe(true);
@@ -61,6 +62,36 @@ describe("command output (TJ-12)", () => {
     const out = lines(renderView(FAILED, ctx())).join("\n");
     expect(out.split("convert -i assets/clip.mp4 out/clip.gif").length - 1).toBe(1);
     expect(out).toContain("$ convert -i assets/clip.mp4 out/clip.gif");
+  });
+
+  const lines10 = Array.from({ length: 10 }, (_unused, index) => `line ${index + 1}`).join("\n");
+  const tail = (truncated: boolean, stderrTail = lines10) => job({
+    phase: "failed", command: { argv: ARGV, exitCode: 1, signal: null, endedBy: "exit", stdoutTail: "", stderrTail, truncated }
+  }, { state: "failed" });
+
+  it("an output the app had cut never claims an exact count of what is missing (R-IOV-5)", () => {
+    const block = lines(renderView(tail(true), ctx())).filter((line) => line.startsWith("│"));
+    expect(block).toHaveLength(6);
+    expect(block[0]).toBe("│ … 5+ more lines");
+    expect(block.at(-1)).toBe("│ line 10");
+  });
+
+  it("an output the terminal alone cut says the exact count", () => {
+    const block = lines(renderView(tail(false), ctx())).filter((line) => line.startsWith("│"));
+    expect(block[0]).toBe("│ … 5 more lines");
+  });
+
+  it("an output the app had cut to exactly 6 lines still says something is missing, within 6 rows", () => {
+    const six = Array.from({ length: 6 }, (_unused, index) => `line ${index + 1}`).join("\n");
+    const block = lines(renderView(tail(true, six), ctx())).filter((line) => line.startsWith("│"));
+    expect(block).toHaveLength(6);
+    expect(block[0]).toBe("│ … 1+ more lines");
+    expect(block.at(-1)).toBe("│ line 6");
+  });
+
+  it("a short output the app had cut keeps its │ … marker", () => {
+    const block = lines(renderView(tail(true, "one\ntwo"), ctx())).filter((line) => line.startsWith("│"));
+    expect(block).toEqual(["│ …", "│ one", "│ two"]);
   });
 
   it("a short output prints whole, with no 'more' line", () => {
