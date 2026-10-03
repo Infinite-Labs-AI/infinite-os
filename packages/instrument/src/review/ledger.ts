@@ -2,9 +2,11 @@
 // remembers, across rounds AND resumes, what the wizard declined (so an item raised again becomes an ASK, never
 // a loop), which decisions are still open for the user, and which round ran on which head. The run state's
 // `pr.handledThreadIds` stays the record of replied threads.
-import type { ReviewResult } from "../wizard/contracts/agents.js"
-import type { TriageDecision } from "./triage.js"
-import { triageKey } from "./triage.js"
+import type { ReviewChecklistItemId, ReviewResult } from "../wizard/contracts/agents.js"
+import type { ChecklistItem, JobItemState } from "../wizard/contracts/jobs.js"
+import type { InfiniteOwnLabel } from "./post.js"
+import type { TriageAction, TriageDecision } from "./triage.js"
+import { RULINGS, triageKey } from "./triage.js"
 
 export const REVIEW_LEDGER_PATH = ".infinite/wizard/review-ledger.json"
 
@@ -29,6 +31,102 @@ export interface ReviewLedger {
    * `blind` = the reviewer could not read the files (no review was posted).
    */
   completeness?: { reviewer: string; state: "complete" | "incomplete" | "blind"; unchecked: string[] }
+  /** §3x.3 Every trusted finding's latest triage (one per key): what `openFindings` reads. */
+  findings?: LedgerFinding[]
+  /** §3x.3 Written from `openFindings(ledger, jobs)` on every save: the findings that still stand. */
+  openFindings?: OpenFinding[]
+}
+
+export interface LedgerFinding {
+  key: string
+  findingId: string | null
+  item: ReviewChecklistItemId | null
+  severity: "blocker" | "should" | "nit" | "question"
+  path: string | null
+  line: number | null
+  action: TriageAction
+  /** DECLINE: the standing ruling it cites (null = a decline from a passing check, which does not close it). */
+  ruling: string | null
+  label: InfiniteOwnLabel | null
+  round: number
+}
+
+/** One finding that still stands (§3x.3): the verdict's `review_blocker_open` reads the blockers among them. */
+export interface OpenFinding {
+  findingId: string | null
+  item: ReviewChecklistItemId | null
+  severity: LedgerFinding["severity"]
+  path: string | null
+  line: number | null
+  /** `Infinite's own code` / `the wizard's own change`, when the finding is on Infinite's files. */
+  label: InfiniteOwnLabel | null
+}
+
+/** The job item states that close a FIX'd finding (its job-16 item was done and checked by the wizard). */
+const CLOSING_STATES: readonly JobItemState[] = ["done_in_code", "waiting_deploy", "waiting_real_event", "proven", "not_needed"]
+
+/**
+ * §3x.3 / DECISIONS §1.5 THE one definition of an open review finding: every trusted finding that is not closed. Closed =
+ * FIX'd and its `review_comments` item reached a done state; DECLINED citing a standing ruling; or ANSWERED from
+ * receipts. An `INFINITE` finding stays open (it still describes the shipped code), labelled. A ledger written before
+ * this field existed is read from its rounds' reviews (every reviewer finding is trusted), so an old run's open
+ * findings are never silently zero. `ownership` labels a finding the ledger recorded no label for.
+ */
+export function openFindings(
+  ledger: Pick<ReviewLedger, "rounds" | "declined" | "findings">,
+  jobs: readonly Pick<ChecklistItem, "id" | "state">[],
+  ownership?: (path: string, line: number | null) => InfiniteOwnLabel | null
+): OpenFinding[] {
+  const latest = new Map<string, LedgerFinding>()
+  if (ledger.findings && ledger.findings.length > 0) {
+    for (const finding of ledger.findings) latest.set(findingKey(finding.key, finding.findingId), finding)
+  } else {
+    const rulingReplies = new Set(RULINGS.map((ruling) => ruling.reply))
+    for (const round of ledger.rounds) {
+      for (const finding of round.review?.findings ?? []) {
+        const key = triageKey({ path: finding.path, item: finding.item })
+        const declined = ledger.declined.find((entry) => entry.key === key)
+        latest.set(findingKey(key, finding.id), {
+          key,
+          findingId: finding.id,
+          item: finding.item,
+          severity: finding.severity,
+          path: finding.path,
+          line: finding.line,
+          action: declined ? "DECLINE" : "FIX",
+          ruling: declined && rulingReplies.has(declined.reason) ? declined.reason : null,
+          label: null,
+          round: round.round
+        })
+      }
+    }
+  }
+  const out: OpenFinding[] = []
+  for (const finding of latest.values()) {
+    if (finding.action === "ANSWER") continue
+    if (finding.action === "DECLINE" && finding.ruling !== null) continue
+    if (finding.action === "FIX" && finding.findingId !== null) {
+      const job = jobs.find((entry) => entry.id === `review_comments:${finding.findingId}`)
+      if (job && CLOSING_STATES.includes(job.state)) continue
+    }
+    const label = finding.label ?? (finding.path !== null ? (ownership?.(finding.path, finding.line) ?? null) : null)
+    out.push({ findingId: finding.findingId, item: finding.item, severity: finding.severity, path: finding.path, line: finding.line, label })
+  }
+  return out
+}
+
+/**
+ * One finding's identity: its triage key (file + checklist item) and its finding id, so two findings of one round on
+ * the same file and item (run 3's F7 and F8) are two, while a re-review that raises the same id again is one.
+ */
+function findingKey(key: string, findingId: string | null): string {
+  return `${key}|${findingId ?? "-"}`
+}
+
+/** `<item> <path>:<line>` (+ the label), the verdict's name for an open finding. */
+export function openFindingName(finding: OpenFinding): string {
+  const where = finding.path === null ? "general" : finding.line === null ? finding.path : `${finding.path}:${finding.line}`
+  return `${finding.item ?? "review"} ${where}${finding.label ? ` (${finding.label})` : ""}`
 }
 
 export function emptyLedger(runId: string): ReviewLedger {
@@ -51,6 +149,20 @@ export function parseLedger(text: string | null, runId: string): ReviewLedger {
 export function recordDecisions(ledger: ReviewLedger, decisions: readonly TriageDecision[], round: number): void {
   for (const decision of decisions) {
     const key = triageKey(decision.item)
+    // §3x.3 every trusted finding's latest triage (one per key).
+    const entry: LedgerFinding = {
+      key,
+      findingId: decision.item.findingId,
+      item: decision.item.item,
+      severity: decision.item.severity,
+      path: decision.item.path,
+      line: decision.item.line,
+      action: decision.action,
+      ruling: decision.action === "DECLINE" ? (decision.ruling ?? null) : null,
+      label: decision.label ?? null,
+      round
+    }
+    ledger.findings = [...(ledger.findings ?? []).filter((existing) => findingKey(existing.key, existing.findingId) !== findingKey(key, entry.findingId)), entry]
     if (decision.action === "DECLINE" && !ledger.declined.some((entry) => entry.key === key)) {
       ledger.declined.push({ key, reason: decision.reason, round })
     }

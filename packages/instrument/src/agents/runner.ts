@@ -18,8 +18,8 @@
 // one, the turn is retried ONCE with the user's default model at the same effort, and the user is told.
 // Never a provider switch, never Infinite-paid inference, never a real prompt in tests (fakes only).
 import { randomUUID } from "node:crypto"
-import { access, readFile, rm, writeFile } from "node:fs/promises"
-import { basename, join } from "node:path"
+import { access, chmod, open, readFile, rm, writeFile } from "node:fs/promises"
+import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
@@ -348,7 +348,13 @@ export class AgentRunnerImpl implements AgentRunner {
     }
   }
 
-  async review(input: { worktreeDir: string; reviewer: AgentKind; brief: string }): Promise<ReviewResult | ReviewFailure> {
+  /** §3x.3 Where review number `n`'s event stream is kept (0600): `<cache>/<runId>/review-<n>-<agent>.jsonl`. */
+  reviewLogPath(n: number, reviewer: AgentKind): string {
+    const runId = (this.options.runId() ?? "local-run").replace(/[^A-Za-z0-9-]/g, "_")
+    return join(wizardCacheRoot(this.options.home), runId, `review-${n}-${reviewer === "claude_code" ? "claude" : "codex"}.jsonl`)
+  }
+
+  async review(input: { worktreeDir: string; reviewer: AgentKind; brief: string; onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void }): Promise<ReviewResult | ReviewFailure> {
     await assertReviewWorktree(input.worktreeDir, this.options.root)
     const info = await this.infoFor(input.reviewer)
     if (!info) return { error: "unparseable" }
@@ -607,11 +613,22 @@ export class AgentRunnerImpl implements AgentRunner {
 
   private async reviewAttempt(
     info: AgentInfo,
-    input: { worktreeDir: string; reviewer: AgentKind; brief: string },
+    input: { worktreeDir: string; reviewer: AgentKind; brief: string; onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void },
     scratch: string,
     model: ModelChoice
   ): Promise<{ outcome: "completed" | "out_of_usage" | "timeout" | "error"; review: ReviewResult | null; modelRejected: boolean }> {
     const sensitive = await resolveSensitivePaths({ home: this.options.home, env: this.options.env })
+    // §3x.3 (D3) The reviewer's event stream is kept (0600), so the next slow review can be measured, and its tool
+    // beats are narrated like the worker's (run 3's Codex review left no trace of its 8.5 minutes).
+    const logPath = this.reviewLogPath(this.reviews, input.reviewer)
+    await ensurePrivateDir(dirname(logPath))
+    const log = await open(logPath, "a", 0o600)
+    await chmod(logPath, 0o600)
+    const keep = (line: string) => {
+      void log.appendFile(`${line}\n`).catch(() => undefined)
+    }
+    const narrator = new Narrator({ agent: input.reviewer, role: "reviewer", emit: (beat) => input.onNarrate?.({ agent: beat.agent, role: "reviewer", text: beat.text }), now: () => (this.options.now ?? (() => new Date()))().getTime(), throttleMs: this.options.narrationThrottleMs })
+    const beatCtx = { root: input.worktreeDir, isAllowed: () => true, agent: input.reviewer, jobNumber: () => null }
     let outcome: "completed" | "out_of_usage" | "timeout" | "error" | null = null
     let modelRejected = false
     let structured: unknown = null
@@ -640,8 +657,13 @@ export class AgentRunnerImpl implements AgentRunner {
         stdin: REVIEWER_KICKOFF,
         wallMs: AGENT_LIMITS.reviewer.wallMs,
         onStdoutLine: (line) => {
+          keep(line)
           const event = parseClaudeLine(line)
           if (!event) return
+          if (event.kind === "tool_use") {
+            const beat = claudeToolBeat(event.name, event.input, beatCtx)
+            if (beat) narrator.beat(beat)
+          }
           if (claudeModelRejected(event, model.model)) {
             modelRejected = true
             return stop("error")
@@ -683,7 +705,12 @@ export class AgentRunnerImpl implements AgentRunner {
         stdin: `${input.brief}\n\n${REVIEWER_KICKOFF}\n`,
         wallMs: AGENT_LIMITS.reviewer.wallMs,
         onStdoutLine: (line) => {
+          keep(line)
           const event = parseCodexLine(line)
+          if (event?.kind === "item") {
+            const beat = codexItemBeat(event.item, beatCtx)
+            if (beat) narrator.beat(beat)
+          }
           if (!event || event.kind !== "error") return
           if (codexUsageLimit(event.message)) return stop("out_of_usage")
           if (codexModelRejected(event.message, model.model)) {
@@ -695,6 +722,7 @@ export class AgentRunnerImpl implements AgentRunner {
       })
     }
     const exit = await child.done
+    await log.close().catch(() => undefined)
     if (outputPath) {
       try {
         structured = await readFile(outputPath, "utf8")

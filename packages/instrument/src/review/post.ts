@@ -134,7 +134,35 @@ export function buildReviewPost(input: {
  * What happened to a FIX on its thread: `fixed` (committed, and the wizard's checks passed), `unverified`
  * (committed and pushed, but the required checks had not finished), or `not_fixed`.
  */
-export type FixReplyState = { kind: "fixed"; sha: string } | { kind: "unverified"; sha: string } | { kind: "not_fixed" }
+export type FixReplyState =
+  | { kind: "fixed"; sha: string }
+  | { kind: "unverified"; sha: string }
+  | { kind: "not_fixed"; outcome?: NotFixedOutcome; why?: string | null }
+
+/**
+ * §3x.3 / DECISIONS §1.5 Why a FIX stayed open, as it really happened: the round ran out of time, the agent could not use
+ * its tools, it stopped with an error, it finished without a change, or its change failed the wizard's checks.
+ */
+export type NotFixedOutcome = "timeout" | "toolless" | "error" | "no_change" | "checks_failed"
+
+/** The one wording of a not-fixed reply (thread reply, run note and terminal line say the same words). */
+export function notFixedReply(outcome: NotFixedOutcome, why?: string | null): string {
+  switch (outcome) {
+    case "timeout":
+      return "Not fixed: the agent ran out of its 5 minutes before changing anything. It stays open."
+    case "toolless":
+      return "Not fixed: the agent could not use its tools. It stays open."
+    case "error":
+      return "Not fixed: the agent stopped with an error before changing anything. It stays open."
+    case "no_change":
+      return "Not fixed: the agent finished without changing anything. It stays open."
+    case "checks_failed":
+      return `Not fixed this round: the agent's change did not pass the wizard's checks${why ? ` (${stripControl(why).slice(0, 200)})` : ""}. It stays open.`
+  }
+}
+
+/** §3x.3 The label of a finding on Infinite's own files (triage `INFINITE`). */
+export type InfiniteOwnLabel = "Infinite's own code" | "the wizard's own change"
 
 /** The reply on a thread (never re-read as feedback). */
 export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixReplyState | null): string {
@@ -146,7 +174,9 @@ export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixR
         ? `Fixed in ${fix.sha.slice(0, 7)}; the wizard re-ran its checks and the rehearsal on that commit.`
         : fix?.kind === "unverified"
           ? `Changed in ${fix.sha.slice(0, 7)}. The required checks had not finished, so the wizard has not marked it done; it stays open.`
-          : "Not fixed this round: the agent's change did not pass the wizard's checks. It stays open."
+          : notFixedReply(fix?.kind === "not_fixed" ? (fix.outcome ?? "checks_failed") : "checks_failed", fix?.kind === "not_fixed" ? fix.why : null)
+      : decision.action === "INFINITE"
+        ? `This is ${decision.label ?? "Infinite's own code"} (${safeText(scanner, decision.item.path ?? "general")}), which the wizard never hands to your agent. The finding is recorded in this run's report for Infinite to fix.`
       : decision.action === "ASK"
         ? `Waiting on the repo owner: ${safeText(scanner, decision.reason)}`
         : safeText(scanner, decision.reason)

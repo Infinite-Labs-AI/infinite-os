@@ -9,7 +9,7 @@ import { REVIEW_ITEMS, REVIEW_SCHEMA, type ReviewChecklistItemId, type ReviewRes
 import { PR_MARKERS } from "../wizard/contracts/git-host.js"
 
 export const REVIEW_ITEM_TEXT: { readonly [K in ReviewChecklistItemId]: string } = {
-  R1: "Scope: every changed file is on the allowlist. No unrelated refactors, renames or formatting churn. package.json and the lockfile change only for the one approved server-lane package.",
+  R1: "Scope: every changed file is on the allowlist or is one of the wizard's own files listed in wizardFiles (Infinite's managed code, its proof file, .gitignore's Infinite block, .infinite/install.json). No unrelated refactors, renames or formatting churn. package.json and the lockfile change only for the one approved server-lane package.",
   R2: "Exactly once: each tool loads once per page (one gtag config per GA4 ID, one posthog.init, one fbq('init')). A tag removed as a duplicate really duplicated the same ID.",
   R3: "Improve, don't reinstall: where a tool already existed, its init is edited in place (proxy host, defaults, preview guard), not added a second time. Its key is unchanged unless the plan says it was wrong.",
   R4: "Right IDs: every ID in code equals the connected ID in plan.json. Flag UA-/AW-/G- confusion.",

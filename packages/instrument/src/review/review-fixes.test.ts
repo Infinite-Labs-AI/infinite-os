@@ -1,8 +1,8 @@
 // Lane O4 fix round (review-O4): each finding's negative case, on the pure pieces. Planted secrets are built at
 // runtime so no secret-shaped literal sits in the repo.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join, relative } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
 
@@ -20,6 +20,26 @@ import { buildReply, buildReviewPost } from "./post.js"
 import { cspCounts, rehearsalCells, rehearsalCheckResults, rehearsalLines, type RehearsalOutcome } from "./rehearse.js"
 import { collectEnvLiterals, createScanner } from "./scan.js"
 import { triage, type TriageContext, type TriageItem } from "./triage.js"
+import { openFindingName, openFindings, type ReviewLedger } from "./ledger.js"
+import { wizardOwnership } from "./ownership.js"
+import { RUN3_DIR, run3Json } from "../../test/wizard/run3-fixture.js"
+import type { WizardDeps } from "../wizard/contracts/deps.js"
+import type { JobItemState } from "../wizard/contracts/jobs.js"
+
+/** Every file under `RUN3_DIR/<from>`, repo-relative (dotfiles included). */
+function run3Files(from: string): string[] {
+  const base = join(RUN3_DIR, from)
+  const out: string[] = []
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name)
+      if (statSync(path).isDirectory()) walk(path)
+      else out.push(relative(base, path))
+    }
+  }
+  walk(base)
+  return out
+}
 
 const STRIPE = ["sk", "live", "4eC39HqLyjWDarjtT1zdp7dc"].join("_")
 const PIXEL = "1234567890123456"
@@ -320,5 +340,84 @@ describe("P2-4: findPr adopts only the user's own same-repo PR", () => {
       state.prs!.push({ number: 78, url: "https://github.com/acme/acme-store/pull/78", id: "PR_78", isDraft: true, state: "OPEN", headRefName: branch, baseRefName: "main", author: "acme-dev", isCrossRepository: false, title: "ours", body: "", comments: [], reviews: [] })
     })
     expect((await adapter.findPr(branch))!.number).toBe(78)
+  })
+})
+
+describe("W6 §3x.3 live run 3's review: Infinite's own files never go to the customer's agent; open findings are counted", () => {
+  const ledger = run3Json<ReviewLedger>("wizard/review-ledger.json")
+  const state = run3Json<{ jobs: Array<{ id: string; state: JobItemState }> }>("wizard/state.json")
+  const findings = ledger.rounds[0]!.review!.findings
+
+  /** The PR head of run 3 on disk: the site at 6d16d8f with the install's files (f1abea9) on top. */
+  async function run3Ownership() {
+    const root = mkdtempSync(join(tmpdir(), "run3-ownership-"))
+    const copy = (from: string) => {
+      for (const rel of run3Files(from)) {
+        mkdirSync(dirname(join(root, rel)), { recursive: true })
+        writeFileSync(join(root, rel), readFileSync(join(RUN3_DIR, from, rel)))
+      }
+    }
+    copy("site-6d16d8f")
+    copy("install-f1abea9")
+    const fs = { readText: async (path: string) => (existsSync(path) ? readFileSync(path, "utf8") : null) } as unknown as Pick<WizardDeps, "fs">["fs"]
+    const ownership = await wizardOwnership({ fs }, root, async (path) => existsSync(join(RUN3_DIR, "site-6d16d8f", path)))
+    rmSync(root, { recursive: true, force: true })
+    return ownership
+  }
+
+  it("ownership: the runtime module is Infinite's own code, the created next.config.mjs is the wizard's own change, layout lines stay the customer's", async () => {
+    const ownership = await run3Ownership()
+    expect(ownership.classify("lib/infinite-analytics.ts", 3)).toBe("Infinite's own code")
+    expect(ownership.classify("lib/infinite-analytics-client.tsx", 1)).toBe("Infinite's own code")
+    expect(ownership.classify("next.config.mjs", 1)).toBe("the wizard's own change")
+    expect(ownership.classify(".infinite/install.json", null)).toBe("the wizard's own change")
+    expect(ownership.classify(".gitignore", null)).toBe("the wizard's own change")
+    // The managed import line the install added to the customer's layout is the wizard's; the rest is the customer's.
+    expect(ownership.classify("app/layout.tsx", 1)).toBe("the wizard's own change")
+    for (const line of [23, 33, 36, 43]) expect(ownership.classify("app/layout.tsx", line)).toBeNull()
+    expect(ownership.wizardFiles).toEqual(expect.arrayContaining([".gitignore", ".infinite/install.json", "lib/infinite-analytics.ts", "next.config.mjs", "public/.well-known/infinite-site-verification.txt"]))
+  })
+
+  it("triage: F1 (the wizard's own next.config.mjs) and F5/F7/F8 (Infinite's runtime) are INFINITE, never FIX; F2/F3/F4/F6 are FIX in the layout", async () => {
+    const ownership = await run3Ownership()
+    const items: TriageItem[] = findings.map((finding) => ({ source: "reviewer", threadId: `t-${finding.id}`, findingId: finding.id, item: finding.item, severity: finding.severity, path: finding.path, line: finding.line, body: finding.body, suggestedFix: finding.suggested_fix }))
+    const decisions = triage(items, { allowlist: ["app/layout.tsx", "app/signup/page.tsx"], ownership: ownership.classify, declinedKeys: new Set(), passingChecks: new Set(), answerFor: () => null })
+    const byId = Object.fromEntries(decisions.map((decision) => [decision.item.findingId, [decision.action, decision.label ?? null]]))
+    expect(byId).toEqual({
+      F1: ["INFINITE", "the wizard's own change"],
+      F2: ["FIX", null],
+      F3: ["FIX", null],
+      F4: ["FIX", null],
+      F5: ["INFINITE", "Infinite's own code"],
+      F6: ["FIX", null],
+      F7: ["INFINITE", "Infinite's own code"],
+      F8: ["INFINITE", "Infinite's own code"]
+    })
+    const f5 = decisions.find((decision) => decision.item.findingId === "F5")!
+    expect(buildReply(createScanner({ literals: [], allowedIds: [] }), f5, null)).toMatch(/^This is Infinite's own code \(lib\/infinite-analytics\.ts\), which the wizard never hands to your agent\. The finding is recorded in this run's report for Infinite to fix\./)
+    // Negative (today's main): with the managed files in the allowlist and no ownership, F5 was a FIX (job 16 on Infinite's runtime).
+    expect(triage(items, { allowlist: ["app/layout.tsx", "lib/infinite-analytics.ts", "next.config.mjs"], declinedKeys: new Set(), passingChecks: new Set(), answerFor: () => null }).find((decision) => decision.item.findingId === "F5")!.action).toBe("FIX")
+  })
+
+  it("openFindings: run 3's ledger (open: []) still has 8 findings standing, blockers F1 and F5", async () => {
+    expect(ledger.open).toEqual([])
+    const ownership = await run3Ownership()
+    const open = openFindings(ledger, state.jobs, ownership.classify)
+    expect(open).toHaveLength(8)
+    expect(open.filter((finding) => finding.severity === "blocker").map(openFindingName)).toEqual(["R1 next.config.mjs:1 (the wizard's own change)", "R8 lib/infinite-analytics.ts:3 (Infinite's own code)"])
+    // A FIX whose job-16 item reached a done state is closed; an ANSWER or a ruling decline closes too.
+    const closed = openFindings(ledger, [...state.jobs.filter((job) => job.id !== "review_comments:F2"), { id: "review_comments:F2", state: "done_in_code" }])
+    expect(closed.map((finding) => finding.findingId)).not.toContain("F2")
+  })
+
+  it("the not-fixed reply says what happened", () => {
+    const decision = { item: { source: "reviewer", threadId: "t", findingId: "F2", item: "R2", severity: "should", path: "app/layout.tsx", line: 33, body: "x", suggestedFix: null }, action: "FIX", reason: "" } as const
+    const scanner = createScanner({ literals: [], allowedIds: [] })
+    expect(buildReply(scanner, decision, { kind: "not_fixed", outcome: "timeout" })).toMatch(/^Not fixed: the agent ran out of its 5 minutes before changing anything\. It stays open\./)
+    expect(buildReply(scanner, decision, { kind: "not_fixed", outcome: "toolless" })).toMatch(/^Not fixed: the agent could not use its tools\. It stays open\./)
+    expect(buildReply(scanner, decision, { kind: "not_fixed", outcome: "error" })).toMatch(/^Not fixed: the agent stopped with an error before changing anything\. It stays open\./)
+    expect(buildReply(scanner, decision, { kind: "not_fixed", outcome: "checks_failed", why: "census_ga4_config_once: GA4 G-TEST0000000 is configured 2 times" })).toMatch(
+      /^Not fixed this round: the agent's change did not pass the wizard's checks \(census_ga4_config_once: GA4 G-TEST0000000 is configured 2 times\)\. It stays open\./
+    )
   })
 })

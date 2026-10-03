@@ -832,6 +832,55 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.ctx.asks.filter((ask) => ask.kind === "single")).toEqual([])
   })
 
+  it("W6 §3x.3: a fix round that timed out says so (no build); findings on Infinite's own code get the INFINITE reply and never a job; the reviewer sees wizardFiles and a stubbed managed diff", async () => {
+    const w = await opened({
+      reviews: [
+        review([
+          { id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the existing init in place instead.", suggested_fix: "Keep one init." },
+          { id: "F5", item: "R8", severity: "blocker", path: "lib/infinite-server-lane.ts", line: 1, body: "The lane copies a value it should drop.", suggested_fix: null }
+        ]),
+        review([])
+      ],
+      fix: () => ({ outcome: "timeout", edits: [] }),
+      answers: { "teammate-comments": { actOn: [] } }
+    })
+    let plan: { wizardFiles?: string[]; allowlist?: string[] } | null = null
+    let diffPatch = ""
+    const review0 = w.deps.agents.review.bind(w.deps.agents)
+    w.deps.agents.review = async (input) => {
+      plan ??= JSON.parse(readFileSync(join(input.worktreeDir, ".infinite/review/plan.json"), "utf8")) as { wizardFiles?: string[] }
+      if (diffPatch === "") diffPatch = readFileSync(join(input.worktreeDir, ".infinite/review/diff.patch"), "utf8")
+      return review0(input)
+    }
+    let builds = 0
+    const build0 = w.deps.checks.build.bind(w.deps.checks)
+    w.deps.checks.build = async () => {
+      builds += 1
+      return build0()
+    }
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const threads = w.gh.read().threads.filter((thread) => thread.comments[0]!.author === "acme-dev")
+    const reply = (id: string) => threads.find((thread) => thread.comments[0]!.body.includes(id))!.comments[1]!.body
+    expect(reply("F1")).toMatch(/^Not fixed: the agent ran out of its 5 minutes before changing anything\. It stays open\./)
+    expect(reply("F1")).not.toContain("did not pass the wizard's checks")
+    expect(reply("F5")).toMatch(/^This is Infinite's own code \(lib\/infinite-server-lane\.ts\), which the wizard never hands to your agent\. The finding is recorded in this run's report for Infinite to fix\./)
+    // Only F1 went to the worker; nothing was built for a round that changed nothing.
+    expect(w.agents.jobCalls).toHaveLength(1)
+    expect(w.agents.jobCalls[0]!.items.map((item) => item.allow.files)).toEqual([["app/layout.tsx"]])
+    expect(builds).toBe(0)
+    // The reviewer's inputs: the wizard's own files listed; Infinite's runtime stubbed, never its bytes.
+    expect(plan!.wizardFiles).toEqual(expect.arrayContaining([".infinite/install.json", "lib/infinite-server-lane.ts"]))
+    expect(plan!.allowlist).not.toContain("lib/infinite-server-lane.ts")
+    expect(diffPatch).toContain("+// [infinite-tag managed file lib/infinite-server-lane.ts: infinite-tag")
+    expect(diffPatch).not.toContain("export const lane = waitUntil")
+    // The ledger's open findings come from the one definition: both still stand, F5 labelled and a blocker.
+    const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8")) as { openFindings: Array<{ findingId: string; severity: string; label: string | null }> }
+    expect(ledger.openFindings.map((finding) => [finding.findingId, finding.severity, finding.label])).toEqual([
+      ["F1", "should", null],
+      ["F5", "blocker", "Infinite's own code"]
+    ])
+  })
+
   it("with one agent: writes and prints the review brief, readies the PR saying 'no second review', and reads a posted brief review back on a re-run", async () => {
     const w = await opened({ reviewer: "brief", answers: { "teammate-comments": { actOn: [] } } })
     const outcome = await reviewStep.run(w.ctx, w.deps)
