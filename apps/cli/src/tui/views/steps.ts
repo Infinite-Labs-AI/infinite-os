@@ -477,15 +477,25 @@ function refusedReadView(step: TurnStep, views: readonly AnswerViewV1[], steps: 
 }
 
 /**
- * The words a refused call says, from its view's typed state (r4's step rows
- * `✗ not allowed` and `✗ limit`). A frame carries no refusal
- * code, and the transport's own words for a refusal are generic (`didn't go
- * through`), so the state wins. Never parsed out of text.
+ * The words a refused call says (r4's step rows `✗ not allowed` and `✗ limit`).
+ * The host decides the word and sends it as `stateReason.step` (rev 3): it is
+ * drawn as sent, never derived from codes. With none sent, a view that hit a
+ * limit says `limit`; a blocked one says its head's short words (`needs your
+ * OK`), else its plain state word (`blocked`). A blocked view is not always a
+ * refusal (an address waiting for the person's OK, a thing that cannot be
+ * changed), so `not allowed` is said only when the host said it. A frame
+ * carries no refusal code and the transport's own words for a refusal are
+ * generic (`didn't go through`), so the view wins. Never parsed out of text.
  */
-const REFUSAL_WORDS: Partial<Record<AnswerViewState, string>> = {
-  blocked: "not allowed",
-  hit_limit: "limit"
-};
+function refusalWords(view: AnswerViewV1): string | undefined {
+  const step = typeof view.stateReason?.step === "string" ? viewText(view.stateReason.step) : "";
+  if (step) return step;
+  if (view.state === "hit_limit") return LIMIT_STEP_WORDS;
+  return view.state === "blocked" ? viewRowWords(view) : undefined;
+}
+
+/** What a row says when its view hit a limit and the host sent no word of its own. */
+const LIMIT_STEP_WORDS = "limit";
 
 /**
  * The one view that stands for a call: the view it drew (`viewDrawnBy`), else,
@@ -649,9 +659,9 @@ function stepRowFacts(step: TurnStep, steps: readonly TurnStep[], options: Pick<
     };
   }
   const standing = viewStandingFor(step, options.views ?? [], steps);
-  const refusal = status === "fail" && standing ? REFUSAL_WORDS[standing.state] : undefined;
+  const refusal = status === "fail" && standing ? refusalWords(standing) : undefined;
   if (refusal) {
-    // A refused call says what its view's state says (`✗ not allowed`, `✗ limit`).
+    // A refused call says the host's step word for its view (`✗ not allowed`, `✗ limit`, `✗ needs your OK`).
     return { status, mark, tone, label: viewText(step.label), result: refusal };
   }
   // A step still waiting says so (unless its label already does); a failed one says why in plain words.
