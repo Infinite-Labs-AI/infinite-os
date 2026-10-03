@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { AnswerViewV1 } from "@infinite-os/types";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { decodeAnswerView } from "../../desktop/answer-view-decode.js";
 import { displayWidth } from "../lib/display-width.js";
@@ -230,6 +230,37 @@ describe("numbers, the live shape: empty and unmeasured sections (run-2 M7)", ()
     // One that runs into the view's day keeps it.
     expect(draw(live()).detail).toContain("Our sign-ups · Sep 28 – Oct 2 (today so far) · not final");
   });
+
+  describe("`not final` reads the data's own time, never the clock", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("a settled-slot leg ending on its own as-of day stays `not final` a day later, with no view as-of", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(Date.parse("2026-10-03T09:00:00Z"));
+      const view = edited((body, raw) => {
+        raw.asOf = null;
+        const leg = body.sections[2].body.legs.settled;
+        leg.asOf = "2026-10-02T15:30:00Z";
+      });
+      expect(draw(view).detail).toContain("Our sign-ups · Sep 28 – Oct 2 (today so far) · not final · as of 15:30");
+    });
+
+    it("no as-of at all: the adapter's `final:false` is trusted, whatever the clock says", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(Date.parse("2026-12-01T09:00:00Z"));
+      const view = edited((_body, raw) => { raw.asOf = null; });
+      expect(draw(view).detail).toContain("Our sign-ups · Sep 28 – Oct 2 (today so far) · not final");
+    });
+
+    it("the leg's own as-of wins over the view's: read the day after, the period is settled", () => {
+      const view = edited((body) => {
+        body.sections[2].body.legs.settled.asOf = "2026-10-03T08:00:00Z";
+      });
+      expect(draw(view).detail).toContain("Our sign-ups · Sep 28 – Oct 2 (today so far)");
+    });
+  });
 });
 
 describe("numbers: `→ to see` only where → works (run-2 M7)", () => {
@@ -254,6 +285,49 @@ describe("numbers: `→ to see` only where → works (run-2 M7)", () => {
   it("after → the focused table shows every column as records (records only after →)", () => {
     const detail = draw(live(), { showHiddenColumns: true }).detail.join("\n");
     expect(detail).toMatch(/Cost per result: —/u);
+  });
+});
+
+describe("numbers, the Google Ads shape: dates as r4 writes them, said once (live T4)", () => {
+  // Same sections, the way a Google Ads read names things: ISO dates as row
+  // labels and as window labels, and a by-campaign section with a Day column.
+  const google = () => edited((body) => {
+    body.legs.settled.rows[0].label = "Brand search";
+    body.legs.settled.window.label = "2026-09-28 to 2026-10-01";
+    body.legs.today.window.label = "2026-10-02";
+    const byDay = body.sections[0].body.legs.settled;
+    byDay.window.label = "2026-09-28 to 2026-10-01";
+    byDay.rows.forEach((row: any) => { row.label = row.id; });
+    body.sections[1].body.legs.settled.window.label = "2026-09-24 to 2026-09-27";
+    const byCampaign = JSON.parse(JSON.stringify(body.sections[0]));
+    byCampaign.title = "By campaign";
+    byCampaign.body.legs.settled.rows.forEach((row: any) => { row.label = `Campaign ${row.id.slice(-2)}`; });
+    body.sections.push(byCampaign);
+  });
+
+  it.each([60, 100, 140])("at %i, live and committed, no ISO date prints", (width) => {
+    for (const lines of [liveTurn([google()], width), committedTurn([google()], width)]) {
+      expect(lines.join("\n")).not.toMatch(/\d{4}-\d{2}-\d{2}/u);
+      expect(lines.every((line) => displayWidth(line) <= width)).toBe(true);
+    }
+  });
+
+  it("dates as row labels read `Sep 28`, and a Day column that repeats them drops", () => {
+    const detail = draw(google()).detail;
+    const at = detail.indexOf("By day · Sep 28–Oct 1");
+    expect(at).toBeGreaterThan(-1);
+    expect(detail.slice(at + 4, at + 8).map((line) => line.split("│")[1]!.trim())).toEqual(["Sep 28", "Sep 29", "Sep 30", "Oct 1"]);
+    expect(detail[at + 2]).not.toMatch(/\bDay\b/u);
+    // The by-campaign section keeps its Day column, written as r4 writes days.
+    expect(detail.join("\n")).toMatch(/│ Campaign 28 │ Sep 28 /u);
+  });
+
+  it("a window label that is only ISO dates is said once, as r4 says dates", () => {
+    const detail = draw(google()).detail;
+    expect(detail).toContain("Sep 28–Oct 1");
+    expect(detail.join("\n")).not.toMatch(/Sep 28–Oct 1 · Sep 28–Oct 1|Sep 28 to Oct 1/u);
+    expect(detail).toContain("By day · Sep 28–Oct 1");
+    expect(detail.some((line) => line.startsWith("Oct 2 · not final"))).toBe(true);
   });
 });
 

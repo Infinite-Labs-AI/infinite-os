@@ -180,6 +180,23 @@ function isoDay(text: string): string {
   return /^\d{4}-\d{2}-\d{2}$/u.test(text) ? formatAsOf(text) ?? text : text;
 }
 
+/** A row's name: a date as r4 writes days (`2026-09-28` → `Sep 28`), anything else as is. */
+function rowName(label: unknown): string {
+  return viewText(typeof label === "string" ? isoDay(label) : label);
+}
+
+/** A window label that is only ISO dates (`2026-09-28 to 2026-10-02`) names nothing but its days. */
+const ISO_ONLY_LABEL = /^\d{4}-\d{2}-\d{2}(?: to \d{4}-\d{2}-\d{2})?$/u;
+
+/**
+ * A window's words: its label, except that a label of only ISO dates is said
+ * as r4 says dates (`Sep 28–Oct 2`), once.
+ */
+function windowLabel(window: Record<string, unknown>): string {
+  const label = viewText(window.label);
+  return ISO_ONLY_LABEL.test(label) ? windowDates(window) ?? label.replace(/\d{4}-\d{2}-\d{2}/gu, isoDay) : label;
+}
+
 /** The plain text of a text cell (or a string), else null. */
 function textOf(cell: TableCell): string | null {
   if (typeof cell === "string") return cell;
@@ -256,7 +273,7 @@ function tableInput(input: CellTableInput, labels: readonly string[], keep: read
     })
   ];
   const row = (entry: CellTableRow, isTotal = false) => [
-    viewText(entry.label),
+    rowName(entry.label),
     ...keep.map((index) => {
       const column = columnFor(input.columns[index]!, entry, index);
       // A Total has no words of its own for a text column (a status, a result's noun): blank, never a dash.
@@ -448,13 +465,18 @@ const REFRESH_WORDS: Record<string, string> = {
  */
 function legTitle(leg: Leg, isToday: boolean, ctx: ViewRenderCtx, refMs?: number, withWindow = true): string {
   const window = asRecord(leg.window);
-  // A period that ended before the view's day is settled: never `not final`.
-  const final = !isToday && (leg.final === true || endedBefore(window, refMs));
+  // A period that ended before the day the data was read (the leg's own as-of,
+  // else the view's) is settled: never `not final`. No read time: the
+  // adapter's `final` stands; the clock never decides (a re-render after
+  // midnight must not settle today).
+  const legMs = typeof leg.asOf === "string" ? Date.parse(leg.asOf) : Number.NaN;
+  const ref = Number.isFinite(legMs) ? legMs : refMs;
+  const final = !isToday && (leg.final === true || (ref !== undefined && endedBefore(window, ref)));
   const asOf = clockTime(leg.asOf, ctx.timeZone);
   const refresh = asRecord(leg.refresh);
   const refreshWords = isToday && typeof refresh.status === "string" ? REFRESH_WORDS[refresh.status] : undefined;
   const retryAt = refreshWords ? clockTime(refresh.retryAt, ctx.timeZone) : null;
-  const label = viewText(window.label);
+  const label = windowLabel(window);
   return [
     withWindow ? label : "",
     !withWindow || isToday || labelNamesDates(label, window) ? "" : windowDates(window) ?? "",
@@ -474,11 +496,11 @@ function dayOf(ms: number, timeZone: unknown): string {
   }
 }
 
-/** Whether a window ended before the day of `refMs` (the view's as-of, else now) in the window's own zone. */
-function endedBefore(window: Record<string, unknown>, refMs?: number): boolean {
+/** Whether a window ended before the day of `refMs` (a read time of the data) in the window's own zone. */
+function endedBefore(window: Record<string, unknown>, refMs: number): boolean {
   const to = window.to;
   if (typeof to !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(to)) return false;
-  return to < dayOf(refMs ?? Date.now(), window.tz);
+  return to < dayOf(refMs, window.tz);
 }
 
 interface NumbersColumn extends CellTableColumn {
@@ -561,7 +583,7 @@ function legLines(
   if (totalsRow) {
     values.push(...cellTableLines({
       columns,
-      rows: [{ label: viewText(window.label) || windowDates(window) || "", cells: columns.map((column) => totals[column.key] as TableCell) }],
+      rows: [{ label: windowLabel(window) || windowDates(window) || "", cells: columns.map((column) => totals[column.key] as TableCell) }],
       currency
     }, ctx, draw));
   } else if (!nested && (layout === "kpis" || (!rows.length && totals))) {
@@ -579,7 +601,7 @@ function legLines(
     ];
     values.push(...cellTableLines({
       columns: tableColumns,
-      rows: rows.map((row) => ({ label: viewText(row.label), cells: cellsOf(asRecord(row.cells), row.status) })),
+      rows: rows.map((row) => ({ label: rowName(row.label), cells: cellsOf(asRecord(row.cells), row.status) })),
       // One row is its own total: a Total row prints only under two or more.
       total: totals && rows.length > 1 ? { label: "Total", cells: cellsOf(totals, null) } : null,
       currency,
@@ -632,7 +654,7 @@ function kpiLines(
   ctx: ViewRenderCtx,
   notes: FootnoteBook
 ): string[] {
-  const blocks: { label: string; cells: Record<string, unknown> }[] = rows.map((row) => ({ label: viewText(row.label), cells: asRecord(row.cells) }));
+  const blocks: { label: string; cells: Record<string, unknown> }[] = rows.map((row) => ({ label: rowName(row.label), cells: asRecord(row.cells) }));
   if (totals && rows.length !== 1) {
     blocks.push({ label: "Total", cells: totals });
   }
@@ -829,7 +851,7 @@ function unmeasuredLine(title: string, body: Record<string, unknown>, ctx: ViewR
   const [only] = [...reasons];
   const why = reasons.size === 1 && only ? only : "not measured";
   const window = asRecord(asRecord(asRecord(body.legs).settled).window);
-  const label = viewText(window.label);
+  const label = windowLabel(window);
   const dates = label && !title.toLowerCase().includes(label.toLowerCase()) ? label : "";
   return wrapText([title, dates, why].filter(Boolean).join(" · "), ctx.width).map((line) => paint(line, "muted", ctx));
 }
