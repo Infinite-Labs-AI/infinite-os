@@ -110,7 +110,7 @@ describe("infinite provider plan", () => {
       expect(snippet).not.toContain("posthog")
       const assumptions = planned.assumptions.join("\n")
       expect(assumptions).toContain("GA4 and PostHog run independently of Infinite")
-      expect(assumptions).toContain("Infinite never forwards browser events into them")
+      expect(assumptions).toContain("The Infinite runtime never forwards browser events into them")
       expect(assumptions).not.toContain("grant alone is insufficient")
       expect(assumptions).not.toContain("remains consent-denied")
       expect(assumptions).not.toContain("remains opted out")

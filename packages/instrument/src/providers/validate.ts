@@ -9,6 +9,8 @@
  * embedding helpers are belt-and-suspenders so even a validation gap cannot break out of a
  * string literal or `</script>` block.
  */
+import { trimTrailingSlashes } from "../text-escape.js"
+import { normalizeHost } from "../wizard/contracts/host-deny.js"
 
 // GA4/gtag measurement-style IDs: G-XXXX (GA4), and the other prefixes the gtag loader
 // accepts (GT- google tag, AW- ads, UA- legacy, DC- floodlight). Alphanumerics + hyphens
@@ -105,13 +107,23 @@ export function normalizePosthogUiHost(value: unknown): { origin: string } | { e
  * US, so only an explicit EU host (`eu.i.posthog.com` / `eu-assets`) selects EU — hardcoding
  * EU would silently break every US customer.
  */
+const EU_POSTHOG_API_HOSTNAMES: ReadonlySet<string> = new Set(["eu.i.posthog.com", "eu-assets.i.posthog.com"])
+
+/** The parsed, lower-cased hostname of an absolute URL; "" for a path or anything that is not a URL. */
+function hostnameOf(value: string): string {
+  try {
+    return new URL(value).hostname.toLowerCase()
+  } catch {
+    return ""
+  }
+}
+
 export function derivePosthogRegionHosts(apiHost: string): {
   ingestHost: string
   assetsHost: string
   uiHost: string
 } {
-  const isEu = apiHost.includes("eu.i.posthog.com") || apiHost.includes("eu-assets")
-  if (isEu) {
+  if (EU_POSTHOG_API_HOSTNAMES.has(hostnameOf(apiHost))) {
     return {
       ingestHost: "https://eu.i.posthog.com",
       assetsHost: "https://eu-assets.i.posthog.com",
@@ -167,7 +179,7 @@ export function normalizeInfiniteCollectPath(
   ) {
     return { error: "Infinite collectPath must be a root-relative path without query or hash." }
   }
-  const path = value.length > 1 ? value.replace(/\/+$/, "") : value
+  const path = value.length > 1 ? trimTrailingSlashes(value) : value
   if (!/^\/[A-Za-z0-9._~%-]+(?:\/[A-Za-z0-9._~%-]+)*$/.test(path)) {
     return { error: "Infinite collectPath contains unsupported path characters." }
   }
@@ -197,7 +209,7 @@ export function normalizeInfiniteDownloadDestinationPath(
   }
   // Trailing-slash variance is tolerated (both the runtime and the cloud ingest compare in
   // normalized form); strip it here so the serialized config carries one canonical spelling.
-  const path = value.length > 1 ? value.replace(/\/+$/, "") : value
+  const path = value.length > 1 ? trimTrailingSlashes(value) : value
   if (!/^\/[A-Za-z0-9._~%-]+(?:\/[A-Za-z0-9._~%-]+)*$/.test(path)) {
     return { error: "Infinite downloadDestinationPath contains unsupported path characters." }
   }
@@ -215,14 +227,19 @@ export function normalizeInfiniteProductionHosts(
     if (typeof candidate !== "string" || candidate.trim().length === 0) {
       return { error: "Infinite production hosts must be non-empty hostnames." }
     }
+    // The one normaliser (src/host-guard.ts): `ACME.com.` and `acme.com` are ONE host. Without it
+    // `new URL("https://acme.com.").hostname` keeps the dot and the runtime saw two different hosts.
+    const host = normalizeHost(candidate)
     let parsed: URL
     try {
-      parsed = new URL(`https://${candidate.trim()}`)
+      parsed = new URL(`https://${host}`)
     } catch {
       return { error: `Infinite production host ${JSON.stringify(candidate)} is invalid.` }
     }
     if (
-      parsed.hostname !== candidate.trim().toLowerCase() ||
+      host.length === 0 ||
+      host.endsWith(".") ||
+      parsed.hostname !== host ||
       parsed.port ||
       parsed.pathname !== "/" ||
       parsed.search ||

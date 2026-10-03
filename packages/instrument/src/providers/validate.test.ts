@@ -106,6 +106,27 @@ describe("artifact validation", () => {
     )
   })
 
+  it("derivePosthogRegionHosts reads the parsed hostname, so a lookalike never selects EU", () => {
+    for (const lookalike of [
+      "https://eu.i.posthog.com.evil.test",
+      "https://evil.test/eu.i.posthog.com",
+      "https://eu-assets.evil.test",
+      "https://evil.test/eu-assets/ingest",
+      "https://evil.test/?h=eu.i.posthog.com"
+    ]) {
+      expect(derivePosthogRegionHosts(lookalike).ingestHost).toBe("https://us.i.posthog.com")
+    }
+    expect(derivePosthogRegionHosts("https://EU.i.posthog.com/").ingestHost).toBe("https://eu.i.posthog.com")
+  })
+
+  it("normalizeInfiniteCollectPath trims trailing slashes in linear time", () => {
+    expect(normalizeInfiniteCollectPath("/infinite/ledger///")).toEqual({ path: "/infinite/ledger" })
+    const hostile = `/a${"/".repeat(100_000)}b`
+    const started = performance.now()
+    expect(normalizeInfiniteCollectPath(hostile)).toHaveProperty("error")
+    expect(performance.now() - started).toBeLessThan(200)
+  })
+
   it("jsLiteral escapes a value so it cannot close a <script> block, and round-trips", () => {
     const out = jsLiteral("</script><script>alert(1)</script>")
     expect(out).not.toContain("</script>")
@@ -136,6 +157,10 @@ describe("artifact validation", () => {
       hosts: ["example.com", "www.example.com"]
     })
     expect(normalizeInfiniteProductionHosts([])).toHaveProperty("error")
+    // One host normaliser: a trailing dot is the same host, never a second one.
+    expect(normalizeInfiniteProductionHosts(["acme.com.", "ACME.com", " acme.com "])).toEqual({ hosts: ["acme.com"] })
+    expect(normalizeInfiniteProductionHosts(["acme.com.."])).toHaveProperty("error")
+    expect(normalizeInfiniteProductionHosts(["."])).toHaveProperty("error")
     expect(normalizeInfiniteProductionHosts(["https://example.com"])).toHaveProperty("error")
     expect(normalizeInfiniteProductionHosts(["example.com/path"])).toHaveProperty("error")
   })
@@ -248,10 +273,10 @@ describe("provider plans reject hostile artifacts and escape valid ones", () => 
     expect(ok.instructions[0]!.snippet).not.toContain('api_host: "https://us.i.posthog.com/ingest?')
     // no proxy uiHost → no ui_host in the init options
     expect(ok.instructions[0]!.snippet).not.toContain("ui_host")
-    // 0.6.0 — full native: PostHog's OWN defaults (autocapture, pageview, pageleave, recording,
-    // persistence, opt-in state are PostHog's), opted into its current defaults bundle. The
-    // installer never reduces the provider.
-    expect(ok.instructions[0]!.snippet).toContain("defaults: '2025-05-24'")
+    // Full native: PostHog's OWN defaults (autocapture, pageview, pageleave, recording, persistence,
+    // opt-in state are PostHog's), opted into its current defaults bundle ('2026-01-30' for a new
+    // install). A provider is never reduced without an approved plan line.
+    expect(ok.instructions[0]!.snippet).toContain("defaults: '2026-01-30'")
     for (const reduced of [
       "capture_pageview: false",
       "autocapture: false",

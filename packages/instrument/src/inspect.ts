@@ -3,10 +3,11 @@ import { readdirSync } from "node:fs"
 import { join, relative } from "node:path"
 import { spawnSync } from "node:child_process"
 
+import { htmlScripts } from "./html-scripts.js"
 import { providerInstallEvidence } from "./provider-evidence.js"
 
 import { frameworkAdapters } from "./frameworks/index.js"
-import { resolveConfinedAppRoot } from "./frameworks/shared.js"
+import { maskCommentsAndStrings, resolveConfinedAppRoot } from "./frameworks/shared.js"
 import { isManagedInfiniteFile } from "./frameworks/managed-files.js"
 import { readInstallManifest } from "./manifest.js"
 import { detectPackageManager } from "./package-manager.js"
@@ -14,6 +15,7 @@ import type {
   InspectResult,
   PackageManager,
   PosthogConfigSummary,
+  PosthogInitConfig,
   ProviderId,
   RepoStatus,
   UnmanagedProvider,
@@ -143,8 +145,9 @@ function stripManagedHtmlBlocks(contents: string): string {
 /**
  * App-root-relative source files, sorted depth-first so results are deterministic, bounded by
  * count and size, never following symlinks (an app root is confined; a link could leave it).
+ * Exported for the wizard's provider census (`checks/census.ts`), which walks exactly what inspect walks.
  */
-function walkProviderScanFiles(appRoot: string): string[] {
+export function walkProviderScanFiles(appRoot: string): string[] {
   const files: string[] = []
   const visit = (directory: string): void => {
     if (files.length >= providerScanMaxFiles) return
@@ -235,12 +238,52 @@ export function readPosthogOption(contents: string, key: string): string | undef
   return raw
 }
 
+/** The PostHog options read from one init (`posthog.init(…)` or `<PostHogProvider options={…}>`). */
+function readPosthogInitOptions(contents: string): Omit<PosthogInitConfig, "file" | "line"> {
+  return {
+    autocapture: readPosthogOption(contents, "autocapture"),
+    disableSessionRecording: readPosthogOption(contents, "disable_session_recording"),
+    capturePageview: readPosthogOption(contents, "capture_pageview"),
+    capturePageleave: readPosthogOption(contents, "capture_pageleave"),
+    persistence: readPosthogOption(contents, "persistence"),
+    apiHost: readPosthogOption(contents, "api_host"),
+    uiHost: readPosthogOption(contents, "ui_host"),
+    defaults: readPosthogOption(contents, "defaults")
+  }
+}
+
+/** The text of one init call: from the call to its matching close paren (bounded), so two inits never mix. */
+function initCallText(contents: string, start: number): string {
+  const open = contents.indexOf("(", start)
+  const jsx = contents.startsWith("<PostHogProvider", start)
+  if (jsx) {
+    const close = contents.indexOf(">", start)
+    return contents.slice(start, close === -1 ? start + 2000 : close + 1)
+  }
+  if (open === -1) return contents.slice(start, start + 2000)
+  let depth = 0
+  for (let i = open; i < contents.length && i < start + 8000; i += 1) {
+    const ch = contents[i]
+    if (ch === "(") depth += 1
+    else if (ch === ")") {
+      depth -= 1
+      if (depth === 0) return contents.slice(start, i + 1)
+    }
+  }
+  return contents.slice(start, start + 2000)
+}
+
 /**
  * The cost/privacy-relevant PostHog options a founder needs to audit — session replay and
- * autocapture drive billing. Reads them from the first scanned file that carries PostHog evidence.
- * Read-only; returns undefined when no PostHog init is found.
+ * autocapture drive billing. Reads EVERY init in EVERY scanned file that carries PostHog evidence
+ * (lane O6: a site with an init in the layout and another in a page has two configs, and the wizard's
+ * duplicate and D17 lines need both), each with its file:line, and skips Infinite's managed files and
+ * managed HTML blocks (those are infinite-tag's own bytes, not the founder's config). The summary's
+ * top-level fields are the FIRST init's, as before; `inits` lists them all. Read-only; returns
+ * undefined when no PostHog install is found.
  */
 export function detectPosthogConfig(appRoot: string): PosthogConfigSummary | undefined {
+  const inits: PosthogInitConfig[] = []
   for (const file of walkProviderScanFiles(appRoot)) {
     let contents: string
     try {
@@ -248,19 +291,31 @@ export function detectPosthogConfig(appRoot: string): PosthogConfigSummary | und
     } catch {
       continue
     }
+    if (isManagedInfiniteFile(contents)) continue
+    contents = stripManagedHtmlBlocks(contents)
     if (!hasPosthogEvidence(contents)) continue
-    return {
-      file,
-      autocapture: readPosthogOption(contents, "autocapture"),
-      disableSessionRecording: readPosthogOption(contents, "disable_session_recording"),
-      capturePageview: readPosthogOption(contents, "capture_pageview"),
-      capturePageleave: readPosthogOption(contents, "capture_pageleave"),
-      persistence: readPosthogOption(contents, "persistence"),
-      apiHost: readPosthogOption(contents, "api_host"),
-      uiHost: readPosthogOption(contents, "ui_host")
+    // HTML: only script bodies are code (an apostrophe in page text must not mask what follows).
+    const regions: Array<[number, number]> = /\.html?$/i.test(file)
+      ? htmlScripts(contents, true).map((script) => [script.bodyStart, script.bodyEnd])
+      : [[0, contents.length]]
+    const starts: number[] = []
+    for (const [from, to] of regions) {
+      const code = maskCommentsAndStrings(contents.slice(from, to), true)
+      for (const match of code.matchAll(/\bposthog\s*\.\s*init\s*\(|<PostHogProvider\b/g)) starts.push(from + match.index)
+    }
+    if (starts.length === 0) {
+      // Evidence without a readable init (a CDN loader, a wrapper): the file's options, as before.
+      inits.push({ file, line: 1, ...readPosthogInitOptions(contents) })
+      continue
+    }
+    for (const start of starts) {
+      const line = contents.slice(0, start).split("\n").length
+      inits.push({ file, line, ...readPosthogInitOptions(initCallText(contents, start)) })
     }
   }
-  return undefined
+  const first = inits[0]
+  if (!first) return undefined
+  return { ...first, inits }
 }
 
 function detectExistingProviders(root: string, appRoot: string): string[] {

@@ -14,7 +14,7 @@
 // mints the false green the whole feature exists to kill; folding it into `problem` trains people
 // to ignore the tool, which is worse than having no tool.
 
-/** The three checks, by the defect each one exists to catch. */
+/** The setup checks, by the defect each one exists to catch. */
 export type SetupCheckId =
   /** `data-conversion` on an element the runtime will not treat the way the author meant. */
   | "conversion_placement"
@@ -24,6 +24,16 @@ export type SetupCheckId =
   | "click_id_capture"
   /** Meta's automatic events left on, and the managed Meta snippet's counts and order. */
   | "meta_pixel_config"
+  /** The same provider id initialised more than once on a page (or managed + adopted together). */
+  | "provider_census"
+  /** An adopted PostHog's config: proxy, region, SPA page views; readable at all. */
+  | "posthog_config"
+  /** An adopted GA4 / PostHog / Meta init that starts on every host, previews included. */
+  | "host_guard"
+  /** Session replay and click capture still on for login, checkout and confirmation pages (D17). */
+  | "sensitive_pages"
+  /** A Meta event id built in the page, or a standard Meta conversion fired on a click. */
+  | "meta_event_id"
 
 /**
  * `info` is not a pass and not a problem: something worth a decision that infinite-tag will never
@@ -57,7 +67,24 @@ export const SETUP_FINDING_CODES = [
   "INF_SETUP_META_AUTOCONFIG_MANAGED_ON",
   "INF_SETUP_META_AUTOCONFIG_ADOPTED_ON",
   "INF_SETUP_META_AUTOCONFIG_UNDETERMINED",
-  "INF_SETUP_META_SNIPPET_CENSUS"
+  "INF_SETUP_META_SNIPPET_CENSUS",
+  "INF_SETUP_PROVIDER_DUPLICATE_INIT",
+  "INF_SETUP_PROVIDER_MANAGED_AND_ADOPTED",
+  "INF_SETUP_PROVIDER_GTM_AND_GTAG",
+  "INF_SETUP_PROVIDER_MULTIPLE_IDS",
+  "INF_SETUP_POSTHOG_CONFIG_UNREADABLE",
+  "INF_SETUP_POSTHOG_NOT_PROXIED",
+  "INF_SETUP_POSTHOG_SPA_PAGEVIEWS",
+  "INF_SETUP_POSTHOG_REGION_MISMATCH",
+  "INF_SETUP_POSTHOG_PRIVACY_CHANGED",
+  "INF_SETUP_HOST_GUARD_MISSING",
+  "INF_SETUP_HOST_GUARD_PRESENT",
+  "INF_SETUP_HOST_GUARD_SILENCES_PRODUCTION",
+  "INF_SETUP_SENSITIVE_PAGES_RECORDED",
+  "INF_SETUP_SENSITIVE_PAGES_HANDLED",
+  "INF_SETUP_META_EVENT_ID_PAGE_BUILT",
+  "INF_SETUP_META_EVENT_ID_UNDETERMINED",
+  "INF_SETUP_META_STANDARD_ON_CLICK"
 ] as const
 export type SetupFindingCode = (typeof SETUP_FINDING_CODES)[number]
 

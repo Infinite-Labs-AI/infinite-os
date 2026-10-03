@@ -57,11 +57,12 @@ export function renderInfiniteBrowserTag(config: InfiniteBrowserConfig): string 
 }
 
 // The Infinite browser runtime (0.6.0 — the consolidated truth-train release):
-//   • emits ONLY to Infinite's same-origin collect route. Mirror mode is GONE: the runtime never
-//     forwards browser events into PostHog or GA4 and never touches their consent / opt-in / config
-//     APIs (founder decision: healthy providers stay fully independent — the GA4 mirror already
-//     duplicated enhanced-measurement page_views on SPAs, and a provider that the installer had
-//     "reduced" was a provider nobody else could trust). It binds immediately, waiting on nothing;
+//   • emits ONLY to Infinite's same-origin collect route. Mirror mode is GONE: the runtime forwards
+//     nothing into PostHog or GA4 and never touches their consent / opt-in / config APIs (the GA4
+//     mirror duplicated enhanced-measurement page_views on SPAs). A provider is never reduced WITHOUT
+//     a plan line the user approved (decisions 4 and 17). Conversions reach PostHog and GA4 because
+//     the SITE'S OWN CODE calls the managed helpers (`infiniteTrack` and friends, decisions 9 and 13),
+//     never because this runtime forwards anything. It binds immediately, waiting on nothing;
 //   • emits NOTHING when `navigator.webdriver` is true (headless / automation-driven browsers —
 //     Lighthouse, Playwright, Puppeteer — are not visitors and must not become page views);
 //   • stamps `nav` on every site_page_view: "navigate" for the initial document load, "history"
@@ -78,6 +79,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   type RuntimeWindow = Window & {
     __infiniteAnalyticsRuntime?: boolean
     __infiniteHandoffContext?: () => InfiniteHandoffContext | null
+    __infiniteConsentAllowed?: (options?: { privacySignal?: boolean }) => boolean
   }
 
   const runtimeWindow = window as RuntimeWindow
@@ -96,14 +98,17 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   const allowAutomation = config.allowAutomation === true
   if (underAutomation && !allowAutomation) return
 
+  // The one host normaliser (trim, lowercase, strip ONE trailing dot — `src/host-guard.ts`, §3h.9),
+  // inlined because this function ships through `.toString()` and cannot import it: `ACME.com.` is the
+  // verified host `acme.com`, never an unverified one.
+  const currentHost = location.hostname.trim().toLowerCase().replace(/\.$/, "")
   const isLoopbackHost =
-    location.hostname === "localhost" ||
-    location.hostname === "127.0.0.1" ||
-    location.hostname === "::1" ||
-    location.hostname === "[::1]"
+    currentHost === "localhost" ||
+    currentHost === "127.0.0.1" ||
+    currentHost === "::1" ||
+    currentHost === "[::1]"
   const isVerifiedProductionHost =
-    config.productionHosts.length > 0 &&
-    config.productionHosts.includes(location.hostname.toLowerCase())
+    config.productionHosts.length > 0 && config.productionHosts.includes(currentHost)
   if ((isLoopbackHost && !allowAutomation) || !isVerifiedProductionHost) return
 
   const structuralTokenPattern = /^[A-Za-z0-9_-]{1,64}$/
@@ -436,6 +441,24 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     if (decision !== undefined) return decision
     if (privacySignalBlocks()) return false
     return config.consent.mode === "not_required"
+  }
+
+  // The runtime's consent check, exposed so the managed helpers (the Meta click-id capture and
+  // matching accessor, the conversion helpers, the Meta mirror) follow the SAME decision instead of
+  // re-implementing it: the in-memory decision when storage is blocked, the configured storage key in
+  // required mode, DNT/GPC as the default. A live check on every call, never a frozen value, and only
+  // on a verified production host (the returns above); elsewhere the helpers use their stricter
+  // fallback over the persisted decision (`providers/meta-browser/consent.ts`).
+  // `{ privacySignal: false }` asks the same question WITHOUT the DNT/GPC default: the conversion
+  // helpers that feed GA4/PostHog use it, so a GPC browser's conversions are not dropped while its
+  // native page views still count (the recorded decision and required mode still apply).
+  runtimeWindow.__infiniteConsentAllowed = (options?: { privacySignal?: boolean }) => {
+    if (options && options.privacySignal === false) {
+      const decision = consentOverride !== undefined ? consentOverride : storedConsentDecision()
+      if (decision !== undefined) return decision
+      return config.consent.mode === "not_required"
+    }
+    return hasConsent()
   }
 
   function sendInfinite(payload: Record<string, unknown>): void {

@@ -23,18 +23,48 @@ const EXPECTED_FILENAME = "infinite-tag-0.11.0.tgz"
 // accident — a whole directory getting included. The setup checks (src/setup-checks/) add eight
 // published modules, .js + .d.ts each: 130 → 146 measured, so the ceiling goes to 170 to keep the
 // same ~1.15x headroom for source growth rather than sitting on the measurement.
+//
+// Wizard build (lane I1, 2026-10-02): re-measured on the integrated tarball (npm pack of
+// packages/instrument at the integration head): 587 files, 1,090,001 bytes packed, 3,911,018 bytes
+// unpacked. F0's provisional ceilings (560 / 1,300,000 / 4,200,000) are re-based to measured x1.15:
+// 675 files (587 x 1.15 = 675.05), 1,254,000 packed (1,253,501 rounded up), 4,498,000 unpacked
+// (4,497,671 rounded up). Packed went DOWN from F0's guess; files and unpacked went up.
+//
+// Offline E2E (lane I1b, 2026-10-02): the fixes it forced add one module (src/wizard/item-t0, .js +
+// .d.ts). Re-measured: 589 files, 1,094,403 bytes packed, 3,924,183 bytes unpacked; tightened to measured
+// x1.15: 678 files (677.35 rounded up), 1,259,000 packed (1,258,564 rounded up), 4,513,000 unpacked
+// (4,512,811 rounded up). The E2E itself (test/wizard/, the fixture site) is never packed.
+//
+// I1 fix round (2026-10-02): the job-table S checks (src/checks/job-static, .js + .d.ts) add one module.
+// Re-measured: 591 files, 1,119,017 bytes packed, 4,012,232 bytes unpacked; tightened to measured x1.15:
+// 680 files (679.65 rounded up), 1,287,000 packed (1,286,870 rounded up), 4,615,000 unpacked (4,614,067
+// rounded up).
 const MIN_FILES = 50
-const MAX_FILES = 170
+const MAX_FILES = 680
 const MIN_PACKED_SIZE = 40_000
-const MAX_PACKED_SIZE = 350_000
+const MAX_PACKED_SIZE = 1_287_000
 const MIN_UNPACKED_SIZE = 200_000
-const MAX_UNPACKED_SIZE = 1_200_000
+const MAX_UNPACKED_SIZE = 4_615_000
+// The wizard's public contracts (1bu-1 vendors them and pins their sha256). Listed exactly, so a stray
+// file under contracts/ still fails the pack.
+const TAG_WIZARD_CONTRACT_FILES = [
+  "contracts/host-deny-v1.json",
+  "contracts/tag-wizard-v1/bridge-descriptor.example.json",
+  "contracts/tag-wizard-v1/bridge-verbs.fixtures.json",
+  "contracts/tag-wizard-v1/claims.schema.json",
+  "contracts/tag-wizard-v1/receipts.fixtures.json",
+  "contracts/tag-wizard-v1/report-v2.example.json",
+  "contracts/tag-wizard-v1/review.schema.json",
+  "contracts/tag-wizard-v1/run-state.example.json",
+  "contracts/tag-wizard-v1/test-run.fixtures.json"
+]
 const REQUIRED_FILES = [
   "LICENSE",
   "README.md",
   "contracts/browser-collect-v1.fixture.json",
   "contracts/browser-collect-v1.schema.json",
   "contracts/server-lane-v1.vectors.json",
+  ...TAG_WIZARD_CONTRACT_FILES,
   "package.json"
 ]
 
@@ -85,7 +115,8 @@ function validatePath(path) {
     path === "LICENSE" ||
     path === "contracts/browser-collect-v1.schema.json" ||
     path === "contracts/browser-collect-v1.fixture.json" ||
-    path === "contracts/server-lane-v1.vectors.json"
+    path === "contracts/server-lane-v1.vectors.json" ||
+    TAG_WIZARD_CONTRACT_FILES.includes(path)
   if (!allowed) reject(`Unexpected pack file ${rendered}`)
 }
 

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 
+import { nextHelperWrappersSource } from "../conversions/globals.js"
 import { jsLiteral } from "../providers/validate.js"
 import type { InstallPlan } from "../types.js"
 
@@ -46,20 +47,35 @@ export function removeManagedFile(
   return { removed: true }
 }
 
+/**
+ * One provider's bootstrap, isolated. Next.js joins EVERY provider into ONE inline <script>, so a
+ * provider that throws at run time would stop every provider after it (the old PostHog stub did exactly
+ * that). Each runs in its own `try`, so a broken provider costs only itself. (A SyntaxError cannot be
+ * caught this way; the guard's one-IIFE-per-snippet rule and the vm tests cover that.)
+ */
+export function isolateProviderSnippet(snippet: string): string {
+  return ["try {", snippet, "} catch (_infiniteProviderError) {}"].join("\n")
+}
+
+const MANAGED_MODULE_PATH = /(?:^|\/)lib\/infinite-analytics\.(?:ts|js)$/
+
 export function buildAnalyticsModuleSource(plan: InstallPlan): string {
-  const bootstrapSnippets = plan.instructions
-    .filter(
-      (instruction) =>
-        instruction.provider &&
-        /(?:^|\/)lib\/infinite-analytics\.(?:ts|js)$/.test(instruction.path)
-    )
+  const forModule = plan.instructions.filter((instruction) => MANAGED_MODULE_PATH.test(instruction.path))
+  // The helper globals first, so they exist as early as possible; then each provider, isolated.
+  const helperSnippets = forModule
+    .filter((instruction) => instruction.helpers === true)
     .map((instruction) => instruction.snippet.trim())
     .filter((snippet) => snippet.length > 0)
+  const bootstrapSnippets = forModule
+    .filter((instruction) => instruction.provider)
+    .map((instruction) => instruction.snippet.trim())
+    .filter((snippet) => snippet.length > 0)
+    .map(isolateProviderSnippet)
 
   return [
     managedFileBanner,
     "",
-    `const bootstrapSource = ${jsLiteral(bootstrapSnippets.join("\n\n"))}`,
+    `const bootstrapSource = ${jsLiteral([...helperSnippets.map(isolateProviderSnippet), ...bootstrapSnippets].join("\n\n"))}`,
     "",
     "export function installInfiniteInstrumentation(): void {",
     '  if (typeof document === "undefined") {',
@@ -76,7 +92,8 @@ export function buildAnalyticsModuleSource(plan: InstallPlan): string {
     "  script.text = bootstrapSource",
     "  document.head.appendChild(script)",
     "}",
-    ""
+    "",
+    ...(helperSnippets.length > 0 ? [nextHelperWrappersSource(), ""] : [])
   ].join("\n")
 }
 

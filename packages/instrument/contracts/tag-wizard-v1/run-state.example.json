@@ -1,0 +1,793 @@
+{
+  "schema": "infinite-tag.wizard-state.v1",
+  "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+  "displayId": "r-7f3c",
+  "createdAt": "2026-10-02T09:00:00.000Z",
+  "tagVersion": "0.12.0",
+  "root": "/Users/founder/Github/acme-store",
+  "appRoot": "apps/web",
+  "link": {
+    "linkId": "lk_FAKElinkAcmeStore00000",
+    "workspaceName": "Acme",
+    "approvedAt": "2026-10-02T09:01:00.000Z",
+    "runtimeVariant": "prod"
+  },
+  "steps": {
+    "link": {
+      "outcome": "ok",
+      "inputHash": "sha256:4a0b5f63cc74b8b713d55b367cdbaf1eacee2cb7ece7fd068af73da9d1a402fb",
+      "at": "2026-10-02T09:00:00.000Z"
+    },
+    "agent": {
+      "outcome": "ok",
+      "inputHash": "sha256:fec07dd14ac0d78fb9e88ad5bb1e2db357b47241241201b217dcddf7df97b34c",
+      "at": "2026-10-02T09:02:00.000Z"
+    },
+    "before": {
+      "outcome": "ok",
+      "inputHash": "sha256:79f353795df7bd0019cd12f545dd54329dd28c4099d85273f0b29c2c546c17f6",
+      "at": "2026-10-02T09:04:00.000Z"
+    },
+    "keys": {
+      "outcome": "ok",
+      "inputHash": "sha256:4f2e2267cc588a266b1a48fae641e3cfe340d2dd4d68c6b18cf053e8fbb99841",
+      "at": "2026-10-02T09:06:00.000Z"
+    },
+    "plan": {
+      "outcome": "ok",
+      "inputHash": "sha256:e7d59041c874767e026fe3000fc9ff1b06003d3c5e3f3b2a96857e0c7fcdef61",
+      "at": "2026-10-02T09:08:00.000Z"
+    },
+    "install": {
+      "outcome": "ok",
+      "inputHash": "sha256:c30cdb6ec03a535024913844815c248fff32b20c825212fdb89edfb70f6ce7c6",
+      "at": "2026-10-02T09:10:00.000Z"
+    },
+    "jobs": {
+      "outcome": "ok",
+      "inputHash": "sha256:4eaa19ba6388c56561b047fb6c4053223ed7f0f21c36792d3cbcc32bab34aa06",
+      "at": "2026-10-02T09:12:00.000Z"
+    },
+    "settings": {
+      "outcome": "ok",
+      "inputHash": "sha256:4f100fa239ecb72e295e9d15a9449456077d02bd17605cbf3264d0267e7a1655",
+      "at": "2026-10-02T09:14:00.000Z"
+    },
+    "rehearsal": {
+      "outcome": "ok",
+      "inputHash": "sha256:3ead3cd7af305bc37fa5f5c35b2715009218a7a998134bf523d8ae25b0d6e683",
+      "at": "2026-10-02T09:16:00.000Z"
+    },
+    "review": {
+      "outcome": "ok",
+      "inputHash": "sha256:02ce587def345fecf1d6d5fe84e66205a7afd65fed8d4e45aa654ab1c5e76a9e",
+      "at": "2026-10-02T09:18:00.000Z"
+    },
+    "merge": {
+      "outcome": "parked",
+      "inputHash": "sha256:41a8de4dc36574debbc1f860ea299ab8a12877d83fa224202145eb44023a7b5a",
+      "at": "2026-10-02T09:20:00.000Z",
+      "code": "INF_WIZ_MERGE_PARKED"
+    }
+  },
+  "agent": {
+    "worker": "claude_code",
+    "reviewer": "brief",
+    "workerSession": {
+      "kind": "claude",
+      "sessionId": "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    },
+    "whoPays": {
+      "worker": {
+        "payer": "plan",
+        "label": "your Claude plan (max) pays"
+      },
+      "reviewer": null
+    }
+  },
+  "git": {
+    "base": "main",
+    "baseSource": "vercel",
+    "branch": "infinite/tag/2026-10-02-7f3c2a",
+    "baseSha": "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d",
+    "headSha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"
+  },
+  "pr": {
+    "host": "github",
+    "number": 42,
+    "url": "https://github.com/acme/acme-store/pull/42",
+    "nodeId": "PR_FAKEnode0001",
+    "isDraft": false,
+    "round": 1,
+    "reviewedSha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "handledThreadIds": [
+      "PRRT_FAKEthread0001"
+    ],
+    "mergeSha": null
+  },
+  "plan": {
+    "hash": "sha256:64879f7d6b960a01909762d911a32d4582c20010c5641ee90278b644a9e3b525",
+    "answers": {
+      "consentMode": "not_required",
+      "conversions": [
+        "signup",
+        "lead",
+        "purchase"
+      ],
+      "privacyApproved": true,
+      "npmInstall": true,
+      "metaGoal": "StartTrial"
+    },
+    "lines": [
+      {
+        "id": "install_provider:infinite",
+        "approved": true
+      },
+      {
+        "id": "improve_additive:posthog_proxy",
+        "approved": true
+      },
+      {
+        "id": "remove_duplicate:ga4_gtag",
+        "approved": true
+      },
+      {
+        "id": "preview_guard_adopted:meta",
+        "approved": null
+      },
+      {
+        "id": "meta_relay",
+        "approved": null
+      }
+    ]
+  },
+  "jobs": [
+    {
+      "id": "posthog_improve:proxy",
+      "jobId": "posthog_improve",
+      "n": 3,
+      "title": "Improve the existing PostHog",
+      "owner": "agent",
+      "trigger": {
+        "finding": "PostHog is adopted and sends straight to us.i.posthog.com",
+        "evidence": [
+          {
+            "file": "apps/web/app/providers.tsx",
+            "line": 12
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "apps/web/app/providers.tsx",
+          "apps/web/next.config.mjs"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "posthog_config",
+          "tier": "S",
+          "state": "pass",
+          "at": "2026-10-02T09:16:00.000Z",
+          "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+        },
+        {
+          "id": "next_rewrites_exact",
+          "tier": "S",
+          "state": "pass",
+          "at": "2026-10-02T09:16:00.000Z",
+          "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+        },
+        {
+          "id": "posthog_via_proxy_once",
+          "tier": "RH",
+          "state": "pass",
+          "at": "2026-10-02T09:30:00.000Z",
+          "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+        },
+        {
+          "id": "posthog_distinct_id_receipt",
+          "tier": "PV",
+          "state": "not_run"
+        }
+      ],
+      "claim": {
+        "status": "done",
+        "note": "Set api_host to /ingest and added the exact rewrite.",
+        "at": "2026-10-02T09:15:00.000Z"
+      },
+      "state": "waiting_deploy",
+      "edits": [
+        {
+          "editId": "edit_0003",
+          "file": "apps/web/app/providers.tsx"
+        }
+      ]
+    },
+    {
+      "id": "preview_guard:meta",
+      "jobId": "preview_guard",
+      "n": 7,
+      "title": "Keep previews silent (existing tags)",
+      "owner": "agent",
+      "trigger": {
+        "finding": "The adopted Meta bootstrap fires on previews",
+        "evidence": [
+          {
+            "url": "https://acme-store-git-infinite-tag-2026-10-02-7f3c2a-acme.vercel.app/"
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "apps/web/app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "adopted_init_guarded",
+          "tier": "S",
+          "state": "not_run"
+        }
+      ],
+      "state": "blocked",
+      "blockedReason": "needs_you"
+    }
+  ],
+  "markers": {
+    "before": {
+      "infiniteEventIds": [
+        "evt_FAKE0001"
+      ],
+      "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+      "probePath": null,
+      "metaEventIds": []
+    },
+    "rehearsal": {
+      "infiniteEventIds": [
+        "evt_FAKE0201"
+      ],
+      "posthogDistinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4b02",
+      "metaEventIds": []
+    },
+    "prove": {}
+  },
+  "report": {
+    "live_today": {
+      "meta": {
+        "measuredAt": "2026-10-02T09:13:00.000Z",
+        "sha": null
+      },
+      "cells": {
+        "checks_passing": {
+          "value": "4/12",
+          "display": "4 pass · 8 problems · 2 not testable of 14",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "ga4_page_views_per_visit": {
+          "value": 2,
+          "display": "2 (counts every visit twice)",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:12:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "ga4_one_page_view"
+          }
+        },
+        "posthog_route": {
+          "value": "direct",
+          "display": "direct (ad blockers drop it)",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:12:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "proxy"
+          }
+        },
+        "meta_pixel": {
+          "value": "blocked",
+          "display": "blocked on www.acme-store.com",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:12:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "meta_traffic_permissions"
+          }
+        },
+        "preview_share": {
+          "value": "5 of 44",
+          "display": "5 of 44 page views came from previews (GA4, excludes localhost; last 28 days)",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "window": {
+              "from": "2026-09-04T00:00:00.000Z",
+              "to": "2026-10-02T00:00:00.000Z"
+            }
+          },
+          "reason": "below_sample_floor",
+          "raw": {
+            "numerator": 5,
+            "denominator": 44
+          }
+        },
+        "server_conversions": {
+          "value": 0,
+          "display": "0 in the last 7 days",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "window": {
+              "from": "2026-09-25T00:00:00.000Z",
+              "to": "2026-10-02T00:00:00.000Z"
+            }
+          }
+        },
+        "ga4_key_events": {
+          "value": "3 marked · 0 received",
+          "display": "3 marked · 0 received in 28 days",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "window": {
+              "from": "2026-09-04T00:00:00.000Z",
+              "to": "2026-10-02T00:00:00.000Z"
+            }
+          }
+        },
+        "consent_setting": {
+          "value": "not recorded",
+          "display": "not recorded",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:09:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "live_test_per_tool": {
+          "value": "3 of 4",
+          "display": "dry load: 3 of 4 fire correctly",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:12:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "day7_checkin": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "needs_7_days"
+        }
+      },
+      "finishLine": {
+        "each_tool_once": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "ids_match_connections": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "previews_silent": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "survives_ad_blockers": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "spa_page_views": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "conversions_server_side": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "identity_joined": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "utms_survive_redirects": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "consent_recorded": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "csp_allows": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "ga4_key_events_received": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "no_pii": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:13:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proof_from_real_visit": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "not_exercised"
+        },
+        "keeps_being_checked": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "not_exercised"
+        }
+      }
+    },
+    "in_pr": {
+      "meta": {
+        "measuredAt": "2026-10-02T09:30:00.000Z",
+        "sha": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"
+      },
+      "cells": {
+        "checks_passing": {
+          "value": "12/12",
+          "display": "12 pass · 0 problems · 2 not testable of 14",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "ga4_page_views_per_visit": {
+          "value": 1,
+          "display": "1",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "ga4_one_page_view"
+          }
+        },
+        "posthog_route": {
+          "value": "ingest",
+          "display": "through /ingest",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "posthog_via_proxy_once"
+          }
+        },
+        "meta_pixel": {
+          "value": "needs_you",
+          "display": "needs you: allow www in Meta",
+          "state": "info",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "meta_traffic_permissions"
+          }
+        },
+        "preview_share": {
+          "value": "guarded",
+          "display": "guard added",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:25:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "host_matrix"
+          }
+        },
+        "server_conversions": {
+          "value": 3,
+          "display": "3 wired (signup, lead, purchase)",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:25:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+            "checkId": "outcome_after_success"
+          }
+        },
+        "ga4_key_events": {
+          "value": 3,
+          "display": "the 3 events now sent to GA4",
+          "state": "info",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:28:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "consent_setting": {
+          "value": "not_required",
+          "display": "\"collect by default\" recorded",
+          "state": "pass",
+          "provenance": {
+            "source": "plan_answer",
+            "at": "2026-10-02T09:20:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "live_test_per_tool": {
+          "value": "4 of 4",
+          "display": "rehearsal: 4 of 4 fire correctly",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "day7_checkin": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "needs_7_days"
+        }
+      },
+      "finishLine": {
+        "each_tool_once": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "ids_match_connections": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "previews_silent": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "survives_ad_blockers": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "spa_page_views": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "conversions_server_side": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "identity_joined": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "utms_survive_redirects": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "consent_recorded": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "plan_answer",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "csp_allows": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "ga4_key_events_received": {
+          "value": "info",
+          "display": "designated in GA4; received later",
+          "state": "info",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "no_pii": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        },
+        "proof_from_real_visit": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-02T09:45:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          },
+          "reason": "not_exercised"
+        },
+        "keeps_being_checked": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "plan_answer",
+            "at": "2026-10-02T09:30:00.000Z",
+            "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+          }
+        }
+      }
+    },
+    "proven_live": null
+  },
+  "snapshot": {
+    "dir": "~/Library/Caches/infinite-tag/snapshots/7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80/3"
+  }
+}

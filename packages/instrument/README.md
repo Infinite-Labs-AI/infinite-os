@@ -7,14 +7,103 @@ artifacts only. It supports Infinite first-party website collection, GA4,
 PostHog, X, and Meta across Next.js, Vite/React, and static HTML. Installs are
 idempotent, manifest-backed, and reversible.
 
-Run it inside the website repository. It never provisions an Infinite source,
-calls a cloud control plane, or reads a desktop session. Verified source
-creation happens outside this open-core package.
+Run it inside the website repository. The classic commands (`install`, `plan`,
+`harness`, …) never provision an Infinite source, call a cloud control plane, or
+read a desktop session. The setup wizard (bare `npx infinite-tag`) talks only to
+the Infinite desktop app on your Mac, over its local bridge, after you approve
+the link in the app; it never holds a cloud credential. Verified source creation
+happens outside this open-core package.
 
 Installing the npm package is not the instrumentation step. After
 `npm i infinite-tag` / `pnpm add -D infinite-tag`, run
 `npx infinite-tag install ...` (or the matching package-manager command) from
 the website repo so the managed runtime, imports, and proxy rewrites are written.
+
+## The setup wizard
+
+```bash
+npx infinite-tag            # in your website repo, with the Infinite app open on your Mac
+```
+
+One command takes a site from "some tags pasted in" to tags that are proven to collect. It runs 13
+steps and resumes where it stopped:
+
+1. **Link** — the Infinite app shows a 4-digit code; approve it there. Nothing runs before you do.
+2. **Agent** — picks the agent that does the code jobs: your own Claude Code or Codex, on your plan.
+   It runs Opus 4.8 or Sol 6.1 at extra-high effort, with one retry on the other model.
+3. **Before** — branches from production, reads the live site without sending anything, and grades
+   what it finds ("Live site today").
+4. **Keys** — the connection ids (GA4 stream, PostHog project, Meta pixel) come from Infinite, never
+   from the repo or a guess.
+5. **Plan** — one screen with every change and the four decisions only you can make (consent mode,
+   conversion names, the privacy text, the npm install). A 7-day check-in follows the deploy.
+6. **Install** — the managed tags, the approved edits, the preview guard and a build check, with a
+   full rollback if the build breaks.
+7. **Jobs** — the agent does the code jobs the plan approved, fenced to the files each job may touch;
+   the wizard checks every job itself (static checks, the build, an offline browser test).
+8. **Settings** — through the app: the approved conversions, GA4 key events for conversions whose
+   offline click test passed, the server-lane settings on Vercel (only when approved; production is not
+   restarted) and Meta server events (only when approved). The wizard never sees a secret.
+9. **Rehearsal** — opens a draft pull request and tests its preview deployment.
+10. **Review** — a second agent reviews the pull request; fixes are re-checked the same way.
+11. **Merge** — you merge. The wizard never merges, approves or force-pushes.
+12. **Prove** — after the deploy, it checks the live site again with this run's own test events.
+13. **Done** — the before/after report, in your terminal, the pull request and Infinite.
+
+Exit codes: `0` done · `1` failed · `2` usage or environment · `3` parked (resume with
+`npx infinite-tag --resume`) · `4` needs the Infinite app · `130` interrupted.
+
+Flags: `--json` (one NDJSON event per line, for agents and CI), `--answers <file>`, `--yes` (approves
+only the plan lines that are safe to approve for you; never consent, conversion names, the privacy
+text or a change to a tag you already had), `--resume`, `--fresh` (set an unfinished run aside and
+start over), `--root`, `--app-root`, `--no-agent`, `--worker claude|codex`,
+`--reviewer claude|codex|brief|none`, `--consent-mode not_required|required`, `--no-prove`.
+`npx infinite-tag --version` prints the version.
+
+**Run by an agent.** When another agent starts the wizard (`--json`, no terminal), no agent is
+spawned: the code jobs go to the agent that started it (`job.seeded` events and
+`.infinite/wizard/agent-brief.md`), and `npx infinite-tag --resume --json` fences and checks what it
+changed. Questions only you can answer (consent mode, conversion names, the privacy text, Meta server
+events, any change to an existing tag) are never answered from a file in that mode: the run parks and
+asks you to finish in your own terminal.
+
+**Answers file** (`--answers answers.json`). Strict: an unknown key, a wrong type or another version is
+an error, so a typo never silently answers nothing.
+
+```json
+{
+  "v": 1,
+  "plan": { "approved": ["install_provider:ga4"], "declined": ["server_lane"], "edits": { "consent_mode": "required" } },
+  "consentMode": "required",
+  "conversionNames": ["signup"],
+  "privacyText": true,
+  "npmInstall": false,
+  "asks": [{ "kind": "single", "match": "GA4", "answer": "G-XXXXXXXXXX" }]
+}
+```
+
+`plan` answers plan lines by id; `asks` answers any other question by kind, the first entry whose
+`match` text appears in the question (no `match` = any question of that kind). An ask the file does
+not answer parks the run with exit 3.
+
+**What it leaves behind.** Its own state lives in `.infinite/wizard/` (gitignored, mode 0600); the
+edit receipt `.infinite/install.json` is committed with the pull request, so
+`npx infinite-tag uninstall --pr` can open a pull request that reverses every edit, the `.gitignore`
+fence included.
+
+### `infinite-tag doctor`
+
+```bash
+npx infinite-tag doctor --url https://example.com      # ids from .infinite/install.json
+npx infinite-tag doctor --json --url https://example.com --expect-ga4 G-XXXXXXXXXX
+```
+
+Checks an installed site without a browser: the setup checks over your source and, with `--url`, the
+live checks (the tags and ids your pages serve, the PostHog proxy, redirects keeping campaign tags,
+the security policy, Meta's domain permissions). Every live request is marked as a check, so nothing
+counts as a visit, and nothing is sent to the server lane unless you pass `--probe-server-lane`.
+Live requests honour `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`. Exit: `0` clean · `1` a problem ·
+`3` nothing wrong but something could not be determined · `2` usage.
 
 ## Quick Start
 
@@ -71,6 +160,9 @@ contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
 
 | Command | Behavior |
 | --- | --- |
+| *(none)* / `wizard` | The setup wizard (see [The setup wizard](#the-setup-wizard)). |
+| `doctor` | Check an installed site: setup checks, and with `--url` the live checks. |
+| `uninstall --pr` | Open a pull request that reverses the wizard's install. |
 | `inspect` | Detect framework, package manager, and existing providers. |
 | `plan` | Print deterministic changes and blockers without writing. |
 | `install` | Plan, apply with approval, then verify managed files. |
@@ -249,12 +341,16 @@ button text, form values — ever leaves the browser.
 
 **Providers are independent (0.6.0).** GA4 and PostHog install as fully native
 bootstraps — Google's own `gtag.js` snippet with its default `page_view`, and
-PostHog's own `posthog.init` with PostHog's defaults (`defaults: '2025-05-24'`:
-autocapture, page views, pageleave, session recording and opt-in state are
-PostHog's). The Infinite runtime never forwards browser events into a provider,
-never loads a provider on its behalf, and never changes a provider's configuration
-or consent; consent for GA4 / PostHog is the site's own, exactly as with a
-hand-pasted snippet. Mirror mode (the pre-0.6.0 translation of `site_page_view`
+PostHog's own `posthog.init` with PostHog's defaults (`defaults: '2026-01-30'`
+unless the install pins an earlier value: autocapture, page views, pageleave,
+session recording and opt-in state are PostHog's). The Infinite runtime forwards
+nothing into a provider and never loads a provider on its behalf; conversions
+reach GA4 / PostHog only because the site's own code calls the managed helpers
+(`infiniteTrack`, `infiniteTrackThenNavigate`, `infiniteIdentify`), which follow
+the visitor's consent at every call. A provider's configuration or consent is
+never reduced WITHOUT a plan line the user approved (the setup wizard's plan);
+consent for GA4 / PostHog is the site's own, exactly as with a hand-pasted
+snippet. Mirror mode (the pre-0.6.0 translation of `site_page_view`
 into GA4 `page_view` / PostHog `$pageview`) is gone. Without an Infinite source
 key no Infinite runtime is embedded at all; with one, it emits only from hosts
 on its validated `productionHosts` allowlist.
@@ -564,8 +660,8 @@ server_lane  installed, no receipt                                       —    
 States: `absent` / `adopted` / `installed` / `verified` / `conflict` / `skipped`. **`verified` is
 printed only with a receipt timestamp read back from the provider.** `installed` means a file was
 written; `adopted` means an existing tag (a hand-pasted snippet, or GA4 through a Tag Manager
-container) was found and left byte-for-byte alone — never reduced, never installed twice, and
-never claimed as verified by us. Two different ids for one provider, or a managed install beside
+container) was found and left byte-for-byte alone — never reduced WITHOUT an approved plan line,
+never installed twice, and never claimed as verified by us. Two different ids for one provider, or a managed install beside
 an unmanaged snippet, is a `conflict`: nothing is installed for it and the report names both.
 
 ### Conversion marking
@@ -714,7 +810,7 @@ discard hand-edited generated configs or Vercel files.
 - A workspace ID alone cannot enable collection.
 - Browser code cannot select workspace, environment, authority, or dispatch.
 - Infinite uses a same-origin collection route with a source-bound public key.
-- Provider initialization order is GA4, PostHog, X, Meta, then Infinite — each native and independent; Infinite never forwards events into another provider.
+- Provider initialization order is GA4, PostHog, X, Meta, then Infinite — each native and independent; the Infinite runtime forwards nothing into another provider (conversions reach them only through the managed helpers the site's own code calls).
 - Installs are idempotent, atomic, path-contained, and dirty-tree guarded.
 - Existing unmanaged analytics is adopted (left untouched, never duplicated); existing configuration is not overwritten.
 

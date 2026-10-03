@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "service": "infinite-desktop-tag",
+  "protocol": {
+    "min": 1,
+    "max": 1
+  },
+  "capabilities": [
+    "tag.status.v1",
+    "tag.link.v1",
+    "tag.keys.v1",
+    "tag.hosting.v1",
+    "tag.runs.v1",
+    "tag.receipts.v1",
+    "tag.report.v2",
+    "tag.baseline.v1",
+    "tag.site-source.v1",
+    "tag.conversions.v1",
+    "tag.ga4-key-events.v1",
+    "tag.server-lane.v1",
+    "tag.meta-relay.v1",
+    "tag.uninstall.v1",
+    "tag.test.v1",
+    "tag.test-facts.v1"
+  ],
+  "url": "http://127.0.0.1:53917",
+  "pid": 4242,
+  "bootId": "3b9d6e2a-5c41-4f7e-9a0b-1c2d3e4f5a6b",
+  "desktopVersion": "0.4.1",
+  "runtime": {
+    "variant": "prod",
+    "label": "Infinite"
+  },
+  "token": "FAKE-TEST-TOKEN-not-a-secret-00000000000000",
+  "startedAt": "2026-10-02T09:00:00.000Z"
+}

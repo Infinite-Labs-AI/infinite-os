@@ -1,0 +1,139 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "verdict",
+    "summary",
+    "checklist",
+    "findings"
+  ],
+  "properties": {
+    "verdict": {
+      "enum": [
+        "looks_good",
+        "changes_suggested"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "checklist": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "item",
+          "status",
+          "note"
+        ],
+        "properties": {
+          "item": {
+            "enum": [
+              "R1",
+              "R2",
+              "R3",
+              "R4",
+              "R5",
+              "R6",
+              "R7",
+              "R8",
+              "R9",
+              "R10",
+              "R11",
+              "R12",
+              "R13",
+              "R14",
+              "R15",
+              "R16"
+            ]
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "cant_tell"
+            ]
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 500
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "item",
+          "severity",
+          "path",
+          "line",
+          "body",
+          "suggested_fix"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^F[0-9]{1,2}$"
+          },
+          "item": {
+            "enum": [
+              "R1",
+              "R2",
+              "R3",
+              "R4",
+              "R5",
+              "R6",
+              "R7",
+              "R8",
+              "R9",
+              "R10",
+              "R11",
+              "R12",
+              "R13",
+              "R14",
+              "R15",
+              "R16"
+            ]
+          },
+          "severity": {
+            "enum": [
+              "blocker",
+              "should",
+              "nit",
+              "question"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 1500
+          },
+          "suggested_fix": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 1500
+          }
+        }
+      }
+    }
+  }
+}

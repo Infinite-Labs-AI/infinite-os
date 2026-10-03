@@ -11,7 +11,8 @@ import {
   SERVER_LANE_BRIEF_BANNER,
   SERVER_LANE_POSITIONING,
   renderServerLaneBrief,
-  serverLaneCopy
+  serverLaneCopy,
+  serverLaneWizardCopy
 } from "./copy.js"
 import { outcomeHelperSource } from "./targets/shared.js"
 
@@ -281,5 +282,79 @@ describe("the event-ID copy uses the app's own dedupe labels and the real reason
     // Negative: the old labels and the old (false for Every-event bindings) reason are gone.
     expect(flat).not.toContain("counted once per account or once per visit")
     expect(flat).not.toContain("cannot carry the id Meta received")
+  })
+})
+
+// The plain installer keeps its EXACT words (lane O5, build plan §O5 "Copy"): `install --server-lane`
+// still installs nothing and says so, while the wizard has its own strings for decision 5 and the
+// reportInfiniteOutcome / mirror recipes. The hash pins every string and every copy function's source as
+// they were before the wizard build (computed at infinite-os 8bbf550 + F0).
+describe("the plain installer's server-lane copy is byte-identical to before the wizard", () => {
+  function serialise(value: unknown): unknown {
+    if (typeof value === "function") return "fn:" + value.toString()
+    if (Array.isArray(value)) return value.map(serialise)
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, serialise(inner)]))
+    }
+    return value
+  }
+
+  it("hashes to the pre-wizard value", () => {
+    const text = JSON.stringify(serialise(serverLaneCopy))
+    expect(createHash("sha256").update(text).digest("hex")).toBe(
+      "0b5a6ac57d3d0dfe4f93594e45213eed510c373eaacf10333307dd02050f4765"
+    )
+    expect(createHash("sha256").update(serverLaneCopy.status.targetPackages(["@vercel/functions"])).digest("hex")).toBe(
+      "9b0fbf1256ca539e699938d069961dc145855359f994b43133afa58d89add7ec"
+    )
+  })
+
+  it("negative: the wizard's npm line never leaks into install --server-lane output", () => {
+    const brief = renderServerLaneBrief({
+      status: {
+        kind: "target",
+        mode: "vercel-middleware",
+        label: "Vercel",
+        created: ["middleware.js", "lib/infinite-server-lane.js"],
+        manual: [],
+        installPackages: ["@vercel/functions"]
+      }
+    })
+    expect(brief).toContain("infinite-tag never installs packages")
+    const wizardLine = serverLaneWizardCopy.targetPackages(["@vercel/functions"])
+    expect(wizardLine).toContain("The wizard installs it as its own plan line")
+    expect(brief).not.toContain("as its own plan line")
+    expect(brief).not.toContain(wizardLine)
+    for (const recipe of [serverLaneWizardCopy.reportOutcomeRecipe(), serverLaneWizardCopy.webhookCaptureRecipe()]) {
+      expect(brief).not.toContain(recipe[0]!)
+    }
+  })
+})
+
+describe("the wizard's recipes", () => {
+  const report = serverLaneWizardCopy.reportOutcomeRecipe().join("\n")
+  const webhook = serverLaneWizardCopy.webhookCaptureRecipe().join("\n")
+
+  it("report from the awaited request with a stable eventId, and mirror only the returned id", () => {
+    expect(report).toContain("reportInfiniteOutcome({")
+    // B16: the raw stable id; the helper namespaces it as "<type>:<id>" on the wire
+    expect(report).toMatch(/eventId: user\.id,/)
+    expect(report).toContain('"sign_up:<id>"')
+    expect(report).toContain("infiniteMetaMirror(data.metaEventName, data.metaEventId)")
+    expect(report).not.toMatch(/eventID:|fbq\(/)
+  })
+
+  it("capture fbc, fbp, user agent and ip from one device at checkout; purchases from the webhook only", () => {
+    expect(webhook).toContain("adMatchFromRequest(request")
+    expect(webhook).toMatch(/one device/i)
+    expect(webhook).toContain('eventId: "purchase:" + session.id')
+    expect(webhook).not.toMatch(/\bph\b|phone_number|infiniteMetaMirror\(/)
+  })
+
+  it("speaks the JS helper's import specifier when the helper is .mjs", () => {
+    expect(serverLaneWizardCopy.reportOutcomeRecipe("../lib/infinite-outcome.mjs", "js")[1]).toBe("```js")
+    expect(serverLaneWizardCopy.reportOutcomeRecipe("../lib/infinite-outcome.mjs", "js").join("\n")).toContain(
+      'from "../lib/infinite-outcome.mjs"'
+    )
   })
 })

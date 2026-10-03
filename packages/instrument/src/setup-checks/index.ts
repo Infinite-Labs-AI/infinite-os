@@ -23,7 +23,12 @@ import { readSourceFile, walkSourceFiles } from "../harness/scan.js"
 import { checkClickIdCapture } from "./click-id-capture.js"
 import { checkConversionPlacement } from "./conversion-placement.js"
 import { runtimeConversionLanes } from "./contract.js"
+import { checkHostGuard } from "./host-guard.js"
+import { checkMetaEventId } from "./meta-event-id.js"
 import { checkMetaPixelConfig } from "./meta-pixel-config.js"
+import { checkPosthogConfig } from "./posthog-config.js"
+import { checkProviderCensus } from "./provider-census.js"
+import { checkSensitivePages } from "./sensitive-pages.js"
 import { checkSilentForms } from "./silent-form.js"
 import { worstState, type SetupCheckResult, type SetupFinding } from "./types.js"
 
@@ -33,6 +38,17 @@ export { checkConversionPlacement } from "./conversion-placement.js"
 export { checkSilentForms } from "./silent-form.js"
 export { checkClickIdCapture, isSharedEntry } from "./click-id-capture.js"
 export { checkMetaPixelConfig, metaSourceUnits } from "./meta-pixel-config.js"
+export { censusEntries, checkProviderCensus } from "./provider-census.js"
+export { checkPosthogConfig, posthogConfigDrift, readPosthogConfigs, type PosthogConfigRead } from "./posthog-config.js"
+export { checkHostGuard, readAdoptedInitGuards, type HostGuardRead } from "./host-guard.js"
+export { checkSensitivePages, detectSensitivePages, type SensitiveRoute } from "./sensitive-pages.js"
+export {
+  META_STANDARD_CONVERSIONS,
+  checkMetaEventId,
+  clickHandlerRegions,
+  findEventIdHits,
+  findStandardOnClick
+} from "./meta-event-id.js"
 
 export interface SetupChecksReport {
   version: 1
@@ -52,13 +68,31 @@ export function readAppSources(appRootAbsolute: string): Map<string, string> {
   return files
 }
 
-export function runSetupChecks(appRootAbsolute: string): SetupChecksReport {
+/** What the wizard knows that the harness does not (the connection's ids and hosts). Optional. */
+export interface SetupChecksContext {
+  /** The connected PostHog project's `apiHost`: enables the region verdict. */
+  expectedPosthogApiHost?: string
+  /** The exempt production hosts: enables the "guard silences production" verdict. */
+  productionHosts?: readonly string[]
+}
+
+export function runSetupChecks(appRootAbsolute: string, context: SetupChecksContext = {}): SetupChecksReport {
   const files = readAppSources(appRootAbsolute)
+  return setupChecksOver(files, context)
+}
+
+/** The same checks over files already read (the wizard re-runs them between agent turns). */
+export function setupChecksOver(files: ReadonlyMap<string, string>, context: SetupChecksContext = {}): SetupChecksReport {
   const checks = [
     checkConversionPlacement({ files, lanes: runtimeConversionLanes() }),
     checkSilentForms({ files }),
     checkClickIdCapture({ files }),
-    checkMetaPixelConfig({ files })
+    checkMetaPixelConfig({ files }),
+    checkProviderCensus({ files }),
+    checkPosthogConfig({ files, ...(context.expectedPosthogApiHost ? { expectedApiHost: context.expectedPosthogApiHost } : {}) }),
+    checkHostGuard({ files, ...(context.productionHosts ? { productionHosts: context.productionHosts } : {}) }),
+    checkSensitivePages({ files }),
+    checkMetaEventId({ files })
   ]
   const findings = checks.flatMap((check) => check.findings)
   return { version: 1, state: worstState(findings), checks, findings }

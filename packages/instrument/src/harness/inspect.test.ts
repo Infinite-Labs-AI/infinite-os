@@ -11,6 +11,7 @@ import {
   classifyProviders,
   detectProvidersWithEvidence,
   normalizeDetected,
+  plannedArtifacts,
   readEnvKeys,
   resolveHarnessKeys
 } from "./inspect.js"
@@ -348,5 +349,19 @@ describe("buildHarnessPlan", () => {
     const classes = classifyProviders({ manifest: null, detected: [], keys, adoptExisting: true, serverLane: false })
     const result = buildHarnessPlan({ root, inspect, classifications: classes, keys, workspaceId: "ws_1", serverLane: false })
     expect(result.failure).toMatchObject({ code: "INF_PLAN_UNMANAGED_TARGET", message: expect.stringContaining("lib/infinite-analytics.ts") })
+  })
+})
+
+describe("plannedArtifacts carries the plan-wide options (I1b)", () => {
+  const ga4 = { measurementId: "G-FAKE00001" }
+  const install = [{ provider: "ga4", action: "install" }] as unknown as Parameters<typeof plannedArtifacts>[0]
+  it("keeps the preview guard and the conversion helpers with the tools", () => {
+    const hostGuard = { mode: "deny" as const, exempt: ["acme-store.com"], deny: ["localhost"] }
+    const planned = plannedArtifacts(install, { artifacts: { ga4, hostGuard, conversions: { helpers: true } }, sources: {} })
+    expect(planned).toEqual({ ga4, hostGuard, conversions: { helpers: true } })
+  })
+  it("NEGATIVE: the plain installer (no guard asked for) gets none, and a tool not being installed is dropped", () => {
+    const planned = plannedArtifacts([{ provider: "ga4", action: "adopt" }] as unknown as Parameters<typeof plannedArtifacts>[0], { artifacts: { ga4 }, sources: {} })
+    expect(planned).toEqual({})
   })
 })

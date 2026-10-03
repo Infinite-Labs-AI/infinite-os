@@ -1,0 +1,221 @@
+// Review I1 P1-5: the job table's S checks on an agent's edit. Each check gets a passing edit and the
+// failing edit it exists to catch (and an undetermined case where the wizard cannot tell), on a real tree.
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
+
+import { afterEach, describe, expect, it } from "vitest"
+
+import type { CheckContext, CheckResult, ChecklistItem, JobId } from "../wizard/contracts/jobs.js"
+import { callsOf, jobStaticCheckFunctions, staticPolicyText, topLevelProps, type JobStaticCheckId, type JobStaticRunContext } from "./job-static.js"
+import { createCheckRunner } from "./registry.js"
+import { registerJobStaticChecks, JOB_STATIC_CHECK_IDS } from "./job-static.js"
+import { JOB_TABLE } from "../wizard/contracts/jobs.js"
+
+const RUN = "7f3c2a91-b0de-4c55-9a11-23456789abcd"
+const ctx: CheckContext = { runId: RUN, now: () => new Date("2026-10-02T10:00:00.000Z") }
+const roots: string[] = []
+afterEach(() => {
+  while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true })
+})
+
+function site(files: Record<string, string>): string {
+  const root = mkdtempSync(join(tmpdir(), "job-static-"))
+  roots.push(root)
+  for (const [path, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true })
+    writeFileSync(join(root, path), text)
+  }
+  return root
+}
+
+function item(jobId: JobId, target: string, files: string[]): ChecklistItem {
+  return {
+    id: `${jobId}:${target}`,
+    jobId,
+    n: JOB_TABLE[jobId].n,
+    title: "t",
+    owner: "agent",
+    trigger: { finding: "f", evidence: files.map((file) => ({ file, line: 1 })) },
+    allow: { files, create: [] },
+    checks: [],
+    state: "claimed"
+  }
+}
+
+async function check(id: JobStaticCheckId, files: Record<string, string>, jobItem: ChecklistItem, run: JobStaticRunContext = {}, base?: Record<string, string | null>): Promise<CheckResult> {
+  const root = site(files)
+  const fns = jobStaticCheckFunctions({ run: () => run, readBaseFile: (_root, file) => (base ? (base[file] ?? null) : undefined) })
+  const raw = await fns[id]({ item: jobItem, root, appRoot: ".", runId: RUN }, ctx)
+  const results = Array.isArray(raw) ? raw : [raw]
+  expect(results).toHaveLength(1)
+  return results[0]!
+}
+
+describe("registration", () => {
+  it("every job-table S check that had no implementation is now registered (a claim never crashes or sits unchecked)", () => {
+    const runner = createCheckRunner({ root: tmpdir(), appRoot: "." })
+    registerJobStaticChecks(runner, {})
+    for (const id of JOB_STATIC_CHECK_IDS) expect(runner.registered()).toContain(id)
+    const sChecks = Object.values(JOB_TABLE).flatMap((spec) => spec.checks.filter((entry) => entry.tier === "S").map((entry) => entry.checkId))
+    for (const id of ["server_lane_mount_order", "rescan_app_found", "next_rewrites_exact", "outcome_after_success", "outcome_declared", "event_id_stable", "no_pii_in_outcome", "identify_on_auth_success", "reset_on_every_signout", "csp_hosts", "privacy_names_installed_tools"]) {
+      expect(sChecks).toContain(id)
+    }
+  })
+})
+
+describe("source helpers", () => {
+  it("callsOf ignores comments and strings; topLevelProps reads keys, shorthand and quoted keys", () => {
+    const text = `// reportInfiniteOutcome({ type: "x" })\nconst s = "reportInfiniteOutcome({})"\nawait reportInfiniteOutcome({ type: "sign_up", eventId, "path": "/signup", adMatch: { em: hash(e) } })\n`
+    const calls = callsOf(text, ["reportInfiniteOutcome"])
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.line).toBe(3)
+    const props = topLevelProps(calls[0]!)!
+    expect(props.get("type")).toBe('"sign_up"')
+    expect(props.get("eventId")).toBe("eventId")
+    expect(props.get("path")).toBe('"/signup"')
+    expect(props.get("adMatch")).toBe("{ em: hash(e) }")
+  })
+})
+
+// ---- job 8 ----
+const SIGNUP = "app/api/signup/route.ts"
+const signupRoute = (body: string) => `import { reportInfiniteOutcome } from "../../../lib/infinite-outcome"\nexport async function POST(req: Request) {\n  const { email } = await req.json()\n  const { data, error } = await supabase.auth.signUp({ email, password: "x" })\n  if (error) return Response.json({ error }, { status: 400 })\n${body}\n  return Response.json({ ok: true })\n}\n`
+const GOOD = `  await reportInfiniteOutcome({ type: "sign_up", path: "/signup", eventId: \`signup:\${data.user.id}\` })`
+const job8 = item("server_conversions", "signup", [SIGNUP])
+const approved = { conversionNames: ["sign_up"] }
+
+describe("job 8: server conversions", () => {
+  it("outcome_after_success: after the success branch passes; before it, or in a catch, is a problem; none at all is a problem", async () => {
+    expect((await check("outcome_after_success", { [SIGNUP]: signupRoute(GOOD) }, job8)).state).toBe("pass")
+    const before = `import { reportInfiniteOutcome } from "x"\nexport async function POST(req) {\n  await reportInfiniteOutcome({ type: "sign_up", eventId: "a" })\n  const { data } = await supabase.auth.signUp({ email: "a", password: "b" })\n}\n`
+    expect((await check("outcome_after_success", { [SIGNUP]: before }, job8)).state).toBe("problem")
+    const inCatch = signupRoute(`  try { await x() } catch (e) {\n    await reportInfiniteOutcome({ type: "sign_up", eventId: data.user.id })\n  }`)
+    expect((await check("outcome_after_success", { [SIGNUP]: inCatch }, job8)).reason).toMatch(/error branch/)
+    expect((await check("outcome_after_success", { [SIGNUP]: signupRoute("") }, job8)).state).toBe("problem")
+  })
+
+  it("outcome_declared: an approved name passes; another name is a problem; a computed one is undetermined; no plan read is undetermined", async () => {
+    expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD) }, job8, approved)).state).toBe("pass")
+    expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD.replace('"sign_up"', '"signup_completed"')) }, job8, approved)).state).toBe("problem")
+    expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD.replace('"sign_up"', "name")) }, job8, approved)).state).toBe("undetermined")
+    expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD) }, job8, {})).state).toBe("undetermined")
+  })
+
+  it("event_id_stable: a row id passes; random, time-based, constant or missing ids are problems", async () => {
+    expect((await check("event_id_stable", { [SIGNUP]: signupRoute(GOOD) }, job8)).state).toBe("pass")
+    for (const id of ["crypto.randomUUID()", "`s:${Date.now()}`", '"signup"']) {
+      expect((await check("event_id_stable", { [SIGNUP]: signupRoute(`  await reportInfiniteOutcome({ type: "sign_up", eventId: ${id} })`) }, job8)).state, id).toBe("problem")
+    }
+    expect((await check("event_id_stable", { [SIGNUP]: signupRoute(`  await reportInfiniteOutcome({ type: "sign_up" })`) }, job8)).reason).toMatch(/no eventId/)
+  })
+
+  it("no_pii_in_outcome: a hashed em passes; a raw email anywhere, an unhashed em, or ph is a problem", async () => {
+    expect((await check("no_pii_in_outcome", { [SIGNUP]: signupRoute(`  await reportInfiniteOutcome({ type: "sign_up", eventId: data.user.id, adMatch: { em: sha256(email) } })`) }, job8)).state).toBe("pass")
+    for (const body of [
+      `  await reportInfiniteOutcome({ type: "sign_up", eventId: data.user.id, accountKey: email })`,
+      `  await reportInfiniteOutcome({ type: "sign_up", eventId: data.user.id, properties: { email: data.user.email } })`,
+      `  await reportInfiniteOutcome({ type: "sign_up", eventId: data.user.id, adMatch: { em: email } })`,
+      `  await reportInfiniteOutcome({ type: "sign_up", eventId: data.user.id, adMatch: { ph: "x" } })`
+    ]) {
+      expect((await check("no_pii_in_outcome", { [SIGNUP]: signupRoute(body) }, job8)).state, body).toBe("problem")
+    }
+  })
+})
+
+// ---- job 9 ----
+const LOGIN = "app/login/page.tsx"
+const LOGOUT = "app/api/auth/logout/route.ts"
+const NAV = "components/nav.tsx"
+const login = (identify: string) => `"use client"\nexport function Login() {\n  async function submit() {\n    const { data, error } = await supabase.auth.signInWithPassword({ email, password })\n    if (error) return\n${identify}\n  }\n}\n`
+const job9 = item("identify_reset", "auth", [LOGIN, LOGOUT, NAV])
+
+describe("job 9: identify and reset", () => {
+  it("identify_on_auth_success: the account id after the login passes; an email, a constant, before the login, or none is a problem", async () => {
+    expect((await check("identify_on_auth_success", { [LOGIN]: login("    window.infiniteIdentify(data.user.id)") }, job9)).state).toBe("pass")
+    expect((await check("identify_on_auth_success", { [LOGIN]: login("    window.infiniteIdentify(data.user.email)") }, job9)).state).toBe("problem")
+    expect((await check("identify_on_auth_success", { [LOGIN]: login('    window.infiniteIdentify("user")') }, job9)).state).toBe("problem")
+    const early = `"use client"\nexport function Login() {\n  async function submit() {\n    window.infiniteIdentify(id)\n    await supabase.auth.signInWithPassword({ email, password })\n  }\n}\n`
+    expect((await check("identify_on_auth_success", { [LOGIN]: early }, job9)).state).toBe("problem")
+    expect((await check("identify_on_auth_success", { [LOGIN]: login("") }, job9)).state).toBe("problem")
+  })
+
+  it("reset_on_every_signout: a client reset covers a server-only logout route; a client sign-out with no reset is a problem", async () => {
+    const route = `export async function POST() {\n  await supabase.auth.signOut()\n  return Response.redirect("/")\n}\n`
+    const nav = (reset: string) => `"use client"\nexport function Nav() {\n  return <button onClick={async () => { await signOut();${reset} }}>Log out</button>\n}\n`
+    expect((await check("reset_on_every_signout", { [LOGOUT]: route, [NAV]: nav(" window.infiniteReset()") }, job9)).state).toBe("pass")
+    expect((await check("reset_on_every_signout", { [LOGOUT]: route, [NAV]: nav("") }, job9)).state).toBe("problem")
+    expect((await check("reset_on_every_signout", { [LOGIN]: login("") }, item("identify_reset", "auth", [LOGIN]))).state).toBe("pass")
+  })
+})
+
+// ---- jobs 2, 3 ----
+describe("jobs 2 and 3: the Next config rewrites and the app shell", () => {
+  const proxy: JobStaticRunContext["proxy"] = {
+    infinite: { path: "/infinite/ledger", destination: "https://api.ultima.inc/api/analytics/events/collect" },
+    posthog: { path: "/ingest", ingestHost: "https://us.i.posthog.com", assetsHost: "https://us-assets.i.posthog.com" }
+  }
+  const rewriteJob = item("unusual_layout", "next_config_rewrites", ["next.config.mjs"])
+  it("next_rewrites_exact: the exact Infinite pair passes; a near miss is a problem; no run facts is undetermined", async () => {
+    const good = `const nextConfig = {\n  async rewrites() {\n    return [{ source: "/infinite/ledger", destination: "https://api.ultima.inc/api/analytics/events/collect" }]\n  }\n}\nexport default nextConfig\n`
+    expect((await check("next_rewrites_exact", { "next.config.mjs": good }, rewriteJob, { proxy })).state).toBe("pass")
+    expect((await check("next_rewrites_exact", { "next.config.mjs": good.replace("/infinite/ledger", "/infinite/ledger/") }, rewriteJob, { proxy })).state).toBe("problem")
+    expect((await check("next_rewrites_exact", { "next.config.mjs": good }, rewriteJob, {})).state).toBe("undetermined")
+    // Job 3 asks for PostHog's pairs, not Infinite's.
+    expect((await check("next_rewrites_exact", { "next.config.mjs": good }, item("posthog_improve", "proxy", ["next.config.mjs"]), { proxy })).state).toBe("problem")
+  })
+
+  it("rescan_app_found: the managed client mounted in the job's file passes; a file without it is a problem", async () => {
+    const shell = item("unusual_layout", "custom_builder", ["src/layouts/Base.astro"])
+    expect((await check("rescan_app_found", { "src/layouts/Base.astro": `---\nimport InfiniteAnalyticsClient from "../lib/infinite-analytics-client"\n---\n<html><body><InfiniteAnalyticsClient /><slot /></body></html>\n` }, shell)).state).toBe("pass")
+    expect((await check("rescan_app_found", { "src/layouts/Base.astro": "<html><body><slot /></body></html>\n" }, shell)).state).toBe("problem")
+  })
+})
+
+// ---- job 1 ----
+describe("job 1: the server lane mount", () => {
+  const job1 = item("server_lane_mount", "server_ts", ["server.ts", "lib/infinite-server-lane.js"])
+  it("mounted before the routes passes; after a route, or not at all, is a problem", async () => {
+    const server = (lines: string) => `import express from "express"\nimport { infiniteServerLane } from "./lib/infinite-server-lane.js"\nconst app = express()\n${lines}\napp.listen(3000)\n`
+    expect((await check("server_lane_mount_order", { "server.ts": server(`app.use(infiniteServerLane())\napp.get("/", home)`) }, job1)).state).toBe("pass")
+    expect((await check("server_lane_mount_order", { "server.ts": server(`app.use(express.static("public"))\napp.use(infiniteServerLane())`) }, job1)).state).toBe("problem")
+    expect((await check("server_lane_mount_order", { "server.ts": server(`app.get("/", home)`) }, job1)).state).toBe("problem")
+  })
+  it("a Next middleware must export withInfiniteServerLane(...)", async () => {
+    const mw = item("server_lane_mount", "middleware_ts", ["middleware.ts"])
+    expect((await check("server_lane_mount_order", { "middleware.ts": `export default withInfiniteServerLane(function middleware(req) { return NextResponse.next() })\n` }, mw)).state).toBe("pass")
+    expect((await check("server_lane_mount_order", { "middleware.ts": `export function middleware(req) { return NextResponse.next() }\n` }, mw)).state).toBe("problem")
+  })
+})
+
+// ---- job 12 ----
+describe("job 12: the CSP hosts", () => {
+  const job12 = item("csp", "next_config_mjs", ["next.config.mjs"])
+  const run: JobStaticRunContext = { productionHosts: ["acme-store.com"], expect: { ga4: ["G-ACME000001"] } }
+  const config = (policy: string) => `const csp = "${policy}"\nexport default { async headers() { return [{ source: "/(.*)", headers: [{ key: "Content-Security-Policy", value: csp }] }] } }\n`
+  const BASE = "default-src 'self'; script-src 'self'; connect-src 'self'"
+  const GOOD = "default-src 'self'; script-src 'self' https://www.googletagmanager.com; connect-src 'self' https://*.google-analytics.com https://*.analytics.google.com"
+  it("every needed host and nothing broader passes; a missing host, a new *, or a new 'unsafe-inline' is a problem", async () => {
+    const base = { "next.config.mjs": config(BASE) }
+    expect((await check("csp_hosts", { "next.config.mjs": config(GOOD) }, job12, run, base)).state).toBe("pass")
+    expect((await check("csp_hosts", { "next.config.mjs": config(BASE) }, job12, run, base)).reason).toMatch(/googletagmanager/)
+    expect((await check("csp_hosts", { "next.config.mjs": config(`${GOOD}; img-src *`) }, job12, run, base)).reason).toMatch(/\*/)
+    expect((await check("csp_hosts", { "next.config.mjs": config(GOOD.replace("script-src 'self'", "script-src 'self' 'unsafe-inline'")) }, job12, run, base)).reason).toMatch(/unsafe-inline/)
+    expect((await check("csp_hosts", { "next.config.mjs": config(GOOD) }, job12, {}, base)).state).toBe("undetermined")
+  })
+  it("staticPolicyText reads helmet's camelCase directives", () => {
+    expect(staticPolicyText(`helmet({ contentSecurityPolicy: { directives: { scriptSrc: ["'self'", "https://a.example"] } } })`)).toBe("script-src 'self' https://a.example")
+  })
+})
+
+// ---- job 14 ----
+describe("job 14: the privacy paragraph", () => {
+  const job14 = item("privacy_paragraph", "page", ["app/privacy/page.tsx"])
+  const text = "We use Google Analytics and PostHog to measure visits."
+  it("the approved paragraph naming every new tool passes; a missing tool or an edited paragraph is a problem", async () => {
+    const page = (body: string) => `export default function Privacy() {\n  return (\n    <main>\n      <p>\n        ${body}\n      </p>\n    </main>\n  )\n}\n`
+    expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": page(text) }, job14, { privacyText: text, newTools: ["ga4", "posthog"] })).state).toBe("pass")
+    expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": page("We use Google Analytics.") }, job14, { privacyText: null, newTools: ["ga4", "posthog"] })).reason).toMatch(/posthog/)
+    expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": page("We use Google Analytics and PostHog.") }, job14, { privacyText: text, newTools: ["ga4", "posthog"] })).reason).toMatch(/verbatim/)
+  })
+})

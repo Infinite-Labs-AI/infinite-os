@@ -11,6 +11,8 @@ import { inspectWorkspace } from "../inspect.js"
 import { planInstallation } from "../plan.js"
 import type { InstallPlan, WorkspaceInstallArtifacts } from "../types.js"
 
+import { jsLiteral } from "../providers/validate.js"
+
 import { buildAnalyticsModuleSource } from "./managed-files.js"
 
 const fixtureRoot = dirname(fileURLToPath(import.meta.url))
@@ -365,7 +367,7 @@ describe.each(frameworks)("$name assembled module with every provider, executed"
     expect(loaded.some((src) => src.includes("googletagmanager.com/gtag/js?id=G-TEST123"))).toBe(true)
     // PostHog: init queued for array.js.
     const posthog = window.posthog as { _i: unknown[][] }
-    expect((plain(posthog._i) as unknown[][])[0]).toEqual(["phc_test", { api_host: "https://us.i.posthog.com", defaults: "2025-05-24" }, "posthog"])
+    expect((plain(posthog._i) as unknown[][])[0]).toEqual(["phc_test", { api_host: "https://us.i.posthog.com", defaults: "2026-01-30" }, "posthog"])
     expect(loaded).toContain("https://us-assets.i.posthog.com/static/array.js")
     // X
     expect(typeof window.twq).toBe("function")
@@ -383,12 +385,39 @@ describe.each(frameworks)("$name assembled module with every provider, executed"
     expect(window.__infiniteAnalyticsRuntime).toBe(true)
   })
 
-  it("negative: one snippet that throws (the old PostHog stub) stops every provider after it", () => {
+  // Per-provider isolation (the Phase-1 F4 follow-up): each provider runs in its own try, so the old
+  // PostHog stub — which threw while it was built — now costs PostHog alone.
+  it("a provider that throws (the old PostHog stub) leaves GA4, X, Meta and Infinite started", () => {
     const source = generateManagedModule(fixture, modulePath, ALL_PROVIDERS)
     // The stub list it replaced named methods under parents the stub never creates.
     const broken = source.replace(/o='[^']*'\.split/, "o='init capture people.set person.set_once group.set'.split")
     expect(broken).not.toBe(source)
     const { window, scriptErrors } = executeAssembledModuleAsBrowser(broken)
+    expect(scriptErrors).toEqual([])
+    expect(typeof window.gtag).toBe("function")
+    expect(typeof window.twq).toBe("function")
+    expect(typeof window.fbq).toBe("function")
+    expect(window.__infiniteAnalyticsRuntime).toBe(true)
+  })
+
+  it("a GA4 snippet that throws (first in the script) leaves PostHog, X, Meta and Infinite started", () => {
+    const source = generateManagedModule(fixture, modulePath, ALL_PROVIDERS)
+    const broken = source.replace("window.gtag('js', new Date());", "window.gtag('js', new Date()); throw new Error('ga4 broke');")
+    expect(broken).not.toBe(source)
+    const { window, scriptErrors, loaded } = executeAssembledModuleAsBrowser(broken)
+    expect(scriptErrors).toEqual([])
+    expect(loaded).toContain("https://us-assets.i.posthog.com/static/array.js")
+    expect(typeof window.twq).toBe("function")
+    expect(typeof window.fbq).toBe("function")
+    expect(window.__infiniteAnalyticsRuntime).toBe(true)
+  })
+
+  it("negative: without the per-provider try, the same throw stops every provider after it", () => {
+    const source = generateManagedModule(fixture, modulePath, ALL_PROVIDERS)
+    const broken = source.replace(/o='[^']*'\.split/, "o='init capture people.set person.set_once group.set'.split")
+    const unisolated = stripProviderIsolation(broken)
+    expect(unisolated).not.toBe(broken)
+    const { window, scriptErrors } = executeAssembledModuleAsBrowser(unisolated)
     expect(scriptErrors).toHaveLength(1)
     expect(scriptErrors[0]!.message).toMatch(/set_once/)
     expect(typeof window.gtag).toBe("function") // before PostHog in the script: unaffected
@@ -397,3 +426,18 @@ describe.each(frameworks)("$name assembled module with every provider, executed"
     expect(window.__infiniteAnalyticsRuntime).toBeUndefined()
   })
 })
+
+/** The module with every provider's `try { … } catch {}` wrapper removed (the pre-isolation bytes). */
+function stripProviderIsolation(source: string): string {
+  const literal = source.match(/^const bootstrapSource = (".*")$/m)![1]!
+  const decoded = JSON.parse(literal) as string
+  const stripped = decoded
+    .split("\n\n")
+    .map((snippet) =>
+      snippet.startsWith("try {\n") && snippet.endsWith("\n} catch (_infiniteProviderError) {}")
+        ? snippet.slice("try {\n".length, -"\n} catch (_infiniteProviderError) {}".length)
+        : snippet
+    )
+    .join("\n\n")
+  return source.replace(literal, () => jsLiteral(stripped))
+}

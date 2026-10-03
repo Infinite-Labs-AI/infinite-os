@@ -1,0 +1,842 @@
+// Step 9 `review` (§3d.1, §3g.4, lane O4): the OTHER agent reviews the PR read-only in a detached worktree of
+// the head → the wizard scans the review and posts it as ONE `event: COMMENT` review → reads the threads back
+// under the trust rules → triages (FIX / DECLINE / ANSWER / ASK) → fixes through the worker (job 16, ≤ 2 rounds)
+// → commits, pushes, proves the new head descends from the old → replies on its own threads (and on a
+// teammate's only with the user's OK) → resolves only its own fixed threads → re-rehearses → `gh pr ready` + the
+// final comment. With one agent it writes and prints the review brief instead.
+import { createHash } from "node:crypto"
+import { join } from "node:path"
+
+import type { AgentKind, ReviewFailure, ReviewResult } from "../contracts/agents.js"
+import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
+import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
+import type { CheckResult } from "../contracts/jobs.js"
+import { WIZARD_PATHS } from "../contracts/state.js"
+import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { isGloballyDenied } from "../../git/commit.js"
+import { isGitHubAdapter, type GitHubHostAdapter } from "../../hosts/github.js"
+import { isUnsupported } from "../../hosts/other.js"
+import { isReviewResult, parseBriefReview, printedReviewBrief, reviewerBrief } from "../../review/brief.js"
+import { allowlistUnion, assertNoAgentAlive, bestEffortBridge, bridgeStop, manifestFiles, status, sub } from "../../review/context.js"
+import { parseUnifiedDiff } from "../../review/diff.js"
+import { job16Item, restoreFiles, runFixRound, snapshotFiles, verifyFix } from "../../review/fix.js"
+import { parseLedger, recordDecisions, REVIEW_LEDGER_PATH, type ReviewLedger } from "../../review/ledger.js"
+import { commentTrust, hasFinalMarker, hasReplyMarker, parseReviewMarker, stripMarkers } from "../../review/markers.js"
+import { AGENT_LABEL, buildFinalComment, buildReply, buildReviewPost, excerpt, redactIdsNotInDiff, safeText, type FixReplyState } from "../../review/post.js"
+import { applyRehearsalToJobs, recordRehearsalCells, rehearse } from "../../review/rehearse.js"
+import { mergeRequirementLine } from "../../github/rules.js"
+import { checksSummary } from "../../github/checks.js"
+import { DETERMINISTIC_CHECKS_BY_ITEM, isRepoRelativePath, triage, triageKey, type TriageDecision, type TriageItem } from "../../review/triage.js"
+import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
+import { announceRehearsal, commitStop, evidenceUrls, isShipContext, prepareShip, recordClickTests, type ShipContext } from "./rehearsal.js"
+
+const meta = WIZARD_STEP_META.review
+const REVIEW_INPUT_DIR = ".infinite/review"
+const HEAD_SYNC_ATTEMPTS = 5
+const HEAD_SYNC_SLEEP_MS = 3_000
+
+function sha256(text: string): string {
+  return `sha256:${createHash("sha256").update(text).digest("hex")}`
+}
+
+interface Session {
+  ctx: WizardContext
+  deps: WizardDeps
+  ship: ShipContext
+  github: GitHubHostAdapter | null
+  number: number | null
+  login: string | null
+  ledger: ReviewLedger
+  decisions: TriageDecision[]
+  /** Comments from people outside the repo, keyed `<threadId>#<index>` so each is listed once across rounds. */
+  untrusted: Array<{ key: string; author: string; path: string | null; excerpt: string }>
+  notes: string[]
+  reviewed: boolean
+  reviewer: AgentKind | "brief" | null
+}
+
+async function saveLedger(session: Session): Promise<void> {
+  const path = join(session.ctx.root, REVIEW_LEDGER_PATH)
+  await session.deps.fs.mkdirp(join(session.ctx.root, WIZARD_PATHS.dir), 0o700)
+  await session.deps.fs.writeTextAtomic(path, `${JSON.stringify(session.ledger, null, 2)}\n`, 0o600)
+}
+
+/** The review inputs, written into the reviewer's own detached worktree (never into the user's repo). */
+async function writeReviewInputs(session: Session, dir: string, diff: string): Promise<{ diff: string; plan: string; checks: string }> {
+  const { deps, ctx } = session
+  const state = ctx.state.get()
+  const keys = session.ship.facts.keys
+  const inputDir = join(dir, REVIEW_INPUT_DIR)
+  await deps.fs.mkdirp(inputDir, 0o700)
+  const plan = {
+    approvedPlanLines: (state.plan?.lines ?? []).filter((line) => line.approved === true).map((line) => line.id),
+    allowlist: allowlistUnion(state.jobs),
+    connectedIds: keys
+      ? {
+          ga4: keys.ga4.streams.map((stream) => stream.measurementId),
+          posthog: keys.posthog.projectKey,
+          meta: keys.meta.pixels.map((pixel) => pixel.pixelId),
+          infinite: keys.infinite.siteSourceKey
+        }
+      : null,
+    consentMode: state.plan?.answers.consentMode ?? null,
+    approvedConversions: state.plan?.answers.conversions ?? []
+  }
+  const checks = {
+    jobs: state.jobs.map((job) => ({ id: job.id, title: job.title, state: job.state, checks: job.checks.map((check) => ({ id: check.id, tier: check.tier, state: check.state })) })),
+    inPr: state.report.in_pr ? Object.fromEntries(Object.entries(state.report.in_pr.finishLine).map(([id, cell]) => [id, cell?.state ?? null])) : null
+  }
+  const names = { diff: `${REVIEW_INPUT_DIR}/diff.patch`, plan: `${REVIEW_INPUT_DIR}/plan.json`, checks: `${REVIEW_INPUT_DIR}/checks.json` }
+  await deps.fs.writeTextAtomic(join(dir, names.diff), diff, 0o600)
+  await deps.fs.writeTextAtomic(join(dir, names.plan), `${JSON.stringify(plan, null, 2)}\n`, 0o600)
+  await deps.fs.writeTextAtomic(join(dir, names.checks), `${JSON.stringify(checks, null, 2)}\n`, 0o600)
+  return names
+}
+
+/** Runs the reviewer agent on `head` (one retry when its JSON does not parse). */
+async function runReviewer(session: Session, reviewer: AgentKind, round: number, head: string, fromSha: string, openItems: string[]): Promise<ReviewResult | ReviewFailure> {
+  const { ship, deps, ctx } = session
+  const worktree = await ship.git.worktreeAddDetached(head)
+  try {
+    const inputs = await writeReviewInputs(session, worktree.dir, await ship.git.diff(fromSha, head))
+    const brief = reviewerBrief({
+      prNumber: session.number,
+      repoLabel: ship.repoLabel,
+      tagVersion: deps.tagVersion,
+      runId: ship.runId,
+      reReview: round > 1 ? { fromSha, toSha: head, openItems } : null,
+      inputs
+    })
+    sub(ctx, "review", `${AGENT_LABEL[reviewer]} is reviewing (read-only)…`, "pending")
+    // The headline names who is working NOW (terminal QA #19: the worker's last line from the jobs or fix turn
+    // stayed above "Codex is reviewing").
+    ctx.emit.emit("narrate", { agent: reviewer, role: "reviewer", text: round > 1 ? "Reading the fix commit (read-only)" : "Reading the pull request (read-only)" })
+    let result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief })
+    if ("error" in result && result.error === "unparseable") {
+      result = await deps.agents.review({
+        worktreeDir: worktree.dir,
+        reviewer,
+        brief: `${brief}\n\nYour previous answer did not match the JSON schema. Return JSON only, exactly matching it.`
+      })
+    }
+    // Belt and braces: whatever the runner parsed must match review.schema.json before anything is posted.
+    if (!("error" in result) && !isReviewResult(result)) return { error: "unparseable" }
+    return result
+  } finally {
+    await ship.git.worktreeRemove(worktree.dir)
+  }
+}
+
+/** Scans and posts one review round (GitHub: one COMMENT review; elsewhere: `.infinite/wizard/REVIEW.md`). */
+async function postRound(session: Session, review: ReviewResult, reviewer: AgentKind, round: number, head: string): Promise<void> {
+  const { ship, deps, ctx } = session
+  const state = ctx.state.get()
+  const fullDiff = await ship.git.diff(state.git!.baseSha, head)
+  const post = buildReviewPost({ review, diffFiles: parseUnifiedDiff(fullDiff), scanner: ship.scanner, runId: ship.runId, round, head, reviewer })
+  const redact = (text: string) => (ship.isPrivate ? text : redactIdsNotInDiff(text, fullDiff, ship.facts.connectionIds))
+  const body = redact(post.body)
+  const threads = post.threads.map((thread) => ({ ...thread, body: redact(thread.body) }))
+  if (session.github && session.number !== null) {
+    await session.github.postReview(session.number, { headSha: head, body, threads })
+  } else {
+    const path = join(ctx.root, WIZARD_PATHS.review)
+    const previous = (await deps.fs.readText(path)) ?? ""
+    const located = threads.map((thread) => `- \`${thread.path}:${thread.line}\` ${thread.body.replace(/\n+/g, " ")}`).join("\n")
+    await deps.fs.writeTextAtomic(path, `${previous}${previous ? "\n\n" : ""}${body}${located ? `\n\n${located}` : ""}\n`, 0o600)
+  }
+  const line = reviewFoundLine(AGENT_LABEL[reviewer], review.findings.length, round)
+  sub(ctx, "review", line.text, line.tone)
+}
+
+/**
+ * The review in a few words for the step's closing line (terminal QA #18: the round's own lines scroll out of the
+ * kept sub-statuses behind the rehearsal re-run, so the closing line says what was found and what was fixed).
+ */
+export function reviewTally(rounds: ReadonlyArray<{ fixSha: string | null; review?: { findings: readonly unknown[] } }>): string {
+  const comments = rounds.reduce((sum, round) => sum + (round.review?.findings.length ?? 0), 0)
+  if (comments === 0) return "no comments"
+  const fixRounds = rounds.filter((round) => round.fixSha !== null).length
+  return `${comments} comment${comments === 1 ? "" : "s"}${fixRounds > 0 ? `, fixed in ${fixRounds} new commit${fixRounds === 1 ? "" : "s"}` : ", none fixed"}`
+}
+
+/**
+ * What the reviewer found, said so a later round never reads as "found nothing at all" (terminal QA #18: after
+ * a fix, the re-review's "Codex: no comments" was the only line left on screen about the review).
+ */
+export function reviewFoundLine(reviewer: string, findings: number, round: number): { text: string; tone: "ok" | "info" } {
+  if (findings === 0) {
+    return { text: round > 1 ? `${reviewer} re-checked the fix: no new comments` : `${reviewer} reviewed the pull request: nothing to change`, tone: "ok" }
+  }
+  return { text: `${reviewer} left ${findings} ${round > 1 ? "new " : ""}comment${findings === 1 ? "" : "s"}`, tone: "info" }
+}
+
+/** The review as the ledger keeps it: every reviewer string passed through the scan (paths included). */
+function scannedReview(scanner: ShipContext["scanner"], review: ReviewResult): ReviewResult {
+  const clean = (text: string) => safeText(scanner, text)
+  return {
+    verdict: review.verdict,
+    summary: clean(review.summary),
+    checklist: review.checklist.map((row) => ({ ...row, note: clean(row.note) })),
+    findings: review.findings.map((finding) => ({
+      ...finding,
+      path: clean(finding.path),
+      body: clean(finding.body),
+      suggested_fix: finding.suggested_fix === null ? null : clean(finding.suggested_fix)
+    }))
+  }
+}
+
+const FINDING_LABEL = /\*\*\[R\d{1,2} [a-z]+\]\*\* (F\d{1,2})/
+
+/** The most of a teammate's comment text the user is shown, and the exact text the worker then gets. */
+const TEAMMATE_TEXT_MAX = 600
+
+/** Reviewer findings + teammate threads (after the user's OK), as triage items; strangers' threads are listed only. */
+async function gatherItems(session: Session, review: ReviewResult, round: number, head: string): Promise<{ items: TriageItem[]; teammateOk: Set<string>; ownThreadByFinding: Map<string, string> }> {
+  const { ctx, ship } = session
+  const ownThreadByFinding = new Map<string, string>()
+  const teammateOk = new Set<string>()
+  const items: TriageItem[] = review.findings.map((finding) => {
+    // A path the scan would change (a token, an email, a private path) is not a file the wizard can scope.
+    const path = safeText(ship.scanner, finding.path) === finding.path ? finding.path : null
+    return {
+      source: "reviewer",
+      threadId: null,
+      findingId: finding.id,
+      item: finding.item,
+      severity: finding.severity,
+      path,
+      line: path === null ? null : finding.line,
+      body: safeText(ship.scanner, finding.body),
+      suggestedFix: finding.suggested_fix === null ? null : safeText(ship.scanner, finding.suggested_fix)
+    }
+  })
+  if (!session.github || session.number === null) return { items, teammateOk, ownThreadByFinding }
+  const threads = await session.github.readThreadDetails(session.number)
+  const handled = new Set(ctx.state.get().pr?.handledThreadIds ?? [])
+  const listed = new Set(session.untrusted.map((entry) => entry.key))
+  const listUntrusted = (key: string, entry: { author: string; path: string | null; body: string }): void => {
+    if (listed.has(key)) return
+    listed.add(key)
+    session.untrusted.push({ key, author: entry.author, path: entry.path, excerpt: safeText(ship.scanner, entry.body) })
+  }
+  const teammateThreads: Array<{ thread: (typeof threads)[number]; text: string }> = []
+  for (const thread of threads) {
+    if (thread.isResolved) continue
+    const first = thread.comments[0]
+    if (!first) continue
+    const trust = commentTrust(first, { login: session.login, runId: ship.runId })
+    if (trust === "own") {
+      const marker = parseReviewMarker(first.body)
+      const label = FINDING_LABEL.exec(first.body)
+      if (marker && marker.round === round && marker.head === head && label) ownThreadByFinding.set(label[1]!, thread.threadId)
+      continue
+    }
+    if (handled.has(thread.threadId)) continue
+    if (trust === "untrusted") {
+      listUntrusted(`${thread.threadId}#0`, { author: first.author, path: thread.path, body: first.body })
+      continue
+    }
+    // A teammate's thread: only comments by OWNER/MEMBER/COLLABORATOR count. A stranger's reply inside it is
+    // listed, never acted on; the reply marker counts only on the user's own comments (anyone can paste it).
+    const ownReply = (comment: (typeof thread.comments)[number]) => session.login !== null && comment.author === session.login && hasReplyMarker(comment.body)
+    const trusted = thread.comments.filter((comment) => commentTrust(comment, { login: session.login, runId: ship.runId }) !== "untrusted")
+    thread.comments.forEach((comment, index) => {
+      if (commentTrust(comment, { login: session.login, runId: ship.runId }) === "untrusted") listUntrusted(`${thread.threadId}#${index}`, { author: comment.author, path: thread.path, body: comment.body })
+    })
+    const lastTrusted = trusted[trusted.length - 1]
+    if (!lastTrusted || ownReply(lastTrusted)) continue
+    // Everything the teammates wrote since the wizard's last reply on this thread: exactly what the user OKs.
+    const lastOwn = trusted.map((comment) => ownReply(comment)).lastIndexOf(true)
+    const text = trusted
+      .slice(lastOwn + 1)
+      .filter((comment) => !hasReplyMarker(comment.body))
+      .map((comment) => `@${comment.author}: ${stripMarkers(comment.body)}`)
+      .join("\n\n")
+    const shown = safeText(ship.scanner, text).slice(0, TEAMMATE_TEXT_MAX)
+    if (shown.trim().length > 0) teammateThreads.push({ thread, text: shown })
+  }
+  for (const item of items) item.threadId = ownThreadByFinding.get(item.findingId ?? "") ?? null
+  const strangers = session.untrusted.length
+  if (strangers > 0) sub(ctx, "review", `${strangers} comment${strangers === 1 ? "" : "s"} from people outside the repo ${strangers === 1 ? "is" : "are"} shown, not acted on`, "info")
+  if (teammateThreads.length > 0) {
+    const answer = await ctx.ask("teammate-comments", {
+      comments: teammateThreads.map(({ thread, text }) => ({
+        threadId: thread.threadId,
+        author: thread.author,
+        path: thread.path ?? "",
+        line: thread.line,
+        excerpt: text
+      }))
+    })
+    const actOn = typeof answer === "object" && answer !== null && Array.isArray(answer.actOn) ? answer.actOn : []
+    for (const { thread, text } of teammateThreads) {
+      if (!actOn.includes(thread.threadId)) {
+        // Not OK'd: never acted on, never replied to, never asked again.
+        ctx.state.update((state) => {
+          if (state.pr && !state.pr.handledThreadIds.includes(thread.threadId)) state.pr.handledThreadIds.push(thread.threadId)
+        })
+        continue
+      }
+      teammateOk.add(thread.threadId)
+      const path = thread.path !== null && safeText(ship.scanner, thread.path) === thread.path ? thread.path : null
+      items.push({
+        source: "teammate",
+        threadId: thread.threadId,
+        findingId: null,
+        item: null,
+        severity: "should",
+        path,
+        line: path === null ? null : thread.line,
+        // The exact text the user was shown and OK'd, nothing more.
+        body: text,
+        suggestedFix: null
+      })
+    }
+  }
+  return { items, teammateOk, ownThreadByFinding }
+}
+
+function passingChecks(ctx: WizardContext): Set<string> {
+  const state = ctx.state.get()
+  const out = new Set<string>()
+  for (const job of state.jobs) for (const check of job.checks) if (check.state === "pass") out.add(check.id)
+  for (const cell of Object.values(state.report.in_pr?.finishLine ?? {})) {
+    if (cell?.state === "pass" && cell.provenance.checkId) out.add(cell.provenance.checkId)
+  }
+  return out
+}
+
+function answerFrom(ctx: WizardContext): (item: TriageItem) => string | null {
+  const state = ctx.state.get()
+  const byId = new Map<string, string>()
+  for (const job of state.jobs) for (const check of job.checks) if (check.state !== "not_run") byId.set(check.id, check.state)
+  return (item) => {
+    const ids = item.item ? DETERMINISTIC_CHECKS_BY_ITEM[item.item] ?? [] : []
+    const measured = ids.filter((id) => byId.has(id)).map((id) => `${id}: ${byId.get(id)}`)
+    return measured.length > 0 ? `From this run's own checks on this commit: ${measured.join(", ")}.` : null
+  }
+}
+
+/** ASK items the user can turn into a fix (widening, a conflict, a re-raised item); the rest stay open. */
+async function resolveAsks(session: Session, decisions: TriageDecision[], workerAvailable: boolean): Promise<TriageDecision[]> {
+  const out: TriageDecision[] = []
+  for (const decision of decisions) {
+    const askable =
+      decision.action === "ASK" &&
+      workerAvailable &&
+      // A ruling (consent, a GA4 proxy, Meta's never-list, deletion) is never offered as a fix.
+      decision.ruling === undefined &&
+      decision.item.path !== null &&
+      isRepoRelativePath(decision.item.path) &&
+      !isGloballyDenied(decision.item.path) &&
+      (decision.askReason === "allowlist_widening" || decision.askReason === "reviewer_conflict" || decision.askReason === "raised_after_decline")
+    if (!askable) {
+      out.push(decision)
+      continue
+    }
+    const who = decision.item.source === "teammate" ? "A teammate" : "The reviewer"
+    const where = `${decision.item.path}${decision.item.line ? `:${decision.item.line}` : ""}`
+    const answer = await session.ctx.ask("single", {
+      question: `${who} on ${where}: “${excerpt(decision.item.body, 140)}” ${decision.reason} Let the agent fix it?`,
+      options: [
+        { label: "Fix it", value: "fix" },
+        { label: "Leave it", value: "leave" }
+      ],
+      default: "leave"
+    })
+    if (answer === "fix") {
+      session.ledger.open = session.ledger.open.filter((entry) => entry.key !== triageKey(decision.item))
+      out.push({ ...decision, action: "FIX", reason: "You approved this fix.", askReason: undefined })
+    } else {
+      out.push(decision)
+    }
+  }
+  return out
+}
+
+/** Pushes the fix commit and proves the PR head moved forward (a descendant, never a rewrite). */
+async function syncHead(session: Session, prevHead: string, newHead: string): Promise<{ head: string } | StepOutcome> {
+  const { ship, deps, ctx } = session
+  const gitState = ctx.state.get().git!
+  // A plain push (on GitLab too: the merge request already exists).
+  const pushed = await pushBranch({ ctx, deps, git: ship.git, scanner: ship.scanner, hostKind: "other", base: gitState.base, branch: gitState.branch, title: "" })
+  if (pushed.kind === "failed") return failed("INF_WIZ_PUSH_REFUSED", pushed.message)
+  if (!(await ship.git.isAncestor(prevHead, newHead))) return failed("INF_WIZ_PUSH_REFUSED", "The fix commit does not descend from the reviewed head; the wizard never rewrites history.")
+  let head = newHead
+  if (session.github && session.number !== null) {
+    let pr = await session.github.readPr(session.number)
+    for (let attempt = 1; attempt < HEAD_SYNC_ATTEMPTS && pr.headRefOid !== head; attempt += 1) {
+      await deps.clock.sleep(HEAD_SYNC_SLEEP_MS, ctx.signal)
+      pr = await session.github.readPr(session.number)
+    }
+    if (pr.headRefOid !== head) return failed("INF_WIZ_PUSH_REFUSED", `GitHub's pull request head (${pr.headRefOid.slice(0, 7)}) is not the pushed commit (${head.slice(0, 7)}).`)
+    const conflict = (): void => {
+      // A conflict cannot be merged by GitHub: the user resolves it; the wizard never rebases.
+      const line = `The branch conflicts with ${gitState.base}. Resolve the conflict on GitHub or locally, then run \`npx infinite-tag\` again.`
+      session.notes.push(line)
+      sub(ctx, "review", line, "warn")
+    }
+    if (pr.mergeStateStatus === "DIRTY") {
+      conflict()
+    } else if (pr.mergeStateStatus === "BEHIND") {
+      sub(ctx, "review", "The base moved: updating the branch with a merge commit…", "info")
+      let updated = true
+      try {
+        await session.github.updateBranch(session.number)
+      } catch {
+        updated = false
+        conflict()
+      }
+      if (updated) head = (await ship.git.pullFfOnly(gitState.branch)).headSha
+    }
+  }
+  ctx.state.update((state) => {
+    if (state.git) state.git.headSha = head
+  })
+  return { head }
+}
+
+/** Replies on the wizard's own threads (and teammates' OK'd threads); resolves only its own FIXED threads. */
+async function replyAndResolve(session: Session, decisions: readonly TriageDecision[], teammateOk: ReadonlySet<string>, fixSha: string | null, fixState: ReadonlyMap<string, "fixed" | "unverified">): Promise<void> {
+  if (!session.github) return
+  for (const decision of decisions) {
+    const threadId = decision.item.threadId
+    if (!threadId) continue
+    const own = decision.item.source === "reviewer"
+    if (!own && !teammateOk.has(threadId)) continue
+    // A resumed round never replies twice on the same thread.
+    if (session.ctx.state.get().pr?.handledThreadIds.includes(threadId)) continue
+    const state = decision.action === "FIX" && fixSha !== null ? fixState.get(threadId) : undefined
+    const fix: FixReplyState | null = decision.action !== "FIX" ? null : state && fixSha ? { kind: state, sha: fixSha } : { kind: "not_fixed" }
+    await session.github.reply(threadId, buildReply(session.ship.scanner, decision, fix))
+    if (own && state === "fixed") await session.github.resolve(threadId)
+    session.ctx.state.update((draft) => {
+      if (draft.pr && !draft.pr.handledThreadIds.includes(threadId)) draft.pr.handledThreadIds.push(threadId)
+    })
+  }
+}
+
+const CHECKS_POLL_MS = 30_000
+const CHECKS_WAIT_MS = 10 * 60_000
+/** gh says "no required checks reported" both when none are required and before GitHub registers them. */
+const CHECKS_EMPTY_GRACE_MS = 60_000
+
+/**
+ * Job 16's `pr_checks_pass` (S) on the pushed fix: polls `gh pr checks --required` until they settle (every 30 s,
+ * ≤ 10 minutes). No required check on the branch (still none after a minute) → pass ("none required"); a failing
+ * one → problem; still running at the end, or unreadable → undetermined (never pass).
+ */
+async function requiredChecksResult(session: Session, runId: string): Promise<CheckResult | null> {
+  const { github, number, deps, ctx } = session
+  if (!github || number === null) return null
+  const started = deps.clock.now().getTime()
+  const result = (state: CheckResult["state"], reason: string): CheckResult => ({ checkId: "pr_checks_pass", tier: "S", state, reason, at: ctx.now().toISOString(), runId })
+  let read = false
+  sub(ctx, "review", "Waiting for the required checks on the new commit…", "pending")
+  for (;;) {
+    const elapsed = deps.clock.now().getTime() - started
+    const checks = await github.checks(number).catch(() => null)
+    if (checks !== null && !isUnsupported(checks)) {
+      read = true
+      const summary = checksSummary(checks)
+      if (summary.fail > 0) return result("problem", `${summary.fail} required check(s) failing`)
+      if (summary.total > 0 && summary.pending === 0) return result("pass", `${summary.pass} required check(s) pass`)
+      if (summary.total === 0 && elapsed >= CHECKS_EMPTY_GRACE_MS) return result("pass", "no required checks on this branch")
+    }
+    if (ctx.signal.aborted || elapsed + CHECKS_POLL_MS > CHECKS_WAIT_MS) return result("undetermined", read ? "checks pending" : "checks unreadable")
+    await deps.clock.sleep(CHECKS_POLL_MS, ctx.signal)
+  }
+}
+
+/** §3g.4 step 9: ready + the final comment (or REVIEW.md off GitHub). `once`: skip the comment when this run already posted one. */
+async function finish(session: Session, options: { once?: boolean } = {}): Promise<void> {
+  const { ctx, deps, ship } = session
+  const state = ctx.state.get()
+  if (options.once && session.github && session.number !== null) {
+    const comments = await session.github.readComments(session.number).catch(() => [])
+    if (comments.some((comment) => comment.author === session.login && hasFinalMarker(comment.body, ship.runId))) {
+      const pr = await session.github.readPr(session.number)
+      if (pr.isDraft && pr.state === "OPEN") {
+        await session.github.markReady(session.number)
+        ctx.state.update((draft) => {
+          if (draft.pr) draft.pr.isDraft = false
+        })
+      }
+      return
+    }
+  }
+  if (session.github && session.number !== null) {
+    const pr = await session.github.readPr(session.number)
+    if (pr.isDraft && pr.state === "OPEN") {
+      await session.github.markReady(session.number)
+      ctx.state.update((draft) => {
+        if (draft.pr) draft.pr.isDraft = false
+      })
+      sub(ctx, "review", "Marked the pull request ready for review", "ok")
+    }
+    const rules = await session.github.rules(state.git!.base)
+    const line = isUnsupported(rules) ? null : mergeRequirementLine({ reviewDecision: pr.reviewDecision, ...rules })
+    if (line) {
+      session.notes.push(line)
+      sub(ctx, "review", line, "warn")
+    }
+    const checks = await session.github.checks(session.number).catch(() => [])
+    if (!isUnsupported(checks) && checks.length > 0) {
+      const summary = checksSummary(checks)
+      session.notes.push(`Required checks: ${summary.pass} pass · ${summary.fail} fail · ${summary.pending} pending.`)
+    }
+  }
+  const report = deps.report.build({
+    runId: ship.runId,
+    tagVersion: deps.tagVersion,
+    site: { repoLabel: ship.repoLabel, productionHost: ship.facts.productionHost },
+    columns: ctx.state.get().report,
+    provenLivePending: "deploy",
+    day7: null,
+    notes: []
+  })
+  const openFromLedger: TriageDecision[] = session.ledger.open
+    .filter((entry) => !session.decisions.some((decision) => decision.action === "ASK" && triageKey(decision.item) === entry.key))
+    .map((entry) => ({
+      item: { source: "reviewer", threadId: null, findingId: null, item: null, severity: "should", path: entry.path, line: null, body: entry.excerpt, suggestedFix: null },
+      action: "ASK",
+      reason: entry.reason
+    }))
+  let comment = buildFinalComment({
+    runId: ship.runId,
+    reportMarkdown: deps.report.renderMarkdown(report),
+    reviewer: session.reviewer,
+    reviewed: session.reviewed,
+    jobs: ctx.state.get().jobs,
+    decisions: [...session.decisions, ...openFromLedger],
+    untrusted: session.untrusted,
+    notes: session.notes,
+    scanner: ship.scanner
+  })
+  if (!ship.isPrivate) comment = redactIdsNotInDiff(comment, await ship.git.diff(state.git!.baseSha, await ship.git.head()), ship.facts.connectionIds)
+  if (session.github && session.number !== null) {
+    await session.github.comment(session.number, comment)
+  } else {
+    const path = join(ctx.root, WIZARD_PATHS.review)
+    const previous = (await deps.fs.readText(path)) ?? ""
+    await deps.fs.writeTextAtomic(path, `${previous}${previous ? "\n\n" : ""}${comment}`, 0o600)
+  }
+}
+
+async function mergedEarly(session: Session): Promise<StepOutcome> {
+  const { ctx } = session
+  session.notes.push("You merged before the review finished. The open items are listed here; run `npx infinite-tag` again later for a follow-up pull request.")
+  await finish(session)
+  await saveLedger(session)
+  await ctx.state.save()
+  const line = `Merged before the review finished · ${session.ledger.open.length} open item(s) posted`
+  status(ctx, "review", line)
+  return { kind: "ok", status: line }
+}
+
+async function prState(session: Session): Promise<"OPEN" | "MERGED" | "CLOSED"> {
+  if (!session.github || session.number === null) return "OPEN"
+  return (await session.github.readPr(session.number)).state
+}
+
+/** Merged → post the open items and go on; closed without merging → stop with a fresh-run offer (§3d.6). */
+async function stopIfNotOpen(session: Session): Promise<StepOutcome | null> {
+  const state = await prState(session)
+  if (state === "MERGED") return mergedEarly(session)
+  if (state === "CLOSED") {
+    await saveLedger(session)
+    await session.ctx.state.save()
+    return {
+      kind: "parked",
+      code: "INF_WIZ_MERGE_PARKED",
+      reason: `Pull request #${session.number} was closed without merging, so the wizard stopped reviewing it.`,
+      resumeHint: "Run `npx infinite-tag` to start a fresh run."
+    }
+  }
+  return null
+}
+
+async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
+  try {
+    return await reviewRun(ctx, deps)
+  } catch (error) {
+    const stop = bridgeStop(error)
+    if (stop) {
+      await ctx.state.save()
+      return stop
+    }
+    throw error
+  }
+}
+
+async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
+  const prepared = await prepareShip(ctx, deps)
+  if (!isShipContext(prepared)) return prepared
+  const state = ctx.state.get()
+  if (!state.pr) return { kind: "skipped", reason: "No pull request: nothing was committed this run." }
+  const github = isGitHubAdapter(deps.host) && prepared.ghReady && state.pr.number !== null ? deps.host : null
+  const session: Session = {
+    ctx,
+    deps,
+    ship: prepared,
+    github,
+    number: state.pr.number,
+    login: github ? (await github.auth()).login : null,
+    ledger: parseLedger(await deps.fs.readText(join(ctx.root, REVIEW_LEDGER_PATH)), prepared.runId),
+    decisions: [],
+    untrusted: [],
+    notes: [],
+    reviewed: false,
+    reviewer: state.agent?.reviewer ?? null
+  }
+  const notOpen = await stopIfNotOpen(session)
+  if (notOpen) return notOpen
+
+  const worker = state.agent?.worker ?? null
+  const agentReviewer: AgentKind | null = session.reviewer === "claude_code" || session.reviewer === "codex" ? session.reviewer : null
+  let briefReview: ReviewResult | null = null
+  if (agentReviewer === null) {
+    const brief = printedReviewBrief({
+      prNumber: session.number,
+      prUrl: state.pr.url,
+      repoLabel: prepared.repoLabel,
+      tagVersion: deps.tagVersion,
+      runId: prepared.runId,
+      inputs: { diff: "the pull request's diff", plan: "the pull request's description", checks: "the table in the pull request" }
+    })
+    await deps.fs.mkdirp(join(ctx.root, WIZARD_PATHS.dir), 0o700)
+    await deps.fs.writeTextAtomic(join(ctx.root, WIZARD_PATHS.reviewBrief), brief, 0o600)
+    status(ctx, "review", `No second agent: the review brief is in ${WIZARD_PATHS.reviewBrief}`)
+    if (github && session.number !== null) {
+      for (const comment of await github.readComments(session.number)) {
+        briefReview = parseBriefReview(comment, { login: session.login, runId: prepared.runId }) ?? briefReview
+      }
+    }
+    if (!briefReview) {
+      session.notes.push(`No second review yet. Paste ${WIZARD_PATHS.reviewBrief} into any agent; a re-run of \`npx infinite-tag\` reads its review back.`)
+      // Each re-run until a review arrives: one final comment per run, never one per re-run.
+      await finish(session, { once: true })
+      await saveLedger(session)
+      await ctx.state.save()
+      return { kind: "skipped", reason: `No second agent: the review brief is in ${WIZARD_PATHS.reviewBrief}.` }
+    }
+    sub(ctx, "review", "Read back the review posted from the brief", "ok")
+  }
+
+  const gitState = state.git!
+  let reviewedSha = state.pr.reviewedSha ?? gitState.baseSha
+  let lastRoundFixedUnreviewed = false
+  const { managed } = await manifestFiles(deps, ctx.root)
+  // A resume continues where the ledger stopped: a round already reviewed (and posted) on this head is re-triaged
+  // from its saved review, never re-run or re-posted; after a fix round the next round re-reviews the delta; the
+  // round count never restarts, so a resume can never exceed the 2 rounds.
+  const currentHead = await prepared.git.head()
+  const last = session.ledger.rounds[session.ledger.rounds.length - 1]
+  let firstRound = 1
+  let savedReview: ReviewResult | null = null
+  if (last) {
+    if (last.fixSha === null && last.reviewedSha === currentHead && last.review) {
+      firstRound = last.round
+      savedReview = last.review
+    } else {
+      firstRound = last.round + 1
+      lastRoundFixedUnreviewed = last.fixSha !== null && last.round >= PR_LOOP_LIMITS.maxFixRounds
+    }
+  }
+  for (let round = firstRound; round <= PR_LOOP_LIMITS.maxFixRounds; round += 1) {
+    const stop = await stopIfNotOpen(session)
+    if (stop) return stop
+    const head = await prepared.git.head()
+    let review: ReviewResult
+    const resumed = round === firstRound && savedReview !== null
+    if (resumed) {
+      review = savedReview!
+      sub(ctx, "review", `Resuming round ${round} from its saved review`, "info")
+    } else if (round === 1 && briefReview) {
+      review = briefReview
+    } else if (agentReviewer) {
+      const openItems = session.ledger.open.map((entry) => `${entry.path ?? "general"}: ${entry.excerpt.slice(0, 120)}`)
+      const result = await runReviewer(session, agentReviewer, round, head, round === 1 ? gitState.baseSha : reviewedSha, openItems)
+      if ("error" in result) {
+        await saveLedger(session)
+        await ctx.state.save()
+        if (result.error === "out_of_usage") {
+          return { kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE", reason: "The reviewer agent is out of usage.", resumeHint: "Run `npx infinite-tag` again when your plan resets; the pull request stays a draft." }
+        }
+        if (result.error === "timeout") {
+          return failed("INF_WIZ_AGENT_TIMEOUT", "The second review timed out. The pull request stays a draft; run `npx infinite-tag` again to retry the review.")
+        }
+        session.notes.push("The second review could not be read (its answer did not match the schema twice). Nothing from it was acted on.")
+        await finish(session)
+        return failed("INF_WIZ_REVIEW_UNPARSEABLE", "The second review could not be read; the pull request was marked ready without it.", "continue")
+      }
+      review = result
+      await postRound(session, review, agentReviewer, round, head)
+    } else {
+      break
+    }
+    session.reviewed = true
+    reviewedSha = head
+    if (!resumed) session.ledger.rounds.push({ round, reviewedSha: head, reviewer: agentReviewer ?? "brief", fixSha: null, review: scannedReview(prepared.scanner, review) })
+    ctx.state.update((draft) => {
+      if (draft.pr) {
+        draft.pr.reviewedSha = head
+        draft.pr.round = round
+      }
+    })
+    // Saved before triage: a park in this round resumes it without a second review post.
+    await saveLedger(session)
+
+    const gathered = await gatherItems(session, review, round, head)
+    // Only a decline from an EARLIER round makes an item "raised again": a resumed round re-triages its own
+    // review, and its own declines (saved before the park) must stay declines.
+    const declinedKeys = new Set(session.ledger.declined.filter((entry) => entry.round < round).map((entry) => entry.key))
+    const triaged = triage(gathered.items, {
+      allowlist: [...allowlistUnion(ctx.state.get().jobs), ...managed],
+      declinedKeys,
+      passingChecks: passingChecks(ctx),
+      answerFor: answerFrom(ctx)
+    })
+    const decisions = await resolveAsks(session, triaged, worker !== null)
+    recordDecisions(session.ledger, decisions, round)
+    session.decisions.push(...decisions)
+    const fixes = decisions.filter((decision) => decision.action === "FIX")
+    let fixSha: string | null = null
+    const fixState = new Map<string, "fixed" | "unverified">()
+
+    if (fixes.length > 0 && worker === null) {
+      session.notes.push("No worker agent was available, so the valid comments are listed for you to fix.")
+    } else if (fixes.length > 0 && worker !== null) {
+      const items = fixes.map((decision, index) => job16Item(decision, index))
+      for (const item of items) ctx.emit.emit("job.seeded", { item })
+      sub(ctx, "review", `${AGENT_LABEL[worker]} is fixing ${items.length} comment${items.length === 1 ? "" : "s"}…`, "pending")
+      const prevHead = head
+      // The files the round may change AND create (a created file is removed again if the round fails; B29).
+      const snapshots = await snapshotFiles(deps, ctx.root, items.flatMap((item) => [...item.allow.files, ...item.allow.create]))
+      const fix = await runFixRound(ctx, deps, { step: "review", worker, items, scanner: prepared.scanner })
+      if (fix.run.outcome === "out_of_usage") {
+        // Nothing half-done stays in the tree; the resume runs the round again.
+        await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
+        await saveLedger(session)
+        await ctx.state.save()
+        return {
+          kind: "parked",
+          code: "INF_WIZ_AGENT_OUT_OF_USAGE",
+          reason: `The worker agent is out of usage${fix.run.resetsAt ? `; it resets at ${fix.run.resetsAt}` : ""}.`,
+          resumeHint: "Run `npx infinite-tag` again to resume the review fixes."
+        }
+      }
+      const edited = fix.run.edits.map((edit) => edit.file)
+      const verified = await verifyFix(ctx, deps, { runId: prepared.runId, items: fix.items, editedFiles: edited })
+      let finalItems = verified.items
+      if (!verified.buildOk) {
+        // Put the files back: nothing uncommitted stays on the PR branch, and nothing reaches the receipt.
+        const leftOver = await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
+        session.notes.push(
+          `Round ${round}: the agent's fixes broke the build, so the wizard put the files back and did not commit them.${leftOver.length > 0 ? ` Remove ${leftOver.join(", ")} (the agent created it).` : ""}`
+        )
+      } else if (edited.length > 0) {
+        await deps.installer.recordEdits(fix.run.edits)
+        const commit = await stageAndCommit({
+          ctx,
+          deps,
+          git: prepared.git,
+          step: "review",
+          scanner: prepared.scanner,
+          runId: prepared.runId,
+          message: `infinite-tag: review fixes (round ${round})`,
+          round,
+          allowlist: [...allowlistUnion(ctx.state.get().jobs), ...items.flatMap((item) => item.allow.files)],
+          managed,
+          npmFiles: [],
+          connectionIds: prepared.facts.connectionIds
+        })
+        const stop = commitStop(commit)
+        if (stop) return stop
+        if (commit.kind === "committed") {
+          const synced = await syncHead(session, prevHead, commit.sha)
+          if (!("head" in synced)) return synced
+          fixSha = synced.head
+          sub(ctx, "review", `${AGENT_LABEL[worker]} fixed ${items.length} comment${items.length === 1 ? "" : "s"} · new commit ${commit.sha.slice(0, 7)}`, "ok")
+          const checksResult = await requiredChecksResult(session, prepared.runId)
+          if (checksResult) finalItems = deps.registry.apply(finalItems, [checksResult], prepared.runId)
+          for (const [index, decision] of fixes.entries()) {
+            const item = finalItems.find((candidate) => candidate.id === items[index]!.id)
+            const committedFile = item ? commit.staged.includes(item.allow.files[0] ?? "") : false
+            if (!decision.item.threadId || !committedFile || !item) continue
+            if (item.state === "done_in_code" || item.state === "waiting_deploy" || item.state === "proven") fixState.set(decision.item.threadId, "fixed")
+            // Committed and pushed, the build passed, but the required checks have not settled: honest, not "fixed".
+            else if (item.state === "claimed" && checksResult?.state === "undetermined") fixState.set(decision.item.threadId, "unverified")
+          }
+          const outcome = await rehearse(ctx, deps, {
+            step: "review",
+            runId: prepared.runId,
+            head: fixSha,
+            facts: prepared.facts,
+            approvedConversions: ctx.state.get().plan?.answers.conversions ?? [],
+            evidenceUrls: evidenceUrls(ctx),
+            consentRequired: ctx.state.get().plan?.answers.consentMode === "required",
+            ghReady: prepared.ghReady
+          })
+          announceRehearsal(ctx, "review", outcome, prepared.runId)
+          recordRehearsalCells(ctx, outcome, { head: fixSha, runId: prepared.runId, keys: prepared.facts.keys })
+          applyRehearsalToJobs(ctx, deps, outcome, prepared.runId)
+          sub(ctx, "review", outcome.state === "graded" ? "✓ Rehearsal re-run on the new commit" : "Rehearsal on the new commit: undetermined", outcome.state === "graded" ? "ok" : "warn")
+          // Only conversions not already sent this run are PATCHed (append-only), and only those get GA4 key events.
+          const already = new Set(session.ledger.clickTested ?? [])
+          const newNames = outcome.clickTested.filter((name) => !already.has(name))
+          if (newNames.length > 0) {
+            assertNoAgentAlive(deps, "runs PATCH")
+            const patched = await bestEffortBridge(ctx, "review", "tell Infinite about the new click tests", () =>
+              deps.bridge.patchRun(prepared.runId, { prHeadSha: fixSha!, clickTestedConversions: newNames })
+            )
+            if (patched) session.ledger.clickTested = [...already, ...newNames].sort()
+            const fresh = new Set(newNames)
+            await recordClickTests(ctx, deps, {
+              step: "review",
+              runId: prepared.runId,
+              outcome: { ...outcome, ga4ClickTested: outcome.ga4ClickTested.filter((name) => fresh.has(name)) },
+              approved: ctx.state.get().plan?.answers.conversions ?? []
+            })
+          }
+          session.ledger.rounds[session.ledger.rounds.length - 1]!.fixSha = fixSha
+        }
+      }
+      ctx.state.update((draft) => {
+        const known = new Set(draft.jobs.map((job) => job.id))
+        draft.jobs = [...draft.jobs.map((job) => finalItems.find((item) => item.id === job.id) ?? job), ...finalItems.filter((item) => !known.has(item.id))]
+      })
+    }
+    await replyAndResolve(session, decisions, gathered.teammateOk, fixSha, fixState)
+    await saveLedger(session)
+    await ctx.state.save()
+    if (fixSha === null) break
+    lastRoundFixedUnreviewed = round === PR_LOOP_LIMITS.maxFixRounds
+  }
+  if (lastRoundFixedUnreviewed) session.notes.push(`The round ${PR_LOOP_LIMITS.maxFixRounds} fixes were not re-reviewed (the review stops after ${PR_LOOP_LIMITS.maxFixRounds} rounds).`)
+  await finish(session)
+  await saveLedger(session)
+  await ctx.state.save()
+  const final = ctx.state.get()
+  const once = final.report.in_pr?.finishLine.each_tool_once?.state
+  const rehearsalText = once === "pass" ? "rehearsal passed on the latest commit" : once === "problem" ? "rehearsal found a problem" : "rehearsal undetermined"
+  const who = session.reviewed ? `reviewed by ${agentReviewer ? AGENT_LABEL[agentReviewer] : "your agent (brief)"}` : "no second review"
+  const found = session.reviewed ? reviewTally(session.ledger.rounds) : null
+  const line = [`${final.pr?.number ? `Pull request #${final.pr.number}` : "Branch"}`, who, ...(found ? [found] : []), rehearsalText].join(" · ")
+  status(ctx, "review", line)
+  return { kind: "ok", status: line }
+}
+
+export const step: WizardStep<"review"> = {
+  id: "review",
+  title: meta.title,
+  who: [...meta.who],
+  learn: meta.learn,
+  requiredCapabilities: [...meta.requiredCapabilities],
+  inputHash: (ctx) => {
+    const state = ctx.state?.get?.()
+    return sha256(`review:${state?.git?.headSha ?? ""}:${state?.agent?.reviewer ?? ""}:${state?.pr?.number ?? ""}`)
+  },
+  run
+}

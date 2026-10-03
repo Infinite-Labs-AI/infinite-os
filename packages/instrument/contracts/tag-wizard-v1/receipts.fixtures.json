@@ -1,0 +1,313 @@
+[
+  {
+    "id": "proven_all_lanes",
+    "note": "Every lane has its best proof: run-scoped ledger rows and a PostHog query; GA4 and Meta are delivering (seen leaving), never verified; no conversion ran, so Meta server events are not verifiable.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:42:00.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 204",
+          "provenance": "desktop_test"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "pending_within_wait",
+    "note": "Still inside waitMs: the ledger rows have not landed yet, so the lanes are pending and the client re-polls every 10 s.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:41:00.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "pending",
+          "receiptAt": null,
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "pending",
+          "receiptAt": null,
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 204",
+          "provenance": "desktop_test"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "pending",
+          "receiptAt": null,
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "posthog_not_connected_no_server_receipt",
+    "note": "PostHog has no connection (not verifiable, never a pass) and the server-lane probe left no row after the wait (no_receipt).",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:44:00.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "not connected",
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 204",
+          "provenance": "desktop_test"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "no_receipt",
+          "receiptAt": null,
+          "reason": "no document row for the probe path after 120 s",
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "meta_capi_verified",
+    "note": "A conversion ran and its server-instructed Meta event id is in the relay ledger as sent with events_received >= 1.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": [
+            "mev_FAKE0001"
+          ]
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:43:00.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 204",
+          "provenance": "desktop_test"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:41:00.000Z",
+          "reason": null,
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  }
+]

@@ -277,7 +277,12 @@ function printResult(_parsed: ParsedArgs, value: unknown): void {
 function printHelp(): void {
   console.log(
     [
-      "Usage: infinite-tag <inspect|plan|apply|verify|install|uninstall|server-lane|harness> [options]",
+      "Usage: infinite-tag <inspect|plan|apply|verify|install|uninstall|server-lane|harness|doctor> [options]",
+      "",
+      "Setup wizard:",
+      "  npx infinite-tag  Run it in your website repo: links the site to your Infinite app, installs and",
+      "                    improves your analytics in a draft pull request, and proves it collects (Mac app)",
+      "  doctor            Check the installed analytics (static + live checks, no browser); --json for CI",
       "",
       "Commands:",
       "  inspect       Detect framework, app root, package manager, and existing providers",
@@ -533,12 +538,77 @@ function renderStandaloneBrief(framework: string, apiOrigin?: string): string {
   })
 }
 
-export async function runCli(argv = process.argv.slice(2)): Promise<number> {
-  // The harness has its own flag surface (teardown §5.1) and exit-code contract, so it is
-  // dispatched before the installer's parser sees the argv.
-  switch (argv[0]) {
+/**
+ * Where an argv goes, decided BEFORE the installer's `parseArgs` sees it. `parseArgs` takes argv[0]
+ * as the command and throws `Unknown command` for anything it does not know, so every flag-first
+ * argv the wizard owns (`npx infinite-tag --json`, `--resume --json`, `--yes --consent-mode …`) must
+ * be routed here first.
+ *
+ * - `[]`, `["wizard", …]`, or argv[0] starting with `-` other than `--help` / `-h` / `--version`
+ *   → the wizard (argv minus a leading "wizard", flags intact);
+ * - `["mcp-proxy"]` → the agent claim channel's stdio proxy (hidden from help);
+ * - `["doctor", …]` → doctor;
+ * - `["uninstall", …]` carrying `--pr` → the wizard's PR-based uninstall;
+ * - `["harness", …]` → the harness (its own flag surface and exit codes);
+ * - everything else, `--help` / `-h` / `--version` included → the installer's parser, unchanged.
+ */
+export type CliRoute =
+  | { kind: "version" }
+  | { kind: "wizard"; argv: string[] }
+  | { kind: "wizard-uninstall"; argv: string[] }
+  | { kind: "mcp-proxy" }
+  | { kind: "doctor"; argv: string[] }
+  | { kind: "harness"; argv: string[] }
+  | { kind: "installer"; argv: string[] }
+
+const INSTALLER_FLAG_COMMANDS: ReadonlySet<string> = new Set(["--help", "-h", "--version"])
+
+export function routeCliArgv(argv: readonly string[]): CliRoute {
+  const [first, ...rest] = argv
+  if (first === undefined) return { kind: "wizard", argv: [] }
+  if (first === "--version" && rest.length === 0) return { kind: "version" }
+  if (first === "wizard") return { kind: "wizard", argv: rest }
+  if (first.startsWith("-") && !INSTALLER_FLAG_COMMANDS.has(first)) {
+    return { kind: "wizard", argv: [...argv] }
+  }
+  switch (first) {
+    case "mcp-proxy":
+      return { kind: "mcp-proxy" }
+    case "doctor":
+      return { kind: "doctor", argv: rest }
     case "harness":
-      return runHarnessCommand(argv.slice(1))
+      return { kind: "harness", argv: rest }
+    case "uninstall":
+      if (rest.includes("--pr")) return { kind: "wizard-uninstall", argv: rest }
+      break
+  }
+  return { kind: "installer", argv: [...argv] }
+}
+
+export async function runCli(argv = process.argv.slice(2)): Promise<number> {
+  // The wizard, doctor, the MCP proxy and the harness each have their own flag surface and exit-code
+  // contract, so they are dispatched before the installer's parser sees the argv. The wizard modules
+  // are imported lazily so the classic commands never load them.
+  const route = routeCliArgv(argv)
+  switch (route.kind) {
+    case "version":
+      // B23: `npx infinite-tag --version` prints the version and exits 0.
+      console.log(INSTRUMENT_VERSION)
+      return 0
+    case "wizard":
+      ;(await import("./wizard/deps.js")).installDefaultWizardWiring()
+      return (await import("./wizard/command.js")).runWizardCommand(route.argv)
+    case "wizard-uninstall":
+      ;(await import("./wizard/deps.js")).installDefaultWizardWiring()
+      return (await import("./wizard/command.js")).runWizardUninstall(route.argv)
+    case "mcp-proxy":
+      return (await import("./agents/mcp/proxy.js")).runMcpProxy()
+    case "doctor":
+      return (await import("./doctor/command.js")).runDoctorCommand(route.argv)
+    case "harness":
+      return runHarnessCommand(route.argv)
+    case "installer":
+      break
   }
   try {
     const parsed = parseArgs(argv)
