@@ -274,6 +274,31 @@ describe("renderers", () => {
     expect(renderMarkdown(piped)).toContain("a \\| b")
   })
 
+  it("review P1-3: markdown opens with THE verdict's headline and one line per reason; ungraded says so", () => {
+    expect(report.verdict).toBeNull()
+    expect(renderMarkdown(report).split("\n")[0]).toBe("**www.acme-store.com: not graded yet · run npx infinite-tag to finish the live checks**")
+    const graded = structuredClone(report)
+    graded.verdict = {
+      state: "problems",
+      headline: "acme-store.com does not collect properly yet: 1 approved fix is not in the code (Remove duplicate tags) · Meta pixel sent nothing on the real visit",
+      reasons: [
+        { kind: "approved_fix_missing", count: 1, names: ["Remove duplicate tags"] },
+        { kind: "tool_silent", count: 1, names: ["Meta pixel"] }
+      ],
+      installed: []
+    }
+    const lines = renderMarkdown(graded).split("\n")
+    expect(lines.slice(0, 5)).toEqual([
+      `**${graded.verdict.headline}**`,
+      "",
+      "- Approved fixes the wizard has not confirmed in the code: Remove duplicate tags",
+      "- Sent nothing on the real visit: Meta pixel",
+      ""
+    ])
+    graded.verdict = { state: "properly", headline: "acme-store.com collects analytics properly now", reasons: [], installed: [] }
+    expect(renderMarkdown(graded).split("\n").slice(0, 3)).toEqual(["**acme-store.com collects analytics properly now**", "", "### Before and after · www.acme-store.com"])
+  })
+
   it("the terminal table fits the width: three columns at 160, stacked below 140", () => {
     const wide = renderTerminal(report, 160)
     for (const line of wide.split("\n")) expect(line.length).toBeLessThanOrEqual(160)

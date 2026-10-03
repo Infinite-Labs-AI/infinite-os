@@ -540,7 +540,7 @@ describe("the outro and run.end.reportPath show only THIS run's report (O1-05)",
       columns: ctx.state.get().report,
       provenLivePending: "deploy",
       day7: null,
-      notes: [], verdictFacts: { jobs: [], openFindings: [], tools: null }
+      notes: [], verdictFacts: { jobs: [], openFindings: [], tools: null, installedUnknown: null }
     })
     mkdirSync(join(ctx.root, ".infinite/wizard"), { recursive: true })
     writeFileSync(join(ctx.root, ".infinite/wizard/report.json"), JSON.stringify(deps.report.payload(report)))
@@ -597,7 +597,7 @@ describe("final verify F5: the closing screen waits for a key in a terminal, and
       columns: ctx.state.get().report,
       provenLivePending: "deploy",
       day7: null,
-      notes: [], verdictFacts: { jobs: [], openFindings: [], tools: null }
+      notes: [], verdictFacts: { jobs: [], openFindings: [], tools: null, installedUnknown: null }
     })
     mkdirSync(join(ctx.root, ".infinite/wizard"), { recursive: true })
     writeFileSync(join(ctx.root, ".infinite/wizard/report.json"), JSON.stringify(deps.report.payload(report)))

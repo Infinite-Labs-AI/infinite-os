@@ -1131,7 +1131,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   let visitError: string | null = null
   // §3x.6 (A1) The tools on the DEPLOYED code: the census of the merge commit's own tree ∪ what this run installed.
   const deployed = await installedAtMerge(ctx, deps, mergeSha, productionBranch)
-  if (deployed.census === null) ctx.emit.emit("step.sub", { step: "prove", text: `! The merge commit's files could not be read, so only connected and firing tools are graded live`, tone: "warn" })
+  // Review P1-6: the cause is said and carried into THE verdict (at best unconfirmed), never swallowed.
+  if (deployed.unknown !== null) ctx.emit.emit("step.sub", { step: "prove", text: `! ${deployed.unknown}: a tool that is installed but sent nothing cannot be named, so this run cannot be called proper`, tone: "warn" })
   const gradeCtx = (result: TestResult) =>
     gradeContextFrom({
       census: deployed.census ?? EMPTY_CENSUS,
@@ -1247,7 +1248,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
       // known), nothing in Infinite finishes the live check, so its cells are "—" and the report says rerun_tag.
       unmeasured: appProving && productionHost ? { reason: "pending_open_infinite", state: "pending" } : { reason: "not_exercised", state: "not_measured" }
     })
-    const proof = visit ? proofFactsFromVisit(visit, receipts, installed, expect, laneInstalled, deps.clock.now().toISOString(), deployed.ids) : null
+    const proof = visit ? proofFactsFromVisit(visit, receipts, installed, expect, laneInstalled, deps.clock.now().toISOString(), deployed.ids, deployed.unknown) : null
     ctx.state.update((draft) => {
       draft.report.proven_live = column
       if (proof) draft.proof = proof
@@ -1298,28 +1299,33 @@ const EMPTY_FACTS_FOR_CONTEXT = { environment: { cmpDetected: null } } as unknow
 
 /**
  * §3x.6 (A1) The census of the merge commit's OWN tree (a detached worktree of `mergeSha`, fetched first when it is
- * not here yet) and the tools this run's install recorded. `census: null` = the merge tree could not be read.
+ * not here yet) and the tools this run's install recorded. `census: null` = the merge tree could not be read; `unknown`
+ * then names why (review P1-6: the cause reaches the verdict and the report, it is never swallowed). An install record
+ * that does not parse is named the same way.
  */
 export async function installedAtMerge(
   ctx: WizardContext,
   deps: WizardDeps,
   mergeSha: string,
   productionBranch: string | null
-): Promise<{ census: CensusResult | null; installed: TestTool[] | null; ids: Partial<Record<TestTool, string[]>> }> {
+): Promise<{ census: CensusResult | null; installed: TestTool[] | null; ids: Partial<Record<TestTool, string[]>>; unknown: string | null }> {
   const receipt = await deps.fs.readText(join(ctx.root, ".infinite/install.json"))
   let installed: TestTool[] | null = null
+  const unknown: string[] = []
   try {
     const providers = receipt === null ? [] : ((JSON.parse(receipt) as { providers?: unknown }).providers ?? [])
     installed = (Array.isArray(providers) ? providers : []).filter((tool): tool is TestTool => (TEST_TOOLS as readonly string[]).includes(String(tool)))
-  } catch {
-    installed = null
+  } catch (error) {
+    unknown.push(`.infinite/install.json does not parse (${errorWords(error)})`)
   }
   let worktree: { dir: string } | null = null
   try {
     try {
       worktree = await deps.git.worktreeAddDetached(mergeSha)
-    } catch {
-      if (productionBranch) await deps.git.remoteBranchSha(productionBranch).catch(() => null)
+    } catch (first) {
+      // The merge commit is not here yet: fetch the production branch once, then try again (its error is the one said).
+      if (!productionBranch) throw first
+      await deps.git.remoteBranchSha(productionBranch)
       worktree = await deps.git.worktreeAddDetached(mergeSha)
     }
     const census = await deps.checks.census(worktree.dir, ctx.appRoot)
@@ -1329,12 +1335,19 @@ export async function installedAtMerge(
       const tool = entry.tool as TestTool
       ids[tool] = [...new Set([...(ids[tool] ?? []), entry.id])]
     }
-    return { census, installed, ids }
-  } catch {
-    return { census: null, installed, ids: {} }
+    return { census, installed, ids, unknown: unknown.length > 0 ? unknown.join("; ") : null }
+  } catch (error) {
+    unknown.unshift(`the merge commit ${mergeSha.slice(0, 7)}'s files could not be read (${errorWords(error)})`)
+    return { census: null, installed, ids: {}, unknown: unknown.join("; ") }
   } finally {
     if (worktree) await deps.git.worktreeRemove(worktree.dir).catch(() => undefined)
   }
+}
+
+/** An error's own words, one line, bounded (a cause the report names). */
+function errorWords(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error)
+  return text.replace(/\s+/g, " ").trim().slice(0, 60) || "no message"
 }
 
 /**
@@ -1423,7 +1436,8 @@ export function proofFactsFromVisit(
   expect: TestExpect,
   laneProbed: boolean,
   at: string,
-  codeIds: Partial<Record<TestTool, string[]>>
+  codeIds: Partial<Record<TestTool, string[]>>,
+  installedUnknown: string | null
 ): RunProofState {
   const result = visit.result
   const tools: VerdictToolFact[] = toolsUnderTest(expect, installed, result).map((tool) => {
@@ -1449,7 +1463,8 @@ export function proofFactsFromVisit(
     tools,
     laneProbed: laneProbed && result.serverLaneProbe !== null,
     infinitePageViews: result.infinite.events.filter((event) => event.eventName === "site_page_view" || event.eventName === "page_view").length,
-    filter: { ga4ClientId: cid, posthogDistinctId: result.markers.posthogDistinctId, metaPageViewAt: metaPageView }
+    filter: { ga4ClientId: cid, posthogDistinctId: result.markers.posthogDistinctId, metaPageViewAt: metaPageView },
+    installedUnknown
   }
 }
 

@@ -83,7 +83,7 @@ describe("QA #6 and #7: the closing verdict, the duration and ONE run id", () =>
   it("the closing line IS the verdict's headline; the verdict reads the columns (negatives: a problem, no proof, not checked yet)", () => {
     expect(verdictLine(example)).toBe(example.verdict!.headline)
     const verdictOf = (report: ReportV2) =>
-      computeVerdict({ site: "www.acme-store.com", finishLine: report.finishLine, provenLive: report.columns.proven_live, jobs: [], openFindings: [], tools: null }).headline
+      computeVerdict({ site: "www.acme-store.com", finishLine: report.finishLine, provenLive: report.columns.proven_live, jobs: [], openFindings: [], tools: null, installedUnknown: null }).headline
     const problem = structuredClone(example)
     problem.finishLine.find((line) => line.id === "each_tool_once")!.cells.proven_live.state = "problem"
     expect(verdictOf(problem)).toBe("www.acme-store.com does not collect properly yet: 1 problem on the live site (each tool once)")

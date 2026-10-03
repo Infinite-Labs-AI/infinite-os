@@ -181,6 +181,8 @@ export interface RunProofState {
   /** Infinite page views seen leaving on the visit (the rows it landed in the customer's ledger). */
   infinitePageViews: number
   filter: { ga4ClientId: string | null; posthogDistinctId: string | null; metaPageViewAt: string | null }
+  /** Review P1-6: null = the merge tree's installed set was read; else why it could not be (the census error). */
+  installedUnknown: string | null
 }
 
 // ---- the store snapshot (lane O1 publishes it; lane O2's TTY and JSON UIs read it) ----
@@ -246,7 +248,7 @@ export const WIZARD_RUN_STATE_SHAPE = shapeOf<WizardRunState>()(
   ],
   ["runStartedAt", "site", "proof"],
   {
-    proof: shapeOf<RunProofState>()("RunState.proof", ["at", "tools", "laneProbed", "infinitePageViews", "filter"], [], {
+    proof: shapeOf<RunProofState>()("RunState.proof", ["at", "tools", "laneProbed", "infinitePageViews", "filter", "installedUnknown"], [], {
       tools: arrayOf(
         shapeOf<VerdictToolFact>()("RunState.proof.tool", ["tool", "ids", "connected", "installed", "fired", "ungraded", "receipt", "receiptReason"], [])
       ),

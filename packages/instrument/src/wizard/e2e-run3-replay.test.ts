@@ -124,7 +124,7 @@ interface World {
   postDeploy: { byteCensus: CheckResult[]; mergePreview: PostDeployLoad; deployedDry: PostDeployLoad }
 }
 
-function replay(world: World) {
+function replay(world: World, installedUnknown: string | null = null) {
   const keys = keysFor(world.connected)
   const expectation = testExpectFromKeys(keys)
   const column = buildProvenColumn({
@@ -142,7 +142,7 @@ function replay(world: World) {
     conversionsWaiting: 0,
     runStartedAt: state.runStartedAt
   })
-  const proof = proofFactsFromVisit(world.visit, world.receipts, INSTALLED, expectation, false, AT, { ga4: [GA4_ID], meta: [PIXEL_ID], infinite: [SITE_KEY] })
+  const proof = proofFactsFromVisit(world.visit, world.receipts, INSTALLED, expectation, false, AT, { ga4: [GA4_ID], meta: [PIXEL_ID], infinite: [SITE_KEY] }, installedUnknown)
   const report = createReportBuilder(() => new Date(AT)).build({
     runId: RUN_ID,
     tagVersion: "0.13.0",
@@ -152,7 +152,7 @@ function replay(world: World) {
     runStartedAt: state.runStartedAt,
     day7: null,
     notes: [],
-    verdictFacts: { jobs: world.jobs, openFindings: world.findings, tools: proof.tools }
+    verdictFacts: { jobs: world.jobs, openFindings: world.findings, tools: proof.tools, installedUnknown: proof.installedUnknown }
   })
   return { report, column, proof }
 }
@@ -231,5 +231,36 @@ describe("W15 / W16 the fixed run-3 site: 'properly' only when every installed t
     expect(report.verdict!.state, JSON.stringify(report.verdict)).toBe("unconfirmed")
     expect(report.verdict!.headline).toBe("tag-smoke.foundernationtv.com: Infinite's tag received this run's real visit; GA4 and Meta send, but their IDs are not checked (not connected in Infinite)")
     expect(proofStateOf(report.verdict!)).toBe("undetermined")
+  })
+})
+
+describe("review P2-1 / P1-6 / P2-5: every unconfirmed or problems verdict names its cause", () => {
+  it("P2-1 connected GA4 and Meta whose receipts are not in: unconfirmed WITH a receipt_not_in reason naming them", () => {
+    const world = fixedWorld(true)
+    world.receipts = receipts({ ga4: lane("undetermined", null, "desktop_test"), meta_pixel: lane("pending", null, "desktop_test") })
+    const { report } = replay(world)
+    expect(report.verdict!.state).toBe("unconfirmed")
+    expect(report.verdict!.reasons).toEqual([{ kind: "receipt_not_in", count: 2, names: ["GA4", "Meta"] }])
+    expect(report.verdict!.headline).toBe("tag-smoke.foundernationtv.com: Infinite's tag received this run's real visit · the receipts of GA4 and Meta are not in yet")
+  })
+
+  it("P1-6 the merge tree could not be read: never properly; the cause is the reason and is in the headline", () => {
+    const why = "the merge commit 6d16d8f's files could not be read (fatal: bad object 6d16d8f)"
+    const { report, proof } = replay(fixedWorld(true), why)
+    expect(proof.installedUnknown).toBe(why)
+    expect(report.verdict!.state).toBe("unconfirmed")
+    expect(report.verdict!.reasons).toEqual([{ kind: "installed_unknown", count: 1, names: [why] }])
+    expect(report.verdict!.headline).toContain(`the deployed code could not be read (${why}), so a tool that sent nothing could not be named`)
+    expect(proofStateOf(report.verdict!)).toBe("undetermined")
+  })
+
+  it("P2-5 a claimed fix is 'in the code but the wizard could not check it', never 'not in the code'", async () => {
+    const ownership = await run3Ownership()
+    const jobs = state.jobs.map((item) => (item.title === "Remove duplicate tags" ? { ...item, state: "claimed" as const, blockedReason: undefined } : item))
+    const { report } = replay({ ...fixedWorld(true), jobs, findings: openFindings(ledger, jobs, ownership.classify) })
+    expect(report.verdict!.state).toBe("problems")
+    expect(report.verdict!.headline).toContain("4 approved fixes are not in the code (Keep previews silent (existing tags), Keep previews silent (existing tags)")
+    expect(report.verdict!.headline).toContain("1 approved fix is in the code but the wizard could not check it (Remove duplicate tags)")
+    expect(report.verdict!.headline).not.toMatch(/not in the code \([^)]*Remove duplicate tags/)
   })
 })

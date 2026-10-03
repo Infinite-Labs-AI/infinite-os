@@ -161,6 +161,8 @@ export const VERDICT_REASON_KINDS = [
   "tool_without_receipt",
   "tool_not_connected",
   "earlier_problem_unchecked",
+  "receipt_not_in",
+  "installed_unknown",
   "not_live"
 ] as const
 export type VerdictReasonKind = (typeof VERDICT_REASON_KINDS)[number]
@@ -212,6 +214,11 @@ export interface VerdictFacts {
   openFindings: readonly VerdictOpenFinding[]
   /** Per tool under test; null = no real-visit facts this run. */
   tools: readonly VerdictToolFact[] | null
+  /**
+   * Review P1-6: null = the deployed code's installed set was read; else WHY it could not be (the census error). While
+   * it is unknown, a tool that is installed but sent nothing cannot be named, so the verdict is at best `unconfirmed`.
+   */
+  installedUnknown: string | null
 }
 
 export interface ReportVerdict {

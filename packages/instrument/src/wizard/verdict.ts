@@ -41,6 +41,8 @@ export interface VerdictInput {
   openFindings: readonly VerdictOpenFinding[]
   /** Per tool under test, what the real visit measured; null = no real visit facts this run. */
   tools: readonly ToolProofFact[] | null
+  /** Review P1-6: null = the deployed code's installed set was read; else why it could not be. */
+  installedUnknown: string | null
 }
 
 /** Job item states that are "in the code" (DECISIONS §5.3): `claimed` is NOT (the wizard could not check it). */
@@ -102,6 +104,21 @@ export function missingApprovedFixes(jobs: readonly ChecklistItem[]): ChecklistI
   })
 }
 
+/**
+ * Review P2-5: the approved-fix clause, split by what the wizard knows. A pending, blocked or failed item is NOT in the
+ * code; a `claimed` item IS in the code but the wizard could not check it. Both keep the run `problems`.
+ */
+export function approvedFixClauses(missing: readonly Pick<ChecklistItem, "state" | "title">[]): string[] {
+  const notIn = missing.filter((item) => item.state !== "claimed").map((item) => item.title)
+  const unchecked = missing.filter((item) => item.state === "claimed").map((item) => item.title)
+  const parts: string[] = []
+  if (notIn.length > 0) parts.push(`${notIn.length} approved ${plural(notIn.length, "fix is", "fixes are")} not in the code (${listNames(notIn)})`)
+  if (unchecked.length > 0) {
+    parts.push(`${unchecked.length} approved ${plural(unchecked.length, "fix is", "fixes are")} in the code but the wizard could not check ${plural(unchecked.length, "it", "them")} (${listNames(unchecked)})`)
+  }
+  return parts
+}
+
 /** Finish-line problems found before the merge and not measured again after it. */
 function earlierProblemsUnchecked(finishLine: VerdictInput["finishLine"]): string[] {
   return finishLine
@@ -145,12 +162,17 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
   if (notConnected.length > 0) reasons.push(reason("tool_not_connected", notConnected.map((tool) => `${SHORT_LABEL[tool.tool]}${tool.ids[0] ? ` ${maskIdentifier(tool.ids[0])}` : ""}`)))
   const unchecked = earlierProblemsUnchecked(input.finishLine)
   if (unchecked.length > 0) reasons.push(reason("earlier_problem_unchecked", unchecked))
+  // Review P2-1: a connected tool that fired but whose receipt is not in names itself (never an unconfirmed with no cause).
+  const waitingOn = tools.filter((tool) => tool.fired && tool.connected && (tool.receipt === null || tool.receipt === "pending" || tool.receipt === "undetermined"))
+  if (waitingOn.length > 0) reasons.push(reason("receipt_not_in", waitingOn.map((tool) => SHORT_LABEL[tool.tool])))
+  // Review P1-6: the installed set could not be read, so a tool installed but silent cannot be named: never "properly".
+  if (input.installedUnknown !== null) reasons.push(reason("installed_unknown", [input.installedUnknown]))
   const proof = input.finishLine.find((line) => line.id === "proof_from_real_visit")?.cells.proven_live
 
   const has = (kind: VerdictReasonKind) => reasons.find((entry) => entry.kind === kind)
   let state: ReportVerdict["state"]
   if (reasons.some((entry) => PROBLEM_REASON_KINDS.includes(entry.kind))) state = "problems"
-  else if (has("tool_not_connected") || has("earlier_problem_unchecked") || proof?.state !== "pass") state = "unconfirmed"
+  else if (reasons.length > 0 || proof?.state !== "pass") state = "unconfirmed"
   else state = "properly"
 
   let headline: string
@@ -158,20 +180,20 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     const parts: string[] = []
     const live = has("live_problem")
     if (live) parts.push(`${live.count} ${plural(live.count, "problem", "problems")} on the live site (${listNames(liveProblems)})`)
-    const fixes = has("approved_fix_missing")
-    if (fixes) parts.push(`${fixes.count} approved ${plural(fixes.count, "fix is", "fixes are")} not in the code (${listNames(missing.map((item) => item.title))})`)
+    if (has("approved_fix_missing")) parts.push(...approvedFixClauses(missing))
     const open = has("review_blocker_open")
     if (open) parts.push(`${open.count} review ${plural(open.count, "blocker", "blockers")} open (${listNames(blockers.map(openFindingName))})`)
     if (silent.length > 0) parts.push(`${listNames(silent.map((tool) => SILENT_LABEL[tool.tool]))} sent nothing on the real visit`)
     if (withoutReceipt.length > 0) parts.push(`no receipt from the real visit for ${listNames(withoutReceipt.map((tool) => SILENT_LABEL[tool.tool]))}`)
     headline = `${input.site} does not collect properly yet: ${parts.join(" · ")}`
+    if (input.installedUnknown !== null) headline += ` · ${installedUnknownWords(input.installedUnknown)}`
   } else if (state === "unconfirmed") {
     const infinite = tools.find((tool) => tool.tool === "infinite")
     const infiniteIn = infinite !== undefined && (infinite.receipt === "verified" || infinite.receipt === "delivering")
-    const waitingOn = tools.filter((tool) => tool.fired && tool.connected && (tool.receipt === null || tool.receipt === "pending" || tool.receipt === "undetermined"))
     headline = infiniteIn
       ? `${input.site}: Infinite's tag received this run's real visit`
       : `${input.site}: the real visit ran, but ${waitingOn.length > 0 ? `the receipts of ${andList(waitingOn.map((tool) => SHORT_LABEL[tool.tool]))} are` : "its receipts are"} not in`
+    if (infiniteIn && waitingOn.length > 0) headline += ` · the receipts of ${andList(waitingOn.map((tool) => SHORT_LABEL[tool.tool]))} are not in yet`
     if (notConnected.length > 0) {
       const names = andList(notConnected.map((tool) => SHORT_LABEL[tool.tool]))
       const many = notConnected.length > 1
@@ -180,6 +202,7 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     if (unchecked.length > 0) headline += ` · ${unchecked.length} earlier ${plural(unchecked.length, "problem", "problems")} not re-checked after the deploy (${listNames(unchecked)})`
     const ungraded = tools.filter((tool) => tool.installed && !tool.fired && tool.ungraded)
     if (ungraded.length > 0) headline += ` · ${andList(ungraded.map((tool) => SHORT_LABEL[tool.tool]))} could not be graded on the real visit`
+    if (input.installedUnknown !== null) headline += ` · ${installedUnknownWords(input.installedUnknown)}`
   } else {
     const waiting = input.finishLine.filter((line) => {
       const cell = line.cells.proven_live
@@ -190,14 +213,19 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
   return { state, headline: headline.slice(0, VERDICT_LIMITS.headlineMaxChars), reasons, installed }
 }
 
+/** Review P1-6: the installed set could not be read, in the headline's words (the cause named). */
+function installedUnknownWords(cause: string): string {
+  return `the deployed code could not be read (${cause.slice(0, VERDICT_LIMITS.nameMaxChars)}), so a tool that sent nothing could not be named`
+}
+
 /**
  * §3x.6 (R3-6) What the pull request lacks that the plan approved, in the headline's own words (missing fixes, open
- * review blockers), or null when it lacks nothing: the merge card says "Ready to merge, but incomplete" with them.
+ * review blockers), or null when it lacks nothing: the merge card says "Ready to merge, but incomplete" with them. The
+ * jobs split the fix clause the same way the headline does (review P2-5).
  */
-export function incompleteParts(verdict: Pick<ReportVerdict, "reasons">): string | null {
+export function incompleteParts(verdict: Pick<ReportVerdict, "reasons">, jobs: readonly ChecklistItem[]): string | null {
   const parts: string[] = []
-  const fixes = verdict.reasons.find((entry) => entry.kind === "approved_fix_missing")
-  if (fixes) parts.push(`${fixes.count} approved ${plural(fixes.count, "fix is", "fixes are")} not in the code (${listNames(fixes.names)})`)
+  if (verdict.reasons.some((entry) => entry.kind === "approved_fix_missing")) parts.push(...approvedFixClauses(missingApprovedFixes(jobs)))
   const blockers = verdict.reasons.find((entry) => entry.kind === "review_blocker_open")
   if (blockers) parts.push(`${blockers.count} review ${plural(blockers.count, "blocker", "blockers")} open (${listNames(blockers.names)})`)
   return parts.length > 0 ? parts.join(" · ") : null

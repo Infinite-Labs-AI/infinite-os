@@ -61,7 +61,7 @@ async function postInPrReport(ctx: WizardContext, deps: WizardDeps, runId: strin
   })
   assertNoAgentAlive(deps, "report post")
   await deps.bridge.postReport(runId, "in_pr", deps.report.payload(report))
-  return report.verdict ? incompleteParts(report.verdict) : null
+  return report.verdict ? incompleteParts(report.verdict, state.jobs) : null
 }
 
 async function saveMerge(ctx: WizardContext, deps: WizardDeps, runId: string, mergeSha: string, mergedAt: string | null): Promise<StepOutcome> {

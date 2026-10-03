@@ -49,7 +49,8 @@ function finishedState() {
     tools: [fired("infinite"), fired("ga4"), fired("posthog"), fired("meta")],
     laneProbed: true,
     infinitePageViews: 1,
-    filter: { ga4ClientId: "1234567890.1759500000", posthogDistinctId: "d", metaPageViewAt: "2026-10-02T09:41:00.000Z" }
+    filter: { ga4ClientId: "1234567890.1759500000", posthogDistinctId: "d", metaPageViewAt: "2026-10-02T09:41:00.000Z" },
+    installedUnknown: null
   }
   return state
 }
@@ -327,7 +328,7 @@ describe("R2-5 (live run 2): the PR's 'what happened' comment carries the final 
 describe("§3x.5 (W13) the disclosure says only what ran", () => {
   const tool = (name: "infinite" | "ga4" | "posthog" | "meta", fired: boolean) => ({ tool: name, ids: [], connected: name === "infinite", installed: true, fired, ungraded: false, receipt: null, receiptReason: null })
   it("no server lane: ONE row in the ledger; only the tools that fired are named, with their filter id", () => {
-    const text = visitDisclosure({ at: AT, tools: [tool("infinite", true), tool("ga4", true), tool("meta", false)], laneProbed: false, infinitePageViews: 1, filter: { ga4ClientId: "1234567890.1759500000", posthogDistinctId: null, metaPageViewAt: null } })
+    const text = visitDisclosure({ at: AT, tools: [tool("infinite", true), tool("ga4", true), tool("meta", false)], laneProbed: false, infinitePageViews: 1, filter: { ga4ClientId: "1234567890.1759500000", posthogDistinctId: null, metaPageViewAt: null }, installedUnknown: null })
     expect(text).toEqual([
       "This run's one real visit landed 1 row in your Infinite ledger, marked as Infinite's test and kept out of your numbers: the page view.",
       "GA4 records it as one normal page view (filter it by: GA4 client id 1234567890.1759500000)."

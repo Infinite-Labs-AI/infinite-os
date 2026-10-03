@@ -29,6 +29,7 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
   return {
     jobs: state.jobs,
     openFindings: openFindings(ledger, state.jobs, ownership.classify),
-    tools: state.proof?.tools ?? null
+    tools: state.proof?.tools ?? null,
+    installedUnknown: state.proof?.installedUnknown ?? null
   }
 }

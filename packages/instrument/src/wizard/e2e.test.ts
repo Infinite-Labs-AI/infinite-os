@@ -18,6 +18,8 @@ import { envProxyFetch } from "../checks/live/env-proxy-fetch.js"
 import { parseCloudReport, type CloudReportContext } from "../../test/wizard/cloud-rules.js"
 import { FAKE_PROOF_BODY, FAKE_RESERVED_SITE_KEY, FAKE_RUN_STARTED_AT, type FakeBridgeCall } from "../../test/wizard/fake-bridge.js"
 import type { TagHosting, TagKeys } from "./contracts/bridge.js"
+import type { ReportV2 } from "./contracts/report.js"
+import { renderTerminal } from "./report.js"
 import type { TestResult, TestRunRequest } from "./contracts/test-engine.js"
 import {
   BUILT_CLI,
@@ -317,6 +319,18 @@ describe("the offline end-to-end run (§4.3)", () => {
     expect(verdict.state).toBe("problems")
     expect(verdict.headline.startsWith("acme-store.com does not collect properly yet:")).toBe(true)
     expect(verdict.reasons.map((reason) => reason.kind)).toContain("approved_fix_missing")
+    // W14 at step level (review P1-3): ONE headline, character for character, on every surface — the terminal's closing
+    // line, report.md, the PR's "what happened" comment and the report Infinite stored.
+    const stored = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/report.json"), "utf8")) as ReportV2
+    const markdown = readFileSync(join(w.site.repo, ".infinite/wizard/report.md"), "utf8")
+    const headline = verdict.headline
+    expect(renderTerminal(stored, 5_000).split("\n")[0]!.startsWith(`◆ ${headline} · run `)).toBe(true)
+    expect(markdown.split("\n")[0]).toBe(`**${headline}**`)
+    expect(markdown).toContain("- Approved fixes the wizard has not confirmed in the code: ")
+    const prComments = ((readGhState(w.ghState).prs[0] as unknown as { comments?: Array<{ body: string }> }).comments ?? []).map((comment) => comment.body)
+    expect(prComments.filter((body) => body.includes(`**${headline}**`)), "the PR comment carries the verdict headline").toHaveLength(1)
+    const postedLast = (reports.at(-1)!.body as { report: ReportV2 }).report
+    expect(postedLast.verdict!.headline).toBe(headline)
     expect(w.bridge.calls.map(label)).not.toContain("runs.patch(phase)")
     expect(cloudRefusedReports(reports)).toEqual([])
     for (const call of reports) expect((call.body as { report: { columns: { live_today: { sha: unknown } } } }).report.columns.live_today.sha).toBeNull()

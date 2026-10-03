@@ -38,6 +38,7 @@ import {
   type ReportColumnMeta,
   type ReportColumnSnapshot,
   type ReportRowId,
+  type VerdictReasonKind,
   type ReportV2
 } from "./contracts/report.js"
 import { FORBIDDEN_CHECKBOX } from "./contracts/git-host.js"
@@ -518,7 +519,8 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
       provenLive: columnsMeta.proven_live,
       jobs: input.verdictFacts.jobs,
       openFindings: input.verdictFacts.openFindings,
-      tools: input.verdictFacts.tools
+      tools: input.verdictFacts.tools,
+      installedUnknown: input.verdictFacts.installedUnknown
     })
   }
   assertReport(report, input.runStartedAt ?? null)
@@ -658,6 +660,35 @@ export function verdictLine(report: ReportV2): string {
 }
 
 /**
+ * Review P1-3: the words a reason opens with on report.md and the PR comment, one line per reason with its names.
+ * `not_live` has none: the headline already says it ("not checked live yet").
+ */
+export const VERDICT_REASON_WORDS: Record<VerdictReasonKind, string | null> = {
+  live_problem: "Problems on the live site",
+  approved_fix_missing: "Approved fixes the wizard has not confirmed in the code",
+  review_blocker_open: "Review blockers still open",
+  tool_silent: "Sent nothing on the real visit",
+  tool_without_receipt: "No receipt from the real visit",
+  tool_not_connected: "Sending, but its ID is not checked (not connected in Infinite)",
+  earlier_problem_unchecked: "Problems found before the merge and not re-checked after the deploy",
+  receipt_not_in: "Receipts not in yet",
+  installed_unknown: "The deployed code could not be read",
+  not_live: null
+}
+
+/** The verdict's reasons as report lines (problems, unconfirmed and not-checked-live verdicts; never "properly"). */
+export function verdictReasonLines(report: ReportV2): string[] {
+  const verdict = report.verdict
+  if (!verdict || verdict.state === "properly") return []
+  return verdict.reasons.flatMap((entry) => {
+    const words = VERDICT_REASON_WORDS[entry.kind]
+    if (words === null || entry.names.length === 0) return []
+    const more = entry.count > entry.names.length ? ` +${entry.count - entry.names.length} more` : ""
+    return [`${words}: ${entry.names.join(", ")}${more}`]
+  })
+}
+
+/**
  * Below this many columns each row is stacked (label, then one line per column); from it, a 3-column table.
  * 140 gives each column 34 characters, so most cells stay on one line; a 120-column terminal reads better stacked.
  */
@@ -717,6 +748,15 @@ function md(text: string): string {
 export function renderMarkdown(report: ReportV2): string {
   const out: string[] = []
   const site = report.site.productionHost ?? report.site.repoLabel
+  // Review P1-3: report.md and the PR comment open with THE verdict's headline (the terminal's own line) and its
+  // reasons; a table of finish-line cells is never the only summary ("7 pass · 0 problems" hid run 3's problems).
+  out.push(`**${md(verdictLine(report))}**`)
+  const reasons = verdictReasonLines(report)
+  if (reasons.length > 0) {
+    out.push("")
+    for (const line of reasons) out.push(`- ${md(line)}`)
+  }
+  out.push("")
   out.push(`### Before and after · ${md(site)}`)
   out.push("")
   out.push(`| | ${REPORT_COLUMN_IDS.map((column) => COLUMN_LABELS[column]).join(" | ")} |`)
