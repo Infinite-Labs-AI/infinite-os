@@ -75,10 +75,10 @@ describe("a document's markdown reads as text (TJ-2)", () => {
   });
 
   it("the live URL is a labelled line, never a bare one", () => {
-    const out = lines(renderView(doc("Hello.", { liveUrl: "https://blog.example.test/cold-brew" }), ctx()));
-    expect(out).toContain("Live: https://blog.example.test/cold-brew");
-    expect(out).not.toContain("https://blog.example.test/cold-brew".padEnd(1));
-    expect(out.filter((line) => line.trim() === "https://blog.example.test/cold-brew")).toEqual([]);
+    const out = lines(renderView(doc("Hello.", { liveUrl: "https://blog.example.test/demo-item" }), ctx()));
+    expect(out).toContain("Live: https://blog.example.test/demo-item");
+    expect(out).not.toContain("https://blog.example.test/demo-item".padEnd(1));
+    expect(out.filter((line) => line.trim() === "https://blog.example.test/demo-item")).toEqual([]);
   });
 
   it("colour on, the body still carries no markdown marks", () => {
@@ -88,7 +88,7 @@ describe("a document's markdown reads as text (TJ-2)", () => {
 
   for (const width of [48, 60, 80, 100, 140]) {
     it(`every line fits ${width} columns`, () => {
-      const out = lines(renderView(doc(SOURCE, { liveUrl: "https://blog.example.test/a/very/long/path/that/goes/on/and/on/cold-brew-ratios-that-work" }), ctx({ width })));
+      const out = lines(renderView(doc(SOURCE, { liveUrl: "https://blog.example.test/a/very/long/path/that/goes/on/and/on/demo-item-sample-post-body" }), ctx({ width })));
       for (const line of out) expect(line.length, line).toBeLessThanOrEqual(width);
     });
   }

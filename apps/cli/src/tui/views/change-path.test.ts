@@ -16,12 +16,12 @@ import type { ViewRender, ViewRenderCtx } from "./types.js";
 const theme = resolveTheme({});
 const plain = { color: false, theme };
 const OUTER = "Sample campaign · prospecting · wide audience";
-const NEAREST = "Broad · Sample 1 · 2026-01-01 — test_x1_sample";
+const NEAREST = "Alpha · Sample 1 · 2026-01-01 — test_x1_sample";
 const body = (path: string[]) => ({ target: { kind: "ad", id: "a1", label: "Demo B", path } });
 
 describe("targetPathLine cuts the outer parts first (TJ-7)", () => {
   it("a path that fits prints whole", () => {
-    expect(targetPathLine(body(["Spring", "Broad"]), 60, plain)).toBe("Spring › Broad");
+    expect(targetPathLine(body(["Spring", "Alpha"]), 60, plain)).toBe("Spring › Alpha");
   });
 
   it("the nearest parent stays whole while the outer part is cut", () => {
@@ -42,7 +42,7 @@ describe("targetPathLine cuts the outer parts first (TJ-7)", () => {
   it("too narrow for the outer parts: they fold to … and the nearest parent keeps its leading words", () => {
     const line = targetPathLine(body([OUTER, NEAREST]), 40, plain)!;
     expect(displayWidth(line)).toBeLessThanOrEqual(40);
-    expect(line.startsWith("… › Broad · Sample 1")).toBe(true);
+    expect(line.startsWith("… › Alpha · Sample 1")).toBe(true);
     expect(line.endsWith("…")).toBe(true);
   });
 
@@ -50,7 +50,7 @@ describe("targetPathLine cuts the outer parts first (TJ-7)", () => {
     it(`never wider than ${width} columns, and never loses the nearest parent's first word`, () => {
       const line = targetPathLine(body(["A", OUTER, NEAREST]), width, plain)!;
       expect(displayWidth(line)).toBeLessThanOrEqual(width);
-      if (width >= 12) expect(line).toContain("Bro");
+      if (width >= 12) expect(line).toContain("Alp");
     });
   }
 });
@@ -79,7 +79,7 @@ describe("the no_change head's path line (TJ-7, flow-pause-05)", () => {
     it(`keeps the ad set's leading words at ${width} columns`, () => {
       const out = lines(renderView(change({}), ctx({ width })));
       const path = out.find((line) => line.includes(" › "))!;
-      expect(path).toContain("Broad");
+      expect(path).toContain("Alpha");
       for (const line of out) expect(displayWidth(line), line).toBeLessThanOrEqual(width);
     });
   }

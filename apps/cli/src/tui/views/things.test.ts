@@ -92,11 +92,11 @@ describe("list (r4 view-02 row grammar, run-2 M8)", () => {
     const v = withBody("list-rows", {
       rows: [
         { id: "ad_1", title: "Demo A", cells: {} },
-        { id: "ad_2", title: "Demo B", cells: {}, detail: [{ label: "since", value: { text: "Demo B · since Jan 02 · Broad" } }, { label: "budget", value: { text: "$10/day" } }] }
+        { id: "ad_2", title: "Demo B", cells: {}, detail: [{ label: "since", value: { text: "Demo B · since Jan 02 · Alpha" } }, { label: "budget", value: { text: "$10/day" } }] }
       ]
     });
     const render = draw(v, { selected: 1 });
-    expect(render.detail.at(-1)).toBe("Demo B · since Jan 02 · Broad · budget $10/day");
+    expect(render.detail.at(-1)).toBe("Demo B · since Jan 02 · Alpha · budget $10/day");
   });
 });
 
@@ -771,9 +771,9 @@ describe("rev 3: a list's name column head and a record's own status", () => {
       const firstCell = /US\s+(\S+)/u.exec(firstRow)!;
       expect(header.indexOf("Spend") + "Spend".length, `@${width}`).toBe(firstCell.index + firstCell[0].length);
     }
-    // The same rule keeps "Ad set" whole over an ad set named "Broad".
-    const broad = [{ id: "s_1", title: "Broad", cells: { spend: { value: 10 }, cpc: { value: 1 }, trials: { value: 1 } } }];
-    expect(draw(headed({ nameLabel: "Ad set", rows: broad })).detail[0]).toContain("Ad set");
+    // The same rule keeps "Ad set" whole over an ad set named "Alpha".
+    const alpha = [{ id: "s_1", title: "Alpha", cells: { spend: { value: 10 }, cpc: { value: 1 }, trials: { value: 1 } } }];
+    expect(draw(headed({ nameLabel: "Ad set", rows: alpha })).detail[0]).toContain("Ad set");
   });
 
   it("a long nameLabel is cut only where the pane cannot fit it, never pushing a line past the pane", () => {
