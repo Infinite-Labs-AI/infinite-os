@@ -16,7 +16,7 @@ import { transpileLikeBuild } from "../test/site-code/typescript.js"
 
 import { buildLandingAttributionScript } from "./attribution/capture.js"
 import * as patterns from "./attribution/patterns.js"
-import { infiniteUnsafeText } from "./conversions/scrub.js"
+import { infiniteUnsafeCampaign, infiniteUnsafeText } from "./conversions/scrub.js"
 import * as consent from "./providers/meta-browser/consent.js"
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -59,6 +59,16 @@ describe("the compiled (published) serialised bytes", () => {
     for (const value of CASES) {
       vm.window.__value = value
       expect(vm.evaluate("infiniteUnsafeText(window.__value)")).toBe(infiniteUnsafeText(value))
+    }
+  })
+
+  it("the campaign rule's tsc bytes give the same verdicts as the source (W7c)", () => {
+    const vm = createBrowserVm()
+    vm.runScript(String(scrub.UNSAFE_CAMPAIGN_SOURCE))
+    expect(vm.scriptErrors).toEqual([])
+    for (const value of [...CASES, "120211234567890123", "spring_2026_10_03", "+1 415 555 0100", "2026-10-03"]) {
+      vm.window.__value = value
+      expect(vm.evaluate("infiniteUnsafeCampaign(window.__value)")).toBe(infiniteUnsafeCampaign(value))
     }
   })
 

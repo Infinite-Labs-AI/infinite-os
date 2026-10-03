@@ -1,12 +1,12 @@
-import { UNSAFE_TEXT_SOURCE } from "../conversions/scrub.js"
+import { UNSAFE_CAMPAIGN_SOURCE } from "../conversions/scrub.js"
 import type { InfiniteBrowserConfig, InfiniteHandoffContext } from "../types.js"
 
 /**
- * §3x.4 (F5) The unsafe-text scrubber ported from infinite.fast, declared here for the type checker only: the runtime
- * ships through `.toString()`, so its source is injected into the runtime's own body (`RUNTIME_SOURCE`), exactly as
- * the conversion helpers carry it. Nothing at module scope defines it.
+ * §3x.4 (F5) The campaign rule (`conversions/scrub.ts`, the same shape tests as the cloud's ingest), declared here for
+ * the type checker only: the runtime ships through `.toString()`, so its source is injected into the runtime's own body
+ * (`RUNTIME_SOURCE`), exactly as the conversion helpers carry the scrubber. Nothing at module scope defines it.
  */
-declare function infiniteUnsafeText(value: unknown): boolean
+declare function infiniteUnsafeCampaign(value: unknown): boolean
 
 const RUNTIME_ATTRIBUTE = 'data-infinite-runtime="managed"'
 
@@ -382,9 +382,10 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
       const raw = params.get(key)
       if (raw === null) continue
       const value = raw.replace(/[\u0000-\u001f]/g, "").trim().slice(0, 100)
-      // §3x.4 (F5): a campaign value that could carry an email, a phone number, a URL or a click id is DROPPED
-      // (never rewritten: a half-cleaned value is still a leak). infinite.fast's campaign capture does the same.
-      if (value && !infiniteUnsafeText(raw)) properties[key] = value
+      // §3x.4 (F5): a campaign value that carries an email, a phone-formatted number, a URL or a click id is DROPPED
+      // (never rewritten: a half-cleaned value is still a leak). Ad-platform ids (15+ digits) and dates are kept: they
+      // are what the campaign is attributed by (review P1-2).
+      if (value && !infiniteUnsafeCampaign(raw)) properties[key] = value
     }
     for (const key of ["gclid", "fbclid", "ttclid", "msclkid"]) {
       const raw = params.get(key)
@@ -778,13 +779,13 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
  * marking step believed `data-conversion` meant "already handled" while the runtime believed it
  * meant two different lanes depending on the tag. Nothing here is a copy.
  */
-export const INFINITE_BROWSER_RUNTIME_SOURCE: string = withUnsafeText(infiniteBrowserRuntime.toString())
+export const INFINITE_BROWSER_RUNTIME_SOURCE: string = withCampaignRule(infiniteBrowserRuntime.toString())
 
-/** The runtime's source with `infiniteUnsafeText` declared first in its body (hoisted; no closure, no import). */
-function withUnsafeText(source: string): string {
+/** The runtime's source with `infiniteUnsafeCampaign` declared first in its body (hoisted; no closure, no import). */
+function withCampaignRule(source: string): string {
   const open = source.indexOf("{")
   if (open < 0) throw new Error("the Infinite runtime source has no body")
-  return `${source.slice(0, open + 1)}\n${UNSAFE_TEXT_SOURCE}\n${source.slice(open + 1)}`
+  return `${source.slice(0, open + 1)}\n${UNSAFE_CAMPAIGN_SOURCE}\n${source.slice(open + 1)}`
 }
 
 /** What the page runs: the runtime with the scrubber inside it. */

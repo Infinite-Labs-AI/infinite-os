@@ -1625,6 +1625,23 @@ describe("campaign capture on the initial page view (contract v1: +9 keys)", () 
     expect(view.rawBody).not.toMatch(/alice|415|555|0100|person/)
   })
 
+  it("W7c (review P1-2): Meta ad ids and dated campaign names are KEPT; a phone and an email are still dropped", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      href: "https://example.com/?utm_source=facebook&utm_content=120211234567890123&utm_campaign=spring_2026_10_03&utm_medium=2026-10-03&utm_term=%2B1%20415%20555%200100"
+    })
+    expect(runtime.requests[0]!.body.properties).toEqual({
+      nav: "navigate",
+      utm_source: "facebook",
+      utm_content: "120211234567890123",
+      utm_campaign: "spring_2026_10_03",
+      utm_medium: "2026-10-03"
+    })
+    const email = executeTag({ siteSourceKey: "site_public_123", consent: "granted", href: "https://example.com/?utm_source=x&utm_content=alice@example.com" })
+    expect(email.requests[0]!.body.properties).toEqual({ nav: "navigate", utm_source: "x" })
+  })
+
   it("W7 §3x.4 (F8): a browser that blocks storage still sends ONE page view, with page-scoped ids", () => {
     const runtime = executeTag({ siteSourceKey: "site_public_123", consentMode: "not_required", storageBlocked: true })
     expect(runtime.requests).toHaveLength(1)
