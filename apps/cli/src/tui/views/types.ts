@@ -10,6 +10,7 @@ import type { AnswerViewEnvelopeV1, AnswerViewKind } from "@infinite-os/types";
 
 import type { KeyContext, KeyHint } from "../keys/keymap.js";
 import type { Theme } from "../theme.js";
+import type { AppOpenTarget } from "./open-target.js";
 
 export interface ViewRenderCtx {
   /** The columns the view may use (the details pane, or the full width when stacked). */
@@ -100,6 +101,16 @@ export interface ViewRender {
   quiet?: true;
   /** The view draws `? what it does` inside itself (a card): the key bar does not repeat it. */
   explainInside?: true;
+  /**
+   * The place `o` opens in the app (app.open.v1), only when the session can
+   * open places (`caps.open`): the one the view marks `(o)`. A kind sets null
+   * when it decided there is none here (the shell then adds none).
+   */
+  openLink?: AppOpenTarget | null;
+  /** What the bar calls that place (`o  Open in Library`); the link's own label. */
+  openLabel?: string;
+  /** What `w` asks as a NEW user turn (a job's watch step), only when the session can watch. */
+  watchAsk?: string;
 }
 
 /**

@@ -15,6 +15,7 @@ import { displayWidth, padEndCells } from "../lib/display-width.js";
 import { asList, asRecord, sectionLines, type MeasureDraw } from "./numbers.js";
 import { FootnoteBook, formatAsOf, isRecord, linkLine, openHint, paint, viewText, wrapText } from "./primitives.js";
 import { marker as selectionMarker } from "./things.js";
+import { appOpenTarget, type AppOpenTarget } from "./open-target.js";
 import type { KindRender, KindRenderer, ViewRenderCtx } from "./types.js";
 
 type ItemTone = "success" | "warning" | "error" | "muted";
@@ -48,6 +49,8 @@ export interface HealthBodyDraw {
   rowCount: number;
   /** The fix `o` opens, when the session can open the app. */
   openLabel: string | null;
+  /** That fix's place (T12: what `o` sends to the app), null when `o` opens nothing here. */
+  openLink: AppOpenTarget | null;
 }
 
 /** A health body, drawn. `nested`: inside a composite (no selection, no `o`, no sections). */
@@ -123,6 +126,7 @@ export function healthBodyLines(
   });
 
   let openLabel = target >= 0 ? openableFix(items[target]!.fix) : null;
+  let openLink = target >= 0 && isRecord(items[target]!.fix) ? appOpenTarget((items[target]!.fix as Record<string, unknown>).appLink) : null;
   const extra: string[][] = [];
 
   // r4: the fixes after the rows, each `Fix it: <link ↗>`, and `(o) · <place>`
@@ -152,7 +156,10 @@ export function healthBodyLines(
     // `o` opens the resume place only when no item fix holds it and no row is
     // selectable (with j/k, `o` belongs to the selected row, even one with no fix).
     const opens = !nested && ctx.caps.open && !selectable && openLabel === null;
-    if (opens) openLabel = resumeLabel;
+    if (opens) {
+      openLabel = resumeLabel;
+      openLink = appOpenTarget(resume.appLink);
+    }
     extra.push(wrapText(`→ ${resumeLabel}${opens ? " (o)" : ""}`, ctx.width).map((line) => paint(line, "muted", ctx)));
   }
 
@@ -182,7 +189,7 @@ export function healthBodyLines(
     if (lines.length) lines.push("");
     lines.push(...block);
   }
-  return { lines, rowCount: selectable ? items.length : 0, openLabel };
+  return { lines, rowCount: selectable ? items.length : 0, openLabel, openLink: openLabel ? openLink : null };
 }
 
 export const renderHealth: KindRenderer<"health"> = (view, ctx): KindRender => {
@@ -194,6 +201,8 @@ export const renderHealth: KindRenderer<"health"> = (view, ctx): KindRender => {
     footnotes: draw.notes.lines().flatMap((line) => wrapText(line, ctx.width).map((part) => paint(part, "muted", ctx))),
     keys,
     okKey: null,
+    // `o` opens exactly the fix marked `(o)`; a health view that marks none opens nothing (T12).
+    ...(ctx.caps.open ? { openLink: drawn.openLink, ...(drawn.openLabel ? { openLabel: drawn.openLabel } : {}) } : {}),
     rowCount: drawn.rowCount,
     ...(draw.hidden ? { hiddenColumns: draw.hidden } : {})
   };

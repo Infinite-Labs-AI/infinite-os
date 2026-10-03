@@ -47,6 +47,7 @@ import {
   type Fields,
   type Span
 } from "./things.js";
+import { appOpenTarget } from "./open-target.js";
 import type { KindRenderer, ViewRenderCtx } from "./types.js";
 
 interface Column {
@@ -137,11 +138,17 @@ export const renderList: KindRenderer<"list"> = (view, ctx) => {
   section(lines, nextStepLines(steps, rows.length, selected, ctx));
 
   const copies = rows.map((row) => viewText(row.copy) || viewText(row.url) || null);
+  // `o` opens the selected row's place (marked `(o)` under it), only when the session can open places (T12).
+  const rowLink = chosen && ctx.caps.open && isRecord(chosen.appLink) ? chosen.appLink : null;
+  const rowTarget = rowLink && viewText(rowLink.label) ? appOpenTarget(rowLink) : null;
   return {
     detail: lines,
     footnotes: notes.lines(),
     keys: [],
     okKey: null,
+    // Rows with places own `o` (the selected one, or none); otherwise the view's own link does.
+    ...(rows.some((row) => isRecord(row.appLink)) ? { openLink: rowTarget } : {}),
+    ...(rowTarget && rowLink ? { openLabel: viewText(rowLink.label) } : {}),
     rowCount,
     rowAsks: [...rows.map(() => null), ...steps.map((step) => step.ask)],
     ...(copies.some((copy) => copy !== null) ? { rowCopies: [...copies, ...steps.map(() => null)] } : {}),
