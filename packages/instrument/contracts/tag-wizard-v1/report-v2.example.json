@@ -941,7 +941,7 @@
   "notes": [
     "Below 50 page views: raw counts shown",
     "Measurement changed: PostHog now goes through /ingest, so counts before and after this pull request are not comparable.",
-    "A real visit lands two bot-flagged document rows in your Infinite ledger (the page load and the server-lane probe)."
+    "This run's one real visit landed 3 rows in your Infinite ledger, marked as Infinite's test and kept out of your numbers: the page view, the server lane's page request and its probe."
   ],
   "verdict": {
     "state": "properly",
