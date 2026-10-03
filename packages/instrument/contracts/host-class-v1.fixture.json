@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "about": "How a production-host answer is classed (2026-10-03 live fix item 3, review-2 P3-1/P3-2/P3-4). production_alias: a *.vercel.app host shaped like a project's production alias, claimable (the site-file proof decides). preview: refused as a production host. bare_platform: a deny suffix without its dot, refused. custom: not on the deny list, claimable. infinite-tag and the cloud must class every host here the same way.",
+  "classes": [
+    "production_alias",
+    "preview",
+    "bare_platform",
+    "custom"
+  ],
+  "cases": [
+    {
+      "host": "infinite-tag-smoke-site.vercel.app",
+      "class": "production_alias",
+      "note": "a project's production alias (<project>.vercel.app)"
+    },
+    {
+      "host": "acme-store.vercel.app",
+      "class": "production_alias",
+      "note": "<project>.vercel.app"
+    },
+    {
+      "host": "acme-store-chaos-edge.vercel.app",
+      "class": "production_alias",
+      "note": "<project>-<team>.vercel.app"
+    },
+    {
+      "host": "ACME.vercel.app.",
+      "class": "production_alias",
+      "note": "case and one trailing dot are normalised away"
+    },
+    {
+      "host": "acme2.vercel.app",
+      "class": "production_alias",
+      "note": "a digit in the first segment is never a hash"
+    },
+    {
+      "host": "acme-riverkhan.vercel.app",
+      "class": "production_alias",
+      "note": "a 9-letter team slug with no digit is not a hash"
+    },
+    {
+      "host": "acme-store-qwertyuio-acme.vercel.app",
+      "class": "production_alias",
+      "note": "KNOWN MISREAD (review-2 P3-1): a deployment URL whose hash has no digit reads as an alias; it fails safe on the proof (an old deployment never serves the new token)"
+    },
+    {
+      "host": "infinite-tag-smoke-site-git-main-chaos-edge.vercel.app",
+      "class": "preview",
+      "note": "a branch alias (-git-)"
+    },
+    {
+      "host": "acme-git-feature-x-team.vercel.app",
+      "class": "preview",
+      "note": "a branch alias (-git-)"
+    },
+    {
+      "host": "infinite-tag-smoke-site-a1b2c3d4e-chaos-edge.vercel.app",
+      "class": "preview",
+      "note": "a deployment URL (<project>-<9-char hash with a digit>-<team>)"
+    },
+    {
+      "host": "acme-k9x8y7w6v.vercel.app",
+      "class": "preview",
+      "note": "a 9-char segment with a digit after the first reads as a deployment hash"
+    },
+    {
+      "host": "acme-store2024.vercel.app",
+      "class": "preview",
+      "note": "KNOWN MISREAD (review-2 P3-1): a real alias with a 9-char digit segment reads as a deployment URL; the refusal says it LOOKS like a preview"
+    },
+    {
+      "host": "preview.acme.vercel.app",
+      "class": "preview",
+      "note": "more than one label under vercel.app (Vercel generates none)"
+    },
+    {
+      "host": "acme.netlify.app",
+      "class": "preview",
+      "note": "a Netlify default"
+    },
+    {
+      "host": "acme.pages.dev",
+      "class": "preview",
+      "note": "a Cloudflare Pages default"
+    },
+    {
+      "host": "localhost",
+      "class": "preview",
+      "note": "a local address"
+    },
+    {
+      "host": "127.0.0.1",
+      "class": "preview",
+      "note": "a local address"
+    },
+    {
+      "host": "app.localhost",
+      "class": "preview",
+      "note": "a local address"
+    },
+    {
+      "host": "foo.local",
+      "class": "preview",
+      "note": "a local address"
+    },
+    {
+      "host": "vercel.app",
+      "class": "bare_platform",
+      "note": "a deny suffix without its dot: nobody's site, never provable (review-2 P3-2)"
+    },
+    {
+      "host": "netlify.app",
+      "class": "bare_platform",
+      "note": "a deny suffix without its dot (review-2 P3-2)"
+    },
+    {
+      "host": "pages.dev",
+      "class": "bare_platform",
+      "note": "a deny suffix without its dot (review-2 P3-2)"
+    },
+    {
+      "host": "acme-store.com",
+      "class": "custom",
+      "note": "a custom domain"
+    },
+    {
+      "host": "www.acme-store.com",
+      "class": "custom",
+      "note": "a custom domain"
+    },
+    {
+      "host": "notvercel.app",
+      "class": "custom",
+      "note": "a look-alike is not on the deny list"
+    }
+  ]
+}

@@ -35,7 +35,7 @@ function validReceipt(overrides: Partial<PackReceipt> = {}): PackReceipt[] {
     "contracts/browser-collect-v1.fixture.json",
     "contracts/browser-collect-v1.schema.json",
     "contracts/server-lane-v1.vectors.json",
-    "contracts/host-class-v1.json",
+    "contracts/host-class-v1.fixture.json",
     "contracts/host-deny-v1.json",
     "contracts/tag-wizard-v1/bridge-descriptor.example.json",
     "contracts/tag-wizard-v1/bridge-verbs.fixtures.json",

@@ -921,31 +921,43 @@ describe("host-deny-v1.json (§3h.9)", () => {
   })
 })
 
-describe("host-class-v1.json (review-2 P3-4: the production-host class, pinned in both repos)", () => {
-  // 1bu-1 vendors these bytes beside host-deny-v1.json and pins the same sha256 against its own classifier
-  // (`src/lib/analytics/wizard/host-deny.test.ts`), so the tag and the cloud classify every listed host the same way.
-  const HOST_CLASS_V1_SHA256 = "23c916b20be15fc63f3b78651e8e4257e8c895eaa90f300db94ed5809ea74e83"
-  const text = readText(contractsDir, "host-class-v1.json")
-  const doc = JSON.parse(text) as { version: number; cases: Array<{ host: string; class: "production_alias" | "preview" | "other"; note?: string }> }
+describe("host-class-v1.fixture.json (review-2 P3-4: the production-host class, pinned in both repos)", () => {
+  // The SAME bytes as 1bu-1 `src/lib/analytics/wizard/host-class-v1.fixture.json`, which pins the same sha256 against
+  // the cloud's classifier: the tag and the cloud class every listed host the same way. Change it in both repos together.
+  const HOST_CLASS_V1_SHA256 = "c2ad8932fb466a961bbfa50ceaf0f854d49cd0fa63af6d14f495a12e93d8d930"
+  const text = readText(contractsDir, "host-class-v1.fixture.json")
+  const doc = JSON.parse(text) as { version: number; classes: string[]; cases: Array<{ host: string; class: string; note: string }> }
+  /** The tag's own class of a host, from the rules `parseHostInput` applies. */
+  const classOf = (host: string): string => {
+    const normalized = host.trim().toLowerCase().replace(/\.$/, "")
+    if (["vercel.app", "netlify.app", "pages.dev"].includes(normalized)) return isPreviewShapedHost(host) ? "bare_platform" : "inconsistent"
+    if (isVercelProductionAliasShape(host)) return isPreviewShapedHost(host) ? "inconsistent" : "production_alias"
+    if (isPreviewShapedHost(host)) return "preview"
+    return isDenyListedHost(host) ? "inconsistent" : "custom"
+  }
 
-  it("is pretty JSON + newline, pinned by sha256", () => {
-    expect(text).toBe(`${JSON.stringify(doc, null, 2)}\n`)
+  it("is pinned by sha256 (the bytes 1bu-1 pins)", () => {
     expect(createHash("sha256").update(text).digest("hex")).toBe(HOST_CLASS_V1_SHA256)
     expect(doc.version).toBe(1)
-    expect(new Set(doc.cases.map((entry) => entry.class))).toEqual(new Set(["production_alias", "preview", "other"]))
+    expect(doc.classes).toEqual(["production_alias", "preview", "bare_platform", "custom"])
+    for (const klass of doc.classes) expect(doc.cases.some((entry) => entry.class === klass)).toBe(true)
   })
 
-  it("the tag's own rule answers every case exactly as the fixture says", () => {
+  it("the tag's own rule classes every case exactly as the fixture says, and refuses exactly preview and bare_platform", () => {
+    expect(doc.cases.map((entry) => [entry.host, classOf(entry.host)])).toEqual(doc.cases.map((entry) => [entry.host, entry.class]))
     for (const entry of doc.cases) {
-      expect(isPreviewShapedHost(entry.host), entry.host).toBe(entry.class === "preview")
-      expect(isVercelProductionAliasShape(entry.host), entry.host).toBe(entry.class === "production_alias")
-      expect(parseHostInput(entry.host).ok, entry.host).toBe(entry.class !== "preview")
+      if (!/^[a-z0-9.-]+\.?$/i.test(entry.host) || !entry.host.includes(".")) continue
+      expect([entry.host, parseHostInput(entry.host).ok]).toEqual([entry.host, entry.class === "production_alias" || entry.class === "custom"])
     }
   })
 
-  it("NEGATIVE: a drifted rule is caught (the bare platform domain and the deployment URL)", () => {
-    const loose = (host: string) => isDenyListedHost(host) && !host.endsWith(".vercel.app")
-    expect(doc.cases.some((entry) => loose(entry.host) !== (entry.class === "preview"))).toBe(true)
+  it("NEGATIVE: a drifted rule is caught (bare platform domains accepted, or every *.vercel.app refused)", () => {
+    // The pre-review-2 rule (a bare platform domain accepted as custom) and the pre-live-fix rule (every *.vercel.app
+    // refused) each disagree with the fixture somewhere.
+    const bareAccepted = (host: string) => (["vercel.app", "netlify.app", "pages.dev"].includes(host) ? "custom" : classOf(host))
+    expect(doc.cases.some((entry) => bareAccepted(entry.host) !== entry.class)).toBe(true)
+    const everyVercelRefused = (host: string) => (host.toLowerCase().replace(/\.$/, "").endsWith(".vercel.app") ? "preview" : classOf(host))
+    expect(doc.cases.some((entry) => everyVercelRefused(entry.host) !== entry.class)).toBe(true)
   })
 })
 
