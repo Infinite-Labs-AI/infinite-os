@@ -203,6 +203,11 @@ describe("the GitHub adapter (§3g.2)", () => {
     expect(await adapter.productionDeployment(SHA)).toEqual({ state: "ready" })
     const superseded = setup({ deployments: [{ id: 31, sha: SHA, environment: "Production", creator: "vercel[bot]", statuses: [{ state: "inactive" }, { state: "success" }] }] })
     expect(await superseded.adapter.productionDeployment(SHA)).toEqual({ state: "ready" })
+    // Review P3-2: only `inactive` statuses (no success ever recorded) is an unmeasured success, so not_found;
+    // `latestProductionDeployment` skips it too.
+    const onlyInactive = setup({ deployments: [{ id: 32, sha: SHA, environment: "Production", creator: "vercel[bot]", statuses: [{ state: "inactive" }, { state: "inactive" }] }] })
+    expect(await onlyInactive.adapter.productionDeployment(SHA)).toEqual({ state: "not_found" })
+    expect(await onlyInactive.adapter.latestProductionDeployment()).toBeNull()
     const none = setup({ deployments: [] })
     expect(await none.adapter.vercelDeploymentSeen()).toBe(false)
     expect(await none.adapter.latestProductionDeployment()).toBeNull()

@@ -21,11 +21,12 @@ export function isProductionDeployment(deployment: RawProductionDeployment): boo
 /**
  * A deployment's state from its statuses (GitHub lists them newest first). A later `inactive` (a newer deployment
  * superseded it) never hides the success before it; `failure`/`error` → failed; `queued`/`pending`/`in_progress` →
- * building; no status → not_found.
+ * building; no status → not_found. Only `inactive` statuses (no success was ever recorded) is not_found too: an
+ * `inactive` says the deployment was superseded, never that it served (an unmeasured success is not a success).
  */
 export function deploymentState(statuses: readonly RawDeploymentStatus[]): GhDeployState {
   const meaningful = statuses.filter((status) => status.state !== "inactive")
-  if (meaningful.length === 0) return statuses.length > 0 ? "ready" : "not_found"
+  if (meaningful.length === 0) return "not_found"
   const newest = meaningful[0]!.state
   if (newest === "success") return "ready"
   if (newest === "failure" || newest === "error") return "failed"
