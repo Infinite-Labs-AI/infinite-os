@@ -121,7 +121,8 @@ export function renderView(given: AnswerViewV1, ctx: ViewRenderCtx): ViewRender 
       ...(managed ? managedApprovalLines(managed, shellCtx) : []),
       ...reconcileLines(view, shellCtx),
       ...truncationLines(view, shellCtx),
-      ...caveatLines(view, shellCtx)
+      // A caveat an earlier read of the same account already printed is not printed again (N27).
+      ...caveatLines(shellCtx.repeats?.caveats.length ? withoutCaveats(view, shellCtx.repeats.caveats) : view, shellCtx)
       // A view's `? what it does` is a key on the key bar (`? hide` while open),
       // never a line inside the answer (run-2 N12). A card draws its own inside
       // itself (r4 `card()`), and the bar leaves it there (`explainInside`).
@@ -219,6 +220,12 @@ const FAILED_QUIET_STATES: ReadonlySet<string> = new Set(["failed", "blocked", "
 /** A quiet view that stands for a failed call: degraded, or in a failure's state. */
 function failedQuiet(view: AnswerViewV1): boolean {
   return (isRecord(view.body) && view.body.degraded === true) || FAILED_QUIET_STATES.has(view.state);
+}
+
+/** The view without the caveats `printed` (an earlier view in its turn said them). */
+function withoutCaveats(view: AnswerViewV1, printed: readonly string[]): AnswerViewV1 {
+  const said = new Set(printed);
+  return { ...view, caveats: view.caveats.filter((caveat) => !said.has(caveat)) } as AnswerViewV1;
 }
 
 /** The kinds whose settled receipts draw only an afterword under the state's sentence (outcome.ts). */

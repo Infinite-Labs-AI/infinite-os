@@ -30,11 +30,12 @@
 //   nothing measured is one dim line saying why; an empty section is nothing;
 // - ONE day strip per view; no verdict-source note (r4 draws none);
 // - a period that ended before the view's day is never `not final`.
-import type { CellV1, TextCellV1, UnitV1 } from "@infinite-os/types";
+import type { AnswerViewV1, CellV1, TextCellV1, UnitV1 } from "@infinite-os/types";
 
 import { renderTable, type TableColumn } from "../../formatting/table.js";
 import { displayWidth, padEndCells } from "../lib/display-width.js";
 import { healthBodyLines } from "./health.js";
+import { metaRepeatLine } from "./meta-fold.js";
 import {
   cellText,
   fitLine,
@@ -656,7 +657,8 @@ function legLines(
   columns: NumbersColumn[],
   ctx: ViewRenderCtx,
   draw: MeasureDraw,
-  heading = ""
+  heading = "",
+  withSteps = true
 ): string[] {
   const layout = body.layout;
   const currency = typeof body.currency === "string" ? body.currency : null;
@@ -676,7 +678,8 @@ function legLines(
   const totals = !isToday ? legTotals : rows.length ? null : legTotals;
   // j/k select the settled leg's rows (the today leg's rows are the same things, not final).
   const selected = !isToday && !nested ? ctx.selected : null;
-  const steps = asList(leg.steps).filter(isRecord);
+  // A later read that repeats the earlier one's funnel draws it once, above (N27).
+  const steps = withSteps ? asList(leg.steps).filter(isRecord) : [];
   // A section's totals with no rows are ONE table row named by its days (r4: every section is a table).
   const totalsRow = nested && !rows.length && totals !== null && layout !== "steps";
   const legWords = untitled ? "" : legTitle(leg, isToday, ctx, draw.refMs, !totalsRow);
@@ -1015,19 +1018,28 @@ function recordSectionLines(body: Record<string, unknown>, ctx: ViewRenderCtx, n
 // ── the body ──
 
 /** A numbers body, drawn. `nested`: inside a composite (its own sections never draw). */
-export function numbersBodyLines(body: Record<string, unknown>, ctx: ViewRenderCtx, draw: MeasureDraw, nested = false, heading = ""): string[] {
+export function numbersBodyLines(
+  body: Record<string, unknown>,
+  ctx: ViewRenderCtx,
+  draw: MeasureDraw,
+  nested = false,
+  heading = "",
+  view: AnswerViewV1 | null = null
+): string[] {
   const columns = numbersColumns(body);
   const currency = typeof body.currency === "string" ? body.currency : null;
   const blocks: string[][] = [];
   const legs = isRecord(body.legs) ? body.legs : null;
+  // What an earlier read of the same account in this turn already drew (N27): not drawn again.
+  const repeats = nested ? undefined : ctx.repeats;
   if (legs && isRecord(legs.settled)) {
-    blocks.push(legLines(legs.settled, false, nested, body, columns, ctx, draw, heading));
+    blocks.push(legLines(legs.settled, false, nested, body, columns, ctx, draw, heading, repeats?.settledSummary !== true));
   }
-  if (legs && isRecord(legs.today)) {
+  if (legs && isRecord(legs.today) && repeats?.today !== true) {
     blocks.push(legLines(legs.today, true, nested, body, columns, ctx, draw, isRecord(legs.settled) ? "" : heading));
   }
   const legsDrew = blocks.some((block) => block.length);
-  if (legs && !draw.stripDrawn) {
+  if (legs && !draw.stripDrawn && repeats?.settledSummary !== true) {
     // ONE day strip per view: a section's own strip would repeat the same days.
     const strip = coverageLines(legs, ctx, draw.reasonSaid === true, columns.some((column) => column.key.toLowerCase() === "spend"));
     // The legend is drawn when no state reason already says which days are in.
@@ -1047,9 +1059,15 @@ export function numbersBodyLines(body: Record<string, unknown>, ctx: ViewRenderC
   });
   blocks.push(leaders);
 
+  // ONE dim line in place of everything folded (N27), worded as the app words it.
+  const repeatLine = repeats && view ? metaRepeatLine(view, repeats) : null;
+  if (repeatLine) {
+    blocks.push(wrapText(repeatLine, ctx.width).map((line) => paint(line, "muted", ctx)));
+  }
   // No verdict-source note: r4 draws none, and the rows' own words carry each verdict.
   if (!nested) {
-    blocks.push(sectionLines(body.sections, ctx, draw));
+    const folded = new Set(repeats?.sections ?? []);
+    blocks.push(sectionLines(asList(body.sections).filter((_section, index) => !folded.has(index)), ctx, draw));
   }
   if (heading && !legsDrew && blocks.some((block) => block.length)) {
     // A section whose legs drew nothing but has a strip or leaders still says what it is, once.
@@ -1092,7 +1110,7 @@ export const renderNumbers: KindRenderer<"numbers"> = (view, ctx): KindRender =>
     notes: new FootnoteBook(), hidden: 0, reasonSaid: isRecord(view.stateReason), viewTitle: viewText(view.title),
     ...(Number.isFinite(asOf) ? { refMs: asOf } : {})
   };
-  const body = numbersBodyLines(asRecord(view.body), ctx, draw);
+  const body = numbersBodyLines(asRecord(view.body), ctx, draw, false, "", view as AnswerViewV1);
   const source = draw.legendDrawn ? sourceWordsLines(view, ctx) : [];
   const detail = source.length ? [...body, "", ...source] : body;
   return {

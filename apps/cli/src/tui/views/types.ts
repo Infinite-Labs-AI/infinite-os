@@ -10,6 +10,7 @@ import type { AnswerViewEnvelopeV1, AnswerViewKind } from "@infinite-os/types";
 
 import type { KeyContext, KeyHint } from "../keys/keymap.js";
 import type { Theme } from "../theme.js";
+import type { MetaRepeats } from "./meta-fold.js";
 import type { AppOpenTarget } from "./open-target.js";
 
 export interface ViewRenderCtx {
@@ -54,6 +55,12 @@ export interface ViewRenderCtx {
    * acts, unless `scrollback`.
    */
   columnKey?: boolean;
+  /**
+   * What this view repeats of an earlier view of the same read in its turn
+   * (N27, `meta-fold.ts`): those parts are not drawn again, and ONE dim line
+   * names them. Set by the turn's layout; absent = the view draws whole.
+   */
+  repeats?: MetaRepeats;
 }
 
 /** One view, drawn. `layout.ts` stacks head, source, detail, then footnotes. */
