@@ -10,8 +10,8 @@ import type { InfiniteOsDb, Migration, QueryableClient } from "./index.js";
 // PGlite (@electric-sql/pglite) is a full Postgres compiled to WASM that runs
 // in-process with a SINGLE connection and no server/Docker. This module is the
 // desktop-only backend behind the existing `createInfiniteOsDb` /
-// `runMigrations` seam in `index.ts`. The real-Postgres (`pg.Pool`) path is left
-// byte-identical; selection is purely by URL scheme (see `isPgliteDatabaseUrl`).
+// `runMigrations` seam in `index.ts`. Backend selection is purely by URL scheme
+// (see `isPgliteDatabaseUrl`).
 //
 // Why a separate module: it lets the `pg` dependency stay the only thing the
 // server bundle imports eagerly. `@electric-sql/pglite` is `import()`-ed lazily
@@ -234,16 +234,13 @@ export function createPgliteDb(
  *
  * This mirrors the `pg` migration loop in `runMigrations` (same
  * `schema_migrations` ledger, same per-file transactional apply, same
- * idempotency) with exactly two adapter-level differences PGlite forces:
+ * idempotency). Both adapters snapshot the applied IDs once and add each new ID
+ * only after its transaction commits. Reading `rows` works on both pg and
+ * PGlite (whose result has `affectedRows` instead of pg's `rowCount`).
  *
- *  1. The already-applied check gates on `rows.length`, NOT `rowCount`. PGlite's
- *     query result exposes `affectedRows` instead of pg's `rowCount`, so the
- *     `pg` loop's `if (existing.rowCount)` would be permanently falsy and every
- *     migration would re-apply on every boot. `rows.length` is correct on both.
- *
- *  2. Migration bodies are applied with `exec()` (multi-statement) rather than
- *     `query()` (single-statement). Migration files contain many statements;
- *     PGlite's `query` runs ONE, `exec` runs the whole script.
+ * Migration bodies use PGlite's `exec()` (multi-statement) rather than
+ * `query()` (single-statement). Migration files contain many statements;
+ * PGlite's `query` runs ONE, `exec` runs the whole script.
  *
  * The role/grant DDL in 0006 (and later re-grants) applies unmodified: PGlite
  * ships a full role/privilege system, the `create role` blocks are `if not
@@ -264,14 +261,11 @@ export async function runPgliteMigrations(
         applied_at timestamptz not null default now()
       )
     `);
+    const existing = await db.query<{ id: string }>("select id from schema_migrations");
+    const appliedIds = new Set(existing.rows.map((row) => row.id));
     const applied: string[] = [];
     for (const migration of migrations) {
-      const existing = await db.query<{ id: string }>(
-        "select id from schema_migrations where id = $1",
-        [migration.id]
-      );
-      // PGlite exposes `affectedRows`, not `rowCount` — gate on `rows.length`.
-      if (existing.rows.length > 0) {
+      if (appliedIds.has(migration.id)) {
         continue;
       }
       // Apply the migration body + ledger insert in ONE native transaction. PGlite's transaction()
@@ -283,6 +277,7 @@ export async function runPgliteMigrations(
         await tx.exec(migration.sql);
         await tx.query("insert into schema_migrations (id) values ($1)", [migration.id]);
       });
+      appliedIds.add(migration.id);
       applied.push(migration.id);
     }
     return applied;
