@@ -335,6 +335,17 @@ export function resolveViewKey(
  */
 export const HANDLED_KIND_KEYS: ReadonlySet<string> = new Set<string>();
 
+/**
+ * The composer bar's word for `o`, as r4 draws it: `open`, or `open in <place>`
+ * when the link names itself that way (flow-images `o open in Library`). Never
+ * a link's raw label (`Posts`, `Connect the store`): those read as the place,
+ * not the key, and stay on the view's own `(o)` line.
+ */
+function openBarLabel(label: string): string {
+  const named = /^open in\s+(.+)$/iu.exec(label.trim());
+  return named ? `open in ${named[1]}` : "open";
+}
+
 function applyViewAction(action: KeyAction, state: ViewFocusState, facts: ViewKeyFacts): ViewFocusState {
   // Every key that acts engages the view.
   const handled = (patch: Partial<ViewFocusState>): ViewFocusState => ({ ...state, engaged: true, ...patch, handled: true });
@@ -437,8 +448,9 @@ export function viewKeyHints(
   if (state.engaged && (facts.more || facts.livePageNext)) hints.push({ key: "m", label: "more" });
   if (state.engaged && copyTextAt(facts, state.selected)) hints.push({ key: "c", label: "copy" });
   // `o` and `w` from the facts (T12), so the bar and the resolver agree; once engaged, as `m` and `c`.
-  if (state.engaged && facts.open) hints.push({ key: "o", label: facts.open.label });
+  // r4 draws them `w watch` then `o open` (view-08-job); the link's own words stay on its in-view line.
   if (state.engaged && facts.watch) hints.push({ key: "w", label: "watch" });
+  if (state.engaged && facts.open) hints.push({ key: "o", label: openBarLabel(facts.open.label) });
   hints.push(...kindKeys.filter((hint) => HANDLED_KIND_KEYS.has(hint.key)));
   // `?` is the bar's (run-2 N12), `? hide` while open; a card keeps its own inside it.
   if (facts.explain) {

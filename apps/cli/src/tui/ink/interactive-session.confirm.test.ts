@@ -108,7 +108,8 @@ describe("Ink in-session write confirmation (Plan 2) — structural guards (CI-r
     // (confirm-card.tsx settleConfirmOutcome: receipt view on the turn, keep, or lines).
     expect(handler).toContain("settleConfirmOutcome(head, outcome, { decision, dismissed: dismissed !== null, onCardTurn: onCardTurn(), thrown })");
     expect(handler).toContain("if (settle(result, false)) afterReceipt(result);");
-    expect(handler).toContain("if (settle(error, true) && !refusedField(error)) afterReceipt(error);");
+    // A thrown error settles through confirm-stream.ts `confirmStreamSteps`' settle step (T12).
+    expect(handler).toContain("if (settle(step.outcome, true) && !refusedField(step.outcome)) afterReceipt(step.outcome);");
     expect(handler).toContain("recordTurnView(step.frame);");
     expect(handler).toContain("appendLines(step.lines);");
     expect(cardSource).toContain("confirmResultLines(outcome, opts.decision)");

@@ -36,7 +36,7 @@ import {
 } from "../../desktop/confirm-in-session.js";
 import { confirmErrorLines, type ConfirmLine } from "../../desktop/confirm-result-lines.js";
 import { appOpenLines } from "../../desktop/app-open.js";
-import { followUpOutcome } from "../../desktop/confirm-stream.js";
+import { confirmStreamSteps } from "../../desktop/confirm-stream.js";
 
 import { turnController } from "../app/turn-controller.js";
 import {
@@ -1672,23 +1672,36 @@ export function InkInteractiveSessionApp({
         refocusCardTurn();
       }
     };
-    const afterFollowUp = (result: unknown) => {
-      const follow = followUpOutcome(result, { confirmFieldsCapable: head.confirmFieldsCapable === true });
-      if (follow.message) appendMessages([{ role: "assistant", text: follow.message }]);
-      if (follow.errorLines.length) appendLines(follow.errorLines);
-      if (follow.pending.length) setPendingConfirmActions((current) => [...current, ...follow.pending]);
+    // When the call ends, what happens and in what order is one pure step list
+    // (confirm-stream.ts `confirmStreamSteps`, unit-tested on CI): the receipt
+    // settled once, then the follow-up's answer, its error words, its cards.
+    const runSteps = (end: Parameters<typeof confirmStreamSteps>[0]) => {
+      for (const step of confirmStreamSteps(end, { answered, confirmFieldsCapable: head.confirmFieldsCapable === true })) {
+        switch (step.type) {
+          case "settle":
+            if (step.thrown) {
+              if (settle(step.outcome, true) && !refusedField(step.outcome)) afterReceipt(step.outcome);
+            } else onAnswer(step.outcome);
+            break;
+          case "message":
+            appendMessages([{ role: "assistant", text: step.text }]);
+            break;
+          case "lines":
+            appendLines(step.lines);
+            break;
+          case "queue":
+            setPendingConfirmActions((current) => [...current, ...step.pending]);
+            break;
+        }
+      }
     };
     setConfirmsInFlight((count) => count + 1);
     void (async () => {
       try {
         const result = await onConfirmAction?.(head, decision, fields, streamHooks);
-        onAnswer(result);
-        afterFollowUp(result);
+        runSteps({ type: "resolved", result });
       } catch (error) {
-        if (answered) {
-          // The receipt already stands: only the follow-up failed.
-          appendLines(followUpOutcome({ followUpError: error }, { confirmFieldsCapable: false }).errorLines);
-        } else if (settle(error, true) && !refusedField(error)) afterReceipt(error);
+        runSteps({ type: "rejected", error });
       } finally {
         setConfirmsInFlight((count) => count - 1);
       }

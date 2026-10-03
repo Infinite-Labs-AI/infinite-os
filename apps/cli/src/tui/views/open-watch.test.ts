@@ -86,7 +86,8 @@ describe("`o` on a view (app.open.v1)", () => {
   it("with the capability `o` is on the bar and opens the view's place with its params", () => {
     const v = images();
     const state = engaged(v, NEW);
-    expect(hints(state, v)).toContainEqual(expect.objectContaining({ key: "o", label: "Open in Library" }));
+    // r4 flow-images (keys `o open in Library`): a link that names its place keeps it, in the bar's lowercase.
+    expect(hints(state, v)).toContainEqual(expect.objectContaining({ key: "o", label: "open in Library" }));
     const next = press(state, v, "o");
     expect(next.handled).toBe(true);
     expect(next.effect).toEqual({ type: "open", target: { place: "creative.library", params: { ids: "img_1,img_2,img_3" } } });
@@ -117,6 +118,28 @@ describe("`o` on a view (app.open.v1)", () => {
     const state = engaged(v, NEW);
     expect(hints(state, v).map((hint) => hint.key)).not.toContain("o");
     expect(press(state, v, "o").effect).toBeNull();
+  });
+});
+
+describe("the composer bar's `o` and `w` read as r4 draws them", () => {
+  const bar = (state: ViewFocusState, v: AnswerViewV1) => hints(state, v).map((hint) => `${hint.key} ${hint.label}`);
+
+  it("a running job: `w watch` then `o open` (r4 view-08-job), never the place's raw label", () => {
+    const v = job();
+    expect(bar(engaged(v, NEW), v)).toEqual(["w watch", "o open", "tab switch side"]);
+  });
+
+  it("a fix or a link that does not name itself `Open in …` is plain `o open` on the bar", () => {
+    const v = view(raw("health-connections"));
+    const labels = bar(engaged(v, NEW), v).filter((hint) => hint.startsWith("o "));
+    expect(labels).toEqual(["o open"]);
+  });
+
+  it("the bar never carries a link's capitalised words (`Open in …`, `Posts`)", () => {
+    for (const v of [job(), images(), view(raw("health-connections"))]) {
+      const o = hints(engaged(v, NEW), v).find((hint) => hint.key === "o");
+      expect(o?.label).toMatch(/^open( in .+)?$/u);
+    }
   });
 });
 

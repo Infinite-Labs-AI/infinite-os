@@ -52,6 +52,43 @@ export function followUpOutcome(result: unknown, options: { confirmFieldsCapable
   };
 }
 
+/** One thing the session does, in order, once a confirm call ends. */
+export type ConfirmStreamStep =
+  /** Settle the card from the app's answer (a result) or from the error it threw. */
+  | { type: "settle"; outcome: unknown; thrown: boolean }
+  /** The agent's follow-up answer, as an assistant message on the same turn. */
+  | { type: "message"; text: string }
+  /** Lines under the receipt (the follow-up's error words). */
+  | { type: "lines"; lines: ConfirmLine[] }
+  /** Cards the follow-up proposed, queued after any already waiting. */
+  | { type: "queue"; pending: InSessionConfirmationAction[] };
+
+/**
+ * The session's sequencing when a confirm call ends, as data (CI-tested here,
+ * so the session only carries each step out). The receipt is settled once: a
+ * streamed receipt already settled it (`answered`), so it is never settled
+ * again; otherwise the result (or the thrown error) settles it first. Then the
+ * follow-up's answer, its error words, and its cards, in that order. A throw
+ * after the receipt adds only the follow-up's error words: the receipt stays.
+ */
+export function confirmStreamSteps(
+  end: { type: "resolved"; result: unknown } | { type: "rejected"; error: unknown },
+  options: { answered: boolean; confirmFieldsCapable: boolean }
+): ConfirmStreamStep[] {
+  if (end.type === "rejected") {
+    if (!options.answered) return [{ type: "settle", outcome: end.error, thrown: true }];
+    const failed = followUpOutcome({ followUpError: end.error }, { confirmFieldsCapable: false });
+    return failed.errorLines.length ? [{ type: "lines", lines: failed.errorLines }] : [];
+  }
+  const steps: ConfirmStreamStep[] = [];
+  if (!options.answered) steps.push({ type: "settle", outcome: end.result, thrown: false });
+  const follow = followUpOutcome(end.result, { confirmFieldsCapable: options.confirmFieldsCapable });
+  if (follow.message) steps.push({ type: "message", text: follow.message });
+  if (follow.errorLines.length) steps.push({ type: "lines", lines: follow.errorLines });
+  if (follow.pending.length) steps.push({ type: "queue", pending: follow.pending });
+  return steps;
+}
+
 /** A follow-up progress frame that is a view (decoded), else null. */
 export function followUpViewFrame(frame: { data: unknown }): ToolViewFrameV1 | null {
   return isToolViewFrameData(frame.data) ? decodeToolViewFrame(frame.data) : null;

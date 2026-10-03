@@ -18,6 +18,7 @@ import {
   runDesktopAppCommand,
   type DesktopBridgeDescriptor
 } from "./desktop-app-client.js";
+import { confirmErrorLines } from "./desktop/confirm-result-lines.js";
 import {
   CONFIRM_FIELDS_CAPABILITY,
   GENERAL_MARKETING_PROFILE,
@@ -2781,6 +2782,53 @@ describe("app.open.v1 and confirm.stream.v1 (T12)", () => {
       expect(onReceipt).not.toHaveBeenCalled();
     }
   );
+
+  it.each([
+    "dispatch_uncertain",
+    "meta_api_error",
+    "ledger_unreachable",
+    "some_new_ledger_code",
+    // The app trusts these as not-sent only with a pre-send mark the stream frame does not carry.
+    "invalid_request",
+    "budget_choice_required",
+    "daemon_timeout"
+  ])(
+    "a streamed %s error with no receipt never claims nothing ran: only proven not-sent codes do",
+    async (code) => {
+      const { client } = harness({
+        respond: () => ndjsonResponse([
+          frame(1, "error", { code, message: "Infinite already started this change and couldn't confirm the result." })
+        ])
+      });
+      await client.status();
+      const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
+        .catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ name: "DesktopAppClientError", code });
+      expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
+      const lines = confirmErrorLines(error);
+      expect(lines[0]?.text).not.toMatch(/Not done|✗/);
+      expect(lines[0]?.text).toContain("Infinite already started this change");
+    }
+  );
+
+  it.each([
+    "receipt_view_unavailable",
+    "confirmation_expired",
+    "confirmation_spent",
+    "stale_turn_context",
+    "desktop_not_ready",
+    "recovery_pending",
+    "unsafe_tool_blocked",
+    "local_provider_busy"
+  ])("a streamed %s error with no receipt is a proven not-sent refusal: nothing ran", async (code) => {
+    const { client } = harness({
+      respond: () => ndjsonResponse([frame(1, "error", { code, message: "Nothing was executed." })])
+    });
+    await client.status();
+    const error = await client.confirm({ turnId: "turn-1", confirmationHandle: "opaque-confirm-1", decision: "approve", stream: true })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code, nothingRan: true });
+  });
 
   it("an error with no receipt the bridge cannot vouch for (receipt_unavailable) never says nothing ran", async () => {
     const { client } = harness({

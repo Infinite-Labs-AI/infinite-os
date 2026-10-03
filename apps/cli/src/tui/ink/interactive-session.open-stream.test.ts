@@ -37,11 +37,17 @@ describe("T12 wiring (CI-runnable)", () => {
     const handler = source.slice(source.indexOf("const resolveConfirmAction"), source.indexOf("const openAppPlace"));
     expect(handler).toContain("onReceipt: onAnswer,");
     expect(handler).toContain("if (answered) return;");
-    expect(handler).toContain("const result = await onConfirmAction?.(head, decision, fields, streamHooks);\n        onAnswer(result);\n        afterFollowUp(result);");
+    // The order of what happens when the call ends is confirm-stream.ts `confirmStreamSteps` (unit-tested there);
+    // the session runs every step it returns, and each step does its one thing.
+    expect(handler).toContain("const result = await onConfirmAction?.(head, decision, fields, streamHooks);\n        runSteps({ type: \"resolved\", result });");
+    expect(handler).toMatch(/\} catch \(error\) \{\s+runSteps\(\{ type: "rejected", error \}\);/u);
+    expect(handler).toContain("for (const step of confirmStreamSteps(end, { answered, confirmFieldsCapable: head.confirmFieldsCapable === true })) {");
+    expect(handler).toMatch(/case "settle":\s+if \(step\.thrown\) \{\s+if \(settle\(step\.outcome, true\) && !refusedField\(step\.outcome\)\) afterReceipt\(step\.outcome\);\s+\} else onAnswer\(step\.outcome\);\s+break;/u);
+    expect(handler).toMatch(/case "message":\s+appendMessages\(\[\{ role: "assistant", text: step\.text \}\]\);\s+break;/u);
+    expect(handler).toMatch(/case "lines":\s+appendLines\(step\.lines\);\s+break;/u);
+    expect(handler).toMatch(/case "queue":\s+setPendingConfirmActions\(\(current\) => \[\.\.\.current, \.\.\.step\.pending\]\);\s+break;/u);
     // The follow-up's views land only on the card's own turn.
     expect(handler).toMatch(/onView: \(frame\) => \{\s+if \(!onCardTurn\(\)\) return;\s+recordTurnView\(frame\);/u);
-    // A failure after the receipt never re-settles the card.
-    expect(handler).toMatch(/if \(answered\) \{[^}]*followUpOutcome\(\{ followUpError: error \}/u);
     // The client streams only a card that carried a view, and only from an app that can.
     expect(indexSource).toContain("...(stream && action.view && runner.streamCapable()");
   });

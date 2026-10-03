@@ -813,14 +813,31 @@ const APP_OPEN_STATUSES: ReadonlySet<string> = new Set<AppOpenStatus>([
 ]);
 
 /**
- * Stream errors before any receipt that the bridge sends without vouching
- * that nothing ran: the change may have gone through (`receipt_unavailable`),
- * or the resolution itself broke (`confirmation_failed`). Every other error
- * with no receipt before it means nothing ran.
+ * Stream errors before any receipt that prove nothing was sent: the only
+ * codes for which the terminal may say "Not done". The bridge's refusal frame
+ * passes ANY no-receipt result's own code through (`{ code, message }`), so a
+ * write that may have gone out (`dispatch_uncertain`, a provider or ledger
+ * failure after the send, a code added later) can arrive here too; those keep
+ * the neutral `! <app's words>`. This is an allowlist, never a denylist.
+ *
+ * It mirrors the app's not-sent codes (its ledger's NOT_SENT_OUTCOME_CODES)
+ * plus the card's own field / expired / spent refusals, MINUS the codes the
+ * app itself trusts as not-sent only together with a pre-send mark that the
+ * stream frame does not carry (`daemon_timeout`, `invalid_request`,
+ * `budget_choice_required`, the analysis-save refusals): from here those may
+ * be a server's refusal after the send, so they stay unknown.
  */
-const STREAM_UNSURE_CODES: ReadonlySet<string> = new Set([
-  "receipt_unavailable",
-  "confirmation_failed"
+const STREAM_NOT_RUN_CODES: ReadonlySet<string> = new Set([
+  "field_invalid",
+  "confirmation_not_found",
+  "receipt_view_unavailable",
+  "confirmation_expired",
+  "confirmation_spent",
+  "stale_turn_context",
+  "desktop_not_ready",
+  "recovery_pending",
+  "unsafe_tool_blocked",
+  "local_provider_busy"
 ]);
 
 /**
@@ -828,9 +845,9 @@ const STREAM_UNSURE_CODES: ReadonlySet<string> = new Set([
  * first frame that counts is the `action.receipt` (`{ ...result, view }` is
  * exactly what a plain confirm answers); then the agent's follow-up frames;
  * then one terminal frame. An `error` after the receipt never undoes it; an
- * `error` with no receipt before it means nothing ran (unless the bridge says
- * it cannot vouch for that). A stream lost before its receipt is an unknown
- * outcome, never a retry.
+ * `error` with no receipt before it means nothing ran only when its code
+ * proves it (STREAM_NOT_RUN_CODES); any other code is unsure. A stream lost
+ * before its receipt is an unknown outcome, never a retry.
  */
 async function streamConfirmation(
   descriptor: DesktopBridgeDescriptor,
@@ -914,7 +931,7 @@ async function streamConfirmation(
         error.code,
         error.message,
         undefined,
-        STREAM_UNSURE_CODES.has(error.code) ? undefined : true
+        STREAM_NOT_RUN_CODES.has(error.code) ? true : undefined
       );
     }
     // A `done` with no receipt before it: the bridge never sends one, so what happened is not known.

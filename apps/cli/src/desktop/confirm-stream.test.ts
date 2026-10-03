@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { appOpenLines } from "./app-open.js";
 import { confirmErrorLines } from "./confirm-result-lines.js";
-import { followUpOutcome, followUpViewFrame } from "./confirm-stream.js";
+import { confirmStreamSteps, followUpOutcome, followUpViewFrame } from "./confirm-stream.js";
 
 function receiptView(overrides: Record<string, unknown> = {}) {
   return {
@@ -60,6 +60,57 @@ describe("the follow-up after a streamed yes", () => {
     expect(followUpViewFrame(frame)?.viewId).toBe("v1");
     expect(followUpViewFrame({ ...frame, data: { type: "message.delta", text: "x" } })).toBeNull();
     expect(followUpViewFrame({ ...frame, data: { type: "tool.view", view: { kind: "carousel" } } })).toBeNull();
+  });
+});
+
+describe("the session's ordered steps when a confirm ends (confirmStreamSteps)", () => {
+  const FOLLOW = {
+    ok: true,
+    view: receiptView(),
+    followUp: {
+      turnId: "turn-2",
+      message: "It stopped spending. Want the ad set paused too?",
+      actionCalls: [{ actionId: "pause_adset", requiresConfirmation: true, confirmationHandle: "h-2", summary: "Pause the ad set?" }]
+    }
+  };
+
+  it("a streamed yes: the receipt settled once (already, by the stream), then the follow-up answer, then its card", () => {
+    const steps = confirmStreamSteps({ type: "resolved", result: FOLLOW }, { answered: true, confirmFieldsCapable: true });
+    expect(steps.map((step) => step.type)).toEqual(["message", "queue"]);
+    expect(steps[0]).toEqual({ type: "message", text: "It stopped spending. Want the ad set paused too?" });
+    expect(steps[1]).toMatchObject({ type: "queue", pending: [expect.objectContaining({ turnId: "turn-2", confirmationHandle: "h-2" })] });
+  });
+
+  it("a receipt not yet drawn by the stream is settled first, then the follow-up, in the same turn", () => {
+    const steps = confirmStreamSteps({ type: "resolved", result: FOLLOW }, { answered: false, confirmFieldsCapable: true });
+    expect(steps.map((step) => step.type)).toEqual(["settle", "message", "queue"]);
+    expect(steps[0]).toEqual({ type: "settle", outcome: FOLLOW, thrown: false });
+  });
+
+  it("a plain confirm with no follow-up only settles its receipt", () => {
+    const plain = { ok: true, view: receiptView() };
+    expect(confirmStreamSteps({ type: "resolved", result: plain }, { answered: false, confirmFieldsCapable: true }))
+      .toEqual([{ type: "settle", outcome: plain, thrown: false }]);
+  });
+
+  it("a follow-up that answered and then failed: its answer, then its error words, never a re-settle", () => {
+    const result = { ...FOLLOW, followUp: { ...FOLLOW.followUp, actionCalls: [] }, followUpError: { code: "turn_failed", message: "The follow-up could not finish." } };
+    const steps = confirmStreamSteps({ type: "resolved", result }, { answered: true, confirmFieldsCapable: true });
+    expect(steps).toEqual([
+      { type: "message", text: "It stopped spending. Want the ad set paused too?" },
+      { type: "lines", lines: [{ tone: "warn", text: "! The follow-up stopped: The follow-up could not finish." }] }
+    ]);
+  });
+
+  it("a throw after the receipt adds only the follow-up's error words: the receipt stays done", () => {
+    const steps = confirmStreamSteps({ type: "rejected", error: new Error("The stream closed.") }, { answered: true, confirmFieldsCapable: true });
+    expect(steps).toEqual([{ type: "lines", lines: [{ tone: "warn", text: "! The follow-up stopped: The stream closed." }] }]);
+  });
+
+  it("a throw with no receipt settles the card from the error (field_invalid keeps it live there), nothing else", () => {
+    const error = Object.assign(new Error("That budget must be at least 1."), { code: "field_invalid", nothingRan: true });
+    expect(confirmStreamSteps({ type: "rejected", error }, { answered: false, confirmFieldsCapable: true }))
+      .toEqual([{ type: "settle", outcome: error, thrown: true }]);
   });
 });
 
