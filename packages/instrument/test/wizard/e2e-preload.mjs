@@ -1,4 +1,4 @@
-/* global process, URL, Response */
+/* global process, URL, Response, setTimeout */
 // Preloaded into the BUILT wizard by the offline E2E (`node --import <this> dist/src/cli.js --json`;
 // test-only, never published). It does two things, both through seams the real wiring already has:
 //
