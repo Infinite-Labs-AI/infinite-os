@@ -161,6 +161,54 @@ describe("a waiting card under a tall view is on screen whenever p is offered (f
   }
 });
 
+describe("a resize opens the pane on the card again (W3R5 review; fake TTY, skipped on CI)", () => {
+  for (const [cols, rows] of [[80, 24], [100, 40], [140, 44]] as const) {
+    it.skipIf(process.env.CI === "true")(`at ${cols}x${rows}: ↑ hides p; widening by 4 columns shows the whole card with p again`, { timeout: 30_000 }, async () => {
+      const decisions: string[] = [];
+      const input = ttyInput();
+      const vt = new VtBuffer(cols, rows);
+      const output = ttyOutput(cols, rows, vt);
+      const session = runInkInteractiveSession({
+        errorOutput: ttyOutput(cols, rows),
+        input,
+        async onSubmitLine(line, _onProgress, _signal, onView) {
+          if (line === "/exit") return { exit: true, messages: [] };
+          onView?.(frame(fixtureJson("numbers-ads"), "week"));
+          onView?.(tallList());
+          return { messages: [{ role: "assistant", text: "Ready. It stops spending once you say OK." }], pendingConfirmations: [pauseCard()] };
+        },
+        async onConfirmAction(_action, decision) {
+          decisions.push(decision);
+          return { messages: [] };
+        },
+        output,
+        title: "Infinite TUI"
+      });
+      await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
+      await sendKeys(input, "pause my worst ad\r");
+      await waitFor(() => offersPause(vt.screenText()), 4_000, () => vt.screenText().join("\n"));
+
+      // ↑ a row: the card's foot leaves the pane, so p leaves the bar.
+      input.write(UP);
+      await waitFor(() => !offersPause(vt.screenText()), 4_000, () => vt.screenText().join("\n"));
+
+      // A resize: the pane opens on the card again, whole, with p back on the bar.
+      vt.resize(cols + 4);
+      output.columns = cols + 4;
+      output.emit("resize");
+      await waitFor(() => offersPause(vt.screenText()), 4_000, () => vt.screenText().join("\n"));
+      const after = vt.screenText();
+      expect(after.some((row) => CARD_TITLE.test(row)), after.join("\n")).toBe(true);
+      expect(after.some((row) => /p {2}Pause {4}n {2}dismiss/u.test(row) && !row.startsWith(" p"))).toBe(true);
+      expect(decisions).toEqual([]);
+      await sendKeys(input, "n");
+      await waitFor(() => decisions.length === 1, 4_000, () => vt.screenText().join("\n"));
+      await sendKeys(input, "/exit\r");
+      await session;
+    });
+  }
+});
+
 function ttyInput() {
   const stream = new PassThrough() as PassThrough & NodeJS.ReadStream & {
     isTTY: boolean;

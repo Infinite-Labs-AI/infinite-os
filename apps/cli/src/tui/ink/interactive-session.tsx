@@ -66,7 +66,7 @@ import {
 } from "./home-inventory.js";
 import { formatBusyNote, isInfiniteTurnBusy } from "./status-indicator.js";
 import { createTurnAbort, ctrlCAction, turnStoppedLine, type TurnAbort } from "./turn-abort.js";
-import { confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, type KeyAction, type KeyContext } from "../keys/keymap.js";
+import { approvesCard, cardKeysOffScreen, confirmCardKeys, keyBarHints, keyBarRowCount, resolveKey, shortOkVerb, type KeyAction, type KeyContext } from "../keys/keymap.js";
 import { fallbackCardLines, declineFrame, dismissalSent, fallbackCardRowCount, fieldInvalidMessage, messagesAfterDecline, settleConfirmOutcome } from "./confirm-card.js";
 import { KeyBar } from "./key-bar.js";
 import { COMPOSER_PLACEHOLDER, composerPlaceholderText } from "./composer-line.js";
@@ -1059,6 +1059,13 @@ export function InkInteractiveSessionApp({
         : null,
     [cardPaneWidth, confirmKeys, explainOpen, headCard, headConfirmAction, t]
   );
+  // The pane opens on the card again when the window or the card's height
+  // changes (`v` documents, `?`, a page): a stored pane row would point into
+  // differently wrapped details, and `p` would leave the bar for no reason on screen.
+  const headCardRowCount = headCardLines?.length ?? 0;
+  useLayoutEffect(() => {
+    setCardPaneScroll(null);
+  }, [columns, rows, headCardRowCount]);
   // The strip a tall finished turn left live (see `keptSteps`): only while no other turn runs or has calls.
   // A streamed follow-up is the card's turn still running: the kept strip stays hidden while it runs.
   const liveKeptSteps = !busy && !followUpRunning && !turnSteps.length ? keptSteps : null;
@@ -3828,16 +3835,6 @@ const CARD_MIN_ROWS = 6;
 
 /** A details pane's scroll past any end: the layout holds it to the pane's last page (its foot). */
 const PANE_FOOT = Number.MAX_SAFE_INTEGER;
-
-/** A card's keys with its approving keys off (W3L2-M2): no OK key, no `r` (which approves again); `n` stays. */
-function cardKeysOffScreen(ctx: KeyContext): KeyContext {
-  return { ...ctx, okKey: null, caps: { ...ctx.caps, retry: false } };
-}
-
-/** A card hint that approves: its OK key, or `r` (sends the approve again). */
-function approvesCard(hint: { key: string; ok?: boolean }): boolean {
-  return hint.ok === true || hint.key === "r";
-}
 
 /**
  * Rows the overlays between the transcript and the composer draw right now
