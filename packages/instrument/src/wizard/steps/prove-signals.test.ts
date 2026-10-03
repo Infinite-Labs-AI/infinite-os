@@ -50,10 +50,22 @@ const NO_HOSTING = { protocolVersion: 1 as const, requestId: "req", provider: "n
 const pending = (outcome: "not_served" | "wrong_token" = "not_served"): Omit<SiteProveResponse, "protocolVersion" | "requestId"> => ({ state: "pending", hosts: [{ host: HOST, outcome }], siteSource: null })
 const proven: Omit<SiteProveResponse, "protocolVersion" | "requestId"> = { state: "proven", hosts: [{ host: HOST, outcome: "proven" }], siteSource: { siteSourceKey: RESERVED, productionHosts: [HOST], consentMode: "not_required", created: true } }
 
-function world(input: { deployments?: FakeHostDeployments; siteProve?: Array<Omit<SiteProveResponse, "protocolVersion" | "requestId">>; keysAfterProof?: boolean }): FakeDepsBundle {
+const PROOF_PATH = "public/.well-known/infinite-site-verification.txt"
+const PROOF_BODY = "infinite-site-verification: isv_FAKEacmeProofToken0000\n"
+/** The merge brought the proof file (its first parent did not have it): this run's PR added it. */
+const MERGE_ADDED_FILE = { [MERGE_SHA]: { [PROOF_PATH]: PROOF_BODY } }
+/** Review P3-1: the file was already served before the merge (an earlier merge; a refreshed claim keeps its token). */
+const FILE_ALREADY_LIVE = { [MERGE_SHA]: { [PROOF_PATH]: PROOF_BODY }, [`${MERGE_SHA}^1`]: { [PROOF_PATH]: PROOF_BODY } }
+
+function world(input: {
+  deployments?: FakeHostDeployments
+  siteProve?: Array<Omit<SiteProveResponse, "protocolVersion" | "requestId">>
+  keysAfterProof?: boolean
+  files?: Record<string, Record<string, string>>
+}): FakeDepsBundle {
   const bundle = fakeDeps({
     bridge: { hosting: NO_HOSTING, keys: freshKeys(), ...(input.siteProve ? { siteProve: input.siteProve } : {}) },
-    git: { ancestors: [[MERGE_SHA, SERVING_SHA]] },
+    git: { ancestors: [[MERGE_SHA, SERVING_SHA]], ...(input.files ? { files: input.files } : {}) },
     ...(input.deployments ? { host: { deployments: input.deployments } } : {})
   })
   if (input.keysAfterProof) {
@@ -140,7 +152,7 @@ describe("prove: no signal at all → ONE question instead of a wait", () => {
 
 describe("prove: the site-file claim (§3y.4)", () => {
   it("the claim proven during the wait → deployed (site_file), the keys re-read, ONE real visit expecting the reserved key", async () => {
-    const bundle = world({ siteProve: [pending(), proven], keysAfterProof: true })
+    const bundle = world({ siteProve: [pending(), proven], keysAfterProof: true, files: MERGE_ADDED_FILE })
     const { outcome, subs, ctx } = await run(bundle, mergedState(answeredSite(true)))
     expect(outcome.kind, JSON.stringify(outcome)).not.toBe("parked")
     expect(subs.some((text) => text.startsWith(`✓ Deployed ${MERGE_SHA.slice(0, 7)} (Infinite read its proof file`)), subs.join("\n")).toBe(true)
@@ -155,6 +167,46 @@ describe("prove: the site-file claim (§3y.4)", () => {
     expect(ctx.current().site?.claim?.state).toBe("proven")
     // The claim was polled at most once a minute while it waited.
     expect(PROVE_LIMITS.claimPollMs).toBe(60_000)
+  })
+
+  it("review P3-1: the proof file was already live before this merge → the claim is proven but NOT counted as the deploy; no other signal → ONE question", async () => {
+    const bundle = world({ siteProve: [proven], keysAfterProof: true, files: FILE_ALREADY_LIVE })
+    const { outcome, subs, asked, ctx } = await run(bundle, mergedState(answeredSite(true)), { json: false }, () => true)
+    expect(outcome.kind, JSON.stringify(outcome)).not.toBe("parked")
+    expect(subs.some((text) => text.includes("Infinite read its proof file")), subs.join("\n")).toBe(false)
+    expect(subs).toContain(`The proof file was already on ${HOST} before this merge, so it does not show that ${MERGE_SHA.slice(0, 7)} deployed`)
+    expect(subs).toContain(`✓ ${HOST} confirmed (Infinite read the proof file)`)
+    // The deploy is what the user said, never a deploy nobody measured.
+    expect(asked).toHaveLength(1)
+    expect(subs).toContain("✓ Pull request #2 is live (you said)")
+    expect(ctx.current().site?.claim?.state).toBe("proven")
+    expect(bundle.log.names("bridge").filter((name) => name === "bridge.startTest")).toHaveLength(1)
+  })
+
+  it("review P3-1: the file already live and --yes → parked DEPLOY_TIMEOUT (no visit), the claim still recorded proven", async () => {
+    const bundle = world({ siteProve: [proven], files: FILE_ALREADY_LIVE })
+    const { outcome, ctx } = await run(bundle, mergedState(answeredSite(true)), { yes: true }, () => {
+      throw new Error("--yes must not ask")
+    })
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_DEPLOY_TIMEOUT" })
+    expect(ctx.current().site?.claim?.state).toBe("proven")
+    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
+  })
+
+  it("review P3-1: the file already live but GitHub shows the merge's deployment → '(GitHub deployment)', never site_file", async () => {
+    const bundle = world({ deployments: { forSha: ["building", "building", "ready"] }, siteProve: [proven], keysAfterProof: true, files: FILE_ALREADY_LIVE })
+    const { outcome, subs } = await run(bundle, mergedState(answeredSite(true)))
+    expect(outcome.kind, JSON.stringify(outcome)).not.toBe("parked")
+    expect(subs).toContain(`✓ Deployed ${MERGE_SHA.slice(0, 7)} (GitHub deployment)`)
+    expect(subs.some((text) => text.includes("Infinite read its proof file"))).toBe(false)
+    // Once proven, the claim is not asked again.
+    expect(bundle.log.names("bridge").filter((name) => name === "bridge.proveSite")).toHaveLength(1)
+  })
+
+  it("review P3-1: a git that cannot show files (unknown) never counts site_file", async () => {
+    const bundle = world({ siteProve: [proven], keysAfterProof: true })
+    const { subs } = await run(bundle, mergedState(answeredSite(true)), { json: false }, () => false)
+    expect(subs.some((text) => text.includes("Infinite read its proof file"))).toBe(false)
   })
 
   it("deployed on GitHub but the claim still pending → 3 more minutes of proofs, then parked HOST_UNCONFIRMED with NO real visit and NO proof claim", async () => {

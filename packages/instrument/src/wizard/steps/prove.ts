@@ -19,7 +19,8 @@ import { gradeContextFrom } from "../../checks/grade-context.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 
-import type { ProveOutcome, SiteProveResponse, TagKeys, TestRunPollResponse } from "../contracts/bridge.js"
+import { SITE_PROOF_PATH, type ProveOutcome, type SiteProveResponse, type TagKeys, type TestRunPollResponse } from "../contracts/bridge.js"
+import type { WizardGitOps } from "../contracts/git-host.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import type { CheckResult } from "../contracts/jobs.js"
 import { RECEIPT_LIMITS, type LaneReceipt, type ReceiptLane, type ReceiptMarkers, type ReceiptsResponseFields } from "../contracts/receipts.js"
@@ -122,7 +123,36 @@ export interface DeploySignals {
   claim: boolean
 }
 
-export type DeployOutcome = (DeployWait & { deployed: true }) | { deployed: false; why: "timeout" | "failed" }
+/**
+ * `no_signal`: the claim was proven, but it says nothing about THIS merge's deploy (the file was already served before
+ * it), and no other signal exists; the step then asks, as it does with no signal at all.
+ */
+export type DeployOutcome = (DeployWait & { deployed: true }) | { deployed: false; why: "timeout" | "failed" | "no_signal" }
+
+/**
+ * Review P3-1: the cloud reading the proof file shows THIS merge deployed only when the merge brought that file:
+ * the merge commit holds it, and its first parent (what production served before) did not hold the same bytes.
+ * A refreshed claim keeps its token, so a file live from an earlier merge (e.g. `--fresh` after a merged but
+ * unproven run) would otherwise read as a deploy nobody measured. Unknown (no `showFile`, an unfetched commit) is
+ * false: never a guess.
+ */
+export async function mergeBroughtProofFile(ctx: WizardContext, deps: WizardDeps, mergeSha: string, productionBranch: string | null): Promise<boolean> {
+  const git = deps.git as Partial<WizardGitOps>
+  if (typeof git.showFile !== "function") return false
+  const showFile = git.showFile.bind(deps.git)
+  // The merge happened on the host: fetch the production branch so the merge commit is known here.
+  if (productionBranch) await deps.git.remoteBranchSha(productionBranch).catch(() => null)
+  const rest = SITE_PROOF_PATH.replace(/^\//, "")
+  const prefix = ctx.appRoot === "." || ctx.appRoot === "" ? "" : `${ctx.appRoot}/`
+  // The two places `proofFileTarget` writes it (Next/Vite `public/`, a static site's root).
+  for (const path of [`${prefix}public/${rest}`, `${prefix}${rest}`]) {
+    const merged = await showFile(mergeSha, path).catch(() => null)
+    if (merged === null) continue
+    const before = await showFile(`${mergeSha}^1`, path).catch(() => null)
+    return before !== merged
+  }
+  return false
+}
 
 /** The step's sub line, throttled to one "still waiting" line per two minutes. */
 function waitLines(ctx: WizardContext, deps: WizardDeps): (text: string) => void {
@@ -159,6 +189,7 @@ async function waitForDeploy(
   const started = deps.clock.now().getTime()
   const say = waitLines(ctx, deps)
   let lastClaimPoll = -Infinity
+  let claimLive = signals.claim
   ctx.emit.emit("step.sub", { step: "prove", text: `Waiting for the deploy of ${mergeSha.slice(0, 7)}…`, tone: "pending" })
   for (;;) {
     if (signals.infinite) {
@@ -172,15 +203,22 @@ async function waitForDeploy(
       say(read.waiting === "building" ? `GitHub: Vercel is building ${mergeSha.slice(0, 7)}…` : `GitHub shows no production deployment for ${mergeSha.slice(0, 7)} yet`)
     }
     const now = deps.clock.now().getTime()
-    if (signals.claim && now - lastClaimPoll >= PROVE_LIMITS.claimPollMs) {
+    if (claimLive && now - lastClaimPoll >= PROVE_LIMITS.claimPollMs) {
       lastClaimPoll = now
       const answer = await proveOnce(ctx, deps)
-      // The file exists only in this run's merge: the cloud reading it IS the deploy (`site_file`).
       if (answer?.state === "proven") {
         input.onProven(answer)
-        return { deployed: true, sha: mergeSha, how: "site_file" }
-      }
-      if (input.host) say(`Checking ${input.host}/.well-known/infinite-site-verification.txt…`)
+        // The file exists only in this run's merge: the cloud reading it IS the deploy (`site_file`).
+        if (await mergeBroughtProofFile(ctx, deps, mergeSha, input.productionBranch)) return { deployed: true, sha: mergeSha, how: "site_file" }
+        // The file was already served before this merge: the proof stands, but it does not show this deploy.
+        claimLive = false
+        ctx.emit.emit("step.sub", {
+          step: "prove",
+          text: `The proof file was already on ${input.host ?? "your site"} before this merge, so it does not show that ${mergeSha.slice(0, 7)} deployed`,
+          tone: "info"
+        })
+        if (!signals.infinite && !signals.github) return { deployed: false, why: "no_signal" }
+      } else if (input.host) say(`Checking ${input.host}/.well-known/infinite-site-verification.txt…`)
     }
     if (deps.clock.now().getTime() - started >= PROVE_LIMITS.deployWaitMs) return { deployed: false, why: "timeout" }
     await deps.clock.sleep(PROVE_LIMITS.deployPollMs, ctx.signal)
@@ -671,9 +709,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     ctx.emit.emit("step.sub", { step: "prove", text: `✓ ${answer.siteSource?.productionHosts[0] ?? productionHost ?? "Your domain"} confirmed (Infinite read the proof file)`, tone: "ok" })
   }
 
-  let deploy: Extract<DeployWait, { deployed: true }>
-  if (!signals.infinite && !signals.github && !signals.claim) {
-    // No way to see the deploy: ONE question instead of a 20-minute wait (never under --yes / --json).
+  // No way to see the deploy: ONE question instead of a 20-minute wait (never under --yes / --json).
+  const askDeployed = async (): Promise<Extract<DeployWait, { deployed: true }> | null> => {
     const asked =
       ctx.options.yes || ctx.options.json || ctx.options.nested
         ? false
@@ -681,13 +718,25 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
             question: `Infinite can't see when ${productionHost ?? "your site"} deploys (no Vercel connection, no GitHub deployments). Is pull request #${state.pr?.number ?? "?"} live on ${productionHost ?? "your site"} now?`,
             defaultYes: false
           })
-    if (asked !== true) {
-      return { kind: "parked", code: "INF_WIZ_DEPLOY_TIMEOUT", reason: "Infinite cannot see this site's deploys.", resumeHint: "Run npx infinite-tag again once it's live." }
+    return asked === true ? { deployed: true, sha: mergeSha, how: "you_said" } : null
+  }
+  const cannotSee: StepOutcome = { kind: "parked", code: "INF_WIZ_DEPLOY_TIMEOUT", reason: "Infinite cannot see this site's deploys.", resumeHint: "Run npx infinite-tag again once it's live." }
+
+  let deploy: Extract<DeployWait, { deployed: true }>
+  if (!signals.infinite && !signals.github && !signals.claim) {
+    const said = await askDeployed()
+    if (!said) {
+      return cannotSee
     }
-    deploy = { deployed: true, sha: mergeSha, how: "you_said" }
+    deploy = said
   } else {
     const waited = await waitForDeploy(ctx, deps, { mergeSha, productionBranch, signals, host: productionHost, onProven })
-    if (!waited.deployed) {
+    if (!waited.deployed && waited.why === "no_signal") {
+      await ctx.state.save()
+      const said = await askDeployed()
+      if (!said) return cannotSee
+      deploy = said
+    } else if (!waited.deployed) {
       if (waited.why === "failed") {
         return {
           kind: "parked",
@@ -704,8 +753,9 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
           ? "Open Infinite: it finishes the proof after the deploy and shows it in Site Settings. Or run npx infinite-tag again later."
           : "Run npx infinite-tag again once it's live."
       }
+    } else {
+      deploy = waited
     }
-    deploy = waited
   }
   const deployWords: Record<DeployHow, string> = {
     merge_deployment: `✓ Deployed ${mergeSha.slice(0, 7)}`,

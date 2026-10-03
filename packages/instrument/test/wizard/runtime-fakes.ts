@@ -430,12 +430,26 @@ export interface FakeGitScript {
   dirtyPaths?: string[]
   createBranchFails?: boolean
   remote?: string | null
+  /**
+   * Files per revision (`git show <rev>:<path>`). Only when set does the fake carry `showFile` (other steps
+   * switch to the full wizard git surface when they see it).
+   */
+  files?: Record<string, Record<string, string>>
 }
 
 export function createFakeGit(log: CallLog, script: FakeGitScript = {}): GitOps {
   const ancestors = new Set((script.ancestors ?? []).map(([a, b]) => `${a}..${b}`))
   const unfetched = new Set(script.unfetched ?? [])
+  const files = script.files
   return {
+    ...(files
+      ? {
+          async showFile(rev: string, path: string): Promise<string | null> {
+            log.push("git", "showFile", rev, path)
+            return files[rev]?.[path] ?? null
+          }
+        }
+      : {}),
     async isRepo() {
       log.push("git", "isRepo")
       return true
