@@ -88,7 +88,8 @@ export function parseHostInput(raw: string): { ok: true; host: string } | { ok: 
       return { ok: false, reason: "not_host", shown: trimmed.slice(0, 80) }
     }
   } else {
-    candidate = trimmed.replace(/\/.*$/, "")
+    const slash = trimmed.indexOf("/")
+    candidate = slash === -1 ? trimmed : trimmed.slice(0, slash)
   }
   const host = normalizeHost(candidate)
   if (!HOST_PATTERN.test(host)) return { ok: false, reason: "not_host", shown: (host || trimmed).slice(0, 80) }
