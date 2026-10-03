@@ -255,9 +255,10 @@ describe("infinite-os npm bootstrap package", () => {
   it("documents setup through the app without trial, local-engine, or Docker fallback copy", () => {
     const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
     expect(readme).toContain("npx infinite-os@latest");
-    expect(readme).toContain("infinite-os@1.0.1");
-    expect(readme).toContain("not promised by `@latest`");
-    expect(readme).not.toContain("open 'infinite://onboarding'");
+    expect(readme).toContain(`infinite-os@${installerVersion}`);
+    expect(readme).toContain("Desktop v0.3.20");
+    expect(readme).toMatch(/must\s+not be published/);
+    expect(readme).toContain("not live in `@latest`");
     expect(readme).toContain("Press `⌘L`");
     expect(readme).toContain('Run `infinite "…"`');
     expect(readme).toContain("Same account. Same workspace. Same agent.");
