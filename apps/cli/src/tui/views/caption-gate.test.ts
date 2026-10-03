@@ -1,7 +1,8 @@
 // The caption gate (round 4, the same rule in both renderers): an answer
 // that comes with a view shows at most 2 sentences above it; the rest is
 // folded, never dropped, rewritten or summarised. These are the shared test
-// vectors V1-V7 (synthetic), pinned exactly; the other renderer pins the same.
+// vectors V1-V7 (synthetic), pinned exactly, and the proposed V8 (a table or a
+// fenced block is one sentence); the other renderer pins the same.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { AnswerViewV1 } from "@infinite-os/types";
@@ -74,6 +75,25 @@ describe("the caption gate's shared vectors (V1-V7)", () => {
     const table = "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |";
     expect(captionGate(`${table}\nFirst note. Second note.`)).toEqual({ shown: `${table}\nFirst note.`, rest: "Second note." });
     expect(captionGate(table)).toEqual({ shown: table, rest: null });
+  });
+
+  // V8 (proposed shared vector, S4): a table and a fenced block each count as ONE sentence.
+  // The Cmd+L renderer pins the same text and the same split, so both renderers fold alike.
+  const V8 = "Here are the rows:\n\n| Ad | Spend |\n| --- | --- |\n| Sample A | $10 |\n| Sample B | $20 |\n\nSample B spent more. Check again tomorrow.";
+  const V8_FENCE = "Run this:\n\n```\nstep one. step two.\nstep three.\n```\n\nIt only reads. Nothing changes.";
+
+  it("V8: a table is one sentence: the intro and the whole table show, the rest folds", () => {
+    expect(captionGate(V8)).toEqual({
+      shown: "Here are the rows:\n\n| Ad | Spend |\n| --- | --- |\n| Sample A | $10 |\n| Sample B | $20 |",
+      rest: "Sample B spent more. Check again tomorrow."
+    });
+  });
+
+  it("V8 (fence): a fenced block is one sentence, its inner full stops are no break", () => {
+    expect(captionGate(V8_FENCE)).toEqual({
+      shown: "Run this:\n\n```\nstep one. step two.\nstep three.\n```",
+      rest: "It only reads. Nothing changes."
+    });
   });
 
   it("a sentence closed inside markdown ends at its closing marker", () => {
