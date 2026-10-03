@@ -881,6 +881,55 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     ])
   })
 
+  it("review P1-4: a round that timed out AFTER editing says its unfinished change was undone, never 'before changing anything'", async () => {
+    const w = await opened({
+      reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the existing init in place instead.", suggested_fix: "Keep one init." }]), review([])],
+      // The fence aborted the turn: the agent's edit to app/layout.tsx was put back (`reverted`), nothing kept.
+      fix: () => ({ outcome: "timeout", edits: [], reverted: ["app/layout.tsx"], blocked: [], gateHits: [] }),
+      answers: { "teammate-comments": { actOn: [] } }
+    })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const thread = w.gh.read().threads.find((entry) => entry.comments[0]!.author === "acme-dev")!
+    expect(thread.comments[1]!.body).toMatch(/^Not fixed: the agent ran out of its 5 minutes; its unfinished change to app\/layout\.tsx was undone\. It stays open\./)
+    expect(thread.comments[1]!.body).not.toMatch(/before changing anything|without changing anything/)
+  })
+
+  it("review P1-4: a round whose every change the safety check refused says the gate's own words, never 'without changing anything'", async () => {
+    const note = "the wizard's safety check refused app/layout.tsx:2: the edit starts a child process"
+    const w = await opened({
+      reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the existing init in place instead.", suggested_fix: "Keep one init." }]), review([])],
+      fix: (input) => ({
+        outcome: "ok",
+        edits: [],
+        reverted: ["app/layout.tsx"],
+        blocked: [],
+        gateHits: [{ rule: "turn_gate", file: "app/layout.tsx", line: 2, hunk: 0, itemIds: [input.items[0]!.id], note }]
+      }),
+      answers: { "teammate-comments": { actOn: [] } }
+    })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const thread = w.gh.read().threads.find((entry) => entry.comments[0]!.author === "acme-dev")!
+    expect(thread.comments[1]!.body).toMatch(new RegExp(`^Not fixed: ${note.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, so the change was undone\\. It stays open\\.`))
+    expect(thread.comments[1]!.body).not.toMatch(/without changing anything/)
+  })
+
+  it("review P1-4: a round whose every change was outside the job's files says the block's words", async () => {
+    const w = await opened({
+      reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the existing init in place instead.", suggested_fix: "Keep one init." }]), review([])],
+      fix: (input) => ({
+        outcome: "ok",
+        edits: [],
+        reverted: ["lib/helper.ts"],
+        blocked: [{ itemId: input.items[0]!.id, reason: "outside_allowlist", paths: ["lib/helper.ts"], note: "Undid the change to lib/helper.ts: a new file no job may create." }],
+        gateHits: []
+      }),
+      answers: { "teammate-comments": { actOn: [] } }
+    })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const thread = w.gh.read().threads.find((entry) => entry.comments[0]!.author === "acme-dev")!
+    expect(thread.comments[1]!.body).toMatch(/^Not fixed: the wizard undid the change to lib\/helper\.ts: a new file no job may create\. It stays open\./)
+  })
+
   it("with one agent: writes and prints the review brief, readies the PR saying 'no second review', and reads a posted brief review back on a re-run", async () => {
     const w = await opened({ reviewer: "brief", answers: { "teammate-comments": { actOn: [] } } })
     const outcome = await reviewStep.run(w.ctx, w.deps)

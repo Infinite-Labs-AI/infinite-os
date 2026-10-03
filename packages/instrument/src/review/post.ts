@@ -143,11 +143,24 @@ export type FixReplyState =
  * §3x.3 / DECISIONS §1.5 Why a FIX stayed open, as it really happened: the round ran out of time, the agent could not use
  * its tools, it stopped with an error, it finished without a change, or its change failed the wizard's checks.
  */
-export type NotFixedOutcome = "timeout" | "toolless" | "error" | "no_change" | "checks_failed"
+export type NotFixedOutcome = "timeout" | "toolless" | "error" | "no_change" | "checks_failed" | "undone" | "gate_refused" | "blocked"
 
-/** The one wording of a not-fixed reply (thread reply, run note and terminal line say the same words). */
+/**
+ * The one wording of a not-fixed reply (thread reply, run note and terminal line say the same words). Review P1-4: a
+ * round whose change the wizard UNDID is never "before changing anything" / "without changing anything":
+ *   - `undone`: the agent stopped (out of time, an error, no tools) mid-change; `why` = what stopped it and the files;
+ *   - `gate_refused`: the post-turn safety check refused every change; `why` = the gate's own note;
+ *   - `blocked`: the fence undid every change (outside the job's files, consent); `why` = the block's note.
+ */
 export function notFixedReply(outcome: NotFixedOutcome, why?: string | null): string {
+  const said = why ? stripControl(why).slice(0, 200) : null
   switch (outcome) {
+    case "undone":
+      return `Not fixed: ${said ?? "the agent stopped before it finished"}. It stays open.`
+    case "gate_refused":
+      return `Not fixed: ${said ?? "the wizard's safety check refused the agent's change"}, so the change was undone. It stays open.`
+    case "blocked":
+      return `Not fixed: ${said ?? "the wizard undid the agent's change"}. It stays open.`
     case "timeout":
       return "Not fixed: the agent ran out of its 5 minutes before changing anything. It stays open."
     case "toolless":

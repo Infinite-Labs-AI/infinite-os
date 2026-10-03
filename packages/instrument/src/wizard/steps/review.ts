@@ -8,7 +8,8 @@ import { createHash, randomBytes } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
-import type { AgentKind, ReviewFailure, ReviewResult } from "../contracts/agents.js"
+import type { AgentKind, AgentRunResult, ReviewFailure, ReviewResult } from "../contracts/agents.js"
+import { runExtras } from "../../agents/runner.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
 import type { CheckResult } from "../contracts/jobs.js"
@@ -893,14 +894,15 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
         }
       }
       const edited = fix.run.edits.map((edit) => edit.file)
-      // §3x.3 / DECISIONS §1.5 A round that changed nothing is said as it happened (it ran out of time, could not use
-      // its tools, stopped, or finished with no change): no build and no check ran, so nothing "failed the checks".
+      // §3x.3 / DECISIONS §1.5 A round that kept no change is said as it happened: no build and no check ran, so
+      // nothing "failed the checks". Review P1-4: the fence's own record decides whether the agent changed anything
+      // the wizard then undid (a stop mid-change, the safety check, a file outside the job), never `edits` alone.
       if (edited.length === 0) {
-        const outcome: NotFixedOutcome = fix.run.outcome === "timeout" ? "timeout" : fix.run.outcome === "toolless" ? "toolless" : fix.run.outcome === "error" ? "error" : "no_change"
-        const words = notFixedReply(outcome)
+        const { outcome, why } = noKeptChangeOutcome(fix.run)
+        const words = notFixedReply(outcome, why)
         session.notes.push(`Round ${round}: ${words}`)
         sub(ctx, "review", `! ${words}`, "warn")
-        for (const decision of fixes) if (decision.item.threadId) notFixed.set(decision.item.threadId, { kind: "not_fixed", outcome })
+        for (const decision of fixes) if (decision.item.threadId) notFixed.set(decision.item.threadId, { kind: "not_fixed", outcome, why })
         await replyAndResolve(session, decisions, gathered.teammateOk, null, fixState, notFixed)
         await saveLedger(session)
         await ctx.state.save()
@@ -1017,6 +1019,32 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
   const line = [`${final.pr?.number ? `Pull request #${final.pr.number}` : "Branch"}`, who, ...(found ? [found] : []), rehearsalText].join(" · ")
   status(ctx, "review", line)
   return { kind: "ok", status: line }
+}
+
+/**
+ * Review P1-4: why a fix round kept no change, read from the fence's record of the turn (`runExtras`):
+ *   - stopped (timeout, error, no tools) after editing → `undone`, naming what it changed;
+ *   - every change refused by the post-turn gate → `gate_refused`, with the gate's own note;
+ *   - every change undone by the fence (outside the job's files, consent) → `blocked`, with the block's note;
+ *   - only when all three are empty → the plain outcome ("ran out of time before changing anything", "without
+ *     changing anything").
+ */
+export function noKeptChangeOutcome(run: AgentRunResult): { outcome: NotFixedOutcome; why: string | null } {
+  const extras = runExtras(run)
+  const stopped = run.outcome === "timeout" ? "the agent ran out of its 5 minutes" : run.outcome === "error" ? "the agent stopped with an error" : run.outcome === "toolless" ? "the agent could not use its tools" : null
+  const changed = [...new Set(run.reverted.filter((path) => !path.startsWith(".git/") && path !== ".git"))]
+  if (stopped && changed.length > 0) return { outcome: "undone", why: `${stopped}; its unfinished change to ${listPaths(changed)} was undone` }
+  if (extras.gateHits.length > 0) return { outcome: "gate_refused", why: [...new Set(extras.gateHits.map((hit) => hit.note))].join("; ") }
+  if (extras.blocked.length > 0) {
+    return { outcome: "blocked", why: [...new Set(extras.blocked.map((block) => `the wizard ${block.note.charAt(0).toLowerCase()}${block.note.slice(1).replace(/\.$/, "")}`))].join("; ") }
+  }
+  const outcome: NotFixedOutcome = run.outcome === "timeout" ? "timeout" : run.outcome === "toolless" ? "toolless" : run.outcome === "error" ? "error" : "no_change"
+  return { outcome, why: null }
+}
+
+function listPaths(paths: readonly string[]): string {
+  const shown = paths.slice(0, 3).join(", ")
+  return paths.length > 3 ? `${shown} +${paths.length - 3} more` : shown
 }
 
 export const step: WizardStep<"review"> = {
