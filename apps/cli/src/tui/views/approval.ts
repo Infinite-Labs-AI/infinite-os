@@ -199,7 +199,9 @@ export function approvalRender(given: AnswerViewV1, ctx: ApprovalRenderCtx): App
 
   // ── above the card: the head (· viewing while a document is open) and the source ──
   const paneCtx: ViewRenderCtx = { ...ctx, width: paneWidth };
-  const head = headLine(view, paneCtx);
+  // The head is never wider than the card under it (W3-ap-pause): a long name is
+  // cut with `…` in the head only; the card's title keeps it whole where it fits.
+  const head = headLine(view, { ...paneCtx, width });
   const source = sourceLine(view, paneCtx);
   const prelude = [
     documentOpen ? viewingHead(head, paneWidth, ctx) : head,

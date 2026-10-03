@@ -913,3 +913,94 @@ describe("the change target's path (contract revision 3) where no golden covers 
     }
   }
 });
+
+// Wave 3 r2 (W3-ap-pause): a long name never makes the head longer than the
+// card under it (r4 `card()`: at most 74 wide). The head stays one line, its
+// state words whole; the name is cut with `…` in the head only, and the whole
+// name stays in the card.
+describe("a long name in a card's head is cut to the card (W3-ap-pause)", () => {
+  const LONG = "sample_video_long_name_for_the_head_test_dark_captions";
+  const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
+  const longPause = () => pause({
+    title: `Pause ${LONG}`,
+    body: { ...PAUSE_BODY, target: { kind: "ad", id: "ad_demo_long", label: LONG } },
+    approval: { ...PAUSE_APPROVAL, title: `Pause ad “${LONG}”?` }
+  });
+
+  for (const cols of [60, 100, 140]) {
+    it(`at ${cols} the head is one line no wider than the card, state words whole`, () => {
+      const render = approvalRender(longPause(), cardCtx({ width: cols, caps: OPEN }));
+      const head = plainText(render.head);
+      expect(head.includes("\n")).toBe(false);
+      expect(displayWidth(head)).toBeLessThanOrEqual(Math.min(cols, 74));
+      expect(head).toMatch(/^ Pause sample_video.*… +▣ Needs your OK$/u);
+      // Where the card is wide enough for it, the whole name stays in the card's title.
+      if (cols >= 100) expect(render.lines.map(plainText).join("\n")).toContain(LONG);
+    });
+  }
+
+  it("a short name is not cut (r4 flow-pause-01)", () => {
+    const head = plainText(approvalRender(pause(), cardCtx({ width: 140 })).head);
+    expect(head).toBe(" Pause Demo B  ▣ Needs your OK");
+  });
+});
+
+// Wave 3 r2 (W3-chg-xpub): an operation_managed approval says where its OK is
+// given, never a key that does nothing: here, once the view is engaged (tab,
+// then its key), or in the app when the view says it finishes there.
+describe("an operation_managed approval says where its OK is given (W3-chg-xpub)", () => {
+  const plainText = (line: string) => line.replace(/\u001b\[[0-9;]*m/gu, "");
+  const publish = (approval: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => decode({
+    kind: "change", tool: "publish_sample_post", title: "Publish sample post", state: "needs_yes",
+    provenance: { source: "Sample network", via: "server" },
+    body: { target: { kind: "post", label: "Sample post" }, rows: [{ label: "Status", before: "Draft", after: "Published" }], warnings: [] },
+    approval: {
+      kind: "operation_managed", title: "Publish “Sample post”?", summary: "This draft goes live.",
+      confirmLabel: "Publish", dismissLabel: "Dismiss", rows: [], ask: "Yes, publish the sample post now.", ...approval
+    },
+    ...extra
+  });
+  const out = (view: AnswerViewV1, over: Partial<ViewRenderCtx> = {}) => {
+    const render = renderView(view, viewCtx({ color: false, ...over }));
+    return [render.head, ...render.detail].map(plainText);
+  };
+
+  for (const cols of [60, 100, 140]) {
+    it(`at rest it says the OK is here, behind tab, with the key that sends it (${cols} columns)`, () => {
+      const lines = out(publish(), { width: cols });
+      expect(lines).toContain("OK it here: tab, then p (Publish)");
+      for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(cols);
+    });
+  }
+
+  it("the key it names is the key that sends the ask", () => {
+    const render = renderView(publish(), viewCtx({ color: false }));
+    expect(render.approvalAsk).toEqual({ key: "p", label: "Publish", ask: "Yes, publish the sample post now." });
+  });
+
+  it("engaged, the key bar has the key, so the line drops `tab`", () => {
+    expect(out(publish(), { engaged: true })).toContain("OK it here: p (Publish)");
+  });
+
+  it("in scrollback, or with the keys on another view, it names no key", () => {
+    for (const over of [{ scrollback: true }, { keysElsewhere: true }]) {
+      expect(out(publish(), over).join("\n")).not.toMatch(/OK it here/u);
+    }
+  });
+
+  it("a view that finishes in the app says so in the app's own words", () => {
+    const view = publish({ finishInApp: { words: "Finish it in Sample drafts", appLink: { place: "sample.drafts", label: "Sample drafts" } } });
+    const lines = out(view);
+    expect(lines).toContain("Finish it in Sample drafts");
+    expect(lines.join("\n")).not.toMatch(/OK it here|↗/u);
+    const open = out(publish(
+      { finishInApp: { words: "Finish it in Sample drafts", appLink: { place: "sample.drafts", label: "Sample drafts" } } },
+      { appLink: { place: "sample.drafts", label: "Sample drafts" } }
+    ), { caps: OPEN });
+    expect(open).toContain("Finish it in Sample drafts ↗  (o)");
+  });
+
+  it("an ask that is a command offers no key and no line", () => {
+    expect(out(publish({ ask: "/publish" })).join("\n")).not.toMatch(/OK it here/u);
+  });
+});
