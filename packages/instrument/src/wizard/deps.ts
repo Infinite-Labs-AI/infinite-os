@@ -29,6 +29,8 @@ import { openTagBridge } from "../bridge/client.js"
 import { envProxyFetch } from "../checks/live/env-proxy-fetch.js"
 import { registerJobStaticChecks, type JobStaticRunContext } from "../checks/job-static.js"
 import { registerO9Checks } from "../checks/o9.js"
+import { runCensus } from "../checks/census.js"
+import { lexicalStates } from "../lexical-states.js"
 import { createCheckRunner } from "../checks/registry.js"
 import { createGitOps } from "../git/index.js"
 import { createGhClient } from "../github/gh.js"
@@ -180,8 +182,45 @@ export function briefFactsFor(root: string, state: Readonly<WizardRunState> | nu
     plan: saved?.plan ? briefPlanFrom(saved.plan, saved.approvals) : null,
     connections: keys ? briefConnectionsFrom(keys) : null,
     previewGuard: previewGuardBrief(saved?.guard ?? null),
-    helpers: writtenHelpers(root)
+    helpers: writtenHelpers(root),
+    guardSites: adoptedInitSites(root, state.appRoot)
   }
+}
+
+const INIT_CALL: Record<"ga4" | "posthog" | "meta", RegExp> = {
+  ga4: /\bgtag\s*\(\s*['"]config['"]/,
+  posthog: /\bposthog\s*\.\s*init\s*\(/,
+  meta: /\bfbq\s*\(\s*['"]init['"]/
+}
+
+/**
+ * §3x.3 (§2.3) Where each adopted GA4 / PostHog / Meta init lives in the CURRENT tree, and whether it sits inside a
+ * template literal (a Next `<Script>{`…`}</Script>` body): the brief then gives the guard escaped for it.
+ */
+export function adoptedInitSites(root: string, appRoot: string): NonNullable<BriefFacts["guardSites"]> {
+  const out: NonNullable<BriefFacts["guardSites"]> = []
+  let census: ReturnType<typeof runCensus>
+  try {
+    census = runCensus({ root, appRoot })
+  } catch {
+    return out
+  }
+  for (const entry of census.entries) {
+    if (entry.owner !== "adopted" || (entry.tool !== "ga4" && entry.tool !== "posthog" && entry.tool !== "meta")) continue
+    let text: string
+    try {
+      text = readFileSync(join(root, entry.file), "utf8")
+    } catch {
+      continue
+    }
+    const lines = text.split("\n")
+    const lineText = lines[entry.line - 1] ?? ""
+    const column = lineText.search(INIT_CALL[entry.tool])
+    if (column < 0) continue
+    const offset = lines.slice(0, entry.line - 1).reduce((sum, line) => sum + line.length + 1, 0) + column
+    out.push({ tool: entry.tool, file: entry.file, line: entry.line, context: lexicalStates(text)[offset] === 2 ? "template_literal" : "js" })
+  }
+  return out
 }
 
 /**

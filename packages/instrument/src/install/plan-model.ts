@@ -306,9 +306,14 @@ export const EDITABLE_LINE_IDS: readonly string[] = Object.values(DECISION_LINE_
 
 /** §3h.6 (R1-34): the server-lane probe disclosure, on the plan line and in the report. */
 export const SERVER_LANE_PROBE_DISCLOSURE =
-  "After you merge, the one real test visit lands TWO bot-flagged page rows in your Infinite ledger (the visit itself and a server-lane probe). The no-send checks before that land none."
+  "After your merge, Infinite makes one real visit to prove it. Infinite marks it as its own test, so it never counts in your Infinite numbers; GA4, PostHog and Meta (whichever your site runs) record it as one normal page view, and the report prints how to filter it."
 
 const TOOL_NAME: Record<ProviderId, string> = { infinite: "Infinite", ga4: "GA4", posthog: "PostHog", x: "X", meta: "Meta" }
+
+/** A public id as the plan prints it: recognisable, never whole (`G-TEST…0000`). */
+function maskPublicId(id: string): string {
+  return id.length <= 10 ? `${id.slice(0, 3)}…` : `${id.slice(0, 6)}…${id.slice(-4)}`
+}
 
 /** Jobs that touch an ADOPTED provider: seeded only behind an approved line (R2-10). */
 export const ADOPTED_PROVIDER_JOBS: readonly JobId[] = ["posthog_improve", "ga4_improve", "meta_improve", "duplicates_remove", "preview_guard"]
@@ -855,6 +860,21 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     )
   }
 
+  // §3x.3 (F6): the site's own Meta pixel counted only the first page of the test load's visit. A change to the
+  // customer's own tag, so it is a line the user approves (never done on the wizard's say-so).
+  const metaSpaItems = candidates.filter((item) => item.id === "meta_improve:spa_page_view")
+  if (metaSpaItems.length > 0 && scan.adopted.some((entry) => entry.provider === "meta")) {
+    lines.push(
+      line({
+        id: "meta_spa_page_views",
+        kind: "meta_spa_page_views",
+        text: "Meta: send one PageView per page change in your app (today it counts only the first page of each visit).",
+        requires: "approval",
+        jobIds: metaSpaItems.map((item) => item.id)
+      })
+    )
+  }
+
   // ---- things only the user can do ----
   if (scan.adopted.some((entry) => entry.via === "gtm")) {
     lines.push(line({ id: "user_action:gtm", kind: "user_action", text: "Google Tag Manager runs some of your tags: changes there are yours to make (the wizard never edits GTM).", requires: "user_action" }))
@@ -874,7 +894,20 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     ["posthog", keys.posthog.status],
     ["meta", keys.meta.status]
   ] as const) {
-    const adopted = scan.adopted.some((entry) => entry.provider === tool)
+    const adopted = scan.adopted.find((entry) => entry.provider === tool)
+    // §3x.6 (R3-4): an ADOPTED tool that is not connected is said too, with the id in the code: its id cannot be
+    // compared with a connection, so the run can only ever be "unconfirmed" for it.
+    if (adopted && (status === "not_connected" || status === "no_pixel")) {
+      lines.push(
+        line({
+          id: `user_action:connect_${tool}`,
+          kind: "user_action",
+          text: `${TOOL_NAME[tool]} (${adopted.key ? `${maskPublicId(adopted.key)} in your code` : "in your code"}): connect it in Infinite so the wizard can check that ID is yours; nothing is changed until then.`,
+          requires: "user_action"
+        })
+      )
+      continue
+    }
     if (!adopted && (status === "not_connected" || status === "read_failed" || status === "no_pixel")) {
       lines.push(
         line({
@@ -1062,7 +1095,9 @@ export function duplicateFindings(before: BeforeFacts): DuplicateFinding[] {
         provider: "ga4",
         publicId: id,
         shape: "repeated_init",
-        text: `GA4: ${id} is set up ${count} times in your code, so page views count more than once. Keep one.`
+        // §3x.6 (A7): say only what was measured. The code holds the id `count` times; the effect on page views is
+        // claimed only when the test load itself counted more than one page view for it.
+        text: `GA4: ${id} is set up ${count} times in your code. Keep one.${(liveTids.get(id) ?? 0) > 1 ? ` The test load counted every page view ${liveTids.get(id)} times.` : ""}`
       })
     }
   }

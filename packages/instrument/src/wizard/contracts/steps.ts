@@ -85,7 +85,7 @@ export const WIZARD_STEP_META: { readonly [Id in WizardStepId]: WizardStepMeta<I
     who: ["code", "infinite"],
     learn: "standard",
     owner: "O8",
-    requiredCapabilities: ["tag.hosting.v1", "tag.keys.v1", "tag.test.v1", "tag.baseline.v1"]
+    requiredCapabilities: ["tag.hosting.v1", "tag.keys.v1", "tag.test.v2", "tag.baseline.v1"]
   },
   keys: {
     id: "keys",
@@ -139,7 +139,7 @@ export const WIZARD_STEP_META: { readonly [Id in WizardStepId]: WizardStepMeta<I
     who: ["code", "infinite"],
     learn: "tests",
     owner: "O4",
-    requiredCapabilities: ["tag.test.v1", "tag.runs.v1", "tag.ga4-key-events.v1"]
+    requiredCapabilities: ["tag.test.v2", "tag.runs.v1", "tag.ga4-key-events.v1"]
   },
   review: {
     id: "review",
@@ -148,7 +148,7 @@ export const WIZARD_STEP_META: { readonly [Id in WizardStepId]: WizardStepMeta<I
     who: ["code", "agent"],
     learn: "review",
     owner: "O4",
-    requiredCapabilities: ["tag.test.v1", "tag.runs.v1", "tag.ga4-key-events.v1"]
+    requiredCapabilities: ["tag.test.v2", "tag.runs.v1", "tag.ga4-key-events.v1"]
   },
   merge: {
     id: "merge",
@@ -166,7 +166,7 @@ export const WIZARD_STEP_META: { readonly [Id in WizardStepId]: WizardStepMeta<I
     who: ["infinite", "code"],
     learn: "proof",
     owner: "O1",
-    requiredCapabilities: ["tag.hosting.v1", "tag.runs.v1", "tag.test.v1", "tag.receipts.v1"]
+    requiredCapabilities: ["tag.hosting.v1", "tag.runs.v1", "tag.test.v2", "tag.receipts.v1"]
   },
   done: {
     id: "done",

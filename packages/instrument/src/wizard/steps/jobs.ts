@@ -34,6 +34,8 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
+import { git } from "../../agents/git-exec.js"
+import { reanchorEvidence } from "../../jobs/reanchor.js"
 import { buildVerdict, isBuildOutputPath } from "../../checks/build.js"
 import {
   disposeSeal,
@@ -202,13 +204,15 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     const wallLeft = AGENT_LIMITS.jobs.wallMs - (deps.clock.now().getTime() - started)
     if (open.length === 0 || wallLeft <= 0 || turnsLeft <= 0) break
     roundsLeft -= 1
-    const brief = composeBrief(deps.registry.brief(open), feedback)
+    // §3x.3 (§2.2): evidence found on the base commit, mapped through the install's (and earlier rounds') edits.
+    const anchored = await io.reanchored(open)
+    const brief = composeBrief(deps.registry.brief(anchored), feedback)
     const questions: AgentQuestion[] = []
     let result: AgentRunResult
     io.agentTurns += 1
     try {
       result = await deps.agents.runJobs({
-        items: open,
+        items: anchored,
         brief,
         budget: { maxTurns: turnsLeft, wallMs: wallLeft },
         ...(session && sessionId(session) !== "" ? { resume: session } : {}),
@@ -731,6 +735,19 @@ class JobsIo {
   async scan(): Promise<ScanResult> {
     if (!this.scanResult) this.scanResult = await this.deps.installer.scan({ root: this.ctx.root, appRoot: this.ctx.appRoot })
     return this.scanResult
+  }
+
+  /** §3x.3 (§2.2) The items with their evidence lines mapped from the base commit to the current tree. */
+  async reanchored(items: readonly ChecklistItem[]): Promise<ChecklistItem[]> {
+    const root = this.ctx.root
+    return reanchorEvidence(
+      items,
+      async (file) => {
+        const shown = await git(root, ["show", `HEAD:${file}`])
+        return shown.code === 0 ? shown.stdout.toString("utf8") : null
+      },
+      (file) => readFile(join(root, file), "utf8").catch(() => null)
+    )
   }
 
   /** §3x.2 Adds the global `turn_gate` S check to an item a gate hit is attributed to (once). */

@@ -50,7 +50,7 @@ function run3Repo(): string {
   return root
 }
 
-/** Run 3's agent items as `plan` left them (pending, nothing checked yet), evidence re-anchored past the install's import line. */
+/** Run 3's agent items as `plan` left them (pending, nothing checked yet). */
 function run3Items(ids: readonly string[]): ChecklistItem[] {
   const state = run3Json<{ jobs: ChecklistItem[] }>("wizard/state.json")
   return ids.map((id) => {
@@ -60,8 +60,7 @@ function run3Items(ids: readonly string[]): ChecklistItem[] {
     delete item.edits
     item.state = "pending"
     item.checks = item.checks.map((check) => ({ id: check.id, tier: check.tier, state: "not_run" }))
-    // The install added one import line at the top of app/layout.tsx (§2.2 re-anchoring; 27→28, 32→33, 41→42).
-    item.trigger = { ...item.trigger, evidence: item.trigger.evidence.map((entry) => ("file" in entry && entry.file === "app/layout.tsx" ? { ...entry, line: entry.line + 1 } : entry)) }
+    // The evidence stays as `before` found it on the base commit (27/32/41): the step re-anchors it (§2.2).
     return item
   })
 }

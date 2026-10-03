@@ -11,7 +11,7 @@ import type { RuntimeVariant } from "./bridge.js"
 import type { WizardCode } from "./codes.js"
 import type { ChecklistItem } from "./jobs.js"
 import { CHECKLIST_ITEM_SHAPE } from "./jobs.js"
-import type { ReportColumnSnapshot } from "./report.js"
+import type { ReportColumnSnapshot, VerdictToolFact } from "./report.js"
 import { REPORT_COLUMN_SNAPSHOT_SHAPE } from "./report.js"
 import { arrayOf, nullable, oneOf, recordOf, shapeOf } from "./shape.js"
 import type { LearnId, StepOutcomeKind, WizardStepId } from "./steps.js"
@@ -165,6 +165,22 @@ export interface WizardRunState {
   snapshot: { dir: string } | null
   /** §3y.1 (optional, additive; schema stays v1): the production host and the site-file claim. */
   site?: SiteState
+  /**
+   * §3x.6 (optional, additive): what this run's real visit measured of every tool under test, and what the customer
+   * filters the one normal page view by. Written by `prove`; THE verdict reads it (`done`, a resumed `prove`).
+   */
+  proof?: RunProofState
+}
+
+/** §3x.6 The real visit's per-tool facts and the ids to filter it by (§3x.5 disclosure). */
+export interface RunProofState {
+  at: string
+  tools: VerdictToolFact[]
+  /** The server lane was probed (installed): its two document rows are this run's too. */
+  laneProbed: boolean
+  /** Infinite page views seen leaving on the visit (the rows it landed in the customer's ledger). */
+  infinitePageViews: number
+  filter: { ga4ClientId: string | null; posthogDistinctId: string | null; metaPageViewAt: string | null }
 }
 
 // ---- the store snapshot (lane O1 publishes it; lane O2's TTY and JSON UIs read it) ----
@@ -228,8 +244,14 @@ export const WIZARD_RUN_STATE_SHAPE = shapeOf<WizardRunState>()(
     "report",
     "snapshot"
   ],
-  ["runStartedAt", "site"],
+  ["runStartedAt", "site", "proof"],
   {
+    proof: shapeOf<RunProofState>()("RunState.proof", ["at", "tools", "laneProbed", "infinitePageViews", "filter"], [], {
+      tools: arrayOf(
+        shapeOf<VerdictToolFact>()("RunState.proof.tool", ["tool", "ids", "connected", "installed", "fired", "ungraded", "receipt", "receiptReason"], [])
+      ),
+      filter: shapeOf<RunProofState["filter"]>()("RunState.proof.filter", ["ga4ClientId", "posthogDistinctId", "metaPageViewAt"], [])
+    }),
     site: shapeOf<SiteState>()("RunState.site", ["productionHost", "source", "decidedAt"], ["vercelSignal", "claim"], {
       claim: shapeOf<SiteClaimState>()("RunState.site.claim", ["hosts", "siteSourceKey", "collectPath", "consentStorageKey", "proofPath", "state"], ["provenAt"])
     }),

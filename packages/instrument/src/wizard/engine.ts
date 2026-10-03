@@ -332,7 +332,10 @@ export async function runWizard(ctx: WizardContext, rawDeps: WizardDeps, options
       outcome = {
         kind: "failed",
         code: "INF_WIZ_BRIDGE_PROTOCOL",
-        message: `The Infinite app is too old for this step (missing ${missing.join(", ")}). Update Infinite, then run npx infinite-tag again.`,
+        message: missing.includes("tag.test.v2")
+          ? // §3x.5: an older test engine announces itself as a monitor; Meta's pixel ignores it, so its grades are wrong.
+            "The Infinite app is missing tag.test.v2; update the app (its test window is identified as a monitor, so Meta's pixel ignores it)."
+          : `The Infinite app is too old for this step (missing ${missing.join(", ")}). Update Infinite, then run npx infinite-tag again.`,
         next: "halt"
       }
     } else {

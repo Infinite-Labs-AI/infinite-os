@@ -48,7 +48,7 @@ export const NOT_A_TTY_MESSAGE =
 export const WIZARD_USAGE = [
   "Usage: npx infinite-tag [--json] [--yes] [--answers <file>] [--root <dir>] [--app-root <dir>] [--resume]",
   "                        [--no-agent] [--worker claude|codex] [--reviewer claude|codex|brief|none]",
-  "                        [--consent-mode not_required|required] [--production-host <domain>] [--no-prove] [--fresh]",
+  "                        [--consent-mode not_required|required] [--production-host <domain>] [--no-prove] [--fresh] [--relink]",
   "       npx infinite-tag uninstall --pr [--json] [--root <dir>] [--base <branch>] [--answers <file>]"
 ].join("\n")
 
@@ -135,6 +135,11 @@ export function parseWizardArgs(argv: readonly string[], cwd: string): Parse<Par
         options.noProve = true
         break
       case "--fresh":
+        fresh = true
+        break
+      case "--relink":
+        // §3x.8: a new link needs a new run (the old one belongs to the old workspace).
+        options.relink = true
         fresh = true
         break
       case "--answers": {

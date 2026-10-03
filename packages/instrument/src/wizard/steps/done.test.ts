@@ -32,6 +32,7 @@ function finishedState() {
   state.report.proven_live = buildProvenColumn({
     runId: RUN_ID,
     mergeSha: MERGE_SHA,
+    installed: null,
     at: AT,
     keys: keysFixture(),
     expect: { ga4: ["G-ACME000001"], posthog: { projectKey: "phc", apiHost: "https://us.i.posthog.com" }, meta: ["1234567890123456"], infinite: { siteSourceKey: "s", collectPath: "/c" } },
@@ -150,6 +151,7 @@ function noVisitState(unmeasured?: Parameters<typeof buildProvenColumn>[0]["unme
   state.report.proven_live = buildProvenColumn({
     runId: RUN_ID,
     mergeSha: MERGE_SHA,
+    installed: null,
     at: AT,
     // The workspace never recorded consent: with a visit this would be a problem; without one it is unmeasured.
     keys: { ...keysFixture(), infinite: { ...keysFixture().infinite, consentMode: null } },
@@ -208,6 +210,7 @@ describe("R2-2 / R2-4 (live run 2): Proven live with no real visit and no receip
     const visited = buildProvenColumn({
       runId: RUN_ID,
       mergeSha: MERGE_SHA,
+    installed: null,
       at: AT,
       keys: { ...keysFixture(), infinite: { ...keysFixture().infinite, consentMode: null } },
       expect: { ga4: ["G-ACME000001"] },

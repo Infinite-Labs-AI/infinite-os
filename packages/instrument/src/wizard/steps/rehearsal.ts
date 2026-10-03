@@ -13,6 +13,7 @@ import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../cont
 import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { verdictFactsFor } from "../verdict-facts.js"
 import type { TestTool } from "../contracts/test-engine.js"
 import { wizardGitExtras, type WizardGitOps } from "../../git/index.js"
 import { canPush } from "../../github/repo.js"
@@ -266,7 +267,8 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     columns: ctx.state.get().report,
     provenLivePending: "deploy",
     day7: null,
-    notes: []
+    notes: [],
+    verdictFacts: await verdictFactsFor(ctx, deps)
   })
   const diffText = await git.diff(gitState.baseSha, head)
   const body = buildPrBody({

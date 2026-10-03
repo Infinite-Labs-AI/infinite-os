@@ -14,6 +14,7 @@ import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
 import type { CheckResult } from "../contracts/jobs.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
+import { verdictFactsFor } from "../verdict-facts.js"
 import { isGloballyDenied } from "../../git/commit.js"
 import { isGitHubAdapter, type GitHubHostAdapter } from "../../hosts/github.js"
 import { isUnsupported } from "../../hosts/other.js"
@@ -611,7 +612,12 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     columns: ctx.state.get().report,
     provenLivePending: provenPendingFor({ state: ctx.state.get(), hostingVercel: ship.facts.hosting?.provider === "vercel", noProve: false, productionHost: ship.facts.productionHost }),
     day7: null,
-    notes: []
+    notes: [],
+    // §3x.6 the ledger is saved first so the verdict reads this session's open findings.
+    verdictFacts: await (async () => {
+      await saveLedger(session)
+      return verdictFactsFor(ctx, deps)
+    })()
   })
   const openFromLedger: TriageDecision[] = session.ledger.open
     .filter((entry) => !session.decisions.some((decision) => decision.action === "ASK" && triageKey(decision.item) === entry.key))

@@ -96,6 +96,7 @@ export function requiredLineKind(item: Pick<ChecklistItem, "id" | "jobId">): Pla
       if (startsWith("retire_fbc_writer")) return "retire_fbc_writer"
       if (startsWith("autoconfig_off_adopted")) return "autoconfig_off_adopted"
       if (startsWith("capture")) return "capture_beside_adopted_pixel"
+      if (startsWith("spa_page_view")) return "meta_spa_page_views"
       return "improve_additive"
     case "duplicates_remove":
       return "remove_duplicate"
@@ -141,7 +142,9 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   meta_improve: (target) =>
     target === "retire_fbc_writer"
       ? ["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"]
-      : ["S:meta_event_id_from_helper", "T1:meta_traffic_permissions", "RH:meta_pixel_once", "PV:meta_seen_leaving"],
+      : target === "spa_page_view"
+        ? ["RH:meta_spa_page_view"]
+        : ["S:meta_event_id_from_helper", "T1:meta_traffic_permissions", "RH:meta_pixel_once", "PV:meta_seen_leaving"],
   duplicates_remove: (target) => {
     const tool = target.startsWith("ga4") ? "ga4" : target.startsWith("posthog") ? "posthog" : target.startsWith("meta") ? "meta" : null
     const census = tool === "ga4" ? "S:census_ga4_config_once" : tool === "posthog" ? "S:census_posthog_init_once" : tool === "meta" ? "S:census_meta_init_once" : null
@@ -411,6 +414,18 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
         allow: allow([...metaFiles, ...filesOf(d.metaBrowserStandardEvents)])
       })
     }
+  }
+  // §3x.3 (F6): the before load navigated once and the site's own Meta pixel sent no PageView for it.
+  const metaSpaMissed = facts.checks.some((check) => check.checkId === "test_run:meta" && check.state === "problem" && (check.reason ?? "").startsWith("meta_spa_page_view_missing"))
+  const adoptedMetaInits = facts.census.entries.filter((entry) => entry.tool === "meta" && entry.owner === "adopted")
+  if (metaSpaMissed && adoptedMetaInits.length > 0) {
+    out.push({
+      jobId: "meta_improve",
+      target: "spa_page_view",
+      finding: "Meta counts only the first page of a visit: the test load's page change sent no PageView",
+      evidence: fileEvidence(adoptedMetaInits),
+      allow: allow(filesOf(adoptedMetaInits))
+    })
   }
   const hostOnlyWriters = d.fbcWriters.filter((finding) => finding.hostOnly)
   if (hostOnlyWriters.length > 0) {

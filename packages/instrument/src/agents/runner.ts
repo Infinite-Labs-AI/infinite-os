@@ -58,7 +58,7 @@ import { detectAgents, apiKeySourceMatches, resolveCodexRuntime, type DetectedAg
 import { buildAgentEnv } from "./env.js"
 import { Fence, recoverCrashedTurns, type FenceBlock, type FenceEditAttribution, type FenceGateHit, type TreeSeal } from "./fence.js"
 import { assertReviewWorktree } from "./worktree-guard.js"
-import { AGENT_LABEL, claudeToolBeat, codexItemBeat, displayPath, Narrator, type NarrationBeat } from "./narration.js"
+import { AGENT_LABEL, claudeToolBeat, codexItemBeat, displayPath, Narrator, ThinkingTicker, type NarrationBeat } from "./narration.js"
 import { AgentProcessRegistry } from "./process.js"
 import { ensurePrivateDir, repoSecretPaths, resolveRealpath, resolveSensitivePaths, runScratchDir, snapshotDir, wizardCacheRoot } from "./paths.js"
 import { sanitizeUntrusted } from "./sanitize.js"
@@ -411,6 +411,10 @@ export class AgentRunnerImpl implements AgentRunner {
       notices.add(text)
       input.onNarrate({ agent: kind, role: "worker", text })
     }
+    // §3x.3 (D1): silence after a tool result is the model thinking, said as `Thinking · N s` (never the last tool's beat).
+    const ticker = new ThinkingTicker(ctx.narrator, () => (this.options.now ?? (() => new Date()))().getTime())
+    const tickTimer = setInterval(() => ticker.tick(), 1_000)
+    tickTimer.unref()
     const state = {
       outcome: null as AgentRunOutcome | null,
       resetsAt: undefined as string | undefined,
@@ -469,10 +473,14 @@ export class AgentRunnerImpl implements AgentRunner {
               }
               return
             case "tool_use": {
+              ticker.acted()
               const beat = claudeToolBeat(event.name, event.input, beatCtx)
               if (beat) ctx.narrator.beat(beat)
               return
             }
+            case "tool_result":
+              ticker.toolReturned()
+              return
             case "assistant_error":
               if (event.error === "rate_limit" || event.error === "billing_error") return stop("out_of_usage")
               return
@@ -545,6 +553,9 @@ export class AgentRunnerImpl implements AgentRunner {
           if (!event) return
           if (event.kind === "thread") state.threadId = event.threadId
           else if (event.kind === "item") {
+            // A finished item hands the result back to the model; a started one is it acting.
+            if (event.phase === "completed") ticker.toolReturned()
+            else ticker.acted()
             const beat = codexItemBeat(event.item, beatCtx)
             if (beat) ctx.narrator.beat(beat)
           } else if (event.kind === "error") {
@@ -573,6 +584,7 @@ export class AgentRunnerImpl implements AgentRunner {
       startup.unref()
       void child.done.then(() => clearTimeout(startup))
       const exit = await child.done
+      clearInterval(tickTimer)
       try {
         state.structured = parseStructuredClaims(await readFile(outputPath, "utf8"))
       } catch {
@@ -585,6 +597,7 @@ export class AgentRunnerImpl implements AgentRunner {
       return finish(exit)
     }
     const exit = await child.done
+    clearInterval(tickTimer)
     return finish(exit)
 
     function finish(exit: { code: number | null; timedOut: boolean; spawnError: Error | null }): AttemptResult {

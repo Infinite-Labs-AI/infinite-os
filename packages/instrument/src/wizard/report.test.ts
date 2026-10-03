@@ -51,7 +51,7 @@ const buildFrom = (columns: Partial<Record<ReportColumnId, ReportColumnSnapshot 
     columns: { live_today: columns.live_today ?? null, in_pr: columns.in_pr ?? null, proven_live: columns.proven_live ?? null },
     provenLivePending: null,
     day7: null,
-    notes: []
+    notes: [], verdictFacts: null
   })
 
 const fact = (input: ColumnFact["input"], state: ColumnFact["state"], extra: Partial<ColumnFact> = {}): ColumnFact => ({ input, state, at: AT, ...extra })
@@ -107,7 +107,7 @@ describe("ReportBuilder.build", () => {
       columns: { live_today: null, in_pr: null, proven_live: null },
       provenLivePending: "deploy",
       day7: null,
-      notes: []
+      notes: [], verdictFacts: null
     })
     for (const row of report.rows) {
       for (const column of REPORT_COLUMN_IDS) {
@@ -127,7 +127,7 @@ describe("ReportBuilder.build", () => {
       columns: { live_today: null, in_pr: null, proven_live: null },
       provenLivePending: "rerun_tag",
       day7: null,
-      notes: []
+      notes: [], verdictFacts: null
     })
     expect(report.columns.proven_live.pending).toBe("rerun_tag")
     for (const row of report.rows) {
@@ -230,7 +230,7 @@ describe("buildColumn (typed inputs → one column)", () => {
         columns: { live_today: snapshots.live_today, in_pr: snapshots.in_pr, proven_live: null },
         provenLivePending: pending,
         day7: null,
-        notes: []
+        notes: [], verdictFacts: null
       })
       const proven = (id: string) => report.finishLine.find((line) => line.id === id)!.cells.proven_live
       expect(proven("ga4_key_events_received")).toMatchObject({ value: null, state: "pending", reason: "needs_7_days", provenance: { source: "cloud_read" } })

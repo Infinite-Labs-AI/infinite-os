@@ -56,7 +56,8 @@ export const APP_GONE_MESSAGE = "The Infinite app stopped answering (it may have
 export const INFINITE_UNAVAILABLE_MESSAGE = "Infinite did not answer; run npx infinite-tag again in a minute."
 export const SITE_LOCKED_MESSAGE = "A website test is running on this site in Infinite, so its setup is locked."
 /** Review I2 P2-2: Infinite's own workspace is never a wizard target (R2-01, §3z.6); the user re-links. */
-export const INFINITE_WORKSPACE_MESSAGE = "This site is linked to Infinite's own workspace. Link it to its own workspace and run npx infinite-tag again."
+export const INFINITE_WORKSPACE_MESSAGE =
+  "This workspace is Infinite's own and cannot take a customer site. Run npx infinite-tag --relink and pick another workspace."
 /** §3z.6: Infinite's cloud cannot tell which workspace is its own, so it refuses every wizard read and write for now. */
 export const INTERNAL_WORKSPACE_UNCONFIGURED_MESSAGE =
   "Infinite cannot set up sites right now (a setting is missing on Infinite's side). Nothing was changed."
@@ -154,7 +155,8 @@ export function hardStopOutcome(error: unknown): StepOutcome | null {
     case "foreign_site_hosts":
       // Review I2 P2-2: Infinite's own workspace stops the run on ANY verb (keys refuses it first); every other
       // state (another site's hosts, …) is a refusal the step words itself as a line.
-      return failure.state === "infinite_workspace" ? { kind: "failed", code: "INF_WIZ_LINK_DECLINED", message: INFINITE_WORKSPACE_MESSAGE, next: "halt" } : null
+      // §3x.8 (R3-7): a usage problem the user fixes by relinking (exit 2), never a generic error.
+      return failure.state === "infinite_workspace" ? { kind: "failed", code: "INF_WIZ_INFINITE_WORKSPACE", message: INFINITE_WORKSPACE_MESSAGE, next: "halt" } : null
     case "capability_unavailable":
       // §3z.6: the cloud fails closed for every wizard verb until Infinite's own workspace is configured.
       if (failure.state === "internal_workspace_unconfigured") {

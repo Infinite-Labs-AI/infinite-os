@@ -12,6 +12,8 @@ export interface GradeContextInput {
   /** Tools the install wrote (they are on the branch even when the census reads them as managed). */
   installed?: readonly TestTool[]
   cmpDetected: TestResult["environment"]["cmpDetected"]
+  /** §3x.3 (F6): the request carried `spaNavigation`. */
+  spaNavigation?: boolean
 }
 
 export function gradeContextFrom(input: GradeContextInput): GradeTestRunContext {
@@ -28,6 +30,7 @@ export function gradeContextFrom(input: GradeContextInput): GradeTestRunContext 
     envSourcedIds: input.census.envSourcedIds,
     consentMode: input.consentMode,
     installedTools,
-    metaPixelOwnership
+    metaPixelOwnership,
+    ...(input.spaNavigation ? { spaNavigation: true } : {})
   }
 }

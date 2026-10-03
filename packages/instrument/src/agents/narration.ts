@@ -49,6 +49,46 @@ export class Narrator {
   }
 }
 
+/** §3x.3 (D1) Silence after a tool result longer than this is the model thinking, and is said as such. */
+export const THINKING_AFTER_MS = 3_000
+
+/**
+ * §3x.3 (D1) Honest narration of the model's thinking time. Run 3's terminal showed "Searching the code" for 373 s:
+ * the last tool's beat, while the model was thinking for 5 min 49 s. After a tool result (Claude) or a finished item
+ * (Codex) with no new event for 3 s, the beat is `Thinking · <N> s` (N from the tool's return), ticking within the
+ * narrator's one-beat-per-3-s cap. Any new event (a tool call, a claim) stops it.
+ */
+export class ThinkingTicker {
+  private since: number | null = null
+  private lastEventAt = Number.NEGATIVE_INFINITY
+
+  constructor(
+    private readonly narrator: Pick<Narrator, "beat">,
+    private readonly now: () => number
+  ) {}
+
+  /** A tool came back to the model: from now on its silence is thinking. */
+  toolReturned(): void {
+    const at = this.now()
+    this.since = at
+    this.lastEventAt = at
+  }
+
+  /** The model acted (a tool call, a claim, an item started): it is not thinking. */
+  acted(): void {
+    this.since = null
+    this.lastEventAt = this.now()
+  }
+
+  /** Called on a timer: emits `Thinking · N s` once the silence passes 3 s (the narrator throttles). */
+  tick(): void {
+    if (this.since === null) return
+    const at = this.now()
+    if (at - this.lastEventAt < THINKING_AFTER_MS) return
+    this.narrator.beat(`Thinking · ${Math.floor((at - this.since) / 1000)} s`)
+  }
+}
+
 /** A file path for a beat: repo-relative when inside the repo, else its basename-free marker. */
 export function displayPath(path: unknown, root: string): string {
   if (typeof path !== "string" || path === "") return "a file"

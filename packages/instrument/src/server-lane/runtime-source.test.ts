@@ -110,6 +110,24 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
     expect(init.headers["content-type"]).toBe("application/json")
   })
 
+  it("§3x.5 forwards a shape-valid Infinite-Test-Visit as the document property testVisit (the vector); a bad one is dropped", async () => {
+    const { readFileSync } = await import("node:fs")
+    const vectors = JSON.parse(readFileSync(new URL("../../contracts/server-lane-v1.vectors.json", import.meta.url), "utf8")) as Record<string, string>
+    const mod = await loadGeneratedModule()
+    const event = fakeEvent()
+    mod.recordInfiniteDocumentRequest(fakeRequest({ headers: { "infinite-test-visit": vectors.testVisitHeader! } }), event)
+    await Promise.all(event.tasks)
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit & { headers: Record<string, string> }]
+    expect(init.body).toBe(vectors.documentEventBodyWithTestVisit)
+    expect(init.headers["x-infinite-signature"]).toBe(vectors.documentEventBodyWithTestVisitSignature)
+    // Negative: a value of the wrong shape is never forwarded (the body is the plain vector).
+    fetchMock.mockClear()
+    const other = fakeEvent()
+    mod.recordInfiniteDocumentRequest(fakeRequest({ headers: { "infinite-test-visit": "itv1.not-a-token" } }), other)
+    await Promise.all(other.tasks)
+    expect((fetchMock.mock.calls[0] as [string, RequestInit])[1].body).toBe(VECTORS.body)
+  })
+
   it("wraps an existing handler and calls it with (request, event)", async () => {
     const mod = await loadGeneratedModule()
     const inner = vi.fn(() => ({ kind: "inner" }))

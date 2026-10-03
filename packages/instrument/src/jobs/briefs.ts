@@ -44,6 +44,17 @@ export interface BriefFacts {
    * not written, and then no brief mentions them.
    */
   helpers?: { module: string | null } | null
+  /**
+   * §3x.3 (D, §2.3) Where each adopted init lives now, and in what context: an init inside a template literal (a
+   * Next `<Script>{`…`}</Script>` body) needs the guard ESCAPED for that literal. Run 3's agent spent its long thinking
+   * call working out that `\s` must be written `\\s` there.
+   */
+  guardSites?: Array<{ tool: "ga4" | "posthog" | "meta"; file: string; line: number; context: "js" | "template_literal" }> | null
+}
+
+/** §3x.3 (§2.3) Text escaped for the inside of a template literal: `\` → `\\`, a backtick and `${` escaped. */
+export function escapeForTemplateLiteral(text: string): string {
+  return text.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${")
 }
 
 /** §3x.3 The import line job 10 pastes in `file`: the managed module's path from that file, with no extension. */
@@ -97,6 +108,9 @@ export const TARGET_GISTS: Readonly<Record<string, string>> = {
  * Review I1 P1-2: the user's own Next config gets the managed rewrites; no tag goes in any page.
  */
 export const TARGET_WHAT: Readonly<Record<string, string>> = {
+  // §3x.3 (F6).
+  "meta_improve:spa_page_view":
+    "Add exactly one fbq('track', 'PageView') per client-side navigation from the router's navigation hook. Never on the first load (the bootstrap already sends it) and never inside a click handler.",
   "unusual_layout:next_config_rewrites":
     "Add exactly the rewrites quoted under Why to the existing Next config's async rewrites() (create the function if it has none). Change nothing else in the file; never put a tag in a page."
 }
@@ -219,10 +233,19 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
     case "preview_guard": {
       if (!facts.previewGuard) return new Error(`the brief for ${item.id} needs the emitted preview-guard expression`)
       if (target === "meta" && !facts.previewGuard.metaRecipe) return new Error(`the brief for ${item.id} needs the adopted Meta guard recipe`)
+      const guard = facts.previewGuard
+      // §3x.3 (§2.3) The guard as it must be written at each init (escaped inside a template literal).
+      const guardAt = (facts.guardSites ?? [])
+        .filter((site) => site.tool === target && item.allow.files.includes(site.file))
+        .map((site) => {
+          const raw = target === "meta" ? guard.metaRecipe! : guard.expression
+          return { file: site.file, line: site.line, context: site.context, guardAsWritten: site.context === "template_literal" ? escapeForTemplateLiteral(raw) : raw }
+        })
       return {
-        guardExpression: facts.previewGuard.expression,
-        productionHostsExempt: facts.previewGuard.exemptHosts,
-        ...(target === "meta" ? { metaGuardRecipe: facts.previewGuard.metaRecipe } : {})
+        guardExpression: guard.expression,
+        productionHostsExempt: guard.exemptHosts,
+        ...(target === "meta" ? { metaGuardRecipe: guard.metaRecipe } : {}),
+        ...(guardAt.length > 0 ? { guardAt } : {})
       }
     }
     case "posthog_improve": {
@@ -253,7 +276,12 @@ export function jobBlock(item: ChecklistItem, facts: BriefFacts): string {
   if (gist === undefined) throw new Error(`no brief for job ${item.jobId} (code jobs are never briefed)`)
   const data = planDataFor(item, facts)
   if (data instanceof Error) throw data
+  const guardNote =
+    item.jobId === "preview_guard" && !(data instanceof Error) && Array.isArray(data.guardAt)
+      ? "Paste guardAsWritten exactly; it is already escaped for where the init lives."
+      : undefined
   const target =
+    guardNote ??
     TARGET_GISTS[item.id] ??
     (item.jobId === "duplicates_remove" ? duplicateGist(itemTargetOf(item)) : item.jobId === "conversions_to_tools" ? conversionGist(itemTargetOf(item), data) : undefined)
   const lines = (facts.plan?.lines ?? []).filter((line) => line.jobIds.includes(item.id))

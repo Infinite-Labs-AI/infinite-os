@@ -124,7 +124,7 @@ function findingKey(key: string, findingId: string | null): string {
 }
 
 /** `<item> <path>:<line>` (+ the label), the verdict's name for an open finding. */
-export function openFindingName(finding: OpenFinding): string {
+export function openFindingName(finding: { item: string | null; path: string | null; line: number | null; label: OpenFinding["label"] }): string {
   const where = finding.path === null ? "general" : finding.line === null ? finding.path : `${finding.path}:${finding.line}`
   return `${finding.item ?? "review"} ${where}${finding.label ? ` (${finding.label})` : ""}`
 }

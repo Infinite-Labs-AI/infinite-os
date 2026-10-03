@@ -182,6 +182,9 @@ async function sendDocumentRequest(request: NextRequest, secret: string, host: s
   const visitKey = (await infiniteVisitKey(request.headers, secret, nowMs)) as string
   const eventId = ${JSON.stringify(DOCUMENT_EVENT_ID_PREFIX)} + (await hmacHex(secret, visitKey + "|" + path + "|" + nowMs))
   const referrerHost = referrerHostOf(request.headers.get("referer"))
+  // Infinite's own test visit carries a cloud-signed, run-scoped mark; it is forwarded (shape-checked only: the cloud
+  // verifies it) so Infinite keeps its own test out of the site's numbers. No page script can set this header.
+  const testVisit = TEST_VISIT_SHAPE.test(request.headers.get("infinite-test-visit") ?? "") ? (request.headers.get("infinite-test-visit") as string) : null
   const event = {
     eventId,
     eventName: DOCUMENT_EVENT_NAME,
@@ -191,11 +194,14 @@ async function sendDocumentRequest(request: NextRequest, secret: string, host: s
       host,
       visitKey,
       userAgentFamily: classifyUserAgent(userAgent),
-      ...(referrerHost ? { referrerHost } : {})
+      ...(referrerHost ? { referrerHost } : {}),
+      ...(testVisit ? { testVisit } : {})
     }
   }
   await postSigned(secret, JSON.stringify(event))
 }
+
+const TEST_VISIT_SHAPE = /^itv1\.[A-Za-z0-9_-]{16,400}\.[A-Za-z0-9_-]{43}$/
 
 async function postSigned(secret: string, body: string): Promise<boolean> {
   const controller = new AbortController()

@@ -315,8 +315,10 @@ export async function rehearse(
   const census = await deps.checks.census(ctx.root, ctx.appRoot)
   // §3z.12 §3e.7 (B11): the grader always gets the site's consent mode, the installed tools and whose Meta pixel it is.
   const gradeCtx = gradeContextFrom({ census, consentMode: input.consentRequired ? "required" : "not_required", cmpDetected: null })
-  const grade = (result: TestResult, mode: TestMode) => deps.checks.gradeTestRun(result, expect, mode, { ...gradeCtx, cmpDetected: result.environment.cmpDetected })
-  const grades = await grade(rehearsal.result, "rehearsal")
+  const grade = (result: TestResult, mode: TestMode, spaNavigation = false) =>
+    deps.checks.gradeTestRun(result, expect, mode, { ...gradeCtx, cmpDetected: result.environment.cmpDetected, ...(spaNavigation ? { spaNavigation: true } : {}) })
+  // §3x.3 (F6): the rehearsal navigated once (its second target), so Meta's page-change PageView is graded there.
+  const grades = await grade(rehearsal.result, "rehearsal", secondPath !== null)
   const previewGrades = preview.result ? await grade(preview.result, "dry_live") : {}
   const clicks = clickResults(rehearsal.result, input.approvedConversions)
   ctx.state.update((state) => {
@@ -496,8 +498,10 @@ export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string;
     finishLine.survives_ad_blockers = makeCell("problem", "problem", `PostHog: ${reasonCode(posthog).replace(/_/g, " ") || "problem"}`, at, runId, undefined, "posthog_via_proxy_once")
   }
   if (outcome.spaExercised) {
+    // §3x.3 (F6): a Meta pixel that missed the page change is a problem here too; the pass still reads GA4 and PostHog.
+    const metaMissed = grades.meta?.state === "problem" && reasonCode(grades.meta) === "meta_spa_page_view_missing"
     finishLine.spa_page_views = finishCell(
-      aggregate(outcome, grades, ["duplicate_page_view"], ["ga4", "posthog"]),
+      metaMissed ? { state: "problem" } : aggregate(outcome, grades, ["duplicate_page_view"], ["ga4", "posthog"]),
       { pass: "one page view per navigation", problem: "a navigation counts twice" },
       at,
       runId
@@ -592,6 +596,13 @@ export function rehearsalCheckResults(outcome: RehearsalOutcome, input: { at: st
     if (!grade || (grade.state !== "pass" && grade.state !== "problem" && grade.state !== "undetermined")) continue
     const state = grade.state === "problem" && problemCodes !== null && !problemCodes.includes(reasonCode(grade)) ? "undetermined" : grade.state
     shared.push({ checkId, tier: "RH", state, ...(grade.reason ? { reason: grade.reason } : {}), at: input.at, runId: input.runId })
+  }
+  // §3x.3 (F6) job 5's `spa_page_view` target: the rehearsal navigated once, and Meta sent its page-change PageView.
+  const meta = outcome.grades.meta
+  if (outcome.spaExercised && meta && meta.state !== "info") {
+    const code = reasonCode(meta)
+    const state = meta.state === "pass" ? "pass" : meta.state === "problem" && (code === "meta_spa_page_view_missing" || code === "duplicate_page_view") ? "problem" : "undetermined"
+    shared.push({ checkId: "meta_spa_page_view", tier: "RH", state, ...(meta.reason ? { reason: meta.reason } : {}), at: input.at, runId: input.runId })
   }
   for (const [name, verdict] of outcome.clickVerdicts ?? []) {
     clicks.set(name, { checkId: "click_test", tier: "RH", state: verdict.state, ...(verdict.reason ? { reason: verdict.reason } : {}), at: input.at, runId: input.runId })

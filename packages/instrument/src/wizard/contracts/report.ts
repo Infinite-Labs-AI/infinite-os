@@ -11,6 +11,9 @@
 // 6. A measurement change is noted as "measurement changed", never as growth.
 // 7. `in_pr` cells are keyed to `columns.in_pr.sha` and rebuilt on each new head.
 import type { ServerLaneState } from "./bridge.js"
+import type { ChecklistItem } from "./jobs.js"
+import type { LaneReceipt } from "./receipts.js"
+import type { TestTool } from "./test-engine.js"
 import { arrayOf, nullable, recordOf, shapeOf, type ObjectShape } from "./shape.js"
 
 export const REPORT_SCHEMA = "infinite-tag.report.v2" as const
@@ -137,6 +140,87 @@ export interface ReportV2 {
   day7: { measuredAt: string | null; window: { from: string; to: string } | null; cell: Cell | null }
   finishLine: Array<{ n: number; id: FinishLineId; cells: Record<ReportColumnId, Cell> }>
   notes: string[]
+  /**
+   * §3x.6 THE one verdict (`wizard/verdict.ts`): every surface (terminal, report.md, the PR comment, Site Settings, the
+   * desktop report card) renders `verdict.headline`, never its own logic. Required on every tag report; null on the
+   * desktop's partial report (the desktop never grades).
+   */
+  verdict: ReportVerdict | null
+}
+
+/** §3x.6 The verdict's states. */
+export const VERDICT_STATES = ["properly", "problems", "unconfirmed", "not_checked_live"] as const
+export type VerdictState = (typeof VERDICT_STATES)[number]
+
+/** §3x.6 Why a run is not "properly" (DECISIONS §5.3), in headline order. */
+export const VERDICT_REASON_KINDS = [
+  "live_problem",
+  "approved_fix_missing",
+  "review_blocker_open",
+  "tool_silent",
+  "tool_without_receipt",
+  "tool_not_connected",
+  "earlier_problem_unchecked",
+  "not_live"
+] as const
+export type VerdictReasonKind = (typeof VERDICT_REASON_KINDS)[number]
+/** The reasons that make a run `problems` (any one of them). */
+export const PROBLEM_REASON_KINDS: readonly VerdictReasonKind[] = ["live_problem", "approved_fix_missing", "review_blocker_open", "tool_silent", "tool_without_receipt"]
+
+export const VERDICT_LIMITS = { headlineMaxChars: 600, namesMax: 8, nameMaxChars: 80 } as const
+
+export interface VerdictReason {
+  kind: VerdictReasonKind
+  count: number
+  /** ≤8 names, each ≤80 characters. */
+  names: string[]
+}
+
+/** §3x.6 What the real visit measured of ONE tool under test (installed ∪ connected ∪ fired). */
+export interface VerdictToolFact {
+  tool: TestTool
+  /** The ids in the site's code / seen leaving (full values; masked when reported). */
+  ids: string[]
+  connected: boolean
+  installed: boolean
+  /** A beacon of the tool was seen on the real visit. */
+  fired: boolean
+  /**
+   * The grader could not grade the tool on the real visit (held by consent, a bot-flagged window, a test error): its
+   * silence then proves nothing either way, so it is never "sent nothing" (the proof cell reads undetermined).
+   */
+  ungraded: boolean
+  /** The tool's receipt this run (null = no receipt was asked: nothing to mark it by). */
+  receipt: LaneReceipt["state"] | null
+  /** The receipt's reason (e.g. `unmarked: …`), when the cloud gave one. */
+  receiptReason: string | null
+}
+
+/** §3x.6 A review finding that still stands (`openFindings`), as the verdict names it. */
+export interface VerdictOpenFinding {
+  findingId: string | null
+  item: string | null
+  severity: "blocker" | "should" | "nit" | "question"
+  path: string | null
+  line: number | null
+  label: "Infinite's own code" | "the wizard's own change" | null
+}
+
+/** §3x.6 The run facts the verdict reads beyond the report's own columns. */
+export interface VerdictFacts {
+  jobs: readonly ChecklistItem[]
+  openFindings: readonly VerdictOpenFinding[]
+  /** Per tool under test; null = no real-visit facts this run. */
+  tools: readonly VerdictToolFact[] | null
+}
+
+export interface ReportVerdict {
+  state: VerdictState
+  /** ≤600 characters; renderers wrap it. Never contains "verified" or "proven" (§3i.3 rule 3). */
+  headline: string
+  reasons: VerdictReason[]
+  /** The installed set the verdict graded (ids masked like the report masks ids). */
+  installed: Array<{ tool: "infinite" | "ga4" | "posthog" | "meta"; ids: string[]; connected: boolean }>
 }
 
 /** One column as the run state keeps it between steps (lane O1's builder renders the report from these). */
@@ -176,6 +260,12 @@ export const FINISH_LINE_INPUTS = [
   "census.identify_reset",
   "t0.host_matrix",
   "t1.live_bytes",
+  /** §3x.6 T1 `byte_census` (a duplicate check), re-run on production after the deploy too. */
+  "t1.byte_census",
+  /** §3x.6 a no-send load of the merge commit's own deployment URL, graded as `preview_self`. */
+  "merge_preview.graded",
+  /** §3x.6 a no-send load of production after the deploy, with a client-side navigation. */
+  "deployed_dry.spa_navigation",
   "t1.proxy",
   "t1.redirect_walk",
   "t1.csp",
@@ -225,6 +315,9 @@ export const FINISH_LINE_INPUT_PROVENANCE: { readonly [I in FinishLineInput]: Pr
   "census.identify_reset": "wizard_check",
   "t0.host_matrix": "wizard_check",
   "t1.live_bytes": "wizard_check",
+  "t1.byte_census": "wizard_check",
+  "merge_preview.graded": "desktop_test",
+  "deployed_dry.spa_navigation": "desktop_test",
   "t1.proxy": "wizard_check",
   "t1.redirect_walk": "wizard_check",
   "t1.csp": "wizard_check",
@@ -271,9 +364,10 @@ const dash = (reason: Reason): FinishLineCellSource => ({ inputs: [], notMeasure
 export const FINISH_LINE_SOURCES: { readonly [F in FinishLineId]: { n: number } & Record<ReportColumnId, FinishLineCellSource> } = {
   each_tool_once: {
     n: 1,
-    live_today: src("dry_live.graded", "census"),
+    live_today: src("dry_live.graded", "census", "t1.byte_census"),
     in_pr: src("rehearsal.graded", "census"),
-    proven_live: src("real_visit.graded")
+    // §3x.6: the deployed site's own bytes are counted again after the deploy (run 3's duplicate config shipped).
+    proven_live: src("real_visit.graded", "t1.byte_census")
   },
   ids_match_connections: {
     n: 2,
@@ -285,7 +379,8 @@ export const FINISH_LINE_SOURCES: { readonly [F in FinishLineId]: { n: number } 
     n: 3,
     live_today: src("baseline.preview_share"),
     in_pr: src("t0.host_matrix", "rehearsal.preview_self"),
-    proven_live: dash("needs_7_days")
+    // §3x.6: the merge's own deployment URL, loaded without sending anything (the day-7 re-read stays in `day7`).
+    proven_live: src("merge_preview.graded")
   },
   survives_ad_blockers: {
     n: 4,
@@ -297,7 +392,7 @@ export const FINISH_LINE_SOURCES: { readonly [F in FinishLineId]: { n: number } 
     n: 5,
     live_today: src("dry_live.spa_navigation"),
     in_pr: src("rehearsal.spa_navigation"),
-    proven_live: dash("not_exercised")
+    proven_live: src("deployed_dry.spa_navigation")
   },
   conversions_server_side: {
     n: 6,
@@ -417,11 +512,17 @@ const COLUMN_CELLS_SHAPE: ObjectShape = shapeOf<Record<ReportColumnId, Cell>>()(
 
 const COLUMN_META_SHAPE = shapeOf<ReportColumnMeta>()("ReportColumnMeta", ["measuredAt", "sha"], [])
 
+export const REPORT_VERDICT_SHAPE = shapeOf<ReportVerdict>()("ReportVerdict", ["state", "headline", "reasons", "installed"], [], {
+  reasons: arrayOf(shapeOf<VerdictReason>()("VerdictReason", ["kind", "count", "names"], [])),
+  installed: arrayOf(shapeOf<ReportVerdict["installed"][number]>()("VerdictInstalledTool", ["tool", "ids", "connected"], []))
+})
+
 export const REPORT_V2_SHAPE = shapeOf<ReportV2>()(
   "ReportV2",
-  ["schema", "runId", "tagVersion", "generatedAt", "site", "columns", "rows", "day7", "finishLine", "notes"],
+  ["schema", "runId", "tagVersion", "generatedAt", "site", "columns", "rows", "day7", "finishLine", "notes", "verdict"],
   [],
   {
+    verdict: nullable(REPORT_VERDICT_SHAPE),
     site: shapeOf<ReportV2["site"]>()("ReportSite", ["repoLabel", "productionHost"], []),
     columns: shapeOf<ReportV2["columns"]>()("ReportColumns", ["live_today", "in_pr", "proven_live"], [], {
       live_today: COLUMN_META_SHAPE,
@@ -487,6 +588,12 @@ export interface ReportBuilder {
     notes: string[]
     /** The run's server-clock start (`runs.start`); a receipt before it never backs "verified"/"proven" (§3z.8). */
     runStartedAt?: string | null
+    /**
+     * §3x.6 The facts THE verdict reads beyond the columns (jobs, open review findings, the real visit's per-tool
+     * facts). Every tag report carries a verdict, so a tag caller always passes them; null only for a partial report
+     * that may not grade (the desktop's).
+     */
+    verdictFacts: VerdictFacts | null
   }): ReportV2
   renderTerminal(report: ReportV2, width: number): string
   /** Plain-text statuses; never a literal `- [ ]`. */

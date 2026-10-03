@@ -18,6 +18,8 @@ import { briefConnectionsFrom, briefPlanFrom } from "./plan-data.js"
 import { applyApprovalsTo, createJobRegistry, newlyInstalledTools, requiredLineKind, seedCandidatesFrom } from "./registry.js"
 import { fixtureKeys } from "../../test/wizard/o8/fixtures.js"
 import { run3File, run3Json } from "../../test/wizard/run3-fixture.js"
+import { reanchorEvidence } from "./reanchor.js"
+import { buildHostGuardExpression } from "../host-guard.js"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -583,5 +585,44 @@ describe("§3x.3 live run 3: job 10 targets the success, job 11 is not a second 
     // Negative: no helpers written → no promise in the operator rules, and job 10 refuses to brief.
     expect(() => buildBrief(items, { ...facts, helpers: null })).toThrow(/helpers the install writes/)
     expect(buildBrief([], { ...facts, helpers: null })).not.toContain("helpers are already")
+  })
+})
+
+describe("§3x.3 (W8) the brief points at the right lines and gives the guard as it must be written", () => {
+  it("re-anchors run 3's evidence through the install's import line: 27→28, 32→33, 41→42", async () => {
+    const base = run3File("site-6d16d8f/app/layout.tsx")
+    const now = run3File("install-f1abea9/app/layout.tsx")
+    const item = { ...seedCandidatesFrom(scanOf(), facts())[0]!, trigger: { finding: "x", evidence: [27, 32, 41].map((line) => ({ file: "app/layout.tsx", line })) } }
+    const [anchored] = await reanchorEvidence([item], async () => base, async () => now)
+    expect(anchored!.trigger.evidence).toEqual([28, 33, 42].map((line) => ({ file: "app/layout.tsx", line })))
+    // Negative: a file the install did not change keeps its lines.
+    const [same] = await reanchorEvidence([item], async () => base, async () => base)
+    expect(same!.trigger.evidence).toEqual(item.trigger.evidence)
+  })
+
+  it("guardAsWritten is escaped for a template literal (run 3's layout: `\\s` becomes `\\\\s`), plain for JS", () => {
+    const expression = buildHostGuardExpression({ mode: "deny", exempt: ["tag-smoke.foundernationtv.com"], deny: [] })
+    expect(expression).toContain("\\s+")
+    const ga4 = { ...seedCandidatesFrom(scanOf(), facts()).find((item) => item.id === "preview_guard:ga4")!, allow: { files: ["app/layout.tsx"], create: [] } }
+    const facts0 = {
+      runId: RUN_ID,
+      framework: "next-app-router",
+      packageManager: "npm",
+      router: "app" as const,
+      appRoot: ".",
+      plan: null,
+      connections: null,
+      previewGuard: { expression, exemptHosts: ["tag-smoke.foundernationtv.com"], metaRecipe: "x" },
+      guardSites: [{ tool: "ga4" as const, file: "app/layout.tsx", line: 28, context: "template_literal" as const }]
+    }
+    const block = buildBrief([ga4], facts0)
+    const data = JSON.parse(/Plan data \(JSON; decided by the user, use it exactly\): (.*)/.exec(block)![1]!) as { guardAt: Array<{ guardAsWritten: string; context: string; line: number }> }
+    expect(data.guardAt[0]).toMatchObject({ line: 28, context: "template_literal" })
+    expect(data.guardAt[0]!.guardAsWritten).toContain("\\\\s+")
+    expect(block).toContain("Paste guardAsWritten exactly; it is already escaped for where the init lives.")
+    // Negative: in plain JS the guard is the expression itself.
+    const js = buildBrief([ga4], { ...facts0, guardSites: [{ tool: "ga4" as const, file: "app/layout.tsx", line: 28, context: "js" as const }] })
+    const jsData = JSON.parse(/Plan data \(JSON; decided by the user, use it exactly\): (.*)/.exec(js)![1]!) as { guardAt: Array<{ guardAsWritten: string }> }
+    expect(jsData.guardAt[0]!.guardAsWritten).toBe(expression)
   })
 })

@@ -8,9 +8,11 @@
 // 2. Claim the proof (`POST /v1/runs/:runId/proof-claim {producer:"tag"}`). Only the winner runs the
 //    `real_visit` (exactly one target: the production root, plus the server-lane probe). The loser, or a
 //    run already proving/proven, reads the existing receipts and NEVER triggers a second real visit.
-// 3. Receipts (waitMs 120 s, re-polled every 10 s), T1 checks after the deploy, the `proven_live` column,
-//    then `PATCH proofState` to the result (winner only).
-// 4. Print the run's PostHog distinct id so the user can filter this visitor out.
+// 3. Receipts (waitMs 120 s, re-polled every 10 s; the server lane only when it is installed), T1 checks after the
+//    deploy, and §3x.6's three post-deploy measurements (production's own bytes for duplicates, a no-send load of
+//    the merge's own deployment URL for previews, a no-send load of production with a page change), the
+//    `proven_live` column over every INSTALLED tool, then `PATCH proofState` from THE verdict (winner only).
+// 4. Print what the customer filters the one normal page view by (GA4 client id, PostHog id, Meta PageView time).
 import { bridgeFailureOutcome, hardStopOutcome, isTransientBridgeFailure } from "../../bridge/outcomes.js"
 import { deploymentReader, type DeploymentReader } from "../../hosts/github.js"
 import { resolveProductionHost } from "../site-host.js"
@@ -23,6 +25,7 @@ import { SITE_PROOF_PATH, type ProveOutcome, type SiteProveResponse, type TagKey
 import type { WizardGitOps } from "../contracts/git-host.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import type { CheckResult } from "../contracts/jobs.js"
+import { TEST_TOOLS } from "../contracts/test-engine.js"
 import { RECEIPT_LANES, RECEIPT_LIMITS, type LaneReceipt, type ReceiptLane, type ReceiptMarkers, type ReceiptsResponseFields } from "../contracts/receipts.js"
 import { REASONS, type Reason, type ReportColumnSnapshot } from "../contracts/report.js"
 import { WIZARD_PATHS, type WizardRunState } from "../contracts/state.js"
@@ -38,6 +41,14 @@ import {
 import { bridgeErrorCode, bridgeErrorState } from "../bridge-errors.js"
 import { gradeReasonCode, gradeWords } from "../before-column.js"
 import { buildColumn, type ColumnFact, type RowCellInput } from "../report.js"
+import { productionMatcher, rehearsalTargets, runDesktopTest } from "../../review/rehearse.js"
+import { evidenceUrls } from "./rehearsal.js"
+import { HOST_DENY_V1, normalizeHost } from "../contracts/host-deny.js"
+import type { RunProofState } from "../contracts/state.js"
+import type { VerdictToolFact } from "../contracts/report.js"
+import type { CensusResult } from "../contracts/jobs.js"
+import { verdictFactsFor } from "../verdict-facts.js"
+import { proofStateOf } from "../verdict.js"
 
 /** How often the deploy status is read, and how long `prove` waits before parking (the desktop watcher continues). */
 export const PROVE_LIMITS = {
@@ -303,6 +314,14 @@ export const PROVE_OUTCOME_WORDS: Record<Exclude<ProveOutcome, "proven">, string
 // 2. The real visit
 // ---------------------------------------------------------------------------------------------
 
+/**
+ * §3x.5 (E): the server lane is installed (the site has its secret; the lane state is not `no_secret`). Only then is it
+ * probed and its receipt asked for: run 3 probed a lane that did not exist and waited 120 s for a `no_receipt`.
+ */
+export function serverLaneInstalled(keys: TagKeys): boolean {
+  return keys.serverLane.laneState !== "no_secret"
+}
+
 async function runRealVisit(
   ctx: WizardContext,
   deps: WizardDeps,
@@ -319,7 +338,7 @@ async function runRealVisit(
     targets: [{ url: `https://${productionHost}/`, label: "home" }],
     expect,
     consentSeed: consentRequired ? { kind: "infinite_runtime_grant", storageKey: keys.infinite.consentStorageKey! } : null,
-    serverLaneProbe: { path: serverLaneProbePathFor(runId) },
+    ...(serverLaneInstalled(keys) ? { serverLaneProbe: { path: serverLaneProbePathFor(runId) } } : {}),
     deadlineMs: TEST_LIMITS.deadlineMs.real_visit
   })
   const begun = deps.clock.now().getTime()
@@ -336,25 +355,26 @@ async function runRealVisit(
   return poll.result
 }
 
-/** The markers the receipts read asks the cloud about: ONLY what this visit itself observed. */
+/**
+ * The markers the receipts read asks the cloud about: ONLY what this visit itself observed. §3x.5: GA4 and the Meta
+ * pixel are marked by the connected id when it was seen leaving, else — for a tool with NO connection — by the first
+ * id seen leaving, so an installed, unconnected tool still gets its `delivering` receipt from a 2xx (one rule with
+ * the desktop's proof watcher).
+ */
 export function receiptMarkersFrom(result: TestResult, expect: TestExpect): ReceiptMarkers {
   const markers: ReceiptMarkers = {}
   const eventIds = result.markers.infiniteEventIds.slice(0, RECEIPT_LIMITS.maxInfiniteEventIds)
   if (expect.infinite && eventIds.length > 0) markers.infinite = { eventIds }
   if (expect.posthog && result.markers.posthogDistinctId) markers.posthog = { distinctId: result.markers.posthogDistinctId }
-  if (expect.ga4) {
-    const event = result.ga4.events.find((candidate) => expect.ga4!.includes(candidate.tid))
-    if (event) {
-      const httpStatus = typeof event.status === "number" ? event.status : null
-      markers.ga4 = { measurementId: event.tid, seenLeaving: httpStatus !== null && httpStatus >= 200 && httpStatus < 300, httpStatus }
-    }
+  const ga4 = expect.ga4 ? result.ga4.events.find((candidate) => expect.ga4!.includes(candidate.tid)) : result.ga4.events[0]
+  if (ga4) {
+    const httpStatus = typeof ga4.status === "number" ? ga4.status : null
+    markers.ga4 = { measurementId: ga4.tid, seenLeaving: httpStatus !== null && httpStatus >= 200 && httpStatus < 300, httpStatus }
   }
-  if (expect.meta) {
-    const tr = result.meta.tr.find((candidate) => expect.meta!.includes(candidate.pixelId))
-    if (tr) {
-      const httpStatus = typeof tr.status === "number" ? tr.status : null
-      markers.metaPixel = { pixelId: tr.pixelId, seenLeaving: httpStatus !== null && httpStatus >= 200 && httpStatus < 300, httpStatus }
-    }
+  const tr = expect.meta ? result.meta.tr.find((candidate) => expect.meta!.includes(candidate.pixelId)) : result.meta.tr[0]
+  if (tr) {
+    const httpStatus = typeof tr.status === "number" ? tr.status : null
+    markers.metaPixel = { pixelId: tr.pixelId, seenLeaving: httpStatus !== null && httpStatus >= 200 && httpStatus < 300, httpStatus }
   }
   if (result.serverLaneProbe) markers.serverLane = { probePath: result.serverLaneProbe.path }
   if (result.markers.metaEventIds.length > 0) markers.metaCapi = { metaEventIds: result.markers.metaEventIds }
@@ -399,9 +419,22 @@ const RECEIPT_TEXT: Record<LaneReceipt["state"], string> = {
 
 const ID_REASONS = new Set(["wrong_id"])
 const ONCE_REASONS = new Set(["duplicate_page_view", "no_beacon", "meta_tr_rejected", "traffic_permissions_blocked"])
+/** Grader codes that mean "this load could not grade the tool" (its silence proves nothing either way). */
+const UNGRADED_CODES = new Set(["automation_detected", "blocked_by_site_bot_rules", "preview_protected", "held_by_consent", "env_dependent", "test_error"])
+const NOT_CONNECTED_WORDS = "ID not checked: not connected in Infinite"
 
-function toolsUnderTest(expect: TestExpect): TestTool[] {
-  return (["infinite", "ga4", "posthog", "meta"] as const).filter((tool) => expect[tool] !== undefined)
+/** The beacons a tool sent on a load (GA4 hits, PostHog events, Infinite events, Meta `/tr`). */
+function beaconsOf(result: TestResult, tool: TestTool): number {
+  return tool === "ga4" ? result.ga4.events.length : tool === "posthog" ? result.posthog.events.length : tool === "infinite" ? result.infinite.events.length : result.meta.tr.length
+}
+
+/**
+ * §3x.6 (A1) The tools "Proven live" grades: every INSTALLED tool (the census of the merge commit's tree ∪ the tools
+ * this run installed), every connected one, and every one the visit saw fire — the rehearsal's `consideredTools` rule.
+ * Run 3 graded only connected tools, so its silent Meta pixel and its unconnected GA4 vanished from the column.
+ */
+export function toolsUnderTest(expect: TestExpect, installed: readonly TestTool[] | null, result: TestResult | null): TestTool[] {
+  return TEST_TOOLS.filter((tool) => expect[tool] !== undefined || (installed ?? []).includes(tool) || (result !== null && beaconsOf(result, tool) > 0))
 }
 
 /**
@@ -437,12 +470,22 @@ export function t1Words(check: Pick<CheckResult, "checkId" | "state">): string {
   return redirect ? "redirects could not be checked" : "the content security policy could not be checked"
 }
 
+/** §3x.6 One post-deploy no-send load: graded, or not measured with the reason. */
+export type PostDeployLoad = { kind: "graded"; result: TestResult; grades: Record<TestTool, CheckResult> } | { kind: "none"; reason: Reason }
+
 export interface ProvenColumnInput {
   runId: string
   mergeSha: string
   at: string
   keys: TagKeys
   expect: TestExpect
+  /**
+   * §3x.6 The tools on the DEPLOYED code: the census of the merge commit's tree ∪ the tools this run installed. null =
+   * unknown (the merge tree could not be read): only connected and firing tools are graded, and the step says so.
+   */
+  installed: readonly TestTool[] | null
+  /** §3x.6 The three post-deploy measurements; absent = none were made (no visit evidence). */
+  postDeploy?: { byteCensus: CheckResult[]; mergePreview: PostDeployLoad; deployedDry: PostDeployLoad }
   /** Null when this run did not do the real visit (the loser of the proof claim, or a re-run). */
   visit: { result: TestResult; grades: Record<TestTool, CheckResult> } | null
   receipts: ReceiptsResponseFields
@@ -483,7 +526,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
     lanes: Object.fromEntries(Object.entries(input.receipts.lanes).map(([lane, receipt]) => [lane, ownReceipt(receipt, runStartedAt)])) as ReceiptsResponseFields["lanes"]
   }
   const facts: ColumnFact[] = []
-  const tools = toolsUnderTest(expect)
+  const tools = toolsUnderTest(expect, input.installed, visit?.result ?? null)
   const unmeasured = input.unmeasured ?? { reason: "not_exercised" as Reason, state: "not_measured" as const }
   // R2-2: no real visit and no receipt of this run → nothing on the live site was measured. The column then holds
   // no fact at all: not the consent setting (no visit measured it), not a T1 read, not a missing receipt.
@@ -495,13 +538,30 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
       const grade = visit.grades[tool]
       if (!grade) continue
       const reason = gradeReasonCode(grade)
+      if (grade.state === "info") continue // not installed, nothing fired: not graded live
+      // §3x.6 (A2) The ONCE half: a tool that fired cleanly but has no connection DOES fire once (the grader's
+      // `not_connected` comes after its duplicate, PII and silence rules); only its ID cannot be compared.
+      const notConnected = grade.state === "undetermined" && reason === "not_connected"
       const once: ColumnFact["state"] =
-        grade.state === "pass" ? "pass" : grade.state === "problem" ? (ONCE_REASONS.has(reason) ? "problem" : "undetermined") : grade.state === "info" ? "info" : "undetermined"
-      // Fixed words only (never the grader's free-text reason): `gradeWords` is the live_today column's wording.
-      facts.push({ input: "real_visit.graded", state: once, display: `${TOOL_LABELS[tool]}: ${gradeWords(grade, null)}`, at, checkId: grade.checkId })
-      const ids: ColumnFact["state"] =
-        grade.state === "pass" ? "pass" : grade.state === "problem" && ID_REASONS.has(reason) ? "problem" : "undetermined"
-      facts.push({ input: "real_visit.ids_vs_keys", state: ids, display: `${TOOL_LABELS[tool]}: ${ids === "pass" ? "the connected ID" : ids === "problem" ? "an ID that is not the connection's" : "not determinable"}`, at, checkId: grade.checkId })
+        grade.state === "pass" || notConnected ? "pass" : grade.state === "problem" ? (ONCE_REASONS.has(reason) ? "problem" : "undetermined") : "undetermined"
+      facts.push({
+        input: "real_visit.graded",
+        state: once,
+        display: notConnected ? `${TOOL_LABELS[tool]}: fires once (${NOT_CONNECTED_WORDS})` : `${TOOL_LABELS[tool]}: ${gradeWords(grade, null)}`,
+        at,
+        checkId: grade.checkId,
+        ...(once === "undetermined" ? { reason: reportReason(reason) } : {})
+      })
+      // The IDS half: pass / wrong_id / undetermined (not_connected, or why it could not be graded).
+      const ids: ColumnFact["state"] = grade.state === "pass" ? "pass" : grade.state === "problem" && ID_REASONS.has(reason) ? "problem" : "undetermined"
+      facts.push({
+        input: "real_visit.ids_vs_keys",
+        state: ids,
+        display: `${TOOL_LABELS[tool]}: ${ids === "pass" ? "the connected ID" : ids === "problem" ? "an ID that is not the connection's" : notConnected ? NOT_CONNECTED_WORDS : "not determinable"}`,
+        at,
+        checkId: grade.checkId,
+        ...(ids === "undetermined" ? { reason: notConnected ? "not_connected" : reportReason(reason) } : {})
+      })
     }
     const piiFlagged = Object.values(visit.grades).some((grade) => grade.state === "problem" && gradeReasonCode(grade) === "no_pii")
     const piiCount = visit.result.pii.reduce((sum, item) => sum + item.count, 0)
@@ -522,11 +582,16 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
       facts.push({ input: "t1.redirect_walk", state: result.state, at: result.at, checkId: result.checkId, display: t1Words(result) })
     }
   }
+  if (input.postDeploy) facts.push(...postDeployFacts(input.postDeploy, input.installed, expect, at))
 
-  // Receipts: at least one verified/delivering per installed tool (and the server lane when installed).
+  // §3x.6 Receipts, per tool under test: a beacon with a receipt, a receipt problem, or an installed tool that sent
+  // NOTHING (the cloud cannot know it is installed, so only the visit can say it was silent; run 3's Meta pixel).
+  for (const tool of tools) facts.push(toolReceiptFact(tool, visit, receipts.lanes[TOOL_LANES[tool]], input, at))
   const proofLanes: Array<[ReceiptLane, string]> = tools.map((tool) => [TOOL_LANES[tool], TOOL_LABELS[tool]])
-  if (input.serverLaneInstalled) proofLanes.push(["server_lane", "Server lane"])
-  for (const [lane, label] of proofLanes) facts.push(receiptFact(receipts.lanes[lane], "receipts.per_tool", at, label))
+  if (input.serverLaneInstalled) {
+    proofLanes.push(["server_lane", "Server lane"])
+    facts.push(receiptFact(receipts.lanes.server_lane, "receipts.per_tool", at, "Server lane"))
+  }
   if (expect.posthog) {
     const lane = receipts.lanes.posthog
     const viaProxy = posthogViaProxy(visit)
@@ -557,8 +622,8 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
       : { value: null, state: "not_measured", source: "wizard_check", at, reason: "not_exercised" }
   rows.live_test_per_tool = liveTestRow(proofLanes, receipts, at)
   if (visit) {
-    rows.ga4_page_views_per_visit = ga4PageViewsRow(visit, expect, at)
-    rows.meta_pixel = metaPixelRow(visit, expect, at)
+    rows.ga4_page_views_per_visit = ga4PageViewsRow(visit, expect, input.installed, at)
+    rows.meta_pixel = metaPixelRow(visit, expect, input.installed, at)
   } else {
     rows.ga4_page_views_per_visit = { value: null, state: "pending", source: "desktop_test", at, reason: "pending_open_infinite" }
     rows.meta_pixel = { value: null, state: "pending", source: "desktop_test", at, reason: "pending_open_infinite" }
@@ -583,7 +648,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
 function unmeasuredProvenColumn(input: ProvenColumnInput, receipts: ReceiptsResponseFields, unmeasured: NonNullable<ProvenColumnInput["unmeasured"]>): ReportColumnSnapshot {
   const { at, expect } = input
   const dash = (source: RowCellInput["source"]): RowCellInput => ({ value: null, state: unmeasured.state, source, at, reason: unmeasured.reason })
-  const tools = toolsUnderTest(expect)
+  const tools = toolsUnderTest(expect, input.installed, null)
   const rows: Parameters<typeof buildColumn>[1]["rows"] = {
     consent_setting: dash("cloud_read"),
     preview_share: { value: null, state: "not_measured", source: "cloud_read", at, reason: "needs_7_days" },
@@ -608,6 +673,92 @@ function unmeasuredProvenColumn(input: ProvenColumnInput, receipts: ReceiptsResp
     unmeasured,
     builtAt: at
   })
+}
+
+/** The grader could not grade `tool` on the visit (held by consent, a bot-flagged window, a test error). */
+function ungradedOn(visit: NonNullable<ProvenColumnInput["visit"]>, tool: TestTool): boolean {
+  const grade = visit.grades[tool]
+  return grade !== undefined && grade.state === "undetermined" && UNGRADED_CODES.has(gradeReasonCode(grade))
+}
+
+/** Words for a receipt the cloud refused because the row lacked Infinite's test mark (§3x.5). */
+const UNMARKED_WORDS = "landed without the test mark (counted as a person)"
+
+/**
+ * §3x.6 One tool's `receipts.per_tool` reading: verified / delivering → pass; `no_receipt` → problem (an `unmarked:`
+ * one says it landed as a person); an installed tool the visit saw NO beacon from → problem "sent nothing" (unless the
+ * grader could not grade it there); a fired tool with no connection → undetermined `not_connected`; pending → pending.
+ */
+function toolReceiptFact(tool: TestTool, visit: ProvenColumnInput["visit"], lane: LaneReceipt, input: ProvenColumnInput, at: string): ColumnFact {
+  const label = TOOL_LABELS[tool]
+  const installed = (input.installed ?? []).includes(tool)
+  const fired = visit !== null && beaconsOf(visit.result, tool) > 0
+  if (visit !== null && !fired && installed) {
+    if (ungradedOn(visit, tool)) return { input: "receipts.per_tool", state: "undetermined", display: `${label}: could not be graded on the real visit`, at, reason: reportReason(gradeReasonCode(visit.grades[tool])) }
+    return { input: "receipts.per_tool", state: "problem", display: `${label}: sent nothing`, at }
+  }
+  if (lane.state === "no_receipt" && (lane.reason ?? "").startsWith("unmarked:")) return { input: "receipts.per_tool", state: "problem", display: `${label}: ${UNMARKED_WORDS}`, at }
+  if (lane.state === "not_verifiable" && input.expect[tool] === undefined && fired) {
+    return { input: "receipts.per_tool", state: "undetermined", display: `${label}: fires (${NOT_CONNECTED_WORDS})`, at, reason: "not_connected" }
+  }
+  if (lane.state === "pending") return { input: "receipts.per_tool", state: "pending", display: `${label}: ${RECEIPT_TEXT.pending}`, at }
+  return receiptFact(lane, "receipts.per_tool", at, label)
+}
+
+/** §3x.6 The post-deploy measurements as facts: production's own bytes, the merge's own deployment, a page change. */
+function postDeployFacts(post: NonNullable<ProvenColumnInput["postDeploy"]>, installed: readonly TestTool[] | null, expect: TestExpect, at: string): ColumnFact[] {
+  const facts: ColumnFact[] = []
+  for (const check of post.byteCensus.filter((entry) => entry.checkId === "byte_census")) {
+    facts.push({
+      input: "t1.byte_census",
+      state: check.state === "info" ? "pass" : check.state,
+      display: check.state === "problem" ? "duplicate tags on the live page" : check.state === "pass" || check.state === "info" ? "each tool set up once on the live page" : "the live page's tags could not be read",
+      at: check.at,
+      checkId: check.checkId
+    })
+  }
+  if (post.mergePreview.kind === "none") {
+    facts.push({ input: "merge_preview.graded", state: "undetermined", display: "the merge's own deployment address was not loaded", at, reason: post.mergePreview.reason })
+  } else {
+    for (const tool of ["ga4", "posthog", "meta"] as const) {
+      const grade = post.mergePreview.grades[tool]
+      if (!grade || grade.state === "info") continue
+      const code = gradeReasonCode(grade)
+      const state: ColumnFact["state"] = grade.state === "pass" ? "pass" : grade.state === "problem" && code === "previews_send_data" ? "problem" : "undetermined"
+      facts.push({
+        input: "merge_preview.graded",
+        state,
+        display: `${TOOL_LABELS[tool]}: ${state === "pass" ? "silent on the merge's own deployment address" : state === "problem" ? "sends from the merge's own deployment address" : "could not be graded there"}`,
+        at,
+        checkId: grade.checkId,
+        ...(state === "undetermined" ? { reason: reportReason(code) } : {})
+      })
+    }
+  }
+  if (post.deployedDry.kind === "none") {
+    facts.push({ input: "deployed_dry.spa_navigation", state: "undetermined", display: "no page change was measured after the deploy", at, reason: post.deployedDry.reason })
+  } else {
+    facts.push(...spaFacts(post.deployedDry.result, post.deployedDry.grades, installed, expect, at))
+  }
+  return facts
+}
+
+/** §3x.6 One page view per client-side navigation, per tool, from a no-send load of production that navigated once. */
+function spaFacts(result: TestResult, grades: Record<TestTool, CheckResult>, installed: readonly TestTool[] | null, expect: TestExpect, at: string): ColumnFact[] {
+  const navigated = result.ga4.events.some((event) => event.afterNav) || result.posthog.events.some((event) => event.afterNav) || result.meta.tr.some((tr) => tr.afterNav) || result.infinite.events.some((event) => event.nav)
+  if (!navigated) return [{ input: "deployed_dry.spa_navigation", state: "undetermined", display: "no page change observed", at, reason: "not_exercised" }]
+  const facts: ColumnFact[] = []
+  const consider = (tool: TestTool) => expect[tool] !== undefined || (installed ?? []).includes(tool)
+  const verdict = (tool: TestTool, after: number, what: string): ColumnFact => {
+    const code = gradeReasonCode(grades[tool])
+    const state: ColumnFact["state"] = code === "meta_spa_page_view_missing" || after === 0 ? "problem" : after > 1 || code === "duplicate_page_view" ? "problem" : "pass"
+    const display = state === "pass" ? `${TOOL_LABELS[tool]}: one ${what} per page change` : after === 0 ? `${TOOL_LABELS[tool]}: misses page changes` : `${TOOL_LABELS[tool]}: counts a page change ${after} times`
+    return { input: "deployed_dry.spa_navigation", state, display, at, checkId: grades[tool]?.checkId }
+  }
+  if (consider("ga4") && result.ga4.events.length > 0) facts.push(verdict("ga4", result.ga4.events.filter((event) => event.afterNav && event.en === "page_view").length, "page_view"))
+  if (consider("posthog") && result.posthog.events.length > 0) facts.push(verdict("posthog", result.posthog.events.filter((event) => event.afterNav && event.event === "$pageview").length, "$pageview"))
+  if (consider("meta") && result.meta.tr.length > 0) facts.push(verdict("meta", result.meta.tr.filter((tr) => tr.afterNav && tr.ev === "PageView").length, "PageView"))
+  return facts.length > 0 ? facts : [{ input: "deployed_dry.spa_navigation", state: "undetermined", display: "no tool sent a page view on the page change", at, reason: "not_exercised" }]
 }
 
 function consentWords(mode: "not_required" | "required"): string {
@@ -636,8 +787,21 @@ function liveTestRow(lanes: Array<[ReceiptLane, string]>, receipts: ReceiptsResp
   }
 }
 
-function ga4PageViewsRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect: TestExpect, at: string): RowCellInput {
-  if (!expect.ga4) return { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" }
+function ga4PageViewsRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect: TestExpect, installed: readonly TestTool[] | null, at: string): RowCellInput {
+  // §3x.6: an installed GA4 with no connection is measured too (its ID just cannot be compared).
+  if (!expect.ga4) {
+    if (!(installed ?? []).includes("ga4") && visit.result.ga4.events.length === 0) return { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" }
+    const views = visit.result.ga4.events.filter((event) => event.en === "page_view" && !event.afterNav)
+    const sent = views.some((event) => typeof event.status === "number" && event.status >= 200 && event.status < 300)
+    return {
+      value: views.length,
+      display: `${views.length}${sent ? " · sent (seen leaving)" : ""} · ${NOT_CONNECTED_WORDS}`,
+      state: views.length === 1 ? "pass" : "problem",
+      source: "desktop_test",
+      at,
+      checkId: "ga4_seen_leaving"
+    }
+  }
   const views = visit.result.ga4.events.filter((event) => event.en === "page_view" && expect.ga4!.includes(event.tid) && !event.afterNav)
   const grade = visit.grades.ga4
   // A tool the grader could not grade (held by consent, a bot-flagged window, …) is UNKNOWN, never a
@@ -669,9 +833,19 @@ function posthogViaProxy(visit: ProvenColumnInput["visit"]): boolean | null {
   return visit.result.posthog.events.some((event) => event.sameOrigin)
 }
 
-function metaPixelRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect: TestExpect, at: string): RowCellInput {
-  if (!expect.meta) return { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" }
+function metaPixelRow(visit: NonNullable<ProvenColumnInput["visit"]>, expect: TestExpect, installed: readonly TestTool[] | null, at: string): RowCellInput {
   const blocked = visit.result.meta.console.includes("traffic_permissions_blocked")
+  // §3x.6: an installed Meta pixel with no connection is measured too: a 2xx PageView passes; silence is a problem.
+  if (!expect.meta) {
+    if (!(installed ?? []).includes("meta") && visit.result.meta.tr.length === 0) return { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" }
+    if (blocked) return { value: "blocked", display: `blocked on ${visit.result.loads[0]?.finalUrl ? new URL(visit.result.loads[0].finalUrl).host : "the site"}`, state: "problem", source: "desktop_test", at, checkId: "meta_seen_leaving" }
+    const pageView = visit.result.meta.tr.some((event) => event.ev === "PageView" && typeof event.status === "number" && event.status >= 200 && event.status < 300)
+    if (pageView) return { value: "sending", display: `sending (seen leaving) · ${NOT_CONNECTED_WORDS}`, state: "pass", source: "desktop_test", at, checkId: "meta_seen_leaving" }
+    if (visit.result.meta.tr.length === 0 && ungradedOn(visit, "meta")) {
+      return { value: null, state: "undetermined", source: "desktop_test", at, checkId: "meta_seen_leaving", reason: reportReason(gradeReasonCode(visit.grades.meta)) }
+    }
+    return { value: "not seen", display: "no Meta event seen leaving", state: "problem", source: "desktop_test", at, checkId: "meta_seen_leaving" }
+  }
   const tr = visit.result.meta.tr.filter((event) => expect.meta!.includes(event.pixelId))
   const sent = tr.some((event) => typeof event.status === "number" && event.status >= 200 && event.status < 300)
   if (blocked) return { value: "blocked", display: `blocked on ${visit.result.loads[0]?.finalUrl ? new URL(visit.result.loads[0].finalUrl).host : "the site"}`, state: "problem", source: "desktop_test", at, checkId: "meta_seen_leaving" }
@@ -698,15 +872,6 @@ function posthogRouteRow(lane: LaneReceipt, visit: ProvenColumnInput["visit"], e
     checkId: "posthog_distinct_id_receipt",
     ...(found && lane.receiptAt ? { receiptAt: lane.receiptAt } : {})
   }
-}
-
-/** The proof state the winner PATCHes: proven only with receipts for every installed tool and no problem. */
-export function proofStateFrom(column: ReportColumnSnapshot): "proven" | "problem" | "undetermined" {
-  const proof = column.finishLine.proof_from_real_visit
-  const once = column.finishLine.each_tool_once
-  if (proof?.state === "problem" || once?.state === "problem") return "problem"
-  if (proof?.state === "pass" && once?.state === "pass") return "proven"
-  return "undetermined"
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -954,6 +1119,17 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   let visit: ProvenColumnInput["visit"] = null
   let markers: ReceiptMarkers = {}
   let visitError: string | null = null
+  // §3x.6 (A1) The tools on the DEPLOYED code: the census of the merge commit's own tree ∪ what this run installed.
+  const deployed = await installedAtMerge(ctx, deps, mergeSha, productionBranch)
+  if (deployed.census === null) ctx.emit.emit("step.sub", { step: "prove", text: `! The merge commit's files could not be read, so only connected and firing tools are graded live`, tone: "warn" })
+  const gradeCtx = (result: TestResult) =>
+    gradeContextFrom({
+      census: deployed.census ?? EMPTY_CENSUS,
+      installed: deployed.installed ?? [],
+      consentMode: state.plan?.answers.consentMode ?? keys.infinite.consentMode,
+      cmpDetected: result.environment.cmpDetected
+    })
+  const installed = deployed.census === null ? null : (gradeCtx(EMPTY_FACTS_FOR_CONTEXT).installedTools ?? [])
   if (ownClaim) {
     ctx.emit.emit("step.sub", { step: "prove", text: `No second visit: ${claimNote}; reading its receipts.`, tone: "info" })
     if (ownClaim.visit) {
@@ -975,9 +1151,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
       if ("error" in result) visitError = result.error
       else {
         // §3z.12 §3e.7 (B11): the grader always gets the consent mode, the installed tools and whose Meta pixel it is.
-        const census = await deps.checks.census(ctx.root, ctx.appRoot)
-        const consentMode = state.plan?.answers.consentMode ?? keys.infinite.consentMode
-        const grades = await deps.checks.gradeTestRun(result, expect, "real_visit", gradeContextFrom({ census, consentMode, cmpDetected: result.environment.cmpDetected }))
+        const grades = await deps.checks.gradeTestRun(result, expect, "real_visit", gradeCtx(result))
         for (const [tool, grade] of Object.entries(grades) as Array<[TestTool, CheckResult]>) {
           ctx.emit.emit("check.result", { checkId: grade.checkId, tier: "PV", state: grade.state, ...(grade.reason ? { reason: grade.reason } : {}), runId })
           void tool
@@ -1003,21 +1177,23 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     // facts the desktop stored; it never starts a second visit. No stored facts → receipts only.
     const stored = await readStoredFacts(ctx, deps, runId)
     if (stored) {
-      const census = await deps.checks.census(ctx.root, ctx.appRoot)
-      const consentMode = state.plan?.answers.consentMode ?? keys.infinite.consentMode
-      const grades = await deps.checks.gradeTestRun(stored, expect, "real_visit", gradeContextFrom({ census, consentMode, cmpDetected: stored.environment.cmpDetected }))
+      const grades = await deps.checks.gradeTestRun(stored, expect, "real_visit", gradeCtx(stored))
       visit = { result: stored, grades }
       markers = receiptMarkersFrom(stored, expect)
     }
   }
+  // §3x.5 (E): no lane installed → no probe, no marker, no receipt asked for (and no 120 s wait for it).
+  const laneInstalled = serverLaneInstalled(keys)
+  if (!laneInstalled) delete markers.serverLane
 
   // A lane with no marker reads the run's STORED receipt (the app's visit, for a lost claim). With the claim held and
   // no visit made, there is none to read (R2-2).
   const receipts = (won || noHost) && visit === null ? noVisitReceipts(runId, deps.clock.now().toISOString()) : await readReceipts(ctx, deps, runId, markers)
   for (const [lane, receipt] of Object.entries(receipts.lanes) as Array<[ReceiptLane, LaneReceipt]>) {
+    if (lane === "server_lane" && !laneInstalled) continue
     ctx.emit.emit("receipt", { lane, state: receipt.state, receiptAt: receipt.receiptAt, runId })
   }
-  for (const tool of toolsUnderTest(expect)) {
+  for (const tool of toolsUnderTest(expect, installed, visit?.result ?? null)) {
     const lane = receipts.lanes[TOOL_LANES[tool]]
     const fired = lane.state === "verified" || lane.state === "delivering"
     ctx.emit.emit("step.sub", { step: "prove", text: `${fired ? "✓" : "·"} ${TOOL_LABELS[tool]} · ${RECEIPT_TEXT[lane.state]}`, tone: fired ? "ok" : "warn" })
@@ -1029,9 +1205,14 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   try {
     // T1 after the deploy (read-only).
     const t1: CheckResult[] = []
+    let postDeploy: ProvenColumnInput["postDeploy"]
     if (productionHost) {
       const url = `https://${productionHost}/`
       t1.push(...(await deps.checks.redirectWalk([url])), ...(await deps.checks.csp(url)))
+      // §3x.6 the three post-deploy measurements, only once something on the live site was measured.
+      if (visit !== null || Object.values(receipts.lanes).some(laneFired)) {
+        postDeploy = await measureAfterDeploy(ctx, deps, { runId, mergeSha, productionHost, expect, keys, gradeCtx, reader })
+      }
     }
 
     // §3z.12 §3e.1 (B15): the passive checks read real events AFTER the deploy (baseline since = deploy time).
@@ -1044,27 +1225,30 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
       at,
       keys,
       expect,
+      installed,
+      ...(postDeploy ? { postDeploy } : {}),
       visit,
       receipts,
       t1,
-      serverLaneInstalled: keys.serverLane.laneState !== "no_secret",
+      serverLaneInstalled: laneInstalled,
       runStartedAt: state.runStartedAt ?? null,
       conversionsWaiting: state.jobs.filter((item) => item.jobId === "server_conversions" && ["done_in_code", "waiting_real_event"].includes(item.state)).length,
       // R2-4: "open Infinite" only while the app is proving this run; when this run held the claim (or no host is
       // known), nothing in Infinite finishes the live check, so its cells are "—" and the report says rerun_tag.
       unmeasured: appProving && productionHost ? { reason: "pending_open_infinite", state: "pending" } : { reason: "not_exercised", state: "not_measured" }
     })
+    const proof = visit ? proofFactsFromVisit(visit, receipts, installed, expect, laneInstalled, deps.clock.now().toISOString(), deployed.ids) : null
     ctx.state.update((draft) => {
       draft.report.proven_live = column
+      if (proof) draft.proof = proof
     })
     await ctx.state.save()
 
-    if (patchProofState) {
-      proofState = visitError ? "undetermined" : proofStateFrom(column)
+    if (patchProofState || ownClaim) {
+      // §3x.6 THE verdict decides the PATCH (properly → proven, problems → problem, else undetermined).
+      proofState = visitError ? "undetermined" : await verdictProofState(ctx, deps, runId)
       // §3z.8 (A10): the proofState PATCH names its producer, which holds the claim.
-      await deps.bridge.patchRun(runId, { proofState }, { producer: "tag" })
-    } else if (ownClaim) {
-      proofState = visitError ? "undetermined" : proofStateFrom(column)
+      if (patchProofState) await deps.bridge.patchRun(runId, { proofState }, { producer: "tag" })
     }
   } catch (error) {
     if (patchProofState && proofState === null) {
@@ -1073,18 +1257,200 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     throw error
   }
 
-  const distinctId = visit?.result.markers.posthogDistinctId ?? state.markers.prove.posthogDistinctId ?? null
-  if (distinctId) {
-    ctx.emit.emit("step.sub", { step: "prove", text: `Filter this visitor out in PostHog: distinct_id = ${distinctId}`, tone: "info" })
-  }
+  // §3x.5 What the customer filters the one normal page view by, per tool that recorded it.
+  const filter = ctx.state.get().proof?.filter ?? null
+  const distinctId = filter?.posthogDistinctId ?? visit?.result.markers.posthogDistinctId ?? state.markers.prove.posthogDistinctId ?? null
+  if (distinctId) ctx.emit.emit("step.sub", { step: "prove", text: `Filter this visitor out in PostHog: distinct_id = ${distinctId}`, tone: "info" })
+  if (filter?.ga4ClientId) ctx.emit.emit("step.sub", { step: "prove", text: `Filter this visitor out in GA4: client id ${filter.ga4ClientId}`, tone: "info" })
+  if (filter?.metaPageViewAt) ctx.emit.emit("step.sub", { step: "prove", text: `Meta recorded it as one PageView at ${filter.metaPageViewAt.slice(11, 19)}Z`, tone: "info" })
 
-  const lanes = toolsUnderTest(expect)
+  const lanes = toolsUnderTest(expect, installed, visit?.result ?? null)
   const passed = lanes.filter((tool) => ["verified", "delivering"].includes(receipts.lanes[TOOL_LANES[tool]].state)).length
   if (visitError) {
     return { kind: "failed", code: "INF_WIZ_PROOF_INCOMPLETE", message: `The real visit could not run: ${visitError}.`, next: "continue" }
   }
   const tail = won || ownClaim ? "" : " (receipts from the Infinite app's visit)"
   return { kind: "ok", status: `${passed} of ${lanes.length} tools passed the live test${tail}${proofState === "problem" ? " · problems found" : ""}` }
+}
+
+/** No census entries: the grader then knows only what this run installed. */
+const EMPTY_CENSUS: CensusResult = { entries: [], envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }
+/** gradeContextFrom reads only the facts' cmpDetected; this stands in when no visit facts exist yet. */
+const EMPTY_FACTS_FOR_CONTEXT = { environment: { cmpDetected: null } } as unknown as TestResult
+
+/**
+ * §3x.6 (A1) The census of the merge commit's OWN tree (a detached worktree of `mergeSha`, fetched first when it is
+ * not here yet) and the tools this run's install recorded. `census: null` = the merge tree could not be read.
+ */
+export async function installedAtMerge(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  mergeSha: string,
+  productionBranch: string | null
+): Promise<{ census: CensusResult | null; installed: TestTool[] | null; ids: Partial<Record<TestTool, string[]>> }> {
+  const receipt = await deps.fs.readText(join(ctx.root, ".infinite/install.json"))
+  let installed: TestTool[] | null = null
+  try {
+    const providers = receipt === null ? [] : ((JSON.parse(receipt) as { providers?: unknown }).providers ?? [])
+    installed = (Array.isArray(providers) ? providers : []).filter((tool): tool is TestTool => (TEST_TOOLS as readonly string[]).includes(String(tool)))
+  } catch {
+    installed = null
+  }
+  let worktree: { dir: string } | null = null
+  try {
+    try {
+      worktree = await deps.git.worktreeAddDetached(mergeSha)
+    } catch {
+      if (productionBranch) await deps.git.remoteBranchSha(productionBranch).catch(() => null)
+      worktree = await deps.git.worktreeAddDetached(mergeSha)
+    }
+    const census = await deps.checks.census(worktree.dir, ctx.appRoot)
+    const ids: Partial<Record<TestTool, string[]>> = {}
+    for (const entry of census.entries) {
+      if (entry.tool === "x" || !entry.id) continue
+      const tool = entry.tool as TestTool
+      ids[tool] = [...new Set([...(ids[tool] ?? []), entry.id])]
+    }
+    return { census, installed, ids }
+  } catch {
+    return { census: null, installed, ids: {} }
+  } finally {
+    if (worktree) await deps.git.worktreeRemove(worktree.dir).catch(() => undefined)
+  }
+}
+
+/**
+ * §3x.6 The three measurements of the deployed site, each a no-send load or a read the tag already knows how to make:
+ * production's own bytes (T1 `byte_census`, the duplicate check), the merge's own deployment address (previews), and
+ * production with one page change (SPA page views). Nothing is sent by any of them.
+ */
+async function measureAfterDeploy(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  input: {
+    runId: string
+    mergeSha: string
+    productionHost: string
+    expect: TestExpect
+    keys: TagKeys
+    gradeCtx: (result: TestResult) => ReturnType<typeof gradeContextFrom>
+    reader: DeploymentReader | null
+  }
+): Promise<NonNullable<ProvenColumnInput["postDeploy"]>> {
+  const { runId, productionHost, expect } = input
+  const home = `https://${productionHost}/`
+  const byteCensus = (await deps.checks.liveBytes([home], expect)).filter((check) => check.checkId === "byte_census")
+  const consentSeed =
+    input.keys.infinite.consentMode === "required" && input.keys.infinite.consentStorageKey ? { kind: "infinite_runtime_grant" as const, storageKey: input.keys.infinite.consentStorageKey } : null
+  const isProd = productionMatcher(productionHost)
+
+  // The merge's OWN deployment address (a `*.vercel.app` the guard silences), from GitHub.
+  let mergePreview: PostDeployLoad = { kind: "none", reason: "not_exercised" }
+  const deploymentUrl = input.reader?.productionDeploymentUrl ? await input.reader.productionDeploymentUrl(input.mergeSha).catch(() => null) : null
+  if (deploymentUrl && !isProd(new URL(deploymentUrl).hostname) && isDeniedHost(new URL(deploymentUrl).hostname)) {
+    ctx.emit.emit("step.sub", { step: "prove", text: `Loading the merge's own address ${new URL(deploymentUrl).host} (nothing sent)…`, tone: "pending" })
+    const loaded = await runDesktopTest(ctx, deps, "prove", {
+      mode: "dry_live",
+      runId,
+      productionHost,
+      targets: [{ url: deploymentUrl, label: "preview_self" }],
+      expect,
+      consentSeed,
+      deadlineMs: TEST_LIMITS.deadlineMs.dry_live
+    })
+    mergePreview = loaded.result
+      ? loaded.result.environment.previewProtected
+        ? { kind: "none", reason: "preview_protected" }
+        : { kind: "graded", result: loaded.result, grades: await deps.checks.gradeTestRun(loaded.result, expect, "dry_live", input.gradeCtx(loaded.result)) }
+      : { kind: "none", reason: "test_error" }
+  }
+
+  // Production with one client-side navigation (allowed against production; nothing is sent).
+  let deployedDry: PostDeployLoad = { kind: "none", reason: "not_exercised" }
+  const targets = rehearsalTargets(productionHost, evidenceUrls(ctx))
+  const secondPath = targets[1] ? new URL(targets[1].url).pathname : null
+  if (secondPath) {
+    ctx.emit.emit("step.sub", { step: "prove", text: `A page change on ${productionHost} (nothing sent)…`, tone: "pending" })
+    const loaded = await runDesktopTest(ctx, deps, "prove", {
+      mode: "dry_live",
+      runId,
+      productionHost,
+      targets: [{ url: home, label: "home" }],
+      expect,
+      consentSeed,
+      spaNavigation: { path: secondPath },
+      deadlineMs: TEST_LIMITS.deadlineMs.dry_live
+    })
+    deployedDry = loaded.result
+      ? { kind: "graded", result: loaded.result, grades: await deps.checks.gradeTestRun(loaded.result, expect, "dry_live", { ...input.gradeCtx(loaded.result), spaNavigation: true }) }
+      : { kind: "none", reason: "test_error" }
+  }
+  return { byteCensus, mergePreview, deployedDry }
+}
+
+/** A host the preview guard silences (`HOST_DENY_V1`). */
+function isDeniedHost(host: string): boolean {
+  const normalized = normalizeHost(host)
+  return HOST_DENY_V1.deny.exact.includes(normalized) || HOST_DENY_V1.deny.suffix.some((suffix) => normalized.length > suffix.length && normalized.endsWith(suffix))
+}
+
+/**
+ * §3x.6 What the real visit measured of every tool under test, and the ids the customer filters its one normal page
+ * view by (§3x.5): written to the run state for THE verdict and the disclosure.
+ */
+function proofFactsFromVisit(
+  visit: NonNullable<ProvenColumnInput["visit"]>,
+  receipts: ReceiptsResponseFields,
+  installed: readonly TestTool[] | null,
+  expect: TestExpect,
+  laneProbed: boolean,
+  at: string,
+  codeIds: Partial<Record<TestTool, string[]>>
+): RunProofState {
+  const result = visit.result
+  const tools: VerdictToolFact[] = toolsUnderTest(expect, installed, result).map((tool) => {
+    const lane = receipts.lanes[TOOL_LANES[tool]]
+    const seen =
+      tool === "ga4" ? result.ga4.events.map((event) => event.tid) : tool === "posthog" ? result.posthog.events.map((event) => event.projectKey) : tool === "meta" ? result.meta.tr.map((tr) => tr.pixelId) : result.infinite.events.map((event) => event.siteSourceKey)
+    const grade = visit.grades[tool]
+    return {
+      tool,
+      ids: [...new Set([...(codeIds[tool] ?? []), ...seen])],
+      connected: expect[tool] !== undefined,
+      installed: (installed ?? []).includes(tool),
+      fired: beaconsOf(result, tool) > 0,
+      ungraded: grade !== undefined && grade.state === "undetermined" && UNGRADED_CODES.has(gradeReasonCode(grade)),
+      receipt: lane.state,
+      receiptReason: lane.reason ?? null
+    }
+  })
+  const cid = result.ga4.events.find((event) => event.cid !== null && /^[0-9]{1,20}\.[0-9]{1,20}$/.test(event.cid))?.cid ?? null
+  const metaPageView = result.meta.tr.some((tr) => tr.ev === "PageView" && typeof tr.status === "number" && tr.status >= 200 && tr.status < 300) ? result.finishedAt : null
+  return {
+    at,
+    tools,
+    laneProbed: laneProbed && result.serverLaneProbe !== null,
+    infinitePageViews: result.infinite.events.filter((event) => event.eventName === "site_page_view" || event.eventName === "page_view").length,
+    filter: { ga4ClientId: cid, posthogDistinctId: result.markers.posthogDistinctId, metaPageViewAt: metaPageView }
+  }
+}
+
+/** §3x.6 The proof state THE verdict gives (the report built from this run's columns and facts). */
+async function verdictProofState(ctx: WizardContext, deps: WizardDeps, runId: string): Promise<"proven" | "problem" | "undetermined"> {
+  const state = ctx.state.get()
+  const report = deps.report.build({
+    runId,
+    tagVersion: deps.tagVersion,
+    site: { repoLabel: ctx.root, productionHost: resolveProductionHost({ keys: null, hosting: null, site: state.site ?? null }).host ?? null },
+    columns: state.report,
+    provenLivePending: null,
+    runStartedAt: state.runStartedAt ?? null,
+    day7: null,
+    notes: [],
+    verdictFacts: await verdictFactsFor(ctx, deps)
+  })
+  if (!report.verdict) throw new Error("the report built for the proof state carries no verdict")
+  return proofStateOf(report.verdict)
 }
 
 /** The desktop's stored real-visit facts for this run (A21), or null (no capability, none stored, or a read failure). */

@@ -56,10 +56,10 @@ export function testResult(mode: TestMode, overrides: Partial<TestResult> = {}):
     runId: RUN_ID,
     startedAt: "2026-10-02T10:00:00.000Z",
     finishedAt: "2026-10-02T10:00:20.000Z",
-    environment: { ua: "Electron InfiniteVerifyCheck/1", automationDetected: false, visibilityState: "visible", blockedBySiteBotRules: false, previewProtected: false, consentSeeded: false, cmpDetected: null },
+    environment: { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36", automationDetected: false, visibilityState: "visible", blockedBySiteBotRules: false, previewProtected: false, consentSeeded: false, cmpDetected: null },
     loads: [{ label: "home", url: "https://acme-store.com/", finalUrl: "https://acme-store.com/", status: 200, rendered: true, managedMarkerSeen: true, redirects: [] }],
     requests: { total: 10, cancelled: 4, otherBeacons: [] },
-    ga4: { events: [{ tid: GA4_ID, en: "page_view", dlHost: "acme-store.com", transport: "get", status: "cancelled", loadLabel: "home", afterNav: false }] },
+    ga4: { events: [{ tid: GA4_ID, cid: "1234567890.1759500000", en: "page_view", dlHost: "acme-store.com", transport: "get", status: "cancelled", loadLabel: "home", afterNav: false }] },
     posthog: { events: [{ projectKey: POSTHOG_KEY, event: "$pageview", distinctId: "d1", host: "acme-store.com", endpointHost: "acme-store.com", sameOrigin: true, libCustomApiHost: true, status: "cancelled", loadLabel: "home", afterNav: false }], bootRequests: [] },
     infinite: { events: [] },
     meta: { configRequests: [PIXEL_ID], tr: [], console: [], fbc: { present: false, value: null, domain: null }, fbp: { present: true } },
@@ -387,7 +387,8 @@ export function fakeReport(markdown = "| Row | Live site today | In this pull re
         rows: [],
         day7: { measuredAt: null, window: null, cell: null },
         finishLine: [],
-        notes: input.notes
+        notes: input.notes,
+        verdict: null
       }) as ReportV2,
     renderTerminal: () => markdown,
     renderMarkdown: () => markdown,

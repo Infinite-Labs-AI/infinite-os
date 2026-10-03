@@ -40,6 +40,11 @@ export interface WizardOptions {
   nested: boolean
   /** §3y.1 `--production-host <host>`: the live site's address (validated; never a preview-shaped host). */
   productionHost?: string | null
+  /**
+   * §3x.8 `--relink` (implies a fresh run): the site's remembered link is revoked once and the app shows its approval
+   * card again, so the user can pick another workspace (e.g. after "this workspace is Infinite's own").
+   */
+  relink?: boolean
 }
 
 /** Read and update the run state; `save` writes state.json atomically (0600). */

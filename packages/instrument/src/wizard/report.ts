@@ -41,6 +41,7 @@ import {
   type ReportV2
 } from "./contracts/report.js"
 import { FORBIDDEN_CHECKBOX } from "./contracts/git-host.js"
+import { computeVerdict, verdictErrors } from "./verdict.js"
 import { shapeErrors } from "./contracts/shape.js"
 
 export const COLUMN_LABELS: Record<ReportColumnId, string> = {
@@ -506,7 +507,19 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     rows,
     day7: input.day7 ?? { measuredAt: null, window: null, cell: null },
     finishLine,
-    notes: [...input.notes]
+    notes: [...input.notes],
+    verdict: null
+  }
+  // §3x.6 THE verdict, from the finished columns and the run's facts (one predicate; every surface renders it).
+  if (input.verdictFacts) {
+    report.verdict = computeVerdict({
+      site: input.site.productionHost ?? input.site.repoLabel,
+      finishLine,
+      provenLive: columnsMeta.proven_live,
+      jobs: input.verdictFacts.jobs,
+      openFindings: input.verdictFacts.openFindings,
+      tools: input.verdictFacts.tools
+    })
   }
   assertReport(report, input.runStartedAt ?? null)
   return report
@@ -527,6 +540,8 @@ export function assertReport(report: ReportV2, runStartedAt: string | null = nul
       if (sha !== null && !/^[0-9a-f]{40}$/.test(sha)) problems.push(`columns.${column}.sha must be a 40-hex commit SHA or null`)
     }
   }
+  // §3x.6 the verdict obeys the same refusals as the cloud parser.
+  if (problems.length === 0 && report.verdict) problems.push(...verdictErrors(report, report.verdict))
   if (problems.length > 0) throw new ReportRuleError(problems.join("; "))
   for (const row of report.rows) for (const column of REPORT_COLUMN_IDS) assertCell(`rows.${row.id}.${column}`, row.cells[column], report.runId, runStartedAt)
   for (const line of report.finishLine) {
@@ -633,37 +648,13 @@ export function durationWords(ms: number): string {
 }
 
 /**
- * The closing verdict, from the "Proven live" column only (the design's outro headline, said only when this run's
- * report supports it). It never says "verified" or "proven" (§3i.3 rule 3 keeps those for cells with a receipt):
- * - the column was not measured (not merged, not deployed, `--no-prove`) → "not checked live yet";
- * - a finish-line check is a problem there → "N problems left on the live site";
- * - no problem, and the real visit gave proof for every installed tool → "collects analytics properly now"
- *   (+ how many checks still wait for real visitors or the 7-day check-in);
- * - no problem but no such proof → "no problem found, but the live test could not confirm every tool".
+ * §3x.6 The closing line IS the verdict's headline (`wizard/verdict.ts`, the one predicate). A report with no verdict
+ * was not graded by the tag (the desktop's partial report): it says so, and never guesses one.
  */
 export function verdictLine(report: ReportV2): string {
+  if (report.verdict) return report.verdict.headline
   const site = report.site.productionHost ?? report.site.repoLabel
-  const column = report.columns.proven_live
-  const cells = report.finishLine.map((line) => ({ id: line.id, cell: line.cells.proven_live }))
-  // R2-2: a column with no pass and no problem measured nothing (no real visit, no receipt): never "N problems left".
-  const measured = cells.some((entry) => entry.cell.state === "pass" || entry.cell.state === "problem")
-  if (column.measuredAt === null || column.pending !== null || !measured) {
-    const why =
-      column.pending === "deploy"
-        ? " (waiting for the deploy)"
-        : column.pending === "open_infinite"
-          ? " (open Infinite to finish the live checks)"
-          : column.pending === "rerun_tag"
-            ? " (nothing in Infinite can finish it: run npx infinite-tag again once it is live)"
-            : ""
-    return `${site}: set up in the pull request · not checked live yet${why}`
-  }
-  const problems = cells.filter((entry) => entry.cell.state === "problem").length
-  if (problems > 0) return `${site}: ${problems} problem${problems === 1 ? "" : "s"} left on the live site (the "${COLUMN_LABELS.proven_live}" column says which)`
-  const proof = cells.find((entry) => entry.id === "proof_from_real_visit")?.cell.state === "pass"
-  if (!proof) return `${site}: no problem found, but the live test could not confirm every tool`
-  const waiting = cells.filter((entry) => entry.cell.state === "pending" || entry.cell.state === "undetermined").length
-  return `${site} collects analytics properly now${waiting > 0 ? ` · ${waiting} check${waiting === 1 ? "" : "s"} still wait${waiting === 1 ? "s" : ""} for real visitors or the 7-day check-in` : ""}`
+  return `${site}: not graded yet · run npx infinite-tag to finish the live checks`
 }
 
 /**

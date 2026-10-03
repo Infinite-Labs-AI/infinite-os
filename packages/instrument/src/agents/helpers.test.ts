@@ -4,7 +4,7 @@ import { applyTextEdits, reverseTextEdits } from "../server-lane/text-edits.js"
 import { buildAgentEnv, nestingMarker, strippedEnv } from "./env.js"
 import { globToRegExp, matchesAnyGlob } from "./glob.js"
 import { applySomeHunks, diffLines, hunksToTextEdits, splitLines } from "./line-diff.js"
-import { claimBeat, claudeToolBeat, codexItemBeat, Narrator } from "./narration.js"
+import { claimBeat, claudeToolBeat, codexItemBeat, Narrator, ThinkingTicker } from "./narration.js"
 import { sanitizeUntrusted } from "./sanitize.js"
 import { claudeResetsAt, claudeUsageSignals, codexErrorMessage, codexUsageLimit, outOfUsageResumeLine } from "./usage-limit.js"
 import { GLOBAL_DENY_GLOBS } from "../wizard/contracts/jobs.js"
@@ -193,5 +193,33 @@ describe("narration (§3f.7)", () => {
     now = 3_000
     expect(narrator.beat("third")).toBe(true)
     expect(beats).toEqual(["all done", "third"])
+  })
+})
+
+describe("§3x.3 (D1, W8) the thinking beat: silence after a tool result is said as thinking, never as the last tool", () => {
+  it("Grep, its result, then 12 s of silence → Searching the code, then Thinking · 3 s … Thinking · 12 s", () => {
+    let now = 0
+    const beats: string[] = []
+    const narrator = new Narrator({ agent: "claude_code", role: "worker", emit: (beat) => beats.push(beat.text), now: () => now })
+    const ticker = new ThinkingTicker(narrator, () => now)
+    ticker.acted()
+    narrator.beat(claudeToolBeat("Grep", { pattern: "infiniteTrack" }, { root: "/repo", isAllowed: () => true, agent: "claude_code", jobNumber: () => null })!)
+    now = 400
+    ticker.toolReturned()
+    for (now = 1_400; now <= 12_400; now += 1_000) ticker.tick()
+    expect(beats).toEqual(["Searching the code", "Thinking · 3 s", "Thinking · 6 s", "Thinking · 9 s", "Thinking · 12 s"])
+  })
+
+  it("negative: a new tool call stops the thinking beat; no tool result, no thinking", () => {
+    let now = 0
+    const beats: string[] = []
+    const ticker = new ThinkingTicker(new Narrator({ agent: "codex", role: "worker", emit: (beat) => beats.push(beat.text), now: () => now }), () => now)
+    for (now = 0; now <= 10_000; now += 1_000) ticker.tick()
+    expect(beats).toEqual([])
+    ticker.toolReturned()
+    now = 1_500
+    ticker.acted()
+    for (; now <= 10_000; now += 1_000) ticker.tick()
+    expect(beats).toEqual([])
   })
 })

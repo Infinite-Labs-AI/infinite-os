@@ -205,6 +205,7 @@ describe("prove: the proven_live column is honest", () => {
   const base = {
     runId: RUN_ID,
     mergeSha: MERGE_SHA,
+    installed: null,
     at: "2026-10-02T09:43:00.000Z",
     keys: keysFixture(),
     t1: [],
@@ -353,6 +354,7 @@ describe("prove: consent-held or unobserved tools are UNKNOWN, never problems (O
     const column = buildProvenColumn({
       runId: RUN_ID,
       mergeSha: MERGE_SHA,
+    installed: null,
       at,
       keys: keysFixture(),
       expect: expect4,
@@ -376,6 +378,7 @@ describe("prove: consent-held or unobserved tools are UNKNOWN, never problems (O
     const column = buildProvenColumn({
       runId: RUN_ID,
       mergeSha: MERGE_SHA,
+    installed: null,
       at,
       keys: keysFixture(),
       expect: expect4,
@@ -440,6 +443,7 @@ describe("prove: receipts from before the run started are not this run's (§3z.8
     const column = buildProvenColumn({
       runId: RUN_ID,
       mergeSha: MERGE_SHA,
+    installed: null,
       at,
       keys: keysFixture(),
       expect: { posthog: { projectKey: "phc_x", apiHost: "https://us.i.posthog.com" } },

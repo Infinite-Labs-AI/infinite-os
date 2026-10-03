@@ -34,6 +34,8 @@ interface HarnessOptions {
   autocapture?: boolean
   /** `true` counts automation (WebDriver) traffic + lifts loopback — synthetic sandbox only. */
   allowAutomation?: boolean
+  /** §3x.4 (F8): the browser blocks storage — reading `localStorage` / `sessionStorage` throws SecurityError. */
+  storageBlocked?: boolean
 }
 
 function createStorage(initial: Record<string, string> = {}, failWrites = false) {
@@ -208,6 +210,17 @@ function executeTag(options: HarnessOptions = {}) {
     console
   }
   Object.assign(windowObject, context)
+  if (options.storageBlocked) {
+    for (const name of ["localStorage", "sessionStorage"]) {
+      const blocked = {
+        get() {
+          throw new Error("SecurityError: The operation is insecure.")
+        }
+      }
+      Object.defineProperty(context, name, blocked)
+      Object.defineProperty(windowObject, name, blocked)
+    }
+  }
   runInNewContext(source, context)
 
   return {
@@ -1599,6 +1612,29 @@ describe("campaign capture on the initial page view (contract v1: +9 keys)", () 
     runtime.setConsent(true)
     expect(runtime.requests[0]!.body.properties).toEqual({ nav: "navigate", utm_source: "x.com", has_fbclid: true })
     expect(runtime.requests[0]!.rawBody).not.toContain("abc")
+  })
+
+  it("W7 §3x.4 (F5): a UTM value that carries an email or a phone number is DROPPED, never rewritten", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      href: "https://example.com/?utm_source=newsletter&utm_content=alice%40example.com&utm_term=%2B1%20415%20555%200100&utm_campaign=person%252540example.test"
+    })
+    const view = runtime.requests[0]!
+    expect(view.body.properties).toEqual({ nav: "navigate", utm_source: "newsletter" })
+    expect(view.rawBody).not.toMatch(/alice|415|555|0100|person/)
+  })
+
+  it("W7 §3x.4 (F8): a browser that blocks storage still sends ONE page view, with page-scoped ids", () => {
+    const runtime = executeTag({ siteSourceKey: "site_public_123", consentMode: "not_required", storageBlocked: true })
+    expect(runtime.requests).toHaveLength(1)
+    const view = runtime.requests[0]!.body
+    expect(view.eventName).toBe("site_page_view")
+    expect(view.anonymousId).toMatch(/^00000000-0000-4000-8000-/)
+    expect(view.sessionId).toMatch(/^00000000-0000-4000-8000-/)
+    // The ids live for the page: a History change re-uses them.
+    runtime.history.pushState({}, "", "/next")
+    expect(runtime.requests[1]!.body.anonymousId).toBe(view.anonymousId)
   })
 
   it("a landing page without campaign params is byte-identical to 0.6.2: properties = { nav }", () => {

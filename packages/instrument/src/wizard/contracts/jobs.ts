@@ -109,6 +109,8 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
       c("S", "meta_event_id_from_helper"),
       c("T1", "meta_traffic_permissions"),
       c("RH", "meta_pixel_once"),
+      // §3x.3 (F6): one PageView per client-side navigation, measured by the rehearsal's page change.
+      c("RH", "meta_spa_page_view"),
       c("T0", "fbc_capture"),
       c("PV", "meta_seen_leaving")
     ],
@@ -519,6 +521,11 @@ export interface GradeTestRunContext {
   installedTools: readonly TestTool[] | null
   /** Whose Meta pixel the site runs; null = no Meta pixel (or unknown). */
   metaPixelOwnership: "managed" | "adopted" | null
+  /**
+   * §3x.3 (F6): the load ran a client-side navigation (the request carried `spaNavigation`). Only then is a Meta pixel
+   * with no PageView after it graded `meta_spa_page_view_missing`. Absent = not requested.
+   */
+  spaNavigation?: boolean
 }
 
 export interface CheckRunner {

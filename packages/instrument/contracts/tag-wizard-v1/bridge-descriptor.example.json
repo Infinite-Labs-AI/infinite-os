@@ -21,6 +21,8 @@
     "tag.meta-relay.v1",
     "tag.uninstall.v1",
     "tag.test.v1",
+    "tag.test.v2",
+    "tag.report-card.v1",
     "tag.test-facts.v1",
     "tag.site-claim.v1"
   ],

@@ -46,7 +46,9 @@ export const WIZARD_CODES_BY_EXIT = {
     "INF_WIZ_DIRTY_TREE",
     "INF_WIZ_BRIDGE_PROTOCOL",
     "INF_WIZ_LOCKED",
-    "INF_WIZ_RUNTIME_MISMATCH"
+    "INF_WIZ_RUNTIME_MISMATCH",
+    // §3x.8 (R3-7): the link points at Infinite's own workspace, which never takes a customer site; relink.
+    "INF_WIZ_INFINITE_WORKSPACE"
   ],
   3: [
     "INF_WIZ_NEEDS_ANSWERS",

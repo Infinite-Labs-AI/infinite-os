@@ -542,7 +542,7 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           } else {
             dryLive = result
             // §3z.12 §3e.7 (B11): the live site's consent mode is the one Infinite records (null = unknown).
-            const gradeCtx = gradeContextFrom({ census, consentMode: keys.infinite.consentMode, cmpDetected: result.environment.cmpDetected ?? cmpDetectedStatic })
+            const gradeCtx = gradeContextFrom({ census, consentMode: keys.infinite.consentMode, cmpDetected: result.environment.cmpDetected ?? cmpDetectedStatic, spaNavigation: dryRequestedSpa })
             const graded = await deps.checks.gradeTestRun(result, expect, "dry_live", gradeCtx)
             grades = graded
             // B12: lane O6's D10 result (an adopted pixel's automatic events) is stored with the checks, so the
@@ -628,7 +628,7 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
 
         // A few findings worth a live line (the plan step turns them into lines; nothing is decided here).
         for (const duplicate of duplicates) {
-          if (duplicate.kind === "gtm_and_gtag") sub("! GA4 also loaded by Tag Manager (counts every visit twice)", "warn")
+          if (duplicate.kind === "gtm_and_gtag") sub("! GA4 also loaded by Tag Manager (set up twice)", "warn")
           else sub(`! ${TOOL_LABEL[duplicate.tool]} is set up more than once`, "warn")
         }
         if (detectAdoptedPosthogConfig(jobScan.snapshot, census).some((config) => config.sendsDirect)) sub("! PostHog sends direct (ad blockers drop it)", "warn")

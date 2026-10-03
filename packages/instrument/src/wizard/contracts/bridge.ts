@@ -59,6 +59,14 @@ export const TAG_CAPABILITIES = [
   "tag.meta-relay.v1",
   "tag.uninstall.v1",
   "tag.test.v1",
+  /**
+   * §3x.5: the test window is a normal browser in every mode, a real visit is marked with the cloud's run-scoped
+   * `Infinite-Test-Visit` token, and the facts carry `ga4.events[].cid` and `meta.tr[].afterNav`. `before`, `rehearsal`,
+   * `review` and `prove` require it: an older engine's Meta grades are wrong in every mode.
+   */
+  "tag.test.v2",
+  /** §3x.7: the desktop shows the run's report in an always-on card (above every onboarding gate). */
+  "tag.report-card.v1",
   /** §3z.9 (A21): `GET /v1/test/facts?runId=` — the real-visit facts the desktop proof watcher stored. */
   "tag.test-facts.v1",
   /**

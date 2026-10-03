@@ -1,4 +1,12 @@
+import { UNSAFE_TEXT_SOURCE } from "../conversions/scrub.js"
 import type { InfiniteBrowserConfig, InfiniteHandoffContext } from "../types.js"
+
+/**
+ * §3x.4 (F5) The unsafe-text scrubber ported from infinite.fast, declared here for the type checker only: the runtime
+ * ships through `.toString()`, so its source is injected into the runtime's own body (`RUNTIME_SOURCE`), exactly as
+ * the conversion helpers carry it. Nothing at module scope defines it.
+ */
+declare function infiniteUnsafeText(value: unknown): boolean
 
 const RUNTIME_ATTRIBUTE = 'data-infinite-runtime="managed"'
 
@@ -53,7 +61,7 @@ export function renderInfiniteBrowserTag(config: InfiniteBrowserConfig): string 
     .replaceAll("<", "\\u003c")
     .replaceAll("\u2028", "\\u2028")
     .replaceAll("\u2029", "\\u2029")
-  return `<script ${RUNTIME_ATTRIBUTE}>;(${infiniteBrowserRuntime.toString()})(${serialized});</script>`
+  return `<script ${RUNTIME_ATTRIBUTE}>;(${RUNTIME_SOURCE})(${serialized});</script>`
 }
 
 // The Infinite browser runtime (0.6.0 — the consolidated truth-train release):
@@ -374,7 +382,9 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
       const raw = params.get(key)
       if (raw === null) continue
       const value = raw.replace(/[\u0000-\u001f]/g, "").trim().slice(0, 100)
-      if (value) properties[key] = value
+      // §3x.4 (F5): a campaign value that could carry an email, a phone number, a URL or a click id is DROPPED
+      // (never rewritten: a half-cleaned value is still a leak). infinite.fast's campaign capture does the same.
+      if (value && !infiniteUnsafeText(raw)) properties[key] = value
     }
     for (const key of ["gclid", "fbclid", "ttclid", "msclkid"]) {
       const raw = params.get(key)
@@ -392,8 +402,11 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     }
   }
 
-  function storageId(storage: Storage, key: string): string {
+  // §3x.4 (F8): the storage is reached INSIDE the try. A browser that blocks storage throws on the `localStorage`
+  // getter itself (SecurityError); the visitor then gets page-scoped random ids and is still counted once.
+  function storageId(getStorage: () => Storage, key: string): string {
     try {
+      const storage = getStorage()
       const existing = storage.getItem(key)
       if (existing) return existing
       const created = crypto.randomUUID()
@@ -499,8 +512,8 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   ): void {
     if (!hasConsent()) return
     const canonicalPath = normalizePath(path)
-    anonymousId ??= storageId(localStorage, "infinite_analytics_visitor")
-    sessionId ??= storageId(sessionStorage, "infinite_analytics_session")
+    anonymousId ??= storageId(() => localStorage, "infinite_analytics_visitor")
+    sessionId ??= storageId(() => sessionStorage, "infinite_analytics_session")
     const payload: Record<string, unknown> = {
       eventId: crypto.randomUUID(),
       eventName,
@@ -737,8 +750,8 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     const siteSourceKey = config.siteSourceKey
     runtimeWindow.__infiniteHandoffContext = () => {
       if (!hasConsent()) return null
-      anonymousId ??= storageId(localStorage, "infinite_analytics_visitor")
-      sessionId ??= storageId(sessionStorage, "infinite_analytics_session")
+      anonymousId ??= storageId(() => localStorage, "infinite_analytics_visitor")
+      sessionId ??= storageId(() => sessionStorage, "infinite_analytics_session")
       return {
         siteSourceKey,
         anonymousId,
@@ -765,4 +778,14 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
  * marking step believed `data-conversion` meant "already handled" while the runtime believed it
  * meant two different lanes depending on the tag. Nothing here is a copy.
  */
-export const INFINITE_BROWSER_RUNTIME_SOURCE: string = infiniteBrowserRuntime.toString()
+export const INFINITE_BROWSER_RUNTIME_SOURCE: string = withUnsafeText(infiniteBrowserRuntime.toString())
+
+/** The runtime's source with `infiniteUnsafeText` declared first in its body (hoisted; no closure, no import). */
+function withUnsafeText(source: string): string {
+  const open = source.indexOf("{")
+  if (open < 0) throw new Error("the Infinite runtime source has no body")
+  return `${source.slice(0, open + 1)}\n${UNSAFE_TEXT_SOURCE}\n${source.slice(open + 1)}`
+}
+
+/** What the page runs: the runtime with the scrubber inside it. */
+const RUNTIME_SOURCE: string = INFINITE_BROWSER_RUNTIME_SOURCE
