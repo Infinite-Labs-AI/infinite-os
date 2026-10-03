@@ -167,6 +167,15 @@ describe("the head does not say the chip's words twice (W3-num-gads)", () => {
     expect(head).toContain("◐ 4 of 5 days in");
   });
 
+  it("a title that holds the chip's words and words of its own stays whole (review S1)", () => {
+    const head = lines(renderView(partial("Spend by campaign, 4 of 5 days in", "4 of 5 days in"), ctx()))[0]!;
+    expect(head).toContain("Spend by campaign");
+    expect(head).toContain("◐ 4 of 5 days in");
+    const short = lines(renderView(partial("Clicks in the last days", "In"), ctx()))[0]!;
+    expect(short).toContain("Clicks in the last days");
+    expect(short).toContain("◐ In");
+  });
+
   it("with no short, the chip says the generic words and the title stays", () => {
     const head = lines(renderView(partial("4 of 5 days are in", null), ctx()))[0]!;
     expect(head).toContain("4 of 5 days are in");

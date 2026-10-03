@@ -1184,12 +1184,15 @@ function wordSet(text: string): Set<string> {
   return new Set(text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean));
 }
 
+/** Words a title may add to its chip's and still only repeat it (`n of m days are in` beside `n of m days in`). */
+const LINKING_WORDS: ReadonlySet<string> = new Set(["are", "is"]);
+
 /**
  * The head's title when the view's own only repeats its state chip (W3-num-gads:
  * `n of m days are in` beside `◐ n of m days in`): what the numbers are of, the
  * source (r4 flow-numbers-03 names the subject in the title chip), or no title
  * at all. Undefined (the view's title stands) when there is no short, or the
- * title has words of its own.
+ * title has words of its own (any word that is not the chip's, past `are` / `is`).
  */
 function headTitleFor(view: Parameters<KindRenderer<"numbers">>[0]): string | undefined {
   const reason = asRecord(view.stateReason);
@@ -1197,7 +1200,8 @@ function headTitleFor(view: Parameters<KindRenderer<"numbers">>[0]): string | un
   if (!short) return undefined;
   const title = wordSet(viewText(view.title));
   const chip = wordSet(short);
-  if (!title.size || ![...chip].every((word) => title.has(word))) return undefined;
+  // Only a title that says nothing past the chip's words (and a linking `are` / `is`) gives way.
+  if (!title.size || ![...title].every((word) => chip.has(word) || LINKING_WORDS.has(word))) return undefined;
   const source = viewText(asRecord(view.provenance).source);
   return source && ![...wordSet(source)].every((word) => chip.has(word)) ? source : "";
 }
