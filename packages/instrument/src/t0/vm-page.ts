@@ -337,7 +337,9 @@ export class T0Page {
     } catch {
       url = raw
     }
-    if (url.startsWith("javascript:")) return
+    // `javascript:`, `data:` and `vbscript:` never load a page from a site (a browser runs the script or blocks
+    // the top-level `data:` load), so none is a navigation the scenarios read. Any case, any leading space.
+    if (/^\s*(?:javascript|data|vbscript):/i.test(url)) return
     this.state.recorder.record("navigation", "GET", url, null)
   }
 

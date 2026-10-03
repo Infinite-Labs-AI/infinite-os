@@ -15,6 +15,7 @@ import { buildScanner, loadRunFacts } from "../../review/context.js"
 import { safeText } from "../../review/post.js"
 import { BRIDGE_BOUNDS } from "../contracts/bridge.js"
 import { PR_MARKERS } from "../contracts/git-host.js"
+import { escapeMarkdownCell } from "../../text-escape.js"
 import { createHash } from "node:crypto"
 import { basename, join } from "node:path"
 
@@ -44,7 +45,7 @@ export const SAMPLE_FLOOR_NOTE = `Below ${SAMPLE_FLOOR_PAGE_VIEWS} page views: r
 export function repoLabelFromRemote(remote: string | null, root: string): string {
   // ONE normaliser (§3z.12 B9): lane O2's `normalizeRemote` (the link card's label).
   const label = (remote ? normalizeRemote(remote) : null) ?? basename(root)
-  return label.replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim()
+  return escapeMarkdownCell(label).trim()
 }
 
 function notesFor(ctx: WizardContext, report: Pick<ReportV2, "rows">): string[] {

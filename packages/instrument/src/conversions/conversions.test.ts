@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest"
 
 import { createBrowserVm, plain, type BrowserVmOptions } from "../../test/site-code/browser-vm.js"
+import { jsSource } from "../../test/site-code/js-source.js"
 
 import { buildConversionHelpersScript, CONVERSION_HELPER_GLOBALS } from "./globals.js"
 
@@ -220,7 +221,7 @@ describe("infiniteTrack", () => {
 
 /** A DOM-shaped anchor (`.href` is absolute, as the DOM reports it). */
 function anchorSource(href: string, target?: string): string {
-  return `({ tagName: 'A', href: new URL(${JSON.stringify(href)}, location.href).href, getAttribute: function (n) { return n === 'target' ? ${JSON.stringify(target ?? null)} : null } })`
+  return `({ tagName: 'A', href: new URL(${jsSource(href)}, location.href).href, getAttribute: function (n) { return n === 'target' ? ${jsSource(target ?? null)} : null } })`
 }
 const BUTTON = "({ tagName: 'BUTTON', getAttribute: function () { return null } })"
 

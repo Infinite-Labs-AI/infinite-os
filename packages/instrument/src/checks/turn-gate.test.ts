@@ -3,13 +3,14 @@
 // (a provider id that is not the connection's — e.g. a default — is refused).
 import { describe, expect, it } from "vitest"
 
+import { jsSource } from "../../test/site-code/js-source.js"
 import { FIXED_NOW } from "../../test/wizard/fixture-fetch.js"
 import { renderInfiniteBrowserTag } from "../runtime/infinite-browser.js"
 import { buildServerLaneModuleSource } from "../server-lane/runtime-source.js"
 import { HOST_DENY_V1 } from "../wizard/contracts/host-deny.js"
 import type { TurnDiff } from "../wizard/contracts/jobs.js"
 
-import { hasLoopbackLiteral, isBuildTimeFile, isServerExecutedFile, scanTurnDiff, turnGate, TURN_GATE_RULES, type TurnGateRule } from "./turn-gate.js"
+import { hasClientDirective, hasLoopbackLiteral, isBuildTimeFile, isServerExecutedFile, scanTurnDiff, turnGate, TURN_GATE_RULES, type TurnGateRule } from "./turn-gate.js"
 
 const CONNECTION = ["G-ACME123", "phc_acmeAcmeAcmeAcme0001", "111222333444555"]
 
@@ -158,7 +159,7 @@ describe("post-turn gate: one positive and one negative per rule", () => {
 
   it("infinite-tag's own emitted bytes pass the loopback rule (review P1-1: jobs 7, 2 and 1)", () => {
     // O5's preview-guard expression inlines the deny list, loopback included.
-    const guardLine = `if (!((function (h) { var n = h, i; var x = ["acme.com"], d = ${JSON.stringify(HOST_DENY_V1.deny.exact)}, s = ${JSON.stringify(HOST_DENY_V1.deny.suffix)}; for (i = 0; i < d.length; i += 1) if (d[i] === n) return false; return true; })(location.hostname))) return;`
+    const guardLine = `if (!((function (h) { var n = h, i; var x = ["acme.com"], d = ${jsSource(HOST_DENY_V1.deny.exact)}, s = ${jsSource(HOST_DENY_V1.deny.suffix)}; for (i = 0; i < d.length; i += 1) if (d[i] === n) return false; return true; })(location.hostname))) return;`
     expect(hasLoopbackLiteral(guardLine)).toBe(false)
     expect(rules(diff("index.html", guardLine))).toEqual([])
     const runtime = renderInfiniteBrowserTag({ siteSourceKey: "site_acme", collectPath: "/infinite/ledger", productionHosts: ["acme.com"], respectDnt: true, consent: { mode: "not_required" } })
@@ -222,5 +223,29 @@ describe("review I1 P1-3: code the wizard's own build executes is gated like a c
     expect(isServerExecutedFile("components/button.tsx", '"use client"\n')).toBe(false)
     expect(isServerExecutedFile("components/button.tsx", '// note\n/* x */\n"use client"\n')).toBe(false)
     expect(isServerExecutedFile("next.config.mjs", '"use client"\n')).toBe(true)
+  })
+
+  it("the use-client directive: only as the first statement, after whitespace and comments", () => {
+    expect(hasClientDirective('"use client"')).toBe(true)
+    expect(hasClientDirective("  'use client';\nexport {}")).toBe(true)
+    expect(hasClientDirective('// a\n/* b\n */ /* c */\n\t"use client"')).toBe(true)
+    expect(hasClientDirective("/*/ still a comment */'use client'")).toBe(true)
+    // negative: anything else first, an unterminated comment, a line comment with no newline, another directive
+    expect(hasClientDirective('import x from "y"\n"use client"')).toBe(false)
+    expect(hasClientDirective('/* never closed "use client"')).toBe(false)
+    expect(hasClientDirective('// "use client"')).toBe(false)
+    expect(hasClientDirective('"use server"')).toBe(false)
+    expect(hasClientDirective('"use clientele"')).toBe(false)
+    expect(hasClientDirective("")).toBe(false)
+  })
+
+  it("a file of many comment openers and no directive is decided in milliseconds (the old regex backtracked exponentially)", () => {
+    // 32 repeats of `*/ /*` take the old regex seconds (each two more double it); the scan takes microseconds.
+    for (const hostile of [`/*${"*/ /*".repeat(32)}`, `/*${"*/".repeat(5_000)}`, `${"// x\n".repeat(50_000)}/*`]) {
+      const started = performance.now()
+      expect(hasClientDirective(hostile)).toBe(false)
+      expect(isServerExecutedFile("components/button.tsx", hostile)).toBe(true)
+      expect(performance.now() - started).toBeLessThan(200)
+    }
   })
 })

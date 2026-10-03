@@ -30,6 +30,7 @@ import { walkProviderScanFiles } from "../inspect.js"
 import type { CensusEntry, CensusResult, CheckResult, EnvSourcedId, Evidence } from "../wizard/contracts/jobs.js"
 import type { TestTool } from "../wizard/contracts/test-engine.js"
 import { decodeNextBootstrap } from "../t0/next-bootstrap.js"
+import { escapeRegExp } from "../text-escape.js"
 
 type Tool = CensusEntry["tool"]
 
@@ -137,7 +138,7 @@ function resolveIdExpression(expression: string, fileSource: string, depth = 0):
   if (env) return { id: null, envName: env[1] ?? env[2] ?? env[3] ?? null }
   const identifier = /^([A-Za-z_$][\w$]*)(?:\s*(?:!|as\s+string))?$/.exec(text)
   if (identifier && depth === 0) {
-    const name = identifier[1]!.replace(/[$]/g, "\\$")
+    const name = escapeRegExp(identifier[1]!)
     const declaration = new RegExp(`\\b(?:const|let|var)\\s+${name}\\s*(?::[^=\\n]+)?=\\s*([^;\\n]+)`).exec(fileSource)
     if (declaration) return resolveIdExpression(declaration[1]!.trim(), fileSource, depth + 1)
   }

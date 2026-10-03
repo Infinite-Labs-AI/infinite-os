@@ -167,6 +167,8 @@ export interface FakeBridge {
   descriptor: BridgeDescriptor
   script: FakeBridgeScript
   calls: FakeBridgeCall[]
+  /** A handler that threw: its message, kept here (the 500 the client gets carries no error detail). */
+  internalErrors: string[]
   callsFor(verb: BridgeVerbId): FakeBridgeCall[]
   /** Rewrite the descriptor (e.g. another runtime variant) and keep serving. */
   rewriteDescriptor(change: Partial<BridgeDescriptor>): void
@@ -287,6 +289,7 @@ export interface StartFakeBridgeOptions {
 export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Promise<FakeBridge> {
   const script: FakeBridgeScript = { ...defaultScript(), ...options.script }
   const calls: FakeBridgeCall[] = []
+  const internalErrors: string[] = []
   const home = options.home ?? mkdtempSync(join(tmpdir(), "infinite-tag-fake-home-"))
   const ownsHome = options.home === undefined
   const linkRequests = new Map<string, { polls: number; site: { repoLabel: string; appRoot: string } }>()
@@ -632,8 +635,10 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
         }
       }
     })().catch((error: unknown) => {
+      // The detail stays on the test's side (`internalErrors`); the response says only that it failed.
+      internalErrors.push(error instanceof Error ? error.message : String(error))
       res.writeHead(500, { "Content-Type": "text/plain" })
-      res.end(String(error instanceof Error ? error.message : error))
+      res.end("fake bridge: internal error")
     })
   })
 
@@ -674,6 +679,7 @@ export async function startFakeBridge(options: StartFakeBridgeOptions = {}): Pro
     descriptor,
     script,
     calls,
+    internalErrors,
     callsFor: (verb) => calls.filter((call) => call.verb === verb),
     rewriteDescriptor(change) {
       Object.assign(descriptor, change)

@@ -9,6 +9,7 @@ import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 import { lineInHunk, type DiffFile } from "./diff.js"
 import { mostlyRedacted, type Scanner } from "./scan.js"
 import type { TriageDecision } from "./triage.js"
+import { escapeMarkdownCell } from "../text-escape.js"
 
 export const AGENT_LABEL: Record<AgentKind, string> = { claude_code: "Claude Code", codex: "Codex" }
 
@@ -18,7 +19,7 @@ export function neutralizeCheckboxes(text: string): string {
 }
 
 function escapeCell(text: string): string {
-  return text.replace(/\|/g, "\\|").replace(/\r?\n/g, " ").trim()
+  return escapeMarkdownCell(text).trim()
 }
 
 /** Strips C0 control characters (but newlines and tabs) from untrusted text before it is posted. */
@@ -194,6 +195,31 @@ export function buildFinalComment(input: FinalCommentInput): string {
 }
 
 export function excerpt(text: string, max = 160): string {
-  const flat = text.replace(/<!--[\s\S]*?-->/g, "").replace(/\s+/g, " ").trim()
+  const flat = neutralizeHtmlComments(text).replace(/\s+/g, " ").trim()
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
+}
+
+/**
+ * Untrusted text with no live HTML comment left in it: whole `<!-- … -->` comments are dropped, then every
+ * remaining opener (`<!`) and closer (`-->`) loses its angle bracket to an entity. A comment rebuilt by the
+ * removal (`<!<!---->--`) or an unclosed `<!--` (which would hide the rest of the PR comment, the run marker
+ * included) cannot survive: the bracket is replaced one character at a time, which cannot leave one behind.
+ */
+export function neutralizeHtmlComments(text: string): string {
+  return dropHtmlComments(text).replace(/<(?=!)/g, "&lt;").replace(/(?<=--)>/g, "&gt;")
+}
+
+/** Whole `<!-- … -->` comments removed, scanning once (a lazy `<!--[\s\S]*?-->` regex is quadratic on many unclosed openers). */
+function dropHtmlComments(text: string): string {
+  let out = ""
+  let at = 0
+  for (;;) {
+    const open = text.indexOf("<!--", at)
+    if (open === -1) break
+    const close = text.indexOf("-->", open + 4)
+    if (close === -1) break
+    out += text.slice(at, open)
+    at = close + 3
+  }
+  return out + text.slice(at)
 }

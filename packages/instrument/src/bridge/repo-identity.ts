@@ -10,6 +10,7 @@ import { createHash } from "node:crypto"
 import { homedir } from "node:os"
 import { isAbsolute, relative, sep } from "node:path"
 
+import { trimTrailingSlashes } from "../text-escape.js"
 import type { LinkSite } from "../wizard/contracts/bridge.js"
 
 const DEFAULT_PORTS: Record<string, string> = { "https:": "443", "http:": "80", "ssh:": "22", "git:": "9418" }
@@ -80,7 +81,7 @@ export function folderLabel(realRoot: string, home: string = homedir()): string 
 export function appRootLabel(root: string, appRoot: string): string {
   if (!appRoot) return "."
   const rel = isAbsolute(appRoot) ? relative(root, appRoot) : appRoot
-  const clean = rel.split(sep).join("/").replace(/^\.\/+/, "").replace(/\/+$/, "")
+  const clean = trimTrailingSlashes(rel.split(sep).join("/").replace(/^\.\/+/, ""))
   return clean || "."
 }
 

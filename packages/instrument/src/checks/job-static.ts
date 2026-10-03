@@ -27,6 +27,7 @@ import type { TestExpect, TestTool } from "../wizard/contracts/test-engine.js"
 import { runCensus } from "./census.js"
 import { analyzeCsp, cspNeeds, parseCspPolicies } from "./live/csp.js"
 import { checkResult, isolated } from "./result.js"
+import { escapeRegExp } from "../text-escape.js"
 
 /** The check ids this module registers (the job table's S checks that had no implementation). */
 export const JOB_STATIC_CHECK_IDS = [
@@ -131,7 +132,7 @@ interface Call {
 export function callsOf(text: string, names: readonly string[]): Call[] {
   const masked = maskCommentsAndStrings(text, true)
   const commentsOnly = maskCommentsAndStrings(text, false)
-  const pattern = new RegExp(`(?<![\\w$])(?:window\\s*\\.\\s*)?(${names.map((name) => name.replace(/[$]/g, "\\$")).join("|")})\\s*\\(`, "g")
+  const pattern = new RegExp(`(?<![\\w$])(?:window\\s*\\.\\s*)?(${names.map(escapeRegExp).join("|")})\\s*\\(`, "g")
   const out: Call[] = []
   for (const match of masked.matchAll(pattern)) {
     const index = match.index ?? 0

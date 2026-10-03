@@ -121,4 +121,10 @@ describe("done", () => {
     expect(repoLabelFromRemote("git@GitHub.com:acme/site.git", "/r")).toBe("github.com/acme/site")
     expect(repoLabelFromRemote(null, "/Users/me/acme")).toBe("acme")
   })
+
+  it("a folder name holding `\\|` stays one table cell (backslash escaped before the pipe)", () => {
+    expect(repoLabelFromRemote(null, String.raw`/Users/me/acme\|store`)).toBe(String.raw`acme\\\|store`)
+    // negative: pipes alone leave `\\|`, an escaped backslash then a live pipe
+    expect(repoLabelFromRemote(null, String.raw`/Users/me/acme\|store`)).not.toBe(String.raw`acme\\|store`)
+  })
 })

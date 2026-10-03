@@ -9,6 +9,7 @@ import { buildManagedHtmlBlock } from "../../src/frameworks/managed-html.js"
 import type { WorkspaceInstallArtifacts } from "../../src/types.js"
 import { HOST_DENY_V1 } from "../../src/wizard/contracts/host-deny.js"
 import type { T0PageSource } from "../../src/t0/protocol.js"
+import { jsSource } from "../site-code/js-source.js"
 
 export const FAKE = {
   host: "acme-store.com",
@@ -38,18 +39,18 @@ export function snippetBody(provider: "ga4" | "posthog" | "meta" | "infinite", a
 }
 
 function unwrap(snippet: string): string {
-  return snippet.replace(/^<script[^>]*>\n?/, "").replace(/\n?<\/script>$/, "")
+  return snippet.replace(/^<script[^>]*>\n?/i, "").replace(/\n?<\/script[^>]*>$/i, "")
 }
 
 /** The §3h.9 deny-list guard as an ES5 boolean expression (exempt first), the shape O5's builder emits. */
 export function hostGuardExpression(exempt: readonly string[]): string {
-  const exact = JSON.stringify(HOST_DENY_V1.deny.exact)
-  const suffix = JSON.stringify(HOST_DENY_V1.deny.suffix)
+  const exact = jsSource(HOST_DENY_V1.deny.exact)
+  const suffix = jsSource(HOST_DENY_V1.deny.suffix)
   return [
     "(function(){",
     "var h=String(location.hostname||'').replace(/^\\s+|\\s+$/g,'').toLowerCase();",
     "if(h.charAt(h.length-1)==='.')h=h.slice(0,-1);",
-    `if(${JSON.stringify(exempt.map((host) => host.toLowerCase()))}.indexOf(h)!==-1)return true;`,
+    `if(${jsSource(exempt.map((host) => host.toLowerCase()))}.indexOf(h)!==-1)return true;`,
     `if(${exact}.indexOf(h)!==-1)return false;`,
     `var s=${suffix};for(var i=0;i<s.length;i++){if(h.length>s[i].length&&h.slice(-s[i].length)===s[i])return false;}`,
     "return true;",

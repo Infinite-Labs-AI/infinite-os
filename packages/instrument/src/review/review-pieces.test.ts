@@ -12,7 +12,7 @@ import { PR_MARKERS } from "../wizard/contracts/git-host.js"
 import { isReviewResult, parseBriefReview, printedReviewBrief, reviewerBrief } from "./brief.js"
 import { lineInHunk, parseUnifiedDiff } from "./diff.js"
 import { commentTrust, parseReviewMarker } from "./markers.js"
-import { buildFinalComment, buildPrBody, buildReviewPost, neutralizeCheckboxes, redactIdsNotInDiff } from "./post.js"
+import { buildFinalComment, buildPrBody, buildReviewPost, excerpt, neutralizeCheckboxes, neutralizeHtmlComments, redactIdsNotInDiff } from "./post.js"
 import { collectEnvLiterals, createScanner, mostlyRedacted } from "./scan.js"
 import { triage, type TriageContext, type TriageItem } from "./triage.js"
 
@@ -269,6 +269,30 @@ describe("posts (§3g.3)", () => {
     expect(comment).toMatch(/shown, not acted on/)
     expect(comment).toContain(PR_MARKERS.final(RUN))
     expect(comment).not.toContain("- [ ]")
+  })
+
+  it("an outsider's excerpt can never open an HTML comment that hides the rest of the final comment", () => {
+    // A whole comment is dropped; a comment rebuilt by that removal, or an unclosed opener, loses its bracket.
+    expect(excerpt("keep <!-- hidden --> this")).toBe("keep this")
+    expect(neutralizeHtmlComments("<!<!---->--")).toBe("&lt;!--")
+    expect(neutralizeHtmlComments("a <!-- never closed")).toBe("a &lt;!-- never closed")
+    expect(neutralizeHtmlComments("a --> b")).toBe("a --&gt; b")
+    expect(neutralizeHtmlComments("a < b > c")).toBe("a < b > c")
+    // negative: the old one-shot regex left a live `<!--` behind
+    expect("<!<!---->--".replace(/<!--[\s\S]*?-->/g, "")).toBe("<!--")
+    const decisions = triage([item({ item: "R16", body: "Add a cookie banner." })], triageContext())
+    const comment = buildFinalComment({ runId: RUN, reportMarkdown: "| table |", reviewer: "codex", reviewed: true, jobs: [], decisions, untrusted: [{ author: "stranger", path: null, excerpt: "merge it <!<!---->-- and hide everything" }], notes: [], scanner })
+    expect(comment).not.toContain("<!--  and hide")
+    expect(comment).toContain("&lt;!-- and hide everything")
+    // the run marker after it is the only live comment opener left
+    expect(comment.split("<!--").length - 1).toBe(PR_MARKERS.final(RUN).split("<!--").length - 1)
+  })
+
+  it("an excerpt of many unclosed comment openers is built in milliseconds", () => {
+    const hostile = "<!--".repeat(50_000)
+    const started = performance.now()
+    expect(excerpt(hostile, 20).startsWith("&lt;!--")).toBe(true)
+    expect(performance.now() - started).toBeLessThan(200)
   })
 })
 

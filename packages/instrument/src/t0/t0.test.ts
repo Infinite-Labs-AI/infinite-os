@@ -381,7 +381,7 @@ describe("fbc_capture (two landings: one cookie, last click wins)", () => {
 describe("storage_wiped (F24: storage gone, cookies kept, page 2 still attributable)", () => {
   it("first-touch in a cookie + the _fbc capture survive the wipe", async () => {
     const artifacts = fakeArtifacts()
-    const source = page(`<script>${ATTRIBUTION_FIXTURE}</script><script>${snippetBody("meta", artifacts).replace(/^<script>|<\/script>$/g, "")}</script>`)
+    const source = page(`<script>${ATTRIBUTION_FIXTURE}</script><script>${snippetBody("meta", artifacts).replace(/^<script>|<\/script>$/gi, "")}</script>`)
     only(await t0({ id: "storage_wiped", params: { productionHost: FAKE.host, source } }), "pass")
   })
 
@@ -418,7 +418,7 @@ describe("fake_click_id (decision 12: the marker never leaves the landing URL an
 })
 
 describe("mirror_event_id (D11/D18: only the server's id, once per id)", () => {
-  const withMirror = (mirror: string) => page(`<script>${snippetBody("meta", fakeArtifacts()).replace(/^<script>|<\/script>$/g, "")}</script><script>${mirror}</script>`)
+  const withMirror = (mirror: string) => page(`<script>${snippetBody("meta", fakeArtifacts()).replace(/^<script>|<\/script>$/gi, "")}</script><script>${mirror}</script>`)
 
   it("null / empty / absent fire nothing; a real id fires once, verbatim; Purchase is refused", async () => {
     only(await t0({ id: "mirror_event_id", params: { productionHost: FAKE.host, source: withMirror(MIRROR_FIXTURE) } }), "pass")
@@ -436,7 +436,7 @@ describe("mirror_event_id (D11/D18: only the server's id, once per id)", () => {
 })
 
 describe("navigation_order (the conversion request is issued before the page leaves)", () => {
-  const withMirror = (mirror: string) => page(`<script>${snippetBody("meta", fakeArtifacts()).replace(/^<script>|<\/script>$/g, "")}</script><script>${mirror}</script>`)
+  const withMirror = (mirror: string) => page(`<script>${snippetBody("meta", fakeArtifacts()).replace(/^<script>|<\/script>$/gi, "")}</script><script>${mirror}</script>`)
 
   it("fbq → navigate; waits for the 50 ms /tr, or the 400 ms budget when it never completes", async () => {
     only(await t0({ id: "navigation_order", params: { productionHost: FAKE.host, source: withMirror(MIRROR_FIXTURE) } }), "pass")
@@ -602,5 +602,21 @@ describe("all scenarios in one sandboxed child", () => {
       ["fake_click_id", "pass"]
     ])
     for (const result of results) expect(result).toMatchObject({ tier: "T0", runId: FAKE.runId, at: "2026-10-02T10:00:00.000Z" })
+  })
+})
+
+describe("navigations the page cannot make (vm-page)", () => {
+  it("javascript:, data: and vbscript: are never recorded as navigations, in any case; a real one is", async () => {
+    const html = `<html><body><script>
+      location.href = "data:text/html,<h1>x</h1>";
+      location.assign("VBScript:msgbox(1)");
+      location.replace("  JavaScript:void(0)");
+      window.open("DATA:text/html,y");
+      location.href = "/next";
+    </script></body></html>`
+    const recording = await runSession({ id: "schemes", actions: [{ kind: "load", label: "page", url: `https://${FAKE.host}/`, source: { html } }] })
+    const navigations = recording.requests.filter((request) => request.kind === "navigation").map((request) => request.url)
+    // negative: the real navigation in the same script IS recorded (the filter does not drop everything)
+    expect(navigations).toEqual([`https://${FAKE.host}/next`])
   })
 })

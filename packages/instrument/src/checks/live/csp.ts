@@ -176,6 +176,16 @@ export function analyzeCsp(
   return { style: nonce ? "nonce" : "hosts", missing, inlineBlocked }
 }
 
+const ATTRIBUTE_ENTITIES: Record<string, string> = { "&amp;": "&", "&#39;": "'", "&apos;": "'", "&quot;": '"' }
+
+/**
+ * The four entities a CSP `content` attribute uses, decoded in ONE pass: `&amp;quot;` is the literal text
+ * `&quot;`, never a second-round `"` (decoding `&amp;` first and then `&quot;` would unescape twice).
+ */
+export function decodeAttributeEntities(value: string): string {
+  return value.replace(/&(?:amp|#39|apos|quot);/g, (entity) => ATTRIBUTE_ENTITIES[entity] ?? entity)
+}
+
 /** `<meta http-equiv="Content-Security-Policy" content="…">` policies in a page. */
 export function metaCspPolicies(html: string): string[] {
   const policies: string[] = []
@@ -183,7 +193,7 @@ export function metaCspPolicies(html: string): string[] {
     if (!/http-equiv\s*=\s*["']content-security-policy["']/i.test(tag)) continue
     const content = /content\s*=\s*"([^"]*)"|content\s*=\s*'([^']*)'/i.exec(tag)
     const value = content?.[1] ?? content?.[2]
-    if (value) policies.push(value.replace(/&amp;/g, "&").replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"'))
+    if (value) policies.push(decodeAttributeEntities(value))
   }
   return policies
 }

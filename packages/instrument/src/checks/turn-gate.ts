@@ -103,8 +103,31 @@ const PAGE_CODE_DIR = /(?:^|\/)(?:public|static|assets|src|app|pages|components|
 const NOT_EXECUTED = /\.(?:html?|css|scss|sass|less|md|json|svg|txt|ya?ml|png|jpe?g|gif|webp|ico|woff2?)$/i
 const PUBLIC_DIR = /(?:^|\/)(?:public|static)\//
 const CODE_FILE = /\.(?:[cm]?[jt]sx?|astro|vue|svelte|mdx)$/i
-/** A `"use client"` directive as the file's first statement (comments before it allowed). */
-const CLIENT_DIRECTIVE = /^\s*(?:(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)\s*)*["']use client["']/
+/**
+ * A `"use client"` directive as the file's first statement (whitespace, `//` line comments and block comments
+ * before it allowed). A scan, not a regex: `(?:\/\*[\s\S]*?\*\/\s*)*` can split one run of comments many
+ * ways and backtracks exponentially on a file that opens with many `/*` and no directive.
+ */
+export function hasClientDirective(full: string): boolean {
+  let at = 0
+  for (;;) {
+    while (at < full.length && /\s/.test(full[at]!)) at += 1
+    if (full.startsWith("//", at)) {
+      const newline = full.indexOf("\n", at + 2)
+      if (newline === -1) return false
+      at = newline + 1
+    } else if (full.startsWith("/*", at)) {
+      const close = full.indexOf("*/", at + 2)
+      if (close === -1) return false
+      at = close + 2
+    } else {
+      break
+    }
+  }
+  const open = full[at]
+  const close = full[at + 11]
+  return (open === '"' || open === "'") && full.startsWith("use client", at + 1) && (close === '"' || close === "'")
+}
 
 /**
  * Review I1 P1-3: code the wizard's own build EXECUTES (network on, `.env` loaded): every build-time file, and
@@ -115,7 +138,7 @@ const CLIENT_DIRECTIVE = /^\s*(?:(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/)\s*)*["']use c
 export function isServerExecutedFile(path: string, full: string | null): boolean {
   if (isBuildTimeFile(path)) return true
   if (PUBLIC_DIR.test(path) || NOT_EXECUTED.test(path) || !CODE_FILE.test(path)) return false
-  return full === null || !CLIENT_DIRECTIVE.test(full)
+  return full === null || !hasClientDirective(full)
 }
 
 /** `next.config.*`, `vite.config.*`, `vercel.json`, `middleware.*`, `postcss/tailwind.config.*`, a repo or app `scripts/**`. */

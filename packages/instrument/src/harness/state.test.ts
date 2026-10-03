@@ -173,6 +173,17 @@ describe("renderReportMarkdown", () => {
     expect(metaRow).not.toMatch(/\bverified\b/)
     expect(metaRow).toContain("installed, not verifiable (Meta has no install-time read-back)")
   })
+
+  it("a cell holding `\\|` keeps its pipe escaped (the backslash is escaped first)", () => {
+    const current = report()
+    current.providers = current.providers.map((state) => (state.provider === "meta" ? { ...state, evidence: String.raw`C:\site\| ok` } : state))
+    const metaRow = renderReportMarkdown(current).split("\n").find((line) => line.startsWith("| meta"))!
+    expect(metaRow).toContain(String.raw`C:\\site\\\| ok`)
+    // negative: the row has exactly the 6 live pipes of five columns. A pipe is live when an EVEN run of
+    // backslashes precedes it; escaping pipes alone turned `\|` into `\\|`, a seventh live pipe.
+    const livePipes = [...metaRow.matchAll(/(\\*)\|/g)].filter((match) => match[1]!.length % 2 === 0)
+    expect(livePipes).toHaveLength(6)
+  })
 })
 
 describe("metaRelayNote", () => {

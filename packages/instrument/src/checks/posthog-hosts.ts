@@ -1,10 +1,11 @@
 // PostHog host facts shared by the live checks and the setup checks: which cloud region a host is in,
 // and whether a served `api_host` fits the connected project's.
+import { trimTrailingSlashes } from "../text-escape.js"
 
 /** Null when the served `api_host` fits the expected one; otherwise the problem sentence. */
 export function compareApiHost(served: string, expected: string): string | null {
   if (isRelativePath(served)) {
-    if (isRelativePath(expected) && served.replace(/\/+$/, "") !== expected.replace(/\/+$/, "")) {
+    if (isRelativePath(expected) && trimTrailingSlashes(served) !== trimTrailingSlashes(expected)) {
       return `PostHog api_host is ${served}, expected ${expected}`
     }
     return null
@@ -28,7 +29,8 @@ export function posthogRegion(host: string): "us" | "eu" | "other" {
   } catch {
     return "other"
   }
-  if (!hostname.endsWith("posthog.com")) return "other"
+  // A dot-boundary suffix: `evilposthog.com` is not PostHog's.
+  if (hostname !== "posthog.com" && !hostname.endsWith(".posthog.com")) return "other"
   if (/(^|\.)eu(-assets)?\.(i\.)?posthog\.com$/.test(hostname)) return "eu"
   if (/(^|\.)(us(-assets)?\.(i\.)?|app\.)posthog\.com$/.test(hostname)) return "us"
   return "other"

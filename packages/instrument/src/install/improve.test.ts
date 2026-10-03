@@ -46,7 +46,7 @@ function runPage(html: string, options: { search?: string; hostname?: string } =
     posthog: { init: (...args: unknown[]) => ((window.posthogInits as unknown[][]) ??= []).push(args) }
   })
   window.window = window
-  for (const match of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) runInNewContext(match[1]!, window)
+  for (const match of html.matchAll(/<script>([\s\S]*?)<\/script[^>]*>/gi)) runInNewContext(match[1]!, window)
   const fbq = window.fbq as { queue?: unknown[][] } | undefined
   return {
     window,

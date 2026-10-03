@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest"
 import { FIXED_NOW, fixtureFetch } from "../../../test/wizard/fixture-fetch.js"
 import type { TestExpect } from "../../wizard/contracts/test-engine.js"
 
-import { analyzeCsp, checkCsp, cspNeeds, sourceAllows } from "./csp.js"
+import { analyzeCsp, checkCsp, cspNeeds, decodeAttributeEntities, metaCspPolicies, sourceAllows } from "./csp.js"
 
 const ctx = { runId: null, now: FIXED_NOW }
 const EXPECT: TestExpect = { ga4: ["G-ACME123"], posthog: { projectKey: "phc_x", apiHost: "/ingest" }, meta: ["111222333444555"] }
@@ -91,5 +91,18 @@ describe("CSP source matching", () => {
       "eu-assets.i.posthog.com",
       "eu.i.posthog.com"
     ])
+  })
+})
+
+describe("meta CSP policies", () => {
+  it("decodes the attribute's entities once: `&amp;quot;` is the text `&quot;`, never a quote", () => {
+    expect(decodeAttributeEntities("a &amp; b &#39;self&#39; &apos;x&apos; &quot;y&quot;")).toBe(`a & b 'self' 'x' "y"`)
+    expect(decodeAttributeEntities("&amp;quot;&amp;#39;&amp;amp;")).toBe("&quot;&#39;&amp;")
+    const html = `<meta http-equiv="Content-Security-Policy" content="script-src &#39;self&#39; https://a.test/?x=1&amp;#39;">`
+    expect(metaCspPolicies(html)).toEqual(["script-src 'self' https://a.test/?x=1&#39;"])
+    // negative: decoding `&amp;` first and then `&#39;` (the old chain) unescapes twice
+    const chained = "&amp;#39;".replace(/&amp;/g, "&").replace(/&#39;|&apos;/g, "'")
+    expect(chained).toBe("'")
+    expect(decodeAttributeEntities("&amp;#39;")).not.toBe(chained)
   })
 })

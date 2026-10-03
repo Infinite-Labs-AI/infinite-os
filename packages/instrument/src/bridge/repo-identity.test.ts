@@ -75,4 +75,12 @@ describe("labels", () => {
     expect(appRootLabel("/r", "apps/web/")).toBe("apps/web")
     expect(appRootLabel("/r", "")).toBe(".")
   })
+
+  it("an app root of many slashes is labelled in linear time (the trailing-slash regex was quadratic)", () => {
+    const hostile = `a${"/".repeat(100_000)}x`
+    const started = performance.now()
+    expect(appRootLabel("/r", hostile)).toBe(hostile)
+    expect(appRootLabel("/r", "apps/web///")).toBe("apps/web")
+    expect(performance.now() - started).toBeLessThan(200)
+  })
 })

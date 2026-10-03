@@ -154,7 +154,7 @@ function executeTag(options: HarnessOptions = {}) {
     ...(options.autocapture === undefined ? {} : { autocapture: options.autocapture }),
     ...(options.allowAutomation === undefined ? {} : { allowAutomation: options.allowAutomation })
   })
-  const source = tag.replace(/^<script[^>]*>/, "").replace(/<\/script>$/, "")
+  const source = tag.replace(/^<script[^>]*>/i, "").replace(/<\/script[^>]*>$/i, "")
 
   const context = {
     window: windowObject,

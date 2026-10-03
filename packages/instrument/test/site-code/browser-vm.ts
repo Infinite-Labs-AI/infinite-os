@@ -370,7 +370,7 @@ export function createBrowserVm(options: BrowserVmOptions = {}): BrowserVm {
     runScript,
     evaluate: <T>(source: string) => runInContext(source, context) as T,
     runHtml(html: string) {
-      const pattern = /<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi
+      const pattern = /<script(?:\s[^>]*)?>([\s\S]*?)<\/script[^>]*>/gi
       let match: RegExpExecArray | null
       while ((match = pattern.exec(html)) !== null) {
         if (match[1]!.trim().length > 0) runScript(match[1]!)

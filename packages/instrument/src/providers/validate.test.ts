@@ -106,6 +106,27 @@ describe("artifact validation", () => {
     )
   })
 
+  it("derivePosthogRegionHosts reads the parsed hostname, so a lookalike never selects EU", () => {
+    for (const lookalike of [
+      "https://eu.i.posthog.com.evil.test",
+      "https://evil.test/eu.i.posthog.com",
+      "https://eu-assets.evil.test",
+      "https://evil.test/eu-assets/ingest",
+      "https://evil.test/?h=eu.i.posthog.com"
+    ]) {
+      expect(derivePosthogRegionHosts(lookalike).ingestHost).toBe("https://us.i.posthog.com")
+    }
+    expect(derivePosthogRegionHosts("https://EU.i.posthog.com/").ingestHost).toBe("https://eu.i.posthog.com")
+  })
+
+  it("normalizeInfiniteCollectPath trims trailing slashes in linear time", () => {
+    expect(normalizeInfiniteCollectPath("/infinite/ledger///")).toEqual({ path: "/infinite/ledger" })
+    const hostile = `/a${"/".repeat(100_000)}b`
+    const started = performance.now()
+    expect(normalizeInfiniteCollectPath(hostile)).toHaveProperty("error")
+    expect(performance.now() - started).toBeLessThan(200)
+  })
+
   it("jsLiteral escapes a value so it cannot close a <script> block, and round-trips", () => {
     const out = jsLiteral("</script><script>alert(1)</script>")
     expect(out).not.toContain("</script>")

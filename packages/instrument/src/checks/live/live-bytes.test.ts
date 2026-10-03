@@ -141,7 +141,7 @@ describe("live bytes: shapes that need care", () => {
     // Managed (the bundle holds the bootstrap id), so the autoConfig opt-out verdict is the managed one.
     expect(byId(results, LIVE_BYTES_CHECK_IDS.metaAutoConfig)[0]!.state).toBe("pass")
     // The cross-origin script is never fetched.
-    expect(requests.some((request) => request.url.startsWith("https://cdn.other.test"))).toBe(false)
+    expect(requests.some((request) => new URL(request.url).hostname === "cdn.other.test")).toBe(false)
   })
 
   it("an id seen in a bundle whose init cannot be read is undetermined, not a problem", async () => {

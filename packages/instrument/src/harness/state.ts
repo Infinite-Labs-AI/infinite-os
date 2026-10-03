@@ -7,6 +7,7 @@ import {
   type ProviderStateKind,
   type VerificationOutcome
 } from "./types.js"
+import { escapeMarkdownCell } from "../text-escape.js"
 
 export { HARNESS_PROVIDER_ORDER }
 
@@ -237,7 +238,7 @@ export function metaRelayNote(report: HarnessReport): string | null {
 }
 
 function markdownCell(value: string): string {
-  return value.replace(/\|/g, "\\|").replace(/\n/g, " ")
+  return escapeMarkdownCell(value)
 }
 
 /** `.infinite/REPORT.md`: the same table plus failures, conversions, next steps, and the checklist. */

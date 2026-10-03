@@ -24,6 +24,7 @@
 import { codeView, isServerFile, matchingBracket, sourceUnits, unitLine } from "./code-view.js"
 import { metaEventIdPageBuiltMessage, metaEventIdUndeterminedMessage, metaStandardOnClickMessage } from "./copy.js"
 import { worstState, type SetupCheckResult, type SetupFinding } from "./types.js"
+import { escapeRegExp } from "../text-escape.js"
 
 /** Meta standard events that are CONVERSIONS (never fired from a click). Funnel steps are not listed. */
 export const META_STANDARD_CONVERSIONS = [
@@ -121,7 +122,7 @@ function namesCalledIn(region: string): string[] {
 
 /** The body of `function name(…) {…}` / `const name = (…) => {…}` / `const name = () => expr` in `code`. */
 function functionBodyRegion(code: string, name: string): [number, number] | null {
-  const escaped = name.replace(/\$/g, "\\$")
+  const escaped = escapeRegExp(name)
   const declaration = new RegExp(String.raw`(?:\bfunction\s+${escaped}\s*\(|\b(?:const|let|var)\s+${escaped}\s*=)`).exec(code)
   if (!declaration) return null
   let from = declaration.index + declaration[0].length
