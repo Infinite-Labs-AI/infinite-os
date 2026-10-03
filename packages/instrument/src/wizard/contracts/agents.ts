@@ -303,9 +303,15 @@ export const INFINITE_TAG_ENV_PREFIX = "INFINITE_TAG_" as const
 export const MCP_ENV = { url: "INFINITE_TAG_MCP_URL", token: "INFINITE_TAG_MCP_TOKEN" } as const
 
 /**
- * Codex 0.159.2 feature names disabled for EVERY role, worker and reviewer (`-c features.<name>=false`).
+ * Codex feature names disabled for EVERY role, worker and reviewer (`-c features.<name>=false`).
  * §3f.3's list + `shell_snapshot` / `skill_search` (the reviewer lacked them) + §3f.7's `view_image`, `goals`
  * and `multi_agent` (still exposed after the old list, L8). A renamed feature fails `--strict-config` loudly.
+ *
+ * `code_mode_host` is deliberately NOT here (live run 2, R2-1): on Codex 0.160 it hosts the shell, so disabling
+ * it makes every command fail ("code-mode host is disabled") and the reviewer and worker read nothing. It is a
+ * stable feature, on by default. What keeps the agent out of `~/.growth-os` is the read confinement profile
+ * (`codexPermissionArgs`), not a feature flag. `CODEX_NEVER_DISABLED_FEATURES` makes disabling it an argv
+ * violation, so it cannot come back by accident.
  */
 export const CODEX_DISABLED_FEATURES = [
   "browser_use",
@@ -314,7 +320,6 @@ export const CODEX_DISABLED_FEATURES = [
   "computer_use",
   "in_app_browser",
   "image_generation",
-  "code_mode_host",
   "apps",
   "plugins",
   "hooks",
@@ -325,6 +330,12 @@ export const CODEX_DISABLED_FEATURES = [
   "goals",
   "multi_agent"
 ] as const
+
+/**
+ * Features an agent needs to run any command at all (R2-1): `-c features.<name>=false` for one of these is an
+ * argv violation. Codex reads files only through its shell, so without the host the agent is blind.
+ */
+export const CODEX_NEVER_DISABLED_FEATURES = ["code_mode_host"] as const
 
 /**
  * Non-feature `-c` settings every Codex role carries (§3f.3 + §3f.7). `skills.include_instructions=false`:
@@ -391,6 +402,11 @@ export function agentArgvViolations(kind: AgentKind, argv: readonly string[]): s
   if (!configValues.some((value) => /^permissions\.infinite_tag(_ro)?\.filesystem=\{/.test(value))) out.push("missing permissions filesystem table")
   for (const feature of CODEX_DISABLED_FEATURES) {
     if (!configValues.includes(`features.${feature}=false`)) out.push(`missing features.${feature}=false`)
+  }
+  for (const feature of CODEX_NEVER_DISABLED_FEATURES) {
+    if (configValues.some((value) => value.replace(/\s+/g, "") === `features.${feature}=false`)) {
+      out.push(`features.${feature}=false blinds the agent (it disables Codex's shell)`)
+    }
   }
   for (const setting of CODEX_REQUIRED_CONFIG) if (!configValues.includes(setting)) out.push(`missing ${setting}`)
   return out

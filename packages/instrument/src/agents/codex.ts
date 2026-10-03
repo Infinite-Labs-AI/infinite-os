@@ -1,13 +1,14 @@
-// Codex (0.159.2) argv builders and the JSONL reader (§3f.3 + the §3f.7 amendment, which wins).
+// Codex (0.159.2, 0.160) argv builders and the JSONL reader (§3f.3 + the §3f.7 amendment, which wins).
 //
 // The read confinement IS the sandbox selection: the `-c default_permissions=…` + `-c permissions.<p>.
 // filesystem={…}` pair from F0's `codexPermissionArgs` (`$HOME` = none, every sensitive path outside
 // `$HOME` = none, Codex's own binary dir and install root re-allowed READ, `:project_roots` = write for the
 // worker, read for the reviewer). NEVER `-s` / `--sandbox` / `sandbox_mode`: `-s` silently drops the
 // profile (L7). Every role disables every feature in `CODEX_DISABLED_FEATURES` (browser, computer use,
-// in-app browser, image generation, code-mode host, apps, plugins, hooks, memories, shell snapshot, skill
-// search, view_image, goals, multi_agent) and carries `--ignore-user-config --strict-config`, so a renamed
-// feature fails loudly. Each argv is checked with F0's `agentArgvViolations` before it is returned.
+// in-app browser, image generation, apps, plugins, hooks, memories, shell snapshot, skill search,
+// view_image, goals, multi_agent) and carries `--ignore-user-config --strict-config`, so a renamed
+// feature fails loudly. Never the code-mode host: on 0.160 it runs the shell, and without it Codex
+// reads nothing (live run 2, R2-1). Each argv is checked with F0's `agentArgvViolations` before it is returned.
 import {
   agentArgvViolations,
   CODEX_DISABLED_FEATURES,

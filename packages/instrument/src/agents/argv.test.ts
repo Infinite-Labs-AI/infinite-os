@@ -270,6 +270,24 @@ describe("Codex argv (§3f.3 + §3f.7)", () => {
     expect(good).toContain("features.apps=false")
     expect(good).toContain("--ignore-user-config")
   })
+
+  it("R2-1: neither the built reviewer nor the worker argv disables code_mode_host (Codex 0.160's shell host)", () => {
+    const reviewer = buildCodexReviewerArgv({ worktree: "/wt", permissionArgs: permission("reviewer"), model: { model: "gpt-6.1-sol", effort: "xhigh" }, outputPath: "/c/r.json", schemaPath: "/c/s.json" })
+    const worker = buildCodexWorkerArgv({ repo: "/repo", permissionArgs: permission("worker"), model: { model: "gpt-6.1-sol", effort: "xhigh" }, node: "n", cliPath: "c", outputPath: "o", schemaPath: "s" })
+    const resume = buildCodexWorkerArgv({ repo: "/repo", permissionArgs: permission("worker"), model: { model: null, effort: "xhigh" }, node: "n", cliPath: "c", outputPath: "o", schemaPath: "s", resumeThreadId: "t-1" })
+    for (const argv of [reviewer, worker, resume]) {
+      expect(argv.some((arg) => arg.includes("code_mode_host"))).toBe(false)
+      // the other disables stay
+      expect(argv).toContain("features.browser_use=false")
+      expect(argv).toContain("features.computer_use=false")
+    }
+    expect(CODEX_DISABLED_FEATURES as readonly string[]).not.toContain("code_mode_host")
+    // negative: an argv that disables it is refused, so it cannot come back by accident
+    expect(agentArgvViolations("codex", [...reviewer.slice(0, -1), "-c", "features.code_mode_host=false", "-"])).toEqual([
+      "features.code_mode_host=false blinds the agent (it disables Codex's shell)"
+    ])
+    expect(() => buildCodexReviewerArgv({ worktree: "/wt", permissionArgs: [...permission("reviewer"), "-c", "features.code_mode_host = false"], model: { model: null, effort: "x" }, outputPath: "o", schemaPath: "s" })).toThrow(/code_mode_host=false blinds the agent/)
+  })
 })
 
 describe("who pays (§3f.2)", () => {
