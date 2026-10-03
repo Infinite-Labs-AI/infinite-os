@@ -110,7 +110,7 @@ export const renderList: KindRenderer<"list"> = (view, ctx) => {
     }
   } else {
     const currency = typeof body.currency === "string" ? body.currency : null;
-    const drawn = rowLines(rows, columns, selected, ctx, notes, currency);
+    const drawn = rowLines(rows, columns, selected, ctx, notes, currency, viewText(body.nameLabel));
     hiddenColumns = drawn.hidden.length;
     // Top rows first, then each group under its label and reason.
     lines.push(...drawn.header, ...drawn.rows.slice(0, top.length).flat());
@@ -207,7 +207,8 @@ function rowLines(
   selected: number,
   ctx: ViewRenderCtx,
   notes: FootnoteBook,
-  currency: string | null = null
+  currency: string | null = null,
+  nameLabel = ""
 ): { header: string[]; rows: string[][]; hidden: string[] } {
   const width = Math.max(1, Math.floor(ctx.width));
   const titles = rows.map((row) => viewText(row.title));
@@ -249,7 +250,12 @@ function rowLines(
       padded.forEach((cellWidth, index) => { columnWidths[index] = cellWidth; });
     }
   }
-  const titleWidth = Math.max(1, Math.min(longestTitle, width - fixed - used(kept)));
+  // A header row draws only for a non-self-describing list with a labelled value column left.
+  const headed = !bare && kept.length > 0 && kept.some((index) => columns[index]?.label);
+  // When it draws, the name column fits its head ("Campaign"; rev 3) the way a value
+  // column fits its label, so the head is cut only when the pane has no room for it.
+  const nameWidth = headed ? displayWidth(nameLabel) : 0;
+  const titleWidth = Math.max(1, Math.min(Math.max(longestTitle, nameWidth), width - fixed - used(kept)));
   // A count that carries its noun (`3 trials`) reads left-aligned, as r4 prints it.
   const right = columns.map((column, index) =>
     !(bare && column.unit === "count") && (column.unit !== "text" || cells.every((row) => !row[index] || looksNumeric(row[index] ?? "")))
@@ -296,8 +302,10 @@ function rowLines(
     };
   }
 
-  const header = !bare && kept.length && kept.some((index) => columns[index]?.label)
-    ? [paint(fitLine(`${" ".repeat(fixed + titleWidth)}${kept.map((index) => `${GAP}${align(columns[index]?.label ?? "", index)}`).join("")}`.trimEnd(), width), "muted", ctx)]
+  // The name column's head is the view's `nameLabel` ("Ad"; rev 3), cut only past the room the pane has.
+  const nameHead = padEndCells(truncateCells(nameLabel, titleWidth), titleWidth);
+  const header = headed
+    ? [paint(fitLine(`${" ".repeat(fixed)}${nameHead}${kept.map((index) => `${GAP}${align(columns[index]?.label ?? "", index)}`).join("")}`.trimEnd(), width), "muted", ctx)]
     : [];
   return {
     header,

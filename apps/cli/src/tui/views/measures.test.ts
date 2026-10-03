@@ -637,3 +637,48 @@ describe("measures: scrubbed and within the pane", () => {
     }
   });
 });
+
+// Contract revision 3: a leader may carry one short context line from the
+// host (r2 meta-03 `$189.32 spent`), drawn dim under the leader's name.
+describe("numbers: a leader's detail line (rev 3)", () => {
+  const withDetail = (detail: string, index = 0) => edited("numbers-week-today", (body) => { body.leaders[index].detail = detail; });
+
+  it("prints under the leader's name, dim, one line", () => {
+    const render = draw(withDetail("$189.32 spent"));
+    const at = render.detail.indexOf("Most clicks · Hook A · 41");
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(render.detail[at + 1]).toBe(`${" ".repeat("Most clicks · ".length)}$189.32 spent`);
+    expect(render.detail[at + 2]).toBe("Most trials · Hook B · 2");
+    const color = draw(withDetail("$189.32 spent"), { color: true });
+    const line = color.detail[color.detail.findIndex((entry) => entry.includes("Hook A · 41")) + 1]!;
+    expect(line).toContain(paint("$189.32 spent", "muted", ctx({ color: true })));
+  });
+
+  it("a leader without detail draws as before", () => {
+    const before = draw(fixture("numbers-week-today")).detail;
+    const after = draw(withDetail("51 of 357 impressions", 1)).detail;
+    const at = after.indexOf("Most trials · Hook B · 2");
+    expect([...after.slice(0, at + 1), ...after.slice(at + 2)]).toEqual(before);
+  });
+
+  it("is fitted to the width, never wraps, and never touches the table, at every width", () => {
+    const long = "51 of 357 impressions, and a much longer context line that runs past the pane";
+    for (const width of [48, 60, 80, 100, 140]) {
+      const plain = draw(fixture("numbers-week-today"), { width });
+      const render = draw(withDetail(long), { width });
+      expect(lines(render).filter((line) => displayWidth(line) > width), `@${width}`).toEqual([]);
+      const at = render.detail.findIndex((line) => line.startsWith("Most clicks"));
+      // Everything above the leaders (the table, the strip) is exactly as without the detail.
+      expect(render.detail.slice(0, at)).toEqual(plain.detail.slice(0, at));
+      // One line only: the next leader follows it.
+      expect(render.detail[at + 2]?.startsWith("Most trials")).toBe(true);
+      expect(render.detail[at + 1]!.trim().startsWith("51 of 357 impressions")).toBe(true);
+    }
+  });
+
+  it("scrubs escape and bidi characters from the detail", () => {
+    const out = text(draw(withDetail("$189.32\u001b[2J spent‮")));
+    expect(out).not.toMatch(/[\u001b‮]/u);
+    expect(out).toContain("$189.32 spent");
+  });
+});

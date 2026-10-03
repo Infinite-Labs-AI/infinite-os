@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   ANSWER_VIEW_CONTRACT_REVISION, ANSWER_VIEW_KINDS, ANSWER_VIEW_LIMITS, ANSWER_VIEW_STATES, ARCHIVE_ASSET_ID_PATTERN,
-  type AnswerViewV1, type ChangeBodyV1, type TodayLegV1
+  type AnswerViewV1, type ChangeBodyV1, type LeaderV1, type ListBodyV1, type RecordBodyV1, type TodayLegV1
 } from "./answer-view.js";
 const stripped = (k: string) => { const n = k.toLowerCase().replace(/[^a-z0-9]/g, "");
   return n.endsWith("token") || n.includes("credential") || n === "confirmationid"; };
@@ -26,6 +26,36 @@ describe("answer view contract v1", () => {
     for (const id of ["", "https://example.test/a.png", "data:image/png;base64,AA", "/Users/example/a.png",
       "a/b", "_lead", "a".repeat(129), "asset\u001b[31m1", "asset 1"]) expect(ARCHIVE_ASSET_ID_PATTERN.test(id)).toBe(false);
     expect(ARCHIVE_ASSET_ID_PATTERN.test("a".repeat(128))).toBe(true);
+  });
+  it("revision 3: an archive id never starts with a URL scheme, in any case", () => {
+    for (const id of ["https:example.test", "javascript:void", "mailto:a", "http:a", "HTTPS:example.test", "Javascript:void",
+      "data:a", "file:a", "blob:a", "vbscript:a", "ftp:a", "MailTo:a"]) expect(ARCHIVE_ASSET_ID_PATTERN.test(id), id).toBe(false);
+    // Real-shaped archive ids still pass, including ones that hold a ':' or start with a scheme's letters.
+    for (const id of ["asset_gallery_hook_b", "meta:1202:thumb.v2", "thumb-1", "asset_c4", "asset-1",
+      "0f8e2a4c-5b6d-4e7f-8a9b-0c1d2e3f4a5b", "https_asset", "datastore:a", "files:a", "mailtox:a", "blob1:a"]) {
+      expect(ARCHIVE_ASSET_ID_PATTERN.test(id), id).toBe(true);
+    }
+  });
+  it("revision 3: a list may name its row-name column, a record its own status, a leader its context line", () => {
+    expect(ANSWER_VIEW_CONTRACT_REVISION).toBe(3);
+    expect(ANSWER_VIEW_LIMITS.maxShortTextChars).toBe(80);
+    const list = { layout: "rows", nameLabel: "Ad", columns: [], rows: [], total: 0, shown: 0 } satisfies ListBodyV1;
+    const record = { title: "Hook B", status: { word: "Paused", tone: "muted" }, fields: [] } satisfies RecordBodyV1;
+    const leader = { measure: { key: "ctr", label: "CTR" }, rowId: "ad_1", rowLabel: "Hook B", value: { value: 2.1 },
+      detail: "51 of 357 impressions" } satisfies LeaderV1;
+    // All three are optional: a body without them is still valid.
+    const oldList = { layout: "rows", columns: [], rows: [], total: 0, shown: 0 } satisfies ListBodyV1;
+    const oldRecord = { fields: [] } satisfies RecordBodyV1;
+    const oldLeader = { measure: { key: "ctr", label: "CTR" }, rowId: "ad_1", rowLabel: "Hook B", value: { value: null } } satisfies LeaderV1;
+    expect([list.nameLabel, record.status.word, leader.detail]).toEqual(["Ad", "Paused", "51 of 357 impressions"]);
+    expect(["nameLabel" in oldList, "status" in oldRecord, "detail" in oldLeader]).toEqual([false, false, false]);
+  });
+  it("revision 3: the contract source documents the new fields and the short-text rule", () => {
+    const src = readFileSync(new URL("./answer-view.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/ANSWER_VIEW_CONTRACT_REVISION = 3 as const;.*ListBodyV1\.nameLabel; RecordBodyV1\.status; LeaderV1\.detail/);
+    expect(src).toMatch(/nameLabel\?: string;.*rev 3/);
+    expect(src).toMatch(/status\?: StatusWordV1;.*rev 3/);
+    expect(src).toMatch(/detail\?: string;.*rev 3/);
   });
   it("a numbers view keeps today out of the settled leg", () => {
     const view = { v: 1, kind: "numbers", tool: "t", title: "T", state: "ready", asOf: null,

@@ -29,9 +29,12 @@ import { terminalText } from "./terminal-text.js";
  * enforce one level of `sections` nesting, or `legs` being required outside
  * `composite`, so kind renderers (T8) must cap recursion and check types.
  *
- * One body field IS cleaned here (contract revision 3): a change target's
- * `path` and `creativeRef` (see `cleanChangeTarget`). The view is copied,
- * never mutated, and only when the target carries either key.
+ * A few body fields ARE cleaned here (contract revision 3): a change target's
+ * `path` and `creativeRef` (see `cleanChangeTarget`), and the short host words
+ * `ListBodyV1.nameLabel`, `RecordBodyV1.status` and `LeaderV1.detail`, also in
+ * a composite's sections one level deep (see `cleanShortWords`). The view is
+ * copied, never mutated, and only when it carries one of those keys: a view
+ * without them (an older Desktop never sends them) is returned as it came.
  */
 const KINDS = new Set<string>(ANSWER_VIEW_KINDS);
 const STATES = new Set<string>(ANSWER_VIEW_STATES);
@@ -56,13 +59,70 @@ export function decodeAnswerView(value: unknown): AnswerViewV1 | null {
   ) {
     return null;
   }
-  if (value.kind === "change" && isRecord(value.body) && isRecord(value.body.target)) {
-    const target = value.body.target;
+  let body: Record<string, unknown> = value.body;
+  if (value.kind === "change" && isRecord(body.target)) {
+    const target = body.target;
     if ("path" in target || "creativeRef" in target) {
-      return { ...value, body: { ...value.body, target: cleanChangeTarget(target) } } as unknown as AnswerViewV1;
+      body = { ...body, target: cleanChangeTarget(target) };
     }
   }
-  return value as unknown as AnswerViewV1;
+  body = cleanShortWords(value.kind, body, true);
+  return (body === value.body ? value : { ...value, body }) as unknown as AnswerViewV1;
+}
+
+const STATUS_TONES = new Set(["ok", "warn", "bad", "muted"]);
+
+/**
+ * A body with its revision 3 short words kept bounded, or the same body when
+ * it carries none of them:
+ * - `list` `nameLabel`, `numbers` `leaders[].detail`: scrubbed for the TTY and
+ *   cut to `maxShortTextChars` with `…`; not a string, or nothing left once
+ *   scrubbed, withholds the field (it is dropped, the rest kept).
+ * - `record` `status`: rebuilt from `word` (cleaned the same way) and `tone`;
+ *   a tone outside `StatusWordV1`'s four, or a withheld word, withholds it.
+ * - `numbers` and `health` `sections`: each section's body the same way, one
+ *   level only (the contract nests sections one level).
+ */
+function cleanShortWords(kind: string, body: Record<string, unknown>, top: boolean): Record<string, unknown> {
+  let out = body;
+  const set = (key: string, cleaned: unknown): void => {
+    const { [key]: _dropped, ...rest } = out;
+    out = cleaned === undefined ? rest : { ...rest, [key]: cleaned };
+  };
+  if (kind === "list" && "nameLabel" in body) set("nameLabel", cleanShortText(body.nameLabel));
+  if (kind === "record" && "status" in body) set("status", cleanStatusWord(body.status));
+  if (kind === "numbers" && Array.isArray(body.leaders) && body.leaders.some((leader) => isRecord(leader) && "detail" in leader)) {
+    set("leaders", body.leaders.map((leader: unknown) => {
+      if (!isRecord(leader) || !("detail" in leader)) return leader;
+      const { detail, ...rest } = leader;
+      const words = cleanShortText(detail);
+      return words === undefined ? rest : { ...rest, detail: words };
+    }));
+  }
+  if (top && (kind === "numbers" || kind === "health") && Array.isArray(body.sections)) {
+    let changed = false;
+    const sections = body.sections.map((section: unknown) => {
+      if (!isRecord(section) || typeof section.kind !== "string" || !isRecord(section.body)) return section;
+      const cleaned = cleanShortWords(section.kind, section.body, false);
+      if (cleaned === section.body) return section;
+      changed = true;
+      return { ...section, body: cleaned };
+    });
+    if (changed) set("sections", sections);
+  }
+  return out;
+}
+
+/** Short host words scrubbed and capped, or `undefined` (withheld) when not a string or empty once scrubbed. */
+function cleanShortText(value: unknown): string | undefined {
+  const words = typeof value === "string" ? terminalText(value) : "";
+  return words ? capChars(words, ANSWER_VIEW_LIMITS.maxShortTextChars) : undefined;
+}
+
+function cleanStatusWord(value: unknown): { word: string; tone: string } | undefined {
+  if (!isRecord(value) || typeof value.tone !== "string" || !STATUS_TONES.has(value.tone)) return undefined;
+  const word = cleanShortText(value.word);
+  return word === undefined ? undefined : { word, tone: value.tone };
 }
 
 /**

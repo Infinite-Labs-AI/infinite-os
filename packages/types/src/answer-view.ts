@@ -5,7 +5,7 @@
  * Key rule: no key may end in "token", contain "credential", or equal a host-private key.
  */
 // ---- contract body (vendored verbatim into 1bu-1; edit only in infinite-os) ----
-export const ANSWER_VIEW_CONTRACT_REVISION = 3 as const;   // rev 3: ChangeBodyV1.target.creativeRef + .path
+export const ANSWER_VIEW_CONTRACT_REVISION = 3 as const;   // rev 3: ChangeBodyV1.target.creativeRef + .path; ListBodyV1.nameLabel; RecordBodyV1.status; LeaderV1.detail
 export const RESULT_VIEW_CAPABILITY = "result.view.v1" as const;
 export const CONFIRM_FIELDS_CAPABILITY = "confirm.fields.v1" as const;
 export const CONFIRM_STREAM_CAPABILITY = "confirm.stream.v1" as const;
@@ -15,9 +15,16 @@ export const ANSWER_VIEW_LIMITS = {
   // A change target's parents; rev 3. A part longer than maxTargetPathPartChars is cut to it, ending in "…";
   // more than maxTargetPathParts parts (or any part not a string, or empty once cleaned) withholds the whole path.
   maxTargetPathParts: 4, maxTargetPathPartChars: 120,
+  // Short host words; rev 3: ListBodyV1.nameLabel, RecordBodyV1.status.word, LeaderV1.detail. A longer string is cut to
+  // maxShortTextChars, ending in "…"; a value not a string, or empty once cleaned, is withheld (the field is dropped);
+  // a status whose tone is not one of StatusWordV1's tones is withheld.
+  maxShortTextChars: 80,
 } as const;
-/** rev 3: a CreativeRefV1.archiveAssetId is an archive id: letters, digits and `_ . : -`, at most 128; no '/', never a URL or path. */
-export const ARCHIVE_ASSET_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
+/** rev 3: a CreativeRefV1.archiveAssetId is an archive id: letters, digits and `_ . : -`, at most 128; no '/', never a URL or path.
+ *  It never starts with a URL scheme (http, https, javascript, data, mailto, file, blob, vbscript, ftp; any case) and a ':'.
+ *  Each letter is spelled in both cases, not with the `i` flag: under `iu` the letter class would also admit U+017F and U+212A. */
+export const ARCHIVE_ASSET_ID_PATTERN =
+  /^(?![Hh][Tt][Tt][Pp][Ss]?:|[Jj][Aa][Vv][Aa][Ss][Cc][Rr][Ii][Pp][Tt]:|[Dd][Aa][Tt][Aa]:|[Mm][Aa][Ii][Ll][Tt][Oo]:|[Ff][Ii][Ll][Ee]:|[Bb][Ll][Oo][Bb]:|[Vv][Bb][Ss][Cc][Rr][Ii][Pp][Tt]:|[Ff][Tt][Pp]:)[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 
 export const ANSWER_VIEW_KINDS = [
   "numbers", "list", "record", "document", "images", "change",
@@ -107,7 +114,10 @@ export interface TodayLegV1 extends NumbersLegV1 {
   final: false; asOf: IsoTime;
   refresh?: { status: "fresh" | "still_running" | "held" | "failed" | "skipped"; retryAt?: IsoTime };
 }
-export interface LeaderV1 { measure: { key: string; label: string }; rowId: string; rowLabel: string; value: CellV1 }
+export interface LeaderV1 {
+  measure: { key: string; label: string }; rowId: string; rowLabel: string; value: CellV1;
+  detail?: string;  // one short context line from the host, drawn under the leader's name ("$189.32 spent", "51 of 357 impressions"); words are data, never computed by a renderer; rev 3
+}
 export type SectionV1 =
   | { title: string; kind: "numbers"; body: NumbersBodyV1 } | { title: string; kind: "list"; body: ListBodyV1 }
   | { title: string; kind: "record"; body: RecordBodyV1 } | { title: string; kind: "health"; body: HealthBodyV1 };
@@ -127,6 +137,7 @@ export interface ListRowV1 {
 }
 export interface ListBodyV1 {
   layout: "rows" | "log" | "groups" | "files";
+  nameLabel?: string;  // the row-name column's header ("Ad", "Ad set", "Campaign"); rev 3
   currency?: string | null;                               // money cells' currency; rev 2
   selected?: string;                                      // the row id the list opens on (the one the answer is about); rev 2
   columns: { key: string; label: string; unit?: UnitV1 }[]; rows: ListRowV1[];
@@ -136,6 +147,7 @@ export interface ListBodyV1 {
 }
 export interface RecordBodyV1 {
   title?: string; currency?: string | null;               // the thing's full name ("Ad “Hook B · founder POV”"); money's currency; rev 2
+  status?: StatusWordV1;  // the thing's own status for the head chip ("Active" ok, "Paused" muted); rev 3
   fields: { label: string; value: CellV1 | TextCellV1; unit?: UnitV1 }[]; creativeRef?: CreativeRefV1;
   history?: { at: IsoTime; from: string | null; to: string | null; who: string | null; source?: string }[];
   rule?: { summary: string; channel: string; schedule: string; nextRunAt: IsoTime | null;

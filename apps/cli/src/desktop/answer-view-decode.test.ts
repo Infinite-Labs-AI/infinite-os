@@ -203,3 +203,153 @@ describe("decodeAnswerView: change target picture and path (revision 3)", () => 
     expect(decodeAnswerView(view)).toEqual(view);
   });
 });
+
+// Contract revision 3, scheme ids: a picture reference whose id starts with a
+// URL scheme is withheld like any other non-archive id.
+describe("decodeAnswerView: archive ids never start with a URL scheme (revision 3)", () => {
+  function changeWith(creativeRef: unknown): Record<string, unknown> {
+    return {
+      v: 1, kind: "change", tool: "propose_pause_entity", title: "Pause Example ad", state: "needs_yes", asOf: null,
+      scope: { workspaceName: "Example Co", crossWorkspace: false }, caveats: [],
+      body: { target: { kind: "ad", label: "Example ad", creativeRef }, rows: [], warnings: [] }
+    };
+  }
+  it.each(["https:example.test", "javascript:void", "mailto:a", "JavaScript:void", "HTTP:a"])("withholds %s", (archiveAssetId) => {
+    const target = (decodeAnswerView(changeWith({ archiveAssetId }))?.body as { target: Record<string, unknown> }).target;
+    expect("creativeRef" in target).toBe(false);
+    expect(target.label).toBe("Example ad");
+  });
+  it.each(["asset_1", "meta:1202:thumb.v2", "https_asset"])("keeps a real-shaped id %s", (archiveAssetId) => {
+    const target = (decodeAnswerView(changeWith({ archiveAssetId }))?.body as { target: Record<string, unknown> }).target;
+    expect(target.creativeRef).toEqual({ archiveAssetId });
+  });
+});
+
+// Contract revision 3, short host words: a list's row-name header, a record's
+// own status and a leader's context line. Each is scrubbed for the TTY, cut to
+// ANSWER_VIEW_LIMITS.maxShortTextChars ending in "…", and withheld (the field
+// dropped) when it is not a string, scrubs to nothing, or (status) has a tone
+// the contract does not name. A view without them decodes exactly as before.
+describe("decodeAnswerView: nameLabel, record status and leader detail (revision 3)", () => {
+  const MAX = ANSWER_VIEW_LIMITS.maxShortTextChars;
+  function view(kind: string, body: Record<string, unknown>): Record<string, unknown> {
+    return {
+      v: 1, kind, tool: "example_read", title: "Example", state: "ready", asOf: null,
+      scope: { workspaceName: "Example Co", crossWorkspace: false }, caveats: [], body
+    };
+  }
+  const listBody = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    layout: "rows", columns: [{ key: "spend", label: "Spend", unit: "money" }],
+    rows: [{ id: "r1", title: "Example ad", cells: { spend: { value: 12.5 } } }], total: 1, shown: 1, ...extra
+  });
+  const recordBody = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    title: "Example ad", fields: [{ label: "Spend", value: { value: 12.5 }, unit: "money" }], ...extra
+  });
+  const leader = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    measure: { key: "ctr", label: "CTR" }, rowId: "r1", rowLabel: "Example ad", value: { value: 2.1 }, ...extra
+  });
+  const numbersBody = (leaders: unknown[], extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    layout: "table", currency: "USD", columns: [{ key: "ctr", label: "CTR", unit: "percent", factGroup: "ads" }],
+    legs: { settled: { window: { from: "2026-09-24", to: "2026-09-30", tz: "UTC", label: "Sep 24–30" }, final: true, asOf: null, rows: [] } },
+    leaders, ...extra
+  });
+  const bodyOf = (value: Record<string, unknown>): Record<string, unknown> =>
+    decodeAnswerView(value)?.body as unknown as Record<string, unknown>;
+
+  it("keeps well-formed short words as they came", () => {
+    expect(bodyOf(view("list", listBody({ nameLabel: "Ad" }))).nameLabel).toBe("Ad");
+    expect(bodyOf(view("record", recordBody({ status: { word: "Paused", tone: "muted" } }))).status).toEqual({ word: "Paused", tone: "muted" });
+    const leaders = bodyOf(view("numbers", numbersBody([leader({ detail: "51 of 357 impressions" })]))).leaders as Record<string, unknown>[];
+    expect(leaders[0]!.detail).toBe("51 of 357 impressions");
+  });
+
+  it.each([
+    ["list", listBody()],
+    ["record", recordBody()],
+    ["numbers", numbersBody([leader()])],
+    ["numbers", numbersBody([leader()], { layout: "composite", sections: [{ title: "Ads", kind: "list", body: listBody() }] })]
+  ])("decodes a %s view without the fields exactly as before (same object)", (kind, body) => {
+    const value = view(kind, body);
+    const snapshot = JSON.stringify(value);
+    expect(decodeAnswerView(value)).toBe(value);
+    expect(JSON.stringify(value)).toBe(snapshot);
+  });
+
+  it("cuts each at the contract's length, ending in …", () => {
+    const long = "word ".repeat(40);
+    const label = bodyOf(view("list", listBody({ nameLabel: long }))).nameLabel as string;
+    const status = bodyOf(view("record", recordBody({ status: { word: long, tone: "ok" } }))).status as { word: string };
+    const detail = (bodyOf(view("numbers", numbersBody([leader({ detail: long })]))).leaders as { detail: string }[])[0]!.detail;
+    for (const words of [label, status.word, detail]) {
+      expect(Array.from(words)).toHaveLength(MAX);
+      expect(words.endsWith("…")).toBe(true);
+    }
+    // Exactly the limit is kept whole.
+    expect(bodyOf(view("list", listBody({ nameLabel: "x".repeat(MAX) }))).nameLabel).toBe("x".repeat(MAX));
+  });
+
+  it("scrubs controls and bidi characters and collapses whitespace", () => {
+    expect(bodyOf(view("list", listBody({ nameLabel: " Ad\u001b[31m set‮ \n" }))).nameLabel).toBe("Ad set");
+    expect((bodyOf(view("record", recordBody({ status: { word: "\u0007Active⁦", tone: "ok" } }))).status as { word: string }).word).toBe("Active");
+    expect((bodyOf(view("numbers", numbersBody([leader({ detail: "$189.32\tspent‏" })]))).leaders as { detail: string }[])[0]!.detail).toBe("$189.32 spent");
+  });
+
+  it.each([
+    ["a number", 7], ["null", null], ["an object", { text: "Ad" }], ["an empty string", ""], ["a string that scrubs to nothing", " \u001b[0m‏ "]
+  ])("withholds a nameLabel or leader detail that is %s, keeping the rest", (_label, bad) => {
+    const list = bodyOf(view("list", listBody({ nameLabel: bad })));
+    expect("nameLabel" in list).toBe(false);
+    expect(list.rows).toEqual(listBody().rows);
+    const leaders = bodyOf(view("numbers", numbersBody([leader({ detail: bad }), leader({ rowId: "r2", detail: "ok words" })]))).leaders as Record<string, unknown>[];
+    expect("detail" in leaders[0]!).toBe(false);
+    expect(leaders[0]).toMatchObject({ rowId: "r1", rowLabel: "Example ad" });
+    expect(leaders[1]!.detail).toBe("ok words");
+  });
+
+  it.each([
+    ["a bad tone", { word: "Active", tone: "green" }],
+    ["a missing tone", { word: "Active" }],
+    ["a non-string word", { word: 1, tone: "ok" }],
+    ["an empty word", { word: "  ", tone: "ok" }],
+    ["a string status", "Active"],
+    ["an array status", [{ word: "Active", tone: "ok" }]]
+  ])("withholds a record status with %s, keeping the rest", (_label, status) => {
+    const record = bodyOf(view("record", recordBody({ status })));
+    expect("status" in record).toBe(false);
+    expect(record.title).toBe("Example ad");
+  });
+
+  it("rebuilds a status from its two keys: nothing else rides along", () => {
+    expect(bodyOf(view("record", recordBody({ status: { word: "Active", tone: "ok", url: "https://example.test" } }))).status)
+      .toEqual({ word: "Active", tone: "ok" });
+  });
+
+  it("cleans the fields in a composite's sections, one level deep", () => {
+    const body = numbersBody([], {
+      layout: "composite",
+      sections: [
+        { title: "Ads", kind: "list", body: listBody({ nameLabel: "x".repeat(MAX + 5) }) },
+        { title: "Ad", kind: "record", body: recordBody({ status: { word: "Active", tone: "loud" } }) },
+        { title: "Leaders", kind: "numbers", body: numbersBody([leader({ detail: 3 })]) }
+      ]
+    });
+    const sections = bodyOf(view("numbers", body)).sections as { body: Record<string, unknown> }[];
+    expect(Array.from(sections[0]!.body.nameLabel as string)).toHaveLength(MAX);
+    expect("status" in sections[1]!.body).toBe(false);
+    expect("detail" in (sections[2]!.body.leaders as Record<string, unknown>[])[0]!).toBe(false);
+  });
+
+  it("never mutates what it was given", () => {
+    const value = view("numbers", numbersBody([leader({ detail: "x".repeat(MAX + 9) })], {
+      sections: [{ title: "Ads", kind: "list", body: listBody({ nameLabel: 7 }) }]
+    }));
+    const snapshot = JSON.stringify(value);
+    decodeAnswerView(value);
+    expect(JSON.stringify(value)).toBe(snapshot);
+  });
+
+  it("leaves a field of the same name on another kind alone", () => {
+    const value = view("document", { meta: [], sections: [], nameLabel: 7, status: "x" });
+    expect(decodeAnswerView(value)).toBe(value);
+  });
+});
