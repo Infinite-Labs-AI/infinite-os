@@ -7,6 +7,7 @@ import { createHash } from "node:crypto"
 import { join } from "node:path"
 
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
+import type { PrSummary } from "../contracts/git-host.js"
 import { PR_LOOP_LIMITS } from "../contracts/git-host.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import { wizardGitExtras } from "../../git/index.js"
@@ -86,6 +87,47 @@ async function filesChanged(deps: WizardDeps, baseSha: string | null | undefined
   }
 }
 
+/**
+ * §3y.9: opens `merge-ready` and polls `gh pr view` every 30 s until the card closes. A merge (or a close) seen while
+ * the card is up aborts the ask through its signal (§3z.12 §3d.8), so the card closes by itself, with no keypress.
+ */
+export async function askWhilePolling(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  github: { readPr(number: number): Promise<PrSummary> },
+  number: number,
+  payload: { prUrl: string; number: number; summary: string }
+): Promise<{ answer: "open" | "later" | string; pr: PrSummary | null }> {
+  const close = new AbortController()
+  const stop = new AbortController()
+  let seen: PrSummary | null = null
+  const poller = (async () => {
+    while (!stop.signal.aborted && !ctx.signal.aborted) {
+      await deps.clock.sleep(PR_LOOP_LIMITS.mergePollMs, stop.signal).catch(() => undefined)
+      if (stop.signal.aborted || ctx.signal.aborted) return
+      let pr: PrSummary
+      try {
+        pr = await github.readPr(number)
+      } catch {
+        // A failed read is retried on the next poll.
+        continue
+      }
+      if ((pr.state === "MERGED" && pr.mergeCommitOid) || pr.state === "CLOSED") {
+        seen = pr
+        close.abort()
+        return
+      }
+    }
+  })()
+  try {
+    const answer = await ctx.ask("merge-ready", payload, { signal: close.signal })
+    return { answer: String(answer), pr: seen }
+  } finally {
+    stop.abort()
+    await poller
+  }
+}
+
 async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const runId = requireRunId(ctx)
   if (!runId) return { kind: "failed", code: "INF_WIZ_PR_CREATE_FAILED", message: "There is no run id yet.", next: "halt" }
@@ -127,10 +169,26 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     checks: once === "pass" ? "rehearsal passed on the latest commit" : once === "problem" ? "the rehearsal found a problem" : "the rehearsal could not tell"
   })
   sub(ctx, "merge", `Waiting for you to merge #${number}…`, "pending")
-  const answer = await ctx.ask("merge-ready", { prUrl: pr.url, number, summary })
-  if (answer !== "open") return parked(answer === "later" ? "You chose to merge later." : "The merge question was closed.", number)
+  // §3y.9 (P2-6): GitHub is polled every 30 s WHILE the card is up; a merge seen closes the card (the ask's signal).
+  const seen = await askWhilePolling(ctx, deps, github, number, { prUrl: pr.url, number, summary })
+  if (seen.pr?.state === "MERGED" && seen.pr.mergeCommitOid) {
+    sub(ctx, "merge", "✓ Merged on GitHub", "ok")
+    return saveMerge(ctx, deps, runId, seen.pr.mergeCommitOid, seen.pr.mergedAt)
+  }
+  if (seen.pr?.state === "CLOSED") return parked("The pull request was closed without merging. Run `npx infinite-tag` to start a fresh run.", null)
+  const answer = seen.answer
+  if (answer !== "open") {
+    // ESC / later: one final read, so a merge made just now is never missed.
+    const last = await github.readPr(number).catch(() => null)
+    if (last?.state === "MERGED" && last.mergeCommitOid) {
+      sub(ctx, "merge", "✓ Merged on GitHub", "ok")
+      return saveMerge(ctx, deps, runId, last.mergeCommitOid, last.mergedAt)
+    }
+    return parked(answer === "later" ? "You chose to merge later." : "The merge question was closed.", number)
+  }
   // B29: "open" opens the pull request in the browser (darwin TTY runs; the wiring sets `openUrl` only there).
   if (!ctx.options.json && deps.openUrl && /^https:\/\//.test(pr.url)) await deps.openUrl(pr.url).catch(() => undefined)
+  sub(ctx, "merge", "Checking GitHub every 30 s — merge whenever you're ready (ESC later)", "pending")
 
   const started = deps.clock.now().getTime()
   for (;;) {
