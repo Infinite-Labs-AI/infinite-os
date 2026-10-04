@@ -1,0 +1,1090 @@
+[
+  {
+    "id": "proven_all_lanes",
+    "note": "Every lane has its best proof: run-scoped ledger rows and a PostHog query; GA4 is not connected here, so it is not asked and stays delivering (seen leaving); the Meta pixel is delivering, never verified; no conversion ran, so Meta server events are not verifiable.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:42:00.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 204",
+          "provenance": "desktop_test"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "pending_within_wait",
+    "note": "Still inside waitMs: the ledger rows have not landed yet, so the lanes are pending and the client re-polls every 10 s.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:41:00.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "pending",
+          "receiptAt": null,
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "pending",
+          "receiptAt": null,
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 204",
+          "provenance": "desktop_test"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "pending",
+          "receiptAt": null,
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "posthog_not_connected_no_server_receipt",
+    "note": "PostHog has no connection (not verifiable, never a pass) and the server-lane probe left no row after the wait (no_receipt).",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:44:00.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "not connected",
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 204",
+          "provenance": "desktop_test"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "no_receipt",
+          "receiptAt": null,
+          "reason": "no document row for the probe path after 120 s",
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "meta_capi_verified",
+    "note": "A conversion ran and its server-instructed Meta event id is in the relay ledger as sent with events_received >= 1.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": [
+            "mev_FAKE0001"
+          ]
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:43:00.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 204",
+          "provenance": "desktop_test"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:41:00.000Z",
+          "reason": null,
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "ga4_realtime_received",
+    "note": "R4-3 / LF4-P1-1: GA4 is connected and the visit's id is one of its web streams. The cloud asks GA4 realtime for that stream only: 1 page_view in the claim's minute (k = 0, minutes 0..0) and none in the 5 quiet minutes before it (5..1), so GA4 received a page view at the time of this visit (verified, provenance ga4_realtime, receiptAt = that read). Realtime has no per-visit id: this is the most a minute-level report can say. The Meta pixel stays delivering: Meta reports only by the hour.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "ga4Realtime": {
+      "proofClaimedAt": "2026-10-02T09:40:00.000Z",
+      "reads": [
+        {
+          "at": "2026-10-02T09:40:30.000Z",
+          "windows": {
+            "before": {
+              "startMinutesAgo": 5,
+              "endMinutesAgo": 1
+            },
+            "after": {
+              "startMinutesAgo": 0,
+              "endMinutesAgo": 0
+            }
+          },
+          "pageViews": {
+            "before": 0,
+            "after": 1
+          }
+        }
+      ]
+    },
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:40:30.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:30.000Z",
+          "reason": null,
+          "provenance": "ga4_realtime"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "ga4_realtime_busy",
+    "note": "R4-3 / LF4-P1-1: GA4 is connected, but its realtime report counted 2 page views on the stream in the quiet minutes before the visit (6..2, read one minute after the claim), so a page view after it cannot be singled out as this visit's: delivering, reason ga4_realtime_busy. Never verified on a guess.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "ga4Realtime": {
+      "proofClaimedAt": "2026-10-02T09:40:00.000Z",
+      "reads": [
+        {
+          "at": "2026-10-02T09:41:10.000Z",
+          "windows": {
+            "before": {
+              "startMinutesAgo": 6,
+              "endMinutesAgo": 2
+            },
+            "after": {
+              "startMinutesAgo": 1,
+              "endMinutesAgo": 0
+            }
+          },
+          "pageViews": {
+            "before": 2,
+            "after": 3
+          }
+        }
+      ]
+    },
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:41:10.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "ga4_realtime_busy",
+          "provenance": "ga4_realtime"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "ga4_realtime_pending",
+    "note": "LF4-P1-1: GA4 is connected and quiet before the visit, but its realtime report has not counted the page view yet (GA4 shows it seconds later): pending inside the wait, provenance ga4_realtime; the client polls again.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "ga4Realtime": {
+      "proofClaimedAt": "2026-10-02T09:40:00.000Z",
+      "reads": [
+        {
+          "at": "2026-10-02T09:40:20.000Z",
+          "windows": {
+            "before": {
+              "startMinutesAgo": 5,
+              "endMinutesAgo": 1
+            },
+            "after": {
+              "startMinutesAgo": 0,
+              "endMinutesAgo": 0
+            }
+          },
+          "pageViews": {
+            "before": 0,
+            "after": 0
+          }
+        }
+      ]
+    },
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:40:20.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "pending",
+          "receiptAt": null,
+          "reason": null,
+          "provenance": "ga4_realtime"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "ga4_realtime_none",
+    "note": "LF4-P1-1: GA4 is connected and quiet before the visit; the first poll is pending, and at the poll after the 120 s wait (k = 2: the claim's minute and the next are minutes 2..1, before 7..3) GA4 still counted no page_view on the stream although the beacon left with a 2xx: no_receipt, reason ga4_realtime_none.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "ga4Realtime": {
+      "proofClaimedAt": "2026-10-02T09:40:00.000Z",
+      "reads": [
+        {
+          "at": "2026-10-02T09:40:20.000Z",
+          "windows": {
+            "before": {
+              "startMinutesAgo": 5,
+              "endMinutesAgo": 1
+            },
+            "after": {
+              "startMinutesAgo": 0,
+              "endMinutesAgo": 0
+            }
+          },
+          "pageViews": {
+            "before": 0,
+            "after": 0
+          }
+        },
+        {
+          "at": "2026-10-02T09:42:30.000Z",
+          "windows": {
+            "before": {
+              "startMinutesAgo": 7,
+              "endMinutesAgo": 3
+            },
+            "after": {
+              "startMinutesAgo": 2,
+              "endMinutesAgo": 1
+            }
+          },
+          "pageViews": {
+            "before": 0,
+            "after": 0
+          }
+        }
+      ]
+    },
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:42:30.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "no_receipt",
+          "receiptAt": null,
+          "reason": "ga4_realtime_none",
+          "provenance": "ga4_realtime"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "ga4_realtime_unavailable",
+    "note": "LF4-P1-1: GA4 is connected, but its realtime report could not be read (Google or the grant refused): delivering (seen leaving), reason ga4_realtime_unavailable. A refusal is never a count, so never verified and never none.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "ga4Realtime": {
+      "proofClaimedAt": "2026-10-02T09:40:00.000Z",
+      "reads": [
+        {
+          "at": "2026-10-02T09:40:30.000Z",
+          "windows": {
+            "before": {
+              "startMinutesAgo": 5,
+              "endMinutesAgo": 1
+            },
+            "after": {
+              "startMinutesAgo": 0,
+              "endMinutesAgo": 0
+            }
+          },
+          "pageViews": null
+        }
+      ]
+    },
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:40:30.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "ga4_realtime_unavailable",
+          "provenance": "ga4_realtime"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "ga4_realtime_late_visitor",
+    "note": "Live-fix 4 round 1: the visit's page view never reached GA4 (claim 09:40:10); another visitor's page view landed at 09:42:30. The cloud asks only the claim's minute and the next (09:40, 09:41) and the 5 before, poll after poll, so at the poll after the wait (09:42:40, k = 2: after 2..1, before 7..3) the other visitor's minute is never counted: no_receipt, reason ga4_realtime_none. Before, `after` grew to k..0 and the other visitor read as this visit (verified).",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "ga4Realtime": {
+      "proofClaimedAt": "2026-10-02T09:40:10.000Z",
+      "reads": [
+        {
+          "at": "2026-10-02T09:40:20.000Z",
+          "windows": {
+            "before": {
+              "startMinutesAgo": 5,
+              "endMinutesAgo": 1
+            },
+            "after": {
+              "startMinutesAgo": 0,
+              "endMinutesAgo": 0
+            }
+          },
+          "pageViews": {
+            "before": 0,
+            "after": 0
+          }
+        },
+        {
+          "at": "2026-10-02T09:41:40.000Z",
+          "windows": {
+            "before": {
+              "startMinutesAgo": 6,
+              "endMinutesAgo": 2
+            },
+            "after": {
+              "startMinutesAgo": 1,
+              "endMinutesAgo": 0
+            }
+          },
+          "pageViews": {
+            "before": 0,
+            "after": 0
+          }
+        },
+        {
+          "at": "2026-10-02T09:42:40.000Z",
+          "windows": {
+            "before": {
+              "startMinutesAgo": 7,
+              "endMinutesAgo": 3
+            },
+            "after": {
+              "startMinutesAgo": 2,
+              "endMinutesAgo": 1
+            }
+          },
+          "pageViews": {
+            "before": 0,
+            "after": 0
+          }
+        }
+      ]
+    },
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T09:42:40.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "no_receipt",
+          "receiptAt": null,
+          "reason": "ga4_realtime_none",
+          "provenance": "ga4_realtime"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  },
+  {
+    "id": "ga4_realtime_final_stands",
+    "note": "Live-fix 4 round 1: a FINAL GA4 answer stands. The poll after the wait (09:42:30) decided no_receipt ga4_realtime_none; a read 10 minutes later (a resume, the app's re-pass) and one past realtime's 29-minute reach (10:15) never ask GA4 again and answer the stored row, so neither another visitor's later page view (verified) nor the passed window (ga4_realtime_unavailable) re-decides it.",
+    "runStartedAt": "2026-10-02T09:02:00.000Z",
+    "ga4Realtime": {
+      "proofClaimedAt": "2026-10-02T09:40:10.000Z",
+      "reads": [
+        {
+          "at": "2026-10-02T09:40:20.000Z",
+          "windows": {
+            "before": {
+              "startMinutesAgo": 5,
+              "endMinutesAgo": 1
+            },
+            "after": {
+              "startMinutesAgo": 0,
+              "endMinutesAgo": 0
+            }
+          },
+          "pageViews": {
+            "before": 0,
+            "after": 0
+          }
+        },
+        {
+          "at": "2026-10-02T09:42:30.000Z",
+          "windows": {
+            "before": {
+              "startMinutesAgo": 7,
+              "endMinutesAgo": 3
+            },
+            "after": {
+              "startMinutesAgo": 2,
+              "endMinutesAgo": 1
+            }
+          },
+          "pageViews": {
+            "before": 0,
+            "after": 0
+          }
+        },
+        {
+          "at": "2026-10-02T09:52:30.000Z",
+          "windows": null,
+          "pageViews": null,
+          "notAsked": true
+        },
+        {
+          "at": "2026-10-02T10:15:00.000Z",
+          "windows": null,
+          "pageViews": null,
+          "notAsked": true
+        }
+      ]
+    },
+    "request": {
+      "phase": "proven_live",
+      "markers": {
+        "infinite": {
+          "eventIds": [
+            "evt_FAKE0301"
+          ]
+        },
+        "posthog": {
+          "distinctId": "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4c03"
+        },
+        "ga4": {
+          "measurementId": "G-FAKE00001",
+          "seenLeaving": true,
+          "httpStatus": 204
+        },
+        "metaPixel": {
+          "pixelId": "1234567890123456",
+          "seenLeaving": true,
+          "httpStatus": 200
+        },
+        "serverLane": {
+          "probePath": "/__infinite_probe/7f3c2a91b0de"
+        },
+        "metaCapi": {
+          "metaEventIds": []
+        }
+      },
+      "waitMs": 120000
+    },
+    "response": {
+      "runId": "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      "phase": "proven_live",
+      "checkedAt": "2026-10-02T10:15:00.000Z",
+      "lanes": {
+        "infinite": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "posthog": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "posthog_query"
+        },
+        "ga4": {
+          "state": "no_receipt",
+          "receiptAt": null,
+          "reason": "ga4_realtime_none",
+          "provenance": "ga4_realtime"
+        },
+        "meta_pixel": {
+          "state": "delivering",
+          "receiptAt": null,
+          "reason": "seen leaving with HTTP 200",
+          "provenance": "desktop_test"
+        },
+        "server_lane": {
+          "state": "verified",
+          "receiptAt": "2026-10-02T09:40:00.000Z",
+          "reason": null,
+          "provenance": "cloud_ledger"
+        },
+        "meta_capi": {
+          "state": "not_verifiable",
+          "receiptAt": null,
+          "reason": "no conversion this run",
+          "provenance": "relay_ledger"
+        }
+      }
+    }
+  }
+]

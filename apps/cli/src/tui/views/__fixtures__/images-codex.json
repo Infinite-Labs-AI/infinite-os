@@ -1,0 +1,53 @@
+{
+  "v": 1,
+  "kind": "images",
+  "tool": "generate_images",
+  "title": "Images",
+  "state": "background",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "runId": "run_2",
+    "requested": 3,
+    "ready": 1,
+    "failed": 0,
+    "items": [
+      {
+        "id": "img_1",
+        "label": "Demo A",
+        "status": "done"
+      },
+      {
+        "id": "img_2",
+        "label": "Demo B",
+        "status": "drawing"
+      },
+      {
+        "id": "img_3",
+        "label": "Demo C",
+        "status": "queued"
+      }
+    ],
+    "format": "png",
+    "aspectRatio": "4:5",
+    "model": "codex-image",
+    "madeWith": "your_codex",
+    "eta": {
+      "startedAtMs": 1000,
+      "etaMs": 25000
+    }
+  },
+  "cost": {
+    "usd": 0,
+    "estimate": false,
+    "whoPays": "your_chatgpt_plan"
+  },
+  "appLink": {
+    "place": "creative.library",
+    "label": "Open in Library"
+  }
+}

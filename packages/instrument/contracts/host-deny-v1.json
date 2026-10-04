@@ -1,0 +1,1 @@
+{"version":1,"deny":{"exact":["localhost","127.0.0.1","::1","[::1]","0.0.0.0"],"suffix":[".localhost",".local",".vercel.app",".netlify.app",".pages.dev"]},"normalize":"trim,lowercase,strip-one-trailing-dot"}

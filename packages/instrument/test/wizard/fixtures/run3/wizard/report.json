@@ -1,0 +1,959 @@
+{
+  "schema": "infinite-tag.report.v2",
+  "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+  "tagVersion": "0.12.0",
+  "generatedAt": "2026-10-03T15:05:16.539Z",
+  "site": {
+    "repoLabel": "github.com/example-owner/example-shop-site",
+    "productionHost": "shop.examplebrand.com"
+  },
+  "columns": {
+    "live_today": {
+      "measuredAt": "2026-10-03T14:39:18.480Z",
+      "sha": null
+    },
+    "in_pr": {
+      "measuredAt": "2026-10-03T14:48:18.546Z",
+      "sha": "f1abea9a6cc2de3587959cacea7d6a9e4202d17c"
+    },
+    "proven_live": {
+      "measuredAt": "2026-10-03T15:05:13.856Z",
+      "sha": "c1e1fb9f821c116e40e7e19d2f7d9a22108b83f5",
+      "pending": null
+    }
+  },
+  "rows": [
+    {
+      "id": "checks_passing",
+      "label": "Checks passing",
+      "cells": {
+        "live_today": {
+          "value": "2/6",
+          "display": "2 pass · 3 problems · 1 unknown · 8 not testable of 14",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        },
+        "in_pr": {
+          "value": "2/7",
+          "display": "2 pass · 2 problems · 3 unknown · 7 not testable of 14",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        },
+        "proven_live": {
+          "value": "7/11",
+          "display": "7 pass · 0 problems · 4 unknown · 3 not testable of 14",
+          "state": "pending",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        }
+      }
+    },
+    {
+      "id": "ga4_page_views_per_visit",
+      "label": "GA4 page views per visit",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        }
+      }
+    },
+    {
+      "id": "posthog_route",
+      "label": "PostHog route",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        },
+        "in_pr": {
+          "value": "info",
+          "display": "not installed",
+          "state": "info",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "test_run:posthog"
+          }
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        }
+      }
+    },
+    {
+      "id": "meta_pixel",
+      "label": "Meta pixel",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        },
+        "in_pr": {
+          "value": "problem",
+          "display": "no beacon",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "test_run:meta"
+          }
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        }
+      }
+    },
+    {
+      "id": "preview_share",
+      "label": "Page views from preview links",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        },
+        "in_pr": {
+          "value": "sends data",
+          "display": "the preview link sends data",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "preview_self_silent"
+          }
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    },
+    {
+      "id": "server_conversions",
+      "label": "Conversions sent from the server",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        }
+      }
+    },
+    {
+      "id": "ga4_key_events",
+      "label": "GA4 key events",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    },
+    {
+      "id": "consent_setting",
+      "label": "Consent setting",
+      "cells": {
+        "live_today": {
+          "value": "not recorded",
+          "display": "not recorded",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        },
+        "in_pr": {
+          "value": "not_required",
+          "display": "\"collect by default\" chosen in the plan (not read back from Infinite)",
+          "state": "info",
+          "provenance": {
+            "source": "plan_answer",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        },
+        "proven_live": {
+          "value": "not_required",
+          "display": "collect by default",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        }
+      }
+    },
+    {
+      "id": "live_test_per_tool",
+      "label": "Live test per tool",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        },
+        "in_pr": {
+          "value": "1/3",
+          "display": "rehearsal: 1 of 3 tools fire once, right ID (nothing sent)",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        },
+        "proven_live": {
+          "value": "1 of 1",
+          "display": "1 of 1 fire: 1 verified (receipts from this visit)",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "receiptAt": "2026-10-03T15:03:06.438Z"
+          }
+        }
+      }
+    },
+    {
+      "id": "day7_checkin",
+      "label": "7 days later",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "needs_7_days"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "needs_7_days"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    }
+  ],
+  "day7": {
+    "measuredAt": null,
+    "window": null,
+    "cell": null
+  },
+  "finishLine": [
+    {
+      "n": 1,
+      "id": "each_tool_once",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "GA4 set up 2 times",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        },
+        "in_pr": {
+          "value": "problem",
+          "display": "a tool fires twice or not at all",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "one_beacon_per_tool"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "Infinite pixel: fires once",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "test_run:infinite"
+          }
+        }
+      }
+    },
+    {
+      "n": 2,
+      "id": "ids_match_connections",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T14:39:17.576Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "byte_census"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "Infinite pixel: the connected ID",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "test_run:infinite"
+          }
+        }
+      }
+    },
+    {
+      "n": 3,
+      "id": "previews_silent",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": "problem",
+          "display": "the preview link sends data",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "preview_self_silent"
+          }
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    },
+    {
+      "n": 4,
+      "id": "survives_ad_blockers",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "posthog_via_proxy_once"
+          },
+          "reason": "not_connected"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        }
+      }
+    },
+    {
+      "n": 5,
+      "id": "spa_page_views",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        }
+      }
+    },
+    {
+      "n": 6,
+      "id": "conversions_server_side",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "waiting_real_event"
+        }
+      }
+    },
+    {
+      "n": 7,
+      "id": "identity_joined",
+      "cells": {
+        "live_today": {
+          "value": "info",
+          "display": "no login found",
+          "state": "info",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "waiting_real_event"
+        }
+      }
+    },
+    {
+      "n": 8,
+      "id": "utms_survive_redirects",
+      "cells": {
+        "live_today": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T14:39:17.623Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "redirect_walk"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "campaign tags kept through every redirect",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:13.745Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "redirect_walk"
+          }
+        }
+      }
+    },
+    {
+      "n": 9,
+      "id": "consent_recorded",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "not recorded",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        },
+        "in_pr": {
+          "value": "not_required",
+          "display": "\"collect by default\" chosen in the plan (not read back from Infinite)",
+          "state": "info",
+          "provenance": {
+            "source": "plan_answer",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "collect by default",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        }
+      }
+    },
+    {
+      "n": 10,
+      "id": "csp_allows",
+      "cells": {
+        "live_today": {
+          "value": "unknown",
+          "display": "unknown",
+          "state": "undetermined",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T14:39:17.623Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "csp_header"
+          }
+        },
+        "in_pr": {
+          "value": "0",
+          "display": "no CSP violation",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "checkId": "no_csp_violation"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "no CSP violation",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        }
+      }
+    },
+    {
+      "n": 11,
+      "id": "ga4_key_events_received",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    },
+    {
+      "n": 12,
+      "id": "no_pii",
+      "cells": {
+        "live_today": {
+          "value": "pass",
+          "display": "no personal data in any request",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:39:18.480Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_connected"
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "no personal data in any request",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        }
+      }
+    },
+    {
+      "n": 13,
+      "id": "proof_from_real_visit",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "Infinite pixel: receipt for this visit",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T15:05:13.856Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2",
+            "receiptAt": "2026-10-03T15:03:06.438Z"
+          }
+        }
+      }
+    },
+    {
+      "n": 14,
+      "id": "keeps_being_checked",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T15:05:16.539Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "7-day check-in is on",
+          "state": "pass",
+          "provenance": {
+            "source": "plan_answer",
+            "at": "2026-10-03T14:48:18.546Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          }
+        },
+        "proven_live": {
+          "value": "pending",
+          "display": "7-day check-in on 10 Oct",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T15:05:15.587Z",
+            "runId": "6aa66323-b9c3-4d86-87ce-f148120d29a2"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    }
+  ],
+  "notes": [
+    "A real visit lands two bot-flagged document rows in your Infinite ledger (the page load and the server-lane probe).",
+    "Claude Code ran claude-opus-4-8 at xhigh effort."
+  ]
+}

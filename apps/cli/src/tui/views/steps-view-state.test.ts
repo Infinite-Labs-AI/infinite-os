@@ -1,0 +1,300 @@
+// Wave 3 r1 (TJ-10, terminal half): when exactly one view stands for a step,
+// the view's state sets the row. The desktop bridge reports a refused read
+// (not connected) as a failed call (`status: "error"`, cmdl-local-bridge
+// publicToolCompleteData), so a not-connected read is `· not connected`
+// (r4 flow-numbers-05), never `✗ didn't go through`; a view that asks a
+// question waits for an answer, never for an OK.
+import type { AnswerViewV1 } from "@infinite-os/types";
+import { describe, expect, it } from "vitest";
+
+import type { TurnStep } from "../app/turn-store.js";
+import { NOT_SENT_STEP_WORDS, refineStepStatus, settleNotSentStep, stepRowLines, toolOutcome, unsettledStepLines } from "./steps.js";
+import { resolveTheme } from "../theme.js";
+
+const theme = resolveTheme({});
+const step = (over: Partial<TurnStep> & Pick<TurnStep, "status">): TurnStep => ({
+  id: "s1", name: "mcp__sample_app__read_metrics", label: "checking your metrics", startedAt: 0, endedAt: 1000, result: "", ...over
+});
+const view = (tool: string, state: string, extra: Record<string, unknown> = {}) =>
+  ({ v: 1, kind: "numbers", tool, title: "Metrics", state, asOf: null, scope: { workspaceName: "Demo", crossWorkspace: false }, caveats: [], body: {}, ...extra }) as unknown as AnswerViewV1;
+const rows = (steps: TurnStep[], views: AnswerViewV1[], width = 100) =>
+  stepRowLines(steps, { width, color: false, theme, nowMs: 1000, views });
+
+describe("a step follows the one view that stands for it (TJ-10)", () => {
+  it("a refused read whose view is not connected is `· not connected`, never ✗", () => {
+    const failed = step({ status: "fail", result: "didn't go through" });
+    const [row] = rows([failed], [view("read_metrics", "not_connected")]);
+    expect(row).toMatch(/· not connected$/u);
+    expect(row).not.toContain("✗");
+    expect(row).not.toContain("didn't go through");
+  });
+
+  it("a failed call whose view failed stays ✗ with its own words", () => {
+    const [row] = rows([step({ status: "fail", result: "not allowed" })], [view("read_metrics", "failed")]);
+    expect(row).toMatch(/✗ not allowed$/u);
+  });
+
+  it("two calls of the tool and one view: no telling which, the call keeps its own status", () => {
+    const steps = [step({ id: "a", status: "fail", result: "didn't go through" }), step({ id: "b", status: "ok", result: "" })];
+    const drawn = rows(steps, [view("read_metrics", "not_connected")]);
+    expect(drawn[0]).toMatch(/✗ didn't go through$/u);
+  });
+
+  it("a view that needs an answer waits for an answer, not for an OK", () => {
+    const [row] = rows([step({ status: "ok", name: "mcp__sample_app__resolve_item", label: "finding the item" })], [view("resolve_item", "needs_answer", { kind: "list" })]);
+    expect(row).toMatch(/▣ waiting for an answer$/u);
+    expect(row).not.toContain("waiting for your OK");
+    const [card] = rows([step({ status: "ok", name: "mcp__sample_app__resolve_item", label: "finding the item" })], [view("resolve_item", "needs_yes", { kind: "list" })]);
+    expect(card).toMatch(/▣ waiting for your OK$/u);
+  });
+
+  it("in scrollback, a not-connected read is not kept as an unsettled row", () => {
+    expect(unsettledStepLines([step({ status: "fail", result: "didn't go through" })], { width: 100, color: false, theme, views: [view("read_metrics", "not_connected")] })).toEqual([]);
+  });
+
+  for (const width of [48, 60, 80, 100, 140]) {
+    it(`fits ${width} columns`, () => {
+      for (const line of rows([step({ status: "fail", result: "didn't go through" })], [view("read_metrics", "not_connected")], width)) {
+        expect(line.length).toBeLessThanOrEqual(width);
+      }
+    });
+  }
+});
+
+// Wave 3 r2 (W3-quiet-blocked, W3-quiet-limit, W3-quiet-unknown, W3-chg-nochange):
+// a frame carries no refusal code, but the one view that stands for the call
+// does. Its typed state sets the row's words (r4 `✗ not allowed`, `✗ limit`),
+// and a row never ends in a lone mark (`?`, `·`).
+describe("a step's words come from the view that stands for it (W3 r2)", () => {
+  // A blocked view carries the host's step word the way the host sends it (rev 3 `stateReason.step`).
+  const quiet = (tool: string, state: string, extra: Record<string, unknown> = {}) =>
+    view(tool, state, { kind: "quiet", ...(state === "blocked" ? { stateReason: { code: "role_required", words: "A sample sentence.", step: "not allowed" } } : {}), ...extra });
+
+  it("a refused call whose view is blocked says `✗ not allowed`, never the transport's generic words", () => {
+    const [row] = rows([step({ status: "fail", result: "didn't go through" })], [quiet("read_metrics", "blocked")]);
+    expect(row).toMatch(/✗ not allowed$/u);
+    expect(row).not.toContain("didn't go through");
+  });
+
+  it("a refused call whose view hit a limit says `✗ limit`", () => {
+    const [row] = rows([step({ status: "fail", result: "didn't go through" })], [quiet("read_metrics", "hit_limit")]);
+    expect(row).toMatch(/✗ limit$/u);
+    expect(row).not.toContain("didn't go through");
+  });
+
+  it("a finished call whose view is blocked or hit a limit says the same words", () => {
+    expect(rows([step({ status: "ok", result: "" })], [quiet("read_metrics", "blocked")])[0]).toMatch(/✗ not allowed$/u);
+    expect(rows([step({ status: "ok", result: "" })], [quiet("read_metrics", "hit_limit")])[0]).toMatch(/✗ limit$/u);
+  });
+
+  it("two calls of the tool and one blocked view: no telling which, each call keeps its own words", () => {
+    const steps = [step({ id: "a", status: "fail", result: "didn't go through" }), step({ id: "b", status: "fail", result: "didn't go through" })];
+    for (const row of rows(steps, [quiet("read_metrics", "blocked")])) expect(row).toMatch(/✗ didn't go through$/u);
+  });
+
+  it("an outcome-unknown view's row says it is not sure, never a lone ?", () => {
+    const [row] = rows([step({ status: "ok", result: "" })], [quiet("read_metrics", "outcome_unknown", { outcome: "unknown" })]);
+    expect(row).toMatch(/\? not sure it happened$/u);
+    expect(row).not.toMatch(/\?$/u);
+  });
+
+  it("an outcome-unknown view with a short reason says that short", () => {
+    const [row] = rows([step({ status: "ok", result: "" })], [quiet("read_metrics", "outcome_unknown", { outcome: "unknown", stateReason: { code: "sample", words: "A sample sentence.", short: "Timed out" } })]);
+    expect(row).toMatch(/\? timed out$/u);
+  });
+
+  it("a no-change view's row says nothing to change, never a lone ·", () => {
+    const [row] = rows([step({ status: "ok", result: "" })], [view("read_metrics", "no_change", { kind: "change", outcome: "no_change" })]);
+    expect(row).toMatch(/· nothing to change$/u);
+  });
+
+  it("the app's own result words still win for unknown and no-change rows", () => {
+    expect(rows([step({ status: "ok", result: "already off" })], [view("read_metrics", "no_change", { kind: "change" })])[0]).toMatch(/· already off$/u);
+    expect(rows([step({ status: "ok", result: "sample words" })], [quiet("read_metrics", "outcome_unknown")])[0]).toMatch(/\? sample words$/u);
+  });
+
+  it("in scrollback, blocked, limit and unknown rows keep their words", () => {
+    const kept = (state: string, status: "fail" | "ok") =>
+      unsettledStepLines([step({ status, result: status === "fail" ? "didn't go through" : "" })], { width: 100, color: false, theme, views: [quiet("read_metrics", state)] });
+    expect(kept("blocked", "fail")).toEqual([expect.stringMatching(/✗ not allowed$/u)]);
+    expect(kept("hit_limit", "fail")).toEqual([expect.stringMatching(/✗ limit$/u)]);
+    expect(kept("outcome_unknown", "ok")).toEqual([expect.stringMatching(/\? not sure it happened$/u)]);
+  });
+
+  for (const width of [48, 60, 100, 140]) {
+    it(`fits ${width} columns`, () => {
+      for (const state of ["blocked", "hit_limit", "outcome_unknown", "no_change"]) {
+        for (const line of rows([step({ status: state.startsWith("b") || state.startsWith("h") ? "fail" : "ok", result: "" })], [quiet("read_metrics", state)], width)) {
+          expect(line.length).toBeLessThanOrEqual(width);
+        }
+      }
+    });
+  }
+});
+
+// Wave 3 r2 review (M1, S2): the desktop bridge sends an uncertain write as a
+// failed call (`status: "error"`, outcome uncertain, a "not sure" summary), so
+// the step is a fail. The one view that stands for it says it is unknown, and
+// ✗ (failed / not sent) would tell the person the write failed when it may
+// have landed. The view's state wins: `? not sure it happened`. A row a view
+// refined never ends in a lone mark (`◐`, `⧗`).
+describe("the view's state wins over the wire's failure (W3 r2 review)", () => {
+  const quiet = (tool: string, state: string, extra: Record<string, unknown> = {}) => view(tool, state, { kind: "quiet", ...extra });
+  const wired = (over: Partial<TurnStep> = {}) => {
+    const outcome = toolOutcome({ status: "error", summary: "not sure it went through" });
+    return step({ name: "mcp__sample_app__update_sample_brief", label: "updating the sample brief", ...outcome, ...over });
+  };
+
+  it("the real wire shape is a failed step", () => {
+    expect(toolOutcome({ status: "error", summary: "not sure it went through" }).status).toBe("fail");
+  });
+
+  it("a failed call whose one view is outcome-unknown is `? not sure it happened`, never ✗", () => {
+    const failed = wired();
+    const views = [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown" })];
+    const [row] = rows([failed], views);
+    expect(row).toMatch(/\? not sure it happened$/u);
+    expect(row).not.toContain("✗");
+    expect(row).not.toContain("went through");
+    expect(refineStepStatus(failed, views, [failed])).toBe("unk");
+  });
+
+  it("an outcome-unknown view's short reason stands for the row", () => {
+    const [row] = rows([wired()], [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown", stateReason: { code: "sample", words: "A sample sentence.", short: "Timed out" } })]);
+    expect(row).toMatch(/\? timed out$/u);
+    expect(row).not.toContain("✗");
+  });
+
+  it("a failed view whose outcome is unknown is unknown too", () => {
+    const [row] = rows([wired()], [quiet("update_sample_brief", "failed", { outcome: "unknown" })]);
+    expect(row).toMatch(/\? not sure it happened$/u);
+    expect(row).not.toContain("✗");
+  });
+
+  it("a failed call whose one view changed nothing is `· nothing to change`, never ✗", () => {
+    const [row] = rows([wired({ result: "didn't go through" })], [view("update_sample_brief", "no_change", { kind: "change", outcome: "no_change" })]);
+    expect(row).toMatch(/· nothing to change$/u);
+    expect(row).not.toContain("✗");
+  });
+
+  it("two calls of the tool and one unknown view: no telling which, each keeps its own ✗", () => {
+    const steps = [wired({ id: "a" }), wired({ id: "b" })];
+    const drawn = rows(steps, [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown" })]).filter((row) => row.includes("━"));
+    expect(drawn).toHaveLength(2);
+    for (const row of drawn) expect(row).toContain("✗");
+  });
+
+  it("in scrollback, the unknown row keeps its words", () => {
+    expect(unsettledStepLines([wired()], { width: 100, color: false, theme, views: [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown" })] }))
+      .toEqual([expect.stringMatching(/\? not sure it happened$/u)]);
+  });
+
+  it("a partial view's row says its words, never a lone ◐", () => {
+    expect(rows([step({ status: "ok", result: "" })], [view("read_metrics", "partial")])[0]).toMatch(/◐ partial$/u);
+    expect(rows([step({ status: "ok", result: "" })], [view("read_metrics", "partial", { stateReason: { code: "sample", words: "A sample sentence.", short: "4 of 5 days in" } })])[0])
+      .toMatch(/◐ 4 of 5 days in$/u);
+  });
+
+  it("an out-of-date view's row says its words, never a lone ⧗", () => {
+    expect(rows([step({ status: "ok", result: "" })], [view("read_metrics", "out_of_date")])[0]).toMatch(/⧗ out of date$/u);
+  });
+
+  it("the app's own result words still win for partial rows", () => {
+    expect(rows([step({ status: "ok", result: "sample words" })], [view("read_metrics", "partial")])[0]).toMatch(/◐ sample words$/u);
+  });
+
+  for (const width of [48, 60, 100, 140]) {
+    it(`fits ${width} columns`, () => {
+      for (const line of rows([wired()], [quiet("update_sample_brief", "outcome_unknown", { outcome: "unknown" })], width)) {
+        expect(line.length).toBeLessThanOrEqual(width);
+      }
+    });
+  }
+});
+
+// S4 (round 2 reassembly): a card the app proved never left (its `notSent`
+// mark, no receipt view) takes its frame off the turn and prints
+// `✗ Not sent: …`; the row that waited for its OK says so too, never `▣`.
+describe("the row that waited for a card the app did not send", () => {
+  const waiting = (over: Partial<TurnStep> = {}) =>
+    step({ id: "w1", name: "mcp__sample_app__propose_pause_entity", label: "waiting for your OK", status: "wait", result: "pause 1 ad", ...over });
+
+  it("says `✗ not sent`, never the waiting mark", () => {
+    const settled = settleNotSentStep([waiting()], "propose_pause_entity");
+    expect(settled[0]).toMatchObject({ status: "fail", result: NOT_SENT_STEP_WORDS });
+    const [row] = rows(settled, []);
+    expect(row).toMatch(/✗ not sent$/u);
+    expect(row).not.toContain("▣");
+  });
+
+  it("leaves every other call's row as it is", () => {
+    const read = step({ status: "ok", result: "3 rows" });
+    const settled = settleNotSentStep([read, waiting()], "propose_pause_entity");
+    expect(settled[0]).toBe(read);
+  });
+
+  it("two calls of the tool waiting: no telling which card it was, both rows stay", () => {
+    const steps = [waiting({ id: "a" }), waiting({ id: "b" })];
+    expect(settleNotSentStep(steps, "propose_pause_entity")).toBe(steps);
+  });
+
+  it("no call of the tool waiting: the steps stay", () => {
+    const steps = [step({ status: "ok", result: "" })];
+    expect(settleNotSentStep(steps, "propose_pause_entity")).toBe(steps);
+  });
+});
+
+// Wave 3 r3 (io-term, judge round 2 "what remains"): a blocked view is not
+// always a refusal. The host decides the Steps word and sends it as
+// `stateReason.step` (rev 3); the terminal draws it verbatim and never says
+// `not allowed` unless the host did. The same table is pinned on the host side,
+// so the terminal and Cmd+L say the same step word for one view.
+describe("a blocked or limited row says the host's step word (W3 r3 parity)", () => {
+  const quiet = (state: string, stateReason?: Record<string, unknown>) =>
+    view("read_metrics", state, { kind: "quiet", ...(stateReason ? { stateReason } : {}) });
+  const word = (status: "fail" | "ok", target: AnswerViewV1) => rows([step({ status, result: "didn't go through" })], [target])[0]!;
+  const PARITY: ReadonlyArray<readonly [string, AnswerViewV1, string]> = [
+    ["blocked, a refusal code with step `not allowed`", quiet("blocked", { code: "role_required", words: "A sample sentence.", step: "not allowed" }), "not allowed"],
+    ["blocked, no step, short `needs your OK`", quiet("blocked", { code: "needs_person_ok", words: "A sample sentence.", short: "needs your OK" }), "needs your OK"],
+    ["blocked, no step, no short", quiet("blocked", { code: "sample_code", words: "A sample sentence." }), "blocked"],
+    ["blocked, no stateReason at all", quiet("blocked"), "blocked"],
+    ["hit_limit with step `limit`", quiet("hit_limit", { code: "sample_cap", words: "A sample sentence.", step: "limit" }), "limit"],
+    ["hit_limit, no step", quiet("hit_limit", { code: "sample_cap", words: "A sample sentence." }), "limit"]
+  ];
+
+  for (const [name, target, expected] of PARITY) {
+    for (const status of ["fail", "ok"] as const) {
+      it(`${name} → ✗ ${expected} (call ${status})`, () => {
+        const row = word(status, target);
+        expect(row).toMatch(new RegExp(`✗ ${expected}$`, "u"));
+        expect(row).not.toContain("didn't go through");
+      });
+    }
+  }
+
+  it("never says `not allowed` unless the host said it", () => {
+    for (const [, target, expected] of PARITY) {
+      if (expected !== "not allowed") expect(word("fail", target)).not.toContain("not allowed");
+    }
+  });
+
+  it("the host's step wins over a short and is drawn as sent", () => {
+    const row = word("fail", quiet("blocked", { code: "sample_code", words: "A sample sentence.", short: "Sample short", step: "Sample Step" }));
+    expect(row).toMatch(/✗ Sample Step$/u);
+  });
+
+  it("in scrollback, a blocked row keeps the host's word", () => {
+    const kept = unsettledStepLines([step({ status: "fail", result: "didn't go through" })], {
+      width: 100, color: false, theme, views: [quiet("blocked", { code: "needs_person_ok", words: "A sample sentence.", short: "needs your OK" })]
+    });
+    expect(kept).toEqual([expect.stringMatching(/✗ needs your OK$/u)]);
+  });
+
+  for (const width of [60, 100, 140]) {
+    it(`fits ${width} columns`, () => {
+      for (const [, target] of PARITY) {
+        for (const line of rows([step({ status: "fail", result: "" })], [target], width)) expect(line.length).toBeLessThanOrEqual(width);
+      }
+    });
+  }
+});

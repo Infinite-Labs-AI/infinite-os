@@ -1,0 +1,859 @@
+# infinite-tag
+
+**By [Infinite](https://infinite.fast) — the agent-first growth operator for founders.** Docs, dashboards and the server lane live at [infinite.fast](https://infinite.fast); source on [GitHub](https://github.com/Infinite-Labs-AI/infinite-os/tree/main/packages/instrument).
+
+`infinite-tag` installs browser analytics into an existing web app using public
+artifacts only. It supports Infinite first-party website collection, GA4,
+PostHog, X, and Meta across Next.js, Vite/React, and static HTML. Installs are
+idempotent, manifest-backed, and reversible.
+
+Run it inside the website repository. The classic commands (`install`, `plan`,
+`harness`, …) never provision an Infinite source, call a cloud control plane, or
+read a desktop session. The setup wizard (bare `npx infinite-tag`) talks only to
+the Infinite desktop app on your Mac, over its local bridge, after you approve
+the link in the app; it never holds a cloud credential. Verified source creation
+happens outside this open-core package.
+
+Installing the npm package is not the instrumentation step. After
+`npm i infinite-tag` / `pnpm add -D infinite-tag`, run
+`npx infinite-tag install ...` (or the matching package-manager command) from
+the website repo so the managed runtime, imports, and proxy rewrites are written.
+
+## The setup wizard
+
+```bash
+npx infinite-tag            # in your website repo, with the Infinite app open on your Mac
+```
+
+One command takes a site from "some tags pasted in" to tags that are proven to collect. It runs 13
+steps and resumes where it stopped:
+
+1. **Link** — the Infinite app shows a 4-digit code; approve it there. Nothing runs before you do.
+2. **Agent** — picks the agent that does the code jobs: your own Claude Code or Codex, on your plan.
+   It runs Opus 4.8 or Sol 6.1 at extra-high effort, with one retry on the other model.
+3. **Before** — branches from production, reads the live site without sending anything, and grades
+   what it finds ("Live site today").
+4. **Keys** — the connection ids (GA4 stream, PostHog project, Meta pixel) come from Infinite, never
+   from the repo or a guess.
+5. **Plan** — one screen with every change and the four decisions only you can make (consent mode,
+   conversion names, the privacy text, the npm install). A 7-day check-in follows the deploy.
+6. **Install** — the managed tags, the approved edits, the preview guard and a build check, with a
+   full rollback if the build breaks.
+7. **Jobs** — the agent does the code jobs the plan approved, fenced to the files each job may touch;
+   the wizard checks every job itself (static checks, the build, an offline browser test).
+8. **Settings** — through the app: the approved conversions, GA4 key events for conversions whose
+   offline click test passed, the server-lane settings on Vercel (only when approved; production is not
+   restarted) and Meta server events (only when approved). The wizard never sees a secret.
+9. **Rehearsal** — opens a draft pull request and tests its preview deployment.
+10. **Review** — a second agent reviews the pull request; fixes are re-checked the same way.
+11. **Merge** — you merge. The wizard never merges, approves or force-pushes.
+12. **Prove** — after the deploy, it checks the live site again with this run's own test events.
+13. **Done** — the before/after report, in your terminal, the pull request and Infinite.
+
+Exit codes: `0` done · `1` failed · `2` usage or environment · `3` parked (resume with
+`npx infinite-tag --resume`) · `4` needs the Infinite app · `130` interrupted.
+
+Flags: `--json` (one NDJSON event per line, for agents and CI), `--answers <file>`, `--yes` (approves
+only the plan lines that are safe to approve for you; never consent, conversion names, the privacy
+text or a change to a tag you already had), `--resume`, `--fresh` (set an unfinished run aside and
+start over), `--root`, `--app-root`, `--no-agent`, `--worker claude|codex`,
+`--reviewer claude|codex|brief|none`, `--consent-mode not_required|required`, `--no-prove`.
+`npx infinite-tag --version` prints the version.
+
+**Run by an agent.** When another agent starts the wizard (`--json`, no terminal), no agent is
+spawned: the code jobs go to the agent that started it (`job.seeded` events and
+`.infinite/wizard/agent-brief.md`), and `npx infinite-tag --resume --json` fences and checks what it
+changed. Questions only you can answer (consent mode, conversion names, the privacy text, Meta server
+events, any change to an existing tag) are never answered from a file in that mode: the run parks and
+asks you to finish in your own terminal.
+
+**Answers file** (`--answers answers.json`). Strict: an unknown key, a wrong type or another version is
+an error, so a typo never silently answers nothing.
+
+```json
+{
+  "v": 1,
+  "plan": { "approved": ["install_provider:ga4"], "declined": ["server_lane"], "edits": { "consent_mode": "required" } },
+  "consentMode": "required",
+  "conversionNames": ["signup"],
+  "privacyText": true,
+  "npmInstall": false,
+  "asks": [{ "kind": "single", "match": "GA4", "answer": "G-XXXXXXXXXX" }]
+}
+```
+
+`plan` answers plan lines by id; `asks` answers any other question by kind, the first entry whose
+`match` text appears in the question (no `match` = any question of that kind). An ask the file does
+not answer parks the run with exit 3.
+
+**What it leaves behind.** Its own state lives in `.infinite/wizard/` (gitignored, mode 0600); the
+edit receipt `.infinite/install.json` is committed with the pull request, so
+`npx infinite-tag uninstall --pr` can open a pull request that reverses every edit, the `.gitignore`
+fence included.
+
+### `infinite-tag doctor`
+
+```bash
+npx infinite-tag doctor --url https://example.com      # ids from .infinite/install.json
+npx infinite-tag doctor --json --url https://example.com --expect-ga4 G-XXXXXXXXXX
+```
+
+Checks an installed site without a browser: the setup checks over your source and, with `--url`, the
+live checks (the tags and ids your pages serve, the PostHog proxy, redirects keeping campaign tags,
+the security policy, Meta's domain permissions). Every live request is marked as a check, so nothing
+counts as a visit, and nothing is sent to the server lane unless you pass `--probe-server-lane`.
+Live requests honour `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`. Exit: `0` clean · `1` a problem ·
+`3` nothing wrong but something could not be determined · `2` usage.
+
+## Quick Start
+
+Preview a GA4 + PostHog install (each provider installs natively and independently):
+
+```bash
+npx infinite-tag@latest install \
+  --workspace <workspace-id> \
+  --ga4-measurement-id G-XXXXXXXXXX \
+  --posthog-project-key phc_xxxxxxxxxxxxxxxx \
+  --posthog-api-host https://us.i.posthog.com
+```
+
+Apply a first-party Infinite install to a Vercel-hosted static or Vite site:
+
+```bash
+npx infinite-tag@latest install \
+  --workspace <workspace-id> \
+  --infinite-site-source-key site_xxxxxxxxxxxxxxxx \
+  --infinite-production-host example.com \
+  --infinite-production-host www.example.com \
+  --infinite-static-proxy vercel \
+  --infinite-consent-mode required \
+  --yes
+```
+
+If the main conversion button goes through a first-party route before Stripe,
+booking, or another external checkout, set that route explicitly:
+
+```bash
+npx infinite-tag@latest install \
+  --workspace <workspace-id> \
+  --infinite-site-source-key site_xxxxxxxxxxxxxxxx \
+  --infinite-production-host example.com \
+  --infinite-static-proxy vercel \
+  --infinite-consent-mode not-required \
+  --infinite-download-destination-path /checkout \
+  --yes
+```
+
+`infinite local setup` can save public artifacts under
+`~/.infinite/artifacts/<workspace-id>.json`. A bare install discovers a single
+saved file, or `--workspace` selects one when several exist. A workspace ID is
+manifest ownership only: it never fabricates a source key or enables Infinite
+collection.
+
+Infinite first-party collection has no implicit consent mode. Every new install
+must explicitly choose `required` or `not-required`. A bare interactive install
+with a legacy artifact that has no `consentMode` prints a blocker instead of
+guessing; it does not prompt because the choice changes the site's privacy
+contract. Noninteractive `--yes` and `apply` runs fail on the same blocker.
+
+## Commands
+
+| Command | Behavior |
+| --- | --- |
+| *(none)* / `wizard` | The setup wizard (see [The setup wizard](#the-setup-wizard)). |
+| `doctor` | Check an installed site: setup checks, and with `--url` the live checks. |
+| `uninstall --pr` | Open a pull request that reverses the wizard's install. |
+| `inspect` | Detect framework, package manager, and existing providers. |
+| `plan` | Print deterministic changes and blockers without writing. |
+| `install` | Plan, apply with approval, then verify managed files. |
+| `apply` | Apply directly; requires `--yes` and `--workspace`. |
+| `verify` | Check managed hashes and forbidden external-loader routes. |
+| `uninstall` | Preview removal, or reverse it with `--yes`. |
+| `server-lane --brief` | Print the server-lane agent brief for this repo's stack (no install). |
+| `harness` | One runbook: adopt existing tags, install what is missing, mark conversions, verify receipts, report per provider. See [The harness](#the-harness-infinite-tag-harness--infinite-analytics). |
+
+## Public Artifact Flags
+
+| Flag | Description |
+| --- | --- |
+| `--infinite-site-source-key <site_...>` | Public, source-bound browser key created after domain verification. |
+| `--infinite-production-host <host>` | Verified hostname for the shared browser runtime; repeatable. Origins, paths, ports, queries, and fragments are rejected. |
+| `--infinite-collect-path <path>` | Same-origin browser route. Defaults to `/infinite/ledger` (an artifact that already records another path keeps it). |
+| `--infinite-api-origin <https://host>` | The API host the same-origin route proxies to. Defaults to `https://api.ultima.inc`; the `INFINITE_API_ORIGIN` env var is the same override. Must be an https origin with no path. |
+| `--infinite-download-destination-path <path>` | Same-origin conversion click path for `app_download_click`. Defaults to `/download`; use `/checkout` only when the site intentionally routes checkout through its own page first. Direct Stripe-hosted payment surfaces are detected automatically as structural checkout-intent `site_click` buckets. |
+| `--infinite-autocapture <on\|off>` | Unmarked-click autocapture (default `on`). `off` stops unmarked links and buttons from emitting; marked `data-analytics-cta-id` CTAs, the conversion destination, Stripe checkout buckets, `data-conversion` markers and sign-up paths still emit. |
+| `--infinite-static-proxy vercel` | Explicit proof that a static/Vite install may create Vercel rewrites. |
+| `--infinite-consent-mode <required\|not-required>` | Required for Infinite first-party collection. There is no default. `required` waits for the external consent event below; `not-required` collects Infinite events unless DNT/GPC blocks them. Neither mode touches GA4/PostHog consent. |
+| `--ga4-measurement-id <G-...>` | Public GA4 measurement ID. |
+| `--posthog-project-key <phc_...>` | Public PostHog project key. |
+| `--posthog-api-host <https://...>` | PostHog ingestion host. |
+| `--posthog-proxy` | Install the managed same-origin `/ingest` Vercel/Next rewrites. |
+| `--posthog-ui-host <https://...>` | Optional PostHog toolbar host when proxying. |
+| `--x-pixel-id <id>` | Public X pixel ID. |
+| `--x-event-tag-id <id>` | Public X event tag ID; repeatable. |
+| `--meta-pixel-id <id>` | Public Meta pixel ID. Installs with Meta's Automatic Configuration off (`fbq('set','autoConfig','false', id)` before `init`): no button clicks or page metadata are sent to Meta by default. Also installs the `_fbc` landing capture: when a visitor arrives from a Meta ad, the ad's click id is saved in Meta's own `_fbc` cookie (last click wins) even if the pixel itself is blocked, and `window.infiniteMetaClickId()` reads it. It sends nothing. It skips a visitor who said no on the site, or whose browser sends Do Not Track / Global Privacy Control, until they grant; with `--infinite-consent-mode required` it waits for the visitor's grant. |
+| `--meta-advanced-matching <on\|off>` | **Default off.** Manual Advanced Matching — see below. On, the page defines `window.infiniteMetaAdvancedMatch({ email, externalId })` for **your** code to call once a visitor identifies themselves; it hashes those values before anything reaches Meta. It never reads your pages and never fires on its own. |
+| `--artifact-file <path>` | Read the same public artifact shape from JSON. |
+| `--server-lane` | Add the lossless server lane (see below). Works alone or with the artifact flags. |
+| `--workspace <id>` | Install-manifest ownership; required for apply. |
+| `--app-root <path>` | App directory in a monorepo. |
+| `--package-manager <pnpm\|npm\|yarn\|bun>` | Override package-manager detection. |
+| `--yes` | Approve writes. |
+| `--allow-dirty` | Bypass the clean-tree gate. |
+| `--json` | Machine-readable output. |
+
+#### `--meta-advanced-matching` — helping Meta match a conversion to the click that caused it
+
+**Off unless you turn it on.** Leave it off and nothing changes: the pixel reports the event and
+Meta matches it as best it can from the `_fbc` / `_fbp` cookies it already sets.
+
+**What it improves.** When someone clicks your Meta ad and buys three days later on a different
+device, Meta often cannot tell that those were the same person, so the sale is never credited to the
+ad that caused it — and Meta's optimiser, which learns from exactly those credited conversions,
+learns from a partial picture and spends your budget worse. Handing Meta a hashed email or account
+id alongside the event lets it join the two with certainty instead of guessing. Meta scores this as
+"Event Match Quality"; a higher score means more of your real conversions get attributed, and
+cheaper results from the same spend.
+
+**What it means for your visitors.** With this on, when your code calls the accessor, their email
+address (or the account id you pass) is turned into a SHA-256 hash in their browser and sent to Meta
+with the event. Meta uses it to look for a matching account on its side. The raw value is hashed
+before it is transmitted and is never sent in the clear — but a hash of an email is still a stable
+identifier for that person, so this is genuinely data about your visitor going to Meta for ad
+measurement. **Disclose it in your privacy policy**, and check it against your consent rules, before
+you turn it on. The installer reminds you at install time.
+
+**It follows the visitor's recorded consent.** The accessor attaches nothing for a visitor who
+denied on your site, or whose browser sends Do Not Track / Global Privacy Control without a grant;
+with `--infinite-consent-mode required` it attaches nothing until the visitor granted. It checks on
+every call, so a revocation counts at once. It never sends a phone number. The email is trimmed and
+lowercased before hashing; the account id is trimmed only (its case is kept), so it hashes to the
+same bytes your server sends.
+
+**We will not do it behind your back.** Meta also offers *Automatic* Advanced Matching, where the
+pixel scrapes your forms for these values by itself. `infinite-tag` keeps that switched off
+(`fbq('set','autoConfig','false', id)`), on every install, opted in or not — deciding to harvest
+your visitors' form fields is not ours to make on your behalf. This flag is the manual alternative:
+values reach Meta only because **your** code handed them over, at a moment you chose.
+
+**How to turn it on**
+
+```bash
+npx infinite-tag install --meta-pixel-id <id> --meta-advanced-matching on --workspace <id> --yes
+```
+
+Then call the accessor from your own code, where you already know who the visitor is — after a
+sign-up completes, or on an order-confirmation page:
+
+```js
+// Pass RAW values. The tag hashes them; you must not hash them first.
+await window.infiniteMetaAdvancedMatch({
+  email: user.email,        // normalised (trimmed + lowercased) and SHA-256'd for you
+  externalId: user.id       // your own stable account id; trimmed only (case kept) and SHA-256'd
+})
+// Browser events fired after this carry the hashed identity. A purchase is not one of them: it
+// goes to Meta from your server's payment webhook (see adMatch below), never as a browser fbq.
+```
+
+**The contract, so nothing is ambiguous:**
+
+- **Raw in, always.** The tag is the only thing that hashes. If you pass a value that is already a
+  64-character hex digest it is **refused**, not hashed a second time — a double-hashed value is
+  accepted by Meta and matches nobody, which quietly makes your score *worse*.
+- **Both fields are optional.** Pass what you have. Nothing usable ⇒ nothing is sent.
+- **Call it before the event** you want enriched; it returns a promise, so `await` it. The identity
+  then rides along with every subsequent event on that page.
+- **It never reads your page.** No form fields, no DOM, no timers, no automatic calls.
+- Needs a secure origin (HTTPS), because the hashing uses the browser's WebCrypto. On an insecure
+  origin it sends nothing rather than sending a raw value.
+
+The removed external-loader flags fail with a migration error and are not
+reinterpreted.
+
+## Infinite Runtime
+
+The generated runtime is self-contained in the managed site code. It posts only
+to the configured root-relative collection path and never loads an Infinite
+script from another origin. The browser artifact is:
+
+```ts
+interface InfinitePublicArtifact {
+  siteSourceKey: string
+  collectPath: string
+  productionHosts: string[]
+  staticProxy?: "vercel"
+  // Optional only for reading legacy files; planning blocks until this is explicit.
+  consentMode?: "required" | "not_required"
+  // Optional; defaults to "/download".
+  downloadDestinationPath?: string
+  // Optional; false turns unmarked-click autocapture off (absent = on).
+  autocapture?: boolean
+}
+```
+
+The runtime owns one logical initial website view and SPA route views. It
+normalizes canonical paths, removes query strings and fragments, tracks the
+configured same-origin conversion destination, detects hosted Stripe payment
+surfaces as structural checkout-intent `site_click` buckets, and autocaptures
+safe DOM clicks. Same-origin links are grouped by destination path
+(`auto_pricing`, `auto_checkout`, etc.); standalone unmarked buttons stay under
+the generic `button` CTA id plus structural location; obvious sign-up routes
+emit `sign_up_click`; non-checkout external links are bucketed by class
+(`external_booking` or `external_link`) without storing the external URL. It
+never captures DOM text, link text, button text, form values, query strings, or
+fragments.
+
+`data-analytics-cta-id` and `data-analytics-cta-location` are still supported as
+explicit overrides for cleaner reporting. Stripe-hosted payment surfaces use
+structural destination buckets (`/external/stripe_payment_link`,
+`/external/stripe_checkout`, `/external/stripe_invoice`); custom external
+checkout domains can opt in with `data-conversion="checkout"`, which emits
+`/external/marked_checkout`. The actual checkout URL and query string are never
+sent to Infinite. Download anchors may additionally retain the
+backward-compatible `data-download-location` placement attribute; a valid
+`data-analytics-cta-location` takes precedence when both are present. Both use
+the same `^[A-Za-z0-9_-]{1,64}$` structural-token constraint, and one click
+still emits only one browser event.
+
+Every `site_page_view` carries one bounded property, `nav`: `"navigate"` for the
+initial document load and `"history"` for a History-API route change. The runtime
+emits nothing when `navigator.webdriver` is true (automation-driven browsers —
+Playwright, Puppeteer, Lighthouse — are not visitors).
+
+### What the pixel sends
+
+The event envelope is the public contract in `contracts/browser-collect-v1.schema.json`
+(the cloud pins the same file by hash): `siteSourceKey`, `eventId`, `eventName` (one of
+`site_page_view`, `site_click`, `app_download_click`, `sign_up_click`), `occurredAt`, the
+runtime's own random `anonymousId` / `sessionId`, `url` (origin + canonical path — the query
+string and fragment are stripped), an optional `referrer` reduced to its host, and a bounded
+`properties` object. On the **initial** page view (`nav: "navigate"`) the runtime also attaches
+an allowlisted campaign block read from the landing URL:
+
+| Property | Value |
+| --- | --- |
+| `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term` | The parameter's value — trimmed, control characters stripped, truncated to 100 characters; absent when empty. |
+| `has_gclid`, `has_fbclid`, `has_ttclid`, `has_msclkid` | `true` when the click id is present. **The id value is never sent.** |
+
+Any other query parameter is dropped, History-API route views carry `nav: "history"` only,
+and click events never carry the block. Nothing else about the page — DOM text, link text,
+button text, form values — ever leaves the browser.
+
+**Providers are independent (0.6.0).** GA4 and PostHog install as fully native
+bootstraps — Google's own `gtag.js` snippet with its default `page_view`, and
+PostHog's own `posthog.init` with PostHog's defaults (`defaults: '2026-01-30'`
+unless the install pins an earlier value: autocapture, page views, pageleave,
+session recording and opt-in state are PostHog's). The Infinite runtime forwards
+nothing into a provider and never loads a provider on its behalf; conversions
+reach GA4 / PostHog only because the site's own code calls the managed helpers
+(`infiniteTrack`, `infiniteTrackThenNavigate`, `infiniteIdentify`), which follow
+the visitor's consent at every call. A provider's configuration or consent is
+never reduced WITHOUT a plan line the user approved (the setup wizard's plan);
+consent for GA4 / PostHog is the site's own, exactly as with a hand-pasted
+snippet. Mirror mode (the pre-0.6.0 translation of `site_page_view`
+into GA4 `page_view` / PostHog `$pageview`) is gone. Without an Infinite source
+key no Infinite runtime is embedded at all; with one, it emits only from hosts
+on its validated `productionHosts` allowlist.
+
+Infinite collection respects DNT and Global Privacy Control in both modes. In `required`
+mode, the runtime starts dormant and the site's existing consent UI must dispatch
+the following signal after every grant, denial, or revocation:
+
+```js
+window.dispatchEvent(new CustomEvent("infinite:analytics-consent-change", {
+  detail: { granted: true } // false on denial or revocation
+}))
+```
+
+The runtime stores this decision under `infinite_analytics_consent`. `verify`
+checks that the managed required-mode runtime contains this event bridge, then
+instructs the founder to exercise the external consent UI in a browser; static
+verification cannot prove that an app-owned UI dispatches the event.
+
+The consent signal governs Infinite collection only: a grant (re-)emits the
+current page as the initial view, a revocation stops future Infinite events. It
+never touches GA4 or PostHog in either mode — those providers run their own
+native consent handling.
+
+### Handoff context
+
+The runtime exposes exactly one accessor to the page, for sites that hand a
+browser journey to a native app:
+
+```ts
+window.__infiniteHandoffContext?.(): {
+  siteSourceKey: string
+  anonymousId: string
+  sessionId: string
+  url: string
+} | null
+```
+
+It is context, not a capability: there is no `track()`, no dispatch, no event
+emitter, no workspace/authority/environment, and no endpoint. It mints no new
+identity either — the ids are the same random `localStorage`/`sessionStorage`
+values the runtime already uses for its own events, so reading it can never
+create a visitor the site would not otherwise have had.
+
+The accessor is installed **only** for a configured source key on a validated
+production host, so a page with no Infinite source, a preview host, loopback, or
+an automation-driven browser has no `__infiniteHandoffContext` at all. Consent is
+re-checked on every call: a stored denial, a DNT/GPC default, or a revocation
+returns `null` rather than an identity.
+
+Localhost and IPv4/IPv6 loopback do not emit. Every shared runtime uses its exact,
+non-empty validated `productionHosts` allowlist, so a verified Vercel production
+host works while custom-domain and Vercel previews remain suppressed unless
+explicitly listed. A source key with an empty allowlist is a planning blocker.
+
+## Server lane (lossless analytics)
+
+> server-side analytics: every page your server serves and every outcome it confirms, counted where ad-blockers can't reach. A floor for people, never an exact share — installed by your agent in ten minutes.
+
+Browser tags see a fraction of real traffic behind ad-blockers and consent gates. The
+server lane counts on the other side of that wall: the customer's **server** records
+every HTML document it serves and every conversion it confirms, signs each record with a
+per-source secret, and posts it to Infinite. The board that comes back — Visitors, the
+declared outcome (downloads, sign-ups, purchases), and the rate between them — matches
+server logs, not a sample. The raw IP and full user agent never leave the customer's
+server: it hashes the visit identity itself (`visitKey` = HMAC of IP + UA + a 30-minute
+window under the secret) and sends only the hash, the path, the host, and the UA family.
+
+```bash
+# Writes a runnable lane for the framework AND the host: Next.js middleware, Vercel's
+# framework-agnostic root middleware, a Netlify Edge Function, a Cloudflare Pages
+# functions/_middleware.ts, or a Node module — plus lib/infinite-outcome and
+# INSTALL-SERVER-LANE.md. Every file is manifest-tracked and reverses byte-for-byte.
+npx infinite-tag@latest install --server-lane --workspace <workspace-id> --yes
+
+# No host signal in the repo: writes + prints INSTALL-SERVER-LANE.md — the agent brief IS the install.
+npx infinite-tag@latest server-lane --brief
+
+# After deploying with the two env vars set, prove receipts arrive:
+INFINITE_SERVER_EVENT_SECRET=… INFINITE_SITE_SOURCE_KEY=site_… \
+  npx infinite-tag@latest verify --server-lane https://example.com/
+```
+
+Next.js keeps its own lane on every host. For every **other** framework the target comes from
+where the site is **hosted** (`vercel.json` / `.vercel/project.json` / `@vercel/*` → Vercel;
+`netlify.toml` / `netlify/` / `@netlify/*` → Netlify; `wrangler.*` / `functions/_middleware` /
+`@cloudflare/*` → Cloudflare; an `express` dependency → Node. `vercel.json` wins every tie):
+
+| Stack | Behavior |
+| --- | --- |
+| Next.js, no middleware | Creates `middleware.ts` (`proxy.ts` on Next.js 16+) with the standard document matcher, wrapping nothing. |
+| Next.js, existing middleware | Inserts fenced `// infinite-tag:server-lane:start … :end` blocks that wrap the existing handler (its body is untouched) — only for shapes it recognizes and only when the matcher already lets every document through. Otherwise the file is left alone and the brief carries the exact addition. Recorded edits reverse byte-for-byte on `uninstall`. |
+| Any framework on **Vercel** (Vite, static, SvelteKit…) | Creates the root `middleware.ts` Vercel runs for [any framework](https://vercel.com/docs/routing-middleware), plus `lib/infinite-server-lane.ts`. The entry imports `@vercel/functions` (for `next()` and `waitUntil`), so the CLI and the brief name the one `npm install` to run. |
+| **Netlify** | Creates `netlify/edge-functions/infinite-server-lane.ts`, declared [in-file](https://docs.netlify.com/build/edge-functions/declarations/) with `export const config` — `netlify.toml` is never edited. Assets are excluded per extension (Netlify's own `["/*.css", "/*.js"]` shape); a blanket `/*.*` would over-exclude, because URLPattern's wildcard is greedy across `/`. |
+| **Cloudflare Pages** | Creates [`functions/_middleware.ts`](https://developers.cloudflare.com/pages/functions/middleware/), reading its secret from `context.env`. A plain Worker (a `wrangler` config with a `main` entrypoint) gets the brief's Worker snippet instead — there is no file of ours to add safely. |
+| **Express / any Node server** | Creates `lib/infinite-server-lane.js`. Nothing auto-wires your server file: the brief names the exact `app.use(infiniteServerLane())` line and where it goes. |
+| No host signal | Writes the agent brief only; `server-lane --brief > INSTALL-SERVER-LANE.md` saves it anywhere. |
+
+Every target also writes **`lib/infinite-outcome`**, exporting `postInfiniteOutcome({ type, path,
+eventId, accountKey, visitKeyInputs, adMatch })` (plus `adMatchFromRequest`), so any server route — a Vercel `api/` function
+confirming a paid Stripe session, a webhook, a job — reports an outcome in three lines and carries
+the same `visitKey` as the page view that produced it. Report outcomes from where they become real
+(a committed row, a captured payment, a served file), never from a click.
+
+#### `adMatch` — forwarding the conversion to Meta
+
+Only for founders who **run Meta ads and do not use PostHog**. PostHog already ships its own Meta
+destination, and two senders for one conversion is a double count.
+
+Add an `adMatch` block to the outcome and turn the relay on in Infinite → Site → Settings → *Send
+outcomes to Meta Conversions API*. Infinite then forwards that outcome to Meta's Conversions API as
+it is ingested and **discards the match data**: it is never stored, never written to your ledger,
+never logged. Neither half works alone — no block, nothing to forward; no toggle, nothing is sent.
+
+```ts
+import { createHash } from "node:crypto"
+import { adMatchFromRequest, infiniteVisitKey, postInfiniteOutcome } from "../lib/infinite-outcome"
+
+// 1. At CHECKOUT, from the BUYER'S browser request: their _fbc/_fbp cookies, ip and user agent,
+//    saved together (one device) with the checkout. Your later call to Infinite is server-to-server
+//    and carries none of them.
+const adMatch = adMatchFromRequest(request, {
+  em: createHash("sha256").update(email.trim().toLowerCase()).digest("hex"),
+  // Only when the buyer has an account id (a guest has none). Trimmed only: never lowercase an id.
+  ...(user?.id != null ? { external_id: createHash("sha256").update(String(user.id).trim()).digest("hex") } : {})
+})
+const infinite_visit_key = await infiniteVisitKey({ clientIp: adMatch.client_ip_address, userAgent: adMatch.client_user_agent })
+const session = await stripe.checkout.sessions.create({ /* … */ metadata: { infinite_visit_key } })
+await saveCheckoutAdMatch(session.id, adMatch)   // e.g. a column on your order row
+
+// 2. In the PAYMENT WEBHOOK, once the payment is real. Report the purchase HERE and only here
+//    (not also from a checkout-status route), and never with a browser fbq('track', 'Purchase').
+await postInfiniteOutcome({
+  type: "purchase",
+  path: "/checkout",                   // Meta requires event_source_url
+  eventId: "purchase:" + session.id,   // the SAME id every time this purchase is reported: counted once
+  properties: {
+    value: session.amount_total / 100, currency: session.currency.toUpperCase(),   // required for a Purchase
+    visitKey: session.metadata.infinite_visit_key   // carried from checkout: same-lane attribution
+  },
+  adMatch: await loadCheckoutAdMatch(session.id)
+})
+```
+
+- **You hash; Infinite never does.** `em` is sha256 hex of the email, trimmed and lowercased.
+  `external_id` is sha256 hex of your own account id, **trimmed only — its case is kept**: the
+  browser accessor hashes the same id the same way, and an id hashed two different ways reaches Meta
+  as two different people. A raw email never leaves your server. A value that is not a 64-character
+  hex digest is rejected with a `400` instead of being forwarded, so a mistake shows up at
+  integration time rather than as an empty match rate three months later. Never hash an
+  already-hashed value.
+- **`fbc` / `fbp` are Meta's own cookies** on your domain
+  ([fbp and fbc](https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/fbp-and-fbc)).
+  A visitor can set them to anything, so a malformed one is **dropped** and your outcome is still
+  recorded — a tampered cookie can never delete your purchase. The same holds for the ip and user
+  agent; only `em`/`external_id`, which your own code computes, are strict enough to reject.
+- **`client_ip_address` / `client_user_agent` are the BUYER'S BROWSER'S.** Meta's spec calls them
+  "the IP address of the browser" and "the user agent for the browser … **required** for website
+  events shared using the Conversions API". Your call to Infinite is server-to-server — its ip is
+  your host's egress address and its user agent is `node` — so `adMatchFromRequest` reads them from
+  *your* inbound request. In a webhook the incoming request is the provider's, not your buyer's:
+  that is why the example captures the block at checkout and carries it to the webhook. When a
+  browser holds two `_fbc` cookies, `adMatchFromRequest` sends the newest ad click.
+- **`eventId` is Infinite's idempotency key, not Meta's event ID.** Make it stable per outcome, and
+  use the SAME one every time the same outcome is reported (`"purchase:" + session.id` everywhere):
+  Infinite counts an `eventId` once, so a retried webhook is counted once, but two reports of one
+  purchase with two different ids count it twice. Infinite decides the `event_id` Meta receives. For
+  a conversion set to *Every event* or *Once per session* in Infinite → Conversions it is this value;
+  for *Once per account*, and for *Once per visitor (TTL)* when the outcome carries a `visitKey`,
+  Infinite derives a different id, which your pages never see.
+- **Purchases are server events only.** Report them from the payment webhook and do not also fire
+  `fbq('track', 'Purchase')` on a thank-you page. The page never builds a Meta event ID, so a
+  browser Purchase has no server event to be deduplicated against, and Meta can count the purchase
+  twice.
+- **Never build a Meta event ID in the page, and never fire a Meta conversion (`Purchase`, `Lead`,
+  `CompleteRegistration`, `StartTrial`, …) with `fbq` on a click.** A click is intent, not a
+  conversion; a browser event with an id your page made up matches no server event.
+- **The relay declines rather than sending a broken event.** It skips — and says which, in Site
+  Settings — when there is no `event_source_url` (send `path`), no `client_user_agent`, a Purchase
+  with no `value` + `currency`, or an `occurredAt` older than Meta's 7-day `event_time` window. Your
+  site's domain must also be verified in Meta Events Manager, or Meta accepts the events and
+  discounts them.
+- `adMatch` rides inside the **signed** body, so nobody without your secret can inject one, and it is
+  never valid on a document request.
+
+If a file it would create already exists and Infinite does not manage it, that file is left alone
+and its exact content goes into the brief; an unmanaged `lib/infinite-server-lane.*` is a planning
+blocker rather than an overwrite. `uninstall` removes only the files it wrote and only the
+directories it had to create — a `netlify/` or `functions/` directory you already had stays.
+
+`--infinite-api-origin` (or `INFINITE_API_ORIGIN`) moves the **server** lane with the browser lane:
+the resolved origin is baked into every generated lane and outcome helper, printed in the brief, and
+used by `verify --server-lane` for the receipt route.
+
+Two environment variables, never written to files by infinite-tag: `INFINITE_SERVER_EVENT_SECRET`
+(minted once in the Infinite desktop → Site Analytics → Settings → Conversions → Server events) and
+`INFINITE_SITE_SOURCE_KEY` (the public source key; the generated Next.js module falls back to the
+key baked at install time). Without the secret the lane stays dormant — it never throws into a
+request. Delivery is fire-and-forget (`event.waitUntil`, 2 s cap); assets, `/api/*`, non-GET,
+prefetch, non-HTML requests, and the pixel's own collect path are skipped; the raw IP, full UA,
+cookies, query strings, and bodies are never sent. What it produces is **a floor for real people,
+never an exact share** — it counts every page your server serves, and the obvious bots it can name
+are filed as `automation`, not as visitors.
+
+The contract (endpoint, headers, both body shapes, recipes) and reference implementations for
+Express / any Node server, Cloudflare Workers, and Netlify Edge live in the brief. Every sentence
+of that brief is in `src/server-lane/copy.ts`; the recipe vectors shared with the receiving side
+are in `contracts/server-lane-v1.vectors.json`.
+
+`verify --server-lane <url>` loads the page once as `infinite-tag-verify` — a self-identified
+automation user agent, not a fake Chrome — then polls Infinite's receipt endpoint with the same
+source headers (the signature covers the raw query string) for up to a minute and prints PASS with
+received / lastPath / lastReceivedAt, or FAIL with the most likely cause. The request is genuinely
+recorded, because proving your middleware runs is the point, but it is classified `automation`, so a
+check never adds a visitor to your own numbers. Bot protection can refuse a self-identified monitor;
+when it answers 401/403/405/406/429 the failure names that first.
+
+## Existing tags are adopted, not replaced
+
+`plan` walks the whole app root for real provider signatures and **adopts** a requested provider
+that already exists: it is left byte-for-byte alone, dropped from the install set, listed under
+`adopted` in `--json` (`{ provider, via: "snippet" | "gtm", file }`) and under "Already on your
+site" in human output, and never installed a second time. When every requested provider already
+exists, nothing is written and no install record is created.
+
+What counts as evidence (a false positive would silently drop a provider from the install, so the
+rules are deliberately narrow):
+
+| Provider | `via: "snippet"` | `via: "gtm"` |
+| --- | --- | --- |
+| GA4 | the `gtag.js` loader or `gtag("config", …)` / `gtag("js", …)` initialization; `@next/third-parties/google` `<GoogleAnalytics>`; `react-ga4` / `ReactGA.initialize(`; `vue-gtag`; `nuxt-gtag`; `@analytics/google-analytics` | the `gtm.js` loader or an imported official `<GoogleTagManager>` integration. A fallback iframe, an unused container-id constant, and an ordinary `dataLayer.push` event are not installation evidence. A Tag Manager container proves GA4 only — a requested Meta or X pixel still installs beside it. |
+| PostHog | `posthog.init(`, an actual PostHog loader, `posthog-js/react` `<PostHogProvider>`, `@posthog/nextjs` | — |
+| X | `twq("config", …)` / `twq("init", …)` or the actual `uwt.js` loader | — |
+| Meta | `fbq("init", …)` or an actual `fbevents.js` loader | — |
+
+The walk reads `.html/.htm/.tsx/.jsx/.ts/.js/.mjs/.cjs/.astro/.vue/.svelte` files, capped at
+2,000 files and 512 KB per file. It skips `node_modules`, `.git`, `.next`, `dist`, `build`, `out`,
+`.vercel`, `coverage`, `public`, `static`, `__tests__`, `__mocks__`, `.storybook` and `emails`,
+plus `*.d.ts`, `*.test.*`, `*.spec.*`, `*.stories.*` and `*.min.js` files (type declarations,
+mocks and minified vendor bundles are not installs). Infinite's own managed files and
+`<!-- infinite:start -->` blocks are ignored, so a re-run never adopts itself. If a hit is wrong,
+review the evidence and correct the detector/source ownership before installation. Do not delete valid application code just to suppress an adoption result.
+
+## The harness: `infinite-tag harness` / `infinite analytics`
+
+One command that knows its job and gets it done. Two front doors, one runbook:
+
+```bash
+npx infinite-tag harness [--check | --plan | --apply | --verify-only] [flags]   # standalone
+infinite analytics [--check | --plan | --apply | --verify-only] [flags]          # desktop CLI
+```
+
+`infinite analytics` adds only what the standalone tag cannot know — the Desktop's active
+workspace, the public keys `infinite setup` saved under `~/.infinite/artifacts/<workspaceId>.json`,
+and a verification backend that reads receipts back through the running Desktop (the CLI holds no
+cloud credential; the app makes the call with its own session) — then runs the same steps. The `infinite` CLI is fully
+paid: `--plan`, the default apply, `--verify-only` — anything that writes or reaches the cloud —
+goes through the same Desktop readiness gate as the rest of the product (signed in, workspace
+linked, subscription active) and prints the standard onboarding guidance otherwise, touching
+nothing. `--check` (read-only, local) runs ungated so an unpaid founder can see the state table
+for their site; when Desktop is not ready its report ends with "Complete onboarding in Infinite
+Desktop to install, mark and verify". The standalone `npx infinite-tag harness`
+is the open-source installer and stays ungated; its only cloud contact is the optional verify
+read-back, which reports `subscription required` honestly when the cloud answers 402. Three depths: `--check`
+(inspect + report, writes nothing), `--plan` (write the plan, the proposed conversions and
+`.infinite/REPORT.md`; apply nothing), and the default `--apply` (plan → confirm → apply → verify).
+
+### The runbook
+
+Every step names its own failure code and whether the run **halts** or **continues degraded**;
+either way the run ends with all seven provider rows.
+
+| # | Step | Success | Failure code (next) |
+|---|---|---|---|
+| 1 | Preflight | Node ≥ 18; git tree clean for `--apply` | `INF_ENV_DIRTY_TREE` (halt; `--allow-dirty` overrides) |
+| 2 | Inspect | one supported framework; every existing provider (incl. Tag Manager) with file + line | `INF_DETECT_NO_FRAMEWORK` / `INF_SOURCE_OUTPUT_OWNERSHIP` (halt; `--brief` can supply manual guidance) |
+| 3 | Resolve keys | flags → saved artifacts → real `.env` files (a key found only in `.env.example` is missing, and that file is never written) | `INF_POSTHOG_NO_KEY` (continue; only when PostHog was explicitly requested) |
+| 4 | Classify | one action per provider: `absent → install`, `unmanaged → adopt`, `managed → upgrade`, `gtm → manual`, `conflict → report` | never fatal |
+| 5 | Plan | deterministic file plan for install/upgrade providers | `INF_PLAN_UNMANAGED_TARGET` / `INF_PLAN_BLOCKED` (halt) |
+| 6 | Confirm | explicit yes (`--yes` skips this one) | clean exit, nothing written |
+| 7 | Apply | managed files written and hash-verified | `INF_APPLY_ROLLED_BACK` (halt; every file restored) |
+| 8 | Conversions | proposed → confirmed → marked (below) | `INF_MARK_STALE_ELEMENT` (continue, per row) |
+| 9 | Server lane | the target the plan chose was written, or the brief only | never fatal |
+| 10 | Verify | a receipt read back per provider | `INF_VERIFY_NO_RECEIPT` / `INF_VERIFY_INCOMPLETE` (continue) |
+| 11 | Report + handoff | `.infinite/REPORT.md` and the pasteable line | never fatal |
+
+A non-interactive `--apply` with neither `--conversions <file>` nor `--no-mark` exits `2` with
+`INF_ARGS_CONVERSIONS_REQUIRED` rather than guess. Failures are also printed on stderr as one
+line — `inf-error: <CODE> — <message>` — for headless callers.
+
+### The state table
+
+A provider is a state machine, not a boolean. All seven rows print every run, including the ones
+the run did nothing to — a silent provider is the bug:
+
+```
+provider     state                                                       key         evidence
+ga4          adopted, not ours to verify                                 G-ABC123    index.html
+gtm          skipped                                                     —           no Tag Manager container found
+posthog      installed, not verifiable (no query key — pass --posthog-query-key, or run infinite analytics from the desktop CLI)  phc_…  index.html
+meta         installed, not verifiable (Meta has no install-time read-back; open Events Manager → Test Events)  1234567890  index.html
+x            skipped                                                     —           no key resolved (flags, saved artifacts, or .env)
+infinite     verified (receipt at 2026-09-02T10:01:03.000Z)              site_…      index.html
+server_lane  installed, no receipt                                       —           middleware.ts
+```
+
+States: `absent` / `adopted` / `installed` / `verified` / `conflict` / `skipped`. **`verified` is
+printed only with a receipt timestamp read back from the provider.** `installed` means a file was
+written; `adopted` means an existing tag (a hand-pasted snippet, or GA4 through a Tag Manager
+container) was found and left byte-for-byte alone — never reduced WITHOUT an approved plan line,
+never installed twice, and never claimed as verified by us. Two different ids for one provider, or a managed install beside
+an unmanaged snippet, is a `conflict`: nothing is installed for it and the report names both.
+
+### Conversion marking
+
+The runtime already reads `data-analytics-cta-id` and `data-analytics-cta-location`, so the
+marking step writes exactly those two attributes. It is three phases with a human gate:
+
+1. **Propose (read-only).** The app's source is scanned (same bounds as provider detection) for
+   `<a>`, `<Link>` and `<button>` elements. Each gets a `cta_id` token (`^[A-Za-z0-9_-]{1,64}$`)
+   derived from its visible text, then its href, then its tag, with evidence
+   `{ file, line, column, tag, hrefOrHandler, textSnippet, lineHash }` — the element's offset in
+   the line and the sha256 of the exact line, so two candidates on one line are two rows.
+   Elements the runtime already counts are skipped and listed: the download destination,
+   Stripe hosts, anything carrying `data-conversion` or already marked. The proposal is written to
+   `.infinite/conversions.proposed.json` and **gitignored by the harness** inside a
+   `# infinite:start … # infinite:end` block: it quotes link text and hrefs and never leaves the machine.
+2. **Confirm.** Interactive runs ask `Mark these N elements now? [y/N]` — a separate answer,
+   default No; `--yes` never approves marking, because a company's conversion vocabulary is a data
+   contract. The non-interactive path is `--conversions <file>`: edit the proposal (rename, drop
+   rows) and pass it back. `--no-mark` skips the phase.
+3. **Apply.** Each row is located by its line hash (the recorded line number is a hint — the
+   installer's own `<head>` injection shifting lines never stales a mark) and the proposed tag
+   must still sit at the recorded column; the attributes are inserted right after that tag name
+   and nothing else on the line is touched — no `id`, `class`, `href` or handler. Several rows on
+   one line are applied right-to-left and share the line's after-hash. Only `--apply` marks:
+   `--plan --conversions <file>` validates and counts the file and writes nothing. Every write is recorded with before/after hashes in
+   `.infinite/conversions.json`; `unmarkConversions` (exported) removes exactly the inserted text,
+   hash-gated on both sides. A changed line is reported as `INF_MARK_STALE_ELEMENT` for that row
+   and the rest still apply; re-running with the same file is a no-op.
+
+Out of scope for the harness, and said so in the report's next steps: GA4 key events (the cloud
+designates them from the desktop) and PostHog actions (they need a write key).
+
+### Verification, honestly
+
+Step 10 loads `--url` (or `https://<first production host>/`) **once**, as
+`infinite-tag-verify/<version> (+https://infinite.fast; server-lane monitor)` — a self-identified
+automation agent, so your own numbers record a flagged agent row, never a visitor — then polls each
+provider's read-back for up to 60 s at 3 s intervals. The loader runs no JavaScript, so browser
+tags fire only when a real browser opens the page during the window; the CLI says so before it polls.
+
+| Provider | Standalone `infinite-tag harness` | `infinite analytics` |
+|---|---|---|
+| Infinite pixel, GA4, server lane | `installed, not verifiable (run infinite analytics from the desktop CLI to verify)` | read back **through the running Infinite Desktop** — the CLI POSTs the app's loopback bridge (`analytics.verify.v1`) and the app calls `POST /api/analytics/verify` with its own session, so no token is ever handled here |
+| PostHog | with `--posthog-query-key <personal key with Query Read>`: one bounded HogQL poll for a `$pageview` since the load, on the region's app host; without it, `not verifiable (no query key)` | same, then the cloud |
+| Meta | never verifiable at install time: `open Events Manager → Test Events` | same |
+| adopted / GTM | `adopted, not ours to verify` | same |
+
+After the report step, `infinite analytics` sends the state table (state, one evidence clause,
+file path, verification word + receipt timestamp — never file contents, DOM text or keys; provider
+ids quoted in a conflict clause are redacted to `<id>`) to Infinite **through the running Desktop**
+(`analytics.report.v1` — the app POSTs `POST /api/analytics/harness-report` with its own session and
+its active workspace), so Site Settings › Analytics shows what the run found. The run ends with
+`Report sent to Infinite.` or `Report not sent (<reason>).` — an app that is not ready names its
+state, an app too old to carry the verb says update, no app says open it — and a failed send never
+fails the run. `--api-token-env` sends straight to the cloud instead; `--check` never reports, and
+the standalone `npx infinite-tag harness` has no session to report to.
+
+A backend answer of `verified` without a receipt timestamp is downgraded to `not verifiable` and
+says so. A cloud that rejects the session (401/403), has no verify route yet (404), or is
+unreachable is reported as exactly that — never as a receipt, never as a failure of your site. The
+same honesty covers the app: a Desktop that is signed out, unlinked, unsubscribed or still booting
+answers `409 not_ready` **before** any cloud read, and the lane reads
+`not verifiable (Infinite Desktop is not ready (<state>) — complete onboarding)`; a Desktop too old
+to carry the verb says `update the Infinite app`.
+
+With no Desktop at all (CI, a server), `infinite analytics --api-token-env [NAME]` opts explicitly
+into the direct cloud backend, reading a bearer from `NAME` (default `INFINITE_API_TOKEN`);
+`INFINITE_API_ORIGIN` overrides the host. It is an advanced escape hatch: a token found in the
+environment is **never** used implicitly, because a stale one silently verifying against another
+account is worse than an honest "not verifiable".
+
+### Flags
+
+| Flag | Meaning |
+|---|---|
+| `--check` / `--plan` / `--apply` (default) / `--verify-only` | the depth |
+| `--providers ga4,posthog,meta,x,infinite` | restrict the set; default = every resolvable provider |
+| `--adopt-existing` (default) / `--no-adopt-existing` | adopt an unmanaged tag, or refuse to install beside it (`conflict`) |
+| `--conversions <file>` | pre-approved conversions (the non-interactive marking path) |
+| `--no-mark` | skip conversion marking |
+| `--server-lane` | add the lossless server lane for the detected host (or the brief) |
+| `--url <prod-url>` | the URL verification loads; defaults to the first production host |
+| `--posthog-query-key <key>` | optional personal API key with Query Read, to read PostHog back |
+| `--yes` | skip the **install** confirmation only |
+| `--allow-dirty` | override the clean-git-tree gate |
+| `--json` | print the report as JSON |
+| `--brief` | write `.infinite/harness-brief.json` and stop |
+| `--workspace`, `--root`, `--app-root`, `--package-manager`, the artifact flags | as for `install` |
+
+With `--json`, stdout carries exactly one JSON document (the report); every preview, proposal
+table and brief goes to stderr.
+
+Every run that writes ends with `.infinite/REPORT.md` — the table, the failures, the conversion
+counts, a "Verify before merging" checklist — and the pasteable line for your agent:
+
+> Open `.infinite/REPORT.md` and work through its 'Verify before merging' checklist: investigate each item, then list the changes you'd make and get my approval before applying any of them.
+
+### Uninstall
+
+`infinite-tag uninstall` reverses the managed install, then the harness's own writes, which are
+recorded separately and reversed by two exported functions it calls: `.infinite/conversions.json` (every marked
+element, before/after hashes) → `unmarkConversions(root)`; `.infinite/harness.json` (REPORT.md, the
+proposal, the brief, conversions.json, and the `.gitignore` fenced block with whether the file was
+created) → `removeHarnessOutputs(root)`, which deletes only recorded `.infinite/` files and strips
+the block only when it is byte-identical. `infinite-tag uninstall --yes` runs both after reversing
+the managed install (the dry run lists what they would undo).
+
+## Proxy Matrix
+
+| Framework | Infinite same-origin route |
+| --- | --- |
+| Next.js App Router | Creates a managed `next.config.mjs` rewrite when no config exists. |
+| Next.js Pages Router | Creates the same managed Next rewrite. |
+| Vite + React | Merges `vercel.json` only when one exists or `--infinite-static-proxy vercel` is explicit. |
+| Static HTML | Uses the same Vercel proof rule and instruments every discovered source page. |
+
+An existing unmanaged `next.config.*` is never edited. Planning prints the exact
+manual integration and a rerun statically proves those literal rewrites before apply.
+Static and Vite installs stop when no
+supported proxy can be proven; GA4/PostHog/X/Meta remain independently
+installable without an Infinite artifact.
+
+When PostHog proxying and Infinite collection are both enabled, managed PostHog
+routes are ordered before the exact Infinite collector route. Existing `vercel.json`
+files receive only manifest-recorded insertions; uninstall hash-checks and reverses
+those insertions to restore the original bytes. Customer rules are never inferred
+from a matching destination.
+
+## Files And Reversal
+
+Framework installs create a managed analytics module and minimal load wiring.
+Static sites receive an `<!-- infinite:start -->` managed block in every source
+HTML page. Proxy installs may also create or merge `next.config.mjs` or
+`vercel.json`.
+
+`.infinite/install.json` records managed files, content hashes, and generated-config
+ownership. `verify`
+rejects drift and forbidden external-loader routes. `uninstall --yes` restores
+modified source files byte-for-byte and deletes files it created. It refuses to
+discard hand-edited generated configs or Vercel files.
+
+## Safety
+
+- Public artifacts only; no cloud credential or desktop session.
+- A workspace ID alone cannot enable collection.
+- Browser code cannot select workspace, environment, authority, or dispatch.
+- Infinite uses a same-origin collection route with a source-bound public key.
+- Provider initialization order is GA4, PostHog, X, Meta, then Infinite — each native and independent; the Infinite runtime forwards nothing into another provider (conversions reach them only through the managed helpers the site's own code calls).
+- Installs are idempotent, atomic, path-contained, and dirty-tree guarded.
+- Existing unmanaged analytics is adopted (left untouched, never duplicated); existing configuration is not overwritten.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
+
+## Links
+
+- Product + docs: https://infinite.fast
+- Server lane guide (`infinite-tag server-lane --brief`) and the desktop app: https://infinite.fast
+- Source, issues, changelog: https://github.com/Infinite-Labs-AI/infinite-os/tree/main/packages/instrument
+
+
+### Coverage checks for existing and custom-built sites (0.9.1)
+
+A provider event call is not proof that its SDK is installed. The installer and harness now share
+initialization/loader evidence, including the modern Infinite inline runtime. Existing unmanaged
+providers are still adopted without replacement; manifest-owned code remains managed and can be
+upgraded normally. Inspect the public source key and file evidence before resolving conflicts.
+
+Running a newer CLI does not upgrade an exact older tag dependency inside an existing custom
+builder. `INF_TAG_VERSION_DRIFT` calls this out. Review the package and provider configuration
+changes, update the existing owner, rebuild, and compare the generated/deployed output.
+
+When `vercel.json` specifies an output directory and a build, `INF_SOURCE_OUTPUT_SPLIT` explains
+the source/output distinction. Selecting that generated directory for `--check` is an inventory
+operation only; `--plan` and `--apply` refuse installation/marking there with
+`INF_SOURCE_OUTPUT_OWNERSHIP`. Choose editable source or integrate the change into the builder. Selecting one subdirectory of an otherwise unsupported custom parent build does not establish injection ownership; automatic installation there is refused too.
+An unsupported custom source with `--brief` writes `.infinite/harness-brief.json` containing
+manual implementation guidance and still exits nonzero because automatic installation is unsupported.
+A subdirectory scan is never a whole-site coverage guarantee.
+
+Reports and briefs include an implementation checklist: map source and output, review adopted
+provider settings, enumerate views/attempts/successes/failures/retries, test real handlers and identity
+correlation, check consent and provider-added URL metadata, rebuild/deploy, trigger representative
+browser actions, and read back provider receipts. A generic click, a played animation, or an HTTP
+page fetch cannot prove an authenticated outcome or a complete funnel.
+
+`--verify-only` now returns nonzero with `INF_VERIFY_INCOMPLETE` if there is no installation manifest,
+no URL, no verifiable lanes, ambiguous ownership, or a provider/backend that cannot supply receipts.
+It does not fabricate a manifest or claim that an unattempted poll found no events.
+`INF_VERIFY_NO_RECEIPT` remains the result of actual receipt polling with no matching event.
+`--check` and `--plan` may succeed without credentials because they are inspections/plans;
+`--apply` may finish installation with manual verification outstanding. The report names that
+incompleteness, including adopted providers, rather than saying nothing is outstanding.

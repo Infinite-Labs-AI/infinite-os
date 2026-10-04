@@ -1,0 +1,52 @@
+{
+  "v": 1,
+  "kind": "job",
+  "tool": "start_post",
+  "title": "Blog post",
+  "state": "background",
+  "asOf": null,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "body": {
+    "jobId": "job_1",
+    "label": "Writing the post",
+    "phase": "running",
+    "steps": [
+      {
+        "id": "s1",
+        "label": "Outline",
+        "state": "done"
+      },
+      {
+        "id": "s2",
+        "label": "Draft",
+        "state": "now",
+        "detail": "section 2"
+      },
+      {
+        "id": "s3",
+        "label": "Publish",
+        "state": "todo"
+      }
+    ],
+    "progress": {
+      "finished": 1,
+      "of": 3
+    },
+    "startedAt": "2026-01-15T10:40:00Z",
+    "runsWhere": "cloud",
+    "outlivesTurn": true,
+    "landsAt": {
+      "place": "content.posts",
+      "label": "Posts"
+    },
+    "noCompletionSignal": false,
+    "watch": {
+      "label": "Watch",
+      "ask": "how is the blog post going?"
+    }
+  }
+}

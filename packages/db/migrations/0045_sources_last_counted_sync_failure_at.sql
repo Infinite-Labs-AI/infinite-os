@@ -1,0 +1,25 @@
+-- 0045 — sources.last_counted_sync_failure_at: time-gate the transient-failure streak.
+--
+-- WHY: 0044's consecutive_sync_failures streak counts FAILED SYNC ATTEMPTS, but attempts
+-- cluster in bursts: a scheduler re-tries a still-connected source every tick (minutes apart),
+-- and a job runner's own retry policy can re-attempt the same scheduled run seconds apart.
+-- Counted per attempt, ~45 minutes of ordinary offline use (laptop asleep, train wifi) — or a
+-- single ~30-second provider outage spanning one run's automatic retries — burns the whole
+-- streak and parks the source at status='error', which is exactly the disproportionate
+-- escalation the streak was built to prevent. The threshold means "genuinely dead path", so
+-- each strike must represent an INDEPENDENT failure episode, not one burst.
+--
+-- This column records when a transient failure last COUNTED toward the streak. A transient
+-- failure increments the streak (and refreshes this timestamp) only when the previous counted
+-- failure is at least TRANSIENT_FAILURE_STREAK_MIN_SPACING_MS (10 min — recordSyncFailure in
+-- @infinite-os/connectors) in the past; burst duplicates are still recorded honestly in
+-- sync_runs/sync_errors but leave the streak and this timestamp untouched. Terminal failures
+-- (provider auth rejection, credential_undecryptable) never consult the streak and still park
+-- immediately.
+--
+-- Every path back to 'connected' (db.updateSourceStatus, reconnect_source, connectSource
+-- re-connect) nulls this timestamp alongside zeroing the streak.
+--
+-- Nullable BY DESIGN: null means "no counted transient failure since the source was last
+-- healthy", which also makes the add orphan-safe for existing rows — no backfill needed.
+alter table sources add column if not exists last_counted_sync_failure_at timestamptz;

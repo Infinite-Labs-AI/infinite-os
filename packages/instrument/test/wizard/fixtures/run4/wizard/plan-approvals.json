@@ -1,0 +1,386 @@
+{
+  "schema": "infinite-tag.plan-approvals.v1",
+  "planHash": "sha256:9abab2d6c29f5707451b291a2d4d78d99650e4a7072575e34f89fab7be98855f",
+  "beforeAt": "2026-10-03T20:44:19.802Z",
+  "candidates": [
+    {
+      "id": "duplicates_remove:ga4_config:G-QWERT67890",
+      "jobId": "duplicates_remove",
+      "n": 6,
+      "title": "Remove duplicate tags",
+      "owner": "agent",
+      "trigger": {
+        "finding": "G-QWERT67890 is set up 2 times (app/layout.tsx:27, app/layout.tsx:32)",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 27
+          },
+          {
+            "file": "app/layout.tsx",
+            "line": 32
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "census_one_per_tool",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "census_ga4_config_once",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "one_beacon_per_tool",
+          "tier": "RH",
+          "state": "not_run"
+        },
+        {
+          "id": "one_beacon_per_tool",
+          "tier": "PV",
+          "state": "not_run"
+        }
+      ],
+      "state": "pending"
+    },
+    {
+      "id": "preview_guard:ga4",
+      "jobId": "preview_guard",
+      "n": 7,
+      "title": "Keep previews silent: GA4",
+      "owner": "agent",
+      "trigger": {
+        "finding": "The site's own GA4 fires on preview deployments too",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 27
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "adopted_init_guarded",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "preview_self_silent",
+          "tier": "RH",
+          "state": "not_run"
+        }
+      ],
+      "state": "pending"
+    },
+    {
+      "id": "preview_guard:meta",
+      "jobId": "preview_guard",
+      "n": 7,
+      "title": "Keep previews silent: Meta pixel",
+      "owner": "agent",
+      "trigger": {
+        "finding": "The site's own Meta pixel fires on preview deployments too",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 41
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "adopted_init_guarded",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "preview_self_silent",
+          "tier": "RH",
+          "state": "not_run"
+        },
+        {
+          "id": "meta_host_matrix",
+          "tier": "T1",
+          "state": "not_run"
+        }
+      ],
+      "state": "pending"
+    },
+    {
+      "id": "conversions_to_tools:signup",
+      "jobId": "conversions_to_tools",
+      "n": 10,
+      "title": "Send the signup conversion to every tool",
+      "owner": "agent",
+      "trigger": {
+        "finding": "The signup succeeds at app/signup/page.tsx:18; send the approved signup conversion to every tool there",
+        "evidence": [
+          {
+            "file": "app/signup/page.tsx",
+            "line": 18
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/signup/page.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "no_fbq_standard_on_click",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "track_after_success",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "first_real_conversion",
+          "tier": "P",
+          "state": "not_run"
+        }
+      ],
+      "state": "pending"
+    },
+    {
+      "id": "setup_check_fixes:provider_census",
+      "jobId": "setup_check_fixes",
+      "n": 11,
+      "title": "Fix the setup-check findings",
+      "owner": "agent",
+      "trigger": {
+        "finding": "Setup check provider_census: INF_SETUP_PROVIDER_DUPLICATE_INIT: GA4 G-QWER...7890 is initialised 2 times in one page (app/layout.tsx:27, app/layout.tsx:32). Keep one and delete the others.",
+        "evidence": [
+          {
+            "file": "app/layout.tsx",
+            "line": 27
+          }
+        ]
+      },
+      "allow": {
+        "files": [
+          "app/layout.tsx"
+        ],
+        "create": []
+      },
+      "checks": [
+        {
+          "id": "setup_rerun_clean",
+          "tier": "S",
+          "state": "not_run"
+        },
+        {
+          "id": "click_test",
+          "tier": "RH",
+          "state": "not_run"
+        }
+      ],
+      "state": "pending"
+    }
+  ],
+  "approvals": {
+    "approved": [
+      "consent_mode",
+      "conversion_names",
+      "privacy_text",
+      "install_provider:infinite",
+      "preview_guard_adopted:ga4:init",
+      "capture_beside_adopted_pixel:meta:capture",
+      "autoconfig_off_adopted:meta:autoconfig",
+      "preview_guard_adopted:meta:init",
+      "remove_duplicate:ga4:ga4_config:G-QWERT67890",
+      "meta_goal",
+      "agent_budget"
+    ],
+    "declined": [],
+    "edits": {
+      "consent_mode": "not_required",
+      "conversion_names": "signup"
+    }
+  },
+  "privacyText": "We use Infinite (Ultima Inc.) to measure visits. Each page view sends Infinite the page address without its query string, a random visitor id, and your browser's IP address and user agent.",
+  "guard": {
+    "emit": true,
+    "exempt": [
+      "shop.examplebrand.com"
+    ],
+    "deny": [
+      "localhost",
+      "127.0.0.1",
+      "::1",
+      "[::1]",
+      "0.0.0.0"
+    ]
+  },
+  "plan": {
+    "hash": "sha256:9abab2d6c29f5707451b291a2d4d78d99650e4a7072575e34f89fab7be98855f",
+    "lines": [
+      {
+        "editable": true,
+        "id": "consent_mode",
+        "kind": "consent_mode",
+        "text": "Consent: collect by default; Do-Not-Track and GPC visitors are still skipped (covers Infinite only)",
+        "requires": "approval"
+      },
+      {
+        "editable": true,
+        "id": "conversion_names",
+        "kind": "conversion_names",
+        "text": "Conversions: signup",
+        "requires": "approval",
+        "jobIds": [
+          "conversions_to_tools:signup"
+        ]
+      },
+      {
+        "editable": true,
+        "id": "privacy_text",
+        "kind": "privacy_text",
+        "text": "Privacy: 1 drafted lines for your privacy page",
+        "requires": "approval"
+      },
+      {
+        "editable": false,
+        "id": "install_provider:infinite",
+        "kind": "install_provider",
+        "text": "Install Infinite",
+        "requires": "approval",
+        "ownership": "managed"
+      },
+      {
+        "editable": false,
+        "id": "user_action:server_lane",
+        "kind": "user_action",
+        "text": "Server lane (counts visits ad blockers hide): connect your Vercel project in Infinite (Connections › GitHub · Website), then run npx infinite-tag again.",
+        "requires": "user_action"
+      },
+      {
+        "editable": false,
+        "id": "preview_guard_adopted:ga4:init",
+        "kind": "preview_guard_adopted",
+        "text": "GA4: keep preview sites silent. Your existing tag also fires on previews; its start gets the preview check. Production always fires.",
+        "requires": "approval",
+        "ownership": "adopted",
+        "jobIds": [
+          "preview_guard:ga4"
+        ]
+      },
+      {
+        "editable": false,
+        "id": "capture_beside_adopted_pixel:meta:capture",
+        "kind": "capture_beside_adopted_pixel",
+        "text": "Meta: save the ad-click id (_fbc) on landing pages beside your existing pixel, so conversions can be matched to the ad. Adds a small script; your pixel itself is unchanged.",
+        "requires": "approval",
+        "ownership": "adopted",
+        "jobIds": [
+          "meta_improve:capture"
+        ]
+      },
+      {
+        "editable": false,
+        "id": "autoconfig_off_adopted:meta:autoconfig",
+        "kind": "autoconfig_off_adopted",
+        "text": "Meta: turn off automatic events on your existing pixel 7777000011112222 (one line before its init). They send button clicks and page data you did not choose. Measured: —.",
+        "requires": "approval",
+        "ownership": "adopted"
+      },
+      {
+        "editable": false,
+        "id": "preview_guard_adopted:meta:init",
+        "kind": "preview_guard_adopted",
+        "text": "Meta: keep preview sites silent. Your existing pixel also fires on previews; its start (init + first PageView) gets the preview check. The ad-click capture keeps running, and production always fires. Preview share: —.",
+        "requires": "approval",
+        "ownership": "adopted",
+        "jobIds": [
+          "preview_guard:meta"
+        ]
+      },
+      {
+        "editable": false,
+        "id": "remove_duplicate:ga4:ga4_config:G-QWERT67890",
+        "kind": "remove_duplicate",
+        "text": "GA4: G-QWERT67890 is set up 2 times in your code. Keep one.",
+        "requires": "approval",
+        "ownership": "adopted",
+        "jobIds": [
+          "duplicates_remove:ga4_config:G-QWERT67890"
+        ]
+      },
+      {
+        "editable": false,
+        "id": "meta_goal",
+        "kind": "meta_goal",
+        "text": "Meta goal: StartTrial (a SaaS sign-up starts a trial); change it in Meta any time.",
+        "requires": "approval"
+      },
+      {
+        "editable": false,
+        "id": "user_action:meta_traffic_permissions",
+        "kind": "user_action",
+        "text": "Meta: in Events Manager → Settings → Traffic permissions, allow only your own domains, so previews and copies of your site cannot send to your pixel.",
+        "requires": "user_action"
+      },
+      {
+        "editable": false,
+        "id": "user_action:connect_posthog",
+        "kind": "user_action",
+        "text": "PostHog: not connected — connect it in Infinite and run the wizard again to add it. No id is made up.",
+        "requires": "user_action"
+      },
+      {
+        "editable": false,
+        "id": "user_action:connect_meta",
+        "kind": "user_action",
+        "text": "Meta (777700…2222 in your code): connect it in Infinite so the wizard can check that ID is yours; nothing is changed until then.",
+        "requires": "user_action"
+      },
+      {
+        "editable": false,
+        "id": "checkin",
+        "kind": "checkin",
+        "text": "Infinite checks your site again 7 days after the deploy and shows you what it finds.",
+        "requires": "info"
+      },
+      {
+        "editable": false,
+        "id": "agent_budget",
+        "kind": "agent_budget",
+        "text": "Claude Code: up to 5 jobs · Opus 4.8 at xhigh effort · up to 30 turns or 10 min · your Claude plan (max) pays",
+        "requires": "approval"
+      }
+    ],
+    "decisions": {
+      "consentMode": "not_required",
+      "conversionNames": [
+        "signup"
+      ],
+      "privacyText": "We use Infinite (Ultima Inc.) to measure visits. Each page view sends Infinite the page address without its query string, a random visitor id, and your browser's IP address and user agent.",
+      "npmInstall": null
+    }
+  }
+}

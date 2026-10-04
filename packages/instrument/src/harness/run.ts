@@ -1,0 +1,1554 @@
+import { IMPLEMENTATION_CHECKLIST, verificationSummary } from "./state.js"
+import { inspectSourceLayout, type SourceLayout } from "./source-layout.js"
+// The harness runbook, composed: teardown §5.2 steps 1–11 over the adapters in inspect.ts,
+// marking.ts and verify.ts, driven by runbook.ts. Every I/O seam is injectable so the whole run
+// is testable against fixture repos and stubbed backends.
+import { spawnSync } from "node:child_process"
+import { existsSync, readFileSync } from "node:fs"
+import { basename, join, relative, resolve } from "node:path"
+
+import { applyInstallation, restoreSnapshot, snapshotFiles, type FileSnapshot } from "../apply.js"
+import { isSupportedFramework } from "../frameworks/index.js"
+import { assertWriteTargetInsideRoot, writeFileAtomic } from "../frameworks/shared.js"
+import { detectRepoStatus, inspectWorkspace } from "../inspect.js"
+import { computeContentHashes, installManifestRelativePath, readInstallManifest, writeInstallManifest } from "../manifest.js"
+import { INSTRUMENT_VERSION } from "../package-manager.js"
+import { renderPreview } from "../render.js"
+import { serverLaneCopy } from "../server-lane/copy.js"
+import { detectHosting } from "../server-lane/hosting.js"
+import type {
+  ApplyResult,
+  InspectResult,
+  InstallManifest,
+  InstallPlan,
+  ManualRequirement,
+  ProviderId,
+  VerifyResult,
+  WorkspaceInstallArtifacts
+} from "../types.js"
+import { verifyInstallation } from "../verify.js"
+import {
+  applyInfiniteDownloadDestinationPath,
+  discoverWorkspaceArtifacts,
+  resolveWorkspaceArtifacts
+} from "../workspace-artifacts.js"
+
+import { hasExplicitArtifacts, type HarnessArgs } from "./args.js"
+import {
+  buildHarnessPlan,
+  classifyProviders,
+  detectProvidersWithEvidence,
+  readEnvKeys,
+  resolveHarnessKeys,
+  type BuildHarnessPlanInput,
+  type ClassifyProvidersInput,
+  type DetectedProviderEvidence,
+  type HarnessPlanResult
+} from "./inspect.js"
+import {
+  PROPOSED_CONVERSIONS_RELATIVE_PATH,
+  applyConversions,
+  detectServerCheckout,
+  ensureProposedIgnored,
+  proposeConversions,
+  readApprovedConversions,
+  renderServerCheckoutRecommendation,
+  writeProposal,
+  type ApplyConversionsResult,
+  type ApprovedConversions,
+  type ConversionProposal,
+  type ServerCheckoutRecommendation
+} from "./marking.js"
+import {
+  runSetupChecks,
+  setupChecksNote,
+  setupFindingLines,
+  type SetupChecksReport
+} from "../setup-checks/index.js"
+
+import { recordHarnessFile } from "./outputs.js"
+import { REPORT_SENT_LINE, buildHarnessReportPayload, reportNotSentLine, type ReportSink } from "./report-sink.js"
+import { RUNBOOK_STEP_IDS, errorText, runRunbook, type RunbookStep, type RunbookStepId } from "./runbook.js"
+import {
+  SERVER_LANE_FIRST_EVENT_BUDGET_MS,
+  runServerLaneEnvStep,
+  waitForFirstServerLaneEvent,
+  type CommandRunner,
+  type ServerLaneBridge,
+  type ServerLaneStatus
+} from "./server-lane-env.js"
+import {
+  HARNESS_REPORT_RELATIVE_PATH,
+  createHarnessReport,
+  findProvider,
+  metaRelayNote,
+  renderReportMarkdown,
+  renderReportTable,
+  transitionProvider,
+  updateProvider
+} from "./state.js"
+import type {
+  HarnessProviderId,
+  HarnessReport,
+  ProviderClassification,
+  ResolvedKeys,
+  ServerLaneEnvReport
+} from "./types.js"
+import {
+  NONE_BACKEND_REASON,
+  NoneBackend,
+  PosthogQueryBackend,
+  VERIFY_BUDGET_MS,
+  VERIFY_POLL_INTERVAL_MS,
+  verifyLanes,
+  type VerificationBackend,
+  type VerifyLane,
+  type VerifyLanesResult
+} from "./verify.js"
+
+export const HARNESS_BRIEF_RELATIVE_PATH = ".infinite/harness-brief.json"
+export const MINIMUM_NODE_MAJOR = 18
+
+export interface HarnessIo {
+  /** TTY on both ends and not forced non-interactive. Gates every prompt. */
+  interactive: boolean
+  out(line: string): void
+  err(line: string): void
+  /** Returns the founder's answer; `defaultYes` decides what Enter means. */
+  confirm(question: string, defaultYes: boolean): Promise<boolean>
+}
+
+export interface HarnessDeps {
+  /** Verification backends in priority order. Default: NoneBackend (standalone). */
+  backends?: VerificationBackend[]
+  fetch?: typeof fetch
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
+  /** Test seam for the saved-artifacts discovery. */
+  discover?: typeof discoverWorkspaceArtifacts
+  nodeVersion?: string
+  budgetMs?: number
+  pollIntervalMs?: number
+  /**
+   * Where the finished report is sent (the desktop's stack-health strip reads it back). Absent
+   * = never sent: the standalone `infinite-tag harness` has no Infinite session. Only
+   * `infinite analytics` wires one, and only a run that wrote a report is sent — `--check`
+   * (read-only, ungated) reports nothing, and a send that fails never fails the run.
+   */
+  reportSink?: ReportSink
+  /**
+   * The server-lane env seam. `bridge` is the running desktop's loopback bridge (status /
+   * provision-env / mint on the app's ACTIVE workspace) — only `infinite analytics` wires it; without
+   * it the env step prints the manual instructions. `runner` is the test seam for the local `vercel`.
+   */
+  serverLaneEnv?: { bridge?: ServerLaneBridge; runner?: CommandRunner }
+}
+
+export interface HarnessRunResult {
+  exitCode: number
+  report: HarnessReport
+}
+
+interface Ctx {
+  report: HarnessReport
+  args: HarnessArgs
+  io: HarnessIo
+  deps: HarnessDeps
+  root: string
+  appRootAbsolute: string
+  inspect?: InspectResult
+  sourceLayout?: SourceLayout
+  manualBriefWritten?: boolean
+  manualBuildOwner?: boolean
+  detected: DetectedProviderEvidence[]
+  manifest: InstallManifest | null
+  keys?: ResolvedKeys
+  classifications: ProviderClassification[]
+  planResult?: HarnessPlanResult
+  applyResult?: ApplyResult
+  staticVerify?: VerifyResult
+  /** What the apply step did when static verification failed: rolled back, or left as written. */
+  applyOutcome?: "rolled_back" | "left_written"
+  declined: boolean
+  /** Preflight's verdict, ignoring the harness's own .infinite/ outputs and gitignore block. */
+  treeCleanForHarness: boolean
+  proposal?: ConversionProposal
+  /** Server-side checkout recommendation surfaced this run (detection only, never an edit). */
+  serverCheckout?: ServerCheckoutRecommendation
+  marking?: ApplyConversionsResult
+  /** Setup-correctness findings from the source scan; never a verification lane. */
+  setupChecks?: SetupChecksReport
+  verifyResult?: VerifyLanesResult
+  verifyIncomplete?: string
+  /** Providers this run wrote (install/upgrade) — the lanes verification reads back. */
+  writtenLanes: VerifyLane[]
+  /** The env step's outcome and the Infinite status it decided on (the first-event baseline). */
+  serverLaneEnv?: ServerLaneEnvReport
+  serverLaneStatus?: ServerLaneStatus | null
+}
+
+/**
+ * Human narration (preview, proposal table, brief echo). With --json stdout must carry exactly one
+ * JSON document — the report — so everything else goes to stderr.
+ */
+function narrate(ctx: Ctx, text: string): void {
+  if (ctx.args.json) ctx.io.err(text)
+  else ctx.io.out(text)
+}
+
+const laneOf: Partial<Record<HarnessProviderId, VerifyLane>> = {
+  infinite: "infinite",
+  ga4: "ga4",
+  posthog: "posthog",
+  meta: "meta",
+  server_lane: "server_lane"
+}
+
+/** Paths the harness itself writes between `--plan` and `--apply`; they never make a tree "dirty". */
+const HARNESS_OWN_PATHS = [".infinite/", ".gitignore"]
+
+/**
+ * The clean-tree gate, aware of the harness's own outputs: a `--plan` run leaves
+ * `.infinite/REPORT.md`, the proposal and the gitignore block behind by design, and the
+ * documented next step is `--apply --conversions <file>` — that must not trip the gate.
+ */
+export function harnessRepoStatus(root: string): "clean" | "dirty" | "not-a-git-repo" {
+  const status = detectRepoStatus(root)
+  if (status !== "dirty") return status
+  const porcelain = spawnSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" })
+  if (porcelain.status !== 0) return "dirty"
+  const foreign = porcelain.stdout
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => line.slice(3).trim().replace(/^"|"$/g, ""))
+    .filter((path) => !HARNESS_OWN_PATHS.some((own) => (own.endsWith("/") ? path.startsWith(own) : path === own)))
+  return foreign.length === 0 ? "clean" : "dirty"
+}
+
+function nodeMajor(version: string): number {
+  return Number.parseInt(version.replace(/^v/, "").split(".")[0] ?? "0", 10)
+}
+
+function flagArtifacts(root: string, args: HarnessArgs): WorkspaceInstallArtifacts {
+  return resolveWorkspaceArtifacts(root, {
+    artifactFile: args.artifactFile,
+    ga4MeasurementId: args.ga4MeasurementId,
+    posthogProjectKey: args.posthogProjectKey,
+    posthogApiHost: args.posthogApiHost,
+    xPixelId: args.xPixelId,
+    xEventTagIds: args.xEventTagIds,
+    metaPixelId: args.metaPixelId,
+    metaAdvancedMatching: args.metaAdvancedMatching,
+    infiniteSiteSourceKey: args.infiniteSiteSourceKey,
+    infiniteCollectPath: args.infiniteCollectPath,
+    infiniteProductionHosts: args.infiniteProductionHosts.length > 0 ? args.infiniteProductionHosts : undefined,
+    infiniteStaticProxy: args.infiniteStaticProxy,
+    infiniteConsentMode: args.infiniteConsentMode
+  })
+}
+
+function keyFor(classification: ProviderClassification): string | undefined {
+  return classification.key
+}
+
+function productionUrl(ctx: Ctx): string | undefined {
+  if (ctx.args.url) return ctx.args.url
+  const host = ctx.keys?.artifacts.productionHosts?.[0] ?? ctx.keys?.artifacts.infinite?.productionHosts?.[0]
+  return host ? `https://${host}/` : undefined
+}
+
+function writeJson(root: string, relativePath: string, value: unknown): string {
+  const absolutePath = join(root, relativePath)
+  assertWriteTargetInsideRoot(root, absolutePath)
+  writeFileAtomic(absolutePath, `${JSON.stringify(value, null, 2)}\n`)
+  recordHarnessFile(root, relativePath)
+  return absolutePath
+}
+
+function renderProposalTable(proposal: ConversionProposal): string {
+  const rows = proposal.rows.map((row) => `  ${row.ctaId.padEnd(28)} ${row.ctaLocation.padEnd(10)} ${row.file}:${row.line}  <${row.tag}> ${row.hrefOrHandler}`)
+  return [
+    `Proposed conversions (${proposal.rows.length}) — data-analytics-cta-id / location / element:`,
+    ...rows,
+    ...(proposal.skipped.length > 0 ? [`  (${proposal.skipped.length} element${proposal.skipped.length === 1 ? "" : "s"} skipped: already marked, download destination, Stripe host, or no destination)`] : []),
+    ...(proposal.serverCheckout
+      ? ["Server-side checkout (detection — not marked, emit these server-side):", ...renderServerCheckoutRecommendation(proposal.serverCheckout).map((line) => `  - ${line}`)]
+      : []),
+    `Edit ${PROPOSED_CONVERSIONS_RELATIVE_PATH} to rename or drop rows, then re-run with --conversions ${PROPOSED_CONVERSIONS_RELATIVE_PATH}.`
+  ].join("\n")
+}
+
+/**
+ * Marking runs AFTER the install (teardown order), and a marked element can sit in a file the
+ * installer manages (index.html, app/layout.tsx). The install manifest records those files'
+ * content hashes for `verify`, so after an additive mark the recorded hash is refreshed — the
+ * mark itself is recorded (and reversible) in .infinite/conversions.json.
+ */
+function refreshManagedHashesAfterMarks(root: string, appRoot: string, marking: ApplyConversionsResult): void {
+  if (marking.marked.length === 0) return
+  const manifest = readInstallManifest(root)
+  if (!manifest) return
+  const touched = new Set(marking.marked.map((entry) => (appRoot === "." ? entry.file : `${appRoot}/${entry.file}`)))
+  const files = manifest.files.filter((file) => touched.has(file))
+  if (files.length === 0) return
+  writeInstallManifest(root, {
+    ...manifest,
+    contentHashes: { ...manifest.contentHashes, ...computeContentHashes(root, files) }
+  })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phases
+//
+// The harness's work, one exported function per runbook phase, with explicit inputs and outputs
+// and NO report bookkeeping, prompts or printing. The runbook steps below wrap them (their
+// behaviour is unchanged); the wizard's installer (`src/install/installer.ts`) composes the same
+// functions without the runbook, so there is one install path, not two.
+// ---------------------------------------------------------------------------------------------
+
+export interface PreflightPhaseInput {
+  root: string
+  /** Defaults to the running Node. */
+  nodeVersion?: string
+  /** True when this run writes files (the dirty-tree gate applies only then). */
+  writes: boolean
+  allowDirty: boolean
+}
+
+export interface PreflightPhaseResult {
+  status: "clean" | "dirty" | "not-a-git-repo"
+  nodeVersion: string
+  /** A writing run on a dirty tree without --allow-dirty: the run must stop. */
+  blockedByDirtyTree: boolean
+}
+
+/** Node version (throws below MINIMUM_NODE_MAJOR) and the tree gate, aware of the harness's own outputs. */
+export function preflightPhase(input: PreflightPhaseInput): PreflightPhaseResult {
+  const nodeVersion = input.nodeVersion ?? process.versions.node
+  if (nodeMajor(nodeVersion) < MINIMUM_NODE_MAJOR) {
+    throw new Error(`Node ${nodeVersion} is too old; infinite-tag needs Node ${MINIMUM_NODE_MAJOR} or newer.`)
+  }
+  const status = harnessRepoStatus(input.root)
+  return { status, nodeVersion, blockedByDirtyTree: input.writes && status === "dirty" && !input.allowDirty }
+}
+
+export interface InspectPhaseInput {
+  root: string
+  appRoot?: string
+  packageManager?: HarnessArgs["packageManager"]
+  /**
+   * Detect adopted tags in `public/` too when the app is a static site (its pages are served from
+   * there, and the static adapter injects into them). The wizard sets it; the harness keeps today's walk.
+   */
+  includePublicForStatic?: boolean
+}
+
+export interface InspectPhaseResult {
+  inspect: InspectResult
+  appRootAbsolute: string
+  /** The server-lane hosting detector's answer (vercel / netlify / cloudflare / node / unknown). */
+  hosting: string
+  sourceLayout: SourceLayout
+  /** A subdirectory of a custom parent build whose analytics owner is unresolved. */
+  manualBuildOwner: boolean
+  detected: DetectedProviderEvidence[]
+  /** Throws on a corrupt manifest (the caller decides whether to rebuild it from markers). */
+  manifest: InstallManifest | null
+}
+
+/** Framework + app root, hosting, the source layout, existing providers with evidence, the manifest. */
+export function inspectPhase(input: InspectPhaseInput): InspectPhaseResult {
+  const inspect = inspectWorkspace(input.root, { appRoot: input.appRoot, packageManager: input.packageManager })
+  const appRootAbsolute = inspect.appRoot === "." ? input.root : join(input.root, inspect.appRoot)
+  const sourceLayout = inspectSourceLayout(input.root, inspect.appRoot, INSTRUMENT_VERSION)
+  const manualBuildOwner = Boolean(
+    sourceLayout.outputDirectory && inspect.appRoot !== "." && !isSupportedFramework(inspectWorkspace(input.root).framework)
+  )
+  if (manualBuildOwner) {
+    sourceLayout.notes.push(
+      "The selected subdirectory does not identify the parent custom build's analytics owner. Inspect the built output and integrate with the parent builder; installing a second SDK into this subdirectory could duplicate tracking."
+    )
+  }
+  return {
+    inspect,
+    appRootAbsolute,
+    hosting: detectHosting(appRootAbsolute),
+    sourceLayout,
+    manualBuildOwner,
+    detected: detectProvidersWithEvidence(appRootAbsolute, {
+      includePublic: Boolean(input.includePublicForStatic) && inspect.framework === "static-html"
+    }),
+    manifest: readInstallManifest(input.root)
+  }
+}
+
+export interface ResolveKeysPhaseInput {
+  root: string
+  appRoot: string
+  /** Artifacts from explicit flags / --artifact-file. */
+  flags: WorkspaceInstallArtifacts
+  explicitFlags: boolean
+  /** The saved artifacts `infinite setup` wrote, if any. */
+  discovered: WorkspaceInstallArtifacts | null
+  downloadDestinationPath?: string
+  detected: ReadonlyArray<DetectedProviderEvidence>
+}
+
+/** Flags → saved artifacts → real .env files (never a template, never an existing snippet's id). */
+export function resolveKeysPhase(input: ResolveKeysPhaseInput): ResolvedKeys {
+  const flags = applyInfiniteDownloadDestinationPath(input.flags, { path: input.downloadDestinationPath })
+  const env = readEnvKeys(input.root, input.appRoot)
+  const keys = resolveHarnessKeys({ flags, explicitFlags: input.explicitFlags, discovered: input.discovered, env, detected: input.detected })
+  if (input.discovered && input.downloadDestinationPath) {
+    keys.artifacts = applyInfiniteDownloadDestinationPath(keys.artifacts, { path: input.downloadDestinationPath })
+  }
+  return keys
+}
+
+/** One action per provider (install / adopt / improve / upgrade / manual / report / skip). */
+export function classifyPhase(input: ClassifyProvidersInput): ProviderClassification[] {
+  return classifyProviders(input)
+}
+
+/** The deterministic install plan for the classified providers. */
+export function planPhase(input: BuildHarnessPlanInput): HarnessPlanResult {
+  return buildHarnessPlan(input)
+}
+
+export interface ApplyPhaseInput {
+  root: string
+  workspaceId: string
+  plan: InstallPlan
+  allowDirty: boolean
+}
+
+export interface ApplyPhaseResult {
+  /** Undefined when static verification failed and the write was rolled back. */
+  applyResult: ApplyResult | undefined
+  staticVerify: VerifyResult
+  /** `applied`: written and statically verified. A failed verification is rolled back when it can be. */
+  outcome: "applied" | "rolled_back" | "left_written"
+  /**
+   * Edits the adapter could NOT make itself (a Vite page with no `</head>`, a missing index.html):
+   * each is an OPEN JOB. While any is pending the pixel is not live, so no provider of this plan
+   * may be reported as installed.
+   */
+  openJobs: ManualRequirement[]
+}
+
+/**
+ * Write the plan, verify it statically, and roll back a failed verification. `applyInstallation`
+ * restores its own snapshot when it throws (the error propagates); a static-verification failure
+ * AFTER a successful write is rolled back here from the same pre-image.
+ */
+export function applyPhase(input: ApplyPhaseInput): ApplyPhaseResult {
+  const p = input.plan
+  const snapshot: FileSnapshot[] = snapshotFiles(input.root, [
+    ...p.files,
+    ...(p.serverLane ? [p.serverLane.briefPath] : []),
+    installManifestRelativePath
+  ])
+  let applyResult: ApplyResult | undefined = applyInstallation({
+    root: input.root,
+    workspaceId: input.workspaceId,
+    plan: p,
+    allowDirty: input.allowDirty
+  })
+  const staticVerify = verifyInstallation({ root: input.root })
+  let outcome: ApplyPhaseResult["outcome"] = "applied"
+  if (!staticVerify.buildOk) {
+    try {
+      restoreSnapshot(input.root, snapshot)
+      outcome = "rolled_back"
+      applyResult = undefined
+    } catch {
+      outcome = "left_written"
+    }
+  }
+  return { applyResult, staticVerify, outcome, openJobs: applyResult?.requiresManual ?? [] }
+}
+
+export type ConversionsPhaseInput =
+  | { action: "propose"; root: string; appRoot: string; downloadDestinationPath?: string }
+  | { action: "mark"; root: string; appRoot: string; approved: ApprovedConversions }
+
+export type ConversionsPhaseResult =
+  | { action: "propose"; serverCheckout: ServerCheckoutRecommendation | null; proposal: ConversionProposal }
+  | { action: "mark"; marking: ApplyConversionsResult }
+
+/**
+ * `propose`: detect the server checkout (detection only) and the markable conversion elements,
+ * writing nothing. `mark`: add the approved `data-conversion` marks (recorded and reversible in
+ * .infinite/conversions.json) and refresh the manifest hashes of the managed files they touched.
+ */
+export function conversionsPhase(input: ConversionsPhaseInput): ConversionsPhaseResult {
+  if (input.action === "propose") {
+    const serverCheckout = detectServerCheckout({ root: input.root, appRoot: input.appRoot })
+    const proposal = proposeConversions({ root: input.root, appRoot: input.appRoot, downloadDestinationPath: input.downloadDestinationPath })
+    if (serverCheckout) proposal.serverCheckout = serverCheckout
+    return { action: "propose", serverCheckout, proposal }
+  }
+  const marking = applyConversions({ root: input.root, appRoot: input.appRoot, approved: input.approved })
+  refreshManagedHashesAfterMarks(input.root, input.appRoot, marking)
+  return { action: "mark", marking }
+}
+
+/** Source-only setup-correctness checks (never a receipt lane). */
+export function setupChecksPhase(appRootAbsolute: string): SetupChecksReport {
+  return runSetupChecks(appRootAbsolute)
+}
+
+export interface ServerLanePhaseInput {
+  lane: NonNullable<InstallPlan["serverLane"]>
+  applied: NonNullable<ApplyResult["serverLane"]>
+}
+
+/**
+ * What the server lane's apply actually left running. `installed`: a file that RUNS was written
+ * (the entry, or the Next middleware). `module_only`: a Node module the customer mounts. `manual_entry`:
+ * the module was written but the entry is someone else's file. `brief`: nothing runs; the brief is
+ * the install.
+ */
+export type ServerLanePhaseResult =
+  | { kind: "installed"; target: string; why: string; evidence: string | undefined; manualCount: number }
+  | { kind: "module_only"; target: string; why: string; evidence: string | undefined }
+  | { kind: "manual_entry"; target: string; manualEntry: { path: string; reason?: string } }
+  | { kind: "brief"; reason: string | undefined }
+
+export function serverLanePhase(input: ServerLanePhaseInput): ServerLanePhaseResult {
+  const { lane } = input
+  const target = lane.targetLabel ?? (lane.mode === "next-middleware" ? "Next.js middleware" : lane.mode)
+  const why = lane.targetEvidence ? ` (${lane.targetEvidence})` : ""
+  const middlewareWritten = lane.mode === "next-middleware" && lane.middleware?.action !== "unpatchable"
+  const created = lane.created ?? []
+  const entryWritten = created.some((entry) => entry.role === "entry" && entry.action !== "manual")
+  const moduleWritten = created.some((entry) => entry.role === "module" && entry.action !== "manual")
+  const manualEntry = created.find((entry) => entry.role === "entry" && entry.action === "manual")
+  const manual = created.filter((entry) => entry.action === "manual")
+  if (lane.mode !== "brief" && (middlewareWritten || entryWritten)) {
+    const evidence = lane.middleware?.path ?? created.find((entry) => entry.role === "entry" && entry.action !== "manual")?.path ?? lane.modulePath
+    return { kind: "installed", target, why, evidence, manualCount: manual.length }
+  }
+  if (lane.mode === "node-module" && moduleWritten) {
+    return { kind: "module_only", target, why, evidence: created.find((entry) => entry.role === "module")?.path ?? lane.modulePath }
+  }
+  if (lane.mode !== "brief" && moduleWritten && manualEntry) {
+    return { kind: "manual_entry", target, manualEntry: { path: manualEntry.path, ...(manualEntry.reason ? { reason: manualEntry.reason } : {}) } }
+  }
+  return { kind: "brief", reason: lane.middleware?.reason ?? manual[0]?.reason }
+}
+
+/** The harness copy for a pending manual requirement: the provider is NOT live until it is added. */
+export function openJobReason(requirements: readonly ManualRequirement[]): string {
+  const first = requirements[0]
+  const more = requirements.length > 1 ? ` (+${requirements.length - 1} more)` : ""
+  return `not live yet — open job: add the managed block to ${first?.path ?? "the page"} by hand (${first?.reason ?? "the installer could not edit it"})${more}`
+}
+
+// ---------------------------------------------------------------------------------------------
+// Steps
+// ---------------------------------------------------------------------------------------------
+
+const preflight: RunbookStep<Ctx> = {
+  id: "preflight",
+  title: "Preflight",
+  run(ctx) {
+    const result = preflightPhase({
+      root: ctx.root,
+      nodeVersion: ctx.deps.nodeVersion,
+      writes: ctx.args.mode === "apply" && !ctx.args.brief,
+      allowDirty: ctx.args.allowDirty
+    })
+    if (result.blockedByDirtyTree) {
+      return { note: "dirty" }
+    }
+    ctx.treeCleanForHarness = result.status !== "dirty"
+    return { note: `git tree ${result.status}; node ${result.nodeVersion}` }
+  },
+  successCheck(ctx) {
+    const step = ctx.report.steps.find((entry) => entry.id === "preflight")
+    return step?.note !== "dirty"
+  },
+  failure: {
+    code: "INF_ENV_DIRTY_TREE",
+    message: () => "Your working tree has uncommitted changes. Commit or stash them first, or re-run with --allow-dirty.",
+    next: "halt"
+  }
+}
+
+const inspect: RunbookStep<Ctx> = {
+  id: "inspect",
+  title: "Inspect stack",
+  run(ctx) {
+    const phase = inspectPhase({ root: ctx.root, appRoot: ctx.args.appRoot, packageManager: ctx.args.packageManager })
+    ctx.inspect = phase.inspect
+    ctx.appRootAbsolute = phase.appRootAbsolute
+    ctx.report.framework = ctx.inspect.framework
+    ctx.report.appRoot = ctx.inspect.appRoot
+    ctx.report.hosting = phase.hosting
+    ctx.sourceLayout = phase.sourceLayout
+    ctx.manualBuildOwner = phase.manualBuildOwner
+    ctx.report.nextSteps.push(...ctx.sourceLayout.notes)
+    ctx.detected = phase.detected
+    ctx.manifest = phase.manifest
+    if (ctx.args.brief && ctx.args.mode !== "check" && (!isSupportedFramework(ctx.inspect.framework) || ctx.manualBuildOwner)) {
+      writeJson(ctx.root, HARNESS_BRIEF_RELATIVE_PATH, {
+        version: 1, coverageStatus: "not_established", framework: ctx.inspect.framework,
+        appRoot: ctx.inspect.appRoot, sourceLayout: ctx.sourceLayout,
+        observedProviders: ctx.detected, implementationChecklist: IMPLEMENTATION_CHECKLIST,
+        handoff: "Map the source/build owner and deployed routes, then implement and test the missing coverage without duplicating existing providers. No installation was performed."
+      })
+      ctx.manualBriefWritten = true
+      ctx.report.nextSteps.push(`Manual implementation guidance was written to ${HARNESS_BRIEF_RELATIVE_PATH}; automatic installation remains unsupported for this source layout.`)
+    }
+    return {
+      note: `${ctx.inspect.framework} at ${ctx.inspect.appRoot}; existing: ${ctx.detected.length === 0 ? "none" : ctx.detected.map((entry) => `${entry.provider}${entry.via === "gtm" ? "(gtm)" : ""} in ${entry.file}:${entry.line}`).join(", ")}`
+    }
+  },
+  successCheck(ctx) {
+    if ((ctx.sourceLayout?.generatedTarget || ctx.manualBuildOwner) && (ctx.args.mode === "apply" || ctx.args.mode === "plan")) return false
+    return ctx.inspect !== undefined && isSupportedFramework(ctx.inspect.framework)
+  },
+  failure: {
+    code: (ctx) => ctx.sourceLayout?.generatedTarget || ctx.manualBuildOwner ? "INF_SOURCE_OUTPUT_OWNERSHIP" : "INF_DETECT_NO_FRAMEWORK",
+    message: (ctx) => ctx.manualBuildOwner
+      ? "The selected subdirectory is part of a custom parent build whose analytics injection owner is unresolved. No installation or marking was performed. Audit the generated output and modify its existing source/build owner; --brief supplies manual guidance."
+      : ctx.sourceLayout?.generatedTarget
+      ? "The selected app root is generated build output. No installation or marking was performed. Select editable source with --app-root, or integrate with the existing builder and audit the rebuilt/deployed pages."
+      : ctx.sourceLayout?.outputDirectory
+        ? "This repo has a custom source/build-output layout; a source app could not be identified. Follow INF_SOURCE_OUTPUT_SPLIT in next steps. Do not point the installer at generated output just to get a passing result."
+        : "Could not identify a source web app in this repo. Use --root/--app-root to select its editable source. No provider coverage was established.",
+    next: "halt"
+  }
+}
+
+const resolveKeys: RunbookStep<Ctx> = {
+  id: "resolve-keys",
+  title: "Resolve keys",
+  run(ctx) {
+    const explicit = hasExplicitArtifacts(ctx.args)
+    const flags = flagArtifacts(ctx.root, ctx.args)
+    let discovered: WorkspaceInstallArtifacts | null = null
+    if (!explicit) {
+      const found = (ctx.deps.discover ?? discoverWorkspaceArtifacts)({
+        workspaceId: ctx.args.workspaceId,
+        warn: (message) => ctx.io.err(message)
+      })
+      if (found) {
+        discovered = found.artifacts
+        if (ctx.args.workspaceId === undefined && found.workspaceId) ctx.args.workspaceId = found.workspaceId
+        ctx.io.err(`Discovered saved public artifacts: ${found.filePath} (providers: ${found.providers.join(", ")})`)
+      }
+    }
+    ctx.keys = resolveKeysPhase({
+      root: ctx.root,
+      appRoot: ctx.inspect?.appRoot ?? ".",
+      flags,
+      explicitFlags: explicit,
+      discovered,
+      downloadDestinationPath: ctx.args.infiniteDownloadDestinationPath,
+      detected: ctx.detected
+    })
+    const named = Object.entries(ctx.keys.sources).map(([provider, source]) => `${provider} (${source})`)
+    return { note: named.length === 0 ? "no keys resolved" : named.join(", ") }
+  },
+  successCheck(ctx) {
+    // Only an EXPLICIT request for PostHog with no key is a failure (non-fatal); everything else
+    // without a key is simply skipped and says so in the table.
+    const requested = ctx.args.providers?.includes("posthog") ?? false
+    const hasKey = Boolean(ctx.keys?.artifacts.posthog?.projectKey)
+    const exists = ctx.detected.some((entry) => entry.provider === "posthog")
+    return !(requested && !hasKey && !exists)
+  },
+  failure: {
+    code: "INF_POSTHOG_NO_KEY",
+    message: () => "PostHog: no project key. Paste one with --posthog-project-key, or re-run with --providers listing only the providers you have keys for.",
+    next: "continue"
+  }
+}
+
+const classify: RunbookStep<Ctx> = {
+  id: "classify",
+  title: "Classify providers",
+  run(ctx) {
+    ctx.classifications = classifyPhase({
+      manifest: ctx.manifest,
+      detected: ctx.detected,
+      keys: ctx.keys ?? { artifacts: {}, sources: {} },
+      adoptExisting: ctx.args.adoptExisting,
+      serverLane: ctx.args.serverLane,
+      requested: ctx.args.providers
+    })
+    for (const entry of ctx.classifications) {
+      updateProvider(ctx.report, entry.provider, (state) => {
+        const evidence = entry.file ? `${entry.file}` : undefined
+        switch (entry.action) {
+          case "adopt":
+          case "improve":
+          case "manual":
+            // `improve` is an adopted provider with improve lines (the wizard's plan); the harness
+            // never classifies one, and an improved provider is still the customer's, not ours.
+            return { ...transitionProvider(state, { to: "adopted", reason: entry.reason, key: keyFor(entry), evidence }), verification: { kind: "adopted_not_ours" } }
+          case "report":
+            return transitionProvider(state, { to: "conflict", reason: entry.reason, key: keyFor(entry), evidence })
+          case "skip":
+            // A provider infinite-tag already installed (manifest-backed) is installed, not absent,
+            // even when this run has no key to re-plan it with.
+            return entry.file === ".infinite/install.json"
+              ? transitionProvider(state, { to: "installed", reason: entry.reason, evidence: entry.file })
+              : transitionProvider(state, { to: "skipped", reason: entry.reason })
+          case "install":
+            return { ...state, reason: entry.reason, ...(entry.key ? { key: entry.key } : {}) }
+          case "upgrade":
+            return transitionProvider(state, { to: "installed", reason: entry.reason, key: entry.key, evidence: ".infinite/install.json" })
+        }
+      })
+    }
+    return { note: ctx.classifications.map((entry) => `${entry.provider}:${entry.action}`).join(" ") }
+  },
+  successCheck: () => true,
+  failure: { code: "INF_PLAN_BLOCKED", message: () => "classification failed", next: "halt" }
+}
+
+// Consent is a GUIDED CHOICE, never a silent default and never a raw dead-end. When an Infinite
+// source will be installed with no consent decision, the provider would otherwise emit a plan
+// blocker; instead, in an interactive run we ASK (clear copy, both options, DNT/GPC explained) and
+// record the answer before planning; in a non-interactive run we print the same guidance naming
+// the exact flag to pass (never auto-picking a mode — not-required still collects by default).
+export const INFINITE_CONSENT_EXPLAINER = [
+  "Infinite first-party analytics needs one consent decision before it can collect:",
+  "  • not-required — collect by default; DNT/GPC visitors are still suppressed (most first-party sites).",
+  "  • required — collection stays OFF until your own consent banner grants it (DNT/GPC honored as the default)."
+].join("\n")
+export const INFINITE_CONSENT_PROMPT = "Gate Infinite analytics behind an explicit consent banner? [y/N] "
+export const INFINITE_CONSENT_NONINTERACTIVE =
+  "inf-guidance: INF_CONSENT_REQUIRED — Infinite analytics needs a consent decision. Re-run with --infinite-consent-mode not-required to collect by default (DNT/GPC still suppress), or --infinite-consent-mode required to gate collection on your own consent banner."
+
+async function resolveInfiniteConsent(ctx: Ctx): Promise<void> {
+  if (!ctx.keys) return
+  if (ctx.args.mode !== "plan" && ctx.args.mode !== "apply") return
+  if (ctx.args.brief) return
+  const infinite = ctx.keys.artifacts.infinite
+  if (!infinite?.siteSourceKey || infinite.consentMode !== undefined) return
+  // Only when Infinite will actually be INSTALLED: planning maps the artifact into the runtime for
+  // an install/upgrade only, which is the only case the provider's consent blocker fires.
+  const installing = ctx.classifications.some(
+    (entry) => entry.provider === "infinite" && (entry.action === "install" || entry.action === "upgrade")
+  )
+  if (!installing) return
+
+  if (ctx.io.interactive) {
+    narrate(ctx, INFINITE_CONSENT_EXPLAINER)
+    const gated = await ctx.io.confirm(INFINITE_CONSENT_PROMPT, false)
+    ctx.keys.artifacts.infinite = { ...infinite, consentMode: gated ? "required" : "not_required" }
+    narrate(
+      ctx,
+      gated
+        ? "Consent mode: required — collection stays off until your consent UI grants it. Pass --infinite-consent-mode required to skip this next time."
+        : "Consent mode: not-required — collecting by default; DNT/GPC visitors are still suppressed. Pass --infinite-consent-mode not-required to skip this next time."
+    )
+  } else {
+    // Never silently collect: leave consent unset (the plan blocker still guards it) but guide.
+    ctx.io.err(INFINITE_CONSENT_NONINTERACTIVE)
+  }
+}
+
+// Installing Infinite's first-party collection adds a new data processor (Infinite / Ultima Inc.,
+// api.ultima.inc). This is a NON-BLOCKING reminder (it never fails the run), surfaced in the report +
+// install output as an INF_ notice, that prompts the user to disclose Infinite in their privacy policy
+// BEFORE collection is enabled — and it states exactly what each installed lane sends, so the
+// disclosure can be accurate. The two lanes send DIFFERENT payloads, so the notice is split by lane:
+//
+//   • Browser pixel (runtime/infinite-browser.ts) — the page POSTs each event to a same-origin
+//     collectPath that the framework rewrite forwards to Infinite at api.ultima.inc, so Infinite is
+//     the HTTP endpoint that receives the request: the visitor's IP and User-Agent arrive as request
+//     headers there. The JSON body carries a random anonymousId + sessionId, the URL (origin + path;
+//     query string and fragment stripped), an optional referrer reduced to its host, the event name,
+//     and bounded properties. It sends NO visit key and NO UA class. So this lane must NOT claim the
+//     IP / user agent stay on your server.
+//   • Server lane (server-lane/runtime-source.ts) — your server's edge middleware derives the fields
+//     and POSTs them to Infinite at api.ultima.inc: path, host, referrer host, a User-Agent CLASS
+//     (userAgentFamily), and a secret-keyed visit key that rotates every 30 minutes. The raw IP and
+//     full User-Agent are processed ON your server to derive the class + key and never leave it.
+export const PRIVACY_DISCLOSURE_CODE = "INF_PRIVACY_DISCLOSURE"
+
+export const PIXEL_DISCLOSURE_FIELDS =
+  "Browser pixel — each event is POSTed to Infinite (Ultima Inc.) at api.ultima.inc via a same-origin rewrite, so Infinite receives the request headers, INCLUDING the visitor's IP address and User-Agent, plus a JSON body of: a random anonymousId + sessionId, the page URL (origin + path; query string and fragment stripped), an optional referrer reduced to its host, the event name, and bounded event properties (no DOM text, form values, or click ids)."
+
+// Manual Advanced Matching is OFF unless the customer asked for it, so this line is added to the
+// disclosure only when it is actually installed. It is the one lane that can carry a visitor's
+// contact details, so it says so plainly rather than hiding behind "hashed".
+export const META_ADVANCED_MATCHING_DISCLOSURE_FIELDS =
+  "Meta Manual Advanced Matching (you turned this on with --meta-advanced-matching on) — when YOUR code calls window.infiniteMetaAdvancedMatch(), the page sends Meta a sha256 hash of the email address and/or the account id you passed it, alongside the event. The raw values are hashed in the browser and never transmitted, and the page never reads them from your forms or your DOM by itself; it sends only what your code hands it, when your code hands it over. Disclose that hashed contact details are shared with Meta for ad measurement."
+
+export const SERVER_LANE_DISCLOSURE_FIELDS =
+  "Server lane — your edge middleware sends to Infinite (Ultima Inc.) at api.ultima.inc: the path, the host, the referrer host, a User-Agent CLASS (userAgentFamily, not the raw UA), and a secret-keyed visit key that rotates every 30 minutes. The raw IP address and full User-Agent are processed on your server to derive the class and key and never leave it."
+
+/** Builds the disclosure notice for exactly the lanes being installed, or null if neither is. */
+export function buildPrivacyDisclosureNotice(lanes: {
+  pixel: boolean
+  serverLane: boolean
+  metaAdvancedMatching?: boolean
+}): string | null {
+  const parts: string[] = []
+  if (lanes.pixel) parts.push(PIXEL_DISCLOSURE_FIELDS)
+  if (lanes.serverLane) parts.push(SERVER_LANE_DISCLOSURE_FIELDS)
+  if (lanes.metaAdvancedMatching) parts.push(META_ADVANCED_MATCHING_DISCLOSURE_FIELDS)
+  if (parts.length === 0) return null
+  return `${PRIVACY_DISCLOSURE_CODE} — Installing Infinite adds a new data processor (Infinite / Ultima Inc., api.ultima.inc). Disclose it in your privacy policy BEFORE enabling collection. What is sent: ${parts.join(" ")}`
+}
+
+function remindInfinitePrivacyDisclosure(ctx: Ctx): void {
+  const pixel = ctx.classifications.some(
+    (entry) => entry.provider === "infinite" && (entry.action === "install" || entry.action === "upgrade")
+  )
+  const serverLane = Boolean(ctx.planResult?.plan.serverLane)
+  // Only when Meta is actually being installed AND the customer opted in — a discovered artifact
+  // that merely records the flag while Meta is skipped must not produce a disclosure for a lane
+  // that is not there.
+  const metaAdvancedMatching =
+    ctx.keys?.artifacts.meta?.advancedMatching === true &&
+    ctx.classifications.some(
+      (entry) => entry.provider === "meta" && (entry.action === "install" || entry.action === "upgrade")
+    )
+  const notice = buildPrivacyDisclosureNotice({ pixel, serverLane, metaAdvancedMatching })
+  if (!notice) return
+  if (!ctx.report.nextSteps.includes(notice)) ctx.report.nextSteps.push(notice)
+}
+
+const plan: RunbookStep<Ctx> = {
+  id: "plan",
+  title: "Plan",
+  async run(ctx) {
+    if (!ctx.inspect || !ctx.keys) throw new Error("inspect did not run")
+    await resolveInfiniteConsent(ctx)
+    ctx.planResult = planPhase({
+      root: ctx.root,
+      inspect: ctx.inspect,
+      classifications: ctx.classifications,
+      keys: ctx.keys,
+      workspaceId: ctx.args.workspaceId,
+      serverLane: ctx.args.serverLane
+    })
+    // After the plan is built so the server-lane presence (ctx.planResult.plan.serverLane) is known.
+    remindInfinitePrivacyDisclosure(ctx)
+    if (ctx.args.brief && ctx.args.mode !== "check") {
+      writeJson(ctx.root, HARNESS_BRIEF_RELATIVE_PATH, {
+        version: 1,
+        generatedAt: new Date(ctx.deps.now?.() ?? Date.now()).toISOString(),
+        mode: ctx.args.mode,
+        framework: ctx.inspect.framework,
+        appRoot: ctx.inspect.appRoot,
+        providers: ctx.classifications,
+        plan: {
+          files: ctx.planResult.plan.files,
+          envKeys: ctx.planResult.plan.envKeys,
+          instructions: ctx.planResult.plan.instructions,
+          assumptions: ctx.planResult.plan.assumptions,
+          blockers: ctx.planResult.plan.blockers
+        },
+        implementationChecklist: IMPLEMENTATION_CHECKLIST,
+        sourceLayout: ctx.sourceLayout,
+        handoff: ctx.report.handoff
+      })
+    }
+    const p = ctx.planResult.plan
+    return {
+      note: ctx.planResult.nothingToInstall
+        ? "nothing to install"
+        : `${p.providers.length} provider${p.providers.length === 1 ? "" : "s"} → ${p.files.length} file${p.files.length === 1 ? "" : "s"}${p.serverLane ? " + server lane" : ""}`
+    }
+  },
+  successCheck(ctx) {
+    if (!ctx.planResult || ctx.planResult.failure) return false
+    if (ctx.args.mode === "apply" && !ctx.planResult.nothingToInstall && !ctx.args.workspaceId) {
+      ctx.planResult.failure = {
+        code: "INF_PLAN_BLOCKED",
+        message: "apply requires --workspace <workspace-id> (or a saved artifacts file that names one)."
+      }
+      return false
+    }
+    return true
+  },
+  failure: {
+    code: "INF_PLAN_UNMANAGED_TARGET",
+    message: (ctx) => ctx.planResult?.failure?.message ?? "plan failed",
+    next: "halt"
+  }
+}
+
+const confirm: RunbookStep<Ctx> = {
+  id: "confirm",
+  title: "Confirm install",
+  async run(ctx) {
+    if (ctx.args.mode !== "apply") return { skipped: `${ctx.args.mode} mode writes no install` }
+    if (ctx.args.brief) return { skipped: "--brief" }
+    if (!ctx.planResult || ctx.planResult.nothingToInstall) return { skipped: "nothing to install" }
+    narrate(ctx, renderPreview(ctx.planResult.plan))
+    if (ctx.args.yes) return { note: "approved with --yes" }
+    if (!ctx.io.interactive) {
+      ctx.declined = true
+      narrate(ctx, "This was a preview — nothing changed. To apply:  npx infinite-tag harness --yes")
+      return { note: "non-interactive without --yes; nothing written" }
+    }
+    const approved = await ctx.io.confirm("Apply these changes? [Y/n] ", true)
+    if (!approved) {
+      ctx.declined = true
+      narrate(ctx, "No changes made.")
+      return { note: "declined; nothing written" }
+    }
+    return { note: "approved" }
+  },
+  successCheck: () => true,
+  failure: { code: "INF_PLAN_BLOCKED", message: () => "confirmation failed", next: "halt" }
+}
+
+const apply: RunbookStep<Ctx> = {
+  id: "apply",
+  title: "Apply",
+  run(ctx) {
+    if (ctx.args.mode !== "apply") return { skipped: `${ctx.args.mode} mode` }
+    if (ctx.args.brief) return { skipped: "--brief" }
+    if (ctx.declined) return { skipped: "not approved" }
+    if (!ctx.planResult || ctx.planResult.nothingToInstall) return { skipped: "nothing to install" }
+    const p = ctx.planResult.plan
+    // The installer's own gate reads raw `git status`; preflight already judged the tree with the
+    // harness's outputs excluded, so its verdict (or --allow-dirty) is what applies here.
+    const phase = applyPhase({
+      root: ctx.root,
+      workspaceId: ctx.args.workspaceId as string,
+      plan: p,
+      allowDirty: ctx.args.allowDirty || ctx.treeCleanForHarness
+    })
+    ctx.applyResult = phase.applyResult
+    ctx.staticVerify = phase.staticVerify
+    if (phase.outcome !== "applied") ctx.applyOutcome = phase.outcome
+    if (ctx.staticVerify.buildOk) {
+      // A pending manual requirement means the managed block is NOT on the page yet: every pixel
+      // provider of this plan is an open job, never "installed" (and never read back as a lane).
+      const openJob = phase.openJobs.length > 0 ? openJobReason(phase.openJobs) : null
+      if (openJob) {
+        const line = `${openJob}. Snippet: see the plan instructions for ${phase.openJobs[0]?.path ?? "the page"}.`
+        if (!ctx.report.nextSteps.includes(line)) ctx.report.nextSteps.push(line)
+      }
+      for (const provider of p.providers) {
+        if (openJob) {
+          updateProvider(ctx.report, provider as HarnessProviderId, (state) =>
+            transitionProvider(state, { to: "skipped", reason: openJob, evidence: phase.openJobs[0]?.path })
+          )
+          continue
+        }
+        const lane = laneOf[provider as HarnessProviderId]
+        if (lane) ctx.writtenLanes.push(lane)
+        updateProvider(ctx.report, provider as HarnessProviderId, (state) =>
+          transitionProvider(state, {
+            to: "installed",
+            reason: "written this run; hash-verified against .infinite/install.json",
+            evidence: p.files.find((file) => !file.endsWith("install.json")) ?? ".infinite/install.json"
+          })
+        )
+      }
+    }
+    const changed = ctx.applyResult?.changedFiles.length ?? 0
+    const open = phase.openJobs.length
+    return {
+      note: ctx.applyOutcome
+        ? `static verification failed; ${ctx.applyOutcome === "rolled_back" ? "rolled back" : "left as written"}`
+        : `${changed} file${changed === 1 ? "" : "s"} changed${open > 0 ? `; ${open} open job${open === 1 ? "" : "s"} (manual edit)` : ""}`
+    }
+  },
+  successCheck(ctx) {
+    return ctx.staticVerify?.buildOk === true
+  },
+  failure: {
+    code: "INF_APPLY_ROLLED_BACK",
+    // "rolled back" is claimed only when a rollback actually ran: applyInstallation restores its
+    // snapshot when it throws, and the apply step restores its own when static verification fails.
+    message: (ctx, error) => {
+      const files = ctx.planResult?.plan.files.length ?? 0
+      const drift = ctx.staticVerify?.routeChecks.filter((line) => /Missing|drifted|forbidden/.test(line)).join("; ")
+      if (error !== undefined || ctx.applyOutcome === "rolled_back") {
+        return `Apply failed${error ? ` (${errorText(error)})` : drift ? ` — ${drift}` : ""}; rolled back ${files} file${files === 1 ? "" : "s"}. Nothing was left half-installed.`
+      }
+      return `Apply wrote ${files} file${files === 1 ? "" : "s"} but static verification failed${drift ? ` — ${drift}` : ""}; the files were left as written (rollback failed) — review \`git diff\`.`
+    },
+    next: "halt"
+  }
+}
+
+const conversions: RunbookStep<Ctx> = {
+  id: "conversions",
+  title: "Mark conversions",
+  async run(ctx) {
+    if (ctx.args.noMark) return { skipped: "--no-mark" }
+    if (ctx.args.mode === "check") return { skipped: "check mode writes nothing" }
+    if (ctx.args.mode === "verify-only") return { skipped: "verify-only" }
+    if (ctx.args.brief) return { skipped: "--brief" }
+    const appRoot = ctx.inspect?.appRoot ?? "."
+    const downloadDestinationPath = ctx.keys?.artifacts.infinite?.downloadDestinationPath
+
+    // Detection-only: a server checkout entry (and its webhook fulfillment) can't be marked by a
+    // client button, so recommend emitting checkout_started + purchase server-side as a pair.
+    const detected = conversionsPhase({ action: "propose", root: ctx.root, appRoot, downloadDestinationPath })
+    if (detected.action !== "propose") throw new Error("unreachable")
+    ctx.serverCheckout = detected.serverCheckout ?? undefined
+    if (ctx.serverCheckout) {
+      for (const line of renderServerCheckoutRecommendation(ctx.serverCheckout)) {
+        if (!ctx.report.nextSteps.includes(line)) ctx.report.nextSteps.push(line)
+      }
+    }
+
+    let approved: ApprovedConversions | null = null
+    if (ctx.args.conversions) {
+      approved = readApprovedConversions(ctx.root, ctx.args.conversions)
+      // Only --apply marks. In plan mode the file is validated and counted, and nothing is written.
+      if (ctx.args.mode !== "apply") {
+        ctx.report.conversions = { proposed: approved.rows.length, marked: 0, skipped: 0, stale: 0 }
+        return { note: `${approved.rows.length} approved row${approved.rows.length === 1 ? "" : "s"} validated; nothing marked in ${ctx.args.mode} mode` }
+      }
+      if (ctx.declined) return { skipped: "install not approved; nothing marked" }
+    } else {
+      ctx.proposal = detected.proposal
+      writeProposal(ctx.root, ctx.proposal)
+      ensureProposedIgnored(ctx.root)
+      ctx.report.conversions = { proposed: ctx.proposal.rows.length, marked: 0, skipped: ctx.proposal.skipped.length, stale: 0 }
+      if (ctx.args.mode === "plan") {
+        return { note: `${ctx.proposal.rows.length} proposed → ${PROPOSED_CONVERSIONS_RELATIVE_PATH} (nothing marked in plan mode)` }
+      }
+      if (ctx.declined) return { skipped: "install not approved; proposal written only" }
+      if (ctx.proposal.rows.length === 0) return { note: "nothing to propose" }
+      narrate(ctx, renderProposalTable(ctx.proposal))
+      // --yes never approves marking: renaming a company's conversion vocabulary is a data
+      // contract change, so it is always an explicit answer (default No).
+      const mark = ctx.io.interactive
+        ? await ctx.io.confirm(`Mark these ${ctx.proposal.rows.length} elements now? [y/N] `, false)
+        : false
+      if (!mark) return { note: "proposal written; not marked (approve with --conversions <file>)" }
+      approved = { rows: ctx.proposal.rows }
+    }
+
+    const marked = conversionsPhase({ action: "mark", root: ctx.root, appRoot, approved })
+    if (marked.action !== "mark") throw new Error("unreachable")
+    ctx.marking = marked.marking
+    ctx.report.conversions = {
+      proposed: ctx.proposal?.rows.length ?? approved.rows.length,
+      marked: ctx.marking.marked.length,
+      skipped: (ctx.proposal?.skipped.length ?? 0) + ctx.marking.skipped.length,
+      stale: ctx.marking.stale.length
+    }
+    if (ctx.marking.marked.length > 0) {
+      const has = (provider: HarnessProviderId) => ["installed", "adopted"].includes(findProvider(ctx.report, provider).state)
+      if (has("ga4")) ctx.report.nextSteps.push("GA4 key events for the marked conversions are designated from the Infinite desktop (the cloud owns them) — not done by this run.")
+      if (has("posthog")) ctx.report.nextSteps.push("PostHog actions for the marked conversions need a write key — create them in PostHog; not done by this run.")
+    }
+    return { note: `${ctx.marking.marked.length} marked, ${ctx.marking.skipped.length} skipped, ${ctx.marking.stale.length} stale` }
+  },
+  successCheck(ctx) {
+    return (ctx.marking?.stale.length ?? 0) === 0
+  },
+  failure: {
+    code: "INF_MARK_STALE_ELEMENT",
+    message: (ctx) => ctx.marking?.stale.map((entry) => entry.message).join(" ") ?? "stale element",
+    next: "continue"
+  }
+}
+
+/**
+ * SETUP CORRECTNESS — the checks that ask whether something SHOULD have fired.
+ *
+ * Placed immediately after `mark` and run in EVERY mode, `--check` included: it reads source only,
+ * so it needs no deploy, no browser and no receipt window, and `mark` is both the step that writes
+ * `data-conversion` and the step whose "already marked" skip hid the original defect. It never
+ * touches the verification contract — the five receipt lanes stay exactly what they are, and this
+ * step can neither mint nor deny one.
+ *
+ * Its failure is `continue`: a miswired conversion is worth stopping a human for, never worth
+ * abandoning a half-finished install over.
+ */
+const setupChecks: RunbookStep<Ctx> = {
+  id: "setup-checks",
+  title: "Setup correctness",
+  run(ctx) {
+    if (ctx.args.brief) return { skipped: "--brief" }
+    const report = setupChecksPhase(ctx.appRootAbsolute)
+    ctx.setupChecks = report
+    ctx.report.setupChecks = report
+    for (const line of setupFindingLines(report)) {
+      if (!ctx.report.nextSteps.includes(line)) ctx.report.nextSteps.push(line)
+    }
+    return { note: setupChecksNote(report) }
+  },
+  successCheck(ctx) {
+    return !(ctx.setupChecks?.findings ?? []).some((finding) => finding.state === "problem")
+  },
+  failure: {
+    code: "INF_SETUP_MISWIRED",
+    message: (ctx) =>
+      (ctx.setupChecks?.findings ?? [])
+        .filter((finding) => finding.state === "problem")
+        .map((finding) => finding.message)
+        .join(" "),
+    next: "continue"
+  }
+}
+
+const serverLane: RunbookStep<Ctx> = {
+  id: "server-lane",
+  title: "Server lane",
+  run(ctx) {
+    if (!ctx.args.serverLane) return { skipped: "not requested" }
+    if (ctx.args.mode !== "apply" || ctx.declined || ctx.args.brief) return { skipped: `${ctx.args.mode === "apply" ? "not applied" : `${ctx.args.mode} mode`}` }
+    const lane = ctx.planResult?.plan.serverLane
+    const applied = ctx.applyResult?.serverLane
+    if (!lane || !applied) return { skipped: "no server lane in the plan" }
+    // The plan picked a target by framework + hosting (Next middleware, Vercel root middleware,
+    // Netlify edge, Cloudflare Pages, Node module) or fell back to the brief. It is "installed"
+    // only when a file the lane manages was actually written or kept this run.
+    const outcome = serverLanePhase({ lane, applied })
+    if (outcome.kind === "installed") {
+      const { target, why, evidence, manualCount } = outcome
+      ctx.writtenLanes.push("server_lane")
+      updateProvider(ctx.report, "server_lane", (state) =>
+        transitionProvider(state, {
+          to: "installed",
+          reason: `${target}${why}; brief ${applied.briefWritten ? "written" : "printed"}${manualCount > 0 ? `; ${manualCount} file${manualCount === 1 ? "" : "s"} left for you (see the brief)` : ""}`,
+          evidence
+        })
+      )
+      return { note: `${target}${why}: ${lane.files.join(", ")}; ${lane.briefPath} ${applied.briefWritten ? "written" : "not written"}` }
+    }
+    if (outcome.kind === "module_only") {
+      // No entry by design: the customer mounts the module. Written, but not counting anything yet.
+      const { target, why, evidence } = outcome
+      updateProvider(ctx.report, "server_lane", (state) =>
+        transitionProvider(state, {
+          to: "installed",
+          reason: `${target}${why}; not mounted yet — add the one-line mount from ${lane.briefPath}; nothing is recorded until then`,
+          evidence
+        })
+      )
+      return { note: `${target}: module written, mount is manual (${lane.briefPath})` }
+    }
+    if (outcome.kind === "manual_entry") {
+      const { target, manualEntry } = outcome
+      updateProvider(ctx.report, "server_lane", (state) =>
+        transitionProvider(state, {
+          to: "skipped",
+          reason: `entry manual — ${manualEntry.path} is not ours to edit${manualEntry.reason ? ` (${manualEntry.reason})` : ""}; the module was written but nothing runs until you add the lines from ${lane.briefPath}`,
+          evidence: manualEntry.path
+        })
+      )
+      return { note: `${target}: module written, entry ${manualEntry.path} left for you (${lane.briefPath})` }
+    }
+    const target = lane.targetLabel ?? (lane.mode === "next-middleware" ? "Next.js middleware" : lane.mode)
+    const reason = outcome.reason
+    updateProvider(ctx.report, "server_lane", (state) =>
+      transitionProvider(state, {
+        to: "skipped",
+        reason: `brief only — ${lane.mode === "brief" ? "no server this harness can patch here" : `${target} left untouched${reason ? `: ${reason}` : ""}`}; the agent brief ${applied.briefWritten ? `is at ${lane.briefPath}` : "was printed"}`,
+        evidence: lane.briefPath
+      })
+    )
+    if (!applied.briefWritten) narrate(ctx, applied.brief)
+    return { note: `brief only (${lane.mode}${reason ? `: ${reason}` : ""})` }
+  },
+  successCheck: () => true,
+  failure: { code: "INF_PLAN_BLOCKED", message: () => "server lane failed", next: "continue" }
+}
+
+/**
+ * The server-lane ENV step (see server-lane-env.ts). Runs after a lane was installed this run, or is
+ * recorded by an earlier one — a merged middleware whose deployment lacks the two env vars records
+ * nothing, and no install state can tell. Never prints the secret; its outcome rides the report.
+ */
+const serverLaneEnv: RunbookStep<Ctx> = {
+  id: "server-lane-env",
+  title: "Server lane env",
+  async run(ctx) {
+    if (ctx.args.brief) return { skipped: "--brief" }
+    if (ctx.args.mode !== "apply" && ctx.args.mode !== "verify-only") return { skipped: `${ctx.args.mode} mode` }
+    if (ctx.declined) return { skipped: "not applied" }
+    const recorded = ctx.manifest?.serverLane
+    const installed =
+      findProvider(ctx.report, "server_lane").state === "installed" ||
+      (ctx.args.mode === "verify-only" && recorded !== undefined && recorded.mode !== "brief")
+    if (!installed) return { skipped: "no server lane installed" }
+    const copy = serverLaneCopy.envStep
+    narrate(ctx, "")
+    narrate(ctx, `${copy.title}:`)
+    const result = await runServerLaneEnvStep({
+      mode: ctx.args.mode,
+      interactive: ctx.io.interactive,
+      yes: ctx.args.yes,
+      replaceLiveSecret: ctx.args.replaceLiveSecret === true,
+      redeploy: ctx.args.redeploy === true,
+      allowDirty: ctx.args.allowDirty,
+      root: ctx.root,
+      appRootAbsolute: ctx.appRootAbsolute,
+      knownPublicKey: ctx.keys?.artifacts.infinite?.siteSourceKey,
+      bridge: ctx.deps.serverLaneEnv?.bridge,
+      runner: ctx.deps.serverLaneEnv?.runner,
+      say: (line) => narrate(ctx, line),
+      confirm: (question, defaultYes) => ctx.io.confirm(question, defaultYes)
+    })
+    ctx.serverLaneEnv = result.report
+    ctx.serverLaneStatus = result.status
+    ctx.report.serverLaneEnv = result.report
+    const env = result.report
+    const pushNext = (line: string) => {
+      if (!ctx.report.nextSteps.includes(line)) ctx.report.nextSteps.push(line)
+    }
+    if (env.envSet !== "yes") pushNext(copy.manualNextStep(env.publicKey))
+    if (env.path === "local_vercel" && (env.redeploy.state === "skipped" || env.redeploy.state === "failed")) pushNext(copy.redeployNeeded)
+    if (env.path === "infinite_vercel" && env.redeploy.state === "skipped") pushNext(copy.redeploySkipped(env.redeploy.reason).trim())
+    if (env.path === "infinite_vercel" && env.redeploy.state === "unconfirmed") pushNext(copy.redeployUnconfirmed(env.redeploy.reason).trim())
+    if (env.path === "infinite_vercel" && env.redeploy.state === "unknown") pushNext(copy.redeployUnknown.trim())
+    return {
+      note: `${env.path}; env set: ${env.envSet}${env.written.length > 0 ? `; wrote ${env.written.join(", ")}` : ""}${env.statusRefusal ? `; status: ${env.statusRefusal.code}` : ""}`
+    }
+  },
+  successCheck: () => true,
+  failure: { code: "INF_PLAN_BLOCKED", message: () => "server lane env step failed", next: "continue" }
+}
+
+/**
+ * The server lane's receipt, read from Infinite's server-lane STATUS instead of the verify backends
+ * whenever the env step could read that status. Why this seam and not `/v1/analytics/verify`: the
+ * verify backends load the URL ONCE at the start and poll for a receipt newer than that load, but a
+ * lane whose env was just set is not live until the redeploy finishes — minutes later, after that
+ * one load. The status answers "has Infinite ever received a server-lane event" with no page load
+ * and no secret, which is exactly "working". A timestamp the baseline already had never counts.
+ *
+ * Returns the step note, or null when the status seam is unavailable (no app, old app): then the
+ * lane keeps riding the verify backends exactly as before.
+ */
+async function verifyServerLaneViaStatus(ctx: Ctx): Promise<string | null> {
+  const env = ctx.serverLaneEnv
+  const baseline = ctx.serverLaneStatus
+  const bridge = ctx.deps.serverLaneEnv?.bridge
+  if (!env || !baseline || !bridge) return null
+  if (findProvider(ctx.report, "server_lane").state !== "installed") return null
+  const copy = serverLaneCopy.envStep
+  const verified = (at: string) => {
+    env.firstEvent = { state: "received", at }
+    updateProvider(ctx.report, "server_lane", (state) => transitionProvider(state, { to: "verified", receiptAt: at }))
+  }
+  const awaiting = (reason: string) => {
+    env.firstEvent = { state: "waiting" }
+    updateProvider(ctx.report, "server_lane", (state) => ({ ...state, verification: { kind: "awaiting_first_event", envSet: env.envSet, reason } }))
+  }
+
+  if (env.path === "already_receiving") {
+    // "receiving" = a SERVER-LANE receipt at/after the current secretSetAt (pixel traffic never
+    // counts). The decoder refuses a receiving status without serverLaneLastReceivedAt.
+    const at = baseline.serverLaneLastReceivedAt
+    if (at === null) throw new Error("server-lane status said receiving without serverLaneLastReceivedAt")
+    verified(at)
+    return "server_lane=verified (receiving with the current secret)"
+  }
+  const url = productionUrl(ctx)
+  const poll = env.envSet === "yes" || ctx.args.mode === "verify-only"
+  if (!poll) {
+    awaiting(copy.awaitingReason(env.envSet, false))
+    if (ctx.args.mode === "apply") ctx.report.nextSteps.push(copy.awaitingNextStep(url))
+    return `server_lane=awaiting_first_event (env set: ${env.envSet}; not polled)`
+  }
+  const redeploying = env.redeploy.state === "started" || env.redeploy.state === "deployed" || env.redeploy.state === "unconfirmed"
+  const budgetMs = ctx.deps.budgetMs ?? (redeploying ? SERVER_LANE_FIRST_EVENT_BUDGET_MS : VERIFY_BUDGET_MS)
+  ctx.io.err(copy.waiting(Math.round(budgetMs / 1000), url))
+  const answer = await waitForFirstServerLaneEvent({
+    bridge,
+    runStartedAt: ctx.report.startedAt,
+    now: ctx.deps.now ?? (() => Date.now()),
+    sleep: ctx.deps.sleep ?? ((ms) => new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms))),
+    budgetMs,
+    pollIntervalMs: ctx.deps.pollIntervalMs ?? VERIFY_POLL_INTERVAL_MS
+  })
+  if (answer.state === "received") {
+    verified(answer.at)
+    ctx.io.err(copy.firstEvent(answer.at))
+    return "server_lane=verified"
+  }
+  const reason = answer.state === "refused" ? copy.awaitingRefused(answer.message) : copy.awaitingReason(env.envSet, true)
+  awaiting(reason)
+  if (ctx.args.mode === "verify-only") ctx.verifyIncomplete = copy.verifyOnlyIncomplete(reason)
+  else ctx.report.nextSteps.push(copy.awaitingNextStep(url))
+  return `server_lane=awaiting_first_event (env set: ${env.envSet})`
+}
+
+const verify: RunbookStep<Ctx> = {
+  id: "verify",
+  title: "Verify receipts",
+  async run(ctx) {
+    if (ctx.args.mode === "check" || ctx.args.mode === "plan") return { skipped: `${ctx.args.mode} mode` }
+    if (ctx.args.brief) return { skipped: "--brief" }
+    const incomplete = (reason: string) => {
+      ctx.verifyIncomplete = reason
+      return { note: reason }
+    }
+    if (ctx.args.mode === "verify-only") {
+      const manifest = ctx.manifest
+      if (!manifest) return incomplete("Verification was not attempted: no .infinite/install.json manifest identifies the owned installation. Audit the existing build and provider receipts manually; do not fabricate a manifest or install duplicate tags.")
+      const ambiguous = ctx.report.providers.filter(row => manifest.providers.includes(row.provider as ProviderId) && (row.state === "adopted" || row.state === "conflict"))
+      if (ambiguous.length) return incomplete(`Verification ownership is ambiguous for ${ambiguous.map(row => row.provider).join(", ")}. Reconcile the existing installation and manifest before verifying; no tags were changed.`)
+      for (const provider of manifest.providers) {
+        const lane = laneOf[provider as HarnessProviderId]
+        if (lane) ctx.writtenLanes.push(lane)
+        updateProvider(ctx.report, provider as HarnessProviderId, (state) =>
+          state.state === "absent" || state.state === "skipped"
+            ? { ...state, state: "installed", reason: "recorded in .infinite/install.json", evidence: ".infinite/install.json" }
+            : state
+        )
+      }
+      // Every lane mode a manifest can record (Next, Vercel-any, Netlify, Cloudflare Pages, Node
+      // module) is a lane to read back; only "brief" wrote nothing.
+      const recordedLane = manifest.serverLane
+      if (recordedLane && recordedLane.mode !== "brief") {
+        ctx.writtenLanes.push("server_lane")
+        // Evidence is the file that RUNS: the middleware, else the created entry (never the
+        // lib/ module), else the module for a node-module lane.
+        const created = recordedLane.created ?? []
+        const entry = created.find((file) => !/(^|\/)lib\//.test(file)) ?? created[0]
+        const evidence = recordedLane.middleware ?? entry ?? recordedLane.module ?? ".infinite/install.json"
+        updateProvider(ctx.report, "server_lane", (state) => ({ ...state, state: "installed", reason: `recorded in .infinite/install.json (${recordedLane.mode})`, evidence }))
+      }
+    } else if (ctx.declined) {
+      return { skipped: "not applied" }
+    }
+    const laneNote = await verifyServerLaneViaStatus(ctx)
+    const lanes = [...new Set(ctx.writtenLanes)].filter((lane) => !(laneNote !== null && lane === "server_lane"))
+    if (lanes.length === 0) {
+      if (laneNote !== null) return { note: laneNote }
+      return ctx.args.mode === "verify-only"
+        ? incomplete("Verification was not attempted: the manifest contains no verifiable lanes.")
+        : { skipped: "nothing installed by this run to read back" }
+    }
+    const url = productionUrl(ctx)
+    if (!url) {
+      if (ctx.args.mode === "verify-only") return incomplete(`${ctx.verifyIncomplete ? `${ctx.verifyIncomplete} ` : ""}Verification was not attempted: provide --url or a configured production host.`)
+      return laneNote !== null
+        ? { note: `${laneNote}; ${lanes.join(", ")} not read back: no --url and no production host to load` }
+        : { skipped: "no --url and no production host to load" }
+    }
+    const serverLaneIncomplete = ctx.verifyIncomplete
+
+    const backends: VerificationBackend[] = []
+    const posthogHost = ctx.keys?.artifacts.posthog?.apiHost || "https://us.i.posthog.com"
+    // A founder-supplied Query Read key answers the PostHog lane directly; without one the lane
+    // falls through to the cloud (or None) backend and the reason names the missing key.
+    if (lanes.includes("posthog") && ctx.args.posthogQueryKey) {
+      backends.push(new PosthogQueryBackend({ apiHost: posthogHost, queryKey: ctx.args.posthogQueryKey, fetch: ctx.deps.fetch, now: ctx.deps.now, sleep: ctx.deps.sleep, budgetMs: ctx.deps.budgetMs, pollIntervalMs: ctx.deps.pollIntervalMs }))
+    }
+    backends.push(...(ctx.deps.backends ?? [new NoneBackend()]))
+    ctx.io.err(`Verifying ${lanes.join(", ")} against ${url} — open the site in a browser now so the tags fire; polling up to ${Math.round((ctx.deps.budgetMs ?? 60_000) / 1000)}s.`)
+    ctx.verifyResult = await verifyLanes({ url, lanes, backends, fetch: ctx.deps.fetch, now: ctx.deps.now, sleep: ctx.deps.sleep, budgetMs: ctx.deps.budgetMs, pollIntervalMs: ctx.deps.pollIntervalMs, log: (line) => ctx.io.err(line) })
+    if (lanes.includes("posthog") && !ctx.args.posthogQueryKey) {
+      const answer = ctx.verifyResult.lanes.posthog
+      if (answer.state === "not_verifiable" && answer.reason === NONE_BACKEND_REASON) {
+        ctx.verifyResult.lanes.posthog = { state: "not_verifiable", reason: "no query key — pass --posthog-query-key, or run infinite analytics from the desktop CLI" }
+      }
+    }
+    for (const lane of lanes) {
+      const answer = ctx.verifyResult.lanes[lane]
+      const provider = lane as HarnessProviderId
+      updateProvider(ctx.report, provider, (state) => {
+        if (answer.state === "verified") return transitionProvider(state, { to: "verified", receiptAt: answer.receiptAt })
+        if (answer.state === "not_verifiable") return { ...state, verification: { kind: "not_verifiable", reason: answer.reason } }
+        return { ...state, verification: { kind: "no_receipt", causes: answer.causes } }
+      })
+    }
+    if (ctx.verifyResult.siteStatus === null || ctx.verifyResult.siteStatus >= 400) {
+      ctx.verifyIncomplete = "The site could not be loaded; receipt polling was not performed. Check the URL, deployment and access restrictions, then rerun verification."
+    } else if (ctx.args.mode === "verify-only") {
+      const unavailable = lanes.filter(lane => ctx.verifyResult?.lanes[lane].state === "not_verifiable")
+      if (unavailable.length) ctx.verifyIncomplete = `Receipt verification is incomplete: ${unavailable.map(lane => {
+        const answer = ctx.verifyResult!.lanes[lane]
+        return `${lane}: ${answer.state === "not_verifiable" ? answer.reason : "not verified"}`
+      }).join("; ")}. Complete the named provider checks; installed is not verified.`
+    }
+    if (serverLaneIncomplete && ctx.verifyIncomplete !== serverLaneIncomplete) {
+      ctx.verifyIncomplete = ctx.verifyIncomplete ? `${serverLaneIncomplete} ${ctx.verifyIncomplete}` : serverLaneIncomplete
+    }
+    const summary = lanes.map((lane) => `${lane}=${ctx.verifyResult?.lanes[lane].state}`).join(" ")
+    return { note: `${url} (HTTP ${ctx.verifyResult.siteStatus ?? "—"}) ${summary}${laneNote !== null ? ` ${laneNote}` : ""}` }
+  },
+  successCheck(ctx) {
+    if (ctx.verifyIncomplete) return false
+    if (!ctx.verifyResult) return true
+    return !Object.values(ctx.verifyResult.lanes).some((answer) => answer.state === "no_receipt")
+  },
+  failure: {
+    code: (ctx) => ctx.verifyIncomplete ? "INF_VERIFY_INCOMPLETE" : "INF_VERIFY_NO_RECEIPT",
+    message: (ctx) => {
+      if (ctx.verifyIncomplete) return ctx.verifyIncomplete
+      const missing = Object.entries(ctx.verifyResult?.lanes ?? {}).filter(([, answer]) => answer.state === "no_receipt")
+      const budget = Math.round((ctx.deps.budgetMs ?? 60_000) / 1000)
+      const causes = missing[0]?.[1].state === "no_receipt" ? missing[0][1].causes : []
+      return `No ${missing.map(([lane]) => lane).join("/")} event arrived within ${budget}s.${causes.length > 0 ? ` Likely: ${causes.join(" · ")}` : ""}`
+    },
+    next: "continue"
+  }
+}
+
+const reportStep: RunbookStep<Ctx> = {
+  id: "report",
+  title: "Report + handoff",
+  run(ctx) {
+    // The overclaim guard: a server lane whose env step ran but whose receipt was never read (verify
+    // skipped, declined, no URL) must not print a bare "installed" — that reads as done.
+    const lane = findProvider(ctx.report, "server_lane")
+    if (ctx.serverLaneEnv && lane.state === "installed" && lane.verification.kind === "not_run") {
+      const envSet = ctx.serverLaneEnv.envSet
+      updateProvider(ctx.report, "server_lane", (state) => ({
+        ...state,
+        verification: { kind: "awaiting_first_event", envSet, reason: serverLaneCopy.envStep.awaitingReason(envSet, false) }
+      }))
+    }
+    // BEFORE the check-mode return: `--check` prints nextSteps too, and the relay line is exactly
+    // the kind of thing a dry run should surface (it changes nothing and costs nothing to say).
+    const relay = metaRelayNote(ctx.report)
+    if (relay && !ctx.report.nextSteps.includes(relay)) ctx.report.nextSteps.push(relay)
+    if (ctx.args.mode === "check") return { note: "check mode: printed only, nothing written" }
+    ctx.report.finishedAt = new Date(ctx.deps.now?.() ?? Date.now()).toISOString()
+    const absolutePath = join(ctx.root, HARNESS_REPORT_RELATIVE_PATH)
+    assertWriteTargetInsideRoot(ctx.root, absolutePath)
+    writeFileAtomic(absolutePath, renderReportMarkdown(ctx.report))
+    recordHarnessFile(ctx.root, HARNESS_REPORT_RELATIVE_PATH)
+    return { note: `${HARNESS_REPORT_RELATIVE_PATH} written` }
+  },
+  successCheck: () => true,
+  failure: { code: "INF_PLAN_BLOCKED", message: () => "report failed", next: "continue" }
+}
+
+/**
+ * Every harness step, keyed by its runbook id. A Record over RunbookStepId: a new id in
+ * RUNBOOK_STEP_IDS without a step here is a compile error, and runbook.test.ts fails when a step's
+ * own `id` disagrees with its key.
+ */
+export const HARNESS_STEPS_BY_ID: Readonly<Record<RunbookStepId, RunbookStep<Ctx>>> = {
+  preflight,
+  inspect,
+  "resolve-keys": resolveKeys,
+  classify,
+  plan,
+  confirm,
+  apply,
+  conversions,
+  "setup-checks": setupChecks,
+  "server-lane": serverLane,
+  "server-lane-env": serverLaneEnv,
+  verify,
+  report: reportStep
+}
+
+/** The run order, DERIVED from RUNBOOK_STEP_IDS so the two can never drift. */
+export const HARNESS_STEPS: ReadonlyArray<RunbookStep<Ctx>> = RUNBOOK_STEP_IDS.map((id) => HARNESS_STEPS_BY_ID[id])
+
+// ---------------------------------------------------------------------------------------------
+// Entry
+// ---------------------------------------------------------------------------------------------
+
+export async function runHarness(args: HarnessArgs, io: HarnessIo, deps: HarnessDeps = {}): Promise<HarnessRunResult> {
+  const root = resolve(args.root ?? process.cwd())
+  const ctx: Ctx = {
+    report: createHarnessReport({ mode: args.mode, root, startedAt: new Date(deps.now?.() ?? Date.now()).toISOString() }),
+    args: { ...args, xEventTagIds: [...args.xEventTagIds], infiniteProductionHosts: [...args.infiniteProductionHosts] },
+    io,
+    deps,
+    root,
+    appRootAbsolute: root,
+    detected: [],
+    manifest: null,
+    classifications: [],
+    declined: false,
+    treeCleanForHarness: false,
+    writtenLanes: []
+  }
+
+  const { report } = await runRunbook(HARNESS_STEPS, ctx, {
+    now: () => new Date(deps.now?.() ?? Date.now()).toISOString(),
+    finalize(finished) {
+      if (args.json) {
+        io.out(JSON.stringify(finished, null, 2))
+        return
+      }
+      io.out("")
+      io.out(`Infinite analytics harness · ${finished.mode} · ${finished.framework ?? "no framework"}${finished.appRoot && finished.appRoot !== "." ? ` (app at ${finished.appRoot})` : ""}`)
+      io.out("")
+      io.out(verificationSummary(finished))
+      io.out(renderReportTable(finished))
+      if (finished.conversions) {
+        const c = finished.conversions
+        io.out("")
+        io.out(`Conversions: ${c.proposed} proposed · ${c.marked} marked · ${c.skipped} skipped · ${c.stale} stale`)
+      }
+      for (const failure of finished.failures) {
+        io.out("")
+        io.out(`${failure.next === "halt" ? "✗" : "!"} ${failure.code} at ${failure.step}: ${failure.message}`)
+      }
+      if (finished.nextSteps.length > 0) {
+        io.out("")
+        io.out("Next steps (not done by this run):")
+        for (const next of finished.nextSteps) io.out(`  - ${next}`)
+      }
+      io.out("")
+      if (finished.mode !== "check" && finished.steps.find(step => step.id === "report")?.status === "ok") {
+        io.out(`Report: ${HARNESS_REPORT_RELATIVE_PATH}`)
+        io.out("")
+        io.out("Paste this to your agent:")
+        io.out(`  ${finished.handoff}`)
+        io.out("")
+      }
+      if (ctx.manualBriefWritten) io.out(`Manual agent brief: ${HARNESS_BRIEF_RELATIVE_PATH} (no installation performed).`)
+    }
+  })
+
+  await sendReport(report, args, io, deps)
+
+  const exitCode = report.failures.length === 0 ? 0 : 1
+  return { exitCode, report }
+}
+
+/**
+ * After the report step: hand the state table to the sink, print one line either way. Gated on
+ * the report step having RUN OK — a run that halted before inspecting (dirty tree, no framework)
+ * has seven `absent` rows that were never observed, and sending those would render as a stack
+ * the harness did not look at. `--check` writes no report and sends none (it is the ungated,
+ * read-only path). With --json the line rides stderr so stdout stays one document.
+ */
+async function sendReport(report: HarnessReport, args: HarnessArgs, io: HarnessIo, deps: HarnessDeps): Promise<void> {
+  const sink = deps.reportSink
+  if (!sink || args.mode === "check") return
+  const say = (line: string) => (args.json ? io.err(line) : io.out(line))
+  if (report.steps.find((step) => step.id === "report")?.status !== "ok") {
+    say(reportNotSentLine("the run did not reach the report step"))
+    return
+  }
+  if (!args.workspaceId) {
+    say(reportNotSentLine("no workspace id — pass --workspace"))
+    return
+  }
+  const payload = buildHarnessReportPayload(report, {
+    engineProjectId: args.workspaceId,
+    tagVersion: INSTRUMENT_VERSION,
+    repoLabel: basename(report.root)
+  })
+  let result: Awaited<ReturnType<ReportSink["send"]>>
+  try {
+    result = await sink.send(payload)
+  } catch (error) {
+    result = { sent: false, reason: errorText(error) }
+  }
+  say(result.sent ? REPORT_SENT_LINE : reportNotSentLine(result.reason))
+}
+
+/** The .infinite/REPORT.md text of the last run, for the CLI's `--brief` echo and tests. */
+export function readHarnessReport(root: string): string | null {
+  const absolutePath = join(root, HARNESS_REPORT_RELATIVE_PATH)
+  return existsSync(absolutePath) ? readFileSync(absolutePath, "utf8") : null
+}
+
+/** Root-relative display path helper for CLI copy. */
+export function displayPath(root: string, absolutePath: string): string {
+  return relative(root, absolutePath) || "."
+}

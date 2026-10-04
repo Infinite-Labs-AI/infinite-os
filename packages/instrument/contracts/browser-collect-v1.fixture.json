@@ -1,0 +1,15 @@
+{
+  "siteSourceKey": "site_public_fixture",
+  "eventId": "00000000-0000-4000-8000-000000000003",
+  "eventName": "site_click",
+  "occurredAt": "2026-08-02T09:00:00.000Z",
+  "anonymousId": "00000000-0000-4000-8000-000000000001",
+  "sessionId": "00000000-0000-4000-8000-000000000002",
+  "url": "https://example.com/pricing/",
+  "referrer": "referrer.example",
+  "properties": {
+    "cta_id": "pricing_primary",
+    "cta_location": "hero",
+    "destination_path": "/download"
+  }
+}

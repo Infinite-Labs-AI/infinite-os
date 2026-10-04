@@ -1,0 +1,222 @@
+// The harness's own vocabulary. It deliberately does NOT import the sibling branches' shapes
+// (`adopted`, `UnmanagedProvider`, hosting targets): those are adapted at the boundary in
+// inspect.ts so this module compiles against main today and against those branches tomorrow.
+import type { SetupChecksReport } from "../setup-checks/index.js"
+import type { ImproveLine, ProviderId, WorkspaceInstallArtifacts } from "../types.js"
+
+/** The seven rows every run prints, in this order. `gtm` is a container, not an install target. */
+export const HARNESS_PROVIDER_ORDER = [
+  "ga4",
+  "gtm",
+  "posthog",
+  "meta",
+  "x",
+  "infinite",
+  "server_lane"
+] as const
+export type HarnessProviderId = (typeof HARNESS_PROVIDER_ORDER)[number]
+
+/**
+ * A provider is a state machine, not a boolean. `verified` is reachable only from `installed`
+ * and only with a receipt timestamp (see state.ts) — the word is never printed without one.
+ */
+export type ProviderStateKind =
+  | "absent"
+  | "adopted"
+  | "installed"
+  | "verified"
+  | "conflict"
+  | "skipped"
+
+export type VerificationOutcome =
+  | { kind: "not_run" }
+  | { kind: "verified"; receiptAt: string }
+  | { kind: "not_verifiable"; reason: string }
+  | { kind: "no_receipt"; causes: string[] }
+  | { kind: "adopted_not_ours" }
+  /**
+   * The server lane only: installed, but Infinite has not seen its first server-side event yet.
+   * `envSet` says whether this run KNOWS both env vars are on the production deployment — the
+   * middleware records nothing without them, so "installed" alone must never read as working.
+   */
+  | { kind: "awaiting_first_event"; envSet: ServerLaneEnvSet; reason: string }
+
+export interface ProviderState {
+  provider: HarnessProviderId
+  state: ProviderStateKind
+  /** The PUBLIC key/id in play (measurement id, project key, pixel id, source key). Never a secret. */
+  key?: string
+  /** File(+line) or one-clause reason the state rests on. Local paths only; never DOM text. */
+  evidence?: string
+  /** One clause: why this state (e.g. "no key resolved", "left byte-for-byte alone"). */
+  reason?: string
+  verification: VerificationOutcome
+}
+
+/** Failure codes, exactly as the teardown names them (plus one for blockers it did not name). */
+export const HARNESS_FAILURE_CODES = [
+  "INF_ENV_DIRTY_TREE",
+  "INF_DETECT_NO_FRAMEWORK",
+  "INF_SOURCE_OUTPUT_OWNERSHIP",
+  "INF_POSTHOG_NO_KEY",
+  "INF_PLAN_UNMANAGED_TARGET",
+  "INF_PLAN_BLOCKED",
+  "INF_APPLY_ROLLED_BACK",
+  "INF_MARK_STALE_ELEMENT",
+  "INF_SETUP_MISWIRED",
+  "INF_VERIFY_NO_RECEIPT",
+  "INF_VERIFY_INCOMPLETE",
+  "INF_ARGS_CONVERSIONS_REQUIRED"
+] as const
+export type HarnessFailureCode = (typeof HARNESS_FAILURE_CODES)[number]
+
+export type FailureNext = "halt" | "continue"
+
+export interface HarnessFailure {
+  step: string
+  code: HarnessFailureCode
+  message: string
+  next: FailureNext
+}
+
+export type StepStatus = "ok" | "failed" | "skipped" | "not_run"
+
+export interface StepOutcome {
+  id: string
+  title: string
+  status: StepStatus
+  /** One-line note for the report (what happened, or why skipped). */
+  note?: string
+  failure?: HarnessFailure
+}
+
+export type HarnessMode = "check" | "plan" | "apply" | "verify-only"
+
+export interface ConversionCounts {
+  proposed: number
+  marked: number
+  skipped: number
+  stale: number
+}
+
+export interface HarnessReport {
+  version: 1
+  mode: HarnessMode
+  root: string
+  startedAt: string
+  finishedAt: string | null
+  framework: string | null
+  appRoot: string | null
+  /** Hosting the server-lane detector saw (vercel / netlify / cloudflare / node / unknown); null before inspect. */
+  hosting: string | null
+  /** Always all seven, in HARNESS_PROVIDER_ORDER. */
+  providers: ProviderState[]
+  steps: StepOutcome[]
+  conversions: ConversionCounts | null
+  /** The first halting failure, or the first continuing one when nothing halted. */
+  failure: HarnessFailure | null
+  /** Every failure recorded this run, in order. */
+  failures: HarnessFailure[]
+  /** Things this run did NOT do and says so (GA4 key events, PostHog actions, …). */
+  nextSteps: string[]
+  /** The pasteable two-sided handoff line. */
+  handoff: string
+  /** The server-lane env step's outcome (never the secret); null/absent when the step did not run. */
+  serverLaneEnv?: ServerLaneEnvReport | null
+  /**
+   * SETUP-CORRECTNESS findings — a class of defect the receipt lanes structurally cannot produce
+   * (see setup-checks/types.ts). Deliberately separate from `providers`: a lane is a backend
+   * answering whether an event arrived, and nothing here may mint or deny a receipt. Local only —
+   * `buildHarnessReportPayload` does not send it.
+   */
+  setupChecks?: SetupChecksReport | null
+}
+
+/** Whether this run knows both server-lane env vars are on the production deployment. */
+export type ServerLaneEnvSet = "yes" | "no" | "unknown"
+
+/**
+ * Where the server-lane env vars ended up this run: already proven by receipts, written by
+ * Infinite into its Vercel connection, written with the founder's own `vercel` CLI, or left to
+ * the founder (the printed manual instructions).
+ */
+export type ServerLaneEnvPath = "already_receiving" | "infinite_vercel" | "local_vercel" | "manual"
+
+export type ServerLaneRedeployOutcome =
+  | { state: "not_run" }
+  | { state: "started"; deploymentId: string }
+  | { state: "deployed"; url: string | null }
+  | { state: "skipped"; reason: string }
+  /** Infinite submitted a redeploy but could not read it back — never reported as skipped. */
+  | { state: "unconfirmed"; reason: string }
+  /** The app answered with a redeploy shape this CLI does not know; no reason is invented. */
+  | { state: "unknown" }
+  | { state: "failed"; detail: string }
+
+export interface ServerLaneEnvAttempt {
+  path: "infinite_vercel" | "local_vercel"
+  outcome: "ok" | "declined" | "refused" | "failed" | "unavailable"
+  code?: string
+  message?: string
+}
+
+/** The env step in `--json` / the report. Carries env var NAMES and the public key — never the secret. */
+export interface ServerLaneEnvReport {
+  path: ServerLaneEnvPath
+  envSet: ServerLaneEnvSet
+  envNames: { sourceKey: string; secret: string }
+  /** The PUBLIC site source key (`site_…`), when known. */
+  publicKey: string | null
+  laneState: "no_secret" | "awaiting_first_event" | "receiving" | null
+  /** Why the Infinite status could not be read (no app, old app, signed out …); null when it was. */
+  statusRefusal: { code: string; message: string } | null
+  hosting: { connected: boolean; provider: "vercel" | null; projectName: string | null; envWriteGranted: boolean; error: string | null } | null
+  /** Env var names written this run. */
+  written: string[]
+  mintedNewSecret: boolean
+  redeploy: ServerLaneRedeployOutcome
+  attempts: ServerLaneEnvAttempt[]
+  /** Filled by verification: only a server-seen receipt makes the lane "working". */
+  firstEvent: { state: "not_checked" } | { state: "received"; at: string } | { state: "waiting" }
+}
+
+/**
+ * How the harness classified one provider before planning. `improve` (decision 4) is an ADOPTED
+ * provider that also carries improve lines: it is still the customer's, never reinstalled, and every
+ * change to it waits on a plan line the user approves. Only the wizard produces it (the harness passes
+ * no improve lines, so its classifications are unchanged).
+ */
+export type ProviderAction = "install" | "adopt" | "improve" | "upgrade" | "manual" | "report" | "skip"
+
+export interface ProviderClassification {
+  provider: HarnessProviderId
+  action: ProviderAction
+  reason: string
+  /** App-root-relative file the existing install was found in (adopt/improve/manual/report). */
+  file?: string
+  /** Public id read from flags/artifacts/.env or from the existing snippet. */
+  key?: string
+  /** `improve` only: the proposed in-place improvements, each its own plan line. */
+  improve?: ImproveLine[]
+}
+
+/**
+ * Local mirror of the sibling branch's `detectUnmanagedProviders` return shape. Main returns
+ * `string[]`; the tag-harness-wave1 branch returns `{provider, via, file}[]`. `normalizeDetected`
+ * in inspect.ts accepts either.
+ */
+export interface DetectedProvider {
+  provider: ProviderId
+  via: "snippet" | "gtm"
+  /** App-root-relative; "?" when the source (main's string[]) carried no file. */
+  file: string
+}
+
+export interface ResolvedKeys {
+  artifacts: WorkspaceInstallArtifacts
+  /** Where each provider's key came from — for the report's evidence column. Never the value. */
+  sources: Partial<Record<Exclude<HarnessProviderId, "gtm" | "server_lane">, KeySource>>
+}
+
+/** `infinite-connection`: the wizard's keys verb (the user's Infinite connections; public ids only). */
+export type KeySource = "flag" | "artifact-file" | "discovered-artifacts" | "env" | "existing-snippet" | "infinite-connection"

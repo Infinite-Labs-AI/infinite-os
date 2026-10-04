@@ -1,0 +1,26 @@
+name: Published installer smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 8 * * 2"
+
+permissions:
+  contents: read
+
+jobs:
+  published-installer:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Upgrade npm for trusted-publisher provenance checks
+        run: npm install --global npm@11
+
+      - name: Verify the published macOS installer contract
+        run: node scripts/ci/verify-published-infinite-os.mjs

@@ -1,0 +1,639 @@
+{
+ "v": 1,
+ "kind": "numbers",
+ "tool": "get_meta_performance",
+ "title": "Ads by campaign \u00b7 last 6 days",
+ "state": "ready",
+ "asOf": "2026-10-01T18:30:00Z",
+ "provenance": {
+  "source": "Ads",
+  "via": "our_db"
+ },
+ "scope": {
+  "workspaceName": "Demo",
+  "crossWorkspace": false
+ },
+ "caveats": [
+  "Registrations are what the ad platform credited, not our own count.",
+  "Trials come from the payments sync."
+ ],
+ "body": {
+  "layout": "table",
+  "currency": "USD",
+  "rowLabel": "Campaign",
+  "columns": [
+   {
+    "key": "spend",
+    "label": "Spend",
+    "unit": "money",
+    "factGroup": "delivery"
+   },
+   {
+    "key": "linkClicks",
+    "label": "Link clicks",
+    "unit": "count",
+    "factGroup": "delivery"
+   },
+   {
+    "key": "registrations",
+    "label": "Registrations",
+    "unit": "count",
+    "factGroup": "provider_credit"
+   }
+  ],
+  "legs": {
+   "settled": {
+    "window": {
+     "from": "2026-09-25",
+     "to": "2026-09-30",
+     "tz": "UTC",
+     "label": "Last 6 days"
+    },
+    "final": true,
+    "asOf": "2026-10-01T06:00:00Z",
+    "rows": [
+     {
+      "id": "c1",
+      "label": "Spring trials",
+      "cells": {
+       "spend": {
+        "value": 80
+       },
+       "linkClicks": {
+        "value": 70
+       },
+       "registrations": {
+        "value": 5
+       }
+      }
+     },
+     {
+      "id": "c2",
+      "label": "Retargeting",
+      "cells": {
+       "spend": {
+        "value": 55
+       },
+       "linkClicks": {
+        "value": 50
+       },
+       "registrations": {
+        "value": 4
+       }
+      }
+     }
+    ],
+    "totals": {
+     "spend": {
+      "value": 135
+     },
+     "linkClicks": {
+      "value": 120
+     },
+     "registrations": {
+      "value": 9
+     }
+    },
+    "steps": [
+     {
+      "key": "clicks",
+      "label": "Link clicks",
+      "count": 120
+     },
+     {
+      "key": "reg",
+      "label": "Registrations",
+      "count": 9,
+      "ofPrevious": true
+     }
+    ],
+    "coverage": {
+     "requestedDays": 6,
+     "measuredDays": 6,
+     "days": [
+      {
+       "date": "2026-09-25",
+       "status": "measured"
+      },
+      {
+       "date": "2026-09-26",
+       "status": "measured"
+      },
+      {
+       "date": "2026-09-27",
+       "status": "measured"
+      },
+      {
+       "date": "2026-09-28",
+       "status": "measured"
+      },
+      {
+       "date": "2026-09-29",
+       "status": "measured"
+      },
+      {
+       "date": "2026-09-30",
+       "status": "measured"
+      }
+     ]
+    }
+   },
+   "today": {
+    "window": {
+     "from": "2026-10-01",
+     "to": "2026-10-01",
+     "tz": "UTC",
+     "label": "Oct 1 so far"
+    },
+    "final": false,
+    "asOf": "2026-10-01T18:30:00Z",
+    "rows": [],
+    "totals": {
+     "spend": {
+      "value": 12.5
+     },
+     "linkClicks": {
+      "value": 14
+     },
+     "registrations": {
+      "value": 1
+     }
+    }
+   }
+  },
+  "sections": [
+   {
+    "title": "By day",
+    "kind": "numbers",
+    "body": {
+     "layout": "series",
+     "currency": "USD",
+     "columns": [
+      {
+       "key": "date",
+       "label": "Day",
+       "unit": "text",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "spend",
+       "label": "Spend",
+       "unit": "money",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "impressions",
+       "label": "Impressions",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "clicks",
+       "label": "Clicks",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "linkClicks",
+       "label": "Link clicks",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "ctrLink",
+       "label": "CTR (link)",
+       "unit": "percent",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "registrations",
+       "label": "Registrations",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "trials",
+       "label": "Trials",
+       "unit": "count",
+       "factGroup": "delivery"
+      }
+     ],
+     "legs": {
+      "settled": {
+       "window": {
+        "from": "2026-09-25",
+        "to": "2026-09-30",
+        "tz": "UTC",
+        "label": "Last 6 days"
+       },
+       "final": true,
+       "asOf": "2026-10-01T06:00:00Z",
+       "rows": [
+        {
+         "id": "2026-09-25",
+         "label": "2026-09-25",
+         "cells": {
+          "date": {
+           "text": "2026-09-25"
+          },
+          "spend": {
+           "value": 20
+          },
+          "impressions": {
+           "value": 900
+          },
+          "clicks": {
+           "value": 30
+          },
+          "linkClicks": {
+           "value": 20
+          },
+          "ctrLink": {
+           "value": 2.2
+          },
+          "registrations": {
+           "value": 0
+          },
+          "trials": {
+           "value": 0
+          }
+         }
+        },
+        {
+         "id": "2026-09-26",
+         "label": "2026-09-26",
+         "cells": {
+          "date": {
+           "text": "2026-09-26"
+          },
+          "spend": {
+           "value": 21
+          },
+          "impressions": {
+           "value": 901
+          },
+          "clicks": {
+           "value": 31
+          },
+          "linkClicks": {
+           "value": 21
+          },
+          "ctrLink": {
+           "value": 2.2
+          },
+          "registrations": {
+           "value": 1
+          },
+          "trials": {
+           "value": 0
+          }
+         }
+        },
+        {
+         "id": "2026-09-27",
+         "label": "2026-09-27",
+         "cells": {
+          "date": {
+           "text": "2026-09-27"
+          },
+          "spend": {
+           "value": 22
+          },
+          "impressions": {
+           "value": 902
+          },
+          "clicks": {
+           "value": 32
+          },
+          "linkClicks": {
+           "value": 22
+          },
+          "ctrLink": {
+           "value": 2.2
+          },
+          "registrations": {
+           "value": 2
+          },
+          "trials": {
+           "value": 0
+          }
+         }
+        },
+        {
+         "id": "2026-09-28",
+         "label": "2026-09-28",
+         "cells": {
+          "date": {
+           "text": "2026-09-28"
+          },
+          "spend": {
+           "value": 23
+          },
+          "impressions": {
+           "value": 903
+          },
+          "clicks": {
+           "value": 33
+          },
+          "linkClicks": {
+           "value": 23
+          },
+          "ctrLink": {
+           "value": 2.2
+          },
+          "registrations": {
+           "value": 0
+          },
+          "trials": {
+           "value": 0
+          }
+         }
+        },
+        {
+         "id": "2026-09-29",
+         "label": "2026-09-29",
+         "cells": {
+          "date": {
+           "text": "2026-09-29"
+          },
+          "spend": {
+           "value": 24
+          },
+          "impressions": {
+           "value": 904
+          },
+          "clicks": {
+           "value": 34
+          },
+          "linkClicks": {
+           "value": 24
+          },
+          "ctrLink": {
+           "value": 2.2
+          },
+          "registrations": {
+           "value": 1
+          },
+          "trials": {
+           "value": 0
+          }
+         }
+        },
+        {
+         "id": "2026-09-30",
+         "label": "2026-09-30",
+         "cells": {
+          "date": {
+           "text": "2026-09-30"
+          },
+          "spend": {
+           "value": 25
+          },
+          "impressions": {
+           "value": 905
+          },
+          "clicks": {
+           "value": 35
+          },
+          "linkClicks": {
+           "value": 25
+          },
+          "ctrLink": {
+           "value": 2.2
+          },
+          "registrations": {
+           "value": 2
+          },
+          "trials": {
+           "value": 0
+          }
+         }
+        }
+       ]
+      }
+     }
+    }
+   },
+   {
+    "title": "Prior 6 days",
+    "kind": "numbers",
+    "body": {
+     "layout": "kpis",
+     "currency": "USD",
+     "columns": [
+      {
+       "key": "spend",
+       "label": "spend",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "impressions",
+       "label": "impressions",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "linkClicks",
+       "label": "linkClicks",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "ctrLink",
+       "label": "ctrLink",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "cpcLink",
+       "label": "cpcLink",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "cpm",
+       "label": "cpm",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "registrations",
+       "label": "registrations",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "trials",
+       "label": "trials",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "purchases",
+       "label": "purchases",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "purchaseValue",
+       "label": "purchaseValue",
+       "unit": "count",
+       "factGroup": "delivery"
+      },
+      {
+       "key": "roas",
+       "label": "roas",
+       "unit": "count",
+       "factGroup": "delivery"
+      }
+     ],
+     "legs": {
+      "settled": {
+       "window": {
+        "from": "2026-09-19",
+        "to": "2026-09-24",
+        "tz": "UTC",
+        "label": "Prior 6 days"
+       },
+       "final": true,
+       "asOf": "2026-10-01T06:00:00Z",
+       "rows": [],
+       "totals": {
+        "spend": {
+         "value": 10
+        },
+        "impressions": {
+         "value": 10
+        },
+        "linkClicks": {
+         "value": 10
+        },
+        "ctrLink": {
+         "value": 10
+        },
+        "cpcLink": {
+         "value": 10
+        },
+        "cpm": {
+         "value": 10
+        },
+        "registrations": {
+         "value": 10
+        },
+        "trials": {
+         "value": 10
+        },
+        "purchases": {
+         "value": 10
+        },
+        "purchaseValue": {
+         "value": 10
+        },
+        "roas": {
+         "value": 10
+        }
+       }
+      }
+     }
+    }
+   },
+   {
+    "title": "Our sign-ups",
+    "kind": "numbers",
+    "body": {
+     "layout": "table",
+     "currency": null,
+     "columns": [
+      {
+       "key": "registrations",
+       "label": "Registrations",
+       "unit": "count",
+       "factGroup": "our_truth"
+      },
+      {
+       "key": "appSignups",
+       "label": "App sign-ups",
+       "unit": "count",
+       "factGroup": "our_truth"
+      }
+     ],
+     "legs": {
+      "settled": {
+       "window": {
+        "from": "2026-09-25",
+        "to": "2026-09-30",
+        "tz": "UTC",
+        "label": "Last 6 days"
+       },
+       "final": true,
+       "asOf": "2026-10-01T06:00:00Z",
+       "rows": [
+        {
+         "id": "c1",
+         "label": "Spring trials",
+         "cells": {
+          "registrations": {
+           "value": 3
+          },
+          "appSignups": {
+           "value": 2
+          }
+         }
+        },
+        {
+         "id": "c2",
+         "label": "Retargeting",
+         "cells": {
+          "registrations": {
+           "value": 4
+          },
+          "appSignups": {
+           "value": 1
+          }
+         }
+        }
+       ]
+      },
+      "today": {
+       "window": {
+        "from": "2026-10-01",
+        "to": "2026-10-01",
+        "tz": "UTC",
+        "label": "Oct 1 so far"
+       },
+       "final": false,
+       "asOf": "2026-10-01T18:30:00Z",
+       "rows": [
+        {
+         "id": "c1",
+         "label": "Spring trials",
+         "cells": {
+          "registrations": {
+           "value": 2
+          },
+          "appSignups": {
+           "value": 0
+          }
+         }
+        },
+        {
+         "id": "c2",
+         "label": "Retargeting",
+         "cells": {
+          "registrations": {
+           "value": 0
+          },
+          "appSignups": {
+           "value": 0
+          }
+         }
+        }
+       ]
+      }
+     }
+    }
+   }
+  ]
+ }
+}

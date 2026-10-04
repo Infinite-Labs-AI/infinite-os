@@ -1,0 +1,792 @@
+{
+  "v": 1,
+  "kind": "numbers",
+  "tool": "read_ads_period",
+  "title": "Ad campaigns · Sep 28 – Oct 1, and today so far",
+  "state": "ready",
+  "asOf": "2026-10-02T15:30:00Z",
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "explain": "From the stored copy of the ad account. Settled days and today are separate; today is never final.",
+  "provenance": {
+    "source": "Demo Ads",
+    "via": "our_db",
+    "verdictsBy": "the app's verdict rules"
+  },
+  "body": {
+    "layout": "table",
+    "currency": "USD",
+    "columns": [
+      {
+        "key": "spend",
+        "label": "Spent",
+        "unit": "money",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "impressions",
+        "label": "Impressions",
+        "unit": "count",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "linkClicks",
+        "label": "Link clicks",
+        "unit": "count",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "ctrLink",
+        "label": "CTR (link)",
+        "unit": "percent",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "cpcLink",
+        "label": "CPC (link)",
+        "unit": "money",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "cpm",
+        "label": "CPM",
+        "unit": "money",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "results",
+        "label": "Results",
+        "unit": "count",
+        "factGroup": "credited"
+      },
+      {
+        "key": "costPerResult",
+        "label": "Cost per result",
+        "unit": "money",
+        "factGroup": "credited"
+      },
+      {
+        "key": "roas",
+        "label": "ROAS",
+        "unit": "ratio",
+        "factGroup": "credited"
+      },
+      {
+        "key": "result",
+        "label": "Result",
+        "unit": "text",
+        "factGroup": "credited"
+      }
+    ],
+    "legs": {
+      "settled": {
+        "window": {
+          "from": "2026-09-28",
+          "to": "2026-10-01",
+          "tz": "UTC",
+          "label": "Sep 28 – Oct 1"
+        },
+        "final": true,
+        "asOf": null,
+        "rows": [
+          {
+            "id": "c_1",
+            "label": "Sample · Trials · US · 2026-09-01 — sample_b1_trial_us",
+            "untrusted": true,
+            "status": {
+              "word": "Numbers not confirmed",
+              "tone": "muted"
+            },
+            "cells": {
+              "spend": {
+                "value": 212.4
+              },
+              "impressions": {
+                "value": 801
+              },
+              "linkClicks": {
+                "value": 47
+              },
+              "ctrLink": {
+                "value": 5.87
+              },
+              "cpcLink": {
+                "value": 4.52
+              },
+              "cpm": {
+                "value": 265.17
+              },
+              "results": {
+                "value": null,
+                "reason": {
+                  "code": "blanked",
+                  "words": "numbers not confirmed",
+                  "show": "dash"
+                }
+              },
+              "costPerResult": {
+                "value": null,
+                "reason": {
+                  "code": "blanked",
+                  "words": "numbers not confirmed",
+                  "show": "dash"
+                }
+              },
+              "roas": {
+                "value": null,
+                "reason": {
+                  "code": "no_value",
+                  "words": "no purchase value counted",
+                  "show": "dash"
+                }
+              },
+              "result": {
+                "text": "trial"
+              }
+            }
+          }
+        ],
+        "totals": {
+          "spend": {
+            "value": 212.4
+          },
+          "impressions": {
+            "value": 801
+          },
+          "linkClicks": {
+            "value": 47
+          },
+          "ctrLink": {
+            "value": 5.87
+          },
+          "cpcLink": {
+            "value": 4.52
+          },
+          "cpm": {
+            "value": 265.17
+          },
+          "results": {
+            "value": null,
+            "reason": {
+              "code": "not_served",
+              "words": "this read did not carry it",
+              "show": "dash"
+            }
+          },
+          "costPerResult": {
+            "value": null,
+            "reason": {
+              "code": "not_served",
+              "words": "this read did not carry it",
+              "show": "dash"
+            }
+          },
+          "roas": {
+            "value": null,
+            "reason": {
+              "code": "no_value",
+              "words": "no purchase value counted",
+              "show": "dash"
+            }
+          }
+        },
+        "coverage": {
+          "requestedDays": 4,
+          "measuredDays": 4,
+          "days": [
+            {
+              "date": "2026-09-28",
+              "status": "measured"
+            },
+            {
+              "date": "2026-09-29",
+              "status": "measured"
+            },
+            {
+              "date": "2026-09-30",
+              "status": "measured"
+            },
+            {
+              "date": "2026-10-01",
+              "status": "measured"
+            }
+          ]
+        },
+        "steps": [
+          {
+            "key": "impressions",
+            "label": "Impressions",
+            "count": 801
+          },
+          {
+            "key": "linkClicks",
+            "label": "Link clicks",
+            "count": 47,
+            "ofPrevious": true
+          },
+          {
+            "key": "landingPageViews",
+            "label": "Page views",
+            "count": 30,
+            "ofPrevious": true
+          },
+          {
+            "key": "registrations",
+            "label": "Registrations",
+            "count": 1,
+            "ofPrevious": true
+          },
+          {
+            "key": "trials",
+            "label": "Website trials",
+            "count": null,
+            "reason": {
+              "code": "unconfirmed",
+              "words": "the provider hasn't confirmed the count",
+              "show": "dash"
+            }
+          }
+        ]
+      },
+      "today": {
+        "window": {
+          "from": "2026-10-02",
+          "to": "2026-10-02",
+          "tz": "UTC",
+          "label": "Oct 2 so far"
+        },
+        "final": false,
+        "asOf": "2026-10-02T15:30:00Z",
+        "rows": [],
+        "totals": {
+          "spend": {
+            "value": 38.9
+          },
+          "impressions": {
+            "value": 179
+          },
+          "linkClicks": {
+            "value": 16
+          },
+          "ctrLink": {
+            "value": 8.94
+          },
+          "cpcLink": {
+            "value": 2.43
+          },
+          "cpm": {
+            "value": 217.32
+          },
+          "results": {
+            "value": null,
+            "reason": {
+              "code": "not_served",
+              "words": "this read did not carry it",
+              "show": "dash"
+            }
+          },
+          "costPerResult": {
+            "value": null,
+            "reason": {
+              "code": "not_served",
+              "words": "this read did not carry it",
+              "show": "dash"
+            }
+          },
+          "roas": {
+            "value": null,
+            "reason": {
+              "code": "no_value",
+              "words": "no purchase value counted",
+              "show": "dash"
+            }
+          }
+        }
+      }
+    },
+    "sections": [
+      {
+        "title": "By day",
+        "kind": "numbers",
+        "body": {
+          "layout": "series",
+          "currency": "USD",
+          "columns": [
+            {
+              "key": "date",
+              "label": "Day",
+              "unit": "text",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "spend",
+              "label": "Spent",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "impressions",
+              "label": "Impressions",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "linkClicks",
+              "label": "Link clicks",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "ctrLink",
+              "label": "CTR (link)",
+              "unit": "percent",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "registrations",
+              "label": "Registrations",
+              "unit": "count",
+              "factGroup": "credited"
+            },
+            {
+              "key": "trials",
+              "label": "Website trials",
+              "unit": "count",
+              "factGroup": "credited"
+            }
+          ],
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-09-28",
+                "to": "2026-10-01",
+                "tz": "UTC",
+                "label": "Sep 28 – Oct 1"
+              },
+              "final": true,
+              "asOf": null,
+              "rows": [
+                {
+                  "id": "2026-09-28",
+                  "label": "Sep 28",
+                  "cells": {
+                    "date": {
+                      "text": "2026-09-28"
+                    },
+                    "spend": {
+                      "value": 28.1
+                    },
+                    "impressions": {
+                      "value": 110
+                    },
+                    "linkClicks": {
+                      "value": 9
+                    },
+                    "ctrLink": {
+                      "value": 8.18
+                    },
+                    "registrations": {
+                      "value": null,
+                      "reason": {
+                        "code": "not_credited",
+                        "words": "none credited yet",
+                        "show": "dash"
+                      }
+                    },
+                    "trials": {
+                      "value": null,
+                      "reason": {
+                        "code": "unconfirmed",
+                        "words": "the provider hasn't confirmed the count",
+                        "show": "dash"
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": "2026-09-29",
+                  "label": "Sep 29",
+                  "cells": {
+                    "date": {
+                      "text": "2026-09-29"
+                    },
+                    "spend": {
+                      "value": 61.2
+                    },
+                    "impressions": {
+                      "value": 240
+                    },
+                    "linkClicks": {
+                      "value": 12
+                    },
+                    "ctrLink": {
+                      "value": 5.0
+                    },
+                    "registrations": {
+                      "value": null,
+                      "reason": {
+                        "code": "not_credited",
+                        "words": "none credited yet",
+                        "show": "dash"
+                      }
+                    },
+                    "trials": {
+                      "value": null,
+                      "reason": {
+                        "code": "unconfirmed",
+                        "words": "the provider hasn't confirmed the count",
+                        "show": "dash"
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": "2026-09-30",
+                  "label": "Sep 30",
+                  "cells": {
+                    "date": {
+                      "text": "2026-09-30"
+                    },
+                    "spend": {
+                      "value": 63.5
+                    },
+                    "impressions": {
+                      "value": 231
+                    },
+                    "linkClicks": {
+                      "value": 11
+                    },
+                    "ctrLink": {
+                      "value": 4.76
+                    },
+                    "registrations": {
+                      "value": 1
+                    },
+                    "trials": {
+                      "value": null,
+                      "reason": {
+                        "code": "unconfirmed",
+                        "words": "the provider hasn't confirmed the count",
+                        "show": "dash"
+                      }
+                    }
+                  }
+                },
+                {
+                  "id": "2026-10-01",
+                  "label": "Oct 1",
+                  "cells": {
+                    "date": {
+                      "text": "2026-10-01"
+                    },
+                    "spend": {
+                      "value": 59.6
+                    },
+                    "impressions": {
+                      "value": 220
+                    },
+                    "linkClicks": {
+                      "value": 15
+                    },
+                    "ctrLink": {
+                      "value": 6.82
+                    },
+                    "registrations": {
+                      "value": null,
+                      "reason": {
+                        "code": "not_credited",
+                        "words": "none credited yet",
+                        "show": "dash"
+                      }
+                    },
+                    "trials": {
+                      "value": null,
+                      "reason": {
+                        "code": "unconfirmed",
+                        "words": "the provider hasn't confirmed the count",
+                        "show": "dash"
+                      }
+                    }
+                  }
+                }
+              ],
+              "coverage": {
+                "requestedDays": 4,
+                "measuredDays": 4,
+                "days": [
+                  {
+                    "date": "2026-09-28",
+                    "status": "measured"
+                  },
+                  {
+                    "date": "2026-09-29",
+                    "status": "measured"
+                  },
+                  {
+                    "date": "2026-09-30",
+                    "status": "measured"
+                  },
+                  {
+                    "date": "2026-10-01",
+                    "status": "measured"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      {
+        "title": "Prior 4 days",
+        "kind": "numbers",
+        "body": {
+          "layout": "kpis",
+          "currency": "USD",
+          "columns": [
+            {
+              "key": "spend",
+              "label": "Spent",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "impressions",
+              "label": "Impressions",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "linkClicks",
+              "label": "Link clicks",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "ctrLink",
+              "label": "CTR (link)",
+              "unit": "percent",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "cpcLink",
+              "label": "CPC (link)",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "cpm",
+              "label": "CPM",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "registrations",
+              "label": "Registrations",
+              "unit": "count",
+              "factGroup": "credited"
+            },
+            {
+              "key": "trials",
+              "label": "Website trials",
+              "unit": "count",
+              "factGroup": "credited"
+            },
+            {
+              "key": "purchases",
+              "label": "Purchases",
+              "unit": "count",
+              "factGroup": "credited"
+            },
+            {
+              "key": "purchaseValue",
+              "label": "Purchase value",
+              "unit": "money",
+              "factGroup": "credited"
+            },
+            {
+              "key": "roas",
+              "label": "ROAS",
+              "unit": "ratio",
+              "factGroup": "credited"
+            }
+          ],
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-09-24",
+                "to": "2026-09-27",
+                "tz": "UTC",
+                "label": "Sep 24 – 27"
+              },
+              "final": true,
+              "asOf": null,
+              "rows": [],
+              "totals": {
+                "spend": {
+                  "value": 171.3
+                },
+                "impressions": {
+                  "value": 1502
+                },
+                "linkClicks": {
+                  "value": 121
+                },
+                "ctrLink": {
+                  "value": 8.06
+                },
+                "cpcLink": {
+                  "value": 1.42
+                },
+                "cpm": {
+                  "value": 114.05
+                },
+                "registrations": {
+                  "value": 1
+                },
+                "trials": {
+                  "value": null,
+                  "reason": {
+                    "code": "unconfirmed",
+                    "words": "the provider hasn't confirmed the count",
+                    "show": "dash"
+                  }
+                },
+                "purchases": {
+                  "value": 0
+                },
+                "purchaseValue": {
+                  "value": null,
+                  "reason": {
+                    "code": "no_value",
+                    "words": "no purchase value counted",
+                    "show": "dash"
+                  }
+                },
+                "roas": {
+                  "value": null,
+                  "reason": {
+                    "code": "no_value",
+                    "words": "no purchase value counted",
+                    "show": "dash"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "title": "Our sign-ups",
+        "kind": "numbers",
+        "body": {
+          "layout": "table",
+          "currency": null,
+          "columns": [
+            {
+              "key": "registrations",
+              "label": "Registered (ours)",
+              "unit": "count",
+              "factGroup": "ours"
+            },
+            {
+              "key": "appSignups",
+              "label": "App sign-ups (ours)",
+              "unit": "count",
+              "factGroup": "ours"
+            }
+          ],
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-09-28",
+                "to": "2026-10-02",
+                "tz": "UTC",
+                "label": "Sep 28 – Oct 2 (today so far)"
+              },
+              "final": false,
+              "asOf": null,
+              "rows": [
+                {
+                  "id": "linked",
+                  "label": "Linked to an ad",
+                  "cells": {
+                    "registrations": {
+                      "value": 0
+                    },
+                    "appSignups": {
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "id": "not_linked",
+                  "label": "Not linked to an ad",
+                  "cells": {
+                    "registrations": {
+                      "value": 4
+                    },
+                    "appSignups": {
+                      "value": 2
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "title": "Billing trials",
+        "kind": "numbers",
+        "body": {
+          "layout": "kpis",
+          "currency": null,
+          "columns": [
+            {
+              "key": "newTrials",
+              "label": "New trials (billing)",
+              "unit": "count",
+              "factGroup": "billing"
+            }
+          ],
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-09-28",
+                "to": "2026-10-01",
+                "tz": "UTC",
+                "label": "Sep 28 – Oct 1 (UTC days)"
+              },
+              "final": true,
+              "asOf": null,
+              "rows": [
+                {
+                  "id": "window",
+                  "label": "New trials",
+                  "cells": {
+                    "newTrials": {
+                      "value": 1
+                    }
+                  }
+                },
+                {
+                  "id": "spend_days",
+                  "label": "New trials since the first spend (Sep 28)",
+                  "cells": {
+                    "newTrials": {
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "verdictSource": "the app's verdict rules"
+  }
+}

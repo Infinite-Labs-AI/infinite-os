@@ -1,0 +1,390 @@
+// Fakes for lane O8's `before` step tests. Every collaborator records its calls into ONE ordered log, so
+// the tests can assert the call order. Anything `before` must not touch throws when it is used (the
+// report builder, the agent runner, the git host's write methods, the state-changing bridge verbs).
+import type { AgentRunner } from "../../../src/wizard/contracts/agents.js"
+import type { HostingResponse, KeysResponse, TagBridgeClient, TestRunPollResponse } from "../../../src/wizard/contracts/bridge.js"
+import { testRequestModeErrors, type TestResult, type TestRunRequest } from "../../../src/wizard/contracts/test-engine.js"
+import type { RunStateAccessor, WizardContext, WizardDeps, WizardEmitter, WizardFs } from "../../../src/wizard/contracts/deps.js"
+import type { WizardEventFields, WizardEventType } from "../../../src/wizard/contracts/events.js"
+import type { GitHostAdapter, GitOps } from "../../../src/wizard/contracts/git-host.js"
+import type { BuildResult, CensusResult, CheckResult, CheckRunner, Installer, JobRegistry, ScanResult } from "../../../src/wizard/contracts/jobs.js"
+import type { ReportBuilder } from "../../../src/wizard/contracts/report.js"
+import { WIZARD_STATE_SCHEMA, type WizardRunState } from "../../../src/wizard/contracts/state.js"
+import type { TestTool } from "../../../src/wizard/contracts/test-engine.js"
+import { checkEnvTargets } from "../../../src/checks/live/env-targets.js"
+import { baselineResponse, census as makeCensus, fixtureDryLive, hostingResponse, keysResponse, RUN_ID } from "./fixtures.js"
+
+export type CallLog = string[]
+
+/** An object whose every unlisted property throws on use ("before must not call X"). */
+function strict<T extends object>(name: string, implemented: Partial<T>): T {
+  return new Proxy(implemented as T, {
+    get(target, property, receiver) {
+      if (property === "then" || typeof property === "symbol") return Reflect.get(target, property, receiver)
+      if (!(property in target)) {
+        return () => {
+          throw new Error(`${name}.${String(property)} must not be called by before`)
+        }
+      }
+      return Reflect.get(target, property, receiver)
+    }
+  })
+}
+
+export class FakeBridgeError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    readonly retryable = false
+  ) {
+    super(`${status} ${code}`)
+  }
+}
+
+export interface FakeBridgeOptions {
+  keys?: KeysResponse | FakeBridgeError
+  hosting?: HostingResponse
+  /** Polls answered in order; the last repeats. */
+  polls?: TestRunPollResponse[]
+  baseline?: Record<string, unknown>
+  /** Thrown by `startTest`, one per call, before it succeeds. */
+  startErrors?: FakeBridgeError[]
+  /** Thrown by `baseline`. */
+  baselineError?: FakeBridgeError
+  /** Thrown by the `hosting?envNames=` read (the env-target presence read), after the desktop's own §3b check. */
+  hostingEnvError?: FakeBridgeError
+}
+
+/** The desktop's §3b decoder for `hosting?envNames=` (1bu-1 `verbs/hosting.ts`): ≤10 public build-time names. */
+const DESKTOP_ENV_NAME = /^(NEXT_PUBLIC|VITE|PUBLIC)_[A-Z0-9_]{1,64}$/
+
+/** Rejects any production `dry_live` that carries clicks or the fake click id (R2-06): the test fails. */
+export function assertNoSendOnProduction(request: Omit<TestRunRequest, "protocolVersion" | "requestId">): void {
+  if (request.mode !== "dry_live") return
+  if (request.clicks !== undefined || request.fakeClickId !== undefined) {
+    throw new Error("before sent clicks or a fake click id to production")
+  }
+  const errors = testRequestModeErrors({ protocolVersion: 1, requestId: "x", ...request }, (host) => host === request.productionHost || host.endsWith(`.${request.productionHost}`))
+  if (errors.length > 0) throw new Error(`invalid dry_live request: ${errors.join("; ")}`)
+}
+
+export function fakeBridge(log: CallLog, options: FakeBridgeOptions = {}) {
+  const sentTests: Array<Omit<TestRunRequest, "protocolVersion" | "requestId">> = []
+  const hostingCalls: Array<readonly string[] | undefined> = []
+  let pollIndex = 0
+  const polls = options.polls ?? [
+    { protocolVersion: 1, requestId: "r", state: "running", progress: [] },
+    { protocolVersion: 1, requestId: "r", state: "done", progress: [], result: fixtureDryLive() }
+  ]
+  const client = strict<TagBridgeClient>("bridge", {
+    async hosting(envNames?: readonly string[]) {
+      log.push(envNames ? `bridge.hosting(${envNames.join(",")})` : "bridge.hosting")
+      hostingCalls.push(envNames)
+      // As the real desktop answers since review I2 P1-2: a server-side name or an 11th name is a 400 `invalid_request`.
+      if (envNames && (envNames.length > 10 || envNames.some((name) => !DESKTOP_ENV_NAME.test(name)))) throw new FakeBridgeError(400, "invalid_request")
+      if (envNames && options.hostingEnvError) throw options.hostingEnvError
+      const response = options.hosting ?? hostingResponse()
+      if (envNames && response.vercel) {
+        return { ...response, vercel: { ...response.vercel, envTargets: Object.fromEntries(envNames.map((name) => [name, ["production" as const]])) } }
+      }
+      return response
+    },
+    async keys() {
+      log.push("bridge.keys")
+      if (options.keys instanceof FakeBridgeError) throw options.keys
+      return options.keys ?? keysResponse()
+    },
+    async startTest(body) {
+      log.push(`bridge.test.start(${body.mode})`)
+      const startError = options.startErrors?.shift()
+      if (startError) throw startError
+      assertNoSendOnProduction(body)
+      sentTests.push(body)
+      return { protocolVersion: 1, requestId: "r", testRunId: "tr_FAKEdryLive00000000000", state: "queued" }
+    },
+    async pollTest() {
+      log.push("bridge.test.poll")
+      const poll = polls[Math.min(pollIndex, polls.length - 1)]!
+      pollIndex += 1
+      return poll
+    },
+    async cancelTest(testRunId: string) {
+      log.push("bridge.test.cancel")
+      return { protocolVersion: 1, requestId: "r", testRunId, state: "cancelled" }
+    },
+    async baseline(runId: string) {
+      log.push(`bridge.baseline(${runId})`)
+      if (options.baselineError) throw options.baselineError
+      return (options.baseline ?? baselineResponse()) as never
+    }
+  })
+  return { client, sentTests, hostingCalls }
+}
+
+export interface FakeGitOptions {
+  isRepo?: boolean
+  dirtyPaths?: string[]
+  createBranchError?: Error
+  /**
+   * O4's resume extras (`switchTo`, `currentBranch`, `mergeBase`, `remoteBranchSha`): present only when given.
+   * `switchFails` makes `switchTo` throw; `mergeBase: null` = no common commit.
+   */
+  resumeOps?: { checkedOut: { branch: string | null }; switchFails?: boolean; remoteBase?: string | null; mergeBase?: string | null }
+}
+
+function resumeOps(log: CallLog, ops: NonNullable<FakeGitOptions["resumeOps"]>) {
+  return {
+    async statusEntries() {
+      return []
+    },
+    async showFile() {
+      return null
+    },
+    async unstage() {},
+    async stagedDiff() {
+      return ""
+    },
+    async switchTo(branch: string) {
+      log.push(`git.switchTo(${branch})`)
+      if (ops.switchFails) throw new Error("error: Your local changes would be overwritten")
+      ops.checkedOut.branch = branch
+    },
+    async currentBranch() {
+      return ops.checkedOut.branch
+    },
+    async remoteBranchSha(branch: string) {
+      log.push(`git.remoteBranchSha(${branch})`)
+      return ops.remoteBase ?? null
+    },
+    async mergeBase(a: string, b: string) {
+      log.push(`git.mergeBase(${a},${b})`)
+      return ops.mergeBase ?? null
+    }
+  }
+}
+
+export function fakeGit(log: CallLog, options: FakeGitOptions = {}) {
+  const branches: Array<{ base: string; branch: string }> = []
+  const git = strict<GitOps>("git", {
+    async isRepo() {
+      log.push("git.isRepo")
+      return options.isRepo ?? true
+    },
+    async cleanTree() {
+      log.push("git.cleanTree")
+      const dirtyPaths = options.dirtyPaths ?? []
+      return { clean: dirtyPaths.length === 0, dirtyPaths }
+    },
+    async createBranch(base: string, branch: string) {
+      log.push(`git.createBranch(${base},${branch})`)
+      if (options.createBranchError) throw options.createBranchError
+      branches.push({ base, branch })
+      return { baseSha: "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d" }
+    },
+    ...(options.resumeOps ? resumeOps(log, options.resumeOps) : {})
+  })
+  return { git, branches }
+}
+
+/** `defaultBranch: "THROW"` = a host CLI that is installed but not signed in. */
+export function fakeHost(
+  log: CallLog,
+  defaultBranch: string | null = "main",
+  /** The newest successful GitHub "Production" deployment (null = none). `before` never reads it for the host ask. */
+  latestProduction: { sha: string; createdAt: string } | null = null
+): GitHostAdapter {
+  return strict<GitHostAdapter>("host", {
+    kind: "github",
+    async repoFacts() {
+      log.push("host.repoFacts")
+      if (defaultBranch === "THROW") throw new Error("gh: not logged in")
+      return { isPrivate: true, defaultBranch, viewerPermission: "WRITE" }
+    },
+    // The deploy reads (`deploymentReader`): `before` reads none of them (no `*.vercel.app` candidate is derived).
+    ...({
+      async productionDeployment() {
+        throw new Error("host.productionDeployment must not be called by before")
+      },
+      async latestProductionDeployment() {
+        log.push("host.latestProductionDeployment")
+        return latestProduction
+      },
+      async vercelDeploymentSeen() {
+        throw new Error("host.vercelDeploymentSeen must not be called by before")
+      }
+    } as Partial<GitHostAdapter>)
+  })
+}
+
+export interface FakeChecksOptions {
+  census?: CensusResult
+  grades?: Partial<Record<TestTool, CheckResult>>
+  setup?: CheckResult[]
+  baselineBuild?: BuildResult
+  /** Lane O6's D10 result `gradeTestRunChecks` returns (absent = no adopted pixel). */
+  metaAutomaticEvents?: CheckResult
+}
+
+const AT = "2026-10-02T09:12:00.000Z"
+
+export function passGrades(): Record<TestTool, CheckResult> {
+  const grade = (tool: TestTool): CheckResult => ({ checkId: `dry_live_${tool}`, tier: "T1", state: "pass", at: AT, runId: RUN_ID })
+  return { infinite: grade("infinite"), ga4: grade("ga4"), posthog: grade("posthog"), meta: grade("meta") }
+}
+
+export function fakeChecks(log: CallLog, options: FakeChecksOptions = {}) {
+  const graded: Array<{ result: TestResult; expect: unknown; mode: string; ctx: unknown }> = []
+  const checks = strict<CheckRunner>("checks", {
+    async buildBaseline() {
+      log.push("checks.buildBaseline")
+      return options.baselineBuild ?? { ok: true, failureSignature: [], durationMs: 1200 }
+    },
+    async census(root: string, appRoot: string) {
+      log.push(`checks.census(${root},${appRoot})`)
+      return options.census ?? makeCensus([])
+    },
+    async setupChecks(appRoot: string) {
+      log.push(`checks.setupChecks(${appRoot})`)
+      return options.setup ?? [{ checkId: "click_id_capture", tier: "S", state: "pass", at: AT, runId: RUN_ID }]
+    },
+    async envTargets(envSourcedIds, hosting) {
+      log.push("checks.envTargets")
+      // The real check (env-targets.ts), so a name that was never asked is graded as the step leaves it.
+      return checkEnvTargets(envSourcedIds, hosting, { runId: RUN_ID, now: () => new Date(AT) })
+    },
+    async gradeTestRun(result, expect, mode, ctx) {
+      log.push(`checks.gradeTestRun(${mode})`)
+      graded.push({ result, expect, mode, ctx })
+      return { ...passGrades(), ...(options.grades ?? {}) } as Record<TestTool, CheckResult>
+    },
+    async gradeTestRunChecks() {
+      log.push("checks.gradeTestRunChecks")
+      return options.metaAutomaticEvents ? [options.metaAutomaticEvents] : []
+    },
+    async liveBytes() {
+      log.push("checks.liveBytes")
+      return [{ checkId: "byte_census", tier: "T1", state: "pass", at: AT, runId: RUN_ID }]
+    },
+    async redirectWalk() {
+      log.push("checks.redirectWalk")
+      return [{ checkId: "redirect_walk", tier: "T1", state: "pass", at: AT, runId: RUN_ID }]
+    },
+    async csp() {
+      log.push("checks.csp")
+      return [{ checkId: "csp_header", tier: "T1", state: "pass", at: AT, runId: RUN_ID }]
+    },
+    async metaDomains() {
+      log.push("checks.metaDomains")
+      return [{ checkId: "meta_traffic_permissions", tier: "T1", state: "pass", at: AT, runId: RUN_ID }]
+    }
+  })
+  return { checks, graded }
+}
+
+export function fakeInstaller(log: CallLog, scan: Partial<ScanResult> = {}): Installer {
+  return strict<Installer>("installer", {
+    async scan(opts) {
+      log.push(`installer.scan(${opts.appRoot ?? "."})`)
+      return { root: opts.root, appRoot: opts.appRoot ?? ".", framework: "next-app-router", packageManager: "pnpm", fileCount: 214, truncated: false, ...scan }
+    }
+  })
+}
+
+/** Wraps a registry so its calls land in the log too. */
+export function spyRegistry(log: CallLog, registry: JobRegistry): JobRegistry {
+  return strict<JobRegistry>("registry", {
+    seedCandidates(scan, facts) {
+      log.push("registry.seedCandidates")
+      return registry.seedCandidates(scan, facts)
+    }
+  })
+}
+
+export function memoryFs(log: CallLog, files: Record<string, string> = {}) {
+  const store = new Map<string, { text: string; mode: number | undefined }>(Object.entries(files).map(([path, text]) => [path, { text, mode: undefined }]))
+  const fs: WizardFs = {
+    async readText(path) {
+      return store.get(path)?.text ?? null
+    },
+    async writeTextAtomic(path, text, mode) {
+      log.push(`fs.write(${path})`)
+      store.set(path, { text, mode })
+    },
+    async exists(path) {
+      return store.has(path)
+    },
+    async mkdirp() {}
+  }
+  return { fs, store }
+}
+
+export function initialState(overrides: Partial<WizardRunState> = {}): WizardRunState {
+  return {
+    schema: WIZARD_STATE_SCHEMA,
+    runId: RUN_ID,
+    displayId: "r-7f3c",
+    createdAt: "2026-10-02T09:00:00.000Z",
+    tagVersion: "0.11.0",
+    root: "/repo",
+    appRoot: ".",
+    link: { linkId: "lk_FAKElink0000000000000000", workspaceName: "Acme", approvedAt: "2026-10-02T09:00:00.000Z", runtimeVariant: "prod" },
+    steps: {},
+    agent: null,
+    git: null,
+    pr: null,
+    plan: null,
+    jobs: [],
+    markers: { before: {}, rehearsal: {}, prove: {} },
+    report: { live_today: null, in_pr: null, proven_live: null },
+    snapshot: null,
+    ...overrides
+  }
+}
+
+export interface Emitted {
+  type: WizardEventType
+  fields: unknown
+}
+
+export function context(state: WizardRunState, log: CallLog, overrides: Partial<WizardContext> = {}): { ctx: WizardContext; events: Emitted[] } {
+  const events: Emitted[] = []
+  const accessor: RunStateAccessor = {
+    get: () => state,
+    update: (mutate) => mutate(state),
+    save: async () => {
+      log.push("state.save")
+    }
+  }
+  const emit: WizardEmitter = {
+    emit<T extends WizardEventType>(type: T, fields: WizardEventFields[T]) {
+      events.push({ type, fields })
+    }
+  }
+  const ctx: WizardContext = {
+    runId: state.runId,
+    state: accessor,
+    emit,
+    ask: async () => {
+      throw new Error("before must not ask anything (the keys are read silently)")
+    },
+    signal: new AbortController().signal,
+    options: { json: true, yes: false, answersFile: null, resume: false, noAgent: false, worker: null, reviewer: null, consentMode: null, noProve: false, nested: false },
+    root: "/repo",
+    appRoot: ".",
+    now: () => new Date("2026-10-02T09:05:00.000Z"),
+    ...overrides
+  }
+  return { ctx, events }
+}
+
+export function deps(parts: Pick<WizardDeps, "bridge" | "git" | "host" | "checks" | "installer" | "registry" | "fs">): WizardDeps {
+  return {
+    ...parts,
+    agents: strict<AgentRunner>("agents", {}),
+    report: strict<ReportBuilder>("report", {}),
+    clock: { now: () => new Date("2026-10-02T09:05:00.000Z"), sleep: async () => {} },
+    env: {},
+    platform: "darwin",
+    tagVersion: "0.11.0"
+  }
+}

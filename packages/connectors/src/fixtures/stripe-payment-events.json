@@ -1,0 +1,975 @@
+{
+  "_comment": "Full-shape Stripe events (API version 2025-06-30.basil) as /v1/events returns them, modelled field-for-field on the Stripe API reference objects. Every identifier, name, email, address and card detail is FICTIONAL. The sensitive fields (billing_details, customer_details, card last4/fingerprint, receipt_email, client_secret, dispute evidence, description, metadata) are present ON PURPOSE: the tests assert that none of them survive into stored evidence. `kept` is one realistic payment story (checkout sale, partial refund, a dispute on an earlier charge, a failed payment); `ignored` is noise from the same families that must stay ignored.",
+  "kept": [
+    {
+      "id": "evt_3PayFixtureSucceeded01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785843900,
+      "data": {
+        "object": {
+          "id": "pi_3PayFixtureA0001",
+          "object": "payment_intent",
+          "amount": 4900,
+          "amount_capturable": 0,
+          "amount_details": { "tip": {} },
+          "amount_received": 4900,
+          "application": null,
+          "application_fee_amount": null,
+          "automatic_payment_methods": { "allow_redirects": "always", "enabled": true },
+          "canceled_at": null,
+          "cancellation_reason": null,
+          "capture_method": "automatic_async",
+          "client_secret": "pi_3PayFixtureA0001_secret_FixtureClientSecret0001",
+          "confirmation_method": "automatic",
+          "created": 1785843880,
+          "currency": "usd",
+          "customer": "cus_PayFixtureBuyer01",
+          "description": "Order 7781 for buyer@example.test",
+          "last_payment_error": null,
+          "latest_charge": "ch_3PayFixtureA0001",
+          "livemode": true,
+          "metadata": { "order_ref": "ord_7781", "buyer_email": "buyer@example.test" },
+          "next_action": null,
+          "on_behalf_of": null,
+          "payment_method": "pm_1PayFixtureCard01",
+          "payment_method_configuration_details": { "id": "pmc_1PayFixtureConfig", "parent": null },
+          "payment_method_options": {
+            "card": {
+              "installments": null,
+              "mandate_options": null,
+              "network": null,
+              "request_three_d_secure": "automatic"
+            }
+          },
+          "payment_method_types": ["card"],
+          "processing": null,
+          "receipt_email": "buyer@example.test",
+          "review": null,
+          "setup_future_usage": null,
+          "shipping": {
+            "address": {
+              "city": "Exampleton",
+              "country": "US",
+              "line1": "1 Example Street",
+              "line2": "Apt 2",
+              "postal_code": "94000",
+              "state": "CA"
+            },
+            "carrier": null,
+            "name": "Jordan Example",
+            "phone": "+15555550100",
+            "tracking_number": null
+          },
+          "source": null,
+          "statement_descriptor": null,
+          "statement_descriptor_suffix": null,
+          "status": "succeeded",
+          "transfer_data": null,
+          "transfer_group": null
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": "req_PayFixture0001", "idempotency_key": "fixture-idem-0001" },
+      "type": "payment_intent.succeeded"
+    },
+    {
+      "id": "evt_3PayFixtureChargeOk01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785843900,
+      "data": {
+        "object": {
+          "id": "ch_3PayFixtureA0001",
+          "object": "charge",
+          "amount": 4900,
+          "amount_captured": 4900,
+          "amount_refunded": 0,
+          "application": null,
+          "application_fee": null,
+          "application_fee_amount": null,
+          "balance_transaction": "txn_3PayFixtureA0001",
+          "billing_details": {
+            "address": {
+              "city": "Exampleton",
+              "country": "US",
+              "line1": "1 Example Street",
+              "line2": "Apt 2",
+              "postal_code": "94000",
+              "state": "CA"
+            },
+            "email": "buyer@example.test",
+            "name": "Jordan Example",
+            "phone": "+15555550100",
+            "tax_id": null
+          },
+          "calculated_statement_descriptor": "EXAMPLE SHOP",
+          "captured": true,
+          "created": 1785843881,
+          "currency": "usd",
+          "customer": "cus_PayFixtureBuyer01",
+          "description": "Order 7781 for buyer@example.test",
+          "destination": null,
+          "dispute": null,
+          "disputed": false,
+          "failure_balance_transaction": null,
+          "failure_code": null,
+          "failure_message": null,
+          "fraud_details": {},
+          "livemode": true,
+          "metadata": { "order_ref": "ord_7781", "buyer_email": "buyer@example.test" },
+          "on_behalf_of": null,
+          "outcome": {
+            "advice_code": null,
+            "network_advice_code": null,
+            "network_decline_code": null,
+            "network_status": "approved_by_network",
+            "reason": null,
+            "risk_level": "normal",
+            "risk_score": 21,
+            "seller_message": "Payment complete.",
+            "type": "authorized"
+          },
+          "paid": true,
+          "payment_intent": "pi_3PayFixtureA0001",
+          "payment_method": "pm_1PayFixtureCard01",
+          "payment_method_details": {
+            "card": {
+              "amount_authorized": 4900,
+              "authorization_code": "123456",
+              "brand": "visa",
+              "checks": {
+                "address_line1_check": "pass",
+                "address_postal_code_check": "pass",
+                "cvc_check": "pass"
+              },
+              "country": "US",
+              "exp_month": 8,
+              "exp_year": 2030,
+              "extended_authorization": { "status": "disabled" },
+              "fingerprint": "FixtureFingerprint01",
+              "funding": "credit",
+              "incremental_authorization": { "status": "unavailable" },
+              "installments": null,
+              "last4": "4242",
+              "mandate": null,
+              "multicapture": { "status": "unavailable" },
+              "network": "visa",
+              "network_token": { "used": false },
+              "network_transaction_id": "FixtureNetworkTxn01",
+              "overcapture": { "maximum_amount_capturable": 4900, "status": "unavailable" },
+              "regulated_status": "unregulated",
+              "three_d_secure": null,
+              "wallet": null
+            },
+            "type": "card"
+          },
+          "radar_options": {},
+          "receipt_email": "buyer@example.test",
+          "receipt_number": null,
+          "receipt_url": "https://pay.stripe.test/receipts/payment/FixtureReceipt01",
+          "refunded": false,
+          "review": null,
+          "shipping": null,
+          "source": null,
+          "source_transfer": null,
+          "statement_descriptor": null,
+          "statement_descriptor_suffix": null,
+          "status": "succeeded",
+          "transfer_data": null,
+          "transfer_group": null
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": "req_PayFixture0001", "idempotency_key": "fixture-idem-0001" },
+      "type": "charge.succeeded"
+    },
+    {
+      "id": "evt_1PayFixtureCheckout01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785843902,
+      "data": {
+        "object": {
+          "id": "cs_live_PayFixtureSessionA0001",
+          "object": "checkout.session",
+          "adaptive_pricing": { "enabled": false },
+          "after_expiration": null,
+          "allow_promotion_codes": false,
+          "amount_subtotal": 4900,
+          "amount_total": 4900,
+          "automatic_tax": { "enabled": false, "liability": null, "provider": null, "status": null },
+          "billing_address_collection": "required",
+          "cancel_url": "https://shop.example.test/cancel",
+          "client_reference_id": "user_7781",
+          "client_secret": null,
+          "collected_information": { "shipping_details": null },
+          "consent": null,
+          "consent_collection": null,
+          "created": 1785843700,
+          "currency": "usd",
+          "currency_conversion": null,
+          "custom_fields": [],
+          "custom_text": {
+            "after_submit": null,
+            "shipping_address": null,
+            "submit": null,
+            "terms_of_service_acceptance": null
+          },
+          "customer": "cus_PayFixtureBuyer01",
+          "customer_creation": "always",
+          "customer_details": {
+            "address": {
+              "city": "Exampleton",
+              "country": "US",
+              "line1": "1 Example Street",
+              "line2": "Apt 2",
+              "postal_code": "94000",
+              "state": "CA"
+            },
+            "email": "buyer@example.test",
+            "name": "Jordan Example",
+            "phone": "+15555550100",
+            "tax_exempt": "none",
+            "tax_ids": []
+          },
+          "customer_email": "buyer@example.test",
+          "discounts": [],
+          "expires_at": 1785930100,
+          "invoice": null,
+          "invoice_creation": {
+            "enabled": false,
+            "invoice_data": {
+              "account_tax_ids": null,
+              "custom_fields": null,
+              "description": null,
+              "footer": null,
+              "issuer": null,
+              "metadata": {},
+              "rendering_options": null
+            }
+          },
+          "livemode": true,
+          "locale": null,
+          "metadata": { "order_ref": "ord_7781", "buyer_email": "buyer@example.test" },
+          "mode": "payment",
+          "payment_intent": "pi_3PayFixtureA0001",
+          "payment_link": null,
+          "payment_method_collection": "if_required",
+          "payment_method_configuration_details": { "id": "pmc_1PayFixtureConfig", "parent": null },
+          "payment_method_options": { "card": { "request_three_d_secure": "automatic" } },
+          "payment_method_types": ["card"],
+          "payment_status": "paid",
+          "permissions": null,
+          "phone_number_collection": { "enabled": false },
+          "recovered_from": null,
+          "saved_payment_method_options": null,
+          "setup_intent": null,
+          "shipping_address_collection": null,
+          "shipping_cost": null,
+          "shipping_options": [],
+          "status": "complete",
+          "submit_type": null,
+          "subscription": null,
+          "success_url": "https://shop.example.test/thanks?session_id={CHECKOUT_SESSION_ID}",
+          "total_details": { "amount_discount": 0, "amount_shipping": 0, "amount_tax": 0 },
+          "ui_mode": "hosted",
+          "url": null,
+          "wallet_options": null
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": null, "idempotency_key": null },
+      "type": "checkout.session.completed"
+    },
+    {
+      "id": "evt_3PayFixtureRefundNew01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785844200,
+      "data": {
+        "object": {
+          "id": "re_3PayFixtureA0001",
+          "object": "refund",
+          "amount": 2000,
+          "balance_transaction": "txn_3PayFixtureRefund01",
+          "charge": "ch_3PayFixtureA0001",
+          "created": 1785844200,
+          "currency": "usd",
+          "destination_details": {
+            "card": { "reference": null, "reference_status": "pending", "reference_type": "acquirer_reference_number", "type": "refund" },
+            "type": "card"
+          },
+          "metadata": { "support_ticket": "T-5521", "buyer_email": "buyer@example.test" },
+          "payment_intent": "pi_3PayFixtureA0001",
+          "reason": "requested_by_customer",
+          "receipt_number": null,
+          "source_transfer_reversal": null,
+          "status": "succeeded",
+          "transfer_reversal": null
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": "req_PayFixture0002", "idempotency_key": "fixture-idem-0002" },
+      "type": "refund.created"
+    },
+    {
+      "id": "evt_3PayFixtureChargeRefunded01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785844200,
+      "data": {
+        "object": {
+          "id": "ch_3PayFixtureA0001",
+          "object": "charge",
+          "amount": 4900,
+          "amount_captured": 4900,
+          "amount_refunded": 2000,
+          "application": null,
+          "application_fee": null,
+          "application_fee_amount": null,
+          "balance_transaction": "txn_3PayFixtureA0001",
+          "billing_details": {
+            "address": {
+              "city": "Exampleton",
+              "country": "US",
+              "line1": "1 Example Street",
+              "line2": "Apt 2",
+              "postal_code": "94000",
+              "state": "CA"
+            },
+            "email": "buyer@example.test",
+            "name": "Jordan Example",
+            "phone": "+15555550100",
+            "tax_id": null
+          },
+          "calculated_statement_descriptor": "EXAMPLE SHOP",
+          "captured": true,
+          "created": 1785843881,
+          "currency": "usd",
+          "customer": "cus_PayFixtureBuyer01",
+          "description": "Order 7781 for buyer@example.test",
+          "destination": null,
+          "dispute": null,
+          "disputed": false,
+          "failure_balance_transaction": null,
+          "failure_code": null,
+          "failure_message": null,
+          "fraud_details": {},
+          "livemode": true,
+          "metadata": { "order_ref": "ord_7781", "buyer_email": "buyer@example.test" },
+          "on_behalf_of": null,
+          "outcome": {
+            "advice_code": null,
+            "network_advice_code": null,
+            "network_decline_code": null,
+            "network_status": "approved_by_network",
+            "reason": null,
+            "risk_level": "normal",
+            "risk_score": 21,
+            "seller_message": "Payment complete.",
+            "type": "authorized"
+          },
+          "paid": true,
+          "payment_intent": "pi_3PayFixtureA0001",
+          "payment_method": "pm_1PayFixtureCard01",
+          "payment_method_details": {
+            "card": {
+              "amount_authorized": 4900,
+              "authorization_code": "123456",
+              "brand": "visa",
+              "checks": {
+                "address_line1_check": "pass",
+                "address_postal_code_check": "pass",
+                "cvc_check": "pass"
+              },
+              "country": "US",
+              "exp_month": 8,
+              "exp_year": 2030,
+              "extended_authorization": { "status": "disabled" },
+              "fingerprint": "FixtureFingerprint01",
+              "funding": "credit",
+              "incremental_authorization": { "status": "unavailable" },
+              "installments": null,
+              "last4": "4242",
+              "mandate": null,
+              "multicapture": { "status": "unavailable" },
+              "network": "visa",
+              "network_token": { "used": false },
+              "network_transaction_id": "FixtureNetworkTxn01",
+              "overcapture": { "maximum_amount_capturable": 4900, "status": "unavailable" },
+              "regulated_status": "unregulated",
+              "three_d_secure": null,
+              "wallet": null
+            },
+            "type": "card"
+          },
+          "radar_options": {},
+          "receipt_email": "buyer@example.test",
+          "receipt_number": "1827-3341",
+          "receipt_url": "https://pay.stripe.test/receipts/payment/FixtureReceipt01",
+          "refunded": false,
+          "review": null,
+          "shipping": null,
+          "source": null,
+          "source_transfer": null,
+          "statement_descriptor": null,
+          "statement_descriptor_suffix": null,
+          "status": "succeeded",
+          "transfer_data": null,
+          "transfer_group": null
+        },
+        "previous_attributes": {
+          "amount_refunded": 0,
+          "receipt_number": null,
+          "receipt_url": "https://pay.stripe.test/receipts/payment/FixtureReceiptOld01"
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": "req_PayFixture0002", "idempotency_key": "fixture-idem-0002" },
+      "type": "charge.refunded"
+    },
+    {
+      "id": "evt_3PayFixtureRefundUpd01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785844260,
+      "data": {
+        "object": {
+          "id": "re_3PayFixtureA0001",
+          "object": "refund",
+          "amount": 2000,
+          "balance_transaction": "txn_3PayFixtureRefund01",
+          "charge": "ch_3PayFixtureA0001",
+          "created": 1785844200,
+          "currency": "usd",
+          "destination_details": {
+            "card": { "reference": "74987654321098765432109", "reference_status": "available", "reference_type": "acquirer_reference_number", "type": "refund" },
+            "type": "card"
+          },
+          "metadata": { "support_ticket": "T-5521", "buyer_email": "buyer@example.test" },
+          "payment_intent": "pi_3PayFixtureA0001",
+          "reason": "requested_by_customer",
+          "receipt_number": null,
+          "source_transfer_reversal": null,
+          "status": "succeeded",
+          "transfer_reversal": null
+        },
+        "previous_attributes": {
+          "destination_details": {
+            "card": { "reference": null, "reference_status": "pending" }
+          }
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": null, "idempotency_key": null },
+      "type": "refund.updated"
+    },
+    {
+      "id": "evt_1PayFixtureDisputeNew01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785844300,
+      "data": {
+        "object": {
+          "id": "dp_1PayFixtureB0001",
+          "object": "dispute",
+          "amount": 12000,
+          "balance_transactions": [],
+          "charge": "ch_3PayFixtureB0001",
+          "created": 1785844300,
+          "currency": "usd",
+          "enhanced_eligibility_types": [],
+          "evidence": {
+            "access_activity_log": null,
+            "billing_address": null,
+            "cancellation_policy": null,
+            "cancellation_policy_disclosure": null,
+            "cancellation_rebuttal": null,
+            "customer_communication": null,
+            "customer_email_address": null,
+            "customer_name": null,
+            "customer_purchase_ip": null,
+            "customer_signature": null,
+            "duplicate_charge_documentation": null,
+            "duplicate_charge_explanation": null,
+            "duplicate_charge_id": null,
+            "enhanced_evidence": {},
+            "product_description": null,
+            "receipt": null,
+            "refund_policy": null,
+            "refund_policy_disclosure": null,
+            "refund_refusal_explanation": null,
+            "service_date": null,
+            "service_documentation": null,
+            "shipping_address": null,
+            "shipping_carrier": null,
+            "shipping_date": null,
+            "shipping_documentation": null,
+            "shipping_tracking_number": null,
+            "uncategorized_file": null,
+            "uncategorized_text": null
+          },
+          "evidence_details": {
+            "due_by": 1786617599,
+            "enhanced_eligibility": {},
+            "has_evidence": false,
+            "past_due": false,
+            "submission_count": 0
+          },
+          "is_charge_refundable": false,
+          "livemode": true,
+          "metadata": {},
+          "network_reason_code": "10.4",
+          "payment_intent": "pi_3PayFixtureB0001",
+          "payment_method_details": {
+            "card": { "brand": "visa", "case_type": "chargeback", "network_reason_code": "10.4" },
+            "type": "card"
+          },
+          "reason": "fraudulent",
+          "status": "needs_response"
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": null, "idempotency_key": null },
+      "type": "charge.dispute.created"
+    },
+    {
+      "id": "evt_1PayFixtureDisputeFunds01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785844301,
+      "data": {
+        "object": {
+          "id": "dp_1PayFixtureB0001",
+          "object": "dispute",
+          "amount": 12000,
+          "balance_transactions": [
+            {
+              "id": "txn_1PayFixtureDisputeFee",
+              "object": "balance_transaction",
+              "amount": -12000,
+              "currency": "usd",
+              "description": "Chargeback withdrawal for ch_3PayFixtureB0001",
+              "fee": 1500,
+              "net": -13500,
+              "reporting_category": "dispute",
+              "status": "available",
+              "type": "adjustment"
+            }
+          ],
+          "charge": "ch_3PayFixtureB0001",
+          "created": 1785844300,
+          "currency": "usd",
+          "enhanced_eligibility_types": [],
+          "evidence": {
+            "access_activity_log": null,
+            "billing_address": null,
+            "customer_email_address": null,
+            "customer_name": null,
+            "uncategorized_text": null
+          },
+          "evidence_details": {
+            "due_by": 1786617599,
+            "enhanced_eligibility": {},
+            "has_evidence": false,
+            "past_due": false,
+            "submission_count": 0
+          },
+          "is_charge_refundable": false,
+          "livemode": true,
+          "metadata": {},
+          "network_reason_code": "10.4",
+          "payment_intent": "pi_3PayFixtureB0001",
+          "payment_method_details": {
+            "card": { "brand": "visa", "case_type": "chargeback", "network_reason_code": "10.4" },
+            "type": "card"
+          },
+          "reason": "fraudulent",
+          "status": "needs_response"
+        },
+        "previous_attributes": { "balance_transactions": [] }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": null, "idempotency_key": null },
+      "type": "charge.dispute.funds_withdrawn"
+    },
+    {
+      "id": "evt_1PayFixtureDisputeUpd01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785844380,
+      "data": {
+        "object": {
+          "id": "dp_1PayFixtureB0001",
+          "object": "dispute",
+          "amount": 12000,
+          "balance_transactions": [],
+          "charge": "ch_3PayFixtureB0001",
+          "created": 1785844300,
+          "currency": "usd",
+          "enhanced_eligibility_types": [],
+          "evidence": {
+            "access_activity_log": "Login from 203.0.113.7 on 2026-07-30",
+            "billing_address": "1 Example Street, Apt 2, Exampleton, CA 94000, US",
+            "customer_email_address": "buyer@example.test",
+            "customer_name": "Jordan Example",
+            "customer_purchase_ip": "203.0.113.7",
+            "product_description": "Annual plan",
+            "shipping_address": "1 Example Street, Apt 2, Exampleton, CA 94000, US",
+            "uncategorized_text": "Customer used the product for 30 days before disputing."
+          },
+          "evidence_details": {
+            "due_by": 1786617599,
+            "enhanced_eligibility": {},
+            "has_evidence": true,
+            "past_due": false,
+            "submission_count": 1
+          },
+          "is_charge_refundable": false,
+          "livemode": true,
+          "metadata": {},
+          "network_reason_code": "10.4",
+          "payment_intent": "pi_3PayFixtureB0001",
+          "payment_method_details": {
+            "card": { "brand": "visa", "case_type": "chargeback", "network_reason_code": "10.4" },
+            "type": "card"
+          },
+          "reason": "fraudulent",
+          "status": "under_review"
+        },
+        "previous_attributes": {
+          "evidence": {
+            "access_activity_log": null,
+            "billing_address": null,
+            "customer_email_address": null,
+            "customer_name": null,
+            "customer_purchase_ip": null,
+            "product_description": null,
+            "shipping_address": null,
+            "uncategorized_text": null
+          },
+          "evidence_details": { "has_evidence": false, "submission_count": 0 },
+          "status": "needs_response"
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": "req_PayFixture0003", "idempotency_key": "fixture-idem-0003" },
+      "type": "charge.dispute.updated"
+    },
+    {
+      "id": "evt_1PayFixtureDisputeClosed01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785844400,
+      "data": {
+        "object": {
+          "id": "dp_1PayFixtureB0001",
+          "object": "dispute",
+          "amount": 12000,
+          "balance_transactions": [],
+          "charge": "ch_3PayFixtureB0001",
+          "created": 1785844300,
+          "currency": "usd",
+          "enhanced_eligibility_types": [],
+          "evidence": {
+            "access_activity_log": "Login from 203.0.113.7 on 2026-07-30",
+            "billing_address": "1 Example Street, Apt 2, Exampleton, CA 94000, US",
+            "customer_email_address": "buyer@example.test",
+            "customer_name": "Jordan Example",
+            "customer_purchase_ip": "203.0.113.7",
+            "product_description": "Annual plan",
+            "shipping_address": "1 Example Street, Apt 2, Exampleton, CA 94000, US",
+            "uncategorized_text": "Customer used the product for 30 days before disputing."
+          },
+          "evidence_details": {
+            "due_by": 1786617599,
+            "enhanced_eligibility": {},
+            "has_evidence": true,
+            "past_due": false,
+            "submission_count": 1
+          },
+          "is_charge_refundable": false,
+          "livemode": true,
+          "metadata": {},
+          "network_reason_code": "10.4",
+          "payment_intent": "pi_3PayFixtureB0001",
+          "payment_method_details": {
+            "card": { "brand": "visa", "case_type": "chargeback", "network_reason_code": "10.4" },
+            "type": "card"
+          },
+          "reason": "fraudulent",
+          "status": "won"
+        },
+        "previous_attributes": { "status": "under_review" }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": null, "idempotency_key": null },
+      "type": "charge.dispute.closed"
+    },
+    {
+      "id": "evt_3PayFixtureFailed01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785844440,
+      "data": {
+        "object": {
+          "id": "pi_3PayFixtureC0001",
+          "object": "payment_intent",
+          "amount": 9900,
+          "amount_capturable": 0,
+          "amount_details": { "tip": {} },
+          "amount_received": 0,
+          "application": null,
+          "application_fee_amount": null,
+          "automatic_payment_methods": { "allow_redirects": "always", "enabled": true },
+          "canceled_at": null,
+          "cancellation_reason": null,
+          "capture_method": "automatic_async",
+          "client_secret": "pi_3PayFixtureC0001_secret_FixtureClientSecret0003",
+          "confirmation_method": "automatic",
+          "created": 1785844430,
+          "currency": "eur",
+          "customer": "cus_PayFixtureBuyer02",
+          "description": "Renewal for second.buyer@example.test",
+          "last_payment_error": {
+            "advice_code": "try_again_later",
+            "charge": "ch_3PayFixtureC0001",
+            "code": "card_declined",
+            "decline_code": "insufficient_funds",
+            "doc_url": "https://docs.stripe.com/error-codes/card-declined",
+            "message": "Your card has insufficient funds.",
+            "network_decline_code": "51",
+            "payment_method": {
+              "id": "pm_1PayFixtureCard03",
+              "object": "payment_method",
+              "allow_redisplay": "unspecified",
+              "billing_details": {
+                "address": {
+                  "city": "Sampleville",
+                  "country": "DE",
+                  "line1": "9 Sample Road",
+                  "line2": null,
+                  "postal_code": "10115",
+                  "state": null
+                },
+                "email": "second.buyer@example.test",
+                "name": "Alex Sample",
+                "phone": null,
+                "tax_id": null
+              },
+              "card": {
+                "brand": "mastercard",
+                "checks": { "address_line1_check": null, "address_postal_code_check": null, "cvc_check": "pass" },
+                "country": "DE",
+                "exp_month": 3,
+                "exp_year": 2029,
+                "fingerprint": "FixtureFingerprint03",
+                "funding": "debit",
+                "last4": "0341",
+                "networks": { "available": ["mastercard"], "preferred": null },
+                "regulated_status": "regulated",
+                "three_d_secure_usage": { "supported": true },
+                "wallet": null
+              },
+              "created": 1785844425,
+              "customer": "cus_PayFixtureBuyer02",
+              "livemode": true,
+              "metadata": {},
+              "type": "card"
+            },
+            "type": "card_error"
+          },
+          "latest_charge": "ch_3PayFixtureC0001",
+          "livemode": true,
+          "metadata": { "renewal_of": "ord_6410" },
+          "next_action": null,
+          "on_behalf_of": null,
+          "payment_method": null,
+          "payment_method_configuration_details": { "id": "pmc_1PayFixtureConfig", "parent": null },
+          "payment_method_options": {
+            "card": {
+              "installments": null,
+              "mandate_options": null,
+              "network": null,
+              "request_three_d_secure": "automatic"
+            }
+          },
+          "payment_method_types": ["card"],
+          "processing": null,
+          "receipt_email": "second.buyer@example.test",
+          "review": null,
+          "setup_future_usage": null,
+          "shipping": null,
+          "source": null,
+          "statement_descriptor": null,
+          "statement_descriptor_suffix": null,
+          "status": "requires_payment_method",
+          "transfer_data": null,
+          "transfer_group": null
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": "req_PayFixture0004", "idempotency_key": "fixture-idem-0004" },
+      "type": "payment_intent.payment_failed"
+    }
+  ],
+  "ignored": [
+    {
+      "id": "evt_3PayFixturePiCreated01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785843880,
+      "data": {
+        "object": {
+          "id": "pi_3PayFixtureA0001",
+          "object": "payment_intent",
+          "amount": 4900,
+          "amount_received": 0,
+          "client_secret": "pi_3PayFixtureA0001_secret_FixtureClientSecret0001",
+          "created": 1785843880,
+          "currency": "usd",
+          "customer": "cus_PayFixtureBuyer01",
+          "livemode": true,
+          "metadata": {},
+          "receipt_email": "buyer@example.test",
+          "status": "requires_payment_method"
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": "req_PayFixture0000", "idempotency_key": "fixture-idem-0000" },
+      "type": "payment_intent.created"
+    },
+    {
+      "id": "evt_3PayFixtureChargeUpd01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785843960,
+      "data": {
+        "object": {
+          "id": "ch_3PayFixtureA0001",
+          "object": "charge",
+          "amount": 4900,
+          "amount_refunded": 0,
+          "balance_transaction": "txn_3PayFixtureA0001",
+          "created": 1785843881,
+          "currency": "usd",
+          "customer": "cus_PayFixtureBuyer01",
+          "livemode": true,
+          "paid": true,
+          "status": "succeeded"
+        },
+        "previous_attributes": { "balance_transaction": null }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": null, "idempotency_key": null },
+      "type": "charge.updated"
+    },
+    {
+      "id": "evt_3PayFixtureChargeRefundUpd01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785844260,
+      "data": {
+        "object": {
+          "id": "re_3PayFixtureA0001",
+          "object": "refund",
+          "amount": 2000,
+          "charge": "ch_3PayFixtureA0001",
+          "created": 1785844200,
+          "currency": "usd",
+          "status": "succeeded"
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": null, "idempotency_key": null },
+      "type": "charge.refund.updated"
+    },
+    {
+      "id": "evt_1PayFixtureSessionExpired01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785844000,
+      "data": {
+        "object": {
+          "id": "cs_live_PayFixtureSessionZ0001",
+          "object": "checkout.session",
+          "amount_total": 4900,
+          "created": 1785757600,
+          "currency": "usd",
+          "customer": null,
+          "customer_details": null,
+          "livemode": true,
+          "mode": "payment",
+          "payment_status": "unpaid",
+          "status": "expired"
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": null, "idempotency_key": null },
+      "type": "checkout.session.expired"
+    },
+    {
+      "id": "evt_1PayFixturePmAttached01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785843881,
+      "data": {
+        "object": {
+          "id": "pm_1PayFixtureCard01",
+          "object": "payment_method",
+          "billing_details": {
+            "address": { "city": "Exampleton", "country": "US", "line1": "1 Example Street", "line2": "Apt 2", "postal_code": "94000", "state": "CA" },
+            "email": "buyer@example.test",
+            "name": "Jordan Example",
+            "phone": "+15555550100",
+            "tax_id": null
+          },
+          "card": { "brand": "visa", "fingerprint": "FixtureFingerprint01", "last4": "4242", "exp_month": 8, "exp_year": 2030 },
+          "created": 1785843881,
+          "customer": "cus_PayFixtureBuyer01",
+          "livemode": true,
+          "metadata": {},
+          "type": "card"
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 1,
+      "request": { "id": "req_PayFixture0001", "idempotency_key": "fixture-idem-0001" },
+      "type": "payment_method.attached"
+    },
+    {
+      "id": "evt_1PayFixtureBalance01",
+      "object": "event",
+      "api_version": "2025-06-30.basil",
+      "created": 1785844100,
+      "data": {
+        "object": {
+          "object": "balance",
+          "available": [{ "amount": 184500, "currency": "usd", "source_types": { "card": 184500 } }],
+          "livemode": true,
+          "pending": [{ "amount": 4900, "currency": "usd", "source_types": { "card": 4900 } }]
+        }
+      },
+      "livemode": true,
+      "pending_webhooks": 0,
+      "request": { "id": null, "idempotency_key": null },
+      "type": "balance.available"
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "v": 1,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "kind": "numbers",
+  "tool": "read_funnel",
+  "title": "Signup funnel",
+  "state": "ready",
+  "asOf": "2026-01-14",
+  "provenance": {
+    "source": "Demo analytics",
+    "via": "our_db"
+  },
+  "body": {
+    "layout": "steps",
+    "currency": null,
+    "columns": [],
+    "legs": {
+      "settled": {
+        "window": {
+          "from": "2025-12-16",
+          "to": "2026-01-14",
+          "tz": "UTC",
+          "label": "Last 30 days"
+        },
+        "final": true,
+        "asOf": "2026-01-14T23:00:00Z",
+        "rows": [],
+        "steps": [
+          {
+            "key": "visits",
+            "label": "Visits",
+            "count": 1000
+          },
+          {
+            "key": "registered",
+            "label": "Registered",
+            "count": 176,
+            "ofPrevious": true
+          },
+          {
+            "key": "app_signup",
+            "label": "App signup",
+            "count": 127,
+            "ofPrevious": true
+          },
+          {
+            "key": "trial",
+            "label": "Started trial",
+            "count": null,
+            "reason": {
+              "code": "not_measured",
+              "words": "not counted before Jan 10",
+              "show": "dash"
+            },
+            "countingSince": "2026-01-10",
+            "ofPrevious": true
+          },
+          {
+            "key": "paying",
+            "label": "Paying",
+            "count": 4,
+            "ofPrevious": true
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,1015 @@
+{
+  "schema": "infinite-tag.report.v2",
+  "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+  "tagVersion": "0.12.0",
+  "generatedAt": "2026-10-03T21:08:36.960Z",
+  "site": {
+    "repoLabel": "github.com/example-owner/example-shop-site",
+    "productionHost": "shop.examplebrand.com"
+  },
+  "columns": {
+    "live_today": {
+      "measuredAt": "2026-10-03T20:44:19.785Z",
+      "sha": null
+    },
+    "in_pr": {
+      "measuredAt": "2026-10-03T20:55:55.990Z",
+      "sha": "5e6f3f3bb56b5363e8a9ed85541f3af852731047"
+    },
+    "proven_live": {
+      "measuredAt": "2026-10-03T21:08:33.998Z",
+      "sha": "4aae09ef02a6c87953efd48535e746c0e6f53a16",
+      "pending": null
+    }
+  },
+  "rows": [
+    {
+      "id": "checks_passing",
+      "label": "Checks passing",
+      "cells": {
+        "live_today": {
+          "value": "3/9",
+          "display": "3 pass · 4 problems · 2 unknown · 5 not testable of 14",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "in_pr": {
+          "value": "5/9",
+          "display": "5 pass · 0 problems · 4 unknown · 5 not testable of 14",
+          "state": "undetermined",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "proven_live": {
+          "value": "7/13",
+          "display": "7 pass · 1 problem · 5 unknown · 1 not testable of 14",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        }
+      }
+    },
+    {
+      "id": "ga4_page_views_per_visit",
+      "label": "GA4 page views per visit",
+      "cells": {
+        "live_today": {
+          "value": 1,
+          "display": "1",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:ga4"
+          }
+        },
+        "in_pr": {
+          "value": "1",
+          "display": "1",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:ga4"
+          }
+        },
+        "proven_live": {
+          "value": 1,
+          "display": "1 · sent (seen leaving)",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "ga4_seen_leaving"
+          }
+        }
+      }
+    },
+    {
+      "id": "posthog_route",
+      "label": "PostHog route",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        },
+        "in_pr": {
+          "value": "info",
+          "display": "not installed",
+          "state": "info",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:posthog"
+          }
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        }
+      }
+    },
+    {
+      "id": "meta_pixel",
+      "label": "Meta pixel",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        },
+        "proven_live": {
+          "value": "sending",
+          "display": "sending (seen leaving) · ID not checked: not connected in Infinite",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "meta_seen_leaving"
+          }
+        }
+      }
+    },
+    {
+      "id": "preview_share",
+      "label": "Page views from preview links",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "read_failed"
+        },
+        "in_pr": {
+          "value": "silent",
+          "display": "guard added · the preview link sent nothing",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "preview_self_silent"
+          }
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    },
+    {
+      "id": "server_conversions",
+      "label": "Conversions sent from the server",
+      "cells": {
+        "live_today": {
+          "value": 0,
+          "display": "0 in 7 days",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        }
+      }
+    },
+    {
+      "id": "ga4_key_events",
+      "label": "GA4 key events",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "read_failed"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    },
+    {
+      "id": "consent_setting",
+      "label": "Consent setting",
+      "cells": {
+        "live_today": {
+          "value": "not_required",
+          "display": "collect by default",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "in_pr": {
+          "value": "not_required",
+          "display": "\"collect by default\" recorded",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "proven_live": {
+          "value": "not_required",
+          "display": "collect by default",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        }
+      }
+    },
+    {
+      "id": "live_test_per_tool",
+      "label": "Live test per tool",
+      "cells": {
+        "live_today": {
+          "value": "1/2",
+          "display": "1 of 2 tools fire once (nothing sent)",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "in_pr": {
+          "value": "2/3",
+          "display": "rehearsal: 2 of 3 tools fire once, right ID (nothing sent)",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "proven_live": {
+          "value": "3 of 3",
+          "display": "3 of 3 fire: 1 verified (receipts from this visit) · 2 seen leaving",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "receiptAt": "2026-10-03T21:08:14.264Z"
+          }
+        }
+      }
+    },
+    {
+      "id": "day7_checkin",
+      "label": "7 days later",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "needs_7_days"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "needs_7_days"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    }
+  ],
+  "day7": {
+    "measuredAt": null,
+    "window": null,
+    "cell": null
+  },
+  "finishLine": [
+    {
+      "n": 1,
+      "id": "each_tool_once",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "GA4 set up 2 times",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "one_beacon_per_tool"
+          },
+          "reason": "not_connected"
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "Infinite pixel: fires once",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:infinite"
+          }
+        }
+      }
+    },
+    {
+      "n": 2,
+      "id": "ids_match_connections",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "problem",
+          "state": "problem",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "infinite_runtime_once"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        },
+        "proven_live": {
+          "value": "unknown",
+          "display": "Meta: ID not checked: not connected in Infinite",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:meta"
+          },
+          "reason": "not_connected"
+        }
+      }
+    },
+    {
+      "n": 3,
+      "id": "previews_silent",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "preview link sent nothing",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "preview_self_silent"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "GA4: silent on the merge's own deployment address",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:ga4"
+          }
+        }
+      }
+    },
+    {
+      "n": 4,
+      "id": "survives_ad_blockers",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "server lane not receiving",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "posthog_via_proxy_once"
+          },
+          "reason": "not_connected"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        }
+      }
+    },
+    {
+      "n": 5,
+      "id": "spa_page_views",
+      "cells": {
+        "live_today": {
+          "value": "unknown",
+          "display": "no page change observed",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "one page view per navigation",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "proven_live": {
+          "value": "problem",
+          "display": "GA4: misses page changes",
+          "state": "problem",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "test_run:ga4"
+          }
+        }
+      }
+    },
+    {
+      "n": 6,
+      "id": "conversions_server_side",
+      "cells": {
+        "live_today": {
+          "value": "problem",
+          "display": "0 sent from the server in 7 days",
+          "state": "problem",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "waiting_real_event"
+        }
+      }
+    },
+    {
+      "n": 7,
+      "id": "identity_joined",
+      "cells": {
+        "live_today": {
+          "value": "info",
+          "display": "no login found",
+          "state": "info",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "waiting_real_event"
+        }
+      }
+    },
+    {
+      "n": 8,
+      "id": "utms_survive_redirects",
+      "cells": {
+        "live_today": {
+          "value": "pass",
+          "display": "pass",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:18.725Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "redirect_walk"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "campaign tags kept through every redirect",
+          "state": "pass",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:19.114Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "redirect_walk"
+          }
+        }
+      }
+    },
+    {
+      "n": 9,
+      "id": "consent_recorded",
+      "cells": {
+        "live_today": {
+          "value": "pass",
+          "display": "collect by default",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "in_pr": {
+          "value": "not_required",
+          "display": "\"collect by default\" recorded",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "collect by default",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        }
+      }
+    },
+    {
+      "n": 10,
+      "id": "csp_allows",
+      "cells": {
+        "live_today": {
+          "value": "unknown",
+          "display": "unknown",
+          "state": "undetermined",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T20:44:18.726Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "csp_header"
+          }
+        },
+        "in_pr": {
+          "value": "0",
+          "display": "no CSP violation",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "checkId": "no_csp_violation"
+          }
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "no CSP violation",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        }
+      }
+    },
+    {
+      "n": 11,
+      "id": "ga4_key_events_received",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": null,
+          "display": "—",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    },
+    {
+      "n": 12,
+      "id": "no_pii",
+      "cells": {
+        "live_today": {
+          "value": "pass",
+          "display": "no personal data in any request",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:44:19.785Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "undetermined",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_connected"
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "no personal data in any request",
+          "state": "pass",
+          "provenance": {
+            "source": "desktop_test",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        }
+      }
+    },
+    {
+      "n": 13,
+      "id": "proof_from_real_visit",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "proven_live": {
+          "value": "pass",
+          "display": "Infinite pixel: receipt for this visit",
+          "state": "pass",
+          "provenance": {
+            "source": "cloud_receipt",
+            "at": "2026-10-03T21:08:33.998Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247",
+            "receiptAt": "2026-10-03T21:08:14.264Z"
+          }
+        }
+      }
+    },
+    {
+      "n": 14,
+      "id": "keeps_being_checked",
+      "cells": {
+        "live_today": {
+          "value": null,
+          "display": "—",
+          "state": "not_measured",
+          "provenance": {
+            "source": "wizard_check",
+            "at": "2026-10-03T21:08:36.960Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "not_exercised"
+        },
+        "in_pr": {
+          "value": "pass",
+          "display": "7-day check-in is on",
+          "state": "pass",
+          "provenance": {
+            "source": "plan_answer",
+            "at": "2026-10-03T20:55:55.990Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          }
+        },
+        "proven_live": {
+          "value": "pending",
+          "display": "7-day check-in on 10 Oct",
+          "state": "pending",
+          "provenance": {
+            "source": "cloud_read",
+            "at": "2026-10-03T21:08:35.662Z",
+            "runId": "85483904-c9a1-4125-bb85-8fd66e709247"
+          },
+          "reason": "needs_7_days"
+        }
+      }
+    }
+  ],
+  "notes": [
+    "This run's one real visit landed 1 row in your Infinite ledger, marked as Infinite's test and kept out of your numbers: the page view.",
+    "GA4 and Meta each record it as one normal page view (filter it by: GA4 client id 1505848303.1791061694 · Meta PageView at 21:08:17Z).",
+    "Review finding on the wizard's own change: R4 app/layout.tsx:59 (should)",
+    "Claude Code ran claude-opus-4-8 at xhigh effort."
+  ],
+  "verdict": {
+    "state": "problems",
+    "headline": "shop.examplebrand.com does not collect properly yet: 1 problem on the live site (spa page views) · 1 approved fix is not in the code (Improve the existing Meta pixel)",
+    "reasons": [
+      {
+        "kind": "live_problem",
+        "count": 1,
+        "names": [
+          "spa page views"
+        ]
+      },
+      {
+        "kind": "approved_fix_missing",
+        "count": 1,
+        "names": [
+          "Improve the existing Meta pixel"
+        ]
+      },
+      {
+        "kind": "tool_not_connected",
+        "count": 1,
+        "names": [
+          "Meta 777700...2222"
+        ]
+      },
+      {
+        "kind": "earlier_problem_unchecked",
+        "count": 1,
+        "names": [
+          "survives ad blockers"
+        ]
+      }
+    ],
+    "installed": [
+      {
+        "tool": "infinite",
+        "ids": [
+          "site_c...7acb"
+        ],
+        "connected": true
+      },
+      {
+        "tool": "ga4",
+        "ids": [
+          "G-QWER...7890"
+        ],
+        "connected": true
+      },
+      {
+        "tool": "meta",
+        "ids": [
+          "777700...2222"
+        ],
+        "connected": false
+      }
+    ]
+  }
+}

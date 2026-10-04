@@ -1,0 +1,157 @@
+<!doctype html>
+<html>
+<head>
+<!-- infinite-tag T0 fixture: an ADOPTED Meta pixel after agent job 7 (src/site-code.test.ts). -->
+<script>
+(function () {
+  if (typeof window.infiniteMetaClickId === "function") return;
+  // Meta's documented shapes. FB_COOKIE is the rule the whole pipeline accepts; FBCLID bounds
+  // the payload segment. A value failing either is never written and never returned.
+  var FB_COOKIE = /^fb\.[0-9]{1,2}\.[0-9]{1,20}\.[A-Za-z0-9_%.-]{1,512}$/;
+  var FBCLID = /^[A-Za-z0-9_%.-]{1,400}$/;
+  var MAX_AGE = 7776000;
+  function infiniteConsentAllows() {
+    try {
+      if (typeof window.__infiniteConsentAllowed === "function") return window.__infiniteConsentAllowed() === true;
+    } catch (_error) { return false; }
+    var decision = null;
+    try { decision = localStorage.getItem("infinite_analytics_consent"); } catch (_error) { decision = null; }
+    if (decision === "granted") return true;
+    if (decision === "denied") return false;
+    try {
+      if (navigator.doNotTrack === "1" || navigator.globalPrivacyControl === true) return false;
+    } catch (_error) { return false; }
+    return true;
+  }
+  function infiniteConsentGate(start) {
+    if (infiniteConsentAllows()) { start(); return; }
+    var started = false;
+    try {
+      window.addEventListener("infinite:analytics-consent-change", function () {
+        setTimeout(function () {
+          if (started || !infiniteConsentAllows()) return;
+          started = true;
+          start();
+        }, 0);
+      });
+    } catch (_error) {}
+  }
+  // EVERY _fbc the browser exposes, in its order. usableOnly drops values Meta would reject.
+  function storedFbcs(usableOnly) {
+    var found = [];
+    try {
+      var parts = String(document.cookie || "").split(";");
+      for (var index = 0; index < parts.length; index += 1) {
+        var part = parts[index].replace(/^\s+/, "");
+        if (part.indexOf("_fbc=") !== 0) continue;
+        var value = part.slice(5);
+        if (!usableOnly || FB_COOKIE.test(value)) found.push(value);
+      }
+    } catch (_error) {}
+    return found;
+  }
+  // The newest click by the creation time Meta's format carries, never the first-listed one.
+  function newestStored() {
+    var values = storedFbcs(true);
+    var newest = "";
+    for (var index = 0; index < values.length; index += 1) {
+      if (!newest || Number(values[index].split(".")[2]) > Number(newest.split(".")[2])) newest = values[index];
+    }
+    return newest;
+  }
+  // Case-sensitive and untouched: no toLowerCase, no trim, no further decoding.
+  function urlFbclid() {
+    try {
+      var value = new URLSearchParams(location.search || "").get("fbclid") || "";
+      return FBCLID.test(value) ? value : "";
+    } catch (_error) {
+      return "";
+    }
+  }
+  // The fbclid on THIS page's URL when the newest stored value does not already describe it.
+  function newClick() {
+    var fbclid = urlFbclid();
+    if (!fbclid) return "";
+    var stored = newestStored();
+    if (!stored) return fbclid;
+    var storedClick = stored.split(".").slice(3).join(".");
+    return storedClick === fbclid || storedClick.indexOf(fbclid + ".") === 0 ? "" : fbclid;
+  }
+  function format(index, fbclid) {
+    return "fb." + String(index) + "." + String(Date.now()) + "." + fbclid;
+  }
+  // Rule 5: the index of the domain a cookie is defined on ('com' = 0, 'acme.com' = 1).
+  function domainIndex(domain) {
+    return String(domain).split(".").length - 1;
+  }
+  function hostName() {
+    try {
+      return String(location.hostname || "").toLowerCase().replace(/\.$/, "");
+    } catch (_error) {
+      return "";
+    }
+  }
+  // Rule 2: the domains a Domain cookie could live on, shortest first. None for a bare
+  // hostname or a literal IP.
+  function cookieDomains() {
+    var host = hostName();
+    if (!host || host.indexOf(".") === -1 || /^[0-9.]+$/.test(host) || host.indexOf(":") !== -1) return [];
+    var labels = host.split(".");
+    var domains = [];
+    for (var size = 2; size <= labels.length; size += 1) domains.push(labels.slice(labels.length - size).join("."));
+    return domains;
+  }
+  window.infiniteMetaClickId = function () {
+    if (!infiniteConsentAllows()) return "";
+    var fresh = newClick();
+    return fresh ? format(1, fresh) : newestStored();
+  };
+  infiniteConsentGate(function () {
+    try {
+      var fbclid = newClick();
+      if (!fbclid) return;
+      var secure = location.protocol === "https:" ? ";secure" : "";
+      var attributes = ";path=/;max-age=" + MAX_AGE + ";samesite=Lax" + secure;
+      // Rule 3: retire a host-only copy. Without a Domain attribute this deletes only the
+      // host-only cookie and never touches Meta's Domain cookie.
+      if (storedFbcs(false).length) {
+        document.cookie = "_fbc=;path=/;max-age=0;samesite=Lax" + secure;
+      }
+      var domains = cookieDomains();
+      for (var index = 0; index < domains.length; index += 1) {
+        var value = format(domainIndex(domains[index]), fbclid);
+        document.cookie = "_fbc=" + value + ";domain=" + domains[index] + attributes;
+        if (storedFbcs(true).indexOf(value) === -1) continue;
+        // Rule 3 on a subdomain: a copy on a NARROWER domain than the one just written
+        // (www.acme.com beside acme.com) would still be listed first if it is older.
+        if (storedFbcs(false).length > 1) {
+          for (var narrower = index + 1; narrower < domains.length; narrower += 1) {
+            document.cookie = "_fbc=;domain=" + domains[narrower] + ";path=/;max-age=0;samesite=Lax" + secure;
+          }
+        }
+        return;
+      }
+      // No Domain cookie was accepted (localhost, an IP): host-only, indexed by the host itself.
+      document.cookie = "_fbc=" + format(domainIndex(hostName()), fbclid) + attributes;
+    } catch (_error) {}
+  });
+})();
+</script>
+<script>
+(function () {
+if (!((function (h) { var n = (function (h) { h = String(h == null ? "" : h).replace(/^\s+|\s+$/g, "").toLowerCase(); return h.charAt(h.length - 1) === "." ? h.slice(0, -1) : h; })(h), i; var x = ["acme-git-main-x.vercel.app","acme.com","www.acme.com"], d = ["localhost","127.0.0.1","::1","[::1]","0.0.0.0"], s = [".localhost",".local",".vercel.app",".netlify.app",".pages.dev"]; for (i = 0; i < x.length; i += 1) if (x[i] === n) return true; for (i = 0; i < d.length; i += 1) if (d[i] === n) return false; for (i = 0; i < s.length; i += 1) if (n.length > s[i].length && n.slice(n.length - s[i].length) === s[i]) return false; return true; })(location.hostname))) { if (typeof window.fbq !== 'function') { window.fbq = function () {}; window.fbq.__infiniteSilenced = true; } return; }
+!function(f,b,e,v,n,t,s)
+{if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+n.queue=[];t=b.createElement(e);t.async=!0;
+t.src=v;s=b.getElementsByTagName(e)[0];
+s.parentNode.insertBefore(t,s)}(window, document,'script',
+'https://connect.facebook.net/en_US/fbevents.js');
+fbq('init', '6543210987654321');
+fbq('track', 'PageView');
+})();
+</script>
+</head>
+<body></body>
+</html>

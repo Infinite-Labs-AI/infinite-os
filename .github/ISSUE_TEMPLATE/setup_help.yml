@@ -1,0 +1,104 @@
+name: "🔧 Setup / Installation Help"
+description: Having trouble installing or configuring Infinite OS? Ask here.
+title: "[Setup]: "
+labels: ["setup"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Sorry you're having trouble! Please fill out the details below so we can help.
+
+        **Quick checks first:**
+        - Run `infinite setup status` and paste the output in the Environment section below
+        - Try `infinite update` to get the latest version
+        - Check the [README](https://github.com/Infinite-Labs-AI/infinite-os/blob/main/README.md)
+        - For general questions, consider the [Infinite Discord](https://discord.gg/F2CT4C7R) for faster help
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What's Going Wrong?
+      description: Describe what you're trying to do and where it fails.
+      placeholder: |
+        I ran `infinite setup` and tried to connect Google Analytics 4, but when I
+        reach the OAuth step I get...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps Taken
+      description: What did you do? Include the exact commands you ran.
+      placeholder: |
+        1. Ran the install script: `curl -fsSL ... | bash`
+        2. Ran `infinite start` to bring up the local runtime
+        3. Ran `infinite setup` and chose to connect a source
+        4. Got error...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Installation Method
+      options:
+        - Install script (curl | bash)
+        - Manual clone + pnpm install
+        - Docker
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      placeholder: macOS 15.2 / Ubuntu 24.04 / Windows 11 (WSL2)
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js Version
+      description: Output of `node --version`
+      placeholder: "v20.11.0"
+
+  - type: input
+    id: infinite-version
+    attributes:
+      label: Infinite Version
+      description: Your installed version, or the short git commit of your checkout (if install got that far)
+      placeholder: "0.2.0 / a1b2c3d"
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Paste the output of `infinite setup status` (it reports runtime, model, and connector status — no secrets).
+        If the runtime won't start, `infinite logs` output is also helpful.
+      placeholder: |
+        $ infinite setup status
+        ...
+      render: shell
+
+  - type: textarea
+    id: error-output
+    attributes:
+      label: Full Error Output
+      description: Paste the complete error message. Please redact secrets/tokens. This will be auto-formatted.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What I've Already Tried
+      description: List any fixes or workarounds you've already attempted.
+      placeholder: |
+        - Ran `infinite update`
+        - Restarted the runtime with `infinite start`
+        - Checked that my `.growth-os/.env` has the expected values

@@ -1,0 +1,89 @@
+#!/usr/bin/env node
+// Fake `claude` (Claude Code 2.1.287 surface) for the agent-runner tests. Never a model, never the network.
+// Scenario keys: version, authStatus, authExit, turns[]: { mcp: "connect"|"skip", apiKeySource, rejectModel,
+// steps[], denials[], structured, result: null|{subtype,is_error,api_error_status,result}, exit }.
+import { randomUUID } from "node:crypto"
+import { readdirSync, readFileSync, statSync } from "node:fs"
+import { dirname } from "node:path"
+
+import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps, withReadCheck } from "./fake-agent-lib.mjs"
+
+const argv = process.argv.slice(2)
+const scenario = loadScenario("claude")
+
+if (argv[0] === "--version") {
+  process.stdout.write(`${scenario.version ?? "2.1.287 (Claude Code)"}\n`)
+  process.exit(0)
+}
+if (argv[0] === "auth" && argv[1] === "status") {
+  record({ kind: "probe", agent: "claude", argv, env: envSnapshot() })
+  const status = scenario.authStatus ?? JSON.parse(readFileSync(new URL("../fixtures/agents/claude-status.ok.json", import.meta.url), "utf8"))
+  process.stdout.write(`${JSON.stringify(status)}\n`)
+  process.exit(scenario.authExit ?? 0)
+}
+
+const flag = (name) => {
+  const index = argv.indexOf(name)
+  return index === -1 ? null : argv[index + 1]
+}
+
+const index = priorRuns("claude")
+const turns = scenario.turns ?? [{}]
+const turn = turns[Math.min(index, turns.length - 1)] ?? {}
+const stdin = await readStdin()
+const role = argv.includes("--no-session-persistence") ? "reviewer" : "worker"
+record({ kind: "run", agent: "claude", role, argv, cwd: process.cwd(), env: envSnapshot(), stdin, cwdEntries: readdirSync(process.cwd()) })
+
+const sessionId = flag("--resume") ?? flag("--session-id") ?? randomUUID()
+if (turn.rejectModel && argv.includes("--model")) {
+  emit({ type: "assistant", error: "model_not_found", message: { content: [] }, session_id: sessionId })
+  emit({ type: "result", subtype: "error_during_execution", is_error: true, session_id: sessionId, result: "model not found", permission_denials: [] })
+  process.exit(1)
+}
+
+let mcp = null
+let connected = false
+const configPath = flag("--mcp-config")
+if (role === "worker" && configPath && (turn.mcp ?? "connect") === "connect") {
+  record({ kind: "mcp-config", agent: "claude", mode: statSync(configPath).mode & 0o777, dirMode: statSync(dirname(configPath)).mode & 0o777 })
+  const config = JSON.parse(readFileSync(configPath, "utf8")).mcpServers.infinite_tag
+  mcp = new McpClient(config.command, config.args, { ...process.env, ...config.env })
+  connected = await mcp.connect()
+}
+const tools = (flag("--tools") ?? "").split(",").filter(Boolean)
+if (connected) tools.push("mcp__infinite_tag__job_list", "mcp__infinite_tag__job_claim", "mcp__infinite_tag__report_progress", "mcp__infinite_tag__ask_user")
+emit({
+  type: "system",
+  subtype: "init",
+  session_id: sessionId,
+  apiKeySource: turn.apiKeySource ?? "none",
+  tools,
+  mcp_servers: role === "worker" ? [{ name: "infinite_tag", status: connected ? "connected" : "failed" }] : [],
+  model: flag("--model") ?? "default",
+  permissionMode: flag("--permission-mode")
+})
+
+await runSteps(turn.steps, {
+  agent: "claude",
+  cwd: process.cwd(),
+  mcp,
+  onEdit: (path) => emit({ type: "assistant", session_id: sessionId, message: { content: [{ type: "tool_use", id: randomUUID(), name: "Edit", input: { file_path: `${process.cwd()}/${path}`, old_string: "x", new_string: "y" } }] } }),
+  onTool: (tool, args) => emit({ type: "assistant", session_id: sessionId, message: { content: [{ type: "tool_use", id: randomUUID(), name: `mcp__infinite_tag__${tool}`, input: args }] } })
+})
+mcp?.close()
+
+if (turn.result !== null) {
+  const result = turn.result ?? {}
+  emit({
+    type: "result",
+    subtype: result.subtype ?? "success",
+    is_error: result.is_error ?? false,
+    ...(result.api_error_status !== undefined ? { api_error_status: result.api_error_status } : {}),
+    session_id: sessionId,
+    num_turns: result.num_turns ?? 3,
+    result: result.result ?? "",
+    permission_denials: (turn.denials ?? []).map((path) => ({ tool_name: "Read", tool_use_id: randomUUID(), tool_input: { file_path: path } })),
+    structured_output: role === "reviewer" ? withReadCheck(turn.structured ?? null, process.cwd(), turn) : (turn.structured ?? { claims: [], questions: [] })
+  })
+}
+process.exit(turn.exit ?? 0)

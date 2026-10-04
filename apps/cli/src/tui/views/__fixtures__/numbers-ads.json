@@ -1,0 +1,204 @@
+{
+  "v": 1,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "kind": "numbers",
+  "tool": "read_ads_numbers",
+  "title": "Ads since launch",
+  "state": "ready",
+  "asOf": "2026-01-14T23:00:00Z",
+  "provenance": {
+    "source": "Demo ads",
+    "via": "our_db"
+  },
+  "body": {
+    "layout": "table",
+    "currency": "USD",
+    "columns": [
+      {
+        "key": "spend",
+        "label": "Spend",
+        "unit": "money",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "clicks",
+        "label": "Clicks",
+        "unit": "count",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "ctr",
+        "label": "CTR",
+        "unit": "percent",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "conv",
+        "label": "Conv",
+        "unit": "count",
+        "factGroup": "conversions"
+      },
+      {
+        "key": "cpc",
+        "label": "CPC",
+        "unit": "money",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "impressions",
+        "label": "Impressions",
+        "unit": "count",
+        "factGroup": "delivery"
+      }
+    ],
+    "legs": {
+      "settled": {
+        "window": {
+          "from": "2026-01-08",
+          "to": "2026-01-14",
+          "tz": "UTC",
+          "label": "Last 7 days"
+        },
+        "final": true,
+        "asOf": "2026-01-14T23:00:00Z",
+        "rows": [
+          {
+            "id": "cmp_1",
+            "label": "Ad set 01",
+            "cells": {
+              "spend": {
+                "value": 40
+              },
+              "clicks": {
+                "value": 50
+              },
+              "ctr": {
+                "value": 1.25
+              },
+              "conv": {
+                "value": 0
+              },
+              "cpc": {
+                "value": 0.8
+              },
+              "impressions": {
+                "value": 4000
+              }
+            }
+          },
+          {
+            "id": "cmp_2",
+            "label": "Ad set 02",
+            "cells": {
+              "spend": {
+                "value": 30
+              },
+              "clicks": {
+                "value": 30
+              },
+              "ctr": {
+                "value": 1
+              },
+              "conv": {
+                "value": 0
+              },
+              "cpc": {
+                "value": 1
+              },
+              "impressions": {
+                "value": 3000
+              }
+            }
+          },
+          {
+            "id": "cmp_3",
+            "label": "Ad set 03",
+            "cells": {
+              "spend": {
+                "value": 30
+              },
+              "clicks": {
+                "value": 20
+              },
+              "ctr": {
+                "value": 1
+              },
+              "conv": {
+                "value": null,
+                "reason": {
+                  "code": "not_measured",
+                  "words": "not measured: no conversion tracked",
+                  "show": "dash"
+                }
+              },
+              "cpc": {
+                "value": 1.5
+              },
+              "impressions": {
+                "value": 2000
+              }
+            }
+          }
+        ],
+        "totals": {
+          "spend": {
+            "value": 100
+          },
+          "clicks": {
+            "value": 100
+          },
+          "ctr": {
+            "value": 1.11
+          },
+          "conv": {
+            "value": 0
+          },
+          "cpc": {
+            "value": 1
+          },
+          "impressions": {
+            "value": 9000
+          }
+        },
+        "coverage": {
+          "requestedDays": 7,
+          "measuredDays": 2,
+          "days": [
+            {
+              "date": "2026-01-08",
+              "status": "zero"
+            },
+            {
+              "date": "2026-01-09",
+              "status": "zero"
+            },
+            {
+              "date": "2026-01-10",
+              "status": "zero"
+            },
+            {
+              "date": "2026-01-11",
+              "status": "zero"
+            },
+            {
+              "date": "2026-01-12",
+              "status": "zero"
+            },
+            {
+              "date": "2026-01-13",
+              "status": "measured"
+            },
+            {
+              "date": "2026-01-14",
+              "status": "measured"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

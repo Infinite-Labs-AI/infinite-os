@@ -1,0 +1,87 @@
+{
+  "screen": "flow-pause-09-dismissed",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "pause hook b",
+    "answer": "Okay, left it running.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "change",
+        "tool": "propose_pause_entity",
+        "title": "Pause Hook B",
+        "state": "cancelled",
+        "asOf": null,
+        "provenance": {
+          "source": "Meta · ad",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "body": {
+          "target": {
+            "kind": "ad",
+            "id": "ad_hook_b",
+            "label": "Hook B · founder POV"
+          },
+          "rows": [
+            {
+              "label": "status",
+              "before": "on",
+              "after": "PAUSED"
+            }
+          ],
+          "effect": "Stops spending",
+          "warnings": []
+        },
+        "stateReason": {
+          "code": "dismissed",
+          "words": "Dismissed — nothing was executed."
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "waiting for your OK",
+        "start": 0,
+        "end": 1,
+        "result": "dismissed",
+        "status": "off"
+      }
+    ]
+  },
+  "gaps": [
+    "\"Sent to the app\" follows the dismissed line in dim."
+  ]
+}

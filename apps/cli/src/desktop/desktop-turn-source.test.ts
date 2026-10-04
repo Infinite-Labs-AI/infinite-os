@@ -1,0 +1,751 @@
+import { describe, expect, it } from "vitest";
+import type { ChatProgressEvent } from "@infinite-os/llm-controller";
+import type { CreativeDraftFrameV1, ToolViewFrameV1 } from "@infinite-os/types";
+import {
+  bridgeFrameToChatEvent,
+  createDesktopTurnSource,
+  type BridgeFrame,
+  type DesktopTurnSourceClient,
+  type DesktopTurnSourceInput
+} from "./desktop-turn-source.js";
+
+interface FakeClient extends DesktopTurnSourceClient {
+  lastTurnBody: { message: string; sessionId?: string };
+}
+
+function fakeClient(opts: {
+  sessionCapable: boolean;
+  frames: BridgeFrame[];
+}): FakeClient {
+  const client: FakeClient = {
+    sessionCapable: opts.sessionCapable,
+    lastTurnBody: { message: "" },
+    async turn(
+      input: DesktopTurnSourceInput,
+      onFrame: (frame: BridgeFrame) => void
+    ) {
+      client.lastTurnBody = {
+        message: input.message,
+        sessionId: input.sessionId
+      };
+      for (const frame of opts.frames) onFrame(frame);
+      return {};
+    }
+  };
+  return client;
+}
+
+const completions = (events: ChatProgressEvent[]) =>
+  events.filter((e) => (e as { type?: string }).type === "message.complete");
+
+describe("createDesktopTurnSource", () => {
+  // Regression: the CLAUDE plane streams text-only progress and produces NO
+  // typed `message.complete`, so the terminal `done` frame is the answer's only
+  // carrier. While `done` mapped to null the shell committed nothing, and the
+  // answer — rendered live from the streaming region — was erased by
+  // `turnController.reset()` a split second after the turn ended.
+  it("emits exactly one message.complete for a Claude text-only turn", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        { kind: "progress", data: { delta: "GA4 and PostHog " } },
+        { kind: "progress", data: { delta: "answer different questions." } },
+        { kind: "done", message: "FULL ANSWER", actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "why both?",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal
+    );
+    expect(completions(events)).toHaveLength(1);
+    expect(completions(events)[0]).toMatchObject({ text: "FULL ANSWER" });
+  });
+
+  // The other half of the same guard: Codex ALREADY sends a typed
+  // `message.complete` mid-stream and the `done` frame repeats the text. The
+  // shell commits on every completion it sees, so without first-wins the Codex
+  // answer would be appended to the transcript twice.
+  it("does not double-commit when Codex already sent a typed completion", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "progress",
+          data: { type: "message.complete", text: "FULL ANSWER" }
+        },
+        { kind: "done", message: "FULL ANSWER", actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "why both?",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal
+    );
+    expect(completions(events)).toHaveLength(1);
+  });
+
+  it("passes typed Codex frames through as ChatProgressEvents", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        { kind: "progress", data: { type: "tool.start", name: "list_sources" } },
+        { kind: "done", data: { sessionId: "s1" }, message: "ok", actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const src = createDesktopTurnSource(client);
+    const r = await src.runTurn(
+      "hi",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal
+    );
+    expect(
+      events.find((e) => (e as { type?: string }).type === "tool.start")
+    ).toMatchObject({ name: "list_sources" });
+    expect(r.sessionId).toBe("s1");
+    expect(client.lastTurnBody.sessionId).toBeUndefined(); // first turn: none yet
+  });
+
+  it("omits sessionId when the Desktop is not session-capable (silent degrade)", async () => {
+    const client = fakeClient({
+      sessionCapable: false,
+      frames: [{ kind: "done", message: "ok", actionCalls: [] }]
+    });
+    const src = createDesktopTurnSource(client);
+    await src.runTurn(
+      "hi",
+      "s-prev",
+      () => {},
+      new AbortController().signal
+    );
+    expect(client.lastTurnBody.sessionId).toBeUndefined(); // NOT sent, no error
+  });
+
+  it("resends the prior sessionId when the Desktop is session-capable", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [{ kind: "done", data: { sessionId: "s2" }, message: "ok", actionCalls: [] }]
+    });
+    const src = createDesktopTurnSource(client);
+    const r = await src.runTurn(
+      "again",
+      "s2",
+      () => {},
+      new AbortController().signal
+    );
+    expect(client.lastTurnBody.sessionId).toBe("s2");
+    expect(r.sessionId).toBe("s2");
+  });
+
+  it("surfaces redacted pending confirmations from a terminal done frame", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "queued",
+          sessionId: "s3",
+          data: { sessionId: "s3", turnId: "turn-1" },
+          actionCalls: [
+            {
+              status: "requires_confirmation",
+              confirmationHandle: "h1",
+              actionId: "create_link",
+              summary: "Set api_key=SUPERSECRET now",
+              confirmationDetails: [
+                { label: "password", value: "hunter2" },
+                { label: "url", value: "https://example.com/p" }
+              ]
+            }
+          ]
+        }
+      ]
+    });
+    const src = createDesktopTurnSource(client);
+    const r = await src.runTurn(
+      "do it",
+      undefined,
+      () => {},
+      new AbortController().signal
+    );
+    expect(r.sessionId).toBe("s3");
+    expect(r.pendingConfirmations).toHaveLength(1);
+    const pending = r.pendingConfirmations![0]!;
+    expect(pending.turnId).toBe("turn-1");
+    expect(pending.confirmationHandle).toBe("h1");
+    // Summary secret is redacted (mirrors the one-shot parser).
+    expect(pending.summary).toBe("Set api_key=[redacted] now");
+    expect(pending.summary).not.toContain("SUPERSECRET");
+    // Sensitive-named detail is redacted; a plain URL passes through.
+    expect(pending.confirmationDetails).toEqual([
+      { label: "password", value: "[redacted]" },
+      { label: "url", value: "https://example.com/p" }
+    ]);
+  });
+
+  it("marks a summary made from the tool's name, so the card never titles itself with it", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "queued",
+          data: { turnId: "turn-9" },
+          actionCalls: [
+            { status: "requires_confirmation", confirmationHandle: "h1", actionId: "mcp__infinite_app__propose_pause_meta_entity" },
+            { status: "requires_confirmation", confirmationHandle: "h2", actionId: "propose_pause", summary: "Pause ad Hook B" }
+          ]
+        }
+      ]
+    });
+    const r = await createDesktopTurnSource(client).runTurn("pause it", undefined, () => {}, new AbortController().signal);
+    const [fromTool, fromApp] = r.pendingConfirmations!;
+    expect(fromTool!.summary).toBe("mcp infinite app propose pause meta entity");
+    expect(fromTool!.summaryFromTool).toBe(true);
+    expect(fromApp!.summary).toBe("Pause ad Hook B");
+    expect(fromApp!.summaryFromTool).toBeUndefined();
+  });
+
+  // Lane review (M5): a card can carry the app's line over it and its words
+  // after a no, so `n` changes the line in the same frame as the key.
+  it("keeps the app's card captions (askedCaption, dismissedCaption) only when both are words", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "queued",
+          data: { turnId: "turn-7" },
+          actionCalls: [
+            { status: "requires_confirmation", confirmationHandle: "h1", actionId: "propose_pause",
+              askedCaption: "Ready. It stops spending once you say OK.", dismissedCaption: "Okay, left it running." },
+            { status: "requires_confirmation", confirmationHandle: "h2", actionId: "propose_pause", dismissedCaption: "Okay, left it running." },
+            { status: "requires_confirmation", confirmationHandle: "h3", actionId: "propose_pause", askedCaption: 7, dismissedCaption: " " }
+          ]
+        }
+      ]
+    });
+    const r = await createDesktopTurnSource(client).runTurn("pause it", undefined, () => {}, new AbortController().signal);
+    const [both, one, neither] = r.pendingConfirmations!;
+    expect(both!.captions).toEqual({ asked: "Ready. It stops spending once you say OK.", dismissed: "Okay, left it running." });
+    expect(one!.captions).toBeUndefined();
+    expect(neither!.captions).toBeUndefined();
+  });
+
+  it("derives redacted confirmation details from raw action input when none supplied", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "queued",
+          data: { turnId: "turn-2" },
+          actionCalls: [
+            {
+              requiresConfirmation: true,
+              confirmationHandle: "h2",
+              actionId: "rotate_key",
+              input: { token: "abc123", note: "hello" }
+            }
+          ]
+        }
+      ]
+    });
+    const src = createDesktopTurnSource(client);
+    const r = await src.runTurn(
+      "go",
+      undefined,
+      () => {},
+      new AbortController().signal
+    );
+    const pending = r.pendingConfirmations![0]!;
+    expect(pending.confirmationHandle).toBe("h2");
+    // token is a sensitive key → redacted; note is plain.
+    expect(pending.confirmationDetails).toContainEqual({
+      label: "token",
+      value: "[redacted]"
+    });
+    expect(pending.confirmationDetails).toContainEqual({
+      label: "note",
+      value: "hello"
+    });
+  });
+
+  it("omits pendingConfirmations when no action requires confirmation", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "ok",
+          data: { turnId: "turn-3" },
+          actionCalls: [{ status: "completed", actionId: "list_sources" }]
+        }
+      ]
+    });
+    const src = createDesktopTurnSource(client);
+    const r = await src.runTurn(
+      "hi",
+      undefined,
+      () => {},
+      new AbortController().signal
+    );
+    expect(r.pendingConfirmations).toBeUndefined();
+  });
+
+  it("throws when a confirmation is pending but the turn carries no turn id", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "ok",
+          data: {},
+          actionCalls: [
+            {
+              status: "requires_confirmation",
+              confirmationHandle: "h9",
+              actionId: "create_link",
+              summary: "Create link"
+            }
+          ]
+        }
+      ]
+    });
+    const src = createDesktopTurnSource(client);
+    await expect(
+      src.runTurn("do it", undefined, () => {}, new AbortController().signal)
+    ).rejects.toThrow(/turn id/i);
+  });
+
+  it("routes a tool.view frame to onView and never emits it as a ChatProgressEvent", async () => {
+    const view = approvalView();
+    const toolView = {
+      type: "tool.view",
+      stage: "tool",
+      message: "Pause",
+      viewId: "view-1",
+      name: "pause_entity",
+      view
+    };
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        { kind: "progress", data: { type: "tool.start", name: "pause_entity" } },
+        { kind: "progress", data: toolView },
+        { kind: "done", message: "ok", data: { turnId: "turn-4" }, actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const views: ToolViewFrameV1[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "pause it",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal,
+      undefined,
+      (frame) => views.push(frame)
+    );
+    expect(views).toEqual([toolView]);
+    expect(events.map((e) => (e as { type?: string }).type)).toEqual([
+      "tool.start",
+      "message.complete"
+    ]);
+  });
+
+  it("routes a creative.draft frame to onCreativeDraft, allowlisted, never as a ChatProgressEvent", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "progress",
+          data: {
+            type: "creative.draft",
+            runId: "run_1",
+            status: "running",
+            count: 3,
+            format: "png",
+            aspectRatio: "4:5",
+            quality: "high",
+            pending: [{ startedAtMs: 1000, etaMs: 25000, imageUrl: "https://cdn.example.com/a.png" }],
+            brief: "a private brief",
+            images: [{ url: "https://cdn.example.com/b.png" }],
+            estimatedPerImageUsd: 0.17
+          }
+        },
+        { kind: "done", message: "Drawing.", data: { turnId: "turn-7" }, actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const drafts: CreativeDraftFrameV1[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "make 3",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal,
+      undefined,
+      undefined,
+      (frame) => drafts.push(frame)
+    );
+    expect(drafts).toEqual([{
+      type: "creative.draft",
+      runId: "run_1",
+      status: "running",
+      count: 3,
+      format: "png",
+      aspectRatio: "4:5",
+      quality: "high",
+      pending: [{ startedAtMs: 1000, etaMs: 25000 }],
+      estimatedPerImageUsd: 0.17
+    }]);
+    expect(JSON.stringify(drafts)).not.toMatch(/http|brief/u);
+    expect(events.map((e) => (e as { type?: string }).type)).toEqual(["message.complete"]);
+  });
+
+  it("drops a creative.draft frame that does not decode, and one with no listener, without failing the turn", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        { kind: "progress", data: { type: "creative.draft", status: "running", count: 3 } },
+        { kind: "progress", data: { type: "creative.draft", runId: "r", status: "painting", count: 3 } },
+        { kind: "done", message: "ok", data: { turnId: "turn-8" }, actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const drafts: CreativeDraftFrameV1[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "make 3", undefined, (e) => events.push(e), new AbortController().signal, undefined, undefined,
+      (frame) => drafts.push(frame)
+    );
+    expect(drafts).toEqual([]);
+    expect(events.map((e) => (e as { type?: string }).type)).toEqual(["message.complete"]);
+    const quiet = fakeClient({
+      sessionCapable: true,
+      frames: [
+        { kind: "progress", data: { type: "creative.draft", runId: "r", status: "done", count: 1, format: "png", aspectRatio: "1:1", quality: "high" } },
+        { kind: "done", message: "ok", data: { turnId: "turn-9" }, actionCalls: [] }
+      ]
+    });
+    const quietEvents: ChatProgressEvent[] = [];
+    await createDesktopTurnSource(quiet).runTurn("x", undefined, (e) => quietEvents.push(e), new AbortController().signal);
+    expect(quietEvents.map((e) => (e as { type?: string }).type)).toEqual(["message.complete"]);
+  });
+
+  it("stamps each pending card with whether the desktop takes fields", async () => {
+    const frames: BridgeFrame[] = [{
+      kind: "done", message: "ok", data: { turnId: "turn-10" },
+      actionCalls: [{ status: "requires_confirmation", confirmationHandle: "h1", actionId: "set_budget", summary: "Set budget" }]
+    }];
+    const capable = { ...fakeClient({ sessionCapable: true, frames }), confirmFieldsCapable: true };
+    const old = fakeClient({ sessionCapable: true, frames });
+    const a = await createDesktopTurnSource(capable).runTurn("x", undefined, () => {}, new AbortController().signal);
+    const b = await createDesktopTurnSource(old).runTurn("x", undefined, () => {}, new AbortController().signal);
+    expect(a.pendingConfirmations![0]!.confirmFieldsCapable).toBe(true);
+    expect(b.pendingConfirmations![0]!.confirmFieldsCapable).toBe(false);
+  });
+
+  it("a throwing onView drops the view and the turn still resolves with its answer and pending cards", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "progress",
+          data: {
+            type: "tool.view",
+            stage: "tool",
+            message: "Pause",
+            viewId: "view-3",
+            name: "pause_entity",
+            view: approvalView()
+          }
+        },
+        {
+          kind: "done",
+          message: "Ready to pause.",
+          sessionId: "s9",
+          data: { sessionId: "s9", turnId: "turn-9" },
+          actionCalls: [
+            {
+              status: "requires_confirmation",
+              confirmationHandle: "h9",
+              actionId: "pause_entity",
+              summary: "Pause Hook B"
+            }
+          ]
+        }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const r = await createDesktopTurnSource(client).runTurn(
+      "pause it",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal,
+      undefined,
+      () => {
+        throw new Error("renderer blew up");
+      }
+    );
+    expect(completions(events)).toHaveLength(1);
+    expect(JSON.stringify(completions(events)[0])).toContain("Ready to pause.");
+    expect(r.sessionId).toBe("s9");
+    expect(r.pendingConfirmations).toHaveLength(1);
+    expect(r.pendingConfirmations![0]!.turnId).toBe("turn-9");
+  });
+
+  it("drops an undecodable tool.view frame: no onView call and no ChatProgressEvent", async () => {
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "progress",
+          data: {
+            type: "tool.view",
+            stage: "tool",
+            message: "Pause",
+            viewId: "view-2",
+            name: "pause_entity",
+            view: approvalView({ kind: "carousel" })
+          }
+        },
+        { kind: "done", message: "ok", data: { turnId: "turn-5" }, actionCalls: [] }
+      ]
+    });
+    const events: ChatProgressEvent[] = [];
+    const views: ToolViewFrameV1[] = [];
+    await createDesktopTurnSource(client).runTurn(
+      "pause it",
+      undefined,
+      (e) => events.push(e),
+      new AbortController().signal,
+      undefined,
+      (frame) => views.push(frame)
+    );
+    expect(views).toEqual([]);
+    expect(events.map((e) => (e as { type?: string }).type)).toEqual([
+      "message.complete"
+    ]);
+  });
+
+  it("keeps a pending call's decoded view, and leaves an undecodable one off", async () => {
+    const view = approvalView();
+    const client = fakeClient({
+      sessionCapable: true,
+      frames: [
+        {
+          kind: "done",
+          message: "queued",
+          data: { turnId: "turn-6" },
+          actionCalls: [
+            {
+              status: "requires_confirmation",
+              confirmationHandle: "h6",
+              actionId: "pause_entity",
+              summary: "Pause ad Hook B",
+              view
+            },
+            {
+              status: "requires_confirmation",
+              confirmationHandle: "h7",
+              actionId: "pause_entity",
+              summary: "Pause ad Hook C",
+              view: approvalView({ v: 2 })
+            }
+          ]
+        }
+      ]
+    });
+    const r = await createDesktopTurnSource(client).runTurn(
+      "pause both",
+      undefined,
+      () => {},
+      new AbortController().signal
+    );
+    expect(r.pendingConfirmations).toHaveLength(2);
+    expect(r.pendingConfirmations![0]!.view).toEqual(view);
+    expect(r.pendingConfirmations![0]!.view?.approval?.confirmLabel).toBe("Pause");
+    expect(r.pendingConfirmations![1]!).not.toHaveProperty("view");
+    // The existing redacted fields still ride alongside the view.
+    expect(r.pendingConfirmations![0]!).toMatchObject({
+      turnId: "turn-6",
+      confirmationHandle: "h6",
+      summary: "Pause ad Hook B"
+    });
+  });
+});
+
+// Synthetic approval view written from the contract (open-core: no real data).
+function approvalView(overrides: Record<string, unknown> = {}) {
+  return {
+    v: 1,
+    kind: "change",
+    tool: "pause_entity",
+    title: "Pause ad",
+    state: "needs_yes",
+    asOf: null,
+    scope: { workspaceName: "Example Co", crossWorkspace: false },
+    caveats: [],
+    approval: {
+      kind: "card",
+      turnId: "turn-6",
+      handle: "h6",
+      title: "Pause ad",
+      summary: null,
+      confirmLabel: "Pause",
+      dismissLabel: "Dismiss",
+      rows: [{ label: "Ad", value: "Hook B" }]
+    },
+    body: {
+      target: { kind: "ad", label: "Hook B" },
+      rows: [{ label: "Status", before: "Active", after: "Paused" }],
+      warnings: []
+    },
+    ...overrides
+  };
+}
+
+describe("bridgeFrameToChatEvent", () => {
+  it("never maps a tool.view frame, decodable or not, to a ChatProgressEvent", () => {
+    expect(
+      bridgeFrameToChatEvent({
+        kind: "progress",
+        data: { type: "tool.view", viewId: "v", name: "n", view: approvalView() }
+      })
+    ).toBeNull();
+    expect(
+      bridgeFrameToChatEvent({ kind: "progress", data: { type: "creative.draft", runId: "r" } })
+    ).toBeNull();
+    expect(
+      bridgeFrameToChatEvent({ kind: "progress", data: { type: "tool.view" } })
+    ).toBeNull();
+  });
+
+  it("passes a typed Codex progress event through unchanged (identity)", () => {
+    const data = { type: "tool.complete", stage: "tool", name: "run_x" };
+    const frame: BridgeFrame = { kind: "progress", data };
+    expect(bridgeFrameToChatEvent(frame)).toBe(data);
+  });
+
+  it("maps a Claude streamed-text progress frame to message.delta", () => {
+    const frame: BridgeFrame = { kind: "progress", data: { delta: "hello" } };
+    expect(bridgeFrameToChatEvent(frame)).toMatchObject({
+      type: "message.delta",
+      stage: "message",
+      text: "hello"
+    });
+  });
+
+
+
+  it("commits the done frame's answer as message.complete", () => {
+    expect(
+      bridgeFrameToChatEvent({
+        kind: "done",
+        sessionId: "s1",
+        message: "the answer"
+      })
+    ).toMatchObject({
+      type: "message.complete",
+      stage: "message",
+      text: "the answer"
+    });
+  });
+
+  it("returns null for a done frame carrying no answer", () => {
+    // A tool-only turn (or an empty terminal message) must not commit a blank
+    // assistant bubble.
+    expect(bridgeFrameToChatEvent({ kind: "done", sessionId: "s1" })).toBeNull();
+    expect(
+      bridgeFrameToChatEvent({ kind: "done", message: "" })
+    ).toBeNull();
+  });
+
+  it("returns null for terminal error frames", () => {
+    expect(
+      bridgeFrameToChatEvent({ kind: "error", message: "boom" })
+    ).toBeNull();
+  });
+});
+
+describe("step words on tool frames (step.words.v1)", () => {
+  const toolFrames = (words: { start?: unknown; complete?: unknown }): BridgeFrame[] => [
+    {
+      kind: "progress",
+      data: {
+        type: "tool.start", stage: "tool", message: "mcp__sample_app__list_sample_rows", toolId: "call-1",
+        name: "mcp__sample_app__list_sample_rows", context: "", ...(words.start !== undefined ? { words: words.start } : {})
+      }
+    },
+    {
+      kind: "progress",
+      data: {
+        type: "tool.complete", stage: "tool", message: "mcp__sample_app__list_sample_rows", toolId: "call-1",
+        name: "mcp__sample_app__list_sample_rows", status: "ok", ...(words.complete !== undefined ? { words: words.complete } : {})
+      }
+    },
+    { kind: "done", message: "Done.", actionCalls: [] }
+  ];
+
+  async function toolEvents(client: DesktopTurnSourceClient): Promise<Record<string, unknown>[]> {
+    const events: ChatProgressEvent[] = [];
+    await createDesktopTurnSource(client).runTurn("q", undefined, (event) => events.push(event), new AbortController().signal);
+    return events.filter((event) => "type" in event && event.type.startsWith("tool.")) as unknown as Record<string, unknown>[];
+  }
+
+  it("a desktop that negotiated them: the events carry the app's words, scrubbed", async () => {
+    const client = {
+      ...fakeClient({
+        sessionCapable: true,
+        frames: toolFrames({
+          start: { label: "checking\u001b[31m the catalog" },
+          complete: { label: "checking the catalog", result: "3 rows" }
+        })
+      }),
+      stepWordsCapable: true
+    };
+    const [start, complete] = await toolEvents(client);
+    expect(start!.words).toEqual({ label: "checking the catalog" });
+    expect(complete!.words).toEqual({ label: "checking the catalog", result: "3 rows" });
+    // Every existing field stays as it was sent.
+    expect(start).toMatchObject({ type: "tool.start", toolId: "call-1", name: "mcp__sample_app__list_sample_rows" });
+    expect(complete).toMatchObject({ type: "tool.complete", toolId: "call-1", status: "ok" });
+  });
+
+  it("words that are a tool id or JSON are dropped, so the step keeps its generic label", async () => {
+    const client = {
+      ...fakeClient({
+        sessionCapable: true,
+        frames: toolFrames({ start: { label: "mcp__sample_app__list_sample_rows" }, complete: { label: '{"rows":3}' } })
+      }),
+      stepWordsCapable: true
+    };
+    const [start, complete] = await toolEvents(client);
+    expect(start).not.toHaveProperty("words");
+    expect(complete).not.toHaveProperty("words");
+  });
+
+  it("a desktop that did not negotiate them: words on a frame are never read", async () => {
+    const frames = toolFrames({ start: { label: "checking the catalog" }, complete: { label: "checking the catalog", result: "3 rows" } });
+    for (const client of [
+      fakeClient({ sessionCapable: true, frames }),
+      { ...fakeClient({ sessionCapable: true, frames }), stepWordsCapable: false }
+    ]) {
+      const [start, complete] = await toolEvents(client);
+      expect(start).not.toHaveProperty("words");
+      expect(complete).not.toHaveProperty("words");
+    }
+  });
+
+  it("an old desktop's frames (no words) pass through untouched", async () => {
+    const frames = toolFrames({});
+    const [start, complete] = await toolEvents({ ...fakeClient({ sessionCapable: true, frames }), stepWordsCapable: true });
+    expect(start).toEqual(frames[0]!.data);
+    expect(complete).toEqual(frames[1]!.data);
+  });
+});

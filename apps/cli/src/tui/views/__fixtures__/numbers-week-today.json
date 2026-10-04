@@ -1,0 +1,290 @@
+{
+  "v": 1,
+  "scope": {
+    "workspaceName": "Demo",
+    "crossWorkspace": false
+  },
+  "caveats": [],
+  "kind": "numbers",
+  "tool": "read_ads_week",
+  "title": "Ads this week",
+  "state": "ready",
+  "asOf": "2026-01-15T18:30:00Z",
+  "provenance": {
+    "source": "Demo ads",
+    "via": "our_db"
+  },
+  "body": {
+    "layout": "table",
+    "currency": "USD",
+    "columns": [
+      {
+        "key": "spend",
+        "label": "Spend",
+        "unit": "money",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "clicks",
+        "label": "Clicks",
+        "unit": "count",
+        "factGroup": "delivery"
+      },
+      {
+        "key": "results",
+        "label": "Trials",
+        "unit": "count",
+        "factGroup": "results"
+      },
+      {
+        "key": "cost_per",
+        "label": "Cost per trial",
+        "unit": "money",
+        "factGroup": "results"
+      }
+    ],
+    "legs": {
+      "settled": {
+        "window": {
+          "from": "2026-01-08",
+          "to": "2026-01-14",
+          "tz": "UTC",
+          "label": "Last 7 days"
+        },
+        "final": true,
+        "asOf": "2026-01-15T06:00:00Z",
+        "rows": [
+          {
+            "id": "ad_1",
+            "label": "Demo A",
+            "cells": {
+              "spend": {
+                "value": 60
+              },
+              "clicks": {
+                "value": 41
+              },
+              "results": {
+                "value": 1
+              },
+              "cost_per": {
+                "value": 60
+              }
+            }
+          },
+          {
+            "id": "ad_2",
+            "label": "Demo B",
+            "cells": {
+              "spend": {
+                "value": 40
+              },
+              "clicks": {
+                "value": 10
+              },
+              "results": {
+                "value": 2
+              },
+              "cost_per": {
+                "value": 20
+              }
+            }
+          },
+          {
+            "id": "ad_3",
+            "label": "Demo C",
+            "cells": {
+              "spend": {
+                "value": null,
+                "reason": {
+                  "code": "not_synced",
+                  "words": "not synced yet",
+                  "show": "dash"
+                }
+              },
+              "clicks": {
+                "value": null,
+                "reason": {
+                  "code": "not_synced",
+                  "words": "not synced yet",
+                  "show": "dash"
+                }
+              },
+              "results": {
+                "value": null,
+                "reason": {
+                  "code": "new",
+                  "words": "New",
+                  "show": "words"
+                }
+              },
+              "cost_per": {
+                "value": null,
+                "reason": {
+                  "code": "not_synced",
+                  "words": "not synced yet",
+                  "show": "dash"
+                }
+              }
+            }
+          }
+        ],
+        "totals": {
+          "spend": {
+            "value": 100
+          },
+          "clicks": {
+            "value": 51
+          },
+          "results": {
+            "value": 3
+          },
+          "cost_per": {
+            "value": 33.33
+          }
+        },
+        "coverage": {
+          "requestedDays": 7,
+          "measuredDays": 5,
+          "days": [
+            {
+              "date": "2026-01-08",
+              "status": "zero"
+            },
+            {
+              "date": "2026-01-09",
+              "status": "not_measured"
+            },
+            {
+              "date": "2026-01-10",
+              "status": "measured"
+            },
+            {
+              "date": "2026-01-11",
+              "status": "measured"
+            },
+            {
+              "date": "2026-01-12",
+              "status": "measured"
+            },
+            {
+              "date": "2026-01-13",
+              "status": "measured"
+            },
+            {
+              "date": "2026-01-14",
+              "status": "measured"
+            }
+          ]
+        }
+      },
+      "today": {
+        "window": {
+          "from": "2026-01-15",
+          "to": "2026-01-15",
+          "tz": "UTC",
+          "label": "Today"
+        },
+        "final": false,
+        "asOf": "2026-01-15T18:30:00Z",
+        "rows": [
+          {
+            "id": "ad_1",
+            "label": "Demo A",
+            "cells": {
+              "spend": {
+                "value": 5
+              },
+              "clicks": {
+                "value": 4
+              },
+              "results": {
+                "value": 0
+              },
+              "cost_per": {
+                "value": null,
+                "reason": {
+                  "code": "no_results",
+                  "words": "no trials to divide by",
+                  "show": "dash"
+                }
+              }
+            }
+          },
+          {
+            "id": "ad_2",
+            "label": "Demo B",
+            "cells": {
+              "spend": {
+                "value": 3
+              },
+              "clicks": {
+                "value": 1
+              },
+              "results": {
+                "value": 0
+              },
+              "cost_per": {
+                "value": null,
+                "reason": {
+                  "code": "no_results",
+                  "words": "no trials to divide by",
+                  "show": "dash"
+                }
+              }
+            }
+          }
+        ],
+        "totals": {
+          "spend": {
+            "value": 8
+          },
+          "clicks": {
+            "value": 5
+          },
+          "results": {
+            "value": 0
+          }
+        },
+        "refresh": {
+          "status": "fresh"
+        }
+      }
+    },
+    "leaders": [
+      {
+        "measure": {
+          "key": "clicks",
+          "label": "Most clicks"
+        },
+        "rowId": "ad_1",
+        "rowLabel": "Demo A",
+        "value": {
+          "value": 41
+        }
+      },
+      {
+        "measure": {
+          "key": "results",
+          "label": "Most trials"
+        },
+        "rowId": "ad_2",
+        "rowLabel": "Demo B",
+        "value": {
+          "value": 2
+        }
+      },
+      {
+        "measure": {
+          "key": "cost_per",
+          "label": "Lowest cost per trial"
+        },
+        "rowId": "ad_2",
+        "rowLabel": "Demo B",
+        "value": {
+          "value": 20
+        }
+      }
+    ]
+  }
+}

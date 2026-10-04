@@ -1,0 +1,259 @@
+{
+  "screen": "view-01-numbers",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "google ads since launch?",
+    "answer": "Ran Sep 29–30: $40.00, 120 clicks, 0 conversions (Google's count). Too early to judge.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "numbers",
+        "tool": "get_google_ads_performance",
+        "title": "Google Ads since launch",
+        "state": "ready",
+        "asOf": "2026-09-30",
+        "provenance": {
+          "source": "Google Ads",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "appLink": {
+          "place": "ads.google",
+          "label": "Open in Google Ads"
+        },
+        "body": {
+          "layout": "table",
+          "currency": "USD",
+          "columns": [
+            {
+              "key": "spend",
+              "label": "Spend",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "impressions",
+              "label": "Impressions",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "clicks",
+              "label": "Clicks",
+              "unit": "count",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "ctr",
+              "label": "CTR",
+              "unit": "percent",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "cpc",
+              "label": "CPC",
+              "unit": "money",
+              "factGroup": "delivery"
+            },
+            {
+              "key": "conv",
+              "label": "Conv",
+              "unit": "count",
+              "factGroup": "conversions"
+            }
+          ],
+          "rowLabel": "Campaign",
+          "legs": {
+            "settled": {
+              "window": {
+                "from": "2026-09-29",
+                "to": "2026-09-30",
+                "tz": "UTC",
+                "label": "since launch"
+              },
+              "final": true,
+              "asOf": "2026-09-30",
+              "rows": [
+                {
+                  "id": "c1",
+                  "label": "Ad set 01",
+                  "cells": {
+                    "spend": {
+                      "value": 10
+                    },
+                    "impressions": {
+                      "value": 3000
+                    },
+                    "clicks": {
+                      "value": 40
+                    },
+                    "ctr": {
+                      "value": 1.33
+                    },
+                    "cpc": {
+                      "value": 0.25
+                    },
+                    "conv": {
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "id": "c2",
+                  "label": "Ad set 02",
+                  "cells": {
+                    "spend": {
+                      "value": 12.5
+                    },
+                    "impressions": {
+                      "value": 2000
+                    },
+                    "clicks": {
+                      "value": 30
+                    },
+                    "ctr": {
+                      "value": 1.5
+                    },
+                    "cpc": {
+                      "value": 0.42
+                    },
+                    "conv": {
+                      "value": 0
+                    }
+                  }
+                },
+                {
+                  "id": "c4",
+                  "label": "Ad set 04",
+                  "cells": {
+                    "spend": {
+                      "value": 17.5
+                    },
+                    "impressions": {
+                      "value": 4000
+                    },
+                    "clicks": {
+                      "value": 50
+                    },
+                    "ctr": {
+                      "value": 1.25
+                    },
+                    "cpc": {
+                      "value": 0.35
+                    },
+                    "conv": {
+                      "value": 0
+                    }
+                  }
+                }
+              ],
+              "totals": {
+                "spend": {
+                  "value": 40
+                },
+                "impressions": {
+                  "value": 9000
+                },
+                "clicks": {
+                  "value": 120
+                },
+                "ctr": {
+                  "value": 1.33
+                },
+                "cpc": {
+                  "value": 0.33
+                },
+                "conv": {
+                  "value": 0
+                }
+              },
+              "coverage": {
+                "requestedDays": 8,
+                "measuredDays": 2,
+                "days": [
+                  {
+                    "date": "2026-09-24",
+                    "status": "zero"
+                  },
+                  {
+                    "date": "2026-09-25",
+                    "status": "zero"
+                  },
+                  {
+                    "date": "2026-09-26",
+                    "status": "zero"
+                  },
+                  {
+                    "date": "2026-09-27",
+                    "status": "zero"
+                  },
+                  {
+                    "date": "2026-09-28",
+                    "status": "zero"
+                  },
+                  {
+                    "date": "2026-09-29",
+                    "status": "measured"
+                  },
+                  {
+                    "date": "2026-09-30",
+                    "status": "measured"
+                  },
+                  {
+                    "date": "2026-10-01",
+                    "status": "not_synced"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "checking Google Ads",
+        "start": 0,
+        "end": 0.6,
+        "result": "3 campaigns",
+        "status": "ok"
+      }
+    ]
+  },
+  "gaps": [
+    "Column drop priority (Impressions 4, CPC 3, Conv 2, Clicks 1) is not on ColumnV1: the renderer owns it.",
+    "\"Source: Google Ads, via our data\" spells provenance.via; the link label is appLink.label."
+  ]
+}

@@ -1,0 +1,267 @@
+{
+ "note": "The r4 terminal palette: every style token with its colours and the SGR it emits at each tier. Copied from the design spec's palette.json (tokens and canvas only). tokens.ts must match it; tokens.test.ts checks.",
+ "canvas": {
+  "bg": "#0a0d11",
+  "fg": "#d3dae2"
+ },
+ "tokens": {
+  "": {
+   "fg": "#d3dae2",
+   "sgr": {
+    "truecolor": "39",
+    "256": "39",
+    "16": "39",
+    "mono": "",
+    "plain": "text only"
+   }
+  },
+  "dim": {
+   "fg": "#6d7986",
+   "fg_256": 243,
+   "sgr": {
+    "truecolor": "38;2;109;121;134",
+    "256": "38;5;243",
+    "16": "90",
+    "mono": "",
+    "plain": "text only"
+   }
+  },
+  "line": {
+   "fg": "#3a4653",
+   "fg_256": 238,
+   "sgr": {
+    "truecolor": "38;2;58;70;83",
+    "256": "38;5;238",
+    "16": "90",
+    "mono": "",
+    "plain": "text only"
+   }
+  },
+  "cyan": {
+   "fg": "#56c8e8",
+   "fg_256": 81,
+   "sgr": {
+    "truecolor": "38;2;86;200;232",
+    "256": "38;5;81",
+    "16": "36",
+    "mono": "",
+    "plain": "text only"
+   }
+  },
+  "b": {
+   "fg": "#ffffff",
+   "bold": true,
+   "fg_256": 231,
+   "sgr": {
+    "truecolor": "1;38;2;255;255;255",
+    "256": "1;38;5;231",
+    "16": "1;97",
+    "mono": "1",
+    "plain": "text only"
+   }
+  },
+  "green": {
+   "fg": "#6fd08c",
+   "fg_256": 78,
+   "sgr": {
+    "truecolor": "38;2;111;208;140",
+    "256": "38;5;78",
+    "16": "32",
+    "mono": "",
+    "plain": "text only"
+   }
+  },
+  "amber": {
+   "fg": "#e9b44c",
+   "fg_256": 179,
+   "sgr": {
+    "truecolor": "38;2;233;180;76",
+    "256": "38;5;179",
+    "16": "33",
+    "mono": "",
+    "plain": "text only"
+   }
+  },
+  "red": {
+   "fg": "#ef6b73",
+   "fg_256": 203,
+   "sgr": {
+    "truecolor": "38;2;239;107;115",
+    "256": "38;5;203",
+    "16": "31",
+    "mono": "",
+    "plain": "text only"
+   }
+  },
+  "mag": {
+   "fg": "#c39af0",
+   "fg_256": 183,
+   "design_only": true,
+   "sgr": {
+    "truecolor": "38;2;195;154;240",
+    "256": "38;5;183",
+    "16": "35",
+    "mono": "",
+    "plain": "text only"
+   }
+  },
+  "hatch": {
+   "fg": "#46525e",
+   "fg_256": 239,
+   "sgr": {
+    "truecolor": "38;2;70;82;94",
+    "256": "38;5;239",
+    "16": "90",
+    "mono": "",
+    "plain": "text only"
+   }
+  },
+  "blue": {
+   "fg": "#7aa7ff",
+   "fg_256": 111,
+   "sgr": {
+    "truecolor": "38;2;122;167;255",
+    "256": "38;5;111",
+    "16": "94",
+    "mono": "",
+    "plain": "text only"
+   }
+  },
+  "cb": {
+   "fg": "#56c8e8",
+   "bold": true,
+   "fg_256": 81,
+   "sgr": {
+    "truecolor": "1;38;2;86;200;232",
+    "256": "1;38;5;81",
+    "16": "1;36",
+    "mono": "1",
+    "plain": "text only"
+   }
+  },
+  "ab": {
+   "fg": "#e9b44c",
+   "bold": true,
+   "fg_256": 179,
+   "sgr": {
+    "truecolor": "1;38;2;233;180;76",
+    "256": "1;38;5;179",
+    "16": "1;33",
+    "mono": "1",
+    "plain": "text only"
+   }
+  },
+  "gb": {
+   "fg": "#6fd08c",
+   "bold": true,
+   "fg_256": 78,
+   "sgr": {
+    "truecolor": "1;38;2;111;208;140",
+    "256": "1;38;5;78",
+    "16": "1;32",
+    "mono": "1",
+    "plain": "text only"
+   }
+  },
+  "rb": {
+   "fg": "#ef6b73",
+   "bold": true,
+   "fg_256": 203,
+   "sgr": {
+    "truecolor": "1;38;2;239;107;115",
+    "256": "1;38;5;203",
+    "16": "1;31",
+    "mono": "1",
+    "plain": "text only"
+   }
+  },
+  "bb": {
+   "fg": "#7aa7ff",
+   "bold": true,
+   "fg_256": 111,
+   "sgr": {
+    "truecolor": "1;38;2;122;167;255",
+    "256": "1;38;5;111",
+    "16": "1;94",
+    "mono": "1",
+    "plain": "text only"
+   }
+  },
+  "inv": {
+   "fg": "#0a0d11",
+   "bg": "#56c8e8",
+   "bold": true,
+   "fg_256": 232,
+   "bg_256": 81,
+   "sgr": {
+    "truecolor": "1;38;2;10;13;17;48;2;86;200;232",
+    "256": "1;38;5;232;48;5;81",
+    "16": "1;30;46",
+    "mono": "1;7",
+    "plain": "[…]"
+   }
+  },
+  "key": {
+   "fg": "#ffffff",
+   "bg": "#2a3440",
+   "fg_256": 231,
+   "bg_256": 237,
+   "sgr": {
+    "truecolor": "38;2;255;255;255;48;2;42;52;64",
+    "256": "38;5;231;48;5;237",
+    "16": "97;100",
+    "mono": "7",
+    "plain": "[k]"
+   }
+  },
+  "pk": {
+   "fg": "#0a0d11",
+   "bg": "#e9b44c",
+   "bold": true,
+   "fg_256": 232,
+   "bg_256": 179,
+   "sgr": {
+    "truecolor": "1;38;2;10;13;17;48;2;233;180;76",
+    "256": "1;38;5;232;48;5;179",
+    "16": "1;30;43",
+    "mono": "1;7",
+    "plain": "[k]"
+   }
+  },
+  "tag": {
+   "fg": "#ffffff",
+   "bg": "#22303b",
+   "bold": true,
+   "fg_256": 231,
+   "bg_256": 236,
+   "sgr": {
+    "truecolor": "1;38;2;255;255;255;48;2;34;48;59",
+    "256": "1;38;5;231;48;5;236",
+    "16": "1;97;100",
+    "mono": "1",
+    "plain": "[…]"
+   }
+  },
+  "sel": {
+   "bg": "#1b2f3a",
+   "bg_256": 235,
+   "sgr": {
+    "truecolor": "48;2;27;47;58",
+    "256": "48;5;235",
+    "16": "100",
+    "mono": "",
+    "plain": "text only"
+   }
+  },
+  "u": {
+   "underline": true,
+   "sgr": {
+    "truecolor": "4",
+    "256": "4",
+    "16": "4",
+    "mono": "4",
+    "plain": "text only"
+   }
+  }
+ }
+}

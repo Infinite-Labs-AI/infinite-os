@@ -1,0 +1,163 @@
+{
+  "$comment": "Server lane (lossless analytics) recipe vectors, shared with the receiving side. Every hex value is lowercase HMAC-SHA256 under `secret`. visitKey message = \"visit:\" + clientIp + \"|\" + userAgent + \"|\" + floor(epochSeconds / 1800); documentEventId = \"doc:\" + HMAC(visitKey + \"|\" + path + \"|\" + occurredAtMs); the body signature is HMAC over the exact JSON bytes of `documentEventBody`; the receipt request (GET …/server-lane/receipt?since=<iso>) signature is HMAC over the RAW QUERY STRING as sent (`receiptQuery`). The OUTCOME vectors cover the optional `adMatch` block (the Meta Conversions API relay): `outcomeEmail` hashed with sha256 of the TRIMMED, LOWERCASED address gives `outcomeEmailHash`, and the signature is HMAC over the exact JSON bytes of `outcomeAdMatchBody` — key order included, since the signature is over bytes, not over a parsed object. The block also carries the BUYER'S BROWSER `client_ip_address` and `client_user_agent`, copied by the customer's server from ITS OWN inbound request — never from the (server-to-server) call to Infinite, whose ip and user agent describe the customer's host. adMatch is consumed by the relay at ingest and never stored. `testVisitHeader` is the request's `Infinite-Test-Visit` value (shape-valid only; the cloud verifies its HMAC): the generated middleware forwards it as the document property `testVisit` (last), giving `documentEventBodyWithTestVisit`.",
+  "secret": "test-secret",
+  "clientIp": "203.0.113.9",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+  "occurredAtMs": 1755500000123,
+  "epochSeconds": 1755500000,
+  "visitBucket": 975277,
+  "path": "/pricing",
+  "host": "example.com",
+  "referrer": "https://google.com/search?q=infinite",
+  "visitKey": "b16eaccc3fc131a1fc6428105bf366164c1f8fff3e0de56d0da7bbfa1712005e",
+  "documentEventId": "doc:85c11b1b1ed121d9f91da03777ea890b895033f7a383dceca0694d59ceda8b67",
+  "documentEventBody": "{\"eventId\":\"doc:85c11b1b1ed121d9f91da03777ea890b895033f7a383dceca0694d59ceda8b67\",\"eventName\":\"site_document_request\",\"occurredAt\":\"2025-08-18T06:53:20.123Z\",\"properties\":{\"path\":\"/pricing\",\"host\":\"example.com\",\"visitKey\":\"b16eaccc3fc131a1fc6428105bf366164c1f8fff3e0de56d0da7bbfa1712005e\",\"userAgentFamily\":\"browser\",\"referrerHost\":\"google.com\"}}",
+  "documentEventBodySignature": "679b2a1bd1e69c49f57534707df1c20e890c17a93ff5fa312fb45519950ddf03",
+  "emptyBodySignature": "a41bc6d81d6413576ae0994995e0ad89a416ec97389515c3604f47722122eeeb",
+  "receiptSince": "2026-08-18T20:00:00.000Z",
+  "receiptQuery": "since=2026-08-18T20%3A00%3A00.000Z",
+  "receiptSignature": "2d07572d2a6385584160e88deda6acab37233af2e6ec497b4340572d41aa9b16",
+  "outcomeEmail": "founder@example.com",
+  "outcomeEmailHash": "fb72704240c3527ba45904a8705865922f70a9c4f3c11bfa93c839f939945884",
+  "outcomeExternalId": "acct_991",
+  "outcomeExternalIdHash": "1f2550b834705a7afb32da4e783f532d6ca62bf9f380884ed2dcb7c7d6a82f39",
+  "outcomeAdMatchBody": "{\"eventId\":\"purchase:cs_test_123\",\"eventName\":\"purchase\",\"occurredAt\":\"2025-08-18T06:53:20.123Z\",\"accountKey\":\"acct_991\",\"properties\":{\"path\":\"/checkout\",\"visitKey\":\"b16eaccc3fc131a1fc6428105bf366164c1f8fff3e0de56d0da7bbfa1712005e\",\"value\":\"49.50\",\"currency\":\"USD\"},\"adMatch\":{\"em\":\"fb72704240c3527ba45904a8705865922f70a9c4f3c11bfa93c839f939945884\",\"fbc\":\"fb.1.1755500000123.IwAR0abcDEF_-123\",\"fbp\":\"fb.1.1755500000123.987654321\",\"external_id\":\"1f2550b834705a7afb32da4e783f532d6ca62bf9f380884ed2dcb7c7d6a82f39\",\"client_ip_address\":\"203.0.113.9\",\"client_user_agent\":\"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\"}}",
+  "outcomeAdMatchBodySignature": "fa3bf05dada4371bbdca04ad582832d83f3675191777835123ee3259e8ac748a",
+  "headers": {
+    "sourceKey": "x-infinite-source-key",
+    "signature": "x-infinite-signature"
+  },
+  "userAgentFamilySamples": {
+    "browser": [
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0 Safari/537.36",
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Version/17.5 Mobile/15E148 Safari/604.1"
+    ],
+    "automation": [
+      "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+      "curl/8.4.0",
+      "python-requests/2.31.0",
+      "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/124.0.0.0 Safari/537.36"
+    ],
+    "unknown": [
+      ""
+    ]
+  },
+  "outcomeExternalIdMixedCase": "  Acct_991_MixedCase \n",
+  "outcomeExternalIdMixedCaseHash": "44076829909a24ae9bc8e44643c31d149866ebd99ac80ddc78f1a49e5cfe8485",
+  "outcomeResponses": {
+    "$comment": "The 202 the server-events route answers (build plan section 3j.1), and what reportInfiniteOutcome resolves for each. metaEventId is non-null ONLY for an accepted, first-time outcome the relay will send AND a named Meta event; a duplicate, a relay that is off, or an unreadable reply resolves null, so the browser never mirrors.",
+    "cases": [
+      {
+        "name": "accepted, relay off (today's cloud)",
+        "status": 202,
+        "body": "{\"accepted\":true,\"duplicate\":false}",
+        "report": {
+          "accepted": true,
+          "duplicate": false,
+          "metaEventId": null,
+          "metaEventName": null
+        }
+      },
+      {
+        "name": "accepted, relay sending a Lead",
+        "status": 202,
+        "body": "{\"accepted\":true,\"duplicate\":false,\"metaEventId\":\"sign_up:acct_991\",\"metaEventName\":\"Lead\"}",
+        "report": {
+          "accepted": true,
+          "duplicate": false,
+          "metaEventId": "sign_up:acct_991",
+          "metaEventName": "Lead"
+        }
+      },
+      {
+        "name": "accepted, relay gates closed",
+        "status": 202,
+        "body": "{\"accepted\":true,\"duplicate\":false,\"metaEventId\":null,\"metaEventName\":null}",
+        "report": {
+          "accepted": true,
+          "duplicate": false,
+          "metaEventId": null,
+          "metaEventName": null
+        }
+      },
+      {
+        "name": "duplicate: never a mirror",
+        "status": 202,
+        "body": "{\"accepted\":true,\"duplicate\":true,\"metaEventId\":\"sign_up:acct_991\",\"metaEventName\":\"Lead\"}",
+        "report": {
+          "accepted": true,
+          "duplicate": true,
+          "metaEventId": null,
+          "metaEventName": null
+        }
+      },
+      {
+        "name": "an id without a name is not an instruction",
+        "status": 202,
+        "body": "{\"accepted\":true,\"duplicate\":false,\"metaEventId\":\"abc\"}",
+        "report": {
+          "accepted": true,
+          "duplicate": false,
+          "metaEventId": null,
+          "metaEventName": null
+        }
+      },
+      {
+        "name": "not JSON",
+        "status": 202,
+        "body": "accepted",
+        "report": {
+          "accepted": false,
+          "duplicate": false,
+          "metaEventId": null,
+          "metaEventName": null
+        }
+      },
+      {
+        "name": "rejected signature",
+        "status": 401,
+        "body": "{\"error\":\"invalid_signature\"}",
+        "report": {
+          "accepted": false,
+          "duplicate": false,
+          "metaEventId": null,
+          "metaEventName": null
+        }
+      },
+      {
+        "name": "server error",
+        "status": 500,
+        "body": "{\"accepted\":true}",
+        "report": {
+          "accepted": false,
+          "duplicate": false,
+          "metaEventId": null,
+          "metaEventName": null
+        }
+      }
+    ]
+  },
+  "outcomeWireIds": {
+    "$comment": "reportInfiniteOutcome sends the wire eventId \"<type>:<eventId>\" (build plan section 3z.10, B16); once that passes 160 characters it sends \"<type>:\" + the sha256 hex of the eventId. One stable id reused for two outcome types never collides. The echoed metaEventId is the wire id.",
+    "cases": [
+      {
+        "type": "sign_up",
+        "eventId": "acct_991",
+        "wire": "sign_up:acct_991"
+      },
+      {
+        "type": "trial",
+        "eventId": "acct_991",
+        "wire": "trial:acct_991"
+      },
+      {
+        "type": "lead",
+        "eventId": "lead:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "wire": "lead:c59f6d159833e1632c6b8c0a8ba2fc4d0aa300372bfff81a74abe8a6f51da2b8"
+      }
+    ]
+  },
+  "testVisitHeader": "itv1.eyJyIjoiNmFhNjYzMjMtYjljMy00ZDg2LTg3Y2UtZjE0ODEyMGQyOWEyIiwidyI6InZlY3Rvci13b3Jrc3BhY2UiLCJzIjoidmVjdG9yLXNvdXJjZSIsImUiOjE3NTU1MDA2MDB9.SHAPEonlyNotAValidSignatureForAnySecret0000",
+  "documentEventBodyWithTestVisit": "{\"eventId\":\"doc:85c11b1b1ed121d9f91da03777ea890b895033f7a383dceca0694d59ceda8b67\",\"eventName\":\"site_document_request\",\"occurredAt\":\"2025-08-18T06:53:20.123Z\",\"properties\":{\"path\":\"/pricing\",\"host\":\"example.com\",\"visitKey\":\"b16eaccc3fc131a1fc6428105bf366164c1f8fff3e0de56d0da7bbfa1712005e\",\"userAgentFamily\":\"browser\",\"referrerHost\":\"google.com\",\"testVisit\":\"itv1.eyJyIjoiNmFhNjYzMjMtYjljMy00ZDg2LTg3Y2UtZjE0ODEyMGQyOWEyIiwidyI6InZlY3Rvci13b3Jrc3BhY2UiLCJzIjoidmVjdG9yLXNvdXJjZSIsImUiOjE3NTU1MDA2MDB9.SHAPEonlyNotAValidSignatureForAnySecret0000\"}}",
+  "documentEventBodyWithTestVisitSignature": "8f630620805290ab0a932f8738bb36c7c1e51dc66f507d43ba546fd5894adb95"
+}

@@ -1,0 +1,22 @@
+{
+  "v": 1,
+  "kind": "list",
+  "tool": "list_changes",
+  "title": "Recent changes",
+  "state": "ready",
+  "asOf": "2026-01-15T10:40:00Z",
+  "provenance": { "source": "Demo source", "via": "our_db" },
+  "scope": { "workspaceName": "Demo", "crossWorkspace": false },
+  "caveats": [],
+  "body": {
+    "layout": "log",
+    "columns": [],
+    "rows": [
+      { "id": "chg_1", "title": "Ad set 01 budget", "cells": {}, "from": "$40.00/day", "to": "$30.00/day", "at": "2026-01-15T09:12:00Z", "who": "Sam" },
+      { "id": "chg_2", "title": "Demo B status", "cells": {}, "from": "on", "to": "paused", "at": "2026-01-14T16:05:00Z", "who": null }
+    ],
+    "total": 2,
+    "shown": 2,
+    "omitted": { "count": 4, "reason": "older than 30 days" }
+  }
+}

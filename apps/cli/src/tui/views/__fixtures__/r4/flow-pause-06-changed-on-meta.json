@@ -1,0 +1,89 @@
+{
+  "screen": "flow-pause-06-changed-on-meta",
+  "session": {
+    "workspace": "Infinite workspace",
+    "connections": [
+      {
+        "name": "Shopify",
+        "status": "broken"
+      },
+      {
+        "name": "GA4",
+        "status": "connected"
+      },
+      {
+        "name": "Stripe",
+        "status": "connected"
+      },
+      {
+        "name": "PostHog",
+        "status": "connected"
+      },
+      {
+        "name": "Google Ads",
+        "status": "connected"
+      },
+      {
+        "name": "Meta",
+        "status": "connected"
+      }
+    ]
+  },
+  "turn": {
+    "question": "pause hook b",
+    "answer": "It changed on Meta since I looked. Nothing ran.",
+    "views": [
+      {
+        "v": 1,
+        "kind": "change",
+        "tool": "propose_pause_entity",
+        "title": "Pause Hook B",
+        "state": "failed",
+        "asOf": null,
+        "provenance": {
+          "source": "Meta · ad",
+          "via": "our_db"
+        },
+        "scope": {
+          "workspaceName": "Infinite workspace",
+          "crossWorkspace": false
+        },
+        "caveats": [],
+        "body": {
+          "target": {
+            "kind": "ad",
+            "id": "ad_hook_b",
+            "label": "Hook B · founder POV"
+          },
+          "rows": [
+            {
+              "label": "status",
+              "before": "on",
+              "after": "PAUSED"
+            }
+          ],
+          "effect": "Stops spending",
+          "warnings": []
+        },
+        "outcome": "not_sent",
+        "stateReason": {
+          "code": "changed_on_meta",
+          "words": "This changed since you looked. Meta now says PAUSED, so it's already off.",
+          "short": "Changed on Meta"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "pausing on Meta",
+        "start": 0,
+        "end": 0.6,
+        "result": "changed",
+        "status": "old"
+      }
+    ]
+  },
+  "gaps": [
+    "D3: head \"⧗ Changed on Meta\" (amber) via stateReason.short; \"Nothing ran.\" follows in dim."
+  ]
+}

@@ -1,0 +1,104 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderFrame > 70 columns: the Learn card is dropped and no line runs past the screen 1`] = `
+" Infinite setup · infinite-tag 0.12.0                     run r-7f3c
+
+ Tasks
+ ■ Link to Infinite
+ ■ Pick the agent
+ ■ Check the live site
+ ■ Keys from Infinite
+ ■ Plan + your decisions
+ ■ Install
+ ⠋ Agent jobs  your agent
+ □ Infinite settings
+ □ Draft PR + rehearsal
+ □ Second-agent review
+ □ You merge
+ □ Prove it live
+ □ What happened
+
+ ━━━━━━━━━━━━━━━━━━────────────────────── 46% · step 6 of 12
+
+ Claude Code › The sign-up route already creates the user, so I'm
+   adding the server-side sign-up event right after that.
+   · Job 1/7 · Server-side sign-up event
+   · Job 2/7 · Improve the existing PostHog (proxy, page changes)
+   · Job 3/7 · Remove the second GA4 tag
+   ✓ Job 1 checked by the wizard
+   ! Job 3 needs a second look
+   ⠋ Wizard checking each job itself…
+ Ctrl+C stop"
+`;
+
+exports[`renderFrame > 120 columns: Learn card beside the 13-row step list, the narration and the sub-statuses 1`] = `
+" Infinite setup · infinite-tag 0.12.0                                                                       run r-7f3c
+
+ Learn                                    Tasks
+ The agent's checklist                    ■ Link to Infinite
+ The agent claims; the wizard checks.     ■ Pick the agent
+ Agent says done ·········· not enough    ■ Check the live site
+ Code check ··········· wizard runs it    ■ Keys from Infinite
+ Build + offline test · wizard runs it    ■ Plan + your decisions
+ Live test ··············· after merge    ■ Install
+                                          ⠋ Agent jobs  your agent
+                                          □ Infinite settings
+                                          □ Draft PR + rehearsal
+                                          □ Second-agent review
+                                          □ You merge
+                                          □ Prove it live
+                                          □ What happened
+
+                                          ━━━━━━━━━━━━━━━━━━────────────────────── 46% · step 6 of 12
+
+ Claude Code › The sign-up route already creates the user, so I'm adding the server-side sign-up event right after
+   that.
+   · Job 1/7 · Server-side sign-up event
+   · Job 2/7 · Improve the existing PostHog (proxy, page changes)
+   · Job 3/7 · Remove the second GA4 tag
+   ✓ Job 1 checked by the wizard
+   ! Job 3 needs a second look
+   ⠋ Wizard checking each job itself…
+ Ctrl+C stop"
+`;
+
+exports[`renderFrame > draws the pending ask as one overlay box in place of the live region 1`] = `
+" Infinite setup · infinite-tag 0.12.0                                                                       run r-7f3c
+
+ Learn                                    Tasks
+ What only you decide                     ■ Link to Infinite
+ Everything else is done for you.         ■ Pick the agent
+ Consent ······················· legal    ■ Check the live site
+ Conversion names ·········· your data    ■ Keys from Infinite
+ Privacy text ·················· legal    ⠋ Plan + your decisions  you
+ Merging ···················· shipping    □ Install
+                                          □ Agent jobs
+                                          □ Infinite settings
+                                          □ Draft PR + rehearsal
+                                          □ Second-agent review
+                                          □ You merge
+                                          □ Prove it live
+                                          □ What happened
+
+                                          ━━━━━━━━━━━━──────────────────────────── 31% · step 4 of 12
+
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ ◆ Plan + your decisions                                                                                            │
+ │ The plan (one screen)                                                                                              │
+ │ Approve the plan: 2 lines to approve · 1 thing only you can do.                                                    │
+ │                                                                                                                    │
+ │ Your decisions                                                                                                     │
+ │ · Consent: — choose it (E on the consent line)                                                                     │
+ │ · Conversions: start_trial · signup                                                                                │
+ │ · Privacy: 2 drafted lines for your privacy page                                                                   │
+ │ · npm: npm install @vercel/functions                                                                               │
+ │                                                                                                                    │
+ │ The plan                                                                                                           │
+ │ ▸ [✓] Install the Infinite pixel and server lane                                                                   │
+ │   [✓] Consent setting                                                                                              │
+ │    →  Connect GA4 in Infinite                                                                                      │
+ │                                                                                                                    │
+ │ ENTER approve  ·  SPACE skip a line  ·  E edit a line  ·  ↑↓ move  ·  ESC later                                    │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Ctrl+C stop"
+`;

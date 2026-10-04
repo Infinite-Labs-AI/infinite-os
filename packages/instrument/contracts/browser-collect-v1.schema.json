@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://infinite.fast/contracts/browser-collect-v1.schema.json",
+  "title": "Infinite browser collect v1",
+  "description": "Public browser event envelope accepted by the Infinite cloud collect endpoint.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "siteSourceKey",
+    "eventId",
+    "eventName",
+    "occurredAt",
+    "anonymousId",
+    "sessionId",
+    "url"
+  ],
+  "properties": {
+    "siteSourceKey": {
+      "type": "string",
+      "pattern": "^site_[A-Za-z0-9_-]+$"
+    },
+    "eventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "eventName": {
+      "type": "string",
+      "enum": ["site_page_view", "site_click", "app_download_click", "sign_up_click"]
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "anonymousId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "url": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^https?://[^@/?#\\s]+(?:/[^?#\\s]*)?$"
+    },
+    "referrer": {
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^[a-z0-9._:\\[\\]-]+$"
+    },
+    "properties": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 13,
+      "properties": {
+        "cta_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "cta_location": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        },
+        "destination_path": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^/[^?#]*$"
+        },
+        "nav": {
+          "type": "string",
+          "enum": ["navigate", "history"]
+        },
+        "utm_source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "utm_medium": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "utm_campaign": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "utm_content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "utm_term": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "has_gclid": { "const": true },
+        "has_fbclid": { "const": true },
+        "has_ttclid": { "const": true },
+        "has_msclkid": { "const": true }
+      }
+    },
+    "automation": {
+      "type": "boolean"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "eventName": { "const": "site_page_view" }
+        }
+      },
+      "then": {
+        "properties": {
+          "properties": {
+            "type": "object",
+            "maxProperties": 10,
+            "properties": {
+              "nav": { "$ref": "#/properties/properties/properties/nav" },
+              "utm_source": { "$ref": "#/properties/properties/properties/utm_source" },
+              "utm_medium": { "$ref": "#/properties/properties/properties/utm_medium" },
+              "utm_campaign": { "$ref": "#/properties/properties/properties/utm_campaign" },
+              "utm_content": { "$ref": "#/properties/properties/properties/utm_content" },
+              "utm_term": { "$ref": "#/properties/properties/properties/utm_term" },
+              "has_gclid": { "$ref": "#/properties/properties/properties/has_gclid" },
+              "has_fbclid": { "$ref": "#/properties/properties/properties/has_fbclid" },
+              "has_ttclid": { "$ref": "#/properties/properties/properties/has_ttclid" },
+              "has_msclkid": { "$ref": "#/properties/properties/properties/has_msclkid" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventName": { "const": "site_click" }
+        }
+      },
+      "then": {
+        "required": ["properties"],
+        "properties": {
+          "properties": {
+            "type": "object",
+            "required": ["cta_id", "cta_location"],
+            "properties": {
+              "cta_id": { "$ref": "#/properties/properties/properties/cta_id" },
+              "cta_location": { "$ref": "#/properties/properties/properties/cta_location" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventName": { "const": "app_download_click" }
+        }
+      },
+      "then": {
+        "required": ["properties"],
+        "properties": {
+          "properties": {
+            "type": "object",
+            "required": ["destination_path"],
+            "properties": {
+              "cta_id": { "$ref": "#/properties/properties/properties/cta_id" },
+              "cta_location": { "$ref": "#/properties/properties/properties/cta_location" },
+              "destination_path": { "$ref": "#/properties/properties/properties/destination_path" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$comment": "site_page_view properties.nav (infinite-tag 0.6.0): \"navigate\" for the initial document load, \"history\" for a History-API route change — a bounded enum so the cloud can count INITIAL browser page views; older tags omit it, so it is optional. app_download_click destination_path is the per-source same-origin conversion destination (analytics_site_sources.download_destination_path, default /download); hosted external checkout intent stays in site_click with bounded structural destination buckets such as /external/stripe_payment_link, never external URLs. sign_up_click is browser INTENT (a click) with the same optional structural cta properties as site_click; the signup OUTCOME is server-only and never enters this contract. automation is an OPTIONAL client marker the pixel sets true ONLY when it deliberately fired under navigator.webdriver for a synthetic/test sandbox source (infinite-tag scoped --infinite-allow-automation); it is a hint, never trusted as truth — on a production source the ingest counts-and-flags the event as automation (is_bot), on a synthetic source it is a no-op."
+}
