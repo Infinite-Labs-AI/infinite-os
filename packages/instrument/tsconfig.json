@@ -4,6 +4,6 @@
     "rootDir": ".",
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts", "test/wizard/**/*.ts", "test/site-code/**/*.ts"],
+  "include": ["src/**/*.ts", "test/wizard/**/*.ts", "test/site-code/**/*.ts", "test/campaign-wire-fixture.ts"],
   "exclude": ["test/wizard/fixture-site/**", "test/wizard/fixtures/run3/**", "test/wizard/fixtures/run4/**"]
 }

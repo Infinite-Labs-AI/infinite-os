@@ -3,6 +3,16 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## Unreleased
+
+### Page views carry the Meta ad they came from
+
+- The first page view of a visit records `ad_id`, `adset_id`, `campaign_id` and `utm_placement` from the landing URL
+  when present, so a signup can be traced to the exact Meta ad. Each value must match its pattern exactly (digits for
+  the ids; letters, digits and `_` for the placement) and pass the same personal-data rule as the UTM fields; anything
+  else is omitted, never rewritten. Other events, consent and delivery are unchanged. The browser-collect-v1 contract
+  is byte-identical to the server's.
+
 ## 0.12.1 — 2026-10-04
 
 Fixes from six live end-to-end runs on a real customer-style site, with real Claude Code and Codex, a real pull

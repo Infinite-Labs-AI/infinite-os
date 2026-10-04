@@ -387,6 +387,19 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
       // are what the campaign is attributed by (review P1-2).
       if (value && !infiniteUnsafeCampaign(raw)) properties[key] = value
     }
+    // Optional ad metadata (the door's browser-collect-v1 patterns): a value that does not match its pattern EXACTLY is
+    // omitted, never trimmed or cut (a cleaned value could fail the whole view). It also passes the same unsafe-value
+    // rule as the UTM fields, so a phone-shaped digit run is dropped while a 15+ digit ad id is kept.
+    const adFields: Array<[string, RegExp]> = [
+      ["ad_id", /^\d{1,32}$/], ["adset_id", /^\d{1,32}$/], ["campaign_id", /^\d{1,32}$/],
+      ["utm_placement", /^[A-Za-z0-9_]{1,64}$/]
+    ]
+    for (const [key, pattern] of adFields) {
+      const value = params.get(key)
+      if (value === null) continue
+      const match = value.match(pattern)
+      if (match && match[0] === value && !infiniteUnsafeCampaign(value)) properties[key] = value
+    }
     for (const key of ["gclid", "fbclid", "ttclid", "msclkid"]) {
       const raw = params.get(key)
       if (raw !== null && raw.trim() !== "") properties["has_" + key] = true

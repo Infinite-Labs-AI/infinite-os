@@ -55,8 +55,12 @@
     "properties": {
       "type": "object",
       "additionalProperties": false,
-      "maxProperties": 13,
+      "maxProperties": 18,
       "properties": {
+        "ad_id": { "type": "string", "pattern": "^\\d{1,32}$", "not": { "pattern": "[\\r\\n]" } },
+        "adset_id": { "type": "string", "pattern": "^\\d{1,32}$", "not": { "pattern": "[\\r\\n]" } },
+        "campaign_id": { "type": "string", "pattern": "^\\d{1,32}$", "not": { "pattern": "[\\r\\n]" } },
+        "utm_placement": { "type": "string", "pattern": "^[A-Za-z0-9_]{1,64}$", "not": { "pattern": "[\\r\\n]" } },
         "cta_id": {
           "type": "string",
           "minLength": 1,
@@ -77,6 +81,11 @@
         "nav": {
           "type": "string",
           "enum": ["navigate", "history"]
+        },
+        "ie": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+          "description": "Email send-intent id from a tagged link (?ie=). site_page_view only. Lifted into the ledger's email_send_intent_id column and never stored in the properties bag."
         },
         "utm_source": {
           "type": "string",
@@ -129,9 +138,14 @@
         "properties": {
           "properties": {
             "type": "object",
-            "maxProperties": 10,
+            "maxProperties": 15,
             "properties": {
+              "ad_id": { "$ref": "#/properties/properties/properties/ad_id" },
+              "adset_id": { "$ref": "#/properties/properties/properties/adset_id" },
+              "campaign_id": { "$ref": "#/properties/properties/properties/campaign_id" },
+              "utm_placement": { "$ref": "#/properties/properties/properties/utm_placement" },
               "nav": { "$ref": "#/properties/properties/properties/nav" },
+              "ie": { "$ref": "#/properties/properties/properties/ie" },
               "utm_source": { "$ref": "#/properties/properties/properties/utm_source" },
               "utm_medium": { "$ref": "#/properties/properties/properties/utm_medium" },
               "utm_campaign": { "$ref": "#/properties/properties/properties/utm_campaign" },
@@ -142,6 +156,18 @@
               "has_ttclid": { "$ref": "#/properties/properties/properties/has_ttclid" },
               "has_msclkid": { "$ref": "#/properties/properties/properties/has_msclkid" }
             }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "properties": {
+            "not": { "anyOf": [
+              { "required": ["ad_id"] },
+              { "required": ["adset_id"] },
+              { "required": ["campaign_id"] },
+              { "required": ["utm_placement"] }
+            ] }
           }
         }
       }
