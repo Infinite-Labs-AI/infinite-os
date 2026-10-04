@@ -3,7 +3,7 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
-## Unreleased
+## 0.12.2 — 2026-10-05
 
 ### Page views carry the Meta ad they came from
 
