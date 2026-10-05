@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import { createClaudeCliModelClient, claudeCliReadiness, terminalClaudeSelection } from "./claude-cli-model-client.js";
+import { createDesktopModelPicker, desktopModelFromFile } from "./desktop/model-selection.js";
+import { MODEL_CATALOG, resolveTerminalModelSelection } from "@infinite-os/config";
+import { createTerminalModelPicker, terminalModelStatus, MODEL_PICKER_GUIDANCE } from "./terminal-model-picker.js";
 
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -672,25 +676,12 @@ const DEFAULT_CLAUDE_REFRESH_URLS = [
   "https://platform.claude.com/v1/oauth/token",
   "https://console.anthropic.com/v1/oauth/token"
 ];
-const MODEL_PROVIDER_CATALOG: Record<
-  InfiniteOsModelProvider,
-  { models: string[]; defaultModel: string }
-> = {
-  codex: {
-    models: ["gpt-5.5", "gpt-5.4"],
-    defaultModel: "gpt-5.5"
-  },
-  claude: {
-    models: [
-      "claude-sonnet-4-6",
-      "claude-opus-4-8",
-      "claude-opus-4-7",
-      "claude-sonnet-4-5",
-      "claude-haiku-4-5-20251001"
-    ],
-    defaultModel: "claude-sonnet-4-6"
-  }
-};
+const MODEL_PROVIDER_CATALOG = Object.fromEntries(
+  (["codex", "claude"] as const).map(provider => [provider, {
+    models: MODEL_CATALOG.filter(model => model.provider === provider).map(model => model.id),
+    defaultModel: MODEL_CATALOG.find(model => model.provider === provider && model.default)!.id
+  }])
+) as Record<InfiniteOsModelProvider, { models: string[]; defaultModel: string }>;
 const SETUP_INTERVIEW_PROVIDERS = ["ga4", "posthog", "x"] as const satisfies readonly SetupProviderId[];
 const DEFAULT_SETUP_INTERVIEW_PROVIDERS = ["ga4", "posthog"] as const satisfies readonly SetupProviderId[];
 const DEFAULT_SETUP_INTERVIEW_PROVIDER_SET = new Set<SetupProviderId>(DEFAULT_SETUP_INTERVIEW_PROVIDERS);
@@ -1772,7 +1763,13 @@ async function runDesktopInteractiveEntry(
   // workspace and, from a Desktop that sends them (`status.connections.v1`),
   // the connection dots.
   let barStatus: DesktopStatus = status;
+  const desktopPicker = createDesktopModelPicker(env as NodeJS.ProcessEnv, async () => {
+    const live = resolveLiveBridge(env);
+    if (!live) throw new Error("Start Infinite Desktop before choosing a model.");
+    return live.client.status();
+  });
   const runner = createDesktopSessionTurnRunner({
+    getTerminalModel: () => desktopModelFromFile(env as NodeJS.ProcessEnv),
     resolveBridge: () => resolveLiveBridge(env),
     onStatus: (next) => {
       barStatus = next;
@@ -1803,6 +1800,7 @@ async function runDesktopInteractiveEntry(
     // carries. An older Desktop sends none, and the bar then draws no dots
     // (never a guess, never a false "daemon not reachable").
     await runInkInteractiveSession({
+      modelPicker: desktopPicker,
       errorOutput,
       ...(firstRun ? { homeInventory: homeInventoryData(status.workspace?.name, undefined) } : {}),
       input,
@@ -1835,6 +1833,9 @@ async function runDesktopInteractiveEntry(
         const trimmed = line.trim();
         if (trimmed === "/help") {
           return { messages: [desktopHelpMessage()] };
+        }
+        if (trimmed === "/model default") {
+          return { messages: [{ kind: "slash", role: "system", text: await desktopPicker.clear!() }] };
         }
         // The streamed answer renders through the shell's turnController via
         // `onProgress`; the terminal message.complete commits it. Answer views
@@ -1889,6 +1890,8 @@ async function runDesktopInteractiveEntry(
       // overlap turns, so a `busy` outcome surfaces as a plain error line.
       turnSource: {
         runTurn: async (line, _sessionId, onEvent, signal) => {
+          if (line.trim() === "/model default") { output.write(`${await desktopPicker.clear!()}\n`); return {}; }
+          if (line.trim() === "/model") { output.write("Open an interactive Ink terminal to use /model, or use /model default to clear the saved choice.\n"); return {}; }
           const outcome = await runner.turn(line, onEvent, signal);
           if (outcome.busy) {
             throw new DesktopAppClientError(
@@ -7772,6 +7775,12 @@ async function interactiveSession(env: CliEnv): Promise<void> {
     };
     try {
       await runInkInteractiveSession({
+        modelPicker: createTerminalModelPicker(env as NodeJS.ProcessEnv,
+          async () => (await verifyInfiniteOsProviderAuth("codex", env)).ok,
+          async (onStatus, signal) => {
+            await codexLogin(env, { signal, onDeviceCode: onStatus });
+            return (await verifyInfiniteOsProviderAuth("codex", env)).ok;
+          }),
         errorOutput,
         getAgentTitle: () =>
           activeProjectLabel ? `${theme.brand.name} — ${activeProjectLabel}` : undefined,
@@ -9094,6 +9103,7 @@ async function projectDefaultCommand(args: string[], env: CliEnv): Promise<unkno
 
 async function modelCommand(args: string[], env: CliEnv): Promise<Record<string, unknown>> {
   const [subcommand, provider, model, ...rest] = args;
+  if (!subcommand) return { ok: true, modelGuidance: MODEL_PICKER_GUIDANCE };
   if (subcommand === "list") {
     return {
       ok: true,
@@ -9104,7 +9114,7 @@ async function modelCommand(args: string[], env: CliEnv): Promise<Record<string,
     };
   }
   if (subcommand === "use") {
-    if (!provider && input.isTTY === true) {
+    if (!provider && input.isTTY === true && env.GROWTH_OS_CLI_NONINTERACTIVE !== "1") {
       const initialSelection = readInfiniteOsModelSelection(env as NodeJS.ProcessEnv);
       return runModelSetup(env, {
         initialProvider: initialSelection.provider,
@@ -9122,7 +9132,8 @@ async function modelCommand(args: string[], env: CliEnv): Promise<Record<string,
     return {
       ok: true,
       provider: selection.provider ?? null,
-      model: selection.model ?? null
+      model: selection.model ?? null,
+      modelStatus: terminalModelStatus(env as NodeJS.ProcessEnv)
     };
   }
   throw new Error("model requires list, use, or status");
@@ -9589,7 +9600,7 @@ export function renderDetectedModelAuthStatus(env: CliEnv): string {
 
 async function codexLogin(
   env: CliEnv,
-  options: { force?: boolean } = {}
+  options: { force?: boolean; signal?: AbortSignal; onDeviceCode?: (text: string) => void } = {}
 ): Promise<Record<string, unknown>> {
   // Default is idempotent reuse (fast, no surprise browser pop). `--force`/
   // `--reauth` skips every reuse path and runs a fresh device login, so a user
@@ -9632,7 +9643,8 @@ async function codexLogin(
       }
     }
   }
-  const tokens = await runCodexDeviceCodeLogin(env);
+  const tokens = await runCodexDeviceCodeLogin(env, options);
+  options.signal?.throwIfAborted();
   const saved = writeInfiniteOsAuthRecord(
     {
       provider: "codex",
@@ -9655,7 +9667,7 @@ async function codexLogin(
   };
 }
 
-async function runCodexDeviceCodeLogin(env: CliEnv): Promise<{
+async function runCodexDeviceCodeLogin(env: CliEnv, options: { signal?: AbortSignal; onDeviceCode?: (text: string) => void } = {}): Promise<{
   token?: string;
   refreshToken?: string;
   expiresAt?: string;
@@ -9664,6 +9676,7 @@ async function runCodexDeviceCodeLogin(env: CliEnv): Promise<{
   const tokenUrl = env.GROWTH_OS_CODEX_TOKEN_URL ?? DEFAULT_CODEX_TOKEN_URL;
   const userCodeResponse = await fetchJson(`${authBaseUrl}/api/accounts/deviceauth/usercode`, {
     method: "POST",
+    signal: options.signal,
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ client_id: CODEX_OAUTH_CLIENT_ID })
   }, "Codex device-code request");
@@ -9675,7 +9688,10 @@ async function runCodexDeviceCodeLogin(env: CliEnv): Promise<{
   }
 
   const verificationUrl = `${authBaseUrl}/codex/device`;
-  if (env.GROWTH_OS_CODEX_AUTH_SILENT !== "1") {
+  if (options.onDeviceCode) {
+    openBrowserForAuth(verificationUrl, env);
+    options.onDeviceCode(`Open ${boundedTerminalText(verificationUrl, 200, "the sign-in page")}\nEnter code: ${boundedTerminalText(userCode, 40, "unknown")}\nWaiting for Codex sign-in…`);
+  } else if (env.GROWTH_OS_CODEX_AUTH_SILENT !== "1") {
     const browser = openBrowserForAuth(verificationUrl, env);
     output.write(
       [
@@ -9689,8 +9705,9 @@ async function runCodexDeviceCodeLogin(env: CliEnv): Promise<{
     );
   }
 
-  const authorization = await pollCodexAuthorizationCode(authBaseUrl, deviceAuthId, userCode, env, pollMs);
+  const authorization = await pollCodexAuthorizationCode(authBaseUrl, deviceAuthId, userCode, env, pollMs, options.signal);
   const tokenResponse = await fetchJson(tokenUrl, {
+    signal: options.signal,
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -9723,15 +9740,19 @@ async function pollCodexAuthorizationCode(
   deviceAuthId: string,
   userCode: string,
   env: CliEnv,
-  pollMs: number
+  pollMs: number,
+  signal?: AbortSignal
 ): Promise<{ authorizationCode: string; codeVerifier: string }> {
   const startedAt = Date.now();
   const timeoutMs = numberEnv(env.GROWTH_OS_CODEX_AUTH_TIMEOUT_MS, 15 * 60 * 1000);
   while (Date.now() - startedAt <= timeoutMs) {
+    signal?.throwIfAborted();
     if (pollMs > 0) {
-      await delay(pollMs);
+      await delay(pollMs, undefined, { signal });
     }
+    signal?.throwIfAborted();
     const response = await fetch(`${authBaseUrl}/api/accounts/deviceauth/token`, {
+      signal,
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode })
@@ -10101,14 +10122,14 @@ async function chatRequest(
 }
 
 export async function localChatReadiness(env: CliEnv): Promise<Record<string, unknown> & { ok: boolean }> {
-  const readiness = await readSetupReadiness(env);
+  const readiness = await readSetupReadiness(env, true);
   if (readiness.llmQuery === "ready") {
     return { ok: true, workspaceRoot: readiness.workspaceRoot, setupReadiness: readiness };
   }
   return workspaceNotReadyFromSetupReadiness(readiness);
 }
 
-export async function readSetupReadiness(env: CliEnv): Promise<SetupReadiness> {
+export async function readSetupReadiness(env: CliEnv, terminalChat = false): Promise<SetupReadiness> {
   const workspaceRoot = workspaceRootFor(env);
   const blockingReasons: string[] = [];
   let config: InfiniteOsConfig | undefined;
@@ -10123,7 +10144,8 @@ export async function readSetupReadiness(env: CliEnv): Promise<SetupReadiness> {
     blockingReasons.push(`runtime_config_incomplete: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const selection = readInfiniteOsModelSelection(env as NodeJS.ProcessEnv);
+  const cliClaude = terminalChat ? terminalClaudeSelection(env as NodeJS.ProcessEnv) : undefined;
+  const selection = cliClaude ?? (terminalChat ? resolveTerminalModelSelection(env as NodeJS.ProcessEnv).selection : readInfiniteOsModelSelection(env as NodeJS.ProcessEnv)) ?? {};
   let model: SetupReadiness["model"] = "missing";
   let auth: SetupReadiness["auth"] = "missing";
   let authProvider: SetupReadiness["authProvider"] | undefined;
@@ -10131,7 +10153,9 @@ export async function readSetupReadiness(env: CliEnv): Promise<SetupReadiness> {
     blockingReasons.push("model_missing: Choose Codex or Claude before chatting.");
   } else {
     model = "selected";
-    const authReadiness = await verifyInfiniteOsProviderAuth(selection.provider, env);
+    const terminalClaude = Boolean(cliClaude);
+    const cliReady = terminalClaude ? await claudeCliReadiness(env as NodeJS.ProcessEnv) : undefined;
+    const authReadiness = cliReady ? {ok:cliReady.ready,provider:"claude" as const,source:"claude-cli-subscription",reason:cliReady.detail??"ready"} : await verifyInfiniteOsProviderAuth(selection.provider, env);
     authProvider = {
       provider: authReadiness.provider,
       source: authReadiness.source,
@@ -10140,7 +10164,7 @@ export async function readSetupReadiness(env: CliEnv): Promise<SetupReadiness> {
     if (authReadiness.ok) {
       auth = "ready";
     } else {
-      blockingReasons.push(`model_auth_incomplete: ${selection.provider} auth is not ready: ${authReadiness.reason}.`);
+      blockingReasons.push(`model_auth_incomplete: ${selection.provider} auth is not ready: ${authReadiness.reason.replace(/\.+$/u, "")}.`);
     }
   }
 
@@ -10955,7 +10979,7 @@ export function createCliAgentRuntime(env: CliEnv = process.env): CliAgentRuntim
     reviewer: createModelBackedMemoryReviewer(modelClient)
   });
   const queryAdvisor = createSourceAwareQueryAdvisor();
-  const controller = createLlmController({ registry, sessionStore, modelClient, memoryManager, queryAdvisor });
+  const nativeClients = new Set<ReturnType<typeof createClaudeCliModelClient>>();
 
   // Local-path workspace validation. The gateway/platform path validates the
   // bound id against `workspaces` (`apps/app/src/index.ts` `select 1 ... from
@@ -11006,7 +11030,17 @@ export function createCliAgentRuntime(env: CliEnv = process.env): CliAgentRuntim
   return {
     async chat(input) {
       await assertWorkspaceExists();
-      return controller.chat({
+      // Snapshot once per turn. Memory review and compaction retain modelClient,
+      // which reads only the shared default, never terminal-model.yml.
+      const resolvedModel = resolveTerminalModelSelection(env as NodeJS.ProcessEnv);
+      const claudeSelection = terminalClaudeSelection(env as NodeJS.ProcessEnv);
+      const nativeClient = claudeSelection
+        ? createClaudeCliModelClient({env:env as NodeJS.ProcessEnv,cwd:workspaceRoot,selection:claudeSelection})
+        : undefined;
+      if (nativeClient) nativeClients.add(nativeClient);
+      const chatModelClient = nativeClient ?? createConfiguredModelClient({ env: env as NodeJS.ProcessEnv, selection: resolvedModel.selection });
+      const controller = createLlmController({ registry, sessionStore, modelClient: chatModelClient, memoryManager, queryAdvisor });
+      try { return await controller.chat({
         message: input.message,
         sessionId: input.sessionId ? deriveControllerSessionId(input.sessionId) : undefined,
         workspaceId,
@@ -11014,7 +11048,7 @@ export function createCliAgentRuntime(env: CliEnv = process.env): CliAgentRuntim
         surface: "cli",
         progressMode: input.progressMode,
         onProgress: input.onProgress
-      });
+      }); } finally { if (nativeClient) { nativeClient.close(); nativeClients.delete(nativeClient); } }
     },
     async listSessions() {
       await assertWorkspaceExists();
@@ -11153,7 +11187,7 @@ export function createCliAgentRuntime(env: CliEnv = process.env): CliAgentRuntim
       );
       return { ok: true, sessionId: conversationId, memoryId };
     },
-    close: () => database.close()
+    close: () => { for (const client of nativeClients) client.close(); return database.close(); }
   };
 }
 
@@ -11249,6 +11283,8 @@ function memoryCommand(
 
 export function renderCliResult(result: unknown): string {
   if (typeof result === "string") return result;
+  if (isRecord(result) && typeof result.modelStatus === "string") return result.modelStatus;
+  if (isRecord(result) && typeof result.modelGuidance === "string") return result.modelGuidance;
   if (isChatResponseResult(result)) {
     return renderChatResponse(result);
   }

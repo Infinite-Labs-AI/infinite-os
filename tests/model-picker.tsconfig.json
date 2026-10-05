@@ -1,0 +1,34 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "rootDir": "..",
+    "paths": {
+      "@infinite-os/analytical-engine": [
+        "packages/analytical-engine/src/index.ts"
+      ],
+      "@infinite-os/config": ["packages/config/src/index.ts"],
+      "@infinite-os/connectors": ["packages/connectors/src/index.ts"],
+      "@infinite-os/core": ["packages/core/src/index.ts"],
+      "@infinite-os/db": ["packages/db/src/index.ts"],
+      "@infinite-os/llm-controller": ["packages/llm-controller/src/index.ts"],
+      "@infinite-os/metadata": ["packages/metadata/src/index.ts"],
+      "@infinite-os/runtime": ["packages/runtime/src/index.ts"],
+      "@infinite-os/types": ["packages/types/src/index.ts"],
+      "infinite-tag": ["packages/instrument/src/index.ts"]
+    }
+  },
+  "include": [
+    "../apps/cli/src/**/*.ts",
+    "../apps/cli/src/**/*.tsx",
+    "../packages/config/src/**/*.ts",
+    "../packages/config/test/terminal-model.test.ts",
+    "../packages/llm-controller/src/**/*.ts",
+    "../packages/llm-controller/test/terminal-model.test.ts",
+    "./fixtures/model-picker-session.mts",
+    "../packages/llm-controller/test/native-tools.test.ts"
+  ]
+}

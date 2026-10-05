@@ -1,3 +1,4 @@
+import { TURN_MODEL_CAPABILITY, decodeDesktopModels, requireDesktopModel, type DesktopTurnModel, type DesktopModelOption } from "./desktop/model-selection.js";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -135,6 +136,7 @@ export interface DesktopBridgeDescriptor {
 }
 
 export interface DesktopStatus {
+  terminalModels?: DesktopModelOption[];
   service: typeof DESKTOP_SERVICE;
   bootId: string;
   protocol: { min: number; max: number };
@@ -240,6 +242,7 @@ export interface DesktopAppClient {
     input: {
       message: string;
       expectedContextRevision: string;
+      model?: DesktopTurnModel;
       /** Prior session to continue; sent only when the Desktop is capable. */
       sessionId?: string;
       signal?: AbortSignal;
@@ -473,6 +476,7 @@ function createClientFromDescriptor(
   let confirmStreamCapable = false;
   let interactiveWorkspace: InteractiveWorkspaceStatusV1 | undefined;
   let statusCapabilities: string[] = [];
+  let terminalModels: DesktopModelOption[] | undefined;
   const negotiated = (status: DesktopStatus, capability: string) =>
     descriptor.capabilities.includes(capability) && status.capabilities.includes(capability);
 
@@ -508,6 +512,7 @@ function createClientFromDescriptor(
       appOpenCapable = false;
       confirmStreamCapable = false;
       interactiveWorkspace = undefined;
+      terminalModels = undefined;
       statusCapabilities = [];
       const deadline = createRequestDeadline(undefined, requestTimeoutMs);
       try {
@@ -525,6 +530,7 @@ function createClientFromDescriptor(
         const payload = await deadline.race(readJsonResponse(response));
         const status = parseStatus(unwrapData(payload), descriptor);
         statusCapabilities = status.capabilities;
+        terminalModels = status.terminalModels;
         confirmationReplaySafe =
           descriptor.capabilities.includes(CONFIRM_IDEMPOTENCY_CAPABILITY) &&
           status.capabilities.includes(CONFIRM_IDEMPOTENCY_CAPABILITY);
@@ -559,6 +565,7 @@ function createClientFromDescriptor(
     },
 
     async turn(input, onProgress) {
+      if (input.model) requireDesktopModel({terminalModels}, input.model);
       const message = input.message.trim();
       if (!message) {
         throw new DesktopAppClientError(
@@ -619,6 +626,7 @@ function createClientFromDescriptor(
               ...(nonEmptyString(input.sessionId)
                 ? { sessionId: nonEmptyString(input.sessionId) }
                 : {}),
+              ...(input.model ? { model: input.model } : {}),
               ...(input.interactive ? { interactive: input.interactive } : {}),
               ...(accept.length ? { accept } : {})
             })
@@ -1195,6 +1203,10 @@ function parseStatus(
   ) {
     throw invalidResponse();
   }
+  let terminalModels: DesktopModelOption[] | undefined;
+  if (descriptor.capabilities.includes(TURN_MODEL_CAPABILITY) && capabilities.includes(TURN_MODEL_CAPABILITY)) {
+    try { terminalModels = decodeDesktopModels(value.terminalModels); } catch { /* Only an opted-in model turn requires this new metadata. */ }
+  }
   const provider = parseProvider(value.provider);
   const workspace = parseWorkspace(value.workspace);
   const error = parseRemoteError(value.error);
@@ -1212,6 +1224,7 @@ function parseStatus(
     bootId: descriptor.bootId,
     protocol,
     capabilities,
+    ...(terminalModels ? {terminalModels} : {}),
     ready: value.ready,
     contextRevision: nonEmptyString(value.contextRevision)!,
     ...(provider ? { provider } : {}),

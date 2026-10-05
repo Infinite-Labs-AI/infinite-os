@@ -107,6 +107,8 @@ export const ALWAYS_KEY_HINTS: readonly KeyHint[] = [
 
 /** What the bar's closing keys depend on. */
 export interface KeyBarOptions {
+  /** A modal picker owns typing, so / cannot open commands until it closes. */
+  commands?: boolean;
   /**
    * The turn on screen has a details view or card, so `tab switch side` has a
    * side to switch to. Default true (r4's bar, and the boot frame's, which is
@@ -295,7 +297,7 @@ export function keyBarShownHints(hints: readonly KeyHint[], options: KeyBarOptio
   const tabWords = hints.find((hint) => hint.key === "tab" && !hint.chipOnly && hint.label !== TAB_HINT.label);
   return [
     ...shown,
-    ...ALWAYS_KEY_HINTS.flatMap((hint) => hint.key !== "tab" ? [hint] : tabWords ? [{ key: "tab", label: tabWords.label }] : options.sides !== false ? [hint] : [])
+    ...ALWAYS_KEY_HINTS.filter(hint => hint.key !== "/" || options.commands !== false).flatMap((hint) => hint.key !== "tab" ? [hint] : tabWords ? [{ key: "tab", label: tabWords.label }] : options.sides !== false ? [hint] : [])
   ];
 }
 

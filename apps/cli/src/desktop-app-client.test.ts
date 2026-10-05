@@ -3005,3 +3005,25 @@ describe("app.open.v1 and confirm.stream.v1 (T12)", () => {
     expect((error as { nothingRan?: boolean }).nothingRan).toBeUndefined();
   });
 });
+describe('turn.model.v1',()=>{
+ const models=[{provider:'codex',id:'gpt-6.1-sol',label:'Sol 6.1 Medium',efforts:['low','medium','high','xhigh'],connected:true,selectable:true},{provider:'claude-cli',id:'claude-opus-4-8',label:'Opus 4.8 Medium',efforts:['low','medium','high'],connected:true,selectable:true}];
+ function setup(enabled=true){
+  const caps=[...CAPABILITIES,...(enabled?['turn.model.v1']:[])];const fixture=createBridgeHome(descriptor({capabilities:caps}));roots.push(fixture.root);
+  const bodies:Record<string,unknown>[]=[];
+  const client=createDesktopAppClient(fixture.env,{randomId:()=> 'model-turn',fetchImpl:async(input,init)=>{
+   if(String(input).endsWith('/v1/status'))return jsonResponse(status({capabilities:caps,terminalModels:models}));
+   bodies.push(JSON.parse(String(init?.body)));return ndjsonResponse([JSON.stringify({protocolVersion:1,requestId:'model-turn',sequence:1,kind:'done',data:{turnId:'test-turn',message:'ok',actionCalls:[]}})]);
+  }});return {client,bodies};
+ }
+ it('negotiates both catalogs and sends an opt-in model without adding it to accept',async()=>{
+  const {client,bodies}=setup();const current=await client.status();expect(current.terminalModels).toEqual(models);
+  const model={provider:'claude-cli' as const,modelId:'claude-opus-4-8',effort:'high' as const};
+  await client.turn({message:'hi',expectedContextRevision:'context-1',model});expect(bodies[0]?.model).toEqual(model);expect(bodies[0]).not.toHaveProperty('accept');
+  await client.turn({message:'hi',expectedContextRevision:'context-1'});expect(bodies[1]).not.toHaveProperty('model');expect(bodies[1]).toEqual({protocolVersion:1,requestId:'model-turn',message:'hi',expectedContextRevision:'context-1'});
+ });
+ it('refuses an override on an older Desktop before sending while legacy turns still work',async()=>{
+  const {client,bodies}=setup(false);expect((await client.status()).terminalModels).toBeUndefined();
+  await expect(client.turn({message:'hi',expectedContextRevision:'context-1',model:{provider:'codex',modelId:'gpt-6.1-sol'}})).rejects.toThrow(/update/i);expect(bodies).toHaveLength(0);
+  await client.turn({message:'hi',expectedContextRevision:'context-1'});expect(bodies[0]).not.toHaveProperty('model');
+ });
+});

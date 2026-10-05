@@ -2,6 +2,7 @@ import type { Key } from "ink";
 import { describe, expect, it } from "vitest";
 
 import {
+  keyBarShownHints,
   RESERVED_KEYS,
   approvesCard,
   cardKeysOffScreen,
@@ -382,4 +383,8 @@ describe("a card scrolled off screen (W3L2-M2): no key approves what the user ca
     // A drawn approval view's own hints, filtered the same way, keep n.
     expect(keyBarHints(onScreen).filter((hint) => !approvesCard(hint)).map((hint) => hint.key)).toEqual(["v", "n", "o", "w", "?"]);
   });
+});
+
+it('a modal picker can hide unavailable global commands', () => {
+  expect(keyBarShownHints([{key:'esc',label:'back'}], {sides:false,commands:false})).toEqual([{key:'esc',label:'back'}]);
 });
