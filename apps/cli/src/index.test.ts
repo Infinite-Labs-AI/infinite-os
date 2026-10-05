@@ -4573,14 +4573,19 @@ describe("cli smoke", () => {
     }
   });
 
+  it("bare model gives noninteractive guidance without asking for auth", async () => {
+    const result = await runSlashCommand("/model", { GROWTH_OS_CLI_NONINTERACTIVE: "1" });
+    expect(renderCliResult(result)).toContain("/model inside infinite local");
+  });
+
   it("lists supported models from the shared provider catalog", async () => {
     const result = await runCommand("model", ["list"], {});
 
     expect(result).toMatchObject({
       ok: true,
       providers: [
-        { provider: "codex", models: ["gpt-5.5", "gpt-5.4"] },
-        { provider: "claude", models: ["claude-sonnet-4-6", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-5", "claude-haiku-4-5-20251001"] }
+        { provider: "codex", models: ["gpt-6.1-sol", "gpt-5.5", "gpt-5.4"] },
+        { provider: "claude", models: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5-20251001"] }
       ]
     });
   });

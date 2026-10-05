@@ -1,3 +1,4 @@
+import { requireDesktopModel, type DesktopTurnModel } from "./model-selection.js";
 import type { ChatProgressEvent } from "@infinite-os/llm-controller";
 import {
   type CreativeDraftFrameV1,
@@ -208,7 +209,8 @@ function errorText(error: unknown): string {
  */
 export function adaptDesktopClientToTurnSource(
   client: DesktopAppClient,
-  contextRevision: string
+  contextRevision: string,
+  model?: DesktopTurnModel
 ): DesktopTurnSourceClient {
   return {
     get sessionCapable() {
@@ -228,6 +230,7 @@ export function adaptDesktopClientToTurnSource(
         {
           message: input.message,
           expectedContextRevision: contextRevision,
+          ...(model ? {model} : {}),
           ...(input.sessionId ? { sessionId: input.sessionId } : {}),
           ...(input.interactive ? { interactive: input.interactive } : {}),
           signal: input.signal
@@ -273,8 +276,10 @@ export interface DesktopSessionTurnDeps {
   /** Test seam: build the turn-source over a client + fresh contextRevision. */
   createTurnSource?: (
     client: DesktopAppClient,
-    contextRevision: string
+    contextRevision: string,
+    model?: DesktopTurnModel
   ) => DesktopInteractiveTurnSource;
+  getTerminalModel?: () => DesktopTurnModel | undefined;
   /**
    * Called with each READY status a turn ran against (the per-turn preflight),
    * so the session's top bar follows the app: its workspace and, from a
@@ -359,9 +364,9 @@ export function createDesktopSessionTurnRunner(
 ): DesktopSessionTurnRunner {
   const buildTurnSource =
     deps.createTurnSource ??
-    ((client: DesktopAppClient, contextRevision: string) =>
+    ((client: DesktopAppClient, contextRevision: string, model?: DesktopTurnModel) =>
       createDesktopTurnSource(
-        adaptDesktopClientToTurnSource(client, contextRevision)
+        adaptDesktopClientToTurnSource(client, contextRevision, model)
       ));
   let inFlight = false;
   let sessionId: string | undefined;
@@ -423,6 +428,8 @@ export function createDesktopSessionTurnRunner(
           );
         }
         const status = await resolved.client.status();
+        const model = deps.getTerminalModel?.();
+        if (model) requireDesktopModel(status, model);
         if (!status.ready) {
           throw new DesktopAppClientError(
             status.error?.code ?? "desktop_not_ready",
@@ -455,13 +462,14 @@ export function createDesktopSessionTurnRunner(
           resolved.descriptor.bootId,
           status,
           interactive,
+          model,
         );
         if (lastScope !== undefined && scope !== lastScope) {
           sessionId = undefined;
         }
         lastScope = scope;
         lastClient = resolved.client;
-        const source = buildTurnSource(resolved.client, status.contextRevision);
+        const source = buildTurnSource(resolved.client, status.contextRevision, model);
         const result = await source.runTurn(
           message,
           sessionId,
@@ -491,6 +499,7 @@ function turnScopeFingerprint(
   bootId: string,
   status: DesktopStatus,
   interactive?: InteractiveWorkspaceRequestV1,
+  model?: DesktopTurnModel,
 ): string {
   return JSON.stringify([
     bootId,
@@ -501,5 +510,5 @@ function turnScopeFingerprint(
     status.provider?.model ?? null,
     interactive?.profile ?? null,
     interactive?.cwd ?? null,
-  ]);
+    ...(model ? [model.provider,model.modelId,model.effort??null] : []),  ]);
 }

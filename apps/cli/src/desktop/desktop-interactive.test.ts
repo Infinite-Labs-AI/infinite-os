@@ -822,3 +822,12 @@ function changeView() {
     body: { target: { kind: "ad", label: "Hook B" }, rows: [], warnings: [] }
   };
 }
+it('snapshots the terminal provider per turn and clears it without leaking sessions',async()=>{
+ let choice: import('./model-selection.js').DesktopTurnModel|undefined={provider:'codex',modelId:'gpt-6.1-sol',effort:'high'};
+ const sent: Array<{model?:unknown;sessionId?:string;expectedContextRevision:string}>=[];
+ const client={sessionCapable:true,status:async()=>({...statusFor({rev:'1'}),terminalModels:[{provider:'codex',id:'gpt-6.1-sol',label:'Sol',efforts:['high'],connected:true,selectable:true},{provider:'claude-cli',id:'claude-opus-4-8',label:'Opus',efforts:[],connected:true,selectable:true}]}),turn:async(input:typeof sent[number])=>{sent.push(input);return {sessionId:`session-${sent.length}`,message:'ok',actionCalls:[]};}} as unknown as DesktopAppClient;
+ const runner=createDesktopSessionTurnRunner({resolveBridge:()=>({descriptor:{bootId:'boot-1'},client}),getTerminalModel:()=>choice});
+ await runner.turn('one');choice={provider:'claude-cli',modelId:'claude-opus-4-8'};await runner.turn('two');choice=undefined;await runner.turn('three');
+ expect(sent.map(s=>s.model)).toEqual([{provider:'codex',modelId:'gpt-6.1-sol',effort:'high'},{provider:'claude-cli',modelId:'claude-opus-4-8'},undefined]);
+ expect(sent.map(s=>s.sessionId)).toEqual([undefined,undefined,undefined]);expect(sent[2]).not.toHaveProperty('model');
+});

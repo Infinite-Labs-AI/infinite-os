@@ -1,3 +1,4 @@
+import { ModelPicker, useModelPicker, modelPickerLines, type ModelPickerAdapter } from "./model-picker.js";
 import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { stdin as defaultInput, stderr as defaultErrorOutput, stdout as defaultOutput } from "node:process";
@@ -264,6 +265,7 @@ export interface InkInteractiveSessionAppProps {
   // masked field loop), a deferred provider (returns a `note` line to show), or
   // nothing of interest (`none`/undefined → normal routing). Owned by index.ts so
   // the registry/copy/dispatch helpers stay there; the TUI only renders + collects.
+  modelPicker?: ModelPickerAdapter;
   connectWizard?: (line: string) => ConnectWizardDecision | undefined;
   // Build the leading-slash `/connect <provider> <name> <json>` dispatch line on
   // final confirm (index.ts's `buildConnectDispatchLine`, which owns normalization
@@ -506,6 +508,7 @@ export function buildProjectSelectionPrompt(selection: {
 export function InkInteractiveSessionApp({
   columns: columnsOverride,
   connectWizard,
+  modelPicker: modelPickerAdapter,
   buildConnectDispatch,
   getAgentTitle,
   getCompletions,
@@ -1133,7 +1136,13 @@ export function InkInteractiveSessionApp({
   // empty (views/focus.ts: only what works on the focused view). Otherwise the
   // bar is the composer's: `esc stop` while a stoppable turn runs (the only key
   // that works then), nothing when idle.
+  const modelPickerResult = useCallback((text: string) => appendMessages([{kind: "slash", role: "system", text}]), [appendMessages]);
+  const modelPicker = useModelPicker(modelPickerAdapter, modelPickerResult);
+
   const keyHintsFor = (turn: LiveTurnRender | null) => {
+    if (modelPicker.state?.step === "saving") return [];
+    if (modelPicker.state?.step === "auth" || modelPicker.state?.step === "loading") return [{key:"esc",label:"cancel"}];
+    if (modelPicker.state) return [{key:"↑↓",label:"move"},{key:"enter",label:"select"},{key:"esc",label:modelPicker.state.step === "models" ? "close" : "back"}];
     // While a streamed follow-up runs the view keys rest, as during any running turn.
     const quiet = !confirmKeys && inputValue.length === 0
       && !pendingSelection && !pendingOperatorLine && !pendingFieldPrompt && !followUpRunning;
@@ -1163,8 +1172,8 @@ export function InkInteractiveSessionApp({
     return runningBarHints(hints, followUpRunning && turnStoppable);
   };
   const completions = useMemo(
-    () => getCompletions?.(inputValue).slice(0, 6) ?? [],
-    [getCompletions, inputValue]
+    () => modelPicker.state ? [] : getCompletions?.(inputValue).slice(0, 6) ?? [],
+    [getCompletions, inputValue, modelPicker.state]
   );
   const selectedCompletionIndex = completions.length
     ? Math.min(completionIndex, completions.length - 1)
@@ -1577,6 +1586,7 @@ export function InkInteractiveSessionApp({
     // falls through to the normal routing (so `/connect <provider> {json}` and the
     // oauth subcommands keep working). The raw `/connect <provider>` user line is
     // already echoed above; no secret is in it.
+    if (line.trim() === "/model" && modelPickerAdapter) { modelPicker.open(); return; }
     const connectDecision = connectWizard?.(line);
     if (connectDecision && connectDecision.kind === "wizard") {
       startConnectWizard(connectDecision.descriptor);
@@ -1601,7 +1611,7 @@ export function InkInteractiveSessionApp({
     }
 
     void submitExecutableLine(line);
-  }, [appendMessages, commitLatestTurn, connectWizard, pendingOperatorLine, requiresConfirmation, requiresSelection, startConnectWizard, submitExecutableLine]);
+  }, [appendMessages, commitLatestTurn, connectWizard, modelPickerAdapter, modelPicker.open, pendingOperatorLine, requiresConfirmation, requiresSelection, startConnectWizard, submitExecutableLine]);
 
   const selectPendingOption = useCallback((direction: "next" | "previous") => {
     setPendingSelection((current) => {
@@ -1920,6 +1930,7 @@ export function InkInteractiveSessionApp({
       pendingSelection ||
       pendingFieldPrompt ||
       pendingConnectConfirm ||
+      modelPicker.state ||
       pendingConfirmActions.length > 0 ||
       confirmsInFlight > 0 ||
       queuedLines.length === 0
@@ -1935,7 +1946,7 @@ export function InkInteractiveSessionApp({
 
     setQueuedLines(remainingLines);
     runSubmittedLine(nextLine);
-  }, [busy, confirmsInFlight, pendingConfirmActions, pendingConnectConfirm, pendingFieldPrompt, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
+  }, [busy, confirmsInFlight, modelPicker.state, pendingConfirmActions, pendingConnectConfirm, pendingFieldPrompt, pendingOperatorLine, pendingSelection, queuedLines, runSubmittedLine]);
 
   const submitLine = useCallback((rawLine: string) => {
     // A new line ends the keys of the turn that went to scrollback (live L8), and the open fold.
@@ -2015,6 +2026,7 @@ export function InkInteractiveSessionApp({
   // slot; it is below the composer, so never into the composer-row prediction.
   // The rule over the composer is reserved with the composer.
   const composerText = activeFieldComposer ? activeFieldComposer.display : inputValue;
+  const modelPickerRows = modelPicker.state ? modelPickerLines(modelPicker.state).length : 0;
   const overlayRows = liveOverlayRows({
     // The write card is the latest turn's details, inside the live region.
     confirmAction: null,
@@ -2025,12 +2037,12 @@ export function InkInteractiveSessionApp({
     field: fieldPromptActive && pendingFieldPrompt ? pendingFieldPrompt : null,
     selection: pendingSelection?.prompt ?? null,
     width: columns
-  });
+  }) + modelPickerRows;
   // While a turn runs, the composer keeps three rows reserved, so a second
   // and third draft line never move the tail being read. A finished turn is
   // measured against the rows the composer really draws: a turn that fits on
   // screen stays live with its keys.
-  const composerRowsNow = composerRowsFor(composerText || connectPlaceholder, columns, t);
+  const composerRowsNow = modelPicker.state ? 0 : composerRowsFor(composerText || connectPlaceholder, columns, t);
   const reservedRows = homeInventoryRows
     + COMPOSER_RULE_ROWS
     + (transcriptBusy ? Math.max(DEFAULT_COMPOSER_ROWS, composerRowsNow) : composerRowsNow)
@@ -2202,7 +2214,12 @@ export function InkInteractiveSessionApp({
   // never reach the screen.
   const liveLatestShown = finishedOverflow ? null : liveLatest;
   const liveTranscript = finishedOverflow ? idleTranscript : turnTranscript;
-  const liveLayout = finishedOverflow ? layoutOf(null, idleTranscript) : turnLayout;
+  const transcriptLayout = finishedOverflow ? layoutOf(null, idleTranscript) : turnLayout;
+  // The picker is drawn above the composer, after the transcript. Include those
+  // live-frame rows in the cursor position without changing the paging window.
+  const liveLayout = modelPickerRows
+    ? { ...transcriptLayout, rowCount: transcriptLayout.rowCount + modelPickerRows }
+    : transcriptLayout;
   // The pane the keys are on, marked on the rule under the top bar (live L8):
   // the answer pane after tab switched sides, the details pane while a view is engaged.
   const panesNow = paneWidths(transcriptColumns(columns));
@@ -2322,6 +2339,7 @@ export function InkInteractiveSessionApp({
         transcript={liveTranscript}
         turnStartedAt={busyStartedAt}
       />
+      <ModelPicker state={modelPicker.state} theme={t} width={columns} />
       <SelectionMenu
         pending={pendingSelection}
         theme={t}
@@ -2341,6 +2359,7 @@ export function InkInteractiveSessionApp({
       <CreativeDraftLines lines={draftLines} theme={t} width={columns} />
       {composerRuleRows ? <AnsiLine line={ruleLine(columns, t)} /> : null}
       <InkLineInput
+        onModelPickerKey={modelPicker.state ? modelPicker.handleKey : undefined}
         busy={busy || followUpRunning}
         completionActive={completions.length > 0}
         rowsBelow={completions.length + keyBarRows}
@@ -2399,7 +2418,7 @@ export function InkInteractiveSessionApp({
         theme={t}
         width={columns}
       />
-      <KeyBar hints={keyHints} sides={bootFrameDrawn || (Boolean(liveTurn?.details) && !finishedOverflow)} theme={t} width={columns} />
+      <KeyBar hints={keyHints} commands={!modelPicker.state} sides={!modelPicker.state && (bootFrameDrawn || (Boolean(liveTurn?.details) && !finishedOverflow))} theme={t} width={columns} />
     </Box>
   );
 }
@@ -3210,6 +3229,7 @@ export function navigateInputHistory(
 }
 
 function InkLineInput({
+  onModelPickerKey,
   busy,
   completionActive,
   rowsBelow,
@@ -3262,6 +3282,7 @@ function InkLineInput({
   valueIsMasked,
   width
 }: {
+  onModelPickerKey?: (input: string, key: Key) => void;
   busy: boolean;
   completionActive: boolean;
   /** Rows drawn under the composer: an open completion menu, then the key bar. */
@@ -3339,6 +3360,7 @@ function InkLineInput({
   // handler: `v` on a card that had just appeared typed into the composer.
   const handleInputRef = useRef<(input: string, key: Key) => void>(() => {});
   handleInputRef.current = (input, key) => {
+    if (onModelPickerKey) { onModelPickerKey(input, key); return; }
     markCursorActivity();
     const editState = editRef.current;
     const value = editState.value;
@@ -3585,7 +3607,7 @@ function InkLineInput({
   // and never the native cursor (the rendered `value` is already the masked bullets
   // string for secret fields, so there is no raw value to position a cursor in).
   const fieldRowActive = fieldPromptActive && !fieldChoiceActive;
-  const overlayActive = selectionActive || connectConfirmActive || fieldRowActive || confirmActionActive;
+  const overlayActive = Boolean(onModelPickerKey) || selectionActive || connectConfirmActive || fieldRowActive || confirmActionActive;
   // The prompt is r4's cyan `❯`, with a write card open too (its keys are in the
   // key bar). An operator confirm shows a `!` and the pickers and /connect
   // fields a `?`, in amber: those rows take a typed answer, not a message.
@@ -3622,6 +3644,7 @@ function InkLineInput({
       ? renderComposerValueWithCursor(value, cursor, selection, { nativeCursor })
       : truncateCells(placeholder, inputWidth);
   const look = themeInkStyle(theme, value ? "text" : "muted");
+  if (onModelPickerKey) return null;
 
   return (
     <Box width={width}>
