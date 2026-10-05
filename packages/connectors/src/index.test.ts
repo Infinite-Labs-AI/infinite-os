@@ -86,15 +86,14 @@ describe("trusted server Meta CLI isolation", () => {
     }
   });
 
-  it("surfaces sanitized structured Meta provider rejection from isolated CLI stderr", async () => {
+  it("surfaces sanitized real CLI provider rejection from isolated stderr", async () => {
     const dir = mkdtempSync(join(tmpdir(), "meta-server-test-"));
     const secret = "EAA_REAL_ACTIVE_TOKEN_123";
     const tokenLike = "EAA_TOKEN_SHAPED_VALUE_456";
     const executable = fakeExecutable(
       dir,
-      `const body = { error: { message: "DSA beneficiary required ${secret} ${tokenLike}", code: 100, error_subcode: 2446394, error_user_title: "Missing DSA defaults", error_user_msg: "Set the beneficiary and payor in Ads Manager." } };
-process.stderr.write("provider request failed 400 for https://graph.facebook.com/v25.0/act_123/adsets?access_token=${secret}: " + JSON.stringify(body));
-process.exit(1);`
+      `process.stderr.write("Error: API error (100): DSA beneficiary required ${secret} ${tokenLike}\\nSet the beneficiary and payor.\\n");
+process.exit(4);`
     );
     try {
       const credential = bindMetaAdsCliExecution(
@@ -104,7 +103,7 @@ process.exit(1);`
       await expect(createMetaCampaign(credential, campaign)).rejects.toMatchObject({
         code: "meta_provider_rejection",
         retryable: false,
-        message: expect.stringContaining("Missing DSA defaults")
+        message: expect.stringContaining("Set the beneficiary and payor")
       });
       await expect(createMetaCampaign(credential, campaign)).rejects.not.toThrow(secret);
       await expect(createMetaCampaign(credential, campaign)).rejects.not.toThrow(tokenLike);
