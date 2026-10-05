@@ -336,6 +336,8 @@ export interface TurnModel {
 }
 
 export interface ModelRequest {
+  /** Opt-in native CLI tools, still executed and recorded by this controller. */
+  executeTools?: (calls: ModelToolCall[]) => Promise<ModelToolResult[]>;
   model?: TurnModel;
   systemPrompt: string;
   userMessage: string;
@@ -371,6 +373,7 @@ export interface ModelResponse {
 }
 
 export interface InfiniteOsModelClient {
+  nativeToolExecution?: boolean;
   complete: (request: ModelRequest) => Promise<ModelResponse>;
   modelMetadata?: (model?: TurnModel) => { provider?: "codex" | "claude"; model?: string; authSource?: string };
 }
@@ -757,6 +760,64 @@ export function createLlmController(options: {
           });
         }
       });
+      const executeAndRecordToolCalls = async (calls: ModelToolCall[]) => {
+        const progressLabels = new Map<string, string>();
+        for (const call of calls) {
+          const actionId = normalizeToolCallName(call.name, options.registry, scopedAppTools, withheldActionIds);
+          const message = toolCallProgressMessage(advisedQuestion, call, options.registry, scopedAppTools, withheldActionIds);
+          progressLabels.set(call.id, message);
+          await emitLegacy({ stage: "tool", message });
+          await emitInfinite({
+            type: "tool.generating",
+            stage: "tool",
+            message: `Drafting ${actionId}.`,
+            name: actionId
+          });
+        }
+        const nextCalls = await executeToolCalls(options.registry, calls, scopedInput, {
+          scopedAppTools,
+          withheldActionIds,
+          progressLabels,
+          nowMs: () => now().getTime(),
+          emitToolStart: async (event) => emitInfinite(event),
+          emitToolProgress: async (event) => emitInfinite(event),
+          emitToolComplete: async (event) => emitInfinite(event)
+        });
+        for (const call of nextCalls) {
+          if (persistTurn) {
+            await sessionStore?.recordActionCall({
+              sessionId,
+              providerToolCallId: call.id,
+              actionId: call.actionId,
+              authority: call.requiresConfirmation ? "operator" : "tool_agent",
+              input: call.input,
+              outputEnvelope: call.envelope,
+              status: call.status,
+              requiresConfirmation: call.requiresConfirmation,
+              confirmationId: call.confirmationId,
+              inputHash: call.inputHash,
+              // P0-A: pin the action call to the authoring workspace so the confirm
+              // path can fail closed on a cross-workspace confirmation.
+              workspaceId: input.workspaceId
+            });
+          }
+          actionCalls.push(call);
+          const toolResult = modelToolResult(call);
+          toolResults.push(toolResult);
+          advisorResults.push({ name: toolResult.name, result: toolResult.result, input: call.input });
+        }
+        return nextCalls;
+      };
+      let nativeConfirmationPending = false;
+      let nativeToolCount = 0;
+      const nativeExecuteTools = async (calls: ModelToolCall[]): Promise<ModelToolResult[]> => {
+        if (nativeConfirmationPending) throw new Error("Operator confirmation is required before continuing.");
+        nativeToolCount += calls.length;
+        if (nativeToolCount > maxToolIterations * 8) throw new Error("The tool call limit was reached.");
+        const executed = await executeAndRecordToolCalls(calls);
+        nativeConfirmationPending = executed.some(call => call.requiresConfirmation);
+        return executed.map(modelToolResult);
+      };
       let usage: ModelResponse["usage"];
       try {
         for (let iteration = 0; iteration < maxToolIterations; iteration += 1) {
@@ -772,6 +833,7 @@ export function createLlmController(options: {
           const prompt = assemblePrompt(refinementSections, synthesisSections);
           const streamState = { messageStarted: false };
           const response = await modelClient.complete({
+            ...(modelClient.nativeToolExecution ? { executeTools: nativeExecuteTools } : {}),
             model: input.model,
             systemPrompt: prompt,
             userMessage: effectiveMessage,
@@ -782,6 +844,11 @@ export function createLlmController(options: {
             promptCacheKey: sessionId,
             ...streamCallbacks(streamState)
           });
+          if (nativeConfirmationPending) {
+            response.message = "This request includes an operator action that requires confirmation before execution.";
+            response.toolCalls = undefined;
+            streamState.messageStarted = false;
+          }
           usage = iteration === 0 ? mergeUsage(response.usage) : mergeUsage(usage, response.usage);
           if (usage) await input.onUsage?.(usage);
           if (!response.toolCalls?.length) {
@@ -809,51 +876,7 @@ export function createLlmController(options: {
               ...responseMetadata(usage)
             };
           }
-          const progressLabels = new Map<string, string>();
-          for (const call of response.toolCalls) {
-            const actionId = normalizeToolCallName(call.name, options.registry, scopedAppTools, withheldActionIds);
-            const message = toolCallProgressMessage(advisedQuestion, call, options.registry, scopedAppTools, withheldActionIds);
-            progressLabels.set(call.id, message);
-            await emitLegacy({ stage: "tool", message });
-            await emitInfinite({
-              type: "tool.generating",
-              stage: "tool",
-              message: `Drafting ${actionId}.`,
-              name: actionId
-            });
-          }
-          const nextCalls = await executeToolCalls(options.registry, response.toolCalls, scopedInput, {
-            scopedAppTools,
-            withheldActionIds,
-            progressLabels,
-            nowMs: () => now().getTime(),
-            emitToolStart: async (event) => emitInfinite(event),
-            emitToolProgress: async (event) => emitInfinite(event),
-            emitToolComplete: async (event) => emitInfinite(event)
-          });
-          for (const call of nextCalls) {
-            if (persistTurn) {
-              await sessionStore?.recordActionCall({
-                sessionId,
-                providerToolCallId: call.id,
-                actionId: call.actionId,
-                authority: call.requiresConfirmation ? "operator" : "tool_agent",
-                input: call.input,
-                outputEnvelope: call.envelope,
-                status: call.status,
-                requiresConfirmation: call.requiresConfirmation,
-                confirmationId: call.confirmationId,
-                inputHash: call.inputHash,
-                // P0-A: pin the action call to the authoring workspace so the confirm
-                // path can fail closed on a cross-workspace confirmation.
-                workspaceId: input.workspaceId
-              });
-            }
-            actionCalls.push(call);
-            const toolResult = modelToolResult(call);
-            toolResults.push(toolResult);
-            advisorResults.push({ name: toolResult.name, result: toolResult.result, input: call.input });
-          }
+          const nextCalls = await executeAndRecordToolCalls(response.toolCalls);
           if (nextCalls.some((call) => call.requiresConfirmation)) {
             const message = "This request includes an operator action that requires confirmation before execution.";
             if (persistTurn) {

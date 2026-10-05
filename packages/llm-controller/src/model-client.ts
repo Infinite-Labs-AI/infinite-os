@@ -1,3 +1,4 @@
+import { supportedModelEffort, type ModelEffort, type TerminalModelSelection } from "@infinite-os/config";
 import {
   readInfiniteOsAuthState,
   readInfiniteOsModelSelection,
@@ -46,6 +47,8 @@ const CLAUDE_OAUTH_UNSUPPORTED_MESSAGE =
 export interface CreateConfiguredModelClientOptions {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
+  /** CLI-only default. A callback observes a new terminal choice on the next turn. */
+  selection?: TerminalModelSelection | (() => TerminalModelSelection | undefined);
 }
 
 type ModelStreamCallback = (delta: string) => Promise<void> | void;
@@ -60,9 +63,13 @@ export function createConfiguredModelClient(
 ): InfiniteOsModelClient {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetch ?? globalThis.fetch;
+  const selected = () => {
+    if ((env.GROWTH_OS_MODEL_PROVIDER === "codex" || env.GROWTH_OS_MODEL_PROVIDER === "claude") && env.GROWTH_OS_MODEL_NAME) return readInfiniteOsModelSelection(env);
+    return (typeof options.selection === "function" ? options.selection() : options.selection) ?? readInfiniteOsModelSelection(env);
+  };
   return {
     modelMetadata(model?: TurnModel) {
-      const selection = model ? { provider: "codex" as const, model: model.modelId } : readInfiniteOsModelSelection(env);
+      const selection = model ? { provider: "codex" as const, model: model.modelId } : selected();
       if (!selection.provider || !selection.model) {
         return {};
       }
@@ -75,11 +82,12 @@ export function createConfiguredModelClient(
     async complete(request) {
       // An accepted Codex override is independent of later changes to the persisted default.
       if (request.model) return completeForProvider("codex", request.model.modelId, request, env, fetchImpl);
-      const selection = readInfiniteOsModelSelection(env);
+      const selection = selected();
       if (!selection.provider || !selection.model) {
         return unconfiguredModelResponse();
       }
-      return completeForProvider(selection.provider, selection.model, request, env, fetchImpl);
+      const effort = "effort" in selection ? supportedModelEffort(selection.provider, selection.model, selection.effort) : undefined;
+      return completeForProvider(selection.provider, selection.model, request, env, fetchImpl, effort);
     }
   };
 }
@@ -89,10 +97,11 @@ async function completeForProvider(
   model: string,
   request: ModelRequest,
   env: NodeJS.ProcessEnv,
-  fetchImpl: typeof fetch
+  fetchImpl: typeof fetch,
+  effort?: ModelEffort
 ): Promise<ModelResponse> {
   if (provider === "codex") {
-    return completeWithCodex(request, model, env, fetchImpl);
+    return completeWithCodex(request, model, env, fetchImpl, effort);
   }
   if (provider === "claude") {
     return completeWithClaude(request, model, env, fetchImpl);
@@ -117,7 +126,8 @@ async function completeWithCodex(
   request: ModelRequest,
   model: string,
   env: NodeJS.ProcessEnv,
-  fetchImpl: typeof fetch
+  fetchImpl: typeof fetch,
+  selectedEffort?: ModelEffort
 ): Promise<ModelResponse> {
   const credentials = await resolveCodexRuntimeCredentials({ env, fetch: fetchImpl });
   if (!credentials?.token) {
@@ -127,7 +137,7 @@ async function completeWithCodex(
   const responseUrl = `${baseUrl.replace(/\/$/, "")}/responses`;
   const responseBody = JSON.stringify({
     model,
-    ...(request.model?.effort ? { reasoning: { effort: request.model.effort } } : {}),
+    ...((request.model?.effort ?? selectedEffort) ? { reasoning: { effort: request.model?.effort ?? selectedEffort } } : {}),
     store: false,
     stream: true,
     // The upstream codex CLI sends a stable prompt_cache_key (its thread id) on

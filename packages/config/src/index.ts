@@ -208,3 +208,5 @@ export * from "./growth-os-home.js";
 export * from "./workspace-id.js";
 export * from "./active-project.js";
 export * from "./daemon-endpoint.js";
+export * from './model-catalog.js';
+export * from './terminal-model.js';
