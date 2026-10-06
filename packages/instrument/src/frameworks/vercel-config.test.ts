@@ -69,6 +69,13 @@ it("reads exact rewrites beside unrelated template literals and escaped strings"
   expect(hasExactNextConfigRewrites(source.replace('destination: "https://us.i.posthog.com/:path"', 'destination: `${notion}/:path`'), usProxy)).toBe(false)
 })
 
+it("refuses an escaped string whose decoded source collides with a managed rewrite", () => {
+  const pairs = buildPosthogRewritePairs(usProxy).map((pair) => JSON.stringify(pair)).join(",")
+  const escaped = "/ingest/:path" + String.fromCharCode(92) + "x28.*)"
+  const config = `module.exports = { async rewrites() { return [{ source: "${escaped}", destination: "https://evil.example/:path" }, ${pairs}] } }`
+  expect(hasExactNextConfigRewrites(config, usProxy)).toBe(false)
+})
+
 describe("buildPosthogRewritePairs", () => {
   it("orders the assets rule before the catch-all and derives the prefix from proxy.path", () => {
     expect(buildPosthogRewritePairs(usProxy)).toEqual([US_STATIC, US_ARRAY, US_INGEST])

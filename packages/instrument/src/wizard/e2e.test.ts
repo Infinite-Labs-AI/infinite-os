@@ -11,6 +11,7 @@ import { execFileSync, spawn } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import vm from "node:vm"
+import ts from "typescript"
 
 import { afterEach, beforeAll, describe, expect, it } from "vitest"
 
@@ -20,6 +21,8 @@ import { FAKE_PROOF_BODY, FAKE_RESERVED_SITE_KEY, FAKE_RUN_STARTED_AT, type Fake
 import type { TagHosting, TagKeys } from "./contracts/bridge.js"
 import type { ReportV2 } from "./contracts/report.js"
 import { renderTerminal } from "./report.js"
+import { capturePasteAsWritten } from "../jobs/briefs.js"
+import { buildHostGuardExpression } from "../host-guard.js"
 import type { TestResult, TestRunRequest } from "./contracts/test-engine.js"
 import {
   BUILT_CLI,
@@ -594,6 +597,61 @@ describe("the offline end-to-end run (§4.3)", () => {
 // ---------------------------------------------------------------------------------------------
 
 describe("a strict pages-router site with adopted tags and fork-only access", () => {
+  it("runs a scripted worker through annotated guard, escaped-source rewrites, privacy, and landing capture checks", { timeout: RUN_TIMEOUT }, async () => {
+    const capture = capturePasteAsWritten("typescript_module", "not_required").split("\n").map((line) => `  ${line}`).join("\r\n")
+    const guard = buildHostGuardExpression({ mode: "deny", exempt: [PRODUCTION_HOST, `www.${PRODUCTION_HOST}`, "acme-store.vercel.app"], deny: [] })
+      .replaceAll("(function (h) {", "(function (h: string) {")
+      .replace("})(h), i;", "})(h), i: number;")
+    const remote = "posthog.init('phc_FAKEtestProjectKeyNotReal000', { api_host: 'https://us.i.posthog.com' });"
+    const proxy = "posthog.init('phc_FAKEtestProjectKeyNotReal000', { api_host: '/ingest', ui_host: 'https://us.posthog.com', capture_pageview: 'history_change', defaults: '2026-01-30' });"
+    const start = `declare const gtag: (...args: unknown[]) => void;\ndeclare const fbq: (...args: unknown[]) => void;\ndeclare const posthog: { init(key: string, options: object): void };\nexport function boot() {\n  gtag('config', 'G-FAKE00001');\n  ${remote}\n  fbq('init', '${FIXTURE_PIXEL_ID}');\n}\n`
+    const withCapture = `${capture}\n${start}`
+    const withGuard = withCapture.replace(`  fbq('init', '${FIXTURE_PIXEL_ID}');`, `  if (typeof window !== 'undefined' && ${guard}) {\n    fbq('init', '${FIXTURE_PIXEL_ID}');\n  }`)
+    const posthogRules = "{ source: '/ingest/static/:path(.*)', destination: 'https://us-assets.i.posthog.com/static/:path' },\n{ source: '/ingest/array/:path(.*)', destination: 'https://us-assets.i.posthog.com/array/:path' },\n{ source: '/ingest/:path(.*)', destination: 'https://us.i.posthog.com/:path' },\n{ source: '/infinite/ledger', destination: 'https://api.ultima.inc/api/analytics/events/collect' },\n"
+    const claim = (job_id: string) => ({ tool: "job_claim", args: { job_id, status: "done", note: "Applied the approved change and checked its placement." } })
+    const scenario = agentScenario({ round1: [
+      { tool: "job_list" },
+      { edit: { path: "src/common/tracking.ts", content: withCapture } }, claim("meta_improve:capture"),
+      { edit: { path: "src/common/tracking.ts", content: withGuard } }, claim("preview_guard:meta"),
+      { edit: { path: "src/common/tracking.ts", content: withGuard.replace(remote, proxy) } },
+      { replace: { path: "next.config.js", find: "return [\n", replace: `return [\n${posthogRules}` } }, claim("posthog_improve:proxy"), claim("unusual_layout:next_config_rewrites"),
+      { edit: { path: "pages/privacy.tsx", content: "export default function Privacy() { return <p>We use Infinite analytics to measure visits.</p> }\n" } }, claim("privacy_paragraph:page")
+    ] }) as { claude: { turns: unknown[] }; codex: { turns: unknown[] } }
+    scenario.codex.turns = [{ final: { verdict: "looks_good", summary: "The four edits pass their checks.", checklist: [], findings: [] } }]
+    const w = await world({ scenario, env: { E2E_FAST_CLOCK: "1" } })
+    rmSync(join(w.site.repo, "app"), { recursive: true, force: true })
+    mkdirSync(join(w.site.repo, "pages"), { recursive: true })
+    mkdirSync(join(w.site.repo, "src/common"), { recursive: true })
+    writeFileSync(join(w.site.repo, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, target: "es2020", lib: ["es2020", "dom"] } }))
+    writeFileSync(join(w.site.repo, "pages/_app.tsx"), "import { boot } from '../src/common/tracking'\nexport default function App({ Component, pageProps }: { Component: (props: Record<string, unknown>) => unknown; pageProps: Record<string, unknown> }) { if (typeof window !== 'undefined') boot(); return <Component {...pageProps} /> }\n")
+    writeFileSync(join(w.site.repo, "pages/index.tsx"), "export default function Home() { return <main>Start</main> }\n")
+    writeFileSync(join(w.site.repo, "pages/privacy.tsx"), "export default function Privacy() { return <p>We measure visits.</p> }\n")
+    writeFileSync(join(w.site.repo, "src/common/tracking.ts"), start)
+    writeFileSync(join(w.site.repo, "next.config.js"), "module.exports = { async rewrites() { const docs = 'https://docs.acme.example'; return [\n{ source: '/v:version\\x28.*)', destination: '/api/version' },\n{ source: '/docs/:path*', destination: `${docs}/:path*` }\n] } }\n")
+    commitAndPush(w, "Strict pages-router worker site")
+    const approvals = answersFile()
+    const plan = approvals.plan as { approved: string[]; declined: string[] }
+    approvals.privacyText = true
+    plan.approved.push("capture_beside_adopted_pixel:meta:capture", "improve_additive:posthog:proxy", "preview_guard_adopted:meta:init", "privacy_text")
+    ;(plan as { edits?: Record<string, string> }).edits = { privacy_text: "We use Infinite analytics to measure visits." }
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w, approvals)], respond: (ask) => ask.kind === "merge-ready" ? "later" : undefined, timeoutMs: RUN_TIMEOUT })
+    const jobs = finalJobs(w)
+    for (const id of ["meta_improve:capture", "preview_guard:meta", "posthog_improve:proxy", "privacy_paragraph:page", "unusual_layout:next_config_rewrites"]) {
+      const job = jobs.find((entry) => entry.id === id)
+      expect(job, `${id}: ${trace(run)}`).toBeDefined()
+      expect(job!.checks.some((check) => check.tier === "S" && check.state === "pass"), `${id}: ${JSON.stringify(job)}`).toBe(true)
+      expect(job!.checks.some((check) => check.state === "problem"), `${id}: ${JSON.stringify(job)}`).toBe(false)
+    }
+    expect(agentRuns(w, "claude", "worker").length).toBeGreaterThan(0)
+    expect(jobs.find((entry) => entry.id === "meta_improve:capture")!.checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: "fbc_capture", tier: "T0", state: "pass" })]))
+    expect(readFileSync(join(w.site.repo, "src/common/tracking.ts"), "utf8")).toContain("function (h: string)")
+    expect(readFileSync(join(w.site.repo, "next.config.js"), "utf8")).toContain("\\x28")
+    expect(readFileSync(join(w.site.repo, "pages/privacy.tsx"), "utf8")).toContain("We use Infinite analytics to measure visits.")
+    expect(readGhState(w.ghState).prs).toHaveLength(1)
+    const program = ts.createProgram([join(w.site.repo, "src/common/tracking.ts")], { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, lib: ["lib.es2020.d.ts", "lib.dom.d.ts"], skipLibCheck: true })
+    expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
+  })
+
   it("opens the PR from the viewer fork and leaves absent preview checks unmeasured", { timeout: RUN_TIMEOUT }, async () => {
     const w = await world({
       gh: { repo: { nameWithOwner: "acme/acme-store", isPrivate: true, defaultBranch: "main", viewerPermission: "TRIAGE", allowForking: true }, deployments: [] },

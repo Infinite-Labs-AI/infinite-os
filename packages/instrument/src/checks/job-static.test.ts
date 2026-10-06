@@ -215,6 +215,10 @@ describe("job 12: the CSP hosts", () => {
 describe("job 14: the privacy paragraph", () => {
   const job14 = item("privacy_paragraph", "page", ["app/privacy/page.tsx"])
   const text = "We use Google Analytics and PostHog to measure visits."
+  it("does not treat a JSX comment as the approved visible paragraph", async () => {
+    const source = `export default function Privacy() { return <main>{/* ${text} */}</main> }`
+    expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": source }, job14, { privacyText: text, newTools: ["ga4", "posthog"] })).state).toBe("problem")
+  })
   it("the approved paragraph naming every new tool passes; a missing tool or an edited paragraph is a problem", async () => {
     const page = (body: string) => `export default function Privacy() {\n  return (\n    <main>\n      <p>\n        ${body}\n      </p>\n    </main>\n  )\n}\n`
     expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": page(text) }, job14, { privacyText: text, newTools: ["ga4", "posthog"] })).state).toBe("pass")

@@ -28,6 +28,8 @@
 // `acme.vercel.app`) and does not appear in the guard's literals.
 import { HOST_DENY_V1, normalizeHost } from "../wizard/contracts/host-deny.js"
 import { buildHostGuardExpression } from "../host-guard.js"
+import { escapeForTemplateLiteral } from "../text-escape.js"
+import { lexicalStates } from "../lexical-states.js"
 
 import { codeView, groupFindings, matchingBracket, sourceUnits, unitLine } from "./code-view.js"
 import { hostGuardMissingMessage, hostGuardPresentMessage, hostGuardSilencesProductionMessage } from "./copy.js"
@@ -56,8 +58,70 @@ function withoutGuardTypeAnnotations(expression: string): string {
     .replace(/\}\)\(h\), i\s*:\s*number;/, "})(h), i;")
 }
 
-function isExactEmittedGuard(expression: string, expected: string | null): boolean {
-  return expected !== null && withoutGuardTypeAnnotations(expression) === expected
+function wholeParens(text: string): string {
+  let value = text.trim()
+  while (value.startsWith("(") && matchingBracket(value, 0) === value.length - 1) value = value.slice(1, -1).trim()
+  return value
+}
+
+/** A conjunction needs the guard to be true; an OR does not. Split only outside brackets and quotes. */
+function conjuncts(text: string): string[] | null {
+  const parts: string[] = []
+  let quote: string | null = null
+  let depth = 0
+  let start = 0
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!
+    if (quote) {
+      if (char === "\\") index += 1
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'" || char === "`") { quote = char; continue }
+    if (char === "(" || char === "[" || char === "{") depth += 1
+    else if (char === ")" || char === "]" || char === "}") depth -= 1
+    else if (depth === 0 && text.slice(index, index + 2) === "||") return null
+    else if (depth === 0 && text.slice(index, index + 2) === "&&") {
+      parts.push(text.slice(start, index).trim())
+      start = index + 2
+      index += 1
+    }
+  }
+  parts.push(text.slice(start).trim())
+  return parts
+}
+
+/** Before the plan exists, accept only a structurally exact raw emission; it cannot prove host approval. */
+function matchesEmissionShape(expression: string, templateLiteral: boolean): boolean {
+  const marker = expression.includes("var x = ") ? "var x = " : "var a = "
+  const start = expression.indexOf(marker)
+  if (start < 0) return false
+  const open = start + marker.length
+  const close = matchingBracket(expression, open)
+  if (close < 0) return false
+  try {
+    const hosts = JSON.parse(expression.slice(open, close + 1)) as unknown
+    if (!Array.isArray(hosts) || !hosts.every((host) => typeof host === "string")) return false
+    const emitted = marker === "var x = "
+      ? buildHostGuardExpression({ mode: "deny", exempt: hosts, deny: [] })
+      : buildHostGuardExpression({ mode: "allow", hosts })
+    return expression === (templateLiteral ? escapeForTemplateLiteral(emitted) : emitted)
+  } catch {
+    return false
+  }
+}
+
+function isExactEmittedGuard(condition: string, expected: string | null, templateLiteral: boolean): boolean {
+  const parts = conjuncts(wholeParens(condition))
+  if (!parts) return false
+  return parts.some((part) => {
+    const expression = wholeParens(part)
+    if (!EMITTED_GUARD_START.test(expression)) return false
+    if (templateLiteral) return expected !== null ? expression === escapeForTemplateLiteral(expected) : matchesEmissionShape(expression, true)
+    const normalised = withoutGuardTypeAnnotations(expression)
+    if (expected !== null) return normalised === expected
+    return normalised === expression && matchesEmissionShape(expression, false)
+  })
 }
 const DENY_HOSTS = [...HOST_DENY_V1.deny.exact, ...HOST_DENY_V1.deny.suffix, ...HOST_DENY_V1.deny.suffix.map((suffix) => suffix.slice(1))]
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
@@ -81,12 +145,13 @@ export function readAdoptedInitGuards(files: ReadonlyMap<string, string>, expect
   for (const unit of sourceUnits(files)) {
     if (unit.managed) continue
     const code = codeView(unit.file, unit.text)
+    const states = lexicalStates(unit.text)
     for (const { tool, pattern } of INITS) {
       for (const match of code.matchAll(pattern)) {
         const at = match.index ?? 0
         const windowStart = Math.max(0, at - GUARD_WINDOW_CHARS)
         const window = code.slice(windowStart, at)
-        const guarded = governingGuard(code, windowStart, at, expectedEmittedGuard)
+        const guarded = governingGuard(code, windowStart, at, expectedEmittedGuard, states[at] === 2)
         const literalHosts = [...window.matchAll(/["']([a-z0-9-]+(?:\.[a-z0-9-]+)+\.?)["']/gi)].map((hit) => normalizeHost(hit[1] as string))
         reads.push({ tool, file: unit.file, line: unitLine(unit, at), guarded, literalHosts })
       }
@@ -96,7 +161,7 @@ export function readAdoptedInitGuards(files: ReadonlyMap<string, string>, expect
 }
 
 /** Does any `if (<host test>)` in the window govern the init at `initAt` with the right polarity? */
-function governingGuard(code: string, windowStart: number, initAt: number, expectedEmittedGuard: string | null): boolean {
+function governingGuard(code: string, windowStart: number, initAt: number, expectedEmittedGuard: string | null, templateLiteral: boolean): boolean {
   const window = code.slice(windowStart, initAt)
   const readsHost = HOST_READ.test(window)
   const candidates = new Set<number>()
@@ -107,7 +172,7 @@ function governingGuard(code: string, windowStart: number, initAt: number, expec
   for (const offset of [...candidates].sort((a, b) => b - a)) {
     const condition = enclosingIfCondition(code, offset, initAt)
     if (!condition) continue
-    const allowWhenTrue = conditionPolarity(code.slice(condition.open + 1, condition.close), expectedEmittedGuard)
+    const allowWhenTrue = conditionPolarity(code.slice(condition.open + 1, condition.close), expectedEmittedGuard, templateLiteral)
     if (allowWhenTrue === null) continue
     if (governs(code, condition.close, initAt, allowWhenTrue)) return true
   }
@@ -130,7 +195,7 @@ function enclosingIfCondition(code: string, offset: number, initAt: number): { o
  * Is the condition TRUE when the host is allowed (`true`), TRUE when it is denied (`false`), or
  * unreadable (`null`)? A leading `!` over the whole condition flips it.
  */
-function conditionPolarity(condition: string, expectedEmittedGuard: string | null): boolean | null {
+function conditionPolarity(condition: string, expectedEmittedGuard: string | null, templateLiteral: boolean): boolean | null {
   let text = condition.trim()
   let negated = false
   while (text.startsWith("!") && !text.startsWith("!=")) {
@@ -142,7 +207,7 @@ function conditionPolarity(condition: string, expectedEmittedGuard: string | nul
   }
   let allowWhenTrue: boolean
   if (EMITTED_GUARD_START.test(text)) {
-    if (!isExactEmittedGuard(text, expectedEmittedGuard)) return null
+    if (!isExactEmittedGuard(text, expectedEmittedGuard, templateLiteral)) return null
     allowWhenTrue = true
   } else if (GUARD_CALL.test(text)) {
     // A predicate negated inside a longer expression (`!hostAllowed() || x`) cannot be read.

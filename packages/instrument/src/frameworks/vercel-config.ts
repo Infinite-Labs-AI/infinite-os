@@ -833,9 +833,10 @@ function tokenizeNextConfig(source: string): JsToken[] | null {
       while (index < source.length) {
         const next = source[index]!
         if (next === "\\") {
-          if (index + 1 >= source.length || source[index + 1] === "\n" || source[index + 1] === "\r") return null
-          value += source.slice(index, index + 2)
-          index += 2
+          const escaped = decodeStringEscape(source, index)
+          if (!escaped) return null
+          value += escaped.value
+          index = escaped.next
           continue
         }
         if (next === quote) {
@@ -893,6 +894,28 @@ function tokenizeNextConfig(source: string): JsToken[] | null {
     index += 1
   }
   return tokens
+}
+
+/** Decode JS string literals before exact-pair comparison; an unknown escape makes the config unprovable. */
+function decodeStringEscape(source: string, at: number): { value: string; next: number } | null {
+  const escaped = source[at + 1]
+  if (!escaped) return null
+  const simple: Record<string, string> = { "0": "\0", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "/": "/" }
+  if (escaped in simple) return { value: simple[escaped]!, next: at + 2 }
+  if (escaped === "x") {
+    const hex = source.slice(at + 2, at + 4)
+    return /^[0-9a-fA-F]{2}$/.test(hex) ? { value: String.fromCharCode(parseInt(hex, 16)), next: at + 4 } : null
+  }
+  if (escaped === "u") {
+    if (source[at + 2] === "{") {
+      const end = source.indexOf("}", at + 3)
+      const hex = end < 0 ? "" : source.slice(at + 3, end)
+      return /^[0-9a-fA-F]{1,6}$/.test(hex) && parseInt(hex, 16) <= 0x10ffff ? { value: String.fromCodePoint(parseInt(hex, 16)), next: end + 1 } : null
+    }
+    const hex = source.slice(at + 2, at + 6)
+    return /^[0-9a-fA-F]{4}$/.test(hex) ? { value: String.fromCharCode(parseInt(hex, 16)), next: at + 6 } : null
+  }
+  return null
 }
 
 function declaredObjectExpressions(tokens: JsToken[]): Map<string, number> {

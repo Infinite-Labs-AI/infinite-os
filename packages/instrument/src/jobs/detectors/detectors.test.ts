@@ -259,6 +259,10 @@ describe("redirects (job 13)", () => {
 })
 
 describe("privacy-page (job 14)", () => {
+  it("does not count tool names that exist only in JSX comments", () => {
+    const [comment] = detectPrivacyPages(snap({ "pages/privacy.tsx": "export default function Privacy() { return <main>{/* We use Infinite (Ultima Inc.) to measure visits. */}</main> }" }))
+    expect(comment?.names.infinite).toBe(false)
+  })
   it("finds the privacy page and which tools it already names", () => {
     const found = detectPrivacyPages(snap({ "app/privacy/page.tsx": "<p>We use Google Analytics to count visits.</p>", "content/privacy-policy.mdx": "# Privacy\nPostHog." }))
     expect(found.map((finding) => [finding.file, finding.route, finding.names.ga4, finding.names.posthog])).toEqual([

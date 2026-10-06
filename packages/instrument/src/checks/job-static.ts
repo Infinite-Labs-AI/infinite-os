@@ -19,7 +19,7 @@ import { detectAuth } from "../jobs/detectors/auth.js"
 import { detectCspOwners } from "../jobs/detectors/csp-owner.js"
 import { detectConversionSuccessPaths, detectOutcomes, isServerFile } from "../jobs/detectors/outcomes.js"
 import { matchingBracket } from "../setup-checks/code-view.js"
-import { PRIVACY_TOOL_NAMES } from "../jobs/detectors/privacy-page.js"
+import { PRIVACY_TOOL_NAMES, privacyVisibleText } from "../jobs/detectors/privacy-page.js"
 import { boundConversionNames } from "../jobs/plan-data.js"
 import { capturesPageviewManually, META_STANDARD_EVENTS, POSTHOG_HISTORY_DEFAULTS_FROM, posthogApiHostUnset } from "../jobs/detectors/adopted-tags.js"
 import { POSTHOG_DEFAULTS_CURRENT } from "../install/improve.js"
@@ -597,14 +597,14 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       const page = [...scope][0]
       if (!page) return missing("privacy_names_installed_tools", ctx, "the privacy page is gone")
       const [file, text] = page
-      const visible = text.replace(/<[^>]*>/g, " ").replace(/[{}"'`]/g, " ").replace(/\s+/g, " ").toLowerCase()
+      const visible = privacyVisibleText(file, text).replace(/[{}"'`]/g, " ").replace(/\s+/g, " ").toLowerCase()
       const run = context()
       if (run.privacyText) {
         const wanted = run.privacyText.replace(/[{}"'`]/g, " ").replace(/\s+/g, " ").trim().toLowerCase()
         if (!visible.includes(wanted)) return missing("privacy_names_installed_tools", ctx, `${file} does not carry the approved paragraph verbatim`, file)
       }
       if (!run.newTools) return result("privacy_names_installed_tools", ctx, "undetermined", "the tools this run installs are not known", file)
-      const unnamed = run.newTools.filter((tool) => !PRIVACY_TOOL_NAMES[tool].test(text))
+      const unnamed = run.newTools.filter((tool) => !PRIVACY_TOOL_NAMES[tool].test(visible))
       if (unnamed.length > 0) return result("privacy_names_installed_tools", ctx, "problem", `${file} does not name ${unnamed.join(", ")}`, file)
       return result("privacy_names_installed_tools", ctx, "pass", `${file} names every tool this run installs`, file)
     }),

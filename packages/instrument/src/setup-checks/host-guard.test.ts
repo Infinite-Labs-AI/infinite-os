@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 
 import { checkHostGuard, readAdoptedInitGuards } from "./host-guard.js"
 import { buildHostGuardExpression } from "../host-guard.js"
+import { escapeForTemplateLiteral } from "../text-escape.js"
 
 const files = (record: Record<string, string>) => new Map(Object.entries(record))
 
@@ -18,6 +19,25 @@ const GUARDED_IIFE = [
 const GUARDED_CALL = "if (infiniteHostAllowed(['acme.com'])) {\n  gtag('config', 'G-ABC123')\n}"
 
 describe("adopted init host guard", () => {
+  it("accepts a verbatim escaped guard in a template-literal Script", () => {
+    const emitted = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
+    const source = `<Script id="analytics">{\`if (!(${escapeForTemplateLiteral(emitted)})) return; gtag('config', 'G-ABC123');\`}</Script>`
+    expect(checkHostGuard({ files: files({ "app/layout.tsx": source }), strict: true, productionHosts: ["acme.example"], expectedEmittedGuard: emitted }).findings.map((finding) => finding.code)).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])
+  })
+
+  it("accepts a required guard in an && condition or another whole pair of parentheses", () => {
+    const emitted = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
+    for (const condition of [`typeof window !== "undefined" && ${emitted}`, `(${emitted})`]) {
+      const source = `if (${condition}) { posthog.init('phc_abcdefghijklmnop', {}); }`
+      expect(checkHostGuard({ files: files({ "src/ph.ts": source }), strict: true, productionHosts: ["acme.example"], expectedEmittedGuard: emitted }).findings.map((finding) => finding.code)).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])
+    }
+  })
+
+  it("recognises structurally exact raw output in the doctor path before a production host is known", () => {
+    const emitted = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
+    const source = `function start() { if (!(${emitted})) return; fbq('init', '111222333444555'); }`
+    expect(checkHostGuard({ files: files({ "src/meta.ts": source }), strict: true }).findings.map((finding) => finding.code)).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])
+  })
   it("accepts only parameter and var TypeScript annotations on the approved emitted guard", () => {
     const emitted = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
     const annotated = emitted.replaceAll("(function (h) {", "(function (h: string) {").replace("})(h), i;", "})(h), i: number;")
