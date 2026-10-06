@@ -24,14 +24,14 @@ import { isUnsupported } from "../../hosts/other.js"
 import { classifyReview, isReviewResult, parseBriefReview, printedReviewBrief, reviewerBrief, type ClassifiedReview } from "../../review/brief.js"
 import { allowlistUnion, assertNoAgentAlive, bestEffortBridge, bridgeStop, manifestFiles, status, sub } from "../../review/context.js"
 import { parseUnifiedDiff } from "../../review/diff.js"
-import { job16Item, restoreFiles, runFixRound, snapshotFiles, verifyFix } from "../../review/fix.js"
+import { hookFixItem, job16Item, restoreFiles, runFixRound, snapshotFiles, verifyFix } from "../../review/fix.js"
 import { openFindings, parseLedger, recordDecisions, REVIEW_LEDGER_PATH, type ReviewLedger } from "../../review/ledger.js"
 import { wizardOwnership, type WizardOwnership } from "../../review/ownership.js"
 import { commentTrust, hasFinalMarker, hasReplyMarker, parseReviewMarker, stripMarkers } from "../../review/markers.js"
 import { AGENT_LABEL, buildFinalComment, buildReply, buildReviewPost, excerpt, FIX_ROUND_MINUTES, notFixedReply, redactIdsNotInDiff, safeText, type FixReplyState, type NotFixedOutcome } from "../../review/post.js"
 import { applyRehearsalToJobs, recordRehearsalCells, rehearse } from "../../review/rehearse.js"
 import { mergeRequirementLine } from "../../github/rules.js"
-import { checksSummary } from "../../github/checks.js"
+import { checksSummary, checkPolicy, commitChecks, type PrCheck } from "../../github/checks.js"
 import { DETERMINISTIC_CHECKS_BY_ITEM, fileRoleOf, isRepoRelativePath, leftByOwnerReason, pageHelperCalls, triage, triageKey, type FileRole, type PageHelperCall, type TriageDecision, type TriageItem } from "../../review/triage.js"
 import { escapeRegExp } from "../../text-escape.js"
 import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
@@ -64,6 +64,7 @@ interface Session {
   notes: string[]
   reviewed: boolean
   reviewer: AgentKind | "brief" | null
+  ciRepairAttempted?: boolean
   /** §3x.3 Whose code a finding is on (Infinite's runtime, the wizard's own change), and the wizard's own files. */
   ownership?: WizardOwnership
 }
@@ -599,6 +600,53 @@ async function replyAndResolve(
   }
 }
 
+class PrChecksStop extends Error {}
+
+/** One bounded CI repair, only for an actual base-green regression with a log naming this run's edits. */
+async function repairCi(session: Session, checks: PrCheck[], base: PrCheck[] | null): Promise<boolean> {
+  const { ctx, deps, ship, github } = session
+  const worker = ctx.state.get().agent?.worker
+  if (!github || !worker || session.ciRepairAttempted) return false
+  session.ciRepairAttempted = true
+  const receipt = JSON.parse((await deps.fs.readText(join(ctx.root, ".infinite/install.json"))) ?? "{}") as { edits?: Array<{ file: string; runId?: string }> }
+  const { managed } = await manifestFiles(deps, ctx.root)
+  const owned = [...new Set([...(receipt.edits ?? []).filter(edit => edit.runId === ship.runId).map(edit => edit.file), ...ctx.state.get().jobs.flatMap(job => (job.edits ?? []).map(edit => edit.file))])].filter(file => !managed.includes(file))
+  const logs: string[] = []
+  const files = new Set<string>()
+  for (const check of checks) {
+    if (!base?.some(previous => previous.name === check.name && previous.bucket === "pass")) return false
+    const run = /\/actions\/runs\/(\d+)/.exec(check.link ?? "")?.[1]
+    if (!run) return false
+    const log = await github.gh.run(["run", "view", run, "--log-failed"]).then(value => value.stdout).catch(() => null)
+    if (!log) return false
+    const named = owned.filter(file => log.includes(file))
+    if (named.length === 0) return false
+    named.forEach(file => files.add(file))
+    logs.push(`${check.name}:\n${ship.scanner.redact(log).text}`)
+  }
+  const item = hookFixItem([...files], logs.join("\n"))
+  item.id = "build_fix:pr_checks"
+  item.title = "Fix the new PR check failure in this run's files"
+  const snapshots = await snapshotFiles(deps, ctx.root, [...files])
+  const previous = await ship.git.head()
+  const fix = await runFixRound(ctx, deps, { step: "review", worker, items: [item], scanner: ship.scanner })
+  if (fix.run.outcome !== "completed") {
+    await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
+    return false
+  }
+  const verified = await verifyFix(ctx, deps, { runId: ship.runId, items: fix.items, editedFiles: fix.run.edits.map(edit => edit.file), edits: fix.run.edits })
+  if (!verified.buildOk || fix.run.edits.length === 0 || fix.run.edits.some(edit => !files.has(edit.file))) {
+    await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
+    return false
+  }
+  await deps.installer.recordEdits(fix.run.edits)
+  const commit = await stageAndCommit({ ctx, deps, git: ship.git, step: "review", scanner: ship.scanner, runId: ship.runId, message: "infinite-tag: fix PR checks", round: 1, allowlist: [...files], managed, npmFiles: [], connectionIds: ship.facts.connectionIds })
+  if (commit.kind !== "committed") return false
+  const synced = await syncHead(session, previous, commit.sha)
+  if ("head" in synced) session.notes.push("The CI repair was committed after the review; it has not had a separate second review.")
+  return "head" in synced
+}
+
 const CHECKS_POLL_MS = 30_000
 const CHECKS_WAIT_MS = 10 * 60_000
 /** gh says "no required checks reported" both when none are required and before GitHub registers them. */
@@ -606,15 +654,16 @@ const CHECKS_EMPTY_GRACE_MS = 60_000
 
 /**
  * Job 16's `pr_checks_pass` (S) on the pushed fix: polls all reported PR checks until they settle (every 30 s,
- * ≤ 10 minutes). No required check on the branch (still none after a minute) → pass ("none required"); a failing
- * one → problem; still running at the end, or unreadable → undetermined (never pass).
+ * ≤ 10 minutes). Empty, cancelled, unreadable and blocked-preview checks remain unmeasured.
+ * New failures get a bounded scoped repair; known base failures are reported without blocking.
  */
-async function requiredChecksResult(session: Session, runId: string): Promise<CheckResult | null> {
+async function requiredChecksResult(session: Session, runId: string, repair = true): Promise<CheckResult | null> {
   const { github, number, deps, ctx } = session
   if (!github || number === null) return null
   const started = deps.clock.now().getTime()
   const result = (state: CheckResult["state"], reason: string): CheckResult => ({ checkId: "pr_checks_pass", tier: "S", state, reason, at: ctx.now().toISOString(), runId })
   let read = false
+  const base = await commitChecks(github.gh, ctx.state.get().git!.baseSha).catch(() => null)
   sub(ctx, "review", "Checking the new commit's CI checks…", "pending")
   for (;;) {
     const elapsed = deps.clock.now().getTime() - started
@@ -622,9 +671,21 @@ async function requiredChecksResult(session: Session, runId: string): Promise<Ch
     if (checks !== null && !isUnsupported(checks)) {
       read = true
       const summary = checksSummary(checks)
-      if (summary.fail > 0) return result("problem", `Failed PR checks: ${checks.filter((check) => check.bucket === "fail" || check.bucket === "cancel").map((check) => check.name).join(", ")}`)
-      if (summary.total > 0 && summary.pending === 0) return result("pass", `${summary.pass} PR check(s) pass`)
-      if (summary.total === 0 && elapsed >= CHECKS_EMPTY_GRACE_MS) return result("pass", "no PR checks reported on this branch")
+      const policy = checkPolicy(checks, base)
+      for (const check of policy.blocked) {
+        const note = `${check.name}: preview not measured. Ask a hosting team member to authorise the deployment or give this GitHub author access to the linked project.`
+        if (!session.notes.includes(note)) { session.notes.push(note); sub(ctx, "review", note, "warn") }
+      }
+      for (const check of policy.existing) {
+        const note = `${check.name} also fails on the base commit; it does not block this run.`
+        if (!session.notes.includes(note)) { session.notes.push(note); sub(ctx, "review", note, "warn") }
+      }
+      if (policy.failing.length > 0) {
+        if (repair && await repairCi(session, policy.failing, base)) return requiredChecksResult(session, runId, false)
+        return result("problem", `Failed PR checks: ${policy.failing.map(check => check.name).join(", ")}${base === null ? " (base checks could not be read)" : ""}`)
+      }
+      if (summary.total > 0 && summary.pending === 0) return result(summary.pass > 0 ? "pass" : "undetermined", summary.pass > 0 ? `${summary.pass} PR check(s) pass` : "PR checks not measured; only blocked previews or existing failures reported")
+      if (summary.total === 0 && elapsed >= CHECKS_EMPTY_GRACE_MS) return result("undetermined", "no checks reported: not measured")
     }
     if (ctx.signal.aborted || elapsed + CHECKS_POLL_MS > CHECKS_WAIT_MS) return result("undetermined", read ? "checks pending" : "checks unreadable")
     await deps.clock.sleep(CHECKS_POLL_MS, ctx.signal)
@@ -635,6 +696,11 @@ async function requiredChecksResult(session: Session, runId: string): Promise<Ch
 async function finish(session: Session, options: { once?: boolean } = {}): Promise<void> {
   const { ctx, deps, ship } = session
   const state = ctx.state.get()
+  if (session.github && session.number !== null && (await session.github.readPr(session.number)).state === "OPEN") {
+    const verdict = await requiredChecksResult(session, ship.runId)
+    if (verdict) session.notes.push(verdict.reason ?? "PR checks not measured")
+    if (verdict?.state === "problem") throw new PrChecksStop(ship.scanner.redact(verdict.reason ?? "A PR check failed").text)
+  }
   if (options.once && session.github && session.number !== null) {
     const comments = await session.github.readComments(session.number).catch(() => [])
     if (comments.some((comment) => comment.author === session.login && hasFinalMarker(comment.body, ship.runId))) {
@@ -662,11 +728,6 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     if (line) {
       session.notes.push(line)
       sub(ctx, "review", line, "warn")
-    }
-    const checks = await session.github.checks(session.number).catch(() => [])
-    if (!isUnsupported(checks) && checks.length > 0) {
-      const summary = checksSummary(checks)
-      session.notes.push(`PR checks: ${summary.pass} pass · ${summary.fail} fail · ${summary.pending} pending.`)
     }
   }
   const report = deps.report.build({
@@ -777,6 +838,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   try {
     return await reviewRun(ctx, deps)
   } catch (error) {
+    if (error instanceof PrChecksStop) { await ctx.state.save(); return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `${error.message}. The pull request stays draft.`, resumeHint: "Resolve the named checks, then run `npx infinite-tag` to resume." } }
     const stop = bridgeStop(error)
     if (stop) {
       await ctx.state.save()
@@ -986,14 +1048,14 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       for (const [index, decision] of fixes.entries()) {
         const item = finalItems.find((candidate) => candidate.id === items[index]!.id)
         const failing = item?.checks.find((check) => check.state === "problem")
-        const why = !verified.buildOk ? "build: the build broke" : failing ? `${failing.id}: ${failing.reason ?? "problem"}` : null
+        const why = !verified.buildOk ? `build: ${verified.buildReason ?? "validation failed"}` : failing ? `${failing.id}: ${failing.reason ?? "problem"}` : null
         if (decision.item.threadId) notFixed.set(decision.item.threadId, { kind: "not_fixed", outcome: "checks_failed", why: why ? why.slice(0, 160) : null })
       }
       if (!verified.buildOk) {
         // Put the files back: nothing uncommitted stays on the PR branch, and nothing reaches the receipt.
         const leftOver = await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
         session.notes.push(
-          `Round ${round}: the agent's fixes broke the build, so the wizard put the files back and did not commit them.${leftOver.length > 0 ? ` Remove ${leftOver.join(", ")} (the agent created it).` : ""}`
+          `Round ${round}: the wizard could not accept the fixes (${verified.buildReason ?? 'validation failed'}), so it put the files back and did not commit them.${leftOver.length > 0 ? ` Remove ${leftOver.join(", ")} (the agent created it).` : ""}`
         )
       } else if (edited.length > 0) {
         await deps.installer.recordEdits(fix.run.edits)
@@ -1019,6 +1081,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
           fixSha = synced.head
           sub(ctx, "review", `${AGENT_LABEL[worker]} fixed ${items.length} comment${items.length === 1 ? "" : "s"} · new commit ${commit.sha.slice(0, 7)}`, "ok")
           const checksResult = await requiredChecksResult(session, prepared.runId)
+          fixSha = await prepared.git.head()
           if (checksResult) finalItems = deps.registry.apply(finalItems, [checksResult], prepared.runId)
           if (checksResult?.state === "problem") {
             ctx.state.update((draft) => {
@@ -1030,7 +1093,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
             await ctx.state.save()
             const reason = prepared.scanner.redact(checksResult.reason ?? "a PR check failed").text
             sub(ctx, "review", `PR check failed: ${reason}`, "warn")
-            return failed("INF_WIZ_VALIDATION_FAILED", `The new commit failed a PR check (${reason}). The pull request stays draft; fix the check, then resume.`)
+            return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `The new commit failed a PR check (${reason}). The pull request stays draft.`, resumeHint: "Resolve the named checks, then run `npx infinite-tag` to resume." }
           }
           for (const [index, decision] of fixes.entries()) {
             const item = finalItems.find((candidate) => candidate.id === items[index]!.id)

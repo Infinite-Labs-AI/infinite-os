@@ -672,6 +672,103 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
 })
 
 describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
+  it("never marks a draft PR ready when its checks are red and no review fix was committed", async () => {
+    const w = await world({ reviews: [review([])], gh: { baseChecks: [{ name: "test", conclusion: "success" }], checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE" }] } } })
+    expectOk(await rehearsalStep.run(w.ctx, w.deps))
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED" })
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+  })
+
+  it("notes a base-red check and an authorization-blocked preview without blocking ready", async () => {
+    const w = await opened({ reviews: [review([])], gh: {
+      baseChecks: [{ name: "test", conclusion: "failure" }],
+      checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE" }, { name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] }
+    } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
+    expect(eventText(w.ctx)).toContain("also fails on the base")
+    expect(eventText(w.ctx)).toContain("preview not measured")
+  })
+
+  it("a resumed round with no fix SHA and a newer HEAD cannot ready a base-green failing PR", async () => {
+    const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "test", conclusion: "success" }], checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE" }] } } })
+    w.fx.write(REVIEW_LEDGER_PATH, JSON.stringify({ version: 1, runId: RUN_ID, rounds: [{ round: 1, reviewedSha: w.baseSha, reviewer: "claude_code", fixSha: null, review: review([]) }], open: [], declined: [] }))
+    w.ctx.state.update(state => { state.pr!.reviewedSha = w.baseSha })
+    w.deps.checks = { ...fakeChecks(), build: async () => ({ ok: false, failureSignature: [], durationMs: 1, error: "sandbox unavailable" }) }
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: expect.stringContaining("test") })
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+    expect(eventText(w.ctx)).not.toContain("broke the build")
+  })
+
+  it("reads Actions failure logs and repairs only a file this run edited before ready", async () => {
+    const w = await opened({ reviews: [review([])], gh: {
+      baseChecks: [{ name: "test", conclusion: "success" }], failedLogs: { "123": "app/layout.tsx:2: error TS2304: init is undefined" },
+      checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE", link: "https://github.com/example/site/actions/runs/123/job/1" }] }
+    }, fix(input, round, current) {
+      current.gh.update(state => { state.checks = { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } })
+      return fixLayout(input, round, current)
+    } })
+    w.ctx.state.update(state => { state.jobs[0]!.edits = [{ editId: "prior", file: "app/layout.tsx" }] })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(w.gh.traffic()).toContain("run view 123 --log-failed")
+    expect(w.agents.jobCalls).toHaveLength(1)
+    expect(w.agents.jobCalls[0]!.items[0]!.allow.files).toEqual(["app/layout.tsx"])
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
+    expect(w.fx.remoteSha(BRANCH)).not.toBe(w.head)
+  })
+
+  it("keeps the draft and names the check when its bounded CI repair is still red", async () => {
+    const w = await opened({ reviews: [review([])], fix: fixLayout, gh: {
+      baseChecks: [{ name: "test", conclusion: "success" }], failedLogs: { "123": "app/layout.tsx:2: error TS2304" },
+      checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE", link: "https://github.com/example/site/actions/runs/123/job/1" }] }
+    } })
+    w.ctx.state.update(state => { state.jobs[0]!.edits = [{ editId: "prior", file: "app/layout.tsx" }] })
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("test") })
+    expect(w.agents.jobCalls).toHaveLength(1)
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+  })
+
+  it("an undetermined local fix remains unmeasured without accusing the agent of breaking the build", async () => {
+    const w = await opened({ reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null }]), review([])], fix: fixLayout,
+      gh: { checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } }
+    })
+    w.deps.checks = { ...fakeChecks(), build: async () => ({ ok: false, failureSignature: [], durationMs: 1, error: "sandbox unavailable" }) }
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(w.fx.remoteSha(BRANCH)).not.toBe(w.head)
+    expect(w.ctx.state.get().jobs.find(job => job.id === "review_comments:F1")!.checks.find(check => check.id === "build")!.state).toBe("undetermined")
+    expect(w.gh.traffic()).not.toContain("broke the build")
+  })
+
+  it("parks a base-green Actions failure outside this run's edited files without a worker", async () => {
+    const w = await opened({ reviews: [review([])], gh: {
+      baseChecks: [{ name: "test", conclusion: "success" }], failedLogs: { "123": "app/unrelated.tsx:2: error TS2304" },
+      checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE", link: "https://github.com/example/site/actions/runs/123/job/1" }] }
+    } })
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED" })
+    expect(w.agents.jobCalls).toHaveLength(0)
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+  })
+
+  it("polls again after cancellation instead of treating the first poll as a failure", async () => {
+    const w = await opened({ reviews: [review([])], gh: { checks: { "42": [{ name: "test", bucket: "cancel", state: "CANCELLED" }] } } })
+    const clock = fakeClock()
+    let polls = 0
+    w.deps.clock = { now: clock.now, async sleep(ms, signal) {
+      polls += 1
+      await clock.sleep(ms, signal)
+      w.gh.update(state => { state.checks = { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } })
+    } }
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(polls).toBe(1)
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
+  })
+
+  it("no reported checks stay not measured in the final report", async () => {
+    const w = await opened({ reviews: [review([])], gh: { checks: { "42": [] } } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(w.gh.traffic()).toContain("no checks reported: not measured")
+  })
+
   it("pushes review fixes to the same approved fork", async () => {
     const w = await world({
       fork: true,
@@ -831,6 +928,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
 
   it("posts ONE COMMENT review, acts only on trusted items, fixes in a descendant commit, replies, resolves its own fixed thread, re-rehearses, then readies the PR", async () => {
     const w = await opened({
+      gh: { checks: { "42": [{ name: "ci", bucket: "pass", state: "SUCCESS" }] } },
       reviews: [
         review([
           { id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the existing init in place instead.", suggested_fix: "Keep one init." },
@@ -907,7 +1005,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
   })
 
   it("acts on a teammate's thread only with the user's OK, and replies there without resolving it", async () => {
-    const w = await opened({ reviews: [review([]), review([])], fix: fixLayout, answers: { "teammate-comments": { actOn: ["PRRT_teammate"] } } })
+    const w = await opened({ gh: { checks: { "42": [{ name: "ci", bucket: "pass", state: "SUCCESS" }] } }, reviews: [review([]), review([])], fix: fixLayout, answers: { "teammate-comments": { actOn: ["PRRT_teammate"] } } })
     seedThreads(w)
     expectOk(await reviewStep.run(w.ctx, w.deps))
     const thread = w.gh.read().threads.find((candidate) => candidate.id === "PRRT_teammate")!
@@ -1303,7 +1401,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
       fix: fixLayout,
       gh: { checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE" }] } }
     })
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_VALIDATION_FAILED", message: expect.stringContaining("test") })
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: expect.stringContaining("test") })
     const job = w.ctx.state.get().jobs.find((candidate) => candidate.id === "review_comments:F1")!
     expect(job.checks.find((check) => check.id === "pr_checks_pass")).toMatchObject({ state: "problem", reason: expect.stringContaining("test") })
     expect(w.gh.traffic()).not.toContain("--required")

@@ -11,6 +11,7 @@ import { AGENT_LIMITS, type AgentKind, type AgentRunResult } from "../wizard/con
 import type { WizardContext, WizardDeps } from "../wizard/contracts/deps.js"
 import { JOB_TABLE, type ChecklistItem, type CheckResult, type JobId } from "../wizard/contracts/jobs.js"
 import type { WizardStepId } from "../wizard/contracts/steps.js"
+import { readBeforeFacts } from "../install/before-facts.js"
 import { buildVerdict } from "../checks/build.js"
 import { sub } from "./context.js"
 import { stripControl } from "./post.js"
@@ -219,12 +220,15 @@ export async function verifyFix(
   ctx: WizardContext,
   deps: WizardDeps,
   input: { runId: string; items: readonly ChecklistItem[]; editedFiles: readonly string[]; edits: ReadonlyArray<{ id: string; file: string }> }
-): Promise<{ items: ChecklistItem[]; buildOk: boolean }> {
+): Promise<{ items: ChecklistItem[]; buildOk: boolean; buildReason?: string }> {
   const at = ctx.now().toISOString()
-  // B26 (one rule with the jobs step): a build that could not run, or ended red with no failure signature, is
-  // UNDETERMINED and the round is not ok; never a vacuous pass over an empty signature.
-  const verdict = await buildVerdict(await deps.checks.build(), () => deps.checks.buildBaseline())
-  let buildOk = verdict.state === "pass"
+  // An unmeasured local build remains UNDETERMINED. It may reach the draft PR, whose checks
+  // decide whether it can proceed; only a measured regression causes rollback here.
+  const before = await readBeforeFacts(deps.fs, ctx.root, ctx.runId)
+  const verdict = before?.localValidation === "not_measured"
+    ? { state: "undetermined" as const, reason: "Local validation was not measured; the PR checks decide." }
+    : await buildVerdict(await deps.checks.build(), async () => before?.baselineBuild ?? await deps.checks.buildBaseline())
+  let buildOk = verdict.state !== "problem"
   const results: CheckResult[] = [
     { checkId: "build", tier: "B", state: verdict.state, ...(verdict.reason && verdict.state !== "pass" ? { reason: verdict.reason } : {}), at, runId: input.runId }
   ]
@@ -249,5 +253,5 @@ export async function verifyFix(
     return mine.length === 0 ? item : { ...item, edits: [...(item.edits ?? []), ...mine] }
   })
   const items = deps.registry.apply(withEdits, results, input.runId)
-  return { items, buildOk }
+  return { items, buildOk, buildReason: verdict.reason }
 }

@@ -1,5 +1,5 @@
 // Review I1 P2-1: a review fix round's B verdict is the jobs step's (B26): a build that could not run, or ended
-// red with no failure signature, is UNDETERMINED and the round is not ok, never a vacuous pass.
+// red with no failure signature, stays UNDETERMINED while the draft PR checks judge the change.
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -30,19 +30,21 @@ function item(): ChecklistItem {
   }
 }
 
-async function verifyWith(build: BuildResult & { error?: string | null }, baseline: BuildResult = { ok: true, failureSignature: [], durationMs: 1 }) {
+async function verifyWith(build: BuildResult & { error?: string | null }, baseline: BuildResult = { ok: true, failureSignature: [], durationMs: 1 }, saved?: { localValidation: "measured" | "not_measured"; baselineBuild: BuildResult }) {
   const root = mkdtempSync(join(tmpdir(), "fix-verdict-"))
   dirs.push(root)
-  const checks = { ...fakeChecks(), build: async () => build, buildBaseline: async () => baseline }
+  const calls = { build: 0, baseline: 0 }
+  const checks = { ...fakeChecks(), build: async () => { calls.build += 1; return build }, buildBaseline: async () => { calls.baseline += 1; return baseline } }
   const deps = testDeps({ bridge: fakeBridge({ capabilities: [] }), agents: {} as never, git: {} as never, host: {} as never, checks, registry: fakeRegistry() })
   const ctx = testContext({ root, state: initialState() })
-  return verifyFix(ctx, deps, { runId: RUN_ID, items: [item()], editedFiles: ["app/layout.tsx"], edits: [{ id: "e1", file: "app/layout.tsx" }] })
+  if (saved) await deps.fs.writeTextAtomic(join(root, ".infinite/wizard/before.json"), JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId: RUN_ID, measuredAt: "2026-10-06T00:00:00Z", facts: { census: { entries: [] }, keys: {}, hosting: {}, ...saved } }))
+  return { ...await verifyFix(ctx, deps, { runId: RUN_ID, items: [item()], editedFiles: ["app/layout.tsx"], edits: [{ id: "e1", file: "app/layout.tsx" }] }), calls }
 }
 
 describe("verifyFix: the B verdict (review I1 P2-1)", () => {
-  it("a build that could not run (sandbox unavailable) is not ok, and the B check is undetermined, never pass", async () => {
+  it("a build that could not run (sandbox unavailable) defers to PR checks, and the B check is undetermined, never pass", async () => {
     const result = await verifyWith({ ok: false, failureSignature: [], durationMs: 1, error: "sandbox-exec could not apply the profile" })
-    expect(result.buildOk).toBe(false)
+    expect(result.buildOk).toBe(true)
     const b = result.items[0]!.checks.find((check) => check.tier === "B")!
     expect(b.state).toBe("undetermined")
     expect(b.reason).toMatch(/^test_error/)
@@ -51,8 +53,22 @@ describe("verifyFix: the B verdict (review I1 P2-1)", () => {
 
   it("red with no failure signature is undetermined, never a vacuous pass", async () => {
     const result = await verifyWith({ ok: false, failureSignature: [], durationMs: 1 })
-    expect(result.buildOk).toBe(false)
+    expect(result.buildOk).toBe(true)
     expect(result.items[0]!.checks.find((check) => check.tier === "B")!.state).toBe("undetermined")
+  })
+
+  it("honors the saved not-measured decision without executing another local check", async () => {
+    const red = { ok: false, failureSignature: ["lint: app/layout.tsx | no-unused-vars | x"], durationMs: 1 }
+    const result = await verifyWith(red, red, { localValidation: "not_measured", baselineBuild: red })
+    expect(result.calls).toEqual({ build: 0, baseline: 0 })
+    expect(result.items[0]!.checks[0]!.state).toBe("undetermined")
+  })
+
+  it("compares a measured fix against the saved base, never retaking a baseline on its edits", async () => {
+    const red = { ok: false, failureSignature: ["lint: app/layout.tsx | no-unused-vars | x"], durationMs: 1 }
+    const result = await verifyWith(red, red, { localValidation: "measured", baselineBuild: { ok: true, failureSignature: [], durationMs: 1 } })
+    expect(result.calls).toEqual({ build: 1, baseline: 0 })
+    expect(result.buildOk).toBe(false)
   })
 
   it("green is a pass; red with only the baseline's own failures is a pass; a new failure is a problem", async () => {

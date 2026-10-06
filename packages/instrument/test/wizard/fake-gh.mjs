@@ -40,6 +40,7 @@ try {
 }
 appendFileSync(`${statePath}.calls.jsonl`, `${JSON.stringify({ argv, stdin: stdin === "" ? null : stdin })}\n`)
 
+if (argv[0] === "run" && argv[1] === "view") { process.stdout.write(state.failedLogs?.[argv[2]] ?? ""); process.exit(0) }
 /** Set by every command that changes the state; only then is the file written. */
 let dirty = false
 function changed() {
@@ -322,6 +323,8 @@ if (group === "api") {
     created_at: entry.created_at ?? "2026-10-02T10:00:00Z",
     creator: { login: entry.creator }
   })
+  if (/\/commits\/[^/]+\/check-runs/.test(path)) out({ check_runs: (state.baseChecks ?? []).map(check => ({ ...check, status: "completed" })) })
+  if (/\/commits\/[^/]+\/status\?/.test(path)) out({ statuses: [] })
   const newestFirst = (rows) => [...rows].sort((a, b) => Date.parse(b.created_at ?? "") - Date.parse(a.created_at ?? ""))
   const deployments = /^repos\/\{owner\}\/\{repo\}\/deployments\?sha=([0-9a-f]{40})/.exec(path)
   if (deployments) {
