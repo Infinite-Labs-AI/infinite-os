@@ -144,7 +144,7 @@ it("preserves the provider diagnostic and holds retries from its audit when the 
   vi.stubGlobal("fetch", fetcher);
   const broken = {
     ...db,
-    query: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
+    query: async <T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> => {
       if (sql.includes("insert into meta_local_publish_cooldown"))
         throw Error("test persistence failure");
       return db.query<T>(sql, params);
@@ -269,7 +269,7 @@ it("retains a typed identity-read throttle hold from the audit when the primary 
   vi.stubGlobal("fetch", fetcher);
   const broken = {
     ...db,
-    query: async <T>(sql: string, params?: unknown[]): Promise<T[]> => {
+    query: async <T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> => {
       if (sql.includes("insert into meta_local_publish_cooldown"))
         throw Error("test persistence failure");
       return db.query<T>(sql, params);
@@ -336,7 +336,7 @@ it("uses one authoritative credential snapshot even if the row rotates after it 
     rotated = false;
   const racing = {
     ...db,
-    one: async <T>(sql: string, params?: unknown[]): Promise<T | null> => {
+    one: async <T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> => {
       const row = await db.one<T>(sql, params);
       if (sql.includes("connection_credentials")) credentialReads++;
       if (!rotated && sql.includes("encrypted_payload")) {

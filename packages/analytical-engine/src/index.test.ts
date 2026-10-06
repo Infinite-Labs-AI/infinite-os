@@ -6484,8 +6484,8 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "stored-server-token", cliCommand: "/missing/meta" }
       });
       const withoutLocalSchema:InfiniteOsDb={...db,
-        one:async<T>(sql:string,params?:unknown[]):Promise<T|null>=>{expect(sql).not.toMatch(/meta_local_publish|actor_id, input_hash/);return db.one<T>(sql,params);},
-        query:async<T>(sql:string,params?:unknown[]):Promise<T[]>=>{expect(sql).not.toMatch(/meta_local_publish|actor_id, input_hash/);return db.query<T>(sql,params);},
+        one:async<T extends Record<string, unknown>>(sql:string,params?:unknown[]):Promise<T|null>=>{expect(sql).not.toMatch(/meta_local_publish|actor_id, input_hash/);return db.one<T>(sql,params);},
+        query:async<T extends Record<string, unknown>>(sql:string,params?:unknown[]):Promise<T[]>=>{expect(sql).not.toMatch(/meta_local_publish|actor_id, input_hash/);return db.query<T>(sql,params);},
       };
       const handlers = createActionHandlers(withoutLocalSchema, { metaAdsCliExecution: { mode: "isolated_server", executable } });
       const result = await handlers.create_meta_campaign?.(
@@ -8595,9 +8595,9 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     const base = metaWriteTestDb({ audits });
     const db: InfiniteOsDb = {
       ...base,
-      async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
+      async one<T extends Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | null> {
         if (sql.includes("from sources")) {
-          return { provider: "stripe" } as T;
+          return { provider: "stripe" } as unknown as T;
         }
         return base.one<T>(sql, params);
       }
@@ -9116,7 +9116,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       const base = metaWriteTestDb({ audits });
       return {
         ...base,
-        async one<T>(sql:string,params?:unknown[]):Promise<T|null>{
+        async one<T extends Record<string, unknown>>(sql:string,params?:unknown[]):Promise<T|null>{
           const row=await base.one<T>(sql,params);
           return sql.includes("join connection_credentials")&&row?{...row,selected_page_id:storedPageId}:row;
         },
