@@ -554,6 +554,14 @@ describe("F13: the exit line breaks between its parts, never inside the pull req
   const input = { displayId: "r-db62", exitCode: 0, prUrl: "https://github.com/acme/acme-store/pull/42", reportPath: ".infinite/wizard/report.md" }
   const styles = makeStyles(false)
 
+  it("leaves a failed code, reason and resume hint in scrollback, wrapped at words", () => {
+    const rows = exitLines({ displayId: "r-db62", exitCode: 1, prUrl: null, reportPath: null, code: "INF_WIZ_PUSH_REFUSED", reason: "You cannot push this branch. Ask the owner for write access, then run npx infinite-tag again." }, styles, 55)
+    expect(rows.join(" ")).toContain("INF_WIZ_PUSH_REFUSED")
+    expect(rows.join(" ")).toMatch(/run npx\s+infinite-tag again/)
+    expect(rows.every((row) => visibleWidth(row) < 55)).toBe(true)
+    expect(rows.join("\n")).not.toContain("infin\n")
+  })
+
   it("at 100 columns the report path starts its own row (the terminal cut it as '.infinite/w' / 'izard/report.md')", () => {
     // The one-line form is 104 columns: a 100-column terminal breaks it inside the path.
     expect(visibleWidth(exitLine(input, styles))).toBeGreaterThan(100)

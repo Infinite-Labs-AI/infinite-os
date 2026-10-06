@@ -143,7 +143,7 @@ export class WizardStore {
         ...row,
         state: outcome,
         code,
-        status: row.status ?? reason
+        status: reason ?? row.status
       }))
     })
   }

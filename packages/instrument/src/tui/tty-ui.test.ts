@@ -23,6 +23,16 @@ function setup(options: { env?: Record<string, string>; columns?: number; store?
 }
 
 describe("TtyUi lifecycle", () => {
+  it("prints the final failure reason after leaving the alternate screen", () => {
+    const { stdout, ui, store } = setup({ columns: 62 })
+    ui.start(store)
+    const current = store.getSnapshot()
+    store.set({ steps: current.steps.map((row) => row.id === "rehearsal" ? { ...row, state: "failed", code: "INF_WIZ_PUSH_REFUSED", status: "Your access is TRIAGE. Ask for write access and resume." } : row), exit: { exitCode: 1, prUrl: null, reportPath: null } })
+    ui.stop()
+    const tail = stripAnsi(stdout.chunks.at(-1) ?? "")
+    expect(tail).toContain("INF_WIZ_PUSH_REFUSED")
+    expect(tail).toContain("Your access is TRIAGE")
+  })
   it("enters the alt screen in raw mode and gives the terminal back on stop, with the exit line in scrollback", () => {
     const { stdin, stdout, ui, store } = setup()
     ui.start(store)
