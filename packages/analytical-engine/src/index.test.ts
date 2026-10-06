@@ -8135,32 +8135,33 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     );
   });
 
-  it("R1: a read refused BEFORE the fetch (the caller's request meter) is also budget_kind_read_failed, keeping the meter's code and message", async () => {
-    const audits: AuditRow[] = [];
-    const db = metaWriteTestDb({ audits });
-    await withGraph(budgetRead(DAILY_ENTITY), async (calls) => {
-      const refusingMeter = new MetaAdsRequestTelemetry(5, async () => {
-        throw Object.assign(new Error("request budget exhausted for this ad account"), { code: "meta_write_read_budget_exhausted" });
-      });
-      let caught: unknown;
-      try {
-        await createActionHandlers(db, { metaAdsRequestTelemetry: refusingMeter }).update_meta_budget?.(
-          { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", dailyBudget: 5000 },
-          operatorContext
-        );
-      } catch (error) {
-        caught = error;
+  it.each(["meta_write_read_budget_exhausted", "meta_write_read_budget_unconfigured", "meta_write_read_cooldown", "provider_rate_limited"])(
+    "preserves typed request-meter refusal %s across both budget-kind read paths",
+    async (code) => {
+      for (const kind of ["daily", "lifetime"] as const) {
+        const audits: AuditRow[] = [];
+        const db = metaWriteTestDb({ audits });
+        await withGraph(budgetRead(DAILY_ENTITY), async (calls) => {
+          const message = `The request meter refused this read: ${code}`;
+          const refusal = Object.assign(new Error(message), { code, ...(code === "provider_rate_limited" ? { retryable: true } : {}) });
+          const refusingMeter = new MetaAdsRequestTelemetry(5, async () => { throw refusal; });
+          let caught: unknown;
+          try {
+            await createActionHandlers(db, { metaAdsRequestTelemetry: refusingMeter }).update_meta_budget?.(
+              { sourceId: "src_meta", entityId: "120000000000555", entity: "campaign", [kind === "daily" ? "dailyBudget" : "lifetimeBudget"]: 5000 },
+              operatorContext
+            );
+          } catch (error) { caught = error; }
+          expect(caught).toMatchObject({ code, message, retryable: code === "provider_rate_limited", metaWrite: { phase: "not_dispatched" } });
+          expect((caught as { cause?: unknown }).cause).toBe(refusal);
+          expect(calls).toHaveLength(0);
+          expect(audits.find((row) => row.action === "update_meta_budget")?.details).toMatchObject({
+            budget_kind: kind, error_code: code, read_error_code: code
+          });
+        });
       }
-      expect(caught).toMatchObject({ code: "budget_kind_read_failed", retryable: false });
-      expect(String((caught as Error).message)).toContain("meta_write_read_budget_exhausted: request budget exhausted");
-      expect((caught as { cause?: { code?: string } }).cause?.code).toBe("meta_write_read_budget_exhausted");
-      expect(calls).toHaveLength(0);
-      expect(audits.find((row) => row.action === "update_meta_budget")?.details).toMatchObject({
-        error_code: "budget_kind_read_failed",
-        read_error_code: "meta_write_read_budget_exhausted"
-      });
-    });
-  });
+    }
+  );
 
   it("R1: the pre-read is COUNTED by the caller's request telemetry (shared per-account request budget)", async () => {
     const db = metaWriteTestDb({ audits: [] });

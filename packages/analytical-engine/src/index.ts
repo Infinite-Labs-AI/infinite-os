@@ -3105,25 +3105,30 @@ async function updateMetaBudgetHandler(
       await getMetaEntity(credential, entityId, { fields: "id,daily_budget,lifetime_budget", entity }, telemetry)
     );
   } catch (error) {
-    // The budget-type check could not run, so NOTHING was written. Surface ONE typed pre-write code so a
-    // caller can tell this apart from a failed write (whose provider codes look the same), while keeping
-    // the read's own code (message, audit, `cause`) and retryability — a failed read is safe to retry.
+    // This boundary is read-only. Known allowance/cooldown refusals must keep their
+    // machine code and words so hosts can explain the hold instead of suggesting a blind retry.
+    // Other provider/read failures retain the generic pre-write wrapper and original cause.
     const readErrorCode = metaErrorCode(error);
+    const preserveReadRefusal = [
+      "meta_write_read_budget_exhausted", "meta_write_read_budget_unconfigured",
+      "meta_write_read_cooldown", "provider_rate_limited"
+    ].includes(readErrorCode);
+    const errorCode = preserveReadRefusal ? readErrorCode : "budget_kind_read_failed";
     await metaAuditLog(db, context, sourceId, action, "failed", {
       action,
       entity,
       entity_id: entityId,
       budget_present: true,
       budget_kind: budget.kind,
-      error_code: "budget_kind_read_failed",
+      error_code: errorCode,
       read_error_code: readErrorCode
     });
     const retryable = (error as { retryable?: unknown } | null)?.retryable === true;
     const detail = error instanceof Error ? error.message : String(error);
     throw Object.assign(
       new ConnectorError(
-        "budget_kind_read_failed",
-        `budget_kind_read_failed: the ${entity}'s budget type could not be read (${readErrorCode}: ${detail}), so nothing was changed`,
+        errorCode,
+        preserveReadRefusal ? detail : `budget_kind_read_failed: the ${entity}'s budget type could not be read (${readErrorCode}: ${detail}), so nothing was changed`,
         retryable
       ),
       { cause: error }
