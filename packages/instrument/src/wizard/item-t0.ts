@@ -18,6 +18,7 @@ import { readBeforeFactsFile } from "./handoff/before-facts.js"
 import { loadPlanApprovals } from "../install/step-inputs.js"
 import { pageSourceFromRepo } from "../t0/inline-scripts.js"
 import type { T0PageSource } from "../t0/protocol.js"
+import { buildMetaClickIdCaptureScript, buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
 
 /** The reason a T0 scenario the wizard cannot build for an item carries (undetermined). */
 export const T0_UNBUILDABLE_PREFIX = "test_error — the offline test could not be set up for this job"
@@ -39,6 +40,21 @@ const GUARDED_TARGETS: ReadonlySet<string> = new Set(["ga4", "posthog", "meta"])
  * capture → "wrote no _fbc cookie" while production, running the agent's code, wrote it).
  */
 const ADOPTED_PAGE_JOBS: ReadonlySet<string> = new Set(["meta_improve"])
+
+/** A plain module has no inline HTML for T0 to load. Execute only the exact emitted capture's browser twin. */
+async function emittedModuleCapture(item: ChecklistItem, io: { fs: Pick<WizardDeps["fs"], "readText">; root: string }): Promise<T0PageSource | null> {
+  for (const file of item.allow.files.filter((path) => /\.[cm]?[jt]s$/i.test(path))) {
+    const source = await io.fs.readText(join(io.root, file))
+    if (!source) continue
+    for (const mode of ["not_required", "required"] as const) {
+      const gate = { kind: "infinite-consent" as const, mode }
+      const browser = buildMetaClickIdCaptureScript({ gate })
+      const emitted = /\.[cm]?ts$/i.test(file) ? buildMetaClickIdCaptureTypescript({ gate }) : browser
+      if (source.includes(emitted)) return { html: "<html><head></head><body></body></html>", scripts: [{ label: file, code: browser }] }
+    }
+  }
+  return null
+}
 
 /** The page the adopted job's files put on the browser, or why it cannot be known without running them. */
 async function adoptedPage(item: ChecklistItem, io: { fs: Pick<WizardDeps["fs"], "readText">; root: string }): Promise<{ source: T0PageSource } | { sourceError: string }> {
@@ -74,6 +90,7 @@ export async function itemT0Scenarios(
   const target = item.id.slice(item.id.indexOf(":") + 1)
   const page = item.allow.files.find((file) => /\.html?$/i.test(file))
   const html = item.jobId === "preview_guard" && page ? await io.fs.readText(join(io.root, page)) : null
+  const moduleCapture = item.jobId === "meta_improve" && target === "capture" ? await emittedModuleCapture(item, io) : null
   const adopted = ADOPTED_PAGE_JOBS.has(item.jobId) && specs.length > 0 ? await adoptedPage(item, io) : null
   return specs.map((spec) => ({
     id: `${item.id}:${spec.checkId}`,
@@ -85,7 +102,7 @@ export async function itemT0Scenarios(
       target,
       files: [...item.allow.files],
       ...(spec.checkId === "host_matrix" && html !== null ? { source: { html }, ...(GUARDED_TARGETS.has(target) ? { tools: [target] } : {}) } : {}),
-      ...(adopted ?? {})
+      ...(spec.checkId === "fbc_capture" && moduleCapture ? { source: moduleCapture } : adopted ?? {})
     }
   }))
 }
