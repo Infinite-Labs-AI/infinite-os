@@ -68,8 +68,9 @@ async function receiptFor(fs: Pick<WizardFs, "readText">, root: string, runId: s
       ? receipt.contentHashes as Record<string, unknown>
       : {}
     const contentHashes = new Map<string, string>()
-    // Legacy receipts have no explicit runId: the newest edit identifies the run that wrote them.
-    const owner = typeof receipt.runId === "string" ? receipt.runId : edits.at(-1)?.runId
+    // Legacy receipts are attributable only when every recorded edit names this run. A mixed
+    // receipt cannot prove which run produced its whole-file hashes.
+    const owner = typeof receipt.runId === "string" ? receipt.runId : edits.length > 0 && edits.every(edit => edit.runId === runId) ? runId : null
     if (owner === runId && Array.isArray(receipt.files)) for (const file of receipt.files) {
       if (typeof file === "string" && typeof hashes[file] === "string" && /^[0-9a-f]{64}$/.test(hashes[file])) contentHashes.set(file, hashes[file])
     }

@@ -208,14 +208,16 @@ describe("the GitHub adapter (§3g.2)", () => {
   })
 
   it("reads the Vercel preview URL from deployments (vercel[bot], Preview, success)", async () => {
-    const { adapter } = setup({
+    const { adapter, gh } = setup({
       deployments: [
         { id: 1, sha: SHA, environment: "Production", creator: "vercel[bot]", statuses: [{ state: "success", environment_url: "https://acme-store.com" }] },
         { id: 2, sha: SHA, environment: "Preview", creator: "someone", statuses: [{ state: "success", environment_url: "https://evil.example" }] },
-        { id: 3, sha: SHA, environment: "Preview", creator: "vercel[bot]", statuses: [{ state: "pending", environment_url: null }, { state: "success", environment_url: "https://acme-store-git-x-acme.vercel.app" }] }
+        { id: 3, sha: SHA, environment: "Preview", creator: "vercel[bot]", statuses: [{ state: "success", environment_url: "https://acme-store-git-x-acme.vercel.app" }, { state: "pending", environment_url: null }] }
       ]
     })
     expect(await adapter.previewUrl(SHA)).toBe("https://acme-store-git-x-acme.vercel.app")
+    gh.update(state => { state.deployments![2]!.statuses.unshift({ state: "pending", environment_url: null }) })
+    expect(await adapter.previewUrl(SHA)).toBeNull()
     // Negative: another SHA has no deployment.
     expect(await adapter.previewUrl("b".repeat(40))).toBeNull()
   })

@@ -106,11 +106,12 @@ describe("--fresh over the wizard's own leftovers (§3y.8, P2-4)", () => {
     expect(existsSync(join(fx.root, "lib/infinite-analytics-client.tsx"))).toBe(false)
   })
 
-  it("never treats another run's matching content hash as this set-aside run's leftover", async () => {
+  it.each([false, true])("never treats another or mixed run's matching content hash as this set-aside run's leftover (mixed=%s)", async (mixed) => {
     const { fx } = liveRun3()
     fx.write("pages/_app.tsx", "export const marker = true\n")
     const receipt = JSON.parse(readFileSync(join(fx.root, ".infinite/install.json"), "utf8")) as { edits: Array<{ runId: string }>; files?: string[]; contentHashes?: Record<string, string> }
     receipt.edits.forEach((edit) => { edit.runId = "other-run" })
+    if (mixed) receipt.edits.push({ ...receipt.edits[0]!, runId: OLD_RUN })
     receipt.files = ["pages/_app.tsx"]
     receipt.contentHashes = { "pages/_app.tsx": sha256Tagged("export const marker = true\n").slice(7) }
     fx.write(".infinite/install.json", JSON.stringify(receipt))
