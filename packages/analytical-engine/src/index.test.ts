@@ -7675,6 +7675,8 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     const fetched: string[] = [];
     process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
     vi.stubGlobal("fetch", ((url: string) => {
+      if (String(url).includes("/advideos")) { fetched.push(String(url)); return Promise.resolve(jsonResponse({id:"321"})); }
+      if (String(url).includes("/321?")) return Promise.resolve(jsonResponse({id:"321",status:{video_status:"ready"},picture:"https://cdn.example.com/thumb.jpg"}));
       if (String(url).includes("graph.facebook.com")) return Promise.resolve(jsonResponse(String(url).includes("/me/") ? {data:[]} : {id:"222"}));
       fetched.push(String(url));
       return Promise.resolve(new Response(Buffer.from("fake-video"), {
@@ -7696,7 +7698,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         operatorContext
       );
 
-      expect(fetched).toEqual(["https://cdn.example.com/video.mp4"]);
+      expect(fetched).toEqual(["https://graph.facebook.com/v25.0/act_999/advideos"]);
       expect(result?.data).toMatchObject({ id: "creative-video-1", deduped: false });
     } finally {
       vi.unstubAllGlobals();

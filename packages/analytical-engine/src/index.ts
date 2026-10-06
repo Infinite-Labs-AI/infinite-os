@@ -183,7 +183,7 @@ export function createActionHandlers(
     run_meta_live_insights: (input, context) => runMetaLiveInsightsHandler(db, context, input, metaAdsCliExecution, encryptionKey, options?.metaAdsRequestTelemetry),
     create_meta_campaign: (input, context) => withMetaWriteDiagnostics(() => createMetaCampaignHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)),
     create_meta_ad_set: (input, context) => withMetaWriteDiagnostics(() => createMetaAdSetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)),
-    create_meta_creative: (input, context) => withMetaWriteDiagnostics(() => createMetaCreativeHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)),
+    create_meta_creative: (input, context) => withMetaWriteDiagnostics(() => createMetaCreativeHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential, options?.metaAdsRequestTelemetry)),
     create_meta_ad: (input, context) => withMetaWriteDiagnostics(() => createMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)),
     set_meta_entity_status: (input, context) => withMetaWriteDiagnostics(() => setMetaEntityStatusHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)),
     update_meta_budget: (input, context) => withMetaWriteDiagnostics(() => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential, options?.metaAdsRequestTelemetry)),
@@ -2680,7 +2680,8 @@ async function createMetaCreativeHandler(
   input: unknown,
   cliExecution?: MetaAdsCliExecution,
   encryptionKey?: string,
-  expectedCredential?: ExpectedMetaCredential
+  expectedCredential?: ExpectedMetaCredential,
+  telemetry?: MetaAdsRequestObserver
 ): Promise<ActionEnvelope> {
   const name = requiredString(input, "name");
   // Every creative this engine creates carries an explicit enhancement choice: the caller's, or — when it names
@@ -2721,14 +2722,12 @@ async function createMetaCreativeHandler(
           credential.transport === "cli";
         if (
           !cliTransport &&
-          (optionalString(input, "videoUrl") ||
-            (optionalString(input, "imageUrl") &&
-              !optionalString(input, "imageHash"))) &&
+          (optionalString(input, "imageUrl") && !optionalString(input, "imageHash")) &&
           !assetFeedSpec
         ) {
           throw new MetaPublishingError(
             "provider_unsupported",
-            "Standard media URL creatives require the Meta CLI transport. Direct Graph supports image hashes or a feed with existing media references."
+            "Standard image URL creatives require the Meta CLI transport. Direct Graph supports image hashes, video URLs or a feed with existing media references."
           );
         }
         const version = localMetaCredentialVersion(credential);
@@ -2810,7 +2809,7 @@ async function createMetaCreativeHandler(
         ...(assetFeedSpec !== undefined
           ? { assetFeedSpec: assetFeedSpec as MetaAssetFeedSpec }
           : {})
-      });
+      }, telemetry);
     },
     undefined,
     cliExecution,

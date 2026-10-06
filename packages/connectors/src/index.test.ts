@@ -9033,85 +9033,16 @@ process.exit(1);`,
       });
     });
 
-    it("downloads videoUrl to a temp file and passes it as --video (not DCO --videos)", async () => {
-      await withTmp(async (dir) => {
-        const videoBytes = Buffer.from("fake-mov-bytes");
-        let fetchedUrl: string | undefined;
-        let videoPathArg: string | undefined;
-        const credential: MetaAdsCredential = {
-          mode: "live",
-          transport: "meta_ads_cli",
-          adAccountId: "1234567890",
-          accessToken: "cli-write-token",
-          cliCommand: fakeCliWriterThatRecordsMedia(dir, { id: "120000000000053" })
-        };
-        await withMockFetch(
-          (url) => {
-            fetchedUrl = url;
-            return new Response(videoBytes, { status: 200, headers: { "content-type": "video/quicktime" } });
-          },
-          async () => {
-            const result = await createMetaCreative(credential, {
-              name: "CLI Video Creative!",
-              pageId: "page_1",
-              videoUrl: "https://cdn.example.com/promo?id=99",
-              linkUrl: "https://example.com",
-              body: "Watch now",
-              title: "Video Headline",
-              description: "Optional video description",
-              callToAction: "learn_more"
-            });
-            expect(result).toEqual({ ok: true, id: "120000000000053", status: null });
-            const argv = recordedArgv(dir);
-            expect(argv.slice(0, 9)).toEqual(["--no-color", "--no-input", "--output", "json", "ads", "--ad-account-id", "1234567890", "creative", "create"]);
-            expect(argv).toContain("--video");
-            expect(argv).not.toContain("--videos");
-            expect(argv).not.toContain("--image");
-            expect(argv).not.toContain("--description");
-            videoPathArg = argv[argv.indexOf("--video") + 1];
-            expect(argv[argv.indexOf("--page-id") + 1]).toBe("page_1");
-            expect(argv[argv.indexOf("--link-url") + 1]).toBe("https://example.com");
-            expect(argv[argv.indexOf("--body") + 1]).toBe("Watch now");
-            expect(argv[argv.indexOf("--title") + 1]).toBe("Video Headline");
-            expect(argv[argv.indexOf("--call-to-action") + 1]).toBe("LEARN_MORE");
-          }
-        );
-        expect(fetchedUrl).toBe("https://cdn.example.com/promo?id=99");
-        expect(videoPathArg).toBeDefined();
-        expect(videoPathArg).toContain(tmpdir());
-        expect(videoPathArg).toContain("meta-creative-cli-video-creative-");
-        expect(videoPathArg).toMatch(/\.mov$/);
-        const observation = recordedMediaObservation(dir);
-        expect(observation.mediaPath).toBe(videoPathArg);
-        expect(observation.existsAtSpawn).toBe(true);
-        expect(observation.contentsBase64).toBe(videoBytes.toString("base64"));
-        expect(existsSync(videoPathArg as string)).toBe(false);
-      });
-    });
-
-    it("derives video temp-file extensions from URL paths when Content-Type is generic", async () => {
-      await withTmp(async (dir) => {
-        const credential: MetaAdsCredential = {
-          mode: "live",
-          transport: "meta_ads_cli",
-          adAccountId: "1234567890",
-          accessToken: "cli-write-token",
-          cliCommand: fakeCliWriterThatRecordsMedia(dir, { id: "120000000000054" })
-        };
-        let videoPathArg: string | undefined;
-        await withMockFetch(
-          () => new Response(Buffer.from("mp4"), { status: 200, headers: { "content-type": "application/octet-stream" } }),
-          async () => {
-            await createMetaCreative(credential, {
-              name: "MP4 Video",
-              pageId: "page_1",
-              videoUrl: "https://cdn.example.com/video.mp4?download=1"
-            });
-            const argv = recordedArgv(dir);
-            videoPathArg = argv[argv.indexOf("--video") + 1];
-          }
-        );
-        expect(videoPathArg).toMatch(/\.mp4$/);
+    it("uploads videoUrl through Graph and submits raw video_data instead of broken CLI shortcuts",async()=>{
+      await withTmp(async(dir)=>{
+        const credential:MetaAdsCredential={mode:"live",transport:"meta_ads_cli",adAccountId:"1234567890",accessToken:"cli-write-token",cliCommand:fakeCliWriterThatRecordsMedia(dir,{id:"120000000000053"})};
+        await withMockFetch(url=>new Response(JSON.stringify(String(url).endsWith("/advideos")?{id:"321"}:{id:"321",status:{video_status:"ready"},picture:"https://cdn.example.com/thumb.jpg"})),async()=>{
+          expect(await createMetaCreative(credential,{name:"Video",pageId:"222",videoUrl:"https://cdn.example.com/video.mp4",linkUrl:"https://example.com",body:"Watch now",title:"Headline",description:"Supporting copy",callToAction:"learn_more"})).toEqual({ok:true,id:"120000000000053",status:null});
+          const argv=recordedArgv(dir),story=JSON.parse(argv[argv.indexOf("--object-story-spec")+1]!);
+          expect(story.video_data).toEqual({video_id:"321",image_url:"https://cdn.example.com/thumb.jpg",message:"Watch now",title:"Headline",link_description:"Supporting copy",call_to_action:{type:"LEARN_MORE",value:{link:"https://example.com"}}});
+          for(const shortcut of ["--video","--link-url","--description","--body","--title"])expect(argv).not.toContain(shortcut);
+          expect(recordedMediaObservation(dir).mediaPath).toBeNull();
+        });
       });
     });
 
