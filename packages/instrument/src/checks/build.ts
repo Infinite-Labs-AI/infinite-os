@@ -16,7 +16,7 @@ import { join, resolve } from "node:path"
 import { detectPackageManager } from "../package-manager.js"
 import type { PackageManager } from "../types.js"
 import type { BuildResult, CheckResult } from "../wizard/contracts/jobs.js"
-import { defaultDenyReads, sandboxedSpawn, SandboxUnavailableError, type DenyReadSet, type SandboxedSpawnFn } from "../t0/sandbox.js"
+import { defaultDenyReads, sandboxedSpawn, SandboxUnavailableError, type DenyReadSet, type SandboxedSpawnFn, type SandboxedSpawnResult } from "../t0/sandbox.js"
 
 export const BUILD_DEFAULT_TIMEOUT_MS = 10 * 60_000
 
@@ -110,7 +110,7 @@ export function failureSignature(output: string, root: string, options: { home?:
 
 /** A signature with no recognised error line (only an exit code or a timeout) cannot be compared. */
 function opaqueSignature(signature: readonly string[]): boolean {
-  return signature.length > 0 && signature.every((line) => /^(?:exit_code:|timeout$)/.test(line))
+  return signature.length > 0 && signature.every((line) => /^(?:(?:build|lint): )?(?:exit_code:|timeout$)/.test(line))
 }
 
 /**
@@ -141,14 +141,15 @@ export function buildDeniedWrites(root: string, appRoot: string): string[] {
   return [...new Set([join(root, ".git"), join(root, ".husky"), join(root, ".infinite"), join(appRoot, ".infinite")])]
 }
 
-function readBuildScript(appRoot: string): { ok: true } | { ok: false; reason: BuildSkipReason } {
+function readValidationScripts(appRoot: string): { scripts: Array<"build" | "lint"> } | { reason: BuildSkipReason } {
   const path = join(appRoot, "package.json")
-  if (!existsSync(path)) return { ok: false, reason: "no_package_json" }
+  if (!existsSync(path)) return { reason: "no_package_json" }
   try {
     const manifest = JSON.parse(readFileSync(path, "utf8")) as { scripts?: Record<string, unknown> }
-    return typeof manifest.scripts?.build === "string" && manifest.scripts.build.trim() ? { ok: true } : { ok: false, reason: "no_build_script" }
+    const scripts = (["build", "lint"] as const).filter((name) => typeof manifest.scripts?.[name] === "string" && (manifest.scripts[name] as string).trim())
+    return scripts.length > 0 ? { scripts } : { reason: "no_build_script" }
   } catch {
-    return { ok: false, reason: "no_package_json" }
+    return { reason: "no_package_json" }
   }
 }
 
@@ -170,15 +171,17 @@ export async function runBuild(options: BuildOptions): Promise<BuildRun> {
   const clock = options.now ?? Date.now
   const started = clock()
   const base = { ok: false, failureSignature: [] as string[], durationMs: 0, exitCode: null, timedOut: false, error: null, sandboxed: false, outputTail: [] as string[] }
-  const script = readBuildScript(appRoot)
-  if (!script.ok) return { ...base, ok: true, skipped: script.reason, packageManager: null }
+  const scripts = readValidationScripts(appRoot)
+  if ("reason" in scripts) return { ...base, ok: true, skipped: scripts.reason, packageManager: null }
   const manager = buildPackageManager(root, appRoot, options.packageManager)
   if (manager === "ambiguous") return { ...base, skipped: "ambiguous_lockfiles", packageManager: null }
   const deny = options.denyReads ?? defaultDenyReads()
   const spawnFn = options.spawn ?? sandboxedSpawn
-  let result
-  try {
-    result = await spawnFn(manager, ["run", "build"], {
+  const runs: Array<{ name: "build" | "lint"; result: SandboxedSpawnResult; output: string }> = []
+  for (const name of scripts.scripts) {
+    let result: SandboxedSpawnResult
+    try {
+      result = await spawnFn(manager, ["run", name], {
       denyReads: deny.paths,
       denyReadPrefixes: deny.prefixes,
       network: true,
@@ -202,29 +205,38 @@ export async function runBuild(options: BuildOptions): Promise<BuildRun> {
       timeoutMs: options.timeoutMs ?? BUILD_DEFAULT_TIMEOUT_MS,
       signal: options.signal,
       platform: options.platform
-    })
-  } catch (error) {
-    const message = error instanceof SandboxUnavailableError || error instanceof Error ? error.message : String(error)
-    return { ...base, durationMs: clock() - started, skipped: null, error: message, packageManager: manager }
+      })
+    } catch (error) {
+      const message = error instanceof SandboxUnavailableError || error instanceof Error ? error.message : String(error)
+      return { ...base, durationMs: clock() - started, skipped: null, error: message, packageManager: manager }
+    }
+    runs.push({ name, result, output: `${result.stdout}\n${result.stderr}` })
+    if (result.timedOut || result.aborted) break
   }
-  const output = `${result.stdout}\n${result.stderr}`
-  const outputTail = output
+  const outputTail = runs.flatMap(({ name, result, output }) => output
     .replace(ANSI, "")
     .split(/\r?\n/)
     .map((line) => line.split(root).join("<root>").split(result.home).join("<home>").replace(SANDBOX_HOME, "<home>").trimEnd())
     .filter(Boolean)
-    .slice(-20)
-  const ok = result.exitCode === 0 && !result.timedOut
-  const signature = ok ? [] : failureSignature(output, root, { home: result.home })
+    .map((line) => scripts.scripts.length > 1 ? `${name}: ${line}` : line)).slice(-20)
+  const ok = runs.length === scripts.scripts.length && runs.every(({ result }) => result.exitCode === 0 && !result.timedOut && !result.aborted)
+  const signature = runs.flatMap(({ name, result, output }) => {
+    if (result.exitCode === 0 && !result.timedOut && !result.aborted) return []
+    const lines = failureSignature(output, root, { home: result.home })
+    return (lines.length > 0 ? lines : [result.timedOut ? "timeout" : `exit_code:${result.exitCode ?? result.signal}`]).map((line) => scripts.scripts.length > 1 ? `${name}: ${line}` : line)
+  })
+  const missing = runs.find(({ result, output }) => result.exitCode === 127 && /(?:command )?not found|is not recognized/i.test(output))
+  const stopped = runs.find(({ result }) => result.timedOut || result.aborted)
+  const failed = runs.find(({ result }) => result.exitCode !== 0)
   return {
     ok,
-    failureSignature: ok ? [] : signature.length ? signature : [result.timedOut ? "timeout" : `exit_code:${result.exitCode ?? result.signal}`],
+    failureSignature: ok ? [] : signature.length ? signature : ["exit_code:unknown"],
     durationMs: clock() - started,
     skipped: null,
-    exitCode: result.exitCode,
-    timedOut: result.timedOut,
-    error: result.aborted ? "the build was cancelled" : null,
-    sandboxed: result.sandboxed,
+    exitCode: failed?.result.exitCode ?? null,
+    timedOut: stopped?.result.timedOut ?? false,
+    error: missing ? `the site's ${missing.name} script could not run: its executable was not found (install this site's dependencies, then resume)` : stopped?.result.aborted ? "site validation was cancelled" : null,
+    sandboxed: runs.every(({ result }) => result.sandboxed),
     packageManager: manager,
     outputTail
   }
@@ -248,7 +260,7 @@ export function gradeBuild(checkId: string, current: BuildResult, baseline: Buil
     runId: ctx.runId
   })
   if (isBuildRun(current)) {
-    if (current.skipped === "no_package_json" || current.skipped === "no_build_script") return make("info", "no_build_script", "the app has no build script, so there is nothing to build")
+    if (current.skipped === "no_package_json" || current.skipped === "no_build_script") return make("info", "no_build_script", "the app has no build or lint script, so there is nothing to check")
     if (current.skipped === "ambiguous_lockfiles") return make("undetermined", "test_error", "several lockfiles: the package manager to build with is ambiguous")
     if (current.error) return make("undetermined", "test_error", current.error)
     if (current.timedOut) return make("undetermined", "test_error", `the build did not finish within ${Math.round(current.durationMs / 1000)} s`)
@@ -280,6 +292,7 @@ export async function buildVerdict(
   if (build.ok) return { state: "pass" }
   if (build.failureSignature.length === 0) return { state: "undetermined", reason: "test_error — the build did not run to a verdict" }
   const known = (await baseline()).failureSignature
+  if (opaqueSignature(build.failureSignature) || opaqueSignature(known)) return { state: "undetermined", reason: "test_error — the site checks did not print a comparable failure" }
   const fresh = build.failureSignature.filter((failure) => !known.includes(failure))
   if (fresh.length === 0) return { state: "pass", reason: "red before this run too; no new failures" }
   return { state: "problem", reason: `new build failures: ${fresh.slice(0, 3).join("; ")}` }

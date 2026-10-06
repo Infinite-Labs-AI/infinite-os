@@ -111,7 +111,7 @@ describe("LICENSE (npm always packs it)", () => {
 })
 
 describe("source self-containment", () => {
-  it("every import in src/ is node:, relative, or vitest (test files only)", () => {
+  it("production imports stay self-contained; test files may use Vitest and TypeScript", () => {
     const tsFiles = collectTsFiles(srcDir)
     const violations: string[] = []
 
@@ -124,7 +124,7 @@ describe("source self-containment", () => {
         if (spec.startsWith("node:") || spec.startsWith("./") || spec.startsWith("../")) {
           continue
         }
-        if (spec === "vitest" && isTestFile) {
+        if (isTestFile && (spec === "vitest" || spec === "typescript")) {
           continue
         }
         violations.push(`${file}: "${spec}"`)

@@ -71,7 +71,7 @@ ${LANE_MODULE_IMPORT}
 
 /** Vercel hands framework-agnostic middleware a RequestContext carrying waitUntil(). */
 interface InfiniteRequestContext {
-  waitUntil?: (promise: Promise<unknown>) => void
+  waitUntil?: typeof import("@vercel/functions").waitUntil
 }
 
 export default function middleware(request: Request, context?: InfiniteRequestContext) {

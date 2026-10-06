@@ -83,8 +83,7 @@ const AUTOMATION_USER_AGENT = /${AUTOMATION_USER_AGENT_PATTERN.source}/i
 const NON_DOCUMENT_PREFIXES = ${jsStringArray([...NON_DOCUMENT_PATH_PREFIXES])}
 const REFERRER_HOST = /${REFERRER_HOST_PATTERN.source}/
 
-type MiddlewareLike = (request: NextRequest, event: NextFetchEvent) => unknown
-type WaitUntilLike = { waitUntil?: (promise: Promise<unknown>) => void } | undefined
+type WaitUntilLike = { waitUntil?: NextFetchEvent["waitUntil"] } | undefined
 
 export interface InfiniteServerEventInput {
   /** The exact outcome name from Infinite → Conversions (e.g. "sign_up", "purchase", "download"). */
@@ -112,10 +111,10 @@ export interface InfiniteServerEventInput {
  * wrapped handler runs. Recording is fire-and-forget via event.waitUntil and can never throw
  * into the request path.
  */
-export function ${SERVER_LANE_WRAPPER_EXPORT}<Handler extends MiddlewareLike>(handler?: Handler) {
+export function ${SERVER_LANE_WRAPPER_EXPORT}<Handler>(handler?: Handler) {
   return function infiniteServerLaneMiddleware(request: NextRequest, event: NextFetchEvent) {
     recordInfiniteDocumentRequest(request, event)
-    return handler ? handler(request, event) : NextResponse.next()
+    return typeof handler === "function" ? handler(request, event) : NextResponse.next()
   }
 }
 

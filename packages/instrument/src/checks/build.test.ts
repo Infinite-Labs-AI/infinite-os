@@ -7,7 +7,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
 import type { SandboxedSpawnFn, SandboxedSpawnOptions, SandboxedSpawnResult } from "../t0/sandbox.js"
-import { buildAllowedWrites, buildDeniedWrites, buildPackageManager, FAILURE_SIGNATURE_MAX_LINES, failureSignature, gradeBuild, runBuild } from "./build.js"
+import { buildAllowedWrites, buildDeniedWrites, buildPackageManager, buildVerdict, FAILURE_SIGNATURE_MAX_LINES, failureSignature, gradeBuild, runBuild } from "./build.js"
 
 const ctx = { runId: "7f3c2a91-b0de-4c03-9a00-000000000001", now: () => new Date("2026-10-02T10:00:00.000Z") }
 
@@ -43,6 +43,27 @@ Type error: Type 'number' is not assignable to type 'string'.
 `
 
 describe("runBuild goes through sandboxedSpawn, never the wizard's process", () => {
+  it("runs a site's lint script as well as its build and reports a new generated-file lint error", async () => {
+    const root = site({ "package.json": JSON.stringify({ scripts: { build: "next build", lint: "next lint" } }) })
+    const calls: string[] = []
+    const spawn: SandboxedSpawnFn = async (_cmd, args) => {
+      calls.push(args[1]!)
+      return { exitCode: args[1] === "lint" ? 1 : 0, signal: null, stdout: args[1] === "lint" ? "lib/infinite-analytics.ts:39:79 Error: 'name' is defined but never used. no-unused-vars" : "", stderr: "", timedOut: false, aborted: false, sandboxed: true, pid: 4242, home: "/tmp/infinite-tag-sbx-AAAA11", stdoutTruncated: false, stderrTruncated: false }
+    }
+    const current = await runBuild({ root, appRoot: ".", spawn })
+    expect(calls).toEqual(["build", "lint"])
+    expect(current.ok).toBe(false)
+    expect(current.failureSignature.join(" ")).toContain("infinite-analytics.ts")
+    expect(await buildVerdict(current, async () => ({ failureSignature: [] }))).toMatchObject({ state: "problem", reason: expect.stringContaining("infinite-analytics.ts") })
+  })
+
+  it("a missing site executable is unknown even when baseline and current both exit 127", async () => {
+    const root = site({ "package.json": JSON.stringify({ scripts: { build: "next build", lint: "next lint" } }) })
+    const run = await runBuild({ root, appRoot: ".", spawn: spy({ exitCode: 127, stderr: "sh: next: command not found" }).fn })
+    expect(run.error).toMatch(/not found|dependencies/i)
+    expect(gradeBuild("build", run, run, ctx).state).toBe("undetermined")
+    expect((await buildVerdict(run, async () => run)).state).toBe("undetermined")
+  })
   it("runs `<pm> run build` in the app root with network ON, the read denies, and telemetry off", async () => {
     const root = site({ "apps/web/package.json": JSON.stringify({ scripts: { build: "next build" } }), "pnpm-lock.yaml": "" })
     const { fn, calls } = spy({ exitCode: 0 })

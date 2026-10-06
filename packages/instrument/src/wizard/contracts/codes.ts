@@ -36,7 +36,8 @@ export const WIZARD_CODES_BY_EXIT = {
     "INF_WIZ_BRANCH_FAILED",
     "INF_WIZ_FENCE_TAMPER",
     // §3z.4 (B6): a generic agent error (not out of usage, not a timeout, not toolless).
-    "INF_WIZ_AGENT_FAILED"
+    "INF_WIZ_AGENT_FAILED",
+    "INF_WIZ_VALIDATION_FAILED"
   ],
   2: [
     "INF_WIZ_NOT_BUILT",

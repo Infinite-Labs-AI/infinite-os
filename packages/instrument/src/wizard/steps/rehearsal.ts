@@ -6,6 +6,7 @@ import type { ChecklistItem } from "../contracts/jobs.js"
 import { homedir } from "node:os"
 import { finalSealPath } from "../../agents/paths.js"
 import { verifyFinalSeal } from "../../agents/fence.js"
+import { buildVerdict } from "../../checks/build.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
 
@@ -232,6 +233,28 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     }
   }
 
+  // Run the site's build AND lint scripts on the final tree before opening a PR. A missing local
+  // executable is unmeasured, never the same red baseline; a new failure cannot ride into customer CI.
+  const before = await readBeforeFactsFile(deps.fs, ctx.root, runId)
+  const validate = async () => buildVerdict(await deps.checks.build(), async () => before?.facts.baselineBuild ?? { failureSignature: [] })
+  let validation = await validate()
+  const worker = state.agent?.worker ?? null
+  for (let round = 1; validation.state === "problem" && worker && round <= PR_LOOP_LIMITS.maxFixRounds; round += 1) {
+    const reason = validation.reason ?? "site validation failed"
+    const generated = managed.filter((file) => reason.includes(file))
+    if (generated.length > 0) break // Infinite's own emitted source is never delegated to the site's agent.
+    const fixable = allowlist.filter((file) => reason.includes(file))
+    if (fixable.length === 0) break
+    sub(ctx, "rehearsal", `${worker === "codex" ? "Codex" : "Claude Code"} is fixing ${fixable.length} new site-check failure(s) before the pull request…`, "pending")
+    const item = hookFixItem(fixable, reason)
+    ctx.emit.emit("job.seeded", { item })
+    const fix = await runFixRound(ctx, deps, { step: "rehearsal", worker, items: [item], scanner })
+    if (fix.run.outcome === "out_of_usage") return { kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE", reason: "The worker agent is out of usage while fixing site validation.", resumeHint: "Run `npx infinite-tag` again when your plan resets." }
+    if (fix.run.edits.length > 0) await deps.installer.recordEdits(fix.run.edits)
+    validation = await validate()
+  }
+  if (validation.state !== "pass") return failed("INF_WIZ_VALIDATION_FAILED", `The site's build or lint could not pass before opening a pull request: ${scanner.redact(validation.reason ?? "not checked").text}. Fix the named files or install this site's dependencies, then resume.`)
+
   sub(ctx, "rehearsal", "Committing the changes…", "pending")
   const commitOnce = () =>
     stageAndCommit({
@@ -250,7 +273,6 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     })
   let commit = await commitOnce()
   // §3g.1: a commit hook that fails on the wizard's OWN files gets a fix round through the worker (≤ 2).
-  const worker = state.agent?.worker ?? null
   for (let round = 1; commit.kind === "hook_failed" && commit.ourFiles.length > 0 && worker !== null && round <= PR_LOOP_LIMITS.maxFixRounds; round += 1) {
     const fixable = commit.ourFiles.filter((file) => allowlist.includes(file) || managed.includes(file))
     if (fixable.length === 0) break
