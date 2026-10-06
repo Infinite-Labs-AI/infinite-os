@@ -1,5 +1,5 @@
 import { boundedMetaDiagnosticText, markMetaWriteDispatch, metaCliDiagnostic, metaProviderOutcome, redactMetaDiagnostic, rememberMetaWriteDiagnostic, type MetaWriteDiagnostic } from "./meta-write-diagnostic.js";
-export { withMetaWriteDiagnostics, type MetaWriteDiagnostic } from "./meta-write-diagnostic.js";
+export { withMetaWriteDiagnostics, captureMetaWriteDiagnostic, type MetaWriteDiagnostic } from "./meta-write-diagnostic.js";
 const metaCliResponseDiagnostics = new WeakMap<object, MetaWriteDiagnostic>();
 import {
   META_ADS_HOT_ROLLUP_DERIVATION,
@@ -14121,6 +14121,8 @@ const META_CLI_VIDEO_CREATIVE_TIMEOUT_MS = 600_000;
 interface MetaCliCallOptions {
   /** Kill timer for this ONE invocation; defaults to META_CLI_DEFAULT_TIMEOUT_MS. */
   timeoutMs?: number;
+  /** Media upload precedes creative creation; a later refusal cannot undo the upload. */
+  mayHavePartialWrites?: boolean;
 }
 
 async function callMetaAdsCliJson(
@@ -14181,7 +14183,7 @@ async function callMetaAdsCliJson(
   let notDispatched = false;
   const writeDiagnostic = () => metaCliDiagnostic({ stdout: stdoutBuffer, stderr: stderrBuffer,
     token: tokenForScrub, exitCode, signal: exitSignal, durationMs: Date.now() - started,
-    notDispatched, stderrTruncated: stderrBytes > Buffer.byteLength(stderrBuffer),
+    notDispatched, mayHavePartialWrites:options.mayHavePartialWrites, stderrTruncated: stderrBytes > Buffer.byteLength(stderrBuffer),
   });
   const CLI_TIMEOUT_MS = options.timeoutMs ?? META_CLI_DEFAULT_TIMEOUT_MS;
   const CLI_MAX_STDOUT_BYTES = 1_000_000;
@@ -14290,7 +14292,7 @@ async function callIsolatedMetaAdsCliJson(
   let home: string | undefined;
   const diagnostic = () => metaCliDiagnostic({
     stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"), token,
-    exitCode, signal, notDispatched, durationMs: Date.now() - started,
+    exitCode, signal, notDispatched, mayHavePartialWrites:options.mayHavePartialWrites, durationMs: Date.now() - started,
     stdoutTruncated: stdoutBytes > stdout.length, stderrTruncated: stderrBytes > stderr.length,
   });
   try {
@@ -14760,7 +14762,10 @@ async function createMetaCreativeViaCli(
     if (input.linkUrl) args.push("--link-url", input.linkUrl);
     if (input.body) args.push("--body", input.body);
     if (input.title) args.push("--title", input.title);
-    if (input.description) args.push("--description", input.description);
+    // Meta's video field is link_description. CLI 1.1.0's --description shortcut instead emits
+    // unsupported video_data.description (confirmed provider refusal). Omit this optional video
+    // copy until the CLI maps it correctly; image link descriptions remain supported.
+    if (input.description && mediaKind !== "video") args.push("--description", input.description);
     if (callToAction) args.push("--call-to-action", callToAction);
     // `meta ads creative create --url-tags` (meta-ads 1.1.0). NOTE: the CLI exposes --url-tags on
     // `creative create` ONLY — `ad create` has no such flag — which is why tracking parameters are
@@ -14771,7 +14776,8 @@ async function createMetaCreativeViaCli(
     if (input.degreesOfFreedomSpec) args.push("--degrees-of-freedom-spec", JSON.stringify(input.degreesOfFreedomSpec));
     // A4: budget the kill timer for the upload + Meta-side processing the CLI waits on.
     const response = await metaAdsCliWrite(credential, args, {
-      timeoutMs: mediaKind === "video" ? META_CLI_VIDEO_CREATIVE_TIMEOUT_MS : META_CLI_IMAGE_CREATIVE_TIMEOUT_MS
+      timeoutMs: mediaKind === "video" ? META_CLI_VIDEO_CREATIVE_TIMEOUT_MS : META_CLI_IMAGE_CREATIVE_TIMEOUT_MS,
+      mayHavePartialWrites:true
     });
     const id = requireGraphId("creative", response);
     // Creatives have no status; report null (no PAUSE/ACTIVE concept).

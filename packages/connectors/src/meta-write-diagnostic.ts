@@ -51,7 +51,7 @@ export function metaProviderOutcome(code?: number, subcode?: number, status?: nu
 
 export function metaCliDiagnostic(input: {
   stdout: string; stderr: string; exitCode: number | null; signal: string | null;
-  durationMs: number; token?: string; notDispatched?: boolean; stdoutTruncated?: boolean; stderrTruncated?: boolean;
+  durationMs: number; token?: string; notDispatched?: boolean; mayHavePartialWrites?: boolean; stdoutTruncated?: boolean; stderrTruncated?: boolean;
 }): MetaWriteDiagnostic {
   const stdout = redactMetaDiagnostic(input.stdout, input.token);
   const stderr = redactMetaDiagnostic(input.stderr, input.token);
@@ -63,14 +63,23 @@ export function metaCliDiagnostic(input: {
   };
   diagnostic.stdoutTruncated = input.stdoutTruncated === true || diagnostic.stdout !== stdout;
   diagnostic.stderrTruncated = input.stderrTruncated === true || diagnostic.stderr !== stderr;
-  // Only the actual CLI's exit-4 API header has provenance. Never mine arbitrary embedded JSON.
-  const api = input.exitCode === 4 && !input.signal && !input.notDispatched && !input.stderrTruncated
-    ? stderr.match(/^Error: API error \((\d{1,7}|None)\): ([^\r\n]*)(?:\r?\n([\s\S]*))?$/) : null;
-  if (api) {
-    diagnostic.phase = "provider_response";
-    if (api[1] !== "None") diagnostic.providerCode = Number(api[1]);
-    diagnostic.outcome = metaProviderOutcome(diagnostic.providerCode);
-    diagnostic.metaMessage = boundedMetaDiagnosticText(api[3]?.trim() || api[2].trim(), 768);
+  // Extract only the CLI's standalone exit-4 API header, never error-shaped JSON in prose.
+  // Upload progress means this command may already have created media before its creative failed.
+  const lines=stderr.trimEnd().split(/\r?\n/);
+  const header=/^Error: API error \((\d{1,7}|None)\): ([^\r\n]*)$/;
+  const headers=lines.flatMap((line,index)=>{const match=header.exec(line);return match?[{index,match}]:[];});
+  const upload=(line:string)=>/^Uploading (?:video|image) .+\.\.\.$/.test(line);
+  const warning=(line:string)=>/^WARNING:root:parent_id(?: as a parameter of constructor)? is being deprecated\.$/.test(line);
+  if(input.exitCode===4&&!input.signal&&!input.notDispatched&&!input.stderrTruncated&&headers.length===1){
+    const {index,match}=headers[0];
+    if(match[1]!=='None')diagnostic.providerCode=Number(match[1]);
+    const body=lines.slice(index+1).filter(line=>!upload(line)&&!warning(line)).join('\n').trim();
+    diagnostic.metaMessage=boundedMetaDiagnosticText(body||match[2].trim(),768);
+    const knownPrefix=lines.slice(0,index).every(line=>!line.trim()||warning(line));
+    if(!input.mayHavePartialWrites&&!lines.some(upload)&&knownPrefix){
+      diagnostic.phase='provider_response';
+      diagnostic.outcome=metaProviderOutcome(diagnostic.providerCode);
+    }
   }
   return diagnostic;
 }
@@ -85,6 +94,16 @@ export function rememberMetaWriteDiagnostic(diagnostic: MetaWriteDiagnostic): vo
   if (current) current.diagnostic = diagnostic;
 }
 
+/** Capture inside a host's catch before the outer diagnostic wrapper rethrows. No scope means unknown. */
+export function captureMetaWriteDiagnostic(error:unknown):MetaWriteDiagnostic {
+  const current=scope.getStore();
+  const existing=error&&typeof error==='object'?(error as {metaWrite?:MetaWriteDiagnostic}).metaWrite:undefined;
+  return existing??current?.diagnostic??{
+    version:1,phase:current&&!current.dispatched?'not_dispatched':'dispatch_unknown',
+    outcome:current&&!current.dispatched?'refused':'unknown',
+  };
+}
+
 /** Covers validation/credential failures AND failures persisting a successful write. Per invocation, never global. */
 export function withMetaWriteDiagnostics<T>(operation: () => Promise<T>): Promise<T> {
   return scope.run({ dispatched: false }, async () => {
@@ -92,11 +111,7 @@ export function withMetaWriteDiagnostics<T>(operation: () => Promise<T>): Promis
     catch (caught) {
       const current = scope.getStore()!;
       const error = caught instanceof Error ? caught : new Error(String(caught));
-      const existing = (error as Error & { metaWrite?: MetaWriteDiagnostic }).metaWrite;
-      const diagnostic = existing ?? current.diagnostic ?? {
-        version: 1 as const, phase: current.dispatched ? "dispatch_unknown" as const : "not_dispatched" as const,
-        outcome: current.dispatched ? "unknown" as const : "refused" as const,
-      };
+      const diagnostic = captureMetaWriteDiagnostic(error);
       error.message = boundedMetaDiagnosticText(redactMetaDiagnostic(error.message, current.token), 1024);
       throw Object.assign(error, { metaWrite: diagnostic });
     }
