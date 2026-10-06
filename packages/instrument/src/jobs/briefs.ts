@@ -129,7 +129,7 @@ export const JOB_GISTS: { readonly [J in JobId]: string } = {
     "Boot the pixel on landing pages; send browser conversions only through `infiniteMetaMirror(metaEventId)` with the id the server returned. Never reduce the number of pixel inits here (that is the duplicates job).",
   duplicates_remove: "Delete only the redundant tag owner named below, and nothing else.",
   preview_guard:
-    "Wrap the existing init in the emitted host guard expression (`buildHostGuardExpression`). For Meta, wrap the bootstrap only (`fbq('init')` and the first `PageView`), never the `_fbc` capture.",
+    "Wrap the existing init in the emitted host guard expression (`buildHostGuardExpression`). It compiles as written in strict TypeScript: paste it byte-for-byte with no type annotations. For Meta, wrap the bootstrap only (`fbq('init')` and the first `PageView`), never the `_fbc` capture.",
   server_conversions:
     "After the success branch, `await reportInfiniteOutcome({ type: <an approved conversion name from Plan data>, path, eventId: <a stable id such as the order or row id>, adMatch? })`. Payment webhooks use the checkout-capture recipe. Pass `metaEventId` to the browser only for requests the browser awaits.",
   identify_reset: "Call `infiniteIdentify(accountId)` after a VERIFIED login (an account id, never an email). Call `infiniteReset()` in every logout.",
@@ -579,7 +579,7 @@ export function jobBlock(item: ChecklistItem, facts: BriefFacts): string {
   if (data instanceof Error) throw data
   const guardNote =
     item.jobId === "preview_guard" && !(data instanceof Error) && Array.isArray(data.guardAt)
-      ? "Paste guardAsWritten exactly; it is already escaped for where the init lives."
+      ? "Paste guardAsWritten exactly; it is already escaped for where the init lives. It compiles as written in strict TypeScript, so add no type annotations."
       : undefined
   const target =
     guardNote ??

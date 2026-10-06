@@ -45,7 +45,7 @@ it("emits a guard accepted by strict TypeScript and by the adopted-init checker"
     const program = ts.createProgram([path], options)
     expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
     const { checkHostGuard } = await import("./setup-checks/host-guard.js")
-    expect(checkHostGuard({ files: new Map([["tracking.ts", source]]), strict: true }).state).toBe("ok")
+    expect(checkHostGuard({ files: new Map([["tracking.ts", source]]), strict: true, expectedEmittedGuard: buildHostGuardExpression(GUARD) }).state).toBe("ok")
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

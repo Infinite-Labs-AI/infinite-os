@@ -111,7 +111,7 @@ function runKeys(root: string, runId: string | null): TagKeys | null {
 }
 
 /** O9's run context: the exempt production hosts (§3h.9) and the run's expectation (the connection's ids). */
-export function o9RunContext(root: string, runId: string | null): { productionHosts?: string[]; expect?: TestExpect } | undefined {
+export function o9RunContext(root: string, runId: string | null): { productionHosts?: string[]; expect?: TestExpect; expectedEmittedGuard?: string } | undefined {
   const before = readBeforeFactsSync(root, runId)
   if (!before) return undefined
   const keys = applyKeysChoices(before.facts.keys, readKeysResultSync(root, runId))
@@ -124,7 +124,12 @@ export function o9RunContext(root: string, runId: string | null): { productionHo
   ]
     .map(normalizeHost)
     .filter((host) => host !== "")
-  return { productionHosts: [...new Set(hosts)], expect: testExpectFromKeys(keys) }
+  const saved = readPlanApprovalsSync(root)
+  const runState = readJsonSync(join(root, WIZARD_PATHS.state))
+  const currentPlan = isRecord(runState) && runState.runId === runId && isRecord(runState.plan) && runState.plan.hash === saved?.planHash && isRecord(runState.steps) && isRecord(runState.steps.before) && runState.steps.before.at === saved?.beforeAt
+  const approved = currentPlan ? saved?.guard : null
+  const expectedEmittedGuard = approved?.emit ? buildHostGuardExpression({ mode: "deny", exempt: approved.exempt, deny: approved.deny }) : null
+  return { productionHosts: [...new Set(hosts)], expect: testExpectFromKeys(keys), ...(expectedEmittedGuard ? { expectedEmittedGuard } : {}) }
 }
 
 /**

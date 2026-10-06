@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest"
 
 import { checkHostGuard, readAdoptedInitGuards } from "./host-guard.js"
+import { buildHostGuardExpression } from "../host-guard.js"
 
 const files = (record: Record<string, string>) => new Map(Object.entries(record))
 
@@ -17,6 +18,25 @@ const GUARDED_IIFE = [
 const GUARDED_CALL = "if (infiniteHostAllowed(['acme.com'])) {\n  gtag('config', 'G-ABC123')\n}"
 
 describe("adopted init host guard", () => {
+  it("accepts only parameter and var TypeScript annotations on the approved emitted guard", () => {
+    const emitted = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
+    const annotated = emitted.replaceAll("(function (h) {", "(function (h: string) {").replace("})(h), i;", "})(h), i: number;")
+    expect(annotated).not.toBe(emitted)
+    const guarded = (expression: string) => checkHostGuard({
+      files: files({
+        "src/ga.ts": `function start() { if (!(${expression})) return; gtag('config', 'G-ABC123'); }`,
+        "src/ph.ts": `function start() { if (!(${expression})) return; posthog.init('phc_abcdefghijklmnop', {}); }`,
+        "src/meta.ts": `function start() { if (!(${expression})) return; fbq('init', '111222333444555'); }`
+      }),
+      strict: true,
+      productionHosts: ["acme.example"],
+      expectedEmittedGuard: emitted
+    })
+    expect(guarded(annotated).findings.map((finding) => finding.code)).toEqual(Array(3).fill("INF_SETUP_HOST_GUARD_PRESENT"))
+    expect(guarded(annotated.replaceAll("h: string", "h:string").replace("i: number", "i:number")).findings.map((finding) => finding.code)).toEqual(Array(3).fill("INF_SETUP_HOST_GUARD_PRESENT"))
+    expect(guarded(annotated.replace('"acme.example"', '"other.example"')).findings.map((finding) => finding.code)).toEqual(Array(3).fill("INF_SETUP_HOST_GUARD_MISSING"))
+    expect(guarded(annotated.replace("if (x[i] === n) return true;", "if (x[i] === n) return false;")).findings.map((finding) => finding.code)).toEqual(Array(3).fill("INF_SETUP_HOST_GUARD_MISSING"))
+  })
   it("is information in the harness and a problem as job 7's proof", () => {
     const input = { files: files({ "src/ph.ts": UNGUARDED }) }
     expect(checkHostGuard(input).findings.map((finding) => [finding.code, finding.state])).toEqual([["INF_SETUP_HOST_GUARD_MISSING", "info"]])

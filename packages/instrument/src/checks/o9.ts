@@ -109,6 +109,8 @@ export interface JobInput {
 export interface O9RunContext {
   /** The exempt production hosts (site source ∪ hosting domains + aliases ∪ the observed host). */
   productionHosts?: readonly string[]
+  /** The approved preview guard's exact emitted bytes for job 7. */
+  expectedEmittedGuard?: string
   /** The run's expectation (the connection ids), for `csp(url)`. */
   expect?: TestExpect
 }
@@ -316,12 +318,14 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
     }),
     adopted_init_guarded: wrap("adopted_init_guarded", "S", (input, ctx) => {
       const files = filesOf(input)
-      const productionHosts = Array.isArray(input.productionHosts) ? (input.productionHosts as string[]) : deps.run?.()?.productionHosts
+      const run = deps.run?.()
+      const productionHosts = Array.isArray(input.productionHosts) ? (input.productionHosts as string[]) : run?.productionHosts
+      const expectedEmittedGuard = run?.expectedEmittedGuard
       const tool = itemTool(input)
       const toolAt = new Map(readAdoptedInitGuards(files).map((read) => [`${read.file}:${read.line}`, read.tool]))
       const findings = scoped(
         input,
-        checkHostGuard({ files, strict: true, ...(productionHosts ? { productionHosts } : {}) }).findings.filter(
+        checkHostGuard({ files, strict: true, ...(productionHosts ? { productionHosts } : {}), ...(expectedEmittedGuard ? { expectedEmittedGuard } : {}) }).findings.filter(
           (finding) => tool === null || toolAt.get(`${finding.file}:${finding.line}`) === tool
         )
       )

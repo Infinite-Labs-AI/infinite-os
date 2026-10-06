@@ -636,10 +636,13 @@ describe("§3x.3 (W8) the brief points at the right lines and gives the guard as
     expect(data.guardAt[0]).toMatchObject({ line: 28, context: "template_literal" })
     expect(data.guardAt[0]!.guardAsWritten).toContain("\\\\s+")
     expect(block).toContain("Paste guardAsWritten exactly; it is already escaped for where the init lives.")
+    expect(block).toContain("compiles as written in strict TypeScript")
+    expect(block).toContain("no type annotations")
     // Negative: in plain JS the guard is the expression itself.
     const js = buildBrief([ga4], { ...facts0, guardSites: [{ tool: "ga4" as const, file: "app/layout.tsx", line: 28, context: "js" as const }] })
     const jsData = JSON.parse(/Plan data \(JSON; decided by the user, use it exactly\): (.*)/.exec(js)![1]!) as { guardAt: Array<{ guardAsWritten: string }> }
     expect(jsData.guardAt[0]!.guardAsWritten).toBe(expression)
+    expect(js).toContain("compiles as written in strict TypeScript")
   })
 
   it("live run 5: the registry names the exact bytes the brief prescribes and their file, the same bytes the brief carries", () => {

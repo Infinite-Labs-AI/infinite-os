@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest"
 
 import { FIXED_NOW, fixtureFetch } from "../../test/wizard/fixture-fetch.js"
 import type { CheckFn, CheckId } from "../wizard/contracts/jobs.js"
+import { buildHostGuardExpression } from "../host-guard.js"
 
 import { O9_CHECK_IDS, O9_RUNNER_METHODS, o9CheckFunctions, registerO9Checks } from "./o9.js"
 
@@ -132,6 +133,18 @@ describe("O9 registration", () => {
     // Unknown production hosts: a found guard is undetermined, never a pass.
     const unknown = (await o9CheckFunctions({ version: "t", root }).adopted_init_guarded!(input, ctx)) as Array<{ state: string }>
     expect(unknown.map((result) => result.state)).toEqual(["undetermined"])
+  })
+
+  it("checks an annotated job guard against the run's approved emitted bytes", async () => {
+    const expectedEmittedGuard = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
+    const annotated = expectedEmittedGuard.replaceAll("(function (h) {", "(function (h: string) {").replace("})(h), i;", "})(h), i: number;")
+    const root = app({ "src/ph.ts": `function start() { if (!(${annotated})) return; posthog.init('phc_abcdefghijklmnop', {}); }` })
+    const item = { id: "preview_guard:posthog", allow: { files: ["src/ph.ts"], create: [] }, trigger: { finding: "INF_SETUP_HOST_GUARD_MISSING", evidence: [{ file: "src/ph.ts", line: 1 }] } }
+    const input = { item, root, appRoot: root, runId: "run-9" }
+    const check = o9CheckFunctions({ version: "t", root, run: () => ({ productionHosts: ["acme.example"], expectedEmittedGuard }) }).adopted_init_guarded!
+    expect((await check(input, ctx) as Array<{ state: string }>).map((result) => result.state)).toEqual(["pass"])
+    writeFileSync(join(root, "src/ph.ts"), `function start() { if (!(${annotated.replace('"acme.example"', '"other.example"')})) return; posthog.init('phc_abcdefghijklmnop', {}); }`)
+    expect((await check(input, ctx) as Array<{ state: string }>).map((result) => result.state)).toEqual(["problem"])
   })
 
   it("job-level checks grade only the item's files and tool (review P2-3)", async () => {

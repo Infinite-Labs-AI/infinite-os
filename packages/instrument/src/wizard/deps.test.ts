@@ -2,7 +2,7 @@
 // live reads go through the proxy-aware fetch. A loopback proxy that refuses every tunnel stands in for the
 // network: nothing leaves this machine, and no app, agent or gh is started.
 import { execFileSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { createServer, type IncomingMessage } from "node:http"
 import type { AddressInfo, Socket } from "node:net"
 import { tmpdir } from "node:os"
@@ -10,9 +10,12 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { O9_CHECK_IDS } from "../checks/o9.js"
+import { buildHostGuardExpression } from "../host-guard.js"
+import { fakeKeys } from "../../test/wizard/o7-fakes.js"
 import type { O6CheckRunner } from "../checks/registry.js"
+import { WIZARD_PATHS } from "./contracts/state.js"
 import { parseWizardArgs } from "./command.js"
-import { createDefaultWizardDeps, createDefaultWizardWiring } from "./deps.js"
+import { createDefaultWizardDeps, createDefaultWizardWiring, o9RunContext } from "./deps.js"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -40,6 +43,24 @@ async function deps(env: Record<string, string>, fetch?: typeof globalThis.fetch
     { home, ...(fetch ? { fetch } : {}) }
   )
 }
+
+describe("O9 guard context", () => {
+  it("uses exact approved guard bytes only for the current run and plan", () => {
+    const { root } = site()
+    const dir = join(root, WIZARD_PATHS.dir)
+    mkdirSync(dir, { recursive: true })
+    const runId = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+    const beforeAt = "2026-10-06T16:44:02.443Z"
+    const guard = { emit: true, exempt: ["acme.example"], deny: ["localhost"] }
+    writeFileSync(join(root, WIZARD_PATHS.beforeFacts), JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId, facts: { keys: fakeKeys(), hosting: { provider: "none", vercel: null }, observedProductionHost: "acme.example" } }))
+    writeFileSync(join(root, WIZARD_PATHS.planApprovals), JSON.stringify({ schema: "infinite-tag.plan-approvals.v1", planHash: "sha256:current", beforeAt, guard }))
+    const state = { runId, plan: { hash: "sha256:current" }, steps: { before: { at: beforeAt } } }
+    writeFileSync(join(root, WIZARD_PATHS.state), JSON.stringify(state))
+    expect(o9RunContext(root, runId)?.expectedEmittedGuard).toBe(buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny }))
+    writeFileSync(join(root, WIZARD_PATHS.state), JSON.stringify({ ...state, plan: { hash: "sha256:other" } }))
+    expect(o9RunContext(root, runId)?.expectedEmittedGuard).toBeUndefined()
+  })
+})
 
 describe("createDefaultWizardDeps (I1 wiring)", () => {
   it("registers every O9 check on O6's runner (the seams the steps call resolve to O9's functions)", async () => {
