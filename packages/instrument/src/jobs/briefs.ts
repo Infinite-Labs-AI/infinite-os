@@ -20,6 +20,7 @@ import { GLOBAL_DENY_TEXT } from "./allow.js"
 import { OUTCOME_CONVERSION_TYPES } from "./detectors/outcomes.js"
 import { boundConversionNames, type BriefConnections, type BriefPlan } from "./plan-data.js"
 import { buildMetaClickIdCaptureJavascript, buildMetaClickIdCaptureScript, buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
+import { adoptedMetaModuleGuardRecipe } from "../providers/meta.js"
 import { escapeForTemplateLiteral, escapeRegExp } from "../text-escape.js"
 
 export { escapeForTemplateLiteral }
@@ -129,7 +130,7 @@ export const JOB_GISTS: { readonly [J in JobId]: string } = {
     "Boot the pixel on landing pages; send browser conversions only through `infiniteMetaMirror(metaEventId)` with the id the server returned. Never reduce the number of pixel inits here (that is the duplicates job).",
   duplicates_remove: "Delete only the redundant tag owner named below, and nothing else.",
   preview_guard:
-    "Wrap the existing init in the emitted host guard expression (`buildHostGuardExpression`). It compiles as written in strict TypeScript: paste it byte-for-byte with no type annotations. For Meta, wrap the bootstrap only (`fbq('init')` and the first `PageView`), never the `_fbc` capture.",
+    "Guard the existing init with the emitted host expression (`buildHostGuardExpression`). It compiles as written in strict TypeScript: paste it byte-for-byte with no type annotations. In a plain Meta module, insert the early-return recipe before the bootstrap; leave every existing statement, especially fbq('consent'), on its original line and indentation. Never guard the `_fbc` capture.",
   server_conversions:
     "After the success branch, `await reportInfiniteOutcome({ type: <an approved conversion name from Plan data>, path, eventId: <a stable id such as the order or row id>, adMatch? })`. Payment webhooks use the checkout-capture recipe. Pass `metaEventId` to the browser only for requests the browser awaits.",
   identify_reset: "Call `infiniteIdentify(accountId)` after a VERIFIED login (an account id, never an email). Call `infiniteReset()` in every logout.",
@@ -314,7 +315,9 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
       const guardAt = (facts.guardSites ?? [])
         .filter((site) => site.tool === target && item.allow.files.includes(site.file))
         .map((site) => {
-          const raw = target === "meta" ? guard.metaRecipe! : guard.expression
+          const raw = target === "meta"
+            ? site.context === "js" ? adoptedMetaModuleGuardRecipe(guard.expression, /\.[cm]?tsx?$/i.test(site.file)) : guard.metaRecipe!
+            : guard.expression
           return { file: site.file, line: site.line, context: site.context, guardAsWritten: site.context === "template_literal" ? escapeForTemplateLiteral(raw) : raw }
         })
       // R4-6: with the guard as written at each init, the raw expression and recipe are not repeated (run 4's brief

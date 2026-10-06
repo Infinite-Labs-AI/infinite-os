@@ -60,6 +60,23 @@ const planData = (brief: string, id: string): Record<string, unknown> => {
 }
 
 describe("R4-6: run 4's brief hands each job its exact change", () => {
+  it("gives a strict TypeScript Meta module an early return before its unchanged consent call", () => {
+    const source = "declare const fbq: (...args: unknown[]) => void;\nexport function start() {\n  fbq('init', '555500001111222');\n  fbq('consent', 'grant');\n}\n"
+    const root = makeSite({ "src/common/tracking.ts": source })
+    const spec = { mode: "deny" as const, exempt: ["shop.example.com"], deny: [] }
+    const guard = { expression: buildHostGuardExpression(spec), exemptHosts: spec.exempt, metaRecipe: adoptedMetaGuardRecipe(spec) }
+    const brief = buildBrief([item("preview_guard:meta", ["src/common/tracking.ts"])], facts(root, { guardSites: [{ tool: "meta", file: "src/common/tracking.ts", line: 3, context: "js" }], previewGuard: guard }))
+    const recipe = (planData(brief, "preview_guard:meta").guardAt as Array<{ guardAsWritten: string }>)[0]!.guardAsWritten
+    expect(recipe).toContain("if (!(" )
+    expect(recipe).toContain("return;")
+    expect(recipe).not.toContain("<your existing Meta Pixel bootstrap")
+    expect(brief).toContain("leave every existing statement")
+    const path = join(root, "tracking-for-compile.ts")
+    writeFileSync(path, source.replace("export function start() {", `export function start() {\n${recipe}`))
+    const program = ts.createProgram([path], { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, lib: ["lib.es2020.d.ts", "lib.dom.d.ts"], skipLibCheck: true })
+    expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
+  })
+
   it("gives a strict TypeScript module plain capture statements beside an imperative pixel init", () => {
     const source = "declare const fbq: (...args: string[]) => void;\nexport function start() {\n  fbq('init', '555500001111222');\n}\n"
     const root = makeSite({ "src/common/tracking.ts": source })

@@ -36,6 +36,7 @@ import {
   type AgentRunResult,
   type ReviewFailure,
   type ReviewResult,
+  type ReviewRunInput,
   type RunJobsInput,
   type SessionRef
 } from "../wizard/contracts/agents.js"
@@ -277,6 +278,8 @@ export class AgentRunnerImpl implements AgentRunner {
         onClaim: async (claim) => {
           if (!this.activeFence || !(await this.activeFence.claimCheckSafe())) return { state: "undetermined", problems: ["The safety fence found an out-of-scope or changing file; no static check ran. The turn will be settled before any further checks."] }
           const feedback = await input.onClaim(claim)
+          const consentProblems = await this.activeFence.claimConsentProblems(claim.jobId)
+          if (consentProblems.length > 0) return { state: "problem", problems: [...(feedback?.problems ?? []), ...consentProblems] }
           return feedback && typeof feedback === "object" ? feedback : undefined
         },
         onAsk: (question) => input.onAsk(question),
@@ -362,7 +365,7 @@ export class AgentRunnerImpl implements AgentRunner {
     return join(wizardCacheRoot(this.options.home), runId, `review-${n}-${reviewer === "claude_code" ? "claude" : "codex"}.jsonl`)
   }
 
-  async review(input: { worktreeDir: string; reviewer: AgentKind; brief: string; onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void }): Promise<ReviewResult | ReviewFailure> {
+  async review(input: ReviewRunInput): Promise<ReviewResult | ReviewFailure> {
     await assertReviewWorktree(input.worktreeDir, this.options.root)
     const info = await this.infoFor(input.reviewer)
     if (!info) return { error: "unparseable" }
@@ -643,7 +646,7 @@ export class AgentRunnerImpl implements AgentRunner {
 
   private async reviewAttempt(
     info: AgentInfo,
-    input: { worktreeDir: string; reviewer: AgentKind; brief: string; onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void },
+    input: ReviewRunInput,
     scratch: string,
     model: ModelChoice
   ): Promise<{ outcome: "completed" | "out_of_usage" | "timeout" | "error"; review: ReviewResult | null; modelRejected: boolean }> {
@@ -658,6 +661,9 @@ export class AgentRunnerImpl implements AgentRunner {
       void log.appendFile(`${line}\n`).catch(() => undefined)
     }
     const narrator = new Narrator({ agent: input.reviewer, role: "reviewer", emit: (beat) => input.onNarrate?.({ agent: beat.agent, role: "reviewer", text: beat.text }), now: () => (this.options.now ?? (() => new Date()))().getTime(), throttleMs: this.options.narrationThrottleMs })
+    const ticker = new ThinkingTicker(narrator, () => (this.options.now ?? (() => new Date()))().getTime(), (seconds) => input.onActivity?.({ kind: "thinking", seconds }))
+    const tickTimer = setInterval(() => ticker.tick(), 1_000)
+    tickTimer.unref()
     const beatCtx = { root: input.worktreeDir, isAllowed: () => true, agent: input.reviewer, jobNumber: () => null }
     let outcome: "completed" | "out_of_usage" | "timeout" | "error" | null = null
     let modelRejected = false
@@ -671,7 +677,10 @@ export class AgentRunnerImpl implements AgentRunner {
     if (input.reviewer === "claude_code") {
       // Review I1 P1-4: a reviewer whose own worktree is under one of its Read denies would review nothing.
       const cwd = await resolveRealpath(input.worktreeDir)
-      if (reviewerDenyCoveringCwd(sensitive, cwd) !== null) return { outcome: "error", review: null, modelRejected: false }
+      if (reviewerDenyCoveringCwd(sensitive, cwd) !== null) {
+        clearInterval(tickTimer)
+        return { outcome: "error", review: null, modelRejected: false }
+      }
       const argv = buildClaudeReviewerArgv({
         sensitive,
         systemPrompt: `${SYSTEM_PROMPT_HEADER}\n\n${input.brief}`,
@@ -691,9 +700,15 @@ export class AgentRunnerImpl implements AgentRunner {
           const event = parseClaudeLine(line)
           if (!event) return
           if (event.kind === "tool_use") {
+            ticker.acted()
+            const toolInput = typeof event.input === "object" && event.input !== null ? event.input as Record<string, unknown> : {}
+            const path = displayPath(toolInput.file_path ?? toolInput.path ?? toolInput.notebook_path, input.worktreeDir)
+            if (event.name === "Read") input.onActivity?.({ kind: "read", path })
+            if (event.name === "Edit" || event.name === "Write" || event.name === "MultiEdit") input.onActivity?.({ kind: "edit", path })
             const beat = claudeToolBeat(event.name, event.input, beatCtx)
             if (beat) narrator.beat(beat)
           }
+          if (event.kind === "tool_result") ticker.toolReturned()
           if (claudeModelRejected(event, model.model)) {
             modelRejected = true
             return stop("error")
@@ -738,7 +753,12 @@ export class AgentRunnerImpl implements AgentRunner {
           keep(line)
           const event = parseCodexLine(line)
           if (event?.kind === "item") {
+            if (event.phase === "completed") ticker.toolReturned()
+            else ticker.acted()
             const beat = codexItemBeat(event.item, beatCtx)
+            if (typeof event.item === "object" && event.item !== null && (event.item as { type?: string }).type === "file_change") {
+              for (const change of (event.item as { changes?: Array<{ path?: string }> }).changes ?? []) if (change.path) input.onActivity?.({ kind: "edit", path: displayPath(change.path, input.worktreeDir) })
+            }
             if (beat) narrator.beat(beat)
           }
           if (!event || event.kind !== "error") return
@@ -752,6 +772,7 @@ export class AgentRunnerImpl implements AgentRunner {
       })
     }
     const exit = await child.done
+    clearInterval(tickTimer)
     await log.close().catch(() => undefined)
     if (outputPath) {
       try {

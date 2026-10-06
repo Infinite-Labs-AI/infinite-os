@@ -56,6 +56,20 @@ function jobsInput(over: Partial<RunJobsInput> = {}) {
 const CLAIM_DONE = { tool: "job_claim", args: { job_id: "meta_improve:landing", status: "done", note: "trial button wired" } }
 
 describe("runJobs with Claude (fake)", () => {
+  it("returns a moved consent call as claim-time feedback before the turn settles", async () => {
+    const { root, fakes } = setup({ turns: [{ steps: [
+      { tool: "job_list" },
+      { edit: { path: "app/layout.tsx", content: `${POST_INSTALL_LAYOUT}  fbq('consent', 'grant')\n` } },
+      { tool: "job_claim", args: { job_id: "meta_improve:landing", status: "done", note: "guarded" } }
+    ] }] })
+    // This call was already in the site before the turn; only its indentation changes.
+    write(root, "app/layout.tsx", `${POST_INSTALL_LAYOUT}fbq('consent', 'grant')\n`)
+    const result = await makeRunner(fakes, root).runJobs(jobsInput().input)
+    const reply = records(fakes).find((entry) => entry.kind === "mcp" && entry.tool === "job_claim")?.reply
+    expect(reply?.result?.structuredContent).toMatchObject({ staticChecks: { state: "problem", problems: [expect.stringContaining("early-return")] } })
+    expect(result.blocked).toEqual(expect.arrayContaining([expect.objectContaining({ itemId: "meta_improve:landing", reason: "consent_touched" })]))
+  })
+
   it("relays claims through the real mcp-proxy, keeps allowlisted edits, and narrates", async () => {
     const { root, fakes } = setup(
       {

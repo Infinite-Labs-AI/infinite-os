@@ -130,6 +130,15 @@ export interface ReviewResult {
 
 export type ReviewFailure = { error: "unparseable" | "timeout" | "out_of_usage" }
 
+export interface ReviewRunInput {
+  worktreeDir: string
+  reviewer: AgentKind
+  brief: string
+  onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void
+  /** Trusted tool events and thinking-ticker time, like the worker's status line. */
+  onActivity?: RunJobsInput["onActivity"]
+}
+
 /** §3f.1. Lane O3 implements it; every other lane gets it through WizardDeps. */
 export interface AgentRunner {
   detect(): Promise<AgentDetectResult>
@@ -138,7 +147,7 @@ export interface AgentRunner {
    * §3x.3 `onNarrate` (optional): the reviewer's tool beats, narrated like the worker's. Every reviewer event stream is
    * also kept (0600) at `~/Library/Caches/infinite-tag/<runId>/review-<n>-<agent>.jsonl`, so a slow review can be measured.
    */
-  review(input: { worktreeDir: string; reviewer: AgentKind; brief: string; onNarrate?: (beat: { agent: AgentKind; role: "reviewer"; text: string }) => void }): Promise<ReviewResult | ReviewFailure>
+  review(input: ReviewRunInput): Promise<ReviewResult | ReviewFailure>
   /** True while any agent child of this run is running (the engine invariant, §3a.9.4). */
   isAgentAlive(): boolean
   killAll(): Promise<void>

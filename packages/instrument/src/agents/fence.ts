@@ -304,6 +304,10 @@ const HEAVY = new Set<string>(HEAVY_DIR_NAMES)
 export class Fence {
   private settled = false
   private closing: { kind: "abort" | "end"; promise: Promise<unknown> } | null = null
+  /** The last bytes seen at a claim, so a later job in the same file is not blamed for an earlier consent edit. */
+  private readonly claimConsentSnapshots = new Map<string, string>()
+  /** Consent hunk owners observed while claims were made, keyed by the hunk's original line range. */
+  private readonly claimConsentOwners = new Map<string, Map<string, Set<string>>>()
 
   private constructor(private readonly manifest: FenceManifest, private readonly dir: string) {}
 
@@ -329,6 +333,36 @@ export class Fence {
     const touched = await this.touched()
     if (touched.tamper.length > 0) return false
     return touched.paths.every((rel) => !isDenied(rel) && this.manifest.allow.some((item) => [...item.files, ...item.create].some((pattern) => sameOrGlob(pattern, rel))))
+  }
+
+  /** Preview a consent refusal while the agent can still repair its own edit. No files are changed here. */
+  async claimConsentProblems(itemId: string): Promise<string[]> {
+    this.assertOpen()
+    const rule = this.manifest.allow.find((entry) => entry.itemId === itemId)
+    if (!rule) return []
+    const problems: string[] = []
+    for (const rel of [...new Set([...rule.files, ...rule.create])].filter((path) => !path.includes("*"))) {
+      const bytes = await readFile(join(this.manifest.root, rel)).catch(() => null)
+      if (bytes === null) continue
+      const current = decodeText(bytes)
+      const original = decodeText(await this.originalBytes(rel) ?? Buffer.from(""))
+      if (current === null || original === null) continue
+      const previous = this.claimConsentSnapshots.get(rel) ?? original
+      const changedNow = consentChangedHunks(previous, current)
+      const unsafe = consentChangedHunks(original, current)
+      for (const hunk of unsafe) {
+        if (!changedNow.some((recent) => recent.bStart <= hunk.bEnd && hunk.bStart <= recent.bEnd)) continue
+        const byFile = this.claimConsentOwners.get(rel) ?? new Map<string, Set<string>>()
+        const key = `${hunk.aStart}:${hunk.aEnd}`
+        const owners = byFile.get(key) ?? new Set<string>()
+        owners.add(itemId)
+        byFile.set(key, owners)
+        this.claimConsentOwners.set(rel, byFile)
+        problems.push(`${rel}: your edit moved or changed a consent call. Restore that line exactly; for a Meta preview guard use the early-return form before the pixel bootstrap, without wrapping or re-indenting the consent call.`)
+      }
+      this.claimConsentSnapshots.set(rel, current)
+    }
+    return [...new Set(problems)]
   }
 
   static async begin(options: FenceBeginOptions): Promise<Fence> {
@@ -526,8 +560,8 @@ export class Fence {
     const strays = new Map<string, FenceStray>()
     const reverted = new Set<string>()
     const reportedOutside: string[] = []
-    const block = (rel: string, reason: FenceBlockReason, note: string) => {
-      const owners = this.itemsFor(rel, options.claims ?? [])
+    const block = (rel: string, reason: FenceBlockReason, note: string, attributed?: readonly string[]) => {
+      const owners = attributed ?? this.itemsFor(rel, options.claims ?? [])
       // Review P2-3: no job owns the path, so no job is failed for it: only the path was put back, and the turn says so.
       if (owners.length === 0 && !strays.has(rel)) strays.set(rel, { path: rel, note })
       for (const itemId of owners) {
@@ -625,15 +659,16 @@ export class Fence {
       const afterLines = splitLines(after)
       const hunks = hunksOf(beforeLines, afterLines)
       const keep = hunks.map(() => true)
-      const spansBefore = consentLineSpans(before)
-      const spansAfter = consentLineSpans(after)
       hunks.forEach((hunk, index) => {
-        const { added, removed } = hunkLines(beforeLines, afterLines, hunk)
-        const byPattern = [...added, ...removed].some((line) => CONSENT_CALL_PATTERNS.some((pattern) => pattern.test(line.text)))
-        const inCall = added.some((line) => inSpans(line.line, spansAfter)) || removed.some((line) => inSpans(line.line, spansBefore))
-        if (byPattern || inCall) {
+        if (consentHunkChanged(beforeLines, afterLines, hunk, consentLineSpans(before), consentLineSpans(after))) {
           keep[index] = false
-          block(rel, "consent_touched", `Undid a change to a consent call in ${rel}: consent is never the agent's job.`)
+          const key = `${hunk.aStart}:${hunk.aEnd}`
+          const observed = this.claimConsentOwners.get(rel)?.get(key)
+          const inferred = this.attributeHunk(rel, hunk, options.claims ?? [])
+          // Without a claim-time checkpoint, several jobs on one file are ambiguous. Revert the hunk,
+          // then let each job's check decide; never accuse every file owner of moving consent.
+          const owners = observed && observed.size > 0 ? [...observed] : inferred.length === 1 ? inferred : []
+          block(rel, "consent_touched", `Undid a change to a consent call in ${rel}: consent is never the agent's job. Use the early-return preview guard before the pixel bootstrap without moving that call.`, owners)
         }
       })
       candidates.push({ rel, before: beforeBytes === null ? null : before, after, beforeLines, afterLines, hunks, keep })
@@ -1207,6 +1242,20 @@ async function heavyDirsReplaced(root: string, inodes: readonly HeavyInode[]): P
 }
 
 // ---- consent call spans (review O3 F3) ----
+
+function consentHunkChanged(before: readonly string[], after: readonly string[], hunk: LineHunk, spansBefore: ReadonlyArray<[number, number]>, spansAfter: ReadonlyArray<[number, number]>): boolean {
+  const { added, removed } = hunkLines(before, after, hunk)
+  return [...added, ...removed].some((line) => CONSENT_CALL_PATTERNS.some((pattern) => pattern.test(line.text))) ||
+    added.some((line) => inSpans(line.line, spansAfter)) || removed.some((line) => inSpans(line.line, spansBefore))
+}
+
+function consentChangedHunks(before: string, after: string): LineHunk[] {
+  const beforeLines = splitLines(before)
+  const afterLines = splitLines(after)
+  const spansBefore = consentLineSpans(before)
+  const spansAfter = consentLineSpans(after)
+  return hunksOf(beforeLines, afterLines).filter((hunk) => consentHunkChanged(beforeLines, afterLines, hunk, spansBefore, spansAfter))
+}
 
 /** 1-based, inclusive line ranges of every consent call in `text` (its whole bracket span). */
 export function consentLineSpans(text: string): Array<[number, number]> {

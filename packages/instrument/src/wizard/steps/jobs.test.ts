@@ -3,9 +3,10 @@
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
+import ts from "typescript"
 
 import { assertBuilt, fakeAgents, makeRunner, records, runs } from "../../../test/wizard/agents.js"
-import { cleanup, makeFenceFixture, POST_INSTALL_LAYOUT, write } from "../../../test/wizard/repo.js"
+import { cleanup, makeFenceFixture, POST_INSTALL_LAYOUT, runGit, write } from "../../../test/wizard/repo.js"
 import { agentItem, baseState, fakeBridge, fakeChecks, fakeInstaller, fakeRegistry, makeCtx, makeDeps, STEP_RUN_ID } from "../../../test/wizard/agent-step-harness.js"
 import type { AgentRunnerImpl } from "../../agents/runner.js"
 import type { WizardOptions } from "../contracts/deps.js"
@@ -13,6 +14,7 @@ import type { CheckResult, ChecklistItem, CheckRunner } from "../contracts/jobs.
 import { NESTED_BRIEF_PATH, NESTED_SANDBOX_HINT, step } from "./jobs.js"
 import { verifyFinalSeal } from "../../agents/fence.js"
 import { finalSealPath } from "../../agents/paths.js"
+import { buildMetaClickIdCaptureTypescript } from "../../providers/meta-browser/click-id.js"
 
 // These spawn real node fakes, the built mcp-proxy and git for up to 4 rounds: the 5 s default is too
 // tight under a loaded full-suite run (review O3 F15).
@@ -64,6 +66,54 @@ function stateOf(items: ChecklistItem[], id: string) {
 }
 
 describe("step jobs: claims are only claims; the wizard checks", () => {
+  it("a wrapped Meta consent call blocks its own job while four other shared-file jobs pass", async () => {
+    const file = "src/common/tracking.ts"
+    const base = [
+      "declare const gtag: (...args: unknown[]) => void;",
+      "declare const posthog: { init(key: string, options: object): void };",
+      "declare const fbq: (...args: unknown[]) => void;",
+      "declare function allowHost(): boolean;",
+      "export function ga() { gtag('config', 'G-FAKE00001'); }",
+      "export function ph() { posthog.init('phc_FAKE', { api_host: 'https://us.i.posthog.com' }); }",
+      "export function meta() {",
+      "  fbq('init', '1234567890123456');",
+      "  fbq('consent', 'grant');",
+      "  fbq('track', 'PageView');",
+      "}", ""
+    ].join("\n")
+    const capture = buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "not_required" } })
+    const withCapture = `${capture}\n${base}`
+    const wrapped = withCapture.replace("  fbq('init', '1234567890123456');\n  fbq('consent', 'grant');\n  fbq('track', 'PageView');", "  if (allowHost()) {\n    fbq('init', '1234567890123456');\n    fbq('consent', 'grant');\n    fbq('track', 'PageView');\n  }")
+    const gaGuarded = wrapped.replace("gtag('config', 'G-FAKE00001');", "if (allowHost()) gtag('config', 'G-FAKE00001');")
+    const phGuarded = gaGuarded.replace("posthog.init('phc_FAKE', { api_host: 'https://us.i.posthog.com' });", "if (allowHost()) posthog.init('phc_FAKE', { api_host: '/ingest' });")
+    const sensitive = phGuarded.replace("api_host: '/ingest'", "api_host: '/ingest', mask_all_text: true")
+    const ids = ["meta_improve:capture", "preview_guard:meta", "preview_guard:ga4", "preview_guard:posthog", "posthog_improve:sensitive_pages"]
+    const t = setup({
+      scenario: { turns: [{ steps: [
+        { edit: { path: file, content: withCapture } }, claim(ids[0]!),
+        { edit: { path: file, content: wrapped } }, claim(ids[1]!),
+        { edit: { path: file, content: gaGuarded } }, claim(ids[2]!),
+        { edit: { path: file, content: phGuarded } }, claim(ids[3]!),
+        { edit: { path: file, content: sensitive } }, claim(ids[4]!)
+      ] }] },
+      items: ids.map((id) => agentItem(id, [file]))
+    })
+    write(t.root, file, base)
+    runGit(t.root, ["add", file])
+    runGit(t.root, ["commit", "-m", "tracking fixture"])
+    expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
+    const jobs = t.current().jobs
+    expect(jobs.find((job) => job.id === ids[1])).toMatchObject({ state: "blocked", blockedReason: "consent_touched" })
+    for (const id of [ids[0]!, ...ids.slice(2)]) expect(jobs.find((job) => job.id === id)?.state, id).toMatch(/done_in_code|waiting_deploy/)
+    const final = readFileSync(join(t.root, file), "utf8")
+    expect(final).toContain("mask_all_text: true")
+    expect(final).not.toContain("  if (allowHost()) {")
+    const program = ts.createProgram([join(t.root, file)], { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, lib: ["lib.es2020.d.ts", "lib.dom.d.ts"], skipLibCheck: true })
+    expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
+    const metaReply = records(t.fakes).filter((entry) => entry.kind === "mcp" && entry.tool === "job_claim")[1]?.reply?.result?.structuredContent
+    expect(metaReply).toMatchObject({ staticChecks: { state: "problem", problems: [expect.stringContaining("early-return")] } })
+  })
+
   it("does not turn an agent progress sentence into file counts or a writing phase", async () => {
     const t = setup({ scenario: { turns: [{ steps: [{ tool: "report_progress", args: { job_id: "meta_improve:landing", text: "Editing phantom.ts" } }] }] }, items: [ITEMS[0]!] })
     await step.run(t.ctx, t.deps)

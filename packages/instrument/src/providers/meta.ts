@@ -290,6 +290,24 @@ export function adoptedMetaGuardRecipe(guard: HostGuardSpec): string {
   return ADOPTED_META_GUARD_RECIPE.replace(GUARD_EXPRESSION_PLACEHOLDER, buildHostGuardExpression(guard))
 }
 
+/** Plain modules keep the existing bootstrap (and any consent call inside it) in place. */
+export function adoptedMetaModuleGuardRecipe(expression: string, typeScript: boolean): string {
+  const alias = typeScript
+    ? "var infinitePreviewWindow = window as unknown as { fbq?: ((...args: unknown[]) => void) & { __infiniteSilenced?: boolean } };"
+    : "var infinitePreviewWindow = window;"
+  return [
+    'if (typeof window === "undefined") return;',
+    `if (!(${expression})) {`,
+    `  ${alias}`,
+    '  if (typeof infinitePreviewWindow.fbq !== "function") {',
+    "    infinitePreviewWindow.fbq = function () {};",
+    "    infinitePreviewWindow.fbq.__infiniteSilenced = true;",
+    "  }",
+    "  return;",
+    "}"
+  ].join("\n")
+}
+
 export { META_CLICK_ID_ACCESSOR }
 
 /**
