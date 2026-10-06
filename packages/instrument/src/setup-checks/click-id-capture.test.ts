@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { checkClickIdCapture, isSharedEntry } from "./click-id-capture.js"
+import { buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
 
 const PIXEL = "fbq('init', '555500001111222');\nfbq('track', 'PageView');"
 const PAGE = (body: string) => `<html><head>${body}</head><body><h1>Hi</h1></body></html>`
@@ -10,6 +11,19 @@ function check(files: Record<string, string>) {
 }
 
 describe("_fbc capture at the landing page", () => {
+  it("recognises the exact module capture imported through the shared app entry", () => {
+    const capture = buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "not_required" } })
+    const files = {
+      "pages/_app.tsx": "import '../components/MarketingConsent'; export default function App() { return null }",
+      "components/MarketingConsent.tsx": "import '../src/common/tracking'; export function MarketingConsent() { return null }",
+      "src/common/tracking.ts": `${capture}\nexport function startMeta() { fbq('init', '555500001111222'); }`
+    }
+    const result = check(files)
+    expect(result.state).toBe("ok")
+    expect(result.findings[0]?.message).toContain("managed click-id capture")
+    const broken = check({ ...files, "src/common/tracking.ts": files["src/common/tracking.ts"].replace('document.cookie = "_fbc=" + value', 'void "_fbc=" + value') })
+    expect(broken.findings[0]?.message).not.toContain("managed click-id capture")
+  })
   /** THE FIXTURE FOR THE DEFECT: the pixel boots only where the visitor ALREADY converted. */
   it("catches a pixel that only initialises on a conversion page", () => {
     const result = check({

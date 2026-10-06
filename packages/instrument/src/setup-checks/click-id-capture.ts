@@ -23,7 +23,8 @@
 // literal — read raw, its escaped quotes hide the managed pixel and the check called a correctly
 // installed Next site "not checked".
 import { extractMetaPixelIds } from "../meta-live/config-probe.js"
-import { META_CLICK_ID_ACCESSOR } from "../providers/meta-browser/click-id.js"
+import { posix } from "node:path"
+import { buildMetaClickIdCaptureTypescript, META_CLICK_ID_ACCESSOR } from "../providers/meta-browser/click-id.js"
 
 import {
   clickIdManagedCaptureMessage,
@@ -36,6 +37,26 @@ import { metaSourceUnits } from "./meta-pixel-config.js"
 import { worstState, type SetupCheckResult, type SetupFinding } from "./types.js"
 
 const MANAGED_CAPTURE = new RegExp(String.raw`window\.${META_CLICK_ID_ACCESSOR}\s*=\s*function`)
+const MODULE_CAPTURES = (["not_required", "required"] as const).map((mode) => buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode } }))
+
+/** Static imports from a shared entry are part of its initial bundle; dynamic imports are not assumed shared. */
+function sharedImports(files: ReadonlyMap<string, string>): Set<string> {
+  const shared = new Set([...files.keys()].filter(isSharedEntry))
+  const queue = [...shared]
+  while (queue.length > 0) {
+    const file = queue.shift()!
+    const source = files.get(file) ?? ""
+    for (const match of source.matchAll(/\bimport\s+(?:(?:[^;"']|\n)*?\s+from\s+)?["'](\.[^"']+)["']/g)) {
+      const base = posix.normalize(posix.join(posix.dirname(file), match[1]!))
+      const resolved = [base, ...[".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", "/index.ts", "/index.tsx"].map((suffix) => base + suffix)].find((path) => files.has(path))
+      if (resolved && !shared.has(resolved)) {
+        shared.add(resolved)
+        queue.push(resolved)
+      }
+    }
+  }
+  return shared
+}
 
 /**
  * Files every route loads. An `fbq('init')` here runs on the first page a visitor sees, whichever
@@ -81,10 +102,11 @@ export function checkClickIdCapture(input: ClickIdCaptureInput): SetupCheckResul
   const htmlPagesWith: string[] = []
   const htmlPagesWithout: string[] = []
   const managedCaptureFiles = new Set<string>()
+  const sharedFiles = sharedImports(input.files)
 
   for (const [file, contents] of input.files) {
     const units = metaSourceUnits(file, contents)
-    if (units.some((unit) => unit.managed && MANAGED_CAPTURE.test(unit.text))) managedCaptureFiles.add(file)
+    if (units.some((unit) => (unit.managed && MANAGED_CAPTURE.test(unit.text)) || MODULE_CAPTURES.some((capture) => unit.text.includes(capture)))) managedCaptureFiles.add(file)
     const initialises =
       managedCaptureFiles.has(file) || units.some((unit) => extractMetaPixelIds(unit.text).length > 0)
     if (initialises) initFiles.push(file)
@@ -121,7 +143,7 @@ export function checkClickIdCapture(input: ClickIdCaptureInput): SetupCheckResul
     return { check: "click_id_capture", state: worstState(findings), findings }
   }
 
-  const shared = initFiles.filter(isSharedEntry)
+  const shared = initFiles.filter((file) => sharedFiles.has(file))
   if (shared.length > 0) {
     const managed = shared.find((file) => managedCaptureFiles.has(file))
     const file = managed ?? (shared[0] as string)

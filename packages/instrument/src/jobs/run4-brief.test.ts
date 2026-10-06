@@ -4,15 +4,18 @@
 // exact change, names Infinite's modules as never to be opened (never a file a job must change), and says what the
 // helpers do.
 import { readFileSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import ts from "typescript"
 
 import { cleanupSites, makeSite } from "../../test/wizard/o7-fakes.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 import { adoptedInitSites } from "../wizard/deps.js"
 import { cookTemplateLiteral } from "../t0/inline-scripts.js"
 import { buildMetaClickIdCaptureScript } from "../providers/meta-browser/click-id.js"
-import { autoConfigOffLine, buildBrief, HELPER_API, type BriefFacts } from "./briefs.js"
+import { autoConfigOffLine, buildBrief, capturePasteAsWritten, HELPER_API, type BriefFacts } from "./briefs.js"
 import { buildHostGuardExpression } from "../host-guard.js"
 import { adoptedMetaGuardRecipe } from "../providers/meta.js"
 
@@ -56,6 +59,24 @@ const planData = (brief: string, id: string): Record<string, unknown> => {
 }
 
 describe("R4-6: run 4's brief hands each job its exact change", () => {
+  it("gives a strict TypeScript module plain capture statements beside an imperative pixel init", () => {
+    const source = "declare const fbq: (...args: string[]) => void;\nexport function start() {\n  fbq('init', '555500001111222');\n}\n"
+    const root = makeSite({ "src/common/tracking.ts": source })
+    const brief = buildBrief([item("meta_improve:capture", ["src/common/tracking.ts"])], facts(root, { guardSites: [{ tool: "meta", file: "src/common/tracking.ts", line: 3, context: "js" }], managedFiles: [] }))
+    const capture = planData(brief, "meta_improve:capture").capture as { insertBefore: string; pasteAsWritten: string }
+    expect(capture.insertBefore).toContain("fbq('init') call")
+    expect(capture.pasteAsWritten).not.toContain("<Script")
+    const dir = mkdtempSync(join(tmpdir(), "infinite-capture-ts-"))
+    try {
+      const file = join(dir, "tracking.ts")
+      writeFileSync(file, source.replace("  fbq('init'", `${capture.pasteAsWritten}\n  fbq('init'`))
+      const program = ts.createProgram([file], { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, lib: ["lib.es2020.d.ts", "lib.dom.d.ts"], skipLibCheck: true })
+      expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+    expect(capture.pasteAsWritten).toBe(capturePasteAsWritten("typescript_module", "not_required"))
+  })
   it("the capture job gets Infinite's capture as written for the <Script> body, and where; its own task, not the job's gist", () => {
     const root = makeSite({ "app/layout.tsx": layout })
     const brief = buildBrief([item("meta_improve:capture", ["app/layout.tsx"])], facts(root))

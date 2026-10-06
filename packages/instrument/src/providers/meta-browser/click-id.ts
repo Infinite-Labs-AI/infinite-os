@@ -192,6 +192,16 @@ export function buildMetaClickIdCaptureScript(options: MetaClickIdCaptureOptions
   ].join("\n")
 }
 
+/** The same capture in a strict TypeScript module with an imperative adopted pixel. */
+export function buildMetaClickIdCaptureTypescript(options: MetaClickIdCaptureOptions = {}): string {
+  return buildMetaClickIdCaptureScript(options)
+    .replace("(function () {", "(function () {\n  const window: any = globalThis.window;\n  const navigator: any = globalThis.navigator;")
+    .replace("function infiniteConsentGate(start)", "function infiniteConsentGate(start: () => void)")
+    .replace("function storedFbcs(usableOnly)", "function storedFbcs(usableOnly: boolean)")
+    .replace("function format(index, fbclid)", "function format(index: number, fbclid: string)")
+    .replace("function domainIndex(domain)", "function domainIndex(domain: string)")
+}
+
 function indent(source: string): string[] {
   return source.split("\n").map((line) => `  ${line}`)
 }

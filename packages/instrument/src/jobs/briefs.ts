@@ -19,7 +19,7 @@ import type { ChecklistItem, JobId, PastePlacement, PrescribedPaste } from "../w
 import { GLOBAL_DENY_TEXT } from "./allow.js"
 import { OUTCOME_CONVERSION_TYPES } from "./detectors/outcomes.js"
 import { boundConversionNames, type BriefConnections, type BriefPlan } from "./plan-data.js"
-import { buildMetaClickIdCaptureScript } from "../providers/meta-browser/click-id.js"
+import { buildMetaClickIdCaptureScript, buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
 import { escapeForTemplateLiteral, escapeRegExp } from "../text-escape.js"
 
 export { escapeForTemplateLiteral }
@@ -70,9 +70,11 @@ export interface BriefFacts {
  * managed capture (`buildMetaClickIdCaptureScript`, last click wins, one cookie on Meta's scope), never a hand-made one:
  * run 4's agent wrote its own, which kept the FIRST click.
  */
-export function capturePasteAsWritten(context: "component" | "html", consentMode: "not_required" | "required"): string {
+export function capturePasteAsWritten(context: "component" | "html" | "typescript_module" | "javascript_module", consentMode: "not_required" | "required"): string {
   const capture = buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: consentMode } })
   if (context === "html") return `<script>\n${capture}\n</script>`
+  if (context === "javascript_module") return capture
+  if (context === "typescript_module") return buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: consentMode } })
   return `<Script id="infinite-meta-click-id" strategy="afterInteractive">{\`${escapeForTemplateLiteral(capture)}\`}</Script>`
 }
 
@@ -254,7 +256,7 @@ export function operatorRules(facts: BriefFacts): string {
         ]
       : []),
     "Each job below says exactly what to change and where (its Plan data holds any text to paste as written). Make that change, then claim it; do not re-derive it.",
-    "When a job is finished, blocked, or not needed, claim it with `job_claim`. Your claim is not the result: the wizard runs its own checks before it ticks anything.",
+    "Finish and claim one job at a time with `job_claim`. Read its staticChecks result before starting the next job; if it reports a problem, fix this job and claim it again in this turn. The wizard runs the build and offline checks after your turn before it ticks anything.",
     "Questions about consent, conversion names, privacy text, the banner or npm installs are already decided in the plan; do not ask them. Where a job carries plan data (conversion names, the privacy paragraph, the guard expression, connection IDs), use exactly that data; never choose your own.",
     // §3y.10 (P3-10, P3-13).
     "Everything you need is in this brief; never read .infinite/.",
@@ -349,9 +351,11 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
         if (!site) return new Error(`the brief for ${item.id} needs where the adopted Meta pixel starts`)
         if (facts.consentMode !== "not_required" && facts.consentMode !== "required") return new Error(`the brief for ${item.id} needs the approved consent mode`)
         const html = /\.html?$/i.test(site.file)
+        const moduleKind = /\.tsx?$/i.test(site.file) ? "typescript_module" : "javascript_module"
+        const context = html ? "html" : /\.[cm]?[jt]sx$/i.test(site.file) ? "component" : moduleKind
         data.capture = {
-          insertBefore: `the ${html ? "<script>" : "<Script>"} element that holds fbq('init') at ${site.file}:${site.line}`,
-          pasteAsWritten: capturePasteAsWritten(html ? "html" : "component", facts.consentMode)
+          insertBefore: context === "html" || context === "component" ? `the ${html ? "<script>" : "<Script>"} element that holds fbq('init') at ${site.file}:${site.line}` : `the fbq('init') call at ${site.file}:${site.line}`,
+          pasteAsWritten: capturePasteAsWritten(context, facts.consentMode)
         }
       }
       if (target === "autoconfig_off_adopted") {
