@@ -33,7 +33,7 @@ import {
   writeInstallManifest
 } from "../manifest.js"
 import { packageInstallCommandLine, type CommandSpawner } from "../package-manager.js"
-import { planServerLane } from "../server-lane/install.js"
+import { planServerLane, serverLaneTargetForMode, SERVER_LANE_MODULE_IMPORT_PATH } from "../server-lane/install.js"
 import type {
   DeferredConfigRewrite,
   ImproveLine,
@@ -62,11 +62,12 @@ import type {
 import { beforeTextOf, makeEditRecord, refreshFromHead } from "./edits.js"
 import { applyImproveEdit, detectAdoptedFacts, improveLinesFor, withSensitivePaths, type AdoptedFacts } from "./improve.js"
 import { artifactsFromKeys, manifestIdsFor, posthogProxyFor, withConversionHelpers, wizardInstallWorkspaceId, type WizardInstallArtifacts } from "./keys-adapter.js"
+import { buildCreatedMiddlewareSource, buildServerLaneModuleSource } from "../server-lane/runtime-source.js"
 import { SERVER_LANE_GUIDE_FILE } from "../server-lane/copy.js"
-import { normalizeAppRelativePath } from "../frameworks/shared.js"
+import { normalizeAppRelativePath, writeFileAtomic } from "../frameworks/shared.js"
 import { DEFAULT_POSTHOG_PROXY_PATH, INFINITE_API_ORIGIN, infiniteCollectDestination } from "../workspace-artifacts.js"
 import { hasExactNextConfigRewrites, type ManagedProxySpec } from "../frameworks/vercel-config.js"
-import { isManagedInfiniteFile } from "../frameworks/managed-files.js"
+import { buildAnalyticsModuleSource, buildClientComponentSource, isManagedInfiniteFile } from "../frameworks/managed-files.js"
 import { findLockfile, runNpmJob } from "./npm.js"
 import { proofFileBlockedText, proofFileTarget } from "./proof-file.js"
 import {
@@ -423,7 +424,7 @@ export class WizardInstaller implements Installer {
   // apply
   // ---------------------------------------------------------------------------------------------
 
-  async apply(plan: PlanModel, approvals: PlanApprovals): Promise<WizardApplyResult> {
+  private prepareApply(plan: PlanModel, approvals: PlanApprovals) {
     const internals = this.internals.get(plan)
     if (!internals) throw new Error("apply needs a plan built by this installer (buildPlan) in this process.")
     const model = plan as WizardPlanModel
@@ -516,6 +517,13 @@ export class WizardInstaller implements Installer {
     const npmFiles =
       lockfile?.ok === true ? [repoRelative(scan.appRoot, "package.json"), lockfile.lockfile.file] : []
     const p = planResult.plan
+    return { root, scan, runId, artifacts, warnings, previous, internals, keys, answers, served, codeImprove, npmApproved, workspaceId, improveFiles, npmFiles, planResult, p }
+  }
+
+  async apply(plan: PlanModel, approvals: PlanApprovals): Promise<WizardApplyResult> {
+    const prepared = this.prepareApply(plan, approvals)
+    if (!("p" in prepared)) return prepared
+    const { root, scan, runId, artifacts, warnings, previous, internals, keys, answers, served, codeImprove, npmApproved, workspaceId, improveFiles, npmFiles, planResult, p } = prepared
     // Every file the server lane can write (brief, guide, module, middleware, created entries) is in the
     // snapshot too, so a rollback leaves nothing half-installed (P3-21).
     const laneFiles = p.serverLane
@@ -646,6 +654,69 @@ export class WizardInstaller implements Installer {
     } catch (error) {
       const restored = rollback()
       return this.failed(artifacts, warnings, error instanceof Error ? error.message : String(error), restored)
+    }
+  }
+
+  /** Re-render whole owned modules only. Entry points, npm and improve edits are never replayed. */
+  async refreshManaged(plan: PlanModel, approvals: PlanApprovals): Promise<{ changedFiles: string[]; blocked: string[] }> {
+    const prepared = this.prepareApply(plan, approvals)
+    if (!("p" in prepared)) throw new Error(prepared.reason ?? "Could not rebuild the managed install plan")
+    const { root, scan, p, runId } = prepared
+    const readBlob = this.options.readBlob ?? gitShow
+    const committedReceipt = readBlob(root, "HEAD", installManifestRelativePath)
+    if (!committedReceipt) return { changedFiles: [], blocked: [] }
+    const previous = JSON.parse(committedReceipt) as InstallManifest
+    const current = readInstallManifest(root)
+    if (previous.runId && previous.runId !== runId) return { changedFiles: [], blocked: [installManifestRelativePath] }
+    if (!current || readFileSync(join(root, installManifestRelativePath), "utf8") !== committedReceipt) return { changedFiles: [], blocked: [installManifestRelativePath] }
+    const expected = new Map<string, string>()
+    for (const file of previous.files) {
+      if (/(?:^|\/)lib\/infinite-analytics\.ts$/.test(file)) expected.set(file, buildAnalyticsModuleSource(p))
+      if (/(?:^|\/)lib\/infinite-analytics-client\.tsx$/.test(file)) expected.set(file, buildClientComponentSource())
+    }
+    for (const instruction of p.instructions) {
+      if (/(?:^|\/)next\.config\.[cm]?js$/.test(instruction.path) && previous.configOwnership?.[instruction.path]?.kind === "created" && isManagedInfiniteFile(instruction.snippet)) expected.set(instruction.path, instruction.snippet)
+    }
+    const lane = p.serverLane
+    const infinite = p.artifacts.infinite
+    const options = { siteSourceKey: infinite?.siteSourceKey || undefined, productionHosts: infinite?.productionHosts ?? p.artifacts.productionHosts ?? [], ...(infinite?.apiOrigin ? { apiOrigin: infinite.apiOrigin } : {}), ...(infinite?.collectPath ? { collectPath: infinite.collectPath } : {}) }
+    if (lane?.mode === "next-middleware") {
+      if (lane.modulePath && previous.serverLane?.module === lane.modulePath) expected.set(lane.modulePath, buildServerLaneModuleSource(options))
+      if (lane.middleware && previous.configOwnership?.[lane.middleware.path]?.kind === "created") expected.set(lane.middleware.path, buildCreatedMiddlewareSource({ moduleImportPath: SERVER_LANE_MODULE_IMPORT_PATH }))
+    }
+    const target = lane ? serverLaneTargetForMode(lane.mode) : null
+    if (target) {
+      const built = target.build(options, join(root, scan.appRoot))
+      for (const [file, source] of Object.entries(built)) {
+        const path = normalizeAppRelativePath(scan.appRoot, file)
+        if (previous.serverLane?.created?.includes(path) && previous.configOwnership?.[path]?.kind === "created") expected.set(path, source)
+      }
+    }
+    const blocked: string[] = []
+    const changed: Array<{ file: string; before: string; after: string }> = []
+    for (const [file, after] of expected) {
+      const before = existsSync(join(root, file)) ? readFileSync(join(root, file), "utf8") : null
+      const committed = readBlob(root, "HEAD", file)
+      const ownership = previous.configOwnership?.[file]
+      const hash = ownership?.kind === "created" ? ownership.installedHash : previous.contentHashes[file]
+      if (!hash || before === null || committed === null || computeContentHash(before) !== hash || computeContentHash(committed) !== hash || !isManagedInfiniteFile(before)) {
+        blocked.push(file)
+      } else if (before !== after) changed.push({ file, before, after })
+    }
+    // Check every candidate before writing any: a hand edit never leaves a half-refreshed install.
+    if (blocked.length > 0 || changed.length === 0) return { changedFiles: [], blocked }
+    const snapshot = snapshotFiles(root, [...changed.map(entry => entry.file), installManifestRelativePath])
+    try {
+      for (const entry of changed) writeFileAtomic(join(root, entry.file), entry.after)
+      const edits = changed.map((entry, seq) => makeEditRecord({ ...entry, jobId: null, planLineId: "managed_resume_refresh", by: "wizard", runId, seq: (current.edits?.length ?? 0) + seq }))
+      const configOwnership = { ...current.configOwnership }
+      for (const entry of changed) if (configOwnership[entry.file]?.kind === "created") configOwnership[entry.file] = { kind: "created", installedHash: computeContentHash(entry.after) }
+      cacheEditBefores(root, edits)
+      writeInstallManifest(root, { ...current, runId, edits: [...(current.edits ?? []), ...edits], configOwnership, contentHashes: { ...current.contentHashes, ...Object.fromEntries(changed.map(entry => [entry.file, computeContentHash(entry.after)])) } })
+      return { changedFiles: [...changed.map(entry => entry.file), installManifestRelativePath], blocked: [] }
+    } catch (error) {
+      restoreSnapshot(root, snapshot)
+      throw error
     }
   }
 

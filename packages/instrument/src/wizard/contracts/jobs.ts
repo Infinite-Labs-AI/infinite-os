@@ -670,6 +670,8 @@ export interface Installer {
    * WITHOUT writing anything. The install step reads it before any cloud write (the site source).
    */
   preflight?(plan: PlanModel, approvals: PlanApprovals): string | null
+  /** Resume-only refresh of whole generated files whose committed ownership hashes still match. */
+  refreshManaged?(plan: PlanModel, approvals: PlanApprovals): Promise<{ changedFiles: string[]; blocked: string[] }>
   npmInstall(pkgs: readonly string[]): Promise<{ ok: boolean; edits: WizardEditRecord[] }>
   recordEdits(edits: readonly WizardEditRecord[]): Promise<void>
   refreshEditReceiptFromHead(): Promise<{ refreshed: boolean }>
