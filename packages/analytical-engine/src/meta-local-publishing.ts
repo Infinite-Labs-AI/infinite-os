@@ -223,7 +223,7 @@ export async function resolveLocalMetaIdentity(
       values($1,$2,$3,$4,$5,$7,$6::timestamptz+interval '2 minutes')
       on conflict(workspace_id,source_id,actor_id,operation_id) do update set binding_hash=excluded.binding_hash,verified_at=null,
         identity_json=case when meta_local_publish_identity.binding_hash=excluded.binding_hash then meta_local_publish_identity.identity_json else null end,
-        claim_token=excluded.claim_token,claim_until=excluded.claim_until
+        claim_token = (excluded.claim_token), claim_until = excluded.claim_until
       where (meta_local_publish_identity.claim_until is null or meta_local_publish_identity.claim_until<=$6::timestamptz)
         and (meta_local_publish_identity.binding_hash<>$5 or meta_local_publish_identity.verified_at is null or meta_local_publish_identity.verified_at<=$6::timestamptz-interval '10 minutes')
       returning identity_json`,
