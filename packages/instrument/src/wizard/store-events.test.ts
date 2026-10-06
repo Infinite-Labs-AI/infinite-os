@@ -49,6 +49,13 @@ function setup(json = false) {
 }
 
 describe("WizardStore", () => {
+  it("retains the stopping reason over a stale running status", () => {
+    const { store } = setup()
+    store.stepStart("rehearsal")
+    store.stepStatus("rehearsal", "Pushing the branch…")
+    store.stepDone("rehearsal", "failed", "INF_WIZ_PUSH_REFUSED", "Your GitHub access cannot push this branch.")
+    expect(store.getSnapshot().steps.find((row) => row.id === "rehearsal")?.status).toBe("Your GitHub access cannot push this branch.")
+  })
   it("keeps each job in one row while its live state changes", () => {
     const { store, emitter } = setup()
     store.jobSeeded({ id: "a", title: "First job", state: "pending" })

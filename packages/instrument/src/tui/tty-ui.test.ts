@@ -33,6 +33,17 @@ describe("TtyUi lifecycle", () => {
     expect(tail).toContain("INF_WIZ_PUSH_REFUSED")
     expect(tail).toContain("Your access is TRIAGE")
   })
+
+  it("uses the last stopping step when an earlier failure continued", () => {
+    const { stdout, ui, store } = setup()
+    ui.start(store)
+    const current = store.getSnapshot()
+    store.set({ steps: current.steps.map((row) => row.id === "jobs" ? { ...row, state: "failed", code: "INF_WIZ_AGENT_FAILED", status: "An earlier failure" } : row.id === "merge" ? { ...row, state: "parked", code: "INF_WIZ_MERGE_PARKED", status: "Merge the PR, then resume." } : row), exit: { exitCode: 3, prUrl: null, reportPath: null } })
+    ui.stop()
+    const tail = stripAnsi(stdout.chunks.at(-1) ?? "")
+    expect(tail).toContain("INF_WIZ_MERGE_PARKED")
+    expect(tail).not.toContain("INF_WIZ_AGENT_FAILED")
+  })
   it("enters the alt screen in raw mode and gives the terminal back on stop, with the exit line in scrollback", () => {
     const { stdin, stdout, ui, store } = setup()
     ui.start(store)

@@ -125,7 +125,7 @@ export class TtyUi implements WizardUi {
     // The report table keeps its columns in scrollback too (see `layoutSafeLine`).
     if (outro) tail += outro.split("\n").map((line) => layoutSafeLine(line, 400)).join("\n") + "\n"
     if (snapshot?.exit) {
-      const stopped = snapshot.steps.find((row) => (row.state === "failed" || row.state === "blocked" || row.state === "parked") && row.code)
+      const stopped = [...snapshot.steps].reverse().find((row) => (row.state === "failed" || row.state === "blocked" || row.state === "parked") && row.code)
       tail +=
         exitLines(
           {
