@@ -38,6 +38,7 @@ import { discardCommand, discardLeftovers, dirtyTreeMessage, findLeftovers } fro
 import { wizardGitExtras } from "../git/index.js"
 import { runUninstallFlow, type UninstallLinkFn } from "./uninstall-flow.js"
 import { getWizardWiring, type WizardIo, type WizardWiring } from "./wiring.js"
+import { sanitizeUntrusted } from "../agents/sanitize.js"
 
 export const WIZARD_NOT_BUILT_MESSAGE =
   "The infinite-tag setup wizard is not built yet in this build (its parts are not wired together). Use `npx infinite-tag harness` or `npx infinite-tag install` for now."
@@ -406,7 +407,7 @@ async function runLocked(input: LockedRun): Promise<number> {
       }
       ui.stop()
       writeCrashReason()
-      if (preEngineStop && options.json) io.stderr.write(`${preEngineStop.code}: ${preEngineStop.reason}\n`)
+      if (preEngineStop && options.json) io.stderr.write(`${preEngineStop.code}: ${sanitizeUntrusted(preEngineStop.reason, 2_000)}\n`)
       for (const line of deferredNotices) io.stderr.write(line)
       deferredNotices.length = 0
       removeHandlers()

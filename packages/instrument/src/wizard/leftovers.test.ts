@@ -106,6 +106,20 @@ describe("--fresh over the wizard's own leftovers (§3y.8, P2-4)", () => {
     expect(existsSync(join(fx.root, "lib/infinite-analytics-client.tsx"))).toBe(false)
   })
 
+  it("never treats another run's matching content hash as this set-aside run's leftover", async () => {
+    const { fx } = liveRun3()
+    fx.write("pages/_app.tsx", "export const marker = true\n")
+    const receipt = JSON.parse(readFileSync(join(fx.root, ".infinite/install.json"), "utf8")) as { edits: Array<{ runId: string }>; files?: string[]; contentHashes?: Record<string, string> }
+    receipt.edits.forEach((edit) => { edit.runId = "other-run" })
+    receipt.files = ["pages/_app.tsx"]
+    receipt.contentHashes = { "pages/_app.tsx": sha256Tagged("export const marker = true\n").slice(7) }
+    fx.write(".infinite/install.json", JSON.stringify(receipt))
+    const git = createGitOps({ cwd: fx.root, env: fx.env, worktreeRoot: join(fx.dir, "worktrees") })
+    const scan = await findLeftovers(fx.root, nodeWizardFs, git, OLD_RUN)
+    expect(scan.others).toContain("pages/_app.tsx")
+    expect(scan.leftovers.some((entry) => entry.path === "pages/_app.tsx")).toBe(false)
+  })
+
   it("the live run-3 state → ONE confirm naming app/layout.tsx; yes restores exactly it, drops the run's receipt entries, switches to the base", async () => {
     const { fx, old } = liveRun3()
     const asked: Array<{ kind: string; payload: { question: string; defaultYes: boolean } }> = []

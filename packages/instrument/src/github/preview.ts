@@ -31,21 +31,24 @@ export async function previewFailureForSha(gh: GhClient, sha: string, projectNam
     const statuses = await gh.json<RawDeploymentStatus[]>(["api", `repos/{owner}/{repo}/deployments/${deployment.id}/statuses?per_page=20`])
     attempts.push({ deployment, latest: statuses.find((status) => status.state !== "inactive"), index })
   }
-  const candidates = attempts.length === 1 ? attempts : projectName
+  const candidates = attempts.length === 1 && (!projectName || matchesProject(attempts[0]!.deployment, attempts[0]!.latest?.environment_url ?? null, projectName)) ? attempts : projectName
     ? attempts.filter(({ deployment, latest }) => matchesProject(deployment, latest?.environment_url ?? null, projectName))
     : []
   const newest = [...candidates].sort((a, b) => (Date.parse(b.deployment.created_at ?? "") || 0) - (Date.parse(a.deployment.created_at ?? "") || 0) || a.index - b.index)[0]
   if (newest) {
     const latest = newest.latest
     if (latest && ["failure", "error", "cancelled", "canceled"].includes(latest.state ?? "")) {
-    const reason = latest.description?.trim() || "Vercel preview deployment failed"
-    return { reason, blocked: /\bblocked\b/i.test(reason) }
+      const reason = latest.description?.trim() || "Vercel preview deployment failed"
+      return { reason, blocked: /\bblocked\b|needs? authori[sz]ation|requires? authori[sz]ation/i.test(reason) }
     }
   }
   // A commit status can fail before GitHub publishes a deployment row.
   if (previews.length === 0) {
     const combined = await gh.json<{ statuses?: Array<{ context?: string; state?: string; description?: string | null }> }>(["api", `repos/{owner}/{repo}/commits/${sha}/status`]).catch(() => null)
-    const failed = combined?.statuses?.find((status) => /^vercel(?:\b|:)/i.test(status.context ?? "") && ["failure", "error"].includes(status.state ?? ""))
+    const failed = combined?.statuses?.find((status) => {
+      const context = status.context ?? ""
+      return ["failure", "error"].includes(status.state ?? "") && (projectName ? context.toLowerCase() === `vercel - ${slugOf(projectName)}` || context.toLowerCase() === `vercel: ${slugOf(projectName)}` : context === "Vercel")
+    })
     if (failed) {
       const reason = failed.description?.trim() || "Vercel preview deployment failed"
       return { reason, blocked: /\bblocked\b/i.test(reason) }
@@ -103,8 +106,9 @@ export async function previewUrlForSha(gh: GhClient, sha: string, projectName: s
     const statuses = await gh.json<RawDeploymentStatus[]>(["api", `repos/{owner}/{repo}/deployments/${deployment.id}/statuses?per_page=20`])
     attempts.push({ deployment, latest: statuses.find((status) => status.state !== "inactive"), index })
   }
-  // Multiple projects need the linked project; among retries of that project only the newest speaks.
+  // Multiple matching deployment rows are ambiguous; their ordering is not project identity.
   const candidates = previews.length === 1 ? attempts : projectName === null ? [] : attempts.filter(({ deployment, latest }) => matchesProject(deployment, latest?.environment_url ?? null, projectName))
-  const newest = [...candidates].sort((a, b) => (Date.parse(b.deployment.created_at ?? "") || 0) - (Date.parse(a.deployment.created_at ?? "") || 0) || a.index - b.index)[0]
+  if (candidates.length !== 1) return null
+  const newest = candidates[0]
   return newest?.latest?.state === "success" && isUsablePreviewUrl(newest.latest.environment_url) ? newest.latest.environment_url : null
 }

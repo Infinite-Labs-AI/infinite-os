@@ -58,17 +58,19 @@ interface LeftoverReceipt {
   contentHashes: ReadonlyMap<string, string>
 }
 
-async function receiptFor(fs: Pick<WizardFs, "readText">, root: string): Promise<LeftoverReceipt> {
+async function receiptFor(fs: Pick<WizardFs, "readText">, root: string, runId: string): Promise<LeftoverReceipt> {
   const text = await fs.readText(join(root, INSTALL_MANIFEST_PATH))
   if (text === null) return { edits: [], contentHashes: new Map() }
   try {
-    const receipt = JSON.parse(text) as { edits?: unknown; files?: unknown; contentHashes?: unknown }
+    const receipt = JSON.parse(text) as { runId?: unknown; edits?: unknown; files?: unknown; contentHashes?: unknown }
     const edits = Array.isArray(receipt.edits) ? (receipt.edits as ReceiptEdit[]) : []
     const hashes = receipt.contentHashes && typeof receipt.contentHashes === "object" && !Array.isArray(receipt.contentHashes)
       ? receipt.contentHashes as Record<string, unknown>
       : {}
     const contentHashes = new Map<string, string>()
-    if (Array.isArray(receipt.files)) for (const file of receipt.files) {
+    // Legacy receipts have no explicit runId: the newest edit identifies the run that wrote them.
+    const owner = typeof receipt.runId === "string" ? receipt.runId : edits.at(-1)?.runId
+    if (owner === runId && Array.isArray(receipt.files)) for (const file of receipt.files) {
       if (typeof file === "string" && typeof hashes[file] === "string" && /^[0-9a-f]{64}$/.test(hashes[file])) contentHashes.set(file, hashes[file])
     }
     return { edits, contentHashes }
@@ -81,7 +83,7 @@ async function receiptFor(fs: Pick<WizardFs, "readText">, root: string): Promise
 export async function findLeftovers(root: string, fs: Pick<WizardFs, "readText">, git: Pick<WizardGitOps, "cleanTree" | "showFile">, runId: string | null): Promise<LeftoverScan> {
   const tree = await git.cleanTree()
   const blocking = blockingDirtyPaths(tree.dirtyPaths)
-  const receipt = runId ? await receiptFor(fs, root) : { edits: [], contentHashes: new Map<string, string>() }
+  const receipt = runId ? await receiptFor(fs, root, runId) : { edits: [], contentHashes: new Map<string, string>() }
   const edits = receipt.edits.filter((edit) => edit.runId === runId && typeof edit.file === "string")
   const leftovers: Leftover[] = []
   const others: string[] = []

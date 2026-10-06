@@ -247,6 +247,20 @@ describe("TTY stops before the engine", () => {
     return { fx, tty }
   }
 
+  it("sanitizes the pre-engine refusal in JSON stderr", async () => {
+    const { fx } = dirtyOldRun()
+    const path = join(fx.root, ".infinite/wizard/state.json")
+    const state = JSON.parse(readFileSync(path, "utf8")) as { git: { base: string } }
+    state.git.base = "main\u001b[31m"
+    writeFileSync(path, JSON.stringify(state))
+    const { io, err } = fakeIo(fx.root)
+    const spy = fakeWiring({}, () => false)
+    spy.bundle.deps.git = createGitOps({ cwd: fx.root, env: fx.env, worktreeRoot: join(fx.dir, "worktrees") })
+    expect(await runWizardCommand(["--json", "--fresh"], { io, wiring: spy.wiring, signals: fakeSignals() })).toBe(2)
+    expect(err.join("")).toContain("INF_WIZ_DIRTY_TREE")
+    expect(err.join("")).not.toContain("\u001b")
+  })
+
   it("shows a corrupt-state refusal with its code and sentence after leaving the alternate screen", async () => {
     const root = tempDir("wizard-cmd-tty-")
     mkdirSync(join(root, ".infinite/wizard"), { recursive: true })

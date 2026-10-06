@@ -25,6 +25,19 @@ describe("a preview's terminal GitHub status", () => {
     expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: "Deployment was blocked", blocked: true })
   })
 
+  it("ignores another project's fallback commit status", async () => {
+    const client = gh([], [], [{ context: "Vercel - other-project", state: "failure", description: "Deployment was blocked" }])
+    expect(await previewFailureForSha(client, SHA, "chosen-project")).toBeNull()
+  })
+
+  it("refuses an ambiguous project preview URL", async () => {
+    const rows = [
+      { id: 7, environment: "Preview - chosen-project", creator: { login: "vercel[bot]" } },
+      { id: 8, environment: "Preview", creator: { login: "vercel[bot]" } }
+    ]
+    expect(await previewUrlForSha(gh(rows, { "7": [{ state: "success", environment_url: "https://chosen-project-a.vercel.app" }], "8": [{ state: "success", environment_url: "https://chosen-project-b.vercel.app" }] }), SHA, "chosen-project")).toBeNull()
+  })
+
   it("does not ascribe another project's failure or a pending deployment to this site", async () => {
     const rows = [
       { id: 7, environment: "Preview - other-project", creator: { login: "vercel[bot]" } },

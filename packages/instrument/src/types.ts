@@ -362,6 +362,8 @@ export interface WorkspaceInstallArtifacts {
 
 export interface InstallManifest {
   workspaceId: string
+  /** The wizard run that last wrote the managed-file content hashes. */
+  runId?: string
   appRoot: string
   framework: SupportedFramework
   providers: ProviderId[]
