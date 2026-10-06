@@ -30,6 +30,13 @@ describe("a preview's terminal GitHub status", () => {
     expect(await previewFailureForSha(client, SHA, "chosen-project")).toBeNull()
   })
 
+  it("identifies a bare Vercel status by its dashboard project", async () => {
+    const status = { context: "Vercel", state: "failure", description: "Deployment was blocked", target_url: "https://vercel.com/fixture-team/chosen-project/deployment" }
+    expect(await previewFailureForSha(gh([], [], [status]), SHA, "chosen-project")).toEqual({ reason: "Deployment was blocked", blocked: true })
+    expect(await previewFailureForSha(gh([], [], [status]), SHA, "other-project")).toBeNull()
+    expect(await previewFailureForSha(gh([], [], [{ ...status, context: "Vercel – chosen-project", target_url: null }]), SHA, "chosen-project")).toEqual({ reason: "Deployment was blocked", blocked: true })
+  })
+
   it("refuses an ambiguous project preview URL", async () => {
     const rows = [
       { id: 7, environment: "Preview - chosen-project", creator: { login: "vercel[bot]" } },

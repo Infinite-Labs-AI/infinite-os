@@ -44,10 +44,20 @@ export async function previewFailureForSha(gh: GhClient, sha: string, projectNam
   }
   // A commit status can fail before GitHub publishes a deployment row.
   if (previews.length === 0) {
-    const combined = await gh.json<{ statuses?: Array<{ context?: string; state?: string; description?: string | null }> }>(["api", `repos/{owner}/{repo}/commits/${sha}/status`]).catch(() => null)
-    const failed = combined?.statuses?.find((status) => {
+    const combined = await gh.json<{ statuses?: Array<{ context?: string; state?: string; description?: string | null; target_url?: string | null }> }>(["api", `repos/{owner}/{repo}/commits/${sha}/status`]).catch(() => null)
+    const vercel = combined?.statuses?.filter(status => /^vercel(?:\b|:)/i.test(status.context ?? "")) ?? []
+    const failed = vercel.find((status) => {
       const context = status.context ?? ""
-      return ["failure", "error"].includes(status.state ?? "") && (projectName ? context.toLowerCase() === `vercel - ${slugOf(projectName)}` || context.toLowerCase() === `vercel: ${slugOf(projectName)}` : context === "Vercel")
+      if (!["failure", "error"].includes(status.state ?? "")) return false
+      if (!projectName) return vercel.length === 1 && /^vercel$/i.test(context)
+      const project = slugOf(projectName)
+      if (new RegExp(`^vercel\\s*[-–:]\\s*${project}$`, "i").test(context)) return true
+      // Single-project integrations use the bare context; the dashboard URL still identifies the project.
+      if (!/^vercel$/i.test(context)) return false
+      try {
+        const url = new URL(status.target_url ?? "")
+        return url.protocol === "https:" && ["vercel.com", "www.vercel.com"].includes(url.hostname) && url.pathname.split("/").filter(Boolean)[1] === project
+      } catch { return false }
     })
     if (failed) {
       const reason = failed.description?.trim() || "Vercel preview deployment failed"
