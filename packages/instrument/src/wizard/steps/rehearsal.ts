@@ -155,10 +155,10 @@ export async function prepareShip(ctx: WizardContext, deps: WizardDeps): Promise
     const auth = await deps.host.auth()
     ghReady = auth.ok
     if (ghReady) {
-      const repo = await deps.host.repoFacts()
-      if (!isUnsupported(repo)) {
+      const repo = await deps.host.repoFacts().catch(() => null)
+      if (repo && !isUnsupported(repo)) {
         isPrivate = repo.isPrivate
-        if (!canPush(repo.viewerPermission) && state.pushTarget?.kind !== "fork") {
+        if (repo.viewerPermission !== null && !canPush(repo.viewerPermission) && state.pushTarget?.kind !== "fork") {
           return failed(
             "INF_WIZ_PUSH_REFUSED",
             `Your GitHub access to this repo is ${repo.viewerPermission ?? "unknown"}, and no fork was approved before the agent step. Run npx infinite-tag again to choose a fork, or ask for write access.`

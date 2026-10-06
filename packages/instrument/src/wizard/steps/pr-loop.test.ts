@@ -481,6 +481,23 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(w.fx.remoteSha(BRANCH)).toBeNull()
   })
 
+  it("unreadable gh facts leave the push decision to git without a false refusal", async () => {
+    const w = await world()
+    w.deps.host.repoFacts = async () => { throw new Error("gh temporarily unavailable") }
+    const lines: string[] = []
+    expect(await ensurePushTarget(w.ctx, w.deps, (line) => lines.push(line))).toBeNull()
+    expect(lines).toEqual([expect.stringContaining("could not be checked early")])
+    expectOk(await rehearsalStep.run(w.ctx, w.deps))
+    expect(w.fx.remoteSha(BRANCH)).toBe(await w.git.head())
+  })
+
+  it("a non-GitHub host says access is deferred to the push", async () => {
+    const w = await world({ host: "other" })
+    const lines: string[] = []
+    expect(await ensurePushTarget(w.ctx, w.deps, (line) => lines.push(line))).toBeNull()
+    expect(lines).toEqual([expect.stringContaining("could not be checked early")])
+  })
+
   it("TRIAGE with approved forking pushes only to the viewer fork and opens a cross-repo PR; no preview stays unmeasured", async () => {
     const clock = fakeClock()
     const w = await world({ fork: true, gh: { repo: { viewerPermission: "TRIAGE", allowForking: true } }, answers: { confirm: true }, previewDeployed: false, clock })
@@ -495,7 +512,22 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(execFileSync("git", ["--git-dir", join(w.fx.dir, "viewer-fork.git"), "rev-parse", `refs/heads/${BRANCH}`], { encoding: "utf8" }).trim()).toBe(await w.git.head())
     expect(w.gh.read().prs[0]).toMatchObject({ isCrossRepository: true, headOwner: "acme-dev", state: "OPEN" })
     expect(outcome.status).toMatch(/undetermined/)
-    expect(clock.slept).not.toContain(15_000)
+    expect(clock.slept).toContain(15_000)
+  })
+
+  it("waits for a fork preview that appears after the first poll and rehearses it", async () => {
+    const clock = fakeClock()
+    const w = await world({ fork: true, gh: { repo: { viewerPermission: "TRIAGE", allowForking: true } }, answers: { confirm: true }, previewDeployed: false, clock })
+    const sleep = clock.sleep.bind(clock)
+    clock.sleep = async (ms, signal) => {
+      await sleep(ms, signal)
+      if (ms === 15_000 && clock.slept.filter((waited) => waited === 15_000).length === 1) {
+        w.gh.update((state) => { state.deployments = [{ id: 7, sha: "*", environment: "Preview", creator: "vercel[bot]", statuses: [{ state: "success", environment_url: PREVIEW }] }] })
+      }
+    }
+    expect(await ensurePushTarget(w.ctx, w.deps, () => undefined)).toBeNull()
+    expectOk(await rehearsalStep.run(w.ctx, w.deps))
+    expect(w.bridge.testRequests.some((request) => request.mode === "rehearsal")).toBe(true)
   })
 
   it("P2-2: without gh the rehearsal is undetermined at once (no 10-minute wait for a preview it cannot read)", async () => {

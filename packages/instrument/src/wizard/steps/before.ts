@@ -389,7 +389,7 @@ export interface BeforeStepOptions {
  * roots; a new run or another site re-runs `before`. It reads the context's plain fields only.
  */
 export function beforeInputHash(ctx: WizardContext): string {
-  const input = JSON.stringify({ step: "before-shipping-v2", runId: ctx.runId ?? null, root: ctx.root ?? null, appRoot: ctx.appRoot ?? null })
+  const input = JSON.stringify({ step: "before", runId: ctx.runId ?? null, root: ctx.root ?? null, appRoot: ctx.appRoot ?? null })
   return `sha256:${createHash("sha256").update(input).digest("hex")}`
 }
 

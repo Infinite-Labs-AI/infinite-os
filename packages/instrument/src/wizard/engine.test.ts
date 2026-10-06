@@ -29,6 +29,8 @@ import { nodeWizardFs } from "./fs.js"
 import { RunStateFile, createRunState, loadRunState } from "./run-state.js"
 import { WizardStore } from "./store.js"
 import { GITIGNORE_FENCE_BLOCK } from "../harness/outputs.js"
+import { beforeInputHash } from "./steps/before.js"
+import { ensurePushTarget } from "./push-target.js"
 
 const roots: string[] = []
 function tempRoot(): string {
@@ -137,6 +139,38 @@ describe("runWizard: order, outcomes and exit codes", () => {
 })
 
 describe("runWizard: resume", () => {
+  it("resumes a failed pre-push run with recorded dirty edits and reaches push after access becomes WRITE", async () => {
+    const { root, ctx, run, deps, log } = await setup()
+    ctx.state.update((state) => {
+      state.runId = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+      for (const id of ["link", "agent", "before", "keys", "plan", "install", "jobs", "settings"] as const) {
+        state.steps[id] = { outcome: "ok", inputHash: "h", at: "2026-10-02T09:00:00.000Z" }
+      }
+      state.steps.rehearsal = { outcome: "failed", inputHash: "h", at: "2026-10-02T09:01:00.000Z", code: "INF_WIZ_PUSH_REFUSED" }
+    })
+    ctx.state.update((state) => { state.steps.before!.inputHash = beforeInputHash(ctx) })
+    await ctx.state.save()
+    writeFileSync(join(root, "app.tsx"), "// agent's recorded edit\n")
+    writeFileSync(join(root, ".infinite/install.json"), '{"edits":[{"file":"app.tsx","by":"agent"}]}\n')
+    Object.assign(deps.host, { repoFacts: async () => ({ isPrivate: true, defaultBranch: "main", viewerPermission: "WRITE", allowForking: false }) })
+    const ran: WizardStepId[] = []
+    const steps = fakeSteps({
+      link: async (linkedCtx, linkedDeps) => {
+        expect(await ensurePushTarget(linkedCtx, linkedDeps, () => undefined)).toBeNull()
+        return { kind: "ok", status: "linked" }
+      },
+      before: async () => { throw new Error("before must not re-run over this run's edits") },
+      rehearsal: async (_resumeCtx, resumeDeps) => {
+        await resumeDeps.git.push("infinite/tag/resumed")
+        return { kind: "ok", status: "pushed" }
+      }
+    }, ran, { link: "new-process", before: beforeInputHash(ctx) })
+    const result = await run(steps)
+    expect(result.exitCode).toBe(0)
+    expect(ran).toEqual(["link", "rehearsal", "review", "merge", "prove", "done"])
+    expect(log.names("git")).toContain("git.push")
+  })
+
   it("parked → exit 3, the state is saved, and a reload resumes at the parked step, skipping ok steps with unchanged hashes", async () => {
     const root = tempRoot()
     const first = await setup({ root })

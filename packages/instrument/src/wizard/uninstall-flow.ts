@@ -32,6 +32,7 @@ import { HARNESS_OUTPUTS_RELATIVE_PATH } from "../harness/outputs.js"
 import { canPush } from "../github/repo.js"
 import type { WizardGitOps } from "./contracts/git-host.js"
 import { forkTargetMatches } from "./push-target.js"
+import { readOriginHead } from "./steps/before.js"
 
 export const UNINSTALL_RECORD_SCHEMA = "infinite-tag.wizard-uninstall.v1" as const
 export const UNINSTALL_RECORD_PATH = `${WIZARD_PATHS.dir}/uninstall.json`
@@ -256,7 +257,7 @@ async function resolveBase(ctx: UninstallContext, deps: WizardDeps): Promise<str
   }
   const facts = await deps.host.repoFacts().catch(() => null)
   if (facts && !("unsupported" in facts) && facts.defaultBranch) return facts.defaultBranch
-  return null
+  return readOriginHead(deps, ctx.root)
 }
 
 /**
@@ -337,8 +338,8 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
       headOwner = saved.headOwner
     } else {
       const facts = await deps.host.repoFacts().catch(() => null)
-      if (!facts || "unsupported" in facts) return stop("INF_WIZ_PUSH_REFUSED", "GitHub permissions could not be read before uninstall.", lines)
-      if (!canPush(facts.viewerPermission)) {
+      if (!facts || "unsupported" in facts || facts.viewerPermission === null) lines.push("GitHub push access could not be checked early; the push will confirm it.")
+      if (facts && !("unsupported" in facts) && facts.viewerPermission !== null && !canPush(facts.viewerPermission)) {
         if (facts.allowForking !== true || !deps.host.createFork || !git.setPushRemote) return stop("INF_WIZ_PUSH_REFUSED", "This repo cannot be pushed or forked by your account. Ask its owner for write access or fork permission.", lines)
         const approved = await ctx.ask("confirm", { question: "Create your fork and open the uninstall pull request from it?", defaultYes: false })
         if (approved !== true) return stop("INF_WIZ_PUSH_REFUSED", "The fork pull request was not approved.", lines)

@@ -194,6 +194,21 @@ describe("step link", () => {
     expect(fresh.bridge.callsFor("runs.get")).toHaveLength(0)
   })
 
+  it("rechecks push access on a resumed run whose before step is already complete", async () => {
+    const state = freshState("", {
+      runId: "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80",
+      link: { linkId: "lk_FAKElinkAcmeStore00000", workspaceName: "Acme", approvedAt: "2026-10-02T09:01:00.000Z", runtimeVariant: "prod" }
+    })
+    state.steps.before = { outcome: "ok", inputHash: "saved-before-hash", at: "2026-10-02T09:02:00.000Z" }
+    const refused = await setup({ link: "remembered" }, { state })
+    refused.deps.host = { kind: "github", repoFacts: async () => ({ isPrivate: true, defaultBranch: "main", viewerPermission: "READ", allowForking: false }) } as typeof refused.deps.host
+    expect(await step.run(refused.harness.ctx, refused.deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_PUSH_REFUSED" })
+    const allowed = await setup({ link: "remembered" }, { state })
+    allowed.deps.host = { kind: "github", repoFacts: async () => ({ isPrivate: true, defaultBranch: "main", viewerPermission: "WRITE", allowForking: false }) } as typeof allowed.deps.host
+    expect(await step.run(allowed.harness.ctx, allowed.deps)).toMatchObject({ kind: "ok" })
+    expect(allowed.harness.state().pushTarget).toMatchObject({ kind: "origin" })
+  })
+
   it("ESC on the code → cancelled (declined), polling stops", async () => {
     const { bridge, harness, deps } = await setup({ link: "pending" }, { answers: ["__cancelled__"] })
     const outcome = await step.run(harness.ctx, deps)

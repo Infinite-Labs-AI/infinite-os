@@ -45,6 +45,21 @@ function run(root: string, bundle: ReturnType<typeof fakeDeps>, ask: AskFn, stat
 }
 
 describe("uninstall --pr", () => {
+  it("uses origin/HEAD and attempts the push when gh facts are unreadable", async () => {
+    const root = tempRoot()
+    mkdirSync(join(root, ".git/refs/remotes/origin"), { recursive: true })
+    writeFileSync(join(root, ".git/refs/remotes/origin/HEAD"), "ref: refs/remotes/origin/trunk\n")
+    const state = linkedState(root)
+    state.git = null
+    const bundle = fakeDeps({ reversed: ["app/layout.tsx"], bridge: { hosting: { protocolVersion: 1, requestId: "r", provider: "none", vercel: null } } })
+    bundle.deps.host.repoFacts = async () => { throw new Error("gh temporarily unavailable") }
+    const result = await run(root, bundle, answering({}), state)
+    expect(result.exitCode).toBe(0)
+    expect(result.lines.some((line) => line.includes("could not be checked early"))).toBe(true)
+    expect(bundle.log.calls.find((call) => call.what === "createBranch")?.args[0]).toBe("trunk")
+    expect(bundle.log.names("git")).toContain("git.push")
+  })
+
   it("uses the saved fork for the uninstall push and PR head", async () => {
     const root = tempRoot()
     const bundle = fakeDeps({ reversed: ["app/layout.tsx"] })

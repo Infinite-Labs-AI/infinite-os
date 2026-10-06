@@ -13,16 +13,22 @@ export function forkTargetMatches(target: { remoteUrl: string; headOwner: string
 }
 
 export async function ensurePushTarget(ctx: WizardContext, deps: WizardDeps, say: (text: string) => void): Promise<StepOutcome | null> {
-  if (deps.host.kind !== "github") return null
+  if (deps.host.kind !== "github") {
+    say("Push access could not be checked early for this host; the push will confirm it.")
+    return null
+  }
   const facts = await deps.host.repoFacts().catch(() => null)
-  if (!facts || "unsupported" in facts) return refused("GitHub repository permissions could not be read. Sign in with gh, then run npx infinite-tag again.")
   const saved = ctx.state.get().pushTarget
   const git = wizardGitExtras(deps.git)
   if (saved?.kind === "fork") {
-    if (!forkTargetMatches(saved, facts.nameWithOwner?.split("/")[1] ?? null)) return refused("The saved fork does not match this GitHub repository; it cannot be pushed.")
+    if (!forkTargetMatches(saved, facts && !("unsupported" in facts) ? facts.nameWithOwner?.split("/")[1] ?? null : null)) return refused("The saved fork does not match this GitHub repository; it cannot be pushed.")
     if (!git?.setPushRemote) return refused("The wizard cannot restore the approved fork push destination on this run.")
     git.setPushRemote(saved.remoteUrl)
     say(`This run will push to your fork (${saved.headOwner}) and open a pull request to the original repo.`)
+    return null
+  }
+  if (!facts || "unsupported" in facts || facts.viewerPermission === null) {
+    say("GitHub push access could not be checked early; the push will confirm it.")
     return null
   }
   if (canPush(facts.viewerPermission)) {

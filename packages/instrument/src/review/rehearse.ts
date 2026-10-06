@@ -212,7 +212,6 @@ async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: Wizard
     }
     if (isUnsupported(url)) return { url: null, why: "no_preview" }
     if (url) return { url }
-    if (fork) return { url: null, why: "no_preview" }
     if (ctx.signal.aborted || deps.clock.now().getTime() + PREVIEW_POLL_MS > until) return { url: null, why: "no_preview" }
     await deps.clock.sleep(PREVIEW_POLL_MS, ctx.signal)
   }

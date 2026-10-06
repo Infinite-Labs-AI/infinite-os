@@ -319,11 +319,12 @@ describe("step before: preconditions and the branch", () => {
     expect(await none.run()).toMatchObject({ kind: "failed", code: "INF_WIZ_BRANCH_FAILED" })
   })
 
-  it("a signed-out GitHub CLI stops before branching because the PR destination is unknown", async () => {
+  it("a signed-out GitHub CLI uses origin/HEAD and continues when access cannot be checked early", async () => {
     const none: HostingResponse = { protocolVersion: 1, requestId: "r", provider: "none", vercel: null }
     const s = setup({ hosting: none, defaultBranch: "THROW", fsFiles: { "/repo/.git/refs/remotes/origin/HEAD": "ref: refs/remotes/origin/trunk\n" } })
-    expect(await s.run()).toMatchObject({ kind: "failed", code: "INF_WIZ_PUSH_REFUSED" })
-    expect(s.state.git).toBeNull()
+    expect(await s.run()).toMatchObject({ kind: "ok" })
+    expect(s.state.git).toMatchObject({ base: "trunk", baseSource: "origin_head" })
+    expect(s.events.some((event) => JSON.stringify(event).includes("could not be checked early"))).toBe(true)
   })
 
   it("TRIAGE with forking disabled stops before branching or building", async () => {
