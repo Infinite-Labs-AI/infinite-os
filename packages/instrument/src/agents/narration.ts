@@ -64,7 +64,8 @@ export class ThinkingTicker {
 
   constructor(
     private readonly narrator: Pick<Narrator, "beat">,
-    private readonly now: () => number
+    private readonly now: () => number,
+    private readonly onTick?: (seconds: number) => void
   ) {}
 
   /** A tool came back to the model: from now on its silence is thinking. */
@@ -85,7 +86,9 @@ export class ThinkingTicker {
     if (this.since === null) return
     const at = this.now()
     if (at - this.lastEventAt < THINKING_AFTER_MS) return
-    this.narrator.beat(`Thinking · ${Math.floor((at - this.since) / 1000)} s`)
+    const seconds = Math.floor((at - this.since) / 1000)
+    this.onTick?.(seconds)
+    this.narrator.beat(`Thinking · ${seconds} s`)
   }
 }
 

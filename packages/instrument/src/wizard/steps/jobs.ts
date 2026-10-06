@@ -253,9 +253,12 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     const read = new Set<string>()
     const edited = new Set<string>()
     let thinking = 0
+    let phase: "Reading your code" | "Writing the changes" | "Checking its work" = "Reading your code"
+    let lastClaim: string | null = null
     const liveStatus = () => {
-      const phase = claimedNow.size > 0 ? "Checking its work" : edited.size > 0 ? "Writing the changes" : "Reading your code"
-      return `${phase} · ${read.size} files read · ${edited.size} edited · thinking ${thinking} s · ${claimedNow.size} of ${open.length} claimed · ${minutesWords(deps.clock.now().getTime() - started)} of ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min`
+      const active = phase === "Checking its work" ? lastClaim : open.find((item) => !claimedNow.has(item.id))?.id
+      const position = active ? open.findIndex((item) => item.id === active) + 1 : open.length
+      return `${phase} · job ${Math.max(1, position)} of ${open.length} · ${read.size} files read · ${edited.size} edited · thinking ${thinking} s · ${claimedNow.size} of ${open.length} claimed · ${minutesWords(deps.clock.now().getTime() - started)} of ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min`
     }
     try {
       result = await deps.agents.runJobs({
@@ -266,7 +269,10 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
         // The claim's `job.state` is emitted ONCE, when the step applies it after the turn (review I1 P3-3).
         onClaim: async (claim) => {
           claimedNow.add(claim.jobId)
-          ctx.emit.emit("job.progress", { itemId: claim.jobId, state: "agent_claim" })
+          lastClaim = claim.jobId
+          phase = "Checking its work"
+          thinking = 0
+          ctx.emit.emit("job.progress", { itemId: claim.jobId, state: claim.status === "blocked" ? "agent_blocked" : claim.status === "not_needed" ? "agent_not_needed" : "agent_claim" })
           ctx.emit.emit("step.status", { step: "jobs", text: liveStatus() })
           if (claim.status !== "done") return { state: "not_run", problems: [] }
           ctx.emit.emit("job.progress", { itemId: claim.jobId, state: "checking" })
@@ -276,23 +282,14 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
         },
         onAsk: (question) => questions.push(question),
         onProgress: () => undefined,
-        onActivity: (text) => {
-          const reading = /^Reading (.+)$/.exec(text)
-          const editing = /^Editing (.+)$/.exec(text)
-          if (reading) read.add(reading[1]!)
-          if (editing) edited.add(editing[1]!)
+        onActivity: (activity) => {
+          if (activity.kind === "read") { read.add(activity.path); phase = "Reading your code"; thinking = 0 }
+          if (activity.kind === "edit") { edited.add(activity.path); phase = "Writing the changes"; thinking = 0 }
+          if (activity.kind === "thinking") thinking = activity.seconds
           ctx.emit.emit("step.status", { step: "jobs", text: liveStatus() })
         },
         onNarrate: (beat) => {
-          const reading = /^Reading (.+)$/.exec(beat.text)
-          const editing = /^Editing (.+)$/.exec(beat.text)
-          const thought = /^Thinking · (\d+) s/.exec(beat.text)
-          if (reading) read.add(reading[1]!)
-          if (editing) edited.add(editing[1]!)
-          if (thought) thinking = Number(thought[1])
-          else thinking = 0
           ctx.emit.emit("narrate", beat)
-          ctx.emit.emit("step.status", { step: "jobs", text: liveStatus() })
         }
       })
     } catch (error) {

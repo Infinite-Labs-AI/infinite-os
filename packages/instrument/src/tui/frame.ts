@@ -131,9 +131,10 @@ function taskLines(input: FrameInput, width: number): { rows: string[]; currentI
   const budget = running?.id === "jobs" ? 20 * 60_000 : running?.id === "link" ? 6 * 60_000 : running?.id === "prove" ? 45 * 60_000 : 60_000
   const timeFraction = Math.min(0.95, elapsed / budget)
   const jobs = snapshot.jobs ?? []
-  const settled = jobs.filter((job) => job.state === "passed" || job.state === "failed" || job.state === "blocked").length
+  const settled = Math.max(snapshot.jobsSettledHighWater ?? 0, jobs.filter((job) => ["done_in_code", "waiting_deploy", "waiting_real_event", "proven", "not_needed", "failed", "blocked"].includes(job.state)).length)
   const fraction = running?.id === "jobs" && jobs.length > 0 ? Math.max(timeFraction, Math.min(0.95, settled / jobs.length)) : timeFraction
-  const pct = Math.round((Math.min(finished + (running ? fraction : 0), total) / total) * 100)
+  const rawPct = Math.round((Math.min(finished + (running ? fraction : 0), total) / total) * 100)
+  const pct = running ? Math.min(rawPct, Math.round(((finished + 1) / total) * 100) - 1) : rawPct
   const barWidth = Math.max(10, Math.min(40, width - 24))
   const filled = Math.round((pct / 100) * barWidth)
   const bar = s.accent("━".repeat(filled)) + s.dim("─".repeat(barWidth - filled))
@@ -192,10 +193,11 @@ function liveLines(input: FrameInput, width: number, feedLines: number = FEED_LI
     lines.push(...wrapRows(`${s.accent("◆")} ${s.dim(STEP_COPY[row.id].what)}`, width, 2, STATUS_ROWS_MAX))
   }
   if (row.id === "jobs" && (snapshot.jobs?.length ?? 0) > 0) {
-    const labels = { waiting: "waiting", agent_claim: "agent claims done", checking: "wizard checking", passed: "passed", failed: "failed", blocked: "blocked" } as const
+    const labels = { waiting: "waiting", agent_claim: "agent claims done", agent_blocked: "agent says blocked", agent_not_needed: "agent says not needed", checking: "wizard checking", could_not_check: "could not be checked", done_in_code: "passed in code", waiting_deploy: "in the pull request, prove after deploy", waiting_real_event: "waiting for a real event", proven: "proven live", not_needed: "not needed", failed: "failed", blocked: "blocked" } as const
     for (const [index, job] of snapshot.jobs!.entries()) {
-      const glyph = job.state === "passed" ? s.ok("✓") : job.state === "failed" ? s.bad("✗") : job.state === "blocked" ? s.warn("!") : job.state === "checking" ? s.accent(spinner) : s.dim("·")
-      lines.push(...wrapRows(`  ${glyph} ${index + 1}/${snapshot.jobs!.length} ${sanitize(job.title, 100)} · ${labels[job.state]}`, width, 4, 2))
+      const glyph = job.state === "done_in_code" || job.state === "proven" ? s.ok("✓") : job.state === "failed" ? s.bad("✗") : job.state === "blocked" || job.state === "agent_blocked" || job.state === "could_not_check" ? s.warn("!") : job.state === "checking" ? s.accent(spinner) : s.dim("·")
+      const words = job.state === "blocked" && job.note ? `blocked: ${sanitize(job.note, 100)}` : job.state === "could_not_check" && job.note ? `could not be checked: ${sanitize(job.note, 100)}` : labels[job.state]
+      lines.push(...wrapRows(`  ${glyph} ${index + 1}/${snapshot.jobs!.length} ${sanitize(job.title, 100)} · ${words}`, width, 4, 2))
     }
     return lines
   }

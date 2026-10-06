@@ -17,7 +17,7 @@ import {
   type WizardEventType
 } from "./contracts/events.js"
 import type { WizardStepId } from "./contracts/steps.js"
-import type { SubTone, WizardStore } from "./store.js"
+import { jobDisplayState, type SubTone, type WizardStore } from "./store.js"
 
 /** A timer seam so tests drive the throttle with a fake clock. */
 export interface EmitterTimers {
@@ -137,8 +137,7 @@ export class WizardEventEmitter implements WizardEmitter {
       }
       case "job.state": {
         const job = fields as WizardEventFields["job.state"]
-        const state = job.state === "pending" ? "waiting" : job.state === "claimed" ? "checking" : job.state === "failed" ? "failed" : job.state === "blocked" ? "blocked" : "passed"
-        this.store.jobDisplay(job.itemId, state)
+        this.store.jobDisplay(job.itemId, jobDisplayState(job.state, job.by), job.note ? cleanEventText(job.note, EVENT_LIMITS.subTextMaxChars) : undefined)
         break
       }
       default:

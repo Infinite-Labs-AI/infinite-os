@@ -23,6 +23,16 @@ export type SubTone = "ok" | "warn" | "info" | "pending"
 /** Narration lines kept in the snapshot (the TUI shows the last few). */
 export const STORE_NARRATION_KEPT = 8
 
+const settledJobState = (state: NonNullable<WizardStoreSnapshot["jobs"]>[number]["state"]): boolean =>
+  state === "done_in_code" || state === "waiting_deploy" || state === "waiting_real_event" || state === "proven" || state === "not_needed" || state === "failed" || state === "blocked"
+
+export function jobDisplayState(state: string, by: "agent_claim" | "wizard" = "wizard"): NonNullable<WizardStoreSnapshot["jobs"]>[number]["state"] {
+  if (state === "pending") return "waiting"
+  if (state === "claimed") return by === "wizard" ? "could_not_check" : "agent_claim"
+  if (state === "done_in_code" || state === "waiting_deploy" || state === "waiting_real_event" || state === "proven" || state === "not_needed" || state === "failed" || state === "blocked") return state
+  return "waiting"
+}
+
 export class StoreAskConflictError extends Error {
   constructor(pendingKind: AskKind, requestedKind: AskKind) {
     super(`An ask is already open (${pendingKind}); a second ask (${requestedKind}) cannot open until it closes.`)
@@ -77,6 +87,7 @@ export class WizardStore {
       learn: null,
       narration: [],
       jobs: [],
+      jobsSettledHighWater: 0,
       pendingAsk: null,
       outro: null,
       exit: null
@@ -116,7 +127,7 @@ export class WizardStore {
   stepStart(step: WizardStepId): void {
     this.commit({
       currentStep: step,
-      ...(step === "jobs" ? { jobs: [] } : {}),
+      ...(step === "jobs" ? { jobs: [], jobsSettledHighWater: 0 } : {}),
       // An agent's last line belongs to the step it was said in: a new step starts with none (terminal QA #19).
       narration: [],
       learn: WIZARD_STEP_META[step].learn,
@@ -150,14 +161,17 @@ export class WizardStore {
     })
   }
 
-  jobSeeded(item: { id: string; title: string; state: string }): void {
+  jobSeeded(item: { id: string; title: string; state: string; note?: string }): void {
     const jobs = this.snapshot.jobs ?? []
     if (jobs.some((row) => row.id === item.id)) return
-    this.commit({ jobs: [...jobs, { id: item.id, title: item.title, state: "waiting" }] })
+    const next = [...jobs, { id: item.id, title: item.title, state: jobDisplayState(item.state), ...(item.note ? { note: item.note } : {}) }]
+    this.commit({ jobs: next, jobsSettledHighWater: Math.max(this.snapshot.jobsSettledHighWater ?? 0, next.filter((row) => settledJobState(row.state)).length) })
   }
 
-  jobDisplay(itemId: string, state: NonNullable<WizardStoreSnapshot["jobs"]>[number]["state"]): void {
-    this.commit({ jobs: (this.snapshot.jobs ?? []).map((row) => row.id === itemId ? { ...row, state } : row) })
+  jobDisplay(itemId: string, state: NonNullable<WizardStoreSnapshot["jobs"]>[number]["state"], note?: string): void {
+    const jobs = (this.snapshot.jobs ?? []).map((row) => row.id === itemId ? { ...row, state, note } : row)
+    const settled = jobs.filter((row) => settledJobState(row.state)).length
+    this.commit({ jobs, jobsSettledHighWater: Math.max(this.snapshot.jobsSettledHighWater ?? 0, settled) })
   }
 
   // ---- narration ----

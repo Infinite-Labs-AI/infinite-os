@@ -50,7 +50,7 @@ describe("O9 guard context", () => {
     const dir = join(root, WIZARD_PATHS.dir)
     mkdirSync(dir, { recursive: true })
     const runId = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
-    const beforeAt = "2026-10-06T16:44:02.443Z"
+    const beforeAt = "2030-01-02T03:04:05.000Z"
     const guard = { emit: true, exempt: ["acme.example"], deny: ["localhost"] }
     writeFileSync(join(root, WIZARD_PATHS.beforeFacts), JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId, facts: { keys: fakeKeys(), hosting: { provider: "none", vercel: null }, observedProductionHost: "acme.example" } }))
     writeFileSync(join(root, WIZARD_PATHS.planApprovals), JSON.stringify({ schema: "infinite-tag.plan-approvals.v1", planHash: "sha256:current", beforeAt, guard }))

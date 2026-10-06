@@ -214,6 +214,8 @@ export interface StoreStepRow {
   subs: Array<{ text: string; tone: "ok" | "warn" | "info" | "pending"; at: string }>
 }
 
+export type JobDisplayState = "waiting" | "agent_claim" | "agent_blocked" | "agent_not_needed" | "checking" | "could_not_check" | "done_in_code" | "waiting_deploy" | "waiting_real_event" | "proven" | "not_needed" | "failed" | "blocked"
+
 /** Renderer-agnostic: what a UI needs to draw one frame. `version` bumps on every change. */
 export interface WizardStoreSnapshot {
   version: number
@@ -229,7 +231,9 @@ export interface WizardStoreSnapshot {
   learnFacts?: { site?: string | null; workspace?: string | null; worker?: "claude_code" | "codex" | null; reviewer?: "claude_code" | "codex" | "brief" | null }
   narration: Array<{ agent: "claude_code" | "codex"; role: "worker" | "reviewer"; text: string; at: string }>
   /** Stable rows for the agent's jobs; transient claim/checking states never assert a verdict. */
-  jobs?: Array<{ id: string; title: string; state: "waiting" | "agent_claim" | "checking" | "passed" | "failed" | "blocked" }>
+  jobs?: Array<{ id: string; title: string; state: JobDisplayState; note?: string }>
+  /** Highest number of jobs that reached a settled display state during this step. */
+  jobsSettledHighWater?: number
   /** At most one pending ask (a second throws). */
   pendingAsk: { askId: string; kind: AskKind; payload: unknown } | null
   outro: string | null

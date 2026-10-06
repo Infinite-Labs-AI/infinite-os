@@ -420,7 +420,7 @@ export class AgentRunnerImpl implements AgentRunner {
       input.onNarrate({ agent: kind, role: "worker", text })
     }
     // §3x.3 (D1): silence after a tool result is the model thinking, said as `Thinking · N s` (never the last tool's beat).
-    const ticker = new ThinkingTicker(ctx.narrator, () => (this.options.now ?? (() => new Date()))().getTime())
+    const ticker = new ThinkingTicker(ctx.narrator, () => (this.options.now ?? (() => new Date()))().getTime(), (seconds) => input.onActivity?.({ kind: "thinking", seconds }))
     const tickTimer = setInterval(() => ticker.tick(), 1_000)
     tickTimer.unref()
     const state = {
@@ -483,7 +483,10 @@ export class AgentRunnerImpl implements AgentRunner {
             case "tool_use": {
               ticker.acted()
               const beat = claudeToolBeat(event.name, event.input, beatCtx)
-              if (beat) input.onActivity?.(beat)
+              const toolInput = typeof event.input === "object" && event.input !== null ? event.input as Record<string, unknown> : {}
+              const path = displayPath(toolInput.file_path ?? toolInput.path ?? toolInput.notebook_path, this.options.root)
+              if (event.name === "Read") input.onActivity?.({ kind: "read", path })
+              if (event.name === "Edit" || event.name === "Write" || event.name === "MultiEdit") input.onActivity?.({ kind: "edit", path })
               if (beat) ctx.narrator.beat(beat)
               return
             }
@@ -566,10 +569,9 @@ export class AgentRunnerImpl implements AgentRunner {
             if (event.phase === "completed") ticker.toolReturned()
             else ticker.acted()
             const beat = codexItemBeat(event.item, beatCtx)
-            if (beat) input.onActivity?.(beat)
             if (typeof event.item === "object" && event.item !== null && (event.item as { type?: string }).type === "file_change") {
               for (const change of (event.item as { changes?: Array<{ path?: string }> }).changes ?? []) {
-                if (change.path) input.onActivity?.(`Editing ${displayPath(change.path, this.options.root)}`)
+                if (change.path) input.onActivity?.({ kind: "edit", path: displayPath(change.path, this.options.root) })
               }
             }
             if (beat) ctx.narrator.beat(beat)

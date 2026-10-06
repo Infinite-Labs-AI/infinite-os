@@ -64,6 +64,28 @@ function stateOf(items: ChecklistItem[], id: string) {
 }
 
 describe("step jobs: claims are only claims; the wizard checks", () => {
+  it("does not turn an agent progress sentence into file counts or a writing phase", async () => {
+    const t = setup({ scenario: { turns: [{ steps: [{ tool: "report_progress", args: { job_id: "meta_improve:landing", text: "Editing phantom.ts" } }] }] }, items: [ITEMS[0]!] })
+    await step.run(t.ctx, t.deps)
+    const lines = t.recorded.events.filter((event) => event.type === "step.status").map((event) => String(event.fields.text))
+    expect(lines).not.toContainEqual(expect.stringContaining("1 edited"))
+    expect(lines).not.toContainEqual(expect.stringContaining("Writing the changes"))
+  })
+
+  it("returns to writing when a real edit follows an earlier claim", async () => {
+    const t = setup({ scenario: { turns: [{ steps: [claim("meta_improve:landing"), { edit: { path: "app/page.tsx", content: PAGE_EDIT } }, claim("conversions_to_tools:trial")] }] } })
+    await step.run(t.ctx, t.deps)
+    const lines = t.recorded.events.filter((event) => event.type === "step.status").map((event) => String(event.fields.text))
+    expect(lines.some((line) => line.includes("Writing the changes") && line.includes("1 of 2 claimed"))).toBe(true)
+  })
+
+  it("shows a blocked claim as blocked by the agent, not as a done claim", async () => {
+    const t = setup({ scenario: { turns: [{ steps: [claim("meta_improve:landing", "blocked", "the site has no pixel") ] }] }, items: [ITEMS[0]!] })
+    await step.run(t.ctx, t.deps)
+    const states = t.recorded.events.filter((event) => event.type === "job.progress").map((event) => event.fields.state)
+    expect(states).toContain("agent_blocked")
+    expect(states).not.toContain("agent_claim")
+  })
   it("returns an S-check failure in the claim tool reply before the turn ends", async () => {
     const staticId = ITEMS[0]!.checks.find((check) => check.tier === "S")!.id
     const t = setup({

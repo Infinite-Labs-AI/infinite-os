@@ -46,7 +46,7 @@ export interface WizardEventFields {
   "ask.open": { askId: string; kind: AskKind; payload: unknown }
   "ask.closed": { askId: string; answer: unknown }
   "job.seeded": { item: ChecklistItem }
-  "job.progress": { itemId: string; state: "agent_claim" | "checking" | "failed" }
+  "job.progress": { itemId: string; state: "agent_claim" | "agent_blocked" | "agent_not_needed" | "checking" | "failed" }
   "job.state": { itemId: string; state: JobItemState; by: "wizard" | "agent_claim"; checkId?: string; note?: string }
   "check.result": {
     checkId: string

@@ -24,13 +24,43 @@ function frame(change: Partial<FrameInput> = {}): string[] {
 const plain = (lines: string[]) => lines.map((line) => stripAnsi(line).replace(/\s+$/, "")).join("\n")
 
 describe("renderFrame", () => {
+  it("names pending proof, not-needed, blocked and unmeasured rows plainly", () => {
+    const snapshot = midRunSnapshot({ jobs: [
+      { id: "a", title: "Deploy proof", state: "waiting_deploy" },
+      { id: "b", title: "Outcome proof", state: "waiting_real_event" },
+      { id: "c", title: "Skipped", state: "not_needed" },
+      { id: "d", title: "Unreadable", state: "could_not_check", note: "no offline proof" },
+      { id: "e", title: "Blocked", state: "blocked", note: "needs your answer" }
+    ] })
+    const text = plain(frame({ snapshot, height: 40 }))
+    for (const label of ["in the pull request", "waiting for a real event", "not needed", "could not be checked", "blocked: needs your answer"]) expect(text).toContain(label)
+  })
+  it("keeps job progress monotonic through a provisional failure and re-claim", () => {
+    const base = midRunSnapshot()
+    const steps = base.steps.map((row) => row.id === "jobs" ? { ...row, startedAt: "2026-10-02T09:00:00.000Z" } : row)
+    const jobs: NonNullable<FrameInput["snapshot"]["jobs"]> = [
+      { id: "a", title: "A", state: "failed" },
+      { id: "b", title: "B", state: "failed" },
+      { id: "c", title: "C", state: "waiting" }
+    ]
+    const pct = (states: typeof jobs, highWater?: number) => Number(/(\d+)%/.exec(plain(frame({ snapshot: midRunSnapshot({ steps, jobs: states, jobsSettledHighWater: highWater }), nowMs: Date.parse("2026-10-02T09:00:00.000Z") })))?.[1])
+    expect(pct([{ ...jobs[0]!, state: "checking" }, jobs[1]!, jobs[2]!], 2)).toBeGreaterThanOrEqual(pct(jobs, 2))
+  })
+
+  it("never rounds a running step up to the next step mark", () => {
+    const base = midRunSnapshot()
+    const steps = base.steps.map((row, index) => index < 8 ? { ...row, state: "ok" as const } : index === 8 ? { ...row, state: "running" as const, startedAt: "2026-10-02T09:00:00.000Z" } : row)
+    const text = plain(frame({ snapshot: midRunSnapshot({ steps, currentStep: "rehearsal" }), nowMs: Date.parse("2026-10-02T09:00:57.000Z") }))
+    const runningPct = Number(/(\d+)%/.exec(text)?.[1])
+    expect(runningPct).toBeLessThan(Math.round(9 / 13 * 100))
+  })
   it("shows every job as a stable checklist and moves the bar during a long running step", () => {
     const base = midRunSnapshot()
     const snapshot = midRunSnapshot({
       currentStep: "jobs",
       steps: base.steps.map((row) => row.id === "jobs" ? { ...row, startedAt: "2026-10-02T09:00:00.000Z", status: "Writing the changes · 3 files edited" } : row),
       jobs: [
-        { id: "a", title: "Add capture", state: "passed" },
+        { id: "a", title: "Add capture", state: "done_in_code" },
         { id: "b", title: "Guard Meta", state: "checking" },
         { id: "c", title: "Update privacy", state: "waiting" }
       ]

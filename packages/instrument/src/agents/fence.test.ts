@@ -55,6 +55,22 @@ describe("fence snapshot", () => {
 })
 
 describe("fence end: outside the allowlist", () => {
+  it("claimCheckSafe refuses out-of-scope edits, heavy-directory tamper, and git config changes", async () => {
+    const { root, fence } = await setup()
+    expect(await fence.claimCheckSafe()).toBe(true)
+    write(root, "app/layout.tsx", `${POST_INSTALL_LAYOUT}// allowed edit\n`)
+    expect(await fence.claimCheckSafe()).toBe(true)
+    write(root, "lib/stray.ts", "export const stray = true\n")
+    expect(await fence.claimCheckSafe()).toBe(false)
+    rmSync(join(root, "lib/stray.ts"))
+    write(root, "node_modules/next/dist/server.js", "/* tamper */\n")
+    expect(await fence.claimCheckSafe()).toBe(false)
+    rmSync(join(root, "node_modules/next/dist/server.js"))
+    write(root, ".git/config", "[core]\n\thooksPath = /tmp/untrusted\n")
+    expect(await fence.claimCheckSafe()).toBe(false)
+    await fence.abort()
+  })
+
   it("review P2-3: deletes a new file no job owns — only that path; it is a stray, and no job is blocked for it", async () => {
     const { root, fence } = await setup()
     write(root, "lib/stray.ts", "export const x = 1\n")

@@ -49,6 +49,32 @@ function setup(json = false) {
 }
 
 describe("WizardStore", () => {
+  it("keeps resumed and checked job rows in their actual states", () => {
+    const { store, emitter } = setup()
+    store.stepStart("jobs")
+    store.jobSeeded({ id: "a", title: "A", state: "waiting_deploy" })
+    expect(store.getSnapshot().jobs?.[0]?.state).toBe("waiting_deploy")
+    emitter.emit("job.state", { itemId: "a", state: "waiting_real_event", by: "wizard" })
+    expect(store.getSnapshot().jobs?.[0]?.state).toBe("waiting_real_event")
+    emitter.emit("job.state", { itemId: "a", state: "not_needed", by: "wizard" })
+    expect(store.getSnapshot().jobs?.[0]?.state).toBe("not_needed")
+    emitter.emit("job.state", { itemId: "a", state: "claimed", by: "wizard", note: "no check could decide" })
+    expect(store.getSnapshot().jobs?.[0]).toMatchObject({ state: "could_not_check", note: "no check could decide" })
+    emitter.emit("job.progress", { itemId: "a", state: "agent_blocked" })
+    expect(store.getSnapshot().jobs?.[0]?.state).toBe("agent_blocked")
+    store.stepStart("jobs")
+    store.jobSeeded({ id: "a", title: "A", state: "proven" })
+    expect(store.getSnapshot().jobs?.[0]?.state).toBe("proven")
+  })
+  it("retains the job progress high-water count when a provisional failure is reclaimed", () => {
+    const { store } = setup()
+    for (const id of ["a", "b", "c"]) store.jobSeeded({ id, title: id, state: "pending" })
+    store.jobDisplay("a", "failed")
+    store.jobDisplay("b", "done_in_code")
+    expect(store.getSnapshot().jobsSettledHighWater).toBe(2)
+    store.jobDisplay("a", "checking")
+    expect(store.getSnapshot().jobsSettledHighWater).toBe(2)
+  })
   it("retains the stopping reason over a stale running status", () => {
     const { store } = setup()
     store.stepStart("rehearsal")
@@ -66,7 +92,7 @@ describe("WizardStore", () => {
       { id: "b", title: "Second job", state: "waiting" }
     ])
     emitter.emit("job.state", { itemId: "a", state: "done_in_code", by: "wizard" })
-    expect(store.getSnapshot().jobs?.[0]?.state).toBe("passed")
+    expect(store.getSnapshot().jobs?.[0]?.state).toBe("done_in_code")
   })
   it("bumps the version and tells subscribers on every change; snapshots are new objects", () => {
     const { store } = setup()
