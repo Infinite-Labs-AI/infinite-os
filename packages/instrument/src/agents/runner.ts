@@ -140,6 +140,7 @@ export function runExtras(result: AgentRunResult, items: readonly { id: string }
 }
 
 export interface AgentRunnerOptions {
+  expectedPreviewGuard?(): string | null
   /** The repo root (absolute). */
   root: string
   /** The user's home (absolute): scratch, snapshots and the sensitive-path list come from it. */
@@ -185,6 +186,17 @@ interface AttemptResult {
 }
 
 export class AgentRunnerImpl implements AgentRunner {
+  private activeJob: string | null = null
+  private readonly pendingEdits = new Map<string, { path: string; owner: string | null }>()
+  private readonly codexEditOwners = new Map<string, string | null>()
+  private flushEditActivities(ids?: readonly string[]): void {
+    for (const id of ids ?? this.pendingEdits.keys()) {
+      const edit = this.pendingEdits.get(id)
+      if (!edit) continue
+      this.activeFence?.recordEditActivity(edit.owner, edit.path)
+      this.pendingEdits.delete(id)
+    }
+  }
   private readonly registry = new AgentProcessRegistry()
   private detected: DetectedAgents | null = null
   private activeFence: Fence | null = null
@@ -276,14 +288,17 @@ export class AgentRunnerImpl implements AgentRunner {
         now,
         redact,
         onClaim: async (claim) => {
+          if (this.pendingEdits.size > 0) return { state: "undetermined", problems: ["An editing tool is still running. Wait for it to finish, then claim again."] }
           if (!this.activeFence || !(await this.activeFence.claimCheckSafe())) return { state: "undetermined", problems: ["The safety fence found an out-of-scope or changing file; no static check ran. The turn will be settled before any further checks."] }
-          const feedback = await input.onClaim(claim)
           const consentProblems = await this.activeFence.claimConsentProblems(claim.jobId)
-          if (consentProblems.length > 0) return { state: "problem", problems: [...(feedback?.problems ?? []), ...consentProblems] }
+          if (consentProblems.length > 0) return { state: "problem", problems: consentProblems }
+          const feedback = await input.onClaim(claim)
+          if (this.activeJob === claim.jobId && feedback?.state !== "problem") this.activeJob = null
           return feedback && typeof feedback === "object" ? feedback : undefined
         },
         onAsk: (question) => input.onAsk(question),
         onProgress: (progress) => {
+          this.activeJob = progress.jobId
           input.onProgress(progress)
           narrator.beat(progress.text)
         }
@@ -300,7 +315,10 @@ export class AgentRunnerImpl implements AgentRunner {
     this.mcpTokens.add(token)
     // The snapshot dir is unique per process and turn, so a later run never overwrites a crashed turn's copies.
     const turnDir = (suffix = "") => snapshotDir(this.options.home, runId, `${turn}${suffix}-${process.pid}-${Date.now().toString(36)}`)
-    let fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir(), runId, turn, items: input.items })
+    this.activeJob = input.items.length === 1 ? input.items[0]!.id : null
+    this.pendingEdits.clear()
+    this.codexEditOwners.clear()
+    let fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir(), runId, turn, items: input.items, expectedPreviewGuard: this.options.expectedPreviewGuard?.() })
     this.activeFence = fence
     let modelFallback = false
     try {
@@ -310,12 +328,16 @@ export class AgentRunnerImpl implements AgentRunner {
         modelFallback = true
         input.onNarrate({ agent: kind, role: "worker", text: `${this.models()[kind].label} isn't on your plan: using your default model` })
         if (!fence.isSettled) await fence.abort()
-        fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir("-retry"), runId, turn: `${turn}-retry`, items: input.items })
+        fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir("-retry"), runId, turn: `${turn}-retry`, items: input.items, expectedPreviewGuard: this.options.expectedPreviewGuard?.() })
         this.activeFence = fence
+        this.pendingEdits.clear()
+        this.codexEditOwners.clear()
+        this.activeJob = input.items.length === 1 ? input.items[0]!.id : null
         channel = newChannel()
         attempt = await this.workerAttempt(kind, info, input, { bridge, scratch, narrator, channel, turn, model: this.modelFor(kind) })
       }
       if (this.interrupted && attempt.outcome === "completed") attempt.outcome = "error"
+      this.flushEditActivities()
       const claims = mergeClaims(channel.claims, attempt.structured, input.items, now, redact)
       const questions = mergeQuestions(channel.questions, attempt.structured, input.items, redact)
       const base = {
@@ -485,15 +507,24 @@ export class AgentRunnerImpl implements AgentRunner {
               return
             case "tool_use": {
               ticker.acted()
-              const beat = claudeToolBeat(event.name, event.input, beatCtx)
-              const toolInput = typeof event.input === "object" && event.input !== null ? event.input as Record<string, unknown> : {}
-              const path = displayPath(toolInput.file_path ?? toolInput.path ?? toolInput.notebook_path, this.options.root)
-              if (event.name === "Read") input.onActivity?.({ kind: "read", path })
-              if (event.name === "Edit" || event.name === "Write" || event.name === "MultiEdit") input.onActivity?.({ kind: "edit", path })
-              if (beat) ctx.narrator.beat(beat)
+              for (const use of [event, ...event.additional ?? []]) {
+                const beat = claudeToolBeat(use.name, use.input, beatCtx)
+                const toolInput = typeof use.input === "object" && use.input !== null ? use.input as Record<string, unknown> : {}
+                const path = displayPath(toolInput.file_path ?? toolInput.path ?? toolInput.notebook_path, this.options.root)
+                if (use.name === "Read") input.onActivity?.({ kind: "read", path })
+                if (use.name === "Edit" || use.name === "Write" || use.name === "MultiEdit") {
+                  const overlapping = [...this.pendingEdits.values()].filter(edit => edit.path === path)
+                  // Concurrent writes to one file have no reliable byte attribution; never guess a claimant.
+                  overlapping.forEach(edit => { edit.owner = null })
+                  this.pendingEdits.set(use.id ?? `unidentified-${this.pendingEdits.size}`, { path, owner: overlapping.length ? null : this.activeJob })
+                  input.onActivity?.({ kind: "edit", path })
+                }
+                if (beat) ctx.narrator.beat(beat)
+              }
               return
             }
             case "tool_result":
+              this.flushEditActivities(event.ids)
               ticker.toolReturned()
               return
             case "assistant_error":
@@ -573,9 +604,17 @@ export class AgentRunnerImpl implements AgentRunner {
             else ticker.acted()
             const beat = codexItemBeat(event.item, beatCtx)
             if (typeof event.item === "object" && event.item !== null && (event.item as { type?: string }).type === "file_change") {
+              const id = (event.item as { id?: string }).id
+              if (id && event.phase !== "completed") this.codexEditOwners.set(id, this.activeJob)
+              const owner = id && this.codexEditOwners.has(id) ? this.codexEditOwners.get(id)! : this.activeJob
               for (const change of (event.item as { changes?: Array<{ path?: string }> }).changes ?? []) {
-                if (change.path) input.onActivity?.({ kind: "edit", path: displayPath(change.path, this.options.root) })
+                if (change.path) {
+                  const path = displayPath(change.path, this.options.root)
+                  if (event.phase === "completed") this.activeFence?.recordEditActivity(owner, path)
+                  input.onActivity?.({ kind: "edit", path })
+                }
               }
+              if (id && event.phase === "completed") this.codexEditOwners.delete(id)
             }
             if (beat) ctx.narrator.beat(beat)
           } else if (event.kind === "error") {

@@ -67,7 +67,11 @@ await runSteps(turn.steps, {
   agent: "claude",
   cwd: process.cwd(),
   mcp,
-  onEdit: (path) => emit({ type: "assistant", session_id: sessionId, message: { content: [{ type: "tool_use", id: randomUUID(), name: "Edit", input: { file_path: `${process.cwd()}/${path}`, old_string: "x", new_string: "y" } }] } }),
+  onEdit: (path) => {
+    const id = randomUUID()
+    emit({ type: "assistant", session_id: sessionId, message: { content: [{ type: "tool_use", id, name: "Edit", input: { file_path: `${process.cwd()}/${path}`, old_string: "x", new_string: "y" } }] } })
+    emit({ type: "user", session_id: sessionId, message: { content: [{ type: "tool_result", tool_use_id: id, content: "updated" }] } })
+  },
   onTool: (tool, args) => emit({ type: "assistant", session_id: sessionId, message: { content: [{ type: "tool_use", id: randomUUID(), name: `mcp__infinite_tag__${tool}`, input: args }] } })
 })
 mcp?.close()

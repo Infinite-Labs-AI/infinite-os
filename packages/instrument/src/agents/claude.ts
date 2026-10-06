@@ -219,9 +219,9 @@ export type ClaudeStreamEvent =
       hasClaimTool: boolean
       model: string | null
     }
-  | { kind: "tool_use"; name: string; input: unknown }
+  | { kind: "tool_use"; name: string; input: unknown; id?: string; additional?: Array<{ name: string; input: unknown; id?: string }> }
   /** §3x.3 a tool's result came back to the model (it now thinks until its next event). */
-  | { kind: "tool_result" }
+  | { kind: "tool_result"; ids: string[] }
   | { kind: "assistant_error"; error: string }
   | { kind: "rate_limit"; event: Record<string, unknown> }
   | {
@@ -262,13 +262,14 @@ export function parseClaudeLine(line: string): ClaudeStreamEvent | null {
     const error = typeof event.error === "string" ? event.error : null
     if (error) return { kind: "assistant_error", error }
     const content = isRecord(event.message) && Array.isArray(event.message.content) ? event.message.content : []
-    const toolUse = content.find((block): block is Record<string, unknown> => isRecord(block) && block.type === "tool_use" && typeof block.name === "string")
-    if (toolUse) return { kind: "tool_use", name: toolUse.name as string, input: toolUse.input }
+    const uses = content.filter((block): block is Record<string, unknown> => isRecord(block) && block.type === "tool_use" && typeof block.name === "string")
+      .map(block => ({ name: block.name as string, input: block.input, ...(typeof block.id === "string" ? { id: block.id } : {}) }))
+    if (uses[0]) return { kind: "tool_use", ...uses[0], ...(uses.length > 1 ? { additional: uses.slice(1) } : {}) }
     return { kind: "other" }
   }
   if (event.type === "user") {
     const content = isRecord(event.message) && Array.isArray(event.message.content) ? event.message.content : []
-    if (content.some((block) => isRecord(block) && block.type === "tool_result")) return { kind: "tool_result" }
+    if (content.some((block) => isRecord(block) && block.type === "tool_result")) return { kind: "tool_result", ids: content.filter(isRecord).filter(block => block.type === "tool_result" && typeof block.tool_use_id === "string").map(block => block.tool_use_id as string) }
     return { kind: "other" }
   }
   if (event.type === "rate_limit_event") return { kind: "rate_limit", event }

@@ -196,6 +196,62 @@ describe("fence end: outside the allowlist", () => {
 })
 
 describe("fence end: consent hunks, text edits, the gate", () => {
+  it("rejects a new enclosing condition even when the consent line stays byte-identical", async () => {
+    const { root } = makeFenceFixture()
+    const home = tempDir("infinite-tag-home-")
+    dirs.push(root, home)
+    const file = "src/common/tracking.ts"
+    write(root, file, "export function boot() {\n  fbq('consent', 'grant');\n}\n")
+    const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 91), runId: RUN_ID, turn: 91, items: [item("preview_guard:meta", [file])] })
+    write(root, file, "export function boot() {\n  if (allowHost()) {\n  fbq('consent', 'grant');\n  }\n}\n")
+    expect((await fence.end({ claims: [{ jobId: "preview_guard:meta", status: "done", note: "done", at: "2026-10-06T21:00:00Z" }] })).blocked).toEqual([expect.objectContaining({ reason: "consent_touched" })])
+  })
+
+  it("keeps a formatting-only reindent of a consent call", async () => {
+    const { root } = makeFenceFixture()
+    const home = tempDir("infinite-tag-home-")
+    dirs.push(root, home)
+    const file = "src/common/tracking.ts"
+    write(root, file, "export function boot() {\n  fbq('consent', 'grant');\n}\n")
+    const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 92), runId: RUN_ID, turn: 92, items: [item("preview_guard:meta", [file])] })
+    write(root, file, "export function boot() {\n    fbq('consent', 'grant');\n}\n")
+    const result = await fence.end({ claims: [{ jobId: "preview_guard:meta", status: "done", note: "done", at: "2026-10-06T21:00:00Z" }] })
+    expect(result.blocked).toEqual([])
+    expect(readFileSync(join(root, file), "utf8")).toContain("    fbq('consent', 'grant');")
+  })
+
+  it("does not blame the first claimant for an earlier edit made by another job", async () => {
+    const { root } = makeFenceFixture()
+    const home = tempDir("infinite-tag-home-")
+    dirs.push(root, home)
+    const file = "src/common/tracking.ts"
+    write(root, file, "export function boot() {\n  fbq('consent', 'grant');\n}\n")
+    const ids = ["preview_guard:ga4", "preview_guard:meta"]
+    const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 93), runId: RUN_ID, turn: 93, items: ids.map((id) => item(id, [file])) })
+    write(root, file, "export function boot() {\n  if (allowHost()) {\n    fbq('consent', 'grant');\n  }\n}\n")
+    fence.recordEditActivity("preview_guard:meta", file)
+    await fence.claimConsentProblems("preview_guard:ga4")
+    await fence.claimConsentProblems("preview_guard:meta")
+    const claims = ids.map((jobId) => ({ jobId, status: "done" as const, note: "done", at: "2026-10-06T21:00:00Z" }))
+    const settled = await fence.end({ claims })
+    expect(settled.blocked.map((entry) => entry.itemId)).toEqual(["preview_guard:meta"])
+  })
+
+  it("tells the neighboring job when its line will be reverted with a consent hunk", async () => {
+    const { root } = makeFenceFixture()
+    const home = tempDir("infinite-tag-home-")
+    dirs.push(root, home)
+    const file = "src/common/tracking.ts"
+    write(root, file, "export function boot() {\n  fbq('init', '123');\n  fbq('consent', 'grant');\n}\n")
+    const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 94), runId: RUN_ID, turn: 94, items: [item("meta_improve:capture", [file]), item("preview_guard:meta", [file])] })
+    write(root, file, "export function boot() {\n  fbq('init', '456');\n  fbq('consent', 'grant');\n}\n")
+    fence.recordEditActivity("meta_improve:capture", file)
+    write(root, file, "export function boot() {\n  fbq('init', '456');\n  if (allowHost()) {\n    fbq('consent', 'grant');\n  }\n}\n")
+    fence.recordEditActivity("preview_guard:meta", file)
+    await fence.claimConsentProblems("preview_guard:meta")
+    expect((await fence.claimConsentProblems("meta_improve:capture")).join(" ")).toMatch(/reverted with a consent change, redo it/i)
+  })
+
   it("a wrapped Meta consent call rejects only its guard hunk and claimant in a shared tracking module", async () => {
     const { root } = makeFenceFixture()
     const home = tempDir("infinite-tag-home-")
@@ -221,18 +277,23 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 7), runId: RUN_ID, turn: 7, items })
     let edited = base.replace("export function ga()", "window.infiniteMetaClickId = () => '';\nexport function ga()")
     write(root, file, edited)
+    fence.recordEditActivity("meta_improve:capture", file)
     expect(await fence.claimConsentProblems("meta_improve:capture")).toEqual([])
     edited = edited.replace("  fbq('init', '1234567890123456');\n  fbq('consent', 'grant');\n  fbq('track', 'PageView');", "  if (allowHost()) {\n    fbq('init', '1234567890123456');\n    fbq('consent', 'grant');\n    fbq('track', 'PageView');\n  }")
     write(root, file, edited)
+    fence.recordEditActivity("preview_guard:meta", file)
     expect((await fence.claimConsentProblems("preview_guard:meta")).join(" ")).toMatch(/consent call.*early-return/i)
     edited = edited.replace("gtag('config', 'G-FAKE00001');", "if (allowHost()) gtag('config', 'G-FAKE00001');")
     write(root, file, edited)
+    fence.recordEditActivity("preview_guard:ga4", file)
     expect(await fence.claimConsentProblems("preview_guard:ga4")).toEqual([])
     edited = edited.replace("posthog.init('phc_FAKE', { api_host: 'https://us.i.posthog.com' });", "if (allowHost()) posthog.init('phc_FAKE', { api_host: '/ingest' });")
     write(root, file, edited)
+    fence.recordEditActivity("preview_guard:posthog", file)
     expect(await fence.claimConsentProblems("preview_guard:posthog")).toEqual([])
     edited = edited.replace("api_host: '/ingest'", "api_host: '/ingest', mask_all_text: true")
     write(root, file, edited)
+    fence.recordEditActivity("posthog_improve:sensitive_pages", file)
     expect(await fence.claimConsentProblems("posthog_improve:sensitive_pages")).toEqual([])
     const claims = ids.map((jobId) => ({ jobId, status: "done" as const, note: "done", at: "2026-10-06T21:00:00.000Z" }))
     const settled = await fence.end({ claims })
@@ -257,8 +318,8 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     const claims = items.map((entry) => ({ jobId: entry.id, status: "done" as const, note: "done", at: "2026-10-06T21:00:00.000Z" }))
     const settled = await fence.end({ claims })
     expect(settled.blocked).toEqual([])
-    expect(settled.strays.map((stray) => stray.path)).toEqual([file])
-    expect(readFileSync(join(root, file), "utf8")).toContain("  fbq('consent', 'grant');")
+    expect(settled.strays).toEqual([])
+    expect(readFileSync(join(root, file), "utf8")).toContain("    fbq('consent', 'grant');")
   })
 
   it("reverts only the consent hunk, keeps the rest, blocks consent_touched", async () => {

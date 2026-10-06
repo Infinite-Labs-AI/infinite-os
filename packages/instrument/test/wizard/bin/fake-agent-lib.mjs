@@ -158,7 +158,7 @@ export async function runSteps(steps, ctx) {
       const path = join(ctx.cwd, step.edit.path)
       mkdirSync(dirname(path), { recursive: true })
       writeFileSync(path, step.edit.content)
-      ctx.onEdit?.(step.edit.path)
+      if (!step.edit.silent) ctx.onEdit?.(step.edit.path)
     } else if (step.append) {
       const path = join(ctx.cwd, step.append.path)
       appendFileSync(path, step.append.text)

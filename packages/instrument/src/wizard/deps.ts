@@ -340,6 +340,7 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
   registerJobStaticChecks(checks, { root, run: () => jobStaticRunContext(root, runId()) })
 
   const agents = new AgentRunnerImpl({
+    expectedPreviewGuard: () => briefFactsFor(root, state())?.previewGuard?.expression ?? null,
     root,
     home,
     env,
