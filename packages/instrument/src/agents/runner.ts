@@ -274,7 +274,11 @@ export class AgentRunnerImpl implements AgentRunner {
         items: input.items,
         now,
         redact,
-        onClaim: (claim) => input.onClaim(claim),
+        onClaim: async (claim) => {
+          if (!this.activeFence || !(await this.activeFence.claimCheckSafe())) return { state: "undetermined", problems: ["The safety fence found an out-of-scope or changing file; no static check ran. The turn will be settled before any further checks."] }
+          const feedback = await input.onClaim(claim)
+          return feedback && typeof feedback === "object" ? feedback : undefined
+        },
         onAsk: (question) => input.onAsk(question),
         onProgress: (progress) => {
           input.onProgress(progress)
@@ -479,6 +483,7 @@ export class AgentRunnerImpl implements AgentRunner {
             case "tool_use": {
               ticker.acted()
               const beat = claudeToolBeat(event.name, event.input, beatCtx)
+              if (beat) input.onActivity?.(beat)
               if (beat) ctx.narrator.beat(beat)
               return
             }
@@ -561,6 +566,12 @@ export class AgentRunnerImpl implements AgentRunner {
             if (event.phase === "completed") ticker.toolReturned()
             else ticker.acted()
             const beat = codexItemBeat(event.item, beatCtx)
+            if (beat) input.onActivity?.(beat)
+            if (typeof event.item === "object" && event.item !== null && (event.item as { type?: string }).type === "file_change") {
+              for (const change of (event.item as { changes?: Array<{ path?: string }> }).changes ?? []) {
+                if (change.path) input.onActivity?.(`Editing ${displayPath(change.path, this.options.root)}`)
+              }
+            }
             if (beat) ctx.narrator.beat(beat)
           } else if (event.kind === "error") {
             const message = event.message

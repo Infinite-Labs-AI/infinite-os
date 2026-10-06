@@ -134,19 +134,25 @@ async function staticChecksOnClaim(io: JobsIo, itemId: string): Promise<{ state:
   const scanner = await io.scanner()
   const problems: string[] = []
   let undetermined = false
+  let sawPass = false
+  let sawProblem = false
   for (const spec of specs) {
     try {
       const raw = await io.deps.checks.run(spec.checkId, { item, root: io.ctx.root, appRoot: io.ctx.appRoot, runId: io.runId() })
       for (const result of Array.isArray(raw) ? raw : [raw]) {
-        if (result.state === "problem") problems.push(`${spec.checkId}: ${scanner.redact(result.reason ?? "problem").text}`)
-        if (result.state === "undetermined") undetermined = true
+        if (result.state === "problem") {
+          sawProblem = true
+          problems.push(`${spec.checkId}: ${scanner.redact(result.reason ?? "problem").text}`)
+        }
+        if (result.state === "pass") sawPass = true
+        if (result.state === "undetermined" || result.state === "info") undetermined = true
       }
     } catch (error) {
       undetermined = true
       problems.push(`${spec.checkId}: ${scanner.redact(error instanceof Error ? error.message : String(error)).text}`)
     }
   }
-  return { state: problems.length > 0 && !undetermined ? "problem" : problems.length > 0 || undetermined ? "undetermined" : "pass", problems }
+  return { state: sawProblem ? "problem" : undetermined || !sawPass ? "undetermined" : "pass", problems }
 }
 
 class SealBroken extends Error {
@@ -270,6 +276,13 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
         },
         onAsk: (question) => questions.push(question),
         onProgress: () => undefined,
+        onActivity: (text) => {
+          const reading = /^Reading (.+)$/.exec(text)
+          const editing = /^Editing (.+)$/.exec(text)
+          if (reading) read.add(reading[1]!)
+          if (editing) edited.add(editing[1]!)
+          ctx.emit.emit("step.status", { step: "jobs", text: liveStatus() })
+        },
         onNarrate: (beat) => {
           const reading = /^Reading (.+)$/.exec(beat.text)
           const editing = /^Editing (.+)$/.exec(beat.text)

@@ -92,8 +92,9 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     expect(t.checkCalls.turnGate).toBe(1)
     expect(t.checkCalls.build).toBe(1)
     expect(t.recorded.events.filter((event) => event.type === "job.seeded")).toHaveLength(2)
-    expect(t.recorded.events.filter((event) => event.type === "job.progress").map((event) => event.fields.state)).toEqual(["agent_claim", "agent_claim"])
+    expect(t.recorded.events.filter((event) => event.type === "job.progress").map((event) => event.fields.state)).toEqual(["agent_claim", "checking", "agent_claim", "checking"])
     expect(t.recorded.events.some((event) => event.type === "step.status" && String(event.fields.text).includes("files read"))).toBe(true)
+    expect(t.recorded.events.some((event) => event.type === "step.status" && String(event.fields.text).includes("1 edited"))).toBe(true)
     const states = t.recorded.events.filter((event) => event.type === "job.state").map((event) => [event.fields.itemId, event.fields.state, event.fields.by])
     expect(states).toContainEqual(["conversions_to_tools:trial", "claimed", "agent_claim"])
     // Review I1 P3-3: one `claimed` per claim (never once on the claim and again on apply).

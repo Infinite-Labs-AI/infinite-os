@@ -105,6 +105,8 @@ export interface RunJobsInput {
   onClaim(claim: Claim): void | { state: "pass" | "problem" | "undetermined" | "not_run"; problems: string[] } | Promise<{ state: "pass" | "problem" | "undetermined" | "not_run"; problems: string[] }>
   onAsk(question: AgentQuestion): void
   onProgress(progress: { jobId: string; text: string }): void
+  /** Every observed tool activity, before narration's three-second throttle. */
+  onActivity?(text: string): void
   onNarrate(beat: { agent: AgentKind; role: "worker" | "reviewer"; text: string }): void
 }
 

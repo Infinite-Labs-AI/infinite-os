@@ -316,6 +316,21 @@ export class Fence {
     return this.settled || this.closing !== null
   }
 
+  /** Read-only gate before an in-turn claim check: never run a check on a tampered or out-of-scope tree. */
+  async claimCheckSafe(): Promise<boolean> {
+    this.assertOpen()
+    const root = this.manifest.root
+    // Read git internals with file I/O first. `touched()` calls git, so an agent-written git config must stop it.
+    for (const rel of this.manifest.gitInternal) {
+      const entry = this.entry(rel)
+      if (!entry || (await currentHash(join(root, rel))) !== entry.sha256) return false
+    }
+    for (const rel of await listGitInternal(root)) if (!this.entry(rel)) return false
+    const touched = await this.touched()
+    if (touched.tamper.length > 0) return false
+    return touched.paths.every((rel) => !isDenied(rel) && this.manifest.allow.some((item) => [...item.files, ...item.create].some((pattern) => sameOrGlob(pattern, rel))))
+  }
+
   static async begin(options: FenceBeginOptions): Promise<Fence> {
     const root = options.root
     const dir = options.snapshotDir
