@@ -107,15 +107,25 @@ describe("R4-2: fbc_capture grades the page the job's files put on the browser",
 })
 
 describe("R4-2: itemT0Scenarios hands an adopted Meta job ITS page, never the managed one", () => {
-  it("runs the exact strict TypeScript module capture as browser code, and refuses changed bytes", async () => {
+  it("runs the site module capture after re-indentation, and refuses changed or dead code", async () => {
     const moduleItem: ChecklistItem = { ...item(), allow: { files: ["src/common/tracking.ts"], create: [] } }
-    const source = `export function boot() {\n${capturePasteAsWritten("typescript_module", "not_required")}\nfbq('init', '555500001111222');\n}`
+    const capture = capturePasteAsWritten("typescript_module", "not_required")
+    const indented = capture.split("\n").map((line) => `  ${line}`).join("\r\n")
+    const source = `${indented}\r\nexport function boot() { fbq('init', '555500001111222'); }`
     const scenarios = await itemT0Scenarios(moduleItem, [{ checkId: "fbc_capture" }], { productionHost: HOST }, { fs: fsOf(source), root: "/repo" })
+    const browserCode = (scenarios[0]?.params.source as { scripts?: Array<{ code: string }> } | undefined)?.scripts?.[0]?.code
+    expect(browserCode).toContain("\r\n")
+    expect(browserCode).toMatch(/^  \(function/)
     const results = await runItemT0({ checks: { t0 } as never }, scenarios, {} as never, { runId: FAKE.runId, at: () => NOW().toISOString() })
     expect(results[0]?.state, results[0]?.reason).toBe("pass")
     const broken = await itemT0Scenarios(moduleItem, [{ checkId: "fbc_capture" }], { productionHost: HOST }, { fs: fsOf(source.replace('document.cookie = "_fbc=" + value', 'void "_fbc=" + value')), root: "/repo" })
     const negative = await runItemT0({ checks: { t0 } as never }, broken, {} as never, { runId: FAKE.runId, at: () => NOW().toISOString() })
     expect(negative[0]?.state).toBe("undetermined")
+    for (const dead of [`function neverCalled() {\n${capture}\n}\nexport function boot() { fbq('init', '555500001111222'); }`, `/*\n${capture}\n*/\nexport function boot() { fbq('init', '555500001111222'); }`, `const example = \`${capture}\`;\nexport function boot() { fbq('init', '555500001111222'); }`]) {
+      const unrun = await itemT0Scenarios(moduleItem, [{ checkId: "fbc_capture" }], { productionHost: HOST }, { fs: fsOf(dead), root: "/repo" })
+      const result = await runItemT0({ checks: { t0 } as never }, unrun, {} as never, { runId: FAKE.runId, at: () => NOW().toISOString() })
+      expect(result[0]?.state).toBe("undetermined")
+    }
   })
   const item = (): ChecklistItem => ({
     id: "meta_improve:capture",

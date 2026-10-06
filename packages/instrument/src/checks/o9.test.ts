@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { FIXED_NOW, fixtureFetch } from "../../test/wizard/fixture-fetch.js"
 import type { CheckFn, CheckId } from "../wizard/contracts/jobs.js"
 import { buildHostGuardExpression } from "../host-guard.js"
+import { buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
 
 import { O9_CHECK_IDS, O9_RUNNER_METHODS, o9CheckFunctions, registerO9Checks } from "./o9.js"
 
@@ -145,6 +146,26 @@ describe("O9 registration", () => {
     expect((await check(input, ctx) as Array<{ state: string }>).map((result) => result.state)).toEqual(["pass"])
     writeFileSync(join(root, "src/ph.ts"), `function start() { if (!(${annotated.replace('"acme.example"', '"other.example"')})) return; posthog.init('phc_abcdefghijklmnop', {}); }`)
     expect((await check(input, ctx) as Array<{ state: string }>).map((result) => result.state)).toEqual(["problem"])
+  })
+
+  it("returns a problem for a missing plain-module capture and passes the executable indented paste", async () => {
+    const pixel = "export function boot() { fbq('init', '111222333444555'); }"
+    const root = app({
+      "pages/_app.tsx": "import Consent from '../components/Consent'; export default function App() { return <Consent /> }",
+      "components/Consent.tsx": "import { boot } from '../src/common/tracking'; export default function Consent() { boot(); return null }",
+      "src/common/tracking.ts": pixel
+    })
+    const item = { id: "meta_improve:capture", allow: { files: ["src/common/tracking.ts"], create: [] }, trigger: { finding: "capture", evidence: [{ file: "src/common/tracking.ts", line: 1 }] } }
+    const input = { item, root, appRoot: root, runId: "run-9" }
+    const check = o9CheckFunctions({ version: "t", root }).click_id_capture!
+    const missing = await check(input, ctx) as Array<{ state: string; reason?: string }>
+    expect(missing.map((result) => result.state)).toEqual(["problem"])
+    expect(missing[0]?.reason).toContain("not executable at module load")
+    const pasted = buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "not_required" } }).split("\n").map((line) => `  ${line}`).join("\r\n")
+    writeFileSync(join(root, "src/common/tracking.ts"), `${pasted}\r\n${pixel}`)
+    const installed = await check(input, ctx) as Array<{ state: string; reason?: string }>
+    expect(installed.map((result) => result.state)).toEqual(["pass"])
+    expect(installed[0]?.reason).toContain("managed click-id capture")
   })
 
   it("job-level checks grade only the item's files and tool (review P2-3)", async () => {

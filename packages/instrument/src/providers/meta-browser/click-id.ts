@@ -195,11 +195,16 @@ export function buildMetaClickIdCaptureScript(options: MetaClickIdCaptureOptions
 /** The same capture in a strict TypeScript module with an imperative adopted pixel. */
 export function buildMetaClickIdCaptureTypescript(options: MetaClickIdCaptureOptions = {}): string {
   return buildMetaClickIdCaptureScript(options)
-    .replace("(function () {", "(function () {\n  const window: any = globalThis.window;\n  const navigator: any = globalThis.navigator;")
+    .replace("(function () {", "(function () {\n  if (typeof globalThis.window === \"undefined\") return;\n  const window: any = globalThis.window;\n  const navigator: any = globalThis.navigator;")
     .replace("function infiniteConsentGate(start)", "function infiniteConsentGate(start: () => void)")
     .replace("function storedFbcs(usableOnly)", "function storedFbcs(usableOnly: boolean)")
     .replace("function format(index, fbclid)", "function format(index: number, fbclid: string)")
     .replace("function domainIndex(domain)", "function domainIndex(domain: string)")
+}
+
+/** The browser capture as a top-level JS module statement, safe to import during SSR. */
+export function buildMetaClickIdCaptureJavascript(options: MetaClickIdCaptureOptions = {}): string {
+  return buildMetaClickIdCaptureScript(options).replace("(function () {", "(function () {\n  if (typeof window === \"undefined\") return;")
 }
 
 function indent(source: string): string[] {

@@ -11,6 +11,39 @@ function check(files: Record<string, string>) {
 }
 
 describe("_fbc capture at the landing page", () => {
+  const modulePath = "src/common/tracking.ts"
+  const app = "import Consent from '../components/Consent'; export default function App() { return <Consent /> }"
+  const consent = "import { boot } from '../src/common/tracking'; export default function Consent() { boot(); return null }"
+  const pixel = "export function boot() { fbq('init', '555500001111222'); }"
+  const moduleSite = (source: string) => ({ "pages/_app.tsx": app, "components/Consent.tsx": consent, [modulePath]: source })
+
+  it("keeps an imported pixel with no capture, including a submit-only init, off the landing-time pass path", () => {
+    for (const source of [pixel, "export function submit() { fbq('init', '555500001111222'); }"]) {
+      expect(check(moduleSite(source))).toMatchObject({ state: "problem", findings: [{ code: "INF_SETUP_CLICK_ID_NOT_AT_LANDING" }] })
+    }
+  })
+
+  it("does not execute an import type edge", () => {
+    const capture = buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "not_required" } })
+    for (const imported of ["import type { boot } from '../src/common/tracking'", "import { type boot } from '../src/common/tracking'"]) {
+      const files = { "pages/_app.tsx": `${imported}; export default function App() { return null }`, [modulePath]: `${capture}\n${pixel}` }
+      expect(check(files).state).toBe("problem")
+    }
+  })
+
+  it("refuses capture text in a comment, string or dead function", () => {
+    const capture = buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "not_required" } })
+    for (const source of [`/*\n${capture}\n*/\n${pixel}`, `const example = \`${capture}\`;\n${pixel}`, `function neverCalled() {\n${capture}\n}\n${pixel}`]) {
+      expect(check(moduleSite(source)).state).toBe("problem")
+    }
+  })
+
+  it("recognises the same module statements after re-indentation and CRLF conversion", () => {
+    const capture = buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "not_required" } })
+    const indented = capture.split("\n").map((line) => `  ${line}`).join("\r\n")
+    expect(check(moduleSite(`${indented}\r\n${pixel}`)).findings[0]?.message).toContain("managed click-id capture")
+  })
+
   it("recognises the exact module capture imported through the shared app entry", () => {
     const capture = buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "not_required" } })
     const files = {
@@ -22,7 +55,7 @@ describe("_fbc capture at the landing page", () => {
     expect(result.state).toBe("ok")
     expect(result.findings[0]?.message).toContain("managed click-id capture")
     const broken = check({ ...files, "src/common/tracking.ts": files["src/common/tracking.ts"].replace('document.cookie = "_fbc=" + value', 'void "_fbc=" + value') })
-    expect(broken.findings[0]?.message).not.toContain("managed click-id capture")
+    expect(broken.state).toBe("problem")
   })
   /** THE FIXTURE FOR THE DEFECT: the pixel boots only where the visitor ALREADY converted. */
   it("catches a pixel that only initialises on a conversion page", () => {

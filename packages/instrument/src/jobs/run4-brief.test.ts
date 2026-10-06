@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { runInNewContext } from "node:vm"
 import { afterEach, describe, expect, it } from "vitest"
 import ts from "typescript"
 
@@ -64,7 +65,8 @@ describe("R4-6: run 4's brief hands each job its exact change", () => {
     const root = makeSite({ "src/common/tracking.ts": source })
     const brief = buildBrief([item("meta_improve:capture", ["src/common/tracking.ts"])], facts(root, { guardSites: [{ tool: "meta", file: "src/common/tracking.ts", line: 3, context: "js" }], managedFiles: [] }))
     const capture = planData(brief, "meta_improve:capture").capture as { insertBefore: string; pasteAsWritten: string }
-    expect(capture.insertBefore).toContain("fbq('init') call")
+    expect(capture.insertBefore).toContain("module top level immediately after imports")
+    expect(capture.insertBefore).toContain("outside its preview guard and consent early returns")
     expect(capture.pasteAsWritten).not.toContain("<Script")
     const dir = mkdtempSync(join(tmpdir(), "infinite-capture-ts-"))
     try {
@@ -76,6 +78,8 @@ describe("R4-6: run 4's brief hands each job its exact change", () => {
       rmSync(dir, { recursive: true, force: true })
     }
     expect(capture.pasteAsWritten).toBe(capturePasteAsWritten("typescript_module", "not_required"))
+    const serverCode = ts.transpileModule(capture.pasteAsWritten, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText
+    expect(() => runInNewContext(serverCode, { globalThis: {} })).not.toThrow()
   })
   it("the capture job gets Infinite's capture as written for the <Script> body, and where; its own task, not the job's gist", () => {
     const root = makeSite({ "app/layout.tsx": layout })

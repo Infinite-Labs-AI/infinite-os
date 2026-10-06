@@ -18,7 +18,7 @@ import { readBeforeFactsFile } from "./handoff/before-facts.js"
 import { loadPlanApprovals } from "../install/step-inputs.js"
 import { pageSourceFromRepo } from "../t0/inline-scripts.js"
 import type { T0PageSource } from "../t0/protocol.js"
-import { buildMetaClickIdCaptureScript, buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
+import { readExecutableModuleCapture } from "../setup-checks/module-click-id-capture.js"
 
 /** The reason a T0 scenario the wizard cannot build for an item carries (undetermined). */
 export const T0_UNBUILDABLE_PREFIX = "test_error — the offline test could not be set up for this job"
@@ -41,17 +41,13 @@ const GUARDED_TARGETS: ReadonlySet<string> = new Set(["ga4", "posthog", "meta"])
  */
 const ADOPTED_PAGE_JOBS: ReadonlySet<string> = new Set(["meta_improve"])
 
-/** A plain module has no inline HTML for T0 to load. Execute only the exact emitted capture's browser twin. */
+/** A plain module has no inline HTML for T0 to load. Execute only its own proven top-level capture. */
 async function emittedModuleCapture(item: ChecklistItem, io: { fs: Pick<WizardDeps["fs"], "readText">; root: string }): Promise<T0PageSource | null> {
   for (const file of item.allow.files.filter((path) => /\.[cm]?[jt]s$/i.test(path))) {
     const source = await io.fs.readText(join(io.root, file))
     if (!source) continue
-    for (const mode of ["not_required", "required"] as const) {
-      const gate = { kind: "infinite-consent" as const, mode }
-      const browser = buildMetaClickIdCaptureScript({ gate })
-      const emitted = /\.[cm]?ts$/i.test(file) ? buildMetaClickIdCaptureTypescript({ gate }) : browser
-      if (source.includes(emitted)) return { html: "<html><head></head><body></body></html>", scripts: [{ label: file, code: browser }] }
-    }
+    const capture = readExecutableModuleCapture(file, source)
+    if (capture) return { html: "<html><head></head><body></body></html>", scripts: [{ label: file, code: capture.browserCode }] }
   }
   return null
 }

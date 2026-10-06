@@ -362,9 +362,11 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
         "no standard Meta conversion fires from a click handler"
       )
     ),
-    click_id_capture: wrap("click_id_capture", "S", (input, ctx) =>
-      checkClickIdCapture({ files: filesOf(input) }).findings.map((finding) => setupFindingResult(finding, ctx, "click_id_capture"))
-    ),
+    click_id_capture: wrap("click_id_capture", "S", (input, ctx) => {
+      const item = input.item as JobInput["item"] | undefined
+      const target = item?.id === "meta_improve:capture" ? item.allow?.files.find((file) => /\.[cm]?[jt]s$/i.test(file)) : undefined
+      return checkClickIdCapture({ files: filesOf(input), ...(target ? { requireModuleCaptureFile: target } : {}) }).findings.map((finding) => setupFindingResult(finding, ctx, "click_id_capture"))
+    }),
     // LF4-P1-2: the autoConfig job is checked on ITS work: in the job's own files, every adopted pixel initialised
     // there queues `fbq('set','autoConfig',false,id)` before its init. The job's other checks (the mirror's event id)
     // pass on a page with nothing of it in it, so they could never tick it.

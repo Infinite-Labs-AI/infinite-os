@@ -165,10 +165,10 @@ export function clickIdPresentMessage(input: { file: string }): string {
 /** The managed `_fbc` capture is installed in a shared entry. */
 export function clickIdManagedCaptureMessage(input: { file: string }): string {
   return (
-    `infinite-tag's managed click-id capture runs in ${input.file}, a shared entry that loads on ` +
-    `every route. On the page a visitor lands on it saves the ad's \`fbclid\` into Meta's own ` +
-    `\`_fbc\` cookie — last click wins — even when the pixel itself is blocked or still waiting, so ` +
-    `a later conversion can still be credited to the ad. That is the setup being right; it is not ` +
+    `infinite-tag's managed click-id capture loads in ${input.file} on every route. On a landing ` +
+    `with an ad's \`fbclid\`, it saves the last click in Meta's \`_fbc\` cookie when consent allows, ` +
+    `even if the pixel is blocked or still waiting. Required consent waits for a grant; a recorded no, ` +
+    `Do Not Track or Global Privacy Control writes no cookie. That is the setup being right; it is not ` +
     `proof a cookie was written on your live site.`
   )
 }

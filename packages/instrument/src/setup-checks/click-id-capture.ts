@@ -24,7 +24,9 @@
 // installed Next site "not checked".
 import { extractMetaPixelIds } from "../meta-live/config-probe.js"
 import { posix } from "node:path"
-import { buildMetaClickIdCaptureTypescript, META_CLICK_ID_ACCESSOR } from "../providers/meta-browser/click-id.js"
+import { META_CLICK_ID_ACCESSOR } from "../providers/meta-browser/click-id.js"
+import { lexicalStates } from "../lexical-states.js"
+import { readExecutableModuleCapture } from "./module-click-id-capture.js"
 
 import {
   clickIdManagedCaptureMessage,
@@ -37,7 +39,11 @@ import { metaSourceUnits } from "./meta-pixel-config.js"
 import { worstState, type SetupCheckResult, type SetupFinding } from "./types.js"
 
 const MANAGED_CAPTURE = new RegExp(String.raw`window\.${META_CLICK_ID_ACCESSOR}\s*=\s*function`)
-const MODULE_CAPTURES = (["not_required", "required"] as const).map((mode) => buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode } }))
+
+function managedAccessorInCode(source: string): boolean {
+  const states = lexicalStates(source)
+  return [...source.matchAll(new RegExp(MANAGED_CAPTURE.source, "g"))].some((match) => states[match.index ?? 0] === 0)
+}
 
 /** Static imports from a shared entry are part of its initial bundle; dynamic imports are not assumed shared. */
 function sharedImports(files: ReadonlyMap<string, string>): Set<string> {
@@ -46,8 +52,10 @@ function sharedImports(files: ReadonlyMap<string, string>): Set<string> {
   while (queue.length > 0) {
     const file = queue.shift()!
     const source = files.get(file) ?? ""
-    for (const match of source.matchAll(/\bimport\s+(?:(?:[^;"']|\n)*?\s+from\s+)?["'](\.[^"']+)["']/g)) {
-      const base = posix.normalize(posix.join(posix.dirname(file), match[1]!))
+    const states = lexicalStates(source)
+    for (const match of source.matchAll(/\bimport\s+(type\s+)?(?:(?:[^;"']|\n)*?\s+from\s+)?["'](\.[^"']+)["']/g)) {
+      if (states[match.index ?? 0] !== 0 || match[1] || /^import\s*\{(?:\s*type\s+[\w$]+(?:\s+as\s+[\w$]+)?\s*,?)+\}\s+from/.test(match[0])) continue
+      const base = posix.normalize(posix.join(posix.dirname(file), match[2]!))
       const resolved = [base, ...[".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", "/index.ts", "/index.tsx"].map((suffix) => base + suffix)].find((path) => files.has(path))
       if (resolved && !shared.has(resolved)) {
         shared.add(resolved)
@@ -94,6 +102,8 @@ const MAX_NAMED_PAGES = 5
 
 export interface ClickIdCaptureInput {
   files: ReadonlyMap<string, string>
+  /** Job 5's plain-module target needs the added capture, not merely an adopted pixel. */
+  requireModuleCaptureFile?: string
 }
 
 export function checkClickIdCapture(input: ClickIdCaptureInput): SetupCheckResult {
@@ -103,14 +113,31 @@ export function checkClickIdCapture(input: ClickIdCaptureInput): SetupCheckResul
   const htmlPagesWithout: string[] = []
   const managedCaptureFiles = new Set<string>()
   const sharedFiles = sharedImports(input.files)
+  const executableModuleFiles = new Set<string>()
 
   for (const [file, contents] of input.files) {
     const units = metaSourceUnits(file, contents)
-    if (units.some((unit) => (unit.managed && MANAGED_CAPTURE.test(unit.text)) || MODULE_CAPTURES.some((capture) => unit.text.includes(capture)))) managedCaptureFiles.add(file)
+    if (units.some((unit) => unit.managed && managedAccessorInCode(unit.text))) managedCaptureFiles.add(file)
+    if (sharedFiles.has(file) && readExecutableModuleCapture(file, contents)) {
+      executableModuleFiles.add(file)
+      managedCaptureFiles.add(file)
+    }
     const initialises =
       managedCaptureFiles.has(file) || units.some((unit) => extractMetaPixelIds(unit.text).length > 0)
     if (initialises) initFiles.push(file)
     if (isHtmlPage(file, contents)) (initialises ? htmlPagesWith : htmlPagesWithout).push(file)
+  }
+
+  if (input.requireModuleCaptureFile && /\.[cm]?[jt]s$/i.test(input.requireModuleCaptureFile) && !executableModuleFiles.has(input.requireModuleCaptureFile)) {
+    findings.push({
+      check: "click_id_capture",
+      code: "INF_SETUP_CLICK_ID_NOT_AT_LANDING",
+      state: "problem",
+      confidence: "certain",
+      file: input.requireModuleCaptureFile,
+      message: `Infinite's click-id capture is not executable at module load in ${input.requireModuleCaptureFile}, before the adopted pixel init. Place the approved statements at module top level after imports, outside the pixel's preview and consent early returns; the capture's own consent gate waits for permission.`
+    })
+    return { check: "click_id_capture", state: "problem", findings }
   }
 
   if (initFiles.length === 0) {
@@ -143,7 +170,7 @@ export function checkClickIdCapture(input: ClickIdCaptureInput): SetupCheckResul
     return { check: "click_id_capture", state: worstState(findings), findings }
   }
 
-  const shared = initFiles.filter((file) => sharedFiles.has(file))
+  const shared = initFiles.filter((file) => isSharedEntry(file) || executableModuleFiles.has(file))
   if (shared.length > 0) {
     const managed = shared.find((file) => managedCaptureFiles.has(file))
     const file = managed ?? (shared[0] as string)

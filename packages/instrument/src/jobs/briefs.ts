@@ -19,7 +19,7 @@ import type { ChecklistItem, JobId, PastePlacement, PrescribedPaste } from "../w
 import { GLOBAL_DENY_TEXT } from "./allow.js"
 import { OUTCOME_CONVERSION_TYPES } from "./detectors/outcomes.js"
 import { boundConversionNames, type BriefConnections, type BriefPlan } from "./plan-data.js"
-import { buildMetaClickIdCaptureScript, buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
+import { buildMetaClickIdCaptureJavascript, buildMetaClickIdCaptureScript, buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
 import { escapeForTemplateLiteral, escapeRegExp } from "../text-escape.js"
 
 export { escapeForTemplateLiteral }
@@ -73,7 +73,7 @@ export interface BriefFacts {
 export function capturePasteAsWritten(context: "component" | "html" | "typescript_module" | "javascript_module", consentMode: "not_required" | "required"): string {
   const capture = buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: consentMode } })
   if (context === "html") return `<script>\n${capture}\n</script>`
-  if (context === "javascript_module") return capture
+  if (context === "javascript_module") return buildMetaClickIdCaptureJavascript({ gate: { kind: "infinite-consent", mode: consentMode } })
   if (context === "typescript_module") return buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: consentMode } })
   return `<Script id="infinite-meta-click-id" strategy="afterInteractive">{\`${escapeForTemplateLiteral(capture)}\`}</Script>`
 }
@@ -152,7 +152,7 @@ export const TARGET_GISTS: Readonly<Record<string, string>> = {
     "Here: paste `pageViewOnPageChange.pasteAsWritten` from Plan data exactly, as the next statement after `pageViewOnPageChange.insertAfter`, inside the same script and block (so any preview guard around it covers it too). It sends one page_view per page change and never on the first load. Change nothing else.",
   "meta_improve:mirror": "Here: move the browser standard conversions named below onto `infiniteMetaMirror(metaEventId)`.",
   "meta_improve:capture":
-    "Here: paste `capture.pasteAsWritten` from Plan data exactly, as its own element right before `capture.insertBefore`. It is Infinite's capture (last click wins), already escaped for that file; never write your own, never host-guard it, never change the pixel.",
+    "Here: paste `capture.pasteAsWritten` from Plan data exactly at `capture.insertBefore`. In a plain module it is a top-level statement after imports, outside the pixel function and every preview or consent early return; its own consent gate waits for a grant when required and writes nothing on a recorded no, DNT or GPC. In JSX or HTML it is its own element before the pixel. Never write your own capture, host-guard it or change the pixel.",
   "meta_improve:autoconfig_off_adopted": "Here: put `autoConfigOff.lineAsWritten` from Plan data on its own line right before `autoConfigOff.insertBefore`. Change nothing else.",
   "meta_improve:retire_fbc_writer":
     "Here: retire the hand-written `_fbc` writer named below (it writes a host-only cookie that shadows Meta's own). Remove only that write; the managed capture replaces it."
@@ -354,7 +354,7 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
         const moduleKind = /\.tsx?$/i.test(site.file) ? "typescript_module" : "javascript_module"
         const context = html ? "html" : /\.[cm]?[jt]sx$/i.test(site.file) ? "component" : moduleKind
         data.capture = {
-          insertBefore: context === "html" || context === "component" ? `the ${html ? "<script>" : "<Script>"} element that holds fbq('init') at ${site.file}:${site.line}` : `the fbq('init') call at ${site.file}:${site.line}`,
+          insertBefore: context === "html" || context === "component" ? `the ${html ? "<script>" : "<Script>"} element that holds fbq('init') at ${site.file}:${site.line}` : `module top level immediately after imports, before the function containing fbq('init') at ${site.file}:${site.line} (outside its preview guard and consent early returns)`,
           pasteAsWritten: capturePasteAsWritten(context, facts.consentMode)
         }
       }
