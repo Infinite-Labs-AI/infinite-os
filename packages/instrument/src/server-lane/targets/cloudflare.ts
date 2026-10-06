@@ -53,7 +53,7 @@ interface InfiniteCloudflareContext {
   request: Request
   env: Record<string, string | undefined>
   next: () => Promise<Response>
-  waitUntil: (promise: Promise<unknown>) => void
+  waitUntil: Function
 }
 
 export const onRequest = async (context: InfiniteCloudflareContext): Promise<Response> => {

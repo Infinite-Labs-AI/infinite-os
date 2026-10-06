@@ -613,13 +613,14 @@ export function buildNextConfigSource(proxy: ProxyInput): string {
   return [
     managedFileBanner,
     "",
-    "export default {",
+    "const nextConfig = {",
     "  async rewrites() {",
     "    return [",
     rewriteLiterals,
     "    ]",
     "  }",
     "}",
+    "export default nextConfig",
     ""
   ].join("\n")
 }

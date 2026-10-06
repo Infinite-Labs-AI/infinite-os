@@ -8,7 +8,11 @@ import ts from "typescript"
 
 import type { InstallPlan } from "../types.js"
 import { vercelLaneModuleSource, vercelMiddlewareSource } from "../server-lane/targets/vercel-any.js"
+import { netlifyEdgeFunctionSource } from "../server-lane/targets/netlify.js"
+import { cloudflarePagesMiddlewareSource } from "../server-lane/targets/cloudflare.js"
+import { nodeLaneModuleSource, nodeOutcomeHelperSource } from "../server-lane/targets/node.js"
 import { buildCreatedMiddlewareSource, buildServerLaneModuleSource } from "../server-lane/runtime-source.js"
+import { buildNextConfigSource } from "./vercel-config.js"
 import { buildAnalyticsModuleSource, buildClientComponentSource } from "./managed-files.js"
 
 const require = createRequire(import.meta.url)
@@ -37,7 +41,8 @@ describe("the Next files the installer writes", () => {
       ["lib/infinite-server-lane.ts", vercelLaneModuleSource({ productionHosts: ["example.com"] })],
       ["middleware.ts", vercelMiddlewareSource({ productionHosts: ["example.com"] })],
       ["lib/infinite-server-lane-next.ts", buildServerLaneModuleSource()],
-      ["middleware.ts", buildCreatedMiddlewareSource({ moduleImportPath: "./lib/infinite-server-lane" })]
+      ["middleware.ts", buildCreatedMiddlewareSource({ moduleImportPath: "./lib/infinite-server-lane" })],
+      ["next.config.mjs", buildNextConfigSource({ infinite: { path: "/infinite/ledger", destination: "https://api.example.com/collect" } })]
     ] as const
     for (const [file, source] of emitted) {
       const results = await lint.lintText(source, { filePath: join(packageRoot, file) })
@@ -51,6 +56,28 @@ describe("the Next files the installer writes", () => {
       expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it("passes both unused-variable rules in emitted non-Next server-lane files", async () => {
+    const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "../..")
+    const lint = new LegacyESLint({
+      cwd: packageRoot,
+      useEslintrc: false,
+      overrideConfig: { parser: "@typescript-eslint/parser", plugins: ["@typescript-eslint"], rules: { "no-unused-vars": "error", "@typescript-eslint/no-unused-vars": "error" } },
+      resolvePluginsRelativeTo: packageRoot,
+      ignore: false
+    })
+    const input = { productionHosts: ["example.com"] }
+    const emitted = [
+      ["netlify/edge-functions/infinite-server-lane.ts", netlifyEdgeFunctionSource(input)],
+      ["functions/_middleware.ts", cloudflarePagesMiddlewareSource(input)],
+      ["lib/infinite-server-lane.js", nodeLaneModuleSource(input)],
+      ["lib/infinite-outcome.js", nodeOutcomeHelperSource()]
+    ] as const
+    for (const [file, source] of emitted) {
+      const results = await lint.lintText(source, { filePath: join(packageRoot, file) })
+      expect(results.flatMap((result) => result.messages.map((message) => `${file}:${message.line} ${message.ruleId}: ${message.message}`))).toEqual([])
     }
   })
 })

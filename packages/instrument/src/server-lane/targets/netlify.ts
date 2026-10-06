@@ -109,16 +109,16 @@ export function netlifyEdgeFunctionSource(input: TargetBuildInput): string {
 interface InfiniteNetlifyContext {
   /** "A string containing the client IP address." */
   ip?: string
-  waitUntil?: (promise: Promise<unknown>) => void
+  waitUntil?: Function
 }
 
 /** Netlify.env.get(name) is the documented reader; Deno.env is the fallback for local netlify dev. */
 function infiniteNetlifyEnv(name: string): string {
   const scope = globalThis as {
-    Netlify?: { env?: { get(name: string): string | undefined } }
-    Deno?: { env?: { get(name: string): string | undefined } }
+    Netlify?: { env?: { get?: Map<string, string>["get"] } }
+    Deno?: { env?: { get?: Map<string, string>["get"] } }
   }
-  return scope.Netlify?.env?.get(name) ?? scope.Deno?.env?.get(name) ?? ""
+  return scope.Netlify?.env?.get?.(name) ?? scope.Deno?.env?.get?.(name) ?? ""
 }
 
 export default async (request: Request, context: InfiniteNetlifyContext): Promise<void> => {
