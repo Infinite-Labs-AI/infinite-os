@@ -6345,6 +6345,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     id: string;
     clientToken: string;
     entityId: string | null;
+    entity?: string; actor_id?: string; input_hash?: string;
   }
 
   // A fake db that serves the meta_ads source + an encrypted Meta credential,
@@ -6353,7 +6354,6 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
   // with the same client_token is deduped. `dedupRows` lets a test inspect claims.
   function metaWriteTestDb(options: {
     audits: AuditRow[];
-    dedup?: { clientToken: string; entityId: string };
     dedupRows?: DedupRow[];
     credential?: Record<string, unknown>;
     credentialEncryptionKey?: string;
@@ -6366,13 +6366,6 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     campaignCurrency?: string | null;
   }): InfiniteOsDb {
     const dedupRows: DedupRow[] = options.dedupRows ?? [];
-    if (options.dedup) {
-      dedupRows.push({
-        id: "mwd_seed",
-        clientToken: options.dedup.clientToken,
-        entityId: options.dedup.entityId
-      });
-    }
     return {
       async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
         if (sql.includes("insert into integration_audit_log")) {
@@ -6411,11 +6404,17 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         return [] as T[];
       },
       async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
+        if (sql.includes("join connection_credentials")) return {
+          provider:"meta_ads",source_status:"connected",account_external_id:"act_999",credential_id:"credential-fixture",credential_updated_at:"2026-01-01T00:00:00.000000Z",
+          selected_page_id:"222",credential_kind:"system_user_token",oauth_token_id:null,
+          encrypted_payload:encryptCredentialPayload(options.credential ?? {mode:"live",transport:"marketing_api",adAccountId:"act_999",accessToken:"secret-meta-token",apiVersion:"v25.0"},options.credentialEncryptionKey??"analytical-test-encryption-key")
+        } as T;
         if (sql.includes("from sources")) {
           return { provider: "meta_ads", account_external_id: "act_999" } as T;
         }
         if (sql.includes("from connection_credentials")) {
           return {
+            id: "credential-fixture", updated_at: "2026-01-01T00:00:00Z",
             credential_kind: "system_user_token",
             encrypted_payload: encryptCredentialPayload(options.credential ?? {
               mode: "live",
@@ -6427,6 +6426,8 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
             oauth_token_id: null
           } as T;
         }
+        if (sql.includes("insert into meta_local_publish_identity")) return { identity_json: null } as T;
+        if (sql.includes("update meta_local_publish_identity")) return { operation_id: params?.[3] } as T;
         // Atomic dedup CLAIM: insert ... on conflict do nothing returning id.
         if (sql.includes("insert into meta_write_dedup")) {
           const p = params ?? [];
@@ -6437,7 +6438,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
             // Conflict → no row returned (someone else holds the key).
             return null;
           }
-          dedupRows.push({ id: claimId, clientToken: token, entityId: null });
+          dedupRows.push({ id: claimId, clientToken: token, entityId: null, entity, actor_id:p[5] as string|undefined, input_hash:p[6] as string|undefined });
           void entity;
           return { id: claimId } as T;
         }
@@ -6445,7 +6446,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         if (sql.includes("from meta_write_dedup")) {
           const token = String(params?.[2] ?? "");
           const row = dedupRows.find((r) => r.clientToken === token);
-          return row ? ({ entity_id: row.entityId } as T) : null;
+          return row ? ({ entity_id: row.entityId,entity:row.entity,actor_id:row.actor_id,input_hash:row.input_hash } as T) : null;
         }
         return null;
       },
@@ -6482,9 +6483,13 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         audits: [],
         credential: { mode: "live", transport: "meta_ads_cli", adAccountId: "act_999", accessToken: "stored-server-token", cliCommand: "/missing/meta" }
       });
-      const handlers = createActionHandlers(db, { metaAdsCliExecution: { mode: "isolated_server", executable } });
+      const withoutLocalSchema:InfiniteOsDb={...db,
+        one:async<T>(sql:string,params?:unknown[]):Promise<T|null>=>{expect(sql).not.toMatch(/meta_local_publish|actor_id, input_hash/);return db.one<T>(sql,params);},
+        query:async<T>(sql:string,params?:unknown[]):Promise<T[]>=>{expect(sql).not.toMatch(/meta_local_publish|actor_id, input_hash/);return db.query<T>(sql,params);},
+      };
+      const handlers = createActionHandlers(withoutLocalSchema, { metaAdsCliExecution: { mode: "isolated_server", executable } });
       const result = await handlers.create_meta_campaign?.(
-        { sourceId: "src_meta", name: "Server", objective: "OUTCOME_TRAFFIC" },
+        { sourceId: "src_meta", name: "Server", objective: "OUTCOME_TRAFFIC", clientToken:"server-confirmed-attempt" },
         operatorContext
       );
       expect(result?.data).toMatchObject({ id: "server-campaign", status: "PAUSED" });
@@ -7082,6 +7087,9 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         authorization: headers.Authorization ?? headers.authorization ?? null,
         body
       };
+      const fields = new URL(url).searchParams.get("fields");
+      if (fields === "id,access_token") return Promise.resolve(jsonResponse({ data: [] }));
+      if (fields?.includes("connected_page_backed_instagram_account")) return Promise.resolve(jsonResponse({ id: new URL(url).pathname.split("/").at(-1) }));
       calls.push(call);
       return Promise.resolve(responder(call));
     }) as typeof fetch);
@@ -7569,14 +7577,12 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
 
   it("dedups a repeat create by client_token without a second POST", async () => {
     const audits: AuditRow[] = [];
-    const db = metaWriteTestDb({
-      audits,
-      dedup: { clientToken: "tok_dupe", entityId: "120000000000111" }
-    });
+    const db = metaWriteTestDb({audits});
     await withGraph(
-      () => jsonResponse({ id: "should-not-be-created", status: "PAUSED" }),
+      () => jsonResponse({ id: "120000000000111", status: "PAUSED" }),
       async (calls) => {
         const handlers = createActionHandlers(db);
+        await handlers.create_meta_campaign?.({sourceId:"src_meta",name:"Dup",objective:"OUTCOME_TRAFFIC",clientToken:"tok_dupe"},operatorContext);
         const result = await handlers.create_meta_campaign?.(
           {
             sourceId: "src_meta",
@@ -7586,10 +7592,10 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
           },
           operatorContext
         );
-        // No Graph POST happened.
-        expect(calls).toHaveLength(0);
+        // Only the first create posted; the repeated token returns its receipt.
+        expect(calls).toHaveLength(1);
         expect(result?.data).toMatchObject({ id: "120000000000111", deduped: true });
-        const audit = audits.find((row) => row.action === "create_meta_campaign");
+        const audit = audits.find((row) => row.action === "create_meta_campaign" && row.details.deduped === true);
         expect(audit?.details).toMatchObject({ deduped: true, entity_id: "120000000000111" });
       }
     );
@@ -7605,29 +7611,24 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         const handlers = createActionHandlers(db);
         // Fire two creates with the SAME client_token concurrently. The UNIQUE
         // claim means only ONE wins the claim and POSTs; the other dedups.
-        const [a, b] = await Promise.all([
+        const [a, b] = await Promise.allSettled([
           handlers.create_meta_campaign?.(
-            { sourceId: "src_meta", name: "Race A", objective: "OUTCOME_TRAFFIC", clientToken: "tok_race" },
+            { sourceId: "src_meta", name: "Race", objective: "OUTCOME_TRAFFIC", clientToken: "tok_race" },
             operatorContext
           ),
           handlers.create_meta_campaign?.(
-            { sourceId: "src_meta", name: "Race B", objective: "OUTCOME_TRAFFIC", clientToken: "tok_race" },
+            { sourceId: "src_meta", name: "Race", objective: "OUTCOME_TRAFFIC", clientToken: "tok_race" },
             operatorContext
           )
         ]);
         // THE money-safety guarantee: exactly ONE Graph POST despite two
         // concurrent same-token creates (the UNIQUE claim blocked the second).
         expect(calls).toHaveLength(1);
-        // Exactly one result is the real create (deduped:false) and one is the
-        // deduped short-circuit (deduped:true). The winner carries the concrete
-        // id; the loser carries the existing id, or null if it read the claim
-        // while the winner was still mid-flight (documented concurrent behavior).
-        const results = [a?.data, b?.data] as Array<Record<string, unknown>>;
-        const winner = results.find((d) => d.deduped === false);
-        const loser = results.find((d) => d.deduped === true);
-        expect(winner).toBeDefined();
-        expect(loser).toBeDefined();
-        expect(winner?.id).toBe("120000000000999");
+        const outcomes = [a, b];
+        const winner = outcomes.find(outcome => outcome.status === "fulfilled");
+        const loser = outcomes.find(outcome => outcome.status === "rejected");
+        expect(winner?.status === "fulfilled" ? winner.value?.data : null).toMatchObject({ id: "120000000000999", deduped: false });
+        expect(loser?.status === "rejected" ? loser.reason : null).toMatchObject({ code: "meta_mutation_outcome_uncertain" });
         // Only ONE dedup row exists and it resolves to the created entity id.
         expect(dedupRows).toHaveLength(1);
         expect(dedupRows[0].entityId).toBe("120000000000999");
@@ -7635,7 +7636,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     );
   });
 
-  it("clientToken is OPTIONAL (opt-out): a tokenless create writes NO dedup row and is not deduped", async () => {
+  it("requires clientToken for local creates before dispatch", async () => {
     const audits: AuditRow[] = [];
     const dedupRows: DedupRow[] = [];
     const db = metaWriteTestDb({ audits, dedupRows });
@@ -7643,12 +7644,10 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       () => jsonResponse({ id: "120000000000888", status: "PAUSED" }),
       async (calls) => {
         const handlers = createActionHandlers(db);
-        // No clientToken → no dedup row, normal POST.
-        await handlers.create_meta_campaign?.(
-          { sourceId: "src_meta", name: "NoToken", objective: "OUTCOME_TRAFFIC" },
-          operatorContext
-        );
-        expect(calls).toHaveLength(1);
+        await expect(handlers.create_meta_campaign?.(
+          { sourceId: "src_meta", name: "NoToken", objective: "OUTCOME_TRAFFIC" }, operatorContext
+        )).rejects.toMatchObject({ code: "meta_client_token_required" });
+        expect(calls).toHaveLength(0);
         expect(dedupRows).toHaveLength(0);
       }
     );
@@ -7676,6 +7675,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     const fetched: string[] = [];
     process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
     vi.stubGlobal("fetch", ((url: string) => {
+      if (String(url).includes("graph.facebook.com")) return Promise.resolve(jsonResponse(String(url).includes("/me/") ? {data:[]} : {id:"222"}));
       fetched.push(String(url));
       return Promise.resolve(new Response(Buffer.from("fake-video"), {
         status: 200,
@@ -7688,8 +7688,9 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         {
           sourceId: "src_meta",
           name: "Video creative",
-          pageId: "page_1",
+          pageId: "222",
           videoUrl: "https://cdn.example.com/video.mp4",
+          linkUrl: "https://example.com",
           clientToken: "tok_video_creative",
         },
         operatorContext
@@ -7726,10 +7727,12 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       },
     });
     process.env.GROWTH_OS_ENCRYPTION_KEY = "analytical-test-encryption-key";
+    vi.stubGlobal("fetch", (async (url: URL | string) => jsonResponse(String(url).includes("/me/") ? {data:[]} : {id:"222"})) as typeof fetch);
     const degreesOfFreedomSpec = { creative_features_spec: { text_optimizations: { enroll_status: "OPT_OUT" } } };
     const assetFeedSpec = {
       images: [{ url: "https://media.example.com/4x5.png", adlabels: [{ name: "r_4x5" }] }],
       bodies: [{ text: "One" }, { text: "Two" }],
+      link_urls: [{ website_url: "https://example.com" }],
     };
     try {
       const handlers = createActionHandlers(db);
@@ -7737,10 +7740,10 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         {
           sourceId: "src_meta",
           name: "Feed creative",
-          pageId: "page_1",
+          pageId: "222",
           assetFeedSpec,
           degreesOfFreedomSpec,
-          urlTags: "utm_content={{ad.name}}",
+
           clientToken: "tok_feed_creative",
         },
         operatorContext
@@ -7751,6 +7754,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       expect(JSON.parse(argv[argv.indexOf("--degrees-of-freedom-spec") + 1])).toEqual(degreesOfFreedomSpec);
       expect(argv).not.toContain("--image");
     } finally {
+      vi.unstubAllGlobals();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -7775,7 +7779,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
     );
   });
 
-  it("releases an un-resolved claim on a failed POST so the same token can retry", async () => {
+  it("retains an unresolved claim after an uncertain provider failure", async () => {
     const audits: AuditRow[] = [];
     const dedupRows: DedupRow[] = [];
     const db = metaWriteTestDb({ audits, dedupRows });
@@ -7789,8 +7793,8 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
             operatorContext
           )
         ).rejects.toMatchObject({ retryable: false });
-        // The un-resolved claim was released, so the poisoned token is freed.
-        expect(dedupRows).toHaveLength(0);
+        // A 500 without a definite refusal cannot prove the create was absent.
+        expect(dedupRows).toHaveLength(1);
       }
     );
   });
@@ -7804,7 +7808,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         const handlers = createActionHandlers(db);
         await expect(
           handlers.create_meta_campaign?.(
-            { sourceId: "src_meta", name: "Sneaky", objective: "OUTCOME_TRAFFIC" },
+            { sourceId: "src_meta", name: "Sneaky", objective: "OUTCOME_TRAFFIC", clientToken: "tok-sneaky" },
             operatorContext
           )
         ).rejects.toMatchObject({ code: "money_safety_violation", retryable: false });
@@ -8588,13 +8592,14 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
 
   it("refuses a non-Meta source before touching the Graph API", async () => {
     const audits: AuditRow[] = [];
+    const base = metaWriteTestDb({ audits });
     const db: InfiniteOsDb = {
-      ...metaWriteTestDb({ audits }),
-      async one<T>(sql: string): Promise<T | null> {
+      ...base,
+      async one<T>(sql: string, params?: unknown[]): Promise<T | null> {
         if (sql.includes("from sources")) {
           return { provider: "stripe" } as T;
         }
-        return null;
+        return base.one<T>(sql, params);
       }
     };
     await withGraph(
@@ -8603,10 +8608,10 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         const handlers = createActionHandlers(db);
         await expect(
           handlers.create_meta_campaign?.(
-            { sourceId: "src_stripe", name: "X", objective: "OUTCOME_TRAFFIC" },
+            { sourceId: "src_stripe", name: "X", objective: "OUTCOME_TRAFFIC", clientToken: "tok-wrong-provider" },
             operatorContext
           )
-        ).rejects.toThrow("source_provider_mismatch");
+        ).rejects.toMatchObject({code:"credential_binding_changed"});
         expect(calls).toHaveLength(0);
       }
     );
@@ -9111,6 +9116,10 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       const base = metaWriteTestDb({ audits });
       return {
         ...base,
+        async one<T>(sql:string,params?:unknown[]):Promise<T|null>{
+          const row=await base.one<T>(sql,params);
+          return sql.includes("join connection_credentials")&&row?{...row,selected_page_id:storedPageId}:row;
+        },
         async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
           if (sql.includes("select selected_page_id from connection_credentials")) {
             return [{ selected_page_id: storedPageId }] as T[];
@@ -9127,14 +9136,14 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       await withGraph(
         () => jsonResponse({ id: "23850000000001" }),
         async (calls) => {
-          const handlers = createActionHandlers(creativeDb("pg_stored"));
+          const handlers = createActionHandlers(creativeDb("123222"));
           const result = await handlers.create_meta_creative?.(
-            { sourceId: "src_meta", name: "Default Page creative", linkUrl: "https://example.com", imageHash: "abc" },
+            { sourceId: "src_meta", name: "Default Page creative", clientToken: "tok-page-default", linkUrl: "https://example.com", imageHash: "abc" },
             operatorContext
           );
           expect(result?.data).toMatchObject({ id: "23850000000001", entity: "creative" });
           const post = calls.find((c) => c.method === "POST");
-          expect(post?.body?.object_story_spec).toMatchObject({ page_id: "pg_stored" });
+          expect(post?.body?.object_story_spec).toMatchObject({ page_id: "123222" });
         }
       );
     });
@@ -9145,7 +9154,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       await withGraph(
         () => jsonResponse({ id: "23850000000009" }),
         async (calls) => {
-          const handlers = createActionHandlers(creativeDb("pg_stored"));
+          const handlers = createActionHandlers(creativeDb("123222"));
           await handlers.create_meta_creative?.(
             { sourceId: "src_meta", name: "Terminal creative", linkUrl: "https://example.com", imageHash: "abc", clientToken: "tok_default_off" },
             operatorContext
@@ -9167,7 +9176,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
 
     it("create_meta_creative: an explicit pageId overrides the stored Page and never reads the credential row for it", async () => {
       const reads: string[] = [];
-      const base = creativeDb("pg_stored");
+      const base = creativeDb("123222");
       const db: InfiniteOsDb = {
         ...base,
         async query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T[]> {
@@ -9183,11 +9192,11 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         async (calls) => {
           const handlers = createActionHandlers(db);
           await handlers.create_meta_creative?.(
-            { sourceId: "src_meta", name: "Explicit", pageId: "pg_explicit", imageHash: "abc" },
+            { sourceId: "src_meta", name: "Explicit", pageId: "123333", imageHash: "abc", linkUrl: "https://example.com", clientToken: "tok-page-explicit" },
             operatorContext
           );
           const post = calls.find((c) => c.method === "POST");
-          expect(post?.body?.object_story_spec).toMatchObject({ page_id: "pg_explicit" });
+          expect(post?.body?.object_story_spec).toMatchObject({ page_id: "123333" });
           expect(reads).toHaveLength(0);
         }
       );
@@ -9200,10 +9209,10 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
         async (calls) => {
           const handlers = createActionHandlers(creativeDb(null, audits));
           await expect(
-            handlers.create_meta_creative?.({ sourceId: "src_meta", name: "No page", imageHash: "abc", clientToken: "tok_np" }, operatorContext)
+            handlers.create_meta_creative?.({ sourceId: "src_meta", name: "No page", imageHash: "abc", linkUrl:"https://example.com", clientToken: "tok_np" }, operatorContext)
           ).rejects.toMatchObject({ code: "meta_page_not_selected", retryable: false });
           expect(calls).toHaveLength(0);
-          expect(audits).toHaveLength(0);
+          expect(audits).toHaveLength(1);
         }
       );
     });

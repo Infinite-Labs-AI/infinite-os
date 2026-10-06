@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { metaPublishingTracking, safeMetaWriteErrorFields, isMetaAdTrackingName } from "@infinite-os/connectors";
 import { createClaudeCliModelClient, claudeCliReadiness, terminalClaudeSelection } from "./claude-cli-model-client.js";
 import { createDesktopModelPicker, desktopModelFromFile } from "./desktop/model-selection.js";
 import { MODEL_CATALOG, resolveTerminalModelSelection } from "@infinite-os/config";
@@ -8253,12 +8254,7 @@ export function metaLinkUtmKeys(link: string): string[] {
  * PII rule). E.g. the naming convention's `inf_b1_static_customer_10k-users_f-asian_warm_na_v3`.
  */
 export function isUtmSafeMetaAdName(name: string): boolean {
-  if (!name || name.length > 160) return false;
-  if (!/^[a-z0-9]/.test(name) || !/[a-z0-9]$/.test(name)) return false;
-  if (!/^[a-z0-9._-]+$/.test(name) || /-{2,}/.test(name)) return false;
-  if (/[^\s@]+@[^\s@]+\.[^\s@]+/.test(name)) return false;
-  const digits = name.replace(/[^0-9]/g, "");
-  return !(digits.length >= 7 && /[0-9][\s().-]{0,2}[0-9]/.test(name));
+  return isMetaAdTrackingName(name);
 }
 
 function assertUtmSafeMetaAdName(name: string, command: string): void {
@@ -8299,6 +8295,10 @@ const META_VALUE_FLAGS = new Set<string>([
   "--call-to-action",
   "--instagram-user-id",
   "--image-hash",
+  "--image-url",
+  "--video-url",
+  "--asset-feed-spec",
+  "--launch-id",
   "--url-tags",
   "--client-token",
   "--fields",
@@ -8633,6 +8633,11 @@ async function metaCreateCommand(
   ctx: { json: boolean; sourceId: string }
 ): Promise<unknown> {
   const clientToken = optionValue(rest, "--client-token");
+  if (!clientToken || clientToken.trim() !== clientToken || clientToken.length > 200) {
+    throw new Error("Local Meta creates require --client-token <stable-attempt-id>. Reuse it for an uncertain attempt; a new token means a new intended create.");
+  }
+  const launchId = optionValue(rest, "--launch-id");
+  if (launchId !== undefined && (!launchId || launchId.trim() !== launchId || launchId.length > 200)) throw new Error("--launch-id must be a stable nonempty identifier of at most 200 characters");
   const section = `meta_${object}_create`;
   let actionId: string;
   let toolInput: Record<string, unknown>;
@@ -8695,9 +8700,17 @@ async function metaCreateCommand(
     const description = optionValue(rest, "--description");
     const callToAction = optionValue(rest, "--call-to-action");
     const instagramUserId = optionValue(rest, "--instagram-user-id");
-    // STANDARD creatives only: a single uploaded image referenced by hash. The
-    // `/adimages` upload→imageHash flow is deferred; we pass a supplied hash.
     const imageHash = optionValue(rest, "--image-hash");
+    const imageUrl = optionValue(rest, "--image-url");
+    const videoUrl = optionValue(rest, "--video-url");
+    const rawFeed = optionValue(rest, "--asset-feed-spec");
+    let assetFeedSpec: Record<string, unknown> | undefined;
+    if (rawFeed !== undefined) {
+      if (rawFeed.length > 256_000) throw new Error("--asset-feed-spec is too large");
+      try { const parsed: unknown = JSON.parse(rawFeed); if (!isRecord(parsed)) throw new Error(); assetFeedSpec = parsed; }
+      catch { throw new Error("--asset-feed-spec must be a JSON object"); }
+    }
+    if ([imageHash, imageUrl, videoUrl, assetFeedSpec].filter(value => value !== undefined).length !== 1) throw new Error("Choose exactly one of --image-hash (direct Graph), --image-url, --video-url (CLI transport), or --asset-feed-spec.");
     // A clean link; the tracking rides url_tags (the rulings above). --url-tags overrides the default string.
     const preTagged = linkUrl ? metaLinkUtmKeys(linkUrl) : [];
     if (preTagged.length > 0) {
@@ -8706,13 +8719,18 @@ async function metaCreateCommand(
           "tracking rides --url-tags (default: utm_content={{ad.name}} and the id macros)"
       );
     }
-    const urlTags = optionValue(rest, "--url-tags") ?? (linkUrl ? META_DEFAULT_URL_TAGS : undefined);
+    const urlTags = metaPublishingTracking({ ...(linkUrl ? { linkUrl } : {}), ...(assetFeedSpec ? { assetFeedSpec } : {}),
+      ...(optionValue(rest, "--url-tags") !== undefined ? { urlTags: optionValue(rest, "--url-tags") } : {}) });
     actionId = "create_meta_creative";
     toolInput = {
       sourceId: ctx.sourceId,
       name,
       ...(pageId ? { pageId } : {}),
       ...(imageHash ? { imageHash } : {}),
+      ...(imageUrl ? { imageUrl } : {}),
+      ...(videoUrl ? { videoUrl } : {}),
+      ...(assetFeedSpec ? { assetFeedSpec } : {}),
+      ...(launchId ? { launchId } : {}),
       ...(instagramUserId ? { instagramUserId } : {}),
       ...(linkUrl ? { linkUrl } : {}),
       ...(urlTags ? { urlTags } : {}),
@@ -8736,6 +8754,7 @@ async function metaCreateCommand(
       adsetId,
       name,
       creativeId,
+      ...(launchId ? { launchId } : {}),
       ...(clientToken ? { clientToken } : {})
     };
   }
@@ -12880,7 +12899,14 @@ async function apiRequest(path: string, env: CliEnv, options: ApiOptions = {}): 
   }
   const payload = await response.json();
   if (!response.ok) {
-    throw new Error(JSON.stringify(payload));
+    const raw = isRecord(payload) && isRecord(payload.error) ? payload.error : {};
+    const diagnostic = safeMetaWriteErrorFields(raw);
+    const detail = { ...(typeof raw.code === "string" ? { code: raw.code } : {}),
+      ...(typeof raw.message === "string" ? { message: raw.message } : {}),
+      ...(typeof raw.retryable === "boolean" ? { retryable: raw.retryable } : {}), ...diagnostic };
+    throw Object.assign(new Error(JSON.stringify(diagnostic.metaWrite ? { ok: false, error: detail } : payload)),
+      { ...(typeof raw.code === "string" ? { code: raw.code } : {}),
+        ...(typeof raw.retryable === "boolean" ? { retryable: raw.retryable } : {}), ...diagnostic });
   }
   return payload;
 }

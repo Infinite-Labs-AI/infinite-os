@@ -1,3 +1,4 @@
+export { resolveMetaPublishingIdentity, metaPublishingTracking, assertMetaAdTrackingName, isMetaAdTrackingName, safeMetaWriteErrorFields, verifyMetaCreativeTracking, MetaPublishingError, type MetaPublishingIdentity } from "./meta-publishing.js";
 import { boundedMetaDiagnosticText, markMetaWriteDispatch, metaCliDiagnostic, metaProviderOutcome, redactMetaDiagnostic, rememberMetaWriteDiagnostic, type MetaWriteDiagnostic } from "./meta-write-diagnostic.js";
 export { withMetaWriteDiagnostics, captureMetaWriteDiagnostic, type MetaWriteDiagnostic } from "./meta-write-diagnostic.js";
 const metaCliResponseDiagnostics = new WeakMap<object, MetaWriteDiagnostic>();

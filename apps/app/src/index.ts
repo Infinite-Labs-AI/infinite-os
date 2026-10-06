@@ -1,3 +1,4 @@
+import { safeMetaWriteErrorFields } from "@infinite-os/connectors";
 import { acknowledgeAuxiliaryBrainUsage, completeAuxiliaryModel, listAuxiliaryBrainUsage } from "./brain-usage-outbox.js";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -2045,7 +2046,8 @@ export function createApp(options: {
             ? "operator_authority_required"
             : typedCode ?? "invalid_tool_input",
           message,
-          ...(retryable === undefined ? {} : { retryable })
+          ...(retryable === undefined ? {} : { retryable }),
+          ...safeMetaWriteErrorFields(error)
         }
       };
     }

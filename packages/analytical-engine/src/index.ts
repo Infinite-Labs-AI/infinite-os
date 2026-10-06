@@ -1,7 +1,14 @@
+import { assertLocalMetaCooldown, recordLocalMetaCooldown, resolveLocalMetaIdentity, localMetaIdentityBinding, localMetaCredentialVersion, localMetaIntentHash, bindLocalMetaCredentialSnapshot } from "./meta-local-publishing.js";
 import { createHash, randomUUID } from "node:crypto";
 import { decryptCredentialPayload, encryptCredentialPayload, isEncryptedCredentialPayload } from "@infinite-os/core";
 import {
   classifyConnectorError,
+  metaPublishingTracking,
+  assertMetaAdTrackingName,
+  safeMetaWriteErrorFields,
+  verifyMetaCreativeTracking,
+  captureMetaWriteDiagnostic,
+  MetaPublishingError,
   connectorFor,
   createMetaAd,
   createMetaAdSet,
@@ -1652,7 +1659,8 @@ async function claimMetaDedup(
   workspaceId: string,
   sourceId: string,
   entity: MetaWriteEntity,
-  clientToken: string | undefined
+  clientToken: string | undefined,
+  localBinding?: { actorId: string; intentHash: string }
 ): Promise<MetaDedupClaim | undefined> {
   if (!clientToken) {
     // Opt-out: no token → no dedup row, no idempotency guarantee.
@@ -1661,12 +1669,19 @@ async function claimMetaDedup(
   const claimId = `mwd_${randomUUID()}`;
   const claimed = await db.one<{ id: string }>(
     `
-      insert into meta_write_dedup (id, workspace_id, source_id, client_token, entity)
-      values ($1, $2, $3, $4, $5)
+      insert into meta_write_dedup (id, workspace_id, source_id, client_token, entity${localBinding ? ", actor_id, input_hash" : ""})
+      values ($1, $2, $3, $4, $5${localBinding ? ", $6, $7" : ""})
       on conflict (workspace_id, source_id, client_token) do nothing
       returning id
     `,
-    [claimId, workspaceId, sourceId, clientToken, entity]
+    [
+      claimId,
+      workspaceId,
+      sourceId,
+      clientToken,
+      entity,
+      ...(localBinding ? [localBinding.actorId, localBinding.intentHash] : [])
+    ]
   );
   if (claimed) {
     return { won: true, claimId: claimed.id, existingId: null };
@@ -1674,15 +1689,32 @@ async function claimMetaDedup(
   // Lost the race (or a prior create already holds this token): return the
   // existing entity id (deduped). A null entity_id means the winner is still
   // mid-flight — we still dedup rather than risk a second POST.
-  const existing = await db.one<{ entity_id: string | null }>(
+  const existing = await db.one<{
+    entity_id: string | null;
+    entity?: string;
+    actor_id?: string;
+    input_hash?: string;
+  }>(
     `
-      select entity_id
+      select entity_id${localBinding ? ", entity, actor_id, input_hash" : ""}
       from meta_write_dedup
       where workspace_id = $1 and source_id = $2 and client_token = $3
       limit 1
     `,
     [workspaceId, sourceId, clientToken]
   );
+  if (
+    localBinding &&
+    (!existing ||
+      existing.entity !== entity ||
+      existing.actor_id !== localBinding.actorId ||
+      existing.input_hash !== localBinding.intentHash)
+  ) {
+    throw new MetaPublishingError(
+      "meta_client_token_conflict",
+      "This clientToken belongs to another actor, entity or input, or to a legacy claim without identity proof. Reconcile the original operation before choosing a new token."
+    );
+  }
   const existingId =
     typeof existing?.entity_id === "string" && existing.entity_id.trim() !== ""
       ? existing.entity_id
@@ -1915,11 +1947,129 @@ async function resolveMetaCredentialForWrite(
   sourceId: string,
   cliExecution?: MetaAdsCliExecution,
   encryptionKey?: string,
-  expectedCredential?: ExpectedMetaCredential
+  expectedCredential?: ExpectedMetaCredential,
+  localPublishingSnapshot = false
 ): Promise<MetaAdsCredential> {
+  if (!cliExecution && localPublishingSnapshot) {
+    // Local publishing uses one authoritative row for account, token and proof version.
+    // Decrypt through the snapshot facade rather than pairing a token with a later metadata read.
+    const snapshot = await db.one<{
+      provider: string;
+      source_status: string;
+      account_external_id: string | null;
+      credential_id: string;
+      credential_updated_at: string;
+      credential_kind: string;
+      encrypted_payload: string;
+      oauth_token_id: string | null;
+      selected_page_id: string | null;
+      oauth_payload: string | null;
+      oauth_version: string | null;
+      oauth_expires_at: string | Date | null;
+    }>(
+      `select s.provider,s.status as source_status,s.account_external_id,
+        cc.id as credential_id,to_char(cc.updated_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as credential_updated_at,
+        cc.credential_kind,cc.encrypted_payload,cc.oauth_token_id,cc.selected_page_id,
+        ot.encrypted_payload as oauth_payload,ot.expires_at as oauth_expires_at,
+        to_char(coalesce(ot.last_rotated_at,ot.created_at) at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as oauth_version
+      from sources s join connection_credentials cc on cc.workspace_id=s.workspace_id and cc.source_id=s.id
+      left join oauth_tokens ot on ot.id=cc.oauth_token_id and ot.workspace_id=s.workspace_id and ot.provider='meta_ads'
+        and (ot.source_id is null or ot.source_id=s.id) and ot.revoked_at is null and (ot.expires_at is null or ot.expires_at>now())
+      where s.workspace_id=$1 and s.id=$2 and s.provider='meta_ads' and s.status in ('connected','syncing')
+        and cc.revoked_at is null and (cc.expires_at is null or cc.expires_at>now())
+      order by cc.created_at desc,cc.id desc limit 1`,
+      [context.workspaceId, sourceId]
+    );
+    if (
+      !snapshot ||
+      snapshot.provider !== "meta_ads" ||
+      !["connected", "syncing"].includes(snapshot.source_status)
+    ) {
+      throw metaCredentialBindingChanged(
+        "The local Meta source and credential are no longer active"
+      );
+    }
+    if (
+      expectedCredential &&
+      (expectedCredential.sourceId !== sourceId ||
+        expectedCredential.credentialId !== snapshot.credential_id ||
+        expectedCredential.credentialUpdatedAt !==
+          snapshot.credential_updated_at ||
+        expectedCredential.selectedPageId !==
+          (snapshot.selected_page_id ?? undefined))
+    ) {
+      throw metaCredentialBindingChanged(
+        "Meta credential binding changed before local execution"
+      );
+    }
+    const snapshotDb: InfiniteOsDb = {
+      ...db,
+      one: async <T extends Record<string, unknown>>(
+        sql: string,
+        params?: unknown[]
+      ): Promise<T | null> =>
+        sql.includes("from connection_credentials")
+          ? ({
+              credential_kind: snapshot.credential_kind,
+              encrypted_payload: snapshot.encrypted_payload,
+              oauth_token_id: null
+            } as unknown as T)
+          : db.one<T>(sql, params)
+    };
+    const credential = await resolveMetaAdsCredential(snapshotDb, {
+      workspaceId: context.workspaceId,
+      sourceId,
+      ...(encryptionKey ? { encryptionKey } : {})
+    });
+    if (snapshot.oauth_token_id) {
+      if (!snapshot.oauth_payload)
+        throw new ConnectorError(
+          "provider_auth_failed",
+          "The linked Meta OAuth token is missing, revoked or expired. Refresh or reconnect it before publishing.",
+          false
+        );
+      const oauth = decryptCredentialPayload<Record<string, unknown>>(
+        snapshot.oauth_payload,
+        requiredEncryptionKey(encryptionKey)
+      );
+      const expiresAt =
+        typeof oauth.expiresAt === "string"
+          ? Date.parse(oauth.expiresAt)
+          : snapshot.oauth_expires_at
+            ? new Date(snapshot.oauth_expires_at).getTime()
+            : null;
+      if (
+        typeof oauth.accessToken !== "string" ||
+        !oauth.accessToken ||
+        (expiresAt !== null &&
+          (!Number.isFinite(expiresAt) || expiresAt <= Date.now()))
+      )
+        throw new ConnectorError(
+          "provider_auth_failed",
+          "Refresh or reconnect the linked Meta OAuth token before publishing. Writes never refresh a token during execution.",
+          false
+        );
+      credential.accessToken = oauth.accessToken;
+    }
+    validateStrictMetaCredential(snapshot.account_external_id, credential);
+    bindLocalMetaCredentialSnapshot(credential, {
+      version: JSON.stringify([
+        snapshot.credential_id,
+        snapshot.credential_updated_at,
+        snapshot.oauth_token_id,
+        snapshot.oauth_version
+      ]),
+      ...(snapshot.selected_page_id
+        ? { pageId: snapshot.selected_page_id }
+        : {})
+    });
+    return credential;
+  }
   if (expectedCredential) {
     if (expectedCredential.sourceId !== sourceId) {
-      throw metaCredentialBindingChanged("expected source does not match the requested source");
+      throw metaCredentialBindingChanged(
+        "expected source does not match the requested source"
+      );
     }
     const snapshot = await db.one<{
       account_external_id: string | null;
@@ -1946,26 +2096,40 @@ async function resolveMetaCredentialForWrite(
       [context.workspaceId, sourceId]
     );
     if (!snapshot) {
-      throw metaCredentialBindingChanged("expected Meta credential is no longer active");
+      throw metaCredentialBindingChanged(
+        "expected Meta credential is no longer active"
+      );
     }
-    const currentUpdatedAt = normalizedCredentialTimestamp(snapshot.credential_updated_at);
-    const expectedUpdatedAt = normalizedCredentialTimestamp(expectedCredential.credentialUpdatedAt);
-    const currentPageId = typeof snapshot.selected_page_id === "string" && snapshot.selected_page_id !== ""
-      ? snapshot.selected_page_id
-      : undefined;
+    const currentUpdatedAt = normalizedCredentialTimestamp(
+      snapshot.credential_updated_at
+    );
+    const expectedUpdatedAt = normalizedCredentialTimestamp(
+      expectedCredential.credentialUpdatedAt
+    );
+    const currentPageId =
+      typeof snapshot.selected_page_id === "string" &&
+      snapshot.selected_page_id !== ""
+        ? snapshot.selected_page_id
+        : undefined;
     if (
-      snapshot.credential_id !== expectedCredential.credentialId
-      || currentUpdatedAt !== expectedUpdatedAt
-      || currentPageId !== expectedCredential.selectedPageId
+      snapshot.credential_id !== expectedCredential.credentialId ||
+      currentUpdatedAt !== expectedUpdatedAt ||
+      currentPageId !== expectedCredential.selectedPageId
     ) {
-      throw metaCredentialBindingChanged("Meta credential binding changed after confirmation");
+      throw metaCredentialBindingChanged(
+        "Meta credential binding changed after confirmation"
+      );
     }
     // Hosted Meta credentials are direct encrypted system-user tokens. Following an OAuth FK
     // here would resolve mutable token state outside the versioned row and reopen the TOCTOU gap.
     if (snapshot.oauth_token_id) {
-      throw metaCredentialBindingChanged("versioned Meta execution does not accept an OAuth token reference");
+      throw metaCredentialBindingChanged(
+        "versioned Meta execution does not accept an OAuth token reference"
+      );
     }
-    const snapshotOne: InfiniteOsDb["one"] = async <T extends Record<string, unknown>>(
+    const snapshotOne: InfiniteOsDb["one"] = async <
+      T extends Record<string, unknown>
+    >(
       sql: string,
       params?: unknown[]
     ): Promise<T | null> => {
@@ -1984,15 +2148,23 @@ async function resolveMetaCredentialForWrite(
       sourceId,
       ...(encryptionKey ? { encryptionKey } : {})
     });
-    validateStrictMetaCredential(snapshot.account_external_id, credential, cliExecution);
-    return cliExecution ? bindMetaAdsCliExecution(credential, cliExecution) : credential;
+    validateStrictMetaCredential(
+      snapshot.account_external_id,
+      credential,
+      cliExecution
+    );
+    return cliExecution
+      ? bindMetaAdsCliExecution(credential, cliExecution)
+      : credential;
   }
 
   // Pin the source to meta_ads before touching the Graph API (a non-Meta source
   // id must never reach the write transport).
   const provider = await sourceProvider(db, context.workspaceId, sourceId);
   if (provider !== "meta_ads") {
-    throw new Error(`source_provider_mismatch:expected meta_ads got ${provider}`);
+    throw new Error(
+      `source_provider_mismatch:expected meta_ads got ${provider}`
+    );
   }
   // DEFENSE-IN-DEPTH (P0-A, redundant no-op): the real confused-deputy control lives in
   // the confirm path (chat_action_calls.workspace_id + workspace-scoped getPending/confirm
@@ -2017,9 +2189,15 @@ async function resolveMetaCredentialForWrite(
          where workspace_id = $1 and id = $2 and provider = 'meta_ads' and status = 'connected'`,
       [context.workspaceId, sourceId]
     );
-    validateStrictMetaCredential(source?.account_external_id ?? null, credential, cliExecution);
+    validateStrictMetaCredential(
+      source?.account_external_id ?? null,
+      credential,
+      cliExecution
+    );
   }
-  return cliExecution ? bindMetaAdsCliExecution(credential, cliExecution) : credential;
+  return cliExecution
+    ? bindMetaAdsCliExecution(credential, cliExecution)
+    : credential;
 }
 
 function normalizedCredentialTimestamp(value: string | Date): string {
@@ -2067,17 +2245,72 @@ async function runMetaCreate(
   extra?: Record<string, unknown>,
   cliExecution?: MetaAdsCliExecution,
   encryptionKey?: string,
-  expectedCredential?: ExpectedMetaCredential
+  expectedCredential?: ExpectedMetaCredential,
+  localProof?: () => Record<string, unknown> | undefined
 ): Promise<ActionEnvelope> {
   const clientToken = optionalString(input, "clientToken");
+  if (!cliExecution && (!clientToken || clientToken.length > 200)) {
+    throw new MetaPublishingError(
+      "meta_client_token_required",
+      "Local Meta creates require a stable clientToken (CLI: --client-token). Reuse it when checking an uncertain attempt; use a new token only for a new intended create."
+    );
+  }
   const presence = metaBudgetPresence(input);
+  let credential: MetaAdsCredential | undefined;
+  let localBinding: { actorId: string; intentHash: string } | undefined;
+  if (!cliExecution) {
+    credential = await resolveMetaCredentialForWrite(
+      db,
+      context,
+      sourceId,
+      undefined,
+      encryptionKey,
+      expectedCredential,
+      true
+    );
+    const snapshot = localMetaCredentialVersion(credential);
+    localBinding = {
+      actorId: context.actorId,
+      intentHash: localMetaIntentHash(entity, {
+        input,
+        accountId: credential.adAccountId?.replace(/^act_/i, ""),
+        credentialBinding: localMetaIdentityBinding(
+          credential,
+          snapshot.version,
+          snapshot.pageId ?? ""
+        )
+      })
+    };
+  }
 
   // INVARIANT 4: ATOMIC claim-before-create. Claiming the dedup key first means a
   // concurrent same-token create gets a unique violation and never POSTs. On a
   // dedup hit we return the existing id with deduped:true and never POST again.
-  const claim = await claimMetaDedup(db, context.workspaceId, sourceId, entity, clientToken);
+  const claim = await claimMetaDedup(
+    db,
+    context.workspaceId,
+    sourceId,
+    entity,
+    clientToken,
+    localBinding
+  );
   if (claim && !claim.won) {
     const existingId = claim.existingId;
+    if (!existingId) {
+      throw Object.assign(
+        new MetaPublishingError(
+          "meta_mutation_outcome_uncertain",
+          "This clientToken already has a pending or uncertain Meta create. Do not repeat it with another token; reconcile the original outcome first."
+        ),
+        {
+          metaWrite: {
+            version: 1,
+            phase: "dispatch_unknown",
+            outcome: "unknown"
+          }
+        }
+      );
+    }
     await metaAuditLog(db, context, sourceId, action, "succeeded", {
       action,
       entity,
@@ -2090,16 +2323,22 @@ async function runMetaCreate(
     return envelope(
       action,
       context.authority,
-      { entity, id: existingId, status: entity === "creative" ? null : "PAUSED", deduped: true, clientToken: clientToken ?? null, ...(extra ?? {}) },
+      {
+        entity,
+        id: existingId,
+        status: entity === "creative" ? null : "PAUSED",
+        deduped: true,
+        clientToken: clientToken ?? null,
+        ...(extra ?? {})
+      },
       ["integration_audit_log"],
       "ok"
     );
   }
 
-  let credential: MetaAdsCredential | undefined;
   let result: MetaWriteResult;
   try {
-    credential = await resolveMetaCredentialForWrite(
+    credential ??= await resolveMetaCredentialForWrite(
       db,
       context,
       sourceId,
@@ -2107,11 +2346,33 @@ async function runMetaCreate(
       encryptionKey,
       expectedCredential
     );
+    if (!cliExecution)
+      await assertLocalMetaCooldown(db, credential.adAccountId ?? "");
     result = await write(credential);
   } catch (error) {
-    // Release the un-resolved claim so a transient failure does not poison the
-    // token (a later retry with the same token can claim again).
-    await releaseMetaDedup(db, claim?.claimId ?? null);
+    // A pending claim is the local write fence. Release only a proven no-create outcome.
+    // Lost responses and upload/create ambiguity retain it for explicit reconciliation.
+    const diagnostic = captureMetaWriteDiagnostic(error);
+    let cooldownRecorded = true;
+    if (!cliExecution && credential) {
+      try {
+        await recordLocalMetaCooldown(db, credential.adAccountId ?? "", {
+          metaWrite: diagnostic,
+          ...(error instanceof MetaPublishingError ? { code: error.code } : {})
+        });
+      } catch {
+        cooldownRecorded = false; /* The failed audit below is the durable fallback; preserve Meta's original error. */
+      }
+    }
+    if (
+      cooldownRecorded &&
+      (diagnostic?.phase === "not_dispatched" ||
+        (diagnostic?.phase === "provider_response" &&
+          (diagnostic.outcome === "refused" ||
+            diagnostic.outcome === "throttled")))
+    ) {
+      await releaseMetaDedup(db, claim?.claimId ?? null).catch(() => undefined);
+    }
     // INVARIANT 1/6 REMEDIATION: a money_safety_violation means the create unexpectedly landed
     // ACTIVE — the entity is ALREADY live and spending, and throwing only stops OUR flow, not
     // Meta's spend. The connector stamps the violating entity id onto the error; attempt a
@@ -2119,10 +2380,12 @@ async function runMetaCreate(
     // pause error so it never masks the original violation. Record the entity id + outcome in the
     // audit so an operator can verify. A normal (non-violation) failure skips all of this.
     const violatedId =
-      metaErrorCode(error) === "money_safety_violation" && error && typeof error === "object"
-        ? (typeof (error as { entityId?: unknown }).entityId === "string"
-            ? ((error as { entityId?: string }).entityId as string)
-            : undefined)
+      metaErrorCode(error) === "money_safety_violation" &&
+      error &&
+      typeof error === "object"
+        ? typeof (error as { entityId?: unknown }).entityId === "string"
+          ? ((error as { entityId?: string }).entityId as string)
+          : undefined
         : undefined;
     let remediationPaused: boolean | undefined;
     if (violatedId && credential) {
@@ -2135,17 +2398,53 @@ async function runMetaCreate(
     }
     // INVARIANT 1/6: audit a failure (incl. a money_safety_violation when Graph
     // echoed ACTIVE) WITHOUT the token or raw spend, then surface the error.
-    await metaAuditLog(db, context, sourceId, action, "failed", {
+    const auditRecorded = await metaAuditLog(
+      db,
+      context,
+      sourceId,
       action,
-      entity,
-      client_token: clientToken ?? null,
-      error_code: metaErrorCode(error),
-      deduped: false,
-      ...(violatedId
-        ? { entity_id: violatedId, money_safety_violation: true, remediation_paused: remediationPaused }
-        : {}),
-      ...presence
-    });
+      "failed",
+      {
+        action,
+        entity,
+        client_token: clientToken ?? null,
+        error_code: metaErrorCode(error),
+        ...(!cliExecution && credential
+          ? {
+              account_id: credential.adAccountId?.replace(/^act_/i, ""),
+              meta_write: safeMetaWriteErrorFields({ metaWrite: diagnostic })
+                .metaWrite,
+              ...(error instanceof MetaPublishingError &&
+              error.code === "provider_rate_limited" &&
+              diagnostic.phase === "not_dispatched"
+                ? { provider_read_throttled: true }
+                : {})
+            }
+          : {}),
+        deduped: false,
+        ...(violatedId
+          ? {
+              entity_id: violatedId,
+              money_safety_violation: true,
+              remediation_paused: remediationPaused
+            }
+          : {}),
+        ...presence
+      }
+    ).then(
+      () => true,
+      () => false
+    ); // An audit outage must never replace the provider diagnostic.
+    if (
+      !cooldownRecorded &&
+      auditRecorded &&
+      (diagnostic.phase === "not_dispatched" ||
+        (diagnostic.phase === "provider_response" &&
+          (diagnostic.outcome === "refused" ||
+            diagnostic.outcome === "throttled")))
+    ) {
+      await releaseMetaDedup(db, claim?.claimId ?? null).catch(() => undefined);
+    }
     throw error;
   }
 
@@ -2160,13 +2459,21 @@ async function runMetaCreate(
     client_token: clientToken ?? null,
     status: result.status,
     deduped: false,
+    ...(!cliExecution ? localProof?.() : {}),
     ...presence
   });
 
   return envelope(
     action,
     context.authority,
-    { entity, id: result.id, status: result.status, deduped: false, clientToken: clientToken ?? null, ...(extra ?? {}) },
+    {
+      entity,
+      id: result.id,
+      status: result.status,
+      deduped: false,
+      clientToken: clientToken ?? null,
+      ...(extra ?? {})
+    },
     ["integration_audit_log"],
     "ok"
   );
@@ -2379,32 +2686,137 @@ async function createMetaCreativeHandler(
   // Every creative this engine creates carries an explicit enhancement choice: the caller's, or — when it names
   // none (the terminal's `meta creative create`, an older host) — every documented enhancement OFF. Meta's own
   // Advantage+ defaults are never taken silently (the founder's ruling, 2026-09-23; dc-readiness wave-1 review).
-  const degreesOfFreedomSpec = optionalCreativeObject(input, "degreesOfFreedomSpec") ?? metaCreativeEnhancementsAllOff();
+  const degreesOfFreedomSpec =
+    optionalCreativeObject(input, "degreesOfFreedomSpec") ??
+    metaCreativeEnhancementsAllOff();
   const assetFeedSpec = optionalCreativeObject(input, "assetFeedSpec");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
-  const pageId = await resolveMetaPostingPageId(db, context, sourceId, input, expectedCredential);
-  return runMetaCreate(db, context, input, sourceId, "create_meta_creative", "creative", (credential) =>
-    createMetaCreative(credential, {
-      name,
-      pageId,
-      ...(optionalString(input, "imageHash") ? { imageHash: optionalString(input, "imageHash") } : {}),
-      ...(optionalString(input, "imageUrl") ? { imageUrl: optionalString(input, "imageUrl") } : {}),
-      ...(optionalString(input, "videoUrl") ? { videoUrl: optionalString(input, "videoUrl") } : {}),
-      ...(optionalString(input, "instagramUserId") ? { instagramUserId: optionalString(input, "instagramUserId") } : {}),
-      ...(optionalString(input, "linkUrl") ? { linkUrl: optionalString(input, "linkUrl") } : {}),
-      ...(optionalString(input, "body") ? { body: optionalString(input, "body") } : {}),
-      ...(optionalString(input, "title") ? { title: optionalString(input, "title") } : {}),
-      ...(optionalString(input, "description") ? { description: optionalString(input, "description") } : {}),
-      ...(optionalString(input, "callToAction") ? { callToAction: optionalString(input, "callToAction") } : {}),
-      // Tracking parameters Meta appends to the destination link at delivery. Carries dynamic macros
-      // verbatim — see MetaCreativeCreateInput.urlTags.
-      ...(optionalString(input, "urlTags") ? { urlTags: optionalString(input, "urlTags") } : {}),
-      // Raw AdCreative objects (validated by the connector before any download/spawn/POST). Forwarded
-      // whole — a host that sends them checks META_CREATIVE_WRITE_FEATURES / the daemon's
-      // meta_creative_rulings_writes capability first, because an older engine drops unknown keys.
-      degreesOfFreedomSpec: degreesOfFreedomSpec as unknown as MetaDegreesOfFreedomSpec,
-      ...(assetFeedSpec !== undefined ? { assetFeedSpec: assetFeedSpec as MetaAssetFeedSpec } : {})
-    }), undefined, cliExecution, encryptionKey, expectedCredential
+  const explicitPageId = optionalString(input, "pageId");
+  const hostedPageId = cliExecution
+    ? await resolveMetaPostingPageId(
+        db,
+        context,
+        sourceId,
+        input,
+        expectedCredential
+      )
+    : undefined;
+  let proof: Record<string, unknown> | undefined;
+  const urlTags = cliExecution
+    ? optionalString(input, "urlTags")
+    : metaPublishingTracking(isRecord(input) ? input : {});
+  return runMetaCreate(
+    db,
+    context,
+    input,
+    sourceId,
+    "create_meta_creative",
+    "creative",
+    async (credential) => {
+      let pageId = hostedPageId ?? explicitPageId;
+      let instagramUserId = optionalString(input, "instagramUserId");
+      if (!cliExecution) {
+        const cliTransport =
+          credential.transport === "meta_ads_cli" ||
+          credential.transport === "cli";
+        if (
+          !cliTransport &&
+          (optionalString(input, "videoUrl") ||
+            (optionalString(input, "imageUrl") &&
+              !optionalString(input, "imageHash"))) &&
+          !assetFeedSpec
+        ) {
+          throw new MetaPublishingError(
+            "provider_unsupported",
+            "Standard media URL creatives require the Meta CLI transport. Direct Graph supports image hashes or a feed with existing media references."
+          );
+        }
+        const version = localMetaCredentialVersion(credential);
+        pageId ??= version.pageId;
+        if (!pageId)
+          throw new MetaPublishingError(
+            "meta_page_not_selected",
+            "No posting Page is selected. Choose a posting Page or pass pageId before publishing."
+          );
+        const identity = await resolveLocalMetaIdentity({
+          db,
+          context,
+          sourceId,
+          credential,
+          pageId,
+          credentialVersion: version.version,
+          operationId:
+            optionalString(input, "launchId") ??
+            optionalString(input, "clientToken")!,
+          ...(instagramUserId !== undefined
+            ? { expectedInstagramUserId: instagramUserId }
+            : {})
+        });
+        instagramUserId = identity.instagramUserId ?? undefined;
+        if (optionalString(input, "launchId"))
+          proof = {
+            tracking_verified: true,
+            launch_id: optionalString(input, "launchId"),
+            actor_id: context.actorId,
+            account_id: credential.adAccountId?.replace(/^act_/i, ""),
+            binding: localMetaIdentityBinding(
+              credential,
+              version.version,
+              pageId
+            )
+          };
+      }
+      if (!pageId)
+        throw new MetaPublishingError(
+          "meta_page_not_selected",
+          "No posting Page is selected."
+        );
+      return createMetaCreative(credential, {
+        name,
+        pageId,
+        ...(optionalString(input, "imageHash")
+          ? { imageHash: optionalString(input, "imageHash") }
+          : {}),
+        ...(optionalString(input, "imageUrl")
+          ? { imageUrl: optionalString(input, "imageUrl") }
+          : {}),
+        ...(optionalString(input, "videoUrl")
+          ? { videoUrl: optionalString(input, "videoUrl") }
+          : {}),
+        ...(instagramUserId ? { instagramUserId } : {}),
+        ...(optionalString(input, "linkUrl")
+          ? { linkUrl: optionalString(input, "linkUrl") }
+          : {}),
+        ...(optionalString(input, "body")
+          ? { body: optionalString(input, "body") }
+          : {}),
+        ...(optionalString(input, "title")
+          ? { title: optionalString(input, "title") }
+          : {}),
+        ...(optionalString(input, "description")
+          ? { description: optionalString(input, "description") }
+          : {}),
+        ...(optionalString(input, "callToAction")
+          ? { callToAction: optionalString(input, "callToAction") }
+          : {}),
+        // Tracking parameters Meta appends to the destination link at delivery. Carries dynamic macros
+        // verbatim — see MetaCreativeCreateInput.urlTags.
+        ...(urlTags ? { urlTags } : {}),
+        // Raw AdCreative objects (validated by the connector before any download/spawn/POST). Forwarded
+        // whole — a host that sends them checks META_CREATIVE_WRITE_FEATURES / the daemon's
+        // meta_creative_rulings_writes capability first, because an older engine drops unknown keys.
+        degreesOfFreedomSpec:
+          degreesOfFreedomSpec as unknown as MetaDegreesOfFreedomSpec,
+        ...(assetFeedSpec !== undefined
+          ? { assetFeedSpec: assetFeedSpec as MetaAssetFeedSpec }
+          : {})
+      });
+    },
+    undefined,
+    cliExecution,
+    encryptionKey,
+    expectedCredential,
+    () => proof
   );
 }
 
@@ -2429,10 +2841,56 @@ async function createMetaAdHandler(
 ): Promise<ActionEnvelope> {
   const adsetId = requiredString(input, "adsetId");
   const name = requiredString(input, "name");
+  if (!cliExecution) assertMetaAdTrackingName(name);
   const creativeId = requiredString(input, "creativeId");
   const sourceId = await resolveMetaWriteSourceId(db, context, input);
-  return runMetaCreate(db, context, input, sourceId, "create_meta_ad", "ad", (credential) =>
-    createMetaAd(credential, { adsetId, name, creativeId }), undefined, cliExecution, encryptionKey, expectedCredential
+  return runMetaCreate(
+    db,
+    context,
+    input,
+    sourceId,
+    "create_meta_ad",
+    "ad",
+    async (credential) => {
+      if (!cliExecution) {
+        const launchId = optionalString(input, "launchId");
+        let proven = false;
+        if (launchId) {
+          const version = await localMetaCredentialVersion(credential);
+          if (version.pageId)
+            proven = !!(await db.one(
+              `select id from integration_audit_log where workspace_id=$1 and source_id=$2
+          and action='create_meta_creative' and status='succeeded' and details->>'entity_id'=$3
+          and details->>'actor_id'=$4 and details->>'launch_id'=$5 and details->>'binding'=$6
+          and details->>'tracking_verified'='true' and created_at>now()-interval '10 minutes' and created_at<=now() limit 1`,
+              [
+                context.workspaceId,
+                sourceId,
+                creativeId,
+                context.actorId,
+                launchId,
+                localMetaIdentityBinding(
+                  credential,
+                  version.version,
+                  version.pageId
+                )
+              ]
+            ));
+        }
+        if (!proven)
+          await verifyMetaCreativeTracking({
+            accessToken: credential.accessToken ?? "",
+            accountId: credential.adAccountId ?? "",
+            creativeId,
+            apiVersion: credential.apiVersion
+          });
+      }
+      return createMetaAd(credential, { adsetId, name, creativeId });
+    },
+    undefined,
+    cliExecution,
+    encryptionKey,
+    expectedCredential
   );
 }
 
@@ -3007,7 +3465,7 @@ async function resolveSoleConnectedMetaSourceId(
   context: SessionContext
 ): Promise<string> {
   const rows = await db.query<{ id: string }>(
-    "select id from sources where workspace_id = $1 and provider = 'meta_ads' and status = 'connected' order by connected_at desc",
+    "select id from sources where workspace_id = $1 and provider = 'meta_ads' and status in ('connected','syncing') order by connected_at desc",
     [context.workspaceId]
   );
   if (rows.length === 0) {
