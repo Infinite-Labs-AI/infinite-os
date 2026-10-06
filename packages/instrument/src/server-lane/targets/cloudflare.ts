@@ -53,7 +53,7 @@ interface InfiniteCloudflareContext {
   request: Request
   env: Record<string, string | undefined>
   next: () => Promise<Response>
-  waitUntil: Function
+  waitUntil: (promise: Promise<unknown>) => void // eslint-disable-line no-unused-vars
 }
 
 export const onRequest = async (context: InfiniteCloudflareContext): Promise<Response> => {

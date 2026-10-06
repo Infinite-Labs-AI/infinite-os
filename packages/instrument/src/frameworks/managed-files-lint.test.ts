@@ -21,13 +21,13 @@ const { LegacyESLint } = require("eslint/use-at-your-own-risk") as {
 }
 
 describe("the Next files the installer writes", () => {
-  it("pass Next core-web-vitals and both unused-variable rules as emitted", async () => {
+  it.each(["plugin:@typescript-eslint/recommended", "next/typescript"])("passes Next and unused-variable rules with %s as emitted", async (preset) => {
     const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "../..")
     const lint = new LegacyESLint({
       cwd: packageRoot,
       useEslintrc: false,
       overrideConfig: {
-        extends: ["next/core-web-vitals"],
+        extends: ["next/core-web-vitals", preset],
         plugins: ["@typescript-eslint"],
         rules: { "no-unused-vars": "error", "@typescript-eslint/no-unused-vars": "error" }
       },
@@ -59,12 +59,12 @@ describe("the Next files the installer writes", () => {
     }
   })
 
-  it("passes both unused-variable rules in emitted non-Next server-lane files", async () => {
+  it.each(["plugin:@typescript-eslint/recommended", "next/typescript"])("passes non-Next emitted files with %s and both unused-variable rules", async (preset) => {
     const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "../..")
     const lint = new LegacyESLint({
       cwd: packageRoot,
       useEslintrc: false,
-      overrideConfig: { parser: "@typescript-eslint/parser", plugins: ["@typescript-eslint"], rules: { "no-unused-vars": "error", "@typescript-eslint/no-unused-vars": "error" } },
+      overrideConfig: { parser: "@typescript-eslint/parser", extends: [preset], plugins: ["@typescript-eslint"], rules: { "no-unused-vars": "error", "@typescript-eslint/no-unused-vars": "error" } },
       resolvePluginsRelativeTo: packageRoot,
       ignore: false
     })

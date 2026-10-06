@@ -109,7 +109,7 @@ export function netlifyEdgeFunctionSource(input: TargetBuildInput): string {
 interface InfiniteNetlifyContext {
   /** "A string containing the client IP address." */
   ip?: string
-  waitUntil?: Function
+  waitUntil?: (promise: Promise<unknown>) => void // eslint-disable-line no-unused-vars
 }
 
 /** Netlify.env.get(name) is the documented reader; Deno.env is the fallback for local netlify dev. */
