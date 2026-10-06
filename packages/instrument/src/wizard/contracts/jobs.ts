@@ -431,7 +431,8 @@ export interface JobClaimInput {
 /** Never says "verified". */
 export interface JobClaimResult {
   recorded: true
-  next: "the wizard will run its own checks"
+  next: "the wizard will run its own checks" | "fix the static check failures and claim this job again"
+  staticChecks?: { state: "pass" | "problem" | "undetermined" | "not_run"; problems: string[] }
 }
 
 export interface ReportProgressInput {

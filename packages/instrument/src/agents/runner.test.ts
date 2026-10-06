@@ -44,7 +44,7 @@ function jobsInput(over: Partial<RunJobsInput> = {}) {
     items: ITEMS,
     brief: "BRIEF: do the jobs",
     budget: { maxTurns: 30, wallMs: 60_000 },
-    onClaim: (claim) => claims.push(claim),
+    onClaim: (claim) => { claims.push(claim) },
     onAsk: (question) => asks.push(question),
     onProgress: (entry) => progress.push(entry.text),
     onNarrate: (beat) => beats.push(beat.text),

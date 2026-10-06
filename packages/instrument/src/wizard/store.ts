@@ -76,6 +76,7 @@ export class WizardStore {
       currentStep: null,
       learn: null,
       narration: [],
+      jobs: [],
       pendingAsk: null,
       outro: null,
       exit: null
@@ -115,10 +116,11 @@ export class WizardStore {
   stepStart(step: WizardStepId): void {
     this.commit({
       currentStep: step,
+      ...(step === "jobs" ? { jobs: [] } : {}),
       // An agent's last line belongs to the step it was said in: a new step starts with none (terminal QA #19).
       narration: [],
       learn: WIZARD_STEP_META[step].learn,
-      steps: this.mapStep(step, (row) => ({ ...row, state: "running", status: null, code: null }))
+      steps: this.mapStep(step, (row) => ({ ...row, state: "running", status: null, code: null, startedAt: this.now().toISOString() }))
     })
   }
 
@@ -146,6 +148,16 @@ export class WizardStore {
         status: reason ?? row.status
       }))
     })
+  }
+
+  jobSeeded(item: { id: string; title: string; state: string }): void {
+    const jobs = this.snapshot.jobs ?? []
+    if (jobs.some((row) => row.id === item.id)) return
+    this.commit({ jobs: [...jobs, { id: item.id, title: item.title, state: "waiting" }] })
+  }
+
+  jobDisplay(itemId: string, state: NonNullable<WizardStoreSnapshot["jobs"]>[number]["state"]): void {
+    this.commit({ jobs: (this.snapshot.jobs ?? []).map((row) => row.id === itemId ? { ...row, state } : row) })
   }
 
   // ---- narration ----

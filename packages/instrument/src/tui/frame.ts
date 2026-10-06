@@ -44,6 +44,7 @@ export interface FrameInput {
   styles: Styles
   sanitize: UntrustedSanitizer
   spinnerIndex: number
+  nowMs?: number
   /** Draws the pending ask's overlay into a box of the given size; null when there is no visible overlay. */
   overlay: ((ctx: OverlayContext) => OverlayView) | null
   /** The outro text (replaces the step screen when set). */
@@ -125,7 +126,14 @@ function taskLines(input: FrameInput, width: number): { rows: string[]; currentI
   })
   const finished = snapshot.steps.filter((row) => row.state !== "pending" && row.state !== "running").length
   const total = WIZARD_STEP_IDS.length
-  const pct = Math.round((Math.min(finished, total) / total) * 100)
+  const running = snapshot.steps.find((row) => row.state === "running")
+  const elapsed = running?.startedAt ? Math.max(0, (input.nowMs ?? Date.now()) - new Date(running.startedAt).getTime()) : 0
+  const budget = running?.id === "jobs" ? 20 * 60_000 : running?.id === "link" ? 6 * 60_000 : running?.id === "prove" ? 45 * 60_000 : 60_000
+  const timeFraction = Math.min(0.95, elapsed / budget)
+  const jobs = snapshot.jobs ?? []
+  const settled = jobs.filter((job) => job.state === "passed" || job.state === "failed" || job.state === "blocked").length
+  const fraction = running?.id === "jobs" && jobs.length > 0 ? Math.max(timeFraction, Math.min(0.95, settled / jobs.length)) : timeFraction
+  const pct = Math.round((Math.min(finished + (running ? fraction : 0), total) / total) * 100)
   const barWidth = Math.max(10, Math.min(40, width - 24))
   const filled = Math.round((pct / 100) * barWidth)
   const bar = s.accent("━".repeat(filled)) + s.dim("─".repeat(barWidth - filled))
@@ -174,12 +182,22 @@ function liveLines(input: FrameInput, width: number, feedLines: number = FEED_LI
   const meta = WIZARD_STEP_META[row.id]
   const lines: string[] = []
   const narration = snapshot.narration[snapshot.narration.length - 1]
-  if (row.state === "running" && meta.who.includes("agent") && narration) {
+  if (row.id === "jobs" && row.state === "running" && row.status) {
+    lines.push(...wrapRows(`${s.accent("◆")} ${sanitize(row.status, EVENT_LIMITS.statusTextMaxChars)}`, width, 2, STATUS_ROWS_MAX))
+  } else if (row.state === "running" && meta.who.includes("agent") && narration) {
     lines.push(...wrapRows(`${s.agent(`${AGENT_LABEL[narration.agent]} ›`)} ${sanitize(narration.text, EVENT_LIMITS.narrateTextMaxChars)}`, width, 2, STATUS_ROWS_MAX))
   } else if (row.status) {
     lines.push(...wrapRows(`${s.accent("◆")} ${sanitize(row.status, EVENT_LIMITS.statusTextMaxChars)}`, width, 2, STATUS_ROWS_MAX))
   } else {
     lines.push(...wrapRows(`${s.accent("◆")} ${s.dim(STEP_COPY[row.id].what)}`, width, 2, STATUS_ROWS_MAX))
+  }
+  if (row.id === "jobs" && (snapshot.jobs?.length ?? 0) > 0) {
+    const labels = { waiting: "waiting", agent_claim: "agent claims done", checking: "wizard checking", passed: "passed", failed: "failed", blocked: "blocked" } as const
+    for (const [index, job] of snapshot.jobs!.entries()) {
+      const glyph = job.state === "passed" ? s.ok("✓") : job.state === "failed" ? s.bad("✗") : job.state === "blocked" ? s.warn("!") : job.state === "checking" ? s.accent(spinner) : s.dim("·")
+      lines.push(...wrapRows(`  ${glyph} ${index + 1}/${snapshot.jobs!.length} ${sanitize(job.title, 100)} · ${labels[job.state]}`, width, 4, 2))
+    }
+    return lines
   }
   const subs = row.subs.slice(-feedLines)
   subs.forEach((sub, index) => {

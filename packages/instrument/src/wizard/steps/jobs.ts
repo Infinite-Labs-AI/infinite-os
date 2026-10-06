@@ -125,6 +125,30 @@ interface RoundOutcome {
   changedByChecks?: string[]
 }
 
+/** A provisional, read-only S check while the claim tool has the agent paused. B and T0 still run after the turn. */
+async function staticChecksOnClaim(io: JobsIo, itemId: string): Promise<{ state: "pass" | "problem" | "undetermined" | "not_run"; problems: string[] }> {
+  const item = io.item(itemId)
+  if (!item) return { state: "undetermined", problems: ["The claimed job is no longer in this run."] }
+  const specs = io.deps.registry.checksFor(item, "S")
+  if (specs.length === 0) return { state: "not_run", problems: [] }
+  const scanner = await io.scanner()
+  const problems: string[] = []
+  let undetermined = false
+  for (const spec of specs) {
+    try {
+      const raw = await io.deps.checks.run(spec.checkId, { item, root: io.ctx.root, appRoot: io.ctx.appRoot, runId: io.runId() })
+      for (const result of Array.isArray(raw) ? raw : [raw]) {
+        if (result.state === "problem") problems.push(`${spec.checkId}: ${scanner.redact(result.reason ?? "problem").text}`)
+        if (result.state === "undetermined") undetermined = true
+      }
+    } catch (error) {
+      undetermined = true
+      problems.push(`${spec.checkId}: ${scanner.redact(error instanceof Error ? error.message : String(error)).text}`)
+    }
+  }
+  return { state: problems.length > 0 && !undetermined ? "problem" : problems.length > 0 || undetermined ? "undetermined" : "pass", problems }
+}
+
 class SealBroken extends Error {
   constructor(readonly changed: string[]) {
     super(`Files changed after the agent's turn ended (${changed.slice(0, 3).join(", ")}${changed.length > 3 ? ", …" : ""}); a process it started may still be running. Nothing was built or tested.`)
@@ -147,6 +171,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
       await io.settleEdits()
     }
   }
+  for (const item of io.items().filter((entry) => entry.owner === "agent")) ctx.emit.emit("job.seeded", { item })
   const claimed = agentItems.filter((item) => item.state === "claimed")
   if (claimed.length > 0) {
     const tampered = await recheckClaimed(io, claimed)
@@ -203,7 +228,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   let roundsLeft = 1 + AGENT_LIMITS.jobs.maxResumeRounds
   let session: SessionRef | undefined = ctx.state.get().agent?.workerSession ?? undefined
   let feedback: string[] = []
-  agentItems.forEach((item, index) => io.sub(`Job ${index + 1}/${agentItems.length} · ${item.title}`, "info"))
+  ctx.emit.emit("step.status", { step: "jobs", text: `Reading your code · 0 files read · 0 edited · 0 of ${agentItems.length} claimed · 0 of ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min` })
 
   while (roundsLeft > 0) {
     const open = io.items().filter((item) => item.owner === "agent" && item.state === "pending")
@@ -219,10 +244,13 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     // R4-6: a clear progress line. Run 4's terminal read "Thinking · 254 s" with nothing saying how much of the budget
     // was gone or how many jobs were claimed; the thinking beat now carries both.
     const claimedNow = new Set<string>()
-    const progress = (text: string) =>
-      /^Thinking · /.test(text)
-        ? `${text} · ${claimedNow.size} of ${open.length} claimed · ${minutesWords(deps.clock.now().getTime() - started)} of ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min`
-        : text
+    const read = new Set<string>()
+    const edited = new Set<string>()
+    let thinking = 0
+    const liveStatus = () => {
+      const phase = claimedNow.size > 0 ? "Checking its work" : edited.size > 0 ? "Writing the changes" : "Reading your code"
+      return `${phase} · ${read.size} files read · ${edited.size} edited · thinking ${thinking} s · ${claimedNow.size} of ${open.length} claimed · ${minutesWords(deps.clock.now().getTime() - started)} of ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min`
+    }
     try {
       result = await deps.agents.runJobs({
         items: anchored,
@@ -230,10 +258,29 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
         budget: { maxTurns: turnsLeft, wallMs: wallLeft },
         ...(session && sessionId(session) !== "" ? { resume: session } : {}),
         // The claim's `job.state` is emitted ONCE, when the step applies it after the turn (review I1 P3-3).
-        onClaim: (claim) => void claimedNow.add(claim.jobId),
+        onClaim: async (claim) => {
+          claimedNow.add(claim.jobId)
+          ctx.emit.emit("job.progress", { itemId: claim.jobId, state: "agent_claim" })
+          ctx.emit.emit("step.status", { step: "jobs", text: liveStatus() })
+          if (claim.status !== "done") return { state: "not_run", problems: [] }
+          ctx.emit.emit("job.progress", { itemId: claim.jobId, state: "checking" })
+          const checked = await staticChecksOnClaim(io, claim.jobId)
+          if (checked.state === "problem") ctx.emit.emit("job.progress", { itemId: claim.jobId, state: "failed" })
+          return checked
+        },
         onAsk: (question) => questions.push(question),
         onProgress: () => undefined,
-        onNarrate: (beat) => ctx.emit.emit("narrate", { ...beat, text: progress(beat.text) })
+        onNarrate: (beat) => {
+          const reading = /^Reading (.+)$/.exec(beat.text)
+          const editing = /^Editing (.+)$/.exec(beat.text)
+          const thought = /^Thinking · (\d+) s/.exec(beat.text)
+          if (reading) read.add(reading[1]!)
+          if (editing) edited.add(editing[1]!)
+          if (thought) thinking = Number(thought[1])
+          else thinking = 0
+          ctx.emit.emit("narrate", beat)
+          ctx.emit.emit("step.status", { step: "jobs", text: liveStatus() })
+        }
       })
     } catch (error) {
       if (isTamper(error)) {

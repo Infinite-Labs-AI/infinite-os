@@ -24,6 +24,22 @@ function frame(change: Partial<FrameInput> = {}): string[] {
 const plain = (lines: string[]) => lines.map((line) => stripAnsi(line).replace(/\s+$/, "")).join("\n")
 
 describe("renderFrame", () => {
+  it("shows every job as a stable checklist and moves the bar during a long running step", () => {
+    const base = midRunSnapshot()
+    const snapshot = midRunSnapshot({
+      currentStep: "jobs",
+      steps: base.steps.map((row) => row.id === "jobs" ? { ...row, startedAt: "2026-10-02T09:00:00.000Z", status: "Writing the changes · 3 files edited" } : row),
+      jobs: [
+        { id: "a", title: "Add capture", state: "passed" },
+        { id: "b", title: "Guard Meta", state: "checking" },
+        { id: "c", title: "Update privacy", state: "waiting" }
+      ]
+    })
+    const text = plain(frame({ snapshot, nowMs: Date.parse("2026-10-02T09:08:00.000Z") }))
+    for (const title of ["Add capture", "Guard Meta", "Update privacy"]) expect(text).toContain(title)
+    expect(text).toContain("Writing the changes")
+    expect(text).toMatch(/\b4[7-9]%|\b5[0-3]%/)
+  })
   it("120 columns: Learn card beside the 13-row step list, the narration and the sub-statuses", () => {
     const lines = frame()
     expect(plain(lines)).toMatchSnapshot()

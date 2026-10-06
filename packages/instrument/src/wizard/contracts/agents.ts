@@ -102,7 +102,7 @@ export interface RunJobsInput {
   brief: string
   budget: { maxTurns: number; wallMs: number }
   resume?: SessionRef
-  onClaim(claim: Claim): void
+  onClaim(claim: Claim): void | { state: "pass" | "problem" | "undetermined" | "not_run"; problems: string[] } | Promise<{ state: "pass" | "problem" | "undetermined" | "not_run"; problems: string[] }>
   onAsk(question: AgentQuestion): void
   onProgress(progress: { jobId: string; text: string }): void
   onNarrate(beat: { agent: AgentKind; role: "worker" | "reviewer"; text: string }): void

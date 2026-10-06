@@ -4,7 +4,7 @@ import { existsSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
-import { assertBuilt, fakeAgents, makeRunner, runs } from "../../../test/wizard/agents.js"
+import { assertBuilt, fakeAgents, makeRunner, records, runs } from "../../../test/wizard/agents.js"
 import { cleanup, makeFenceFixture, POST_INSTALL_LAYOUT, write } from "../../../test/wizard/repo.js"
 import { agentItem, baseState, fakeBridge, fakeChecks, fakeInstaller, fakeRegistry, makeCtx, makeDeps, STEP_RUN_ID } from "../../../test/wizard/agent-step-harness.js"
 import type { AgentRunnerImpl } from "../../agents/runner.js"
@@ -64,6 +64,17 @@ function stateOf(items: ChecklistItem[], id: string) {
 }
 
 describe("step jobs: claims are only claims; the wizard checks", () => {
+  it("returns an S-check failure in the claim tool reply before the turn ends", async () => {
+    const staticId = ITEMS[0]!.checks.find((check) => check.tier === "S")!.id
+    const t = setup({
+      scenario: { turns: [{ steps: [{ edit: { path: "app/layout.tsx", content: POST_INSTALL_LAYOUT + "\n// changed\n" } }, claim("meta_improve:landing")] }] },
+      checks: { results: { [staticId]: ["problem", "pass"] } },
+      items: [ITEMS[0]!]
+    })
+    await step.run(t.ctx, t.deps)
+    const reply = records(t.fakes).find((entry) => entry.kind === "mcp" && entry.tool === "job_claim")?.reply?.result?.structuredContent
+    expect(reply).toMatchObject({ staticChecks: { state: "problem", problems: [expect.stringContaining(staticId)] } })
+  })
   it("claimed + S/B/T0 pass → done_in_code; edits recorded; clickTested PATCHed once no agent is alive", async () => {
     const t = setup({
       scenario: { turns: [{ steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, claim("conversions_to_tools:trial"), claim("meta_improve:landing")] }] }
@@ -80,6 +91,9 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     expect(t.bridgeCalls.patchRun).toEqual([{ runId: STEP_RUN_ID, patch: { clickTestedConversions: ["trial"] }, agentAlive: false }])
     expect(t.checkCalls.turnGate).toBe(1)
     expect(t.checkCalls.build).toBe(1)
+    expect(t.recorded.events.filter((event) => event.type === "job.seeded")).toHaveLength(2)
+    expect(t.recorded.events.filter((event) => event.type === "job.progress").map((event) => event.fields.state)).toEqual(["agent_claim", "agent_claim"])
+    expect(t.recorded.events.some((event) => event.type === "step.status" && String(event.fields.text).includes("files read"))).toBe(true)
     const states = t.recorded.events.filter((event) => event.type === "job.state").map((event) => [event.fields.itemId, event.fields.state, event.fields.by])
     expect(states).toContainEqual(["conversions_to_tools:trial", "claimed", "agent_claim"])
     // Review I1 P3-3: one `claimed` per claim (never once on the claim and again on apply).

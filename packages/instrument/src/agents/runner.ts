@@ -76,7 +76,7 @@ export { AGENT_MODELS }
 
 /** Prompts on stdin (the job brief is the system prompt for Claude and the prompt for Codex). */
 export const WORKER_KICKOFF =
-  "Do the jobs in your instructions. Start with job_list. Edit files only; never run git, a build, the tests, an install or a dev server (the wizard builds and tests after your turn). Claim each job with job_claim when you think it is done, blocked or not needed; your claim is not the result, the wizard checks. Finish with the JSON your output schema asks for."
+  "Do the jobs in your instructions. Start with job_list. Edit files only; never run git, a build, the tests, an install or a dev server (the wizard builds and tests after your turn). Finish and claim one job at a time. Read job_claim's staticChecks result and fix any problem before moving to the next job; the wizard runs the remaining checks after your turn. Finish with the JSON your output schema asks for."
 export const WORKER_RESUME_KICKOFF =
   "Continue. The wizard ran its own checks; its notes and any answers from the user are at the end of your instructions. Fix what failed, then claim again with job_claim and finish with the JSON your output schema asks for."
 /** The first line of every Claude system prompt: the value after `--append-system-prompt` never starts with "-". */

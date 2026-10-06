@@ -207,6 +207,7 @@ export interface StoreStepRow {
   state: "pending" | "running" | StepOutcomeKind
   status: string | null
   code: WizardCode | null
+  startedAt?: string | null
   /** The last few sub-statuses (the TUI shows the last 5). */
   subs: Array<{ text: string; tone: "ok" | "warn" | "info" | "pending"; at: string }>
 }
@@ -225,6 +226,8 @@ export interface WizardStoreSnapshot {
    */
   learnFacts?: { site?: string | null; workspace?: string | null; worker?: "claude_code" | "codex" | null; reviewer?: "claude_code" | "codex" | "brief" | null }
   narration: Array<{ agent: "claude_code" | "codex"; role: "worker" | "reviewer"; text: string; at: string }>
+  /** Stable rows for the agent's jobs; transient claim/checking states never assert a verdict. */
+  jobs?: Array<{ id: string; title: string; state: "waiting" | "agent_claim" | "checking" | "passed" | "failed" | "blocked" }>
   /** At most one pending ask (a second throws). */
   pendingAsk: { askId: string; kind: AskKind; payload: unknown } | null
   outro: string | null

@@ -19,7 +19,7 @@ function channel(extra: { claims?: Claim[]; asks?: AgentQuestion[]; progress?: s
     items: [item("posthog_improve:proxy", ["app/providers.tsx"]), item("server_conversions:signup", ["app/api/signup/route.ts"])],
     now: () => new Date("2026-10-02T10:00:00.000Z"),
     redact: (text) => text.split("RUN-TOKEN-SECRET").join("[redacted]"),
-    onClaim: (claim) => extra.claims?.push(claim),
+    onClaim: (claim) => { extra.claims?.push(claim) },
     onAsk: (question) => extra.asks?.push(question),
     onProgress: (progress) => extra.progress?.push(progress.text)
   })
@@ -136,6 +136,22 @@ describe("the MCP bridge (§3e.3, §3a.2 origin rule)", () => {
 })
 
 describe("the claim tools", () => {
+  it("returns a static check failure inside the claim turn so the agent can fix and reclaim", async () => {
+    let attempts = 0
+    const tools = new ClaimChannel({
+      items: [item("server_conversions:signup", ["app/api/signup/route.ts"])],
+      now: () => new Date("2026-10-02T10:00:00.000Z"),
+      redact: (value) => value,
+      onClaim: async () => {
+        attempts += 1
+        return attempts === 1 ? { state: "problem" as const, problems: ["outcome call missing"] } : { state: "pass" as const, problems: [] }
+      }
+    })
+    const claimArgs = { job_id: "server_conversions:signup", status: "done", note: "done" }
+    expect((await tools.call("job_claim", claimArgs)).result).toMatchObject({ staticChecks: { state: "problem", problems: ["outcome call missing"] } })
+    expect((await tools.call("job_claim", claimArgs)).result).toMatchObject({ staticChecks: { state: "pass", problems: [] } })
+    expect(tools.claims).toHaveLength(2)
+  })
   it("job_list returns this turn's items only", async () => {
     const outcome = await channel().call("job_list", {})
     const jobs = (outcome.result as { jobs: Array<{ id: string; allow: unknown; rules: string[] }> }).jobs

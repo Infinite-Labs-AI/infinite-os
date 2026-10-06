@@ -125,6 +125,22 @@ export class WizardEventEmitter implements WizardEmitter {
         this.store.setExit({ exitCode: end.exitCode, prUrl: end.prUrl ?? null, reportPath: end.reportPath })
         break
       }
+      case "job.seeded": {
+        const seeded = fields as WizardEventFields["job.seeded"]
+        this.store.jobSeeded(seeded.item)
+        break
+      }
+      case "job.progress": {
+        const progress = fields as WizardEventFields["job.progress"]
+        this.store.jobDisplay(progress.itemId, progress.state)
+        break
+      }
+      case "job.state": {
+        const job = fields as WizardEventFields["job.state"]
+        const state = job.state === "pending" ? "waiting" : job.state === "claimed" ? "checking" : job.state === "failed" ? "failed" : job.state === "blocked" ? "blocked" : "passed"
+        this.store.jobDisplay(job.itemId, state)
+        break
+      }
       default:
         break
     }

@@ -63,7 +63,7 @@ export interface ClaimChannelOptions {
   now(): Date
   /** Replaces the wizard's own secret literals before any text is kept or shown. */
   redact(text: string): string
-  onClaim?(claim: Claim): void
+  onClaim?(claim: Claim): void | JobClaimResult["staticChecks"] | Promise<JobClaimResult["staticChecks"]>
   onAsk?(question: AgentQuestion): void
   onProgress?(progress: { jobId: string; text: string }): void
 }
@@ -149,12 +149,12 @@ export class ClaimChannel implements McpServerHandler {
   }
 
   async call(name: string, args: unknown): Promise<McpToolOutcome> {
-    const outcome = this.dispatch(name, args)
+    const outcome = await this.dispatch(name, args)
     if ("error" in outcome) return { result: outcome, isError: true }
     return { result: outcome, isError: false }
   }
 
-  private dispatch(name: string, args: unknown): object {
+  private async dispatch(name: string, args: unknown): Promise<object> {
     const input = record(args)
     if (!input) return fail("arguments must be an object")
     switch (name) {
@@ -184,7 +184,7 @@ export class ClaimChannel implements McpServerHandler {
     }
   }
 
-  private jobClaim(input: Record<string, unknown>): JobClaimResult | ToolError {
+  private async jobClaim(input: Record<string, unknown>): Promise<JobClaimResult | ToolError> {
     const extra = unknownKeys(input, ["job_id", "status", "note", "files"])
     if (extra) return extra
     const jobId = this.knownJob(input.job_id)
@@ -207,8 +207,10 @@ export class ClaimChannel implements McpServerHandler {
       at: this.options.now().toISOString()
     }
     this.claims.push(claim)
-    this.options.onClaim?.(claim)
-    return JOB_CLAIM_RESULT
+    const checked = await this.options.onClaim?.(claim)
+    if (!checked) return JOB_CLAIM_RESULT
+    const staticChecks = { state: checked.state, problems: checked.problems.map((problem) => sanitizeUntrusted(this.options.redact(problem), 200)) }
+    return { recorded: true, next: staticChecks.state === "problem" ? "fix the static check failures and claim this job again" : "the wizard will run its own checks", staticChecks }
   }
 
   private reportProgress(input: Record<string, unknown>): { ok: true } | ToolError {

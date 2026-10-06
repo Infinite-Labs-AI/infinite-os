@@ -49,6 +49,18 @@ function setup(json = false) {
 }
 
 describe("WizardStore", () => {
+  it("keeps each job in one row while its live state changes", () => {
+    const { store, emitter } = setup()
+    store.jobSeeded({ id: "a", title: "First job", state: "pending" })
+    store.jobSeeded({ id: "b", title: "Second job", state: "pending" })
+    emitter.emit("job.progress", { itemId: "a", state: "agent_claim" })
+    expect(store.getSnapshot().jobs).toEqual([
+      { id: "a", title: "First job", state: "agent_claim" },
+      { id: "b", title: "Second job", state: "waiting" }
+    ])
+    emitter.emit("job.state", { itemId: "a", state: "done_in_code", by: "wizard" })
+    expect(store.getSnapshot().jobs?.[0]?.state).toBe("passed")
+  })
   it("bumps the version and tells subscribers on every change; snapshots are new objects", () => {
     const { store } = setup()
     const seen: number[] = []
