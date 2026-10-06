@@ -96,6 +96,7 @@ import { useTerminalColumns, useTerminalRows } from "./terminal-columns.js";
 import {
   answerOnlyFacts,
   committedViewFacts,
+  factsAfterKey,
   resolveViewKey,
   turnAsk,
   viewFocusAfterTurnDone,
@@ -633,6 +634,8 @@ export function InkInteractiveSessionApp({
   const [committedFocus, setCommittedFocus] = useState<{ state: ViewFocusState; facts: ViewKeyFacts } | null>(null);
   // What the latest live turn's focused view offered when last drawn, for that commit.
   const liveFactsRef = useRef<ViewKeyFacts | null>(null);
+  const keyedViewRef = useRef<{ focus: ViewFocusState; facts: ViewKeyFacts } | null>(null);
+  const keyedCardPaneRef = useRef<NonNullable<LiveTurnRender["pane"]> | null>(null);
   // The rows the live turn was last drawn to, so the turn commits to scrollback
   // with the same document pages the user was reading.
   const liveTurnRowsRef = useRef<number | undefined>(undefined);
@@ -2132,6 +2135,12 @@ export function InkInteractiveSessionApp({
   const { turn: liveTurn, turnRows: liveTurnRows } = drawTurnWith(reservedRows, compactTurn);
   liveTurnRowsRef.current = liveTurnRows;
   liveFactsRef.current = liveTurn?.focused?.facts ?? null;
+  // A held arrow repeats faster than a frame draws, so the terminal hands over
+  // several presses in one read, all before React draws again. Each key leaves
+  // here where it put the view (and the waiting card's pane) and the next one
+  // goes on from there; every draw resets them to the frame.
+  keyedViewRef.current = null;
+  keyedCardPaneRef.current = null;
   const keyHints = keyHintsFor(liveTurn);
   const keyBarRows = keyBarRowCount(keyHints, columns);
   // The card's keys: its OK key (and `r`, which approves again) only while the
@@ -2141,12 +2150,14 @@ export function InkInteractiveSessionApp({
   // ↑/↓ (PgUp/PgDn) move the details pane while the card waits, when the pane
   // is cut: the views above the card stay readable. At either end the key is spent.
   const scrollCardPane = (key: Key): boolean => {
-    const pane = headCardLines ? liveTurn?.pane : null;
+    const pane = headCardLines ? keyedCardPaneRef.current ?? liveTurn?.pane : null;
     if (!pane || !(key.upArrow || key.downArrow || key.pageUp || key.pageDown) || key.ctrl || key.meta) {
       return false;
     }
     const step = key.pageUp || key.pageDown ? Math.max(1, pane.shown) : 1;
-    setCardPaneScroll(key.downArrow || key.pageDown ? pane.above + Math.min(step, pane.below) : pane.above - Math.min(step, pane.above));
+    const above = key.downArrow || key.pageDown ? pane.above + Math.min(step, pane.below) : pane.above - Math.min(step, pane.above);
+    keyedCardPaneRef.current = { ...pane, above, below: pane.above + pane.below - above };
+    setCardPaneScroll(above);
     return true;
   };
   const liveLatest = useMemo<CommittedEntry | null>(
@@ -2258,7 +2269,10 @@ export function InkInteractiveSessionApp({
     const drawnFacts = liveTurnFacts(liveTurn);
     let next: ViewFocusState;
     if (viewFocus && drawnFacts) {
-      next = resolveViewKey(input, viewFocus, key, { ...drawnFacts, livePageNext: liveLayout.window.hiddenBelow > 0 });
+      // A key before the next draw goes on from the last key, never from the frame (see `keyedViewRef`).
+      const keyed = keyedViewRef.current ?? { focus: viewFocus, facts: { ...drawnFacts, livePageNext: liveLayout.window.hiddenBelow > 0 } };
+      next = resolveViewKey(input, keyed.focus, key, keyed.facts);
+      keyedViewRef.current = { focus: next, facts: factsAfterKey(keyed.facts, next) };
       setViewFocus(next);
     } else if (!drawnFacts && committedFocus) {
       // The last turn went to scrollback whole: its view still takes tab and `o` (live L8).

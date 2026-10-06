@@ -319,6 +319,27 @@ export function committedViewFacts(facts: ViewKeyFacts): ViewKeyFacts {
   };
 }
 
+/**
+ * What the view offers once `next` is drawn, as far as a key can tell before
+ * the frame is: a pane a key scrolled stands where the key put it. A second
+ * key in the same read (a held arrow repeats faster than a frame draws) is
+ * resolved against this, so it moves on from the first and is never dropped.
+ * A pane that follows the row (j/k) is placed by the draw: it is left as drawn.
+ */
+export function factsAfterKey(facts: ViewKeyFacts, next: ViewFocusState): ViewKeyFacts {
+  const pane = next.followRow ? facts.pane : paneAt(facts.pane, next.paneScroll);
+  const answerPane = paneAt(facts.answerPane, next.answerScroll);
+  return pane === facts.pane && answerPane === facts.answerPane
+    ? facts
+    : { ...facts, ...(pane ? { pane } : {}), ...(answerPane ? { answerPane } : {}) };
+}
+
+function paneAt<T extends { above: number; below: number }>(pane: T | null | undefined, scroll: number | undefined): T | null | undefined {
+  if (!pane || scroll === undefined) return pane;
+  const above = clamp(scroll, 0, pane.above + pane.below);
+  return above === pane.above ? pane : { ...pane, above, below: pane.above + pane.below - above };
+}
+
 /** The keys on the answer pane (live L8). */
 function resolveAnswerKey(input: string, state: ViewFocusState, key: Partial<Key>, facts: ViewKeyFacts, base: ViewFocusState): ViewFocusState {
   const leave = { ...base, answerFocus: false, focus: "composer" as const, engaged: false };

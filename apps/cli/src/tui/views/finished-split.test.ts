@@ -16,7 +16,7 @@ import type { TurnStep } from "../app/turn-store.js";
 import { stripAnsi } from "../lib/display-width.js";
 import { INFINITE_R4_THEME } from "../theme.js";
 import type { Msg } from "../types.js";
-import { answerOnlyFacts, resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints, type ViewFocusState } from "./focus.js";
+import { answerOnlyFacts, factsAfterKey, resolveViewKey, viewFocusAfterTurnDone, viewKeyFacts, viewKeyHints, type ViewFocusState } from "./focus.js";
 import { paneWidths, renderLiveTurn, type LiveTurnRender } from "./layout.js";
 
 const theme = INFINITE_R4_THEME;
@@ -149,6 +149,28 @@ describe("a finished tall turn keeps the split, both panes held to the window (l
     const onAnswer = resolveViewKey("", start, { tab: true }, facts);
     expect(onAnswer.answerFocus).toBe(true);
     expect(resolveViewKey("", onAnswer, { downArrow: true }, facts).answerScroll).toBe(1);
+  });
+
+  it("keys before the next draw go on from one another: a held ↓ never drops a press", () => {
+    const drawn = renderLiveTurn({ messages: longAnswer, views: [], focus: null, width: 100, color: false, theme, rows: TURN_ROWS, steps });
+    const pane = { above: 0, below: drawn.answerPane!.below, page: drawn.answerPane!.shown };
+    let facts = answerOnlyFacts(pane);
+    let state = resolveViewKey("", viewFocusAfterTurnDone([], CAPS), { tab: true }, facts);
+    for (let press = 0; press < 5; press += 1) {
+      state = resolveViewKey("", state, { downArrow: true }, facts);
+      facts = factsAfterKey(facts, state);
+    }
+    expect(state.answerScroll).toBe(5);
+    expect(facts.answerPane).toEqual({ above: 5, below: pane.below - 5, page: pane.page });
+    // Past the foot the keys are spent, as against a drawn frame.
+    for (let press = 0; press < pane.below + 3; press += 1) {
+      state = resolveViewKey("", state, { downArrow: true }, facts);
+      facts = factsAfterKey(facts, state);
+    }
+    expect(state.answerScroll).toBe(pane.below);
+    expect(facts.answerPane).toEqual({ above: pane.below, below: 0, page: pane.page });
+    // A key that scrolls nothing leaves the facts as drawn.
+    expect(factsAfterKey(facts, state)).toBe(facts);
   });
 
   it("while it runs, the answer still keeps its newest lines (no more line)", () => {

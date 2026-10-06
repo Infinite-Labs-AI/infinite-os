@@ -18,6 +18,7 @@ import { VtBuffer } from "./vt-buffer.test-util.js";
 
 const ROWS = 44;
 const DOWN = "\u001b[B";
+const UP = "\u001b[A";
 
 function tallListFrame(count = 60): ToolViewFrameV1 {
   const raw = JSON.parse(readFileSync(fileURLToPath(new URL("../views/__fixtures__/list-rows.json", import.meta.url)), "utf8"));
@@ -105,6 +106,47 @@ describe("a tall turn keeps the split in a 44-row window (fake TTY; skipped on C
       await session;
     });
   }
+});
+
+describe("a held arrow key scrolls a row for every press (fake TTY; skipped on CI like the other PTY tests)", () => {
+  // A held key repeats faster than a frame draws, so the terminal hands several
+  // presses over in one read. Each one moves the pane a row: none is dropped.
+  it.skipIf(process.env.CI === "true")("five ↓ in one read move the details pane five rows", { timeout: 30_000 }, async () => {
+    const cols = 120;
+    const input = ttyInput();
+    const vt = new VtBuffer(cols, ROWS);
+    const output = ttyOutput(cols, ROWS, vt);
+    const session = runInkInteractiveSession({
+      errorOutput: ttyOutput(cols, ROWS),
+      input,
+      async onSubmitLine(line, _onProgress, _signal, onView) {
+        if (line === "/exit") return { exit: true, messages: [] };
+        onView?.(tallListFrame());
+        return { messages: [{ role: "assistant", text: "Here they are, newest first." }] };
+      },
+      output,
+      title: "Infinite TUI"
+    });
+    const below = () => Number(/↓ (\d+) more/u.exec(vt.screenText().join("\n"))?.[1] ?? -1);
+
+    await waitFor(() => output.text().includes("Ask Infinite"), 4_000, output.text);
+    await sendKeys(input, "show me every row\r");
+    await waitFor(() => vt.screenText().some((row) => /↓ \d+ more · tab, then ↓/u.test(row)), 4_000, () => vt.screenText().join("\n"));
+    const whole = below();
+    await sendKeys(input, "\t");
+    input.write(DOWN);
+    await waitFor(() => below() === whole - 1, 4_000, () => vt.screenText().join("\n"));
+    const start = below();
+
+    input.write(DOWN.repeat(5));
+    await waitFor(() => below() === start - 5, 2_000, () => `${start} -> ${below()}\n${vt.screenText().join("\n")}`);
+    input.write(UP.repeat(3));
+    await waitFor(() => below() === start - 2, 2_000, () => `${start} -> ${below()}\n${vt.screenText().join("\n")}`);
+
+    await sendKeys(input, "\x1b");
+    await sendKeys(input, "/exit\r");
+    await session;
+  });
 });
 
 function ttyInput() {

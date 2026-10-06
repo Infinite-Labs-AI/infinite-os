@@ -134,6 +134,28 @@ describe("a finished tall turn keeps the split and its keys (live L8; fake TTY, 
     }
   }
 
+  // A held key repeats faster than a frame draws, so several presses come in one read: none is dropped.
+  it.skipIf(process.env.CI === "true")("140x44: tab, tab, then five ↓ in one read scroll the answer five rows", { timeout: 30_000 }, async () => {
+    const left = paneWidths(140).left;
+    const { input, vt, session } = await start(140, 44, FIXTURES["list_sources health"]);
+    const below = () => Number(/↓ (\d+) more/u.exec(vt.screenText().map((row) => row.slice(0, left)).join("\n"))?.[1] ?? -1);
+    await sendKeys(input, "how are my sources?\r");
+    await waitFor(() => vt.screenText().some((row) => row.slice(0, left).trim() === "… more (?)"), 4_000, () => vt.screenText().join("\n"));
+    await sendKeys(input, "?");
+    await waitFor(() => below() > 0, 4_000, () => vt.screenText().join("\n"));
+    await sendKeys(input, "\t\t");
+    await waitFor(() => /↑ ↓\s+scroll/u.test(keyBar(vt)), 4_000, () => keyBar(vt));
+    const whole = below();
+    input.write(DOWN);
+    await waitFor(() => below() === whole - 1, 4_000, () => vt.screenText().join("\n"));
+    const start1 = below();
+    input.write(DOWN.repeat(5));
+    await waitFor(() => below() === start1 - 5, 2_000, () => `${start1} -> ${below()}`);
+    await sendKeys(input, "\x1b");
+    await sendKeys(input, "/exit\r");
+    await session;
+  });
+
   for (const [name, view] of Object.entries(FIXTURES)) {
     it.skipIf(process.env.CI === "true")(`79x24, ${name}: one column, the turn goes up, tab then o still opens its place`, { timeout: 30_000 }, async () => {
       const { input, vt, opened, session } = await start(79, 24, view);
