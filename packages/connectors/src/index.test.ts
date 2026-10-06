@@ -8926,7 +8926,7 @@ process.exit(1);`,
     // operation: a video upload + Meta's server-side processing routinely exceeds it and the
     // engine was killing real creates mid-flight. Budget the kill timer per media kind; every
     // other CLI call keeps the 30 s default.
-    it("creative create budgets the CLI kill timer per media kind: 600 000 ms for --video, 120 000 ms for --image, 30 000 ms elsewhere", async () => {
+    it("creative create budgets the CLI kill timer per media kind: 600 000 ms for video raw creates, 120 000 ms for --image, 30 000 ms elsewhere", async () => {
       // Observe the kill timer through the global setTimeout the connector schedules it on. The
       // media DOWNLOAD has its own 120 000 ms abort timer (META_CREATIVE_MEDIA_DOWNLOAD_TIMEOUT_MS),
       // so the counts below distinguish it from the CLI kill timer.
@@ -8939,7 +8939,9 @@ process.exit(1);`,
       try {
         await withTmp(async (dir) => {
           await withMockFetch(
-            () => new Response(Buffer.from("bytes"), { status: 200 }),
+            (url) => String(url).includes("graph.facebook.com")
+              ? new Response(JSON.stringify(String(url).endsWith("/advideos") ? {id:"321"} : {id:"321",status:{video_status:"ready"},picture:"https://cdn.example.com/thumb.jpg"}))
+              : new Response(Buffer.from("bytes"), { status: 200 }),
             async () => {
               delays.length = 0;
               await createMetaCreative(cliCredential(dir, { id: "120000000000070" }), {
@@ -8947,9 +8949,9 @@ process.exit(1);`,
                 pageId: "page_1",
                 videoUrl: "https://cdn.example.com/promo.mp4"
               });
-              // download abort timer (120 000) + CLI kill timer (600 000); never the 30 s default.
+              // Native video upload has no local-download timer; raw creative retains the video CLI deadline.
               expect(count(600_000)).toBe(1);
-              expect(count(120_000)).toBe(1);
+              expect(count(120_000)).toBe(0);
               expect(count(30_000)).toBe(0);
 
               delays.length = 0;
