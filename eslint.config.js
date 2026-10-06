@@ -28,5 +28,11 @@ module.exports = [
         require: "readonly"
       }
     }
+  },
+  {
+    files: ["packages/desktop-installer/bin/*.mjs"],
+    languageOptions: {
+      globals: { process: "readonly", URL: "readonly" }
+    }
   }
 ];
