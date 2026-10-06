@@ -15,7 +15,7 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path"
 
 import { INSTRUMENT_VERSION } from "../package-manager.js"
 import { NESTING_ENV_MARKERS } from "./contracts/agents.js"
-import { WIZARD_EXIT, exitCodeFor } from "./contracts/codes.js"
+import { WIZARD_EXIT, exitCodeFor, type WizardCode } from "./contracts/codes.js"
 import type { RunStateAccessor, WizardContext, WizardDeps, WizardOptions } from "./contracts/deps.js"
 import type { ReportV2 } from "./contracts/report.js"
 import type { WizardRunState, WizardStoreSnapshot } from "./contracts/state.js"
@@ -282,7 +282,7 @@ export async function runWizardCommand(argv: readonly string[], overrides: RunWi
   const lock = await acquireRunLock(root)
   if (!lock.ok) {
     const holder = lock.holder ? ` (pid ${lock.holder.pid} on ${lock.holder.hostname}, since ${lock.holder.startedAt})` : ""
-    io.stderr.write(`Another infinite-tag run is using this repo${holder}. Wait for it, or remove ${lock.path} if it is gone.\n`)
+    io.stderr.write(`INF_WIZ_LOCKED: Another infinite-tag run is using this repo${holder}. Wait for it, or remove ${lock.path} if it is gone.\n`)
     return exitCodeFor("INF_WIZ_LOCKED")
   }
   return runLocked({ io, wiring, options, root, appRoot, fresh, answers, lock: lock.handle, signals: overrides.signals ?? process })
@@ -355,6 +355,10 @@ async function runLocked(input: LockedRun): Promise<number> {
    * "failed" (the reason is the last thing they need).
    */
   let crashReason: string | null = null
+  let preEngineStop: { code: WizardCode; reason: string } | null = null
+  const deferredNotices: string[] = []
+  const deferNotice = (text: string): void => { deferredNotices.push(text.endsWith("\n") ? text : `${text}\n`) }
+  const deferredIo: WizardIo = { ...io, stderr: { write: deferNotice } }
   const writeCrashReason = () => {
     if (crashReason === null) return
     io.stderr.write(crashReason)
@@ -376,6 +380,7 @@ async function runLocked(input: LockedRun): Promise<number> {
         ...(state?.pr?.url ? { prUrl: state.pr.url } : {}),
         reportPath
       })
+      if (preEngineStop && store.getSnapshot().exit) store.setExit({ ...store.getSnapshot().exit!, ...preEngineStop })
       if (report) {
         const startedAt = Date.parse(state?.createdAt ?? "")
         store.setOutro(
@@ -401,6 +406,9 @@ async function runLocked(input: LockedRun): Promise<number> {
       }
       ui.stop()
       writeCrashReason()
+      if (preEngineStop && options.json) io.stderr.write(`${preEngineStop.code}: ${preEngineStop.reason}\n`)
+      for (const line of deferredNotices) io.stderr.write(line)
+      deferredNotices.length = 0
       removeHandlers()
       ttyPrompter?.close()
       await lock.release()
@@ -421,7 +429,7 @@ async function runLocked(input: LockedRun): Promise<number> {
         await finish(exitCode)
       },
       exit,
-      notice: (text) => io.stderr.write(`${text}\n`)
+      notice: deferNotice
     })
   const removeHandlers = installInterruptHandlers({
     abort: () => controller.abort(new Error("interrupted")),
@@ -433,7 +441,7 @@ async function runLocked(input: LockedRun): Promise<number> {
       await finish(WIZARD_EXIT.interrupted)
     },
     exit: (code) => io.exit(code),
-    notice: (text) => io.stderr.write(`${text}\n`),
+    notice: deferNotice,
     started: (sequence) => {
       interrupt = sequence
     }
@@ -445,6 +453,10 @@ async function runLocked(input: LockedRun): Promise<number> {
       return WIZARD_EXIT.interrupted
     }
     return finish(exitCode)
+  }
+  const stopBeforeEngine = (code: WizardCode, reason: string): Promise<number> => {
+    preEngineStop = { code, reason: reason.trim() }
+    return end(exitCodeFor(code))
   }
 
   ui.start(store)
@@ -464,8 +476,7 @@ async function runLocked(input: LockedRun): Promise<number> {
         defaultYes: false
       })
       if (yes !== true) {
-        io.stderr.write("Not started: fix or move .infinite/wizard/state.json, or answer yes to start fresh.\n")
-        return await end(exitCodeFor("INF_WIZ_NEEDS_ANSWERS"))
+        return await stopBeforeEngine("INF_WIZ_NEEDS_ANSWERS", "Not started: fix or move .infinite/wizard/state.json, or answer yes to start fresh.")
       }
       await setStateAside(root, `corrupt-${Date.now()}`)
       state = newState()
@@ -479,6 +490,8 @@ async function runLocked(input: LockedRun): Promise<number> {
       }
       state = newState()
     }
+    // A set-aside run is no longer this run, even when the new run stops before the engine starts.
+    store.setRun({ displayId: state.displayId, runId: state.runId })
 
     const createDeps = (forState: WizardRunState) =>
       wiring.createDeps({
@@ -497,9 +510,9 @@ async function runLocked(input: LockedRun): Promise<number> {
     // §3y.8 (P2-4, P3-11): `--fresh` offers to discard the set-aside run's OWN unfinished edits (never anyone
     // else's), then marks its cloud run abandoned so no run is left open at `before`.
     if (setAside) {
-      const stopped = await freshStart({ root, deps, ask: asks.ask, io, old: setAside })
-      if (stopped !== null) return await end(stopped)
-      await abandonRun(deps, setAside, io)
+      const stopped = await freshStart({ root, deps, ask: asks.ask, io: deferredIo, old: setAside })
+      if (stopped !== null) return await stopBeforeEngine("INF_WIZ_DIRTY_TREE", deferredNotices.pop() ?? "The prior run's changes could not be discarded safely.")
+      await abandonRun(deps, setAside, deferredIo)
     }
 
     // §3d.6 / §3z.5 (B25): no state file here (a fresh clone, a teammate's machine) → an OPEN wizard PR's
@@ -508,10 +521,10 @@ async function runLocked(input: LockedRun): Promise<number> {
       const rebuilt = await rebuildFromPrMarker(state, deps.host)
       if (rebuilt) {
         resuming = true
-        io.stderr.write(`Resuming the run of pull request #${rebuilt.prNumber} (${rebuilt.branch}) from its marker. To start over instead: npx infinite-tag --fresh\n`)
+        deferNotice(`Resuming the run of pull request #${rebuilt.prNumber} (${rebuilt.branch}) from its marker. To start over instead: npx infinite-tag --fresh`)
       }
     }
-    if (!resuming && options.resume) io.stderr.write("There is no unfinished run to resume here; starting a fresh one.\n")
+    if (!resuming && options.resume) deferNotice("There is no unfinished run to resume here; starting a fresh one.")
 
     // §3d.6: a resumed run whose pull request was CLOSED (not merged) cannot go on; offer a fresh run.
     // A merged PR resumes at `merge`, which records the merge commit and hands over to `prove`.
@@ -525,11 +538,10 @@ async function runLocked(input: LockedRun): Promise<number> {
           defaultYes: false
         })
         if (yes !== true) {
-          io.stderr.write(`Not resumed: the pull request #${pr.number} is closed. Reopen it and run again, or run npx infinite-tag --fresh.\n`)
-          return await end(exitCodeFor("INF_WIZ_NEEDS_ANSWERS"))
+          return await stopBeforeEngine("INF_WIZ_NEEDS_ANSWERS", `Not resumed: the pull request #${pr.number} is closed. Reopen it and run again, or run npx infinite-tag --fresh.`)
         }
         await setStateAside(root, asideSuffix(state, "pr-closed"))
-        await abandonRun(deps, state, io)
+        await abandonRun(deps, state, deferredIo)
         const previousAppRoot = state.appRoot
         state = newState()
         resuming = false
@@ -733,7 +745,7 @@ export async function runWizardUninstall(argv: readonly string[], overrides: Run
   }
   const lock = await acquireRunLock(args.root)
   if (!lock.ok) {
-    io.stderr.write(`Another infinite-tag run is using this repo. Wait for it, or remove ${lock.path} if it is gone.\n`)
+    io.stderr.write(`INF_WIZ_LOCKED: Another infinite-tag run is using this repo. Wait for it, or remove ${lock.path} if it is gone.\n`)
     return exitCodeFor("INF_WIZ_LOCKED")
   }
   const loaded = await loadRunState(nodeWizardFs, args.root)
@@ -743,6 +755,8 @@ export async function runWizardUninstall(argv: readonly string[], overrides: Run
   const ui = wiring.createUi(options.json ? "json" : "tty", store, io)
   const controller = new AbortController()
   ui.start(store)
+  const afterScreen: string[] = []
+  let resultLines: string[] = []
   const ttyPrompter = options.nested ? (wiring.ttyPrompter ? wiring.ttyPrompter() : openDevTtyPrompter()) : null
   try {
     const asks = createWizardAsks({ store, emitter, options, answers, ttyPrompter, signal: controller.signal })
@@ -788,20 +802,24 @@ export async function runWizardUninstall(argv: readonly string[], overrides: Run
       return { linkId: null, code, message }
     }
     const result = await runUninstallFlow(
-      { root: args.root, state, ask: asks.askUserOnly, link, print: (line) => io.stderr.write(`${line}\n`), now: () => deps.clock.now(), base: args.base },
+      { root: args.root, state, ask: asks.askUserOnly, link, print: (line) => options.json ? io.stderr.write(`${line}\n`) : afterScreen.push(line), now: () => deps.clock.now(), base: args.base },
       deps
     )
+    resultLines = result.lines
     store.setOutro(result.lines.join("\n"))
     // stdout carries only NDJSON in --json mode, so the per-piece lines go to stderr there.
-    for (const line of result.lines) (options.json ? io.stderr : io.stdout).write(`${line}\n`)
+    if (options.json) for (const line of result.lines) io.stderr.write(`${line}\n`)
     emitter.emit("run.end", { exitCode: result.exitCode, runId: state?.runId ?? null, ...(result.record?.pr ? { prUrl: result.record.pr.url } : {}), reportPath: null })
     return result.exitCode
   } catch (error) {
-    io.stderr.write(`Internal error: ${error instanceof Error ? error.message : String(error)}\n`)
+    const message = `Internal error: ${error instanceof Error ? error.message : String(error)}\n`
+    if (options.json) io.stderr.write(message)
+    else afterScreen.push(message)
     return WIZARD_EXIT.failed
   } finally {
     emitter.dispose()
     ui.stop()
+    if (!options.json) for (const line of afterScreen) if (!resultLines.includes(line)) io.stderr.write(line.endsWith("\n") ? line : `${line}\n`)
     ttyPrompter?.close()
     await lock.handle.release()
   }

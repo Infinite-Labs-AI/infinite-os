@@ -133,8 +133,8 @@ export class TtyUi implements WizardUi {
             exitCode: snapshot.exit.exitCode,
             prUrl: snapshot.exit.prUrl === null ? null : this.options.sanitize(snapshot.exit.prUrl, 400),
             reportPath: snapshot.exit.reportPath === null ? null : this.options.sanitize(snapshot.exit.reportPath, 400),
-            code: stopped?.code ?? null,
-            reason: stopped?.status ? this.options.sanitize(stopped.status, 1_000) : null
+            code: snapshot.exit.code ?? stopped?.code ?? null,
+            reason: snapshot.exit.reason ? this.options.sanitize(snapshot.exit.reason, 1_000) : stopped?.status ? this.options.sanitize(stopped.status, 1_000) : null
           },
           this.styles,
           frameSize(this.options.stdout).width

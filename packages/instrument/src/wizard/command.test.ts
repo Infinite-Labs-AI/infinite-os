@@ -5,6 +5,12 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { createFakeHost, fakeDeps, fakeStepRecord, prSummary, type StepBehaviour } from "../../test/wizard/runtime-fakes.js"
+import { FakeStdin, FakeStdout, makeTestSanitizer } from "../../test/wizard/fake-store.js"
+import { createGitFixture } from "../../test/wizard/git-fixture.js"
+import { createGitOps } from "../git/index.js"
+import { makeEditRecord } from "../install/edits.js"
+import { SEQ, stripAnsi } from "../tui/ansi.js"
+import { TtyUi } from "../tui/tty-ui.js"
 import { INSTRUMENT_VERSION } from "../package-manager.js"
 import type { AskPayloads, PlanLine } from "./contracts/asks.js"
 import type { WizardOptions } from "./contracts/deps.js"
@@ -87,6 +93,27 @@ function fakeWiring(
     engine: { steps: fakeStepRecord(steps, ran), afterStep: async () => {} }
   }
   return { wiring, createdWith, bundle }
+}
+
+/** The real alternate-screen exit line, with the fake wiring's automatic answers. */
+function ttyHarness(root: string, steps: Partial<Record<WizardStepId, StepBehaviour>> = {}, answer: (kind: string, payload: unknown) => unknown = () => false) {
+  const { io, err } = fakeIo(root, { tty: true })
+  const stdin = new FakeStdin()
+  const stdout = new FakeStdout(100, 35)
+  const sequence: string[] = []
+  const originalWrite = stdout.write.bind(stdout)
+  stdout.write = (text) => { if (text.includes(SEQ.leaveAltScreen)) sequence.push("left alternate screen"); return originalWrite(text) }
+  io.stderr.write = (text) => { err.push(text); sequence.push(`stderr: ${text}`) }
+  io.stdin = stdin
+  io.stdout = stdout
+  const spy = fakeWiring(steps, answer)
+  const base = spy.wiring.createUi.bind(spy.wiring)
+  spy.wiring.createUi = (kind, store, uiIo) => {
+    const answers = base(kind, store, uiIo)
+    const screen = new TtyUi({ stdin, stdout, env: {}, sanitize: makeTestSanitizer(), spinnerIntervalMs: 0, registerExitHook: false })
+    return { start: (started) => { answers.start(started); screen.start(started) }, stop: () => { screen.stop(); answers.stop() } }
+  }
+  return { io, wiring: spy.wiring, tail: () => stripAnsi(stdout.chunks.at(-1) ?? ""), err, sequence, spy }
 }
 
 describe("routing and flags", () => {
@@ -198,6 +225,80 @@ describe("a --json run", () => {
     expect(await runWizardCommand(["--json", "--yes"], { io, wiring: spy.wiring })).toBe(3)
     expect(ran.at(-1)).toBe("plan")
     expect(ran).not.toContain("install")
+  })
+})
+
+describe("TTY stops before the engine", () => {
+  const oldId = "11f15f98-0000-4000-8000-000000000003"
+  const oldBranch = "infinite/tag/2026-10-03-11f15f"
+  function dirtyOldRun() {
+    const fx = createGitFixture({ files: { "README.md": "# Before\n" } })
+    roots.push(fx.dir)
+    fx.git(["checkout", "-q", "-b", oldBranch])
+    fx.write("README.md", "# After\n")
+    const record = makeEditRecord({ file: "README.md", before: "# Before\n", after: "# After\n", jobId: "setup_check_fixes", planLineId: "fix", by: "agent", runId: oldId })
+    fx.write(".infinite/install.json", JSON.stringify({ workspaceId: "wizard:fixture", edits: [record] }))
+    const state = createRunState({ tagVersion: "0.12.0", root: fx.root, appRoot: ".", now: new Date("2026-10-03T05:20:00Z"), displayId: "r-old1" })
+    state.runId = oldId
+    state.git = { base: "main", baseSource: "default_branch", branch: oldBranch, baseSha: fx.git(["rev-parse", "main"]).trim(), headSha: null }
+    fx.write(".infinite/wizard/state.json", JSON.stringify(state))
+    const tty = ttyHarness(fx.root)
+    tty.spy.bundle.deps.git = createGitOps({ cwd: fx.root, env: fx.env, worktreeRoot: join(fx.dir, "worktrees") })
+    return { fx, tty }
+  }
+
+  it("shows a corrupt-state refusal with its code and sentence after leaving the alternate screen", async () => {
+    const root = tempDir("wizard-cmd-tty-")
+    mkdirSync(join(root, ".infinite/wizard"), { recursive: true })
+    writeFileSync(join(root, ".infinite/wizard/state.json"), "{ broken")
+    const tty = ttyHarness(root)
+    expect(await runWizardCommand([], { io: tty.io, wiring: tty.wiring, signals: fakeSignals() })).toBe(3)
+    expect(tty.tail()).toContain("INF_WIZ_NEEDS_ANSWERS")
+    expect(tty.tail()).toContain("Not started: fix or move")
+  })
+
+  it.each([
+    ["unrelated dirty path", "other", "Commit or stash your changes first (NOTES.md)"],
+    ["wrong branch", "branch", "Commit or stash your changes first (README.md)"],
+    ["declined discard", "decline", "Not started: your last run's own changes are still there"]
+  ])("shows the fresh-start %s reason and never labels the set-aside run as the current run", async (_label, variant, sentence) => {
+    const { fx, tty } = dirtyOldRun()
+    if (variant === "other") fx.write("NOTES.md", "my notes\n")
+    if (variant === "branch") fx.git(["switch", "-q", "-c", "another-branch"])
+    expect(await runWizardCommand(["--fresh"], { io: tty.io, wiring: tty.wiring, signals: fakeSignals() })).toBe(2)
+    expect(tty.tail()).toContain("INF_WIZ_DIRTY_TREE")
+    expect(tty.tail()).toContain(sentence)
+    expect(tty.tail()).not.toContain("r-old1")
+  })
+
+  it("keeps the no-unfinished-run resume notice visible after the TTY closes", async () => {
+    const root = tempDir("wizard-cmd-tty-")
+    const tty = ttyHarness(root)
+    const lines: string[] = []
+    tty.io.stderr.write = (text) => { lines.push(text) }
+    expect(await runWizardCommand(["--resume"], { io: tty.io, wiring: tty.wiring, signals: fakeSignals() })).toBe(0)
+    expect(lines.join("")).toContain("There is no unfinished run to resume here")
+  })
+
+  it("a held lock is reported with its code and sentence before any alternate screen starts", async () => {
+    const root = tempDir("wizard-cmd-tty-")
+    const held = await acquireRunLock(root)
+    if (!held.ok) throw new Error("expected the lock")
+    try {
+      const { io, err } = fakeIo(root, { tty: true })
+      expect(await runWizardCommand([], { io, wiring: fakeWiring({}).wiring, signals: fakeSignals() })).toBe(2)
+      expect(err.join("")).toContain("INF_WIZ_LOCKED: Another infinite-tag run is using this repo")
+    } finally {
+      await held.handle.release()
+    }
+  })
+
+  it("uninstall writes an internal stop after leaving the TTY screen", async () => {
+    const root = tempDir("wizard-cmd-tty-")
+    const tty = ttyHarness(root)
+    tty.wiring.createDeps = async () => { throw new Error("fixture dependency failure") }
+    expect(await runWizardUninstall(["--pr", "--base", "main"], { io: tty.io, wiring: tty.wiring })).toBe(1)
+    expect(tty.sequence).toEqual(["left alternate screen", expect.stringContaining("Internal error: fixture dependency failure")])
   })
 })
 
@@ -742,6 +843,16 @@ describe("a resumed run whose PR was closed offers a fresh run; --fresh sets a r
     expect(ran).toEqual([])
     expect(err.join("")).toContain("--fresh")
     expect(readFileSync(join(root, ".infinite/wizard/state.json"), "utf8")).toBe(before)
+  })
+
+  it("TTY closed-PR refusal leaves its code and next step in scrollback", async () => {
+    const root = tempDir("wizard-cmd-tty-")
+    savedRunWithPr(root)
+    const tty = ttyHarness(root)
+    tty.spy.bundle.deps.host = createFakeHost(tty.spy.bundle.log, { readPr: prSummary({ number: 42, state: "CLOSED" }) })
+    expect(await runWizardCommand([], { io: tty.io, wiring: tty.wiring, signals: fakeSignals() })).toBe(3)
+    expect(tty.tail()).toContain("INF_WIZ_NEEDS_ANSWERS")
+    expect(tty.tail()).toContain("Not resumed: the pull request #42 is closed")
   })
 
   it("yes → a fresh run from step 0; the closed run is kept aside", async () => {

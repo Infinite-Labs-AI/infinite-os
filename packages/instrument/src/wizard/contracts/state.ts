@@ -237,7 +237,7 @@ export interface WizardStoreSnapshot {
   /** At most one pending ask (a second throws). */
   pendingAsk: { askId: string; kind: AskKind; payload: unknown } | null
   outro: string | null
-  exit: { exitCode: number; prUrl: string | null; reportPath: string | null } | null
+  exit: { exitCode: number; prUrl: string | null; reportPath: string | null; code?: string | null; reason?: string | null } | null
 }
 
 // ---- shapes ----
