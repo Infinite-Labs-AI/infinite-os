@@ -40,7 +40,7 @@ describe("step link", () => {
     expect(harness.state().link).toEqual({ linkId: "lk_FAKElinkAcmeStore00000", workspaceName: "Acme", approvedAt: "2026-10-02T09:01:00.000Z", runtimeVariant: "prod" })
     expect(harness.saves).toBe(1)
     expect(client.currentLinkId()).toBe("lk_FAKElinkAcmeStore00000")
-    expect(harness.subs()).toContain("✓ Remembered · workspace Acme")
+    expect(harness.subs()).toContain("✓ Saved approval reused · linked to workspace Acme")
     // Order: status → link.request → the first link-scoped call (the subscription check). No run is created.
     expect(bridge.calls.map((call) => call.verb)).toEqual(["status", "link.request", "keys"])
   })

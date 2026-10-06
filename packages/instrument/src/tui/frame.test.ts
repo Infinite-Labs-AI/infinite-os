@@ -24,6 +24,40 @@ function frame(change: Partial<FrameInput> = {}): string[] {
 const plain = (lines: string[]) => lines.map((line) => stripAnsi(line).replace(/\s+$/, "")).join("\n")
 
 describe("renderFrame", () => {
+  it("names the linked workspace in the header and labels who is acting", () => {
+    const base = midRunSnapshot()
+    const snapshot = midRunSnapshot({
+      learnFacts: { workspace: "Example Workspace" },
+      currentStep: "settings",
+      steps: base.steps.map((row) => row.id === "settings" ? { ...row, state: "running" as const } : row)
+    })
+    const text = plain(frame({ snapshot }))
+    expect(text.split("\n")[0]).toContain("Infinite setup · Example Workspace")
+    expect(text).toContain("by Infinite")
+    expect(plain(frame())).toContain("by your agent")
+  })
+
+  it("shows review-fix phase, fix rows and a moving bar instead of the old Thinking narration", () => {
+    const base = midRunSnapshot()
+    const snapshot = midRunSnapshot({
+      currentStep: "review",
+      steps: base.steps.map((row, index) => row.id === "review" ? { ...row, state: "running" as const, startedAt: "2026-10-02T09:00:00.000Z", status: "Writing the changes · job 2 of 2 · 3 files read · 1 edited · thinking 0 s · 1 of 2 claimed · 5 of 10 min" } : index < 9 ? { ...row, state: "ok" as const } : row),
+      narration: [{ agent: "claude_code", role: "worker", text: "Thinking · 9 s · 2 of 2 claimed", at: "2026-10-02T09:05:00.000Z" }],
+      jobs: [
+        { id: "preview_guard:meta", title: "Old guard job", state: "blocked" },
+        { id: "review_comments:f1", title: "Fix comment one", state: "done_in_code" },
+        { id: "review_comments:f2", title: "Fix comment two", state: "checking" }
+      ]
+    })
+    const text = plain(frame({ snapshot, nowMs: Date.parse("2026-10-02T09:05:00.000Z") }))
+    expect(text).toContain("Writing the changes · job 2 of 2")
+    expect(text).toContain("Fix comment one")
+    expect(text).toContain("Fix comment two")
+    expect(text).not.toContain("Old guard job")
+    expect(text).not.toContain("Claude Code › Thinking")
+    expect(Number(/(\d+)%/.exec(text)?.[1])).toBeGreaterThan(9 / 13 * 100)
+  })
+
   it("names pending proof, not-needed, blocked and unmeasured rows plainly", () => {
     const snapshot = midRunSnapshot({ jobs: [
       { id: "a", title: "Deploy proof", state: "waiting_deploy" },

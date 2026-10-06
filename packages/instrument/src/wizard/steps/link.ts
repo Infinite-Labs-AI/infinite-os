@@ -186,7 +186,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
           continue
         }
         link = request.link
-        sub(ctx, "link", `✓ Remembered · workspace ${link.workspace.name}`, "ok")
+        sub(ctx, "link", `✓ Saved approval reused · linked to workspace ${link.workspace.name}`, "ok")
         break
       }
       sub(ctx, "link", "Waiting for approval in the Infinite app…", "pending")

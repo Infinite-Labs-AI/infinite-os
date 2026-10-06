@@ -37,6 +37,7 @@ import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
 import { git } from "../../agents/git-exec.js"
 import { reanchorEvidence } from "../../jobs/reanchor.js"
 import { buildVerdict, isBuildOutputPath } from "../../checks/build.js"
+import { agentStatusLine } from "../agent-status.js"
 import {
   disposeSeal,
   Fence,
@@ -258,7 +259,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     const liveStatus = () => {
       const active = phase === "Checking its work" ? lastClaim : open.find((item) => !claimedNow.has(item.id))?.id
       const position = active ? open.findIndex((item) => item.id === active) + 1 : open.length
-      return `${phase} · job ${Math.max(1, position)} of ${open.length} · ${read.size} files read · ${edited.size} edited · thinking ${thinking} s · ${claimedNow.size} of ${open.length} claimed · ${minutesWords(deps.clock.now().getTime() - started)} of ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min`
+      return agentStatusLine({ phase, position: Math.max(1, position), total: open.length, read: read.size, edited: edited.size, thinking, claimed: claimedNow.size, elapsedMs: deps.clock.now().getTime() - started, budgetMs: AGENT_LIMITS.jobs.wallMs })
     }
     try {
       result = await deps.agents.runJobs({

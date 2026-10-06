@@ -10,7 +10,7 @@ exports[`renderFrame > 70 columns: the Learn card is dropped and no line runs pa
  ■ Keys from Infinite
  ■ Plan + your decisions
  ■ Install
- ⠋ Agent jobs  your agent
+ ⠋ Agent jobs  by your agent
  □ Infinite settings
  □ Draft PR + rehearsal
  □ Second-agent review
@@ -41,7 +41,7 @@ exports[`renderFrame > 120 columns: Learn card beside the 13-row step list, the 
  Code check ··········· wizard runs it    ■ Keys from Infinite
  Build + offline test · wizard runs it    ■ Plan + your decisions
  Live test ··············· after merge    ■ Install
-                                          ⠋ Agent jobs  your agent
+                                          ⠋ Agent jobs  by your agent
                                           □ Infinite settings
                                           □ Draft PR + rehearsal
                                           □ Second-agent review
@@ -70,7 +70,7 @@ exports[`renderFrame > draws the pending ask as one overlay box in place of the 
  Everything else is done for you.         ■ Pick the agent
  Consent ······················· legal    ■ Check the live site
  Conversion names ·········· your data    ■ Keys from Infinite
- Privacy text ·················· legal    ⠋ Plan + your decisions  you
+ Privacy text ·················· legal    ⠋ Plan + your decisions  by you
  Merging ···················· shipping    □ Install
                                           □ Agent jobs
                                           □ Infinite settings

@@ -13,7 +13,8 @@ import { JOB_TABLE, type ChecklistItem, type CheckResult, type JobId } from "../
 import type { WizardStepId } from "../wizard/contracts/steps.js"
 import { buildVerdict } from "../checks/build.js"
 import { sub } from "./context.js"
-import { FIX_ROUND_MINUTES, stripControl } from "./post.js"
+import { stripControl } from "./post.js"
+import { agentStatusLine } from "../wizard/agent-status.js"
 import type { Scanner } from "./scan.js"
 import { itemT0Scenarios, runItemT0, t0RunParams } from "../wizard/item-t0.js"
 import type { TriageDecision } from "./triage.js"
@@ -81,14 +82,20 @@ export async function runFixRound(
   const items = input.items.map((item) => ({ ...item }))
   const brief = [deps.registry.brief(items), input.extraBrief ?? ""].filter(Boolean).join("\n\n")
   const clean = (text: string, max: number) => input.scanner.redact(stripControl(text)).text.slice(0, max)
-  // LF4-P3-4: the thinking beat carries how many fixes are claimed so far and how much of the round's budget is gone,
-  // like the jobs step's (a bare "Thinking · N s" over a 10-minute round said nothing about progress).
+  // Tool activity, not narration or report_progress prose, controls the phase and counters.
   const started = deps.clock.now().getTime()
   const claimedNow = new Set<string>()
-  const progress = (text: string) =>
-    /^Thinking · /.test(text)
-      ? `${text} · ${claimedNow.size} of ${items.length} claimed · ${Math.max(0, Math.floor((deps.clock.now().getTime() - started) / 60_000))} of ${FIX_ROUND_MINUTES} min`
-      : text
+  const read = new Set<string>()
+  const edited = new Set<string>()
+  let thinking = 0
+  let phase: "Reading your code" | "Writing the changes" | "Checking its work" = "Reading your code"
+  let lastClaim: string | null = null
+  const status = () => {
+    const active = phase === "Checking its work" ? lastClaim : items.find((item) => !claimedNow.has(item.id))?.id
+    const position = active ? items.findIndex((item) => item.id === active) + 1 : items.length
+    ctx.emit.emit("step.status", { step: input.step, text: agentStatusLine({ phase, position: Math.max(1, position), total: items.length, read: read.size, edited: edited.size, thinking, claimed: claimedNow.size, elapsedMs: deps.clock.now().getTime() - started, budgetMs: AGENT_LIMITS.reviewFix.wallMsPerRound }) })
+  }
+  status()
   const run = await deps.agents.runJobs({
     items,
     brief,
@@ -97,6 +104,10 @@ export async function runFixRound(
       const item = items.find((candidate) => candidate.id === claim.jobId)
       const note = clean(claim.note, 500)
       claimedNow.add(claim.jobId)
+      lastClaim = claim.jobId
+      phase = "Checking its work"
+      thinking = 0
+      status()
       if (item) {
         item.claim = { status: claim.status, note, at: claim.at }
         item.state = "claimed"
@@ -110,8 +121,14 @@ export async function runFixRound(
     onProgress(progress) {
       sub(ctx, input.step, clean(progress.text, 120), "info")
     },
+    onActivity(activity) {
+      if (activity.kind === "thinking") thinking = activity.seconds
+      else if (activity.kind === "read") { read.add(activity.path); phase = "Reading your code"; thinking = 0 }
+      else { edited.add(activity.path); phase = "Writing the changes"; thinking = 0 }
+      status()
+    },
     onNarrate(beat) {
-      ctx.emit.emit("narrate", { agent: beat.agent, role: beat.role, text: progress(clean(beat.text, 120)) })
+      ctx.emit.emit("narrate", { agent: beat.agent, role: beat.role, text: clean(beat.text, 120) })
     }
   })
   // The edits are NOT recorded here: the caller records them only once the wizard's checks pass and they are about

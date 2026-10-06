@@ -1,5 +1,4 @@
-// LF4-P3-4: a review fix round narrates like the jobs step: "Thinking · N s" carries the fixes claimed so far and the
-// minutes used of the round's budget (live run 4's 5-minute round printed a bare "Thinking · N s" and fixed 0 of 5).
+// A review fix round uses the same trusted phase/count status as the jobs step.
 import { describe, expect, it } from "vitest"
 
 import { agentItem, baseState, fakeBridge, makeCtx, makeDeps } from "../../test/wizard/agent-step-harness.js"
@@ -8,8 +7,8 @@ import { runFixRound } from "./fix.js"
 import { FIX_ROUND_MINUTES } from "./post.js"
 import { createScanner } from "./scan.js"
 
-describe("LF4-P3-4: the fix round's thinking beat", () => {
-  it("carries claims so far and the minutes used of FIX_ROUND_MINUTES; other beats pass as said", async () => {
+describe("the review fix round's activity status", () => {
+  it("counts tool activity and claims, and returns to writing after a claim", async () => {
     let t = Date.parse("2026-10-03T21:00:00.000Z")
     const clock = { now: () => new Date(t), sleep: async () => undefined }
     const items = [agentItem("review_comments:f1", ["app/signup/page.tsx"]), agentItem("review_comments:f2", ["app/layout.tsx"])]
@@ -19,10 +18,14 @@ describe("LF4-P3-4: the fix round's thinking beat", () => {
       detect: async () => ({ worker: null, reviewer: null, available: [] }),
       review: async () => ({ error: "unparseable" as const }),
       runJobs: async (input: Parameters<AgentRunnerImpl["runJobs"]>[0]) => {
+        input.onActivity?.({ kind: "read", path: "app/signup/page.tsx" })
+        input.onActivity?.({ kind: "thinking", seconds: 30 })
         input.onNarrate({ agent: "claude_code", role: "worker", text: "Thinking · 30 s" })
         input.onClaim({ jobId: "review_comments:f1", status: "done", note: "moved the call", at: "2026-10-03T21:03:00.000Z" })
         t += 3 * 60_000 + 5_000
+        input.onActivity?.({ kind: "thinking", seconds: 215 })
         input.onNarrate({ agent: "claude_code", role: "worker", text: "Thinking · 215 s" })
+        input.onActivity?.({ kind: "edit", path: "app/layout.tsx" })
         input.onNarrate({ agent: "claude_code", role: "worker", text: "Editing app/layout.tsx" })
         return { outcome: "completed" as const, session: { kind: "claude" as const, sessionId: "s" }, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [] }
       }
@@ -33,10 +36,9 @@ describe("LF4-P3-4: the fix round's thinking beat", () => {
     const scanner = createScanner({ literals: [], allowedIds: [] })
     await runFixRound(ctx, deps, { step: "review", worker: "claude_code", items, scanner })
     const beats = recorded.events.filter((event) => event.type === "narrate").map((event) => (event.fields as { text: string }).text)
-    expect(beats).toEqual([
-      `Thinking · 30 s · 0 of 2 claimed · 0 of ${FIX_ROUND_MINUTES} min`,
-      `Thinking · 215 s · 1 of 2 claimed · 3 of ${FIX_ROUND_MINUTES} min`,
-      "Editing app/layout.tsx"
-    ])
+    expect(beats).toEqual(["Thinking · 30 s", "Thinking · 215 s", "Editing app/layout.tsx"])
+    const statuses = recorded.events.filter((event) => event.type === "step.status").map((event) => (event.fields as { text: string }).text)
+    expect(statuses).toContain(`Checking its work · job 1 of 2 · 1 files read · 0 edited · thinking 0 s · 1 of 2 claimed · 0 of ${FIX_ROUND_MINUTES} min`)
+    expect(statuses.at(-1)).toBe(`Writing the changes · job 2 of 2 · 1 files read · 1 edited · thinking 0 s · 1 of 2 claimed · 3 of ${FIX_ROUND_MINUTES} min`)
   })
 })

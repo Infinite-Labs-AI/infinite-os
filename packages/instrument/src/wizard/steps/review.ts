@@ -9,6 +9,8 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
 import type { AgentKind, AgentRunResult, ReviewFailure, ReviewResult } from "../contracts/agents.js"
+import { AGENT_LIMITS, REVIEW_ITEMS } from "../contracts/agents.js"
+import { agentStatusLine } from "../agent-status.js"
 import { runExtras } from "../../agents/runner.js"
 import type { StepOutcome, WizardContext, WizardDeps, WizardStep } from "../contracts/deps.js"
 import { PR_LOOP_LIMITS, PR_MARKERS } from "../contracts/git-host.js"
@@ -234,11 +236,24 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
     // The headline names who is working NOW (terminal QA #19: the worker's last line from the jobs or fix turn
     // stayed above "Codex is reviewing").
     ctx.emit.emit("narrate", { agent: reviewer, role: "reviewer", text: round > 1 ? "Reading the fix commit (read-only)" : "Reading the pull request (read-only)" })
+    const started = deps.clock.now().getTime()
+    const read = new Set<string>()
+    const edited = new Set<string>()
+    let thinking = 0
+    let phase = "Reading the pull request"
+    const showStatus = () => ctx.emit.emit("step.status", { step: "review", text: `${agentStatusLine({ phase, read: read.size, edited: edited.size, thinking, elapsedMs: deps.clock.now().getTime() - started, budgetMs: AGENT_LIMITS.reviewer.wallMs })} · ${REVIEW_ITEMS.length} checklist items` })
+    showStatus()
     const once = async (text: string): Promise<ReviewResult | ReviewFailure> => {
       const onNarrate = (beat: { agent: AgentKind; role: "reviewer"; text: string }) => ctx.emit.emit("narrate", beat)
-      let result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: text, onNarrate })
+      const onActivity: NonNullable<Parameters<WizardDeps["agents"]["review"]>[0]["onActivity"]> = (activity) => {
+        if (activity.kind === "thinking") thinking = activity.seconds
+        else if (activity.kind === "read") { read.add(activity.path); phase = "Reading the pull request"; thinking = 0 }
+        else { edited.add(activity.path); phase = "Writing the changes"; thinking = 0 }
+        showStatus()
+      }
+      let result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: text, onNarrate, onActivity })
       if ("error" in result && result.error === "unparseable") {
-        result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: `${text}\n\nYour previous answer did not match the JSON schema. Return JSON only, exactly matching it.`, onNarrate })
+        result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: `${text}\n\nYour previous answer did not match the JSON schema. Return JSON only, exactly matching it.`, onNarrate, onActivity })
       }
       // Belt and braces: whatever the runner parsed must match review.schema.json before anything is posted.
       if (!("error" in result) && !isReviewResult(result)) return { error: "unparseable" }
@@ -590,7 +605,7 @@ const CHECKS_WAIT_MS = 10 * 60_000
 const CHECKS_EMPTY_GRACE_MS = 60_000
 
 /**
- * Job 16's `pr_checks_pass` (S) on the pushed fix: polls `gh pr checks --required` until they settle (every 30 s,
+ * Job 16's `pr_checks_pass` (S) on the pushed fix: polls all reported PR checks until they settle (every 30 s,
  * ≤ 10 minutes). No required check on the branch (still none after a minute) → pass ("none required"); a failing
  * one → problem; still running at the end, or unreadable → undetermined (never pass).
  */
@@ -600,16 +615,16 @@ async function requiredChecksResult(session: Session, runId: string): Promise<Ch
   const started = deps.clock.now().getTime()
   const result = (state: CheckResult["state"], reason: string): CheckResult => ({ checkId: "pr_checks_pass", tier: "S", state, reason, at: ctx.now().toISOString(), runId })
   let read = false
-  sub(ctx, "review", "Waiting for the required checks on the new commit…", "pending")
+  sub(ctx, "review", "Checking the new commit's CI checks…", "pending")
   for (;;) {
     const elapsed = deps.clock.now().getTime() - started
     const checks = await github.checks(number).catch(() => null)
     if (checks !== null && !isUnsupported(checks)) {
       read = true
       const summary = checksSummary(checks)
-      if (summary.fail > 0) return result("problem", `${summary.fail} required check(s) failing`)
-      if (summary.total > 0 && summary.pending === 0) return result("pass", `${summary.pass} required check(s) pass`)
-      if (summary.total === 0 && elapsed >= CHECKS_EMPTY_GRACE_MS) return result("pass", "no required checks on this branch")
+      if (summary.fail > 0) return result("problem", `Failed PR checks: ${checks.filter((check) => check.bucket === "fail" || check.bucket === "cancel").map((check) => check.name).join(", ")}`)
+      if (summary.total > 0 && summary.pending === 0) return result("pass", `${summary.pass} PR check(s) pass`)
+      if (summary.total === 0 && elapsed >= CHECKS_EMPTY_GRACE_MS) return result("pass", "no PR checks reported on this branch")
     }
     if (ctx.signal.aborted || elapsed + CHECKS_POLL_MS > CHECKS_WAIT_MS) return result("undetermined", read ? "checks pending" : "checks unreadable")
     await deps.clock.sleep(CHECKS_POLL_MS, ctx.signal)
@@ -651,7 +666,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     const checks = await session.github.checks(session.number).catch(() => [])
     if (!isUnsupported(checks) && checks.length > 0) {
       const summary = checksSummary(checks)
-      session.notes.push(`Required checks: ${summary.pass} pass · ${summary.fail} fail · ${summary.pending} pending.`)
+      session.notes.push(`PR checks: ${summary.pass} pass · ${summary.fail} fail · ${summary.pending} pending.`)
     }
   }
   const report = deps.report.build({
@@ -1005,6 +1020,18 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
           sub(ctx, "review", `${AGENT_LABEL[worker]} fixed ${items.length} comment${items.length === 1 ? "" : "s"} · new commit ${commit.sha.slice(0, 7)}`, "ok")
           const checksResult = await requiredChecksResult(session, prepared.runId)
           if (checksResult) finalItems = deps.registry.apply(finalItems, [checksResult], prepared.runId)
+          if (checksResult?.state === "problem") {
+            ctx.state.update((draft) => {
+              const known = new Set(draft.jobs.map((job) => job.id))
+              draft.jobs = [...draft.jobs.map((job) => finalItems.find((item) => item.id === job.id) ?? job), ...finalItems.filter((item) => !known.has(item.id))]
+            })
+            session.ledger.rounds[session.ledger.rounds.length - 1]!.fixSha = fixSha
+            await saveLedger(session)
+            await ctx.state.save()
+            const reason = prepared.scanner.redact(checksResult.reason ?? "a PR check failed").text
+            sub(ctx, "review", `PR check failed: ${reason}`, "warn")
+            return failed("INF_WIZ_VALIDATION_FAILED", `The new commit failed a PR check (${reason}). The pull request stays draft; fix the check, then resume.`)
+          }
           for (const [index, decision] of fixes.entries()) {
             const item = finalItems.find((candidate) => candidate.id === items[index]!.id)
             const committedFile = item ? commit.staged.includes(item.allow.files[0] ?? "") : false

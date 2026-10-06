@@ -59,10 +59,10 @@ function owner(who: readonly Who[]): Who {
 }
 
 function chip(who: Who, styles: Styles): string {
-  if (who === "agent") return styles.agent("your agent")
-  if (who === "you") return styles.you("you")
-  if (who === "infinite") return styles.infinite("Infinite")
-  return ""
+  if (who === "agent") return styles.agent("by your agent")
+  if (who === "you") return styles.you("by you")
+  if (who === "infinite") return styles.infinite("by Infinite")
+  return styles.dim("by wizard")
 }
 
 function stepMark(row: StoreStepRow, spinner: string, styles: Styles): string {
@@ -94,11 +94,13 @@ function subParts(text: string, tone: StoreStepRow["subs"][number]["tone"]): { t
 function header(input: FrameInput, width: number): string {
   const s = input.styles
   const run = input.snapshot.run
-  const left = ` Infinite setup · infinite-tag ${run.tagVersion}`
+  const workspace = input.snapshot.learnFacts?.workspace ? ` · ${input.sanitize(input.snapshot.learnFacts.workspace, 60)}` : ""
+  const left = ` Infinite setup${workspace} · infinite-tag ${run.tagVersion}`
   const variant = run.runtimeVariant && run.runtimeVariant !== "prod" ? ` · Infinite ${run.runtimeVariant}` : ""
   const right = `run ${run.displayId}${variant} `
-  const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right))
-  return s.inverse(fit(`${left}${" ".repeat(gap)}${right}`, width))
+  const shownLeft = truncate(left, Math.max(1, width - visibleWidth(right) - 1))
+  const gap = Math.max(1, width - visibleWidth(shownLeft) - visibleWidth(right))
+  return s.inverse(fit(`${shownLeft}${" ".repeat(gap)}${right}`, width))
 }
 
 function taskLines(input: FrameInput, width: number): { rows: string[]; currentIndex: number; progress: string } {
@@ -126,9 +128,9 @@ function taskLines(input: FrameInput, width: number): { rows: string[]; currentI
   })
   const finished = snapshot.steps.filter((row) => row.state !== "pending" && row.state !== "running").length
   const total = WIZARD_STEP_IDS.length
-  const running = snapshot.steps.find((row) => row.state === "running")
+  const running = snapshot.steps.find((row) => row.id === snapshot.currentStep && row.state === "running") ?? snapshot.steps.find((row) => row.state === "running")
   const elapsed = running?.startedAt ? Math.max(0, (input.nowMs ?? Date.now()) - new Date(running.startedAt).getTime()) : 0
-  const budget = running?.id === "jobs" ? 20 * 60_000 : running?.id === "link" ? 6 * 60_000 : running?.id === "prove" ? 45 * 60_000 : 60_000
+  const budget = running?.id === "jobs" ? 20 * 60_000 : running?.id === "review" || running?.id === "rehearsal" ? 10 * 60_000 : running?.id === "link" ? 6 * 60_000 : running?.id === "prove" ? 45 * 60_000 : 60_000
   const timeFraction = Math.min(0.95, elapsed / budget)
   const jobs = snapshot.jobs ?? []
   const settled = Math.max(snapshot.jobsSettledHighWater ?? 0, jobs.filter((job) => ["done_in_code", "waiting_deploy", "waiting_real_event", "proven", "not_needed", "failed", "blocked"].includes(job.state)).length)
@@ -183,7 +185,7 @@ function liveLines(input: FrameInput, width: number, feedLines: number = FEED_LI
   const meta = WIZARD_STEP_META[row.id]
   const lines: string[] = []
   const narration = snapshot.narration[snapshot.narration.length - 1]
-  if (row.id === "jobs" && row.state === "running" && row.status) {
+  if (row.state === "running" && meta.who.includes("agent") && row.status) {
     lines.push(...wrapRows(`${s.accent("◆")} ${sanitize(row.status, EVENT_LIMITS.statusTextMaxChars)}`, width, 2, STATUS_ROWS_MAX))
   } else if (row.state === "running" && meta.who.includes("agent") && narration) {
     lines.push(...wrapRows(`${s.agent(`${AGENT_LABEL[narration.agent]} ›`)} ${sanitize(narration.text, EVENT_LIMITS.narrateTextMaxChars)}`, width, 2, STATUS_ROWS_MAX))
@@ -192,12 +194,13 @@ function liveLines(input: FrameInput, width: number, feedLines: number = FEED_LI
   } else {
     lines.push(...wrapRows(`${s.accent("◆")} ${s.dim(STEP_COPY[row.id].what)}`, width, 2, STATUS_ROWS_MAX))
   }
-  if (row.id === "jobs" && (snapshot.jobs?.length ?? 0) > 0) {
+  const shownJobs = row.id === "jobs" ? (snapshot.jobs ?? []) : row.id === "review" ? (snapshot.jobs ?? []).filter((job) => job.id.startsWith("review_comments:")) : row.id === "rehearsal" ? (snapshot.jobs ?? []).filter((job) => job.id.startsWith("build_fix:")) : []
+  if (shownJobs.length > 0) {
     const labels = { waiting: "waiting", agent_claim: "agent claims done", agent_blocked: "agent says blocked", agent_not_needed: "agent says not needed", checking: "wizard checking", could_not_check: "could not be checked", done_in_code: "passed in code", waiting_deploy: "in the pull request, prove after deploy", waiting_real_event: "waiting for a real event", proven: "proven live", not_needed: "not needed", failed: "failed", blocked: "blocked" } as const
-    for (const [index, job] of snapshot.jobs!.entries()) {
+    for (const [index, job] of shownJobs.entries()) {
       const glyph = job.state === "done_in_code" || job.state === "proven" ? s.ok("✓") : job.state === "failed" ? s.bad("✗") : job.state === "blocked" || job.state === "agent_blocked" || job.state === "could_not_check" ? s.warn("!") : job.state === "checking" ? s.accent(spinner) : s.dim("·")
       const words = job.state === "blocked" && job.note ? `blocked: ${sanitize(job.note, 100)}` : job.state === "could_not_check" && job.note ? `could not be checked: ${sanitize(job.note, 100)}` : labels[job.state]
-      lines.push(...wrapRows(`  ${glyph} ${index + 1}/${snapshot.jobs!.length} ${sanitize(job.title, 100)} · ${words}`, width, 4, 2))
+      lines.push(...wrapRows(`  ${glyph} ${index + 1}/${shownJobs.length} ${sanitize(job.title, 100)} · ${words}`, width, 4, 2))
     }
     return lines
   }
