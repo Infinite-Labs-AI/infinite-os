@@ -28,6 +28,7 @@ import { gradeContextFrom } from "../../checks/grade-context.js"
 import { BEFORE_FACTS_SCHEMA, writeBeforeFactsFile, type BeforeFactsFile } from "../handoff/before-facts.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
+import { prepareLocalValidation } from "../local-validation.js"
 
 import { scanForJobs, jobScanFrom, type JobScan } from "../../jobs/detectors/index.js"
 import { detectDuplicates } from "../../jobs/detectors/duplicates.js"
@@ -506,8 +507,9 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         const productionHost = await decideProductionHost(ctx, deps, keys, hosting, sub)
 
         // ---- baseline build, scan, census, setup checks ----
-        const baselineBuild = await deps.checks.buildBaseline()
-        if (!baselineBuild.ok) sub("! Your build already fails on production; the wizard reports it and only fixes new failures", "warn")
+        const local = await prepareLocalValidation(ctx, deps)
+        if ("kind" in local) return local
+        const { baselineBuild, localValidation } = local
         const scan = await deps.installer.scan({ root: ctx.root, appRoot: ctx.appRoot, hosting })
         sub(`Scanning ${scan.fileCount} files…`, "pending")
         if (scan.truncated) sub(`! The scan stopped at ${scan.fileCount} files; some code was not read`, "warn")
@@ -600,7 +602,7 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
           measuredAt,
           productionHost,
           scan: { framework: scan.framework, packageManager: scan.packageManager, appRoot: scan.appRoot, fileCount: scan.fileCount, truncated: scan.truncated },
-          facts: { ...facts, baseline, baselineBuild },
+          facts: { ...facts, baseline, baselineBuild, localValidation },
           grades,
           setupChecks,
           envTargetChecks,

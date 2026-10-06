@@ -580,6 +580,8 @@ export interface CheckRunner {
   run(checkId: CheckId, input: unknown): Promise<CheckResult | CheckResult[]>
   buildBaseline(): Promise<BuildResult>
   build(): Promise<BuildResult>
+  /** User-approved, sandboxed frozen-lockfile install; only called from `before`. */
+  installDependencies?(onOutput: (line: string) => void): Promise<{ ok: boolean; reason: string | null }>
   t0(scenarios: readonly T0Scenario[], artifacts: WorkspaceInstallArtifacts): Promise<CheckResult[]>
   liveBytes(urls: readonly string[], expect: TestExpect): Promise<CheckResult[]>
   redirectWalk(urls: readonly string[]): Promise<CheckResult[]>

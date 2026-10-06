@@ -37,6 +37,7 @@ import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
 import { git } from "../../agents/git-exec.js"
 import { reanchorEvidence } from "../../jobs/reanchor.js"
 import { buildVerdict, isBuildOutputPath } from "../../checks/build.js"
+import { readBeforeFactsFile } from "../handoff/before-facts.js"
 import { agentStatusLine } from "../agent-status.js"
 import {
   disposeSeal,
@@ -659,7 +660,8 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   await io.save()
   // B26: inside the parent agent's own sandbox, T0 and the build cannot run; they read undetermined
   // (test_error) and the jobs stay claimed until the user's own terminal runs the checks.
-  if (round.results.some(sandboxBlocked)) {
+  const before = await readBeforeFactsFile(deps.fs, ctx.root, ctx.runId)
+  if (round.results.some(sandboxBlocked) && before?.facts.localValidation !== "not_measured") {
     return {
       kind: "parked",
       code: "INF_WIZ_NEEDS_ANSWERS",
@@ -1364,9 +1366,11 @@ class JobsIo {
   private buildVerdict(): Promise<CheckResult> {
     if (!this.buildPromise) {
       this.buildPromise = (async () => {
+        const before = await readBeforeFactsFile(this.deps.fs, this.ctx.root, this.ctx.runId)
+        if (before?.facts.localValidation === "not_measured") return this.result("build", "B", "undetermined", "local validation not measured; PR checks decide")
         // A build that could not run (no sandbox inside another sandbox, a spawn failure) or was skipped for
         // an ambiguous lockfile proves nothing either way: undetermined, never a pass (B26, one rule: `buildVerdict`).
-        const verdict = await buildVerdict(await this.deps.checks.build(), () => (this.baseline ??= this.deps.checks.buildBaseline()))
+        const verdict = await buildVerdict(await this.deps.checks.build(), async () => before?.facts.baselineBuild ?? await (this.baseline ??= this.deps.checks.buildBaseline()))
         return this.result("build", "B", verdict.state, verdict.reason)
       })()
     }

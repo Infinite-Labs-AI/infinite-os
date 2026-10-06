@@ -606,7 +606,7 @@ export class WizardInstaller implements Installer {
 
       // 4. the build check: a failure NEW against the baseline rolls everything back
       let build: WizardApplyResult["build"] = "not_run"
-      if (this.options.build) {
+      if (this.options.build && internals.before.localValidation !== "not_measured") {
         const result = await this.options.build()
         // ONE rule with the jobs step and the review's fix rounds (B26, `buildVerdict`): a build that could not
         // run (or ended red with no failure signature) is UNDETERMINED: never "passed", never "red before this
@@ -616,15 +616,15 @@ export class WizardInstaller implements Installer {
         if (verdict.state === "pass") build = result.ok ? "passed" : "failed_baseline"
         else if (verdict.state === "undetermined") {
           build = "not_run"
-          warnings.push(`The build could not run (${verdict.reason ?? "test_error"}); it is checked again in the draft pull request.`)
+          warnings.push(`The build could not run here (${verdict.reason ?? "test_error"}); the pull request's own checks will be the judge.`)
         } else {
           const known = new Set(baselineBuild?.failureSignature ?? [])
           const fresh = result.failureSignature.filter((signature) => !known.has(signature))
           const restored = rollback()
           return this.failed(artifacts, warnings, `The build failed after the install${fresh.length > 0 ? ` (${fresh.slice(0, 3).join("; ")})` : ""}; every change was rolled back.`, restored)
         }
-      } else {
-        warnings.push("No build check ran (none wired); the build is checked again in the draft pull request.")
+      } else if (internals.before.localValidation !== "not_measured") {
+        warnings.push("No local build check is available; the pull request's own checks will be the judge.")
       }
 
       // 5. the receipt: the earlier runs' edits carried over, this run's edits, and the public ids the
@@ -757,6 +757,7 @@ export class WizardInstaller implements Installer {
     if (merged.length === 0 && ids === null && current) return
     writeInstallManifest(root, {
       ...base,
+      runId: this.requireRunId(),
       contentHashes: { ...base.contentHashes, ...computeContentHashes(root, base.files) },
       ...(merged.length > 0 ? { edits: merged } : {}),
       ...(ids ? { ids } : base.ids ? { ids: base.ids } : {})

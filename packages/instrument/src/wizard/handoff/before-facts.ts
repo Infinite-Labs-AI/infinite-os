@@ -25,6 +25,7 @@ export interface BeforeFactsWithBaseline extends BeforeFacts {
   /** The cloud's baseline reads (null when the read failed: never 0). */
   baseline: BaselineResponseFields | null
   baselineBuild: BuildResult | null
+  localValidation?: "measured" | "not_measured"
 }
 
 /** Everything `before` measured, as typed FACTS (no cell is computed from it here). */

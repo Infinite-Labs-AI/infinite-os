@@ -56,6 +56,8 @@ export interface SandboxedSpawnOptions {
   signal?: AbortSignal
   /** stdout/stderr are each truncated to this many bytes (default 4 MiB). */
   maxOutputBytes?: number
+  /** Progress from the child while it is running (never fed back into the child). */
+  onOutput?: (chunk: string, stream: "stdout" | "stderr") => void
   /** Test seam: the platform to behave as (default `process.platform`). */
   platform?: NodeJS.Platform
 }
@@ -364,12 +366,14 @@ export const sandboxedSpawn: SandboxedSpawnFn = (cmd, args, options) => {
     child.stdout.setEncoding("utf8")
     child.stderr.setEncoding("utf8")
     child.stdout.on("data", (chunk: string) => {
+      options.onOutput?.(chunk, "stdout")
       if (stdout.length + chunk.length > maxBytes) {
         stdout += chunk.slice(0, Math.max(0, maxBytes - stdout.length))
         stdoutTruncated = true
       } else stdout += chunk
     })
     child.stderr.on("data", (chunk: string) => {
+      options.onOutput?.(chunk, "stderr")
       if (stderr.length + chunk.length > maxBytes) {
         stderr += chunk.slice(0, Math.max(0, maxBytes - stderr.length))
         stderrTruncated = true

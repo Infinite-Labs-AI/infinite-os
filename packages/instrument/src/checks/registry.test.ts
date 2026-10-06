@@ -163,16 +163,16 @@ describe("built-in checks", () => {
   })
 
   it("buildBaseline stores the baseline that build_green_or_baseline compares against", async () => {
-    const outputs = ["Module not found: Can't resolve 'x'", "Module not found: Can't resolve 'x'\nType error: y"]
+    const outputs = ["./app/page.tsx\nModule not found: Can't resolve 'x'", "./app/page.tsx\nModule not found: Can't resolve 'x'\n./app/other.tsx:4:1\nType error: y"]
     const spawn: SandboxedSpawnFn = async () => ({ exitCode: 1, signal: null, stdout: outputs.shift() ?? "", stderr: "", timedOut: false, aborted: false, sandboxed: true, pid: 1, home: "/tmp/infinite-tag-sbx-x", stdoutTruncated: false, stderrTruncated: false })
     const root = mkdtempSync(join(tmpdir(), "registry-build-"))
-    writeFileSync(join(root, "package.json"), JSON.stringify({ scripts: { build: "vite build" } }))
+    writeFileSync(join(root, "package.json"), JSON.stringify({ scripts: { build: "next build" } }))
     const runner = createCheckRunner({ root, appRoot: ".", now: NOW, spawn })
     const baseline = await runner.buildBaseline()
     expect(runner.baseline()).toBe(baseline)
     const graded = (await runner.run("build_green_or_baseline", {})) as CheckResult
     expect(graded.state).toBe("problem")
-    expect(graded.reason).toContain("Type error: y")
+    expect(graded.reason).toContain("app/other.tsx | Type error | y")
     expect(graded.reason).not.toContain("Can't resolve 'x'")
   })
 })

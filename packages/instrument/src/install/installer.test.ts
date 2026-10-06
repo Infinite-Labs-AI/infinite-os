@@ -244,7 +244,7 @@ describe("the build check", () => {
     const plan = subject.buildPlan(scan, fakeKeys(), before, [])
     const result = (await subject.apply(plan, approveAll(plan))) as WizardApplyResult
     expect(result).toMatchObject({ ok: true, build: "not_run" })
-    expect(result.warnings.some((warning) => warning.startsWith("The build could not run (test_error"))).toBe(true)
+    expect(result.warnings.some((warning) => warning.startsWith("The build could not run here (test_error"))).toBe(true)
     // With a green baseline it is still not a new failure: the install stays.
     const green = makeSite({ "index.html": STATIC_HTML })
     const second = installer({ build: async () => couldNotRun })

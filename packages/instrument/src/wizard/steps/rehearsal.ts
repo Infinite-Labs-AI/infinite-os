@@ -236,7 +236,9 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   // Run the site's build AND lint scripts on the final tree before opening a PR. A missing local
   // executable is unmeasured, never the same red baseline; a new failure cannot ride into customer CI.
   const before = await readBeforeFactsFile(deps.fs, ctx.root, runId)
-  const validate = async () => buildVerdict(await deps.checks.build(), async () => before?.facts.baselineBuild ?? { failureSignature: [] })
+  const validate = async () => before?.facts.localValidation === "not_measured"
+    ? { state: "undetermined" as const, reason: "local validation not measured; PR checks decide" }
+    : buildVerdict(await deps.checks.build(), async () => before?.facts.baselineBuild ?? { failureSignature: [] })
   let validation = await validate()
   const worker = state.agent?.worker ?? null
   for (let round = 1; validation.state === "problem" && worker && round <= PR_LOOP_LIMITS.maxFixRounds; round += 1) {
@@ -253,7 +255,8 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     if (fix.run.edits.length > 0) await deps.installer.recordEdits(fix.run.edits)
     validation = await validate()
   }
-  if (validation.state !== "pass") return failed("INF_WIZ_VALIDATION_FAILED", `The site's build or lint could not pass before opening a pull request: ${scanner.redact(validation.reason ?? "not checked").text}. Fix the named files or install this site's dependencies, then resume.`)
+  if (validation.state !== "pass" && !(validation.state === "undetermined" && before?.facts.localValidation === "not_measured"))
+    return failed("INF_WIZ_VALIDATION_FAILED", `${validation.state === "undetermined" ? "Local validation could not run and no earlier decision was saved" : "The site's build or lint found a new failure"}: ${scanner.redact(validation.reason ?? "not checked").text}. Resolve this before resuming.`)
 
   sub(ctx, "rehearsal", "Committing the changes…", "pending")
   const commitOnce = () =>

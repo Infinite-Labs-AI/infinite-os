@@ -90,10 +90,15 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     const ids = ["meta_improve:capture", "preview_guard:meta", "preview_guard:ga4", "preview_guard:posthog", "posthog_improve:sensitive_pages"]
     const t = setup({
       scenario: { turns: [{ steps: [
+        { tool: "report_progress", args: { job_id: ids[0], text: "Capture" } },
         { edit: { path: file, content: withCapture } }, claim(ids[0]!),
+        { tool: "report_progress", args: { job_id: ids[1], text: "Meta guard" } },
         { edit: { path: file, content: wrapped } }, claim(ids[1]!),
+        { tool: "report_progress", args: { job_id: ids[2], text: "GA guard" } },
         { edit: { path: file, content: gaGuarded } }, claim(ids[2]!),
+        { tool: "report_progress", args: { job_id: ids[3], text: "PostHog guard" } },
         { edit: { path: file, content: phGuarded } }, claim(ids[3]!),
+        { tool: "report_progress", args: { job_id: ids[4], text: "Sensitive pages" } },
         { edit: { path: file, content: sensitive } }, claim(ids[4]!)
       ] }] },
       items: ids.map((id) => agentItem(id, [file]))
@@ -464,6 +469,20 @@ describe("step jobs: nested mode (§3d.7)", () => {
 
 describe("step jobs: nested inside another sandbox (§3z B26)", () => {
   const NO_SANDBOX = "macOS sandbox-exec could not apply a profile (sandbox_apply: Operation not permitted); refusing to run site code unsandboxed."
+
+  it("continues with unknown local checks when before already declared the sandbox unavailable", async () => {
+    const t = setup({ scenario: {}, options: { nested: true, json: true } })
+    write(t.root, ".infinite/wizard/before.json", JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId: STEP_RUN_ID, measuredAt: t.ctx.now().toISOString(), facts: {
+      keys: await t.deps.bridge.keys(), hosting: {}, census: { entries: [] }, dryLive: null, localValidation: "not_measured", baselineBuild: { ok: false, failureSignature: [], durationMs: 1 }
+    } }))
+    t.deps.checks.build = async () => { throw new Error("must not retry unavailable local build") }
+    t.deps.checks.t0 = async (scenarios) => scenarios.map((scenario) => ({ checkId: scenario.checkId, tier: "T0", state: "undetermined", reason: `test_error — sandbox_unavailable: ${NO_SANDBOX}`, at: t.ctx.now().toISOString(), runId: STEP_RUN_ID }))
+    expect((await step.run(t.ctx, t.deps)).kind).toBe("parked")
+    write(t.root, "app/page.tsx", PAGE_EDIT)
+    t.ctx.options.resume = true
+    expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
+    expect(t.current().jobs.flatMap((job) => job.checks).filter((check) => check.tier === "B").every((check) => check.state === "undetermined")).toBe(true)
+  })
 
   it("the build cannot run → undetermined test_error (never a pass), the run parks with the own-terminal line; the user's terminal finishes the checks without an agent", async () => {
     const t = setup({ scenario: {}, options: { nested: true, json: true }, checks: { build: [{ ok: false, failureSignature: [], durationMs: 1, error: NO_SANDBOX } as never, { ok: true, failureSignature: [], durationMs: 1 }] } })

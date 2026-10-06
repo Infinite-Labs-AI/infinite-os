@@ -49,6 +49,7 @@ export type PlanApprovalsLike = AskAnswers["plan"]
 export interface WizardBeforeFacts extends BeforeFacts {
   baseline?: BaselineResponseFields | null
   baselineBuild?: BuildResult | null
+  localValidation?: "measured" | "not_measured"
 }
 
 /** The scan facts the plan reads (the installer's `WizardScanResult` carries them). */

@@ -45,6 +45,7 @@ import type { AgentRunResult, ReviewResult, RunJobsInput } from "../contracts/ag
 import { step as mergeStep } from "./merge.js"
 import { step as rehearsalStep } from "./rehearsal.js"
 import { step as reviewStep } from "./review.js"
+import { failureSignature } from "../../checks/build.js"
 
 const BRANCH = "infinite/tag/2026-10-02-7f3c2a"
 const PREVIEW = "https://acme-store-git-infinite-tag-acme.vercel.app"
@@ -483,18 +484,29 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
 
   it("stops before committing when site validation finds new lint errors in wizard-owned files", async () => {
     const w = await world()
-    w.deps.checks.build = async () => ({ ok: false, durationMs: 1, failureSignature: ["lint: lib/infinite-server-lane.ts Error: no-unused-vars"] })
+    w.deps.checks.build = async () => ({ ok: false, durationMs: 1, failureSignature: failureSignature("./lib/infinite-server-lane.ts\n39:79  Error: 'name' is defined but never used.  no-unused-vars", w.fx.root).map(line => `lint: ${line}`) })
     const outcome = await rehearsalStep.run(w.ctx, w.deps)
     expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_VALIDATION_FAILED", message: expect.stringContaining("lint") })
     expect(w.fx.remoteSha(BRANCH)).toBeNull()
     expect(w.gh.read().prs).toEqual([])
   })
 
-  it("does not open a PR when build and lint cannot run because site dependencies are absent", async () => {
+  it("does not invent a local verdict when no before decision was saved", async () => {
     const w = await world()
     w.deps.checks.build = async () => ({ ok: false, durationMs: 1, failureSignature: ["exit_code:127"], error: "the site's build script could not run: executable not found" })
-    expect(await rehearsalStep.run(w.ctx, w.deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_VALIDATION_FAILED", message: expect.stringContaining("dependencies") })
+    expect(await rehearsalStep.run(w.ctx, w.deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_VALIDATION_FAILED", message: expect.stringContaining("could not run") })
     expect(w.fx.remoteSha(BRANCH)).toBeNull()
+  })
+
+  it.each(["sandbox unavailable", "timeout", "opaque failure"])("reaches the draft PR after before records %s as not measured", async (why) => {
+    const w = await world()
+    w.fx.write(".infinite/wizard/before.json", JSON.stringify({
+      schema: "infinite-tag.before-facts.v1", runId: RUN_ID, measuredAt: w.ctx.now().toISOString(),
+      facts: { keys: await w.bridge.keys(), hosting: fakeHosting(), census: { entries: [], envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }, dryLive: null, checks: [], baseline: null, baselineBuild: { ok: false, failureSignature: [`opaque: ${why}`], durationMs: 1 }, localValidation: "not_measured" }
+    }))
+    w.deps.checks.build = async () => { throw new Error("before already decided local validation; no late retry") }
+    expectOk(await rehearsalStep.run(w.ctx, w.deps))
+    expect(w.gh.read().prs[0]).toMatchObject({ isDraft: true })
   })
 
   it("has the worker fix a new lint failure in its allowed file before opening the PR", async () => {
@@ -507,7 +519,7 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     } })
     let checks = 0
     w.deps.checks.build = async () => (++checks === 1
-      ? { ok: false, durationMs: 1, failureSignature: ["lint: app/layout.tsx Error: no-unused-vars"] }
+      ? { ok: false, durationMs: 1, failureSignature: failureSignature("./app/layout.tsx\n39:79  Error: 'name' is defined but never used.  no-unused-vars", w.fx.root).map(line => `lint: ${line}`) }
       : { ok: true, durationMs: 1, failureSignature: [] })
     expectOk(await rehearsalStep.run(w.ctx, w.deps))
     expect(fixes).toBe(1)
@@ -565,7 +577,7 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
 
   it("does not wait out the preview window when Vercel has already blocked this deployment", async () => {
     const clock = fakeClock()
-    const w = await world({ clock, gh: { deployments: [{ id: 7, sha: "*", environment: "Preview", creator: "vercel[bot]", statuses: [{ state: "failure", description: "Deployment was blocked" }] }] } })
+    const w = await world({ clock, gh: { deployments: [{ id: 7, sha: "*", environment: "Preview - acme-store", creator: "vercel[bot]", statuses: [{ state: "failure", description: "Deployment was blocked" }] }] } })
     const outcome = await rehearsalStep.run(w.ctx, w.deps)
     expectOk(outcome)
     expect(outcome.status).toMatch(/undetermined.*blocked/i)

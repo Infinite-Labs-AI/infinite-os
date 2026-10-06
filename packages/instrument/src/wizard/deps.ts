@@ -32,6 +32,7 @@ import { registerO9Checks } from "../checks/o9.js"
 import { runCensus } from "../checks/census.js"
 import { lexicalStates } from "../lexical-states.js"
 import { createCheckRunner } from "../checks/registry.js"
+import { baselineTree } from "../checks/baseline-tree.js"
 import { createGitOps } from "../git/index.js"
 import { createGhClient } from "../github/gh.js"
 import { buildHostGuardExpression, productionDeniedConflict, type HostGuardSpec } from "../host-guard.js"
@@ -322,7 +323,13 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
   const remoteUrl = await git.remoteUrl().catch(() => null)
   const host = createGitHostAdapter({ remoteUrl, gh, git })
 
-  const checks = createCheckRunner({ root, appRoot: input.appRoot, runId, platform: platform as NodeJS.Platform, signal: input.signal })
+  const checks = createCheckRunner({ root, appRoot: input.appRoot, runId, platform: platform as NodeJS.Platform, signal: input.signal,
+    baselineTree: async () => {
+      const sha = state()?.git?.baseSha
+      if (!sha) return { root, dispose: async () => {} }
+      return baselineTree(root, input.appRoot, sha, git)
+    }
+  })
   registerO9Checks(checks, {
     root,
     version: tagVersion,

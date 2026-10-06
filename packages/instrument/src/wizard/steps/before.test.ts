@@ -22,10 +22,11 @@ import { census, fixtureDryLive, hostingResponse, keysResponse, RUN_ID } from ".
 import { createJobRegistry } from "../../jobs/registry.js"
 import { snapshotFromFiles } from "../../jobs/repo-files.js"
 import type { HostingResponse, KeysResponse } from "../contracts/bridge.js"
-import type { CheckResult } from "../contracts/jobs.js"
+import type { BuildResult, CheckResult } from "../contracts/jobs.js"
 import type { WizardRunState } from "../contracts/state.js"
 import { BEFORE_FACTS_PATH, beforeDryLiveRequest, buildLiveTodayColumn, createBeforeStep, jobScanWith, readBeforeFactsFile, step as defaultStep, type BeforeFactsFile } from "./before.js"
 import { WIZARD_STEPS } from "./index.js"
+import { refreshValidationBaseline } from "../local-validation.js"
 
 const SITE = {
   "package.json": JSON.stringify({ name: "acme", dependencies: { next: "15.0.0" } }),
@@ -96,6 +97,65 @@ const BEFORE_FACTS_PATH_ABS = `/repo/${BEFORE_FACTS_PATH}`
 const indexOf = (log: CallLog, prefix: string): number => log.findIndex((entry) => entry.startsWith(prefix))
 
 describe("step before: call order", () => {
+  it.each(["yes", "nested"] as const)("never implies dependency installation in %s mode", async (mode) => {
+    const options = { ...context(initialState(), []).ctx.options, [mode]: true }
+    const s = setup({ ctx: { options, ask: (async () => { throw new Error("must not ask") }) as never }, checks: { baselineBuild: { ok: false, durationMs: 1, failureSignature: ["exit_code:127"] } } })
+    expect(await s.run()).toMatchObject({ kind: "failed", message: expect.stringContaining("npm ci") })
+    expect(s.log.some((line) => line.startsWith("installer.scan"))).toBe(false)
+  })
+
+  it("retakes and saves an old-version baseline before resumed work", async () => {
+    const s = setup()
+    await s.run()
+    let reads = 0
+    s.checks.checks.buildBaseline = async () => { reads++; return { ok: true, durationMs: 1, failureSignature: [], signatureVersion: 2 } as BuildResult }
+    const ctx = context(s.state, s.log).ctx
+    const minimal = { fs: s.fs.fs, checks: s.checks.checks } as import("../contracts/deps.js").WizardDeps
+    expect(await refreshValidationBaseline(ctx, minimal)).toBeNull()
+    expect(reads).toBe(1)
+    expect(await refreshValidationBaseline(ctx, minimal)).toBeNull()
+    expect(reads).toBe(1)
+  })
+  it.each([
+    { error: "sandbox-exec could not apply the profile" },
+    { timedOut: true },
+    { failureSignature: ["build: opaque: process failed without a diagnostic"] }
+  ])("records unavailable validation as not measured before work: %j", async (detail) => {
+    const s = setup({ checks: { baselineBuild: { ok: false, durationMs: 1, failureSignature: [], ...detail } as BuildResult } })
+    expect(await s.run()).toMatchObject({ kind: "ok" })
+    expect((await readBeforeFactsFile(s.fs.fs, "/repo", RUN_ID))?.facts.localValidation).toBe("not_measured")
+    expect(JSON.stringify(s.events)).toContain("your pull request's own checks will be the judge")
+    expect(JSON.stringify(s.events)).not.toContain("already fails on production")
+  })
+
+  it("stops ambiguous package managers before scanning", async () => {
+    const s = setup({ checks: { baselineBuild: { ok: false, failureSignature: [], durationMs: 1, skipped: "ambiguous_lockfiles" } as BuildResult } })
+    expect(await s.run()).toMatchObject({ kind: "failed", message: expect.stringContaining("Several lockfiles") })
+    expect(s.log.some((line) => line.startsWith("installer.scan"))).toBe(false)
+  })
+
+  it("retakes the baseline after the approved dependency install", async () => {
+    const s = setup({ ctx: { ask: (async () => true) as never } })
+    let count = 0
+    s.checks.checks.buildBaseline = async () => ++count === 1
+      ? { ok: false, durationMs: 1, failureSignature: ["exit_code:127"], exitCode: 127 } as BuildResult
+      : { ok: true, durationMs: 1, failureSignature: [] }
+    let installs = 0
+    s.checks.checks.installDependencies = async (output) => { installs += 1; output("installed fixture dependencies"); return { ok: true, reason: null } }
+    expect(await s.run()).toMatchObject({ kind: "ok" })
+    expect(installs).toBe(1)
+    expect(count).toBe(2)
+    expect((await readBeforeFactsFile(s.fs.fs, "/repo", RUN_ID))?.facts.baselineBuild?.ok).toBe(true)
+  })
+
+  it("stops for missing dependencies before scanning or agent jobs when install is declined", async () => {
+    const asked: string[] = []
+    const s = setup({ checks: { baselineBuild: { ok: false, failureSignature: ["exit_code:127"], durationMs: 250, error: "the site's build script could not run: its executable was not found", skipped: null, packageManager: "npm", exitCode: 127, timedOut: false, sandboxed: true, outputTail: [] } as BuildResult }, ctx: { ask: (async (_kind: string, payload: { question: string }) => { asked.push(payload.question); return false }) as never } })
+    expect(await s.run()).toMatchObject({ kind: "failed", code: "INF_WIZ_VALIDATION_FAILED" })
+    expect(asked).toEqual([expect.stringContaining("Your site's dependencies are not installed here")])
+    expect(s.log).not.toContain("installer.scan")
+  })
+
   it("branches first, reads keys before the dry load, and seeds candidates last", async () => {
     const s = setup()
     const outcome = await s.run()

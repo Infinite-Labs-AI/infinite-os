@@ -24,6 +24,7 @@ export type BuildSkipReason = "no_package_json" | "no_build_script" | "ambiguous
 
 /** A `BuildResult` with what the wizard needs to explain it. */
 export interface BuildRun extends BuildResult {
+  signatureVersion: 2
   skipped: BuildSkipReason | null
   exitCode: number | null
   timedOut: boolean
@@ -46,6 +47,46 @@ export interface BuildOptions {
   denyReads?: DenyReadSet
   platform?: NodeJS.Platform
   now?: () => number
+}
+
+export function frozenInstallCommand(manager: PackageManager): { command: string; args: string[] } {
+  const args: Record<PackageManager, string[]> = {
+    npm: ["ci"],
+    pnpm: ["install", "--frozen-lockfile"],
+    yarn: ["install", "--frozen-lockfile"],
+    bun: ["install", "--frozen-lockfile"]
+  }
+  return { command: manager, args: args[manager] }
+}
+
+/** A user-approved install, under the same process sandbox as the site's build. */
+export async function installSiteDependencies(options: BuildOptions & { onOutput?: (line: string) => void }): Promise<{ ok: boolean; reason: string | null }> {
+  const root = resolve(options.root)
+  const appRoot = resolve(root, options.appRoot)
+  const manager = buildPackageManager(root, appRoot, options.packageManager)
+  if (manager === "ambiguous") return { ok: false, reason: "several lockfiles name different package managers" }
+  const { command, args } = frozenInstallCommand(manager)
+  const deny = options.denyReads ?? defaultDenyReads()
+  try {
+    const result = await (options.spawn ?? sandboxedSpawn)(command, args, {
+      denyReads: deny.paths,
+      denyReadPrefixes: deny.prefixes,
+      network: true,
+      allowWrites: [...buildAllowedWrites(root, appRoot), ...[...new Set([root, appRoot])].flatMap((path) => [join(path, "node_modules"), join(path, ".yarn"), join(path, ".pnp.cjs"), join(path, ".pnp.loader.mjs")])],
+      denyWrites: buildDeniedWrites(root, appRoot),
+      cwd: appRoot,
+      env: { CI: "1", NO_UPDATE_NOTIFIER: "1", npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" },
+      timeoutMs: options.timeoutMs ?? BUILD_DEFAULT_TIMEOUT_MS,
+      signal: options.signal,
+      platform: options.platform,
+      onOutput: (chunk) => options.onOutput?.(chunk)
+    })
+    return result.exitCode === 0 && !result.timedOut && !result.aborted
+      ? { ok: true, reason: null }
+      : { ok: false, reason: result.timedOut ? "installation timed out" : result.aborted ? "installation was cancelled" : `installation exited ${result.exitCode ?? "without a status"}` }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g
@@ -88,9 +129,34 @@ export function failureSignature(output: string, root: string, options: { home?:
       if (homePattern) out = out.replace(homePattern, "<home>")
       return out.replace(SANDBOX_HOME, "<home>").replace(rootPattern, "<root>").trim()
     })
-  const signature = new Set<string>()
+  const structured = new Set<string>()
+  const opaque = new Set<string>()
+  let file: string | null = null
+  const sourceFile = (value: string): string | null => {
+    const path = value.replace(/^<root>\//, "").replace(/^\.\//, "")
+    return /^[^:\r\n]+\.(?:[cm]?[jt]sx?|vue|svelte|astro)$/.test(path) ? path : null
+  }
+  const add = (path: string, code: string, message: string) => structured.add(`${path} | ${code} | ${message.trim().replace(/\s+/g, " ")}`)
   for (const line of lines) {
-    if (!ERROR_LINE.test(line) || RUN_BOOKKEEPING.test(line)) continue
+    const header = /^(.*?)(?::\d+(?::\d+)?)?$/.exec(line)?.[1]
+    const fileHeader = header ? sourceFile(header) : null
+    if (fileHeader) { file = fileHeader; continue }
+    const tsc = /^(.+?)(?:\(\d+,\d+\):|:\d+:\d+\s*-?)\s*error\s+(TS\d+):\s*(.+)$/i.exec(line)
+    if (tsc && sourceFile(tsc[1]!)) { add(sourceFile(tsc[1]!)!, tsc[2]!, tsc[3]!); continue }
+    const eslint = /^(?:(.+?\.\w+):)?\s*\d+:\d+\s+(?:Error:|error)\s+(.+?)\s+([@\w/-]+)$/.exec(line)
+    if (eslint) {
+      const path = sourceFile(eslint[1] ?? "") ?? file
+      if (path) { add(path, eslint[3]!, eslint[2]!); continue }
+    }
+    const nextType = /^Type error:\s*(.+)$/.exec(line)
+    if (nextType && file) { add(file, "Type error", nextType[1]!); continue }
+    const nextModule = /^Module not found:\s*(.+)$/.exec(line)
+    if (nextModule && file) { add(file, "Module not found", nextModule[1]!); continue }
+    const vite = /Rollup failed to resolve import (.+) from ["']([^"']+)["']/.exec(line)
+    if (vite && sourceFile(vite[2]!)) { add(sourceFile(vite[2]!)!, "Rollup resolve", `Failed to resolve import ${vite[1]!}`); continue }
+    const syntax = /^SyntaxError:\s*(.+) in ([^\s]+)$/.exec(line)
+    if (syntax && sourceFile(syntax[2]!)) { add(sourceFile(syntax[2]!)!, "SyntaxError", syntax[1]!); continue }
+    if (!ERROR_LINE.test(line) || RUN_BOOKKEEPING.test(line) || /^(?:Failed to compile\.|error during build:?)$/i.test(line)) continue
     const normalised = line
       .replace(/\((\d+),(\d+)\)/g, "")
       .replace(/:\d+:\d+\b/g, "")
@@ -100,9 +166,9 @@ export function failureSignature(output: string, root: string, options: { home?:
       .replace(/\b[0-9a-f]{8,}\b/gi, "<hash>")
       .replace(/\s+/g, " ")
       .trim()
-    if (normalised) signature.add(normalised)
+    if (normalised) opaque.add(`opaque: ${normalised}`)
   }
-  const sorted = [...signature].sort()
+  const sorted = [...structured, ...opaque].sort()
   if (sorted.length <= FAILURE_SIGNATURE_MAX_LINES) return sorted
   const digest = createHash("sha256").update(sorted.join("\n")).digest("hex").slice(0, 16)
   return [...sorted.slice(0, FAILURE_SIGNATURE_MAX_LINES - 1), `…${sorted.length - FAILURE_SIGNATURE_MAX_LINES + 1} more failure lines (set ${digest})`]
@@ -110,7 +176,7 @@ export function failureSignature(output: string, root: string, options: { home?:
 
 /** A signature with no recognised error line (only an exit code or a timeout) cannot be compared. */
 function opaqueSignature(signature: readonly string[]): boolean {
-  return signature.length > 0 && signature.every((line) => /^(?:(?:build|lint): )?(?:exit_code:|timeout$)/.test(line))
+  return signature.length > 0 && signature.every((line) => /^(?:(?:build|lint): )?(?:exit_code:|timeout$|opaque:)/.test(line))
 }
 
 /**
@@ -170,7 +236,7 @@ export async function runBuild(options: BuildOptions): Promise<BuildRun> {
   const appRoot = resolve(root, options.appRoot)
   const clock = options.now ?? Date.now
   const started = clock()
-  const base = { ok: false, failureSignature: [] as string[], durationMs: 0, exitCode: null, timedOut: false, error: null, sandboxed: false, outputTail: [] as string[] }
+  const base = { signatureVersion: 2 as const, ok: false, failureSignature: [] as string[], durationMs: 0, exitCode: null, timedOut: false, error: null, sandboxed: false, outputTail: [] as string[] }
   const scripts = readValidationScripts(appRoot)
   if ("reason" in scripts) return { ...base, ok: true, skipped: scripts.reason, packageManager: null }
   const manager = buildPackageManager(root, appRoot, options.packageManager)
@@ -223,12 +289,13 @@ export async function runBuild(options: BuildOptions): Promise<BuildRun> {
   const signature = runs.flatMap(({ name, result, output }) => {
     if (result.exitCode === 0 && !result.timedOut && !result.aborted) return []
     const lines = failureSignature(output, root, { home: result.home })
-    return (lines.length > 0 ? lines : [result.timedOut ? "timeout" : `exit_code:${result.exitCode ?? result.signal}`]).map((line) => scripts.scripts.length > 1 ? `${name}: ${line}` : line)
+    return (lines.length > 0 ? lines : [result.timedOut ? "timeout" : `exit_code:${result.exitCode ?? result.signal}`]).map((line) => `${name}: ${line}`)
   })
   const missing = runs.find(({ result, output }) => result.exitCode === 127 && /(?:command )?not found|is not recognized/i.test(output))
   const stopped = runs.find(({ result }) => result.timedOut || result.aborted)
   const failed = runs.find(({ result }) => result.exitCode !== 0)
   return {
+    signatureVersion: 2,
     ok,
     failureSignature: ok ? [] : signature.length ? signature : ["exit_code:unknown"],
     durationMs: clock() - started,
