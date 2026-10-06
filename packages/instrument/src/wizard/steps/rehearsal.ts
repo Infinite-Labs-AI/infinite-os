@@ -18,6 +18,7 @@ import { verdictFactsFor } from "../verdict-facts.js"
 import type { TestTool } from "../contracts/test-engine.js"
 import { wizardGitExtras, type WizardGitOps } from "../../git/index.js"
 import { canPush } from "../../github/repo.js"
+import { forkTargetMatches } from "../push-target.js"
 import { resolveVercelSignal } from "../vercel-signal.js"
 import { isUnsupported } from "../../hosts/other.js"
 import { howToReviewSection } from "../../review/brief.js"
@@ -157,14 +158,20 @@ export async function prepareShip(ctx: WizardContext, deps: WizardDeps): Promise
       const repo = await deps.host.repoFacts()
       if (!isUnsupported(repo)) {
         isPrivate = repo.isPrivate
-        if (!canPush(repo.viewerPermission)) {
+        if (!canPush(repo.viewerPermission) && state.pushTarget?.kind !== "fork") {
           return failed(
             "INF_WIZ_PUSH_REFUSED",
-            `Your GitHub access to this repo is ${repo.viewerPermission ?? "unknown"}, so the wizard cannot push a branch. Ask for write access; the wizard never forks.`
+            `Your GitHub access to this repo is ${repo.viewerPermission ?? "unknown"}, and no fork was approved before the agent step. Run npx infinite-tag again to choose a fork, or ask for write access.`
           )
         }
       }
     }
+  }
+  if (state.pushTarget?.kind === "fork") {
+    if (!forkTargetMatches(state.pushTarget)) return failed("INF_WIZ_PUSH_REFUSED", "The saved fork destination is invalid.")
+    if (!ghReady) return failed("INF_WIZ_PUSH_REFUSED", "GitHub is not signed in, so the fork pull request cannot be opened. Run gh auth login, then npx infinite-tag again.")
+    if (!git.setPushRemote) return failed("INF_WIZ_PUSH_REFUSED", "The approved fork destination could not be restored.")
+    git.setPushRemote(state.pushTarget.remoteUrl)
   }
   return { runId, git, facts, scanner, remoteUrl, repoLabel: repoLabelFrom(remoteUrl, ctx.root), ghReady, isPrivate }
 }
@@ -303,7 +310,7 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   }
   const body = buildPrBody(bodyInput)
   sub(ctx, "rehearsal", "Opening draft pull request…", "pending")
-  const pr = await ensurePr({ deps, remoteUrl: prepared.remoteUrl, base: gitState.base, branch: gitState.branch, title, body, root: ctx.root, ghReady: prepared.ghReady })
+  const pr = await ensurePr({ deps, remoteUrl: prepared.remoteUrl, base: gitState.base, branch: gitState.branch, title, body, root: ctx.root, ghReady: prepared.ghReady, headOwner: state.pushTarget?.kind === "fork" ? state.pushTarget.headOwner : null })
   if (pr.kind === "failed") return failed("INF_WIZ_PR_CREATE_FAILED", pr.message)
   if (pr.kind === "pr") {
     ctx.state.update((draft) => {

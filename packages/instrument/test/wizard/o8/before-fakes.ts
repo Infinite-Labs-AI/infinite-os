@@ -191,14 +191,16 @@ export function fakeHost(
   log: CallLog,
   defaultBranch: string | null = "main",
   /** The newest successful GitHub "Production" deployment (null = none). `before` never reads it for the host ask. */
-  latestProduction: { sha: string; createdAt: string } | null = null
+  latestProduction: { sha: string; createdAt: string } | null = null,
+  permission: string = "WRITE",
+  allowForking: boolean = true
 ): GitHostAdapter {
   return strict<GitHostAdapter>("host", {
     kind: "github",
     async repoFacts() {
       log.push("host.repoFacts")
       if (defaultBranch === "THROW") throw new Error("gh: not logged in")
-      return { isPrivate: true, defaultBranch, viewerPermission: "WRITE" }
+      return { isPrivate: true, defaultBranch, viewerPermission: permission, allowForking }
     },
     // The deploy reads (`deploymentReader`): `before` reads none of them (no `*.vercel.app` candidate is derived).
     ...({

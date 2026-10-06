@@ -72,7 +72,7 @@ function nextId(prefix) {
   return id
 }
 function headOf(pr) {
-  const remote = process.env.FAKE_GH_REMOTE
+  const remote = pr.isCrossRepository ? state.forkRemote : process.env.FAKE_GH_REMOTE
   if (!remote) return pr.headRefOid ?? ""
   try {
     return execFileSync("git", ["--git-dir", remote, "rev-parse", `refs/heads/${pr.headRefName}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim()
@@ -89,6 +89,7 @@ function prView(pr, fields) {
     state: pr.state,
     headRefOid: headOf(pr),
     headRefName: pr.headRefName,
+    headRepositoryOwner: { login: pr.headOwner ?? (state.repo?.nameWithOwner ?? "acme/acme-store").split("/")[0] },
     baseRefName: pr.baseRefName,
     title: pr.title,
     body: pr.body,
@@ -147,6 +148,7 @@ if (group === "pr") {
       fail("pull request create failed: GraphQL: Draft pull requests are not supported in this repository. (createPullRequest) HTTP 422")
     }
     const head = flag("--head")
+    const [headOwner, headBranch] = head?.includes(":") ? head.split(":") : [null, head]
     const bodyFile = flag("--body-file")
     // Like the real gh: "-" is stdin, a relative path is from the cwd, an absolute one is used as is.
     const body = bodyFile === "-" ? stdin : readFileSync(isAbsolute(bodyFile) ? bodyFile : join(process.cwd(), bodyFile), "utf8")
@@ -160,7 +162,9 @@ if (group === "pr") {
       id: `PR_${number}`,
       isDraft: draft,
       state: "OPEN",
-      headRefName: head,
+      headRefName: headBranch,
+      headOwner,
+      isCrossRepository: headOwner !== null,
       baseRefName: flag("--base"),
       title: flag("--title"),
       body,
@@ -223,6 +227,20 @@ if (group === "pr") {
 
 if (group === "api") {
   const path = argv[1]
+  if (path === "repos/{owner}/{repo}") out({ allow_forking: state.repo?.allowForking ?? true })
+  const viewerRepo = /^repos\/([^/]+)\/([^/]+)$/.exec(path)
+  if (viewerRepo) {
+    if (state.forkExists !== true) fail("HTTP 404 Not Found")
+    const name = (state.repo?.nameWithOwner ?? "acme/acme-store").split("/")[1]
+    out({ owner: { login: state.login }, name, clone_url: `https://github.com/${state.login}/${name}.git`, ssh_url: `git@github.com:${state.login}/${name}.git`, parent: { full_name: state.repo?.nameWithOwner ?? "acme/acme-store" } })
+  }
+  if (path === "-X" && argv[2] === "POST" && argv[3] === "repos/{owner}/{repo}/forks") {
+    if (state.repo?.allowForking === false) fail("Repository forking is disabled")
+    const name = (state.repo?.nameWithOwner ?? "acme/acme-store").split("/")[1]
+    state.forkExists = true
+    changed()
+    out({ owner: { login: state.login }, name, clone_url: `https://github.com/${state.login}/${name}.git`, ssh_url: `git@github.com:${state.login}/${name}.git` })
+  }
   if (path === "graphql") {
     const { query, variables } = JSON.parse(stdin)
     if (query.includes("addPullRequestReview(")) {

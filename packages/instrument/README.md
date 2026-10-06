@@ -50,6 +50,12 @@ steps and resumes where it stopped:
 12. **Prove** — after the deploy, it checks the live site again with this run's own test events.
 13. **Done** — the before/after report, in your terminal, the pull request and Infinite.
 
+On GitHub, the wizard checks push access before the code work starts. If you cannot push and the
+repository allows forks, it asks once to create your fork and opens the pull request from there.
+If forks are disabled, ask the repository owner for write access or permission to fork. A fork PR
+may have no Vercel preview; when no preview appears, the rehearsal reports those checks as not
+measured. `--yes` cannot authorize creation of a fork.
+
 Exit codes: `0` done · `1` failed · `2` usage or environment · `3` parked (resume with
 `npx infinite-tag --resume`) · `4` needs the Infinite app · `130` interrupted.
 

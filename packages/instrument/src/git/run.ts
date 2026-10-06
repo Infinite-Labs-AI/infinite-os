@@ -145,6 +145,7 @@ const FORBIDDEN_ANYWHERE = ["--no-verify", "--no-gpg-sign", "--amend", "--force"
 export interface GitGuardContext {
   /** The base branch: never pushed to. */
   base?: string | null
+  pushRemote?: string | null
 }
 
 /**
@@ -196,7 +197,7 @@ export function assertSafeGitArgv(args: readonly string[], context: GitGuardCont
         if (arg.startsWith("-")) throw new GitSafetyError(`push ${arg} is not allowed`)
         positional.push(arg)
       }
-      if (positional.length !== 2 || positional[0] !== "origin") throw new GitSafetyError("push must be `push -u origin <branch>`")
+      if (positional.length !== 2 || (positional[0] !== "origin" && positional[0] !== context.pushRemote)) throw new GitSafetyError("push must target origin or the approved fork")
       const branch = positional[1]!
       if (branch.includes(":") || branch.startsWith("+")) throw new GitSafetyError(`push refspec ${branch} is never used`)
       if (context.base && (branch === context.base || branch === `refs/heads/${context.base}`)) {

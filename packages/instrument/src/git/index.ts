@@ -46,10 +46,11 @@ export function createGitOps(options: CreateGitOpsOptions): WizardGitOps {
   const gitBin = options.gitBin ?? "git"
   const calls: string[][] = []
   let base: string | null = null
+  let pushRemote: string | null = null
   let ttyHandedOver = false
 
   async function git(args: string[], extra: { input?: string; allowFail?: boolean } = {}): Promise<ProcessResult> {
-    assertSafeGitArgv(args, { base })
+    assertSafeGitArgv(args, { base, pushRemote })
     calls.push([...args])
     const result = await runner(gitBin, args, {
       cwd: options.cwd,
@@ -104,6 +105,13 @@ export function createGitOps(options: CreateGitOpsOptions): WizardGitOps {
     setBase(value) {
       if (!isSafeBranchName(value)) throw new Error(`unsafe base branch ${JSON.stringify(value)}`)
       base = value
+    },
+    setPushRemote(value) {
+      if (value !== null && !/^https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+\.git$/.test(value) && !/^git@github\.com:[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+\.git$/.test(value)) throw new Error("unsafe fork remote")
+      pushRemote = value
+    },
+    pushCommand(branch) {
+      return pushRemote ? `git push ${pushRemote} ${branch}` : `git push -u origin ${branch}`
     },
 
     async isRepo() {
@@ -160,18 +168,18 @@ export function createGitOps(options: CreateGitOpsOptions): WizardGitOps {
       return { sha, hookRewrote }
     },
     async push(branch) {
-      const result = await git(pushArgv(branch), { allowFail: true })
+      const result = await git(pushArgv(branch, [], pushRemote ?? "origin"), { allowFail: true })
       if (result.status !== 0 || result.error) throw classifyPushFailure(`${result.stderr}\n${result.error ?? ""}`)
     },
     async pushWithOptions(branch, pushOptions) {
-      const result = await git(pushArgv(branch, pushOptions), { allowFail: true })
+      const result = await git(pushArgv(branch, pushOptions, pushRemote ?? "origin"), { allowFail: true })
       if (result.status !== 0 || result.error) throw classifyPushFailure(`${result.stderr}\n${result.error ?? ""}`)
     },
     async pullFfOnly(branch) {
       if (!isSafeBranchName(branch)) throw new Error(`unsafe branch ${JSON.stringify(branch)}`)
       // fetch + merge --ff-only rather than `git pull`, so a user's pull.rebase setting can never rebase.
-      await git(["fetch", "origin", branch])
-      await git(["merge", "--ff-only", `origin/${branch}`])
+      await git(["fetch", pushRemote ?? "origin", branch])
+      await git(["merge", "--ff-only", pushRemote ? "FETCH_HEAD" : `origin/${branch}`])
       return { headSha: await trimmed(["rev-parse", "HEAD"]) }
     },
     async worktreeAddDetached(sha) {

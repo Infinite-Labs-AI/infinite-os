@@ -63,10 +63,27 @@ describe("the GitHub adapter (§3g.2)", () => {
   it("reads auth from `gh auth status --json hosts` and the repo facts", async () => {
     const { adapter } = setup({ repo: { isPrivate: false, viewerPermission: "READ" } })
     expect(await adapter.auth()).toEqual({ ok: true, login: "acme-dev" })
-    expect(await adapter.repoFacts()).toEqual({ isPrivate: false, defaultBranch: "main", viewerPermission: "READ", homepageUrl: null })
+    expect(await adapter.repoFacts()).toEqual({ isPrivate: false, defaultBranch: "main", viewerPermission: "READ", homepageUrl: null, allowForking: true, nameWithOwner: "acme/acme-store" })
     // §3y.1: the repo's homepage rides the SAME `gh repo view` (a hint for the live-site ask only).
     const withHome = setup({ repo: { homepageUrl: "https://acme-store.com" } })
     expect(await withHome.adapter.repoFacts()).toMatchObject({ homepageUrl: "https://acme-store.com" })
+  })
+
+  it("creates only the viewer fork and distinguishes its PR from a same-branch upstream PR", async () => {
+    const { adapter, gh, fx } = setup({ repo: { viewerPermission: "TRIAGE", allowForking: true } })
+    expect(await adapter.createFork(false)).toEqual({ remoteUrl: "https://github.com/acme-dev/acme-store.git", headOwner: "acme-dev" })
+    fx.write(".infinite/wizard/pr-body.md", "body\n")
+    const branch = "infinite/tag/2026-10-02-7f3c2a"
+    await adapter.createDraftPr({ base: "main", head: `acme-dev:${branch}`, title: "t", bodyFile: ".infinite/wizard/pr-body.md" })
+    expect(await adapter.findPr(branch, "acme-dev")).toMatchObject({ number: 42 })
+    expect(await adapter.findPr(branch)).toBeNull()
+    expect(gh.read().prs[0]).toMatchObject({ isCrossRepository: true, headOwner: "acme-dev" })
+  })
+
+  it("reuses an existing viewer fork only when GitHub says it belongs to the target", async () => {
+    const { adapter, gh } = setup({ repo: { viewerPermission: "TRIAGE", allowForking: true }, forkExists: true })
+    expect(await adapter.createFork(false)).toEqual({ remoteUrl: "https://github.com/acme-dev/acme-store.git", headOwner: "acme-dev" })
+    expect(gh.read().calls.some((call) => call.argv.includes("POST"))).toBe(false)
   })
 
   it("is not logged in when gh says so (negative)", async () => {

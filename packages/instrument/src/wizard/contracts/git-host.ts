@@ -113,8 +113,10 @@ export interface GitHostAdapter {
   kind: GitHostKind
   auth(): Promise<{ ok: boolean; login: string | null }>
   /** `homepageUrl` (§3y.1, optional): the repo's homepage, a hint for the live-site ask only. */
-  repoFacts(): Promise<{ isPrivate: boolean; defaultBranch: string | null; viewerPermission: string | null; homepageUrl?: string | null } | Unsupported>
-  findPr(branch: string): Promise<PrSummary | null | Unsupported>
+  repoFacts(): Promise<{ isPrivate: boolean; defaultBranch: string | null; viewerPermission: string | null; homepageUrl?: string | null; allowForking?: boolean | null; nameWithOwner?: string | null } | Unsupported>
+  /** Creates the viewer's fork only after the early shipping choice was approved. */
+  createFork?(preferSsh: boolean): Promise<{ remoteUrl: string; headOwner: string }>
+  findPr(branch: string, headOwner?: string | null): Promise<PrSummary | null | Unsupported>
   createDraftPr(input: { base: string; head: string; title: string; bodyFile: string }): Promise<PrSummary | Unsupported>
   readPr(number: number): Promise<PrSummary | Unsupported>
   readThreads(number: number): Promise<ReviewThread[] | Unsupported>
@@ -149,6 +151,9 @@ export interface StatusEntry {
 
 /** `GitOps` plus what the PR loop, the fence and the resume need (lane O4's `createGitOps` implements it). */
 export interface WizardGitOps extends GitOps {
+  /** The validated fork destination for pushes and review fast-forwards; origin stays the production base. */
+  setPushRemote?(remoteUrl: string | null): void
+  pushCommand?(branch: string): string
   /** `git status --porcelain=v1 -z --untracked-files=all` (ignored files excluded). */
   statusEntries(): Promise<StatusEntry[]>
   /** The file at a revision (`git show <rev>:<path>`), or null when it does not exist there. */

@@ -15,7 +15,9 @@ export interface FakeGhCall {
 export interface FakeGhState {
   login?: string
   authOk?: boolean
-  repo?: { nameWithOwner?: string; isPrivate?: boolean; defaultBranch?: string | null; viewerPermission?: string; homepageUrl?: string | null }
+  repo?: { nameWithOwner?: string; isPrivate?: boolean; defaultBranch?: string | null; viewerPermission?: string; homepageUrl?: string | null; allowForking?: boolean }
+  forkRemote?: string
+  forkExists?: boolean
   draftUnsupported?: boolean
   rejectInlineThreads?: boolean
   reviewDecision?: string

@@ -8,7 +8,7 @@
 // branch and commits on the remote, the fake gh's PR / review / threads, the bridge's calls in order, the
 // files on disk.
 import { execFileSync, spawn } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import vm from "node:vm"
 
@@ -56,6 +56,7 @@ import {
   GA4_AGAIN,
   GTAG_LOADER,
   agentScenario,
+  agentScenarioWithoutServerOutcome,
   answersFile,
   codexWorkerScenario,
   usageLimitTurn,
@@ -592,6 +593,44 @@ describe("the offline end-to-end run (§4.3)", () => {
 // The negative variants (§4.3 a–h)
 // ---------------------------------------------------------------------------------------------
 
+describe("a strict pages-router site with adopted tags and fork-only access", () => {
+  it("opens the PR from the viewer fork and leaves absent preview checks unmeasured", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world({
+      gh: { repo: { nameWithOwner: "acme/acme-store", isPrivate: true, defaultBranch: "main", viewerPermission: "TRIAGE", allowForking: true }, deployments: [] },
+      env: { E2E_NO_AGENTS: "1", E2E_FAST_CLOCK: "1" }
+    })
+    rmSync(join(w.site.repo, "app"), { recursive: true, force: true })
+    mkdirSync(join(w.site.repo, "pages/api"), { recursive: true })
+    mkdirSync(join(w.site.repo, "src/common"), { recursive: true })
+    writeFileSync(join(w.site.repo, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, jsx: "preserve", target: "es2020", module: "esnext" } }))
+    writeFileSync(join(w.site.repo, "pages/_app.tsx"), "import { boot } from '../src/common/tracking'\nexport default function App({ Component, pageProps }: { Component: (props: Record<string, unknown>) => unknown; pageProps: Record<string, unknown> }) { if (typeof window !== 'undefined') boot(); return <Component {...pageProps} /> }\n")
+    writeFileSync(join(w.site.repo, "pages/index.tsx"), "export default function Home() { return <main><a href='/signup'>Start</a></main> }\n")
+    writeFileSync(join(w.site.repo, "pages/privacy.tsx"), "export default function Privacy() { return <p>We measure visits.</p> }\n")
+    writeFileSync(join(w.site.repo, "pages/api/mailing-list.ts"), "export default async function handler(req: unknown, res: { status(n: number): { json(value: unknown): void } }) { res.status(200).json({ subscribed: true }) }\n")
+    writeFileSync(join(w.site.repo, "src/common/tracking.ts"), "declare const gtag: (...args: unknown[]) => void; declare const fbq: (...args: unknown[]) => void; declare const posthog: { init(key: string, options: object): void }; export function boot() { gtag('config', 'G-FAKE00001'); posthog.init('phc_FAKEtestProjectKeyNotReal000', { api_host: '/ingest' }); fbq('init', '1234567890123456'); }\n")
+    writeFileSync(join(w.site.repo, "next.config.js"), `module.exports = { async rewrites() { const docs = 'https://docs.acme.example'; return [\n{ source: '/v:version(\\\\d+)', destination: '/api/version' },\n{ source: '/docs/:path*', destination: \`\${docs}/:path*\` },\n{ source: '/ingest/static/:path(.*)', destination: 'https://us-assets.i.posthog.com/static/:path' },\n{ source: '/ingest/array/:path(.*)', destination: 'https://us-assets.i.posthog.com/array/:path' },\n{ source: '/ingest/:path(.*)', destination: 'https://us.i.posthog.com/:path' }\n] } }\n`)
+    commitAndPush(w, "Strict pages-router site with adopted analytics")
+    const fork = join(w.site.base, "viewer-fork.git")
+    execFileSync("git", ["clone", "--bare", w.site.bare, fork])
+    git(w.site.repo, "config", `url.file://${fork}.insteadOf`, "https://github.com/acme-dev/acme-store.git")
+    const gh = readGhState(w.ghState)
+    gh.forkRemote = fork
+    saveGhState(w.ghState, gh)
+    const run = await runWizard({
+      cwd: w.site.repo,
+      env: w.env,
+      args: ["--json", "--answers", writeAnswers(w)],
+      respond: (ask) => ask.kind === "confirm" ? true : ask.kind === "merge-ready" ? "later" : undefined,
+      timeoutMs: RUN_TIMEOUT
+    })
+    expect(run.steps(), trace(run)).toEqual(expect.arrayContaining([expect.objectContaining({ step: "rehearsal", outcome: "ok" })]))
+    expect(readGhState(w.ghState).prs[0]).toMatchObject({ state: "OPEN", headRefName: expect.stringMatching(/^infinite\/tag\//) })
+    expect(bareGit(w.site.bare, "for-each-ref", "--format=%(refname:short)", "refs/heads/").split("\n")).toEqual(["main"])
+    expect(bareGit(fork, "for-each-ref", "--format=%(refname:short)", "refs/heads/")).toContain(readGhState(w.ghState).prs[0]!.headRefName)
+    expect(run.ofType("step.sub").map((event) => String(event.text)).join(" ")).toMatch(/undetermined|not exercised|no preview/i)
+  })
+})
+
 describe("the negative variants (§4.3 a–h)", () => {
   it("(a) Claude hits its usage limit mid-jobs → exit 3, the tree back to the post-install bytes, and a re-run resumes from `jobs`", { timeout: 2 * RUN_TIMEOUT }, async () => {
     const w = await world({ scenario: agentScenario({ prefixTurns: [usageLimitTurn()] }) })
@@ -1033,7 +1072,7 @@ function productionDeployment(id: number, sha: string, state: "success" | "failu
 
 describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted site) reaches a PROOF", () => {
   it("one host ask pre-filled from the repo, a site-file claim, the GitHub preview (accepted by its proof file, as the desktop does), the GitHub deploy, the proof, ONE real visit, an Infinite receipt", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
-    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor } })
+    const w = await world({ scenario: agentScenarioWithoutServerOutcome(), bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor } })
     // The repo's only hint at its live address (a CNAME file); Infinite knows none.
     mkdirSync(join(w.site.repo, "public"), { recursive: true })
     writeFileSync(join(w.site.repo, "public/CNAME"), `${PRODUCTION_HOST}\n`)
@@ -1116,8 +1155,8 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
       "keys",
       "runs.get", "conversions",
       "keys", "hosting", "runs.patch(phase,prHeadSha,prNumber,prUrl)", "test.start(rehearsal:home)", "test.poll", "test.start(dry_live:preview_self)", "test.poll", "runs.patch(clickTestedConversions)", "ga4-key-events(sign_up)",
-      // review: the fix round re-rehearses the new head.
-      "keys", "hosting", "test.start(rehearsal:home)", "test.poll", "test.start(dry_live:preview_self)", "test.poll",
+      // review: no server outcome was seeded, so there is no R8 fix round or second rehearsal.
+      "keys", "hosting",
       // merge (§3x.7): the in-PR report before the merge card, then the merge commit.
       "keys", "report(in_pr)",
       "runs.patch(mergeSha,mergedAt,phase)",
@@ -1168,7 +1207,7 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
     // The 3-minute proof grace runs on the preload's virtual clock (E2E_FAST_CLOCK): the same deadlines, in seconds.
     // The proof file is served nowhere (a CDN rule), so the PR's preview does not serve it either: the desktop
     // refuses the preview (review P1-2), and the terminal says so (P2-1), never "the test window did not finish".
-    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor, previewServesClaimProof: false }, env: { E2E_FAST_CLOCK: "1" } })
+    const w = await world({ scenario: agentScenarioWithoutServerOutcome(), bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor, previewServesClaimProof: false }, env: { E2E_FAST_CLOCK: "1" } })
     const respond = (ask: { kind: string; payload: unknown }) => {
       const payload = ask.payload as { question?: string; options?: Array<{ value: string }>; number?: number }
       if (ask.kind === "single" && payload.question?.startsWith("Which address is your live site?")) return "__type__"
@@ -1189,13 +1228,11 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
     expect(labels).not.toContain("runs.proof-claim")
     expect(labels.some((entry) => entry.startsWith("test.start(real_visit"))).toBe(false)
     expect(labels.filter((entry) => entry === "site-prove").length).toBeGreaterThanOrEqual(2)
-    // The rehearsal, and the review's re-rehearsal of the fix head, were each refused 400 naming the preview; no
-    // preview_self load was asked.
-    expect(w.bridge.callsFor("test.start").filter((call) => (call.body as { mode: string }).mode === "rehearsal").map((call) => call.status)).toEqual([400, 400])
+    // No unavailable server outcome means no fix round, so only the initial rehearsal was refused.
+    expect(w.bridge.callsFor("test.start").filter((call) => (call.body as { mode: string }).mode === "rehearsal").map((call) => call.status)).toEqual([400])
     expect(labels).not.toContain("test.start(dry_live:preview_self)")
     const subs = run.ofType("step.sub").map((event) => String(event.text))
-    // Once for the rehearsal step, once for the review's re-rehearsal of the fix head: the same honest words.
-    expect(subs.filter((text) => text.startsWith("Rehearsal:"))).toEqual(Array(2).fill("Rehearsal: undetermined (the preview did not serve this pull request's proof file, e.g. it is protected)"))
+    expect(subs.filter((text) => text.startsWith("Rehearsal:"))).toEqual(["Rehearsal: undetermined (the preview did not serve this pull request's proof file, e.g. it is protected)"])
     expect(subs.some((text) => text.includes("the test window did not finish"))).toBe(false)
   })
 })

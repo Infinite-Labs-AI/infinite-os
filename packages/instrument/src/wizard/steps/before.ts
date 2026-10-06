@@ -45,6 +45,7 @@ import type { BaseSource, WizardRunState } from "../contracts/state.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { wizardBranchName } from "../contracts/git-host.js"
 import { wizardGitExtras } from "../../git/index.js"
+import { ensurePushTarget } from "../push-target.js"
 import { buildColumn } from "../report.js"
 import { EVENT_LIMITS } from "../contracts/events.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
@@ -388,7 +389,7 @@ export interface BeforeStepOptions {
  * roots; a new run or another site re-runs `before`. It reads the context's plain fields only.
  */
 export function beforeInputHash(ctx: WizardContext): string {
-  const input = JSON.stringify({ step: "before", runId: ctx.runId ?? null, root: ctx.root ?? null, appRoot: ctx.appRoot ?? null })
+  const input = JSON.stringify({ step: "before-shipping-v2", runId: ctx.runId ?? null, root: ctx.root ?? null, appRoot: ctx.appRoot ?? null })
   return `sha256:${createHash("sha256").update(input).digest("hex")}`
 }
 
@@ -422,6 +423,8 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
       }
 
       try {
+        const pushAccess = await ensurePushTarget(ctx, deps, (line) => sub(line, "info"))
+        if (pushAccess) return pushAccess
         // ---- hosting (read-only; the base is the production branch) → branch ----
         const hosting: TagHosting = withoutEnvelope(await deps.bridge.hosting(undefined, { signal: ctx.signal }))
         const existing = ctx.state.get().git

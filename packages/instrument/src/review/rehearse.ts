@@ -199,7 +199,8 @@ async function pollDesktopTest(
 
 async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: WizardStepId, head: string): Promise<{ url: string } | { url: null; why: "no_preview" | "gh_unavailable" }> {
   const until = deps.clock.now().getTime() + PR_LOOP_LIMITS.previewWaitMs
-  sub(ctx, step, "Waiting for its Vercel preview…", "pending")
+  const fork = ctx.state.get().pushTarget?.kind === "fork"
+  sub(ctx, step, fork ? "Checking for a fork PR preview (Vercel may need the project owner's authorization)…" : "Waiting for its Vercel preview…", "pending")
   for (;;) {
     let url: Awaited<ReturnType<WizardDeps["host"]["previewUrl"]>> | null
     try {
@@ -211,6 +212,7 @@ async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: Wizard
     }
     if (isUnsupported(url)) return { url: null, why: "no_preview" }
     if (url) return { url }
+    if (fork) return { url: null, why: "no_preview" }
     if (ctx.signal.aborted || deps.clock.now().getTime() + PREVIEW_POLL_MS > until) return { url: null, why: "no_preview" }
     await deps.clock.sleep(PREVIEW_POLL_MS, ctx.signal)
   }

@@ -29,6 +29,9 @@ import { buildScanner } from "../review/context.js"
 import { safeText } from "../review/post.js"
 import { mergeIsDeployed } from "./steps/prove.js"
 import { HARNESS_OUTPUTS_RELATIVE_PATH } from "../harness/outputs.js"
+import { canPush } from "../github/repo.js"
+import type { WizardGitOps } from "./contracts/git-host.js"
+import { forkTargetMatches } from "./push-target.js"
 
 export const UNINSTALL_RECORD_SCHEMA = "infinite-tag.wizard-uninstall.v1" as const
 export const UNINSTALL_RECORD_PATH = `${WIZARD_PATHS.dir}/uninstall.json`
@@ -323,6 +326,33 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
   if (!tree.clean && dirty.length > 0) {
     return stop("INF_WIZ_DIRTY_TREE", `Commit or stash your changes first (${dirty.slice(0, 5).join(", ")}${dirty.length > 5 ? ", …" : ""}).`, lines)
   }
+  let headOwner: string | null = null
+  if (deps.host.kind === "github") {
+    const git = deps.git as Partial<WizardGitOps>
+    const saved = ctx.state?.pushTarget
+    if (saved?.kind === "fork") {
+      if (!forkTargetMatches(saved)) return stop("INF_WIZ_PUSH_REFUSED", "The saved uninstall fork destination is invalid.", lines)
+      if (!git.setPushRemote) return stop("INF_WIZ_PUSH_REFUSED", "The approved fork destination cannot be restored for uninstall.", lines)
+      git.setPushRemote(saved.remoteUrl)
+      headOwner = saved.headOwner
+    } else {
+      const facts = await deps.host.repoFacts().catch(() => null)
+      if (!facts || "unsupported" in facts) return stop("INF_WIZ_PUSH_REFUSED", "GitHub permissions could not be read before uninstall.", lines)
+      if (!canPush(facts.viewerPermission)) {
+        if (facts.allowForking !== true || !deps.host.createFork || !git.setPushRemote) return stop("INF_WIZ_PUSH_REFUSED", "This repo cannot be pushed or forked by your account. Ask its owner for write access or fork permission.", lines)
+        const approved = await ctx.ask("confirm", { question: "Create your fork and open the uninstall pull request from it?", defaultYes: false })
+        if (approved !== true) return stop("INF_WIZ_PUSH_REFUSED", "The fork pull request was not approved.", lines)
+        const origin = await deps.git.remoteUrl()
+        try {
+          const fork = await deps.host.createFork(/^(?:git@github\.com:|ssh:\/\/git@github\.com\/)/.test(origin ?? ""))
+          git.setPushRemote(fork.remoteUrl)
+          headOwner = fork.headOwner
+        } catch (error) {
+          return stop("INF_WIZ_PUSH_REFUSED", `GitHub could not create the uninstall fork: ${error instanceof Error ? error.message : String(error)}`, lines)
+        }
+      }
+    }
+  }
   const base = await resolveBase(ctx, deps)
   if (!base) return stop("INF_WIZ_BRANCH_FAILED", "Cannot tell which branch ships to production; run again with --base <branch>.", lines)
   const day = ctx.now().toISOString().slice(0, 10)
@@ -361,7 +391,7 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
     const scanner = buildScanner({ root: ctx.root, appRoot: ctx.state?.appRoot ?? "." }, deps, [])
     await deps.fs.writeTextAtomic(join(ctx.root, UNINSTALL_PR_BODY_PATH), `${safeText(scanner, body)}\n`, 0o600)
     try {
-      const created = await deps.host.createDraftPr({ base, head: branch, title: UNINSTALL_PR_TITLE, bodyFile: join(ctx.root, UNINSTALL_PR_BODY_PATH) })
+      const created = await deps.host.createDraftPr({ base, head: headOwner ? `${headOwner}:${branch}` : branch, title: UNINSTALL_PR_TITLE, bodyFile: join(ctx.root, UNINSTALL_PR_BODY_PATH) })
       if ("unsupported" in created) lines.push(`Pushed ${branch}; open a merge request for it on your git host.`)
       else {
         pr = { number: created.number, url: created.url }

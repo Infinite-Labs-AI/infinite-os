@@ -45,6 +45,18 @@ function run(root: string, bundle: ReturnType<typeof fakeDeps>, ask: AskFn, stat
 }
 
 describe("uninstall --pr", () => {
+  it("uses the saved fork for the uninstall push and PR head", async () => {
+    const root = tempRoot()
+    const bundle = fakeDeps({ reversed: ["app/layout.tsx"] })
+    const bound: string[] = []
+    Object.assign(bundle.deps.git, { setPushRemote: (url: string) => bound.push(url) })
+    const state = linkedState(root)
+    state.pushTarget = { kind: "fork", remoteUrl: "https://github.com/acme-dev/acme-store.git", headOwner: "acme-dev" }
+    const result = await run(root, bundle, answering({}), state)
+    expect(result.exitCode).toBe(0)
+    expect(bound).toEqual([state.pushTarget.remoteUrl])
+    expect(bundle.log.calls.find((call) => call.what === "createDraftPr")?.args[0]).toMatchObject({ head: expect.stringMatching(/^acme-dev:infinite\/tag\/uninstall-/) })
+  })
   it("creates the uninstall branch BEFORE any file changes, then reverses, commits, pushes and opens a draft PR", async () => {
     const root = tempRoot()
     const bundle = fakeDeps({ reversed: ["app/layout.tsx", ".gitignore"] })

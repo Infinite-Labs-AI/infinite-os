@@ -67,6 +67,7 @@ export interface StepRecord {
 
 export type BaseSource = "vercel" | "default_branch" | "origin_head"
 export type GitHostKind = "github" | "gitlab" | "bitbucket" | "other"
+export type PushTarget = { kind: "origin"; remoteUrl: null; headOwner: null } | { kind: "fork"; remoteUrl: string; headOwner: string }
 
 /** Run markers per moment (the ids a real visit or a rehearsal produced). */
 export interface RunMarkers {
@@ -144,6 +145,7 @@ export interface WizardRunState {
     cloudReviewer?: AgentReviewerKind
   } | null
   git: { base: string; baseSource: BaseSource; branch: string; baseSha: string; headSha: string | null } | null
+  pushTarget?: PushTarget
   pr: {
     host: GitHostKind
     number: number | null
@@ -263,8 +265,9 @@ export const WIZARD_RUN_STATE_SHAPE = shapeOf<WizardRunState>()(
     "report",
     "snapshot"
   ],
-  ["runStartedAt", "site", "proof", "rehearsalChecks"],
+  ["runStartedAt", "site", "proof", "rehearsalChecks", "pushTarget"],
   {
+    pushTarget: shapeOf<PushTarget>()("RunState.pushTarget", ["kind", "remoteUrl", "headOwner"], []),
     rehearsalChecks: arrayOf(shapeOf<NonNullable<WizardRunState["rehearsalChecks"]>[number]>()("RunState.rehearsalCheck", ["checkId", "state", "sha"], [])),
     proof: shapeOf<RunProofState>()("RunState.proof", ["at", "tools", "laneProbed", "infinitePageViews", "filter", "installedUnknown"], [], {
       tools: arrayOf(

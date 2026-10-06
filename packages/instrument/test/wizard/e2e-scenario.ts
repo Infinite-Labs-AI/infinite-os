@@ -208,6 +208,21 @@ export function agentScenario(options: AgentScenarioOptions = {}): unknown {
   }
 }
 
+/** A fresh site with no server lane must not ask the fake agent to write an unavailable server outcome. */
+export function agentScenarioWithoutServerOutcome(): unknown {
+  const scenario = structuredClone(agentScenario()) as {
+    claude: { turns: Array<{ steps?: Step[] }> }
+    codex: { turns: Array<{ final?: unknown }> }
+  }
+  scenario.claude.turns[0]!.steps = scenario.claude.turns[0]!.steps!.filter((step) => {
+    const replace = step.replace as { path?: string } | undefined
+    const args = step.args as { job_id?: string } | undefined
+    return replace?.path !== "app/api/signup/route.ts" && args?.job_id !== ITEMS.serverConversion
+  })
+  scenario.codex.turns[0]!.final = { verdict: "looks_good", summary: "No server outcome was requested without a server lane.", checklist: [], findings: [] }
+  return scenario
+}
+
 /** The second agent's review: one real finding whose text carries a planted secret AND the Meta pixel id. */
 export function firstReview(): unknown {
   return {
@@ -266,6 +281,8 @@ export function fixtureHosting(): Omit<TagHosting, never> {
   delete hosting.requestId
   if (!hosting.vercel) throw new Error("hosting fixture without vercel")
   hosting.vercel.rootDirectory = null
+  // This world's agent scenario writes a server outcome: the lane must really be installable here.
+  hosting.vercel.envWriteGranted = true
   hosting.vercel.envTargets = {}
   return hosting
 }

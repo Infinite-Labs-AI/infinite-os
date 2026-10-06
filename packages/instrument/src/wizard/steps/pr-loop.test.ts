@@ -1,6 +1,7 @@
 // Lane O4: the `rehearsal`, `review` and `merge` steps end to end over a real git fixture (bare remote + clone),
 // the stateful fake gh, a recording fake bridge and scripted agents. No network, no real agent, no prompt.
 import { existsSync, readFileSync } from "node:fs"
+import { execFileSync } from "node:child_process"
 import { join } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
@@ -30,6 +31,7 @@ import {
 import { createGitOps, type WizardGitOps } from "../../git/index.js"
 import { createGhClient } from "../../github/gh.js"
 import { createGitHubAdapter } from "../../hosts/github.js"
+import { ensurePushTarget } from "../push-target.js"
 import { createGitLabAdapter } from "../../hosts/gitlab.js"
 import { createOtherAdapter } from "../../hosts/other.js"
 import { REVIEW_LEDGER_PATH } from "../../review/ledger.js"
@@ -92,6 +94,7 @@ interface WorldOptions {
   clock?: Clock
   host?: "github" | "gitlab" | "other"
   previewDeployed?: boolean
+  fork?: boolean
   checks?: ReturnType<typeof fakeChecks>
 }
 
@@ -108,6 +111,11 @@ async function world(options: WorldOptions = {}): Promise<World> {
     }
   })
   worlds.push(fx)
+  const forkRemote = options.fork ? join(fx.dir, "viewer-fork.git") : null
+  if (forkRemote) {
+    execFileSync("git", ["clone", "--bare", fx.remote, forkRemote])
+    execFileSync("git", ["-C", fx.root, "config", `url.file://${forkRemote}.insteadOf`, "https://github.com/acme-dev/acme-store.git"])
+  }
   const gh = createFakeGh({
     dir: fx.dir,
     remote: fx.remote,
@@ -117,7 +125,8 @@ async function world(options: WorldOptions = {}): Promise<World> {
         options.previewDeployed === false
           ? []
           : [{ id: 7, sha: "*", environment: "Preview", creator: "vercel[bot]", statuses: [{ state: "success", environment_url: PREVIEW }] }],
-      ...options.gh
+      ...options.gh,
+      ...(forkRemote ? { forkRemote } : {})
     }
   })
   const git = createGitOps({ cwd: fx.root, env: gh.env, worktreeRoot: join(fx.dir, "worktrees") })
@@ -465,11 +474,28 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(body).toContain(PIXEL_ID) // it is in the diff (the managed layout)
   })
 
-  it("no push access stops before any push (never a fork)", async () => {
+  it("no push access without an early approved fork stops before any push", async () => {
     const w = await world({ gh: { repo: { viewerPermission: "READ" } } })
     const outcome = await rehearsalStep.run(w.ctx, w.deps)
     expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_PUSH_REFUSED" })
     expect(w.fx.remoteSha(BRANCH)).toBeNull()
+  })
+
+  it("TRIAGE with approved forking pushes only to the viewer fork and opens a cross-repo PR; no preview stays unmeasured", async () => {
+    const clock = fakeClock()
+    const w = await world({ fork: true, gh: { repo: { viewerPermission: "TRIAGE", allowForking: true } }, answers: { confirm: true }, previewDeployed: false, clock })
+    const early = await ensurePushTarget(w.ctx, w.deps, () => undefined)
+    expect(early).toBeNull()
+    expect(await ensurePushTarget(w.ctx, w.deps, () => undefined)).toBeNull()
+    expect(w.gh.read().calls.filter((call) => call.argv.join(" ").includes("POST repos/{owner}/{repo}/forks"))).toHaveLength(1)
+    expect(w.ctx.state.get().pushTarget).toMatchObject({ kind: "fork", headOwner: "acme-dev" })
+    const outcome = await rehearsalStep.run(w.ctx, w.deps)
+    expectOk(outcome)
+    expect(w.fx.remoteSha(BRANCH)).toBeNull()
+    expect(execFileSync("git", ["--git-dir", join(w.fx.dir, "viewer-fork.git"), "rev-parse", `refs/heads/${BRANCH}`], { encoding: "utf8" }).trim()).toBe(await w.git.head())
+    expect(w.gh.read().prs[0]).toMatchObject({ isCrossRepository: true, headOwner: "acme-dev", state: "OPEN" })
+    expect(outcome.status).toMatch(/undetermined/)
+    expect(clock.slept).not.toContain(15_000)
   })
 
   it("P2-2: without gh the rehearsal is undetermined at once (no 10-minute wait for a preview it cannot read)", async () => {
@@ -557,6 +583,24 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
 })
 
 describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
+  it("pushes review fixes to the same approved fork", async () => {
+    const w = await world({
+      fork: true,
+      gh: { repo: { viewerPermission: "TRIAGE", allowForking: true } },
+      answers: { confirm: true, "teammate-comments": { actOn: [] } },
+      reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit this init in place.", suggested_fix: "Keep one init." }]), review([])],
+      fix: fixLayout,
+      previewDeployed: false
+    })
+    expect(await ensurePushTarget(w.ctx, w.deps, () => undefined)).toBeNull()
+    expectOk(await rehearsalStep.run(w.ctx, w.deps))
+    const fork = join(w.fx.dir, "viewer-fork.git")
+    const first = execFileSync("git", ["--git-dir", fork, "rev-parse", `refs/heads/${BRANCH}`], { encoding: "utf8" }).trim()
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const fixed = execFileSync("git", ["--git-dir", fork, "rev-parse", `refs/heads/${BRANCH}`], { encoding: "utf8" }).trim()
+    expect(fixed).not.toBe(first)
+    expect(w.fx.remoteSha(BRANCH)).toBeNull()
+  })
   async function opened(options: WorldOptions): Promise<World & { head: string }> {
     const w = await world(options)
     expectOk(await rehearsalStep.run(w.ctx, w.deps))

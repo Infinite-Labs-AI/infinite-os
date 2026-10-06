@@ -1,6 +1,6 @@
 // Pushing the PR branch (lane O4, §3g.1): `git push -u origin <branch>`, never `-f`, never the base, with
 // `GIT_TERMINAL_PROMPT=0` and SSH in BatchMode (see run.ts). A refusal is reported verbatim and the wizard
-// stops; it never takes a fork path.
+// stops. The wizard may select an approved viewer fork before the agent starts; the git argv guard checks it.
 
 export type PushFailureKind =
   /** An SSH key needs a passphrase (BatchMode refused to prompt): hand the TTY over and retry once. */
@@ -35,9 +35,9 @@ export function classifyPushFailure(stderr: string): GitPushError {
 }
 
 /** The argv for a push, with GitLab's merge-request push options when given (§3g.2). */
-export function pushArgv(branch: string, pushOptions: readonly string[] = []): string[] {
+export function pushArgv(branch: string, pushOptions: readonly string[] = [], remote = "origin"): string[] {
   const options = pushOptions.flatMap((option) => ["-o", option])
-  return ["push", "-u", ...options, "origin", branch]
+  return ["push", ...(remote === "origin" ? ["-u"] : []), ...options, remote, branch]
 }
 
 /** GitLab opens a draft MR from push options; `glab` is never needed (§3g.2). */

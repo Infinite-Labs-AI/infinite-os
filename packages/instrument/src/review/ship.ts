@@ -205,7 +205,7 @@ export type PushResult = { kind: "pushed"; mergeRequestOpened: boolean } | { kin
 
 /**
  * §3g.1 push. GitLab first tries the merge-request push options; a refusal falls back to a plain push. An SSH
- * key with a passphrase hands the terminal over once. Refusals are reported verbatim; the wizard never forks.
+ * key with a passphrase hands the terminal over once. Refusals are reported verbatim; a fork is chosen earlier.
  */
 export async function pushBranch(input: {
   ctx: WizardContext
@@ -235,7 +235,7 @@ export async function pushBranch(input: {
     if (error.kind === "ssh_passphrase") {
       ctx.emit.emit("tty.handover", { reason: "ssh" })
       git.setTtyHandedOver(true)
-      const answer = await ctx.ask("tty-handover", { reason: "ssh", command: `git push -u origin ${input.branch}` })
+      const answer = await ctx.ask("tty-handover", { reason: "ssh", command: git.pushCommand?.(input.branch) ?? `git push -u origin ${input.branch}` })
       git.setTtyHandedOver(false)
       ctx.emit.emit("tty.resume", {})
       if (typeof answer === "object" && answer.exitCode === 0) return { kind: "pushed", mergeRequestOpened: false }
@@ -260,13 +260,14 @@ export async function ensurePr(input: {
   body: string
   root: string
   ghReady: boolean
+  headOwner?: string | null
 }): Promise<EnsurePrResult> {
   const { deps } = input
   if (deps.host.kind !== "github" || !input.ghReady) {
     const link = hostLinkFor(deps.host.kind === "github" ? "github" : deps.host.kind, input.remoteUrl ? parseRemote(input.remoteUrl) : null, input.base, input.branch)
     return { kind: "link", url: link, why: deps.host.kind === "github" ? "gh_unavailable" : "not_github" }
   }
-  const existing = await deps.host.findPr(input.branch)
+  const existing = await deps.host.findPr(input.branch, input.headOwner)
   if (!isUnsupported(existing) && existing !== null && existing.state === "OPEN") return { kind: "pr", pr: existing, adopted: true, draftFallback: false }
   if (!isUnsupported(existing) && existing !== null && existing.state === "CLOSED") {
     // §3d.6: a closed PR is never reopened or duplicated from the same branch: the user starts a fresh run.
@@ -275,7 +276,7 @@ export async function ensurePr(input: {
   await deps.fs.mkdirp(join(input.root, WIZARD_PATHS.dir), 0o700)
   await deps.fs.writeTextAtomic(join(input.root, WIZARD_PATHS.prBody), input.body, 0o600)
   try {
-    const created = await deps.host.createDraftPr({ base: input.base, head: input.branch, title: input.title, bodyFile: WIZARD_PATHS.prBody })
+    const created = await deps.host.createDraftPr({ base: input.base, head: input.headOwner ? `${input.headOwner}:${input.branch}` : input.branch, title: input.title, bodyFile: WIZARD_PATHS.prBody })
     if (isUnsupported(created)) return { kind: "link", url: null, why: "not_github" }
     return { kind: "pr", pr: created, adopted: false, draftFallback: !created.isDraft }
   } catch (error) {

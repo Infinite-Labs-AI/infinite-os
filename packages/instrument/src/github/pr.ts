@@ -5,7 +5,7 @@ import { PR_LOOP_LIMITS, DRAFT_UNSUPPORTED_TITLE_PREFIX, type PrSummary } from "
 import { WIZARD_BRANCH_PREFIX } from "../wizard/contracts/state.js"
 import { GhError, type GhClient } from "./gh.js"
 
-const PR_FIELDS = "number,url,id,isDraft,state,headRefOid,headRefName,mergeCommit,mergedAt,mergeStateStatus,reviewDecision"
+const PR_FIELDS = "number,url,id,isDraft,state,headRefOid,headRefName,headRepositoryOwner,mergeCommit,mergedAt,mergeStateStatus,reviewDecision"
 
 interface RawPr {
   number?: number
@@ -15,6 +15,7 @@ interface RawPr {
   state?: string
   headRefOid?: string
   headRefName?: string
+  headRepositoryOwner?: { login?: string } | null
   mergeCommit?: { oid?: string } | null
   mergedAt?: string | null
   mergeStateStatus?: string | null
@@ -52,7 +53,7 @@ export async function readPr(gh: GhClient, number: number): Promise<PrSummary> {
  * same-repo PRs count: `--head` also matches a stranger's fork PR that reuses the branch name, and the wizard must
  * never post on, ready or merge-watch someone else's PR.
  */
-export async function findPr(gh: GhClient, branch: string): Promise<PrSummary | null> {
+export async function findPr(gh: GhClient, branch: string, headOwner: string | null = null): Promise<PrSummary | null> {
   const rows = await gh.json<RawPr[]>([
     "pr",
     "list",
@@ -67,7 +68,7 @@ export async function findPr(gh: GhClient, branch: string): Promise<PrSummary | 
     "--json",
     `${PR_FIELDS},isCrossRepository`
   ])
-  const matching = rows.filter((row) => row.headRefName === branch && row.isCrossRepository !== true)
+  const matching = rows.filter((row) => row.headRefName === branch && (headOwner ? row.isCrossRepository === true && row.headRepositoryOwner?.login === headOwner : row.isCrossRepository !== true))
   if (matching.length === 0) return null
   const open = matching.find((row) => row.state === "OPEN")
   const chosen = open ?? [...matching].sort((a, b) => (b.number ?? 0) - (a.number ?? 0))[0]!
@@ -84,7 +85,7 @@ export function prMarkerRunId(body: string): string | null {
  * §3d.6 fresh-machine resume: the author's PRs, filtered client-side to the `infinite/tag/` prefix AND the body
  * marker (gh's `--head` takes no `owner:branch`). Each comes with the run id its marker carries.
  */
-export async function findWizardPrs(gh: GhClient): Promise<Array<{ pr: PrSummary; runId: string; branch: string; base: string | null }>> {
+export async function findWizardPrs(gh: GhClient): Promise<Array<{ pr: PrSummary; runId: string; branch: string; base: string | null; headOwner: string | null }>> {
   const rows = await gh.json<RawPr[]>([
     "pr",
     "list",
@@ -95,14 +96,14 @@ export async function findWizardPrs(gh: GhClient): Promise<Array<{ pr: PrSummary
     "--limit",
     String(PR_LOOP_LIMITS.prListLimit),
     "--json",
-    `${PR_FIELDS},body,baseRefName`
+    `${PR_FIELDS},body,baseRefName,isCrossRepository`
   ])
-  const out: Array<{ pr: PrSummary; runId: string; branch: string; base: string | null }> = []
+  const out: Array<{ pr: PrSummary; runId: string; branch: string; base: string | null; headOwner: string | null }> = []
   for (const row of rows) {
     if (typeof row.headRefName !== "string" || !row.headRefName.startsWith(WIZARD_BRANCH_PREFIX)) continue
     const runId = prMarkerRunId(row.body ?? "")
     if (!runId) continue
-    out.push({ pr: toPrSummary(row), runId, branch: row.headRefName, base: typeof row.baseRefName === "string" && row.baseRefName !== "" ? row.baseRefName : null })
+    out.push({ pr: toPrSummary(row), runId, branch: row.headRefName, base: typeof row.baseRefName === "string" && row.baseRefName !== "" ? row.baseRefName : null, headOwner: row.isCrossRepository === true ? row.headRepositoryOwner?.login ?? null : null })
   }
   return out
 }

@@ -65,6 +65,8 @@ function setup(options: {
   fsFiles?: Record<string, string>
   defaultBranch?: string | null
   latestProduction?: Parameters<typeof fakeHost>[2]
+  viewerPermission?: string
+  allowForking?: boolean
   clockStepMs?: number
   ctx?: Partial<import("../contracts/deps.js").WizardContext>
 } = {}): Setup {
@@ -76,7 +78,7 @@ function setup(options: {
   const fs = memoryFs(log, { "/repo/.env": SITE[".env"], ...(options.fsFiles ?? {}) })
   const { ctx, events } = context(state, log, options.ctx ?? {})
   const registry = spyRegistry(log, createJobRegistry({ briefFacts: () => null }))
-  const wizardDeps = deps({ bridge: bridge.client, git: git.git, host: fakeHost(log, options.defaultBranch === undefined ? "main" : options.defaultBranch, options.latestProduction ?? null), checks: checks.checks, installer: fakeInstaller(log), registry, fs: fs.fs })
+  const wizardDeps = deps({ bridge: bridge.client, git: git.git, host: fakeHost(log, options.defaultBranch === undefined ? "main" : options.defaultBranch, options.latestProduction ?? null, options.viewerPermission ?? "WRITE", options.allowForking ?? true), checks: checks.checks, installer: fakeInstaller(log), registry, fs: fs.fs })
   if (options.clockStepMs) {
     let now = Date.parse("2026-10-02T09:05:00.000Z")
     wizardDeps.clock = { now: () => new Date((now += options.clockStepMs!)), sleep: async () => {} }
@@ -118,10 +120,9 @@ describe("step before: call order", () => {
     ].map((prefix) => indexOf(s.log, prefix))
     expect(order.every((index) => index >= 0)).toBe(true)
     expect([...order].sort((a, b) => a - b)).toEqual(order)
-    // The branch comes before every other verb and every repo read; the only earlier call is the
-    // read-only hosting lookup that names the production branch (§3g.1).
+    // Push permission is resolved before the branch and all expensive checks.
     const branchAt = indexOf(s.log, "git.createBranch")
-    expect(s.log.slice(0, branchAt).filter((entry) => !entry.startsWith("git.isRepo") && !entry.startsWith("git.cleanTree"))).toEqual(["bridge.hosting"])
+    expect(s.log.slice(0, branchAt).filter((entry) => !entry.startsWith("git.isRepo") && !entry.startsWith("git.cleanTree"))).toEqual(["host.repoFacts", "state.save", "bridge.hosting"])
     expect(indexOf(s.log, "bridge.keys")).toBeLessThan(indexOf(s.log, "bridge.test.start"))
     expect(s.git.branches).toEqual([{ base: "main", branch: "infinite/tag/2026-10-02-7f3c2a" }])
     expect(s.state.git).toMatchObject({ base: "main", baseSource: "vercel", branch: "infinite/tag/2026-10-02-7f3c2a" })
@@ -318,11 +319,18 @@ describe("step before: preconditions and the branch", () => {
     expect(await none.run()).toMatchObject({ kind: "failed", code: "INF_WIZ_BRANCH_FAILED" })
   })
 
-  it("a signed-out GitHub CLI falls back to origin/HEAD instead of stopping (review P3-3)", async () => {
+  it("a signed-out GitHub CLI stops before branching because the PR destination is unknown", async () => {
     const none: HostingResponse = { protocolVersion: 1, requestId: "r", provider: "none", vercel: null }
     const s = setup({ hosting: none, defaultBranch: "THROW", fsFiles: { "/repo/.git/refs/remotes/origin/HEAD": "ref: refs/remotes/origin/trunk\n" } })
-    expect(await s.run()).toMatchObject({ kind: "ok" })
-    expect(s.state.git).toMatchObject({ base: "trunk", baseSource: "origin_head" })
+    expect(await s.run()).toMatchObject({ kind: "failed", code: "INF_WIZ_PUSH_REFUSED" })
+    expect(s.state.git).toBeNull()
+  })
+
+  it("TRIAGE with forking disabled stops before branching or building", async () => {
+    const s = setup({ viewerPermission: "TRIAGE", allowForking: false })
+    expect(await s.run()).toMatchObject({ kind: "failed", code: "INF_WIZ_PUSH_REFUSED", message: expect.stringContaining("does not allow forks") })
+    expect(s.git.branches).toEqual([])
+    expect(s.log).not.toContain("bridge.baseline")
   })
 
   it("402 from the keys verb → blocked SUBSCRIPTION_REQUIRED (exit 4)", async () => {
