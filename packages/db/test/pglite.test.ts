@@ -88,9 +88,9 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("applied ALL 83 migrations on first boot and is idempotent on a re-run", async () => {
-    expect(loadMigrations().length).toBe(83);
-    expect(firstRun).toHaveLength(83);
+  it("applied ALL 84 migrations on first boot and is idempotent on a re-run", async () => {
+    expect(loadMigrations().length).toBe(84);
+    expect(firstRun).toHaveLength(84);
     expect(firstRun).toContain("0001_control_plane.sql");
     expect(firstRun).toContain("0006_security_roles.sql");
     expect(firstRun).toContain("0036_chat_sessions_desktop_surface.sql");
@@ -145,13 +145,13 @@ describe("pglite migration + query path (real WASM Postgres)", () => {
     expect(secondRun).toEqual([]);
   });
 
-  it("created the schema_migrations ledger with all 83 rows", async () => {
+  it("created the schema_migrations ledger with all 84 rows", async () => {
     const ledger = await db.query<{ id: string }>(
       "select id from schema_migrations order by id"
     );
-    expect(ledger).toHaveLength(83);
+    expect(ledger).toHaveLength(84);
     expect(ledger[0]?.id).toBe("0001_control_plane.sql");
-    expect(ledger.at(-1)?.id).toBe("0083_remove_dead_x_metrics.sql");
+    expect(ledger.at(-1)?.id).toBe("0084_meta_local_publishing.sql");
   });
 
   it("0083 leaves no X metric or view advertised, keeps the X tables, and re-applies as a no-op", async () => {

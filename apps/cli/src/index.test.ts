@@ -12505,7 +12505,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     const api = stubToolsApi();
     const confirmMutation = vi.fn(async () => true);
     await metaCommand(
-      ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--daily-budget", "5000", "--yes"],
+      ["campaign", "create", "--client-token", "fixture-attempt", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--daily-budget", "5000", "--yes"],
       ENV,
       { confirmMutation }
     );
@@ -12525,7 +12525,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
   it("creative create tags the ruling's url_tags onto a clean link, and refuses a link that already carries UTMs", async () => {
     const api = stubToolsApi();
     await metaCommand(
-      ["creative", "create", "--source-id", "src_meta", "--name", "hero", "--image-hash", "h1", "--link-url", "https://infinite.fast/", "--yes"],
+      ["creative", "create", "--client-token", "fixture-attempt", "--source-id", "src_meta", "--name", "hero", "--image-hash", "h1", "--link-url", "https://infinite.fast/", "--yes"],
       ENV
     );
     expect(toolCalls(api)[0]?.body).toMatchObject({
@@ -12534,12 +12534,12 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     });
     expect(META_DEFAULT_URL_TAGS).toContain("utm_content={{ad.name}}");
     await metaCommand(
-      ["creative", "create", "--source-id", "src_meta", "--name", "hero", "--image-hash", "h1", "--link-url", "https://infinite.fast/", "--url-tags", "utm_content={{ad.id}}", "--yes"],
+      ["creative", "create", "--client-token", "fixture-attempt", "--source-id", "src_meta", "--name", "hero", "--image-hash", "h1", "--link-url", "https://infinite.fast/", "--url-tags", "utm_source=facebook&utm_medium=paid_social&utm_campaign=fixture&utm_term=fixture&utm_content={{ad.name}}&utm_placement={{placement}}&ad_id={{ad.id}}&adset_id={{adset.id}}&campaign_id={{campaign.id}}", "--yes"],
       ENV
     );
-    expect(toolCalls(api)[1]?.body.input).toMatchObject({ urlTags: "utm_content={{ad.id}}" });
+    expect(toolCalls(api)[1]?.body.input).toMatchObject({ urlTags: "utm_source=facebook&utm_medium=paid_social&utm_campaign=fixture&utm_term=fixture&utm_content={{ad.name}}&utm_placement={{placement}}&ad_id={{ad.id}}&adset_id={{adset.id}}&campaign_id={{campaign.id}}" });
     await expect(metaCommand(
-      ["creative", "create", "--source-id", "src_meta", "--name", "hero", "--image-hash", "h1", "--link-url", "https://infinite.fast/?utm_source=fb", "--yes"],
+      ["creative", "create", "--client-token", "fixture-attempt", "--source-id", "src_meta", "--name", "hero", "--image-hash", "h1", "--link-url", "https://infinite.fast/?utm_source=fb", "--yes"],
       ENV
     )).rejects.toThrow(/already carries utm_source/);
     expect(toolCalls(api)).toHaveLength(2);
@@ -12548,13 +12548,13 @@ describe("meta command (CLI write surface + confirm gates)", () => {
   it("ad create and ad update refuse a name that could not be the ad's utm_content, before any /tools/call", async () => {
     const api = stubToolsApi();
     await expect(metaCommand(
-      ["ad", "create", "120555", "--source-id", "src_meta", "--name", "Summer Sale · v2", "--creative-id", "777", "--yes"],
+      ["ad", "create", "--client-token", "fixture-attempt", "120555", "--source-id", "src_meta", "--name", "Summer Sale · v2", "--creative-id", "777", "--yes"],
       ENV
     )).rejects.toThrow(/utm_content/);
     await expect(metaCommand(["ad", "update", "120556", "--source-id", "src_meta", "--name", "Summer Sale", "--yes"], ENV)).rejects.toThrow(/utm_content/);
     expect(toolCalls(api)).toHaveLength(0);
     await metaCommand(
-      ["ad", "create", "120555", "--source-id", "src_meta", "--name", "inf_b1_static_na_hero_na_na_na_v1", "--creative-id", "777", "--yes"],
+      ["ad", "create", "--client-token", "fixture-attempt", "120555", "--source-id", "src_meta", "--name", "inf_b1_static_na_hero_na_na_na_v1", "--creative-id", "777", "--yes"],
       ENV
     );
     expect(toolCalls(api)[0]?.body).toMatchObject({ actionId: "create_meta_ad", input: { name: "inf_b1_static_na_hero_na_na_na_v1" } });
@@ -12567,7 +12567,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     const api = stubToolsApi();
     const confirmMutation = vi.fn(async () => true);
     await metaCommand(
-      ["adset", "create", "120555", "--source-id", "src_meta", "--name", "AS", "--optimization-goal", "OFFSITE_CONVERSIONS", "--billing-event", "IMPRESSIONS", "-y"],
+      ["adset", "create", "--client-token", "fixture-attempt", "120555", "--source-id", "src_meta", "--name", "AS", "--optimization-goal", "OFFSITE_CONVERSIONS", "--billing-event", "IMPRESSIONS", "-y"],
       ENV,
       { confirmMutation }
     );
@@ -12582,7 +12582,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     const api = stubToolsApi();
     const confirmMutation = vi.fn(async () => false);
     const result = (await metaCommand(
-      ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES"],
+      ["campaign", "create", "--client-token", "fixture-attempt", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES"],
       ENV,
       { confirmMutation }
     )) as { ok: boolean; cancelled?: boolean; section?: string };
@@ -12597,7 +12597,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     const api = stubToolsApi();
     await expect(
       metaCommand(
-        ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES"],
+        ["campaign", "create", "--client-token", "fixture-attempt", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES"],
         ENV,
         {}
       )
@@ -12613,7 +12613,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
       return true;
     });
     await metaCommand(
-      ["campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--daily-budget", "5000"],
+      ["campaign", "create", "--client-token", "fixture-attempt", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--daily-budget", "5000"],
       // Force the interactive seam path by clearing the non-interactive marker.
       { ...(ENV as Record<string, string>), GROWTH_OS_CLI_NONINTERACTIVE: "0" } as never,
       { confirmMutation, adAccountCurrency: "USD" }
@@ -12895,7 +12895,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
     });
     try {
       await runCli(
-        ["local", "meta", "campaign", "create", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--yes", "--json"],
+        ["local", "meta", "campaign", "create", "--client-token", "fixture-attempt", "--source-id", "src_meta", "--name", "Launch", "--objective", "OUTCOME_SALES", "--yes", "--json"],
         ENV
       );
       const parsed = JSON.parse(writes.join(""));
@@ -13032,7 +13032,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
       await metaCommand(
         [
           "adset",
-          "create",
+          "create", "--client-token", "fixture-attempt",
           "--source-id",
           "act_123",
           "cmp_999",
@@ -13057,7 +13057,7 @@ describe("meta command (CLI write surface + confirm gates)", () => {
       await metaCommand(
         [
           "ad",
-          "create",
+          "create", "--client-token", "fixture-attempt",
           "--source-id",
           "act_123",
           "as_888",

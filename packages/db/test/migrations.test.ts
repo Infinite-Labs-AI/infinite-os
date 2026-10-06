@@ -97,7 +97,8 @@ describe("Infinite OS migration stack", () => {
       "0080_meta_ads_adset_breakdown_windows.sql",
       "0081_meta_ads_window_total_dimension.sql",
       "0082_stripe_checkout_sessions.sql",
-      "0083_remove_dead_x_metrics.sql"
+      "0083_remove_dead_x_metrics.sql",
+      "0084_meta_local_publishing.sql"
     ]);
   });
 
@@ -1108,7 +1109,8 @@ describe("Infinite OS migration stack", () => {
       "0080_meta_ads_adset_breakdown_windows.sql",
       "0081_meta_ads_window_total_dimension.sql",
       "0082_stripe_checkout_sessions.sql",
-      "0083_remove_dead_x_metrics.sql"
+      "0083_remove_dead_x_metrics.sql",
+      "0084_meta_local_publishing.sql"
     ]);
   });
 

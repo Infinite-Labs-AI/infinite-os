@@ -1215,7 +1215,7 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         lifetimeBudgetMajor: { type: "number", minimum: 0 },
         clientToken: {
           type: "string",
-          description: "Optional idempotency token; a repeat with the same token returns the existing id (deduped)."
+          description: "Required for local creates. Stable operation token: completed repeats return the existing ID; pending or uncertain repeats refuse without another write."
         }
       },
       ["name", "objective"]
@@ -1293,7 +1293,7 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
           type: "string",
           description: "The website event to optimise for (promoted_object.custom_event_type), e.g. PURCHASE, START_TRIAL, INITIATED_CHECKOUT. Only with OFFSITE_CONVERSIONS or VALUE, and always with pixelId; never defaulted."
         },
-        clientToken: { type: "string" }
+        clientToken: { type: "string", maxLength: 200, description: "Required for local creates; reuse this stable operation token for the same attempt." }
       },
       ["campaignId", "name", "optimizationGoal", "billingEvent"]
     ),
@@ -1311,11 +1311,15 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         videoUrl: { type: "string" },
         instagramUserId: { type: "string" },
         linkUrl: { type: "string" },
+        urlTags: { type: "string", description: "Tracking for the clean destination URL; defaults are generated when omitted." },
+        assetFeedSpec: { type: "object", additionalProperties: true },
+        degreesOfFreedomSpec: { type: "object", additionalProperties: true },
+        launchId: { type: "string", maxLength: 200, description: "Optional local batch identity scope. Reuse across creatives only in the same intended launch; every create still needs its own clientToken." },
         body: { type: "string" },
         title: { type: "string" },
         description: { type: "string" },
         callToAction: { type: "string" },
-        clientToken: { type: "string" }
+        clientToken: { type: "string", maxLength: 200, description: "Required for local creates; reuse this stable operation token for the same attempt." }
       },
       // sourceId OPTIONAL — auto-resolved server-side (see create_meta_campaign.sourceId).
       // pageId OPTIONAL (migration 0068) — defaults to the connection's stored posting Page
@@ -1328,8 +1332,9 @@ function inputSchemaFor(id: InfiniteOsActionId): Record<string, unknown> {
         sourceId: { type: "string" },
         adsetId: { type: "string" },
         name: { type: "string" },
+        launchId: { type: "string", maxLength: 200, description: "Optional same-launch tracking proof from a freshly created creative." },
         creativeId: { type: "string" },
-        clientToken: { type: "string" }
+        clientToken: { type: "string", maxLength: 200, description: "Required for local creates; reuse this stable operation token for the same attempt." }
       },
       // sourceId OPTIONAL — auto-resolved server-side (see create_meta_campaign.sourceId).
       ["adsetId", "name", "creativeId"]

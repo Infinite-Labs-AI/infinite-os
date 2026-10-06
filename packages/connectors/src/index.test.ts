@@ -9058,6 +9058,7 @@ process.exit(1);`,
               linkUrl: "https://example.com",
               body: "Watch now",
               title: "Video Headline",
+              description: "Optional video description",
               callToAction: "learn_more"
             });
             expect(result).toEqual({ ok: true, id: "120000000000053", status: null });
@@ -9066,6 +9067,7 @@ process.exit(1);`,
             expect(argv).toContain("--video");
             expect(argv).not.toContain("--videos");
             expect(argv).not.toContain("--image");
+            expect(argv).not.toContain("--description");
             videoPathArg = argv[argv.indexOf("--video") + 1];
             expect(argv[argv.indexOf("--page-id") + 1]).toBe("page_1");
             expect(argv[argv.indexOf("--link-url") + 1]).toBe("https://example.com");

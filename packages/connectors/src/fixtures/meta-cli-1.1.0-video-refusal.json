@@ -1,0 +1,5 @@
+{
+  "stderr": "Uploading video meta-creative-test-video-0.mp4...\nWARNING:root:parent_id as a parameter of constructor is being deprecated.\nWARNING:root:parent_id is being deprecated.\nWARNING:root:parent_id is being deprecated.\nWARNING:root:parent_id is being deprecated.\nError: API error (100): Invalid parameter\nThe field description is not supported in the field video_data of object_story_spec.\n",
+  "exitCode": 4,
+  "metaMessage": "The field description is not supported in the field video_data of object_story_spec."
+}

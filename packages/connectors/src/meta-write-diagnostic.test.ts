@@ -2,8 +2,9 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { bindMetaAdsCliExecution, createMetaAd } from './index.js';
+import { bindMetaAdsCliExecution, createMetaAd, createMetaCreative } from './index.js';
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/meta-cli-1.1.0-refusal.json', import.meta.url), 'utf8'));
+const videoFixture = JSON.parse(readFileSync(new URL('./fixtures/meta-cli-1.1.0-video-refusal.json', import.meta.url), 'utf8'));
 const dirs: string[] = [];
 afterEach(() => { vi.unstubAllGlobals(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function credential(body: string, token = 'fake-secret') {
@@ -15,6 +16,22 @@ function credential(body: string, token = 'fake-secret') {
 const ad = { name: 'fixture', adsetId: '456', creativeId: '789' };
 async function failure(body: string, token?: string) { return createMetaAd(credential(body, token), ad).catch(error => error); }
 describe('Meta write diagnostics at the real subprocess boundary', () => {
+  it('extracts the captured video refusal around upload and SDK warnings without claiming no partial processing',async()=>{
+    const error=await failure(`process.stderr.write(${JSON.stringify(videoFixture.stderr)});process.exit(4);`);
+    expect(error).toMatchObject({code:'provider_api_error',retryable:false,metaWrite:{phase:'dispatch_unknown',outcome:'unknown',providerCode:100,metaMessage:videoFixture.metaMessage,stderr:videoFixture.stderr}});
+  });
+  it.each(['image','video'])('keeps a pristine API refusal uncertain for an upload-plus-create %s command',async(kind)=>{
+    vi.stubGlobal('fetch',async()=>new Response('fake-media',{status:200,headers:{'content-type':kind==='video'?'video/mp4':'image/png'}}));
+    const stderr='Error: API error (100): Invalid parameter\n'+videoFixture.metaMessage+'\n';
+    const error=await createMetaCreative(credential(`process.stderr.write(${JSON.stringify(stderr)});process.exit(4);`),{name:'fixture',pageId:'222',[kind==='video'?'videoUrl':'imageUrl']:'https://media.test/file',linkUrl:'https://example.com/'}).catch(e=>e);
+    expect(error).toMatchObject({code:'provider_api_error',retryable:false,metaWrite:{phase:'dispatch_unknown',outcome:'unknown',providerCode:100,metaMessage:videoFixture.metaMessage}});
+  });
+  it('excludes trailing SDK deprecation warnings from Meta words',async()=>{
+    const stderr=videoFixture.stderr+'WARNING:root:parent_id is being deprecated.\n';
+    const error=await failure(`process.stderr.write(${JSON.stringify(stderr)});process.exit(4);`);
+    expect(error.metaWrite.metaMessage).toBe(videoFixture.metaMessage);
+  });
+
   it('keeps both error lines emitted by real CLI 1.1.0 during recorded-provider replay', async () => {
     const error = await failure(`process.stderr.write(${JSON.stringify(fixture.stderr)}); process.exit(${fixture.exitCode});`);
     expect(error).toMatchObject({ code: 'meta_provider_rejection', retryable: false, metaWrite: {
