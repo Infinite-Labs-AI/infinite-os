@@ -2,8 +2,8 @@
 //
 // A failed run leaves its edits uncommitted on its branch. `--fresh` used to refuse on them ("Commit or stash your
 // changes first (app/layout.tsx)") — the wizard's own work. A dirty path is a LEFTOVER only when the set-aside run's
-// receipt (`.infinite/install.json`) holds an edit record for it whose `afterHash` equals the file's bytes NOW (so a
-// later hand edit is never taken for the wizard's), plus a `.gitignore` whose change is the wizard's fence alone.
+// receipt (`.infinite/install.json`) holds an edit record or managed-file content hash equal to the file's bytes
+// NOW (so a later hand edit is never taken for the wizard's), plus a `.gitignore` whose change is the wizard's fence alone.
 // Discarding writes HEAD's bytes back to exactly those files (a file the run created is deleted only while its hash
 // still matches): never `git restore --worktree`, never `git reset`.
 import { dirname, join } from "node:path"
@@ -32,7 +32,7 @@ export function dirtyTreeMessage(paths: readonly string[]): string {
 
 export interface Leftover {
   path: string
-  /** The run created the file (its first record has no `beforeHash`). */
+  /** The run created the file (from an edit record, or absence at HEAD for a managed file). */
   created: boolean
   afterHash: string
 }
@@ -53,14 +53,27 @@ interface ReceiptEdit {
   beforeHash?: unknown
 }
 
-async function receiptEdits(fs: Pick<WizardFs, "readText">, root: string): Promise<ReceiptEdit[]> {
+interface LeftoverReceipt {
+  edits: ReceiptEdit[]
+  contentHashes: ReadonlyMap<string, string>
+}
+
+async function receiptFor(fs: Pick<WizardFs, "readText">, root: string): Promise<LeftoverReceipt> {
   const text = await fs.readText(join(root, INSTALL_MANIFEST_PATH))
-  if (text === null) return []
+  if (text === null) return { edits: [], contentHashes: new Map() }
   try {
-    const edits = (JSON.parse(text) as { edits?: unknown }).edits
-    return Array.isArray(edits) ? (edits as ReceiptEdit[]) : []
+    const receipt = JSON.parse(text) as { edits?: unknown; files?: unknown; contentHashes?: unknown }
+    const edits = Array.isArray(receipt.edits) ? (receipt.edits as ReceiptEdit[]) : []
+    const hashes = receipt.contentHashes && typeof receipt.contentHashes === "object" && !Array.isArray(receipt.contentHashes)
+      ? receipt.contentHashes as Record<string, unknown>
+      : {}
+    const contentHashes = new Map<string, string>()
+    if (Array.isArray(receipt.files)) for (const file of receipt.files) {
+      if (typeof file === "string" && typeof hashes[file] === "string" && /^[0-9a-f]{64}$/.test(hashes[file])) contentHashes.set(file, hashes[file])
+    }
+    return { edits, contentHashes }
   } catch {
-    return []
+    return { edits: [], contentHashes: new Map() }
   }
 }
 
@@ -68,18 +81,22 @@ async function receiptEdits(fs: Pick<WizardFs, "readText">, root: string): Promi
 export async function findLeftovers(root: string, fs: Pick<WizardFs, "readText">, git: Pick<WizardGitOps, "cleanTree" | "showFile">, runId: string | null): Promise<LeftoverScan> {
   const tree = await git.cleanTree()
   const blocking = blockingDirtyPaths(tree.dirtyPaths)
-  const edits = runId ? (await receiptEdits(fs, root)).filter((edit) => edit.runId === runId && typeof edit.file === "string") : []
+  const receipt = runId ? await receiptFor(fs, root) : { edits: [], contentHashes: new Map<string, string>() }
+  const edits = receipt.edits.filter((edit) => edit.runId === runId && typeof edit.file === "string")
   const leftovers: Leftover[] = []
   const others: string[] = []
   for (const path of blocking) {
     const records = edits.filter((edit) => edit.file === path)
     const last = records[records.length - 1]
     const current = await fs.readText(join(root, path))
-    if (!last || typeof last.afterHash !== "string" || current === null || sha256Tagged(current) !== last.afterHash) {
+    const currentHash = current === null ? null : sha256Tagged(current)
+    if (last && typeof last.afterHash === "string" && currentHash === last.afterHash) {
+      leftovers.push({ path, created: records[0]!.beforeHash === null, afterHash: last.afterHash })
+    } else if (!last && currentHash !== null && receipt.contentHashes.get(path) === currentHash.slice("sha256:".length)) {
+      leftovers.push({ path, created: await git.showFile("HEAD", path) === null, afterHash: currentHash })
+    } else {
       others.push(path)
-      continue
     }
-    leftovers.push({ path, created: records[0]!.beforeHash === null, afterHash: last.afterHash })
   }
   const gitignoreDirty = tree.dirtyPaths.includes(".gitignore")
   const gitignoreFence = gitignoreDirty && gitignoreChangeIsFenceOnly(await git.showFile("HEAD", ".gitignore"), await fs.readText(join(root, ".gitignore")))
