@@ -1,0 +1,19 @@
+{
+  "provenance": "Real meta-ads CLI output captured offline by replaying recorded provider fields from a 2026-09-18 HTTP 400 validation response. No live request. This is not a failed-write capture from the later all-success replication. Identifiers are synthetic; provider message text is unchanged.",
+  "cliVersion": "1.1.0",
+  "sdkVersion": "25.0.2",
+  "providerResponse": {
+    "error": {
+      "message": "Invalid parameter",
+      "code": 100,
+      "error_subcode": 1885272,
+      "error_user_title": "Budget is too low",
+      "error_user_msg": "Your ad set budget must be more than $5.00 or your ads may not be delivered."
+    }
+  },
+  "httpStatus": 400,
+  "stdout": "",
+  "stderr": "Error: API error (100): Invalid parameter\nYour ad set budget must be more than $5.00 or your ads may not be delivered.\n",
+  "exitCode": 4,
+  "signal": null
+}

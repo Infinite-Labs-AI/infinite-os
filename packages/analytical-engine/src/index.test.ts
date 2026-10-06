@@ -7,7 +7,7 @@ import {
   encryptCredentialPayload,
   isEncryptedCredentialPayload
 } from "@infinite-os/core";
-import { type InfiniteOsDb } from "@infinite-os/db";
+import { createInfiniteOsDb, type InfiniteOsDb } from "@infinite-os/db";
 import { META_CREATIVE_ENHANCEMENT_FEATURES, MetaAdsRequestTelemetry } from "@infinite-os/connectors";
 import { FIRST_PHASE_METRICS, createInfiniteOsRegistry } from "@infinite-os/runtime";
 
@@ -6620,6 +6620,35 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
       credentialUpdatedAt,
       selectedPageId: "page_frozen"
     };
+
+    it("allows an active versioned credential while syncing, but preserves all revocation and binding guards", async () => {
+      const dir=mkdtempSync(join(tmpdir(),"meta-syncing-credential-"));
+      const real=createInfiniteOsDb(`pglite://${join(dir,"db")}`);
+      const executable=join(dir,"meta.mjs"),marker=join(dir,"sent");
+      writeFileSync(executable,`#!${process.execPath}\nimport {appendFileSync} from 'node:fs';appendFileSync(${JSON.stringify(marker)},'sent\\n');console.log(JSON.stringify({id:'123456',status:'PAUSED'}));\n`);chmodSync(executable,0o700);
+      const key="analytical-test-encryption-key";
+      try {
+        await real.query(`create table sources(id text,workspace_id text,provider text,status text,account_external_id text)`);
+        await real.query(`create table connection_credentials(id text,source_id text,workspace_id text,updated_at timestamptz,created_at timestamptz,credential_kind text,encrypted_payload text,oauth_token_id text,selected_page_id text,revoked_at timestamptz,expires_at timestamptz)`);
+        await real.query(`insert into sources values('src_meta',$1,'meta_ads','connected','act_999')`,[operatorContext.workspaceId]);
+        await real.query(`insert into connection_credentials values('cred_snapshot','src_meta',$1,$2,now(),'marketing_api_access_token',$3,null,'page_frozen',null,null)`,[operatorContext.workspaceId,credentialUpdatedAt,encryptCredentialPayload({mode:'live',transport:'meta_ads_cli',adAccountId:'act_999',accessToken:'snapshot-token'},key)]);
+        const base=snapshotDb().db;
+        const db:InfiniteOsDb={...base,one:async<T extends Record<string,unknown>>(sql:string,params?:unknown[])=>sql.includes('join connection_credentials')?real.one<T>(sql,params):base.one<T>(sql,params)};
+        const handlers=createActionHandlers(db,{encryptionKey:key,expectedMetaCredential:expected,metaAdsCliExecution:{mode:'isolated_server',executable}});
+        for(const status of ['connected','syncing']){
+          await real.query('update sources set status=$1',[status]);
+          await expect(handlers.create_meta_campaign!({sourceId:'src_meta',name:status,objective:'OUTCOME_TRAFFIC'},operatorContext)).resolves.toMatchObject({data:{id:'123456'}});
+        }
+        const sent=readFileSync(marker,'utf8');
+        for(const mutation of ["update sources set status='disconnected'","update sources set status='error'","update connection_credentials set revoked_at=now()","update connection_credentials set expires_at=now()-interval '1 day'","update connection_credentials set updated_at=now()","update connection_credentials set selected_page_id='another_page'"]){
+          await real.query("update sources set status='syncing'");
+          await real.query("update connection_credentials set revoked_at=null,expires_at=null,updated_at=$1,selected_page_id='page_frozen'",[credentialUpdatedAt]);
+          await real.query(mutation);
+          await expect(handlers.create_meta_campaign!({sourceId:'src_meta',name:'refused',objective:'OUTCOME_TRAFFIC'},operatorContext)).rejects.toMatchObject({code:'credential_binding_changed',metaWrite:{phase:'not_dispatched'}});
+          expect(readFileSync(marker,'utf8')).toBe(sent);
+        }
+      } finally {await real.close();rmSync(dir,{recursive:true,force:true});}
+    });
 
     it("rejects an expected credential without trusted isolated-server execution", () => {
       const providerCall = vi.fn();

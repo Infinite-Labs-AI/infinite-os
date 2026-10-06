@@ -1,3 +1,6 @@
+import { boundedMetaDiagnosticText, markMetaWriteDispatch, metaCliDiagnostic, metaProviderOutcome, redactMetaDiagnostic, rememberMetaWriteDiagnostic, type MetaWriteDiagnostic } from "./meta-write-diagnostic.js";
+export { withMetaWriteDiagnostics, type MetaWriteDiagnostic } from "./meta-write-diagnostic.js";
+const metaCliResponseDiagnostics = new WeakMap<object, MetaWriteDiagnostic>();
 import {
   META_ADS_HOT_ROLLUP_DERIVATION,
   MetaAdsRollupError,
@@ -11928,6 +11931,7 @@ async function metaAdsGraphWrite(
   const isPost = method === "POST";
   let response: Response;
   try {
+    markMetaWriteDispatch(accessToken);
     response = await fetch(url, {
       method,
       headers: {
@@ -11952,8 +11956,22 @@ async function metaAdsGraphWrite(
       false
     );
   }
+  const rawBody = await response.text();
+  let body: unknown;
+  try { body = JSON.parse(rawBody); } catch { body = null; }
+  const diagnostic: MetaWriteDiagnostic = { version: 1, phase: "dispatch_unknown", outcome: "unknown", httpStatus: response.status };
   if (!response.ok) {
-    const detail = await responseSafeDetail(response);
+    const provider = body && typeof body === "object" ? (body as { error?: Record<string, unknown> }).error : undefined;
+    if (provider && typeof provider === "object") {
+      diagnostic.phase = "provider_response";
+      if (typeof provider.code === "number" && Number.isSafeInteger(provider.code)) diagnostic.providerCode = provider.code;
+      if (typeof provider.error_subcode === "number" && Number.isSafeInteger(provider.error_subcode)) diagnostic.providerSubcode = provider.error_subcode;
+      const message = typeof provider.error_user_msg === "string" ? provider.error_user_msg : provider.message;
+      if (typeof message === "string") diagnostic.metaMessage = boundedMetaDiagnosticText(redactMetaDiagnostic(message, accessToken), 768);
+      diagnostic.outcome = metaProviderOutcome(diagnostic.providerCode, diagnostic.providerSubcode, response.status, provider.is_transient === true);
+    }
+    rememberMetaWriteDiagnostic(diagnostic);
+    const detail = boundedMetaDiagnosticText(redactMetaDiagnostic(rawBody, accessToken), 3000);
     const code =
       response.status === 401 || response.status === 403
         ? "provider_auth_failed"
@@ -11964,10 +11982,13 @@ async function metaAdsGraphWrite(
       code,
       providerHttpErrorMessage("Meta Ads write failed", response.status, safeUrl, detail),
       // INVARIANT 3: writes are non-retryable for ALL status codes (incl 429/5xx).
-      false
+      false, undefined, response.status, diagnostic
     );
   }
-  return (await response.json()) as MetaGraphWriteResponse;
+  rememberMetaWriteDiagnostic(diagnostic);
+  if (!body || typeof body !== "object") throw new ConnectorError("provider_api_error", "Meta Ads write returned invalid JSON", false, undefined, response.status, diagnostic);
+  metaCliResponseDiagnostics.set(body, diagnostic);
+  return body as MetaGraphWriteResponse;
 }
 
 // Reads the echoed status from a create response leniently. Campaign/adset/ad
@@ -12022,7 +12043,7 @@ function assertCreateNotActive(entity: MetaWriteEntity, id: string, response: Me
       "money_safety_violation",
       `Meta Ads ${entity} ${id} was created ACTIVE despite a PAUSED create request — refusing to proceed`,
       false,
-      id
+      id, undefined, metaCliResponseDiagnostics.get(response)
     );
   }
   return status;
@@ -12034,7 +12055,7 @@ function requireGraphId(entity: MetaWriteEntity, response: MetaGraphWritePayload
     throw new ConnectorError(
       "provider_api_error",
       `Meta Ads ${entity} create response did not include an id`,
-      false
+      false, undefined, undefined, metaCliResponseDiagnostics.get(response)
     );
   }
   return id;
@@ -14076,48 +14097,6 @@ function safeMetaCliClickUsageDiagnostic(
   return { code: "meta_cli_invalid_arguments", message: `${prefix}${exit}: ${detail}` };
 }
 
-function safeBoundedMetaErrorText(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const compact = value.replace(/\s+/g, " ").trim();
-  if (!compact) return undefined;
-  return compact.slice(0, 500);
-}
-
-function safeMetaProviderRejectionDiagnostic(
-  stderr: string,
-  accessToken: string | undefined,
-  prefix: string
-): { message: string; status?: number } | null {
-  const scrubbed = scrubMetaToken(stderr, accessToken);
-  const json = lastBalancedJsonBlock(scrubbed);
-  if (!json) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(json);
-  } catch {
-    return null;
-  }
-  const envelope = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-  const rawError = envelope.error;
-  if (!rawError || typeof rawError !== "object" || Array.isArray(rawError)) return null;
-  const error = rawError as Record<string, unknown>;
-  const parts: string[] = [];
-  const title = safeBoundedMetaErrorText(error.error_user_title);
-  const userMsg = safeBoundedMetaErrorText(error.error_user_msg);
-  const message = safeBoundedMetaErrorText(error.message);
-  if (title) parts.push(title);
-  if (userMsg && userMsg !== title) parts.push(userMsg);
-  if (message && message !== title && message !== userMsg) parts.push(message);
-  const numeric: string[] = [];
-  if (typeof error.code === "number" && Number.isSafeInteger(error.code)) numeric.push(`code=${error.code}`);
-  if (typeof error.error_subcode === "number" && Number.isSafeInteger(error.error_subcode)) numeric.push(`subcode=${error.error_subcode}`);
-  if (parts.length === 0 && numeric.length === 0) return null;
-  const statusMatch = scrubbed.match(/\b(?:failed|request failed)\s+(\d{3})\b/i);
-  const status = statusMatch ? Number(statusMatch[1]) : undefined;
-  const detail = `${parts.join(": ")}${numeric.length > 0 ? ` [${numeric.join(", ")}]` : ""}`.slice(0, 1_000);
-  return { message: `${prefix}: ${detail}`, ...(status ? { status } : {}) };
-}
-
 // The daemon can be spawned with a cwd that is later removed (e.g. a temp build dir). Node's
 // `spawn` throws if the child's cwd no longer exists, so pin the Meta CLI to a stable, existing
 // directory instead of inheriting the daemon's (possibly-gone) cwd.
@@ -14183,6 +14162,8 @@ async function callMetaAdsCliJson(
   // --no-color / --no-input are global `meta` options (they precede the subcommand). They keep the
   // CLI non-interactive (a prompt would otherwise hang until the timeout) and strip ANSI colour so
   // banners/escape codes can never contaminate the --output json body the parser reads.
+  const started = Date.now();
+  markMetaWriteDispatch(tokenForScrub);
   const child = spawn(executable, [...commandArgs, "--no-color", "--no-input", ...args], {
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,
@@ -14195,6 +14176,13 @@ async function callMetaAdsCliJson(
   });
   let stdoutBuffer = "";
   let stderrBuffer = "";
+  let stderrBytes = 0;
+  let exitCode: number | null = null, exitSignal: NodeJS.Signals | null = null;
+  let notDispatched = false;
+  const writeDiagnostic = () => metaCliDiagnostic({ stdout: stdoutBuffer, stderr: stderrBuffer,
+    token: tokenForScrub, exitCode, signal: exitSignal, durationMs: Date.now() - started,
+    notDispatched, stderrTruncated: stderrBytes > Buffer.byteLength(stderrBuffer),
+  });
   const CLI_TIMEOUT_MS = options.timeoutMs ?? META_CLI_DEFAULT_TIMEOUT_MS;
   const CLI_MAX_STDOUT_BYTES = 1_000_000;
   const CLI_MAX_STDERR_BYTES = 4_096;
@@ -14208,10 +14196,12 @@ async function callMetaAdsCliJson(
       timeout.unref?.();
       fn();
     };
-    const fail = (message: string) => {
+    const fail = (message: string, code = "provider_api_error") => {
       finish(() => {
         child.kill();
-        reject(new ConnectorError("provider_api_error", message, true));
+        const detail = writeDiagnostic();
+        rememberMetaWriteDiagnostic(detail);
+        reject(new ConnectorError(code, boundedMetaDiagnosticText(redactMetaDiagnostic(message, tokenForScrub), 1024), true, undefined, undefined, detail));
       });
     };
     const timeout = setTimeout(() => {
@@ -14225,13 +14215,16 @@ async function callMetaAdsCliJson(
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {
+      stderrBytes += chunk.length;
       stderrBuffer = `${stderrBuffer}${chunk.toString("utf8")}`.slice(0, CLI_MAX_STDERR_BYTES);
     });
     child.on("error", () => {
+      notDispatched = true;
       fail("Meta Ads CLI command failed to start");
     });
-    child.on("exit", (code) => {
+    child.on("close", (code, signal) => {
       if (settled) return;
+      exitCode = code; exitSignal = signal;
       if (code !== 0) {
         // Defense-in-depth (review): scrub token-shaped substrings (and the actual
         // ACCESS_TOKEN value the CLI uses — explicit OR ambient/inherited) from stderr
@@ -14244,15 +14237,15 @@ async function callMetaAdsCliJson(
           code
         );
         if (diagnostic) {
-          finish(() => {
-            child.kill();
-            reject(new ConnectorError(diagnostic.code, diagnostic.message, false));
-          });
+          notDispatched = true;
+          fail(diagnostic.message, diagnostic.code);
           return;
         }
-        const scrubbed = scrubMetaToken(stderrBuffer.trim(), tokenForScrub);
-        const detail = scrubbed ? `: ${scrubbed}` : "";
-        fail(`Meta Ads CLI command failed${detail}`);
+        const detail = writeDiagnostic();
+        const failureCode = detail.outcome === "refused" ? "meta_provider_rejection"
+          : detail.outcome === "throttled" ? "provider_rate_limited"
+          : detail.outcome === "temporary" ? "meta_provider_temporary" : "provider_api_error";
+        fail(detail.metaMessage ?? `Meta Ads CLI command failed: ${redactMetaDiagnostic(stderrBuffer, tokenForScrub)}`, failureCode);
         return;
       }
       finish(() => {
@@ -14262,16 +14255,20 @@ async function callMetaAdsCliJson(
           // than throwing "invalid JSON"; those callers derive their result from the passed id, not
           // the body. (This was a shipped bug: an empty-stdout delete surfaced as provider_api_error.)
           if (stdoutBuffer.trim() === "") {
-            resolve({ success: true });
-            return;
+            const result = { success: true }, detail = writeDiagnostic();
+            metaCliResponseDiagnostics.set(result, detail); rememberMetaWriteDiagnostic(detail);
+            resolve(result); return;
           }
           // Some `meta` CLI commands prepend a human line (e.g. "Created campaign …")
           // before the `--output json` payload. Strip any leading non-JSON prefix up
           // to the first `{`/`[` so the structured body still parses. A pure-JSON
           // stdout (the read/insights path) is unaffected — it already starts with `{`.
-          resolve(JSON.parse(stripJsonPrefix(stdoutBuffer)));
+          const parsed: unknown = JSON.parse(stripJsonPrefix(stdoutBuffer));
+          const detail = writeDiagnostic(); rememberMetaWriteDiagnostic(detail);
+          if (parsed && typeof parsed === "object") metaCliResponseDiagnostics.set(parsed, detail);
+          resolve(parsed);
         } catch {
-          reject(new ConnectorError("provider_api_error", "Meta Ads CLI command returned invalid JSON", true));
+          reject(new ConnectorError("provider_api_error", "Meta Ads CLI command returned invalid JSON", true, undefined, undefined, writeDiagnostic()));
         }
       });
     });
@@ -14284,54 +14281,51 @@ async function callIsolatedMetaAdsCliJson(
   options: MetaCliCallOptions,
   execution: MetaAdsCliExecution
 ): Promise<unknown> {
+  const started = Date.now();
   const token = metaAdsCliAccessToken(credential);
-  if (!token) {
-    throw new ConnectorError("provider_auth_failed", "Meta Ads CLI server execution requires a stored access token", false);
-  }
-  if (!execution.executable.startsWith("/") || !existsSync(execution.executable)) {
-    throw new ConnectorError("provider_unsupported", "Meta Ads CLI server executable is unavailable", false);
-  }
-  const home = mkdtempSync(join(tmpdir(), "meta-cli-server-"));
-  let stdout = Buffer.alloc(0);
-  let stderr = Buffer.alloc(0);
-  let stderrBytes = 0;
-  let failed: ConnectorError | null = null;
+  let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0);
+  let stdoutBytes = 0, stderrBytes = 0;
+  let notDispatched = true;
+  let exitCode: number | null = null, signal: NodeJS.Signals | null = null;
+  let home: string | undefined;
+  const diagnostic = () => metaCliDiagnostic({
+    stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"), token,
+    exitCode, signal, notDispatched, durationMs: Date.now() - started,
+    stdoutTruncated: stdoutBytes > stdout.length, stderrTruncated: stderrBytes > stderr.length,
+  });
   try {
+    if (!token) throw new ConnectorError("provider_auth_failed", "Meta Ads CLI server execution requires a stored access token", false);
+    if (!execution.executable.startsWith("/") || !existsSync(execution.executable)) {
+      throw new ConnectorError("provider_unsupported", "Meta Ads CLI server executable is unavailable", false);
+    }
+    const accountId = metaAdsCliAccountId(credential);
+    home = mkdtempSync(join(tmpdir(), "meta-cli-server-"));
+    // The child can send before its promise resolves. A child 'error' proves spawn failed;
+    // a timeout/signal never proves the provider did not process a write.
+    markMetaWriteDispatch(token);
     const child = spawn(execution.executable, ["--no-color", "--no-input", ...args], {
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: false,
-      detached: process.platform !== "win32",
-      cwd: home,
-      env: {
-        ACCESS_TOKEN: token,
-        AD_ACCOUNT_ID: metaAdsCliAccountId(credential),
-        PATH: execution.path ?? "/usr/bin:/bin",
-        HOME: home,
-        XDG_CONFIG_HOME: home,
-        XDG_CACHE_HOME: home,
-        PYTHON_DOTENV_DISABLED: "1",
-        PYTHONUNBUFFERED: "1"
-      }
+      stdio: ["ignore", "pipe", "pipe"], shell: false,
+      detached: process.platform !== "win32", cwd: home,
+      env: { ACCESS_TOKEN: token, AD_ACCOUNT_ID: accountId,
+        PATH: execution.path ?? "/usr/bin:/bin", HOME: home, XDG_CONFIG_HOME: home,
+        XDG_CACHE_HOME: home, PYTHON_DOTENV_DISABLED: "1", PYTHONUNBUFFERED: "1" },
     });
+    notDispatched = false;
     let resolveClose!: (value: { code: number | null; signal: NodeJS.Signals | null }) => void;
     const close = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       resolveClose = resolve;
-      child.on("close", (code, signal) => resolve({ code, signal }));
+      child.on("close", (code, childSignal) => resolve({ code, signal: childSignal }));
     });
+    let failed: ConnectorError | undefined;
     let forceCloseTimer: NodeJS.Timeout | undefined;
     const hardStop = () => {
       if (forceCloseTimer) return;
-      // A CLI can spawn descendants holding stdout/stderr open or ignore SIGTERM.
-      // Kill the entire process group on Unix; use the direct child on Windows.
       try {
         if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGKILL");
         else child.kill("SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
+      } catch { child.kill("SIGKILL"); }
       forceCloseTimer = setTimeout(() => {
-        child.stdout.destroy();
-        child.stderr.destroy();
+        child.stdout.destroy(); child.stderr.destroy();
         resolveClose({ code: null, signal: "SIGKILL" });
       }, 2_000);
     };
@@ -14341,68 +14335,65 @@ async function callIsolatedMetaAdsCliJson(
     }, options.timeoutMs ?? META_CLI_DEFAULT_TIMEOUT_MS);
     try {
       child.stdout.on("data", (chunk: Buffer) => {
-        if (failed) return;
-        if (stdout.length + chunk.length > 128 * 1024) {
+        stdoutBytes += chunk.length;
+        if (stdout.length < 128 * 1024) stdout = Buffer.concat([stdout, chunk]).subarray(0, 128 * 1024);
+        if (stdoutBytes > 128 * 1024 && !failed) {
           failed = new ConnectorError("provider_api_error", "Meta Ads CLI server output exceeded the limit", false);
           hardStop();
-          return;
         }
-        stdout = Buffer.concat([stdout, chunk]);
       });
       child.stderr.on("data", (chunk: Buffer) => {
         stderrBytes += chunk.length;
-        if (stderr.length < 8 * 1024) {
-          stderr = Buffer.concat([stderr, chunk]).subarray(0, 8 * 1024);
-        }
+        if (stderr.length < 8 * 1024) stderr = Buffer.concat([stderr, chunk]).subarray(0, 8 * 1024);
         if (stderrBytes > 8 * 1024 && !failed) {
           failed = new ConnectorError("provider_api_error", "Meta Ads CLI server error output exceeded the limit", false);
           hardStop();
         }
       });
       child.on("error", () => {
+        notDispatched = true;
         failed ??= new ConnectorError("provider_api_error", "Meta Ads CLI server command failed to start", false);
         hardStop();
       });
       const result = await close;
+      exitCode = result.code; signal = result.signal;
       if (failed) throw failed;
-      if (result.code !== 0 || result.signal) {
-        // Provider stderr can echo arbitrary credentials. Only expose Click's local
-        // argument parser errors after scrubbing and narrowing to its safe one-line detail.
-        const diagnostic = safeMetaCliClickUsageDiagnostic(
-          stderr.toString("utf8"),
-          token,
-          "Meta Ads CLI server command failed",
-          result.code
-        );
-        if (diagnostic) {
-          throw new ConnectorError(diagnostic.code, diagnostic.message, false);
+      if (exitCode !== 0 || signal) {
+        const usage = safeMetaCliClickUsageDiagnostic(stderr.toString("utf8"), token, "Meta Ads CLI server command failed", exitCode);
+        if (usage) {
+          notDispatched = true;
+          throw new ConnectorError(usage.code, usage.message, false);
         }
-        const providerRejection = safeMetaProviderRejectionDiagnostic(
-          stderr.toString("utf8"),
-          token,
-          "Meta provider rejected the request"
-        );
-        if (providerRejection) {
-          throw new ConnectorError("meta_provider_rejection", providerRejection.message, false, undefined, providerRejection.status);
-        }
-        throw new ConnectorError("provider_api_error", "Meta Ads CLI server command failed", false);
+        const detail = diagnostic();
+        const code = detail.outcome === "refused" ? "meta_provider_rejection"
+          : detail.outcome === "throttled" ? "provider_rate_limited"
+          : detail.outcome === "temporary" ? "meta_provider_temporary" : "provider_api_error";
+        throw new ConnectorError(code, detail.metaMessage ?? "Meta Ads CLI server command failed", false);
       }
       const output = stdout.toString("utf8");
       if (scrubMetaToken(output, token) !== output) {
         throw new ConnectorError("provider_api_error", "Meta Ads CLI server response contained credential material", false);
       }
-      if (!output.trim()) return { success: true };
-      try {
-        return JSON.parse(stripJsonPrefix(output)) as unknown;
-      } catch {
-        throw new ConnectorError("provider_api_error", "Meta Ads CLI server command returned invalid JSON", false);
-      }
+      let parsed: unknown;
+      try { parsed = output.trim() ? JSON.parse(stripJsonPrefix(output)) : { success: true }; }
+      catch { throw new ConnectorError("provider_api_error", "Meta Ads CLI server command returned invalid JSON", false); }
+      const detail = diagnostic();
+      rememberMetaWriteDiagnostic(detail);
+      if (parsed && typeof parsed === "object") metaCliResponseDiagnostics.set(parsed, detail);
+      return parsed;
     } finally {
       clearTimeout(timeout);
       if (forceCloseTimer) clearTimeout(forceCloseTimer);
     }
+  } catch (error) {
+    const detail = diagnostic();
+    rememberMetaWriteDiagnostic(detail);
+    const original = error instanceof ConnectorError ? error : undefined;
+    throw new ConnectorError(original?.code ?? "provider_api_error",
+      boundedMetaDiagnosticText(redactMetaDiagnostic(error instanceof Error ? error.message : String(error), token), 1024),
+      false, original?.entityId, original?.status, detail);
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    if (home) rmSync(home, { recursive: true, force: true });
   }
 }
 
@@ -14536,7 +14527,7 @@ async function metaAdsCliWrite(
   } catch (error) {
     if (error instanceof ConnectorError) {
       // Re-stamp as non-retryable: a create/status/delete must never auto-retry.
-      throw new ConnectorError(error.code, error.message, false);
+      throw new ConnectorError(error.code, error.message, false, error.entityId, error.status, error.metaWrite);
     }
     throw new ConnectorError(
       "provider_api_error",
@@ -15280,7 +15271,8 @@ export class ConnectorError extends Error {
     // Optional: the provider HTTP status, so a caller can CLASSIFY a failure instead of parsing the
     // message. Today only the Stripe delta lane uses it — a 404 on an object a `*.deleted` event
     // named in the same window is an OBSERVED DELETION, not an outage.
-    public readonly status?: number
+    public readonly status?: number,
+    public readonly metaWrite?: MetaWriteDiagnostic
   ) {
     super(message);
   }

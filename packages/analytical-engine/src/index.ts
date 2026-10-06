@@ -20,6 +20,7 @@ import {
   updateMetaBudget,
   updateMetaAd,
   ConnectorError,
+  withMetaWriteDiagnostics,
   type ConnectionTestResult,
   type MetaAdSetTargeting,
   type MetaAssetFeedSpec,
@@ -173,14 +174,14 @@ export function createActionHandlers(
     list_meta_entities: (input, context) => listMetaEntitiesHandler(db, context, input, metaAdsCliExecution, encryptionKey, options?.metaAdsRequestTelemetry),
     get_meta_entity: (input, context) => getMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey, options?.metaAdsRequestTelemetry),
     run_meta_live_insights: (input, context) => runMetaLiveInsightsHandler(db, context, input, metaAdsCliExecution, encryptionKey, options?.metaAdsRequestTelemetry),
-    create_meta_campaign: (input, context) => createMetaCampaignHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
-    create_meta_ad_set: (input, context) => createMetaAdSetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
-    create_meta_creative: (input, context) => createMetaCreativeHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
-    create_meta_ad: (input, context) => createMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
-    set_meta_entity_status: (input, context) => setMetaEntityStatusHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
-    update_meta_budget: (input, context) => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential, options?.metaAdsRequestTelemetry),
-    update_meta_ad: (input, context) => updateMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential),
-    delete_meta_entity: (input, context) => deleteMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)
+    create_meta_campaign: (input, context) => withMetaWriteDiagnostics(() => createMetaCampaignHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)),
+    create_meta_ad_set: (input, context) => withMetaWriteDiagnostics(() => createMetaAdSetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)),
+    create_meta_creative: (input, context) => withMetaWriteDiagnostics(() => createMetaCreativeHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)),
+    create_meta_ad: (input, context) => withMetaWriteDiagnostics(() => createMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)),
+    set_meta_entity_status: (input, context) => withMetaWriteDiagnostics(() => setMetaEntityStatusHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)),
+    update_meta_budget: (input, context) => withMetaWriteDiagnostics(() => updateMetaBudgetHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential, options?.metaAdsRequestTelemetry)),
+    update_meta_ad: (input, context) => withMetaWriteDiagnostics(() => updateMetaAdHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential)),
+    delete_meta_entity: (input, context) => withMetaWriteDiagnostics(() => deleteMetaEntityHandler(db, context, input, metaAdsCliExecution, encryptionKey, expectedMetaCredential))
   };
 }
 
@@ -1937,7 +1938,7 @@ async function resolveMetaCredentialForWrite(
          join connection_credentials cc
            on cc.workspace_id = s.workspace_id and cc.source_id = s.id
         where s.workspace_id = $1 and s.id = $2
-          and s.provider = 'meta_ads' and s.status = 'connected'
+          and s.provider = 'meta_ads' and s.status in ('connected', 'syncing')
           and cc.revoked_at is null
           and (cc.expires_at is null or cc.expires_at > now())
         order by cc.created_at desc
