@@ -31,6 +31,7 @@ import {
   SERVER_LANE_PROBE_DISCLOSURE,
   withGuardHosts,
   GA4_SPA_LINE_TEXT,
+  seedItemsAfterApprovals,
   type PlanModelInput,
   type PlanScanFacts
 } from "./plan-model.js"
@@ -67,6 +68,17 @@ const adoptedMetaLines: ImproveLine[] = [
   { id: "preview_guard_adopted:meta:init", kind: "preview_guard_adopted", provider: "meta", target: "init", text: "Meta: keep preview sites silent.", owner: "agent", evidence: { file: "index.html", line: 6 } },
   { id: "autoconfig_off_adopted:meta:autoconfig", kind: "autoconfig_off_adopted", provider: "meta", target: "autoconfig", text: "Meta: turn off automatic events.", owner: "code", evidence: { file: "index.html", line: 6 } }
 ]
+
+it("withholds server outcome jobs when the server lane cannot be installed", () => {
+  const item = candidate("server_conversions", "lead")
+  const plan = buildPlanModel(input({
+    before: fakeBefore({ hosting: fakeHosting({ envWriteGranted: false }) }),
+    candidates: [item]
+  }))
+  expect(plan.lines.map((line) => line.id)).toContain("user_action:server_lane")
+  expect(plan.withheld).toContain(item.id)
+  expect(seedItemsAfterApprovals([item], [], plan, { approved: plan.lines.filter((line) => line.requires === "approval").map((line) => line.id), declined: [], edits: {} })).not.toContainEqual(expect.objectContaining({ id: item.id }))
+})
 const adoptedPosthogLines: ImproveLine[] = [
   { id: "improve_additive:posthog:proxy", kind: "improve_additive", provider: "posthog", target: "proxy", text: "PostHog: send events through /ingest.", owner: "code", evidence: { file: "index.html", line: 5 } },
   { id: "improve_additive:posthog:history_change", kind: "improve_additive", provider: "posthog", target: "history_change", text: "PostHog: history_change.", owner: "agent", evidence: { file: "index.html", line: 5 } },

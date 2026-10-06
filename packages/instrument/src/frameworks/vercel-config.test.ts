@@ -11,6 +11,7 @@ import {
   buildNextConfigSource,
   buildPosthogRewritePairs,
   buildVercelJson,
+  hasExactNextConfigRewrites,
   mergeVercelRewrites,
   parseVercelConfig,
   planNextConfigProxy,
@@ -58,6 +59,15 @@ const US_INGEST = {
   source: "/ingest/:path(.*)",
   destination: "https://us.i.posthog.com/:path"
 }
+
+it("reads exact rewrites beside unrelated template literals and escaped strings", () => {
+  const source = `const notion = 'https://docs.acme.example'\nmodule.exports = {\n  async rewrites() {\n    return [\n      { source: "/site-v:version(\\\\d+).webmanifest", destination: "/manifest.webmanifest" },\n      { source: "/_assets/:path*", destination: \`\${notion}/_assets/:path*\` },\n      { source: "/ingest/static/:path(.*)", destination: "https://us-assets.i.posthog.com/static/:path" },\n      { source: "/ingest/array/:path(.*)", destination: "https://us-assets.i.posthog.com/array/:path" },\n      { source: "/ingest/:path(.*)", destination: "https://us.i.posthog.com/:path" }\n    ]\n  }\n}\n`
+  expect(hasExactNextConfigRewrites(source, usProxy)).toBe(true)
+  const withLocalConstant = source.replace("const notion = 'https://docs.acme.example'\n", "").replace("async rewrites() {", "async rewrites() {\n    const notion = 'https://docs.acme.example';")
+  expect(hasExactNextConfigRewrites(withLocalConstant, usProxy)).toBe(true)
+  expect(hasExactNextConfigRewrites(source.replace("https://us.i.posthog.com/:path", "https://wrong.acme.example/:path"), usProxy)).toBe(false)
+  expect(hasExactNextConfigRewrites(source.replace('destination: "https://us.i.posthog.com/:path"', 'destination: `${notion}/:path`'), usProxy)).toBe(false)
+})
 
 describe("buildPosthogRewritePairs", () => {
   it("orders the assets rule before the catch-all and derives the prefix from proxy.path", () => {

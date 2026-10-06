@@ -549,11 +549,11 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   // §3y.5 (P3-13): job 10 is seeded only when this install emits the conversion helpers (a new or managed tool).
   const helpersEmitted = tools.length > 0 || scan.managedProviders.length > 0
   const infiniteRecordable = tools.includes("infinite") || scan.managedProviders.includes("infinite") || keys.infinite.status === "ready"
-  // R2-6: job 8 reports through Infinite (`reportInfiniteOutcome`): with no helper emitted AND no Infinite to report
-  // to, it is withheld with job 10 (one user_action line), so the conversion decision governs nothing this run.
-  const withheldItems = helpersEmitted
-    ? []
-    : input.candidates.filter((item) => item.jobId === "conversions_to_tools" || (!infiniteRecordable && item.jobId === "server_conversions"))
+  // Server outcomes need the server lane's reportInfiniteOutcome export. Browser helpers alone do not provide it.
+  const withheldItems = input.candidates.filter((item) =>
+    (item.jobId === "server_conversions" && !serverLaneApprovable) ||
+    (item.jobId === "conversions_to_tools" && !helpersEmitted)
+  )
   const withheld = withheldItems.map((item) => item.id)
   const candidates = input.candidates.filter((item) => !withheld.includes(item.id))
 
@@ -684,7 +684,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         kind: "server_lane",
         text: `Server lane (${scan.serverLane.targetLabel}): counts every page request on your server, even with ad blockers. ${SERVER_LANE_PROBE_DISCLOSURE}`,
         requires: "approval",
-        ownership: "managed"
+        ownership: "managed",
+        jobIds: candidates.filter((item) => item.jobId === "server_conversions").map((item) => item.id)
       })
     )
   } else if (scan.serverLane && (tools.includes("infinite") || infiniteUnrunnable) && !serverLaneRule.ok && serverLaneRule.line) {

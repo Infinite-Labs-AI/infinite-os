@@ -23,7 +23,7 @@ export const PRIVACY_TOOL_NAMES: Record<TestTool, RegExp> = {
   ga4: /google analytics|\bga4\b|googletagmanager/i,
   posthog: /posthog/i,
   meta: /\bmeta pixel\b|facebook pixel|\bmeta platforms\b|\bmeta conversions api\b|facebook conversions api/i,
-  infinite: /\binfinite (?:analytics|tag)\b|\binfinite-tag\b|\binfinite\.(?:fast|inc)\b/i
+  infinite: /\binfinite (?:analytics|tag)\b|\binfinite-tag\b|\binfinite\.(?:fast|inc)\b|\binfinite\s*\(ultima inc\.\)\s+to measure visits\b/i
 }
 
 /** Pure: privacy pages (routed pages, HTML and Markdown), first line of each. */

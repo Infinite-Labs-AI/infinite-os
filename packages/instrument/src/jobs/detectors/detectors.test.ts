@@ -16,10 +16,17 @@ import { detectLayout } from "./layout.js"
 import { detectConversionElements, detectOutcomes } from "./outcomes.js"
 import { detectPrivacyPages } from "./privacy-page.js"
 import { detectRedirects, middlewareMatchers, pathPatternToRegExp } from "./redirects.js"
+import { draftPrivacyParagraph } from "../../install/plan-model.js"
 import { detectServerMount } from "./server-mount.js"
 import { codeMatches, isNonProductPath, routePathOf } from "./shared.js"
 
 const snap = (files: Record<string, string>, appRoot = ".") => snapshotFromFiles(files, { appRoot })
+
+it("recognises the approved Infinite privacy paragraph without treating infinite scroll as disclosure", () => {
+  const paragraph = draftPrivacyParagraph(["infinite"], false)!
+  expect(detectPrivacyPages(snap({ "pages/privacy.tsx": `export default function Privacy() { return <p>${paragraph}</p> }` }))[0]?.names.infinite).toBe(true)
+  expect(detectPrivacyPages(snap({ "pages/privacy.tsx": "export default function Privacy() { return <p>infinite scroll</p> }" }))[0]?.names.infinite).toBe(false)
+})
 
 function census(entries: Array<Partial<CensusEntry> & Pick<CensusEntry, "tool" | "kind" | "file" | "line">>): CensusResult {
   return {

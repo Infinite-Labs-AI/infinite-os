@@ -3,7 +3,11 @@
 // starts), generalised to the deny mode customers get (decision 3) and the 13-host matrix from the
 // build plan (§1.1, S5). Every case runs the EMITTED expression in node:vm and its TS twin, and the two
 // must agree.
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
+import ts from "typescript"
 
 import { createBrowserVm } from "../test/site-code/browser-vm.js"
 
@@ -30,6 +34,22 @@ const GUARD: HostGuardSpec = {
   exempt: ["acme.com", "www.acme.com", "acme-git-main-x.vercel.app"],
   deny: []
 }
+
+it("emits a guard accepted by strict TypeScript and by the adopted-init checker", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "infinite-guard-ts-"))
+  try {
+    const source = `declare const fbq: (...args: string[]) => void\nexport function start() {\n  if (!(${buildHostGuardExpression(GUARD)})) return\n  fbq('init', '111222333444555')\n}\n`
+    const path = join(dir, "tracking.ts")
+    writeFileSync(path, source)
+    const options: ts.CompilerOptions = { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, skipLibCheck: true }
+    const program = ts.createProgram([path], options)
+    expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
+    const { checkHostGuard } = await import("./setup-checks/host-guard.js")
+    expect(checkHostGuard({ files: new Map([["tracking.ts", source]]), strict: true }).state).toBe("ok")
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 // host → fires?  (label explains the row)
 const MATRIX: Array<[string, boolean, string]> = [

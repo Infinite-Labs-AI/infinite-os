@@ -735,7 +735,7 @@ export function planNextConfigProxy(
 }
 
 interface JsToken {
-  kind: "identifier" | "string" | "punctuation"
+  kind: "identifier" | "string" | "template" | "punctuation"
   value: string
 }
 
@@ -786,9 +786,9 @@ export function hasExactNextConfigRewrites(source: string, proxy: ProxyInput): b
   ) {
     return false
   }
-  const actual = literalRewritesFromConfig(tokens, exportedObjects[0]!)
-  if (!actual) return false
   const expected = buildManagedRewritePairs(proxy)
+  const actual = literalRewritesFromConfig(tokens, exportedObjects[0]!, new Set(expected.map((pair) => pair.source)))
+  if (!actual) return false
   return (
     expected.every((pair) =>
       actual.some(
@@ -832,7 +832,12 @@ function tokenizeNextConfig(source: string): JsToken[] | null {
       index += 1
       while (index < source.length) {
         const next = source[index]!
-        if (next === "\\") return null
+        if (next === "\\") {
+          if (index + 1 >= source.length || source[index + 1] === "\n" || source[index + 1] === "\r") return null
+          value += source.slice(index, index + 2)
+          index += 2
+          continue
+        }
         if (next === quote) {
           closed = true
           index += 1
@@ -846,7 +851,30 @@ function tokenizeNextConfig(source: string): JsToken[] | null {
       tokens.push({ kind: "string", value })
       continue
     }
-    if (character === "`") return null
+    if (character === "`") {
+      let closed = false
+      let value = ""
+      index += 1
+      while (index < source.length) {
+        const next = source[index]!
+        if (next === "\\") {
+          if (index + 1 >= source.length) return null
+          value += source.slice(index, index + 2)
+          index += 2
+          continue
+        }
+        if (next === "`") {
+          closed = true
+          index += 1
+          break
+        }
+        value += next
+        index += 1
+      }
+      if (!closed) return null
+      tokens.push({ kind: "template", value })
+      continue
+    }
     const identifier = source.slice(index).match(/^[A-Za-z_$][A-Za-z0-9_$]*/)?.[0]
     if (identifier) {
       tokens.push({ kind: "identifier", value: identifier })
@@ -888,7 +916,7 @@ function declaredObjectExpressions(tokens: JsToken[]): Map<string, number> {
   return declarations
 }
 
-function literalRewritesFromConfig(tokens: JsToken[], objectStart: number): VercelRewrite[] | null {
+function literalRewritesFromConfig(tokens: JsToken[], objectStart: number, expectedSources: ReadonlySet<string>): VercelRewrite[] | null {
   const objectEnd = matchingToken(tokens, objectStart, "{", "}")
   if (objectEnd === null) return null
   const properties = topLevelSegments(tokens, objectStart + 1, objectEnd)
@@ -901,7 +929,7 @@ function literalRewritesFromConfig(tokens: JsToken[], objectStart: number): Verc
   const [start, end] = rewrites[0]!
   const key = tokens[start]?.value === "async" ? start + 1 : start
   const arrayStart = returnedArrayStart(tokens, key, end)
-  return arrayStart === null ? null : literalRewriteArray(tokens, arrayStart)
+  return arrayStart === null ? null : literalRewriteArray(tokens, arrayStart, expectedSources)
 }
 
 function returnedArrayStart(tokens: JsToken[], key: number, end: number): number | null {
@@ -929,8 +957,15 @@ function returnedArrayStart(tokens: JsToken[], key: number, end: number): number
 
 function returnedArrayInBody(tokens: JsToken[], bodyStart: number): number | null {
   const bodyEnd = matchingToken(tokens, bodyStart, "{", "}")
-  if (bodyEnd === null || tokens[bodyStart + 1]?.value !== "return") return null
-  const arrayStart = bodyStart + 2
+  if (bodyEnd === null) return null
+  let cursor = bodyStart + 1
+  // Allow local string constants used by unrelated destinations, but no control flow or calls.
+  while (["const", "let", "var"].includes(tokens[cursor]?.value ?? "")) {
+    if (tokens[cursor + 1]?.kind !== "identifier" || tokens[cursor + 2]?.value !== "=" || tokens[cursor + 3]?.kind !== "string" || tokens[cursor + 4]?.value !== ";") return null
+    cursor += 5
+  }
+  if (tokens[cursor]?.value !== "return") return null
+  const arrayStart = cursor + 1
   if (tokens[arrayStart]?.value !== "[") return null
   const arrayEnd = matchingToken(tokens, arrayStart, "[", "]")
   if (arrayEnd === null) return null
@@ -938,7 +973,7 @@ function returnedArrayInBody(tokens: JsToken[], bodyStart: number): number | nul
   return remainder.length === 0 ? arrayStart : null
 }
 
-function literalRewriteArray(tokens: JsToken[], arrayStart: number): VercelRewrite[] | null {
+function literalRewriteArray(tokens: JsToken[], arrayStart: number, expectedSources: ReadonlySet<string>): VercelRewrite[] | null {
   const arrayEnd = matchingToken(tokens, arrayStart, "[", "]")
   if (arrayEnd === null) return null
   const rewrites: VercelRewrite[] = []
@@ -946,19 +981,26 @@ function literalRewriteArray(tokens: JsToken[], arrayStart: number): VercelRewri
     if (tokens[start]?.value !== "{") return null
     const objectEnd = matchingToken(tokens, start, "{", "}")
     if (objectEnd === null || objectEnd !== end - 1) return null
-    const values = new Map<string, string>()
+    const values = new Map<string, JsToken>()
     for (const [propertyStart, propertyEnd] of topLevelSegments(tokens, start + 1, objectEnd)) {
       if (
         propertyEnd - propertyStart !== 3 ||
         tokens[propertyStart + 1]?.value !== ":" ||
-        tokens[propertyStart + 2]?.kind !== "string"
+        !["string", "template"].includes(tokens[propertyStart + 2]?.kind ?? "")
       ) {
         return null
       }
-      values.set(tokens[propertyStart]!.value, tokens[propertyStart + 2]!.value)
+      values.set(tokens[propertyStart]!.value, tokens[propertyStart + 2]!)
     }
     if (values.size !== 2 || !values.has("source") || !values.has("destination")) return null
-    rewrites.push({ source: values.get("source")!, destination: values.get("destination")! })
+    const source = values.get("source")!
+    const destination = values.get("destination")!
+    if (source.kind !== "string") return null
+    if (destination.kind === "template") {
+      if (expectedSources.has(source.value)) return null
+      continue
+    }
+    rewrites.push({ source: source.value, destination: destination.value })
   }
   return rewrites
 }
