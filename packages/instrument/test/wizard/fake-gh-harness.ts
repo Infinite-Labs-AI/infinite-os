@@ -24,7 +24,7 @@ export interface FakeGhState {
   prs?: Array<Record<string, unknown>>
   threads?: Array<{ id: string; prNumber: number; isResolved: boolean; path: string | null; line: number | null; comments: Array<{ author: string; authorAssociation: string; body: string }> }>
   /** GitHub's deployment rows (`sha: "*"` answers every SHA); statuses newest first. */
-  deployments?: Array<{ id: number; sha: string; environment: string; creator: string; production_environment?: boolean; created_at?: string; statuses: Array<{ state: string; environment_url?: string | null }> }>
+  deployments?: Array<{ id: number; sha: string; environment: string; creator: string; production_environment?: boolean; created_at?: string; statuses: Array<{ state: string; description?: string; environment_url?: string | null }> }>
   rules?: Record<string, Array<{ type: string; parameters?: Record<string, unknown> }>>
   checks?: Record<string, Array<{ name: string; bucket: string; state: string }>>
   calls?: FakeGhCall[]

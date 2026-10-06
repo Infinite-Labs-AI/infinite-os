@@ -221,7 +221,7 @@ if (group === "pr") {
     if (!rows || rows.length === 0) fail("no required checks reported on the 'infinite' branch")
     save()
     process.stdout.write(`${JSON.stringify(rows)}\n`)
-    process.exit(rows.some((row) => row.bucket === "pending") ? 8 : 0)
+    process.exit(rows.some((row) => row.bucket === "fail" || row.bucket === "cancel") ? 1 : rows.some((row) => row.bucket === "pending") ? 8 : 0)
   }
 }
 

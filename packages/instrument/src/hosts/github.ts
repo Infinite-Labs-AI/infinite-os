@@ -4,7 +4,7 @@ import type { GitHostAdapter, GitHostAdapterExtras, PrComment, PrSummary } from 
 import { prChecks, type PrCheck } from "../github/checks.js"
 import type { GhClient } from "../github/gh.js"
 import { comment, createDraftPr, findPr, markReady, readPr, updateBranch, updateOwnComment } from "../github/pr.js"
-import { previewUrlForSha } from "../github/preview.js"
+import { previewFailureForSha, previewUrlForSha } from "../github/preview.js"
 import { latestProductionDeployment, productionDeploymentForSha, productionDeploymentUrl, vercelDeploymentSeen, type GhDeployState, type LatestProductionDeployment } from "../github/deployments.js"
 import { createViewerFork, ghAuthStatus, ghRepoFacts, type GhRepoFacts } from "../github/repo.js"
 import { postCommentReview } from "../github/review.js"
@@ -30,6 +30,7 @@ export interface GitHubHostAdapter extends GitHostAdapter, GitHostAdapterExtras 
   checks(number: number): Promise<PrCheck[]>
   rules(base: string): Promise<{ requiresReview: boolean; mergeQueue: boolean }>
   previewUrl(sha: string): Promise<string | null>
+  previewFailure(sha: string): Promise<{ reason: string; blocked: boolean } | null>
   /** §3y.4: the merge SHA's production deployment (GitHub Deployments; the linked project picks in a monorepo). */
   productionDeployment(sha: string): Promise<{ state: GhDeployState }>
   /** §3x.6: the merge SHA's production deployment's own preview-class address (`*.vercel.app`), or null. */
@@ -126,6 +127,7 @@ export function createGitHubAdapter(gh: GhClient): GitHubHostAdapter {
     },
     updateBranch: (number) => updateBranch(gh, number),
     previewUrl: (sha) => previewUrlForSha(gh, sha, previewProject),
+    previewFailure: (sha) => previewFailureForSha(gh, sha, previewProject),
     productionDeployment: (sha) => productionDeploymentForSha(gh, sha, previewProject),
     productionDeploymentUrl: (sha) => productionDeploymentUrl(gh, sha, previewProject),
     latestProductionDeployment: () => latestProductionDeployment(gh, previewProject),

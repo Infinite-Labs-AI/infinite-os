@@ -48,6 +48,8 @@ export type RehearsalUndetermined =
   | "preview_refused"
   | "preview_protected"
   | "no_preview"
+  | "preview_blocked"
+  | "preview_failed"
   | "no_production_host"
   | "not_github"
   | "gh_unavailable"
@@ -197,7 +199,7 @@ async function pollDesktopTest(
   }
 }
 
-async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: WizardStepId, head: string): Promise<{ url: string } | { url: null; why: "no_preview" | "gh_unavailable" }> {
+async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: WizardStepId, head: string): Promise<{ url: string } | { url: null; why: "no_preview" | "gh_unavailable" | "preview_blocked" | "preview_failed" }> {
   const until = deps.clock.now().getTime() + PR_LOOP_LIMITS.previewWaitMs
   const fork = ctx.state.get().pushTarget?.kind === "fork"
   sub(ctx, step, fork ? "Checking for a fork PR preview (Vercel may need the project owner's authorization)…" : "Waiting for its Vercel preview…", "pending")
@@ -212,6 +214,15 @@ async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: Wizard
     }
     if (isUnsupported(url)) return { url: null, why: "no_preview" }
     if (url) return { url }
+    const failure = await deps.host.previewFailure?.(head).catch(() => null)
+    if (failure && !isUnsupported(failure)) {
+      const reason = sanitizeUntrusted(failure.reason, 90)
+      sub(ctx, step, `Vercel ${failure.blocked ? "blocked the preview" : "preview failed"}: ${reason}`, "warn")
+      sub(ctx, step, failure.blocked
+        ? "Ask the repo owner to add you to the Vercel team, or have a team member authorize the deployment; then rerun."
+        : "Fix the deployment in Vercel, then rerun infinite-tag.", "warn")
+      return { url: null, why: failure.blocked ? "preview_blocked" : "preview_failed" }
+    }
     if (ctx.signal.aborted || deps.clock.now().getTime() + PREVIEW_POLL_MS > until) return { url: null, why: "no_preview" }
     await deps.clock.sleep(PREVIEW_POLL_MS, ctx.signal)
   }
@@ -478,6 +489,8 @@ const UNDETERMINED_REASON: Record<RehearsalUndetermined, Reason> = {
   preview_refused: "not_exercised",
   preview_protected: "preview_protected",
   no_preview: "not_exercised",
+  preview_blocked: "not_exercised",
+  preview_failed: "not_exercised",
   no_production_host: "not_exercised",
   not_github: "not_exercised",
   gh_unavailable: "read_failed",
@@ -753,6 +766,8 @@ export function rehearsalLines(outcome: RehearsalOutcome): Array<{ text: string;
       preview_refused: "Rehearsal: undetermined (Infinite refused the preview: it is not this site's Vercel project)",
       preview_protected: "Rehearsal: undetermined (the preview is protected)",
       no_preview: "Rehearsal: undetermined (no preview appeared within 10 minutes)",
+      preview_blocked: "Rehearsal: undetermined (Vercel blocked the preview; ask the repo owner to authorize it)",
+      preview_failed: "Rehearsal: undetermined (Vercel preview deployment failed)",
       no_production_host: "Rehearsal: undetermined (no production host known)",
       not_github: "Rehearsal: undetermined (previews are read from GitHub only)",
       gh_unavailable: "Rehearsal: undetermined (gh is not installed or logged in, so the preview cannot be read)",

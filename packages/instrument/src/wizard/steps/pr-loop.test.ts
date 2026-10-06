@@ -481,6 +481,39 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(w.fx.remoteSha(BRANCH)).toBeNull()
   })
 
+  it("stops before committing when site validation finds new lint errors in wizard-owned files", async () => {
+    const w = await world()
+    w.deps.checks.build = async () => ({ ok: false, durationMs: 1, failureSignature: ["lint: lib/infinite-server-lane.ts Error: no-unused-vars"] })
+    const outcome = await rehearsalStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_VALIDATION_FAILED", message: expect.stringContaining("lint") })
+    expect(w.fx.remoteSha(BRANCH)).toBeNull()
+    expect(w.gh.read().prs).toEqual([])
+  })
+
+  it("does not open a PR when build and lint cannot run because site dependencies are absent", async () => {
+    const w = await world()
+    w.deps.checks.build = async () => ({ ok: false, durationMs: 1, failureSignature: ["exit_code:127"], error: "the site's build script could not run: executable not found" })
+    expect(await rehearsalStep.run(w.ctx, w.deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_VALIDATION_FAILED", message: expect.stringContaining("dependencies") })
+    expect(w.fx.remoteSha(BRANCH)).toBeNull()
+  })
+
+  it("has the worker fix a new lint failure in its allowed file before opening the PR", async () => {
+    let fixes = 0
+    const w = await world({ fix: (input, _round, world) => {
+      fixes += 1
+      expect(input.items[0]).toMatchObject({ jobId: "build_fix", allow: { files: ["app/layout.tsx"] } })
+      world.fx.write("app/layout.tsx", readFileSync(join(world.fx.root, "app/layout.tsx"), "utf8").replace("// managed", "// lint-fixed managed"))
+      return {}
+    } })
+    let checks = 0
+    w.deps.checks.build = async () => (++checks === 1
+      ? { ok: false, durationMs: 1, failureSignature: ["lint: app/layout.tsx Error: no-unused-vars"] }
+      : { ok: true, durationMs: 1, failureSignature: [] })
+    expectOk(await rehearsalStep.run(w.ctx, w.deps))
+    expect(fixes).toBe(1)
+    expect(w.fx.remoteSha(BRANCH)).not.toBeNull()
+  })
+
   it("unreadable gh facts leave the push decision to git without a false refusal", async () => {
     const w = await world()
     w.deps.host.repoFacts = async () => { throw new Error("gh temporarily unavailable") }
@@ -528,6 +561,18 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(await ensurePushTarget(w.ctx, w.deps, () => undefined)).toBeNull()
     expectOk(await rehearsalStep.run(w.ctx, w.deps))
     expect(w.bridge.testRequests.some((request) => request.mode === "rehearsal")).toBe(true)
+  })
+
+  it("does not wait out the preview window when Vercel has already blocked this deployment", async () => {
+    const clock = fakeClock()
+    const w = await world({ clock, gh: { deployments: [{ id: 7, sha: "*", environment: "Preview", creator: "vercel[bot]", statuses: [{ state: "failure", description: "Deployment was blocked" }] }] } })
+    const outcome = await rehearsalStep.run(w.ctx, w.deps)
+    expectOk(outcome)
+    expect(outcome.status).toMatch(/undetermined.*blocked/i)
+    expect(clock.slept).not.toContain(15_000)
+    expect(w.bridge.testRequests.filter((request) => request.mode === "rehearsal")).toEqual([])
+    expect(w.ctx.state.get().report.in_pr!.finishLine.previews_silent).toMatchObject({ state: "undetermined", reason: "not_exercised" })
+    expect(eventText(w.ctx)).toMatch(/team member.*authoriz/i)
   })
 
   it("P2-2: without gh the rehearsal is undetermined at once (no 10-minute wait for a preview it cannot read)", async () => {
@@ -1152,6 +1197,18 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.agents.jobCalls).toEqual([])
   })
 
+  it("shows a reviewer phase and trusted read/thinking counts while its agent runs", async () => {
+    const w = await opened({ reviews: [review([])] })
+    const original = w.deps.agents.review.bind(w.deps.agents)
+    w.deps.agents.review = async (input) => {
+      input.onActivity?.({ kind: "read", path: "app/layout.tsx" })
+      input.onActivity?.({ kind: "thinking", seconds: 9 })
+      return original(input)
+    }
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(eventText(w.ctx)).toMatch(/Reading the pull request · 1 files read · 0 edited · thinking 9 s/)
+  })
+
   it("P1-2: an OK'd teammate thread acts on exactly the teammate text the user saw, never a stranger's reply in it", async () => {
     const w = await opened({ reviews: [review([]), review([])], fix: fixLayout, answers: { "teammate-comments": { actOn: ["PRRT_mixed", "PRRT_hidden"] } } })
     w.gh.update((state) => {
@@ -1228,6 +1285,19 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(job.checks.map((check) => `${check.tier}:${check.id}:${check.state}`)).toEqual(["S:pr_checks_pass:pass", "B:build:pass"])
   })
 
+  it("reports a failed site test by name on a pushed review fix, even when branch protection marks no checks required", async () => {
+    const w = await opened({
+      reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null }]), review([])],
+      fix: fixLayout,
+      gh: { checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE" }] } }
+    })
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_VALIDATION_FAILED", message: expect.stringContaining("test") })
+    const job = w.ctx.state.get().jobs.find((candidate) => candidate.id === "review_comments:F1")!
+    expect(job.checks.find((check) => check.id === "pr_checks_pass")).toMatchObject({ state: "problem", reason: expect.stringContaining("test") })
+    expect(w.gh.traffic()).not.toContain("--required")
+    expect(w.gh.read().prs[0]).toMatchObject({ isDraft: true })
+  })
+
   it("P2-3: a resume after the worker ran out of usage continues round 1 from its saved review (one review post, one reviewer run)", async () => {
     let calls = 0
     const w = await opened({
@@ -1277,9 +1347,9 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
       reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null }])],
       fix: fixLayout,
       installer,
-      checks: fakeChecks({ build: false }),
       answers: { "teammate-comments": { actOn: [] } }
     })
+    w.deps.checks = fakeChecks({ build: false })
     const before = readFileSync(join(w.fx.root, "app/layout.tsx"), "utf8")
     expectOk(await reviewStep.run(w.ctx, w.deps))
     expect(readFileSync(join(w.fx.root, "app/layout.tsx"), "utf8")).toBe(before)

@@ -133,6 +133,8 @@ export interface GitHostAdapter {
   /** Merge-commit default; never `--rebase`. */
   updateBranch(number: number): Promise<void | Unsupported>
   previewUrl(sha: string): Promise<string | null | Unsupported>
+  /** A terminal Vercel preview failure for this SHA; optional on non-GitHub hosts and older adapters. */
+  previewFailure?(sha: string): Promise<{ reason: string; blocked: boolean } | null | Unsupported>
   rules(base: string): Promise<{ requiresReview: boolean; mergeQueue: boolean } | Unsupported>
 }
 
