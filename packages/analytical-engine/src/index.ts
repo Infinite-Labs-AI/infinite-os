@@ -1938,7 +1938,7 @@ async function resolveMetaCredentialForWrite(
          join connection_credentials cc
            on cc.workspace_id = s.workspace_id and cc.source_id = s.id
         where s.workspace_id = $1 and s.id = $2
-          and s.provider = 'meta_ads' and s.status = 'connected'
+          and s.provider = 'meta_ads' and s.status in ('connected', 'syncing')
           and cc.revoked_at is null
           and (cc.expires_at is null or cc.expires_at > now())
         order by cc.created_at desc
