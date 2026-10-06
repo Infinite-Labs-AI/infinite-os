@@ -1,5 +1,7 @@
+import { buildMetaVideoCreativePayload } from './meta-video-creative.js';
+export { buildMetaVideoCreativePayload, type MetaVideoThumbnail } from './meta-video-creative.js';
 export { resolveMetaPublishingIdentity, metaPublishingTracking, assertMetaAdTrackingName, isMetaAdTrackingName, safeMetaWriteErrorFields, verifyMetaCreativeTracking, MetaPublishingError, type MetaPublishingIdentity } from "./meta-publishing.js";
-import { boundedMetaDiagnosticText, markMetaWriteDispatch, metaCliDiagnostic, metaProviderOutcome, redactMetaDiagnostic, rememberMetaWriteDiagnostic, type MetaWriteDiagnostic } from "./meta-write-diagnostic.js";
+import { captureMetaWriteDiagnostic, boundedMetaDiagnosticText, markMetaWriteDispatch, metaCliDiagnostic, metaProviderOutcome, redactMetaDiagnostic, rememberMetaWriteDiagnostic, type MetaWriteDiagnostic } from "./meta-write-diagnostic.js";
 export { withMetaWriteDiagnostics, captureMetaWriteDiagnostic, type MetaWriteDiagnostic } from "./meta-write-diagnostic.js";
 const metaCliResponseDiagnostics = new WeakMap<object, MetaWriteDiagnostic>();
 import {
@@ -12510,7 +12512,8 @@ function normalizedMetaCreativeInput(input: MetaCreativeCreateInput): MetaCreati
 
 export async function createMetaCreative(
   credential: MetaAdsCredential,
-  rawInput: MetaCreativeCreateInput
+  rawInput: MetaCreativeCreateInput,
+  telemetry?: MetaAdsRequestObserver
 ): Promise<MetaWriteResult> {
   const input = normalizedMetaCreativeInput(rawInput);
   if (input.imageUrl && input.videoUrl) {
@@ -12521,9 +12524,10 @@ export async function createMetaCreative(
     );
   }
   if (isMetaAdsCliTransport(credential)) {
-    return createMetaCreativeViaCli(credential, input);
+    return createMetaCreativeViaCli(credential, input, telemetry);
   }
   const adAccountId = metaAdsAccountId(credential);
+  if (input.videoUrl) return createMetaVideoCreative(credential, input, telemetry);
   if (input.assetFeedSpec) {
     // Multi-asset creative. Identity rides object_story_spec; every media/text/link/CTA rides the feed.
     const identity: Record<string, unknown> = { page_id: input.pageId };
@@ -14718,11 +14722,13 @@ async function createMetaAdSetViaCli(
 // a hash can't become a file → fail loud, non-retryable (review BLOCKER).
 async function createMetaCreativeViaCli(
   credential: MetaAdsCredential,
-  input: MetaCreativeCreateInput
+  input: MetaCreativeCreateInput,
+  telemetry?: MetaAdsRequestObserver
 ): Promise<MetaWriteResult> {
   if (input.assetFeedSpec) {
     return createMetaFeedCreativeViaCli(credential, input, input.assetFeedSpec);
   }
+  if (input.videoUrl) return createMetaVideoCreative(credential, input, telemetry);
   if (!input.imageUrl && !input.videoUrl) {
     // A hash can't become a file. Surface a clear, non-retryable error rather than
     // passing a hash as a bogus --image/--video path (which the CLI rejects as missing file).
@@ -14790,6 +14796,103 @@ async function createMetaCreativeViaCli(
     } catch {
       // ignore — the temp file lives under os.tmpdir() and is reaped by the OS.
     }
+  }
+}
+
+// CLI 1.1.0 has no standalone upload command and its --video shortcut emits invalid fields.
+// Upload via Graph's URL edge, then submit one canonical payload through Graph or official CLI raw mode.
+const META_VIDEO_READY_READ_LIMIT = 10;
+const META_VIDEO_READY_WAIT_MS = 3_000;
+async function metaVideoGraphRequest(credential: MetaAdsCredential, method: "GET" | "POST", path: string,
+  params: Record<string,unknown>, telemetry?: MetaAdsRequestObserver): Promise<Record<string,unknown>> {
+  const token = requireCredential(credential, "accessToken");
+  const url = new URL(`https://graph.facebook.com/${metaAdsApiVersion(credential)}/${path}`);
+  if (method === "GET") for (const [key,value] of Object.entries(params)) url.searchParams.set(key,String(value));
+  await telemetry?.beforeRequest("ad_edge", false);
+  if (method === "POST") markMetaWriteDispatch(token);
+  // Exactly one attempt. A real error/throttle stops this workflow; only 200/processing is polled below.
+  let response: Response;
+  try { response = await fetch(url.toString(), {method, headers:{...bearerHeaders(token), ...(method === "POST" ? {"Content-Type":"application/x-www-form-urlencoded"} : {})},
+    ...(method === "POST" ? {body:metaFormEncode(params).toString()} : {}), signal:AbortSignal.timeout(method === "POST" ? 120_000 : 30_000)}); }
+  catch { throw new ConnectorError("provider_api_error",`Meta video ${method === "POST" ? "upload" : "metadata read"} did not answer`,false); }
+  const text = await response.text();
+  let body: unknown; try {body=JSON.parse(text);} catch {body=null;}
+  const diagnostic: MetaWriteDiagnostic = {version:1,phase:"dispatch_unknown",outcome:"unknown",httpStatus:response.status};
+  const signal = metaAdsResponseSignal(response);
+  const provider = isRecord(body) && isRecord(body.error) ? body.error : null;
+  if (!response.ok || provider) {
+    if(provider){diagnostic.phase=response.ok?"dispatch_unknown":"provider_response";
+      if(typeof provider.code === "number") diagnostic.providerCode=provider.code;
+      if(typeof provider.error_subcode === "number") diagnostic.providerSubcode=provider.error_subcode;
+      const reason = typeof provider.error_user_msg === "string" ? provider.error_user_msg : provider.message;
+      if(typeof reason === "string") diagnostic.metaMessage=boundedMetaDiagnosticText(redactMetaDiagnostic(reason,token),768);
+      diagnostic.outcome=response.ok?"unknown":metaProviderOutcome(diagnostic.providerCode,diagnostic.providerSubcode,response.status,provider.is_transient===true);
+    }
+    signal.throttled=metaProviderOutcome(diagnostic.providerCode,diagnostic.providerSubcode,response.status) === "throttled";
+  }
+  await telemetry?.observeResponse(signal);
+  if(!response.ok || provider){rememberMetaWriteDiagnostic(diagnostic);throw new ConnectorError(
+    diagnostic.outcome === "throttled" ? "provider_rate_limited" : "provider_api_error",
+    diagnostic.metaMessage ?? `Meta video request failed (${response.status})`,false,undefined,response.status,diagnostic);}
+  if(!isRecord(body)) throw new ConnectorError("provider_api_error","Meta video request returned invalid JSON",false);
+  return body;
+}
+async function createMetaVideoCreative(credential: MetaAdsCredential, input: MetaCreativeCreateInput,
+  telemetry?: MetaAdsRequestObserver): Promise<MetaWriteResult> {
+  const callToAction = metaEnum(input.callToAction, META_CALL_TO_ACTION_VALUES, "call to action");
+  const normalized = {...input,callToAction};
+  if(!input.videoUrl || !/^https:\/\//i.test(input.videoUrl)) throw new ConnectorError("provider_api_error","Video media needs an HTTPS URL",false);
+  requireCredential(credential,"accessToken");
+  // Validate identity/copy before uploading; the real thumbnail comes from this video's own metadata.
+  try { buildMetaVideoCreativePayload(normalized,"1",{imageUrl:"https://placeholder.invalid/thumbnail"}); }
+  catch(error){if(error instanceof MetaCreativeSpecError)throw new ConnectorError(error.code,error.message,false);throw error;}
+  let uploaded = false;
+  try {
+    const upload = await metaVideoGraphRequest(credential,"POST",`${metaAdsAccountId(credential)}/advideos`,{file_url:input.videoUrl,name:input.name,title:input.name},telemetry);
+    uploaded=true;
+    const videoId = stringOrNull(upload.id);
+    if(!videoId || !/^\d+$/.test(videoId)) throw new ConnectorError("provider_api_error","Meta video upload returned no video ID",false);
+    let node: Record<string,unknown> | undefined;
+    for(let attempt=0;attempt<META_VIDEO_READY_READ_LIMIT;attempt++){
+      node=await metaVideoGraphRequest(credential,"GET",videoId,{fields:"id,status,picture"},telemetry);
+      const state=isRecord(node.status)?node.status.video_status:undefined;
+      if(state === "ready") break;
+      if(state !== "processing" || attempt === META_VIDEO_READY_READ_LIMIT-1) {
+        const status=isRecord(node.status)?node.status:{};
+        const errors=["uploading_phase","processing_phase","publishing_phase"].flatMap(key=>{
+          const phase=isRecord(status[key])?status[key]:{};
+          return Array.isArray(phase.errors)?phase.errors.filter(isRecord):[];
+        });
+        const failure=errors.find(item=>typeof item.message === "string" && item.message.trim());
+        const reason=failure?boundedMetaDiagnosticText(redactMetaDiagnostic(String(failure.message),String(credential.accessToken??"")),768):"The uploaded video is not ready for a creative";
+        const diagnostic:MetaWriteDiagnostic={version:1,phase:"dispatch_unknown",outcome:"unknown",metaMessage:reason,
+          ...(typeof failure?.code === "number" && Number.isSafeInteger(failure.code)?{providerCode:failure.code}:{})};
+        throw new ConnectorError("provider_api_error",reason,false,undefined,undefined,diagnostic);
+      }
+      await new Promise(resolve=>setTimeout(resolve,META_VIDEO_READY_WAIT_MS));
+    }
+    let thumbnail=stringOrNull(node?.picture);
+    if(!thumbnail || !/^https:\/\//i.test(thumbnail)){
+      const thumbs=await metaVideoGraphRequest(credential,"GET",`${videoId}/thumbnails`,{fields:"uri,is_preferred",limit:25},telemetry);
+      const choices=(Array.isArray(thumbs.data)?thumbs.data:[]).filter(isRecord).filter(row=>typeof row.uri === "string" && /^https:\/\//i.test(row.uri));
+      thumbnail=stringOrNull((choices.find(row=>row.is_preferred===true)??choices[0])?.uri);
+    }
+    if(!thumbnail) throw new ConnectorError("provider_api_error","The uploaded video has no usable thumbnail",false);
+    const params=buildMetaVideoCreativePayload(normalized,videoId,{imageUrl:thumbnail});
+    let response: MetaGraphWritePayload;
+    if(isMetaAdsCliTransport(credential)){
+      const args=["--output","json","ads","--ad-account-id",metaAdsCliAccountId(credential),"creative","create","--name",input.name,"--object-story-spec",JSON.stringify(params.object_story_spec)];
+      if(input.urlTags)args.push("--url-tags",input.urlTags);
+      if(input.degreesOfFreedomSpec)args.push("--degrees-of-freedom-spec",JSON.stringify(input.degreesOfFreedomSpec));
+      response=await metaAdsCliWrite(credential,args,{timeoutMs:META_CLI_VIDEO_CREATIVE_TIMEOUT_MS,mayHavePartialWrites:true});
+    }else response=await metaAdsGraphPost(credential,`${metaAdsAccountId(credential)}/${META_CREATE_EDGE.creative}`,params);
+    return {ok:true,id:requireGraphId("creative",response),status:null};
+  }catch(error){
+    if(!uploaded)throw error;
+    const previous=captureMetaWriteDiagnostic(error), diagnostic:MetaWriteDiagnostic={...previous,phase:"dispatch_unknown",outcome:"unknown"};
+    rememberMetaWriteDiagnostic(diagnostic);
+    if(error instanceof ConnectorError)throw new ConnectorError(error.code,error.message,false,error.entityId,error.status,diagnostic);
+    throw new ConnectorError("provider_api_error",error instanceof Error?error.message:"Video creative failed after media upload",false,undefined,undefined,diagnostic);
   }
 }
 

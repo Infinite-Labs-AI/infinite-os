@@ -234,7 +234,7 @@ describe("local Meta action safety", () => {
       )
     ).toBe(true);
   });
-  it("refuses unsupported direct-Graph video before identity reads or writes", async () => {
+  it("refuses unsupported direct-Graph image URL without a hash before identity reads or writes", async () => {
     const fetcher = vi.fn();
     vi.stubGlobal("fetch", fetcher);
     const { db } = database();
@@ -244,7 +244,7 @@ describe("local Meta action safety", () => {
           sourceId: "source-a",
           name: "fixture",
           pageId: "222",
-          videoUrl: "https://example.test/video.mp4",
+          imageUrl: "https://example.test/image.png",
           linkUrl: "https://example.test",
           clientToken: "attempt-a"
         },
