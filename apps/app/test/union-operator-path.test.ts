@@ -5,12 +5,10 @@ import type { InfiniteOsDb } from "@infinite-os/db";
 import type { ChatSessionStore } from "@infinite-os/llm-controller";
 import { createApp } from "../src/index.js";
 
-// A desktop Codex union turn no longer offers the engine's writes (authority "operator"): the model's call to one is
-// refused as an unknown action inside the turn. The desktop's own Meta writes do not ride the chat: its LOCAL lane
-// (1bu-1 apps/desktop/src/main/ads/engine-action.ts) calls executeOperatorAction, which POSTs /tools/call with the
-// operator token (apps/desktop/src/main/daemon-http.ts executeOperatorAction). That route, and the named /meta/*
-// routes, run guardedAction → registry.execute with operator authority, never the chat's per-turn tool set. This
-// pins both sides in one daemon: the union turn refuses, the direct operator calls still write.
+// A desktop Codex union turn withholds engine writes (authority "operator"). Direct authenticated
+// operator HTTP tools remain supported for engine/CLI clients: /tools/call and named /meta/* routes
+// run guardedAction → registry.execute with operator authority, outside the chat's per-turn tool set.
+// The shipping desktop's former local Meta lane is retired; this test does not revive or exercise it.
 
 const OPERATOR_TOKEN = "operator-token";
 const READ_TOKEN = "read-token";
@@ -49,6 +47,26 @@ function metaDb(audits: AuditRow[]): InfiniteOsDb {
     async one(sql: string, params?: unknown[]) {
       if (sql.includes("from workspaces")) {
         return { ok: 1 };
+      }
+      if (sql.includes("from sources s join connection_credentials cc")) {
+        expect(params).toEqual([WORKSPACE, "src_meta"]);
+        return {
+          provider: "meta_ads",
+          source_status: "connected",
+          account_external_id: "act_999",
+          credential_id: "credential_meta",
+          credential_updated_at: "2026-10-06T00:00:00.000000Z",
+          credential_kind: "system_user_token",
+          encrypted_payload: encryptCredentialPayload(
+            { mode: "live", transport: "marketing_api", adAccountId: "act_999", accessToken: META_TOKEN, apiVersion: "v25.0" },
+            ENCRYPTION_KEY
+          ),
+          oauth_token_id: null,
+          selected_page_id: null,
+          oauth_payload: null,
+          oauth_version: null,
+          oauth_expires_at: null
+        };
       }
       if (sql.includes("from sources")) {
         return { provider: "meta_ads", account_external_id: "act_999" };
@@ -118,11 +136,8 @@ interface Write {
 // A campaign that runs on a lifetime budget: the fetch stub answers its budget-type read with a lifetime budget.
 const LIFETIME_CAMPAIGN = "120000000000557";
 
-// The writes the desktop's local lane sends (pause/unpause, daily and lifetime budget, paused create, ad edit), each
-// through /tools/call and through its named route where the daemon has one. update_meta_ad has none: the desktop's ad
-// edit (1bu-1 meta-ads-pack.ts executeMetaAdUpdate, wired at main.ts updateMetaAd) sends it through
-// executeOperatorAction, and its lifetime budget change (1bu-1 ads/engine-action.ts budgetType "lifetime") sends
-// update_meta_budget with lifetimeBudget the same way.
+// Public operator writes through /tools/call and their named routes, where available.
+// update_meta_ad has no named route; lifetime and daily budgets share /meta/budget.
 const WRITES: readonly Write[] = [
   {
     actionId: "update_meta_budget",
@@ -161,15 +176,18 @@ const WRITES: readonly Write[] = [
   }
 ];
 
-/** Each path the desktop's local lane can send a write through: /tools/call, and its named route when it has one. */
+/** Independent intended creates get distinct stable tokens on the two operator routes. */
 function directCalls(write: Write): Array<readonly [string, Record<string, unknown>]> {
+  const inputFor = (route: "tools" | "named") => write.actionId.startsWith("create_meta_")
+    ? { ...write.input, clientToken: `operator-fixture:${write.actionId}:${route}` }
+    : write.input;
   return [
-    ["/tools/call", { actionId: write.actionId, input: write.input }] as const,
-    ...(write.route ? [[write.route, write.input] as const] : [])
+    ["/tools/call", { actionId: write.actionId, input: inputFor("tools") }] as const,
+    ...(write.route ? [[write.route, inputFor("named")] as const] : [])
   ];
 }
 
-describe("union withholding leaves the desktop's direct operator path intact", () => {
+describe("union withholding leaves direct authenticated operator tools intact", () => {
   let graphCalls: GraphCall[];
 
   beforeEach(() => {
@@ -252,7 +270,7 @@ describe("union withholding leaves the desktop's direct operator path intact", (
       expect(graphCalls).toEqual([]);
       expect(audits).toEqual([]);
 
-      // 2) The desktop's local lane, same daemon, after that turn: each write executes with operator authority.
+      // 2) Direct operator tools, same daemon, after that turn: each route independently writes.
       for (const write of WRITES) {
         for (const [url, payload] of directCalls(write)) {
           graphCalls = [];
@@ -264,7 +282,9 @@ describe("union withholding leaves the desktop's direct operator path intact", (
             authority: "operator",
             status: "ok"
           });
-          const post = graphCalls.find((call) => call.method === "POST");
+          const posts = graphCalls.filter((call) => call.method === "POST");
+          expect(posts, `${write.actionId} via ${url}`).toHaveLength(1);
+          const post = posts[0];
           expect(post?.url, `${write.actionId} via ${url}`).toBe(write.expectPost.url);
           expect(post?.body, `${write.actionId} via ${url}`).toMatchObject(write.expectPost.body);
           if (write.expectPost.exact) {
