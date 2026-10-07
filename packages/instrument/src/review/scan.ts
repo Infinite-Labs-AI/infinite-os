@@ -117,7 +117,7 @@ function assignments(text: string): Assignment[] {
     const end = start + value.length
     const prefix = text.slice(0, match.index)
     const declaration = match[2]!.includes("=") && /\b(?:const|let|var)\s+$/.test(prefix)
-    const objectProperty = match[2]!.includes(":") && /(?:[=(]|\breturn)\s*\{\s*["']?$/.test(prefix) && /^\s*\}/.test(text.slice(end))
+    const objectProperty = match[2]!.includes(":") && /(?:[=(]|\breturn)\s*\{[^{}]*$/.test(prefix) && /^\s*(?:\([^()]*\))?\s*(?:,[^{}]*)?\}/.test(text.slice(end))
     const sourceExpression = !match[3] && SOURCE_EXPRESSION_VALUE.test(value) && (declaration || objectProperty)
     return { name: match[1]!, value, sourceExpression, start, end }
   })

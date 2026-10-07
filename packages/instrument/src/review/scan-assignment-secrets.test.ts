@@ -49,10 +49,18 @@ describe("explicit assignment secret names", () => {
     "const options = { apiKey: config.providers.key };",
     'const options = { "apiKey": config.providers.key };',
     "return { secret: request.headers.authorization }",
-    "configure({ token: process.env.SERVICE_TOKEN });"
+    "configure({ token: process.env.SERVICE_TOKEN });",
+    "record({ request, path: request.url, secret: env.SERVER_SECRET, sourceKey: env.PUBLIC_ID });",
+    'record({ request, secret: Netlify.env.get("SERVER_SECRET"), sourceKey: env.PUBLIC_ID });'
   ])("preserves the explicit source expression %s", text => {
     expect(scanner.redact(text)).toEqual({ text, hits: [] })
     expect(commitHits(text)).toEqual([])
+  })
+
+  it("still redacts a literal credential inside a multi-property source object", () => {
+    const text = `record({ request, secret: "${VALUE}", sourceKey: env.PUBLIC_ID });`
+    expect(scanner.redact(text).text).toBe('record({ request, secret: "[redacted: generic_secret]", sourceKey: env.PUBLIC_ID });')
+    expect(commitHits(text)).toEqual([{ kind: "generic_secret", file: "src/config.ts", line: 1 }])
   })
 
   it.each(["AUTHOR", "GIT_AUTHOR_NAME", "OAUTH_CALLBACK_PATH", "AUTH_PROVIDER", "PASSWORD_HASH_ALGORITHM",
