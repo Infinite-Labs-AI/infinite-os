@@ -213,9 +213,11 @@ export function agentScenario(options: AgentScenarioOptions = {}): unknown {
 }
 
 /** A successful worker writes every approved fix; the safety-failure script above stays a negative world. */
-export function completeWorkerSteps(correctServerOutcome = false): Step[] {
+type CompleteWorkerOptions = { productionHosts?: string[]; posthog?: boolean }
+
+export function completeWorkerSteps(correctServerOutcome = false, options: CompleteWorkerOptions = {}): Step[] {
   const hosting = fixtureHosting().vercel!
-  const guard = { mode: "deny" as const, exempt: [...new Set([PRODUCTION_HOST, `www.${PRODUCTION_HOST}`, ...hosting.productionDomains, ...hosting.productionAliases])], deny: [] }
+  const guard = { mode: "deny" as const, exempt: options.productionHosts ?? [...new Set([PRODUCTION_HOST, `www.${PRODUCTION_HOST}`, ...hosting.productionDomains, ...hosting.productionAliases])], deny: [] }
   const expression = buildHostGuardExpression(guard)
   const ga4 = "window.dataLayer = window.dataLayer || [];\nfunction gtag(){dataLayer.push(arguments);}\ngtag('js', new Date());\ngtag('config', 'G-FAKE00001');"
   const loader = 'var script = document.createElement("script"); script.async = true; script.src = "https://www.googletagmanager.com/gtag/js?id=G-FAKE00001"; document.head.appendChild(script);'
@@ -236,19 +238,21 @@ export function completeWorkerSteps(correctServerOutcome = false): Step[] {
     replaceStep("app/layout.tsx", ga4, escapeForTemplateLiteral(ga4Guard)), claim(ITEMS.guardGa4, "done", "Guarded both the remaining GA4 loader and config."),
     replaceStep("app/layout.tsx", "!function(f,b,e,v,n,t,s)", `${metaOpen}!function(f,b,e,v,n,t,s)`),
     replaceStep("app/layout.tsx", "fbq('track', 'PageView');", "fbq('track', 'PageView');\n})();"), claim(ITEMS.guardMeta, "done", "Wrapped the pixel bootstrap only; managed click-id capture stays outside."),
-    replaceStep("app/providers.tsx", 'api_host: "https://us.i.posthog.com"', 'api_host: "/ingest", ui_host: "https://us.posthog.com"'),
-    replaceStep("next.config.mjs", "    return [\n", `    return [\n${rewrites}\n`), claim(ITEMS.posthogProxy, "done", "Added /ingest and all three exact proxy rewrites, preserving the Infinite rewrite."),
-    replaceStep("app/providers.tsx", 'ui_host: "https://us.posthog.com"', 'ui_host: "https://us.posthog.com", capture_pageview: "history_change"'), claim(ITEMS.posthogHistory, "done", "Enabled native history-change page views."),
-    replaceStep("app/providers.tsx", 'capture_pageview: "history_change"', 'capture_pageview: "history_change", defaults: "2026-01-30"'), claim(ITEMS.posthogDefaults, "done", "Applied the approved defaults date."),
-    replaceStep("app/providers.tsx", "    posthog.init(", `    if (${expression}) posthog.init(`), claim(ITEMS.guardPosthog, "done", "Guarded the actual PostHog initialization with the prescribed host expression.")
+    ...(options.posthog === false ? [] : [
+      replaceStep("app/providers.tsx", 'api_host: "https://us.i.posthog.com"', 'api_host: "/ingest", ui_host: "https://us.posthog.com"'),
+      replaceStep("next.config.mjs", "    return [\n", `    return [\n${rewrites}\n`), claim(ITEMS.posthogProxy, "done", "Added /ingest and all three exact proxy rewrites, preserving the Infinite rewrite."),
+      replaceStep("app/providers.tsx", 'ui_host: "https://us.posthog.com"', 'ui_host: "https://us.posthog.com", capture_pageview: "history_change"'), claim(ITEMS.posthogHistory, "done", "Enabled native history-change page views."),
+      replaceStep("app/providers.tsx", 'capture_pageview: "history_change"', 'capture_pageview: "history_change", defaults: "2026-01-30"'), claim(ITEMS.posthogDefaults, "done", "Applied the approved defaults date."),
+      replaceStep("app/providers.tsx", "    posthog.init(", `    if (${expression}) posthog.init(`), claim(ITEMS.guardPosthog, "done", "Guarded the actual PostHog initialization with the prescribed host expression.")
+    ])
   ]
 }
 
-export function completeAgentScenario(options: Pick<AgentScenarioOptions, "prefixTurns"> & { correctServerOutcome?: boolean } = {}): unknown {
+export function completeAgentScenario(options: Pick<AgentScenarioOptions, "prefixTurns"> & CompleteWorkerOptions & { correctServerOutcome?: boolean } = {}): unknown {
   return {
     claude: { turns: [
       ...(options.prefixTurns ?? []),
-      { steps: completeWorkerSteps(options.correctServerOutcome) },
+      { steps: completeWorkerSteps(options.correctServerOutcome, options) },
       { steps: [{ tool: "job_list" }, ...reviewFixSteps(), claim(FIX_ITEM, "done", "Moved the outcome after the success branch.")] }
     ] },
     codex: { turns: [
@@ -259,8 +263,8 @@ export function completeAgentScenario(options: Pick<AgentScenarioOptions, "prefi
 }
 
 /** A fresh site with no server lane must not ask the fake agent to write an unavailable server outcome. */
-export function agentScenarioWithoutServerOutcome(): unknown {
-  const scenario = structuredClone(completeAgentScenario()) as {
+export function agentScenarioWithoutServerOutcome(options: CompleteWorkerOptions = {}): unknown {
+  const scenario = structuredClone(completeAgentScenario(options)) as {
     claude: { turns: Array<{ steps?: Step[] }> }
     codex: { turns: Array<{ final?: unknown }> }
   }

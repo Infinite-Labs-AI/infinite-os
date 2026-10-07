@@ -1085,7 +1085,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("review I2 P1-2: a server-side env name (POSTHOG_KEY) is never sent to hosting; its env check is unknown and the run goes on", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await wiredWorld({ env: { E2E_NO_AGENTS: "1" } })
+    const w = await wiredWorld()
     const providers = join(w.site.repo, "app/providers.tsx")
     writeFileSync(providers, readFileSync(providers, "utf8").replace('posthog.init("phc_FAKEtestProjectKeyNotReal000",', "posthog.init(process.env.POSTHOG_KEY!,"))
     commitAndPush(w, "PostHog key from the server env")
@@ -1236,9 +1236,20 @@ function productionDeployment(id: number, sha: string, state: "success" | "failu
   }
 }
 
+/** Keep the fresh proof world focused on the connected Infinite claim, with explicit owner exclusions. */
+function freshProofAnswers(): Record<string, unknown> {
+  const answers = completeAnswersFile()
+  const plan = answers.plan as { approved: string[]; declined: string[] }
+  const excluded = ["improve_additive:posthog:proxy", "improve_additive:posthog:history_change", "posthog_defaults_bump_adopted:posthog:defaults", "preview_guard_adopted:posthog:init"]
+  plan.approved = plan.approved.filter(id => !excluded.includes(id))
+  plan.declined.push(...excluded)
+  return answers
+}
+
 describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted site) reaches a PROOF", () => {
   it("one host ask pre-filled from the repo, a site-file claim, the GitHub preview (accepted by its proof file, as the desktop does), the GitHub deploy, the proof, ONE real visit, an Infinite receipt", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
-    const w = await wiredWorld({ scenario: agentScenarioWithoutServerOutcome(), bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor } })
+    const w = await wiredWorld({ scenario: agentScenarioWithoutServerOutcome({ productionHosts: [PRODUCTION_HOST, `www.${PRODUCTION_HOST}`], posthog: false }), bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor } })
+    // Guards exempt the chosen host plus the www redirect actually reported by this world's dry visit.
     // The repo's only hint at its live address (a CNAME file); Infinite knows none.
     mkdirSync(join(w.site.repo, "public"), { recursive: true })
     writeFileSync(join(w.site.repo, "public/CNAME"), `${PRODUCTION_HOST}\n`)
@@ -1257,7 +1268,7 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
       w.bridge.script.siteFileServed = true
       return "open"
     }
-    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond, timeoutMs: RUN_TIMEOUT })
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w, freshProofAnswers())], respond, timeoutMs: RUN_TIMEOUT })
     const why = trace(run)
 
     // ---- every step ran; exit 0; nothing reached a network ----
@@ -1373,7 +1384,7 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
     // The 3-minute proof grace runs on the preload's virtual clock (E2E_FAST_CLOCK): the same deadlines, in seconds.
     // The proof file is served nowhere (a CDN rule), so the PR's preview does not serve it either: the desktop
     // refuses the preview (review P1-2), and the terminal says so (P2-1), never "the test window did not finish".
-    const w = await wiredWorld({ scenario: agentScenarioWithoutServerOutcome(), bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor, previewServesClaimProof: false }, env: { E2E_FAST_CLOCK: "1" } })
+    const w = await wiredWorld({ scenario: agentScenarioWithoutServerOutcome({ productionHosts: [PRODUCTION_HOST, `www.${PRODUCTION_HOST}`], posthog: false }), bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor, previewServesClaimProof: false }, env: { E2E_FAST_CLOCK: "1" } })
     const respond = (ask: { kind: string; payload: unknown }) => {
       const payload = ask.payload as { question?: string; options?: Array<{ value: string }>; number?: number }
       if (ask.kind === "single" && payload.question?.startsWith("Which address is your live site?")) return "__type__"
@@ -1387,7 +1398,7 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
       w.bridge.script.siteFileOutcome = "not_served"
       return "open"
     }
-    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond, timeoutMs: RUN_TIMEOUT })
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w, freshProofAnswers())], respond, timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(3)
     expect(stepOutcomes(run).at(-1)).toBe("prove:parked:INF_WIZ_HOST_UNCONFIRMED")
     const labels = w.bridge.calls.map(label)
