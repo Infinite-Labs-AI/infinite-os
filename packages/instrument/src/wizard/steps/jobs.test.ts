@@ -489,6 +489,35 @@ describe("step jobs: questions, usage, fence", () => {
 })
 
 describe("step jobs: nested mode (§3d.7)", () => {
+  it("reanchors the initial nested handoff before installer-shifted edits are attributed", async () => {
+    const file = "src/tracking.ts"
+    const config = "gtag('config', 'G-FAKE00001');\n"
+    const base = config + config + "fbq('init', '1234567890123456');\n"
+    const installed = "// installer adds an entry import here\n" + base
+    const duplicate = { ...agentItem("duplicates_remove:ga4_config:G-FAKE00001", [file]), trigger: { finding: "Two config calls", evidence: [{ file, line: 1 }, { file, line: 2 }] } }
+    const guard = { ...agentItem("preview_guard:meta", [file]), trigger: { finding: "Unguarded pixel", evidence: [{ file, line: 3 }] } }
+    const t = setup({ scenario: {}, options: { nested: true, json: true }, items: [duplicate, guard], checks: { results: { adopted_init_guarded: ["problem"] } } })
+    write(t.root, file, base)
+    runGit(t.root, ["add", file])
+    runGit(t.root, ["commit", "-m", "tracking before install"])
+    write(t.root, file, installed)
+
+    expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS" })
+    const seeded = t.recorded.events.filter(event => event.type === "job.seeded").map(event => event.fields.item as ChecklistItem)
+    expect(seeded.find(item => item.id === duplicate.id)?.trigger.evidence).toEqual([{ file, line: 2 }, { file, line: 3 }])
+    expect(seeded.find(item => item.id === guard.id)?.trigger.evidence).toEqual([{ file, line: 4 }])
+
+    const after = installed.replace(config + config, config)
+    write(t.root, file, after)
+    t.ctx.options.resume = true
+    expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "ok" })
+    expect(stateOf(t.current().jobs, duplicate.id)).toBe("waiting_deploy")
+    expect(stateOf(t.current().jobs, guard.id)).toBe("failed")
+    expect(readFileSync(join(t.root, file), "utf8")).toBe(after)
+    expect(t.recordedEdits.flat().map(edit => edit.file)).toContain(file)
+    expect(runs(t.fakes)).toEqual([])
+  })
+
   it("seeds the jobs for the parent agent, parks, then fences and checks its edits on --resume", async () => {
     const t = setup({ scenario: {}, options: { nested: true, json: true } })
     const parked = await step.run(t.ctx, t.deps)

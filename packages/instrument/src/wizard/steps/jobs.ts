@@ -623,11 +623,12 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   const existing = ctx.state.get().snapshot
   if (!existing) {
     // Hand the jobs to the agent that launched the wizard, then fence whatever it changes.
+    const anchored = await io.reanchored(agentItems)
     await deps.fs.mkdirp(join(ctx.root, WIZARD_PATHS.dir), 0o700)
-    await deps.fs.writeTextAtomic(join(ctx.root, NESTED_BRIEF_PATH), deps.registry.brief(agentItems), 0o600)
-    for (const item of agentItems) ctx.emit.emit("job.seeded", { item })
+    await deps.fs.writeTextAtomic(join(ctx.root, NESTED_BRIEF_PATH), deps.registry.brief(anchored), 0o600)
+    for (const item of anchored) ctx.emit.emit("job.seeded", { item })
     const dir = snapshotDir(io.home(), ctx.runId ?? ctx.state.get().runId ?? "local-run", "nested")
-    await Fence.begin({ root: ctx.root, appRoot: ctx.appRoot, snapshotDir: dir, runId: ctx.runId ?? "local-run", turn: "nested", items: agentItems, mode: "report" })
+    await Fence.begin({ root: ctx.root, appRoot: ctx.appRoot, snapshotDir: dir, runId: ctx.runId ?? "local-run", turn: "nested", items: anchored, mode: "report" })
     ctx.state.update((state) => {
       state.snapshot = { dir }
     })

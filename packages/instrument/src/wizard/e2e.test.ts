@@ -884,9 +884,13 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(kept).toHaveLength(1)
     expect(readFileSync(kept[0]!, "utf8")).toBe(OUTSIDE_EDITS.readme)
     expect(jobStates(resumed, ITEMS.duplicates).at(-1)).toBe("waiting_deploy/wizard")
+    expect(readFileSync(layoutPath, "utf8").split(GTAG_LOADER.trim()).length - 1).toBe(1)
     const head = headOfBranch(w)!
     expect(bareShow(w.site.bare, head.head, "README.md")).toBe(fixtureFile("README.md"))
     expect(bareShow(w.site.bare, head.head, "app/layout.tsx").split(GTAG_LOADER.trim()).length - 1).toBe(1)
+    // The kept duplicate fix ships in the draft; the other unfinished approved jobs still prevent readiness.
+    expect(stepOutcomes(resumed)).toContain("review:parked:INF_WIZ_MERGE_PARKED")
+    expect(readGhState(w.ghState).prs[0]!.isDraft).toBe(true)
     // Still no agent spawned: the review is a brief for the parent agent.
     expect(agentRuns(w, "claude")).toEqual([])
     expect(agentRuns(w, "codex")).toEqual([])
