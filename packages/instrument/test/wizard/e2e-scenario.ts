@@ -1,3 +1,7 @@
+import vm from "node:vm"
+import { sensitivePosthogOptions } from "../../src/install/posthog-sensitive.js"
+import { META_PAGE_CHANGE_SCRIPT } from "../../src/jobs/briefs.js"
+import { REVIEW_ITEMS } from "../../src/wizard/contracts/agents.js"
 // The offline E2E's scripted world (§4.3; test-only, never published): what the fake agents do each turn,
 // what the fake desktop's test engine "sees", and the answers file. Every edit is computed from the fixture
 // site's own bytes, so a fixture change cannot silently turn an edit into a no-op.
@@ -27,7 +31,9 @@ export const ITEMS = {
   posthogDefaults: "posthog_improve:defaults",
   guardGa4: "preview_guard:ga4",
   guardMeta: "preview_guard:meta",
-  guardPosthog: "preview_guard:posthog"
+  guardPosthog: "preview_guard:posthog",
+  posthogSensitive: "posthog_improve:sensitive_pages",
+  metaSpa: "meta_improve:spa_page_view"
 } as const
 
 export const REVIEW_FINDING_ID = "F1"
@@ -206,7 +212,7 @@ export function agentScenario(options: AgentScenarioOptions = {}): unknown {
     codex: {
       turns: [
         { final: firstReview() },
-        { final: { verdict: "looks_good", summary: "The fix is right.", checklist: [{ item: "R8", status: "pass", note: "Outcome after success." }], findings: [] } }
+        { final: { verdict: "looks_good", summary: "The fix is right.", checklist: REVIEW_ITEMS.map(item => ({ item, status: "pass", note: "Read and checked this fixture." })), findings: [] } }
       ]
     }
   }
@@ -237,12 +243,14 @@ export function completeWorkerSteps(correctServerOutcome = false, options: Compl
     replaceStep("app/layout.tsx", GTAG_LOADER, ""),
     replaceStep("app/layout.tsx", ga4, escapeForTemplateLiteral(ga4Guard)), claim(ITEMS.guardGa4, "done", "Guarded both the remaining GA4 loader and config."),
     replaceStep("app/layout.tsx", "!function(f,b,e,v,n,t,s)", `${metaOpen}!function(f,b,e,v,n,t,s)`),
-    replaceStep("app/layout.tsx", "fbq('track', 'PageView');", "fbq('track', 'PageView');\n})();"), claim(ITEMS.guardMeta, "done", "Wrapped the pixel bootstrap only; managed click-id capture stays outside."),
+    replaceStep("app/layout.tsx", "fbq('track', 'PageView');", `fbq('track', 'PageView');\n${escapeForTemplateLiteral(META_PAGE_CHANGE_SCRIPT)}\n})();`), claim(ITEMS.guardMeta, "done", "Wrapped the pixel bootstrap only; managed click-id capture stays outside."),
+    claim(ITEMS.metaSpa, "done", "Installed the supplied page-change subscription after the initial page view."),
     ...(options.posthog === false ? [] : [
       replaceStep("app/providers.tsx", 'api_host: "https://us.i.posthog.com"', 'api_host: "/ingest", ui_host: "https://us.posthog.com"'),
       replaceStep("next.config.mjs", "    return [\n", `    return [\n${rewrites}\n`), claim(ITEMS.posthogProxy, "done", "Added /ingest and all three exact proxy rewrites, preserving the Infinite rewrite."),
       replaceStep("app/providers.tsx", 'ui_host: "https://us.posthog.com"', 'ui_host: "https://us.posthog.com", capture_pageview: "history_change"'), claim(ITEMS.posthogHistory, "done", "Enabled native history-change page views."),
       replaceStep("app/providers.tsx", 'capture_pageview: "history_change"', 'capture_pageview: "history_change", defaults: "2026-01-30"'), claim(ITEMS.posthogDefaults, "done", "Applied the approved defaults date."),
+      replaceStep("app/providers.tsx", 'defaults: "2026-01-30"', `defaults: "2026-01-30", ${sensitivePosthogOptions(undefined, ["/login"])}`), claim(ITEMS.posthogSensitive, "done", "Turned replay and autocapture off only on the approved /login path and descendants."),
       replaceStep("app/providers.tsx", "    posthog.init(", `    if (${expression}) posthog.init(`), claim(ITEMS.guardPosthog, "done", "Guarded the actual PostHog initialization with the prescribed host expression.")
     ])
   ]
@@ -257,7 +265,7 @@ export function completeAgentScenario(options: Pick<AgentScenarioOptions, "prefi
     ] },
     codex: { turns: [
       { final: firstReview() },
-      { final: { verdict: "looks_good", summary: "The server outcome now follows success.", checklist: [{ item: "R8", status: "pass", note: "Outcome after success." }], findings: [] } }
+      { final: { verdict: "looks_good", summary: "The server outcome now follows success.", checklist: REVIEW_ITEMS.map(item => ({ item, status: "pass", note: "Read and checked this fixture." })), findings: [] } }
     ] }
   }
 }
@@ -283,7 +291,7 @@ export function firstReview(): unknown {
     verdict: "changes_suggested",
     summary: `One fix. The site's server env holds ${PLANTED_DOTENV_VALUE}; it is not in the diff. Meta pixel ${FIXTURE_PIXEL_ID} matches the connection.`,
     checklist: [
-      { item: "R1", status: "pass", note: "One init per tool." },
+      ...REVIEW_ITEMS.filter(item => item !== "R8").map(item => ({ item, status: "pass", note: "Read and checked this fixture." })),
       { item: "R8", status: "fail", note: "The signup outcome is reported before the error check." }
     ],
     findings: [
@@ -328,6 +336,27 @@ export function testResultFor(request: TestRunRequest): TestResult | undefined {
   return undefined
 }
 
+/** The correctly scripted worker's browser includes its one navigation PageView. */
+export function correctWorkerResultFor(request: TestRunRequest): TestResult | undefined {
+  const result = testResultFor(request)
+  if (result && request.mode !== "dry_live") {
+    const first = result.meta.tr.find(event => event.ev === "PageView" && !event.afterNav)
+    if (first && !result.meta.tr.some(event => event.ev === "PageView" && event.afterNav)) {
+      const emitted: string[] = []
+      const location = { pathname: "/", search: "" }
+      const history = { pushState(_state: unknown, _title: string, path: string) { location.pathname = path }, replaceState(_state: unknown, _title: string, path: string) { location.pathname = path } }
+      const window = { fbq(_command: string, event: string) { emitted.push(event) }, addEventListener() {} }
+      vm.runInNewContext(META_PAGE_CHANGE_SCRIPT, { window, location, history })
+      if (emitted.length !== 0) throw new Error("The Meta subscription sent a duplicate initial PageView")
+      history.pushState(null, "", "/next")
+      history.replaceState(null, "", "/next")
+      if (Number(emitted.length) !== 1 || emitted[0] !== "PageView") throw new Error("The emitted Meta subscription did not send exactly one PageView for a changed page")
+      for (const ev of emitted) result.meta.tr.push({ ...first, ev, afterNav: true })
+    }
+  }
+  return result
+}
+
 /** The fixture site's hosting: a single-app Vercel project (no monorepo root) with no env-sourced ids. */
 export function fixtureHosting(): Omit<TagHosting, never> {
   const hosting = fixtureResponse("hosting") as unknown as TagHosting & { protocolVersion?: number; requestId?: string }
@@ -361,21 +390,19 @@ export function answersFile(extra: Record<string, unknown> = {}): Record<string,
         "preview_guard_adopted:ga4:init",
         "remove_duplicate:ga4:ga4_config:G-FAKE00001",
         "preview_guard_adopted:meta:meta",
+        "meta_relay",
         "agent_budget"
       ],
-      declined: ["meta_relay"]
+      declined: []
     },
     asks: [{ kind: "single", match: "GA4", answer: "G-FAKE00001" }],
     ...extra
   }
 }
 
-/** Positive install/proof worlds scope unrelated routing/settings tasks out; the unfinished world approves them. */
+/** Positive worlds accept the default plan without hiding unfinished jobs. */
 export function completeAnswersFile(extra: Record<string, unknown> = {}): Record<string, unknown> {
-  const answers = answersFile(extra)
-  const plan = answers.plan as { approved: string[]; declined: string[] }
-  plan.declined = [...new Set([...plan.declined, "meta_spa_page_views", "sensitive_pages:posthog:replay_autocapture"])]
-  return answers
+  return answersFile(extra)
 }
 
 /** The Claude turn that hits its usage limit after editing (variant a): the real CLI's `rate_limit_event rejected`. */
@@ -394,7 +421,7 @@ export function codexWorkerScenario(): unknown {
       ]
     },
     claude: {
-      turns: [{ structured: { verdict: "looks_good", summary: "One init per tool now.", checklist: [{ item: "R1", status: "pass", note: "One GA4 config." }], findings: [] } }]
+      turns: [{ structured: { verdict: "looks_good", summary: "One init per tool now.", checklist: REVIEW_ITEMS.map(item => ({ item, status: "pass", note: "Read and checked this fixture." })), findings: [] } }]
     }
   }
 }
@@ -403,6 +430,6 @@ export function codexWorkerScenario(): unknown {
 export function completeCodexWorkerScenario(): unknown {
   return {
     codex: { turns: [{ steps: completeWorkerSteps(true), final: { claims: [], questions: [] } }] },
-    claude: { turns: [{ structured: { verdict: "looks_good", summary: "The approved edits are in the code.", checklist: [{ item: "R1", status: "pass", note: "One GA4 config." }, { item: "R8", status: "pass", note: "Outcome follows success." }], findings: [] } }] }
+    claude: { turns: [{ structured: { verdict: "looks_good", summary: "The approved edits are in the code.", checklist: REVIEW_ITEMS.map(item => ({ item, status: "pass", note: "Read and checked this fixture." })), findings: [] } }] }
   }
 }

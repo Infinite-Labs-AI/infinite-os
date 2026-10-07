@@ -7,7 +7,7 @@ import { candidate, fakeBefore, fakeKeys, fakeProductionDeniedConflict } from ".
 import { buildPlanModel, seedItemsAfterApprovals } from "../install/plan-model.js"
 import { buildReport, renderMarkdown } from "../wizard/report.js"
 import type { Cell } from "../wizard/contracts/report.js"
-import { buildFinalComment, buildPrBody } from "../review/post.js"
+import { buildFinalComment, buildPrBody, buildChecklist, withFinalReport } from "../review/post.js"
 import { createScanner } from "../review/scan.js"
 const RUN = "11111111-1111-4111-8111-111111111111"
 const ownerJob = () => candidate("preview_guard", "meta", { state: "left_for_you", checks: [], note: "Not changed by us: Meta pixel's start-up code at src/tracking.ts:5 also handles consent, which is yours. Until you add the guard there, preview and local visits keep counting in Meta pixel.", ownerBoundary: { kind: "frozen_unit", file: "src/tracking.ts", line: 5, unitHash: "hash" }, trigger: { finding: "old finding", evidence: [{ file: "src/tracking.ts", line: 5 }] } })
@@ -16,13 +16,15 @@ it("renders each owner note once in the report, PR body and final comment, with 
   job.note = "Not changed by us: this exact owner initialization needs your guard."
   job.ownerBoundary!.guard = "--- a/src/tracking.ts\n+++ b/src/tracking.ts\n@@ -1,2 +1,2 @@\n function boot() {\n+  if (hostAllowed) start();"
   const report = buildReport({ runId: RUN, tagVersion: "fixture", site: { repoLabel: "example/site", productionHost: null }, columns: { live_today: null, in_pr: null, proven_live: null }, provenLivePending: null, day7: null, notes: [], verdictFacts: { jobs: [job], openFindings: [], tools: null, installedUnknown: null } })
-  const reportMarkdown = renderMarkdown(report, undefined, [job])
+  const reportMarkdown = renderMarkdown(report, undefined, [job], ["GA4 account settings"])
   const scanner = createScanner({ literals: [], allowedIds: [] })
   const pr = buildPrBody({ reportMarkdown, howToReview: "Review the changed files.", runId: RUN, isPrivate: true, diffText: "", connectionIds: [], scanner })
   const comment = buildFinalComment({ reportMarkdown, runId: RUN, reviewer: null, reviewed: false, jobs: [job], decisions: [], untrusted: [], notes: [], scanner })
-  for (const text of [reportMarkdown, pr, comment]) {
+  const updated = withFinalReport(comment, reportMarkdown, buildChecklist([job], scanner, reportMarkdown))!
+  for (const text of [reportMarkdown, pr, comment, updated]) {
     expect(text.split(job.note)).toHaveLength(2)
-    expect(text).toContain("```diff\n--- a/src/tracking.ts")
+    expect(text.split("```diff\n--- a/src/tracking.ts")).toHaveLength(2)
+    expect(text.split("### You said no to")).toHaveLength(2)
   }
 })
 it.each(["lf", "crlf", "no-final-newline"])("the owner guard diff applies with plain git apply and preserves neighboring consent bytes: %s", async newline => {
