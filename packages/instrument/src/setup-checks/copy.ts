@@ -120,15 +120,11 @@ export function clickIdNotAtLandingMessage(input: {
   sharedCandidates: readonly string[]
 }): string {
   return (
-    `A Meta pixel initialises only in page-scoped files (${input.initFiles.join(", ")}), not in a ` +
-    `shared entry point. Meta writes the \`_fbc\` click-id cookie from the \`fbclid\` parameter on ` +
-    `the URL of the page the pixel runs on, and an ad click puts \`fbclid\` on the LANDING url only ` +
-    `— by the time a visitor reaches a conversion or thank-you page it is gone, and the pixel there ` +
-    `has nothing to save. ${FBC_GUIDANCE} Move the pixel bootstrap into the entry the whole site ` +
-    `loads (${input.sharedCandidates.join(" or ")}) so it runs on the first page a visitor lands on. ` +
-    `Until then every conversion you send reaches Meta with no click id: Meta cannot attribute it to ` +
-    `the ad that produced it, the campaign reads as unprofitable, and the creative gets blamed for ` +
-    `spend that actually worked.`
+    `A Meta pixel initialises in ${input.initFiles.join(", ")}, but this source check could not prove ` +
+    `that it runs on every landing page. It does not follow imports to establish site-wide coverage. ` +
+    `Check whether the existing module already loads through ${input.sharedCandidates.join(" or ") || "the app entry"}. ` +
+    `The _fbc cookie needs the landing URL's fbclid before navigation removes it. ${FBC_GUIDANCE} ` +
+    `If the existing entry does not cover landings, add capture at the shared entry without changing consent code.`
   )
 }
 
