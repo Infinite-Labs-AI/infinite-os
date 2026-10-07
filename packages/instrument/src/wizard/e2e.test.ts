@@ -59,10 +59,12 @@ import {
   GA4_AGAIN,
   GTAG_LOADER,
   agentScenario,
+  completeAgentScenario,
   agentScenarioWithoutServerOutcome,
   replaceStep,
   answersFile,
-  codexWorkerScenario,
+  completeAnswersFile,
+  completeCodexWorkerScenario,
   usageLimitTurn,
   duplicateRemovalSteps,
   fixtureFile,
@@ -106,7 +108,7 @@ beforeAll(() => {
 /** A world with the §4.3 defaults: the fixture's hosting, the per-request test results, required checks green. */
 async function wiredWorld(input: { scenario?: unknown; bridge?: Record<string, unknown>; gh?: Record<string, unknown>; env?: Record<string, string>; inlineConsent?: boolean } = {}): Promise<E2eWorld> {
   const made = await makeWorld({
-    scenario: input.scenario ?? agentScenario(),
+    scenario: input.scenario ?? completeAgentScenario(),
     bridge: { hosting: fixtureHosting(), testResultFor, ...(input.bridge ?? {}) },
     // A required check that already passed on every head (the fix round's `pr_checks_pass` reads it).
     gh: { checks: { "42": [{ name: "build", bucket: "pass", state: "SUCCESS" }] }, ...(input.gh ?? {}) },
@@ -169,7 +171,7 @@ function commitAndPush(w: E2eWorld, message: string): void {
   git(w.site.repo, "push", "-q", "origin", "main")
 }
 
-function writeAnswers(w: E2eWorld, answers: Record<string, unknown> = answersFile()): string {
+function writeAnswers(w: E2eWorld, answers: Record<string, unknown> = completeAnswersFile()): string {
   const path = join(w.site.base, "answers.json")
   writeFileSync(path, JSON.stringify(answers))
   return path
@@ -369,12 +371,13 @@ describe("the offline end-to-end run (§4.3)", () => {
       ["in_pr", 201],
       ["proven_live", 201]
     ])
-    // §3x.6: ONE verdict from what was measured. Approved fixes the scenario leaves undone (a consent-touching edit, a
-    // claim with no work, blocked guards) make it "problems", so the run is never PATCHed proven.
+    // Every approved repair is implemented and checked. The separately excluded Meta routing repair still
+    // has a measured live-site problem; a completed install is not a fabricated clean-site verdict.
     const verdict = (JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/report.json"), "utf8")) as { verdict: { state: string; headline: string; reasons: Array<{ kind: string }> } }).verdict
     expect(verdict.state).toBe("problems")
     expect(verdict.headline.startsWith("acme-store.com does not collect properly yet:")).toBe(true)
-    expect(verdict.reasons.map((reason) => reason.kind)).toContain("approved_fix_missing")
+    expect(verdict.reasons.map((reason) => reason.kind)).not.toContain("approved_fix_missing")
+    expect(verdict.reasons.map((reason) => reason.kind)).toContain("live_problem")
     // W14 at step level (review P1-3): ONE headline, character for character, on every surface — the terminal's closing
     // line, report.md, the PR's "what happened" comment and the report Infinite stored.
     const stored = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/report.json"), "utf8")) as ReportV2
@@ -382,7 +385,8 @@ describe("the offline end-to-end run (§4.3)", () => {
     const headline = verdict.headline
     expect(renderTerminal(stored, 5_000).split("\n")[0]!.startsWith(`◆ ${headline} · run `)).toBe(true)
     expect(markdown.split("\n")[0]).toBe(`**${headline}**`)
-    expect(markdown).toContain("- Approved fixes the wizard has not confirmed in the code: ")
+    expect(markdown).not.toContain("- Approved fixes the wizard has not confirmed in the code: ")
+    expect(markdown).toContain("You said no to")
     const prComments = ((readGhState(w.ghState).prs[0] as unknown as { comments?: Array<{ body: string }> }).comments ?? []).map((comment) => comment.body)
     expect(prComments.filter((body) => body.includes(`**${headline}**`)), "the PR comment carries the verdict headline").toHaveLength(1)
     const postedLast = (reports.at(-1)!.body as { report: ReportV2 }).report
@@ -547,7 +551,7 @@ describe("the offline end-to-end run (§4.3)", () => {
     expect(realVisit.fakeClickId).toBeUndefined()
     expect(w.bridge.callsFor("runs.proof-claim")[0]!.status).toBe(200)
 
-    // ---- 5. the reverts ----
+    // ---- 5. source boundaries (the separate unfinished world exercises actual reversion) ----
     const headFile = (rel: string) => bareShow(w.site.bare, head, rel)
     expect(headFile("README.md")).toBe(fixtureFile("README.md"))
     expect(headFile("README.md")).not.toBe(OUTSIDE_EDITS.readme)
@@ -563,12 +567,14 @@ describe("the offline end-to-end run (§4.3)", () => {
     const jobs = finalJobs(w)
     const job = (id: string) => jobs.find((entry) => entry.id === id)!
     expect(job(ITEMS.conversionsToTools).blockedReason).not.toBe("consent_touched") // Unknown multi-job ownership never becomes guessed blame.
-    expect(job(ITEMS.posthogDefaults)).toMatchObject({ state: "blocked", blockedReason: "outside_allowlist" })
+    expect(job(ITEMS.posthogDefaults).checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: "posthog_improve_applied", state: "pass" })]))
+    expect(headFile("app/providers.tsx")).toContain('defaults: "2026-01-30"')
+    expect(headFile("app/providers.tsx")).toContain('capture_pageview: "history_change"')
+    expect(headFile("app/providers.tsx")).toContain('api_host: "/ingest"')
 
-    // ---- 6. a claimed job with a failing check is never ticked; jobs 8 and 9 are now checked by the wizard ----
-    expect(jobStates(run, ITEMS.guardPosthog)).toEqual(["claimed/agent_claim", "pending/wizard", "failed/wizard"])
-    expect(job(ITEMS.guardPosthog).state).toBe("failed")
-    expect(jobStates(run, ITEMS.guardPosthog).some((entry) => entry.startsWith("done_in_code"))).toBe(false)
+    // ---- 6. real guard code passes the wizard's checks; failed claims stay in the negative world ----
+    expect(jobStates(run, ITEMS.guardPosthog).slice(0, 2)).toEqual(["claimed/agent_claim", "done_in_code/wizard"])
+    expect(job(ITEMS.guardPosthog).checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: "adopted_init_guarded", state: "pass" })]))
     // Review I1 P1-5: identify/reset and the server conversion pass the wizard's own S checks (no longer stuck
     // `claimed`) and wait for a real event; each claim is announced ONCE (P3-3).
     expect(jobStates(run, ITEMS.identify)).toEqual(["claimed/agent_claim", "waiting_real_event/wizard"])
@@ -583,13 +589,9 @@ describe("the offline end-to-end run (§4.3)", () => {
     const savedState = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/state.json"), "utf8"))
     expect(Date.parse(testResultFor(visitRequest)!.startedAt)).toBeLessThan(Date.parse(savedState.steps.merge.at))
 
-    // ---- 7. the post-turn gate: child_process in next.config.mjs never built ----
-    // §3x.2: the refused hunk is undone and the job is sent back with the gate's real words (never "outside the job's
-    // files"); the fake agent never fixes it, so it ends failed with that note and an S `turn_gate` problem.
-    expect(job(ITEMS.posthogProxy)).toMatchObject({ state: "failed" })
-    // R4-1: the note also says where the job's change is now (its other edit, to app/providers.tsx, was undone).
-    expect(job(ITEMS.posthogProxy).note).toMatch(/the wizard's safety check refused next\.config\.mjs:\d+: the edit starts a child process\. This run's agent edits for it were undone \(app\/providers\.tsx\)\.$/)
-    expect(job(ITEMS.posthogProxy).checks.find((check) => check.id === "turn_gate")).toMatchObject({ tier: "S", state: "problem" })
+    // ---- 7. the approved proxy is really wired; build inputs contain no child process ----
+    expect(job(ITEMS.posthogProxy).checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: "next_rewrites_exact", state: "pass" })]))
+    expect(headFile("next.config.mjs")).toContain('"https://us.i.posthog.com/:path"')
     expect(headFile("next.config.mjs")).not.toContain("child_process")
     const builds = readJsonl<{ childProcess: boolean }>(join(w.site.repo, ".next/e2e-builds.jsonl"))
     expect(builds.length).toBeGreaterThanOrEqual(2)
@@ -602,11 +604,11 @@ describe("the offline end-to-end run (§4.3)", () => {
     // The agents ran as §3f.7 says (the pinned models at xhigh; Claude restricted; Codex under its read-only
     // profile, never `-s`), with no nesting marker and no wizard token in their env.
     const worker = agentRuns(w, "claude", "worker")
-    expect(worker.length).toBe(5)
+    expect(worker.length).toBe(2)
     expect(worker[0]!.argv).toEqual(expect.arrayContaining(["-p", "--output-format", "stream-json", "--restricted", "--model", "claude-opus-4-8", "--effort", "xhigh", "--strict-mcp-config"]))
     for (const forbidden of ["--bare", "--dangerously-skip-permissions", "--safe-mode"]) expect(worker[0]!.argv).not.toContain(forbidden)
-    // Jobs rounds 2–4 resume the same session with the wizard's notes; the review's fix round is its own.
-    expect(worker.map((entry) => entry.argv.includes("--resume"))).toEqual([false, true, true, true, false])
+    // One complete jobs turn; the review fix is its own bounded session.
+    expect(worker.map((entry) => entry.argv.includes("--resume"))).toEqual([false, false])
     const reviewer = agentRuns(w, "codex", "reviewer")
     expect(reviewer.length).toBe(2)
     expect(reviewer[0]!.argv).toEqual(expect.arrayContaining(["exec", "--json", "-m", "gpt-6.1-sol", 'model_reasoning_effort="xhigh"', 'default_permissions="infinite_tag_ro"', "--output-schema", "-o"]))
@@ -615,17 +617,47 @@ describe("the offline end-to-end run (§4.3)", () => {
       for (const marker of NESTING_MARKERS) expect(entry.env[marker], marker).toBeUndefined()
     }
     expect(worker[0]!.env.INFINITE_TAG_KEYS).toEqual([])
-    // Claude's permission denials (the repo's .env, the app's session file) became incident lines.
-    const subs = run.ofType("step.sub").filter((event) => event.step === "jobs").map((event) => String(event.text))
-    expect(subs).toContain("! Claude Code tried to read .env (denied)")
-    expect(subs.some((text) => text.includes("auth.json outside the repo (denied)"))).toBe(true)
-
     // The review fix landed: the outcome now runs after the success branch.
     expect(headFile("app/api/signup/route.ts")).toContain(LATE_REPORT.trim())
     expect(headFile("app/api/signup/route.ts")).not.toContain(EARLY_REPORT.trim())
     expect(jobStates(run, FIX_ITEM)[0]).toBe("claimed/agent_claim")
     void NEXT_CONFIG_CHILD_PROCESS_LINE
     void git
+  })
+
+  it("keeps the original unsafe and unfinished worker world draft with every refusal visible", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await wiredWorld({ scenario: agentScenario() })
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w, answersFile())], timeoutMs: RUN_TIMEOUT })
+    expect(run.code, trace(run)).toBe(3)
+    expect(stepOutcomes(run).at(-1)).toBe("review:parked:INF_WIZ_MERGE_PARKED")
+    expect(trace(run)).toContain("Approved fixes remain open")
+    const gh = readGhState(w.ghState)
+    expect(gh.prs[0]?.isDraft).toBe(true)
+    expect(gh.calls.some(call => call.argv[0] === "pr" && call.argv[1] === "ready")).toBe(false)
+    const jobs = finalJobs(w)
+    const job = (id: string) => jobs.find(entry => entry.id === id)!
+    expect(job(ITEMS.posthogHistory)).toMatchObject({ state: "blocked", blockedReason: "agent_blocked" })
+    expect(job(ITEMS.posthogDefaults)).toMatchObject({ state: "blocked", blockedReason: "outside_allowlist" })
+    expect(jobStates(run, ITEMS.guardPosthog)).toEqual(["claimed/agent_claim", "pending/wizard", "failed/wizard"])
+    expect(job(ITEMS.guardPosthog).state).toBe("failed")
+    expect(jobStates(run, ITEMS.guardPosthog).some(entry => entry.startsWith("done_in_code"))).toBe(false)
+    expect(job(ITEMS.posthogProxy)).toMatchObject({ state: "failed" })
+    expect(job(ITEMS.posthogProxy).note).toMatch(/the wizard's safety check refused next\.config\.mjs:\d+: the edit starts a child process/)
+    expect(job(ITEMS.posthogProxy).checks.find(check => check.id === "turn_gate")).toMatchObject({ state: "problem" })
+    expect(job(ITEMS.conversionsToTools).blockedReason).not.toBe("consent_touched")
+    expect(readFileSync(join(w.site.repo, "app/signup/page.tsx"), "utf8")).not.toContain(CONSENT_LINE.trim())
+    expect(readFileSync(join(w.site.repo, "README.md"), "utf8")).toBe(fixtureFile("README.md"))
+    expect(readFileSync(join(w.site.repo, "package.json"), "utf8")).toBe(fixtureFile("package.json"))
+    expect(readFileSync(join(w.site.repo, ".env"), "utf8")).not.toContain("AGENT_WAS_HERE")
+    expect(readFileSync(join(w.site.repo, ".infinite/wizard/state.json"), "utf8")).not.toContain("the agent rewrote the wizard state")
+    expect(readFileSync(join(w.site.repo, "next.config.mjs"), "utf8")).not.toContain("child_process")
+    expect(readJsonl<{ childProcess: boolean }>(join(w.site.repo, ".next/e2e-builds.jsonl")).every(build => !build.childProcess)).toBe(true)
+    const warnings = run.ofType("step.sub").filter(event => event.step === "jobs").map(event => String(event.text))
+    expect(warnings).toContain("! Claude Code tried to read .env (denied)")
+    expect(warnings.some(text => text.includes("auth.json outside the repo (denied)"))).toBe(true)
+    expect(w.bridge.callsFor("runs.proof-claim")).toEqual([])
+    expect(w.bridge.callsFor("test.start").some(call => (call.body as TestRunRequest).mode === "real_visit")).toBe(false)
+    expect(w.tripwire.connections).toEqual([])
   })
 })
 
@@ -728,7 +760,7 @@ describe("a strict pages-router site with adopted tags and fork-only access", ()
 
 describe("the negative variants (§4.3 a–h)", () => {
   it("(a) Claude hits its usage limit mid-jobs → exit 3, the tree back to the post-install bytes, and a re-run resumes from `jobs`", { timeout: 2 * RUN_TIMEOUT }, async () => {
-    const w = await wiredWorld({ scenario: agentScenario({ prefixTurns: [usageLimitTurn()] }) })
+    const w = await wiredWorld({ scenario: completeAgentScenario({ prefixTurns: [usageLimitTurn()] }) })
     const answers = writeAnswers(w)
     const first = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(first.code, trace(first)).toBe(3)
@@ -881,7 +913,7 @@ describe("the negative variants (§4.3 a–h)", () => {
   })
 
   it("(g) the proof claim is lost → no real visit, receipts read, done (Codex works, Claude reviews)", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await wiredWorld({ scenario: codexWorkerScenario(), bridge: { proofClaim: "lost" } })
+    const w = await wiredWorld({ scenario: completeCodexWorkerScenario(), bridge: { proofClaim: "lost" } })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--worker", "codex", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(0)
     expect(stepOutcomes(run).slice(-2)).toEqual(["prove:ok", "done:ok"])
@@ -1574,7 +1606,7 @@ describe("the second reviewer: incomplete opinions stay visible, never 'nothing 
     findings: []
   })
   const scenarioWith = (codexTurns: unknown[]) => {
-    const base = agentScenario() as { claude: unknown; codex: unknown }
+    const base = completeAgentScenario({ correctServerOutcome: true }) as { claude: unknown; codex: unknown }
     return { ...base, codex: { turns: codexTurns } }
   }
 

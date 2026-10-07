@@ -5,7 +5,11 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { loadTestRunCases, fixtureResponse } from "./fake-bridge.js"
-import { FIXTURE_PIXEL_ID, FIXTURE_SITE, PLANTED_DOTENV_VALUE } from "./e2e-harness.js"
+import { FIXTURE_PIXEL_ID, FIXTURE_SITE, PLANTED_DOTENV_VALUE, PRODUCTION_HOST } from "./e2e-harness.js"
+import { buildHostGuardExpression, wrapGuardedSnippet } from "../../src/host-guard.js"
+import { GA4_SILENCED_STUB } from "../../src/providers/ga4.js"
+import { META_SILENCED_STUB } from "../../src/providers/meta.js"
+import { escapeForTemplateLiteral } from "../../src/text-escape.js"
 import type { TagHosting } from "../../src/wizard/contracts/bridge.js"
 import type { TestResult, TestRunRequest } from "../../src/wizard/contracts/test-engine.js"
 
@@ -208,9 +212,55 @@ export function agentScenario(options: AgentScenarioOptions = {}): unknown {
   }
 }
 
+/** A successful worker writes every approved fix; the safety-failure script above stays a negative world. */
+export function completeWorkerSteps(correctServerOutcome = false): Step[] {
+  const hosting = fixtureHosting().vercel!
+  const guard = { mode: "deny" as const, exempt: [...new Set([PRODUCTION_HOST, `www.${PRODUCTION_HOST}`, ...hosting.productionDomains, ...hosting.productionAliases])], deny: [] }
+  const expression = buildHostGuardExpression(guard)
+  const ga4 = "window.dataLayer = window.dataLayer || [];\nfunction gtag(){dataLayer.push(arguments);}\ngtag('js', new Date());\ngtag('config', 'G-FAKE00001');"
+  const loader = 'var script = document.createElement("script"); script.async = true; script.src = "https://www.googletagmanager.com/gtag/js?id=G-FAKE00001"; document.head.appendChild(script);'
+  const ga4Guard = wrapGuardedSnippet(`${ga4}\nwindow.gtag = gtag;\n${loader}`, guard, GA4_SILENCED_STUB)
+  const metaOpen = escapeForTemplateLiteral(`(function () { if (!(${expression})) { ${META_SILENCED_STUB} return; }\n`)
+  const rewrites = [
+    '{ source: "/ingest/static/:path(.*)", destination: "https://us-assets.i.posthog.com/static/:path" },',
+    '{ source: "/ingest/array/:path(.*)", destination: "https://us-assets.i.posthog.com/array/:path" },',
+    '{ source: "/ingest/:path(.*)", destination: "https://us.i.posthog.com/:path" },'
+  ].map(line => `      ${line}`).join("\n")
+  return [
+    { tool: "job_list" },
+    ...duplicateRemovalSteps(), claim(ITEMS.duplicates, "done", "Removed exactly the duplicate loader and config."),
+    ...identifyResetSteps(), claim(ITEMS.identify, "done", "Identify after login success and reset after logout."),
+    ...serverConversionSteps(), ...(correctServerOutcome ? reviewFixSteps() : []), claim(ITEMS.serverConversion, "done", "Added the server outcome; review its success boundary."),
+    ...conversionSteps(), claim(ITEMS.conversionsToTools, "done", "Track sign_up after response.ok and before navigation."),
+    replaceStep("app/layout.tsx", GTAG_LOADER, ""),
+    replaceStep("app/layout.tsx", ga4, escapeForTemplateLiteral(ga4Guard)), claim(ITEMS.guardGa4, "done", "Guarded both the remaining GA4 loader and config."),
+    replaceStep("app/layout.tsx", "!function(f,b,e,v,n,t,s)", `${metaOpen}!function(f,b,e,v,n,t,s)`),
+    replaceStep("app/layout.tsx", "fbq('track', 'PageView');", "fbq('track', 'PageView');\n})();"), claim(ITEMS.guardMeta, "done", "Wrapped the pixel bootstrap only; managed click-id capture stays outside."),
+    replaceStep("app/providers.tsx", 'api_host: "https://us.i.posthog.com"', 'api_host: "/ingest", ui_host: "https://us.posthog.com"'),
+    replaceStep("next.config.mjs", "    return [\n", `    return [\n${rewrites}\n`), claim(ITEMS.posthogProxy, "done", "Added /ingest and all three exact proxy rewrites, preserving the Infinite rewrite."),
+    replaceStep("app/providers.tsx", 'ui_host: "https://us.posthog.com"', 'ui_host: "https://us.posthog.com", capture_pageview: "history_change"'), claim(ITEMS.posthogHistory, "done", "Enabled native history-change page views."),
+    replaceStep("app/providers.tsx", 'capture_pageview: "history_change"', 'capture_pageview: "history_change", defaults: "2026-01-30"'), claim(ITEMS.posthogDefaults, "done", "Applied the approved defaults date."),
+    replaceStep("app/providers.tsx", "    posthog.init(", `    if (${expression}) posthog.init(`), claim(ITEMS.guardPosthog, "done", "Guarded the actual PostHog initialization with the prescribed host expression.")
+  ]
+}
+
+export function completeAgentScenario(options: Pick<AgentScenarioOptions, "prefixTurns"> & { correctServerOutcome?: boolean } = {}): unknown {
+  return {
+    claude: { turns: [
+      ...(options.prefixTurns ?? []),
+      { steps: completeWorkerSteps(options.correctServerOutcome) },
+      { steps: [{ tool: "job_list" }, ...reviewFixSteps(), claim(FIX_ITEM, "done", "Moved the outcome after the success branch.")] }
+    ] },
+    codex: { turns: [
+      { final: firstReview() },
+      { final: { verdict: "looks_good", summary: "The server outcome now follows success.", checklist: [{ item: "R8", status: "pass", note: "Outcome after success." }], findings: [] } }
+    ] }
+  }
+}
+
 /** A fresh site with no server lane must not ask the fake agent to write an unavailable server outcome. */
 export function agentScenarioWithoutServerOutcome(): unknown {
-  const scenario = structuredClone(agentScenario()) as {
+  const scenario = structuredClone(completeAgentScenario()) as {
     claude: { turns: Array<{ steps?: Step[] }> }
     codex: { turns: Array<{ final?: unknown }> }
   }
@@ -316,6 +366,14 @@ export function answersFile(extra: Record<string, unknown> = {}): Record<string,
   }
 }
 
+/** Positive install/proof worlds scope unrelated routing/settings tasks out; the unfinished world approves them. */
+export function completeAnswersFile(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  const answers = answersFile(extra)
+  const plan = answers.plan as { approved: string[]; declined: string[] }
+  plan.declined = [...new Set([...plan.declined, "meta_spa_page_views", "sensitive_pages:posthog:replay_autocapture"])]
+  return answers
+}
+
 /** The Claude turn that hits its usage limit after editing (variant a): the real CLI's `rate_limit_event rejected`. */
 export function usageLimitTurn(): unknown {
   return { steps: [{ tool: "job_list" }, ...duplicateRemovalSteps(), { replay: "claude-rate-limit-rejected.jsonl" }], result: null, exit: 1 }
@@ -334,5 +392,13 @@ export function codexWorkerScenario(): unknown {
     claude: {
       turns: [{ structured: { verdict: "looks_good", summary: "One init per tool now.", checklist: [{ item: "R1", status: "pass", note: "One GA4 config." }], findings: [] } }]
     }
+  }
+}
+
+/** The alternate worker performs the same real approved edits, with the server outcome correct initially. */
+export function completeCodexWorkerScenario(): unknown {
+  return {
+    codex: { turns: [{ steps: completeWorkerSteps(true), final: { claims: [], questions: [] } }] },
+    claude: { turns: [{ structured: { verdict: "looks_good", summary: "The approved edits are in the code.", checklist: [{ item: "R1", status: "pass", note: "One GA4 config." }, { item: "R8", status: "pass", note: "Outcome follows success." }], findings: [] } }] }
   }
 }

@@ -22,6 +22,8 @@ Changes to the site's own non-consent helpers can still affect when its consent 
 wizard does not model that, so the second-agent review and the owner's own review remain the check.
 The second review is another AI's opinion; a mislabelled finding is still shown to you, and the wizard does not second-guess the reviewer's severity.
 
+The current adopted-PostHog privacy-drift check cannot validate a sensitive-pages option edit, so that approved task can keep the PR draft and needs owner review.
+
 A task inside that boundary is left for the site owner, with its file and line. For a withheld preview
 guard, the wizard provides the snippet to copy and explains that preview and local visits keep counting.
 Privacy wording, if supplied, is copy-only report material for the owner; the wizard never inserts it
