@@ -703,7 +703,7 @@ it("retains plan wiring and a distinct install-time capture handoff for the same
   expect(original.ownerBoundary?.wiring).toContain("InfiniteAnalyticsClient")
   const capture = 'import InfiniteMetaCaptureScript from "next/script"\n<InfiniteMetaCaptureScript src="/infinite-meta-click-id.js" strategy="beforeInteractive" />'
   const captureBoundary = { kind: "frozen_unit" as const, file: "app/layout.tsx", line: 1, unitHash: "capture-placement-provenance" }
-  h.deps.installer.apply = async () => ({ ok: true, edits: [], openJobs: [], build: "passed", ownerRequirements: [{ path: "app/layout.tsx", reason: "Capture was not wired; add it yourself.", snippet: capture, ownerBoundary: captureBoundary }] })
+  h.deps.installer.apply = async () => ({ ok: true, rolledBack: false, edits: [], openJobs: [], build: "passed", ownerRequirements: [{ path: "app/layout.tsx", reason: "Capture was not wired; add it yourself.", snippet: capture, ownerBoundary: captureBoundary }] })
   for (let attempt = 0; attempt < 2; attempt += 1) {
     expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
     const owners = h.ctx.stateValue().jobs.filter(job => job.jobId === "unusual_layout" && job.state === "left_for_you")
