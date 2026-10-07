@@ -969,7 +969,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
   })
 
   it("no reported checks stay not measured in the final report", async () => {
-    const w = await opened({ reviews: [review([])], gh: { checks: { "42": [] } } })
+    const w = await opened({ reviews: [review([])], gh: { checks: { "42": [] }, deployments: [] } })
     expectOk(await reviewStep.run(w.ctx, w.deps))
     expect(w.gh.traffic()).toContain("no checks reported: not measured")
   })
@@ -1635,7 +1635,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     const f1 = w.gh.read().threads.find((thread) => thread.comments[0]!.author === "acme-dev" && thread.comments[0]!.body.includes("F1"))!
     expect(f1.comments).toHaveLength(1)
     expect(f1.isResolved).toBe(false)
-    expect(w.ctx.state.get().jobs.find((job) => job.id === "review_comments:F1")).toMatchObject({ state: "claimed" })
+    expect(w.ctx.state.get().jobs.find((job) => job.id === "review_comments:F1")).toMatchObject({ state: "done_in_code" })
   })
 
   it("P1-3: passing required checks → 'Fixed in' and resolved; the job reaches done_in_code under O8's rule (every local check passes)", async () => {
