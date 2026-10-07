@@ -106,19 +106,38 @@ it.each([undefined, []])("does not report a pass when no wizard commit record is
   } finally { fixture.cleanup() }
 })
 
-it.each(["amended", "missing"])("retains an explicit unverified result for a %s wizard SHA", async mode => {
+it.each(["amended", "squashed", "missing"])("retains an explicit unverified result for a %s wizard SHA", async mode => {
   const fixture = createGitFixture({ files: { "tracking.ts": "export const count = 1;\n" } })
   try {
     const baseSha = fixture.git(["rev-parse", "HEAD"]).trim()
     fixture.write("tracking.ts", "export const count = 2;\n")
     fixture.git(["add", "tracking.ts"]); fixture.git(["commit", "-m", "wizard fixture"])
     const wizardSha = fixture.git(["rev-parse", "HEAD"]).trim()
-    fixture.git(["commit", "--amend", "-m", "owner amended fixture"])
+    if (mode === "squashed") {
+      fixture.write("tracking.ts", "export const count = 3;\n")
+      fixture.git(["add", "tracking.ts"]); fixture.git(["commit", "-m", "second wizard fixture"])
+      fixture.git(["reset", "--soft", baseSha]); fixture.git(["commit", "-m", "owner squashed fixture"])
+    } else fixture.git(["commit", "--amend", "-m", "owner amended fixture"])
     const headSha = fixture.git(["rev-parse", "HEAD"]).trim()
     const result = await measureWizardCommits({ root: fixture.root, baseSha, headSha, wizardCommits: [mode === "missing" ? "f".repeat(40) : wizardSha] })
     expect(result.state).toBe("not_checked")
     expect(result.unverifiedReason).toMatch(mode === "missing" ? /unavailable|missing|no longer exists/ : /amended|squashed|reachable/)
     expect(result.measuredCommitCount).toBe(0)
     expect(result.files).toContain("tracking.ts")
+  } finally { fixture.cleanup() }
+})
+
+it("measures policy-only components from both historical trees even after the cwd changes", async () => {
+  const fixture = createGitFixture({ files: { "app/privacy/page.tsx": 'import Content from "../../components/Content"; export default Content;\n', "components/Content.tsx": "export default function Content(){return <p>Original policy</p>}\n" } })
+  try {
+    const baseSha = fixture.git(["rev-parse", "HEAD"]).trim()
+    fixture.write("components/Content.tsx", "export default function Content(){return <p>Changed policy</p>}\n")
+    fixture.git(["add", "components/Content.tsx"]); fixture.git(["commit", "-m", "wizard component fixture"])
+    const revision = fixture.git(["rev-parse", "HEAD"]).trim()
+    // A later owner edit/removal of the policy import cannot change what the earlier commit touched.
+    fixture.write("app/privacy/page.tsx", "export default function Page(){return null}\n")
+    const measured = await measureOwnerDiff({ root: fixture.root, baseSha, revision })
+    expect(measured.state).toBe("changed")
+    expect(measured.issues).toContainEqual(expect.objectContaining({ file: "components/Content.tsx" }))
   } finally { fixture.cleanup() }
 })

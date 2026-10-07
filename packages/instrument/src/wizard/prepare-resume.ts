@@ -9,6 +9,7 @@ import { refreshValidationBaseline } from "./local-validation.js"
 import type { InstallManifest } from "../types.js"
 import { siteSourceHosts } from "./steps/install.js"
 import { resolveProductionHost } from "./site-host.js"
+import { prepareCommitHistory } from "./commit-history.js"
 
 const park = (reason: string): StepOutcome => ({ kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason, resumeHint: "Resolve the named files, then run `npx infinite-tag` to resume. The pull request stays draft." })
 
@@ -26,6 +27,7 @@ export async function prepareResume(ctx: WizardContext, deps: WizardDeps): Promi
     try { await branchGit.switchTo(state.git.branch) }
     catch { return park(`Could not restore the recorded branch ${state.git.branch} before validating the site.`) }
   }
+  if (state.git) await prepareCommitHistory(ctx, await deps.git.head())
   const baselineStop = await refreshValidationBaseline(ctx, deps)
   if (baselineStop) return baselineStop
   if (!state.pr || !deps.installer.refreshManaged) return null

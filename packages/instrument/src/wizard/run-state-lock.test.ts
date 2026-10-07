@@ -22,6 +22,20 @@ afterEach(() => {
 const NOW = new Date("2026-10-02T09:00:00Z")
 
 describe("run state (.infinite/wizard/state.json)", () => {
+  it("loads a legacy v1 state without inventing measured commits", async () => {
+    const root = tempRoot()
+    const state = createRunState({ tagVersion: "0.12.0", root, appRoot: ".", now: NOW })
+    delete state.wizardCommits
+    delete state.commitHistory
+    mkdirSync(join(root, ".infinite/wizard"), { recursive: true })
+    writeFileSync(stateFilePath(root), JSON.stringify(state))
+    const loaded = await loadRunState(nodeWizardFs, root)
+    expect(loaded.kind).toBe("ok")
+    if (loaded.kind === "ok") {
+      expect(loaded.state.wizardCommits).toBeUndefined()
+      expect(loaded.state.commitHistory).toBeUndefined()
+    }
+  })
   it("saves atomically at 0600 (no temp file left) and loads back to the same state", async () => {
     const root = tempRoot()
     const file = new RunStateFile(nodeWizardFs, root, createRunState({ tagVersion: "0.12.0", root, appRoot: ".", now: NOW, displayId: "r-7f3c" }))

@@ -445,6 +445,8 @@ export function initialState(overrides: Partial<WizardRunState> = {}): WizardRun
     steps: {},
     agent: { worker: "claude_code", reviewer: "codex", workerSession: null, whoPays: { worker: null, reviewer: null } },
     git: null,
+    wizardCommits: [],
+    commitHistory: { version: 1, priorHeads: [] },
     pr: null,
     plan: { hash: "sha256:plan", answers: { consentMode: "not_required", conversions: ["sign_up"], privacyApproved: null, npmInstall: null, metaGoal: null }, lines: [] },
     jobs: [],

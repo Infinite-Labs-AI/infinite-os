@@ -4,7 +4,8 @@ import { lstat, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { git } from "../agents/git-exec.js"
 import { restoreFrozenUnits } from "./consent-units.js"
-import { isPolicyPath } from "./owner-boundary.js"
+import { isPolicyPath, policyContentPaths } from "./owner-boundary.js"
+import { policySourceTree } from "./policy-tree.js"
 
 export interface OwnerBoundaryMeasurement {
   state: "checked" | "changed" | "not_checked"
@@ -40,6 +41,11 @@ export async function measureOwnerDiff(input: { root: string; baseSha: string; r
     if (extra.code !== 0) return fail("(git)", "new files could not be read")
     for (const path of extra.stdout.toString("utf8").split("\0").filter(Boolean)) paths.add(path)
   }
+  measurement.files = [...paths].sort()
+  const beforeSources = await policySourceTree(input.root, input.baseSha)
+  const afterSources = await policySourceTree(input.root, input.revision)
+  for (const snapshot of [beforeSources, afterSources]) if (snapshot.issue) return fail(snapshot.issue.file, snapshot.issue.reason)
+  const policy = new Set([...policyContentPaths(beforeSources.sources, input.appRoot), ...policyContentPaths(afterSources.sources, input.appRoot)])
   const blob = async (revision: string, path: string): Promise<{ bytes: Buffer | null; error?: string }> => {
     const entry = await git(input.root, ["ls-tree", "-z", revision, "--", path])
     if (entry.code !== 0) return { bytes: null, error: "the source tree entry could not be read" }
@@ -49,11 +55,10 @@ export async function measureOwnerDiff(input: { root: string; baseSha: string; r
     return result.code === 0 ? { bytes: result.stdout } : { bytes: null, error: "an existing source blob could not be read" }
   }
   measurement.state = "checked"
-  measurement.files = [...paths].sort()
   for (const path of [...paths].sort()) {
     if (metadata(path)) continue
     if (path.startsWith("/") || path.split("/").includes("..")) { measurement.state = "not_checked"; fail(path, "invalid diff path"); continue }
-    if (isPolicyPath(path, input.appRoot ?? ".")) { measurement.state = "changed"; fail(path, "a routed privacy/terms policy page is in the final diff"); continue }
+    if (policy.has(path) || isPolicyPath(path, input.appRoot ?? ".")) { measurement.state = "changed"; fail(path, "a routed privacy/terms policy page is in the final diff"); continue }
     const beforeBlob = await blob(input.baseSha, path)
     if (beforeBlob.error) { measurement.state = "not_checked"; fail(path, beforeBlob.error); continue }
     let after: Buffer | null
@@ -127,9 +132,12 @@ export async function measureWizardCommits(input: { root: string; appRoot?: stri
   return result
 }
 
-export async function unrecordedCommits(input: { root: string; baseSha: string; headSha: string; wizardCommits: readonly string[]; approvedForeignCommits: readonly string[] }): Promise<Array<{ sha: string; subject: string }> | null> {
-  if (![input.baseSha, input.headSha, ...input.wizardCommits, ...input.approvedForeignCommits].every(sha => /^[a-f0-9]{40}$/.test(sha))) return null
-  const list = await git(input.root, ["log", "--reverse", "--format=%H%x00%s", "-z", `${input.baseSha}..${input.headSha}`])
+export async function unrecordedCommits(input: { root: string; baseSha: string; headSha: string; wizardCommits: readonly string[]; approvedForeignCommits: readonly string[]; priorHistoryHeads?: readonly string[] }): Promise<Array<{ sha: string; subject: string }> | null> {
+  const prior = input.priorHistoryHeads ?? []
+  if (![input.baseSha, input.headSha, ...input.wizardCommits, ...input.approvedForeignCommits, ...prior].every(sha => /^[a-f0-9]{40}$/.test(sha))) return null
+  const reachable: string[] = []
+  for (const sha of prior) if ((await git(input.root, ["merge-base", "--is-ancestor", sha, input.headSha])).code === 0) reachable.push(sha)
+  const list = await git(input.root, ["log", "--reverse", "--format=%H%x00%s", "-z", `${input.baseSha}..${input.headSha}`, ...reachable.map(sha => `^${sha}`)])
   if (list.code !== 0) return null
   const fields = list.stdout.toString("utf8").split("\0")
   const known = new Set([...input.wizardCommits, ...input.approvedForeignCommits])

@@ -30,6 +30,9 @@ export async function rebuildFromPrMarker(state: WizardRunState, host: GitHostAd
   const open = found.filter((entry) => entry.pr.state === "OPEN" && entry.base !== null).sort((a, b) => b.pr.number - a.pr.number)[0]
   if (!open || open.base === null) return null
   state.runId = open.runId
+  // A PR marker restores identity, not the missing local record of commits this run created.
+  delete state.wizardCommits
+  delete state.commitHistory
   state.pr = {
     host: "github",
     number: open.pr.number,

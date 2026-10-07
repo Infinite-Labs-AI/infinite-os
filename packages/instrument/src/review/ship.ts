@@ -22,6 +22,7 @@ import { safeDisplayText } from "./display.js"
 import type { Scanner, ScanHit } from "./scan.js"
 import { sub } from "./context.js"
 import { DEPENDENCY_INSTALL_RECORD } from "../wizard/local-validation.js"
+import { acknowledgeUnverifiedHistory, prepareCommitHistory } from "../wizard/commit-history.js"
 
 export type CommitResult =
   | { kind: "committed"; sha: string; staged: string[]; leftOut: StageSet["leftOut"]; blocked: ScanHit[]; receiptRefreshSha: string | null }
@@ -101,7 +102,9 @@ async function gateStaged(input: CommitInput): Promise<string[]> {
 /** §3g.1: stage exactly the allowed set, scan it, commit with the run trailer. */
 export async function stageAndCommit(input: CommitInput): Promise<CommitResult> {
   const { git, ctx } = input
-  const boundary = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: await git.head() })
+  const parent = await git.head()
+  await prepareCommitHistory(ctx, parent)
+  const boundary = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: parent })
   ctx.state.update(state => { state.ownerBoundary = boundary })
   await ctx.state.save()
   if (boundary.state !== "checked") return { kind: "refused", message: safeDisplayText(input.scanner, ownerBoundaryStop(boundary)) }
@@ -245,16 +248,19 @@ export async function pushBranch(input: {
 }): Promise<PushResult> {
   const { ctx, git } = input
   const measuredSha = await git.head()
+  await prepareCommitHistory(ctx, measuredSha)
   const state = ctx.state.get()
-  const boundary = await measureWizardCommits({ root: ctx.root, appRoot: ctx.appRoot, baseSha: state.git?.baseSha ?? "", headSha: measuredSha, wizardCommits: state.wizardCommits ?? [] })
+  const boundary = await measureWizardCommits({ root: ctx.root, appRoot: ctx.appRoot, baseSha: state.git?.baseSha ?? "", headSha: measuredSha, wizardCommits: state.wizardCommits, historyReason: state.commitHistory?.unverifiedReason })
   ctx.state.update(state => { state.ownerBoundary = boundary })
   await ctx.state.save()
-  if (boundary.state !== "checked") return { kind: "failed", message: safeDisplayText(input.scanner, ownerBoundaryStop(boundary)) }
-  const foreign = await unrecordedCommits({ root: ctx.root, baseSha: state.git?.baseSha ?? "", headSha: measuredSha, wizardCommits: state.wizardCommits ?? [], approvedForeignCommits: state.approvedForeignCommits ?? [] })
+  if (boundary.state === "changed" || boundary.issues.length > 0 || (boundary.state === "not_checked" && !boundary.unverifiedReason)) return { kind: "failed", message: safeDisplayText(input.scanner, ownerBoundaryStop(boundary)) }
+  if (!await acknowledgeUnverifiedHistory(ctx, measuredSha, boundary)) return { kind: "failed", message: "Continuing with the unverified earlier history was declined. Nothing was pushed." }
+  if (await git.head() !== measuredSha) return { kind: "failed", message: "The branch changed while reviewing its history. Run again to review the current commits." }
+  const foreign = await unrecordedCommits({ root: ctx.root, baseSha: state.git?.baseSha ?? "", headSha: measuredSha, wizardCommits: state.wizardCommits ?? [], approvedForeignCommits: state.approvedForeignCommits ?? [], priorHistoryHeads: ctx.state.get().commitHistory?.priorHeads })
   if (foreign === null) return { kind: "failed", message: "Nothing pushed: the commits outside the wizard's record could not be listed." }
   if (foreign.length > 0) {
     const list = foreign.map(commit => `${commit.sha.slice(0, 12)} ${safeDisplayText(input.scanner, commit.subject)}`).join("\n")
-    if (await ctx.ask("confirm", { question: `These commits are not in this wizard's own commit record and would be pushed:\n${list}\nPush these owner commits to the recorded branch?`, defaultYes: false }) !== true) return { kind: "failed", message: "The additional commits were not approved for push. They remain local." }
+    if (await ctx.ask("confirm", { question: `These commits are not in this wizard's own commit record or its saved earlier history and would be pushed:\n${list}\nPush these additional commits to the recorded branch?`, defaultYes: false }) !== true) return { kind: "failed", message: "The additional commits were not approved for push. They remain local." }
     if (await git.head() !== measuredSha) return { kind: "failed", message: "The branch changed while approving the push. Run again to review its current commits." }
     ctx.state.update(draft => { draft.approvedForeignCommits = [...new Set([...(draft.approvedForeignCommits ?? []), ...foreign.map(commit => commit.sha)])] })
     await ctx.state.save()

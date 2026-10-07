@@ -15,7 +15,7 @@ async function setup(approveForeign = false) {
   const git = createGitOps({ cwd: fx.root, env: fx.env })
   const branch = "infinite/tag/owner-proof"
   const { baseSha } = await git.createBranch("main", branch)
-  const ctx = testContext({ root: fx.root, state: initialState({ git: { base: "main", baseSource: "vercel", baseSha, headSha: baseSha, branch }, jobs: [] }), answers: { confirm: approveForeign } })
+  const ctx = testContext({ root: fx.root, state: initialState({ git: { base: "main", baseSource: "vercel", baseSha, headSha: baseSha, branch }, jobs: [], wizardCommits: [], commitHistory: { version: 1, priorHeads: [] } }), answers: { confirm: approveForeign } })
   const deps = testDeps({ bridge: fakeBridge(), agents: {} as never, git, host: { kind: "github" } as never })
   const scanner = createScanner({ literals: [], allowedIds: [] })
   const push = () => pushBranch({ ctx, deps, git, scanner, branch, base: "main", title: "Fixture", hostKind: "github" })
@@ -195,4 +195,47 @@ it.each(["commit", "push"] as const)("sanitizes owner-boundary filenames at the 
   for (const unsafe of [secret, "<!--", "@reviewer", "[note](link)"]) expect(displayed).not.toContain(unsafe)
   expect(w.ctx.state.get().ownerBoundary?.issues).toContainEqual(expect.objectContaining({ file: unsafePath }))
   expect(w.fx.remoteSha(w.branch)).toBeNull()
+})
+
+it("resumes saved legacy history without calling it owner work or upgrading the run claim", async () => {
+  const w = await setup(false)
+  w.fx.write(path, source.replace("count = 1", "count = 2"))
+  w.fx.git(["add", path]); w.fx.git(["commit", "-m", "older wizard fixture"])
+  const earlier = await w.git.head()
+  w.ctx.state.update(state => { delete state.wizardCommits; delete state.commitHistory; state.git!.headSha = earlier })
+  w.ctx.options.yes = true
+  w.fx.write(path, source.replace("count = 1", "count = 3"))
+  const result = await stageAndCommit({ ...w, step: "rehearsal", runId: RUN_ID, message: "new wizard fixture", round: null, allowlist: [path], managed: [], npmFiles: [], connectionIds: [] })
+  expect(result.kind).toBe("committed")
+  expect(await w.push()).toMatchObject({ kind: "pushed" })
+  expect(w.ctx.asks).toEqual([])
+  expect(w.ctx.state.get().wizardCommits).toEqual([await w.git.head()])
+  expect(w.ctx.state.get().commitHistory?.priorHeads).toContain(earlier)
+  expect(w.ctx.state.get().ownerBoundary).toMatchObject({ state: "not_checked", measuredCommitCount: 1, unverifiedReason: expect.stringContaining("older") })
+})
+
+it.each(["yes", "nested"] as const)("does not refuse unknown legacy history merely because resume is noninteractive: %s", async mode => {
+  const w = await setup(false)
+  w.fx.write(path, source.replace("count = 1", "count = 2"))
+  w.fx.git(["add", path]); w.fx.git(["commit", "-m", "unknown older fixture"])
+  w.ctx.state.update(state => { delete state.wizardCommits; delete state.commitHistory })
+  w.ctx.options[mode] = true
+  expect(await w.push()).toMatchObject({ kind: "pushed" })
+  expect(await w.push()).toMatchObject({ kind: "pushed" })
+  expect(w.ctx.asks).toEqual([])
+  expect(w.ctx.state.get().ownerBoundary?.state).toBe("not_checked")
+  expect(w.ctx.state.get().commitHistory?.resolution).toBe("noninteractive")
+})
+
+it("asks once about unclassified earlier history without calling it owner commits", async () => {
+  const w = await setup(true)
+  w.fx.write(path, source.replace("count = 1", "count = 2"))
+  w.fx.git(["add", path]); w.fx.git(["commit", "-m", "unknown older fixture"])
+  w.ctx.state.update(state => { delete state.wizardCommits; delete state.commitHistory })
+  expect(await w.push()).toMatchObject({ kind: "pushed" })
+  expect(await w.push()).toMatchObject({ kind: "pushed" })
+  expect(w.ctx.asks).toHaveLength(1)
+  const question = JSON.stringify(w.ctx.asks[0]!.payload)
+  expect(question).toContain("cannot identify")
+  expect(question).not.toContain("owner commits")
 })
