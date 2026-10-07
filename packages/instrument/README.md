@@ -28,6 +28,9 @@ stops that push; it does not grant permission to continue.
 Changes to the site's own non-consent helpers can still affect when its consent code runs; the
 wizard does not model that, so the second-agent review and the owner's own review remain the check.
 The second review is another AI's opinion; a mislabelled finding is still shown to you, and the wizard does not second-guess the reviewer's severity.
+A reviewer that fails the file read-check twice contributes no findings or fixes. A complete review
+includes every required rubric row. Finding labels ignore case; `critical` and `high` mean blocker.
+An unknown label makes only that finding a blocker, with the unknown label retained.
 
 The current adopted-PostHog privacy-drift check cannot validate a sensitive-pages option edit, so that approved task can keep the PR draft and needs owner review.
 
