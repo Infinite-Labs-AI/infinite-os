@@ -6,8 +6,8 @@
 // their status codes, a file at a revision, unstaging, the staged diff, a config read, the push-option push
 // for GitLab, the TTY hand-over switch). They are ADDITIVE: every §3g.1 method keeps its contract shape.
 import type { WizardGitOps } from "../wizard/contracts/git-host.js"
-import { constants, accessSync, mkdirSync } from "node:fs"
-import { isAbsolute, join } from "node:path"
+import { constants, accessSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { basename, isAbsolute, join } from "node:path"
 
 import type { GitOps } from "../wizard/contracts/git-host.js"
 import { WIZARD_BRANCH_PREFIX } from "../wizard/contracts/state.js"
@@ -182,17 +182,27 @@ export function createGitOps(options: CreateGitOpsOptions): WizardGitOps {
       await git(["merge", "--ff-only", pushRemote ? "FETCH_HEAD" : `origin/${branch}`])
       return { headSha: await trimmed(["rev-parse", "HEAD"]) }
     },
-    async worktreeAddDetached(sha) {
+    async worktreeList() {
+      return (await git(["worktree", "list", "--porcelain", "-z"])).stdout.split("\0").filter(line => line.startsWith("worktree ")).map(line => line.slice(9))
+    },
+    async isIgnored(path) {
+      return (await git(["check-ignore", "--quiet", "--", path], { allowFail: true })).status === 0
+    },
+    async worktreeAddDetached(sha, purpose) {
       if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("worktreeAddDetached needs a full SHA")
       const root = options.worktreeRoot ?? defaultWorktreeRoot(options.runKey ?? "run")
       mkdirSync(root, { recursive: true, mode: 0o700 })
-      const dir = worktreeDirFor(root, sha)
-      await git(["worktree", "add", "--detach", dir, sha])
+      const dir = purpose === "baseline" ? join(root, basename(worktreeDirFor(root, sha)).replace(/^review-/, "baseline-")) : worktreeDirFor(root, sha)
+      if (purpose === "baseline") writeFileSync(`${dir}.baseline.json`, JSON.stringify({ schema: "infinite-tag.baseline.v1", root: realpathSync(options.cwd), pid: process.pid }), { mode: 0o600 })
+      try { await git(["worktree", "add", "--detach", dir, sha]) }
+      catch (error) { if (purpose === "baseline") rmSync(`${dir}.baseline.json`, { force: true }); throw error }
       return { dir }
     },
     async worktreeRemove(dir) {
-      await git(["worktree", "remove", "--force", dir], { allowFail: true })
+      const removed = await git(["worktree", "remove", "--force", dir], { allowFail: true })
+      if (removed.status !== 0 && existsSync(dir)) throw new GitCommandError(["worktree", "remove", dir], removed)
       await git(["worktree", "prune"], { allowFail: true })
+      rmSync(`${dir}.baseline.json`, { force: true })
     },
     async diff(from, to) {
       return (await git(["diff", "--no-color", "--no-ext-diff", "--no-textconv", `${from}...${to}`])).stdout

@@ -69,7 +69,7 @@ export interface GitOps {
   push(branch: string): Promise<void>
   /** §3g.4 step 5: after `gh pr update-branch`, `git pull --ff-only origin <branch>` (never a merge commit or rebase). */
   pullFfOnly(branch: string): Promise<{ headSha: string }>
-  worktreeAddDetached(sha: string): Promise<{ dir: string }>
+  worktreeAddDetached(sha: string, purpose?: "baseline"): Promise<{ dir: string }>
   worktreeRemove(dir: string): Promise<void>
   diff(from: string, to: string): Promise<string>
   isAncestor(ancestor: string, descendant: string): Promise<boolean>
@@ -153,6 +153,8 @@ export interface StatusEntry {
 
 /** `GitOps` plus what the PR loop, the fence and the resume need (lane O4's `createGitOps` implements it). */
 export interface WizardGitOps extends GitOps {
+  worktreeList?(): Promise<string[]>
+  isIgnored?(path: string): Promise<boolean>
   /** The validated fork destination for pushes and review fast-forwards; origin stays the production base. */
   setPushRemote?(remoteUrl: string | null): void
   pushCommand?(branch: string): string

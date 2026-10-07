@@ -217,8 +217,10 @@ export function assertSafeGitArgv(args: readonly string[], context: GitGuardCont
       if (!rest.includes("--ff-only")) throw new GitSafetyError("merge is used only with --ff-only")
       return
     case "worktree":
-      if (rest[0] !== "add" && rest[0] !== "remove" && rest[0] !== "prune") throw new GitSafetyError(`worktree ${rest[0] ?? ""} is not allowed`)
+      if (!["add", "remove", "prune", "list"].includes(rest[0] ?? "")) throw new GitSafetyError(`worktree ${rest[0] ?? ""} is not allowed`)
       if (rest[0] === "add" && !rest.includes("--detach")) throw new GitSafetyError("worktree add is always --detach")
+      return
+    case "check-ignore":
       return
     case "config":
       if (rest[0] !== "--get") throw new GitSafetyError("config is read-only (--get)")
