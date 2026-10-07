@@ -14,6 +14,7 @@
 // whose inputs are absent is `not_measured` ("—") and leaves N, the determinable count.
 import type { OwnerBoundaryMeasurement } from "../jobs/owner-diff.js"
 import type { ChecklistItem } from "./contracts/jobs.js"
+import { consentActivationFromNotes, consentActivationNotes, consentHandoff, CONSENT_WAITING } from "../install/consent-handoff.js"
 import { OWNER_BOUNDARY, OWNER_BOUNDARY_UNMEASURED, LEGACY_OWNER_BOUNDARY, hasRecordedPolicyEdits, withOwnerBoundary, isOwnerBoundaryStatement, hasLegacyOwnerHistory } from "../jobs/owner-boundary.js"
 import {
   CELL_STATES,
@@ -529,6 +530,21 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
       rows.find(row => row.id === "checks_passing")!.cells.in_pr = checksPassingCell(Object.fromEntries(finishLine.map(line => [line.id, line.cells.in_pr])), runId, generatedAt)
     }
   }
+  const activationNotes = consentActivationNotes(input.verdictFacts?.consentActivation)
+  if (activationNotes.length) {
+    // The wire has aggregate check rows, not dedicated Infinite/capture activation ids. Do not
+    // leave an aggregate pass asserting activation while the required banner signal is untested.
+    for (const column of ["in_pr", "proven_live"] as const) {
+      for (const id of ["each_tool_once", "proof_from_real_visit"] as const) {
+        const line = finishLine.find(entry => entry.id === id)!
+        const cell = line.cells[column]
+        if (cell.state === "pass") line.cells[column] = { ...cell, state: "info", display: activationNotes.join("; ") }
+      }
+      const live = rows.find(row => row.id === "live_test_per_tool")!
+      if (live.cells[column].state === "pass") live.cells[column] = { ...live.cells[column], state: "info", display: activationNotes.join("; ") }
+      rows.find(row => row.id === "checks_passing")!.cells[column] = checksPassingCell(Object.fromEntries(finishLine.map(line => [line.id, line.cells[column]])), runId, generatedAt)
+    }
+  }
   const report: ReportV2 = {
     schema: REPORT_SCHEMA,
     runId,
@@ -541,6 +557,9 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     finishLine,
     notes: [...new Set([
       ...(input.verdictFacts?.reviewUnreliable ? [input.verdictFacts.reviewUnreliable] : []),
+      ...activationNotes,
+      ...(activationNotes.length ? ["Your banner connection is unverified in this run. Required-mode offline and browser checks supply a test grant; passing those checks does not confirm your banner signal."] : []),
+      ...(input.verdictFacts?.consentActivation?.mode === "not_required" && (input.verdictFacts.consentActivation.infinite || input.verdictFacts.consentActivation.capture) ? ["This run's tag and ad-click capture collect by default, independently of other banners until you connect their yes/no signal to Infinite. An Infinite-recorded no and DNT/GPC without an explicit grant are respected."] : []),
       ...(input.verdictFacts?.tagNotInstalled ? ["Infinite’s tag is NOT installed by this run. Add the owner wiring before testing it live."] : []),
       ...(ownerPreviewNote ? [ownerPreviewNote] : []),
       ...input.notes.filter(note => !isOwnerBoundaryStatement(note)),
@@ -566,6 +585,10 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
   if (input.verdictFacts?.tagNotInstalled && report.verdict) {
     report.verdict.state = "not_checked_live"
     report.verdict.headline = "Infinite’s tag is NOT installed by this run. Add the owner wiring before testing it live."
+  }
+  if (activationNotes.length && report.verdict?.state === "properly") {
+    report.verdict.state = "unconfirmed"
+    report.verdict.headline = `${input.site.productionHost ?? input.site.repoLabel}: ${activationNotes.join("; ")}`
   }
   report.notes.push(withOwnerBoundary("", hasLegacyOwnerHistory(report.notes), input.verdictFacts?.ownerBoundary))
   report.notes = boundedNotes(report.notes)
@@ -791,6 +814,12 @@ export function renderTerminal(report: ReportV2, width: number, options: Termina
   }
   lines.push(...wrapPlain(withOwnerBoundary("", hasLegacyOwnerHistory(report.notes), options.ownerBoundary), total))
   lines.push(...hanging("7 days later: ", day7Text(report), total))
+  const activation = consentActivationFromNotes(report.notes)
+  const handoff = activation && consentHandoff(activation)
+  if (handoff) {
+    lines.push("", "Owner action: banner signal", "", ...handoff.split("\n"))
+    lines.push("", "Finish line", ...consentActivationNotes(activation))
+  }
   for (const note of notesAndFootnotes(report)) lines.push(...hanging("", note, total))
   for (const instruction of ownerInstructions(options.ownerJobs ?? [])) {
     lines.push("", ...wrapPlain(instruction.note, total), ...wrapPlain(instruction.placement, total), "", "Full text in the pull request and .infinite/wizard/report.md")
@@ -835,8 +864,18 @@ export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMe
   for (const line of report.finishLine) {
     out.push(`| ${line.n} | ${line.id.replace(/_/g, " ")} | ${REPORT_COLUMN_IDS.map((column) => md(cellText(line.cells[column], line.id === "previews_silent" && column !== "live_today" ? ownerPreviewNote(report) : undefined))).join(" | ")} |`)
   }
+  const activation = consentActivationFromNotes(report.notes)
+  for (const note of consentActivationNotes(activation)) {
+    const label = note.slice(0, note.indexOf(":"))
+    out.push(`| | ${label} | — | ${CONSENT_WAITING} | ${CONSENT_WAITING} |`)
+  }
   out.push("")
   out.push("</details>")
+  const handoff = activation && consentHandoff(activation)
+  if (handoff) {
+    out.push("", "**Owner action: banner signal**", "")
+    for (const section of handoff.split("\n\n")) out.push(section.startsWith("Yes:\n") || section.startsWith("No or revoke:\n") ? `${section.slice(0, section.indexOf("\n"))}\n\n\`\`\`js\n${section.slice(section.indexOf("\n") + 1)}\n\`\`\`` : section, "")
+  }
   const notes = notesAndFootnotes(report)
   if (notes.length > 0) {
     out.push("")

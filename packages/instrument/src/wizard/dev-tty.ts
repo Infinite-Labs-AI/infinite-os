@@ -109,7 +109,7 @@ export function openDevTtyPrompter(path = "/dev/tty", options: { timeoutMs?: num
       const reply = await exchange(async (io) => {
         io.say(`infinite-tag needs your answer (your agent cannot give it): ${line.text}`)
         if (line.kind === "consent_mode") {
-          const answer = await io.question("Consent for this site: [c] collect by default, [a] ask first (consent required), [enter] skip: ")
+          const answer = await io.question("Infinite's tag AND the Meta ad-click cookie: [c] collect by default (other banners are independent), [a] wait for my banner's yes (connect the signal shown), [enter] skip: ")
           if (answer && /^c/i.test(answer)) return { approved: true, edit: "not_required" }
           if (answer && /^a/i.test(answer)) return { approved: true, edit: "required" }
           return null

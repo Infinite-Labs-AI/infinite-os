@@ -41,8 +41,8 @@ export interface PlanState {
 
 const CONSENT_VALUES = ["not_required", "required"] as const
 const CONSENT_LABEL: Record<string, string> = {
-  not_required: "collect by default (covers Infinite only)",
-  required: "wait for consent (your banner decides; Infinite never changes it)"
+  not_required: "Infinite tag + ad-click cookie: collect by default; other banners are independent until connected",
+  required: "Infinite tag + ad-click cookie: wait for my banner's yes; connect the signal below"
 }
 const EDIT_MAX = 2000
 

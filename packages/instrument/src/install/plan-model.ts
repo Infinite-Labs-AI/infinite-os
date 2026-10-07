@@ -1,6 +1,7 @@
 import { configRewriteJobs } from "./config-rewrite-jobs.js"
 import { sensitivePosthogOptions } from "./posthog-sensitive.js"
 import type { ManagedCapturePlan } from "./managed-capture.js"
+import { consentHandoff, recognizedConsentHandling } from "./consent-handoff.js"
 import type { OwnerWiringPreview } from "../frameworks/owner-wiring-preview.js"
 import { scopeOwnerJob } from "../jobs/owner-scope.js"
 import { isRepositoryWork, isContinuedWork } from "./plan-permission.js"
@@ -585,7 +586,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     return { ...item, owner: "code", state: "pending", blockedReason: undefined, ownerBoundary: undefined, claim: undefined, checks: itemChecksFor("meta_improve", "capture", scan.framework),
       note: undefined, title: "Save Meta landing click ids in a managed module",
       allow: { files: [...capture.editEntrypoints], create: [capture.module] },
-      trigger: { finding: `The installer adds ${capture.module} and wires it before the pixel from ${capture.entrypoints.join(", ")}. The pixel's own file is unchanged; capture reads the existing consent gate.`, evidence: capture.editEntrypoints.map(file => ({ file, line: 1 })) } }
+      trigger: { finding: `The installer adds ${capture.module} and wires it before the pixel from ${capture.entrypoints.join(", ")}. The pixel's own file is unchanged. Capture follows the Infinite consent choice below, independently of other banners until you connect their yes/no signal.`, evidence: capture.editEntrypoints.map(file => ({ file, line: 1 })) } }
   }
   const sensitiveNeeded = (file: string | undefined) => sensitivePosthogOptions(file ? scan.sources?.[file] : undefined, scan.sensitivePaths) !== null
   let candidates = input.candidates.filter(item => item.id !== "posthog_improve:sensitive_pages" || sensitiveNeeded(item.allow.files[0])).filter((item) => !withheld.includes(item.id)).map(captureScope).map(item => sources ? scopeOwnerJob(item, sources, scan.appRoot) : item)
@@ -595,16 +596,17 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   // Consent governs Infinite's collection (an install, a managed tag, or a site source it is recorded on) and the
   // consent gate of the managed tags and the Meta click-id capture. Conversion names govern the conversion jobs, the
   // emitted helpers and Infinite's declared conversions. Neither is asked, or pre-checked, when none of that exists.
-  const consentProposed = input.consentFlag ?? keys.infinite.consentMode ?? null
+  const ownerConsentFound = recognizedConsentHandling(scan.sources)
+  const consentProposed = input.consentFlag ?? (ownerConsentFound ? "required" : keys.infinite.consentMode ?? null)
   const consentLine = line({
       id: DECISION_LINE_IDS.consentMode,
       kind: "consent_mode",
       text:
         consentProposed === "required"
-          ? "Consent: wait for your cookie banner's yes before Infinite collects (covers Infinite only)"
+          ? `Consent for Infinite's tag and the Meta ad-click cookie this run adds: wait for my banner's yes.${ownerConsentFound ? " Default: found consent handling or a banner." : ""} You must connect the yes/no signal below.`
           : consentProposed === "not_required"
-            ? "Consent: collect by default; Do-Not-Track and GPC visitors are still skipped (covers Infinite only)"
-            : "Consent: choose — collect by default, or wait for your cookie banner's yes (covers Infinite only)",
+            ? "Consent for Infinite's tag and the Meta ad-click cookie this run adds: collect by default; DNT/GPC visitors are skipped. This is independent of your other banner until you connect it."
+            : "Consent for Infinite's tag and the Meta ad-click cookie this run adds: choose collect by default, or wait for my banner's yes. Other banners do not control them until you connect their yes/no signal.",
       requires: "approval",
       editable: true
     })
@@ -925,7 +927,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     }
   }
   if (scan.managedCapture?.canWire) {
-    for (const planLine of lines) if (planLine.kind === "capture_beside_adopted_pixel") planLine.text = `Meta: save landing ad-click ids in ${scan.managedCapture.module}, loaded first from ${scan.managedCapture.entrypoints.join(", ")}. The installer leaves the pixel's own file unchanged and reads the existing consent gate.`
+    for (const planLine of lines) if (planLine.kind === "capture_beside_adopted_pixel") planLine.text = `Meta: save landing ad-click ids in ${scan.managedCapture.module}, loaded first from ${scan.managedCapture.entrypoints.join(", ")}. The pixel's own file is unchanged. Capture follows Infinite's consent setting: required mode stays off until your banner sends the yes signal; default collection is independent of other banners until you connect them. Offline checks show only that it works when consent is granted.`
   }
   for (const item of [...candidates, ...seeds].filter(entry => entry.state === "left_for_you")) {
     if (item.id === "posthog_improve:sensitive_pages" && item.ownerBoundary) {
@@ -997,6 +999,14 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   // R2-6: the consent line stays only when it governs something on THIS plan (see above).
   const consentGoverns = infiniteRecordable || helpersEmitted || lines.some((entry) => entry.kind === "capture_beside_adopted_pixel")
   if (!consentGoverns) lines.splice(lines.indexOf(consentLine), 1)
+  if (consentGoverns) {
+    const handoff = consentHandoff({ mode: "required", infinite: tools.includes("infinite") || scan.managedProviders.includes("infinite"), capture: scan.managedCapture?.canWire === true || tools.includes("meta") })
+    // Keep the handoff visible when the decision is edited interactively after this plan was built.
+    if (handoff) {
+      const firstOwner = lines.findIndex(entry => entry.requires === "user_action")
+      lines.splice(firstOwner < 0 ? lines.length : firstOwner, 0, line({ id: "user_action:banner_signal", kind: "user_action", requires: "user_action", text: `${consentProposed === "required" ? "" : "If you choose wait for my banner's yes: "}${handoff}` }))
+    }
+  }
 
   // ---- B28: the 7-day check-in (on by default, BUILD-PLAN §1.4; the plan says so, nothing to answer) ----
   lines.push(

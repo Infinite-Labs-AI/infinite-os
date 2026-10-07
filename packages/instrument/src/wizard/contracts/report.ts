@@ -212,6 +212,7 @@ export interface VerdictOpenFinding {
 export interface VerdictFacts {
   /** Local review integrity result, rendered in the existing headline/notes wire fields. */
   reviewUnreliable?: string
+  consentActivation?: import("../../install/consent-handoff.js").ConsentActivation
   tagNotInstalled?: boolean
   ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement
   ownerPolicyFindings?: string[]

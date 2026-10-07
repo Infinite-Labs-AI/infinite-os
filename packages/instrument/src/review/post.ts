@@ -234,6 +234,7 @@ export interface FinalCommentInput {
  * (`failed: <note>` / `blocked: <note>`), never only a state code ("blocked (outside allowlist)").
  */
 export function jobStateCell(job: ChecklistItem): string {
+  if (job.consentActivation === "waiting_banner_signal" && job.state === "done_in_code") return job.note ?? "Installed, waiting on your banner signal. Offline check: works when consent is granted."
   if (job.ownerBoundary?.kind === "restored_unit" || job.blockedReason === "consent_touched") return "Put back: an edit reached code that handles consent."
   if (job.ownerBoundary?.kind === "legacy_policy" || job.jobId === "privacy_paragraph") return job.note ?? "Privacy policy work is retired; earlier recorded edits are reported separately."
   if (job.state === "left_for_you") return job.note ?? "Not done: left for the site owner."
