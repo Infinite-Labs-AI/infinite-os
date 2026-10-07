@@ -128,17 +128,32 @@ export function openLayoutJobs(paths: readonly string[], existing: readonly Chec
 }
 
 /** Known installer proposals held at the owner boundary are information, never worker tasks. */
-export function ownerLayoutJobs(requirements: readonly ManualRequirement[]): ChecklistItem[] {
-  const byPath = new Map<string, ManualRequirement[]>()
-  for (const requirement of requirements) if (requirement.ownerBoundary) byPath.set(requirement.path, [...byPath.get(requirement.path) ?? [], requirement])
-  return [...byPath].map(([path, entries]) => {
+export function ownerLayoutJobs(requirements: readonly ManualRequirement[], existing: readonly ChecklistItem[] = []): ChecklistItem[] {
+  const byPlacement = new Map<string, ManualRequirement[]>()
+  for (const requirement of requirements) {
+    if (!requirement.ownerBoundary) continue
+    // A file may need more than one handoff with different placement/frozen-unit provenance.
+    const key = JSON.stringify([requirement.path, requirement.ownerBoundary])
+    byPlacement.set(key, [...byPlacement.get(key) ?? [], requirement])
+  }
+  const occupied = existing.filter(job => job.state === "left_for_you" && job.ownerBoundary)
+  return [...byPlacement.values()].map(entries => {
+    const path = entries[0]!.path
     const first = entries[0]!
     const wiring = [...new Set(entries.map(entry => entry.snippet).filter(Boolean))].join("\n\n")
-    const note = first.reason
-    return { id: `unusual_layout:${path}`, jobId: "unusual_layout", n: JOB_TABLE.unusual_layout.n,
+    const note = [...new Set(entries.map(entry => entry.reason))].join("\n")
+    const ownerBoundary = { ...first.ownerBoundary!, ...(wiring ? { wiring } : {}) }
+    const identity = JSON.stringify([ownerBoundary, note])
+    const baseId = `unusual_layout:${path}`
+    const matching = occupied.find(job => (job.id === baseId || job.id.startsWith(`${baseId}:handoff:`)) && JSON.stringify([job.ownerBoundary, job.note]) === identity)
+    let id = matching?.id ?? baseId
+    if (!matching && occupied.some(job => job.id === id)) id = `${baseId}:handoff:${sha256(identity).slice(7)}`
+    const job: ChecklistItem = { id, jobId: "unusual_layout", n: JOB_TABLE.unusual_layout.n,
       title: `Analytics wiring left for you: ${path}`, owner: "code", state: "left_for_you", checks: [], allow: { files: [], create: [] }, note,
-      ownerBoundary: { ...first.ownerBoundary!, ...(wiring ? { wiring } : {}) },
+      ownerBoundary,
       trigger: { finding: `${note}${wiring ? `\n\nFor you to copy into ${path}; preserve your consent code. The wizard did not add this wiring.\n\n\`\`\`js\n${wiring}\n\`\`\`` : ""}`, evidence: [{ file: path, line: first.ownerBoundary!.line }] } }
+    occupied.push(job)
+    return job
   })
 }
 
@@ -382,7 +397,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     plan,
     savedApprovals.approvals
   )
-  const ownerJobs = ownerLayoutJobs(result.ownerRequirements ?? [])
+  const ownerJobs = ownerLayoutJobs(result.ownerRequirements ?? [], ctx.state.get().jobs)
   for (const job of ownerJobs) sub(ctx, job.trigger.finding, "info")
   for (const deferred of result.deferredConfigRewrites ?? []) {
     sub(ctx, `Your own ${deferred.path} is left as it is: the agent adds Infinite's collect rewrite there (the wizard checks it)`, "info")

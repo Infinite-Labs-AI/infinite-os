@@ -35,7 +35,7 @@ import type { WizardDeps } from "../contracts/deps.js"
 
 import { GITIGNORE_FENCE_BLOCK } from "../../harness/outputs.js"
 import { reverseEditRecord, sha256Tagged } from "../../install/edits.js"
-import { GITIGNORE_FENCE_LINE_ID, siteSourceHosts, step as installStep } from "./install.js"
+import { GITIGNORE_FENCE_LINE_ID, ownerLayoutJobs, siteSourceHosts, step as installStep } from "./install.js"
 import { step as planStep } from "./plan.js"
 
 afterEach(cleanupSites)
@@ -689,4 +689,36 @@ it("preserves detector candidates across a continued plan with frozen owner work
   expect(h.ctx.stateValue().plan!.hash).toBe(hash)
   expect(h.ctx.asks).toHaveLength(1)
   expect(read(h.ctx.root, "app/layout.tsx")).toBe(layout)
+})
+
+it("retains plan wiring and a distinct install-time capture handoff for the same frozen entry", async () => {
+  const layout = "export default function Layout({children}) { gtag('consent', 'default', {}); return <html><body>{children}</body></html> }\n"
+  const h = await setup({
+    files: { "package.json": JSON.stringify({ dependencies: { next: "15.0.0", react: "19.0.0" } }), "app/layout.tsx": layout, "headers.js": "export const headers = {}\n" },
+    candidates: [candidate("csp", "headers", { allow: { files: ["headers.js"], create: [] }, trigger: { finding: "Allow analytics", evidence: [{ file: "headers.js", line: 1 }] } })],
+    consentFlag: "not_required", answers: [{ approved: [], declined: [], edits: {} }]
+  })
+  expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
+  const original = structuredClone(h.ctx.stateValue().jobs.find(job => job.id === "unusual_layout:app/layout.tsx")!)
+  expect(original.ownerBoundary?.wiring).toContain("InfiniteAnalyticsClient")
+  const capture = 'import InfiniteMetaCaptureScript from "next/script"\n<InfiniteMetaCaptureScript src="/infinite-meta-click-id.js" strategy="beforeInteractive" />'
+  const captureBoundary = { kind: "frozen_unit" as const, file: "app/layout.tsx", line: 1, unitHash: "capture-placement-provenance" }
+  h.deps.installer.apply = async () => ({ ok: true, edits: [], openJobs: [], build: "passed", ownerRequirements: [{ path: "app/layout.tsx", reason: "Capture was not wired; add it yourself.", snippet: capture, ownerBoundary: captureBoundary }] })
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
+    const owners = h.ctx.stateValue().jobs.filter(job => job.jobId === "unusual_layout" && job.state === "left_for_you")
+    expect(owners).toHaveLength(2)
+    expect(owners.find(job => job.id === original.id)).toEqual(original)
+    expect(owners.find(job => job.ownerBoundary?.wiring === capture)).toMatchObject({ state: "left_for_you", owner: "code", checks: [], allow: { files: [], create: [] }, ownerBoundary: { ...captureBoundary, wiring: capture } })
+    expect(read(h.ctx.root, "app/layout.tsx")).toBe(layout)
+  }
+})
+
+
+it("keeps different owner-boundary placements separate within one installer response", () => {
+  const requirements = [1, 7].map(line => ({ path: "app/layout.tsx", reason: `Owner wiring at line ${line}`, snippet: `mount${line}();`, ownerBoundary: { kind: "frozen_unit" as const, file: "app/layout.tsx", line, unitHash: `unit-${line}` } }))
+  const jobs = ownerLayoutJobs(requirements)
+  expect(new Set(jobs.map(job => job.id)).size).toBe(2)
+  expect(jobs.map(job => job.ownerBoundary)).toEqual(requirements.map(requirement => ({ ...requirement.ownerBoundary, wiring: requirement.snippet })))
+  expect(ownerLayoutJobs(requirements, jobs)).toEqual(jobs)
 })
