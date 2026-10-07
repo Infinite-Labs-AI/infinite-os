@@ -137,7 +137,7 @@ function world(input: {
       const target = (checkInput as { item?: ChecklistItem }).item?.id === META_GUARD ? "meta-pixel" : "ga4"
       const script = layout.split(`<Script id="${target}"`)[1]?.split("</Script>")[0] ?? ""
       const present = checkId === "adopted_init_guarded" ? script.includes("if (location.hostname ===") : !layout.includes('id="ga4-again"')
-      return { ...(Array.isArray(result) ? result[0]! : result), state: present ? "pass" as const : "problem" as const, reason: present ? "Fixture change present" : "Fixture change missing after restoration", absent: !present }
+      return { ...(Array.isArray(result) ? result[0]! : result), state: present ? "pass" as const : "problem" as const, reason: present ? "Fixture change present" : "Fixture change missing after restoration", ...(present ? {} : { absent: true as const }) }
     }
     calls.run.push({ checkId, input: checkInput })
     const [result] = (await realFns[checkId]!(checkInput, { runId: STEP_RUN_ID, now: FIXED_NOW })) as Awaited<ReturnType<typeof run>>[]
