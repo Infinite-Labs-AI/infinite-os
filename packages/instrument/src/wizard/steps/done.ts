@@ -235,7 +235,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
       // R4-9 / LF4-P3-5: the ids the run read from the site's own code are public too (an unconnected Meta pixel's id).
       const scanner = buildScanner(ctx, deps, [...new Set([...facts.connectionIds, ...(await runPublicIds(ctx, deps))])])
       const safeReport = safeText(scanner, markdown)
-      let safeChecklist = safeText(scanner, buildChecklist(ctx.state.get().jobs))
+      let safeChecklist = safeText(scanner, buildChecklist(ctx.state.get().jobs, scanner))
       const repoFacts = await deps.host.repoFacts()
       if (!("isPrivate" in repoFacts) || !repoFacts.isPrivate) {
         const git = ctx.state.get().git
