@@ -1,4 +1,5 @@
 import { branchUpdateCommits } from "../../github/update-branch.js"
+import { reviewReliabilityWarning } from "../../review/integrity.js"
 import { safeDisplayText } from "../../review/display.js"
 // Step 9 `review` (§3d.1, §3g.4, lane O4): the OTHER agent reviews the PR read-only in a detached worktree of
 // the head → the wizard scans the review and posts it as ONE `event: COMMENT` review → reads the threads back
@@ -285,7 +286,6 @@ async function postRound(session: Session, review: ReviewResult, reviewer: Agent
   const fullDiff = await ship.git.diff(state.git!.baseSha, head)
   const unchecked = classified?.state === "incomplete" ? classified.unchecked : []
   const ownership = await sessionOwnership(session)
-  review = { ...review, findings: review.findings.map(finding => finding.category === "owner_consent_privacy" && ownership.writtenByRun?.(finding.path, finding.line) ? { ...finding, category: "analytics" } : finding) }
   const post = buildReviewPost({ isRunCode: ownership.writtenByRun, review, diffFiles: parseUnifiedDiff(fullDiff), scanner: ship.scanner, runId: ship.runId, round, head, reviewer, unchecked })
   const redact = (text: string) => (ship.isPrivate ? text : redactIdsNotInDiff(text, fullDiff, ship.facts.connectionIds))
   const body = redact(post.body)
@@ -307,10 +307,13 @@ async function postRound(session: Session, review: ReviewResult, reviewer: Agent
  */
 export function reviewFoundLines(reviewer: string, review: Pick<ReviewResult, "verdict" | "findings" | "checklist">, round: number, classified: Pick<ClassifiedReview, "state" | "unchecked"> | null): Array<{ text: string; tone: "ok" | "info" | "warn" }> {
   const lines: Array<{ text: string; tone: "ok" | "info" | "warn" }> = []
-  const complete = classified === null || classified.state === "complete"
-  if (classified?.state === "incomplete") {
+  const unreliable = reviewReliabilityWarning(review.findings)
+  if (unreliable) lines.push({ text: `! ${reviewer}: ${unreliable}`, tone: "warn" })
+  const complete = !unreliable && (classified === null || classified.state === "complete")
+  const unchecked = classified?.unchecked.filter(item => !item.startsWith("review unreliable:")) ?? []
+  if (classified?.state === "incomplete" && unchecked.length > 0) {
     const total = review.checklist.length
-    lines.push({ text: `! ${reviewer}'s review is incomplete: it could not check ${classified.unchecked.join(", ")} (${total - classified.unchecked.length} of ${total} checked)`, tone: "warn" })
+    lines.push({ text: `! ${reviewer}'s review is incomplete: it could not check ${unchecked.join(", ")} (${Math.max(0, total - unchecked.length)} of ${total} checked)`, tone: "warn" })
   }
   if (review.findings.length > 0) lines.push(reviewFoundLine(reviewer, review.findings.length, round))
   else if (review.verdict !== "looks_good") lines.push({ text: `! ${reviewer} suggested changes but named none`, tone: "warn" })
@@ -391,7 +394,7 @@ async function gatherItems(session: Session, review: ReviewResult, round: number
     listed.add(key)
     session.untrusted.push({ key, author: entry.author, path: entry.path, excerpt: safeText(ship.scanner, entry.body) })
   }
-  const teammateThreads: Array<{ thread: (typeof threads)[number]; text: string }> = []
+  const teammateThreads: Array<{ thread: (typeof threads)[number]; text: string; shown: string }> = []
   for (const thread of threads) {
     if (thread.isResolved) continue
     const first = thread.comments[0]
@@ -424,20 +427,21 @@ async function gatherItems(session: Session, review: ReviewResult, round: number
       .filter((comment) => !hasReplyMarker(comment.body))
       .map((comment) => `@${comment.author}: ${stripMarkers(comment.body)}`)
       .join("\n\n")
-    const shown = safeDisplayText(ship.scanner, text).slice(0, TEAMMATE_TEXT_MAX)
-    if (shown.trim().length > 0) teammateThreads.push({ thread, text: shown })
+    const original = safeText(ship.scanner, text).slice(0, TEAMMATE_TEXT_MAX)
+    const shown = safeDisplayText(ship.scanner, original)
+    if (shown.trim().length > 0) teammateThreads.push({ thread, text: original, shown })
   }
   for (const item of items) item.threadId = ownThreadByFinding.get(item.findingId ?? "") ?? null
   const strangers = session.untrusted.length
   if (strangers > 0) sub(ctx, "review", `${strangers} comment${strangers === 1 ? "" : "s"} from people outside the repo ${strangers === 1 ? "is" : "are"} shown, not acted on`, "info")
   if (teammateThreads.length > 0) {
     const answer = await ctx.ask("teammate-comments", {
-      comments: teammateThreads.map(({ thread, text }) => ({
+      comments: teammateThreads.map(({ thread, shown }) => ({
         threadId: thread.threadId,
         author: safeDisplayText(ship.scanner, thread.author),
         path: safeDisplayText(ship.scanner, thread.path ?? ""),
         line: thread.line,
-        excerpt: text
+        excerpt: shown
       }))
     })
     const actOn = typeof answer === "object" && answer !== null && Array.isArray(answer.actOn) ? answer.actOn : []
@@ -459,7 +463,7 @@ async function gatherItems(session: Session, review: ReviewResult, round: number
         severity: "should",
         path,
         line: path === null ? null : thread.line,
-        // The exact text the user was shown and OK'd, nothing more.
+        // The same approved excerpt, with source syntax preserved; job16Item fences it as data.
         body: text,
         suggestedFix: null
       })
@@ -1043,6 +1047,12 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
     } else {
       break
     }
+    const unreliable = reviewReliabilityWarning(review.findings)
+    session.notes = session.notes.filter(note => !note.startsWith("review unreliable:"))
+    if (unreliable) {
+      session.ledger.completeness = { reviewer: agentReviewer ?? "brief", state: "incomplete", unchecked: [unreliable] }
+      if (!session.notes.includes(unreliable)) session.notes.push(unreliable)
+    }
     session.reviewed = true
     reviewedSha = head
     if (!resumed) session.ledger.rounds.push({ round, reviewedSha: head, reviewer: agentReviewer ?? "brief", fixSha: null, review: scannedReview(prepared.scanner, review) })
@@ -1114,11 +1124,13 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       const edited = fix.run.edits.map((edit) => edit.file)
       for (const [index, decision] of fixes.entries()) {
         if (fix.items.find(item => item.id === items[index]!.id)?.state !== "left_for_you") continue
-        decision.action = "OWNER_INFO"
+        decision.action = "ASK"
+        decision.askReason = "owner_file"
         decision.reason = fix.items.find(item => item.id === items[index]!.id)?.note ?? "Not changed by us: this edit place belongs to the site owner."
-        session.ledger.open = session.ledger.open.filter(entry => entry.key !== triageKey(decision.item))
+        decision.reason += " This finding remains open for the site owner."
       }
-      if (edited.length === 0 && fixes.every(decision => decision.action === "OWNER_INFO")) {
+      recordDecisions(session.ledger, fixes, round)
+      if (edited.length === 0 && fixes.every(decision => decision.action === "ASK" && decision.askReason === "owner_file")) {
         sub(ctx, "review", "Left for you: these edits would touch owner-managed consent or policy code.", "info")
         await saveLedger(session)
         await ctx.state.save()
@@ -1254,10 +1266,11 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
   const rehearsalText = once === "pass" ? "rehearsal passed on the latest commit" : once === "problem" ? "rehearsal found a problem" : "rehearsal undetermined"
   const blind = session.ledger.completeness?.state === "blind" && agentReviewer !== null
   const incomplete = session.ledger.completeness?.state === "incomplete"
+  const unreliable = reviewReliabilityWarning(session.ledger.rounds.at(-1)?.review?.findings ?? [])
   const who = blind
     ? `no second review (${AGENT_LABEL[agentReviewer!]} could not read the files)`
     : session.reviewed
-      ? `reviewed by ${agentReviewer ? AGENT_LABEL[agentReviewer] : "your agent (brief)"}${incomplete ? " (incomplete)" : ""}`
+      ? `reviewed by ${agentReviewer ? AGENT_LABEL[agentReviewer] : "your agent (brief)"}${unreliable ? " (review unreliable)" : incomplete ? " (incomplete)" : ""}`
       : "no second review"
   const found = session.reviewed ? reviewTally(session.ledger.rounds) : null
   const line = [`${final.pr?.number ? `Pull request #${final.pr.number}` : "Branch"}`, who, ...(found ? [found] : []), rehearsalText].join(" · ")

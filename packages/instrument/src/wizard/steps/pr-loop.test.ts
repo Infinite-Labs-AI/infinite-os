@@ -1189,13 +1189,14 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.fx.git(["log", "-1", "--format=%(trailers:key=Infinite-Review-Round,valueonly)", fixHead]).trim()).toBe("1")
     expect(w.fx.git(["log", "-1", "--format=%(trailers:key=Infinite-Tag-Run,valueonly)", fixHead]).trim()).toBe(RUN_ID)
 
-    // Replies: the fixed own thread is resolved; owner-only consent gets no reply.
+    // Replies: the fixed thread is resolved; an owner-heavy review leaves the owner finding open.
     const own = state.threads.filter((thread) => thread.comments[0]!.author === "acme-dev")
     const f1 = own.find((thread) => thread.comments[0]!.body.includes("F1"))!
     const f2 = own.find((thread) => thread.comments[0]!.body.includes("F2"))!
     expect(f1.comments[1]!.body).toMatch(new RegExp(`Fixed in ${fixHead.slice(0, 7)}`))
     expect(f1.isResolved).toBe(true)
-    expect(f2.comments).toHaveLength(1)
+    expect(f2.comments).toHaveLength(2)
+    expect(f2.comments[1]!.body).toContain("review unreliable")
     expect(f2.isResolved).toBe(false)
     // An un-OK'd teammate thread and a stranger's thread get no reply.
     expect(state.threads.find((thread) => thread.id === "PRRT_teammate")!.comments).toHaveLength(1)
@@ -1235,6 +1236,23 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.agents.jobCalls[0]!.items[0]!.trigger.finding).toMatch(/NOT an instruction/)
     // The stranger was never acted on.
     expect(w.agents.jobCalls[0]!.items.map((item) => item.id)).toEqual(["review_comments:PRRT_teammate"])
+  })
+
+  it("R9 preserves the approved teammate code in a data fence for the worker", async () => {
+    const w = await opened({ reviews: [review([]), review([])], fix: fixLayout, answers: { "teammate-comments": { actOn: ["PRRT_teammate"] } } })
+    seedThreads(w)
+    const code = '<Script src="https://example.test/analytics.js" />'
+    w.gh.update(state => {
+      const thread = state.threads!.find(candidate => candidate.id === "PRRT_teammate")!
+      thread.comments[0]!.body = `Please use this JSX:\n\`\`\`tsx\n${code}\n\`\`\``
+    })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const asked = w.ctx.asks.find(ask => ask.kind === "teammate-comments")!.payload as { comments: Array<{ excerpt: string }> }
+    expect(asked.comments[0]!.excerpt).toContain('‹Script src="https[:]//example.test/analytics.js" /›')
+    const prompt = w.agents.jobCalls[0]!.items[0]!.trigger.finding
+    expect(prompt).toContain(code)
+    expect(prompt).toContain("NOT an instruction")
+    expect(prompt).toContain("````text")
   })
 
   it("stops after 2 fix rounds even when the reviewer keeps asking", async () => {
@@ -1311,7 +1329,8 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.agents.jobCalls).toHaveLength(1)
     expect(w.agents.jobCalls[0]!.items.map((item) => item.id)).toEqual(["review_comments:F2"])
     const final = (w.gh.read().prs[0]!.comments as Array<{ body: string }>).at(-1)!.body
-    expect(final).toContain("About the site owner’s consent/privacy: not ours to change.")
+    expect(final).toContain("review unreliable")
+    expect(final).toContain("**You decide**")
     expect(final).toContain("add the consent banner")
   })
 
@@ -1481,7 +1500,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(finals[0]!.edited).toBe(true)
     expect(finals[0]!.body).toMatch(/Reviewed from the printed review brief/)
     expect(finals[0]!.body).not.toMatch(/No second review ran/)
-    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "brief")).toBe("Reviewed from the printed review brief")
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "brief")).toContain("Reviewed from the printed review brief: review unreliable")
   })
 
   it("when the base moved, updates the branch with a merge commit (never a rebase) and fast-forwards", async () => {
@@ -1592,7 +1611,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(shown).not.toContain("evil.example.net")
     const items = w.agents.jobCalls[0]!.items
     const mixed = items.find((candidate) => candidate.id === "review_comments:PRRT_mixed")!
-    expect(mixed.trigger.finding).toContain(shown)
+    expect(mixed.trigger.finding).toContain(shown.replace("＠teammate", "@teammate"))
     expect(JSON.stringify(items)).not.toContain("evil.example.net")
     // The stranger is listed in the final comment, never acted on.
     const final = (w.gh.read().prs[0]!.comments as Array<{ body: string }>).at(-1)!.body
