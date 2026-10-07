@@ -419,8 +419,8 @@ describe("nested-agent mode (§3d.7)", { timeout: 30_000 }, () => {
     resumed.bundle.deps.git = { ...resumed.bundle.deps.git, stage: async (paths) => void git(root, "add", "--", ...paths) }
     expect(await runWizardCommand(["--resume", "--json"], { io: second.io, wiring: resumed.wiring })).toBe(0)
 
-    // Only the allowlisted edit is left in the tree (staging is the rehearsal's job, never the jobs step's).
-    expect(git(root, "diff", "--name-only").trim()).toBe("app/api/signup/route.ts")
+    // Neither job has a passing declared check, so its edits are put back at the end of the jobs step.
+    expect(git(root, "diff", "--name-only").trim()).toBe("")
     // The rejected edits (outside the allowlist; a consent call) are undone before any check, and the
     // parent agent's bytes are kept aside under the snapshot dir (B8), never in the repo.
     expect(readFileSync(join(root, "README.md"), "utf8")).toBe("# Acme\n")
@@ -439,6 +439,7 @@ describe("nested-agent mode (§3d.7)", { timeout: 30_000 }, () => {
     expect(signupNotes).not.toContain("Checked after the parent agent's turn")
     const final = JSON.parse(readFileSync(join(root, ".infinite/wizard/state.json"), "utf8"))
     expect(final.jobs.find((item: ChecklistItem) => item.id === LAYOUT_ITEM.id).blockedReason).not.toBe("consent_touched")
+    expect(final.jobs.map((item: ChecklistItem) => item.state)).toEqual(["left_for_you", "left_for_you"])
     expect(resumed.bundle.log.names("checks")).toContain("checks.turnGate")
     expect(resumed.bundle.log.names("agents")).not.toContain("agents.runJobs")
   })
@@ -480,10 +481,12 @@ describe("nested-agent mode (§3d.7)", { timeout: 30_000 }, () => {
     expect(seenByChecks.length).toBeGreaterThan(0)
     expect(seenByChecks.every((text) => !text.includes("execSync"))).toBe(true)
     expect(readFileSync(join(root, "app/layout.tsx"), "utf8")).not.toContain("execSync")
-    expect(git(root, "diff", "--name-only").trim()).toBe("app/api/signup/route.ts")
+    expect(git(root, "diff", "--name-only").trim()).toBe("")
     const jobStates = Object.fromEntries(second.events().filter((event) => event.t === "job.state").map((event) => [event.itemId, event.state]))
-    // §3x.2: a refused hunk fails the job's `turn_gate` S check (nested mode has no further round): never "blocked".
+    // A refused hunk fails the job's turn gate; with no further nested round, the job is left for its owner.
     expect(jobStates[LAYOUT_ITEM.id]).toBe("failed")
+    const final = JSON.parse(readFileSync(join(root, ".infinite/wizard/state.json"), "utf8"))
+    expect(final.jobs.map((item: ChecklistItem) => item.state)).toEqual(["left_for_you", "left_for_you"])
   })
 
   it("an answers file carrying consentMode / conversion names is ignored in nested mode and, with no /dev/tty, the run parks NEEDS_ANSWERS", async () => {

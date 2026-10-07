@@ -134,7 +134,7 @@ describe("consent-separated entry: approved ordinary edits keep the site's own i
     const jobs = t.current().jobs
     const stateOf = (id: string) => jobs.find((item) => item.id === id)!
     for (const id of [JOB6, GA4_GUARD, META_GUARD]) expect(DONE, id).toContain(stateOf(id).state)
-    expect(stateOf(SIGNUP)).toMatchObject({ state: "blocked", blockedReason: "agent_blocked" })
+    expect(stateOf(SIGNUP)).toMatchObject({ state: "left_for_you", blockedReason: "agent_blocked" })
     // The edit is in the tree and in the receipt.
     const layout = readFileSync(join(t.root, "app/layout.tsx"), "utf8")
     expect(layout).toBe(edited)
@@ -145,7 +145,7 @@ describe("consent-separated entry: approved ordinary edits keep the site's own i
     // Nobody is told the file was outside the job's files.
     const lines = notDoneLines(jobs)
     expect(lines.join("\n")).not.toContain("outside the job's files")
-    expect(lines).toEqual([`! Not done: Send conversions to every tool (the agent said it is blocked: the helpers are not in the repo)`])
+    expect(lines).toEqual([`! Not done, left for you: Send conversions to every tool — the agent said it was blocked: the helpers are not in the repo`])
   })
 })
 
@@ -193,12 +193,12 @@ describe("consent-separated entry: a refused line fails only the job it belongs 
     const jobs = t.current().jobs
     const stateOf = (id: string) => jobs.find((item) => item.id === id)!
     expect(DONE).toContain(stateOf(META_GUARD).state)
-    // Out of rounds (the fake agent has one turn): failed with the gate's words, never "outside the job's files".
+    // Out of rounds (the fake agent has one turn): left for the owner with the gate's words, never "outside the job's files".
     for (const id of [JOB6, GA4_GUARD]) {
-      expect(stateOf(id).state).toBe("failed")
-      expect(stateOf(id).note).toMatch(/the wizard's safety check refused app\/layout\.tsx:\d+: the edit uses a provider id as a default or fallback value/)
+      expect(stateOf(id).state).toBe("left_for_you")
+      expect(stateOf(id).note).toBe("the wizard could not verify it (turn_gate: problem — fallback_provider_id: the edit uses a provider id as a default or fallback value (||, ?? or ?:)). Its own edits were put back.")
     }
-    // The refused line is gone; the two failed jobs' kept hunks are undone per item (their every item failed);
+    // The refused line is gone; the two unverified jobs' kept hunks are undone per item;
     // the Meta job's guard, attributed to it alone, stays.
     const layout = readFileSync(join(t.root, "app/layout.tsx"), "utf8")
     expect(layout).not.toContain("window.GA_ID")

@@ -66,7 +66,7 @@ describe("live run 5: the jobs step", () => {
     await step.run(w.ctx, w.deps)
     expect(runs(w.fakes).length).toBeGreaterThan(0)
     const item = job(w.current)
-    expect(["pending", "failed"]).toContain(item.state)
+    expect(item.state).toBe("left_for_you")
     expect(item.note).toContain("ga4_spa_page_view: ga4_spa_page_view_missing")
     expect(item.note).not.toMatch(/check failed:\s*\./)
   })
