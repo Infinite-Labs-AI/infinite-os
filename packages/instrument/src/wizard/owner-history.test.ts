@@ -44,7 +44,7 @@ describe("report owner boundary preserves legacy edit history", () => {
 
   it.each([true, false])("uses receipt metadata only, scoped to this run: sameRun=%s", async sameRun => {
     const read: string[] = []
-    const ctx = { root: "/fixture", runId: RUN, state: { get: () => ({ runId: RUN, jobs: [], git: null, proof: null }) } } as unknown as WizardContext
+    const ctx = { root: "/fixture", appRoot: ".", runId: RUN, state: { get: () => ({ runId: RUN, jobs: [], git: null, proof: null }) } } as unknown as WizardContext
     const deps = { git: {}, fs: { readText: async (path: string) => {
       read.push(path)
       if (path === "/fixture/.infinite/install.json") return JSON.stringify({ edits: [{ id: "e", file: "app/privacy/page.tsx", jobId: "privacy_paragraph", by: "agent", runId: sameRun ? RUN : "older-run" }] })

@@ -46,7 +46,26 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
     ...(ownerBoundary ? { ownerBoundary } : {}),
     ...(priorPolicyEdits ? { priorPolicyEdits: true } : {}),
     ownerPolicyFindings: (ledger.findings ?? []).filter(finding => finding.action === "OWNER_INFO" && !(finding.path !== null && ownership.writtenByRun?.(finding.path, finding.line))).map(finding => display(`About the site owner’s consent/privacy: not ours to change. ${finding.path ?? "general"}: ${finding.body ?? "Recorded reviewer finding"}`)),
-    jobs: state.jobs.map(job => ({ ...job, title: display(job.title), ...(job.note ? { note: display(job.note) } : {}) })),
+    jobs: state.jobs.map(job => {
+      // These are report-only copies: source paths and executable text in state stay untouched.
+      const boundary = job.ownerBoundary ? { ...job.ownerBoundary } : undefined
+      let withheld = false
+      if (boundary) {
+        if (boundary.file) boundary.file = display(boundary.file)
+        for (const field of ["guard", "wiring"] as const) {
+          const snippet = boundary[field]
+          if (snippet !== undefined && (scanner.redact(snippet).text !== snippet || /[\u0000-\u0008\u000b-\u001f\u007f]/.test(snippet))) {
+            delete boundary[field]
+            withheld = true
+          }
+        }
+      }
+      const note = withheld
+        ? `Copyable owner snippet withheld because it contains sensitive text or terminal controls. Review the named file locally.${job.note ? ` ${display(job.note)}` : ""}`
+        : job.note ? display(job.note) : undefined
+      return { ...job, title: display(job.title), allow: { files: job.allow.files.map(display), create: job.allow.create.map(display) },
+        ...(boundary ? { ownerBoundary: boundary } : {}), ...(note ? { note } : {}) }
+    }),
     openFindings: openFindings(ledger, state.jobs, ownership.classify, ownership.writtenByRun).map(finding => ({ ...finding, path: finding.path === null ? null : display(finding.path) })),
     tools: state.proof?.tools ?? null,
     installedUnknown: state.proof?.installedUnknown ?? null
