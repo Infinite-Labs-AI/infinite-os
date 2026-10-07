@@ -1,3 +1,4 @@
+import { planExclusions } from "../install/plan-exclusions.js"
 import { isContinuedWork } from "../install/plan-permission.js"
 import { scopeOwnerJob } from "./owner-scope.js"
 // The checklist job registry (lane O8; §3e.1, §3e.7). It turns what `before` measured into CANDIDATE
@@ -704,11 +705,13 @@ const PLAN_WIDE_KINDS: ReadonlySet<PlanLineKind> = new Set(["server_lane", "conv
  */
 export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: PlanModel, approvals: PlanApprovals): ChecklistItem[] {
   const automatic = plan.lines.filter(isContinuedWork).map(line => line.id)
-  const declined = new Set(approvals.declined)
+  const exclusions = planExclusions(plan, approvals.declined)
+  const declined = exclusions.lineIds
   const approved = new Set([...approvals.approved, ...automatic].filter(id => !declined.has(id)))
   const conversionNames = approvedConversionNames(plan, approvals)
   const out: ChecklistItem[] = []
   for (const candidate of candidates) {
+    if (exclusions.blocksJob(candidate)) continue
     if (candidate.jobId === "privacy_paragraph") continue // Retired; never revive an old approved job.
     if (candidate.state === "left_for_you") {
       const instruction = plan.lines.find(line => line.id === `owner_only:${candidate.id}`)?.text

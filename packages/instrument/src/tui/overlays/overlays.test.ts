@@ -203,3 +203,8 @@ it("preserves the lines of a copyable owner snippet", () => {
   const view = OVERLAYS.plan.render(payload, OVERLAYS.plan.init(payload), ctx())
   expect(view.body.map(stripAnsi).join("\n")).toContain("      if (isProduction) {\n        start();\n      }")
 })
+
+it("does not offer the required proof-file information as an independent exclusion", () => {
+  const payload: AskPayloads["plan"] = { lines: [{ id: "info:infinite_site_file", kind: "user_action", requires: "info", editable: false, text: "Infinite requires this proof file" }], decisions: { consentMode: null, conversionNames: [], privacyText: null, npmInstall: null } }
+  expect(drive("plan", payload, " " + ENTER).answer).toEqual({ approved: [], declined: [], edits: {} })
+})

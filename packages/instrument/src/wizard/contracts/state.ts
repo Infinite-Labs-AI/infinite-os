@@ -219,7 +219,7 @@ export interface StoreStepRow {
   code: WizardCode | null
   startedAt?: string | null
   /** The last few sub-statuses (the TUI shows the last 5). */
-  subs: Array<{ text: string; tone: "ok" | "warn" | "info" | "pending"; at: string }>
+  subs: Array<{ text: string; tone: "ok" | "warn" | "info" | "pending" | "result"; at: string }>
 }
 
 export type JobDisplayState = "waiting" | "agent_claim" | "agent_blocked" | "agent_not_needed" | "checking" | "could_not_check" | "done_in_code" | "waiting_deploy" | "waiting_real_event" | "proven" | "not_needed" | "left_for_you" | "failed" | "blocked"

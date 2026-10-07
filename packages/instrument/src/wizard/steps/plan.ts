@@ -1,3 +1,4 @@
+import { planExclusions } from "../../install/plan-exclusions.js"
 import { ownerLayoutJobs } from "./install.js"
 // Step `plan` (§3d.1 step 4, lane O7): "Plan + your decisions".
 //
@@ -21,7 +22,7 @@ const sha256 = (text: string): string => `sha256:${createHash("sha256").update(t
 
 const PARK_HINT = "Run `npx infinite-tag --resume` and answer the plan (or pass --consent-mode required|not_required)."
 
-function sub(ctx: WizardContext, text: string, tone: "ok" | "warn" | "info" | "pending"): void {
+function sub(ctx: WizardContext, text: string, tone: "ok" | "warn" | "info" | "pending" | "result"): void {
   ctx.emit.emit("step.sub", { step: "plan", text, tone })
 }
 
@@ -52,7 +53,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   // carries the selected conversion names too).
   const saved = ctx.state.get().plan
   const savedFile = await loadPlanApprovals(ctx, deps)
-  const earlierNo = [...new Set([...(savedFile?.excluded ?? []), ...(savedFile?.approvals.declined ?? []), ...(saved?.lines.filter(line => line.approved === false).map(line => line.id) ?? [])])]
+  const earlierNo = [...new Set([...(savedFile?.excluded ?? savedFile?.approvals.declined ?? saved?.lines.filter(line => line.approved === false).map(line => line.id) ?? [])])]
   let answer =
     !ctx.options.answersFile && saved && saved.hash === plan.hash && (saved.answers.consentMode !== null || !planAsksConsent(plan)) && savedFile?.planHash === plan.hash ? savedFile.approvals : null
   if (!answer) {
@@ -75,8 +76,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const currentAnswer = answer
   const keptNo = earlierNo.filter(id => !currentAnswer.approved.includes(id) || currentAnswer.declined.includes(id))
   answer = { ...answer, declined: [...new Set([...keptNo, ...answer.declined])] }
-  const visibleKeptNo = keptNo.filter(id => plan.lines.some(line => line.id === id))
-  if (visibleKeptNo.length > 0) sub(ctx, `kept your earlier no to: ${visibleKeptNo.slice(0, 20).join(", ")}${visibleKeptNo.length > 20 ? " …" : ""}`, "info")
+  for (const id of answer.declined) sub(ctx, `${keptNo.includes(id) ? "kept your earlier no to" : "You said no to"}: ${id}`, "result")
+  for (const text of planExclusions(plan, answer.declined).consequences) sub(ctx, text, "result")
   const resolved = resolvePlanAnswers(plan, answer, { consentFlag: ctx.options.consentMode })
   ctx.state.update((state) => {
     state.plan = {
@@ -129,7 +130,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   })
   await ctx.state.save()
 
-  if (resolved.conversions.length > 0) {
+  if (resolved.conversions.length > 0 && planExclusions(plan, resolved.approvals.declined).conversionWrites) {
     if (ctx.runId) {
       await deps.bridge.patchRun(ctx.runId, { approvedConversions: resolved.conversions }, { signal: ctx.signal })
     } else {

@@ -431,3 +431,12 @@ it("a continued repository install never authorizes connected-account writes", a
   expect(bridge.callsFor("server-lane.provision-env")).toHaveLength(0)
   expect(bridge.callsFor("ga4-key-events")).toHaveLength(0)
 })
+
+it("an Infinite exclusion suppresses conversion declarations and implied hosting settings", async () => {
+  const { bridge, harness, deps } = await setup({ conversions: ["signup"], lines: [
+    { id: "install_provider:infinite", approved: false }, { id: "account_settings:hosting", approved: true }
+  ], approved: ["signup"], clickTested: ["signup"] })
+  await step.run(harness.ctx, deps)
+  expect(bridge.callsFor("conversions")).toHaveLength(0)
+  expect(bridge.callsFor("server-lane.provision-env")).toHaveLength(0)
+})

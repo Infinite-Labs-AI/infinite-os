@@ -562,13 +562,13 @@ describe("§3x.3 live run 3: job 10 targets the success, job 11 is not a second 
     expect(saved.candidates.map((item) => item.id)).toContain("setup_check_fixes:provider_census")
     const seeded = applyApprovalsTo(saved.candidates, saved.plan, saved.approvals)
     expect(seeded.map((item) => item.id)).toEqual(["duplicates_remove:ga4_config:G-TEST0000000", "preview_guard:ga4", "preview_guard:meta", "conversions_to_tools:signup"])
-    // Negative: the duplicate removal DECLINED → the setup finding is still a job (nothing else fixes it).
+    // A refusal also excludes the broad setup repair; it cannot remove duplicates through a second path.
     const declined = applyApprovalsTo(saved.candidates, saved.plan, {
       ...saved.approvals,
       approved: saved.approvals.approved.filter((id) => !id.startsWith("remove_duplicate:")),
       declined: ["remove_duplicate:ga4:ga4_config:G-TEST0000000"]
     })
-    expect(declined.map((item) => item.id)).toContain("setup_check_fixes:provider_census")
+    expect(declined.map((item) => item.id)).not.toContain("setup_check_fixes:provider_census")
   })
 
   it("titles: each item of a several-item job is named by its target (no two share a title)", () => {

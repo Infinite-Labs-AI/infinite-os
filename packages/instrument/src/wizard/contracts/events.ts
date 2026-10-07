@@ -21,7 +21,7 @@ export const EVENT_LIMITS = {
   subTextMaxChars: 240,
   statusTextMaxChars: 160,
   narrateTextMaxChars: 120,
-  /** step.sub: at most one per this many ms per step… */
+  /** Progress step.sub window; explicit decision result lines bypass it. */
   subThrottleMs: 3_000,
   /** …and at most this many kept per step. */
   subKeptPerStep: 8
@@ -39,7 +39,7 @@ export interface WizardEventFields {
     resumedFrom?: WizardStepId
   }
   "step.start": { step: WizardStepId }
-  "step.sub": { step: WizardStepId; text: string; tone: "ok" | "warn" | "info" | "pending" }
+  "step.sub": { step: WizardStepId; text: string; tone: "ok" | "warn" | "info" | "pending" | "result" }
   "step.status": { step: WizardStepId; text: string }
   "step.done": { step: WizardStepId; outcome: StepOutcomeKind; code?: WizardCode; reason?: string }
   narrate: { agent: "claude_code" | "codex"; role: "worker" | "reviewer"; text: string }

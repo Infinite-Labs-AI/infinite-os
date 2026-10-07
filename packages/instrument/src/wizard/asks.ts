@@ -1,3 +1,4 @@
+import { planExclusions } from "../install/plan-exclusions.js"
 // The wizard's asks (§3d.3, §3d.4, §3d.7): one `ask(kind, payload)` every step uses, the `YES_POLICY`
 // enforcement, `--answers <file>`, batching of agent questions, and the nested-agent rule that
 // user-only asks stay human.
@@ -233,7 +234,7 @@ function fileAnswer(answers: AnswersFile | null, kind: AskKind, payload: unknown
 export function planAnswerFromFile(lines: readonly PlanLine[], answers: AnswersFile): AskAnswers["plan"] | null {
   const known = new Set(lines.map((line) => line.id))
   const approved = new Set((answers.plan?.approved ?? []).filter((id) => known.has(id)))
-  const declined = new Set((answers.plan?.declined ?? []).filter((id) => known.has(id)))
+  const declined = new Set([...planExclusions({ lines }, answers.plan?.declined ?? []).lineIds].filter(id => known.has(id)))
   const edits: Record<string, string> = {}
   for (const [id, value] of Object.entries(answers.plan?.edits ?? {})) if (known.has(id)) edits[id] = value
   const byKind = (kind: PlanLine["kind"]) => lines.filter((line) => line.kind === kind)

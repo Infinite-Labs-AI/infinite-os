@@ -208,3 +208,11 @@ describe("WizardEventEmitter: the sub-status throttle (â‰¤1 per 3 s per step, â‰
     expect(Object.keys(WIZARD_EVENT_SHAPES)).toContain("run.end")
   })
 })
+
+it("every exclusion result is released immediately, even beyond the progress queue limit", () => {
+  const { emitter, events } = setup()
+  emitter.emit("step.sub", { step: "plan", text: "Writing plan", tone: "pending" })
+  for (let i = 0; i < 24; i++) emitter.emit("step.sub", { step: "plan", text: `You said no to: action:${i}`, tone: "result" })
+  expect(events.filter(event => event.t === "step.sub" && event.tone === "result")).toHaveLength(24)
+  emitter.dispose()
+})

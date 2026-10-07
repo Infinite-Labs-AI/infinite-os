@@ -1,3 +1,4 @@
+import { planExclusions } from "./plan-exclusions.js"
 import { configRewriteJobs } from "./config-rewrite-jobs.js"
 import { sensitivePosthogOptions } from "./posthog-sensitive.js"
 import type { ManagedCapturePlan } from "./managed-capture.js"
@@ -675,7 +676,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
   if (tools.includes("infinite") && !facts.infiniteReady && !facts.vercelServesHost && facts.productionHost) {
     // The claim path (§3y.2): said right under the Infinite line, before anything is approved.
-    lines.push(line({ id: "info:infinite_site_file", kind: "install_provider", text: RUNNABILITY_TEXT.claimWording(facts.productionHost), requires: "info" }))
+    lines.push(line({ id: "info:infinite_site_file", kind: "user_action", text: RUNNABILITY_TEXT.claimWording(facts.productionHost), requires: "info" }))
   }
   if (infiniteUnrunnable) {
     lines.push(line({ id: "user_action:infinite", kind: "user_action", text: infiniteUnrunnable, requires: "user_action" }))
@@ -1291,7 +1292,7 @@ export function resolvePlanAnswers(
   options: { consentFlag: "required" | "not_required" | null }
 ): ResolvedPlanAnswers {
   const known = new Map(plan.lines.map((planLine) => [planLine.id, planLine]))
-  const declined = new Set((answer?.declined ?? []).filter((id) => known.has(id)))
+  const declined = new Set([...planExclusions(plan, answer?.declined ?? []).lineIds].filter(id => known.has(id)))
   const edits: Record<string, string> = {}
   for (const [id, value] of Object.entries(answer?.edits ?? {})) {
     const planLine = known.get(id)
@@ -1369,9 +1370,11 @@ export function resolvePlanAnswers(
  */
 export function gateSeededItems(plan: PlanModel, answers: Pick<ResolvedPlanAnswers, "lines">, items: readonly ChecklistItem[]): ChecklistItem[] {
   const approval = new Map(answers.lines.map((entry) => [entry.id, entry.approved]))
+  const exclusions = planExclusions(plan, answers.lines.filter(entry => entry.approved === false).map(entry => entry.id))
+  for (const id of exclusions.lineIds) approval.set(id, false)
   // §3y.5: an item the plan withheld (nothing would run it) is never seeded, whatever the lines say.
   const withheld = new Set((plan as Partial<WizardPlanModel>).withheld ?? [])
-  const gated = gateByLines(plan, approval, items.filter((item) => !withheld.has(item.id)))
+  const gated = gateByLines(plan, approval, items.filter((item) => !withheld.has(item.id) && !exclusions.blocksJob(item)))
   // The go-ahead cost line (P2-18): unless it is approved, no agent job runs — each waits for the user.
   const budget = plan.lines.find((planLine) => planLine.id === "agent_budget" && planLine.requires === "approval")
   if (!budget || approval.get(budget.id) === true) return gated

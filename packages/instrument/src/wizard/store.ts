@@ -18,7 +18,7 @@ import { EVENT_LIMITS } from "./contracts/events.js"
 import type { StoreStepRow, WizardStoreSnapshot } from "./contracts/state.js"
 import { WIZARD_STEP_IDS, WIZARD_STEP_META, type StepOutcomeKind, type WizardStepId } from "./contracts/steps.js"
 
-export type SubTone = "ok" | "warn" | "info" | "pending"
+export type SubTone = "ok" | "warn" | "info" | "pending" | "result"
 
 /** Narration lines kept in the snapshot (the TUI shows the last few). */
 export const STORE_NARRATION_KEPT = 8

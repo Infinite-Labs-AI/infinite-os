@@ -18,6 +18,7 @@ import {
   fakeRegistry,
   IDS,
   makeSite,
+  notConnectedKeys,
   read,
   STATIC_HTML,
   writeBeforeFacts,
@@ -357,6 +358,24 @@ describe("§3y.2 the site-file claim at install (IO-3)", () => {
     await planStep.run(ctx, h.deps)
     return installStep.run(ctx, h.deps)
   }
+
+  it("a saved or external no to the inseparable proof file excludes the whole Infinite install", async () => {
+    const keys = freshKeys()
+    const before = fakeBefore({ keys, hosting: { provider: "none", vercel: null }, observedProductionHost: null })
+    const h = await setup({ files: { "index.html": STATIC_HTML, "vercel.json": "{}\n" }, consentFlag: "not_required", answers: [{ approved: ["conversion_names"], declined: ["info:infinite_site_file", `install_provider:ga4:${IDS.ga4}`, `install_provider:posthog:${IDS.posthog}`, `install_provider:meta:${IDS.meta}`], edits: { conversion_names: "signup" } }], before, answeredHost: "fresh-acme.com", claim: { protocolVersion: 1, requestId: "x", state: "pending_proof", siteSource: null, claim: pendingClaim(["fresh-acme.com"]) } })
+    expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
+    const lines = (h.ctx.asks[0]!.payload as AskPayloads["plan"]).lines
+    expect(lines.find(line => line.id === "info:infinite_site_file")).toMatchObject({ kind: "user_action", requires: "info" })
+    expect(h.ctx.stateValue().plan!.lines.find(line => line.id === "install_provider:infinite")?.approved).toBe(false)
+    expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
+    expect(h.claimCalls).toEqual([])
+    expect(h.siteSourceCalls).toEqual([])
+    expect(h.patches).toEqual([])
+    expect(existsSync(join(h.ctx.root, ".well-known/infinite-site-verification.txt"))).toBe(false)
+    expect(read(h.ctx.root, "index.html")).toBe(STATIC_HTML)
+    expect(h.ctx.stateValue().jobs).toEqual([])
+    expect(JSON.stringify(h.ctx.events)).toContain("site claim/proof file, collect rewrite")
+  })
 
   it("pending_proof: the managed tag carries the RESERVED key and the proof file is written where the site serves it, recorded as the wizard's", async () => {
     const h = await setup({ files: { "index.html": STATIC_HTML, "vercel.json": "{}\n" }, consentFlag: "not_required", answers: [], before: freshBefore(), answeredHost: "fresh-acme.com", claim: { protocolVersion: 1, requestId: "x", state: "pending_proof", siteSource: null, claim: pendingClaim(["fresh-acme.com"]) } })
@@ -762,4 +781,24 @@ it("counts the deferred Next config rewrite in the plan budget before install se
   expect(h.ctx.stateValue().jobs.find(job => job.id === "unusual_layout:next_config_rewrites")?.state).toBe("pending")
   expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
   expect(h.ctx.stateValue().jobs.filter(job => job.owner === "agent" && job.state === "pending")).toHaveLength(1)
+})
+
+it("excluding the only installed provider leaves no helper-dependent jobs, rewrite or cloud writes", async () => {
+  const keys = { ...notConnectedKeys(), infinite: fakeKeys().infinite }
+  const layout = "export default function Layout({children}) { return <html><body>{children}</body></html> }"
+  const config = "export default {}"
+  const h = await setup({ files: { "package.json": '{"dependencies":{"next":"15.0.0","react":"19.0.0"}}', "app/layout.tsx": layout, "next.config.mjs": config }, before: fakeBefore({ keys }), candidates: [candidate("conversions_to_tools", "signup")], consentFlag: "not_required", answers: [
+    { approved: ["conversion_names"], declined: ["install_provider:infinite"], edits: { conversion_names: "signup" } }
+  ] })
+  expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
+  expect(h.ctx.stateValue().jobs.map(job => job.id)).not.toContain("conversions_to_tools:signup")
+  expect(h.ctx.stateValue().jobs.map(job => job.id)).not.toContain("unusual_layout:next_config_rewrites")
+  expect(h.patches).toEqual([])
+  expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
+  expect(h.siteSourceCalls).toEqual([])
+  expect(h.claimCalls).toEqual([])
+  expect(read(h.ctx.root, "next.config.mjs")).toBe(config)
+  expect(read(h.ctx.root, "app/layout.tsx")).toBe(layout)
+  expect(h.ctx.stateValue().jobs).toEqual([])
+  expect(h.ctx.events).toContainEqual({ type: "step.sub", fields: { step: "plan", tone: "result", text: "You said no to: install_provider:infinite" } })
 })

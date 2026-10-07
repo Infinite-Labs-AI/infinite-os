@@ -1,3 +1,4 @@
+import { planExclusions } from "../../install/plan-exclusions.js"
 // Step 7 `settings` (§3d.1): "Infinite settings". Everything here goes through the desktop bridge; the wizard
 // never runs `vercel` and never sees a secret.
 //
@@ -249,9 +250,11 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     const cloudApproved = new Set(run.approvedConversions)
     const approved = [...new Set(plan.answers.conversions)].filter((name) => cloudApproved.has(name) && CONVERSION_NAME_PATTERN.test(name))
 
-    // 1. Conversions (approved names only).
+    const exclusions = planExclusions(plan, plan.lines.filter(line => line.approved === false).map(line => line.id))
+
+    // 1. Conversions (approved names only, and never through an excluded Infinite install).
     let declared: string[] = []
-    if (approved.length > 0) {
+    if (approved.length > 0 && exclusions.conversionWrites) {
       sub(ctx, "settings", `Declaring ${approved.length} conversion${approved.length === 1 ? "" : "s"} in Infinite…`, "pending")
       try {
         const response = await deps.bridge.declareConversions({ runId, conversions: approved.map(conversionDeclaration) }, { signal: ctx.signal })
@@ -263,18 +266,18 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
         if (!pieceLine(ctx, error, "Conversions")) throw error
       }
     } else {
-      sub(ctx, "settings", "No conversions were approved, so none were declared", "info")
+      sub(ctx, "settings", exclusions.conversionWrites ? "No conversions were approved, so none were declared" : "Infinite conversion declarations are excluded by your plan choice", "info")
     }
 
     // 2. Server lane on Vercel (no redeploy; goes live with the merge).
-    const serverLane = await provisionServerLane(ctx, deps)
+    const serverLane = exclusions.hostingWrites ? await provisionServerLane(ctx, deps) : "skipped"
 
     // 3. GA4 key events: approved AND offline click-tested only.
     const clickTested = new Set(run.clickTestedConversions)
     const keyEventNames = approved.filter((name) => clickTested.has(name))
     let marked: string[] = []
     const ga4AccountApproved = plan.lines.some(line => line.id === "account_settings:ga4" && line.approved === true)
-    if (keyEventNames.length > 0 && ga4AccountApproved) {
+    if (keyEventNames.length > 0 && ga4AccountApproved && exclusions.ga4Writes) {
       try {
         const response = await deps.bridge.markGa4KeyEvents({ runId, names: keyEventNames }, { signal: ctx.signal })
         marked = [...response.created, ...response.alreadyExisted]
@@ -292,7 +295,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     }
 
     // 4. Meta relay (approved line AND available).
-    const relay = await enableMetaRelay(ctx, deps)
+    const relay = exclusions.metaRelayWrites ? await enableMetaRelay(ctx, deps) : "skipped"
 
     const parts = [
       serverLane === "saved"

@@ -1,3 +1,4 @@
+import { planExclusions } from "../../install/plan-exclusions.js"
 import { configRewriteJobs } from "../../install/config-rewrite-jobs.js"
 // Step `install` (§3d.1 step 5, lane O7): "Install".
 //
@@ -218,7 +219,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     await ctx.state.save()
     return { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: "The saved plan changed; re-confirm it.", resumeHint: PARK_HINT }
   }
-  const approved = new Set(state.plan.lines.filter((line) => line.approved === true).map((line) => line.id))
+  const exclusions = planExclusions(check, savedApprovals.excluded ?? savedApprovals.approvals.declined)
+  const approved = new Set(state.plan.lines.filter((line) => line.approved === true && !exclusions.lineIds.has(line.id)).map((line) => line.id))
 
   // Review I1 P1-2: an install that cannot be applied stops HERE, before the first cloud write (the site source).
   const blocked = deps.installer.preflight?.(check, savedApprovals.approvals) ?? null
@@ -235,7 +237,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   if (deps.agents.isAgentAlive()) throw new Error("An agent is still running; the site source is not changed while one runs.")
 
   // ---- the site source + the consent answer: ONLY behind an approved Infinite line (P2-20) ----
-  const installInfinite = check.lines.some((line) => line.kind === "install_provider" && line.id.startsWith("install_provider:infinite") && approved.has(line.id))
+  const installInfinite = exclusions.infiniteWrites && check.lines.some((line) => line.kind === "install_provider" && line.id.startsWith("install_provider:infinite") && approved.has(line.id))
   let claim: ClaimPublic | null = null
   // Review P1-5: the claim whose proof line this install keeps in the repo. A pending claim's (the proof the merge
   // must serve), and on the verified-source path the workspace's PROVEN claim's: every PR preview and merge deployment
