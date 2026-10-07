@@ -40,7 +40,7 @@ it("preserves another tool's measured preview failure beside the owner NOT DONE 
   expect(renderMarkdown(report)).toContain("Meta pixel sends on previews (problem)")
   expect(renderMarkdown(report)).toContain("NOT DONE for GA4")
 })
-it("does not render a stale R6 assertion from report notes as a new measured claim", () => {
+it("does not render a stale unmeasured assertion from report notes as a new measured claim", () => {
   const report = buildReport({ runId: RUN, tagVersion: "0.0.0", site: { repoLabel: "example/site", productionHost: null }, columns: { live_today: null, in_pr: null, proven_live: null }, provenLivePending: null, day7: null, notes: ["Consent and your privacy policy are yours; this run changed neither."], verdictFacts: null })
   expect(renderMarkdown(report)).not.toContain("this run changed neither")
   expect(report.notes.join(" ")).not.toContain("this run changed neither")
@@ -54,4 +54,39 @@ it.each(["gtag('config', 'G-FAKE');", "fbq('init', '123456789');", "posthog.init
   expect(handoff.guard).toContain("@@ -2,1 +2,1 @@")
   expect(handoff.guard).not.toContain("Existing analytics")
   expect(handoff.guard).not.toContain("revoke")
+})
+
+it.each([
+  { source: "\nfbq('init', '123456789');\n", line: 1 },
+  { source: "function boot() {\n  if (enabled)\n    fbq('init', '123456789');\n  else fbq('consent', 'revoke');\n}\n", line: 3 },
+  { source: "fbq('init', '123456789'), fbq('consent', 'revoke');\n", line: 1 },
+  { source: "fbq('init', '123456789') && fbq('consent', 'revoke');\n", line: 1 },
+  { source: "gtag('config', 'G-FAKE',\n  buildConfig()) || fbq('consent', 'revoke');\n", line: 1 },
+])("does not offer an apply-ready guard when the initialization statement boundary is ambiguous: $source", async ({ source, line }) => {
+  const { ownerGuardHandoff } = await import("./owner-boundary.js")
+  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line }, "hostAllowed", source)
+  expect(handoff.text).toContain("not an apply-ready edit")
+  expect(handoff.guard).toBe("if (hostAllowed)")
+})
+
+it("keeps a multiline literal initialization separate from the following consent statement", async () => {
+  const { ownerGuardHandoff } = await import("./owner-boundary.js")
+  const source = "function boot() {\n  window.posthog.init('phc_fake', {\n    defaults: '2026-01-30'\n  });\n  fbq('consent', 'revoke');\n}\n"
+  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
+  expect(handoff.guard).toContain("+  if (hostAllowed) window.posthog.init('phc_fake', {")
+  expect(handoff.guard).not.toContain("revoke")
+})
+
+it.each(["gtag('config', 'G-FAKE')", "fbq('init', '123456789')", "posthog.init('phc_fake', { defaults: '2026-01-30' })"])("renders a real diff for an isolated initialization without a semicolon: %s", async statement => {
+  const { ownerGuardHandoff } = await import("./owner-boundary.js")
+  const source = `function boot() {\n  ${statement}\n  fbq('consent', 'revoke')\n}\n`
+  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
+  expect(handoff.guard).toContain(`-  ${statement}\n+  if (hostAllowed) ${statement}`)
+})
+
+it.each(["&& fbq('consent', 'revoke');", ", fbq('consent', 'revoke');", "?.then(grant)", "['consent']()"])("refuses a continued expression after a semicolonless initialization: %s", async continuation => {
+  const { ownerGuardHandoff } = await import("./owner-boundary.js")
+  const source = `function boot() {\n  fbq('init', '123456789')\n  ${continuation}\n}\n`
+  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
+  expect(handoff.guard).toBe("if (hostAllowed)")
 })

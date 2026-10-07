@@ -68,11 +68,19 @@ export function ownerGuardHandoff(note: string, location: { file?: string; line?
   const lines = source?.split(/\r?\n/)
   const at = (location.line ?? 1) - 1
   const original = lines?.[at]
-  const init = original && /^(\s*)((?:(?:window|globalThis)\.)?(?:gtag\(\s*['"]config['"]|fbq\(\s*['"]init['"]|posthog\.init\())/.exec(original)
-  // A single-statement if guards exactly this existing call, including its multiline arguments.
+  const previous = lines?.slice(0, at).filter(line => line.trim()).at(-1)?.trim()
+  // Only emit a diff for an isolated call with literal/simple
+  // arguments. An unbraced branch or a compound expression needs owner placement.
+  const boundary = previous === undefined || (!/^(?:\/\/|\/\*|\*)/.test(previous) && /[;{}]$/.test(previous))
+  const statement = lines?.slice(at).join("\n") ?? ""
+  const candidate = boundary && location.file && /^([ \t]*)((?:(?:window|globalThis)\.)?(?:gtag\(\s*['"]config['"]|fbq\(\s*['"]init['"]|posthog\.init\())(?:[^'"();`/]|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*')*\)[ \t]*(;)?[ \t]*(?:\n|$)/.exec(statement)
+  const tail = candidate ? statement.slice(candidate[0].length).trimStart() : ""
+  const continuation = /^(?:[([`.,+\-*/%&|^?:<>=!]|(?:in|instanceof)\b)/.test(tail)
+  const init = candidate && (candidate[3] || !continuation) ? candidate : null
+  // The recognized call may have multiline literal arguments, but no other statements.
   // It never wraps the enclosing function or adjacent consent statements.
   const guard = init ? `--- a/${location.file}\n+++ b/${location.file}\n@@ -${at + 1},1 +${at + 1},1 @@\n-${original}\n+${init[1]}if (${expression}) ${original!.slice(init[1]!.length)}` : `if (${expression})`
-  return { guard, text: `${note}\n\n${init ? "Owner-only diff for the named initialization statement; adjacent consent statements stay outside the condition." : "The exact initialization statement could not be located. The owner must choose placement for this condition; this is not an apply-ready edit."}\n\n\`\`\`${init ? "diff" : "js"}\n${guard}\n\`\`\`` }
+  return { guard, text: `${note}\n\n${init ? "Owner-only diff for the named initialization statement; adjacent consent statements stay outside the condition." : "The exact initialization statement and its safe boundary could not be proven. The owner must choose placement for this condition; this is not an apply-ready edit."}\n\n\`\`\`${init ? "diff" : "js"}\n${guard}\n\`\`\`` }
 }
 
 /** Recognize only our standalone status sentences, not words inside reviewer findings. */
