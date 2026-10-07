@@ -44,7 +44,7 @@ describe("consent and policy belong to the site owner", () => {
     for (const declinedKeys of [new Set<string>(), new Set([triageKey(finding)])]) {
       const decision = triage([finding], { ...context, declinedKeys })[0]!
       expect(decision).toMatchObject({ action: "ASK", askReason: "owner_file" })
-      expect(decision.reason).toContain("review unreliable")
+      expect(decision.reason).toContain("The reviewer marked this finding as a blocker. It stays open for you")
       const ledger = emptyLedger("fixture")
       recordDecisions(ledger, [decision], 1)
       expect(openFindings(ledger, [])).toEqual([{ findingId: "F1", item: "R6", severity: "blocker", path: "src/tracking.ts", line: 2, label: null }])
