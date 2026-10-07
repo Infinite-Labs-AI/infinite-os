@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest"
 import { beforeFacts, census, scanResult } from "../../test/wizard/o8/fixtures.js"
 import { fakeBefore, fakeKeys, fakeProductionDeniedConflict } from "../../test/wizard/o7-fakes.js"
 import { buildPlanModel } from "../install/plan-model.js"
-import { triage, type TriageItem } from "../review/triage.js"
+import { triage, triageKey, type TriageItem } from "../review/triage.js"
+import { emptyLedger, openFindings, recordDecisions } from "../review/ledger.js"
 import { globalDenyReason } from "./allow.js"
 import { jobScanFrom } from "./detectors/index.js"
 import { snapshotFromFiles } from "./repo-files.js"
@@ -37,10 +38,17 @@ describe("consent and policy belong to the site owner", () => {
     expect(changed.checks).toEqual([])
     expect(missingApprovedFixes([changed])).toEqual([])
   })
-  it.each(["Consent is incorrectly configured", "Rewrite the privacy policy", "Consent guard bypasses a revoke"])("retains structured owner-only review findings as information, including a repeat: %s", body => {
+  it.each(["Consent is incorrectly configured", "Rewrite the privacy policy", "Consent guard bypasses a revoke"])("keeps owner-labelled blockers open for the owner, including a repeat: %s", body => {
     const finding: TriageItem = { category: "owner_consent_privacy", source: "reviewer", threadId: null, findingId: "F1", item: "R6", severity: "blocker", path: "src/tracking.ts", line: 2, body, suggestedFix: null }
     const context = { allowlist: ["src/tracking.ts"], declinedKeys: new Set<string>(), passingChecks: new Set<string>(), answerFor: () => null }
-    expect(triage([finding], context)[0]?.action).toBe("OWNER_INFO")
+    for (const declinedKeys of [new Set<string>(), new Set([triageKey(finding)])]) {
+      const decision = triage([finding], { ...context, declinedKeys })[0]!
+      expect(decision).toMatchObject({ action: "ASK", askReason: "owner_file" })
+      expect(decision.reason).toContain("review unreliable")
+      const ledger = emptyLedger("fixture")
+      recordDecisions(ledger, [decision], 1)
+      expect(openFindings(ledger, [])).toEqual([{ findingId: "F1", item: "R6", severity: "blocker", path: "src/tracking.ts", line: 2, label: null }])
+    }
   })
 })
 

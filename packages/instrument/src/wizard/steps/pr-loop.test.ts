@@ -1388,7 +1388,8 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(diffPatch).not.toContain("export const lane = waitUntil")
     // The ledger's open findings come from the one definition: both still stand, F5 labelled and a blocker.
     const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8")) as { openFindings: Array<{ findingId: string; severity: string; label: string | null }> }
-    expect(ledger.openFindings.map((finding) => [finding.findingId, finding.severity, finding.label])).toEqual([
+    // Re-recording the timed-out fix may reorder entries; identity, severity and ownership must stay exact.
+    expect([...ledger.openFindings].sort((a, b) => a.findingId.localeCompare(b.findingId)).map((finding) => [finding.findingId, finding.severity, finding.label])).toEqual([
       ["F1", "should", null],
       ["F5", "blocker", "Infinite's own code"]
     ])
