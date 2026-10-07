@@ -208,3 +208,11 @@ it("does not offer the required proof-file information as an independent exclusi
   const payload: AskPayloads["plan"] = { lines: [{ id: "info:infinite_site_file", kind: "user_action", requires: "info", editable: false, text: "Infinite requires this proof file" }], decisions: { consentMode: null, conversionNames: [], privacyText: null, npmInstall: null } }
   expect(drive("plan", payload, " " + ENTER).answer).toEqual({ approved: [], declined: [], edits: {} })
 })
+
+it("preserves indentation after plus and minus in an owner diff", () => {
+  const payload: AskPayloads["plan"] = { lines: [
+    { id: "user_action:guard", kind: "user_action", requires: "user_action", editable: false, text: "Owner diff:\n```diff\n--- a/tracking.js\n+++ b/tracking.js\n@@ -1,2 +1,2 @@\n-    fbq('init',  'fixture');\n+    if (hostAllowed) fbq('init',  'fixture');\n```" }
+  ], decisions: { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: null } }
+  const view = OVERLAYS.plan.render(payload, OVERLAYS.plan.init(payload), { ...ctx(), width: 160, maxBodyLines: 30 })
+  expect(view.body.map(stripAnsi).join("\n")).toContain("-    fbq('init',  'fixture');\n      +    if (hostAllowed) fbq('init',  'fixture');")
+})

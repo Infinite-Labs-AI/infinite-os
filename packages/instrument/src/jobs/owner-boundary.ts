@@ -100,7 +100,17 @@ export function ownerGuardHandoff(note: string, location: { file?: string; line?
   const init = candidate && (candidate[3] || !continuation) ? candidate : null
   // The recognized call may have multiline literal arguments, but no other statements.
   // It never wraps the enclosing function or adjacent consent statements.
-  const guard = init ? `--- a/${location.file}\n+++ b/${location.file}\n@@ -${at + 1},1 +${at + 1},1 @@\n-${original}\n+${init[1]}if (${expression}) ${original!.slice(init[1]!.length)}` : `if (${expression})`
+  let guard = `if (${expression})`
+  if (init && lines) {
+    const rawLines = source!.split("\n")
+    const count = rawLines.at(-1) === "" ? rawLines.length - 1 : rawLines.length
+    const start = Math.max(0, at - 3), end = Math.min(count, at + 4)
+    const context = rawLines.slice(start, end).flatMap((line, offset) => {
+      const absentNewline = start + offset === count - 1 && !source!.endsWith("\n") ? ["\\ No newline at end of file"] : []
+      return start + offset === at ? [`-${line}`, ...absentNewline, `+${init[1]}if (${expression}) ${line.slice(init[1]!.length)}`, ...absentNewline] : [` ${line}`, ...absentNewline]
+    })
+    guard = `--- a/${location.file}\n+++ b/${location.file}\n@@ -${start + 1},${end - start} +${start + 1},${end - start} @@\n${context.join("\n")}`
+  }
   return { guard, text: `${note}\n\n${init ? "Owner-only diff for the named initialization statement; adjacent consent statements stay outside the condition." : "The exact initialization statement and its safe boundary could not be proven. The owner must choose placement for this condition; this is not an apply-ready edit."}\n\n\`\`\`${init ? "diff" : "js"}\n${guard}\n\`\`\`` }
 }
 

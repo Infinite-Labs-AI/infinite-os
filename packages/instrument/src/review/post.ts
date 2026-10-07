@@ -262,11 +262,14 @@ function ownerSnippet(text: string, language: string, scanner: Scanner): string 
 /** Shared merge-time and final checklist; scan the returned Markdown before posting. */
 export function buildChecklist(jobs: readonly ChecklistItem[], scanner: Scanner = createScanner({ literals: [], allowedIds: [] }), alreadyShownOwnerText = ""): string {
   if (jobs.length === 0) return ""
-  const rows = jobs.map((job) => `| ${escapeCell(job.title, scanner)} | ${escapeCell(jobStateCell(job), scanner)} |`).join("\n")
+  const rows = jobs.map((job) => {
+    const ownerShown = job.state === "left_for_you" && job.ownerBoundary && job.note && alreadyShownOwnerText.includes(safeDisplayText(scanner, job.note))
+    return `| ${escapeCell(job.title, scanner)} | ${escapeCell(ownerShown ? "Left for you; see the owner action above." : jobStateCell(job), scanner)} |`
+  }).join("\n")
   const guards = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.kind === "frozen_unit" && job.ownerBoundary.guard && !alreadyShownOwnerText.includes(job.ownerBoundary.guard)).map(job => {
     const scope = job.ownerBoundary!
     const where = escapeCell(`${scope.file ?? job.allow.files[0] ?? "the noted file"}:${scope.line ?? 1}`, scanner)
-    return `**For the site owner: ${escapeCell(job.title, scanner)}**\n\nApply this condition to the analytics start-up at ${where}. Keep your consent, grant and revoke code outside the guard. This snippet is for you to copy; the wizard did not edit that unit.\n\n${ownerSnippet(scope.guard!, "js", scanner)}`
+    return `**For the site owner: ${escapeCell(job.title, scanner)}**\n\nApply this condition to the analytics start-up at ${where}. Keep your consent, grant and revoke code outside the guard. This snippet is for you to copy; the wizard did not edit that unit.\n\n${ownerSnippet(scope.guard!, scope.guard!.startsWith("--- a/") ? "diff" : "js", scanner)}`
   })
   const wiring = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.wiring && !alreadyShownOwnerText.includes(job.ownerBoundary.wiring)).map(job => {
     const scope = job.ownerBoundary!

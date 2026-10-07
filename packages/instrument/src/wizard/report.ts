@@ -659,8 +659,9 @@ function sentence(text: string): string {
 }
 
 /** The report's own notes, then the footnotes, each said once (a note may already say a footnote's words). */
-function notesAndFootnotes(report: ReportV2): string[] {
-  return [...new Set([...report.notes.filter(note => !isOwnerBoundaryStatement(note)), ...footnotes(report)])]
+function notesAndFootnotes(report: ReportV2, ownerJobs: readonly ChecklistItem[] = []): string[] {
+  const shown = new Set([...ownerInstructions(ownerJobs).map(instruction => boundedNotes([instruction.note])[0]!), ...consentActivationNotes(consentActivationFromNotes(report.notes))])
+  return [...new Set([...report.notes.filter(note => !isOwnerBoundaryStatement(note) && !shown.has(note)), ...footnotes(report)])]
 }
 
 function cellText(cell: Cell, ownerPreviewNote?: string): string {
@@ -825,7 +826,7 @@ export function renderTerminal(report: ReportV2, width: number, options: Termina
     lines.push("", "Owner action: banner signal", "", ...handoff.split("\n"))
     lines.push("", "Finish line", ...consentActivationNotes(activation))
   }
-  for (const note of notesAndFootnotes(report)) lines.push(...hanging("", note, total))
+  for (const note of notesAndFootnotes(report, options.ownerJobs)) lines.push(...hanging("", note, total))
   for (const instruction of ownerInstructions(options.ownerJobs ?? [])) {
     lines.push("", ...wrapPlain(instruction.note, total), ...wrapPlain(instruction.placement, total), "", "Full text in the pull request and .infinite/wizard/report.md")
   }
@@ -879,9 +880,9 @@ export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMe
   const handoff = activation && consentHandoff(activation)
   if (handoff) {
     out.push("", "**Owner action: banner signal**", "")
-    for (const section of handoff.split("\n\n")) out.push(section.startsWith("Yes:\n") || section.startsWith("No or revoke:\n") ? `${section.slice(0, section.indexOf("\n"))}\n\n\`\`\`js\n${section.slice(section.indexOf("\n") + 1)}\n\`\`\`` : section, "")
+    for (const section of handoff.split("\n\n")) out.push(section.includes("\nwindow.dispatchEvent(") ? `${section.slice(0, section.indexOf("\n"))}\n\n\`\`\`js\n${section.slice(section.indexOf("\n") + 1)}\n\`\`\`` : section, "")
   }
-  const notes = notesAndFootnotes(report)
+  const notes = notesAndFootnotes(report, ownerJobs)
   if (notes.length > 0) {
     out.push("")
     for (const note of notes) out.push(`${md(note)}  `)
@@ -889,7 +890,7 @@ export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMe
   const ownerNoteScanner = createScanner({ literals: [], allowedIds: [] })
   for (const instruction of ownerInstructions(ownerJobs)) {
     const fence = "`".repeat(Math.max(3, ...[...instruction.snippet.matchAll(/`+/g)].map(match => match[0].length + 1)))
-    out.push("", quoteDisplayNote(ownerNoteScanner, instruction.note), "", quoteDisplayNote(ownerNoteScanner, instruction.placement), "", `${fence}js`, instruction.snippet, fence)
+    out.push("", quoteDisplayNote(ownerNoteScanner, instruction.note), "", quoteDisplayNote(ownerNoteScanner, instruction.placement), "", `${fence}${instruction.snippet.startsWith("--- a/") ? "diff" : "js"}`, instruction.snippet, fence)
   }
   if (excludedLines.length > 0) out.push("", "### You said no to", "", ...[...new Set(excludedLines)].map(line => `- ${md(line)}`))
   const text = out.join("\n")

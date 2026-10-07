@@ -17,6 +17,7 @@
 // - the box keeps its height while the plan scrolls (F19): the body takes every row it was given, so a notice
 //   or a shorter window never shrinks the box and brings the step list back above it.
 import { isContinuedWork } from "../../install/plan-permission.js"
+import { sanitizeUntrustedBlock } from "../../agents/sanitize.js"
 import { ASK_CANCELLED, type AskPayloads, type PlanLine } from "../../wizard/contracts/asks.js"
 import { wrapAnsi } from "../ansi.js"
 import type { Key } from "../keys.js"
@@ -86,7 +87,10 @@ function lineMark(line: PlanLine, state: PlanState, ctx: OverlayContext): string
 }
 
 function lineText(line: PlanLine, state: PlanState, ctx: OverlayContext): string {
+  let fenced = false
   let text = line.text.split("\n").map(row => {
+    if (/^\s*`{3,}/.test(row)) fenced = !fenced
+    else if (fenced) return sanitizeUntrustedBlock(row, Math.max(OVERLAY_TEXT_CAPS.line, row.length))
     const indent = /^ */.exec(row)![0]
     return indent + ctx.sanitize(row.slice(indent.length), Math.max(OVERLAY_TEXT_CAPS.line, row.length))
   }).join("\n")
