@@ -12,7 +12,7 @@ export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
   /\b(?:ad_storage|analytics_storage|ad_user_data|ad_personalization|functionality_storage|personalization_storage|security_storage|wait_for_update)\b/,
   /cdn\.cookielaw\.org|otSDKStub\.js|consent\.cookiebot\.com|usercentrics\.eu/,
   /\bOnetrustActiveGroups\b/i,
-  /\bdata-cookieconsent\b|\btype\s*=\s*['"]text\/plain['"]/i,
+  /\bdata-cookieconsent\b|<script(?=\s|\/?>)(?:[^<>"']|"[^"]*"|'[^']*')*?\stype\s*=\s*(?:"text\/plain"|'text\/plain'|text\/plain(?=[\s/>]))/i,
   new RegExp(String.raw`\b(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\b${RAW_TRIVIA}(?:\?\.${RAW_TRIVIA})?\(`)
 ]
 /** Recognition deliberately includes comments and prose; uncertain syntax never hides a raw marker. */
