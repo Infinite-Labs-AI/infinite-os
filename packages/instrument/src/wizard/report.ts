@@ -544,7 +544,7 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
       ...(ownerPreviewNote ? [ownerPreviewNote] : []),
       ...input.notes.filter(note => !isOwnerBoundaryStatement(note)),
       ...(input.verdictFacts?.ownerPolicyFindings ?? []),
-      ...(input.verdictFacts?.jobs ?? []).filter(job => job.state === "left_for_you" && job.ownerBoundary).map(job => job.note ?? "Put back: an edit reached code that handles consent."),
+      ...(input.verdictFacts?.jobs ?? []).filter(job => job.state === "left_for_you" && job.ownerBoundary).map(job => job.note ?? (job.ownerBoundary?.kind === "restored_unit" ? "Put back: an edit reached code that handles consent." : `Not changed by us: ${job.ownerBoundary?.file ?? job.allow.files[0] ?? "the noted file"} is left for you.`)),
       ...(input.verdictFacts?.priorPolicyEdits || hasRecordedPolicyEdits(input.verdictFacts?.jobs ?? []) || hasLegacyOwnerHistory(input.notes) ? [LEGACY_OWNER_BOUNDARY] : [])
     ])],
     verdict: null

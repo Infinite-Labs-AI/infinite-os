@@ -1,3 +1,4 @@
+import { item } from "../../test/wizard/repo.js"
 import { readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -382,4 +383,18 @@ describe("§3z.8: the tag refuses every cell the cloud parser refuses (review I1
   it("buildColumn throws on a fact display the cloud would refuse (so it never reaches the cloud)", () => {
     expect(() => buildColumn("proven_live", { runId: RUN, meta: { measuredAt: AT, sha: "a".repeat(40) }, facts: [{ input: "t1.redirect_walk", state: "pass", display: "hop 1 (http://a => b)", at: AT }], rows: {} })).toThrow(ReportRuleError)
   })
+})
+
+
+it.each(["frozen_unit", "policy_page", "unproven_wiring", "restored_unit"] as const)("describes %s owner work without inventing a restoration", kind => {
+  const job = { ...item("unusual_layout:owner", ["app/layout.tsx"]), state: "left_for_you" as const, ownerBoundary: { kind, file: "app/layout.tsx", line: 1 } }
+  const report = builder.build({
+    runId: RUN, tagVersion: "0.12.0", site: example.site,
+    columns: { live_today: null, in_pr: null, proven_live: null },
+    provenLivePending: null, day7: null, notes: [],
+    verdictFacts: { jobs: [job], openFindings: [], tools: null, installedUnknown: null }
+  })
+  const restored = kind === "restored_unit"
+  expect(report.notes.some(note => note.startsWith("Put back:"))).toBe(restored)
+  if (!restored) expect(report.notes).toContain("Not changed by us: app/layout.tsx is left for you.")
 })
