@@ -16,6 +16,7 @@ import { reverseEditRecord } from "./install/edits.js"
 import { writeFileAtomic } from "./frameworks/shared.js"
 import type { InstallManifest, UninstallResult } from "./types.js"
 import { GENERATED_API_RECORD } from "./jobs/generated-api.js"
+import { isPolicyPath } from "./jobs/owner-boundary.js"
 
 export interface UninstallInstallationOptions {
   root: string
@@ -59,7 +60,7 @@ function reverseHarness(root: string, dryRun: boolean): { removedFiles: string[]
 export interface ReverseEditsResult {
   /** Files restored (or, for an edit that created the file, removed), newest record first. */
   reversed: string[]
-  /** Files left as they are because they changed since the edit ("changed since; left as is"). */
+  /** Policy files and files changed since the edit, both left exactly as they are. */
   leftAsIs: string[]
   /** One founder-facing line per file left as is. */
   warnings: string[]
@@ -70,6 +71,7 @@ export interface ReverseEditsResult {
  * they come off before it. Each record is reversed only while its file still hashes to the record's
  * `afterHash`, by applying its exact `textEdits` in reverse (agent edits carry them too), and only when
  * the result hashes to `beforeHash`; otherwise the file is left exactly as it is, with a warning.
+ * Policy pages are always left to the owner, including edits in legacy receipts.
  * A dry run only reports what it would do.
  */
 export function reverseRecordedEdits(root: string, manifest: Pick<InstallManifest, "edits">, dryRun: boolean): ReverseEditsResult {
@@ -85,6 +87,12 @@ export function reverseRecordedEdits(root: string, manifest: Pick<InstallManifes
   }
   for (const record of [...(manifest.edits ?? [])].reverse()) {
     if (blocked.has(record.file)) continue
+    if (isPolicyPath(record.file)) {
+      blocked.add(record.file)
+      leftAsIs.push(record.file)
+      warnings.push(`Not changed by us: ${record.file} is a policy page, which is yours.`)
+      continue
+    }
     const outcome = reverseEditRecord(read(record.file), record)
     if (!outcome.ok) {
       // An older record of the same file can only be reversed on top of this one: stop the chain.

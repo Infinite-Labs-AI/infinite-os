@@ -19,6 +19,7 @@ import { applyInstallation } from "./apply.js"
 import { inspectWorkspace } from "./inspect.js"
 import { planInstallation } from "./plan.js"
 import { uninstallInstallation } from "./uninstall.js"
+import { makeEditRecord } from "./install/edits.js"
 import type { WorkspaceInstallArtifacts } from "./types.js"
 
 const tempRoots: string[] = []
@@ -241,6 +242,36 @@ describe("uninstallInstallation", () => {
     expect(result.restoredFiles.length).toBeGreaterThan(0)
     expectTreeEquals(root, afterApply)
     expect(existsSync(join(root, ".infinite/install.json"))).toBe(true)
+  })
+
+  it.each([false, true])("leaves legacy policy receipt edits intact, including created pages (dry run %s)", dryRun => {
+    const root = copyFixture("static-html-basic")
+    applyFixture(root, { infinite })
+    const policyFiles = ["terms-and-conditions.html", "tos.html", "src/views/Terms.tsx"]
+    const before = "Owner's original policy\n", after = "Owner's policy with a legacy wizard edit\n"
+    const records = policyFiles.map((file, index) => {
+      mkdirSync(dirname(join(root, file)), { recursive: true })
+      writeFileSync(join(root, file), after)
+      return makeEditRecord({ file, before: index === 1 ? null : before, after, jobId: "privacy_paragraph", planLineId: null, by: "wizard", runId: "legacy-run" })
+    })
+    const apiFile = "src/api/terms.ts"
+    mkdirSync(dirname(join(root, apiFile)), { recursive: true })
+    writeFileSync(join(root, apiFile), "export const terms = 2\n")
+    records.push(makeEditRecord({ file: apiFile, before: "export const terms = 1\n", after: "export const terms = 2\n", jobId: "csp", planLineId: null, by: "wizard", runId: "legacy-run" }))
+    const manifestPath = join(root, ".infinite/install.json")
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+    writeFileSync(manifestPath, JSON.stringify({ ...manifest, edits: records }))
+
+    const result = uninstallInstallation({ root, dryRun })
+
+    for (const file of policyFiles) {
+      expect(readFileSync(join(root, file), "utf8")).toBe(after)
+      expect(result.editsLeftAsIs).toContain(file)
+      expect(result.editsReversed).not.toContain(file)
+      expect(result.warnings).toContain(`Not changed by us: ${file} is a policy page, which is yours.`)
+    }
+    expect(result.editsReversed).toContain(apiFile)
+    expect(readFileSync(join(root, apiFile), "utf8")).toBe(`export const terms = ${dryRun ? 2 : 1}\n`)
   })
 
   it("is idempotent when no manifest is present", () => {
