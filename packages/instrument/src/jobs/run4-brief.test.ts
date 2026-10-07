@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { runInNewContext } from "node:vm"
+import { runInNewContext, Script } from "node:vm"
 import { afterEach, describe, expect, it } from "vitest"
 import ts from "typescript"
 
@@ -16,6 +16,7 @@ import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 import { adoptedInitSites } from "../wizard/deps.js"
 import { cookTemplateLiteral } from "../t0/inline-scripts.js"
 import { buildMetaClickIdCaptureScript } from "../providers/meta-browser/click-id.js"
+import { captureConsentDecisionSource } from "../providers/meta-browser/consent.js"
 import { autoConfigOffLine, buildBrief, capturePasteAsWritten, HELPER_API, type BriefFacts } from "./briefs.js"
 import { buildHostGuardExpression } from "../host-guard.js"
 import { adoptedMetaGuardRecipe } from "../providers/meta.js"
@@ -78,6 +79,8 @@ describe("R4-6: run 4's brief hands each job its exact change", () => {
   })
 
   it("gives a strict TypeScript module plain capture statements beside an imperative pixel init", () => {
+    // The shared listener must also parse as plain JavaScript: no TypeScript-only event annotation.
+    expect(() => new Script(captureConsentDecisionSource({ kind: "infinite-consent", mode: "not_required" }))).not.toThrow()
     const source = "declare const fbq: (...args: string[]) => void;\nexport function start() {\n  fbq('init', '555500001111222');\n}\n"
     const root = makeSite({ "src/common/tracking.ts": source })
     const brief = buildBrief([item("meta_improve:capture", ["src/common/tracking.ts"])], facts(root, { guardSites: [{ tool: "meta", file: "src/common/tracking.ts", line: 3, context: "js" }], managedFiles: [] }))

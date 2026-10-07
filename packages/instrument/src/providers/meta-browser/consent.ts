@@ -60,11 +60,12 @@ export function captureConsentDecisionSource(gate: MetaBrowserGate): string {
     "try {",
     'document.addEventListener("pointerdown", recordConsentGesture, true);',
     'document.addEventListener("keydown", recordConsentGesture, true);',
-    `window.addEventListener("${INFINITE_CONSENT_EVENT}", function (event) {`,
+    `window.addEventListener("${INFINITE_CONSENT_EVENT}", function () {`,
+    "  var event = arguments[0];",
     // Infinite owns the decision whenever its runtime is present, including its in-memory fallback.
     `  if (typeof window.${INFINITE_CONSENT_ACCESSOR} === "function") return;`,
     "  if (!lastConsentGestureAt || Date.now() - lastConsentGestureAt > 10000) return;",
-    '  if (!event.detail || typeof event.detail.granted !== "boolean") return;',
+    '  if (!event || !event.detail || typeof event.detail.granted !== "boolean") return;',
     `  try { localStorage.setItem("${INFINITE_CONSENT_STORAGE_KEY}", event.detail.granted ? "granted" : "denied"); } catch (_error) {}`,
     "});",
     "} catch (_error) {}"

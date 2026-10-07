@@ -40,7 +40,7 @@ const line = (id: string, kind: PlanLine["kind"], text: string, extra: Partial<P
 
 /** The plan of the recorded QA run: 15 lines, the wizard's own wording (10 of them were cut at 96 characters). */
 const PLAN_LINES: PlanLine[] = [
-  line("consent_mode", "consent_mode", "Consent: choose — collect by default, or wait for your cookie banner's yes (covers Infinite only)", { editable: true }),
+  line("consent_mode", "consent_mode", "Consent for Infinite's tag and the Meta ad-click cookie this run adds: choose collect by default, or wait for my banner's yes. Other banners do not control them until you connect their yes/no signal.", { editable: true }),
   line("conversion_names", "conversion_names", "Conversions: signup", { editable: true }),
   line("npm_install", "npm_install", "Install the server-lane package (runs its install scripts): npm install @vercel/functions", { editable: true }),
   line("install_provider:infinite", "install_provider", "Install Infinite"),
@@ -157,8 +157,8 @@ describe("F1: the plan screen shows the FULL text of every line the user approve
     const before = readable(planFrame(120, 60))
     expect(before).not.toContain("→ chosen:")
     const after = readable(planFrame(120, 60, planPayload(), "e"))
-    expect(after).toContain("(covers Infinite only) → chosen: collect by default (covers Infinite only)")
-    expect(readable(planFrame(120, 60, planPayload(), "ee"))).toContain("→ chosen: wait for consent")
+    expect(after).toContain("→ chosen: Infinite tag + ad-click cookie: collect by default; other banners are independent until connected")
+    expect(readable(planFrame(120, 60, planPayload(), "ee"))).toContain("→ chosen: Infinite tag + ad-click cookie: wait for my banner's yes; connect the signal below")
   })
 })
 
@@ -410,7 +410,7 @@ describe("F1b: every plan line can be read in full in a short terminal", () => {
     expect(text).toMatch(/↓ \d+ more lines below/)
     // The summary gave its rows to the lines; the consent decision is still on screen, on its own line.
     expect(text).not.toContain("Your decisions")
-    expect(readable(drivePlan(80, 24, planPayload(), ["e"]).frames.at(-1)!)).toContain("→ chosen: collect by default")
+    expect(readable(drivePlan(80, 24, planPayload(), ["e"]).frames.at(-1)!)).toContain("→ chosen: Infinite tag + ad-click cookie: collect by default")
   })
 
   it("a tall terminal keeps the summary and the step list (negative: nothing is dropped when there is room)", () => {

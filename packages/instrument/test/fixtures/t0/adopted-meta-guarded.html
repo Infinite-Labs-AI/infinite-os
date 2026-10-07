@@ -10,6 +10,19 @@
   var FB_COOKIE = /^fb\.[0-9]{1,2}\.[0-9]{1,20}\.[A-Za-z0-9_%.-]{1,512}$/;
   var FBCLID = /^[A-Za-z0-9_%.-]{1,400}$/;
   var MAX_AGE = 7776000;
+  var lastConsentGestureAt = 0;
+  function recordConsentGesture() { lastConsentGestureAt = Date.now(); }
+  try {
+  document.addEventListener("pointerdown", recordConsentGesture, true);
+  document.addEventListener("keydown", recordConsentGesture, true);
+  window.addEventListener("infinite:analytics-consent-change", function () {
+    var event = arguments[0];
+    if (typeof window.__infiniteConsentAllowed === "function") return;
+    if (!lastConsentGestureAt || Date.now() - lastConsentGestureAt > 10000) return;
+    if (!event || !event.detail || typeof event.detail.granted !== "boolean") return;
+    try { localStorage.setItem("infinite_analytics_consent", event.detail.granted ? "granted" : "denied"); } catch (_error) {}
+  });
+  } catch (_error) {}
   function infiniteConsentAllows() {
     try {
       if (typeof window.__infiniteConsentAllowed === "function") return window.__infiniteConsentAllowed() === true;
