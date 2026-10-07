@@ -77,3 +77,16 @@ it("still measures a recorded reachable wizard commit when the base has advanced
     expect((await measureWizardCommits({ root: fixture.root, baseSha: sha, headSha: sha, wizardCommits: [sha] })).state).toBe("changed")
   } finally { fixture.cleanup() }
 })
+
+it("does not treat an unreadable working source as a deleted consent-free file", async () => {
+  const fixture = createGitFixture({ files: { "src/tracking.ts": "export const count = 1;\n", ".gitignore": "src\n" } })
+  try {
+    fixture.git(["add", "-f", "src/tracking.ts"]); fixture.git(["commit", "-m", "track fixture source"])
+    const baseSha = fixture.git(["rev-parse", "HEAD"]).trim()
+    rmSync(join(fixture.root, "src"), { recursive: true })
+    symlinkSync("src", join(fixture.root, "src"))
+    const measured = await measureOwnerDiff({ root: fixture.root, baseSha })
+    expect(measured.state).toBe("not_checked")
+    expect(measured.issues).toContainEqual({ file: "src/tracking.ts", reason: "the changed source could not be inspected" })
+  } finally { fixture.cleanup() }
+})

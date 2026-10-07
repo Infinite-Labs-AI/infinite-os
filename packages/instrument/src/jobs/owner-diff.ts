@@ -1,4 +1,5 @@
-/** Measure the owner's frozen units against the recorded base, before any push. No source is edited here. */
+/** Measure a single wizard diff against its parent. No source is edited here. */
+import type { Stats } from "node:fs"
 import { lstat, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { git } from "../agents/git-exec.js"
@@ -57,7 +58,11 @@ export async function measureOwnerDiff(input: { root: string; baseSha: string; r
       if (afterBlob.error) { measurement.state = "not_checked"; fail(path, afterBlob.error); continue }
       after = afterBlob.bytes
     } else {
-      const info = await lstat(join(input.root, path)).catch(() => null)
+      let info: Stats | null = null
+      try { info = await lstat(join(input.root, path)) }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") { measurement.state = "not_checked"; fail(path, "the changed source could not be inspected"); continue }
+      }
       if (info && !info.isFile()) { measurement.state = "not_checked"; fail(path, "the changed source is not a regular file"); continue }
       try { after = info ? await readFile(join(input.root, path)) : null }
       catch { measurement.state = "not_checked"; fail(path, "the changed source could not be read"); continue }
