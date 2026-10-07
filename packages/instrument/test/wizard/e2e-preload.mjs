@@ -13,7 +13,7 @@
 //    network" holds for that path too.
 //
 // Every live read and every refused attempt is appended to E2E_LIVE_RECORD.
-import { appendFileSync, readFileSync } from "node:fs"
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 
 const record = (entry) => {
   if (process.env.E2E_LIVE_RECORD) appendFileSync(process.env.E2E_LIVE_RECORD, `${JSON.stringify(entry)}\n`)
@@ -69,13 +69,16 @@ if (process.env.E2E_FAST_CLOCK === "1") {
   const createDeps = wiring.createDeps
   wiring.createDeps = async (input) => {
     const deps = await createDeps(input)
-    let offset = 0
+    // Resume on the same fixture's clock: a second child must not go backwards behind a saved push.
+    const clockFile = process.env.E2E_CLOCK_FILE
+    let offset = clockFile && existsSync(clockFile) ? JSON.parse(readFileSync(clockFile, "utf8")).offset : 0
     deps.clock = {
       now: () => new Date(Date.now() + offset),
       sleep: (ms, signal) =>
         new Promise((resolve, reject) => {
           if (signal?.aborted) return reject(signal.reason ?? new Error("aborted"))
           offset += ms
+          if (clockFile) writeFileSync(clockFile, JSON.stringify({ offset }))
           setTimeout(resolve, Math.min(ms, 25))
         })
     }

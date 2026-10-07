@@ -199,6 +199,9 @@ export function sealedEnv(input: SealedEnvInput): Record<string, string> {
     FAKE_SPY_RECORD: join(site.base, "spy.log"),
     E2E_LIVE_SITE: join(site.base, "live-site.json"),
     E2E_LIVE_RECORD: join(site.base, "live.jsonl"),
+    // Real deadlines, virtual elapsed time: every push waits the full 120-second registration period.
+    E2E_FAST_CLOCK: "1",
+    E2E_CLOCK_FILE: join(site.base, "clock.json"),
     ...(input.extra ?? {})
   }
 }
