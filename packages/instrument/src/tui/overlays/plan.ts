@@ -29,6 +29,8 @@ export interface PlanState {
   cursor: number
   /** Excluded repository actions and unchecked explicit choices. */
   skipped: string[]
+  /** Explicit toggles, distinct from an untouched unchecked opt-in. */
+  touched?: string[]
   edits: Record<string, string>
   editing: { lineId: string; buffer: string } | null
   notice: string | null
@@ -57,6 +59,16 @@ function consentValue(payload: PlanPayload, state: PlanState): string | null {
   const line = consentLine(payload)
   if (line && state.edits[line.id] !== undefined) return state.edits[line.id] ?? null
   return payload.decisions.consentMode
+}
+
+function visiblePayload(payload: PlanPayload, state: PlanState): PlanPayload {
+  const banner = payload.bannerSignal ?? payload.lines.find(line => line.id === "user_action:banner_signal")
+  const lines = payload.lines.filter(line => line.id !== "user_action:banner_signal")
+  if (banner && consentValue(payload, state) === "required") {
+    const firstOwner = lines.findIndex(line => line.requires === "user_action")
+    lines.splice(firstOwner < 0 ? lines.length : firstOwner, 0, banner)
+  }
+  return { ...payload, lines }
 }
 
 function decisionsView(payload: PlanPayload, state: PlanState, ctx: OverlayContext): string[] {
@@ -318,7 +330,7 @@ function handleKey(payload: PlanPayload, state: PlanState, key: Key, ctx: Overla
     case "space": {
       if (!current || (current.requires !== "approval" && !isContinuedWork(current))) return { state }
       const skipped = state.skipped.includes(current.id) ? state.skipped.filter((id) => id !== current.id) : [...state.skipped, current.id]
-      return { state: { ...state, skipped } }
+      return { state: { ...state, skipped, touched: [...new Set([...state.touched ?? [], current.id])] } }
     }
     case "char": {
       if (key.char.toLowerCase() !== "e" || !current) return { state }
@@ -343,7 +355,7 @@ function handleKey(payload: PlanPayload, state: PlanState, key: Key, ctx: Overla
       if (more) return { state: more }
       const approvalLines = lines.filter((line) => line.requires === "approval" || isContinuedWork(line))
       const approved = approvalLines.filter((line) => !state.skipped.includes(line.id)).map((line) => line.id)
-      const declined = approvalLines.filter((line) => state.skipped.includes(line.id)).map((line) => line.id)
+      const declined = approvalLines.filter((line) => state.skipped.includes(line.id) && ((state.touched ?? []).includes(line.id) || (payload.excluded ?? []).includes(line.id))).map((line) => line.id)
       return { state, answer: { approved, declined, edits: { ...state.edits } } }
     }
     case "escape":
@@ -360,6 +372,7 @@ function handleKey(payload: PlanPayload, state: PlanState, key: Key, ctx: Overla
  * line that was never drawn (final verify F18). It is marked on the next key, which gets the box it was drawn in.
  */
 function onKey(payload: PlanPayload, state: PlanState, key: Key, ctx?: OverlayContext): KeyOutcome<"plan", PlanState> {
+  payload = visiblePayload(payload, state)
   if (!ctx) return handleKey(payload, state, key, ctx)
   return handleKey(payload, observe(payload, state, ctx), key, ctx)
 }
@@ -367,6 +380,6 @@ function onKey(payload: PlanPayload, state: PlanState, key: Key, ctx?: OverlayCo
 export const planOverlay: Overlay<"plan", PlanState> = {
   kind: "plan",
   init: (payload) => ({ cursor: 0, skipped: [...new Set([...(payload.excluded ?? []), ...payload.lines.filter(line => line.requires === "approval" && !["consent_mode", "conversion_names"].includes(line.kind)).map(line => line.id)])], edits: {}, editing: null, notice: null, seen: [], lineScroll: 0, readRows: {} }),
-  render,
+  render: (payload, state, ctx) => render(visiblePayload(payload, state), state, ctx),
   onKey
 }

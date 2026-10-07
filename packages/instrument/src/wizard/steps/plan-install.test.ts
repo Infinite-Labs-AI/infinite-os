@@ -800,7 +800,7 @@ it("excluding the only installed provider leaves no helper-dependent jobs, rewri
   expect(read(h.ctx.root, "next.config.mjs")).toBe(config)
   expect(read(h.ctx.root, "app/layout.tsx")).toBe(layout)
   expect(h.ctx.stateValue().jobs).toEqual([])
-  expect(h.ctx.events).toContainEqual({ type: "step.sub", fields: { step: "plan", tone: "result", text: "You said no to: install_provider:infinite" } })
+  expect(h.ctx.events).toContainEqual({ type: "step.sub", fields: { step: "plan", tone: "result", text: "You said no to: Install Infinite" } })
 })
 
 it("restores the gitignore fence when resuming an unsupported install", async () => {

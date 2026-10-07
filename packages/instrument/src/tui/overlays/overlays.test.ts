@@ -136,14 +136,30 @@ describe("plan overlay", () => {
   it("ENTER continues without opting into explicit approval actions", () => {
     expect(drive("plan", payload("not_required"), ENTER).answer).toEqual({
       approved: ["consent_mode", "conversion_names"],
-      declined: ["install_provider:infinite", "remove_duplicate:ga4_gtag"],
+      declined: [],
       edits: {}
     })
   })
 
+  it("distinguishes an untouched opt-in from an explicit no", () => {
+    expect(drive("plan", payload("not_required"), "  " + ENTER).answer).toMatchObject({ declined: ["install_provider:infinite"] })
+  })
+
+  it("shows and counts banner handoff only after choosing to wait", () => {
+    const chosen = { ...payload("not_required"), bannerSignal: { id: "user_action:banner_signal", kind: "user_action" as const, requires: "user_action" as const, editable: false, text: "BANNER SIGNAL INSTRUCTIONS" } }
+    const overlay = OVERLAYS.plan
+    let state = overlay.init(chosen)
+    expect(overlay.render(chosen, state, ctx()).body.join("\n")).not.toContain("BANNER SIGNAL")
+    state = overlay.onKey(chosen, state, { name: "down" }).state
+    state = overlay.onKey(chosen, state, { name: "char", char: "e" }).state
+    expect(overlay.render(chosen, state, { ...ctx(), maxBodyLines: 100 }).body.join("\n")).toContain("BANNER SIGNAL INSTRUCTIONS")
+    state = overlay.onKey(chosen, state, { name: "char", char: "e" }).state
+    expect(overlay.render(chosen, state, ctx()).body.join("\n")).not.toContain("BANNER SIGNAL")
+  })
+
   it("SPACE opts into an explicit approval; owner information cannot be toggled", () => {
     const answer = drive("plan", payload("not_required"), DOWN + DOWN + DOWN + " " + DOWN + " " + ENTER).answer as { approved: string[]; declined: string[] }
-    expect(answer.declined).toEqual(["install_provider:infinite"])
+    expect(answer.declined).toEqual([])
     expect(answer.approved).toContain("remove_duplicate:ga4_gtag")
     expect(answer.approved).not.toContain("user_action:connect_ga4")
   })
@@ -182,8 +198,8 @@ it("never opts into package installs, API costs or connected-account changes on 
     { id: "account_settings:ga4", kind: "account_settings", requires: "approval", editable: false, text: "Mark GA4 key events" },
     { id: "install_provider:infinite", kind: "install_provider", requires: "info", editable: false, text: "Install Infinite" }
   ], decisions: { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: "npm install fixture" } }
-  expect(drive("plan", payload, ENTER).answer).toEqual({ approved: ["install_provider:infinite"], declined: ["npm_install", "agent_budget", "account_settings:ga4"], edits: {} })
-  expect(drive("plan", payload, DOWN + " " + ENTER).answer).toEqual({ approved: ["agent_budget", "install_provider:infinite"], declined: ["npm_install", "account_settings:ga4"], edits: {} })
+  expect(drive("plan", payload, ENTER).answer).toEqual({ approved: ["install_provider:infinite"], declined: [], edits: {} })
+  expect(drive("plan", payload, DOWN + " " + ENTER).answer).toEqual({ approved: ["agent_budget", "install_provider:infinite"], declined: [], edits: {} })
 })
 
 it("SPACE excludes shown repository work and a second SPACE includes it again", () => {

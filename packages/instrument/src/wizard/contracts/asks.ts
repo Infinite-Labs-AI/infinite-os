@@ -155,7 +155,7 @@ export interface AskPayloads {
   single: { question: string; options: AskOption[]; default?: string }
   multi: { question: string; options: AskOption[]; default?: string[] }
   text: { question: string; maxLength: number }
-  plan: { lines: PlanLine[]; decisions: PlanDecisionsPayload; excluded?: string[] }
+  plan: { lines: PlanLine[]; decisions: PlanDecisionsPayload; excluded?: string[]; bannerSignal?: PlanLine }
   "agent-questions": { questions: Array<{ itemId: string; question: string; options?: AskOption[]; why: string }> }
   "teammate-comments": { comments: Array<{ threadId: string; author: string; path: string; line: number | null; excerpt: string }> }
   /** §3x.6 (R3-6) `incomplete`: what the PR lacks that the plan approved (the in-PR verdict's words); absent = nothing. */

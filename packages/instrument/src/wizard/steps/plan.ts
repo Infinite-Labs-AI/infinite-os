@@ -76,9 +76,12 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const currentAnswer = answer
   const keptNo = earlierNo.filter(id => !currentAnswer.approved.includes(id) || currentAnswer.declined.includes(id))
   answer = { ...answer, declined: [...new Set([...keptNo, ...answer.declined])] }
-  for (const id of answer.declined) sub(ctx, `${keptNo.includes(id) ? "kept your earlier no to" : "You said no to"}: ${id}`, "result")
+  for (const id of answer.declined) sub(ctx, `${keptNo.includes(id) ? "kept your earlier no to" : "You said no to"}: ${plan.lines.find(line => line.id === id)?.text ?? id}`, "result")
   for (const text of planExclusions(plan, answer.declined).consequences) sub(ctx, text, "result")
   const resolved = resolvePlanAnswers(plan, answer, { consentFlag: ctx.options.consentMode })
+  for (const line of plan.lines) {
+    if (line.requires === "approval" && resolved.lines.find(entry => entry.id === line.id)?.approved === null) sub(ctx, `Not turned on: ${line.text}`, "result")
+  }
   ctx.state.update((state) => {
     state.plan = {
       hash: plan.hash,

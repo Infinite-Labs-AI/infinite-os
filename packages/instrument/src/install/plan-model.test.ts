@@ -486,3 +486,16 @@ describe("review fixes (O7 fix round)", () => {
     expect(plan.lines.some((line) => line.id.startsWith("install_provider:ga4"))).toBe(true)
   })
 })
+
+ it.each(["required", "not_required"] as const)("shows banner instructions only for the selected %s mode", consentFlag => {
+  const plan = buildPlanModel(input({ consentFlag }))
+  expect(plan.lines.some(line => line.id === "user_action:banner_signal")).toBe(consentFlag === "required")
+  expect(plan.lines.some(line => line.text.includes("If you choose wait"))).toBe(false)
+ })
+
+it("does not call a browser conversion unwired when only its server job is unavailable", () => {
+  const plan = buildPlanModel(input({ scan: scanFacts({ serverLane: null }), candidates: [candidate("server_conversions", "lead"), candidate("conversions_to_tools", "lead")] }))
+  expect(plan.withheld).toContain("server_conversions:lead")
+  expect(plan.withheld).not.toContain("conversions_to_tools:lead")
+  expect(plan.lines.find(line => line.id === "user_action:conversions_unwired")?.text).toContain("Other conversion jobs shown in this plan can still run")
+})

@@ -454,7 +454,7 @@ describe("F1b: every plan line can be read in full in a short terminal", () => {
 
 describe("F11: ENTER never approves a plan line that was not on screen", () => {
   const needUser = PLAN_LINES
-  const defaultAnswer = { approved: PLAN_LINES.filter(line => line.requires === "info" && isRepositoryWork(line) || ["consent_mode", "conversion_names"].includes(line.kind)).map(line => line.id), declined: ["npm_install", "meta_relay"], edits: {} }
+  const defaultAnswer = { approved: PLAN_LINES.filter(line => line.requires === "info" && isRepositoryWork(line) || ["consent_mode", "conversion_names"].includes(line.kind)).map(line => line.id), declined: [], edits: {} }
 
   it("120×36: the first ENTER shows the next unread lines and says how many are left; it approves only after every line was shown", () => {
     const opened = drivePlan(120, 36, chosenPayload(), [])
@@ -513,7 +513,7 @@ describe("F11: ENTER never approves a plan line that was not on screen", () => {
     const toMeta = PLAN_LINES.findIndex((planLine) => planLine.id === "meta_relay")
     const keys: PlanKey[] = [...Array<PlanKey>(toMeta).fill("↓"), "space", "↓", "↓", "enter"]
     const run = drivePlan(80, 24, chosenPayload(), keys)
-    expect(run.answer).toEqual({ approved: [...defaultAnswer.approved, "meta_relay"], declined: ["npm_install"], edits: {} })
+    expect(run.answer).toEqual({ approved: [...defaultAnswer.approved, "meta_relay"], declined: [], edits: {} })
   })
 
   it("a fully shown plan continues on ENTER; unread work still needs to be shown", () => {

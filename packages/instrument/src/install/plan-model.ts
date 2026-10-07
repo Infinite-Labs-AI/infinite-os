@@ -141,6 +141,7 @@ export type GuardDecision =
 
 /** The plan model plus what `apply` needs (never shown, never hashed separately). */
 export interface WizardPlanModel extends PlanModel {
+  bannerSignal?: PlanLine
   scopedCandidates?: ChecklistItem[]
   approvalMode?: "shown_and_continued"
   ownerWiring?: OwnerWiringPreview
@@ -207,7 +208,7 @@ export const RUNNABILITY_TEXT = {
   claimWording: (host: string) =>
     `Infinite confirms ${host} is yours after your merge, from a one-line file this pull request adds (/.well-known/infinite-site-verification.txt). Until then it records nothing.`,
   conversionsUnwired: (names: readonly string[]) =>
-    `Conversions (${names.join(", ") || "none named"}): not wired in this run because their required browser helper or server lane is unavailable.`
+    `Some conversion work (${names.join(", ") || "none named"}) cannot run: the required browser helper or server lane is unavailable. Other conversion jobs shown in this plan can still run.`
 } as const
 
 /** The source is verified: an existing site source (not a pending claim), or a Vercel connection serving the host. */
@@ -1000,12 +1001,16 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   // R2-6: the consent line stays only when it governs something on THIS plan (see above).
   const consentGoverns = infiniteRecordable || helpersEmitted || lines.some((entry) => entry.kind === "capture_beside_adopted_pixel")
   if (!consentGoverns) lines.splice(lines.indexOf(consentLine), 1)
+  let bannerSignal: PlanLine | undefined
   if (consentGoverns) {
     const handoff = consentHandoff({ mode: "required", infinite: tools.includes("infinite") || scan.managedProviders.includes("infinite"), capture: scan.managedCapture?.canWire === true || tools.includes("meta") })
     // Keep the handoff visible when the decision is edited interactively after this plan was built.
     if (handoff) {
-      const firstOwner = lines.findIndex(entry => entry.requires === "user_action")
-      lines.splice(firstOwner < 0 ? lines.length : firstOwner, 0, line({ id: "user_action:banner_signal", kind: "user_action", requires: "user_action", text: `${consentProposed === "required" ? "" : "If you choose wait for my banner's yes: "}${handoff}` }))
+      bannerSignal = line({ id: "user_action:banner_signal", kind: "user_action", requires: "user_action", text: handoff })
+      if (consentProposed === "required") {
+        const firstOwner = lines.findIndex(entry => entry.requires === "user_action")
+        lines.splice(firstOwner < 0 ? lines.length : firstOwner, 0, bannerSignal)
+      }
     }
   }
 
@@ -1055,6 +1060,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     npmInstall
   }
   return {
+    bannerSignal,
     approvalMode: "shown_and_continued",
     ownerWiring: scan.ownerWiring,
     scopedCandidates: candidates,
@@ -1420,8 +1426,9 @@ export function withGuardHosts(items: readonly ChecklistItem[], guard: GuardDeci
 }
 
 /** `Installer.planAsk`: exactly the §3d.3 `plan` payload (strict PlanLine keys, no internals). */
-export function planAskPayload(plan: PlanModel): { lines: PlanLine[]; decisions: PlanModel["decisions"] } {
+export function planAskPayload(plan: PlanModel): { lines: PlanLine[]; decisions: PlanModel["decisions"]; bannerSignal?: PlanLine } {
   return {
+    bannerSignal: (plan as Partial<WizardPlanModel>).bannerSignal,
     lines: plan.lines.map((planLine) => ({
       id: planLine.id,
       kind: planLine.kind,
