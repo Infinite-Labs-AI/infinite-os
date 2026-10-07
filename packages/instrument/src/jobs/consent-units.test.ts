@@ -97,6 +97,26 @@ it.each([
   expect(restoreFrozenUnits(before, before.replace("revoke", "grant")).text).toBe(before)
 })
 
+it.each([
+  'export default function X() { return <div>{/* gtag("consent", "default", {}); */}</div> }',
+  'export default function X() { return <div>{ /* fbq("consent", "revoke"); */ }</div> }',
+  '<html><!-- gtag("consent", "default", {}); --><body>Hello</body></html>',
+  'export default function X() { /* fbq("consent", "revoke"); */ return <div />; }',
+])("does not freeze calls contained in proven complete markup comments", source => {
+  expect(sourceUnits(source).units.some(unit => unit.frozen)).toBe(false)
+  expect(restoreFrozenUnits(source, source.replace("revoke", "grant").replace("default", "update")).changes).toEqual([])
+})
+
+it.each([
+  '<html><script><!-- legacy line comment\nfbq("consent", "revoke");\n// --></script></html>',
+  'export default function X() { return <div>{/* docs */}<script>{`fbq("consent", "revoke");`}</script></div> }',
+  '<html><!-- docs --><script>fbq("consent", "revoke");</script></html>',
+  'export default function X() { return <div>{/* unclosed\nfbq("consent", "revoke");',
+])("retains live or uncertain calls after comment markers", before => {
+  expect(sourceUnits(before).units.some(unit => unit.frozen)).toBe(true)
+  expect(restoreFrozenUnits(before, before.replace("revoke", "grant")).text).toBe(before)
+})
+
 
 it.each([
   "window.fbq /* owner API */ = () => {};",
