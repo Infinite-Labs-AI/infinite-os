@@ -24,7 +24,11 @@ export interface OwnerBoundaryMeasurement {
 }
 const metadata = (path: string) => path.startsWith(".infinite/") || /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?)$/.test(path)
 
-export async function measureOwnerDiff(input: { root: string; baseSha: string; revision?: string; appRoot?: string }): Promise<OwnerBoundaryMeasurement> {
+export async function measureOwnerDiff(input: {
+  root: string; baseSha: string; revision?: string; appRoot?: string
+  /** Exact paths selected for the next commit; committed revisions always measure their full diff. */
+  paths?: readonly string[]
+}): Promise<OwnerBoundaryMeasurement> {
   const measurement: OwnerBoundaryMeasurement = { state: "not_checked", scope: input.revision ? "commit" : "working_tree", baseSha: input.baseSha, headSha: input.revision ?? "", files: [], issues: [] }
   const fail = (file: string, reason: string) => { measurement.issues.push({ file, reason }); return measurement }
   if (!/^[a-f0-9]{40}$/.test(input.baseSha) || (input.revision && !/^[a-f0-9]{40}$/.test(input.revision))) return fail("(git)", "the recorded base or commit is unavailable")
@@ -33,13 +37,18 @@ export async function measureOwnerDiff(input: { root: string; baseSha: string; r
   measurement.headSha = head.stdout.toString("utf8").trim()
   const base = await git(input.root, ["rev-parse", "--verify", `${input.baseSha}^{commit}`])
   if (base.code !== 0) return fail("(git)", "the recorded base could not be read")
-  const names = await git(input.root, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", input.baseSha, ...(input.revision ? [input.revision] : []), "--"])
-  if (names.code !== 0) return fail("(git)", "the final diff could not be read")
-  const paths = new Set(names.stdout.toString("utf8").split("\0").filter(Boolean))
-  if (!input.revision) {
-    const extra = await git(input.root, ["ls-files", "--others", "--exclude-standard", "-z"])
-    if (extra.code !== 0) return fail("(git)", "new files could not be read")
-    for (const path of extra.stdout.toString("utf8").split("\0").filter(Boolean)) paths.add(path)
+  const paths = new Set<string>()
+  if (!input.revision && input.paths !== undefined) {
+    for (const path of input.paths) paths.add(path)
+  } else {
+    const names = await git(input.root, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", input.baseSha, ...(input.revision ? [input.revision] : []), "--"])
+    if (names.code !== 0) return fail("(git)", "the final diff could not be read")
+    for (const path of names.stdout.toString("utf8").split("\0").filter(Boolean)) paths.add(path)
+    if (!input.revision) {
+      const extra = await git(input.root, ["ls-files", "--others", "--exclude-standard", "-z"])
+      if (extra.code !== 0) return fail("(git)", "new files could not be read")
+      for (const path of extra.stdout.toString("utf8").split("\0").filter(Boolean)) paths.add(path)
+    }
   }
   measurement.files = [...paths].sort()
   measurement.filesAvailable = true

@@ -5,6 +5,21 @@ import { expect, it } from "vitest"
 import { createGitFixture } from "../../test/wizard/git-fixture.js"
 import { measureOwnerDiff } from "./owner-diff.js"
 
+it("limits working-tree measurement to selected paths and keeps commit measurement complete", async () => {
+  const fx = createGitFixture({ files: { "src/ordinary.ts": "export const count = 1;\n", "assets/logo.png": "old image" } })
+  try {
+    const baseSha = fx.git(["rev-parse", "HEAD"]).trim()
+    fx.write("src/ordinary.ts", "export const count = 2;\n")
+    writeFileSync(join(fx.root, "assets/logo.png"), Buffer.from([0, 255, 128]))
+    expect(await measureOwnerDiff({ root: fx.root, baseSha, paths: ["src/ordinary.ts"] })).toMatchObject({ state: "checked", files: ["src/ordinary.ts"], issues: [] })
+    expect(await measureOwnerDiff({ root: fx.root, baseSha, paths: [] })).toMatchObject({ state: "checked", files: [], issues: [] })
+    expect(await measureOwnerDiff({ root: fx.root, baseSha, paths: ["assets/logo.png"] })).toMatchObject({ state: "not_checked", files: ["assets/logo.png"] })
+    fx.git(["add", "src/ordinary.ts", "assets/logo.png"]); fx.git(["commit", "-m", "binary and source fixture"])
+    const revision = fx.git(["rev-parse", "HEAD"]).trim()
+    expect(await measureOwnerDiff({ root: fx.root, baseSha, revision, paths: [] })).toMatchObject({ state: "not_checked", files: ["assets/logo.png", "src/ordinary.ts"] })
+  } finally { fx.cleanup() }
+})
+
 it.each([
   { name: "Latin-1", file: "legacy/about-us.html", bytes: Buffer.from("<p>caf\u00e9</p>", "latin1") },
   { name: "UTF-16", file: "notes/readme.md", bytes: Buffer.from("# Notes\n", "utf16le") },

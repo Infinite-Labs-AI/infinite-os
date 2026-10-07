@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { afterEach, expect, it } from "vitest"
 import { createGitFixture, type GitFixture } from "../../test/wizard/git-fixture.js"
@@ -29,6 +29,31 @@ it("refuses a dirty owner unit before committing and names the file", async () =
   const result = await stageAndCommit({ ...w, step: "rehearsal", runId: RUN_ID, message: "fixture", round: null, allowlist: [path], managed: [], npmFiles: [], connectionIds: [] })
   expect(result.kind).not.toBe("committed")
   expect(JSON.stringify(result)).toContain(path)
+  expect(await w.git.head()).toBe(w.baseSha)
+})
+it("commits only the selected wizard paths beside unrelated owner changes and binary files", async () => {
+  const w = await setup()
+  w.fx.write("assets/logo.png", "original image")
+  w.fx.git(["add", "assets/logo.png"]); w.fx.git(["commit", "-m", "owner image fixture"])
+  const files = [".DS_Store", "design/mock.png", "notes.docx", "assets/logo.png"]
+  const bytes = Buffer.from([0, 255, 128, 23])
+  for (const file of files) { w.fx.write(file, ""); writeFileSync(join(w.fx.root, file), bytes) }
+  w.fx.write("pages/privacy.tsx", "export default function Privacy() { return <p>Owner draft</p> }\n")
+  w.fx.write(path, source.replace("count = 1", "count = 2"))
+  const result = await stageAndCommit({ ...w, step: "rehearsal", runId: RUN_ID, message: "fixture", round: null, allowlist: [path], managed: [], npmFiles: [], connectionIds: [] })
+  expect(result).toMatchObject({ kind: "committed", staged: [path] })
+  expect(w.ctx.state.get().ownerBoundary).toMatchObject({ state: "checked", files: [path], issues: [] })
+  expect(w.fx.git(["show", "--name-only", "--format=", "HEAD"]).trim()).toBe(path)
+  for (const file of files) expect(readFileSync(join(w.fx.root, file))).toEqual(bytes)
+  expect(w.fx.git(["status", "--porcelain", "--", "assets/logo.png"])).toContain(" M assets/logo.png")
+  expect(readFileSync(join(w.fx.root, "pages/privacy.tsx"), "utf8")).toContain("Owner draft")
+})
+it("still refuses an unreadable file selected for the wizard commit", async () => {
+  const w = await setup()
+  w.fx.write("src/generated.ts", "")
+  writeFileSync(join(w.fx.root, "src/generated.ts"), Buffer.from([0, 255, 128]))
+  const result = await stageAndCommit({ ...w, step: "rehearsal", runId: RUN_ID, message: "fixture", round: null, allowlist: ["src/generated.ts"], managed: [], npmFiles: [], connectionIds: [] })
+  expect(result).toMatchObject({ kind: "refused", message: expect.stringContaining("src/generated.ts") })
   expect(await w.git.head()).toBe(w.baseSha)
 })
 it("refuses a recorded wizard commit that touched an owner unit before any push", async () => {

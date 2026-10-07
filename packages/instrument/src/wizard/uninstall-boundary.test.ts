@@ -1,4 +1,4 @@
-import { readFileSync, rmSync } from "node:fs"
+import { readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, expect, it } from "vitest"
 import { createGitFixture, installPreCommitHook, type GitFixture } from "../../test/wizard/git-fixture.js"
@@ -38,6 +38,30 @@ it("refuses an uninstall change to an owner unit before committing or pushing", 
   expect(result.lines.join("\n")).toContain(w.path)
   expect(await w.git.head()).toBe(base)
   expect(w.git.calls.some(args => args[0] === "push")).toBe(false)
+})
+
+it("measures only reversed files when unrelated owner changes appear during uninstall", async () => {
+  const w = await fixture()
+  w.fx.write("assets/logo.png", "original image")
+  w.fx.git(["add", "assets/logo.png"]); w.fx.git(["commit", "-m", "owner image fixture"])
+  w.fx.git(["push", "origin", "main"])
+  const files = [".DS_Store", "design/mock.png", "notes.docx", "assets/logo.png"]
+  const bytes = Buffer.from([0, 255, 128, 23])
+  const uninstall = w.bundle.deps.installer.uninstall
+  w.bundle.deps.installer.uninstall = async input => {
+    const result = await uninstall(input)
+    for (const file of files) { w.fx.write(file, ""); writeFileSync(join(w.fx.root, file), bytes) }
+    w.fx.write("pages/privacy.tsx", "export default function Privacy() { return <p>Owner draft</p> }\n")
+    return result
+  }
+  const result = await w.run()
+  expect(result.record?.ownerBoundary).toMatchObject({ state: "checked", files: [".infinite/install.json", w.path], issues: [] })
+  expect(result.record?.wizardCommits).toHaveLength(1)
+  expect(w.fx.remoteSha(result.record!.branch)).toBe(await w.git.head())
+  expect(w.fx.git(["show", "--name-only", "--format=", "HEAD"]).trim().split("\n").sort()).toEqual([".infinite/install.json", w.path])
+  for (const file of files) expect(readFileSync(join(w.fx.root, file))).toEqual(bytes)
+  expect(w.fx.git(["status", "--porcelain", "--", "assets/logo.png"])).toContain(" M assets/logo.png")
+  expect(readFileSync(join(w.fx.root, "pages/privacy.tsx"), "utf8")).toContain("Owner draft")
 })
 
 it.each(["working_tree", "commit"])("redacts env literals and neutralizes markup in %s boundary filenames", async scope => {

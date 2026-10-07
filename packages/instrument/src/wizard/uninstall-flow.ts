@@ -395,9 +395,10 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
   if (reversal.reversed.length === 0) {
     lines.push("Nothing in the code to reverse.")
   } else {
-    const working = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.state?.appRoot ?? ".", baseSha: await deps.git.head() })
+    const stagedPaths = [...new Set([...reversal.reversed, WIZARD_PATHS.installManifest])]
+    const working = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.state?.appRoot ?? ".", baseSha: await deps.git.head(), paths: stagedPaths })
     if (working.state !== "checked") return stop("INF_WIZ_PUSH_REFUSED", safeDisplayText(scanner, ownerBoundaryStop(working)), lines)
-    await deps.git.stage([...new Set([...reversal.reversed, WIZARD_PATHS.installManifest])])
+    await deps.git.stage(stagedPaths)
     const runId = ctx.state?.runId ?? null
     const committed = await deps.git.commit({ message: UNINSTALL_COMMIT_MESSAGE, trailers: runId ? { "Infinite-Tag-Run": runId } : {} })
     record.wizardCommits!.push(committed.sha)

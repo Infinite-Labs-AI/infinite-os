@@ -104,10 +104,6 @@ export async function stageAndCommit(input: CommitInput): Promise<CommitResult> 
   const { git, ctx } = input
   const parent = await git.head()
   await prepareCommitHistory(ctx, parent)
-  const boundary = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: parent })
-  ctx.state.update(state => { state.ownerBoundary = boundary })
-  await ctx.state.save()
-  if (boundary.state !== "checked") return { kind: "refused", message: safeDisplayText(input.scanner, ownerBoundaryStop(boundary)) }
   const allEntries = await git.statusEntries()
   let createdLockfiles: string[] = []
   try {
@@ -124,6 +120,10 @@ export async function stageAndCommit(input: CommitInput): Promise<CommitResult> 
   }
   const set = computeStageSet({ entries, allowlist: input.allowlist, managed: input.managed, npmFiles: input.npmFiles, gitignoreFenceOnly: fenceOnly })
   if (set.refusal) return { kind: "refused", message: set.refusal }
+  const boundary = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: parent, paths: set.stage })
+  ctx.state.update(state => { state.ownerBoundary = boundary })
+  await ctx.state.save()
+  if (boundary.state !== "checked") return { kind: "refused", message: safeDisplayText(input.scanner, ownerBoundaryStop(boundary)) }
   // Anything already in the index that is not ours comes out (the wizard commits only its own set).
   const strayStaged = entries.filter((entry) => entry.x !== " " && entry.x !== "?" && entry.x !== "!" && !set.stage.includes(entry.path)).map((entry) => entry.path)
   await git.unstage(strayStaged)
