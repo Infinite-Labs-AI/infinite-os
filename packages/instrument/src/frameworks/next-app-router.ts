@@ -3,7 +3,7 @@ import { join } from "node:path"
 
 import type { FrameworkAdapter } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
-import { ownerWiringRequirement } from "./owner-boundary.js"
+import { ownerWiringRequirement, policyWiringRequirement, policyUninstallWarning } from "./owner-boundary.js"
 import { recordGeneratedApi } from "../jobs/generated-api.js"
 import { upsertLayoutSource, CLIENT_IMPORT_LINE as clientImportLine, CLIENT_TAG as clientTag } from "./entry-wiring.js"
 
@@ -148,6 +148,8 @@ export const nextAppRouterAdapter: FrameworkAdapter = {
   },
   apply(context) {
     const appRoot = context.appRoot === "." ? context.root : join(context.root, context.appRoot)
+    const policy = policyWiringRequirement(normalizeAppRelativePath(context.appRoot, layoutFilePath), `${clientImportLine}\n\n${clientTag}`, context.appRoot)
+    if (policy) return { changedFiles: [], warnings: [policy.reason], requiresManual: [policy] }
     const currentLayout = readRequiredFile(appRoot, layoutFilePath)
     if (!currentLayout.includes("<body")) {
       throw new Error("Next.js App Router apply requires app/layout.tsx to render a <body> element.")
@@ -221,6 +223,8 @@ export const nextAppRouterAdapter: FrameworkAdapter = {
   },
   uninstall(context) {
     const appRoot = context.appRoot === "." ? context.root : join(context.root, context.appRoot)
+    const policyWarning = policyUninstallWarning(normalizeAppRelativePath(context.appRoot, layoutFilePath), context.appRoot)
+    if (policyWarning) return { removedFiles: [], restoredFiles: [], warnings: [policyWarning] }
     const removedFiles: string[] = []
     const restoredFiles: string[] = []
     const warnings: string[] = []

@@ -8,7 +8,7 @@
 // tarpit (comments, templates, type-only imports, aliases, lexical shadows), and index.html injection
 // has no entrypoint surface to get wrong.
 import { join } from "node:path"
-import { ownerWiringRequirement } from "./owner-boundary.js"
+import { ownerWiringRequirement, policyWiringRequirement, policyUninstallWarning } from "./owner-boundary.js"
 import { recordGeneratedApi } from "../jobs/generated-api.js"
 import { managedBlockFor } from "./entry-wiring.js"
 
@@ -134,6 +134,8 @@ export const viteReactAdapter: FrameworkAdapter = {
 
     const managedBlock = managedBlockFor(context.plan.instructions)
     const indexRootRelative = normalizeAppRelativePath(context.appRoot, INDEX_HTML)
+    const policy = policyWiringRequirement(indexRootRelative, managedBlock, context.appRoot)
+    if (policy) return { changedFiles: [], warnings: [policy.reason], requiresManual: [policy] }
 
     if (!fileExists(appRoot, INDEX_HTML)) {
       requiresManual.push({
@@ -195,6 +197,8 @@ export const viteReactAdapter: FrameworkAdapter = {
     const warnings: string[] = []
 
     const indexRootRelative = normalizeAppRelativePath(context.appRoot, INDEX_HTML)
+    const policyWarning = policyUninstallWarning(indexRootRelative, context.appRoot)
+    if (policyWarning) return { removedFiles: [], restoredFiles: [], warnings: [policyWarning] }
     if (context.manifest.files.includes(indexRootRelative)) {
       if (!fileExists(appRoot, INDEX_HTML)) {
         warnings.push(`Managed file already absent: ${indexRootRelative}`)

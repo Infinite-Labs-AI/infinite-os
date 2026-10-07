@@ -20,3 +20,8 @@ export function ownerWiringRequirement(path: string, before: string | null, afte
     reason: `Not changed by us: analytics wiring at ${path}:${unit.startLine} reaches code that handles consent, which is yours. Add the wiring yourself; the wizard left this code unchanged.`,
     ownerBoundary: { kind: "frozen_unit", file: path, line: unit.startLine, unitHash: unit.hash, lineOffset: 0, unitOrdinal: unit.ordinal } }
 }
+
+/** An old manifest is not permission to edit a policy page during uninstall. */
+export function policyUninstallWarning(path: string, appRoot = "."): string | null {
+  return isPolicyPath(path, appRoot) ? `Not removed automatically: ${path} is a policy page, which is yours. Remove the leftover analytics wiring yourself.` : null
+}

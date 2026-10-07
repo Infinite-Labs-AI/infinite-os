@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import type { InstallPlan, ManualRequirement } from "../types.js"
 import { upsertLayoutSource, upsertAppSource, managedBlockFor, staticManagedBlockFor } from "./entry-wiring.js"
-import { upsertManagedHtmlBlock } from "./managed-html.js"
+import { hasManagedHtmlBlock, upsertManagedHtmlBlock } from "./managed-html.js"
 import { normalizeAppRelativePath } from "./shared.js"
 import { ownerWiringRequirement, policyWiringRequirement } from "./owner-boundary.js"
 
@@ -27,11 +27,17 @@ export function previewOwnerWiring(input: { root: string; appRoot: string; frame
     if (policy) { result.requirements.push(policy); continue }
     if (!existsSync(join(app, relative))) { result.requirements.push({ path, snippet, reason: `The fixed entrypoint ${path} is missing.` }); continue }
     const before = readFileSync(join(app, relative), "utf8")
+    if (!input.framework.startsWith("next-") && !before.includes("</head>") && !(input.framework === "vite-react" && hasManagedHtmlBlock(before))) {
+      result.requirements.push({ path, snippet, reason: `${path} has no </head> to inject into.` }); continue
+    }
     let after: string
     try {
       after = input.framework === "next-app-router" ? upsertLayoutSource(before) : input.framework === "next-pages-router" ? upsertAppSource(before) : upsertManagedHtmlBlock(before, snippet)
     } catch {
       result.requirements.push({ path, snippet, reason: `The fixed entrypoint ${path} cannot take the planned wiring.` }); continue
+    }
+    if (!input.framework.startsWith("next-") && !after.includes(snippet)) {
+      result.requirements.push({ path, snippet, reason: `${path} has an incomplete managed block; add the wiring yourself.` }); continue
     }
     const requirement = ownerWiringRequirement(path, before, after, snippet, input.appRoot, input.framework.startsWith("next-") ? [] : [snippet])
     if (requirement) result.requirements.push(requirement)

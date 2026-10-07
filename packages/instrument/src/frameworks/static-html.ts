@@ -3,7 +3,7 @@ import { join } from "node:path"
 
 import type { FrameworkAdapter, InstallInstruction, ManualRequirement } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
-import { ownerWiringRequirement, policyWiringRequirement } from "./owner-boundary.js"
+import { ownerWiringRequirement, policyWiringRequirement, policyUninstallWarning } from "./owner-boundary.js"
 import { recordGeneratedApi } from "../jobs/generated-api.js"
 import { staticManagedBlockFor } from "./entry-wiring.js"
 
@@ -168,8 +168,12 @@ export const staticHtmlAdapter: FrameworkAdapter = {
       posthog: context.plan.artifacts.posthog?.proxy,
       infinite: infiniteProxySpec(context.plan.artifacts.infinite)
     }
-    if (proxy.posthog || proxy.infinite) {
-      const rootRelativeConfig = normalizeAppRelativePath(context.appRoot, VERCEL_CONFIG_FILE)
+    const rootRelativeConfig = normalizeAppRelativePath(context.appRoot, VERCEL_CONFIG_FILE)
+    const configPolicy = policyWiringRequirement(rootRelativeConfig, buildVercelJson(proxy), context.appRoot)
+    if ((proxy.posthog || proxy.infinite) && configPolicy) {
+      requiresManual.push(configPolicy)
+      warnings.push(configPolicy.reason)
+    } else if (proxy.posthog || proxy.infinite) {
       const appliedConfig = applyManagedVercelJson({
         appRootAbsolute: appRoot,
         proxy,
@@ -200,6 +204,8 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     const warnings: string[] = []
 
     for (const page of pages) {
+      const policyWarning = policyUninstallWarning(normalizeAppRelativePath(context.appRoot, page), context.appRoot)
+      if (policyWarning) { warnings.push(policyWarning); continue }
       if (!fileExists(appRoot, page)) {
         warnings.push(`Managed file already absent: ${page}`)
         continue
@@ -218,7 +224,8 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     }
 
     // Reverse the once-written vercel.json (outside the per-page loop).
-    const vercelReversal = reverseManagedVercelJson({
+    const configPolicyWarning = policyUninstallWarning(normalizeAppRelativePath(context.appRoot, VERCEL_CONFIG_FILE), context.appRoot)
+    const vercelReversal = configPolicyWarning ? { removedFiles: [], restoredFiles: [], warnings: [configPolicyWarning] } : reverseManagedVercelJson({
       manifestFiles: context.manifest.files,
       ownership:
         context.manifest.configOwnership?.[

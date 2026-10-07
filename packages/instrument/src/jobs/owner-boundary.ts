@@ -18,7 +18,9 @@ export function isPolicyPath(path: string, appRoot = "."): boolean {
   const workspace = /^(?:apps|packages)\/[^/]+/.exec(normalized)?.[0]
   if (workspace && appRoot === ".") roots.push(workspace)
   const route = roots.map(root => routePathOf(normalized, root)).find(value => value !== null)
-  return route !== undefined && route !== null && words(route).some(word => vocabulary.has(word))
+  // Keep the previous routed-page recognizer too: collapsed route spellings were
+  // already protected before source/content vocabulary widened the boundary.
+  return route !== undefined && route !== null && /(?:^|\/)(?:privacy(?:[-_]?(?:policy|notice))?|terms(?:[-_]?(?:of[-_]?(?:service|use)|conditions))?|cookies?[-_]?(?:policy|notice))(?:\/|$)/i.test(route)
 }
 
 /** Only the reviewer’s structured category labels owner choices; prose and paths never establish scope. */

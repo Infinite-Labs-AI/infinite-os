@@ -3,7 +3,7 @@ import { join } from "node:path"
 
 import type { FrameworkAdapter } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
-import { ownerWiringRequirement } from "./owner-boundary.js"
+import { ownerWiringRequirement, policyWiringRequirement, policyUninstallWarning } from "./owner-boundary.js"
 import { recordGeneratedApi } from "../jobs/generated-api.js"
 import { upsertAppSource, CLIENT_IMPORT_LINE as clientImportLine, CLIENT_TAG as clientTag } from "./entry-wiring.js"
 
@@ -127,6 +127,8 @@ export const nextPagesRouterAdapter: FrameworkAdapter = {
   },
   apply(context) {
     const appRoot = context.appRoot === "." ? context.root : join(context.root, context.appRoot)
+    const policy = policyWiringRequirement(normalizeAppRelativePath(context.appRoot, appFilePath), `${clientImportLine}\n\n${clientTag}`, context.appRoot)
+    if (policy) return { changedFiles: [], warnings: [policy.reason], requiresManual: [policy] }
     const currentApp = readRequiredFile(appRoot, appFilePath)
     if ((currentApp.match(/<Component\b[^>]*\/>/g) ?? []).length !== 1) {
       throw new Error(
@@ -202,6 +204,8 @@ export const nextPagesRouterAdapter: FrameworkAdapter = {
   },
   uninstall(context) {
     const appRoot = context.appRoot === "." ? context.root : join(context.root, context.appRoot)
+    const policyWarning = policyUninstallWarning(normalizeAppRelativePath(context.appRoot, appFilePath), context.appRoot)
+    if (policyWarning) return { removedFiles: [], restoredFiles: [], warnings: [policyWarning] }
     const removedFiles: string[] = []
     const restoredFiles: string[] = []
     const warnings: string[] = []
