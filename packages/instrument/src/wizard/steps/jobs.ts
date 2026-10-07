@@ -173,7 +173,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   if (outcome.kind === "ok") {
     const reanchored = await reanchorOwnerLocations(ctx.root, ctx.state.get().jobs)
     ctx.state.update(state => { state.jobs = reanchored })
-    const measured = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: ctx.state.get().git?.baseSha ?? "" })
+    const measured = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: await deps.git.head() })
     ctx.state.update(state => { state.ownerBoundary = measured })
     await ctx.state.save()
   }

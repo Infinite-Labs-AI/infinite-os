@@ -1,4 +1,4 @@
-import { measureOwnerDiff, ownerBoundaryStop } from "../jobs/owner-diff.js"
+import { measureOwnerDiff, measureWizardCommits, unrecordedCommits, ownerBoundaryStop } from "../jobs/owner-diff.js"
 import { gitlabMergeRequestPushOptions } from "../git/push.js"
 // Commit → push → PR (lane O4, §3g.1–§3g.3), shared by the `rehearsal` step (the first commit) and the
 // `review` step (fix rounds). Every commit is scanned (§3g.5) before it is made; a hit unstages that file and
@@ -100,7 +100,7 @@ async function gateStaged(input: CommitInput): Promise<string[]> {
 /** §3g.1: stage exactly the allowed set, scan it, commit with the run trailer. */
 export async function stageAndCommit(input: CommitInput): Promise<CommitResult> {
   const { git, ctx } = input
-  const boundary = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: ctx.state.get().git?.baseSha ?? "" })
+  const boundary = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: await git.head() })
   ctx.state.update(state => { state.ownerBoundary = boundary })
   await ctx.state.save()
   if (boundary.state !== "checked") return { kind: "refused", message: ownerBoundaryStop(boundary) }
@@ -150,6 +150,7 @@ export async function stageAndCommit(input: CommitInput): Promise<CommitResult> 
   try {
     const committed = await git.commit({ message: input.message, trailers })
     sha = committed.sha
+    await recordWizardCommit(ctx, sha)
     hookRewrote = committed.hookRewrote
   } catch (error) {
     if (!(error instanceof GitCommitError)) return { kind: "failed", message: error instanceof Error ? error.message : String(error) }
@@ -164,6 +165,7 @@ export async function stageAndCommit(input: CommitInput): Promise<CommitResult> 
       const handed = await handOverCommit(input, trailers)
       if (handed === null) return { kind: "failed", message: "Signing the commit needs your terminal, and the hand-over did not finish." }
       sha = handed
+      await recordWizardCommit(ctx, sha)
     } else {
       return { kind: "failed", message: `git commit failed: ${input.scanner.redact(error.stderr).text.slice(0, 500)}` }
     }
@@ -191,10 +193,17 @@ export async function stageAndCommit(input: CommitInput): Promise<CommitResult> 
       await git.stage([INSTALL_MANIFEST_PATH])
       const follow = await git.commit({ message: RECEIPT_REFRESH_COMMIT_MESSAGE, trailers: { [COMMIT_TRAILERS.run]: input.runId } })
       receiptRefreshSha = follow.sha
+      await recordWizardCommit(ctx, follow.sha)
       sha = follow.sha
     }
   }
   return { kind: "committed", sha, staged: committed, leftOut: set.leftOut, blocked, receiptRefreshSha }
+}
+
+async function recordWizardCommit(ctx: WizardContext, sha: string): Promise<void> {
+  if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error("The wizard commit did not return a full SHA")
+  ctx.state.update(state => { state.wizardCommits = [...new Set([...(state.wizardCommits ?? []), sha])] })
+  await ctx.state.save()
 }
 
 /** Writes the commit message (with the run trailers) to `.infinite/wizard/commit-message.txt`; returns the command. */
@@ -235,22 +244,37 @@ export async function pushBranch(input: {
 }): Promise<PushResult> {
   const { ctx, git } = input
   const measuredSha = await git.head()
-  const boundary = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: ctx.state.get().git?.baseSha ?? "", revision: measuredSha })
+  const state = ctx.state.get()
+  const boundary = await measureWizardCommits({ root: ctx.root, appRoot: ctx.appRoot, baseSha: state.git?.baseSha ?? "", headSha: measuredSha, wizardCommits: state.wizardCommits ?? [] })
   ctx.state.update(state => { state.ownerBoundary = boundary })
   await ctx.state.save()
   if (boundary.state !== "checked") return { kind: "failed", message: ownerBoundaryStop(boundary) }
+  const foreign = await unrecordedCommits({ root: ctx.root, baseSha: state.git?.baseSha ?? "", headSha: measuredSha, wizardCommits: state.wizardCommits ?? [], approvedForeignCommits: state.approvedForeignCommits ?? [] })
+  if (foreign === null) return { kind: "failed", message: "Nothing pushed: the commits outside the wizard's record could not be listed." }
+  if (foreign.length > 0) {
+    const list = foreign.map(commit => `${commit.sha.slice(0, 12)} ${input.scanner.redact(commit.subject).text}`).join("\n")
+    if (await ctx.ask("confirm", { question: `These commits are not in this wizard's own commit record and would be pushed:\n${list}\nPush these owner commits to the recorded branch?`, defaultYes: false }) !== true) return { kind: "failed", message: "The additional commits were not approved for push. They remain local." }
+    if (await git.head() !== measuredSha) return { kind: "failed", message: "The branch changed while approving the push. Run again to review its current commits." }
+    ctx.state.update(draft => { draft.approvedForeignCommits = [...new Set([...(draft.approvedForeignCommits ?? []), ...foreign.map(commit => commit.sha)])] })
+    await ctx.state.save()
+  }
+  const pushed = async (mergeRequestOpened: boolean): Promise<PushResult> => {
+    ctx.state.update(draft => { draft.lastPush = { sha: measuredSha, at: ctx.now().toISOString() } })
+    await ctx.state.save()
+    return { kind: "pushed", mergeRequestOpened }
+  }
   const attempt = async (): Promise<void> => git.push(input.branch, measuredSha)
   try {
     if (input.hostKind === "gitlab") {
       try {
         await git.pushWithOptions(input.branch, gitlabMergeRequestPushOptions(input.base, input.title), measuredSha)
-        return { kind: "pushed", mergeRequestOpened: true }
+        return await pushed(true)
       } catch {
         // GitLab refused the push options: push plainly and print the link.
       }
     }
     await attempt()
-    return { kind: "pushed", mergeRequestOpened: false }
+    return await pushed(false)
   } catch (error) {
     if (!(error instanceof GitPushError)) return { kind: "failed", message: error instanceof Error ? error.message : String(error) }
     if (error.kind === "ssh_passphrase") {
@@ -259,7 +283,7 @@ export async function pushBranch(input: {
       const answer = await ctx.ask("tty-handover", { reason: "ssh", command: git.pushCommand?.(input.branch, measuredSha) ?? `git push -u origin ${measuredSha}:refs/heads/${input.branch}` })
       git.setTtyHandedOver(false)
       ctx.emit.emit("tty.resume", {})
-      if (typeof answer === "object" && answer.exitCode === 0) return { kind: "pushed", mergeRequestOpened: false }
+      if (typeof answer === "object" && answer.exitCode === 0) return await pushed(false)
       return { kind: "failed", message: "The push needs your SSH key, and the hand-over did not finish." }
     }
     return { kind: "failed", message: `git push was refused: ${input.scanner.redact(error.stderr).text.trim().slice(0, 600)}` }

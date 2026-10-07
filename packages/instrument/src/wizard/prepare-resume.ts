@@ -65,13 +65,7 @@ export async function prepareResume(ctx: WizardContext, deps: WizardDeps): Promi
     // A user's merge/pull may advance HEAD while retaining the refresh commit. Continue from that
     // descendant instead of requiring equality with the pre-pull commit forever.
     if (pending.sha !== head) {
-      if (!ship.git.commitsBetween) return park("Cannot list the commits added after the wizard refresh. Review and push them yourself before resuming.")
-      const otherCommits = (await ship.git.commitsBetween(pending.sha, head)).filter(commit => commit.runId !== ship.runId)
-      if (otherCommits.length > 0) {
-        const list = otherCommits.map(commit => `${commit.sha.slice(0, 12)} ${ship.scanner.redact(commit.subject).text}`).join("\n")
-        if (await ctx.ask("confirm", { question: `These commits were not created by this wizard and would be pushed with the refresh:\n${list}\nPush these commits to the recorded branch?`, defaultYes: false }) !== true) return park("The additional commits were not approved for push. They remain local; review them before resuming.")
-        if (await ship.git.head() !== head) return park("The branch changed while approving the push. Run again to review its current commits.")
-      }
+      // pushBranch checks every unrecorded commit against the run's SHA record and asks there.
       pending = { ...pending, sha: head }
       await deps.fs.writeTextAtomic(pendingPath, JSON.stringify(pending), 0o600)
     }

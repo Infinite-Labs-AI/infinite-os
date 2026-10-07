@@ -10,34 +10,37 @@ const fixtures: GitFixture[] = []
 afterEach(() => { while (fixtures.length) fixtures.pop()!.cleanup() })
 const path = "src/tracking.ts"
 const source = 'export function boot() {\n  fbq?.("consent", "revoke");\n}\nexport const count = 1;\n'
-async function setup() {
+async function setup(approveForeign = false) {
   const fx = createGitFixture({ files: { [path]: source, ".gitignore": ".infinite/\n" } }); fixtures.push(fx)
   const git = createGitOps({ cwd: fx.root, env: fx.env })
   const branch = "infinite/tag/owner-proof"
   const { baseSha } = await git.createBranch("main", branch)
-  const ctx = testContext({ root: fx.root, state: initialState({ git: { base: "main", baseSource: "vercel", baseSha, headSha: baseSha, branch }, jobs: [] }) })
+  const ctx = testContext({ root: fx.root, state: initialState({ git: { base: "main", baseSource: "vercel", baseSha, headSha: baseSha, branch }, jobs: [] }), answers: { confirm: approveForeign } })
   const deps = testDeps({ bridge: fakeBridge(), agents: {} as never, git, host: { kind: "github" } as never })
   const scanner = createScanner({ literals: [], allowedIds: [] })
   const push = () => pushBranch({ ctx, deps, git, scanner, branch, base: "main", title: "Fixture", hostKind: "github" })
   return { fx, git, ctx, deps, scanner, branch, baseSha, push }
 }
-it("R7 refuses a dirty owner unit before committing and names the file", async () => {
+it("refuses a dirty owner unit before committing and names the file", async () => {
   const w = await setup(); w.fx.write(path, source.replace('  fbq', '  return;\n  fbq'))
   const result = await stageAndCommit({ ...w, step: "rehearsal", runId: RUN_ID, message: "fixture", round: null, allowlist: [path], managed: [], npmFiles: [], connectionIds: [] })
   expect(result.kind).not.toBe("committed")
   expect(JSON.stringify(result)).toContain(path)
   expect(await w.git.head()).toBe(w.baseSha)
 })
-it("R7 refuses an already committed owner edit before any push", async () => {
+it("refuses a recorded wizard commit that touched an owner unit before any push", async () => {
   const w = await setup(); w.fx.write(path, source.replace('  fbq', '  return;\n  fbq'))
   w.fx.git(["add", path]); w.fx.git(["commit", "-m", "owner change fixture"])
+  const sha = await w.git.head()
+  w.ctx.state.update(state => { state.wizardCommits = [sha] })
   expect(await w.push()).toMatchObject({ kind: "failed", message: expect.stringContaining(path) })
   expect(w.fx.remoteSha(w.branch)).toBeNull()
 })
-it("R7 pushes the measured neighbor edit, not a newer unmeasured branch head", async () => {
+it("pushes the measured neighbor edit, not a newer unmeasured branch head", async () => {
   const w = await setup(); w.fx.write(path, source.replace('count = 1', 'count = 2'))
   w.fx.git(["add", path]); w.fx.git(["commit", "-m", "neighbor fixture"])
   const measured = await w.git.head()
+  w.ctx.state.update(state => { state.wizardCommits = [measured] })
   const push = w.git.push.bind(w.git)
   w.git.push = async (branch, sha) => {
     w.fx.write(path, source.replace('  fbq', '  return;\n  fbq'))
@@ -48,11 +51,51 @@ it("R7 pushes the measured neighbor edit, not a newer unmeasured branch head", a
   expect(w.fx.remoteSha(w.branch)).toBe(measured)
   expect(await w.git.head()).not.toBe(measured)
 })
-it("R7 pins the SSH handover command to the measured commit", async () => {
+it("pins the SSH handover command to the measured commit", async () => {
   const w = await setup()
   const measured = await w.git.head()
   w.git.push = async () => { throw new GitPushError("ssh_passphrase", "fixture SSH key locked") }
   expect(await w.push()).toMatchObject({ kind: "failed" })
   const handover = w.ctx.asks.find(ask => ask.kind === "tty-handover")
   expect(JSON.stringify(handover)).toContain(`${measured}:refs/heads/${w.branch}`)
+})
+
+it("allows an explicitly approved owner consent commit between recorded wizard commits", async () => {
+  const w = await setup(true)
+  w.fx.write(path, source.replace("count = 1", "count = 2"))
+  w.fx.git(["add", path]); w.fx.git(["commit", "-m", "first wizard fixture"])
+  const first = await w.git.head()
+  const ownerSource = source.replace('"revoke"', '"grant"').replace("count = 1", "count = 2")
+  w.fx.write(path, ownerSource)
+  w.fx.git(["add", path]); w.fx.git(["commit", "-m", "owner handoff fixture"])
+  const owner = await w.git.head()
+  w.fx.write(path, ownerSource.replace("count = 2", "count = 3"))
+  w.fx.git(["add", path]); w.fx.git(["commit", "-m", "second wizard fixture"])
+  const second = await w.git.head()
+  w.ctx.state.update(state => Object.assign(state, { wizardCommits: [first, second] }))
+  expect(await w.push()).toMatchObject({ kind: "pushed" })
+  expect(w.ctx.asks.find(ask => ask.kind === "confirm")?.payload).toMatchObject({ question: expect.stringContaining(owner.slice(0, 12)) })
+  expect(w.fx.remoteSha(w.branch)).toBe(second)
+  expect(w.ctx.state.get().ownerBoundary?.wizardCommits).toEqual([first, second])
+  expect(w.ctx.state.get().lastPush?.sha).toBe(second)
+})
+
+it("records its own commit SHA while allowing a committed owner handoff as the working baseline", async () => {
+  const w = await setup(true)
+  const ownerSource = source.replace('"revoke"', '"grant"')
+  w.fx.write(path, ownerSource)
+  w.fx.git(["add", path]); w.fx.git(["commit", "-m", "owner handoff fixture"])
+  w.fx.write(path, ownerSource.replace("count = 1", "count = 2"))
+  const result = await stageAndCommit({ ...w, step: "rehearsal", runId: RUN_ID, message: "wizard fixture", round: null, allowlist: [path], managed: [], npmFiles: [], connectionIds: [] })
+  expect(result.kind).toBe("committed")
+  expect(w.ctx.state.get().wizardCommits).toEqual([await w.git.head()])
+  expect(await w.push()).toMatchObject({ kind: "pushed" })
+})
+
+it("requires approval for unrecorded commits on every push, even with a forged run trailer", async () => {
+  const w = await setup(false)
+  w.fx.write(path, source.replace("count = 1", "count = 2"))
+  w.fx.git(["add", path]); w.fx.git(["commit", "-m", `owner fixture\n\nInfinite-Tag-Run: ${RUN_ID}`])
+  expect(await w.push()).toMatchObject({ kind: "failed", message: expect.stringContaining("not approved") })
+  expect(w.fx.remoteSha(w.branch)).toBeNull()
 })

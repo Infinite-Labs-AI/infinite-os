@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { MERGE_SHA, RUN_ID, fakeDeps, prSummary } from "../../test/wizard/runtime-fakes.js"
 import { ASK_TIMEOUT, type AskKind } from "./contracts/asks.js"
@@ -9,6 +9,16 @@ import type { AskFn } from "./contracts/deps.js"
 import { nodeWizardFs } from "./fs.js"
 import { createRunState } from "./run-state.js"
 import { UNINSTALL_PIECES, UNINSTALL_RECORD_PATH, runUninstallFlow, type UninstallPiece } from "./uninstall-flow.js"
+
+// These workflow tests use a fake GitOps, so its measurement is fake too. Actual Git history,
+// protected-source refusal and pinned GitHub/GitLab pushes run in uninstall-boundary.test.ts.
+vi.mock("../jobs/owner-diff.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../jobs/owner-diff.js")>()
+  return { ...actual,
+    measureOwnerDiff: async (input: { baseSha: string }) => ({ state: "checked", scope: "working_tree", baseSha: input.baseSha, headSha: input.baseSha, files: [], issues: [] }),
+    measureWizardCommits: async (input: { baseSha: string; headSha: string; wizardCommits: string[] }) => ({ state: "checked", scope: "commit", baseSha: input.baseSha, headSha: input.headSha, wizardCommits: input.wizardCommits, files: [], issues: [] }),
+    unrecordedCommits: async () => [] }
+})
 
 const roots: string[] = []
 function tempRoot(): string {

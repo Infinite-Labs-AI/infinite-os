@@ -44,7 +44,7 @@ it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pul
   }
   const ctx = testContext({ root: fx.root, answers: { confirm: payload => {
     expect(payload.question).toContain("remote advance fixture")
-    expect(payload.question).toContain("not created by this wizard")
+    expect(payload.question).toContain("own commit record")
     return mode !== "push_retry_pull_decline"
   } }, state: initialState({ root: fx.root, git: { base: "main", baseSource: "vercel", baseSha, headSha: baseSha, branch }, pr: { host: "github", number: pr.number, url: pr.url, nodeId: pr.nodeId, isDraft: true, round: 1, reviewedSha: baseSha, handledThreadIds: [], mergeSha: null } }) })
   ctx.state.update(state => {

@@ -309,11 +309,11 @@ describe("remotes and other hosts", () => {
     expect(hostLinkFor("gitlab", gitlab, "main", "infinite/tag/x")).toMatch(/^https:\/\/gitlab\.com\/acme\/store\/-\/merge_requests\/new\?/)
   })
 
-  it("GitLab opens the merge request with push options; every other method is unsupported", async () => {
+  it("GitLab adapter never performs a hidden push outside the measured shipping boundary", async () => {
     const pushes: Array<{ branch: string; options: readonly string[] }> = []
     const gitlab = createGitLabAdapter({ pushWithOptions: async (branch, options) => void pushes.push({ branch, options }) })
     expect(await gitlab.createDraftPr({ base: "main", head: "infinite/tag/x", title: "t", bodyFile: "f" })).toEqual({ unsupported: true })
-    expect(pushes[0]!.options).toEqual(["merge_request.create", "merge_request.target=main", "merge_request.draft", "merge_request.title=t"])
+    expect(pushes).toEqual([])
     expect(await gitlab.postReview(1, { headSha: SHA, body: "b", threads: [] })).toEqual({ unsupported: true })
     expect(await createBitbucketAdapter().findPr("x")).toEqual({ unsupported: true })
   })
