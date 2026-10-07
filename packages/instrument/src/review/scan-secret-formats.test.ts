@@ -23,6 +23,14 @@ const CASES = [
   ["PostHog personal", "phx_" + TOKEN],
   ["Meta", "EAA" + TOKEN],
   ["AWS secret access key", TOKEN + "/+xQ5R2Z", "AWS_SECRET_ACCESS_KEY="],
+  ["AWS credentials file key", TOKEN + "/+xQ5R2Z", "aws_secret_access_key = "],
+  ["base64 secret", TOKEN + "/+part==", "NEXTAUTH_SECRET="],
+  ["dotted secret", TOKEN + "." + TOKEN, 'NEXTAUTH_SECRET="', '"'],
+  ["camelCase secret name", TOKEN, 'stripeSecretKey = "', '"'],
+  ["camelCase JSON API key", TOKEN, '"apiKey": "', '"'],
+  ["lowercase secret name", TOKEN, "secret_key: "],
+  ["lowercase password name", TOKEN, "db_password="],
+  ["API key header", TOKEN + "/+part==", "x-api-key: "],
   ["generic key", TOKEN + "_newVendor", "API_KEY: "],
   ["generic JSON key", TOKEN, '"SERVICE_TOKEN": "', '"'],
   ["generic YAML key", TOKEN + "_-", "SERVICE_API_KEY: "],
@@ -124,13 +132,18 @@ it("does not mistake quoted configuration instructions for a credential token", 
   expect(scanner.findInCommit([{ path: "docs/config.ts", added: [{ line: 1, text: prose }] }], () => false)).toEqual([])
 })
 
-it("excludes dotted/path values and camelCase values without inferring source semantics", () => {
+it("preserves unquoted source expressions without exempting quoted secret values", () => {
   const scanner = createScanner({ literals: [], allowedIds: [] })
   for (const value of ["session.metadata.infinite_visit_key", "payload.analytics.visit_key", "request.headers.authorization", "process.env.SYNTHETIC_SERVICE_API_KEY", "config.providers.stripe2.publishableKeyV2", "createWebhookSignatureVerifier"]) {
     for (const quote of ["", '"', "'"]) {
       const text = `API_KEY: ${quote}${value}${quote}`
-      expect(scanner.redact(text)).toEqual({ text, hits: [] })
-      expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text }] }], () => false)).toEqual([])
+      if (quote === "") {
+        expect(scanner.redact(text)).toEqual({ text, hits: [] })
+        expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text }] }], () => false)).toEqual([])
+      } else {
+        expect(scanner.redact(text).text).toBe(`API_KEY: ${quote}[redacted: generic_secret]${quote}`)
+        expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text }] }], () => false)).toEqual([{ kind: "generic_secret", file: "src/outcome.ts", line: 1 }])
+      }
     }
   }
 })
@@ -139,7 +152,7 @@ const MISSED_FORMATS = [
   ["SendGrid", "SG." + TOKEN + "." + TOKEN],
   ["npm", "npm_" + TOKEN],
   ["Vercel", "vcp_" + TOKEN],
-  ["Resend", "re_" + TOKEN],
+  ["Resend", ["re", TOKEN.slice(0, 8), TOKEN.slice(8)].join("_")],
   ["bare bearer", "Bearer " + TOKEN],
   ["Slack webhook", "https://hooks.slack.com/services/TESTTEAM/TESTCHANNEL/" + TOKEN],
   ["Discord webhook", "https://discord.com/api/webhooks/123456789012345678/" + TOKEN],
@@ -150,7 +163,7 @@ const MISSED_FORMATS = [
   ["password hex", "SERVICE_PASSWORD=" + "c3".repeat(16)],
   ["private key hex", "PRIVATE_KEY=" + "d4".repeat(16)],
   ["API key hex", "SERVICE_API_KEY=" + "e5".repeat(16)],
-  ["short assigned token", "SERVICE_TOKEN=01234567"],
+  ["short assigned token", "SERVICE_TOKEN=a1b2c3d4"],
   ["headerless private key", "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ" + TOKEN + "\n" + TOKEN + "==\n-----END PRIVATE KEY-----"]
 ] as const
 const PUBLIC_ANON_JWT = ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJyb2xlIjoiYW5vbiJ9", TOKEN].join(".")
@@ -164,8 +177,6 @@ const ORDINARY_TEXT = [
   "cache key " + "9a5d83b6c2f407e1".repeat(2),
   "idempotency key: 2b26a7b8-e893-4771-a2b5-7de428305c11",
   "receiptKey: " + "9a5d83b6c2f407e1".repeat(2),
-  "SESSION_KEY=" + "d4".repeat(16),
-  "password: must-be-at-least-twelve-characters-long",
   "git@github.com:org/repo.git",
   "customer id 1234567890",
   "timestamp 1791300000000",

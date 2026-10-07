@@ -118,10 +118,19 @@ may have no Vercel preview; when no preview appears, the rehearsal reports those
 measured. `--yes` cannot authorize creation of a fork.
 
 Report redaction checks known credential formats and configured secret values before escaping or
-truncating text. Its generic rule matches uppercase assignment names containing `SECRET`, `TOKEN`,
-`PASSWORD`, `PASSWD`, `PRIVATE_KEY`, `API_KEY` or `AUTH`, including quoted JSON and YAML keys. Values must be single tokens of at least eight characters, without slashes, dots,
-whitespace or a camelCase identifier shape. `NEXT_PUBLIC_`, `VITE_` and `PUBLIC_` assignments are exempt
-from this generic rule. It does not infer secrets from prose or mask phone-like numbers.
+truncating text and before storing job check reasons. Its generic rule splits assignment names into
+underscore or camelCase words, case-insensitively: `secret`, `token`, `password`, `passwd`, `apikey`,
+`api_key`, `privatekey`, `private_key` and `auth` identify secret values, as do `SESSION_KEY`,
+`ENCRYPTION_KEY`, `SIGNING_KEY`, `MASTER_KEY` (with optional underscore prefixes), and `x-api-key` headers.
+A later `NAME`, `PATH`, `URL`, `PROVIDER`, `EXPIRY`, `TTL`, `ALGORITHM`, `HEADER` or `TYPE` word makes
+that name a setting. Values need at least eight characters and no whitespace; base64/base64url
+characters and dots are accepted. Placeholders (`changeme`, `<…>`, `${…}`, four or more `x` characters,
+`your_api_key_here`), numbers and booleans are preserved. Unquoted member expressions, camelCase
+identifiers and JavaScript/TypeScript source paths are preserved; quoted named values are literals.
+URL passwords are redacted for every scheme; URLs without credentials are preserved. `NEXT_PUBLIC_`,
+`VITE_` and `PUBLIC_` assignments, known public IDs and provider publishable keys are exempt from the
+generic rule. Public PEM keys and certificates are preserved. The scanner does not infer secrets
+from prose or mask phone-like numbers.
 Unnamed or unrecognised credentials may not be identified; review the changed files locally.
 
 Exit codes: `0` done · `1` failed · `2` usage or environment · `3` parked (resume with

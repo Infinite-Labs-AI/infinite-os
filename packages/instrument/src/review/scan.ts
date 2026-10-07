@@ -4,7 +4,7 @@
 //
 // - Literal values: the repo's `.env*` values (≥ 8 chars; read by the wizard only), the bridge token, the MCP
 //   token, and any `Authorization` value seen.
-// - Shapes: Stripe, GitHub, Slack, AWS, Google API keys, PEM blocks, JWTs (the desktop bearer is one), PostHog
+// - Shapes: Stripe, GitHub, Slack, AWS, Google API keys, private PEM blocks, JWTs (the desktop bearer is one), PostHog
 //   personal keys, Meta access tokens.
 // - Paths: `.growth-os` and `Application Support/Infinite`.
 // - Emails (except noreply / example.*) are redacted; phone-like numbers are ordinary data.
@@ -62,7 +62,7 @@ export interface ScannerOptions {
 }
 
 const SHAPES: ReadonlyArray<{ kind: ScanKind; pattern: RegExp; postOnly?: true }> = [
-  { kind: "private_key", pattern: /-----BEGIN [A-Z0-9 ]*-----[\s\S]*?(?:-----END [A-Z0-9 ]*-----|$)/g },
+  { kind: "private_key", pattern: /-----BEGIN ((?:[A-Z0-9]+ )*PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/g },
   // A remaining PRIVATE KEY footer identifies a body even if its BEGIN line was cut.
   { kind: "private_key", pattern: /(?:[A-Za-z0-9+/=]{16,}\r?\n)+-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----/g },
   { kind: "private_key", pattern: /\bMII[A-Za-z0-9+/]{40,}={0,2}(?:\r?\n[A-Za-z0-9+/]{32,}={0,2})*/g },
@@ -75,26 +75,34 @@ const SHAPES: ReadonlyArray<{ kind: ScanKind; pattern: RegExp; postOnly?: true }
   { kind: "sendgrid_key", pattern: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g },
   { kind: "npm_token", pattern: /\bnpm_[A-Za-z0-9]{16,}/g },
   { kind: "vercel_token", pattern: /\bvcp_[A-Za-z0-9_-]{16,}/g },
-  { kind: "resend_key", pattern: /\bre_[A-Za-z0-9]{16,}/g },
+  // Resend's create-key response documents an 8-character id and a 24-character secret.
+  // https://resend.com/docs/api-reference/api-keys/create-api-key
+  { kind: "resend_key", pattern: /\bre_[A-Za-z0-9]{8}_[A-Za-z0-9]{24}\b/g },
   { kind: "webhook_url", pattern: /https:\/\/hooks\.slack\.com\/services\/[^\s/"'`<>]+\/[^\s/"'`<>]+\/[^\s"'`<>]+/g },
   { kind: "webhook_url", pattern: /https:\/\/(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/[^\s"'`<>]+/g },
   { kind: "aws_key", pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
-  { kind: "aws_key", pattern: /\bAWS_SECRET_ACCESS_KEY["']?\s*[:=]\s*["']?[A-Za-z0-9/+=]{40}/g },
   { kind: "google_api_key", pattern: /\bAIza[0-9A-Za-z_-]{35}/g },
   { kind: "jwt", pattern: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g },
   { kind: "posthog_personal_key", pattern: /\bphx_[A-Za-z0-9]{20,}/g },
   { kind: "meta_token", pattern: /\bEAA[A-Za-z0-9]{20,}/g },
-  { kind: "authorization", pattern: /\bBearer\s+[A-Za-z0-9._~+\/-]{8,}={0,2}/g },
+  { kind: "authorization", pattern: /\bBearer\s+(?!authentication\b)[A-Za-z0-9._~+\/-]{8,}={0,2}/g },
   { kind: "authorization", pattern: /\bAuthorization\b\s*["']?\s*[:=]\s*["']?(?:Bearer\s+|Basic\s+|token\s+)?[^\s"'`,;]{6,}/gi, postOnly: true },
   { kind: "private_path", pattern: /[^\s"'`()<>]*\.growth-os[^\s"'`()<>]*/g },
   { kind: "private_path", pattern: /(?:[~/][^\s"'`()<>]*)?Application Support\/Infinite[^\s"'`()<>]*/g }
 ]
 
-/** Assignment syntax only. Prose, camelCase keys and generic words do not grant secret status. */
-const ASSIGNMENT = /\b([A-Za-z0-9_]+)(["']?\s*[:=]\s*)(?:(["'`])([^"'`\r\n]*)(?:\3|(?=\r?\n|$))|([^\s"'`<>,;()[\]{}]+))/g
-const SECRET_NAME = /^[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|AUTH)[A-Z0-9_]*$/
+/** Assignment syntax only; secret names are whole underscore/camelCase words. */
+const ASSIGNMENT = /\b([A-Za-z0-9_-]+)(["']?\s*[:=]\s*)(?:(["'`])([^"'`\r\n]*)(?:\3|(?=\r?\n|$))|([^\s"'`<>,;()[\]{}]+))/g
+const SECRET_WORD = /^(?:secret|token|password|passwd|apikey|privatekey|auth)$/
+const NON_SECRET_QUALIFIER = /^(?:name|path|url|provider|expiry|ttl|algorithm|header|type)$/
+const SECRET_KEY_WORD = /^(?:api|session|encryption|signing|master|private)$/
 const PUBLIC_NAME = /^(?:NEXT_PUBLIC_|VITE_|PUBLIC_)/
 const CAMEL_IDENTIFIER = /^[a-z_$][a-z_$]*(?:[A-Z][a-z_$]+)+(?:[0-9]+)?$/
+const MEMBER_EXPRESSION = /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)+$/
+const SOURCE_PATH = /^(?:[\w.-]+\/)+[\w.-]+\.[cm]?[jt]sx?$/
+const PLACEHOLDER = /^(?:changeme|x{4,}|your_api_key_here|<[^>]*>|\$\{[^}]*\})$/i
+const NUMBER_OR_BOOLEAN = /^(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|true|false)$/i
+const PUBLIC_PEM = /-----BEGIN ((?:[A-Z0-9]+ )*(?:PUBLIC KEY|CERTIFICATE))-----[\s\S]*?-----END \1-----/g
 // Standard URLs keep the authority boundary; the DB schemes also accept an unescaped slash in a password.
 const URL_PASSWORD = /([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/:@"'`<>]*:)([^\s/@"'`<>]+)(?=@)/g
 const DB_URL_PASSWORD = /((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss):\/\/[^\s/:@"'`<>]*:)([^\s@"'`<>]+)(?=@)/gi
@@ -102,14 +110,20 @@ const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}
 
 interface Span { start: number; end: number }
 interface SecretSpan extends Span { kind: ScanKind }
-interface Assignment extends Span { name: string; value: string }
+interface Assignment extends Span { name: string; value: string; quoted: boolean }
 function assignments(text: string): Assignment[] {
   return [...text.matchAll(ASSIGNMENT)].map(match => {
     const value = match[4] ?? match[5]!
     const valueAt = match[1]!.length + match[2]!.length + (match[3] ? 1 : 0)
     const start = match.index + valueAt
-    return { name: match[1]!, value, start, end: start + value.length }
+    return { name: match[1]!, value, quoted: Boolean(match[3]), start, end: start + value.length }
   })
+}
+function isSecretName(name: string): boolean {
+  if (/^x-api-key$/i.test(name)) return true
+  const words = name.replace(/([A-Z])([A-Z][a-z])/g, "$1_$2").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase().split("_")
+  const secretAt = words.findIndex((word, index) => SECRET_WORD.test(word) || (SECRET_KEY_WORD.test(word) && words[index + 1] === "key"))
+  return secretAt >= 0 && !words.slice(secretAt + 1).some(word => NON_SECRET_QUALIFIER.test(word))
 }
 function isPublicKey(value: string): boolean {
   return /^(?:phc_|sb_publishable_|pk_(?:live|test)_)[A-Za-z0-9_-]+$/.test(value)
@@ -117,6 +131,7 @@ function isPublicKey(value: string): boolean {
 function isExemptEmail(address: string, text: string, at: number): boolean {
   const lower = address.toLowerCase()
   if (lower.startsWith("git@") && text[at + address.length] === ":") return true
+  if (/@\d+x\.(?:png|jpe?g|gif|webp|avif|svg)$/.test(lower)) return true
   const domain = lower.slice(lower.indexOf("@") + 1)
   return lower.includes("noreply") || lower.includes("no-reply") || /^example\./.test(domain) || /\.example$/.test(domain) || domain === "example"
 }
@@ -137,6 +152,7 @@ export function createScanner(options: ScannerOptions): Scanner {
   function scan(text: string, mode: "post" | "commit", presentAtHead: (value: string) => boolean): SecretSpan[] {
     const named = assignments(text)
     const publicSpans = named.filter(entry => PUBLIC_NAME.test(entry.name))
+    const publicPem = [...text.matchAll(PUBLIC_PEM)].map(match => ({ start: match.index, end: match.index + match[0].length }))
     const matches: SecretSpan[] = []
     const add = (start: number, end: number, kind: ScanKind) => {
       if (publicSpans.some(span => start >= span.start && end <= span.end)) return
@@ -148,13 +164,20 @@ export function createScanner(options: ScannerOptions): Scanner {
     }
     for (const shape of SHAPES) {
       if (shape.postOnly && mode === "commit") continue
-      for (const match of text.matchAll(shape.pattern)) add(match.index, match.index + match[0].length, shape.kind)
+      for (const match of text.matchAll(shape.pattern)) {
+        if (shape.kind === "private_key" && publicPem.some(span => match.index >= span.start && match.index + match[0].length <= span.end)) continue
+        add(match.index, match.index + match[0].length, shape.kind)
+      }
     }
     for (const pattern of [URL_PASSWORD, DB_URL_PASSWORD]) {
       for (const match of text.matchAll(pattern)) add(match.index + match[1]!.length, match.index + match[0].length, "url_password")
     }
     for (const entry of named) {
-      if (!SECRET_NAME.test(entry.name) || entry.value.length < 8 || /[/.\s]/.test(entry.value) || CAMEL_IDENTIFIER.test(entry.value) || allowed.has(entry.value) || isPublicKey(entry.value)) continue
+      if (!isSecretName(entry.name) || entry.value.length < 8 || /\s/.test(entry.value) || PLACEHOLDER.test(entry.value) || NUMBER_OR_BOOLEAN.test(entry.value) || allowed.has(entry.value) || isPublicKey(entry.value)) continue
+      // URL credentials have their own password-only rule above. Unquoted code remains executable;
+      // quotes make a value literal, including base64/base64url values with slashes or dots.
+      if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(entry.value)) continue
+      if (!entry.quoted && (CAMEL_IDENTIFIER.test(entry.value) || MEMBER_EXPRESSION.test(entry.value) || SOURCE_PATH.test(entry.value))) continue
       add(entry.start, entry.end, "generic_secret")
     }
     for (const match of text.matchAll(EMAIL)) {
