@@ -582,6 +582,12 @@ describe("the offline end-to-end run (§4.3)", () => {
     // ---- 6. real guard code passes the wizard's checks; failed claims stay in the negative world ----
     expect(jobStates(run, ITEMS.guardPosthog).slice(0, 2)).toEqual(["claimed/agent_claim", "done_in_code/wizard"])
     expect(job(ITEMS.guardPosthog).checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: "adopted_init_guarded", state: "pass" })]))
+    for (const id of [ITEMS.guardMeta, ITEMS.metaSpa]) {
+      expect(job(id).state, JSON.stringify(job(id))).not.toMatch(/left_for_you|failed|blocked|claimed|pending/)
+      expect(job(id).edits?.length, `${id} retained its checked edits`).toBeGreaterThan(0)
+    }
+    expect(job(ITEMS.guardMeta).checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: "adopted_init_guarded", tier: "S", state: "pass" })]))
+    expect(job(ITEMS.metaSpa).checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: "spa_page_view_applied", tier: "S", state: "pass" })]))
     // Review I1 P1-5: identify/reset and the server conversion pass the wizard's own S checks (no longer stuck
     // `claimed`) and wait for a real event; each claim is announced ONCE (P3-3).
     expect(jobStates(run, ITEMS.identify)).toEqual(["claimed/agent_claim", "waiting_real_event/wizard"])
@@ -611,7 +617,7 @@ describe("the offline end-to-end run (§4.3)", () => {
     // The agents ran as §3f.7 says (the pinned models at xhigh; Claude restricted; Codex under its read-only
     // profile, never `-s`), with no nesting marker and no wizard token in their env.
     const worker = agentRuns(w, "claude", "worker")
-    expect(worker.length).toBe(2)
+    expect(worker.length, why).toBe(2)
     expect(worker[0]!.argv).toEqual(expect.arrayContaining(["-p", "--output-format", "stream-json", "--restricted", "--model", "claude-opus-4-8", "--effort", "xhigh", "--strict-mcp-config"]))
     for (const forbidden of ["--bare", "--dangerously-skip-permissions", "--safe-mode"]) expect(worker[0]!.argv).not.toContain(forbidden)
     // One complete jobs turn; the review fix is its own bounded session.
