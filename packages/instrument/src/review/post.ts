@@ -359,7 +359,16 @@ export function withFinalReport(body: string, reportMarkdown: string, checklistM
   if (table < 0) return null
   const start = reportStartIn(body)
   if (start === null || start > table) return null
-  const ends = AFTER_REPORT.map((marker) => body.indexOf(marker, table)).filter((index) => index > table)
+  // Review notes are the quoted paragraphs immediately before the closing line. Quotes earlier
+  // in the report can be owner handoffs, so they must still be replaced with the report.
+  const closing = [FINAL_COMMENT_MERGE_LINE, FINAL_COMMENT_UPDATED_LINE].map(line => body.indexOf(`\n\n${line}`, table)).filter(index => index > table)
+  let notesStart = closing.length ? Math.min(...closing) : -1
+  while (notesStart > table) {
+    const previous = body.lastIndexOf("\n\n", notesStart - 1)
+    if (previous < table || !body.slice(previous + 2, notesStart).split("\n").every(line => line.startsWith("> "))) break
+    notesStart = previous
+  }
+  const ends = [...AFTER_REPORT.map((marker) => body.indexOf(marker, table)), notesStart].filter((index) => index > table)
   if (ends.length === 0) return null
   const end = Math.min(...ends)
   let tail = body.slice(end)
@@ -367,6 +376,7 @@ export function withFinalReport(body: string, reportMarkdown: string, checklistM
     const checklistStart = tail.indexOf(AFTER_REPORT[0]!)
     if (checklistStart >= 0) {
       const following = AFTER_REPORT.slice(1).map((marker) => tail.indexOf(marker, checklistStart + 2)).filter((index) => index >= 0)
+      if (notesStart > end + checklistStart) following.push(notesStart - end)
       const checklistEnd = following.length > 0 ? Math.min(...following) : tail.length
       tail = tail.slice(0, checklistStart) + tail.slice(checklistEnd)
     }

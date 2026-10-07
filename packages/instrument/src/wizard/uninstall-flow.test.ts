@@ -100,7 +100,7 @@ describe("uninstall --pr", () => {
     const bundle = fakeDeps()
     const secret = "PolicyFilenameFixture42"
     const policy = "terms-and-conditions.html"
-    const sensitivePolicy = `${secret}-<!--@owner-[link](target)-terms.html`
+    const sensitivePolicy = `${secret}-<!--@owner-[link](target)-terms-of-service.html`
     expect(isPolicyPath(sensitivePolicy)).toBe(true)
     writeFileSync(join(root, ".env.local"), `PRIVATE_TOKEN=${secret}\n`)
     bundle.deps.installer.uninstall = async () => ({ reversed: ["app/layout.tsx"], leftAsIs: [policy, sensitivePolicy] })
@@ -111,7 +111,7 @@ describe("uninstall --pr", () => {
       expect(text).toContain(`Not changed by us: ${policy} is a policy page, which is yours.`)
       expect(text).not.toMatch(/changed since the install/i)
       for (const raw of [secret, "<!--", "@owner", "[link]("]) expect(text).not.toContain(raw)
-      expect(text).toContain("‹!--＠owner-［link］(target)-terms.html is a policy page, which is yours.")
+      expect(text).toContain("‹!--＠owner-［link］(target)-terms-of-service.html is a policy page, which is yours.")
     }
     expect(bundle.log.calls.find(call => call.what === "stage")?.args[0]).toEqual(["app/layout.tsx", ".infinite/install.json"])
   })
