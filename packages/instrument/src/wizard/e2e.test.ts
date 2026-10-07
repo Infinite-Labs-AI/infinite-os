@@ -838,9 +838,9 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(bareShow(w.site.bare, head.head, "lib/infinite-analytics.ts")).toContain("Managed by Infinite")
   })
 
-  it.each(["not_required", "required"] as const)("(d) --yes accepts the shown %s consent default without a flag", { timeout: RUN_TIMEOUT }, async consentMode => {
+  it.each(["without_consent_signs", "with_consent_signs"] as const)("(d) --yes asks nothing about how the tag runs and installs it active (%s)", { timeout: RUN_TIMEOUT }, async world => {
     const w = await wiredWorld()
-    if (consentMode === "not_required") {
+    if (world === "without_consent_signs") {
       // A consent-named file or declaration is itself a recognized sign, even with a null body.
       rmSync(join(w.site.repo, "app/consent-defaults.tsx"))
       const layoutPath = join(w.site.repo, "app/layout.tsx")
@@ -858,21 +858,17 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(stepOutcomes(run), trace(run)).toContain("plan:ok")
     expect(stepOutcomes(run)).not.toContain("plan:parked:INF_WIZ_NEEDS_ANSWERS")
     const saved = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/state.json"), "utf8"))
-    expect(saved.plan.answers.consentMode).toBe(consentMode)
+    expect(saved.plan.answers.consentMode).toBe("not_required")
     const registrations = [...w.bridge.callsFor("site-source"), ...w.bridge.callsFor("site-claim")]
-    expect(registrations.some(call => (call.body as { consentMode?: string }).consentMode === consentMode), trace(run)).toBe(true)
+    expect(registrations.some(call => (call.body as { consentMode?: string }).consentMode === "not_required"), trace(run)).toBe(true)
+    expect(registrations.some(call => (call.body as { consentMode?: string }).consentMode === "required")).toBe(false)
   })
 
-  it("(e) nested: job.seeded briefs (exit 3) → the parent agent edits → --resume --json fences it; an answers file never answers consent", { timeout: 3 * RUN_TIMEOUT }, async () => {
+  it("(e) nested: job.seeded briefs (exit 3) → the parent agent edits → --resume --json fences it; no consent question exists to answer", { timeout: 3 * RUN_TIMEOUT }, async () => {
     const w = await wiredWorld({ env: { CLAUDECODE: "1" } })
     const answers = writeAnswers(w)
-    // 1. The answers file carries consentMode, and nested mode ignores it: the run parks for the user's own terminal.
-    const ignored = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], timeoutMs: RUN_TIMEOUT })
-    expect(ignored.code, trace(ignored)).toBe(3)
-    expect(stepOutcomes(ignored).at(-1)).toBe("plan:parked:INF_WIZ_NEEDS_ANSWERS")
-    expect(w.bridge.callsFor("site-source")).toEqual([])
-    expect(w.bridge.callsFor("site-claim")).toEqual([])
-
+    // 1. Nothing about how the tag runs is asked, so nested mode has no consent park. A consent answer still
+    // carried by an answers file or the tty is ignored: the tag installs active.
     // 2. The user answers the wizard's own /dev/tty prompt; the jobs go to the parent agent as job.seeded.
     const tty = join(w.site.base, "tty.json")
     writeFileSync(tty, JSON.stringify({ default: true, lines: { consent_mode: { approved: true, edit: "not_required" }, conversion_names: { approved: true, edit: CONVERSION } } }))
@@ -1559,7 +1555,7 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
     expect(w.tripwire.connections).toEqual([])
   })
 
-  it("no live address (the user says it isn't live yet): no conversion question, consent only for the Meta click-id capture, and Proven live holds no pass and no problem", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
+  it("no live address (the user says it isn't live yet): no conversion question, no consent question, and Proven live holds no pass and no problem", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
     // No agents: this world is about the plan and the report, not the jobs (they would need conversions it withholds).
     const w = await wiredWorld({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_NO_AGENTS: "1" } })
     // This host/report world keeps the signup outcome but has no unrelated login/logout instrumentation.
@@ -1596,9 +1592,9 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
     expect(approvals.approvals.declined).toEqual(expect.arrayContaining(excluded))
     expect(finalJobs(w).some(job => job.owner === "agent" && ["pending", "claimed", "blocked", "failed"].includes(job.state))).toBe(false)
 
-    // R2-6: nothing consent or the conversion names govern can be installed, so neither is asked or pre-checked.
+    // Consent is never asked; the conversion names govern nothing installable here, so they are not asked either.
     const planAsk = run.ofType("ask.open").find((event) => event.kind === "plan")!.payload as { lines: Array<{ id: string; kind: string; requires: string }> }
-    expect(planAsk.lines.some((line) => line.kind === "consent_mode")).toBe(true)
+    expect(planAsk.lines.some((line) => line.kind === "consent_mode")).toBe(false)
     expect(planAsk.lines.some((line) => line.kind === "capture_beside_adopted_pixel")).toBe(true)
     expect(planAsk.lines.some((line) => line.kind === "conversion_names")).toBe(false)
     expect(w.bridge.calls.map(label)).not.toContain("runs.patch(approvedConversions)")

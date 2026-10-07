@@ -86,7 +86,7 @@ const adoptedPosthogLines: ImproveLine[] = [
 ]
 
 describe("the plan model asks ONLY the three decisions", () => {
-  it("consent, conversion names and the npm line are the only editable lines; everything else is a line", () => {
+  it("conversion names and the npm line are the only editable lines; consent is never asked", () => {
     const plan = buildPlanModel(
       input({
         scan: scanFacts({ serverLane: { targetLabel: "Vercel root middleware", installPackages: ["@vercel/functions"] }, npm: { commandLine: "pnpm add @vercel/functions" } }),
@@ -94,7 +94,7 @@ describe("the plan model asks ONLY the three decisions", () => {
       })
     )
     const editable = plan.lines.filter((line) => line.editable).map((line) => line.id)
-    expect(editable.sort()).toEqual([...EDITABLE_LINE_IDS].sort())
+    expect(editable.sort()).toEqual([...EDITABLE_LINE_IDS].filter((id) => id !== DECISION_LINE_IDS.consentMode).sort())
     expect(plan.decisions).toEqual({
       consentMode: "not_required",
       conversionNames: ["start_trial"],
@@ -345,8 +345,9 @@ describe("resolvePlanAnswers", () => {
     expect(resolvePlanAnswers(plan, null, { consentFlag: "required" }).consentMode).toBe("required")
   })
 
-  it("NEGATIVE: an unanswered consent stays null (the run parks)", () => {
-    expect(resolvePlanAnswers(plan, { approved: [], declined: [], edits: {} }, { consentFlag: null }).consentMode).toBeNull()
+  it("needs no consent answer: the plan asks none and the tag installs active", () => {
+    expect(plan.lines.some((line) => line.kind === "consent_mode")).toBe(false)
+    expect(resolvePlanAnswers(plan, { approved: [], declined: [], edits: {} }, { consentFlag: null }).consentMode).toBe("not_required")
   })
 
   it("edits count only on editable lines and only with valid values", () => {
@@ -363,7 +364,7 @@ describe("resolvePlanAnswers", () => {
     expect(resolved.conversions).toEqual(["start_trial", "sign_up"])
     expect(resolved.approvals.edits).not.toHaveProperty(`install_provider:ga4:${IDS.ga4}`)
     const bad = resolvePlanAnswers(plan, { approved: [], declined: [], edits: { consent_mode: "maybe", conversion_names: "Sign Up!" } }, { consentFlag: null })
-    expect(bad.consentMode).toBeNull()
+    expect(bad.consentMode).toBe("not_required")
     expect(bad.conversions).toEqual([])
   })
 

@@ -37,10 +37,9 @@ At the end of the agent jobs and each review or CI repair, only jobs whose check
 A task inside that boundary is left for the site owner, with its file and line. For a withheld preview
 guard, the wizard provides the snippet to copy and explains that preview and local visits keep counting.
 Privacy wording, if supplied, is copy-only report material for the owner; the wizard never inserts it
-into a page. The owner's `consent_mode` answer governs Infinite's tag and the ad-click capture this run
-adds; it does not connect them to the site's own banner. The wizard defaults to "wait for my banner's yes"
-when it finds a recognised consent pattern or banner sign, and to "collect by default" when it finds
-none. This is a default choice you can change, not verification of the banner.
+into a page. The wizard asks nothing about how the tag runs. Infinite's tag and the ad-click
+capture run on every page load like a standard pixel and do not read your cookie banner. If you want them
+to wait for consent, that is your change to make.
 
 Policy pages are page files whose last route segment or basename matches the list below after
 splitting PascalCase, lower-casing and normalising separators. Route depth starts at the selected

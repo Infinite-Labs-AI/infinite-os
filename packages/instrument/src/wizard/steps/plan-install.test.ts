@@ -121,7 +121,7 @@ function approveAllFrom(ctx: FakeContext, consentMode = "not_required") {
 }
 
 describe("step plan", () => {
-  it("opens exactly ONE ask (the plan), whose only questions are the four decisions; persists answers; PATCHes approvedConversions", async () => {
+  it("opens exactly ONE ask (the plan), which never asks how the tag runs; persists answers; PATCHes approvedConversions", async () => {
     const ga4Line = `install_provider:ga4:${IDS.ga4}`
     const answer = { approved: ["consent_mode", "conversion_names", ga4Line], declined: [], edits: { consent_mode: "required", conversion_names: "start_trial" } }
     const h = await setup({ files: { "index.html": STATIC_HTML }, answers: [answer], candidates: [candidate("server_conversions", "start_trial")] })
@@ -130,26 +130,25 @@ describe("step plan", () => {
     expect(h.ctx.asks).toHaveLength(1)
     expect(h.ctx.asks[0]!.kind).toBe("plan")
     const payload = h.ctx.asks[0]!.payload as AskPayloads["plan"]
-    expect(payload.lines.filter((line) => line.editable).map((line) => line.id).sort()).toEqual(["consent_mode", "conversion_names"])
+    expect(payload.lines.filter((line) => line.editable).map((line) => line.id).sort()).toEqual(["conversion_names"])
+    expect(payload.lines.some((line) => line.kind === "consent_mode")).toBe(false)
     expect(Object.keys(payload.decisions).sort()).toEqual(["consentMode", "conversionNames", "npmInstall", "privacyText"])
     const plan = h.ctx.stateValue().plan!
-    expect(plan.answers).toMatchObject({ consentMode: "required", conversions: ["start_trial"] })
+    // A consent answer carried by an older answers file is ignored: the tag installs active.
+    expect(plan.answers).toMatchObject({ consentMode: "not_required", conversions: ["start_trial"] })
     expect(plan.lines.find((line) => line.id === ga4Line)?.approved).toBe(true)
     // Lines the user did not answer stay unanswered (null), never approved by default.
     expect(plan.lines.find((line) => line.id === `install_provider:meta:${IDS.meta}`)?.approved).toBe(true)
     expect(h.patches).toEqual([{ approvedConversions: ["start_trial"] }])
   })
 
-  it("NEGATIVE: an unanswered consent mode ALWAYS parks the run here (INF_WIZ_NEEDS_ANSWERS); no PATCH, no jobs seeded", async () => {
+  it("a plan answered without any consent answer does not park: the tag installs active", async () => {
     const answer = { approved: ["conversion_names"], declined: [], edits: {} }
     const h = await setup({ files: { "index.html": STATIC_HTML }, answers: [answer], candidates: [candidate("server_conversions", "start_trial")] })
-    const outcome = await planStep.run(h.ctx, h.deps)
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS" })
-    expect(h.patches).toEqual([])
-    expect(h.ctx.stateValue().plan?.answers.consentMode).toBeNull()
-    // install never runs without it
-    expect(await installStep.run(h.ctx, h.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS" })
-    expect(h.siteSourceCalls).toEqual([])
+    expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
+    expect(h.ctx.stateValue().plan?.answers.consentMode).toBe("not_required")
+    expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
+    expect(h.siteSourceCalls).toEqual([expect.objectContaining({ consentMode: "not_required" })])
   })
 
   it("NEGATIVE: a cancelled plan ask parks, it never approves anything", async () => {
@@ -229,7 +228,7 @@ describe("step plan", () => {
 })
 
 describe("step install", () => {
-  it("records the consent answer through the site-source verb with the production hosts, then installs and receipts", async () => {
+  it("records collect-by-default through the site-source verb with the production hosts, then installs and receipts", async () => {
     const h = await setup({ files: { "index.html": STATIC_HTML }, answers: [] })
     h.ctx.asks.length = 0
     // plan first (answers come from the payload: approve everything, consent required)
@@ -242,7 +241,7 @@ describe("step install", () => {
     expect((await planStep.run(ctx, h.deps)).kind).toBe("ok")
     const outcome = await installStep.run(ctx, h.deps)
     expect(outcome).toMatchObject({ kind: "ok", status: expect.stringMatching(/files? written · build passes/) })
-    expect(h.siteSourceCalls).toEqual([{ protocolVersion: 1, requestId: "x", productionHosts: ["acme-store.com"], consentMode: "required" }])
+    expect(h.siteSourceCalls).toEqual([{ protocolVersion: 1, requestId: "x", productionHosts: ["acme-store.com"], consentMode: "not_required" }])
     const html = read(ctx.root, "index.html")
     expect(html).toContain(IDS.ga4)
     expect(readInstallManifest(ctx.root)!.ids?.infinite).toEqual({ siteSourceKey: IDS.siteSource })

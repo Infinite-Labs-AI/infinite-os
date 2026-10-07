@@ -128,13 +128,15 @@ describe("WizardInstaller.apply: a new install on a static site", () => {
     expect(exists(root, "infinite-meta-click-id.js")).toBe(false)
   })
 
-  it("NEGATIVE: apply refuses without an answered consent mode (the run parks at plan instead)", async () => {
+  it("applies with no consent answer: nothing is asked and the tag installs active", async () => {
     const root = makeSite({ "index.html": STATIC_HTML })
     const subject = installer()
     const scan = await subject.scan({ root, hosting: fakeHosting() })
     const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
-    await expect(subject.apply(plan, { approved: [], declined: [], edits: {} })).rejects.toThrow(/consent/)
-    expect(read(root, "index.html")).toBe(STATIC_HTML)
+    expect(plan.lines.some((line) => line.kind === "consent_mode")).toBe(false)
+    const result = await subject.apply(plan, { approved: [], declined: [], edits: {} })
+    expect(result.ok).toBe(true)
+    expect(read(root, "index.html")).not.toBe(STATIC_HTML)
   })
 })
 

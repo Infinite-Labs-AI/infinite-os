@@ -566,7 +566,7 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
       ...notDoneJobs(input.verdictFacts?.jobs ?? []).map(item => `Not done, left for you: ${notDoneDescription(item)}`),
       ...activationNotes,
       ...(activationNotes.length ? ["Your banner connection is unverified in this run. Required-mode offline and browser checks supply a test grant; passing those checks does not confirm your banner signal."] : []),
-      ...(input.verdictFacts?.consentActivation?.mode === "not_required" && (input.verdictFacts.consentActivation.infinite || input.verdictFacts.consentActivation.capture) ? ["This run's tag and ad-click capture collect by default, independently of other banners until you connect their yes/no signal to Infinite. An Infinite-recorded no and DNT/GPC without an explicit grant are respected."] : []),
+      ...(input.verdictFacts?.consentActivation?.mode === "not_required" && (input.verdictFacts.consentActivation.infinite || input.verdictFacts.consentActivation.capture) ? ["Infinite's tag runs on every page load like a standard pixel and does not read your cookie banner. If you want it to wait for consent, that is your change to make."] : []),
       ...(input.verdictFacts?.tagNotInstalled ? ["Infinite’s tag is NOT installed by this run. Add the owner wiring before testing it live."] : []),
       ...(ownerPreviewNote ? [ownerPreviewNote] : []),
       ...input.notes.filter(note => !isOwnerBoundaryStatement(note)),

@@ -203,21 +203,22 @@ describe("R2-6 (live run 2): a decision that governs nothing this run is not ask
     // The one honest line about conversions stays, and the duplicate GA4 fix is still offered.
     expect(plan.lines.find((line) => line.id === "user_action:conversions_unwired")?.requires).toBe("user_action")
     expect(plan.lines.some((line) => line.jobIds?.some((id) => id.startsWith("duplicates_remove")))).toBe(true)
-    // Nothing to answer: approving the plan needs no consent and declares no conversion.
+    // Nothing to answer: consent is never asked (the tag would install active) and no conversion is declared.
     const all = resolvePlanAnswers(plan, { approved: approvable(plan).map((line) => line.id), declined: [], edits: {} }, { consentFlag: null })
-    expect(all.consentMode).toBeNull()
+    expect(all.consentMode).toBe("not_required")
     expect(all.conversions).toEqual([])
   })
 
-  it("NEGATIVE: Infinite can be installed (host + claim) → both decisions are asked", () => {
+  it("NEGATIVE: Infinite can be installed (host + claim) → conversion names are asked; consent never is", () => {
     const plan = buildPlanModel(freshInput({ run: { site: answered("fresh-acme.com"), siteClaim: true } }))
-    expect(plan.lines.find((line) => line.kind === "consent_mode")?.requires).toBe("approval")
+    expect(plan.lines.some((line) => line.kind === "consent_mode")).toBe(false)
+    expect(plan.decisions.consentMode).toBe("not_required")
     expect(plan.lines.find((line) => line.kind === "conversion_names")?.requires).toBe("approval")
   })
 
-  it("NEGATIVE: an existing Infinite source (nothing new to install) still asks consent (it is recorded on the source)", () => {
+  it("an existing Infinite source (nothing new to install) asks no consent either", () => {
     const plan = buildPlanModel(freshInput({ keys: fakeKeys(), before: fakeBefore() }))
-    expect(plan.lines.some((line) => line.kind === "consent_mode")).toBe(true)
+    expect(plan.lines.some((line) => line.kind === "consent_mode")).toBe(false)
   })
 })
 

@@ -14,51 +14,26 @@ function planInput(sources: Record<string, string>): PlanModelInput {
 }
 
 describe("the owner banner handoff", () => {
-  it("defaults a site with no recognized consent or banner signs to collection", () => {
-    const plan = buildPlanModel(planInput({ "app/page.tsx": "export default function Page(){ return <main>Example</main> }" }))
-    expect(plan.decisions.consentMode).toBe("not_required")
-    expect(plan.lines.find(line => line.kind === "consent_mode")?.text).toContain("Default: no banner or consent call was recognized")
-  })
-  it.each(["MarketingConsent", "SiteConsentBanner", "GdprBanner"])("uses the requested %s banner sign only as a default", name => {
-    const input = planInput({ [`components/${name}.tsx`]: `export function ${name}(){ return null }` })
-    expect(buildPlanModel(input).decisions.consentMode).toBe("required")
-    expect(buildPlanModel({ ...input, consentFlag: "not_required" }).decisions.consentMode).toBe("not_required")
-  })
-  it("uses the explicit react-cookie-consent import as a default sign", () => {
-    expect(buildPlanModel(planInput({ "app/page.tsx": 'import Banner from "react-cookie-consent"; export default function Page(){ return <Banner /> }' })).decisions.consentMode).toBe("required")
-  })
-  it.each([
-    '<script src="https://consent.cookiebot.com/uc.js"></script>',
-    '<script type="text/plain" data-cookieconsent="statistics">startAnalytics();</script>'
-  ])("uses a script-tag CMP sign only as a consent default: %s", source => {
-    const input = planInput({ "index.html": source })
-    expect(buildPlanModel(input).decisions.consentMode).toBe("required")
-    expect(buildPlanModel({ ...input, consentFlag: "not_required" }).decisions.consentMode).toBe("not_required")
-  })
   it.each<Record<string, string>>([
-    { "src/pixel.ts": "fbq('consent', 'revoke');" },
-    { "components/CookieBanner.tsx": "export function CookieBanner(){ return <button>Accept</button> }" }
-  ])("defaults to required when consent handling is recognized: %j", sources => {
-    const plan = buildPlanModel(planInput(sources))
-    expect(plan.decisions.consentMode).toBe("required")
-    const question = plan.lines.find(line => line.kind === "consent_mode")!.text
-    expect(question).toContain("Infinite's tag and the Meta ad-click cookie")
-    expect(question).toMatch(/found.*(?:consent|banner)/i)
-    expect(question).not.toContain("covers Infinite only")
-    expect(plan.lines.find(line => line.requires === "user_action")?.text).toContain("infinite:analytics-consent-change")
-  })
-
-  it("keeps the explicit default-collection choice and says other banners are independent", () => {
-    const plan = buildPlanModel({ ...planInput({ "src/pixel.ts": "fbq('consent', 'revoke');" }), consentFlag: "not_required" })
+    { "app/page.tsx": "export default function Page(){ return <main>Example</main> }" },
+    { "components/SiteConsentBanner.tsx": "export function SiteConsentBanner(){ return null }" },
+    { "app/page.tsx": 'import Banner from "react-cookie-consent"; export default function Page(){ return <Banner /> }' },
+    { "index.html": '<script src="https://consent.cookiebot.com/uc.js"></script>' },
+    { "src/pixel.ts": "fbq('consent', 'revoke');" }
+  ])("asks nothing about how the tag runs and installs it active, whatever the site holds: %j", sources => {
+    const input = planInput(sources)
+    input.keys.infinite.consentMode = "required"
+    const plan = buildPlanModel(input)
     expect(plan.decisions.consentMode).toBe("not_required")
-    expect(plan.lines.find(line => line.kind === "consent_mode")?.text).toContain("independent of your other banner until you connect it")
+    expect(plan.lines.some(line => line.kind === "consent_mode")).toBe(false)
+    expect(plan.lines.some(line => line.id === "user_action:banner_signal")).toBe(false)
+    expect(plan.lines.map(line => line.text).join("\n")).not.toMatch(/banner's yes|consent-change|NOT ACTIVE YET/)
   })
 
-  it("proposes required over an old cloud default while retaining an explicit flag choice", () => {
-    const input = planInput({ "components/CookieBanner.tsx": "export function CookieBanner(){ return null }" })
-    input.keys.infinite.consentMode = "not_required"
-    expect(buildPlanModel(input).decisions.consentMode).toBe("required")
-    expect(buildPlanModel({ ...input, consentFlag: "not_required" }).decisions.consentMode).toBe("not_required")
+  it("keeps the waiting mode only for an explicit classic flag", () => {
+    const plan = buildPlanModel({ ...planInput({ "app/page.tsx": "export default function Page(){ return null }" }), consentFlag: "required" })
+    expect(plan.decisions.consentMode).toBe("required")
+    expect(plan.lines.some(line => line.kind === "consent_mode")).toBe(false)
   })
 
   it("reports required-mode artifacts as not active and prints the exact owner actions", () => {
