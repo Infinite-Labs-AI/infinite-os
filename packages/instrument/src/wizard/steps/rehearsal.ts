@@ -256,7 +256,7 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     validation = await validate()
   }
   if (validation.state !== "pass" && !(validation.state === "undetermined" && before?.facts.localValidation === "not_measured"))
-    return failed("INF_WIZ_VALIDATION_FAILED", `${validation.state === "undetermined" ? "Local validation could not run and no earlier decision was saved" : "The site's build or lint found a new failure"}: ${scanner.redact(validation.reason ?? "not checked").text}. Resolve this before resuming.`)
+    return failed("INF_WIZ_VALIDATION_FAILED", `${validation.state === "undetermined" ? "The working-tree build or lint could not be measured" : "The site's build or lint found a new failure"}: ${scanner.redact(validation.reason ?? "not checked").text}. Resolve this before resuming.`)
 
   sub(ctx, "rehearsal", "Committing the changes…", "pending")
   const commitOnce = () =>

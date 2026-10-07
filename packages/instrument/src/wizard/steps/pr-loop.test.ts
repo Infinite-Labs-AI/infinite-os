@@ -280,10 +280,10 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     // count over all 14 checks (it was "—" for "Checks passing" and five other rows).
     const inPr = state.report.in_pr!.cells
     expect(inPr.checks_passing).toMatchObject({ provenance: { source: "wizard_check", runId: RUN_ID } })
-    expect(inPr.checks_passing!.display).toMatch(/^\d+ pass · \d+ problems?( · \d+ unknown)? · \d+ not testable of 14$/)
+    expect(inPr.checks_passing!.display).toMatch(/^\d+ pass · \d+ problems?( · \d+ unknown)? · \d+ not testable of 13$/)
     expect(inPr.ga4_page_views_per_visit).toMatchObject({ display: "1", provenance: { source: "desktop_test" } })
     expect(inPr.posthog_route).toMatchObject({ display: "through /ingest" })
-    expect(inPr.consent_setting).toMatchObject({ state: "pass", display: '"collect by default" recorded', provenance: { source: "cloud_read" } })
+    expect(inPr.consent_setting).toMatchObject({ state: "info", display: '"collect by default" recorded', provenance: { source: "cloud_read" } })
     expect(inPr.ga4_key_events).toMatchObject({ state: "info", value: 1, display: "1 marked as key event (click test passed)", provenance: { source: "cloud_read" } })
     expect(inPr.live_test_per_tool!.display).toMatch(/^rehearsal: \d of \d tools fire once, right ID \(nothing sent\)$/)
     expect(state.report.in_pr!.finishLine.ga4_key_events_received).toMatchObject({ state: "info" })
@@ -498,6 +498,15 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(w.fx.remoteSha(BRANCH)).toBeNull()
   })
 
+  it.each(["timeout", "opaque"])("R6 describes a working-tree %s after a measured baseline truthfully", async (kind) => {
+    const w = await world()
+    w.fx.write(".infinite/wizard/before.json", JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId: RUN_ID, measuredAt: w.ctx.now().toISOString(), facts: { keys: await w.bridge.keys(), hosting: fakeHosting(), census: { entries: [] }, dryLive: null, localValidation: "measured", baselineBuild: { ok: true, durationMs: 1, failureSignature: [] } } }))
+    w.deps.checks.build = async () => ({ ok: false, durationMs: 1, failureSignature: kind === "timeout" ? ["build: timeout"] : ["build: opaque: exited without a diagnostic"], timedOut: kind === "timeout" })
+    const outcome = await rehearsalStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "failed", message: expect.not.stringContaining("no earlier decision") })
+    if (kind === "timeout") expect((outcome as { message: string }).message).toContain("timed out")
+  })
+
   it.each(["sandbox unavailable", "timeout", "opaque failure"])("reaches the draft PR after before records %s as not measured", async (why) => {
     const w = await world()
     w.fx.write(".infinite/wizard/before.json", JSON.stringify({
@@ -672,6 +681,63 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
 })
 
 describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
+  it.each(["commit", "stage", "receipt"])("R6 restores both edits and receipt when a CI repair fails during %s", async (failure) => {
+    const w = await opened({ reviews: [review([])], fix: fixLayout, gh: {
+      baseChecks: [{ name: "test", conclusion: "success" }], failedLogs: { "123": "app/layout.tsx:2: error TS2304" },
+      checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE", link: "https://github.com/example/site/actions/runs/123/job/1" }] }
+    } })
+    w.ctx.state.update(state => { state.jobs[0]!.edits = [{ editId: "prior", file: "app/layout.tsx" }] })
+    const source = readFileSync(join(w.fx.root, "app/layout.tsx"), "utf8")
+    const receipt = readFileSync(join(w.fx.root, ".infinite/install.json"), "utf8")
+    w.deps.installer.recordEdits = async () => { w.fx.write(".infinite/install.json", JSON.stringify({ ...JSON.parse(receipt), addedByRepair: true })); if (failure === "receipt") throw new Error("fixture receipt failure") }
+    if (failure === "commit") w.git.commit = async () => { throw new Error("fixture commit rejected") }
+    if (failure === "stage") w.git.stage = async () => { throw new Error("fixture index lock refused staging") }
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked" })
+    expect(readFileSync(join(w.fx.root, "app/layout.tsx"), "utf8")).toBe(source)
+    expect(readFileSync(join(w.fx.root, ".infinite/install.json"), "utf8")).toBe(receipt)
+    expect(w.fx.git(["diff", "--cached", "--name-only"]).trim()).toBe("")
+  })
+
+  it("R6 gives the worker the CI failure near the log tail with the correct label", async () => {
+    const w = await opened({ reviews: [review([])], gh: {
+      baseChecks: [{ name: "test", conclusion: "success" }], failedLogs: { "123": "setup progress\n".repeat(700) + "app/layout.tsx:2: error TS2304: ERROR_TAIL_FIXTURE\n" },
+      checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE", link: "https://github.com/example/site/actions/runs/123/job/1" }] }
+    }, fix(input) {
+      expect(input.items[0]!.trigger.finding).toContain("ERROR_TAIL_FIXTURE")
+      expect(input.items[0]!.trigger.finding).toContain("CI check")
+      expect(input.items[0]!.trigger.finding).not.toMatch(/commit hook|review comment/)
+      return {}
+    } })
+    w.ctx.state.update(state => { state.jobs[0]!.edits = [{ editId: "prior", file: "app/layout.tsx" }] })
+    await reviewStep.run(w.ctx, w.deps)
+  })
+  it.each(["pending", "cancel", "unreadable", "missing"])("R6 keeps draft when a base-green check is %s", async (state) => {
+    const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "test", conclusion: "success" }], checks: { "42": state === "missing" ? [] : [{ name: "test", bucket: state, state: state.toUpperCase() }] } } })
+    if (state === "unreadable") w.host.checks = async () => { throw new Error("fixture unavailable") }
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED" })
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+  })
+
+  it("R6 keeps an authorization-blocked preview draft when that hosting check was green on base", async () => {
+    const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "Vercel", conclusion: "success" }], checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("Vercel") })
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+    expect(eventText(w.ctx)).toContain("preview not measured")
+  })
+
+  it("waits for Actions to register even when only a blocked preview was initially reported", async () => {
+    const w = await opened({ reviews: [review([])], gh: { checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
+    const clock = fakeClock()
+    w.deps.clock = { now: clock.now, async sleep(ms, signal) {
+      expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+      await clock.sleep(ms, signal)
+      w.gh.update(state => { state.checks = { "42": [{ name: "test", bucket: "pending", state: "PENDING" }] } })
+    } }
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("pending") })
+    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBeGreaterThanOrEqual(60_000)
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+  })
+
   it("never marks a draft PR ready when its checks are red and no review fix was committed", async () => {
     const w = await world({ reviews: [review([])], gh: { baseChecks: [{ name: "test", conclusion: "success" }], checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE" }] } } })
     expectOk(await rehearsalStep.run(w.ctx, w.deps))
@@ -759,7 +825,8 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
       w.gh.update(state => { state.checks = { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } })
     } }
     expectOk(await reviewStep.run(w.ctx, w.deps))
-    expect(polls).toBe(1)
+    expect(polls).toBeGreaterThanOrEqual(1)
+    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBeGreaterThanOrEqual(60_000)
     expect(w.gh.read().prs[0]!.isDraft).toBe(false)
   })
 
@@ -900,7 +967,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expectOk(outcome)
     expect(outcome.status).toContain("reviewed by Codex (incomplete)")
     const text = eventText(w.ctx)
-    expect(text).toContain("! Codex's review is incomplete: it could not check R10, R12 (14 of 16 checked)")
+    expect(text).toContain("! Codex's review is incomplete: it could not check R10, R12 (13 of 15 checked)")
     expect(text).not.toContain("nothing to change")
     const state = w.gh.read()
     const posted = state.calls.filter((call) => call.stdin?.includes("addPullRequestReview(input")).map((call) => (JSON.parse(call.stdin!) as { variables: { body: string } }).variables.body)
@@ -943,9 +1010,9 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     seedThreads(w)
     const outcome = await reviewStep.run(w.ctx, w.deps)
     expectOk(outcome)
-    // Terminal QA #18: the closing line says what the review found and that it was fixed (3 comments in round 1,
+    // Terminal QA #18: the closing line says what the review found and that it was fixed (2 in-scope comments in round 1,
     // one fix commit, a clean round 2), so it never reads as "found nothing".
-    expect(outcome.status).toMatch(/reviewed by Codex · 3 comments, fixed in 1 new commit · rehearsal passed on the latest commit/)
+    expect(outcome.status).toMatch(/reviewed by Codex · 2 comments, fixed in 1 new commit · rehearsal passed on the latest commit/)
 
     // Nothing secret reached gh (argv or stdin) or the terminal events.
     const traffic = w.gh.traffic()
@@ -960,7 +1027,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(reviewCalls).toHaveLength(2)
     for (const call of reviewCalls) expect(JSON.parse(call.stdin!).query).toMatch(/event: COMMENT/)
     const first = JSON.parse(reviewCalls[0]!.stdin!) as { variables: { body: string; threads: Array<{ path: string; line: number }> } }
-    expect(first.variables.threads.map((thread) => `${thread.path}:${thread.line}`)).toEqual(["app/layout.tsx:2", "app/layout.tsx:3"])
+    expect(first.variables.threads.map((thread) => `${thread.path}:${thread.line}`)).toEqual(["app/layout.tsx:2"])
     expect(first.variables.body).toContain("`lib/other.ts:9`")
 
     // The fix commit is a descendant with the round trailer.
@@ -970,14 +1037,13 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.fx.git(["log", "-1", "--format=%(trailers:key=Infinite-Review-Round,valueonly)", fixHead]).trim()).toBe("1")
     expect(w.fx.git(["log", "-1", "--format=%(trailers:key=Infinite-Tag-Run,valueonly)", fixHead]).trim()).toBe(RUN_ID)
 
-    // Replies: the fixed own thread → "Fixed in" + resolved; the declined banner → the ruling, not resolved.
+    // Replies: the fixed own thread is resolved; owner-only consent gets no reply.
     const own = state.threads.filter((thread) => thread.comments[0]!.author === "acme-dev")
     const f1 = own.find((thread) => thread.comments[0]!.body.includes("F1"))!
     const f2 = own.find((thread) => thread.comments[0]!.body.includes("F2"))!
     expect(f1.comments[1]!.body).toMatch(new RegExp(`Fixed in ${fixHead.slice(0, 7)}`))
     expect(f1.isResolved).toBe(true)
-    expect(f2.comments[1]!.body).toMatch(/never adds, changes or checks a cookie banner/)
-    expect(f2.isResolved).toBe(false)
+    expect(f2).toBeUndefined()
     // An un-OK'd teammate thread and a stranger's thread get no reply.
     expect(state.threads.find((thread) => thread.id === "PRRT_teammate")!.comments).toHaveLength(1)
     expect(state.threads.find((thread) => thread.id === "PRRT_stranger")!.comments).toHaveLength(1)
@@ -1000,7 +1066,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(final).toMatch(/shown, not acted on/)
     expect(final).not.toContain("- [ ]")
     const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8")) as { declined: unknown[]; rounds: Array<{ fixSha: string | null }> }
-    expect(ledger.declined).toHaveLength(1)
+    expect(ledger.declined).toHaveLength(0)
     expect(ledger.rounds[0]!.fixSha).toBe(fixHead)
   })
 
@@ -1092,7 +1158,8 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.agents.jobCalls).toHaveLength(1)
     expect(w.agents.jobCalls[0]!.items.map((item) => item.id)).toEqual(["review_comments:F2"])
     const final = (w.gh.read().prs[0]!.comments as Array<{ body: string }>).at(-1)!.body
-    expect(final).toMatch(/You decide/)
+    expect(final).toContain("Consent and your privacy policy are yours; this run changed neither.")
+    expect(final).not.toContain("add the consent banner")
   })
 
   it("an R6 'gate GA4 behind consent' finding never becomes a worker job", async () => {
@@ -1229,7 +1296,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     })
     expectOk(await reviewStep.run(w.ctx, w.deps))
     const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8")) as { declined: Array<{ key: string }> }
-    expect(ledger.declined.map((entry) => entry.key)).toEqual(["app/layout.tsx|R16"])
+    expect(ledger.declined).toEqual([])
     expect(w.agents.reviewCalls).toEqual([])
   })
 
@@ -1363,18 +1430,17 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(final).toMatch(/@stranger/)
   })
 
-  it("P1-3: a pushed fix whose required checks are still running is answered 'Changed in', not 'Not fixed', and stays open", async () => {
+  it("a pushed fix with pending checks parks draft without claiming it fixed", async () => {
     const w = await opened({
       reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null }]), review([])],
       fix: fixLayout,
       answers: { "teammate-comments": { actOn: [] } },
       gh: { checks: { "42": [{ name: "ci", bucket: "pending", state: "IN_PROGRESS" }] } }
     })
-    expectOk(await reviewStep.run(w.ctx, w.deps))
-    const fixHead = w.fx.remoteSha(BRANCH)!
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("pending") })
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
     const f1 = w.gh.read().threads.find((thread) => thread.comments[0]!.author === "acme-dev" && thread.comments[0]!.body.includes("F1"))!
-    expect(f1.comments[1]!.body).toMatch(new RegExp(`Changed in ${fixHead.slice(0, 7)}\\. The required checks had not finished`))
-    expect(f1.comments[1]!.body).not.toMatch(/Not fixed/)
+    expect(f1.comments).toHaveLength(1)
     expect(f1.isResolved).toBe(false)
     expect(w.ctx.state.get().jobs.find((job) => job.id === "review_comments:F1")).toMatchObject({ state: "claimed" })
   })

@@ -24,7 +24,7 @@ import { isUnsupported } from "../../hosts/other.js"
 import { classifyReview, isReviewResult, parseBriefReview, printedReviewBrief, reviewerBrief, type ClassifiedReview } from "../../review/brief.js"
 import { allowlistUnion, assertNoAgentAlive, bestEffortBridge, bridgeStop, manifestFiles, status, sub } from "../../review/context.js"
 import { parseUnifiedDiff } from "../../review/diff.js"
-import { hookFixItem, job16Item, restoreFiles, runFixRound, snapshotFiles, verifyFix } from "../../review/fix.js"
+import { ciFixItem, job16Item, restoreFiles, runFixRound, snapshotFiles, verifyFix } from "../../review/fix.js"
 import { openFindings, parseLedger, recordDecisions, REVIEW_LEDGER_PATH, type ReviewLedger } from "../../review/ledger.js"
 import { wizardOwnership, type WizardOwnership } from "../../review/ownership.js"
 import { commentTrust, hasFinalMarker, hasReplyMarker, parseReviewMarker, stripMarkers } from "../../review/markers.js"
@@ -242,7 +242,7 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
     const edited = new Set<string>()
     let thinking = 0
     let phase = "Reading the pull request"
-    const showStatus = () => ctx.emit.emit("step.status", { step: "review", text: `${agentStatusLine({ phase, read: read.size, edited: edited.size, thinking, elapsedMs: deps.clock.now().getTime() - started, budgetMs: AGENT_LIMITS.reviewer.wallMs })} · ${REVIEW_ITEMS.length} checklist items` })
+    const showStatus = () => ctx.emit.emit("step.status", { step: "review", text: `${agentStatusLine({ phase, read: read.size, edited: edited.size, thinking, elapsedMs: deps.clock.now().getTime() - started, budgetMs: AGENT_LIMITS.reviewer.wallMs })} · ${REVIEW_ITEMS.filter(item => item !== "R6").length} checklist items` })
     showStatus()
     const once = async (text: string): Promise<ReviewResult | ReviewFailure> => {
       const onNarrate = (beat: { agent: AgentKind; role: "reviewer"; text: string }) => ctx.emit.emit("narrate", beat)
@@ -584,6 +584,7 @@ async function replyAndResolve(
 ): Promise<void> {
   if (!session.github) return
   for (const decision of decisions) {
+    if (decision.action === "SKIP") continue
     const threadId = decision.item.threadId
     if (!threadId) continue
     const own = decision.item.source === "reviewer"
@@ -600,7 +601,9 @@ async function replyAndResolve(
   }
 }
 
-class PrChecksStop extends Error {}
+class PrChecksStop extends Error {
+  constructor(message: string, readonly failed: boolean) { super(message) }
+}
 
 /** One bounded CI repair, only for an actual base-green regression with a log naming this run's edits. */
 async function repairCi(session: Session, checks: PrCheck[], base: PrCheck[] | null): Promise<boolean> {
@@ -624,27 +627,39 @@ async function repairCi(session: Session, checks: PrCheck[], base: PrCheck[] | n
     named.forEach(file => files.add(file))
     logs.push(`${check.name}:\n${ship.scanner.redact(log).text}`)
   }
-  const item = hookFixItem([...files], logs.join("\n"))
-  item.id = "build_fix:pr_checks"
-  item.title = "Fix the new PR check failure in this run's files"
-  const snapshots = await snapshotFiles(deps, ctx.root, [...files])
+  const item = ciFixItem([...files], logs.join("\n"))
+  const snapshots = await snapshotFiles(deps, ctx.root, [...files, ".infinite/install.json"])
   const previous = await ship.git.head()
   const fix = await runFixRound(ctx, deps, { step: "review", worker, items: [item], scanner: ship.scanner })
   if (fix.run.outcome !== "completed") {
     await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
     return false
   }
-  const verified = await verifyFix(ctx, deps, { runId: ship.runId, items: fix.items, editedFiles: fix.run.edits.map(edit => edit.file), edits: fix.run.edits })
-  if (!verified.buildOk || fix.run.edits.length === 0 || fix.run.edits.some(edit => !files.has(edit.file))) {
+  const restoreUncommitted = async () => {
+    if (await ship.git.head() !== previous) return
     await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
+    await ship.git.unstage(snapshots.map(snapshot => snapshot.path))
+  }
+  try {
+    const verified = await verifyFix(ctx, deps, { runId: ship.runId, items: fix.items, editedFiles: fix.run.edits.map(edit => edit.file), edits: fix.run.edits })
+    if (!verified.buildOk || fix.run.edits.length === 0 || fix.run.edits.some(edit => !files.has(edit.file))) {
+      await restoreUncommitted()
+      return false
+    }
+    await deps.installer.recordEdits(fix.run.edits)
+    const commit = await stageAndCommit({ ctx, deps, git: ship.git, step: "review", scanner: ship.scanner, runId: ship.runId, message: "infinite-tag: fix PR checks", round: 1, allowlist: [...files], managed, npmFiles: [], connectionIds: ship.facts.connectionIds })
+    if (commit.kind !== "committed") {
+      await restoreUncommitted()
+      return false
+    }
+    const synced = await syncHead(session, previous, commit.sha)
+    if ("head" in synced) session.notes.push("The CI repair was committed after the review; it has not had a separate second review.")
+    return "head" in synced
+  } catch (error) {
+    await restoreUncommitted()
+    session.notes.push(ship.scanner.redact(`The CI repair could not be committed: ${error instanceof Error ? error.message : String(error)}`).text)
     return false
   }
-  await deps.installer.recordEdits(fix.run.edits)
-  const commit = await stageAndCommit({ ctx, deps, git: ship.git, step: "review", scanner: ship.scanner, runId: ship.runId, message: "infinite-tag: fix PR checks", round: 1, allowlist: [...files], managed, npmFiles: [], connectionIds: ship.facts.connectionIds })
-  if (commit.kind !== "committed") return false
-  const synced = await syncHead(session, previous, commit.sha)
-  if ("head" in synced) session.notes.push("The CI repair was committed after the review; it has not had a separate second review.")
-  return "head" in synced
 }
 
 const CHECKS_POLL_MS = 30_000
@@ -657,19 +672,18 @@ const CHECKS_EMPTY_GRACE_MS = 60_000
  * ≤ 10 minutes). Empty, cancelled, unreadable and blocked-preview checks remain unmeasured.
  * New failures get a bounded scoped repair; known base failures are reported without blocking.
  */
-async function requiredChecksResult(session: Session, runId: string, repair = true): Promise<CheckResult | null> {
+async function requiredChecksResult(session: Session, runId: string, repair = true): Promise<(CheckResult & { ready: boolean }) | null> {
   const { github, number, deps, ctx } = session
   if (!github || number === null) return null
   const started = deps.clock.now().getTime()
-  const result = (state: CheckResult["state"], reason: string): CheckResult => ({ checkId: "pr_checks_pass", tier: "S", state, reason, at: ctx.now().toISOString(), runId })
-  let read = false
+  const result = (state: CheckResult["state"], reason: string, ready = false): CheckResult & { ready: boolean } => ({ checkId: "pr_checks_pass", tier: "S", state, reason, at: ctx.now().toISOString(), runId, ready })
+  let waitingReason = "PR checks could not be read"
   const base = await commitChecks(github.gh, ctx.state.get().git!.baseSha).catch(() => null)
   sub(ctx, "review", "Checking the new commit's CI checks…", "pending")
   for (;;) {
     const elapsed = deps.clock.now().getTime() - started
     const checks = await github.checks(number).catch(() => null)
     if (checks !== null && !isUnsupported(checks)) {
-      read = true
       const summary = checksSummary(checks)
       const policy = checkPolicy(checks, base)
       for (const check of policy.blocked) {
@@ -684,10 +698,21 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
         if (repair && await repairCi(session, policy.failing, base)) return requiredChecksResult(session, runId, false)
         return result("problem", `Failed PR checks: ${policy.failing.map(check => check.name).join(", ")}${base === null ? " (base checks could not be read)" : ""}`)
       }
-      if (summary.total > 0 && summary.pending === 0) return result(summary.pass > 0 ? "pass" : "undetermined", summary.pass > 0 ? `${summary.pass} PR check(s) pass` : "PR checks not measured; only blocked previews or existing failures reported")
-      if (summary.total === 0 && elapsed >= CHECKS_EMPTY_GRACE_MS) return result("undetermined", "no checks reported: not measured")
+      const missingGreen = (base ?? []).filter(check => check.bucket === "pass" && !checks.some(current => current.name === check.name && current.bucket === "pass"))
+      const cancelled = checks.filter(check => check.bucket === "cancel")
+      const pending = checks.filter(check => check.bucket === "pending")
+      waitingReason = base === null ? "The base commit's checks could not be read" : cancelled.length > 0 ? `PR checks cancelled: ${cancelled.map(check => check.name).join(", ")}`
+        : pending.length > 0 ? `PR checks are still pending: ${pending.map(check => check.name).join(", ")}`
+        : missingGreen.length > 0 ? `Base-green checks have not been read as passing: ${missingGreen.map(check => check.name).join(", ")}`
+        : "No PR checks have been reported"
+      if (elapsed >= CHECKS_EMPTY_GRACE_MS && base !== null && summary.pending === 0 && missingGreen.length === 0) {
+        if (checks.length === 0 && base.length === 0) return result("undetermined", "no checks reported: not measured; the base commit also has no checks", true)
+        if (checks.length > 0) return result(summary.pass > 0 ? "pass" : "undetermined", summary.pass > 0 ? `${summary.pass} PR check(s) pass; all base-green checks were read as passing` : "PR checks not measured; only blocked previews or existing failures reported", true)
+      }
+    } else {
+      waitingReason = "PR checks could not be read"
     }
-    if (ctx.signal.aborted || elapsed + CHECKS_POLL_MS > CHECKS_WAIT_MS) return result("undetermined", read ? "checks pending" : "checks unreadable")
+    if (ctx.signal.aborted || elapsed + CHECKS_POLL_MS > CHECKS_WAIT_MS) return result("undetermined", waitingReason)
     await deps.clock.sleep(CHECKS_POLL_MS, ctx.signal)
   }
 }
@@ -699,7 +724,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
   if (session.github && session.number !== null && (await session.github.readPr(session.number)).state === "OPEN") {
     const verdict = await requiredChecksResult(session, ship.runId)
     if (verdict) session.notes.push(verdict.reason ?? "PR checks not measured")
-    if (verdict?.state === "problem") throw new PrChecksStop(ship.scanner.redact(verdict.reason ?? "A PR check failed").text)
+    if (verdict && !verdict.ready) throw new PrChecksStop(ship.scanner.redact(verdict.reason ?? "PR checks were not measured").text, verdict.state === "problem")
   }
   if (options.once && session.github && session.number !== null) {
     const comments = await session.github.readComments(session.number).catch(() => [])
@@ -838,7 +863,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   try {
     return await reviewRun(ctx, deps)
   } catch (error) {
-    if (error instanceof PrChecksStop) { await ctx.state.save(); return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `${error.message}. The pull request stays draft.`, resumeHint: "Resolve the named checks, then run `npx infinite-tag` to resume." } }
+    if (error instanceof PrChecksStop) { await ctx.state.save(); return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `${error.message}. The pull request stays draft.`, resumeHint: error.failed ? "Resolve the named checks, then run `npx infinite-tag` again." : "Run `npx infinite-tag` again when the checks have finished or can be read." } }
     const stop = bridgeStop(error)
     if (stop) {
       await ctx.state.save()
@@ -1028,6 +1053,18 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
         }
       }
       const edited = fix.run.edits.map((edit) => edit.file)
+      for (const [index, decision] of fixes.entries()) {
+        if (fix.items.find(item => item.id === items[index]!.id)?.state !== "left_for_you") continue
+        decision.action = "SKIP"
+        decision.reason = "Left for you: the file's consent or policy code is outside this run."
+        session.ledger.open = session.ledger.open.filter(entry => entry.key !== triageKey(decision.item))
+      }
+      if (edited.length === 0 && fixes.every(decision => decision.action === "SKIP")) {
+        sub(ctx, "review", "Left for you: these edits would touch owner-managed consent or policy code.", "info")
+        await saveLedger(session)
+        await ctx.state.save()
+        break
+      }
       // §3x.3 / DECISIONS §1.5 A round that kept no change is said as it happened: no build and no check ran, so
       // nothing "failed the checks". Review P1-4: the fence's own record decides whether the agent changed anything
       // the wizard then undid (a stop mid-change, the safety check, a file outside the job), never `edits` alone.
@@ -1083,7 +1120,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
           const checksResult = await requiredChecksResult(session, prepared.runId)
           fixSha = await prepared.git.head()
           if (checksResult) finalItems = deps.registry.apply(finalItems, [checksResult], prepared.runId)
-          if (checksResult?.state === "problem") {
+          if (checksResult && !checksResult.ready) {
             ctx.state.update((draft) => {
               const known = new Set(draft.jobs.map((job) => job.id))
               draft.jobs = [...draft.jobs.map((job) => finalItems.find((item) => item.id === job.id) ?? job), ...finalItems.filter((item) => !known.has(item.id))]
@@ -1092,8 +1129,8 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
             await saveLedger(session)
             await ctx.state.save()
             const reason = prepared.scanner.redact(checksResult.reason ?? "a PR check failed").text
-            sub(ctx, "review", `PR check failed: ${reason}`, "warn")
-            return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `The new commit failed a PR check (${reason}). The pull request stays draft.`, resumeHint: "Resolve the named checks, then run `npx infinite-tag` to resume." }
+            sub(ctx, "review", `PR checks: ${reason}`, "warn")
+            return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `The PR checks are not ready (${reason}). The pull request stays draft.`, resumeHint: checksResult.state === "problem" ? "Resolve the named checks, then run `npx infinite-tag` again." : "Run `npx infinite-tag` again when the checks have finished or can be read." }
           }
           for (const [index, decision] of fixes.entries()) {
             const item = finalItems.find((candidate) => candidate.id === items[index]!.id)

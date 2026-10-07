@@ -42,3 +42,20 @@ describe("the review fix round's activity status", () => {
     expect(statuses.at(-1)).toBe(`Writing the changes · job 2 of 2 · 1 files read · 1 edited · thinking 0 s · 1 of 2 claimed · 3 of ${FIX_ROUND_MINUTES} min`)
   })
 })
+
+it.each(["known", "unknown", "claimed"] as const)("records %s consent refusals as informational and keeps unrelated repair items", async ownership => {
+  const items = [agentItem("review_comments:f1", ["src/tracking.ts"]), agentItem("review_comments:f2", ["src/other.ts"])]
+  const { bridge } = fakeBridge()
+  const { ctx } = makeCtx({ root: "/repo", state: baseState({ root: "/repo" }) })
+  const deps = makeDeps({ bridge, agents: {} as never })
+  deps.agents = { runJobs: async (input: Parameters<AgentRunnerImpl["runJobs"]>[0]) => {
+    for (const item of items) await input.onClaim({ jobId: item.id, status: ownership === "claimed" && item === items[0] ? "blocked" : "done", note: ownership === "claimed" && item === items[0] ? "Consent code is in the way" : "done", at: "2026-10-07T00:00:00Z" })
+    return { outcome: "completed", session: { kind: "claude", sessionId: "s" }, claims: [], questions: [], permissionDenials: 0, reverted: ["src/tracking.ts"], edits: [],
+      blocked: ownership === "known" ? [{ itemId: items[0]!.id, reason: "consent_touched", paths: ["src/tracking.ts"], note: "consent boundary" }] : [],
+      strays: ownership === "unknown" ? [{ path: "src/tracking.ts", reason: "consent_touched", note: "owner unknown" }] : []
+    } as never
+  } } as never
+  const result = await runFixRound(ctx, deps, { step: "review", worker: "claude_code", items, scanner: createScanner({ literals: [], allowedIds: [] }) })
+  expect(result.items[0]).toMatchObject({ state: "left_for_you", checks: [] })
+  expect(result.items[1]).toMatchObject({ state: "claimed" })
+})
