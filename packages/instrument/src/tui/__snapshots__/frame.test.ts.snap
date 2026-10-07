@@ -85,20 +85,19 @@ exports[`renderFrame > draws the pending ask as one overlay box in place of the 
  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
  │ ◆ Plan + your decisions                                                                                            │
  │ The plan (one screen)                                                                                              │
- │ Approve the plan: 2 lines to approve · 1 thing only you can do.                                                    │
+ │ Here is what this run will do · 2 explicit choices · 1 thing only you can do.                                      │
  │                                                                                                                    │
  │ Your decisions                                                                                                     │
  │ · Consent: — choose it (E on the consent line)                                                                     │
  │ · Conversions: start_trial · signup                                                                                │
- │ · Privacy: 2 drafted lines for your privacy page                                                                   │
  │ · npm: npm install @vercel/functions                                                                               │
  │                                                                                                                    │
  │ The plan                                                                                                           │
- │ ▸ [✓] Install the Infinite pixel and server lane                                                                   │
+ │ ▸ [ ] Run npm install @vercel/functions                                                                            │
  │   [✓] Consent setting                                                                                              │
  │    →  Connect GA4 in Infinite                                                                                      │
  │                                                                                                                    │
- │ ENTER approve  ·  SPACE skip a line  ·  E edit a line  ·  ↑↓ move  ·  ESC later                                    │
+ │ ENTER continue  ·  SPACE select explicit choice  ·  E edit a line  ·  ↑↓ move  ·  ESC later                        │
  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  Ctrl+C stop"
 `;

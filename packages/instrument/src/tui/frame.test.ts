@@ -184,7 +184,7 @@ describe("renderFrame", () => {
     const sanitize = makeTestSanitizer()
     const payload = {
       lines: [
-        { id: "install_provider:infinite", kind: "install_provider" as const, text: "Install the Infinite pixel and server lane", requires: "approval" as const, editable: false },
+        { id: "npm_install", kind: "npm_install" as const, text: "Run npm install @vercel/functions", requires: "approval" as const, editable: false },
         { id: "consent_mode", kind: "consent_mode" as const, text: "Consent setting", requires: "approval" as const, editable: true },
         { id: "user_action:connect_ga4", kind: "user_action" as const, text: "Connect GA4 in Infinite", requires: "user_action" as const, editable: false }
       ],
@@ -201,8 +201,8 @@ describe("renderFrame", () => {
     expect(plain(lines)).toMatchSnapshot()
     const text = plain(lines)
     expect(text).toContain("The plan (one screen)")
-    expect(text).toContain("[✓] Install the Infinite pixel")
-    expect(text).toContain("ENTER approve")
+    expect(text).toContain("[ ] Run npm install @vercel/functions")
+    expect(text).toContain("ENTER continue")
     expect(lines.length).toBeLessThanOrEqual(40)
   })
 
