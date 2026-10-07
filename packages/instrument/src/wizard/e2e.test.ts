@@ -328,7 +328,8 @@ describe("the offline end-to-end run (§4.3)", () => {
     expect(stepOutcomes(run).at(-1)).toBe("done:ok")
     expect(readGhState(w.ghState).prs[0]).toMatchObject({ state: "MERGED", isDraft: false })
     expect(readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8")).toBe(inline)
-    expect(stepOutcomes(run)).toEqual(expect.arrayContaining(["merge:ok", "prove:ok"]))
+    expect(stepOutcomes(run), trace(run)).toEqual(expect.arrayContaining(["merge:ok", "prove:skipped"]))
+    expect(run.ofType("step.done").find(event => event.step === "prove")?.reason).toContain("Add the owner wiring before testing it live")
     expect(w.bridge.callsFor("runs.proof-claim")).toEqual([])
     expect(w.bridge.callsFor("test.start").some(call => (call.body as TestRunRequest).mode === "real_visit")).toBe(false)
     expect(existsSync(join(w.site.repo, "lib/infinite-analytics.ts"))).toBe(false)
@@ -902,7 +903,8 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(bareShow(w.site.bare, head.head, "README.md")).toBe(fixtureFile("README.md"))
     expect(bareShow(w.site.bare, head.head, "app/layout.tsx").split(GTAG_LOADER.trim()).length - 1).toBe(1)
     // The kept duplicate fix reaches the ready PR; the owner chooses when to merge.
-    expect(stepOutcomes(resumed)).toContain("review:ok")
+    expect(stepOutcomes(resumed), trace(resumed)).toEqual(expect.arrayContaining(["review:skipped", "merge:parked:INF_WIZ_MERGE_PARKED"]))
+    expect(resumed.ofType("step.done").find(event => event.step === "review")?.reason).toContain("No second agent")
     expect(readGhState(w.ghState).prs[0]!.isDraft).toBe(false)
     // Still no agent spawned: the review is a brief for the parent agent.
     expect(agentRuns(w, "claude")).toEqual([])
