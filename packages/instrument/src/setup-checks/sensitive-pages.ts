@@ -10,6 +10,7 @@
 // replay and click capture on 3 pages: /login, /verify, /checkout/success"). The CHECK reports `info`
 // when PostHog runs and nothing turns those off; `ok` when the PostHog init already handles it.
 // No PostHog → no finding (replay is PostHog's).
+import { sensitivePosthogOptions } from "../install/posthog-sensitive.js"
 import { isHtmlPage } from "./click-id-capture.js"
 import { codeView, sourceUnits } from "./code-view.js"
 import { sensitivePagesHandledMessage, sensitivePagesMessage } from "./copy.js"
@@ -73,7 +74,10 @@ export function checkSensitivePages(input: { files: ReadonlyMap<string, string> 
   if (posthogUnits.length === 0) return { check: "sensitive_pages", state: "ok", findings }
   const routes = detectSensitivePages(input.files)
   if (routes.length === 0) return { check: "sensitive_pages", state: "ok", findings }
-  const handled = posthogUnits.find((unit) => HANDLED.test(codeView(unit.file, unit.text)))
+  // Use the same conservative options reader as the plan, so explicit existing exclusions do not
+  // become a contradictory "recording is on" finding in before. No configuration is executed.
+  const bothOff = posthogUnits.every(unit => sensitivePosthogOptions(unit.text, routes.map(route => route.route)) === null)
+  const handled = bothOff ? posthogUnits[0] : posthogUnits.find((unit) => HANDLED.test(codeView(unit.file, unit.text)))
   if (handled) {
     findings.push({
       check: "sensitive_pages",
@@ -81,7 +85,7 @@ export function checkSensitivePages(input: { files: ReadonlyMap<string, string> 
       state: "ok",
       confidence: "likely",
       file: handled.file,
-      message: sensitivePagesHandledMessage({ file: handled.file })
+      message: sensitivePagesHandledMessage({ file: handled.file, bothOff })
     })
     return { check: "sensitive_pages", state: "ok", findings }
   }

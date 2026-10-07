@@ -22,7 +22,7 @@
 // pixel is blocked. Files are read through `metaSourceUnits`, which decodes the Next module's string
 // literal — read raw, its escaped quotes hide the managed pixel and the check called a correctly
 // installed Next site "not checked".
-import { extractMetaPixelIds } from "../meta-live/config-probe.js"
+import { providerInstallEvidence } from "../provider-evidence.js"
 import { posix } from "node:path"
 import { META_CLICK_ID_ACCESSOR } from "../providers/meta-browser/click-id.js"
 import { lexicalStates } from "../lexical-states.js"
@@ -130,7 +130,10 @@ export function checkClickIdCapture(input: ClickIdCaptureInput): SetupCheckResul
       managedCaptureFiles.add(file)
     }
     const initialises =
-      managedCaptureFiles.has(file) || units.some((unit) => extractMetaPixelIds(unit.text).length > 0)
+      managedCaptureFiles.has(file) || units.some((unit) => providerInstallEvidence(unit.text).some(entry =>
+        // The plan's existing reader recognizes receiver calls and variable IDs. A loader by itself
+        // is installation evidence too, but this check specifically requires an init call.
+        entry.provider === "meta" && /^(?:window\.)?fbq\s*\(/.test(unit.text.slice(entry.offset))))
     if (initialises) initFiles.push(file)
     if (isHtmlPage(file, contents) && !(input.managedCaptureEntries && isPolicyPath(file))) (initialises ? htmlPagesWith : htmlPagesWithout).push(file)
   }

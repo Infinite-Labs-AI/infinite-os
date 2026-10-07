@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 
+import { providerInstallEvidence } from "../provider-evidence.js"
 import { checkClickIdCapture, isSharedEntry } from "./click-id-capture.js"
 import { buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
 
@@ -121,4 +122,25 @@ describe("_fbc capture at the landing page", () => {
     expect(isSharedEntry("src/main.tsx")).toBe(true)
     expect(isSharedEntry("app/thank-you/page.tsx")).toBe(false)
   })
+})
+
+
+it.each([
+  "trackingWindow.fbq('init', pixelId);",
+  "window.fbq ('init', '555500001111222');"
+])("agrees with the plan's init evidence for %s", init => {
+  expect(providerInstallEvidence(init).some(entry => entry.provider === "meta")).toBe(true)
+  const result = check({ "src/tracking.ts": `export function startPixel() { ${init} }` })
+  expect(result.state).toBe("problem")
+  expect(result.findings[0]?.code).toBe("INF_SETUP_CLICK_ID_NOT_AT_LANDING")
+  expect(result.findings[0]?.message).not.toContain("No `fbq('init'")
+})
+
+it.each([
+  "// fbq('init', '555500001111222');",
+  'const example = "fbq(\'init\', \'555500001111222\');";',
+  '<script src="https://connect.facebook.net/en_US/fbevents.js"></script>'
+])("does not count a comment, quoted example, or loader alone as an init: %s", source => {
+  const html = source.startsWith("<script") ? source : `<script>${source}</script>`
+  expect(check({ "index.html": PAGE(html) }).state).toBe("undetermined")
 })

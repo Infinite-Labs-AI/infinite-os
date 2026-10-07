@@ -147,8 +147,9 @@ function pathConversionType(path: string): ConversionType | null {
 /** A request the page sends to an outcome endpoint (`fetch("/api/signup"`, `axios.post("/api/leads"`). */
 const OUTCOME_REQUEST = /\b(?:fetch|axios\s*\.\s*post|ky\s*\.\s*post)\s*\(\s*["'`]\/api\/([\w/-]+)["'`]/g
 
-/** The success branch: a positive `.ok` check, a `!error` / `!err` check, or the first navigation after an await. */
-const SUCCESS_OK = /\bif\s*\(\s*(?:await\s+)?[\w$.]+\.ok\s*\)/g
+/** Existing success shapes: `.ok` (optionally AND a positive response `.success` flag),
+ * `!error` / `!err`, or the first navigation after an await. No helper-call inference. */
+const SUCCESS_OK = /\bif\s*\(\s*(?:await\s+)?[\w$.]+\.ok(?:\s*&&\s*[\w$]+(?:\?\.|\.)success(?:\s*===\s*true)?)?\s*\)/g
 const SUCCESS_NO_ERROR = /\bif\s*\(\s*!\s*(?:error|err|result\.error|res\.error)\s*\)/g
 const NAVIGATION = /\b(?:router\s*\.\s*(?:push|replace)|(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)|redirect)\s*\(|\b(?:window\s*\.\s*)?location\s*\.\s*href\s*=/g
 

@@ -42,3 +42,29 @@ describe("sensitive pages", () => {
     expect(result.findings.map((finding) => finding.code)).toEqual(["INF_SETUP_SENSITIVE_PAGES_HANDLED"])
   })
 })
+
+
+it("reports globally disabled replay and click capture without claiming they are on", () => {
+  const source = `posthog.init(projectKey, {
+    api_host: apiHost,
+    autocapture: false,
+    capture_pageview: false,
+    disable_session_recording: true,
+    person_profiles: 'identified_only'
+  });`
+  const result = checkSensitivePages({ files: files({ "src/tracking.ts": source, "app/account/page.tsx": "" }) })
+  expect(result.state).toBe("ok")
+  expect(result.findings[0]?.code).toBe("INF_SETUP_SENSITIVE_PAGES_HANDLED")
+  expect(result.findings[0]?.message).toContain("replay and click capture off")
+  expect(result.findings[0]?.message).not.toContain("are on")
+})
+
+it.each([
+  "posthog.init(key, unknownOptions)",
+  "posthog.init(key, { autocapture: false, disable_session_recording: false })",
+  "posthog.init(key, { autocapture: true, disable_session_recording: true })"
+])("does not claim both recording modes are on when their settings differ or are unknown: %s", source => {
+  const result = checkSensitivePages({ files: files({ "src/tracking.ts": source, "app/account/page.tsx": "" }) })
+  expect(result.state).toBe("info")
+  expect(result.findings[0]?.message).not.toContain("replay and click capture are on")
+})

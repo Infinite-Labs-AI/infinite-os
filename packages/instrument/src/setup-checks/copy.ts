@@ -389,15 +389,15 @@ export function hostGuardSilencesProductionMessage(input: { tool: string; file: 
 export function sensitivePagesMessage(input: { routes: readonly string[]; remaining: number }): string {
   const more = input.remaining > 0 ? ` and ${input.remaining} more` : ""
   return (
-    `Worth checking: PostHog session replay and click capture are on for ${input.routes.length + input.remaining} ` +
+    `Worth checking: this site uses PostHog and has ${input.routes.length + input.remaining} ` +
     `sensitive page${input.routes.length + input.remaining === 1 ? "" : "s"} (${input.routes.join(", ")}${more}). ` +
-    `Recordings of login, payment and confirmation pages can capture what people type there. A plan line can turn ` +
+    `This source check could not confirm that session replay and click capture are both off there. A plan line can turn ` +
     `replay and click capture off on those pages only; nothing changes without your OK.`
   )
 }
 
-export function sensitivePagesHandledMessage(input: { file: string }): string {
-  return `PostHog in ${input.file} already turns replay or click capture off for sensitive pages.`
+export function sensitivePagesHandledMessage(input: { file: string; bothOff?: boolean }): string {
+  return `PostHog in ${input.file} already turns replay ${input.bothOff ? "and" : "or"} click capture off for sensitive pages.`
 }
 
 export function metaEventIdPageBuiltMessage(input: { file: string; line: number }): string {
