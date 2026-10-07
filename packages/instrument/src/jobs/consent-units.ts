@@ -11,11 +11,10 @@ export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
   /\b(?:__tcfapi|__uspapi|__gpp|__cmp|OneTrust|Optanon\w*|Cookiebot|CookieConsent|Didomi\w*|UC_UI|usercentrics|klaro)\b(?:\s*(?:\?\.|\.)\s*[\w$]+|\s*\[\s*['"`][^'"`]+['"`]\s*\])*\s*(?:\?\.\s*)?\(/i
 ]
 export function isConsentText(text: string): boolean {
-  const withoutHtmlComments = text.replace(/<!--[\s\S]*?-->/g, comment => comment.replace(/[^\n]/g, " "))
-  const parsed = tokenize(withoutHtmlComments)
+  const parsed = tokenize(text)
   // A confident scan can distinguish real comments. With awkward JSX/CSS or an unclosed construct,
   // scan the entire raw text as well: a tokenizer's early stop must never hide a later consent call.
-  const raw = parsed.confident ? maskCommentsAndStrings(withoutHtmlComments, false) : withoutHtmlComments
+  const raw = parsed.confident ? maskCommentsAndStrings(text, false) : text
   return CONSENT_CALL_PATTERNS.some(pattern => pattern.test(raw)) ||
     CONSENT_CALL_PATTERNS.some(pattern => pattern.test(parsed.tokens.map(token => token.text).join(" ")))
 }

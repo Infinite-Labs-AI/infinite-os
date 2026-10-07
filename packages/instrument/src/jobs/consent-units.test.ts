@@ -89,6 +89,14 @@ it("freezes raw consent arguments after a JSX glob even when comments separate t
   expect(restoreFrozenUnits(before, before.replace("revoke", "grant")).text).toBe(before)
 })
 
+it.each([
+  'export default function Layout() { return <html><script>{`const a="<!--";fbq("consent","revoke");const b="-->";`}</script></html> }',
+  'const a="<!--";fbq("consent","revoke");const b="-->";',
+])("does not mistake HTML comment delimiters in strings for comments hiding live consent", before => {
+  expect(sourceUnits(before).units.some(unit => unit.frozen)).toBe(true)
+  expect(restoreFrozenUnits(before, before.replace("revoke", "grant")).text).toBe(before)
+})
+
 
 it.each([
   "window.fbq /* owner API */ = () => {};",
