@@ -132,11 +132,11 @@ export function buildReviewPost(input: {
   const unchecked = input.unchecked?.length ? input.unchecked : input.review.checklist.length === 0 ? ["no checklist rows"] : input.completeness !== "complete" ? ["read-check not verified"] : []
   const header =
     unchecked.length > 0
-      ? `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): incomplete — it could not check ${unchecked.join(", ")}.** Posted by infinite-tag; a review is an opinion, not a receipt.`
+      ? `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): incomplete — unchecked: ${unchecked.join(", ")}.** Posted by infinite-tag; a review is an opinion, not a receipt.`
       : `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): ${verdict}.** Posted by infinite-tag; a review is an opinion, not a receipt.`
   const content = [
     header,
-    "Owner actions and copyable handoffs are in the pull request body and .infinite/wizard/report.md.",
+    "Owner actions and copyable handoffs are in the pull request body.",
     `**Reviewer summary (quoted):**\n\n${safeDisplayText(input.scanner, input.review.summary).split("\n").map(line => `> ${line}`).join("\n")}`,
     checklist ? `| Item | Status | Note |\n|---|---|---|\n${checklist}` : "",
     ownerFindings.length > 0 ? `**${OWNER_INFORMATION_HEADING}**\n\n${ownerFindings.join("\n")}` : "",

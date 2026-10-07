@@ -132,7 +132,7 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boo
   return own.length === keys.length && keys.every((key) => key in value)
 }
 
-/** A strict check of a parsed review against `review.schema.json` (additionalProperties false everywhere). */
+/** Validates the review shape and normalizes only explicit finding labels in place. */
 export function isReviewResult(value: unknown): value is ReviewResult {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false
   const review = value as Record<string, unknown>
@@ -150,12 +150,20 @@ export function isReviewResult(value: unknown): value is ReviewResult {
     if (typeof row !== "object" || row === null) return false
     const entry = row as Record<string, unknown>
     if (!exactKeys(entry, ["id", "item", "severity", "path", "line", "body", "suggested_fix", ...(entry.category === undefined ? [] : ["category"])])) return false
-    if (entry.category !== undefined && !["analytics", "security", "owner_consent_privacy", "request_ga4_proxy", "request_meta_unsupported", "request_meta_deletion"].includes(String(entry.category))) return false
+    if (typeof entry.severity !== "string" || (entry.category !== undefined && typeof entry.category !== "string")) return false
+    const severity = entry.severity.toLowerCase()
+    const category = typeof entry.category === "string" ? entry.category.toLowerCase() : undefined
+    const unknown: string[] = []
+    if (!SEVERITIES.has(severity) && severity !== "critical" && severity !== "high") unknown.push(`severity: ${entry.severity}`)
+    if (category !== undefined && !["analytics", "security", "owner_consent_privacy", "request_ga4_proxy", "request_meta_unsupported", "request_meta_deletion"].includes(category)) unknown.push(`category: ${entry.category}`)
+    entry.severity = unknown.length || severity === "critical" || severity === "high" ? "blocker" : severity
+    if (category !== undefined) entry.category = unknown.some(value => value.startsWith("category:")) ? "analytics" : category
+    if (unknown.length && typeof entry.body === "string") entry.body = `[Unknown review label (${unknown.join("; ")}); treated as blocker.] ${entry.body}`
     if (typeof entry.id !== "string" || !/^F[0-9]{1,2}$/.test(entry.id)) return false
     if (!ITEMS.has(String(entry.item)) || !SEVERITIES.has(String(entry.severity))) return false
     if (typeof entry.path !== "string" || entry.path.length > 300) return false
     if (entry.line !== null && !Number.isInteger(entry.line)) return false
-    if (typeof entry.body !== "string" || entry.body.length > 1500) return false
+    if (typeof entry.body !== "string" || entry.body.replace(/^\[Unknown review label \([^\n]*\); treated as blocker\.\] /, "").length > 1500) return false
     if (entry.suggested_fix !== null && (typeof entry.suggested_fix !== "string" || entry.suggested_fix.length > 1500)) return false
   }
   return true
@@ -229,7 +237,7 @@ export function redactReadCheck(review: ReviewResult, nonce: string): ReviewResu
 }
 
 /**
- * A complete review has a verified read-check and at least one checklist row, with none left unchecked.
+ * A complete review has a verified read-check and every required checklist row, with none left unchecked.
  * Missing evidence stays visible as an incomplete review. The nonce is redacted either way
  * (`redactReadCheck`).
  */
@@ -237,7 +245,7 @@ export function classifyReview(review: ReviewResult, nonce: string): ClassifiedR
   const summary = review.summary.trimStart()
   const quoted = nonce.length > 0 && summary.startsWith(`${READ_CHECK_PREFIX} `) && summary.slice(READ_CHECK_PREFIX.length).trimStart().split(/\s/, 1)[0] === nonce
   const clean = omitOwnerPolicyReview(redactReadCheck(review, nonce))
-  const unchecked: string[] = clean.checklist.filter((row) => row.status === "cant_tell").map((row) => row.item)
+  const unchecked: string[] = REVIEW_ITEMS.filter(item => item !== "R6" && (!clean.checklist.some(row => row.item === item) || clean.checklist.some(row => row.item === item && row.status === "cant_tell")))
   if (!quoted) unchecked.unshift("read-check missing or incorrect")
   if (clean.checklist.length === 0) unchecked.push("no checklist rows")
   return { state: unchecked.length > 0 ? "incomplete" : "complete", review: unchecked.length > 0 ? { ...clean, verdict: "changes_suggested" } : clean, unchecked }

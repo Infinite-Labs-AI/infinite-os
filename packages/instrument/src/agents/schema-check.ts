@@ -1,8 +1,9 @@
+import { isReviewResult } from "../review/brief.js"
 // Validates an agent's structured output against `claims.schema.json` / `review.schema.json` (§3e.3,
 // §3f.8) before anything reads it: the subset those two schemas use (type incl. arrays of types, enum,
 // required, properties, additionalProperties:false, items, maxLength, maxItems, pattern). Zero
 // dependencies. An agent's output that fails is "unparseable", never half-used.
-import { CLAIMS_SCHEMA, REVIEW_SCHEMA, type ReviewResult } from "../wizard/contracts/agents.js"
+import { CLAIMS_SCHEMA, type ReviewResult } from "../wizard/contracts/agents.js"
 
 type Schema = Record<string, unknown>
 
@@ -69,7 +70,7 @@ export function parseStructuredClaims(value: unknown): StructuredClaims | null {
 /** The review, or null when it does not match `review.schema.json` exactly. */
 export function parseReview(value: unknown): ReviewResult | null {
   const parsed = typeof value === "string" ? tryJson(value) : value
-  if (parsed === undefined || schemaErrors(parsed, REVIEW_SCHEMA as unknown as Schema).length > 0) return null
+  if (!isReviewResult(parsed)) return null
   return parsed as ReviewResult
 }
 

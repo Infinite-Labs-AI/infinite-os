@@ -70,7 +70,7 @@ it("keeps a blocker on run-written capture open for the owner", () => {
 it("accepts structured category in fresh reviews and leaves legacy missing-category findings in scope", () => {
   expect(isReviewResult(review)).toBe(true)
   expect(isReviewResult({ ...review, findings: [{ ...finding, category: "owner_consent_privacy" }] })).toBe(true)
-  expect(isReviewResult({ ...review, findings: [{ ...finding, category: "trust_me" }] })).toBe(false)
+  expect(isReviewResult({ ...review, findings: [{ ...finding, category: "trust_me" }] })).toBe(true)
 })
 
 it("keeps a blocker open even when its owner category refers to this run's code", async () => {

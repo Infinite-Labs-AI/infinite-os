@@ -5,7 +5,7 @@ import { buildFinalComment, buildPrBody, buildReviewPost } from "./post.js"
 import { emptyLedger, openFindings, recordDecisions } from "./ledger.js"
 import { classifyReview } from "./brief.js"
 import { triage, type TriageItem } from "./triage.js"
-import type { ReviewResult } from "../wizard/contracts/agents.js"
+import { REVIEW_ITEMS, type ReviewResult } from "../wizard/contracts/agents.js"
 
 const scanner = createScanner({ literals: [], allowedIds: [] })
 const context = { allowlist: ["src/capture.ts"], declinedKeys: new Set<string>(), passingChecks: new Set(["build"]), answerFor: () => "build passed" }
@@ -56,7 +56,7 @@ describe("owner-category integrity", () => {
 
   it("accepts owner information without a percentage threshold", () => {
     const findings = Array.from({ length: 13 }, (_, index) => item({ findingId: `F${index + 1}` }))
-    const review: ReviewResult = { ...result(findings), checklist: [{ item: "R1", status: "pass", note: "checked" }] }
+    const review: ReviewResult = { ...result(findings), checklist: REVIEW_ITEMS.filter(item => item !== "R6").map(item => ({ item, status: "pass", note: "checked" })) }
     const classified = classifyReview(review, "nonce")
     expect(classified.state).toBe("complete")
     const decisions = triage(findings, context)
