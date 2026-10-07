@@ -271,6 +271,7 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
       const retry = await once(`${brief}\n\n${BLIND_RETRY_NOTE}`)
       if (!("error" in retry)) classified = classifyReview(retry, nonce)
     }
+    if (classified.unchecked.includes("read-check missing or incorrect")) return { blind: true }
     return { review: classified.review, classified }
   } finally {
     await ship.git.worktreeRemove(worktree.dir)
@@ -852,7 +853,7 @@ async function blindFallback(session: Session, reviewer: AgentKind, prepared: Sh
   })
   await deps.fs.mkdirp(join(ctx.root, WIZARD_PATHS.dir), 0o700)
   await deps.fs.writeTextAtomic(join(ctx.root, WIZARD_PATHS.reviewBrief), brief, 0o600)
-  sub(ctx, "review", `! ${AGENT_LABEL[reviewer]} could not read the pull request's files, so there is no second review.`, "warn")
+  sub(ctx, "review", `! Review incomplete: ${AGENT_LABEL[reviewer]} could not read the pull request's files; nothing from it was acted on.`, "warn")
   sub(ctx, "review", `The review brief is in ${WIZARD_PATHS.reviewBrief}.`, "warn")
   session.notes.push(`No second review yet: ${AGENT_LABEL[reviewer]} could not read the files. Paste ${WIZARD_PATHS.reviewBrief} into any agent; a re-run of \`npx infinite-tag\` reads its review back.`)
   session.ledger.completeness = { reviewer, state: "blind", unchecked: [] }
@@ -1011,6 +1012,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
         if (result.error === "timeout") {
           return failed("INF_WIZ_AGENT_TIMEOUT", "The second review timed out. The pull request stays a draft; run `npx infinite-tag` again to retry the review.")
         }
+        session.ledger.completeness = { reviewer: agentReviewer, state: "incomplete", unchecked: ["answer did not match the schema"] }
         session.notes.push("The second review could not be read (its answer did not match the schema twice). Nothing from it was acted on.")
         await finish(session)
         return failed("INF_WIZ_REVIEW_UNPARSEABLE", "The second review could not be read; the pull request was marked ready without it.", "continue")

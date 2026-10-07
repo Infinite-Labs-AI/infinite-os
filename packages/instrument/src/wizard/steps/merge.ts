@@ -93,12 +93,12 @@ export async function reviewSentence(ctx: Pick<WizardContext, "root">, deps: Pic
   // Live run 5 (P2): a review posted from the printed brief and read back is a review (its round is in the ledger).
   if (!label) return reviewer === "brief" && ledger.rounds.some((round) => round.reviewer === "brief") ? `Reviewed from the printed review brief${ledger.completeness?.state === "incomplete" ? " (review incomplete)" : ""}` : "No second review"
   const completeness = ledger.completeness
-  if (completeness?.state === "blind") return `No second review (${label} could not read the files)`
+  if (completeness?.state === "blind") return `Review incomplete (${label} could not read the files)`
   if (completeness?.state === "incomplete") {
     const count = completeness.unchecked.length
     return `Review incomplete (${label} could not check ${count} item${count === 1 ? "" : "s"})`
   }
-  return `Reviewed by ${label}`
+  return ledger.rounds.length > 0 && completeness?.state === "complete" ? `Reviewed by ${label}` : "No second review ran"
 }
 
 export function mergeSummary(input: { sentence: string; branch: string; base: string; filesChanged: number | null; checks: string }): string {

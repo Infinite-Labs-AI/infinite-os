@@ -988,34 +988,23 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     findings: []
   })
 
-  it("a missing read-check retries once and keeps the incomplete findings visible", async () => {
-    const unread: ReviewResult = { ...liveBlindReview(), findings: [{ id: "F1", item: "R16", severity: "should", category: "owner_consent_privacy", path: "app/layout.tsx", line: 2, body: "Owner decides the banner wording", suggested_fix: null }] }
-    const w = await opened({ reviews: [unread, unread], blindReviewer: true, answers: { "teammate-comments": { actOn: [] } } })
-    const outcome = await reviewStep.run(w.ctx, w.deps)
-    expectOk(outcome)
-    expect(outcome.status).toContain("reviewed by Codex (incomplete)")
+  it("a missing read-check twice posts no findings and never runs a fix", async () => {
+    const unread = review([{ id: "F1", item: "R16", severity: "blocker", category: "analytics", path: "app/layout.tsx", line: 2, body: "Unread actionable defect", suggested_fix: "Change the file" }])
+    const w = await opened({ reviews: [unread, unread], blindReviewer: true })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
     expect(w.agents.reviewCalls).toHaveLength(2)
-    expect(w.agents.reviewCalls[1]!.worktreeDir).toBe(w.agents.reviewCalls[0]!.worktreeDir)
-    const state = w.gh.read()
-    expect(state.calls.filter(call => call.stdin?.includes("addPullRequestReview(input"))).toHaveLength(1)
-    const final = (state.prs[0] as { comments?: Array<{ body: string }> }).comments?.map(comment => comment.body).join("\n") ?? ""
-    expect(final).toContain("Reviewed by Codex (incomplete")
-    expect(final).toContain("Owner decides the banner wording")
-    expect(eventText(w.ctx)).not.toContain("nothing to change")
-    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toContain("Review incomplete")
+    expect(w.gh.read().calls.filter(call => call.stdin?.includes("addPullRequestReview(input"))).toHaveLength(0)
+    expect(JSON.stringify(w.gh.read())).not.toContain("Unread actionable defect")
     expect(w.agents.jobCalls).toEqual([])
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toContain("could not read")
   })
 
-  it("retains an incomplete review's findings when the read-check retry is unavailable", async () => {
-    const partial: ReviewResult = { ...review([{ id: "F1", item: "R16", category: "owner_consent_privacy", severity: "should", path: "app/layout.tsx", line: 2, body: "Owner decides the banner wording", suggested_fix: null }]), summary: "No read-check was returned" }
+  it("discards an unread review when its read-check retry is unavailable", async () => {
+    const partial = review([{ id: "F1", item: "R16", severity: "blocker", path: "app/layout.tsx", line: 2, body: "Unread actionable defect", suggested_fix: null }])
     const w = await opened({ reviews: [partial, { error: "out_of_usage" }], blindReviewer: true })
-    const outcome = await reviewStep.run(w.ctx, w.deps)
-    expectOk(outcome)
-    expect(outcome.status).toContain("reviewed by Codex (incomplete)")
+    expectOk(await reviewStep.run(w.ctx, w.deps))
     expect(w.agents.reviewCalls).toHaveLength(2)
-    const posted = w.gh.read().calls.filter(call => call.stdin?.includes("addPullRequestReview(input"))
-    expect(posted).toHaveLength(1)
-    expect(posted[0]!.stdin).toContain("Owner decides the banner wording")
+    expect(w.gh.read().calls.filter(call => call.stdin?.includes("addPullRequestReview(input"))).toHaveLength(0)
     expect(w.agents.jobCalls).toEqual([])
   })
 
@@ -1054,13 +1043,12 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(ledger).toContain("[read-check]")
   })
 
-  it("a missing nonce alone is incomplete even with every item checked", async () => {
+  it("a missing nonce is not reviewed even with every item checked", async () => {
     const good = review([])
-    const w = await opened({ reviews: [good, good], blindReviewer: true, answers: { "teammate-comments": { actOn: [] } } })
-    const outcome = await reviewStep.run(w.ctx, w.deps)
-    expectOk(outcome)
-    expect(outcome.status).toContain("reviewed by Codex (incomplete)")
-    expect(eventText(w.ctx)).not.toContain("nothing to change")
+    const w = await opened({ reviews: [good, good], blindReviewer: true })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).not.toContain("Reviewed by")
+    expect(w.agents.jobCalls).toEqual([])
   })
 
   it("§3y.7 a partial cant_tell is INCOMPLETE in the terminal, the posted review, the merge card and the final comment; the nonce is never posted", async () => {
@@ -1520,6 +1508,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     const w = await opened({ reviews: [{ error: "unparseable" }, { error: "unparseable" }] })
     const outcome = await reviewStep.run(w.ctx, w.deps)
     expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_REVIEW_UNPARSEABLE", next: "continue" })
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toContain("Review incomplete")
     expect(w.agents.reviewCalls).toHaveLength(2)
     expect(w.agents.jobCalls).toEqual([])
   })
