@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest"
 import { JOB_IDS, type JobId } from "../wizard/contracts/jobs.js"
+import { PLAN_LINE_KINDS } from "../wizard/contracts/asks.js"
 import { planExclusions } from "./plan-exclusions.js"
 
-// Every registry kind explicitly states whether it requires the installed Infinite runtime.
+// Every registry kind explicitly states whether losing the sole Infinite installation removes a prerequisite.
 const needsInfinite: Record<JobId, boolean> = {
   server_lane_mount: true, unusual_layout: false, posthog_improve: false, ga4_improve: false,
   meta_improve: false, duplicates_remove: false, preview_guard: false, server_conversions: true,
@@ -20,7 +21,7 @@ describe("explicit exclusion prerequisites", () => {
     expect(effects.consequences.join(" ")).toContain("account identity/reset")
   })
   it.each(JOB_IDS)("removes %s when any excludable line explicitly owns it", jobId => {
-    for (const id of ["preview_guard_adopted:meta", "sensitive_pages:posthog", "capture_beside_adopted_pixel", "meta_spa_page_views", "conversion_names", "account_settings:ga4", "server_lane", ...ids]) {
+    for (const id of [...PLAN_LINE_KINDS.map(kind => `${kind}:fixture`), ...ids]) {
       const item = { jobId, id: `${jobId}:fixture` }
       expect(planExclusions({ lines: [{ id, jobIds: [item.id] }] }, [id]).blocksJob(item), id).toBe(true)
     }
