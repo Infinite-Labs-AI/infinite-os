@@ -34,6 +34,7 @@ export function planExclusions(plan: ExclusionPlan, excluded: readonly string[])
     // The tag owns the collect rewrite, source/claim/proof file and server-lane package/settings.
     block("install_provider:infinite", "info:infinite_site_file", "user_action:next_config_rewrites", "server_lane", "npm_install", "account_settings:hosting")
     jobIds.add("unusual_layout:next_config_rewrites")
+    jobKinds.add("identify_reset")
   }
   if (lineIds.has("server_lane")) {
     block("npm_install", "account_settings:hosting")
@@ -56,7 +57,7 @@ export function planExclusions(plan: ExclusionPlan, excluded: readonly string[])
   }
   return {
     lineIds,
-    consequences: noInfinite ? ["Infinite’s tag, site claim/proof file, collect rewrite, server lane and Infinite conversion declarations are excluded."] : [],
+    consequences: noInfinite ? ["Infinite’s tag, site claim/proof file, collect rewrite, server lane, account identity/reset calls and Infinite conversion declarations are excluded."] : [],
     blocksJob: (item: Pick<ChecklistItem, "id" | "jobId">) => jobIds.has(item.id) || jobKinds.has(item.jobId),
     // Cloud and connected-account actions are separate from the emitted browser helpers.
     infiniteWrites: !noInfinite,

@@ -41,7 +41,8 @@ it("carries current and earlier exclusions into the shared report facts without 
   const ctx = { root: "/fixture", appRoot: ".", runId: "fixture", state: { get: () => state } }
   const deps = { env: {}, bridge: {}, git: {}, fs: { readText: async (path: string) => path.endsWith("plan-approvals.json") ? JSON.stringify(saved) : null } }
   const facts = await verdictFactsFor(ctx as never, deps as never)
-  expect(facts.excludedLines).toHaveLength(2)
+  expect(facts.excludedLines).toHaveLength(3)
+  expect(facts.excludedLines![2]).toContain("account identity/reset")
   expect(facts.excludedLines![0]).toContain("Install Infinite")
   expect(facts.excludedLines!.join("\n")).not.toContain("@here")
   expect(facts.excludedLines![1]).toBe("old:choice")
@@ -53,6 +54,7 @@ it.each([undefined, {}])("uses recorded state exclusions when a legacy approval 
   const ctx = { root: "/fixture", appRoot: ".", runId: "fixture", state: { get: () => state } }
   const deps = { env: {}, bridge: {}, git: {}, fs: { readText: async (path: string) => path.endsWith("plan-approvals.json") ? JSON.stringify(saved) : null } }
   const facts = await verdictFactsFor(ctx as never, deps as never)
-  expect(facts.excludedLines).toEqual(["install_provider:infinite"])
+  expect(facts.excludedLines![0]).toBe("install_provider:infinite")
+  expect(facts.excludedLines![1]).toContain("collect rewrite")
   expect(facts.tagNotInstalled).toBe(true)
 })

@@ -1,3 +1,4 @@
+import { planExclusions } from "../install/plan-exclusions.js"
 import { ownerInformationOnly, OWNER_INFORMATION_HEADING } from "../review/integrity.js"
 import { loadPlanApprovals } from "../install/step-inputs.js"
 import { buildScanner, runPublicIds } from "../review/context.js"
@@ -47,6 +48,7 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
   const savedPlan = await loadPlanApprovals(ctx, deps)
   const excluded = savedPlan?.excluded ?? savedPlan?.approvals?.declined ?? state.plan?.lines?.filter(line => line.approved === false).map(line => line.id) ?? []
   const excludedLines = [...new Set(excluded)].map(id => display(savedPlan?.plan?.lines?.find(line => line.id === id)?.text ?? id))
+  excludedLines.push(...planExclusions({ lines: savedPlan?.plan?.lines ?? [] }, excluded).consequences.map(display))
   return {
     consentActivation: await consentActivationFor(ctx, deps),
     excludedLines,
