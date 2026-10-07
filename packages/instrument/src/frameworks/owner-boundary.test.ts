@@ -24,7 +24,7 @@ it.each(cases)("leaves $name byte-identical and returns owner-only manual wiring
   expect(verifyInstallation({ root })).toMatchObject({ buildOk: true, requiresManual: [{ path }] })
 })
 
-it.each(["privacy/index.html", "terms-and-conditions.html", "tos.html", "cookies.html", "product-terms-of-use.html"])("leaves static policy %s untouched while ordinary pages receive their tags", policyPath => {
+it.each(["privacy/index.html", "terms-and-conditions.html", "tos.html", "cookies.html", "product-terms-of-use.html", "api/privacy/index.html", "docs/api/privacy.html", "test/privacy.html", "datenschutz.html", "data-protection.html", "eula.html", "disclaimer.html", "policy.html", "policies.html", "agb.html", "mentions-legales.html", "politica-de-privacidad.html"])("leaves static policy %s untouched while ordinary pages receive their tags", policyPath => {
   const policy = "<html><head></head><body>Owner policy text.</body></html>\n"
   const root = makeSite({ "index.html": "<html><head></head><body>Example</body></html>\n", [policyPath]: policy })
   const plan = planInstallation({ root, inspect: inspectWorkspace(root), workspaceId: "ws_fixture", artifacts: { ga4: { measurementId: "G-FIXTURE" } } })
@@ -44,15 +44,15 @@ it.each(["static-html", "vite-react"])("does not promise writable wiring for an 
   expect(preview.requirements).toEqual([expect.objectContaining({ path: "index.html", snippet: expect.stringContaining("G-FIXTURE") })])
 })
 
-it.each(cases)("leaves every file in a policy-named application untouched ($name)", async ({ files, path }) => {
+it.each(cases)("allows ordinary generated files inside an application with a policy word in its name ($name)", async ({ files, path }) => {
   const { applyPosthogProxy } = await import("../workspace-artifacts.js")
   const scopedFiles = Object.fromEntries(Object.entries(files).map(([file, content]) => [`apps/legal/${file}`, content]))
   const root = makeSite(scopedFiles)
   const plan = planInstallation({ root, inspect: inspectWorkspace(root, { appRoot: "apps/legal" }), workspaceId: "ws_fixture", artifacts: applyPosthogProxy({ posthog: { projectKey: "phc_fixture", apiHost: "https://us.i.posthog.com" } }, { proxy: true }) })
   const result = applyInstallation({ root, workspaceId: "ws_fixture", plan, allowDirty: true })
-  expect(result.changedFiles.filter(file => file.startsWith("apps/legal/"))).toEqual([])
+  expect(result.changedFiles.some(file => file.startsWith("apps/legal/"))).toBe(true)
   expect(read(root, `apps/legal/${path}`)).toBe(files[path])
-  expect(result.requiresManual).toContainEqual(expect.objectContaining({ path: `apps/legal/${path}`, ownerBoundary: expect.objectContaining({ kind: "policy_page" }) }))
+  expect(result.requiresManual).toContainEqual(expect.objectContaining({ path: `apps/legal/${path}`, ownerBoundary: expect.objectContaining({ kind: "frozen_unit" }) }))
 })
 
 it("leaves a policy page recorded by an older static install untouched during uninstall", async () => {
@@ -73,7 +73,7 @@ it("leaves a policy page recorded by an older static install untouched during un
   expect(result.warnings.join("\n")).toContain("terms-and-conditions.html")
 })
 
-it.each(cases)("preserves a legacy managed application after it moves under a policy path ($name)", async ({ files }) => {
+it.each(cases)("allows uninstall of ordinary generated files after the application moves under a policy-named package ($name)", async ({ files }) => {
   const { getFrameworkAdapter } = await import("./index.js")
   const { readInstallManifest } = await import("../manifest.js")
   const { existsSync } = await import("node:fs")
@@ -87,7 +87,7 @@ it.each(cases)("preserves a legacy managed application after it moves under a po
   manifest.files = manifest.files.map(file => `apps/legal/${file}`)
   manifest.appRoot = "apps/legal"
   const result = getFrameworkAdapter(plan.framework)!.uninstall!({ root: movedRoot, appRoot: manifest.appRoot, manifest, dryRun: false })
-  expect(result.removedFiles).toEqual([])
-  expect(result.restoredFiles).toEqual([])
-  for (const [path, content] of Object.entries(copied)) expect(read(movedRoot, path)).toBe(content)
+  expect(result.warnings.some(warning => warning.includes("policy page"))).toBe(false)
+  for (const [path, content] of Object.entries(files)) expect(read(movedRoot, `apps/legal/${path}`)).toBe(content)
+  if (plan.framework.startsWith("next-")) expect(result.removedFiles).toContain("apps/legal/lib/infinite-analytics-client.tsx")
 })

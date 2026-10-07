@@ -4,7 +4,7 @@ import { isPolicyPath } from "./owner-boundary.js"
 const pages = [
   "terms-and-conditions.html", "tos.html", "cookies.html", "product-terms-of-use.html",
   "api/privacy/index.html", "docs/api/privacy.html", "test/privacy.html",
-  "app/privacy/page.tsx", "pages/terms.tsx", "src/routes/privacy.tsx", "src/pages/terms.astro",
+  "app/privacy/page.tsx", "pages/terms.tsx", "app/test/privacy/page.tsx", "pages/test/privacy.tsx", "content/privacy.astro", "src/routes/privacy.tsx", "src/pages/terms.astro",
   "src/routes/privacy/+page.svelte", "content/privacy.md", "content/GDPRNotice.md",
   "app/imprint/page.tsx", "app/dpa/page.tsx", "app/privacypolicy/page.tsx", "pages/privacynotice.tsx",
   "cookiepolicy.html", "cookiesnotice.htm", "pages/termsofservice.tsx", "src/app/termsofuse/page.mdx",
@@ -53,4 +53,12 @@ it("uses explicit URL metadata or a render call for otherwise unproven templates
   expect(isPolicyPath("templates/privacy.njk", ".", sources)).toBe(true)
   expect(isPolicyPath("views/terms.ejs", ".", sources)).toBe(true)
   expect(isPolicyPath("templates/cookie-helper.liquid", ".", sources)).toBe(false)
+})
+
+it.each([
+  ["components/Policy.js", "export default function Policy() { return <p>Privacy</p> }"],
+  ["components/Policy.mdx", "# Privacy\n\nPolicy content"],
+])("protects a rendered component imported only by a policy page: %s", (path, source) => {
+  const sources = new Map([["app/privacy/page.tsx", `import Policy from '../../${path}'; export default Policy`], [path, source]])
+  expect(isPolicyPath(path, ".", sources)).toBe(true)
 })

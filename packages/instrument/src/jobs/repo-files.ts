@@ -5,7 +5,7 @@
 // source walk (`harness/scan.ts`: source extensions only, the installer's skip lists, 2,000 files,
 // 512 KB per file, never following symlinks) and adds the handful of non-source files the jobs need:
 // host config (`vercel.json`, `netlify.toml`, `_headers`, `_redirects`), package manifests (monorepo
-// layout + dependencies) and Markdown privacy pages.
+// layout + dependencies) and Markdown and template page content (including ordinary importers of shared components).
 //
 // Every path in a snapshot is REPO-ROOT relative and POSIX (`apps/web/app/layout.tsx`), so allowlists
 // are monorepo-safe (§3e.2). The snapshot never holds `.env*` files: nothing here reads them.
@@ -48,8 +48,8 @@ const HOST_CONFIG_FILES = [
   "pnpm-workspace.yaml"
 ] as const
 
-const PRIVACY_MARKDOWN = /(?:^|[/_-])(?:privacy|cookie)[^/]*\.mdx?$/i
-const MARKDOWN_ROOTS = ["app", "pages", "src", "content", "docs", "legal"] as const
+const PAGE_CONTENT = /\.(?:mdx?|liquid|php|ejs|njk)$/i
+const MARKDOWN_ROOTS = ["app", "pages", "src", "content", "docs", "legal", "components", "templates", "views", "public", "static"] as const
 const MARKDOWN_MAX_FILES = 200
 const WORKSPACE_PACKAGE_PARENTS = ["apps", "packages", "sites", "web"] as const
 
@@ -80,7 +80,7 @@ function listDirectories(absolutePath: string): string[] {
   }
 }
 
-function walkMarkdown(appRootAbsolute: string): string[] {
+function walkPageContent(appRootAbsolute: string): string[] {
   const found: string[] = []
   const visit = (relative: string): void => {
     if (found.length >= MARKDOWN_MAX_FILES) return
@@ -94,13 +94,16 @@ function walkMarkdown(appRootAbsolute: string): string[] {
     for (const entry of entries) {
       if (found.length >= MARKDOWN_MAX_FILES) return
       const child = relative === "" ? entry.name : `${relative}/${entry.name}`
-      if (entry.isSymbolicLink()) continue
+      if (entry.isSymbolicLink() || entry.name.startsWith(".")) continue
       if (entry.isDirectory()) {
         if (!SCAN_SKIPPED_DIRECTORIES.has(entry.name)) visit(child)
-      } else if (entry.isFile() && PRIVACY_MARKDOWN.test(child)) {
+      } else if (entry.isFile() && PAGE_CONTENT.test(child)) {
         found.push(child)
       }
     }
+  }
+  for (const entry of readdirSync(appRootAbsolute, { withFileTypes: true })) {
+    if (entry.isFile() && !entry.name.startsWith(".") && PAGE_CONTENT.test(entry.name) && found.length < MARKDOWN_MAX_FILES) found.push(entry.name)
   }
   for (const rootDir of MARKDOWN_ROOTS) visit(rootDir)
   return found
@@ -177,7 +180,8 @@ export function loadRepoSnapshot(root: string, appRoot: string): RepoSnapshot {
       if (text !== null) files[path] = text
     }
   }
-  for (const relative of walkMarkdown(appRootAbsolute)) {
+  const pageContent = walkPageContent(appRootAbsolute)
+  for (const relative of pageContent) {
     const text = readSmallFile(join(appRootAbsolute, relative))
     if (text !== null) files[repoPath(normalizedAppRoot, relative)] = text
   }
@@ -191,5 +195,5 @@ export function loadRepoSnapshot(root: string, appRoot: string): RepoSnapshot {
     const text = readSmallFile(join(root, path))
     if (text !== null) files[path] = text
   }
-  return snapshotFromFiles(files, { appRoot: normalizedAppRoot, truncated: sourceFiles.length >= SCAN_MAX_FILES })
+  return snapshotFromFiles(files, { appRoot: normalizedAppRoot, truncated: sourceFiles.length >= SCAN_MAX_FILES || pageContent.length >= MARKDOWN_MAX_FILES })
 }

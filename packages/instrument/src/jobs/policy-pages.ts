@@ -4,7 +4,8 @@ import { maskCommentsAndStrings } from "../frameworks/shared.js"
 
 const sourcePath = /\.(?:[cm]?[jt]sx?|html?|mdx?|astro|vue|svelte|liquid|php|ejs|njk)$/i
 const testPath = /(?:^|\/)(?:__tests__|tests?|specs?|fixtures?|__fixtures__)\/|\.(?:test|spec)\.[^/]+$/i
-const componentPath = /\.(?:[cm]?[jt]sx|vue|svelte|astro)$/i
+const testBasename = /\.(?:test|spec)\.[^/]+$/i
+const componentPath = /\.(?:[cm]?[jt]sx|vue|svelte|astro|mdx)$/i
 const pageExtension = /\.(?:[cm]?[jt]sx?|mdx?|astro|vue|svelte)$/i
 const vocabulary = /(?:^|[^a-z0-9])(?:privacy(?:[-_ ]?(?:policy|notice))?|terms(?:[-_ ]?(?:of[-_ ]?(?:service|use)|and[-_ ]?conditions|conditions))?|tos|cookies?(?:[-_ ]?(?:policy|notice))?|legal|gdpr|ccpa|dpa|imprint|impressum|datenschutz|data[-_ ]protection|eula|disclaimer|polic(?:y|ies)|agb|mentions[-_ ]legales|politica[-_ ]de[-_ ]privacidad)(?:$|[^a-z0-9])/i
 
@@ -23,7 +24,7 @@ function visibleRoute(value: string): string {
 }
 function routedPage(path: string): string | null {
   const relative = path.replace(/^src\//, "")
-  if (!pageExtension.test(relative) || testPath.test(relative)) return null
+  if (!pageExtension.test(relative) || testBasename.test(relative)) return null
   const stem = relative.replace(pageExtension, "")
   if (stem.startsWith("app/")) return /(?:^|\/)page$/.test(stem) ? visibleRoute(stem.slice(4).replace(/(?:^|\/)page$/, "")) : null
   if (stem.startsWith("pages/")) {
@@ -47,13 +48,14 @@ function directPolicyPage(path: string, appRoot: string, sources?: ReadonlyMap<s
   const relative = appRelative(path, appRoot)
   // HTML is a document even under api/, docs/ or test/. Directory names cannot exempt it.
   if (/\.html?$/i.test(relative)) return matchesPolicy(visibleRoute(relative.replace(/\.html?$/i, "")))
-  if (testPath.test(relative)) return false
+  if (testBasename.test(relative)) return false
   const route = routedPage(relative)
   if (route !== null) return matchesPolicy(route)
+  if (testPath.test(relative)) return false
   const text = sources?.get(path) ?? ""
   const mapped = explicitContentRoute(text)
   if (mapped !== null && /\.(?:mdx?|astro|liquid|php|ejs|njk)$/i.test(relative)) return matchesPolicy(mapped) || matchesPolicy(posix.basename(relative))
-  if (/\.mdx?$/i.test(relative) && (/^(?:src\/)?(?:content|_content|_posts)\//.test(relative) || !relative.includes("/"))) return matchesPolicy(relative)
+  if (/\.(?:mdx?|astro)$/i.test(relative) && (/^(?:src\/)?(?:content|_content|_posts)\//.test(relative) || !relative.includes("/"))) return matchesPolicy(relative)
   if (/\.php$/i.test(relative) && /^(?:public|static)\//.test(relative)) return matchesPolicy(relative)
   if (/\.(?:ejs|njk|liquid)$/i.test(relative) && sources) {
     const name = relative.replace(/^(?:src\/)?(?:views|templates)\//, "").replace(/\.(?:ejs|njk|liquid)$/i, "")
@@ -65,7 +67,8 @@ function directPolicyPage(path: string, appRoot: string, sources?: ReadonlyMap<s
   return false
 }
 
-/** Local, static imports only. Resolve extensionless/JS-source imports and the usual root aliases. */
+/** Local, static imports only: relative paths and @/ or ~/ root aliases.
+ * Custom tsconfig aliases and computed runtime imports are not resolved here. */
 function importTargets(importer: string, specifier: string, files: ReadonlyMap<string, string>, appRoot: string): string[] {
   const appPath = appRelative(importer, appRoot)
   const prefix = importer.slice(0, importer.length - appPath.length)
@@ -87,13 +90,18 @@ export function policyContentPaths(sources: ReadonlyMap<string, string>, appRoot
   const pages = new Set([...sources.keys()].filter(path => directPolicyPage(normalize(path), appRoot, sources)))
   const importers = new Map<string, Set<string>>()
   for (const [path, source] of sources) {
-    if (!isPolicySourceFile(path) || testPath.test(path)) continue
+    if (!isPolicySourceFile(path) || /\.md$/i.test(path) || (testPath.test(path) && !/\.html?$/i.test(path) && routedPage(appRelative(path, appRoot)) === null)) continue
     const code = maskCommentsAndStrings(source, false)
     const tokens = maskCommentsAndStrings(source, true)
     for (const match of code.matchAll(/\b(?:import|export)\s+(?:[^;]*?\s+from\s+)?['"]([^'"\r\n]+)['"]|\b(?:import|require)\s*\(\s*['"]([^'"\r\n]+)['"]/g)) {
       if (tokens.slice(match.index, match.index! + 6) !== code.slice(match.index, match.index! + 6)) continue
       for (const target of importTargets(path, match[1] ?? match[2]!, sources, appRoot)) {
-        if (!componentPath.test(target)) continue
+        if (!componentPath.test(target)) {
+          const body = maskCommentsAndStrings(sources.get(target) ?? "", true)
+          const rendersJsx = /\.[cm]?js$/i.test(target) && /(?:return|=>)\s*\(?\s*<[A-Za-z]/.test(body)
+          const rendersElement = /\.[cm]?[jt]s$/i.test(target) && /\bcreateElement\s*\(/.test(body)
+          if (!rendersJsx && !rendersElement) continue
+        }
         const seen = importers.get(target) ?? new Set<string>()
         seen.add(path); importers.set(target, seen)
       }

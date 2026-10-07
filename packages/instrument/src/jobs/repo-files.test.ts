@@ -85,3 +85,13 @@ describe("loadRepoSnapshot", () => {
     expect(packageFactsFrom(".", "not json")).toBeNull()
   })
 })
+
+it("loads policy and ordinary MDX importers plus mapped templates for one-hop policy scope", () => {
+  const root = repo({
+    "app/terms/page.mdx": 'import Body from "../../components/Body"; export default Body',
+    "app/about/page.mdx": 'import Body from "../../components/Body"; export default Body',
+    "components/Body.tsx": "export default function Body() { return <p>Shared</p> }",
+    "templates/privacy.njk": "---\npermalink: /privacy/\n---\nPolicy text",
+  })
+  expect([...loadRepoSnapshot(root, ".").files.keys()]).toEqual(["app/about/page.mdx", "app/terms/page.mdx", "components/Body.tsx", "templates/privacy.njk"])
+})
