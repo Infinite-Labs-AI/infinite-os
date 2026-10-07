@@ -285,6 +285,8 @@ export interface InfiniteHandoffContext {
 
 export interface MetaPublicArtifact {
   pixelId: string
+  /** The wizard's answer also governs capture when no Infinite tag is installed. */
+  consentMode?: InfiniteConsentMode
   /**
    * ADOPTED pixel: emit only the managed `_fbc` landing capture (no pixel bootstrap) beside the pixel the
    * site already has. Set by an approved plan line (wf5-PORT-PLAN row 5); `pixelId` names the adopted

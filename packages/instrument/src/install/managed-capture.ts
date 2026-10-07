@@ -40,7 +40,7 @@ function canonicalCapture(mode: ManagedCaptureRecord["mode"], strategy: ManagedC
   const emitted = strategy === "first_import" ? buildMetaClickIdCaptureJavascript({ gate }) : buildMetaClickIdCaptureScript({ gate })
   // The standalone file is linted as customer source. These are the fixed factory's mutable locals;
   // all other declarations are constants. Consent and cookie behavior remains the same factory code.
-  const mutable = new Set(["decision", "started", "newest", "index", "size", "other", "narrower"])
+  const mutable = new Set(["decision", "started", "newest", "index", "size", "other", "narrower", "lastConsentGestureAt"])
   const modern = emitted.replace(/\bvar\s+([A-Za-z_$][\w$]*)/g, (_match, name: string) => `${mutable.has(name) ? "let" : "const"} ${name}`).replace(/catch\s*\(_error\)/g, "catch").replace(/catch\s*\{\s*\}/g, "catch { /* Browser storage or hooks may be unavailable. */ }")
   return "// Managed by Infinite. Public install artifacts only.\n" + modern + "\n"
 }
@@ -197,7 +197,7 @@ export function planManagedCapture(input: ManagedCaptureInput): ManagedCapturePl
     try {
       const held = readInstallManifest(input.root)?.managedCapture
       const content = readFileSync(join(input.root, module), "utf8")
-      moduleOwned = lstatSync(join(input.root, module)).isFile() && held?.module === module && held.strategy === strategy && (held.mode === "required" || held.mode === "not_required") && held.moduleHash === hash(content) && content === canonicalCapture(held.mode, strategy)
+      moduleOwned = lstatSync(join(input.root, module)).isFile() && held?.module === module && held.strategy === strategy && (held.mode === "required" || held.mode === "not_required") && held.moduleHash === hash(content) && (content === canonicalCapture(held.mode, strategy) || generatedApiTexts(input.root, module).includes(content))
     } catch { moduleOwned = false }
   }
   for (const entry of targets) {

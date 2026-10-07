@@ -55,7 +55,7 @@
 //   - No host guard (founder decision 15): it writes one first-party cookie and sends nothing, and
 //     previews must still be able to test it.
 //   - No banner and no consent gate of its own: see `./consent.ts`.
-import { consentAllowsSource, consentGateSource, type MetaBrowserGate } from "./consent.js"
+import { captureConsentDecisionSource, consentAllowsSource, consentGateSource, type MetaBrowserGate } from "./consent.js"
 
 /** The global the capture defines. One per page; the census checks it. */
 export const META_CLICK_ID_ACCESSOR = "infiniteMetaClickId"
@@ -87,6 +87,7 @@ export function buildMetaClickIdCaptureScript(options: MetaClickIdCaptureOptions
     "  var FB_COOKIE = /^fb\\.[0-9]{1,2}\\.[0-9]{1,20}\\.[A-Za-z0-9_%.-]{1,512}$/;",
     "  var FBCLID = /^[A-Za-z0-9_%.-]{1,400}$/;",
     `  var MAX_AGE = ${META_CLICK_ID_MAX_AGE_SECONDS};`,
+    ...indent(captureConsentDecisionSource(gate)),
     ...indent(consentAllowsSource(gate)),
     ...indent(consentGateSource(gate)),
     "  // EVERY _fbc the browser exposes, in its order. usableOnly drops values Meta would reject.",

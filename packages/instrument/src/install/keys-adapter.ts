@@ -155,7 +155,7 @@ export function artifactsFromKeysDetailed(keys: TagKeys, answers: PlanModel["dec
   if (meta.status === "connected" && meta.pixels.length === 1) {
     const pixelId = meta.pixels[0]!.pixelId
     if (validateMetaPixelId(pixelId) !== null) skipped.meta = "invalid_id"
-    else artifacts.meta = { pixelId }
+    else artifacts.meta = { pixelId, ...(answers.consentMode ? { consentMode: answers.consentMode } : {}) }
   } else {
     skipped.meta =
       meta.status === "infinite_dataset"

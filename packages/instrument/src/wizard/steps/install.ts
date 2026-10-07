@@ -13,6 +13,7 @@ import type { ManualRequirement } from "../../types.js"
 import { itemT0Scenarios, runItemT0, t0RunParams } from "../item-t0.js"
 import type { CheckResult } from "../contracts/jobs.js"
 import { DECISION_LINE_IDS } from "../../install/plan-model.js"
+import { CAPTURE_WAITING } from "../../install/consent-handoff.js"
 import { bridgeErrorCode, keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates } from "../../install/step-inputs.js"
 import { bridgeFailureLine, bridgeFailureOutcome, bridgeFailureState, hardStopOutcome } from "../../bridge/outcomes.js"
 import { makeEditRecord } from "../../install/edits.js"
@@ -166,13 +167,14 @@ export async function verifyManagedCaptureJobs(ctx: WizardContext, deps: Pick<Wi
     const runId = ctx.state.get().runId ?? ctx.runId
     if (runId) {
       for (const saved of ctx.state.get().jobs.filter(job => job.owner === "code" && job.jobId === "meta_improve" && /^meta_improve:capture(?::|$)/.test(job.id) && job.state !== "left_for_you")) {
-        const item: ChecklistItem = { ...saved, state: "claimed", claim: { status: "done", note: "The wizard emitted the managed module and its fixed entrypoint wiring", at: ctx.now().toISOString() }, edits: [...saved.edits ?? [], ...result.edits.filter(edit => edit.jobId === "meta_improve:capture").map(edit => ({ editId: edit.id, file: edit.file }))] }
+        const item: ChecklistItem = { ...saved, state: "claimed", consentActivation: result.managedCapture.mode === "required" ? "waiting_banner_signal" : undefined, claim: { status: "done", note: "The wizard emitted the managed module and its fixed entrypoint wiring", at: ctx.now().toISOString() }, edits: [...saved.edits ?? [], ...result.edits.filter(edit => edit.jobId === "meta_improve:capture").map(edit => ({ editId: edit.id, file: edit.file }))] }
         const raw = await deps.checks.run("click_id_capture", { item, root: ctx.root, appRoot: ctx.appRoot, runId })
         const staticChecks: CheckResult[] = (Array.isArray(raw) ? raw : [raw]).map(check => ({ ...check, tier: "S", runId }))
         const scenarios = await itemT0Scenarios(item, [{ checkId: "fbc_capture" }], params, { root: ctx.root, fs: deps.fs })
         const offline = await runItemT0(deps, scenarios, result.artifacts ?? {}, { runId, at: () => ctx.now().toISOString() })
         const [checked] = deps.registry.apply([item], [...staticChecks, ...offline.map(check => ({ ...check, tier: "T0" as const, runId }))], runId)
         if (checked) {
+          if (checked.consentActivation && ["done_in_code", "waiting_deploy", "proven"].includes(checked.state)) { checked.state = "done_in_code"; checked.note = CAPTURE_WAITING }
           ctx.state.update(current => { current.jobs = current.jobs.map(job => job.id === checked.id ? checked : job) })
           ctx.emit.emit("job.state", { itemId: checked.id, state: checked.state, by: "wizard", note: checked.note ?? "Managed capture checked from the emitted module and fixed entrypoint" })
         }

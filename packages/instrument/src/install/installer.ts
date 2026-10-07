@@ -977,7 +977,7 @@ function keptArtifact(
     case "ga4":
       return ids.ga4.length === 1 ? { measurementId: ids.ga4[0]! } : "its receipt does not record exactly one GA4 id"
     case "meta":
-      return ids.meta.length === 1 ? { pixelId: ids.meta[0]! } : "its receipt does not record exactly one pixel id"
+      return ids.meta.length === 1 ? { pixelId: ids.meta[0]!, consentMode } : "its receipt does not record exactly one pixel id"
     case "posthog": {
       if (!ids.posthog) return "its receipt does not record the PostHog project"
       const { projectKey, apiHost } = ids.posthog

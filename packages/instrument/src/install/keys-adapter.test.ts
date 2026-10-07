@@ -23,7 +23,7 @@ describe("artifactsFromKeys (§3b keys → the installer's input)", () => {
       uiHost: "https://us.posthog.com",
       proxy: { path: "/ingest", ingestHost: "https://us.i.posthog.com", assetsHost: "https://us-assets.i.posthog.com" }
     })
-    expect(artifacts.meta).toEqual({ pixelId: IDS.meta })
+    expect(artifacts.meta).toEqual({ pixelId: IDS.meta, consentMode: "not_required" })
     expect(artifacts.productionHosts).toEqual(["acme-store.com"])
   })
 

@@ -128,7 +128,9 @@ export const metaProviderAdapter: ProviderAdapter = {
       return { assumptions: [], blockers: [guard.error], instructions: [] }
     }
 
-    const consentMode = context?.artifacts.infinite?.consentMode
+    const ownConsentMode = artifact && typeof artifact === "object" && "consentMode" in artifact ? artifact.consentMode : undefined
+    if (ownConsentMode !== undefined && ownConsentMode !== "required" && ownConsentMode !== "not_required") return { assumptions: [], blockers: ["Meta click-id consentMode must be required or not_required."], instructions: [] }
+    const consentMode = ownConsentMode ?? context?.artifacts.infinite?.consentMode
     const captureOnly =
       artifact && typeof artifact === "object" && (artifact as { captureOnly?: unknown }).captureOnly === true
     if (captureOnly) {
@@ -165,8 +167,8 @@ export const metaProviderAdapter: ProviderAdapter = {
           : []),
         "Meta wiring will use only the public pixelId artifact.",
         consentMode === "required"
-          ? "Meta click-id capture is ON: when a visitor who has granted consent lands from a Meta ad, the page saves the ad's click id in Meta's own _fbc cookie, even if the pixel itself is blocked. It sends nothing."
-          : "Meta click-id capture is ON: when a visitor lands from a Meta ad, the page saves the ad's click id in Meta's own _fbc cookie, even if the pixel itself is blocked, so a later conversion can be credited to the ad. It skips visitors who said no on this site or whose browser sends Do Not Track / Global Privacy Control (until they grant), and it sends nothing.",
+          ? "Meta ad-click capture is NOT ACTIVE YET: it waits for your banner's yes signal to Infinite before saving _fbc. Connect the yes/no signal in the owner instructions. Offline capture checks work when consent is granted; they do not test your banner connection."
+          : "Meta ad-click capture collects by default, independently of other banners until you connect their yes/no signal to Infinite. It saves _fbc on ad landings, skips an Infinite-recorded no or DNT/GPC without an explicit grant, and sends nothing.",
         advancedMatching
           ? "Manual Advanced Matching is ON: the page will define window.infiniteMetaAdvancedMatch, which hashes the raw email / external id YOUR code passes it. It never reads the page and never runs on its own."
           : "Manual Advanced Matching is OFF (default): the pixel sends no visitor contact details. Turn it on with --meta-advanced-matching on."

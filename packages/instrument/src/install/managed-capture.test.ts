@@ -1,12 +1,13 @@
 import { afterEach, expect, it } from "vitest"
 import { createRequire } from "node:module"
+import { createHash } from "node:crypto"
 import { join } from "node:path"
 import { rmSync, writeFileSync } from "node:fs"
-import { cleanupSites, fakeBefore, fakeHosting, fakeKeys, fakeProductionDeniedConflict, IDS, makeSite, read, candidate, fakeContext } from "../../test/wizard/o7-fakes.js"
+import { cleanupSites, fakeBefore, fakeHosting, fakeKeys, fakeProductionDeniedConflict, IDS, makeSite, read, candidate, fakeContext, notConnectedKeys } from "../../test/wizard/o7-fakes.js"
 import { createBrowserVm } from "../../test/site-code/browser-vm.js"
 import { WizardInstaller } from "./installer.js"
 import { applyManagedCapture, planManagedCapture, readManagedCapture } from "./managed-capture.js"
-import { GENERATED_API_RECORD, generatedApiTexts } from "../jobs/generated-api.js"
+import { GENERATED_API_RECORD, generatedApiTexts, recordGeneratedApi } from "../jobs/generated-api.js"
 import { nodeWizardFs } from "../wizard/fs.js"
 import { itemT0Scenarios } from "../wizard/item-t0.js"
 import { runT0Scenarios } from "../t0/scenarios.js"
@@ -15,6 +16,8 @@ import { verifyManagedCaptureJobs } from "../wizard/steps/install.js"
 import { createJobRegistry } from "../jobs/registry.js"
 import type { CheckRunner } from "../wizard/contracts/jobs.js"
 import { runSetupChecks } from "../setup-checks/index.js"
+import { renderInfiniteBrowserTag } from "../runtime/infinite-browser.js"
+import { CONSENT_YES, consentActivationFor } from "./consent-handoff.js"
 
 afterEach(cleanupSites)
 const pixel = "if (typeof window !== 'undefined') { fbq('init','7777000011112222'); fbq('consent','revoke'); }\n"
@@ -110,12 +113,27 @@ it("keeps owner consent frozen alongside recorded generated HTML", async () => {
   expect(read(site.root, site.entry)).toBe(before)
 })
 
+it("upgrades a previously recorded fixed capture artifact without adopting unrecorded bytes", async () => {
+  const site = await installed()
+  const earlier = site.proof.browserCode.replace("Public install artifacts only.", "Earlier fixed emitter output.")
+  writeFileSync(join(site.root, site.proof.record.module), earlier)
+  const receipt = JSON.parse(read(site.root, ".infinite/install.json"))
+  receipt.managedCapture.moduleHash = createHash("sha256").update(earlier).digest("hex")
+  writeFileSync(join(site.root, ".infinite/install.json"), JSON.stringify(receipt))
+  const input = { root: site.root, appRoot: ".", framework: "next-pages-router", pixels: site.scan.facts.meta }
+  expect(planManagedCapture(input)?.canWire).toBe(false)
+  recordGeneratedApi(site.root, site.proof.record.module, earlier)
+  expect(planManagedCapture(input)?.canWire).toBe(true)
+  expect(applyManagedCapture({ ...input, mode: "required", runId: IDS.run, seq: 0 }).changedFiles).toEqual([site.proof.record.module])
+  expect(read(site.root, site.proof.record.module)).toBe(site.proof.browserCode)
+})
+
 it("executes the actual recorded artifact in T0, under a sandbox grant", async () => {
   const site = await installed()
   const item = candidate("meta_improve", "capture", { owner: "code", allow: { files: site.proof.record.entrypoints, create: [site.proof.record.module] } })
   const scenarios = await itemT0Scenarios(item, [{ checkId: "fbc_capture" }], { productionHost: "example.test" }, { root: site.root, fs: nodeWizardFs })
   expect(JSON.stringify(scenarios[0]?.params.source)).toContain("infiniteMetaClickId")
-  expect(await runT0Scenarios(scenarios, {}, { runId: IDS.run, now: () => new Date("2026-10-07T00:00:00Z") })).toEqual([expect.objectContaining({ state: "pass" })])
+  expect(await runT0Scenarios(scenarios, {}, { runId: IDS.run, now: () => new Date("2026-10-07T00:00:00Z") })).toEqual([expect.objectContaining({ state: "pass", reason: expect.stringContaining("works when consent is granted") })])
 })
 
 it("advances the installer-owned capture from real S and T0 results without a worker", async () => {
@@ -126,9 +144,66 @@ it("advances the installer-owned capture from real S and T0 results without a wo
   const checks = { run: async (_id: string, input: unknown) => o9CheckFunctions({ root: site.root, version: "fixture" }).click_id_capture(input, { runId: IDS.run, now: ctx.now }), t0: async (scenarios: Parameters<CheckRunner["t0"]>[0], artifacts: Parameters<CheckRunner["t0"]>[1]) => runT0Scenarios(scenarios, artifacts, { runId: IDS.run, now: ctx.now }) } as Pick<CheckRunner, "run" | "t0">
   await verifyManagedCaptureJobs(ctx, { fs: nodeWizardFs, registry: createJobRegistry({ briefFacts: () => null }), checks: checks as CheckRunner }, site.result, { productionHost: "example.test" })
   const checked = ctx.state.get().jobs[0]!
-  expect(checked.state).toBe("waiting_deploy")
+  expect(checked.state).toBe("done_in_code")
+  expect(checked.note).toContain("Installed, waiting on your banner signal")
   expect(checked.checks.filter(check => check.tier === "S" || check.tier === "T0").every(check => check.state === "pass" && check.runId === IDS.run)).toBe(true)
   expect(checked.checks.find(check => check.tier === "PV")?.state).toBe("not_run")
+  const [afterVisit] = createJobRegistry({ briefFacts: () => null }).apply([checked], [{ checkId: "meta_seen_leaving", tier: "PV", state: "pass", at: "2099-01-01T00:00:00Z", runId: IDS.run }], IDS.run, { afterDeploy: true })
+  expect(afterVisit).toMatchObject({ state: "done_in_code", consentActivation: "waiting_banner_signal", note: expect.stringContaining("waiting on your banner signal") })
+})
+
+it.each([false, true])("the exact banner dispatch activates and revokes required capture (Infinite runtime: %s)", async withRuntime => {
+  const site = await installed()
+  const browser = createBrowserVm({ url: "https://example.test/?fbclid=bannerClick" })
+  browser.window.CustomEvent = class { constructor(public type: string, public init: { detail: unknown }) {} get detail() { return this.init.detail } }
+  browser.runScript(site.proof.browserCode)
+  if (withRuntime) browser.runHtml(renderInfiniteBrowserTag({ siteSourceKey: "site_fixture_key", collectPath: "/infinite/ledger", respectDnt: true, consent: { mode: "required", storageKey: "infinite_analytics_consent" }, productionHosts: ["example.test"] }))
+  expect(browser.cookies.writes).toEqual([])
+  expect(browser.beacons).toEqual([])
+  const yes = 'window.dispatchEvent(new CustomEvent("infinite:analytics-consent-change", { detail: { granted: true } }));'
+  const no = 'window.dispatchEvent(new CustomEvent("infinite:analytics-consent-change", { detail: { granted: false } }));'
+  browser.runScript(yes)
+  await browser.advance(0)
+  expect(browser.cookies.writes).toEqual([])
+  browser.runScript('window.dispatchEvent({ type: "pointerdown", isTrusted: true });')
+  browser.runScript(yes)
+  await browser.advance(0)
+  expect(browser.scriptErrors).toEqual([])
+  expect(browser.cookies.values("_fbc")).toHaveLength(1)
+  expect(browser.evaluate('window.infiniteMetaClickId()')).not.toBe("")
+  if (withRuntime) expect(browser.beacons.length + browser.fetches.length).toBeGreaterThan(0)
+  browser.runScript('window.dispatchEvent({ type: "pointerdown", isTrusted: true });')
+  browser.runScript(no)
+  await browser.advance(0)
+  expect(browser.localValues.get("infinite_analytics_consent")).toBe("denied")
+  expect(browser.evaluate('window.infiniteMetaClickId()')).toBe("")
+  if (withRuntime) expect(browser.evaluate('window.__infiniteConsentAllowed()')).toBe(false)
+})
+
+it("a new Meta-only install obeys required mode without an Infinite artifact", async () => {
+  const root = makeSite({ "index.html": "<html><head></head><body>Example</body></html>" })
+  const keys = notConnectedKeys()
+  keys.meta = fakeKeys().meta
+  const hosting = { provider: "none" as const, vercel: null }
+  const subject = new WizardInstaller({ root, repoFingerprint: IDS.fingerprint, runId: () => IDS.run, agent: () => null, consentFlag: () => "required", productionDeniedConflict: fakeProductionDeniedConflict })
+  const scan = await subject.scan({ root, hosting })
+  const plan = subject.buildPlan(scan, keys, fakeBefore({ keys, hosting }), [])
+  const result = await subject.apply(plan, { approved: [], declined: [], edits: { consent_mode: "required" } })
+  expect(result.ok).toBe(true)
+  expect(result.artifacts.infinite).toBeUndefined()
+  expect(result.artifacts.meta).toBeDefined()
+  const browser = createBrowserVm({ url: "https://acme-store.com/?fbclid=metaOnly" })
+  browser.window.CustomEvent = class { constructor(public type: string, public init: { detail: unknown }) {} get detail() { return this.init.detail } }
+  browser.runHtml(read(root, "index.html"))
+  expect(browser.scriptErrors).toEqual([])
+  expect(browser.cookies.writes).toEqual([])
+  browser.runScript('window.dispatchEvent({ type: "pointerdown", isTrusted: true });')
+  browser.runScript(CONSENT_YES)
+  await browser.advance(0)
+  expect(browser.cookies.values("_fbc")).toHaveLength(1)
+  const ctx = fakeContext({ root })
+  ctx.state.update(state => { state.plan = { hash: plan.hash, lines: [], answers: { consentMode: "required", conversions: [], privacyApproved: null, npmInstall: null, metaGoal: null } } })
+  expect(await consentActivationFor(ctx, { fs: nodeWizardFs })).toEqual({ mode: "required", infinite: false, capture: true })
 })
 
 it("emits lintable standalone JavaScript without disabling customer rules", async () => {
@@ -196,7 +271,7 @@ it("does not infer Next module order for a pixel emitted as a native script", as
 })
 
 it("uses a valid owner-added loader in a frozen entry without editing that entry", async () => {
-  const entry = 'import "../lib/infinite-meta-click-id.js"\n' + files["pages/_app.tsx"] + "\nconst OWNER_MODE = { analytics_storage: 'denied' };\n"
+  const entry = 'import "../lib/infinite-meta-click-id.js"\n' + files["pages/_app.tsx"] + "\nconst OWNER_MODE = { analytics_storage: 'denied' };\ngtag('consent', 'default', OWNER_MODE);\n"
   const root = makeSite({ ...files, "pages/_app.tsx": entry })
   const subject = new WizardInstaller({ root, repoFingerprint: IDS.fingerprint, runId: () => IDS.run, agent: () => null, consentFlag: () => "required", productionDeniedConflict: fakeProductionDeniedConflict })
   const scan = await subject.scan({ root, hosting: fakeHosting() })

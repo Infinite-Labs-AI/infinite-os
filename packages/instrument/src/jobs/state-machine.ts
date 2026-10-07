@@ -21,6 +21,7 @@
 // test) reaches `waiting_real_event` only once its live checks pass, and a failing rehearsal check sends
 // an item back to `pending` with the failure (budget left) or to `failed` (budget spent), like a local one.
 import { CONSENT_LEFT_FOR_YOU } from "./owner-boundary.js"
+import { CAPTURE_WAITING } from "../install/consent-handoff.js"
 import { checkWords } from "./check-words.js"
 import { sanitizeUntrusted } from "../agents/sanitize.js"
 import {
@@ -231,6 +232,11 @@ export function applyResults(item: ChecklistItem, results: readonly CheckResult[
   }
   // §3x.2 A check that sent the item back (or failed it) is its note.
   if (advanced.note && (advanced.item.state === "pending" || advanced.item.state === "failed")) withNote(advanced.item, advanced.note)
+  if (advanced.item.consentActivation === "waiting_banner_signal" && ["done_in_code", "waiting_deploy", "proven"].includes(advanced.item.state)) {
+    advanced.item.state = "done_in_code"
+    advanced.note = CAPTURE_WAITING
+    withNote(advanced.item, CAPTURE_WAITING)
+  }
   return { item: advanced.item, changed: merged || advanced.item.state !== item.state, by: "wizard", ...(advanced.note ? { note: advanced.note } : {}) }
 }
 
