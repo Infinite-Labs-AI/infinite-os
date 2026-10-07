@@ -9,7 +9,7 @@
 // refusal. Pure: typed inputs in, one verdict out.
 import { maskIdentifier } from "../checks/result.js"
 import { openFindingName } from "../review/ledger.js"
-import type { ChecklistItem, JobItemState } from "./contracts/jobs.js"
+import { checkProvesChange, type ChecklistItem, type JobItemState } from "./contracts/jobs.js"
 import {
   PROBLEM_REASON_KINDS,
   VERDICT_LIMITS,
@@ -98,6 +98,15 @@ export function missingApprovedFixes(jobs: readonly ChecklistItem[]): ChecklistI
   return jobs.filter((item) => {
     if (item.owner !== "agent" || item.state === "left_for_you" || item.jobId === "privacy_paragraph" || NOT_PLAN_JOBS.has(item.jobId)) return false
     if (DONE_STATES.includes(item.state)) return false
+    if (item.state === "failed") {
+      const failedLiveRunIds = new Set(item.checks
+        .filter((check) => ["T1", "RH", "PV"].includes(check.tier) && check.state === "problem" && check.runId)
+        .map((check) => check.runId!))
+      const local = item.checks.filter((check) => ["S", "B", "T0"].includes(check.tier))
+      if (failedLiveRunIds.size > 0 && local.length > 0 &&
+        local.every((check) => check.state === "pass" && check.runId !== undefined && failedLiveRunIds.has(check.runId)) &&
+        ((item.edits?.length ?? 0) > 0 || local.some((check) => checkProvesChange(item.jobId, check.tier, check.id)))) return false
+    }
     // A plan line the user never answered seeds its item `blocked:needs_you` with no wizard note: not approved.
     if (item.state === "blocked" && item.blockedReason === "needs_you" && item.note === undefined) return false
     return true

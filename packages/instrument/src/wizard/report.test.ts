@@ -144,6 +144,38 @@ describe("ReportBuilder.build", () => {
     // NEGATIVE: nothing in the report sends the user to the app.
     expect(JSON.stringify(report)).not.toContain("pending_open_infinite")
   })
+
+  it("keeps a measured live problem without calling its locally verified agent edit missing", () => {
+    const job = {
+      ...item("meta_improve:spa_page_view", ["app/layout.tsx"]),
+      title: "Send a Meta PageView on every page change",
+      state: "failed" as const,
+      claim: { status: "done" as const, note: "wired", at: AT },
+      edits: [{ editId: "agent-run-t1-0", file: "app/layout.tsx" }],
+      checks: [
+        { id: "spa_page_view_applied", tier: "S" as const, state: "pass" as const, at: AT, runId: RUN },
+        { id: "meta_spa_page_view", tier: "RH" as const, state: "problem" as const, reason: "meta_spa_page_view_missing", at: AT, runId: RUN }
+      ]
+    }
+    const proven = buildColumn("proven_live", {
+      runId: RUN,
+      meta: { measuredAt: AT, sha: "f".repeat(40) },
+      facts: [fact("deployed_dry.spa_navigation", "problem", { display: "Meta page view missing" })],
+      rows: {}
+    })
+    const report = builder.build({
+      runId: RUN,
+      tagVersion: "0.12.0",
+      site: { repoLabel: "github.com/acme/acme-store", productionHost: "www.acme-store.com" },
+      columns: { live_today: null, in_pr: null, proven_live: proven },
+      provenLivePending: null,
+      day7: null,
+      notes: [],
+      verdictFacts: { jobs: [job], openFindings: [], tools: [], installedUnknown: null }
+    })
+    expect(report.verdict?.reasons.map((reason) => reason.kind)).toContain("live_problem")
+    expect(report.verdict?.reasons.map((reason) => reason.kind)).not.toContain("approved_fix_missing")
+  })
 })
 
 describe("buildColumn (typed inputs → one column)", () => {
