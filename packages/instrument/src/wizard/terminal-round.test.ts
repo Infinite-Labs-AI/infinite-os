@@ -167,23 +167,23 @@ describe("QA #20: the jobs that are not done are named", () => {
         item("A code job", "blocked", "needs_you", "code")
       ])
     ).toEqual([
-      "! Not done: Server-side sign-up event (needs your answer)",
-      "! Not done: Remove the second GA4 tag (the agent did not finish it)",
-      "! Not done: Join logged-in visitors (the wizard's check did not pass)"
+      "! Not done, left for you: Server-side sign-up event — needs your answer",
+      "! Not done, left for you: Remove the second GA4 tag — the agent did not finish it",
+      "! Not done, left for you: Join logged-in visitors — the wizard's check did not pass"
     ])
   })
 
   it("§3x.2 the item's own note is the reason when the wizard kept one (a safety-check refusal is never 'outside the job's files')", () => {
     const refused = { ...item("Keep previews silent: GA4", "failed"), note: "the wizard's safety check refused app/layout.tsx:29: the edit uses a provider id as a default or fallback value (||, ?? or ?:)" }
     expect(notDoneLines([refused])).toEqual([
-      "! Not done: Keep previews silent: GA4 (the wizard's safety check refused app/layout.tsx:29: the edit uses a provider id as a default or fallback value (||, ?? or ?:))"
+      "! Not done, left for you: Keep previews silent: GA4 — the wizard's safety check refused app/layout.tsx:29: the edit uses a provider id as a default or fallback value (||, ?? or ?:)"
     ])
   })
 
   it("the closing list names fewer jobs when the step already said more (the terminal keeps 8 result lines; an incident is never pushed out)", () => {
     const failed = ["A", "B", "C", "D", "E", "F", "G"].map((name) => ({ ...item(`Job ${name}`, "failed"), id: `job:${name}` }))
     expect(notDoneLines(failed)).toHaveLength(7)
-    expect(notDoneLines(failed, 5)).toEqual([...["A", "B", "C", "D", "E"].map((name) => `! Not done: Job ${name} (the wizard's check did not pass)`), "! …and 2 more not done: the pull request lists every job"])
+    expect(notDoneLines(failed, 5)).toEqual([...["A", "B", "C", "D", "E"].map((name) => `! Not done, left for you: Job ${name} — the wizard's check did not pass`), "! …and 2 more not done: the pull request lists every job"])
   })
 
   it("parts of one job that ended the same way are one line, with how many parts", () => {
@@ -193,7 +193,7 @@ describe("QA #20: the jobs that are not done are named", () => {
         { ...item("Keep previews silent (existing tags)", "blocked", "agent_blocked"), id: "preview_guard:posthog" },
         { ...item("Keep previews silent (existing tags)", "failed"), id: "preview_guard:meta" }
       ])
-    ).toEqual(["! Not done: Keep previews silent (existing tags) (2 parts: the agent did not finish it)", "! Not done: Keep previews silent (existing tags) (the wizard's check did not pass)"])
+    ).toEqual(["! Not done, left for you: Keep previews silent (existing tags) — 2 parts: the agent did not finish it", "! Not done, left for you: Keep previews silent (existing tags) — the wizard's check did not pass"])
   })
 
   it("more than six are counted, and a clean run adds nothing (negative)", () => {
