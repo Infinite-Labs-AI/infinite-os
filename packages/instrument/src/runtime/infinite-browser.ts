@@ -711,12 +711,13 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
       emit("sign_up_click", normalizePath(location.href), properties)
     })
 
-    // A consent decision must follow a genuine user gesture. Any same-origin script can
+    // A consent grant must follow a genuine user gesture. Refusals always take effect.
+    // Any same-origin script can
     // dispatch the consent event, and — since explicit decisions now override GPC/DNT —
     // a silent dispatch could otherwise persistently defeat a visitor's privacy signal.
     // A real consent UI always produces a pointerdown/keydown moments before dispatching;
     // a background script does not.
-    let lastGestureAt = 0
+    let lastGestureAt = -1
     const recordGesture = () => {
       lastGestureAt = Date.now()
     }
@@ -728,7 +729,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
       // explicit decision of a GPC/DNT visitor (the only visitors it suppresses).
       const detail = (event as CustomEvent<{ granted?: boolean }>).detail
       if (typeof detail?.granted !== "boolean") return
-      if (detail.granted && Date.now() - lastGestureAt > 10000) return
+      if (detail.granted && (lastGestureAt < 0 || Date.now() - lastGestureAt > 10000)) return
       consentOverride = detail?.granted === true
       try {
         localStorage.setItem(consentStorageKey, detail?.granted ? "granted" : "denied")

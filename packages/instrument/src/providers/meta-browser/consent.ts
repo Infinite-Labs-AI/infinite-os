@@ -56,7 +56,7 @@ export function captureConsentDecisionSource(gate: MetaBrowserGate): string {
   if (gate.kind === "none") return ""
   return [
     'var captureConsentDecision = "";',
-    "var lastConsentGestureAt = 0;",
+    "var lastConsentGestureAt = -1;",
     "function recordConsentGesture() { lastConsentGestureAt = Date.now(); }",
     "try {",
     'document.addEventListener("pointerdown", recordConsentGesture, true);',
@@ -64,7 +64,7 @@ export function captureConsentDecisionSource(gate: MetaBrowserGate): string {
     `window.addEventListener("${INFINITE_CONSENT_EVENT}", function () {`,
     "  var event = arguments[0];",
     '  if (!event || !event.detail || typeof event.detail.granted !== "boolean") return;',
-    "  if (event.detail.granted && (!lastConsentGestureAt || Date.now() - lastConsentGestureAt > 10000)) return;",
+    "  if (event.detail.granted && (lastConsentGestureAt < 0 || Date.now() - lastConsentGestureAt > 10000)) return;",
     '  captureConsentDecision = event.detail.granted ? "granted" : "denied";',
     // A refusal also governs capture when storage cannot be written. The runtime owns its own key.
     `  if (typeof window.${INFINITE_CONSENT_ACCESSOR} === "function") { if (event.detail.granted) captureConsentDecision = ""; return; }`,

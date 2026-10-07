@@ -231,6 +231,19 @@ it("an in-memory standalone grant cannot override a later runtime denial", async
   expect(browser.evaluate('window.infiniteMetaClickId()')).toBe("")
 })
 
+it.each([false, true])("requires a recorded gesture even when the clock is zero (runtime: %s)", async withRuntime => {
+  const browser = createBrowserVm({ url: "https://example.test/?fbclid=clockZero", now: 0 })
+  browser.runScript(buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: "required" } }))
+  if (withRuntime) browser.runHtml(renderInfiniteBrowserTag({ siteSourceKey: "site_fixture_key", collectPath: "/infinite/ledger", respectDnt: true, consent: { mode: "required", storageKey: "infinite_analytics_consent" }, productionHosts: ["example.test"] }))
+  browser.runScript('window.dispatchEvent({ type: "infinite:analytics-consent-change", detail: { granted: true } });')
+  await browser.advance(0)
+  expect(browser.cookies.values("_fbc")).toEqual([])
+  expect(browser.localValues.get("infinite_analytics_consent")).not.toBe("granted")
+  browser.runScript('window.dispatchEvent({ type: "pointerdown" }); window.dispatchEvent({ type: "infinite:analytics-consent-change", detail: { granted: true } });')
+  await browser.advance(0)
+  expect(browser.localValues.get("infinite_analytics_consent")).toBe("granted")
+})
+
 it("a new Meta-only install obeys required mode without an Infinite artifact", async () => {
   const root = makeSite({ "index.html": "<html><head></head><body>Example</body></html>" })
   const keys = notConnectedKeys()

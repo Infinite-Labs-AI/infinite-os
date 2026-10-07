@@ -11,7 +11,7 @@
   var FBCLID = /^[A-Za-z0-9_%.-]{1,400}$/;
   var MAX_AGE = 7776000;
   var captureConsentDecision = "";
-  var lastConsentGestureAt = 0;
+  var lastConsentGestureAt = -1;
   function recordConsentGesture() { lastConsentGestureAt = Date.now(); }
   try {
   document.addEventListener("pointerdown", recordConsentGesture, true);
@@ -19,7 +19,7 @@
   window.addEventListener("infinite:analytics-consent-change", function () {
     var event = arguments[0];
     if (!event || !event.detail || typeof event.detail.granted !== "boolean") return;
-    if (event.detail.granted && (!lastConsentGestureAt || Date.now() - lastConsentGestureAt > 10000)) return;
+    if (event.detail.granted && (lastConsentGestureAt < 0 || Date.now() - lastConsentGestureAt > 10000)) return;
     captureConsentDecision = event.detail.granted ? "granted" : "denied";
     if (typeof window.__infiniteConsentAllowed === "function") { if (event.detail.granted) captureConsentDecision = ""; return; }
     try { localStorage.setItem("infinite_analytics_consent", event.detail.granted ? "granted" : "denied"); } catch (_error) {}
