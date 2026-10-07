@@ -1,53 +1,29 @@
 /** The owner's consent boundary is a byte freeze of top-level source units, not a control-flow model. */
 import { createHash } from "node:crypto"
-import { hunksOf, splitLines } from "../agents/line-diff.js"
+import { maskCommentsAndStrings } from "../frameworks/shared.js"
 
-export const CONSENT_API_NAMES = ["gtag", "fbq", "posthog", "dataLayer", "__tcfapi", "__uspapi", "__gpp", "__cmp", "OneTrust", "Optanon", "Cookiebot", "CookieConsent", "Didomi", "UC_UI", "usercentrics", "klaro"] as const
-const API_NAMES = new Set<string>(CONSENT_API_NAMES)
-// Scan the complete raw source even when a glob or malformed construct stops tokenization.
+// Comments between call tokens are whitespace, even when earlier syntax makes splitting uncertain.
 const RAW_TRIVIA = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\r\n]*(?:\r?\n|$))*`
-const API_WORD = `(?:${CONSENT_API_NAMES.join("|")}|Optanon[A-Za-z0-9_$]*|Didomi[A-Za-z0-9_$]*)`
-const API_LITERAL = `['\"\x60]${API_WORD}['\"\x60]`
-const API_TARGET = `(?:\\b${API_WORD}\\b|\\[\\s*${API_LITERAL}\\s*\\])`
-const API_RECEIVER = `(?:(?:[\\w$]+|\\([^;\\n)]*\\))\\s*(?:\\?\\.|\\.)\\s*)*`
-// Comments are JavaScript whitespace; this raw scan must not depend on tokenizer confidence.
-const apiWritePattern = (pattern: string) => new RegExp(pattern.replaceAll(String.raw`\s*`, RAW_TRIVIA).replaceAll(String.raw`\s+`, `${RAW_TRIVIA.slice(0, -1)}+`), "g")
-/** Syntactic writes/definitions/aliases only; this does not evaluate or model control flow. */
-const API_WRITE_PATTERNS = [
-  apiWritePattern(`${API_TARGET}\\s*(?:=(?!=|>)|[+*/%&|^-]=|&&=|\\|\\|=|\\?\\?=|\\+\\+|--)`),
-  apiWritePattern(`\\bdelete\\b[^;]*${API_TARGET}`),
-  apiWritePattern(`\\b(?:const|let|var|function|class|interface|type|enum|namespace)\\s+(?:${API_WORD}\\b|[\\[{][^;=]*\\b${API_WORD}\\b)`),
-  apiWritePattern(`\\b(?:const|let|var)\\b[^;]*?,\\s*${API_TARGET}(?=\\s*[,;=:)}])`),
-  apiWritePattern(`\\bfunction\\b[^;{}(]*\\([^;)]*\\b${API_WORD}\\b`),
-  apiWritePattern(`(?:\\([^;()]*\\b${API_WORD}\\b[^;()]*\\)|\\b${API_WORD}\\b)\\s*(?::[^;=]*)?=>`),
-  // Match binding clauses, never an exported function's body or an options-object closing brace.
-  apiWritePattern(`\\bimport\\s+(?=[^;()]*\\b${API_WORD}\\b[^;()]*\\bfrom\\b)(?:type\\s+)?(?:[\\w$]+\\s*,?\\s*)?(?:\\{[^}]*\\}|\\*\\s+as\\s+[\\w$]+)?\\s*from\\b`),
-  apiWritePattern(`\\bexport\\s+(?:type\\s+)?(?:\\{[^}]*\\b${API_WORD}\\b[^}]*\\}|\\*\\s+as\\s+${API_WORD}\\b)`),
-  apiWritePattern(`\\b(?:Object|Reflect)\\s*(?:\\.\\s*(?:defineProperty|defineProperties|set)|\\[\\s*['\"\x60](?:defineProperty|defineProperties|set)['\"\x60]\\s*\\])\\s*\\([^;]*?${API_LITERAL}`),
-  apiWritePattern(`(?:\\b${API_WORD}\\b|${API_LITERAL})\\s*:(?!:)`),
-  apiWritePattern(`[{,]\\s*${API_WORD}\\s*(?=[,}])`),
-  apiWritePattern(`${API_TARGET}\\s*\\([^;{}]*\\)\\s*(?::[^;{}]*)?\\{`),
-  apiWritePattern(`=\\s*(?:\\(\\s*)*${API_RECEIVER}${API_TARGET}(?![\\w$]|\\s*(?:\\?\\.)?\\()`),
-  apiWritePattern(`=\\s*${API_RECEIVER}[\\w$]+\\s*(?:\\?\\.)?\\s*\\[\\s*${API_LITERAL}\\s*\\]`)
-]
 export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
   new RegExp(String.raw`[([,]${RAW_TRIVIA}['"]consent['"]${RAW_TRIVIA}(?:[,\])]|$)`),
   /(?:\b(?:gtag|fbq)\b|\[\s*['"`](?:gtag|fbq)['"`]\s*\])\s*(?:\?\.\s*)?\(\s*['"`]consent['"`]/,
   new RegExp("(?:\\b(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\\b|\\[\\s*['\"`](?:opt_in_capturing|opt_out_capturing)['\"`]\\s*\\])" + RAW_TRIVIA + "(?:\\?\\." + RAW_TRIVIA + ")?\\("),
-  /\b(?:__tcfapi|__uspapi|__gpp|__cmp|OneTrust|Optanon\w*|Cookiebot|CookieConsent|Didomi\w*|UC_UI|usercentrics|klaro)\b/i,
-  /['"`]consent['"`]\s*,\s*['"`](?:default|update)['"`]/,
-  /\b(?:ad_storage|analytics_storage|ad_user_data|ad_personalization|functionality_storage|personalization_storage|security_storage|wait_for_update)\b/,
-  /cdn\.cookielaw\.org|otSDKStub\.js|consent\.cookiebot\.com|usercentrics\.eu/
+  /\b(?:__tcfapi|__uspapi|__gpp|__cmp|OneTrust|Optanon\w*|Cookiebot|CookieConsent|Didomi\w*|UC_UI|usercentrics|klaro)\b(?:\s*(?:\?\.|\.)\s*[\w$]+|\s*\[\s*['"`][^'"`]+['"`]\s*\])*\s*(?:\?\.\s*)?\(/i
 ]
 export function isConsentText(text: string): boolean {
-  if (CONSENT_CALL_PATTERNS.some(pattern => pattern.test(text))) return true
-  const code = tokenize(text).tokens.map(token => token.text).join(" ")
-  return CONSENT_CALL_PATTERNS.some(pattern => pattern.test(code))
+  const withoutHtmlComments = text.replace(/<!--[\s\S]*?-->/g, comment => comment.replace(/[^\n]/g, " "))
+  const parsed = tokenize(withoutHtmlComments)
+  // A confident scan can distinguish real comments. With awkward JSX/CSS or an unclosed construct,
+  // scan the entire raw text as well: a tokenizer's early stop must never hide a later consent call.
+  const raw = parsed.confident ? maskCommentsAndStrings(withoutHtmlComments, false) : withoutHtmlComments
+  return CONSENT_CALL_PATTERNS.some(pattern => pattern.test(raw)) ||
+    CONSENT_CALL_PATTERNS.some(pattern => pattern.test(parsed.tokens.map(token => token.text).join(" ")))
 }
+
 interface Token { text: string; start: number; end: number; line: number; depth: number }
 export interface SourceUnit {
   start: number; end: number; startLine: number; endLine: number
-  text: string; prefix: string; key: string; hash: string; ordinal: number; names: string[]; references: Set<string>; frozen: boolean; apiBinding: boolean; apiBindings: string[]
+  text: string; prefix: string; key: string; hash: string; ordinal: number; names: string[]; frozen: boolean
 }
 export interface SourceUnits { units: SourceUnit[]; tail: string; confident: boolean }
 const hash = (text: string) => createHash("sha256").update(text).digest("hex")
@@ -109,12 +85,11 @@ function tokenize(source: string): { tokens: Token[]; confident: boolean } {
   return { tokens, confident: confident && stack.length === 0 }
 }
 
-function bindingInfo(tokens: Token[]): { key: string; names: string[]; apiBinding: boolean; apiBindings: string[] } {
+function bindingInfo(tokens: Token[]): { key: string; names: string[] } {
   const ts = tokens.map(token => token.text)
   let at = 0
   while (["export", "default", "declare", "async", "abstract"].includes(ts[at] ?? "")) at++
   const kind = ts[at] ?? ""
-  const typeOnly = ts.slice(0, at).includes("declare") || kind === "type" || kind === "interface" || (kind === "import" && ts[at + 1] === "type")
   const declaration = ["const", "let", "var", "function", "class", "interface", "type", "enum", "namespace", "import"].includes(kind)
   const names: string[] = []
   if (["const", "let", "var"].includes(kind)) {
@@ -130,31 +105,10 @@ function bindingInfo(tokens: Token[]): { key: string; names: string[]; apiBindin
   } else if (kind === "import") {
     for (const token of ts.slice(at + 1)) { if (token === "from") break; if (IDENTIFIER.test(token) && token !== "as" && token !== "type") names.push(token) }
   }
-  // Parameters are part of the declaration header; recognizing a name here does not analyze its use.
-  const parameterStart = ts.indexOf("(", at + 1)
-  const parameterEnd = parameterStart < 0 ? -1 : tokens.findIndex((token, index) => index > parameterStart && token.text === ")" && token.depth === tokens[parameterStart]!.depth + 1)
-  const header = kind === "function" ? ts.slice(at + 1, parameterEnd < 0 ? ts.length : parameterEnd) : []
-  // Type-only/ambient declarations supply no runtime binding. A later value declaration is new.
-  let runtimeNames = names
-  if (kind === "import") {
-    const from = ts.indexOf("from", at + 1)
-    const specifiers = ts.slice(at + 1, from < 0 ? ts.length : from).filter(token => token !== "{" && token !== "}").join(" ").split(",").map(part => part.trim().split(/\s+/))
-    runtimeNames = specifiers.filter(parts => parts[0] !== "type").map(parts => parts.includes("as") ? parts[parts.lastIndexOf("as") + 1]! : parts[0]!).filter(name => IDENTIFIER.test(name))
-  }
-  const apiBindings = typeOnly ? [] : [...new Set([...runtimeNames, ...header].filter(name => API_NAMES.has(name)))]
-  for (let i = 0; !typeOnly && i < ts.length; i++) if (ts[i] === "=>") {
-    if (API_NAMES.has(ts[i - 1] ?? "")) apiBindings.push(ts[i - 1]!)
-    if (ts[i - 1] === ")") {
-      let j = i - 2; let depth = 1
-      for (; j >= 0; j--) { if (ts[j] === ")") depth++; if (ts[j] === "(" && --depth === 0) break }
-      apiBindings.push(...ts.slice(j + 1, i - 1).filter(name => API_NAMES.has(name)))
-    }
-  }
-  const apiBinding = apiBindings.length > 0
   const callAt = ts.indexOf("(")
   const firstArgument = callAt >= 0 && /^['"`]/.test(ts[callAt + 1] ?? "") ? ts[callAt + 1] : ""
   const key = declaration && names.length ? `${kind}:${names[0]}` : `statement:${ts.slice(0, callAt < 0 ? Math.min(ts.length, 3) : callAt).join(" ")}:${firstArgument}`
-  return { key, names, apiBinding, apiBindings }
+  return { key, names }
 }
 
 /** Split only at depth zero. Bracket bodies stay inseparable regardless of the constructs they hold. */
@@ -162,13 +116,13 @@ export function sourceUnits(source: string): SourceUnits {
   const parsed = tokenize(source)
   // The tokenizer is not authoritative about whether raw source contains owner consent. It may
   // stop inside JSX prose, CSS URLs, or a malformed comment before reaching the protected text.
-  const rawConsent = CONSENT_CALL_PATTERNS.some(pattern => pattern.test(source))
+  const rawConsent = isConsentText(source)
   const ts = parsed.tokens
   if (!parsed.confident || (ts.length === 0 && rawConsent)) {
     const info = bindingInfo(ts)
     return { confident: false, tail: "", units: source ? [{ start: 0, end: source.length, startLine: 1, endLine: source.split("\n").length,
       text: source, prefix: "", ...info, key: "whole-file", hash: hash(source), ordinal: 0,
-      references: new Set(source.match(/\b[A-Za-z_$][\w$]*\b/g) ?? []), frozen: rawConsent || info.names.some(name => /consent/i.test(name)) }] : [] }
+      frozen: rawConsent }] : [] }
   }
   const spans: Array<[number, number]> = []
   let from = 0
@@ -213,116 +167,38 @@ export function sourceUnits(source: string): SourceUnits {
     occurrences.set(textHash, ordinal + 1)
     units.push({ start, end, startLine: source.slice(0, start).split("\n").length, endLine: source.slice(0, Math.max(start, end - 1)).split("\n").length,
       text, prefix: source.slice(previousEnd, start), ...info, key: confident ? info.key : "whole-file", hash: textHash, ordinal,
-      references: new Set((text.match(/\b[A-Za-z_$][\w$]*\b/g) ?? [])), frozen: isConsentText(text) || info.names.some(name => /consent/i.test(name)) })
+      frozen: isConsentText(text) })
     previousEnd = end
   }
   if (!confident && units.length) {
     units[0]!.start = 0; units[0]!.end = source.length; units[0]!.startLine = 1; units[0]!.endLine = source.split("\n").length
     units[0]!.text = source; units[0]!.prefix = ""; units[0]!.hash = hash(source); previousEnd = source.length
   }
-  markReferences(units)
-  if (rawConsent) {
-    // In a consent-bearing file, keep the API definitions/aliases beside the calls inseparable too.
-    // This is the same raw syntactic rule used for additions, with no alias or flow evaluation.
-    for (const unit of units) if (API_WRITE_PATTERNS.some(pattern => { pattern.lastIndex = 0; return pattern.test(unit.text) })) unit.frozen = true
-    markReferences(units)
-  }
   // Repeated statement/declaration identities cannot identify which occurrence moved or changed.
   // Declare the whole file frozen before seeding, rather than overwrite an editable neighbor.
   const counts = new Map<string, number>()
   for (const unit of units) counts.set(unit.key, (counts.get(unit.key) ?? 0) + 1)
   if ((rawConsent && !units.some(unit => unit.frozen)) || units.some(unit => unit.frozen && (counts.get(unit.key) ?? 0) > 1) || ((counts.get("statement::") ?? 0) > 1 && units.some(unit => unit.frozen))) {
-    return { confident: false, tail: "", units: [{ ...units[0]!, start: 0, end: source.length, startLine: 1, endLine: source.split("\n").length, prefix: "", text: source, key: "whole-file", hash: hash(source), ordinal: 0, frozen: true, names: units.flatMap(unit => unit.names), references: new Set(units.flatMap(unit => [...unit.references])) }] }
+    return { confident: false, tail: "", units: [{ ...units[0]!, start: 0, end: source.length, startLine: 1, endLine: source.split("\n").length, prefix: "", text: source, key: "whole-file", hash: hash(source), ordinal: 0, frozen: true, names: units.flatMap(unit => unit.names) }] }
   }
   return { units, tail: source.slice(previousEnd), confident }
-}
-
-/** A lexical binding-reference closure: a constant map and its readers/callers are frozen together. */
-function markReferences(units: SourceUnit[], initial: readonly string[] = []): string[] {
-  const names = new Set(initial)
-  let changed = true
-  while (changed) {
-    changed = false
-    const usedApis = new Set(units.filter(unit => unit.frozen).flatMap(unit => [...unit.references].filter(name => API_NAMES.has(name))))
-    for (const unit of units) {
-      // Freeze a referenced API's runtime binding header/initializer mechanically. Replacing its
-      // import or initializer changes the binding the unchanged owner unit calls.
-      if (!unit.frozen && ([...names].some(name => unit.references.has(name)) || unit.apiBindings.some(name => usedApis.has(name)))) { unit.frozen = true; changed = true }
-      if (unit.frozen) for (const name of unit.names) if (!names.has(name)) { names.add(name); changed = true }
-    }
-  }
-  return [...names]
 }
 
 export interface FrozenUnitChange { before: SourceUnit | null; after: SourceUnit | null }
 export interface FrozenUnitRestore { text: string; changes: FrozenUnitChange[]; before: SourceUnits; after: SourceUnits }
 
-export interface FrozenUnitOptions {
-  /** Exact bytes produced by the trusted deterministic emitter. Never supplied to a worker fence. */
-  trustedGenerated?: readonly string[]
-}
-
-function freezeAddedApiWrites(before: string, after: string, units: SourceUnit[], trusted: readonly string[]): void {
-  const beforeLines = splitLines(before), lines = splitLines(after)
-  const originalLines = new Set(beforeLines)
-  const offsets = [0]
-  for (const line of lines) offsets.push(offsets.at(-1)! + line.length)
-  const added = hunksOf(beforeLines, lines).filter(hunk => hunk.bEnd > hunk.bStart).map(hunk => [offsets[hunk.bStart]!, offsets[hunk.bEnd]!] as const)
-  const allowed = [...new Set(trusted)].filter(Boolean).flatMap(text => { const start = after.indexOf(text); return start < 0 ? [] : [[start, start + text.length] as const] })
-  // HTML is still one uncertain unit. An independent tag insertion must not turn an untouched
-  // owner SDK bootstrap into an added API write. Require the complete script's original bytes,
-  // including its attributes, and no added line through it; changed continuations remain guarded.
-  const unchangedScripts = [...after.matchAll(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi)].flatMap(match => {
-    const start = match.index!, end = start + match[0].length
-    return before.includes(match[0]) && !added.some(([a, b]) => start < b && end > a) ? [[start, end] as const] : []
-  })
-  // Complete unchanged source lines provide the same evidence inside a script or before JSX.
-  // Incomplete assignment/descriptor headers cannot pass the balanced-token and terminator checks.
-  const unchangedStatements = lines.flatMap((line, index) => {
-    const start = offsets[index]!, end = offsets[index + 1]!
-    if (!originalLines.has(line) || added.some(([a, b]) => start < b && end > a)) return []
-    const parsed = tokenize(line)
-    if (!parsed.confident) return []
-    const tokens = parsed.tokens, last = tokens.at(-1)?.text ?? ""
-    const staticImport = tokens[0]?.text === "import" && tokens.some(token => token.text === "from") &&
-      (last === ";" || /^['"]/.test(last)) && !/^\s*(?:assert|with)\b/.test(after.slice(end))
-    if (last !== ";" && !staticImport) return []
-    return [{ start, end, staticImport, apiBindings: bindingInfo(tokens).apiBindings }]
-  })
-  const unchanged = [...unchangedScripts, ...unchangedStatements.map(({ start, end }) => [start, end] as const)]
-  const changed = (unit: SourceUnit) => added.some(([a, b]) => unit.start < b && unit.end > a)
-  const preservedImport = (unit: SourceUnit) => unit.key === "whole-file" && unchangedStatements.some(statement => statement.staticImport &&
-    statement.start >= unit.start && tokenize(after.slice(unit.start, statement.start)).tokens.length === 0 &&
-    unit.apiBindings.every(name => statement.apiBindings.includes(name)))
-  // A changed RHS or descriptor continuation belongs to its complete assignment unit.
-  for (const unit of units) if (unit.apiBinding && changed(unit) && !preservedImport(unit) && !allowed.some(([a, b]) => a <= unit.start && unit.end <= b)) unit.frozen = true
-  for (const pattern of API_WRITE_PATTERNS) {
-    pattern.lastIndex = 0
-    for (const match of after.matchAll(pattern)) {
-      const start = match.index!, end = start + match[0].length
-      if ([...allowed, ...unchanged].some(([a, b]) => a <= start && end <= b)) continue
-      for (const unit of units) if (unit.start < end && unit.end > start && changed(unit)) unit.frozen = true
-    }
-  }
-}
-
 /** Ordered alignment preserves editable neighbors. No semantic edit is ever exempt inside a unit. */
-export function restoreFrozenUnits(beforeText: string, afterText: string, options: FrozenUnitOptions = {}): FrozenUnitRestore {
+export function restoreFrozenUnits(beforeText: string, afterText: string): FrozenUnitRestore {
   const beforeBom = beforeText.startsWith("\ufeff"), afterBom = afterText.startsWith("\ufeff")
   if (beforeBom || afterBom) {
-    const restored = restoreFrozenUnits(beforeBom ? beforeText.slice(1) : beforeText, afterBom ? afterText.slice(1) : afterText, options)
+    const restored = restoreFrozenUnits(beforeBom ? beforeText.slice(1) : beforeText, afterBom ? afterText.slice(1) : afterText)
     const protectedFile = restored.before.units.some(unit => unit.frozen) || restored.after.units.some(unit => unit.frozen)
     if (beforeBom !== afterBom && protectedFile) restored.changes.push({ before: restored.before.units[0] ?? null, after: restored.after.units[0] ?? null })
     return { ...restored, text: ((restored.changes.length > 0 ? beforeBom : afterBom) ? "\ufeff" : "") + restored.text }
   }
   let before = sourceUnits(beforeText); let after = sourceUnits(afterText)
-  freezeAddedApiWrites(beforeText, afterText, after.units, options.trustedGenerated ?? [])
-  const names = markReferences(before.units)
-  markReferences(after.units, names)
-  const existingReferences = new Set(before.units.flatMap(unit => [...unit.references]))
-  const shadows = (unit: SourceUnit, previous?: SourceUnit) => unit.apiBindings.some(name => existingReferences.has(name) && !previous?.apiBindings.includes(name))
   if ((!before.confident || !after.confident) && (before.units.some(unit => unit.frozen) || after.units.some(unit => unit.frozen))) {
-    const whole = (text: string, model: SourceUnits): SourceUnits => ({ confident: false, tail: "", units: text ? [{ ...(model.units[0] ?? { names: [], references: new Set<string>(), apiBinding: false, apiBindings: [] }), start: 0, end: text.length, startLine: 1, endLine: text.split("\n").length, text, prefix: "", key: "whole-file", hash: hash(text), ordinal: 0, frozen: true }] : [] })
+    const whole = (text: string, model: SourceUnits): SourceUnits => ({ confident: false, tail: "", units: text ? [{ ...(model.units[0] ?? { names: [] }), start: 0, end: text.length, startLine: 1, endLine: text.split("\n").length, text, prefix: "", key: "whole-file", hash: hash(text), ordinal: 0, frozen: true }] : [] })
     before = whole(beforeText, before); after = whole(afterText, after)
   }
   const a = before.units, b = after.units
@@ -338,14 +214,14 @@ export function restoreFrozenUnits(beforeText: string, afterText: string, option
   while (i < a.length || j < b.length) {
     const old = a[i], next = b[j]
     if (old && next && old.key === next.key && scores[i * width + j] === weight(old) + scores[(i + 1) * width + j + 1]!) {
-      if ((old.frozen || next.frozen || shadows(next, old)) && old.hash !== next.hash) { changes.push({ before: old, after: next }); output.push(next.prefix + old.text) }
+      if ((old.frozen || next.frozen) && old.hash !== next.hash) { changes.push({ before: old, after: next }); output.push(next.prefix + old.text) }
       else output.push(next.prefix + next.text)
       i++; j++
     } else if (old && (!next || scores[(i + 1) * width + j]! >= scores[i * width + j + 1]!)) {
       if (old.frozen) { changes.push({ before: old, after: null }); output.push(old.prefix + old.text) }
       i++
     } else if (next) {
-      if (next.frozen || shadows(next)) changes.push({ before: null, after: next })
+      if (next.frozen) changes.push({ before: null, after: next })
       else output.push(next.prefix + next.text)
       j++
     }

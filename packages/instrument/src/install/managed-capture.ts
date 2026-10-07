@@ -10,7 +10,7 @@ import { lexicalStates } from "../lexical-states.js"
 import { readInstallManifest } from "../manifest.js"
 import { assertConfinedManifestFileEntry, normalizeAppRelativePath, writeFileAtomic } from "../frameworks/shared.js"
 import { ownerWiringRequirement, policyWiringRequirement } from "../frameworks/owner-boundary.js"
-import { generatedApiTexts, recordGeneratedApi } from "../jobs/generated-api.js"
+import { recordGeneratedApi } from "../jobs/generated-api.js"
 import { makeEditRecord } from "./edits.js"
 
 export interface ManagedCapturePlan {
@@ -214,7 +214,7 @@ export function planManagedCapture(input: ManagedCaptureInput): ManagedCapturePl
     catch { result.requirements.push(unknown(entry, snippet, "the fixed entry could not be read")); continue }
     const edit = proposal(before, entry, module, strategy)
     if (!edit) { result.requirements.push(unknown(entry, snippet, "initial execution order could not be established")); continue }
-    const protectedEdit = ownerWiringRequirement(entry, before, edit.after, snippet, input.appRoot, generatedApiTexts(input.root, entry))
+    const protectedEdit = ownerWiringRequirement(entry, before, edit.after, snippet, input.appRoot)
     if (protectedEdit) result.requirements.push(protectedEdit)
     else { result.entrypoints.push(entry); if (edit.after !== before) result.editEntrypoints.push(entry) }
   }
@@ -230,7 +230,7 @@ export function applyManagedCapture(input: ManagedCaptureInput & { mode: Managed
   const writes: Array<{ file: string; before: string | null; after: string }> = plan.entrypoints.map(path => {
     const before = readFileSync(join(input.root, path), "utf8")
     const edit = proposal(before, path, plan.module, plan.strategy)
-    if (!edit || ownerWiringRequirement(path, before, edit.after, edit.snippet, input.appRoot, generatedApiTexts(input.root, path))) throw new Error(`The capture entry changed before apply: ${path}`)
+    if (!edit || ownerWiringRequirement(path, before, edit.after, edit.snippet, input.appRoot)) throw new Error(`The capture entry changed before apply: ${path}`)
     return { file: path, before, after: edit.after }
   })
   assertConfinedManifestFileEntry(input.root, plan.module)

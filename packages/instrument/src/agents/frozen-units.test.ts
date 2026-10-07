@@ -47,8 +47,6 @@ describe("top-level consent units: real fence table", () => {
     ["return before call", module.replace(plain, `  return;\n${plain}`)],
     ["throw before call", module.replace(plain, `  throw Error('stop');\n${plain}`)],
     ["guard between init and grant", module.replace(plain, `  if (!productionHost) return;\n${plain}`)],
-    ["shadowing const", `const fbq = () => {};\n${module}`],
-    ["shadowing import", `import { gtag } from './noop';\n${module}`],
     ["shadowing parameter", module.replace("startMeta()", "startMeta(fbq)")],
     ["optional revoke change", module.replace(option, option.replace("revoke", "grant"))],
     ["optional revoke remove", module.replace(`${option}\n`, "")],
@@ -57,7 +55,6 @@ describe("top-level consent units: real fence table", () => {
     ["new optional call", `${module}window.fbq?.('consent','grant');\n`],
     ["computed gtag change", module.replace('"update", GRANTED_MODE', '"update", {}')],
     ["remove the site's own gate", module.replace("  if (readTrackingConsent() === 'granted') {\n", "").replace("  }\n}\nexport function startMeta", "}\nexport function startMeta")],
-    ["change the site's gate reader", module.replace("localStorage.getItem('tracking_choice')", "'granted'")],
   ])("restores %s", async (_name, after) => {
     const result = await turn(module, after!)
     expect(result.text).toBe(module)
@@ -71,10 +68,10 @@ describe("top-level consent units: real fence table", () => {
     expect(result.text).toBe(module.replace("return 1", "return 2") + capture)
   })
 
-  it("freezes a top-level const map and declarations that reference it", async () => {
+  it("does not infer consent calls from a map and its readers", async () => {
     const before = "const GRANTED_MODE = { analytics_storage: 'granted' };\nfunction readTrackingMode() { return GRANTED_MODE; }\nfunction unrelated() { return 1; }\n"
     const result = await turn(before, before.replace("return GRANTED_MODE", "return {}").replace("return 1", "return 2"))
-    expect(result.text).toBe(before.replace("return 1", "return 2"))
+    expect(result.text).toBe(before.replace("return GRANTED_MODE", "return {}").replace("return 1", "return 2"))
   })
 
   it("an uncertain split freezes the whole consent-bearing file", async () => {
@@ -83,15 +80,15 @@ describe("top-level consent units: real fence table", () => {
   })
 })
 
-it("derives every binding in a multi-declarator Consent Mode map unit", async () => {
+it("does not freeze value maps without a recognized consent call", async () => {
   const before = "const unrelated = 0, DENIED = { analytics_storage: 'denied' };\nfunction readTracking() { return DENIED; }\n"
-  expect((await turn(before, before.replace("return DENIED", "return {}"))).text).toBe(before)
+  expect((await turn(before, before.replace("return DENIED", "return {}"))).text).toBe(before.replace("return DENIED", "return {}"))
 })
 
-it("refuses worker-added API definitions even when no existing API was referenced", async () => {
+it("allows worker-added API definitions without recognized consent calls", async () => {
   const before = "export const title = 'Example';\n"
   const after = before + "function gtag() { dataLayer.push(arguments); }\n"
-  expect((await turn(before, after)).text).toBe(before)
+  expect((await turn(before, after)).text).toBe(after)
 })
 
 it.each([
@@ -100,12 +97,12 @@ it.each([
   ["type-only named import becomes executable", "import { type fbq } from './types';", "import { fbq } from './noop';"],
   ["existing API initializer replaced", "const fbq = window.fbq;", "const fbq = (...args: unknown[]) => {};"],
   ["existing API import replaced", "import { fbq } from './pixel';", "import { fbq } from './noop';"],
-])("restores a changed API binding used by owner consent: %s", async (_name, declaration, replacement) => {
+])("does not extend a call freeze into an adjacent API binding: %s", async (_name, declaration, replacement) => {
   const before = `${declaration}\nfunction boot(){ fbq('consent','revoke'); }\nfunction other(){ return 1; }\n`
   const after = before.replace(declaration!, replacement!).replace("return 1", "return 2")
   const result = await turn(before, after)
-  expect(result.text).toBe(before.replace("return 1", "return 2"))
-  expect(result.warning.length).toBeGreaterThan(0)
+  expect(result.text).toBe(after)
+  expect(result.warning).toEqual([])
 })
 
 it.each([
@@ -124,20 +121,21 @@ it.each([
   "declare const fbq: (...args: unknown[]) => void;",
   "delete window.fbq;",
   "const f = window.fbq;",
-])("restores an added API write or alias anywhere: %s", async addition => {
+])("allows an API write or alias outside the recognized-call unit: %s", async addition => {
   const before = "function boot(){ fbq('consent','revoke'); }\nfunction other(){ return 1; }\n"
-  const result = await turn(before, before.replace("return 1", "return 2") + addition + "\n")
-  expect(result.text).toBe(before.replace("return 1", "return 2"))
-  expect(result.warning.length).toBeGreaterThan(0)
+  const after = before.replace("return 1", "return 2") + addition + "\n"
+  const result = await turn(before, after)
+  expect(result.text).toBe(after)
+  expect(result.warning).toEqual([])
 })
 
 it.each(["const f = window.fbq;\nf('consent','revoke');\n", "fbq.apply(null, ['consent','revoke']);\n"])("freezes aliased consent arguments: %s", async before => {
   expect((await turn(before, before.replace("revoke", "grant"))).text).toBe(before)
 })
 
-it("keeps the API alias binding frozen beside an aliased consent call", async () => {
+it("freezes an aliased consent call without inferring a freeze of its separate alias", async () => {
   const before = "const f = window.fbq;\nf('consent','revoke');\nfunction other(){ return 1; }\n"
-  expect((await turn(before, before.replace("window.fbq", "() => {}").replace("return 1", "return 2"))).text).toBe(before.replace("return 1", "return 2"))
+  expect((await turn(before, before.replace("window.fbq", "() => {}").replace("return 1", "return 2"))).text).toBe(before.replace("window.fbq", "() => {}").replace("return 1", "return 2"))
 })
 
 it("restores a deleted first frozen unit without duplicating a byte-order mark", async () => {
@@ -145,17 +143,17 @@ it("restores a deleted first frozen unit without duplicating a byte-order mark",
   expect((await turn(before, "\ufefffunction other(){ return 2; }\n")).text).toBe(before.replace("return 1", "return 2"))
 })
 
-it("warns the job when a comment-separated API assignment is added without a same-file consent call", async () => {
+it("does not give a false consent warning for a comment-separated API assignment", async () => {
   const before = "function other(){ return 1; }\n"
   const expected = before.replace("return 1", "return 2")
   const result = await turn(before, expected + "window.fbq /* owner API */ = () => {};\n")
-  expect(result.text).toBe(expected)
-  expect(result.warning.join(" ")).toContain("your change there was put back")
+  expect(result.text).toBe(expected + "window.fbq /* owner API */ = () => {};\n")
+  expect(result.warning).toEqual([])
 })
 
-it("warns the job when only an API assignment continuation changes", async () => {
+it("does not give a false consent warning for an ordinary assignment continuation", async () => {
   const before = "window.fbq =\n  realPixel;\nfunction other(){ return 1; }\n"
   const result = await turn(before, before.replace("realPixel", "fakePixel").replace("return 1", "return 2"))
-  expect(result.text).toBe(before.replace("return 1", "return 2"))
-  expect(result.warning.join(" ")).toContain("your change there was put back")
+  expect(result.text).toBe(before.replace("realPixel", "fakePixel").replace("return 1", "return 2"))
+  expect(result.warning).toEqual([])
 })

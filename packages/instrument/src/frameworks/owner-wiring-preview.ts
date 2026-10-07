@@ -39,7 +39,7 @@ export function previewOwnerWiring(input: { root: string; appRoot: string; frame
     if (!input.framework.startsWith("next-") && !after.includes(snippet)) {
       result.requirements.push({ path, snippet, reason: `${path} has an incomplete managed block; add the wiring yourself.` }); continue
     }
-    const requirement = ownerWiringRequirement(path, before, after, snippet, input.appRoot, input.framework.startsWith("next-") ? [] : [snippet])
+    const requirement = ownerWiringRequirement(path, before, after, snippet, input.appRoot)
     if (requirement) result.requirements.push(requirement)
     else result.writableEntrypoints.push(path)
   }

@@ -9,11 +9,11 @@ export function policyWiringRequirement(path: string, snippet: string, appRoot =
     ownerBoundary: { kind: "policy_page", file: path, line: 1 } } : null
 }
 
-export function ownerWiringRequirement(path: string, before: string | null, after: string, snippet: string, appRoot = ".", trustedGenerated: readonly string[] = []): ManualRequirement | null {
+export function ownerWiringRequirement(path: string, before: string | null, after: string, snippet: string, appRoot = "."): ManualRequirement | null {
   if (before === after) return null
   const policy = policyWiringRequirement(path, snippet, appRoot)
   if (policy) return policy
-  const changed = restoreFrozenUnits(before ?? "", after, { trustedGenerated }).changes[0]
+  const changed = restoreFrozenUnits(before ?? "", after).changes[0]
   if (!changed) return null
   const unit = changed.before ?? changed.after!
   return { path, snippet,
