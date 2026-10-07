@@ -104,7 +104,7 @@ export async function stageAndCommit(input: CommitInput): Promise<CommitResult> 
   const boundary = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: await git.head() })
   ctx.state.update(state => { state.ownerBoundary = boundary })
   await ctx.state.save()
-  if (boundary.state !== "checked") return { kind: "refused", message: ownerBoundaryStop(boundary) }
+  if (boundary.state !== "checked") return { kind: "refused", message: safeDisplayText(input.scanner, ownerBoundaryStop(boundary)) }
   const allEntries = await git.statusEntries()
   let createdLockfiles: string[] = []
   try {
@@ -249,7 +249,7 @@ export async function pushBranch(input: {
   const boundary = await measureWizardCommits({ root: ctx.root, appRoot: ctx.appRoot, baseSha: state.git?.baseSha ?? "", headSha: measuredSha, wizardCommits: state.wizardCommits ?? [] })
   ctx.state.update(state => { state.ownerBoundary = boundary })
   await ctx.state.save()
-  if (boundary.state !== "checked") return { kind: "failed", message: ownerBoundaryStop(boundary) }
+  if (boundary.state !== "checked") return { kind: "failed", message: safeDisplayText(input.scanner, ownerBoundaryStop(boundary)) }
   const foreign = await unrecordedCommits({ root: ctx.root, baseSha: state.git?.baseSha ?? "", headSha: measuredSha, wizardCommits: state.wizardCommits ?? [], approvedForeignCommits: state.approvedForeignCommits ?? [] })
   if (foreign === null) return { kind: "failed", message: "Nothing pushed: the commits outside the wizard's record could not be listed." }
   if (foreign.length > 0) {

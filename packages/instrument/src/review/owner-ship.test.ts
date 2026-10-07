@@ -173,3 +173,26 @@ it("refuses a wizard consent edit even if a later owner commit undoes it", async
   expect(w.fx.remoteSha(w.branch)).toBeNull()
   expect(w.ctx.asks).toHaveLength(0)
 })
+
+it.each(["commit", "push"] as const)("sanitizes owner-boundary filenames at the %s refusal surface", async action => {
+  const w = await setup()
+  const secret = "fixture_secret_filename_value"
+  const unsafePath = `src/<!--@reviewer-[note](link)-${secret}.ts`
+  const scanner = createScanner({ literals: [{ value: secret, kind: "env_value" }], allowedIds: [] })
+  w.fx.write(unsafePath, source)
+  w.fx.git(["add", unsafePath]); w.fx.git(["commit", "-m", "owner fixture source"])
+  w.fx.write(unsafePath, source.replace('"revoke"', '"grant"'))
+  if (action === "push") {
+    w.fx.git(["add", unsafePath]); w.fx.git(["commit", "-m", "unsafe wizard fixture"])
+    const sha = await w.git.head()
+    w.ctx.state.update(state => { state.wizardCommits = [sha] })
+  }
+  const result = action === "commit"
+    ? await stageAndCommit({ ...w, scanner, step: "rehearsal", runId: RUN_ID, message: "wizard fixture", round: null, allowlist: [unsafePath], managed: [], npmFiles: [], connectionIds: [] })
+    : await pushBranch({ ...w, scanner, base: "main", title: "Fixture", hostKind: "github" })
+  expect(result).toMatchObject({ kind: action === "commit" ? "refused" : "failed", message: expect.stringContaining("[redacted: env_value]") })
+  const displayed = JSON.stringify(result)
+  for (const unsafe of [secret, "<!--", "@reviewer", "[note](link)"]) expect(displayed).not.toContain(unsafe)
+  expect(w.ctx.state.get().ownerBoundary?.issues).toContainEqual(expect.objectContaining({ file: unsafePath }))
+  expect(w.fx.remoteSha(w.branch)).toBeNull()
+})
