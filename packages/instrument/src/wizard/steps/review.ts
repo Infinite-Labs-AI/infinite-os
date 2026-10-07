@@ -72,7 +72,7 @@ interface Session {
 async function saveLedger(session: Session): Promise<void> {
   const path = join(session.ctx.root, REVIEW_LEDGER_PATH)
   // §3x.3 The findings that still stand, from the ONE definition (`openFindings`), on every save.
-  session.ledger.openFindings = openFindings(session.ledger, session.ctx.state.get().jobs, session.ownership?.classify)
+  session.ledger.openFindings = openFindings(session.ledger, session.ctx.state.get().jobs, session.ownership?.classify, session.ownership?.writtenByRun)
   await session.deps.fs.mkdirp(join(session.ctx.root, WIZARD_PATHS.dir), 0o700)
   await session.deps.fs.writeTextAtomic(path, `${JSON.stringify(session.ledger, null, 2)}\n`, 0o600)
 }
@@ -282,7 +282,9 @@ async function postRound(session: Session, review: ReviewResult, reviewer: Agent
   const state = ctx.state.get()
   const fullDiff = await ship.git.diff(state.git!.baseSha, head)
   const unchecked = classified?.state === "incomplete" ? classified.unchecked : []
-  const post = buildReviewPost({ review, diffFiles: parseUnifiedDiff(fullDiff), scanner: ship.scanner, runId: ship.runId, round, head, reviewer, unchecked })
+  const ownership = await sessionOwnership(session)
+  review = { ...review, findings: review.findings.map(finding => finding.category === "owner_consent_privacy" && ownership.writtenByRun?.(finding.path, finding.line) ? { ...finding, category: "analytics" } : finding) }
+  const post = buildReviewPost({ isRunCode: ownership.writtenByRun, review, diffFiles: parseUnifiedDiff(fullDiff), scanner: ship.scanner, runId: ship.runId, round, head, reviewer, unchecked })
   const redact = (text: string) => (ship.isPrivate ? text : redactIdsNotInDiff(text, fullDiff, ship.facts.connectionIds))
   const body = redact(post.body)
   const threads = post.threads.map((thread) => ({ ...thread, body: redact(thread.body) }))
@@ -369,6 +371,7 @@ async function gatherItems(session: Session, review: ReviewResult, round: number
       source: "reviewer",
       threadId: null,
       findingId: finding.id,
+      category: finding.category,
       item: finding.item,
       severity: finding.severity,
       path,
@@ -584,7 +587,7 @@ async function replyAndResolve(
 ): Promise<void> {
   if (!session.github) return
   for (const decision of decisions) {
-    if (decision.action === "SKIP") continue
+    if (decision.action === "SKIP" || decision.action === "OWNER_INFO") continue
     const threadId = decision.item.threadId
     if (!threadId) continue
     const own = decision.item.source === "reviewer"
@@ -676,12 +679,19 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
   const { github, number, deps, ctx } = session
   if (!github || number === null) return null
   const started = deps.clock.now().getTime()
+  const checkedHead = await session.ship.git.head()
+  const registeredOnResume = session.ledger.checkRegistration?.sha === checkedHead
   const result = (state: CheckResult["state"], reason: string, ready = false): CheckResult & { ready: boolean } => ({ checkId: "pr_checks_pass", tier: "S", state, reason, at: ctx.now().toISOString(), runId, ready })
   let waitingReason = "PR checks could not be read"
   const base = await commitChecks(github.gh, ctx.state.get().git!.baseSha).catch(() => null)
   sub(ctx, "review", "Checking the new commit's CI checks…", "pending")
   for (;;) {
     const elapsed = deps.clock.now().getTime() - started
+    const registered = registeredOnResume || elapsed >= CHECKS_EMPTY_GRACE_MS
+    if (registered && session.ledger.checkRegistration?.sha !== checkedHead) {
+      session.ledger.checkRegistration = { sha: checkedHead, complete: true }
+      await saveLedger(session)
+    }
     const checks = await github.checks(number).catch(() => null)
     if (checks !== null && !isUnsupported(checks)) {
       const summary = checksSummary(checks)
@@ -698,19 +708,26 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
         if (repair && await repairCi(session, policy.failing, base)) return requiredChecksResult(session, runId, false)
         return result("problem", `Failed PR checks: ${policy.failing.map(check => check.name).join(", ")}${base === null ? " (base checks could not be read)" : ""}`)
       }
-      const missingGreen = (base ?? []).filter(check => check.bucket === "pass" && !checks.some(current => current.name === check.name && current.bucket === "pass"))
+      const absent = (base ?? []).filter(check => check.bucket === "pass" && !checks.some(current => current.name === check.name))
       const cancelled = checks.filter(check => check.bucket === "cancel")
       const pending = checks.filter(check => check.bucket === "pending")
+      const unknown = checks.filter(check => !["pass", "fail", "pending", "cancel", "skipping"].includes(check.bucket))
       waitingReason = base === null ? "The base commit's checks could not be read" : cancelled.length > 0 ? `PR checks cancelled: ${cancelled.map(check => check.name).join(", ")}`
         : pending.length > 0 ? `PR checks are still pending: ${pending.map(check => check.name).join(", ")}`
-        : missingGreen.length > 0 ? `Base-green checks have not been read as passing: ${missingGreen.map(check => check.name).join(", ")}`
+        : unknown.length > 0 ? `PR check states could not be read: ${unknown.map(check => check.name).join(", ")}`
         : "No PR checks have been reported"
-      if (elapsed >= CHECKS_EMPTY_GRACE_MS && base !== null && summary.pending === 0 && missingGreen.length === 0) {
-        if (checks.length === 0 && base.length === 0) return result("undetermined", "no checks reported: not measured; the base commit also has no checks", true)
-        if (checks.length > 0) return result(summary.pass > 0 ? "pass" : "undetermined", summary.pass > 0 ? `${summary.pass} PR check(s) pass; all base-green checks were read as passing` : "PR checks not measured; only blocked previews or existing failures reported", true)
+      if (registered && base !== null && summary.pending === 0 && unknown.length === 0) {
+        for (const check of absent) {
+          const note = `${check.name} does not run on pull requests: not measured (no counterpart after registration).`
+          if (!session.notes.includes(note)) { session.notes.push(note); sub(ctx, "review", note, "info") }
+        }
+        if (checks.length === 0) return result("undetermined", base.length === 0 ? "no checks reported: not measured; the base commit also has no checks" : "No checks reported on this pull request after registration: not measured", true)
+        return result(summary.pass > 0 ? "pass" : "undetermined", summary.pass > 0 ? `${summary.pass} PR check(s) pass; unavailable previews and base-only checks remain not measured` : "PR checks not measured; only blocked previews or existing failures reported", true)
       }
+      if (registeredOnResume && pending.length === 0) return result("undetermined", waitingReason)
     } else {
       waitingReason = "PR checks could not be read"
+      if (registeredOnResume) return result("undetermined", waitingReason)
     }
     if (ctx.signal.aborted || elapsed + CHECKS_POLL_MS > CHECKS_WAIT_MS) return result("undetermined", waitingReason)
     await deps.clock.sleep(CHECKS_POLL_MS, ctx.signal)
@@ -755,6 +772,8 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
       sub(ctx, "review", line, "warn")
     }
   }
+  await saveLedger(session)
+  const verdictFacts = await verdictFactsFor(ctx, deps)
   const report = deps.report.build({
     runId: ship.runId,
     tagVersion: deps.tagVersion,
@@ -764,10 +783,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     day7: null,
     notes: [],
     // §3x.6 the ledger is saved first so the verdict reads this session's open findings.
-    verdictFacts: await (async () => {
-      await saveLedger(session)
-      return verdictFactsFor(ctx, deps)
-    })()
+    verdictFacts
   })
   const openFromLedger: TriageDecision[] = session.ledger.open
     .filter((entry) => !session.decisions.some((decision) => decision.action === "ASK" && triageKey(decision.item) === entry.key))
@@ -778,7 +794,8 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     }))
   let comment = buildFinalComment({
     runId: ship.runId,
-    reportMarkdown: deps.report.renderMarkdown(report),
+    reportMarkdown: deps.report.renderMarkdown(report, verdictFacts.ownerBoundary, verdictFacts.jobs),
+    ownerBoundary: verdictFacts.ownerBoundary,
     reviewer: session.reviewer,
     reviewed: session.reviewed,
     completeness: session.ledger.completeness ?? null,
@@ -1007,6 +1024,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       // §3x.3: the customer's agent works inside the jobs' allowlists only; Infinite's own files are never its.
       allowlist: allowlistUnion(ctx.state.get().jobs),
       ownership: ownership.classify,
+      writtenByRun: ownership.writtenByRun,
       declinedKeys,
       passingChecks: passingChecks(ctx, head),
       answerFor: answerFrom(ctx),
@@ -1055,11 +1073,11 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       const edited = fix.run.edits.map((edit) => edit.file)
       for (const [index, decision] of fixes.entries()) {
         if (fix.items.find(item => item.id === items[index]!.id)?.state !== "left_for_you") continue
-        decision.action = "SKIP"
-        decision.reason = "Left for you: the file's consent or policy code is outside this run."
+        decision.action = "OWNER_INFO"
+        decision.reason = "Put back: an edit reached code that handles consent."
         session.ledger.open = session.ledger.open.filter(entry => entry.key !== triageKey(decision.item))
       }
-      if (edited.length === 0 && fixes.every(decision => decision.action === "SKIP")) {
+      if (edited.length === 0 && fixes.every(decision => decision.action === "OWNER_INFO")) {
         sub(ctx, "review", "Left for you: these edits would touch owner-managed consent or policy code.", "info")
         await saveLedger(session)
         await ctx.state.save()
@@ -1213,7 +1231,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
  *   - only when all three are empty → the plain outcome ("ran out of time before changing anything", "without
  *     changing anything").
  */
-export function noKeptChangeOutcome(run: AgentRunResult): { outcome: NotFixedOutcome; why: string | null } {
+export function noKeptChangeOutcome(run: Omit<AgentRunResult, "session">): { outcome: NotFixedOutcome; why: string | null } {
   const extras = runExtras(run)
   const stopped = run.outcome === "timeout" ? `the agent ran out of its ${FIX_ROUND_MINUTES} minutes` : run.outcome === "error" ? "the agent stopped with an error" : run.outcome === "toolless" ? "the agent could not use its tools" : null
   const changed = [...new Set(run.reverted.filter((path) => !path.startsWith(".git/") && path !== ".git"))]

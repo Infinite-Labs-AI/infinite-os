@@ -38,7 +38,7 @@ async function commitWith(routeText: string, extra: Record<string, string> = {},
   const git = createGitOps({ cwd: fx.root, env: fx.env, worktreeRoot: join(fx.dir, "worktrees") })
   const checks = { ...fakeChecks(), turnGate: async (diff: Parameters<typeof turnGate>[0], options: { connectionIds: readonly string[] }) => turnGate(diff, { connectionIds: options.connectionIds, readFile: () => null }, { runId: RUN_ID, now: () => new Date() }) }
   const deps = testDeps({ bridge: fakeBridge(), agents: {} as never, git, host: {} as never, checks })
-  const ctx = testContext({ root: fx.root, state: initialState({ jobs: [structuredClone(job)] }) })
+  const ctx = testContext({ root: fx.root, state: initialState({ jobs: [structuredClone(job)], git: { base: "main", baseSource: "vercel", baseSha: fx.git(["rev-parse", "HEAD"]).trim(), headSha: fx.git(["rev-parse", "HEAD"]).trim(), branch: "infinite/tag/2026-10-02-7f3c2a" } }) })
   const result = await stageAndCommit({
     ctx,
     deps,

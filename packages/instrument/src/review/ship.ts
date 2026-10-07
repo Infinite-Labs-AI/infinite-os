@@ -1,3 +1,5 @@
+import { measureOwnerDiff, ownerBoundaryStop } from "../jobs/owner-diff.js"
+import { gitlabMergeRequestPushOptions } from "../git/push.js"
 // Commit → push → PR (lane O4, §3g.1–§3g.3), shared by the `rehearsal` step (the first commit) and the
 // `review` step (fix rounds). Every commit is scanned (§3g.5) before it is made; a hit unstages that file and
 // blocks the jobs that own it. Hooks run; a hook that rewrites a file re-runs the diff gate and refreshes the
@@ -98,6 +100,10 @@ async function gateStaged(input: CommitInput): Promise<string[]> {
 /** §3g.1: stage exactly the allowed set, scan it, commit with the run trailer. */
 export async function stageAndCommit(input: CommitInput): Promise<CommitResult> {
   const { git, ctx } = input
+  const boundary = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: ctx.state.get().git?.baseSha ?? "" })
+  ctx.state.update(state => { state.ownerBoundary = boundary })
+  await ctx.state.save()
+  if (boundary.state !== "checked") return { kind: "refused", message: ownerBoundaryStop(boundary) }
   const allEntries = await git.statusEntries()
   let createdLockfiles: string[] = []
   try {
@@ -228,12 +234,17 @@ export async function pushBranch(input: {
   title: string
 }): Promise<PushResult> {
   const { ctx, git } = input
-  const attempt = async (): Promise<void> => git.push(input.branch)
+  const measuredSha = await git.head()
+  const boundary = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: ctx.state.get().git?.baseSha ?? "", revision: measuredSha })
+  ctx.state.update(state => { state.ownerBoundary = boundary })
+  await ctx.state.save()
+  if (boundary.state !== "checked") return { kind: "failed", message: ownerBoundaryStop(boundary) }
+  const attempt = async (): Promise<void> => git.push(input.branch, measuredSha)
   try {
     if (input.hostKind === "gitlab") {
       try {
-        const created = await input.deps.host.createDraftPr({ base: input.base, head: input.branch, title: input.title, bodyFile: WIZARD_PATHS.prBody })
-        if (isUnsupported(created)) return { kind: "pushed", mergeRequestOpened: true }
+        await git.pushWithOptions(input.branch, gitlabMergeRequestPushOptions(input.base, input.title), measuredSha)
+        return { kind: "pushed", mergeRequestOpened: true }
       } catch {
         // GitLab refused the push options: push plainly and print the link.
       }
@@ -245,7 +256,7 @@ export async function pushBranch(input: {
     if (error.kind === "ssh_passphrase") {
       ctx.emit.emit("tty.handover", { reason: "ssh" })
       git.setTtyHandedOver(true)
-      const answer = await ctx.ask("tty-handover", { reason: "ssh", command: git.pushCommand?.(input.branch) ?? `git push -u origin ${input.branch}` })
+      const answer = await ctx.ask("tty-handover", { reason: "ssh", command: git.pushCommand?.(input.branch, measuredSha) ?? `git push -u origin ${measuredSha}:refs/heads/${input.branch}` })
       git.setTtyHandedOver(false)
       ctx.emit.emit("tty.resume", {})
       if (typeof answer === "object" && answer.exitCode === 0) return { kind: "pushed", mergeRequestOpened: false }

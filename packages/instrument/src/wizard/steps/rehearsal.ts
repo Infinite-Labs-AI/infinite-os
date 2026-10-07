@@ -80,7 +80,7 @@ export function announceRehearsal(ctx: WizardContext, step: "rehearsal" | "revie
     if (!result) continue
     ctx.emit.emit("check.result", { checkId: result.checkId, tier: "RH", state: result.state, ...(result.reason ? { reason: result.reason } : {}), runId })
   }
-  for (const line of rehearsalLines(outcome)) sub(ctx, step, line.text, line.tone)
+  for (const line of rehearsalLines(outcome, ctx.state.get().jobs)) sub(ctx, step, line.text, line.tone)
 }
 
 /** The rehearsal-click-tested bookkeeping (§3d.1): PATCH first (append-only), then GA4 key events for exactly those names ∩ approved. */
@@ -309,6 +309,7 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   const pushed = await pushBranch({ ctx, deps, git, scanner, hostKind: deps.host.kind, base: gitState.base, branch: gitState.branch, title })
   if (pushed.kind === "failed") return failed("INF_WIZ_PUSH_REFUSED", pushed.message)
 
+  const reportFacts = await verdictFactsFor(ctx, deps)
   const report = deps.report.build({
     runId,
     tagVersion: deps.tagVersion,
@@ -317,11 +318,12 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     provenLivePending: "deploy",
     day7: null,
     notes: [],
-    verdictFacts: await verdictFactsFor(ctx, deps)
+    verdictFacts: reportFacts
   })
   const diffText = await git.diff(gitState.baseSha, head)
   const bodyInput = {
-    reportMarkdown: deps.report.renderMarkdown(report),
+    reportMarkdown: deps.report.renderMarkdown(report, reportFacts.ownerBoundary, reportFacts.jobs),
+    ownerBoundary: reportFacts.ownerBoundary,
     howToReview: howToReviewSection(),
     runId,
     isPrivate: prepared.isPrivate,
@@ -392,7 +394,7 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
 
   // The initial body makes no promise of a rehearsal. Only name checks once they ran,
   // and never replace a body edited by the repo owner in the meantime.
-  const measured = rehearsalCheckResults(outcome, { at: ctx.now().toISOString(), runId })
+  const measured = rehearsalCheckResults(outcome, { at: ctx.now().toISOString(), runId, jobs: ctx.state.get().jobs })
   const measuredIds = new Set(measured.shared.filter(check => check.state === "pass" || check.state === "problem").map(check => check.checkId))
   const checkedJobs = state.jobs.filter(job => job.checks.some(check => check.tier === "RH" && measuredIds.has(check.id))).map(job => job.id)
   const oldNotes = notCheckedNotes(state.jobs)

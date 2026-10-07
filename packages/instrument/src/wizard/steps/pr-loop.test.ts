@@ -674,7 +674,7 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     const w = await world({ host: "gitlab" })
     expectOk(await rehearsalStep.run(w.ctx, w.deps))
     const pushes = w.git.calls.filter((call) => call[0] === "push")
-    expect(pushes[0]).toEqual(["push", "-u", "-o", "merge_request.create", "-o", "merge_request.target=main", "-o", "merge_request.draft", "-o", expect.stringMatching(/^merge_request\.title=/), "origin", BRANCH])
+    expect(pushes[0]).toEqual(["push", "-u", "-o", "merge_request.create", "-o", "merge_request.target=main", "-o", "merge_request.draft", "-o", expect.stringMatching(/^merge_request\.title=/), "origin", `${await w.git.head()}:refs/heads/${BRANCH}`])
     expect(w.fx.remoteSha(BRANCH)).toBeTruthy()
     expect(w.ctx.state.get().pr).toMatchObject({ host: "gitlab", number: null })
   })
@@ -711,18 +711,47 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     w.ctx.state.update(state => { state.jobs[0]!.edits = [{ editId: "prior", file: "app/layout.tsx" }] })
     await reviewStep.run(w.ctx, w.deps)
   })
-  it.each(["pending", "cancel", "unreadable", "missing"])("R6 keeps draft when a base-green check is %s", async (state) => {
+  it.each(["pending", "cancel", "unreadable"])("R6 keeps draft when a base-green check is %s", async (state) => {
     const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "test", conclusion: "success" }], checks: { "42": state === "missing" ? [] : [{ name: "test", bucket: state, state: state.toUpperCase() }] } } })
     if (state === "unreadable") w.host.checks = async () => { throw new Error("fixture unavailable") }
     expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED" })
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
   })
 
-  it("R6 keeps an authorization-blocked preview draft when that hosting check was green on base", async () => {
+  it("R7 allows an authorization-blocked preview after registration with a truthful note", async () => {
     const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "Vercel", conclusion: "success" }], checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("Vercel") })
-    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
     expect(eventText(w.ctx)).toContain("preview not measured")
+  })
+
+  it("R7 reports a base-only push check as not measured after registration", async () => {
+    const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "release", conclusion: "success" }], checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
+    expect(w.gh.traffic()).toContain("does not run on pull requests: not measured")
+  })
+
+  it("R7 reads a resumed blocked host check without repeating registration waits", async () => {
+    const w = await opened({ reviews: [review([])], gh: { checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
+    const clock = fakeClock()
+    w.deps.clock = clock
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const slept = clock.slept.length
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(clock.slept).toHaveLength(slept)
+  })
+
+  it.each(["cancel", "unreadable"])("R7 rereads %s on resume and parks without another idle wait", async bucket => {
+    const w = await opened({ reviews: [review([])], gh: { checks: { "42": [{ name: "test", bucket, state: bucket.toUpperCase() }] } } })
+    const clock = fakeClock()
+    w.deps.clock = clock
+    if (bucket === "unreadable") w.host.checks = async () => { throw new Error("fixture unreadable") }
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked" })
+    const slept = clock.slept.length
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked" })
+    expect(clock.slept).toHaveLength(slept)
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
   })
 
   it("waits for Actions to register even when only a blocked preview was initially reported", async () => {
@@ -999,7 +1028,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
       reviews: [
         review([
           { id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the existing init in place instead.", suggested_fix: "Keep one init." },
-          { id: "F2", item: "R16", severity: "should", path: "app/layout.tsx", line: 3, body: "Add a cookie banner before GA4 loads.", suggested_fix: null },
+          { id: "F2", item: "R16", severity: "should", path: "app/layout.tsx", line: 3, category: "owner_consent_privacy" as const, body: "Add a cookie banner before GA4 loads.", suggested_fix: null },
           { id: "F3", item: "R7", severity: "question", path: "lib/other.ts", line: 9, body: `Is ${STRIPE} or ${FAKE_BRIDGE_TOKEN} used? Ask jane.doe@acme-store.com or call +1 (415) 555-0132. Pixel ${PIXEL_ID} is fine.`, suggested_fix: null }
         ]),
         review([])
@@ -1010,9 +1039,9 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     seedThreads(w)
     const outcome = await reviewStep.run(w.ctx, w.deps)
     expectOk(outcome)
-    // Terminal QA #18: the closing line says what the review found and that it was fixed (2 in-scope comments in round 1,
+    // Terminal QA #18: the closing line says what the review found and that it was fixed (3 comments in round 1, including owner information,
     // one fix commit, a clean round 2), so it never reads as "found nothing".
-    expect(outcome.status).toMatch(/reviewed by Codex · 2 comments, fixed in 1 new commit · rehearsal passed on the latest commit/)
+    expect(outcome.status).toMatch(/reviewed by Codex · 3 comments, fixed in 1 new commit · rehearsal passed on the latest commit/)
 
     // Nothing secret reached gh (argv or stdin) or the terminal events.
     const traffic = w.gh.traffic()
@@ -1027,7 +1056,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(reviewCalls).toHaveLength(2)
     for (const call of reviewCalls) expect(JSON.parse(call.stdin!).query).toMatch(/event: COMMENT/)
     const first = JSON.parse(reviewCalls[0]!.stdin!) as { variables: { body: string; threads: Array<{ path: string; line: number }> } }
-    expect(first.variables.threads.map((thread) => `${thread.path}:${thread.line}`)).toEqual(["app/layout.tsx:2"])
+    expect(first.variables.threads.map((thread) => `${thread.path}:${thread.line}`)).toEqual(["app/layout.tsx:2", "app/layout.tsx:3"])
     expect(first.variables.body).toContain("`lib/other.ts:9`")
 
     // The fix commit is a descendant with the round trailer.
@@ -1043,7 +1072,8 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     const f2 = own.find((thread) => thread.comments[0]!.body.includes("F2"))!
     expect(f1.comments[1]!.body).toMatch(new RegExp(`Fixed in ${fixHead.slice(0, 7)}`))
     expect(f1.isResolved).toBe(true)
-    expect(f2).toBeUndefined()
+    expect(f2.comments).toHaveLength(1)
+    expect(f2.isResolved).toBe(false)
     // An un-OK'd teammate thread and a stranger's thread get no reply.
     expect(state.threads.find((thread) => thread.id === "PRRT_teammate")!.comments).toHaveLength(1)
     expect(state.threads.find((thread) => thread.id === "PRRT_stranger")!.comments).toHaveLength(1)
@@ -1146,7 +1176,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
   }
 
   it("a banner request raised again after its decline is never offered as a fix (the ruling stands)", async () => {
-    const banner = { id: "F1", item: "R16" as const, severity: "should" as const, path: "app/layout.tsx", line: 2, body: "Add a cookie banner.", suggested_fix: null }
+    const banner = { id: "F1", item: "R16" as const, severity: "should" as const, path: "app/layout.tsx", line: 2, category: "owner_consent_privacy" as const, body: "Add a cookie banner.", suggested_fix: null }
     const w = await opened({
       reviews: [review([banner, { id: "F2", item: "R3", severity: "should", path: "app/layout.tsx", line: 3, body: "Edit the init in place.", suggested_fix: null }]), review([{ ...banner, body: "Really, add the consent banner." }])],
       fix: fixLayout,
@@ -1158,13 +1188,13 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.agents.jobCalls).toHaveLength(1)
     expect(w.agents.jobCalls[0]!.items.map((item) => item.id)).toEqual(["review_comments:F2"])
     const final = (w.gh.read().prs[0]!.comments as Array<{ body: string }>).at(-1)!.body
-    expect(final).toContain("Consent and your privacy policy are yours; this run changed neither.")
-    expect(final).not.toContain("add the consent banner")
+    expect(final).toContain("About the site owner’s consent/privacy: not ours to change.")
+    expect(final).toContain("add the consent banner")
   })
 
   it("an R6 'gate GA4 behind consent' finding never becomes a worker job", async () => {
     const w = await opened({
-      reviews: [review([{ id: "F1", item: "R6", severity: "blocker", path: "app/layout.tsx", line: 2, body: "GA4 fires before consent; gate it.", suggested_fix: "Wrap both inits in a consent gate." }]), review([])],
+      reviews: [review([{ id: "F1", item: "R6", severity: "blocker", path: "app/layout.tsx", line: 2, category: "owner_consent_privacy" as const, body: "GA4 fires before consent; gate it.", suggested_fix: "Wrap both inits in a consent gate." }]), review([])],
       fix: fixLayout,
       answers: { "teammate-comments": { actOn: [] }, single: "fix" }
     })
@@ -1288,7 +1318,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect((state.prs[0]!.comments as Array<{ body: string }>).at(-1)!.body).toMatch(/No second review ran/)
 
     // The user's own agent posts a review from the brief; a re-run reads it like an agent review.
-    const posted = review([{ id: "F1", item: "R16", severity: "should", path: "app/layout.tsx", line: 2, body: "Add a cookie banner.", suggested_fix: null }])
+    const posted = review([{ id: "F1", item: "R16", severity: "should", path: "app/layout.tsx", line: 2, category: "owner_consent_privacy" as const, body: "Add a cookie banner.", suggested_fix: null }])
     w.gh.update((draft) => {
       ;(draft.prs![0]!.comments as Array<unknown>).push({ author: { login: "acme-dev" }, authorAssociation: "OWNER", body: `Review.\n\n\`\`\`json\n${JSON.stringify(posted)}\n\`\`\`\n${PR_MARKERS.briefReview(RUN_ID)}` })
       // A stranger's look-alike is ignored.
@@ -1304,7 +1334,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     const w = await opened({ reviewer: "brief", answers: { "teammate-comments": { actOn: [] } } })
     expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "skipped" })
     expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "brief")).toBe("No second review")
-    const posted = review([{ id: "F1", item: "R16", severity: "should", path: "app/layout.tsx", line: 2, body: "Add a cookie banner.", suggested_fix: null }])
+    const posted = review([{ id: "F1", item: "R16", severity: "should", path: "app/layout.tsx", line: 2, category: "owner_consent_privacy" as const, body: "Add a cookie banner.", suggested_fix: null }])
     w.gh.update((draft) => {
       ;(draft.prs![0]!.comments as Array<unknown>).push({ id: 42999, author: { login: "acme-dev" }, authorAssociation: "OWNER", body: `Review.\n\n\`\`\`json\n${JSON.stringify(posted)}\n\`\`\`\n${PR_MARKERS.briefReview(RUN_ID)}` })
     })
