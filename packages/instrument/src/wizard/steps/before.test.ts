@@ -26,7 +26,7 @@ import type { BuildResult, CheckResult } from "../contracts/jobs.js"
 import type { WizardRunState } from "../contracts/state.js"
 import { BEFORE_FACTS_PATH, beforeDryLiveRequest, buildLiveTodayColumn, createBeforeStep, jobScanWith, readBeforeFactsFile, step as defaultStep, type BeforeFactsFile } from "./before.js"
 import { WIZARD_STEPS } from "./index.js"
-import { refreshValidationBaseline } from "../local-validation.js"
+import { prepareLocalValidation, refreshValidationBaseline } from "../local-validation.js"
 
 const SITE = {
   "package.json": JSON.stringify({ name: "acme", dependencies: { next: "15.0.0" } }),
@@ -97,10 +97,28 @@ const BEFORE_FACTS_PATH_ABS = `/repo/${BEFORE_FACTS_PATH}`
 const indexOf = (log: CallLog, prefix: string): number => log.findIndex((entry) => entry.startsWith(prefix))
 
 describe("step before: call order", () => {
+  it("R6 offers plain install with a lockfile notice when no lockfile exists", async () => {
+    const asked: string[] = []
+    const s = setup({ ctx: { ask: (async (_kind: string, payload: { question: string }) => { asked.push(payload.question); return false }) as never }, checks: { baselineBuild: { ok: false, durationMs: 1, failureSignature: ["exit_code:127"] } } })
+    await s.run()
+    expect(asked.join(" ")).toContain("npm install")
+    expect(asked.join(" ")).toMatch(/no lockfile.*create/i)
+  })
+
+  it("R6 asks again after a failed install left partial node_modules", async () => {
+    let asked = 0
+    const s = setup({ ctx: { ask: (async () => { asked++; return true }) as never }, checks: { baselineBuild: { ok: false, durationMs: 1, failureSignature: ["exit_code:127"] } } })
+    s.checks.checks.installDependencies = async () => { s.fs.store.set("/repo/node_modules", { text: "partial", mode: undefined }); return { ok: false, reason: "cancelled" } }
+    const ctx = context(s.state, s.log, { ask: (async () => { asked++; return true }) as never }).ctx
+    const minimal = { fs: s.fs.fs, checks: s.checks.checks } as import("../contracts/deps.js").WizardDeps
+    await prepareLocalValidation(ctx, minimal)
+    await prepareLocalValidation(ctx, minimal)
+    expect(asked).toBe(2)
+  })
   it.each(["yes", "nested"] as const)("never implies dependency installation in %s mode", async (mode) => {
     const options = { ...context(initialState(), []).ctx.options, [mode]: true }
     const s = setup({ ctx: { options, ask: (async () => { throw new Error("must not ask") }) as never }, checks: { baselineBuild: { ok: false, durationMs: 1, failureSignature: ["exit_code:127"] } } })
-    expect(await s.run()).toMatchObject({ kind: "failed", message: expect.stringContaining("npm ci") })
+    expect(await s.run()).toMatchObject({ kind: "failed", message: expect.stringContaining("npm install") })
     expect(s.log.some((line) => line.startsWith("installer.scan"))).toBe(false)
   })
 
@@ -108,7 +126,7 @@ describe("step before: call order", () => {
     const s = setup()
     await s.run()
     let reads = 0
-    s.checks.checks.buildBaseline = async () => { reads++; return { ok: true, durationMs: 1, failureSignature: [], signatureVersion: 2 } as BuildResult }
+    s.checks.checks.buildBaseline = async () => { reads++; return { ok: true, durationMs: 1, failureSignature: [], signatureVersion: 3 } as BuildResult }
     const ctx = context(s.state, s.log).ctx
     const minimal = { fs: s.fs.fs, checks: s.checks.checks } as import("../contracts/deps.js").WizardDeps
     expect(await refreshValidationBaseline(ctx, minimal)).toBeNull()
@@ -663,7 +681,7 @@ describe("step before: the hand-off", () => {
     const outcome = (await s.run()) as { kind: string; status: string }
     const cell = s.state.report.live_today!.cells.checks_passing!
     expect(outcome.status).toBe(`Before: ${cell.display}`)
-    expect(outcome.status).toMatch(/ of 14$/)
+    expect(outcome.status).toMatch(/ of 13$/)
     // The same words reach the screen, and they are NOT the raw count of every check result (9 pass · 0 problems).
     const statuses = s.events.filter((event) => event.type === "step.status").map((event) => (event.fields as { text: string }).text)
     expect(statuses.at(-1)).toBe(outcome.status)

@@ -10,13 +10,14 @@
 // Agent-written `next.config.*` and page modules are evaluated by the build, which is why O9's post-turn
 // gate runs BEFORE any build (§3a.9 item 5) and why the build never runs in the wizard's own process.
 import { createHash } from "node:crypto"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 
 import { detectPackageManager } from "../package-manager.js"
 import type { PackageManager } from "../types.js"
 import type { BuildResult, CheckResult } from "../wizard/contracts/jobs.js"
 import { defaultDenyReads, sandboxedSpawn, SandboxUnavailableError, type DenyReadSet, type SandboxedSpawnFn, type SandboxedSpawnResult } from "../t0/sandbox.js"
+import { createBunLockfile, stablePackageCache } from "./package-cache.js"
 
 export const BUILD_DEFAULT_TIMEOUT_MS = 10 * 60_000
 
@@ -24,7 +25,7 @@ export type BuildSkipReason = "no_package_json" | "no_build_script" | "ambiguous
 
 /** A `BuildResult` with what the wizard needs to explain it. */
 export interface BuildRun extends BuildResult {
-  signatureVersion: 2
+  signatureVersion: 3
   skipped: BuildSkipReason | null
   exitCode: number | null
   timedOut: boolean
@@ -49,14 +50,23 @@ export interface BuildOptions {
   now?: () => number
 }
 
-export function frozenInstallCommand(manager: PackageManager): { command: string; args: string[] } {
+export function frozenInstallCommand(manager: PackageManager, frozen = true): { command: string; args: string[] } {
   const args: Record<PackageManager, string[]> = {
     npm: ["ci"],
     pnpm: ["install", "--frozen-lockfile"],
     yarn: ["install", "--frozen-lockfile"],
     bun: ["install", "--frozen-lockfile"]
   }
-  return { command: manager, args: args[manager] }
+  return { command: manager, args: frozen ? args[manager] : ["install"] }
+}
+
+export async function dependencyInstallPlan(root: string, appRoot: string, manager: PackageManager, exists: (path: string) => Promise<boolean> = async path => existsSync(path), readText: (path: string) => Promise<string | null> = async path => { try { return readFileSync(path, "utf8") } catch { return null } }) {
+  const names = { npm: ["package-lock.json", "npm-shrinkwrap.json"], pnpm: ["pnpm-lock.yaml"], yarn: ["yarn.lock"], bun: ["bun.lock", "bun.lockb"] }[manager]
+  let workspace = manager === "pnpm" && await exists(join(root, "pnpm-workspace.yaml"))
+  try { workspace ||= !!(JSON.parse(await readText(join(root, "package.json")) ?? "{}") as { workspaces?: unknown }).workspaces } catch { /* Invalid manifests fail in the manager with its own message. */ }
+  const cwd = workspace ? root : resolve(root, appRoot)
+  for (const name of names) if (await exists(join(cwd, name))) return { ...frozenInstallCommand(manager), cwd, lockfile: join(cwd, name), createsLockfile: false }
+  return { ...frozenInstallCommand(manager, false), cwd, lockfile: join(cwd, names[0]!), createsLockfile: true }
 }
 
 /** A user-approved install, under the same process sandbox as the site's build. */
@@ -65,17 +75,23 @@ export async function installSiteDependencies(options: BuildOptions & { onOutput
   const appRoot = resolve(root, options.appRoot)
   const manager = buildPackageManager(root, appRoot, options.packageManager)
   if (manager === "ambiguous") return { ok: false, reason: "several lockfiles name different package managers" }
-  const { command, args } = frozenInstallCommand(manager)
+  const plan = await dependencyInstallPlan(root, appRoot, manager)
+  const { command, args } = plan
   const deny = options.denyReads ?? defaultDenyReads()
   try {
-    const result = await (options.spawn ?? sandboxedSpawn)(command, args, {
+    const spawn = options.spawn ?? sandboxedSpawn
+    const cache = await stablePackageCache({ manager, root, appRoot: plan.cwd, spawn, deny, platform: options.platform, signal: options.signal })
+    if (manager === "bun" && plan.createsLockfile) await createBunLockfile({ appRoot: plan.cwd, lockfile: plan.lockfile, spawn, deny, env: cache.env, writableCache: cache.writable, signal: options.signal, platform: options.platform, onOutput: options.onOutput })
+    if (manager === "yarn" && plan.createsLockfile) writeFileSync(plan.lockfile, "", { flag: "wx", mode: 0o644 })
+    const result = await spawn(command, [...(manager === "bun" ? ["install", "--frozen-lockfile", "--no-save"] : args), ...cache.args], {
       denyReads: deny.paths,
       denyReadPrefixes: deny.prefixes,
       network: true,
-      allowWrites: [...buildAllowedWrites(root, appRoot), ...[...new Set([root, appRoot])].flatMap((path) => [join(path, "node_modules"), join(path, ".yarn"), join(path, ".pnp.cjs"), join(path, ".pnp.loader.mjs")])],
-      denyWrites: buildDeniedWrites(root, appRoot),
-      cwd: appRoot,
-      env: { CI: "1", NO_UPDATE_NOTIFIER: "1", npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" },
+      allowWrites: [...cache.writable, ...(plan.createsLockfile ? [plan.lockfile] : []), ...buildAllowedWrites(root, appRoot), ...[...new Set([root, appRoot])].flatMap((path) => [join(path, "node_modules"), join(path, ".yarn"), join(path, ".pnp.cjs"), join(path, ".pnp.loader.mjs")])],
+      packageManagerTempDirs: [...new Set([root, appRoot])],
+      denyWrites: [...buildDeniedWrites(root, appRoot), join(root, "package.json"), join(appRoot, "package.json"), ...(!plan.createsLockfile || manager === "bun" ? [plan.lockfile] : [])],
+      cwd: plan.cwd,
+      env: { ...cache.env, ...(manager === "yarn" ? { YARN_ENABLE_IMMUTABLE_INSTALLS: plan.createsLockfile ? "false" : "true" } : {}), CI: "1", NO_UPDATE_NOTIFIER: "1", npm_config_update_notifier: "false", npm_config_fund: "false", npm_config_audit: "false" },
       timeoutMs: options.timeoutMs ?? BUILD_DEFAULT_TIMEOUT_MS,
       signal: options.signal,
       platform: options.platform,
@@ -86,6 +102,10 @@ export async function installSiteDependencies(options: BuildOptions & { onOutput
       : { ok: false, reason: result.timedOut ? "installation timed out" : result.aborted ? "installation was cancelled" : `installation exited ${result.exitCode ?? "without a status"}` }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  } finally {
+    if (manager === "yarn" && plan.createsLockfile) {
+      try { if (readFileSync(plan.lockfile, "utf8") === "") unlinkSync(plan.lockfile) } catch { /* Keep any completed lock; never erase a nonempty file. */ }
+    }
   }
 }
 
@@ -99,6 +119,7 @@ export const FAILURE_SIGNATURE_MAX_LINES = 200
 
 /** Lines a package manager prints about the run itself (where its log went), never about the failure. */
 const RUN_BOOKKEEPING = /complete log of this run can be found|^npm (?:error|ERR!) A complete log|^npm (?:error|ERR!) +\/|_logs\/.*-debug(?:-\d+)?\.log/i
+const DIAGNOSTIC_SUMMARY = /^(?:[✖×]\s*)?\d+\s+problems?\s*\(|^\d+\s+(?:errors?|warnings?)(?:\s+and\s+\d+\s+(?:errors?|warnings?))?\s+potentially fixable\b|^Found\s+\d+\s+errors?\b|^\d+\s+errors?(?:\s+and\s+\d+\s+warnings?)?\.?$/i
 
 /** The per-run throwaway HOME `sandboxedSpawn` creates, wherever it appears (`/private/var/…/infinite-tag-sbx-Qz98Lk`). */
 const SANDBOX_HOME = /(?:\/private)?\/[^\s'"`]*?infinite-tag-sbx-[A-Za-z0-9]+/g
@@ -129,20 +150,27 @@ export function failureSignature(output: string, root: string, options: { home?:
       if (homePattern) out = out.replace(homePattern, "<home>")
       return out.replace(SANDBOX_HOME, "<home>").replace(rootPattern, "<root>").trim()
     })
-  const structured = new Set<string>()
+  const structured = new Map<string, number>()
   const opaque = new Set<string>()
   let file: string | null = null
   const sourceFile = (value: string): string | null => {
     const path = value.replace(/^<root>\//, "").replace(/^\.\//, "")
     return /^[^:\r\n]+\.(?:[cm]?[jt]sx?|vue|svelte|astro)$/.test(path) ? path : null
   }
-  const add = (path: string, code: string, message: string) => structured.add(`${path} | ${code} | ${message.trim().replace(/\s+/g, " ")}`)
+  const add = (path: string, code: string, message: string) => {
+    const key = `${path} | ${code} | ${message.trim().replace(/\s+/g, " ")}`
+    structured.set(key, (structured.get(key) ?? 0) + 1)
+  }
   for (const line of lines) {
+    if (DIAGNOSTIC_SUMMARY.test(line)) continue
+    if (/^(?:(?:.+?\.\w+):)?\s*\d+:\d+\s+warning\b:?/i.test(line)) continue
     const header = /^(.*?)(?::\d+(?::\d+)?)?$/.exec(line)?.[1]
     const fileHeader = header ? sourceFile(header) : null
     if (fileHeader) { file = fileHeader; continue }
     const tsc = /^(.+?)(?:\(\d+,\d+\):|:\d+:\d+\s*-?)\s*error\s+(TS\d+):\s*(.+)$/i.exec(line)
     if (tsc && sourceFile(tsc[1]!)) { add(sourceFile(tsc[1]!)!, tsc[2]!, tsc[3]!); continue }
+    const parsing = /^(?:(.+?\.\w+):)?\s*\d+:\d+\s+(?:Error:|error)\s+(Parsing error:\s*.+)$/i.exec(line)
+    if (parsing && (sourceFile(parsing[1] ?? "") ?? file)) { add((sourceFile(parsing[1] ?? "") ?? file)!, "parse-error", parsing[2]!); continue }
     const eslint = /^(?:(.+?\.\w+):)?\s*\d+:\d+\s+(?:Error:|error)\s+(.+?)\s+([@\w/-]+)$/.exec(line)
     if (eslint) {
       const path = sourceFile(eslint[1] ?? "") ?? file
@@ -168,7 +196,7 @@ export function failureSignature(output: string, root: string, options: { home?:
       .trim()
     if (normalised) opaque.add(`opaque: ${normalised}`)
   }
-  const sorted = [...structured, ...opaque].sort()
+  const sorted = [...structured].flatMap(([key, count]) => Array.from({ length: count }, (_, index) => index === 0 ? key : `${key} | occurrence:${index + 1}`)).concat([...opaque]).sort()
   if (sorted.length <= FAILURE_SIGNATURE_MAX_LINES) return sorted
   const digest = createHash("sha256").update(sorted.join("\n")).digest("hex").slice(0, 16)
   return [...sorted.slice(0, FAILURE_SIGNATURE_MAX_LINES - 1), `…${sorted.length - FAILURE_SIGNATURE_MAX_LINES + 1} more failure lines (set ${digest})`]
@@ -227,6 +255,13 @@ export function buildPackageManager(root: string, appRoot: string, override?: Pa
     if (detected.kind === "ambiguous") return "ambiguous"
     if (detected.kind !== "unknown") return detected.kind
   }
+  for (const dir of appRoot === root ? [root] : [appRoot, root]) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { packageManager?: string }
+      const declared = /^(npm|pnpm|yarn|bun)@/.exec(manifest.packageManager ?? "")?.[1]
+      if (declared) return declared as PackageManager
+    } catch { /* No declared manager. */ }
+  }
   // No lockfile anywhere: `npm run build` runs the package.json script without installing anything.
   return "npm"
 }
@@ -236,7 +271,7 @@ export async function runBuild(options: BuildOptions): Promise<BuildRun> {
   const appRoot = resolve(root, options.appRoot)
   const clock = options.now ?? Date.now
   const started = clock()
-  const base = { signatureVersion: 2 as const, ok: false, failureSignature: [] as string[], durationMs: 0, exitCode: null, timedOut: false, error: null, sandboxed: false, outputTail: [] as string[] }
+  const base = { signatureVersion: 3 as const, ok: false, failureSignature: [] as string[], durationMs: 0, exitCode: null, timedOut: false, error: null, sandboxed: false, outputTail: [] as string[] }
   const scripts = readValidationScripts(appRoot)
   if ("reason" in scripts) return { ...base, ok: true, skipped: scripts.reason, packageManager: null }
   const manager = buildPackageManager(root, appRoot, options.packageManager)
@@ -295,7 +330,7 @@ export async function runBuild(options: BuildOptions): Promise<BuildRun> {
   const stopped = runs.find(({ result }) => result.timedOut || result.aborted)
   const failed = runs.find(({ result }) => result.exitCode !== 0)
   return {
-    signatureVersion: 2,
+    signatureVersion: 3,
     ok,
     failureSignature: ok ? [] : signature.length ? signature : ["exit_code:unknown"],
     durationMs: clock() - started,
@@ -354,6 +389,7 @@ export async function buildVerdict(
   build: BuildResult,
   baseline: () => Promise<Pick<BuildResult, "failureSignature">>
 ): Promise<{ state: "pass" | "problem" | "undetermined"; reason?: string }> {
+  if ((build as Partial<BuildRun>).timedOut) return { state: "undetermined", reason: "test_error — the working-tree build or lint timed out" }
   const couldNotRun = (build as { error?: string | null }).error
   if (!build.ok && couldNotRun) return { state: "undetermined", reason: `test_error — the build could not run: ${couldNotRun}` }
   if (build.ok) return { state: "pass" }

@@ -7,7 +7,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
 import type { SandboxedSpawnFn, SandboxedSpawnOptions, SandboxedSpawnResult } from "../t0/sandbox.js"
-import { buildAllowedWrites, buildDeniedWrites, buildPackageManager, buildVerdict, FAILURE_SIGNATURE_MAX_LINES, failureSignature, gradeBuild, installSiteDependencies, runBuild } from "./build.js"
+import { buildAllowedWrites, buildDeniedWrites, buildPackageManager, buildVerdict, dependencyInstallPlan, FAILURE_SIGNATURE_MAX_LINES, failureSignature, gradeBuild, installSiteDependencies, runBuild } from "./build.js"
 
 const ctx = { runId: "7f3c2a91-b0de-4c03-9a00-000000000001", now: () => new Date("2026-10-02T10:00:00.000Z") }
 
@@ -43,6 +43,10 @@ Type error: Type 'number' is not assignable to type 'string'.
 `
 
 describe("runBuild goes through sandboxedSpawn, never the wizard's process", () => {
+  it("uses the workspace root as the owner of a new pnpm lockfile", async () => {
+    const root = site({ "package.json": '{"private":true}', "pnpm-workspace.yaml": "packages:\n  - apps/*\n", "apps/web/package.json": '{"name":"web"}' })
+    expect(await dependencyInstallPlan(root, "apps/web", "pnpm")).toMatchObject({ cwd: root, lockfile: join(root, "pnpm-lock.yaml"), createsLockfile: true, args: ["install"] })
+  })
   it("installs frozen dependencies through the network-enabled sandbox and streams progress", async () => {
     const root = site({ "pnpm-lock.yaml": "" })
     const calls: string[] = []
@@ -50,6 +54,10 @@ describe("runBuild goes through sandboxedSpawn, never the wizard's process", () 
     const fake = spy({})
     const result = await installSiteDependencies({ root, appRoot: ".", onOutput: (line) => output.push(line), spawn: async (cmd, args, options) => {
       calls.push(`${cmd} ${args.join(" ")}`)
+      if (args[0] === "store") {
+        expect(options.network).toBe(false)
+        return { ...await fake.fn(cmd, args, options), stdout: "/fixture-cache/store/v10\n" }
+      }
       expect(options.network).toBe(true)
       expect(options.allowWrites).toContain(join(root, "node_modules"))
       expect(options.allowWrites).not.toContain(root)
@@ -57,7 +65,7 @@ describe("runBuild goes through sandboxedSpawn, never the wizard's process", () 
       return fake.fn(cmd, args, options)
     } })
     expect(result.ok).toBe(true)
-    expect(calls).toEqual(["pnpm install --frozen-lockfile"])
+    expect(calls).toEqual(["pnpm store path", "pnpm install --frozen-lockfile --store-dir /fixture-cache/store"])
     expect(output).toEqual(["Progress: installed"])
   })
   it("runs a site's lint script as well as its build and reports a new generated-file lint error", async () => {
@@ -133,6 +141,28 @@ describe("runBuild goes through sandboxedSpawn, never the wizard's process", () 
 })
 
 describe("the failure signature tells a new failure from the baseline's", () => {
+  const stylish = JSON.parse(readFileSync(new URL("../../test/fixtures/lint-diagnostics/eslint-stylish.json", import.meta.url), "utf8")) as Array<{ version: string; base: string; warning: string; duplicate: string; fatal: string; fatalShifted: string }>
+  it.each(stylish)("compares captured ESLint $version stylish output without summary or position noise", fixture => {
+    const base = failureSignature(fixture.base, "/fixture")
+    expect(failureSignature(fixture.warning, "/fixture")).toEqual(base)
+    const duplicate = failureSignature(fixture.duplicate, "/fixture")
+    expect(duplicate).toContain("src/example.js | no-var | Unexpected var, use let or const instead | occurrence:2")
+    expect(duplicate.some(line => !base.includes(line))).toBe(true)
+    expect(failureSignature(fixture.fatalShifted, "/fixture")).toEqual(failureSignature(fixture.fatal, "/fixture"))
+  })
+  it("R6 ignores ESLint 8/9 count summaries and warning-only count changes", () => {
+    const error = "/repo/src/a.ts\n  2:3  error  Unexpected var, use let or const instead  no-var\n"
+    const summary = (warnings: number) => `✖ ${1 + warnings} problems (1 error, ${warnings} warnings)\n  1 error and ${warnings} warnings potentially fixable with the --fix option.`
+    expect(failureSignature(error + summary(1), "/repo")).toEqual(failureSignature(error + summary(0), "/repo"))
+    expect(failureSignature(error + "  4:2  warning  'error' is defined but never used  no-unused-vars\n" + summary(1), "/repo")).toEqual(failureSignature(error + summary(0), "/repo"))
+  })
+
+  it("R6 counts an additional identical diagnostic and normalizes fatal parsing positions", () => {
+    const one = "/repo/src/a.ts\n  2:3  error  duplicate  no-var\n"
+    expect(failureSignature(one + "  3:3  error  duplicate  no-var\n", "/repo")).not.toEqual(failureSignature(one, "/repo"))
+    const fatal = (line: number) => `/repo/src/a.ts\n ${line}:3  error  Parsing error: Unexpected token`
+    expect(failureSignature(fatal(3), "/repo")).toEqual(failureSignature(fatal(30), "/repo"))
+  })
   it("retains a new opaque error beside a structured baseline error", () => {
     const base = "src/a.ts(3,5): error TS2322: Existing type mismatch"
     const first = failureSignature(base, "/repo")

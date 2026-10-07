@@ -42,6 +42,8 @@ export interface SandboxedSpawnOptions {
    * passes none; the build passes the repo root. Each is also added in realpath form.
    */
   allowWrites?: readonly string[]
+  /** pnpm probes the project filesystem with a random _tmp_<pid>_<hex> file. */
+  packageManagerTempDirs?: readonly string[]
   /** Subtrees never writable, even inside `allowWrites` (the build: `<root>/.git`, `.husky`, `.infinite`). */
   denyWrites?: readonly string[]
   /** `false` for T0 (no network at all); `true` for the build (it may fetch packages). */
@@ -214,6 +216,7 @@ export function buildSandboxProfile(options: {
   /** Subtrees the child may write (its temp HOME + the caller's `allowWrites`). */
   writableRoots: readonly string[]
   denyWrites?: readonly string[]
+  packageManagerTempDirs?: readonly string[]
 }): string {
   const lines = ["(version 1)", "(allow default)"]
   if (!options.network) lines.push("(deny network*)")
@@ -224,6 +227,11 @@ export function buildSandboxProfile(options: {
   lines.push("(deny file-write*)")
   const writable = options.writableRoots.map((path) => `(subpath ${sbplString(absolute(path, "writable root"))})`)
   lines.push(`(allow file-write* ${[...writable, ...DEVICE_WRITES].join(" ")})`)
+  for (const dir of options.packageManagerTempDirs ?? []) {
+    if (/["\u0000-\u001f]/.test(dir)) throw new Error("package-manager temp directory contains a quote or control character")
+    const prefix = absolute(dir, "package-manager temp directory").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    lines.push(`(allow file-write* (regex #"^${prefix}/_tmp_[0-9]+_[0-9a-f]+$"))`)
+  }
   for (const path of options.denyWrites ?? []) lines.push(`(deny file-write* (subpath ${sbplString(absolute(path, "deny-write path"))}))`)
   for (const filter of [...readPaths, ...readPrefixes]) lines.push(`(deny file-write* ${filter})`)
   return lines.join("\n")
@@ -321,7 +329,8 @@ export const sandboxedSpawn: SandboxedSpawnFn = (cmd, args, options) => {
         denyReadPrefixes: options.denyReadPrefixes ?? [],
         network: options.network,
         writableRoots: withRealpaths([home, ...(options.allowWrites ?? [])]),
-        denyWrites: withRealpaths(options.denyWrites ?? [])
+        denyWrites: withRealpaths(options.denyWrites ?? []),
+        packageManagerTempDirs: withRealpaths(options.packageManagerTempDirs ?? [])
       })
     } catch (error) {
       rmSync(home, { recursive: true, force: true })

@@ -230,7 +230,7 @@ export function createCheckRunner(options: CheckRunnerOptions): O6CheckRunner {
     try { tree = await options.baselineTree?.() }
     catch (error) {
       if (!(error instanceof BaselineUnavailableError)) throw error
-      const result: BuildRun = { signatureVersion: 2, ok: false, failureSignature: [], durationMs: 0, skipped: null, exitCode: null, timedOut: false, error: error.message, sandboxed: false, packageManager: null, outputTail: [] }
+      const result: BuildRun = { signatureVersion: 3, ok: false, failureSignature: [], durationMs: 0, skipped: null, exitCode: null, timedOut: false, error: error.message, sandboxed: false, packageManager: null, outputTail: [] }
       baseline = result
       return result
     }

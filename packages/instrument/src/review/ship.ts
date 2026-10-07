@@ -18,6 +18,7 @@ import { isUnsupported } from "../hosts/other.js"
 import { parseUnifiedDiff } from "./diff.js"
 import type { Scanner, ScanHit } from "./scan.js"
 import { sub } from "./context.js"
+import { DEPENDENCY_INSTALL_RECORD } from "../wizard/local-validation.js"
 
 export type CommitResult =
   | { kind: "committed"; sha: string; staged: string[]; leftOut: StageSet["leftOut"]; blocked: ScanHit[]; receiptRefreshSha: string | null }
@@ -97,7 +98,16 @@ async function gateStaged(input: CommitInput): Promise<string[]> {
 /** §3g.1: stage exactly the allowed set, scan it, commit with the run trailer. */
 export async function stageAndCommit(input: CommitInput): Promise<CommitResult> {
   const { git, ctx } = input
-  const entries = await git.statusEntries()
+  const allEntries = await git.statusEntries()
+  let createdLockfiles: string[] = []
+  try {
+    const record = JSON.parse(await input.deps.fs.readText(join(ctx.root, DEPENDENCY_INSTALL_RECORD)) ?? "null") as { createdLockfiles?: unknown } | null
+    if (Array.isArray(record?.createdLockfiles)) createdLockfiles = record.createdLockfiles.filter((file): file is string => typeof file === "string" && !file.startsWith("/") && !file.split("/").includes("..") && /(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?)$/.test(file))
+  } catch { /* A malformed optional install record cannot add anything to the commit allowlist. */ }
+  const omitted = new Set(createdLockfiles)
+  const stagedNewLocks = allEntries.filter(entry => omitted.has(entry.path) && entry.x !== " " && entry.x !== "?").map(entry => entry.path)
+  if (stagedNewLocks.length) await git.unstage(stagedNewLocks)
+  const entries = allEntries.filter(entry => !omitted.has(entry.path))
   let fenceOnly = true
   if (entries.some((entry) => entry.path === ".gitignore")) {
     fenceOnly = gitignoreChangeIsFenceOnly(await git.showFile("HEAD", ".gitignore"), await input.deps.fs.readText(join(ctx.root, ".gitignore")))
