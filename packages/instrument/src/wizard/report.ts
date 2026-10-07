@@ -12,7 +12,9 @@
 // 7. `in_pr` cells are keyed to `columns.in_pr.sha` and rebuilt on each new head.
 // A finish-line cell is computed ONLY from the inputs FINISH_LINE_SOURCES names for its column; a cell
 // whose inputs are absent is `not_measured` ("—") and leaves N, the determinable count.
-import { OWNER_BOUNDARY, LEGACY_OWNER_BOUNDARY, hasRecordedPolicyEdits } from "../jobs/owner-boundary.js"
+import type { OwnerBoundaryMeasurement } from "../jobs/owner-diff.js"
+import type { ChecklistItem } from "./contracts/jobs.js"
+import { OWNER_BOUNDARY, OWNER_BOUNDARY_UNMEASURED, LEGACY_OWNER_BOUNDARY, hasRecordedPolicyEdits, withOwnerBoundary, isOwnerBoundaryStatement, hasLegacyOwnerHistory } from "../jobs/owner-boundary.js"
 import {
   CELL_STATES,
   FINISH_LINE_IDS,
@@ -92,6 +94,14 @@ export class ReportRuleError extends Error {
     super(message)
     this.name = "ReportRuleError"
   }
+}
+
+// Existing cloud wire limits. Full owner snippets stay in the trusted local render context.
+const REPORT_NOTE_MAX_CHARS = 300
+const REPORT_NOTE_LIMIT = 20
+function boundedNotes(notes: readonly string[]): string[] {
+  const summaries = [...new Set(notes.map(note => note.replace(/\s+/g, " ").trim()).filter(Boolean).map(note => note.length > REPORT_NOTE_MAX_CHARS ? `${note.slice(0, REPORT_NOTE_MAX_CHARS - 1)}…` : note))]
+  return summaries.length <= REPORT_NOTE_LIMIT ? summaries : [...summaries.slice(0, REPORT_NOTE_LIMIT - 2), `${summaries.length - REPORT_NOTE_LIMIT + 1} additional notes are omitted from this compact report; see the local checklist and review ledger.`, summaries.at(-1)!]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -290,7 +300,7 @@ function finishLineCell(
   // The worst reading decides; its input names the provenance.
   const decider = [...readings].sort((a, b) => STATE_SEVERITY[b.state] - STATE_SEVERITY[a.state] || b.at.localeCompare(a.at))[0]!
   let state: CellState = readings.every((fact) => fact.state === "info") ? "info" : decider.state
-  if (spec.fixedState === "info") state = "info"
+  if (spec.fixedState === "info" && !(decider.state === "problem" && decider.reason === "test_error")) state = "info"
   if (spec.fixedState === "pending" && state !== "pass" && state !== "problem") state = "pending"
   const source = FINISH_LINE_INPUT_PROVENANCE[decider.input]
   const reason = decider.reason ?? (state === "pending" ? spec.reason : undefined)
@@ -347,7 +357,7 @@ export function checksPassingCell(finishLine: Partial<Record<FinishLineId, Cell>
   let unknown = 0
   let pending = 0
   for (const id of FINISH_LINE_IDS) {
-    if (id === "consent_recorded") continue // Recording a choice is never a compliance grade.
+    if (id === "consent_recorded" && !(finishLine[id]?.state === "problem" && finishLine[id]?.reason === "test_error")) continue // A failed wizard recording is its own problem, never a judgment on consent.
     const cell = finishLine[id]
     if (!cell) continue
     if (cell.state === "pass") pass += 1
@@ -361,7 +371,7 @@ export function checksPassingCell(finishLine: Partial<Record<FinishLineId, Cell>
   const determinable = pass + problems + unknown
   if (determinable === 0) return dashCell("wizard_check", at, runId, "not_exercised")
   const state: CellState = problems > 0 ? "problem" : unknown > 0 ? (pending === unknown ? "pending" : "undetermined") : "pass"
-  const total = FINISH_LINE_IDS.length - 1 // consent_recorded is information, not a check
+  const total = FINISH_LINE_IDS.length - (finishLine.consent_recorded?.state === "problem" && finishLine.consent_recorded.reason === "test_error" ? 0 : 1)
   const notTestable = total - determinable
   const words = [`${pass} pass`, `${problems} problem${problems === 1 ? "" : "s"}`, ...(unknown > 0 ? [`${unknown} unknown`] : []), ...(notTestable > 0 ? [`${notTestable} not testable`] : [])]
   return assertCell("rows.checks_passing", {
@@ -447,7 +457,7 @@ function validateSnapshotCells(column: ReportColumnId, snapshot: ReportColumnSna
 export function buildReport(input: BuildInput, now: () => Date = () => new Date()): ReportV2 {
   input = { ...input, columns: Object.fromEntries(Object.entries(input.columns).map(([key, snapshot]) => {
     if (!snapshot) return [key, snapshot]
-    const asInfo = (cell: Cell | undefined) => cell && (cell.state === "pass" || cell.state === "problem") ? { ...cell, state: "info" as const } : cell
+    const asInfo = (cell: Cell | undefined) => cell && (cell.state === "pass" || cell.state === "problem") && cell.reason !== "test_error" ? { ...cell, state: "info" as const } : cell
     const finishLine = { ...snapshot.finishLine, consent_recorded: asInfo(snapshot.finishLine.consent_recorded) }
     return [key, { ...snapshot, finishLine, cells: { ...snapshot.cells, consent_setting: asInfo(snapshot.cells.consent_setting), checks_passing: checksPassingCell(finishLine, input.runId, snapshot.meta.measuredAt ?? new Date(0).toISOString()) } }]
   })) as BuildInput["columns"] }
@@ -506,6 +516,19 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     return { n: index + 1, id, cells }
   })
 
+  const leftGuards = (input.verdictFacts?.jobs ?? []).filter(job => job.jobId === "preview_guard" && job.state === "left_for_you" && (job.ownerBoundary?.kind === "frozen_unit" || job.ownerBoundary?.kind === "restored_unit"))
+  const ownerPreviewNote = leftGuards.length ? `NOT DONE for ${[...new Set(leftGuards.map(job => ({ ga4: "GA4", meta: "Meta pixel", posthog: "PostHog" }[job.id.split(":")[1]!] ?? job.title)))].join(", ")}: left for the owner; preview and local visits keep counting` : null
+  if (ownerPreviewNote) {
+    // This is a wizard source-location fact, not a deployed browser measurement. The wire's proven
+    // column accepts only desktop evidence, so retain it and show the owner annotation alongside it.
+    const current = finishLine.find(line => line.id === "previews_silent")!.cells.in_pr
+    if (current.state !== "problem") {
+      const cell: Cell = { value: "not_done", display: ownerPreviewNote, state: "info", provenance: { source: "wizard_check", at: generatedAt, runId } }
+      finishLine.find(line => line.id === "previews_silent")!.cells.in_pr = cell
+      rows.find(row => row.id === "preview_share")!.cells.in_pr = cell
+      rows.find(row => row.id === "checks_passing")!.cells.in_pr = checksPassingCell(Object.fromEntries(finishLine.map(line => [line.id, line.cells.in_pr])), runId, generatedAt)
+    }
+  }
   const report: ReportV2 = {
     schema: REPORT_SCHEMA,
     runId,
@@ -517,8 +540,11 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     day7: input.day7 ?? { measuredAt: null, window: null, cell: null },
     finishLine,
     notes: [...new Set([
-      ...input.notes.filter(note => note !== OWNER_BOUNDARY),
-      ...(input.verdictFacts?.priorPolicyEdits || hasRecordedPolicyEdits(input.verdictFacts?.jobs ?? []) ? [LEGACY_OWNER_BOUNDARY] : [])
+      ...(ownerPreviewNote ? [ownerPreviewNote] : []),
+      ...input.notes.filter(note => !isOwnerBoundaryStatement(note)),
+      ...(input.verdictFacts?.ownerPolicyFindings ?? []),
+      ...(input.verdictFacts?.jobs ?? []).filter(job => job.state === "left_for_you" && job.ownerBoundary).map(job => job.note ?? "Put back: an edit reached code that handles consent."),
+      ...(input.verdictFacts?.priorPolicyEdits || hasRecordedPolicyEdits(input.verdictFacts?.jobs ?? []) || hasLegacyOwnerHistory(input.notes) ? [LEGACY_OWNER_BOUNDARY] : [])
     ])],
     verdict: null
   }
@@ -534,6 +560,8 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
       installedUnknown: input.verdictFacts.installedUnknown
     })
   }
+  report.notes.push(withOwnerBoundary("", hasLegacyOwnerHistory(report.notes), input.verdictFacts?.ownerBoundary))
+  report.notes = boundedNotes(report.notes)
   assertReport(report, input.runStartedAt ?? null)
   return report
 }
@@ -541,6 +569,7 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
 /** Every rule the whole report must satisfy; throws the first set of problems found. */
 export function assertReport(report: ReportV2, runStartedAt: string | null = null): void {
   const problems = shapeErrors(report, REPORT_V2_SHAPE)
+  if (!Array.isArray(report.notes) || report.notes.length > REPORT_NOTE_LIMIT || report.notes.some(note => typeof note !== "string" || note.length === 0 || note.length > REPORT_NOTE_MAX_CHARS)) problems.push("notes must contain at most 20 nonempty summaries of at most 300 characters")
   if (report.schema !== REPORT_SCHEMA) problems.push(`schema is ${JSON.stringify(report.schema)}`)
   if (report.rows.map((row) => row.id).join() !== REPORT_ROWS.map((row) => row.id).join()) problems.push("rows are not the §3i.4 rows in order")
   if (report.finishLine.map((line) => line.id).join() !== FINISH_LINE_IDS.join()) problems.push("finishLine is not the 14 ids in order")
@@ -596,13 +625,16 @@ function sentence(text: string): string {
 
 /** The report's own notes, then the footnotes, each said once (a note may already say a footnote's words). */
 function notesAndFootnotes(report: ReportV2): string[] {
-  return [...new Set([...report.notes.filter(note => note !== LEGACY_OWNER_BOUNDARY && note !== OWNER_BOUNDARY), ...footnotes(report)])]
+  return [...new Set([...report.notes.filter(note => !isOwnerBoundaryStatement(note)), ...footnotes(report)])]
 }
 
-function cellText(cell: Cell): string {
-  if (cell.value === null) return NULL_DISPLAY
-  if (cell.state === "pass" || cell.state === "info" || cell.display === STATE_WORDS[cell.state]) return cell.display
-  return `${cell.display} (${STATE_WORDS[cell.state]})`
+function cellText(cell: Cell, ownerPreviewNote?: string): string {
+  const measured = cell.value === null ? NULL_DISPLAY : cell.state === "pass" || cell.state === "info" || cell.display === STATE_WORDS[cell.state] ? cell.display : `${cell.display} (${STATE_WORDS[cell.state]})`
+  return ownerPreviewNote && !measured.includes("NOT DONE") ? `${measured} · ${ownerPreviewNote}` : measured
+}
+
+function ownerPreviewNote(report: ReportV2): string | undefined {
+  return report.notes.find(note => note.startsWith("NOT DONE for "))
 }
 
 function day7Text(report: ReportV2): string {
@@ -644,6 +676,8 @@ function hanging(first: string, text: string, width: number): string[] {
 }
 
 export interface TerminalReportOptions {
+  ownerBoundary?: OwnerBoundaryMeasurement
+  ownerJobs?: readonly ChecklistItem[]
   /** The run's display id ("r-7f3c"): the ONE id the terminal shows (header bar, this title, the exit line). */
   displayId?: string | null
   /** From the run's start to now; shown as "9 min". Absent = not shown. */
@@ -734,7 +768,7 @@ export function renderTerminal(report: ReportV2, width: number, options: Termina
     }
     tableLine([[""], ...REPORT_COLUMN_IDS.map((column) => wrapPlain(COLUMN_LABELS[column], columnWidth))])
     for (const row of tableRows) {
-      tableLine([wrapPlain(row.label, labelWidth), ...REPORT_COLUMN_IDS.map((column) => wrapPlain(cellText(row.cells[column]), columnWidth))])
+      tableLine([wrapPlain(row.label, labelWidth), ...REPORT_COLUMN_IDS.map((column) => wrapPlain(cellText(row.cells[column], row.id === "preview_share" && column !== "live_today" ? ownerPreviewNote(report) : undefined), columnWidth))])
     }
   } else {
     // The values line up under each other when the screen has the room for it.
@@ -742,13 +776,16 @@ export function renderTerminal(report: ReportV2, width: number, options: Termina
     for (const row of tableRows) {
       lines.push(...wrapPlain(row.label, total))
       for (const column of REPORT_COLUMN_IDS) {
-        lines.push(...hanging(`  ${`${COLUMN_LABELS[column]}:`.padEnd(labelPad)} `, cellText(row.cells[column]), total))
+        lines.push(...hanging(`  ${`${COLUMN_LABELS[column]}:`.padEnd(labelPad)} `, cellText(row.cells[column], row.id === "preview_share" && column !== "live_today" ? ownerPreviewNote(report) : undefined), total))
       }
     }
   }
-  lines.push(...wrapPlain(report.notes.includes(LEGACY_OWNER_BOUNDARY) ? LEGACY_OWNER_BOUNDARY : OWNER_BOUNDARY, total))
+  lines.push(...wrapPlain(withOwnerBoundary("", hasLegacyOwnerHistory(report.notes), options.ownerBoundary), total))
   lines.push(...hanging("7 days later: ", day7Text(report), total))
   for (const note of notesAndFootnotes(report)) lines.push(...hanging("", note, total))
+  for (const instruction of ownerInstructions(options.ownerJobs ?? [])) {
+    lines.push("", ...wrapPlain(instruction.note, total), ...wrapPlain(instruction.placement, total), "", instruction.snippet)
+  }
   return lines.join("\n")
 }
 
@@ -757,7 +794,7 @@ function md(text: string): string {
 }
 
 /** The PR / app markdown: plain-text statuses, never a `- [ ]`. */
-export function renderMarkdown(report: ReportV2): string {
+export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMeasurement, ownerJobs: readonly ChecklistItem[] = []): string {
   const out: string[] = []
   const site = report.site.productionHost ?? report.site.repoLabel
   // Review P1-3: report.md and the PR comment open with THE verdict's headline (the terminal's own line) and its
@@ -769,7 +806,7 @@ export function renderMarkdown(report: ReportV2): string {
     for (const line of reasons) out.push(`- ${md(line)}`)
   }
   out.push("")
-  out.push(report.notes.includes(LEGACY_OWNER_BOUNDARY) ? LEGACY_OWNER_BOUNDARY : OWNER_BOUNDARY)
+  out.push(withOwnerBoundary("", hasLegacyOwnerHistory(report.notes), ownerBoundary))
   out.push("")
   out.push(`### Before and after · ${md(site)}`)
   out.push("")
@@ -777,7 +814,7 @@ export function renderMarkdown(report: ReportV2): string {
   out.push(`|---|${REPORT_COLUMN_IDS.map(() => "---").join("|")}|`)
   for (const row of report.rows) {
     if (row.id === "day7_checkin") continue
-    out.push(`| ${md(row.label)} | ${REPORT_COLUMN_IDS.map((column) => md(cellText(row.cells[column]))).join(" | ")} |`)
+    out.push(`| ${md(row.label)} | ${REPORT_COLUMN_IDS.map((column) => md(cellText(row.cells[column], row.id === "preview_share" && column !== "live_today" ? ownerPreviewNote(report) : undefined))).join(" | ")} |`)
   }
   out.push("")
   out.push(`**7 days later:** ${md(day7Text(report))}`)
@@ -787,7 +824,7 @@ export function renderMarkdown(report: ReportV2): string {
   out.push(`| # | Check | ${REPORT_COLUMN_IDS.map((column) => COLUMN_LABELS[column]).join(" | ")} |`)
   out.push(`|---|---|${REPORT_COLUMN_IDS.map(() => "---").join("|")}|`)
   for (const line of report.finishLine) {
-    out.push(`| ${line.n} | ${line.id.replace(/_/g, " ")} | ${REPORT_COLUMN_IDS.map((column) => md(cellText(line.cells[column]))).join(" | ")} |`)
+    out.push(`| ${line.n} | ${line.id.replace(/_/g, " ")} | ${REPORT_COLUMN_IDS.map((column) => md(cellText(line.cells[column], line.id === "previews_silent" && column !== "live_today" ? ownerPreviewNote(report) : undefined))).join(" | ")} |`)
   }
   out.push("")
   out.push("</details>")
@@ -796,9 +833,27 @@ export function renderMarkdown(report: ReportV2): string {
     out.push("")
     for (const note of notes) out.push(`${md(note)}  `)
   }
+  for (const instruction of ownerInstructions(ownerJobs)) {
+    const fence = "`".repeat(Math.max(3, ...[...instruction.snippet.matchAll(/`+/g)].map(match => match[0].length + 1)))
+    out.push("", instruction.note, "", instruction.placement, "", `${fence}js`, instruction.snippet, fence)
+  }
   const text = out.join("\n")
   if (text.includes(FORBIDDEN_CHECKBOX)) throw new ReportRuleError("the markdown would contain a checkbox")
   return text
+}
+
+/** Copyable bytes are local wizard facts, never encoded as cloud notes or taken from agent prose. */
+function ownerInstructions(jobs: readonly ChecklistItem[]): Array<{ note: string; placement: string; snippet: string }> {
+  return jobs.flatMap(job => {
+    const proof = job.ownerBoundary
+    if (job.state !== "left_for_you" || !proof || (proof.kind !== "frozen_unit" && proof.kind !== "policy_page")) return []
+    const snippet = proof.guard ?? proof.wiring
+    if (!snippet) return []
+    const where = `${proof.file ?? job.allow.files[0] ?? "the noted file"}:${proof.line ?? 1}`
+    return [{ note: job.note ?? `Not changed by us: ${where} is left for you.`, snippet,
+      placement: proof.guard ? `For the site owner: apply this guard to the analytics start-up at ${where}. Keep consent checks, grants and revocations outside it. The wizard did not apply this snippet.`
+        : `For the site owner: place this import, mount or script at ${where}. The wizard left the entrypoint unchanged; this wiring has not been applied.` }]
+  })
 }
 
 /** The JSON the cloud stores: re-validated and copied. */

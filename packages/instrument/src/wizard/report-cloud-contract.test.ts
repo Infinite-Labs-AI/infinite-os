@@ -15,11 +15,11 @@ import { parseCloudReport, type CloudReportContext } from "../../test/wizard/clo
 import { census, fixtureBaseline, fixtureDryLive, fixtureKeys } from "../../test/wizard/o8/fixtures.js"
 import { MERGE_SHA, RUN_ID, fakeContext, fakeDeps, keysFixture, lane, realVisitResult, receiptsAll } from "../../test/wizard/runtime-fakes.js"
 import { liveTodayColumnInput, type LiveTodaySource } from "./before-column.js"
-import type { CheckResult } from "./contracts/jobs.js"
+import type { CheckResult, ChecklistItem } from "./contracts/jobs.js"
 import { REPORT_COLUMN_IDS, type ReportColumnId, type ReportColumnSnapshot, type ReportV2 } from "./contracts/report.js"
 import type { WizardRunState } from "./contracts/state.js"
 import { testExpectFromKeys, type TestTool } from "./contracts/test-engine.js"
-import { assertReport, buildColumn } from "./report.js"
+import { assertReport, buildColumn, buildReport, renderMarkdown, renderTerminal } from "./report.js"
 import { createRunState } from "./run-state.js"
 import { buildLiveTodayColumn } from "./steps/before.js"
 import { step as doneStep } from "./steps/done.js"
@@ -37,6 +37,24 @@ const BASE_SHA = "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d"
 const tagPost = (phase: CloudReportContext["phase"]): CloudReportContext => ({ runId: example.runId, startedAt: STARTED_AT, phase, producer: "tag", partial: false })
 
 describe("the cloud's report rules (test/wizard/cloud-rules.ts, a port of 1bu-1 parseReportV2)", () => {
+  it("keeps long owner guards and wiring out of bounded cloud notes while rendering their exact copyable bytes", () => {
+    const guard = `if (${Array.from({ length: 18 }, (_, i) => `location.hostname !== 'preview-${i}.example.test'`).join(" && ")}) {\n  // Existing analytics start-up statements go here.\n}`
+    const wiring = 'import { InfiniteAnalyticsClient } from "../lib/infinite-analytics-client"\n\n<InfiniteAnalyticsClient />'
+    const jobs: ChecklistItem[] = ["ga4", "meta", "posthog"].map(tool => ({ id: `preview_guard:${tool}`, jobId: "preview_guard", n: 7, title: `Guard ${tool}`, owner: "agent", state: "left_for_you", checks: [], allow: { files: [], create: [] }, note: `Not changed by us: ${tool} start-up is in owner consent code; preview and local visits keep counting.`, ownerBoundary: { kind: "frozen_unit", file: "src/tracking.ts", line: 5, guard }, trigger: { finding: `Not changed by us: ${tool}\n\n\`\`\`js\n${guard}\n\`\`\``, evidence: [] } }))
+    jobs.push({ ...jobs[0]!, id: "unusual_layout:app/layout.tsx", jobId: "unusual_layout", owner: "code", title: "Owner wiring", ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx", line: 1, wiring }, trigger: { finding: `Not changed by us: owner wiring\n\n\`\`\`js\n${wiring}\n\`\`\``, evidence: [] } })
+    const report = buildReport({ runId: example.runId, tagVersion: "0.0.0", site: example.site, columns: { live_today: null, in_pr: structuredClone(runStateExample.report.in_pr), proven_live: null }, provenLivePending: null, day7: null, notes: [], verdictFacts: { jobs, openFindings: [], tools: null, installedUnknown: null, ownerPolicyFindings: Array.from({ length: 30 }, (_, i) => `Owner-only finding ${i}: ${"Owner controls this setting. ".repeat(20)}`) } })
+    expect(parseCloudReport(report, tagPost("in_pr"))).toEqual({ ok: true })
+    expect(report.notes.every(note => note.length > 0 && note.length <= 300 && !note.includes("```"))).toBe(true)
+    expect(report.notes).toHaveLength(20)
+    expect(report.notes.some(note => note.startsWith("NOT DONE for "))).toBe(true)
+    expect(report.notes.some(note => note.includes("additional notes are omitted"))).toBe(true)
+    expect(JSON.stringify(report)).not.toContain("preview-17.example.test")
+    for (const rendered of [renderMarkdown(report, undefined, jobs), renderTerminal(report, 80, { ownerJobs: jobs })]) {
+      expect(rendered).toContain(guard)
+      expect(rendered).toContain(wiring)
+      expect(rendered).toContain("src/tracking.ts:5")
+    }
+  })
   it("accepts the contract example under each column phase (the port is not vacuous)", () => {
     for (const phase of REPORT_COLUMN_IDS) expect(parseCloudReport(example, tagPost(phase))).toEqual({ ok: true })
   })

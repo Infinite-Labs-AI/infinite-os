@@ -210,6 +210,8 @@ export interface VerdictOpenFinding {
 
 /** §3x.6 The run facts the verdict reads beyond the report's own columns. */
 export interface VerdictFacts {
+  ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement
+  ownerPolicyFindings?: string[]
   /** Metadata-only history of policy edits made by an older version in this same run. */
   priorPolicyEdits?: boolean
   jobs: readonly ChecklistItem[]
@@ -604,8 +606,8 @@ export interface ReportBuilder {
      */
     verdictFacts: VerdictFacts | null
   }): ReportV2
-  renderTerminal(report: ReportV2, width: number): string
+  renderTerminal(report: ReportV2, width: number, options?: { ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement; ownerJobs?: readonly ChecklistItem[] }): string
   /** Plain-text statuses; never a literal `- [ ]`. */
-  renderMarkdown(report: ReportV2): string
+  renderMarkdown(report: ReportV2, ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement, ownerJobs?: readonly ChecklistItem[]): string
   payload(report: ReportV2): ReportV2
 }

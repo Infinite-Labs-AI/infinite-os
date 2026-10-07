@@ -384,9 +384,14 @@ async function runLocked(input: LockedRun): Promise<number> {
       if (preEngineStop && store.getSnapshot().exit) store.setExit({ ...store.getSnapshot().exit!, ...preEngineStop })
       if (report) {
         const startedAt = Date.parse(state?.createdAt ?? "")
+        const proof = state?.ownerBoundary
+        const proofHead = proof?.scope === "commit" && deps ? await deps.git.head().catch(() => null) : null
+        const ownerBoundary = proof?.state === "checked" && proof.baseSha === state?.git?.baseSha && proof.headSha === proofHead && proof.issues.length === 0 ? proof : undefined
         store.setOutro(
           renderTerminal(report, outroWidth(io.stdout.columns), {
             displayId: state?.displayId ?? null,
+            ownerBoundary,
+            ownerJobs: state?.jobs ?? [],
             durationMs: Number.isFinite(startedAt) ? Math.max(0, systemClock.now().getTime() - startedAt) : null
           })
         )

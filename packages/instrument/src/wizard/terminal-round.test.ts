@@ -33,10 +33,10 @@ describe("F2: the final table never cuts a cell", () => {
       const text = renderTerminal(example, width)
       for (const line of text.split("\n")) expect(line.length, line).toBeLessThanOrEqual(width)
       expect(text).not.toContain("…")
-      // "of 14" lived only in the cell, and the cell was cut at about 30 characters from 100 to 180 columns.
-      expect((text.match(/\b14\b/g) ?? []).length).toBe(3)
+      // "of 13" lived only in the cell, and the cell was cut at about 30 characters from 100 to 180 columns.
+      expect((text.match(/\b13\b/g) ?? []).length).toBe(3)
       if (width < TERMINAL_TABLE_MIN_COLUMNS) {
-        expect(flat(text).split("of 14").length - 1).toBe(3)
+        expect(flat(text).split("of 13").length - 1).toBe(3)
         // Stacked: each cell is on its own row(s), so its words are contiguous.
         for (const row of example.rows.filter((entry) => entry.id !== "day7_checkin")) {
           expect(flat(text)).toContain(row.label)
@@ -53,11 +53,11 @@ describe("F2: the final table never cuts a cell", () => {
     })
   }
 
-  it("100 and 120 columns show the count of 14 for the live site in one piece (it was cut off from 100 to 180)", () => {
+  it("100 and 120 columns show the count of 13 for the live site in one piece (it was cut off from 100 to 180)", () => {
     for (const width of [100, 120]) {
       const lines = renderTerminal(example, width).split("\n")
-      expect(lines, `${width}`).toContain("  Live site today:       4 pass · 8 problems · 2 not testable of 14 (problem)")
-      expect(lines).toContain("  In this pull request:  12 pass · 0 problems · 2 not testable of 14")
+      expect(lines, `${width}`).toContain("  Live site today:       4 pass · 7 problems · 2 not testable of 13 (problem)")
+      expect(lines).toContain("  In this pull request:  11 pass · 0 problems · 2 not testable of 13")
     }
   })
 
@@ -115,7 +115,7 @@ describe("F4: one 'before' count", () => {
     const cell = example.rows.find((row) => row.id === "checks_passing")!.cells.live_today
     const column = { meta: { measuredAt: null, sha: null }, cells: { checks_passing: cell }, finishLine: {} }
     expect(beforeStatus(column, checks)).toBe(`Before: ${cell.display}`)
-    expect(beforeStatus(column, checks)).toBe("Before: 4 pass · 8 problems · 2 not testable of 14")
+    expect(beforeStatus(column, checks)).toBe("Before: 4 pass · 7 problems · 2 not testable of 13")
   })
 
   it("negative: with no column the line names what it counts (never the report's words for another count)", () => {

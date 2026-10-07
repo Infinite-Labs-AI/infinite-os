@@ -250,7 +250,7 @@ describe("R2-2 / R2-4 (live run 2): Proven live with no real visit and no receip
     expect(consentRow.split("|").map((cell) => cell.trim()).at(-2)).toBe("—")
   })
 
-  it("NEGATIVE: the same facts WITH a real visit still count consent as a problem (the rule is about measurement)", () => {
+  it("a real visit does not grade an absent consent setting without a recorded-choice comparison", () => {
     const visited = buildProvenColumn({
       runId: RUN_ID,
       mergeSha: MERGE_SHA,
@@ -265,7 +265,7 @@ describe("R2-2 / R2-4 (live run 2): Proven live with no real visit and no receip
       conversionsWaiting: 0
     })
     expect(provenColumnHasEvidence(visited)).toBe(true)
-    expect(visited.finishLine.consent_recorded!.state).toBe("problem")
+    expect(visited.finishLine.consent_recorded!.state).toBe("info")
     expect(visited.meta.measuredAt).toBe(AT)
   })
 

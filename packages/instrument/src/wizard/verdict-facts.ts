@@ -3,6 +3,7 @@
 // the run's checklist, the review's open findings (`openFindings`, the one definition) and the real visit's per-tool
 // facts (`state.proof`, written by `prove`).
 import { join } from "node:path"
+import { reanchorOwnerLocations } from "../jobs/owner-locations.js"
 import { hasRecordedPolicyEdits } from "../jobs/owner-boundary.js"
 
 import { openFindings, parseLedger, REVIEW_LEDGER_PATH } from "../review/ledger.js"
@@ -12,7 +13,9 @@ import type { WizardGitOps } from "./contracts/git-host.js"
 import type { VerdictFacts } from "./contracts/report.js"
 
 export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Promise<VerdictFacts> {
-  const state = ctx.state.get()
+  const reanchoredJobs = await reanchorOwnerLocations(ctx.root, ctx.state.get().jobs)
+  // A read-only report can use corrected locations without rewriting saved policy/source files.
+  const state = { ...ctx.state.get(), jobs: reanchoredJobs }
   const runId = state.runId ?? ctx.runId ?? ""
   const ledger = parseLedger(await deps.fs.readText(join(ctx.root, REVIEW_LEDGER_PATH)), runId)
   const base = state.git?.baseSha ?? null
@@ -30,10 +33,15 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
   // The receipt may outlive a retired job's entry in state. Read only its job/run metadata;
   // never open a policy file, inspect embedded policy text, or undo an earlier edit.
   const priorPolicyEdits = hasRecordedPolicyEdits(state.jobs) || ownership.recordedPolicyEdits?.(runId) === true
+  const proof = state.ownerBoundary
+  const currentHead = proof?.state === "checked" && proof.scope === "commit" && typeof git.head === "function" ? await git.head().catch(() => null) : null
+  const ownerBoundary = proof?.scope === "commit" && proof.baseSha === base && proof.headSha === currentHead && proof.issues.length === 0 ? proof : undefined
   return {
+    ...(ownerBoundary ? { ownerBoundary } : {}),
     ...(priorPolicyEdits ? { priorPolicyEdits: true } : {}),
+    ownerPolicyFindings: (ledger.findings ?? []).filter(finding => finding.action === "OWNER_INFO" && !(finding.path !== null && ownership.writtenByRun?.(finding.path, finding.line))).map(finding => `About the site owner’s consent/privacy: not ours to change. ${finding.path ?? "general"}: ${finding.body ?? "Recorded reviewer finding"}`),
     jobs: state.jobs,
-    openFindings: openFindings(ledger, state.jobs, ownership.classify),
+    openFindings: openFindings(ledger, state.jobs, ownership.classify, ownership.writtenByRun),
     tools: state.proof?.tools ?? null,
     installedUnknown: state.proof?.installedUnknown ?? null
   }

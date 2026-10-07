@@ -191,7 +191,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
   // §3z.8 (A14): the compact JSON report is at most 56,000 bytes; the tag checks before posting.
   const compactBytes = Buffer.byteLength(JSON.stringify(payload), "utf8")
   if (compactBytes > BRIDGE_BOUNDS.reportMaxBytes) {
-    await writeReportFiles(ctx, deps, payload, deps.report.renderMarkdown(report))
+    await writeReportFiles(ctx, deps, payload, deps.report.renderMarkdown(report, verdictFacts.ownerBoundary, verdictFacts.jobs))
     return {
       kind: "failed",
       code: "INF_WIZ_PROOF_INCOMPLETE",
@@ -223,7 +223,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
   }
 
   // 4. The files, then the PR comment (last: a failure there loses nothing).
-  const markdown = deps.report.renderMarkdown(report)
+  const markdown = deps.report.renderMarkdown(report, verdictFacts.ownerBoundary, verdictFacts.jobs)
   await writeReportFiles(ctx, deps, payload, markdown)
   ctx.emit.emit("step.sub", { step: "done", text: "✓ Report sent", tone: "ok" })
 
@@ -249,7 +249,7 @@ async function runDone(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcom
       if (editor) {
         let spliced = false
         edited = await editor.updateOwnComment(prNumber, PR_MARKERS.final(runId), (body) => {
-          const next = withFinalReport(body, safeReport, safeChecklist)
+          const next = withFinalReport(body, safeReport, safeChecklist, verdictFacts.ownerBoundary)
           spliced = next !== null
           return next ?? body
         })
