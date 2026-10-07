@@ -7211,14 +7211,18 @@ describe("Meta Ads WRITE helpers", () => {
           status: "PAUSED",
           attribution_spec: META_DEFAULT_ATTRIBUTION_SPEC_WIRE,
           daily_budget: "2500",
-          targeting: { geo_locations: { countries: ["US", "CA"] } },
+          targeting: {
+            geo_locations: { countries: ["US", "CA"] },
+            publisher_platforms: ["facebook", "instagram"],
+            targeting_automation: { advantage_audience: 0 }
+          },
           promoted_object: { pixel_id: "px_1", custom_event_type: "PURCHASE" }
         });
         // Meta's default attribution rides as ONE JSON string, exactly as Ads Manager stores it.
         expect(captured[0].rawForm?.attribution_spec).toBe(JSON.stringify(META_DEFAULT_ATTRIBUTION_SPEC_WIRE));
         // targeting + promoted_object ride as JSON STRINGS on the wire.
         expect(captured[0].rawForm?.targeting).toBe(
-          JSON.stringify({ geo_locations: { countries: ["US", "CA"] } })
+          JSON.stringify({ geo_locations: { countries: ["US", "CA"] }, publisher_platforms: ["facebook", "instagram"], targeting_automation: { advantage_audience: 0 } })
         );
         expect(captured[0].rawForm?.promoted_object).toBe(
           JSON.stringify({ pixel_id: "px_1", custom_event_type: "PURCHASE" })
@@ -8622,7 +8626,13 @@ console.log(${JSON.stringify(serialized)});
         expect(argv[argv.indexOf("--optimization-goal") + 1]).toBe("LINK_CLICKS");
         expect(argv[argv.indexOf("--billing-event") + 1]).toBe("IMPRESSIONS");
         expect(argv[argv.indexOf("--daily-budget") + 1]).toBe("3000");
-        expect(argv[argv.indexOf("--targeting-countries") + 1]).toBe("US,CA");
+        // Facebook + Instagram only: the countries ride inside --targeting with the two platforms (the
+        // countries-only flag names no platform, which is Meta's automatic placements, Audience Network included).
+        expect(argv).not.toContain("--targeting-countries");
+        expect(JSON.parse(argv[argv.indexOf("--targeting") + 1])).toEqual({
+          geo_locations: { countries: ["US", "CA"] },
+          publisher_platforms: ["facebook", "instagram"]
+        });
         // Link clicks optimise for no website event: no pixel, no event, never a PURCHASE default.
         expect(argv).not.toContain("--pixel-id");
         expect(argv).not.toContain("--custom-event-type");
@@ -8630,7 +8640,6 @@ console.log(${JSON.stringify(serialized)});
         // Product rule: Advantage+ audience is OFF on every ad set, even the countries-only shape.
         expect(argv).toContain("--no-advantage-audience");
         expect(argv).not.toContain("--advantage-audience");
-        expect(argv).not.toContain("--targeting");
         // LINK_CLICKS takes no attribution spec (Meta allows only 1-day click there).
         expect(argv).not.toContain("--attribution-spec");
       });
@@ -8827,7 +8836,7 @@ process.exit(1);`,
       });
     });
 
-    it("adset create maps advantageAudience=true to --advantage-audience with unrestricted placements", async () => {
+    it("adset create maps advantageAudience=true to --advantage-audience with automatic positions inside Facebook + Instagram", async () => {
       await withTmp(async (dir) => {
         const targeting = { geo_locations: { countries: ["US"] } };
         await createMetaAdSet(cliCredential(dir, { id: "120000000000023", status: "PAUSED" }), {
@@ -8839,10 +8848,10 @@ process.exit(1);`,
           targeting
         });
         const argv = recordedArgv(dir);
-        expect(argv[argv.indexOf("--targeting") + 1]).toBe(JSON.stringify(targeting));
+        expect(JSON.parse(argv[argv.indexOf("--targeting") + 1])).toEqual({ ...targeting, publisher_platforms: ["facebook", "instagram"] });
         expect(argv).toContain("--advantage-audience");
         expect(argv).not.toContain("--no-advantage-audience");
-        expect(argv.join(" ")).not.toMatch(/facebook_positions|instagram_positions|publisher_platforms/);
+        expect(argv.join(" ")).not.toMatch(/facebook_positions|instagram_positions|audience_network/);
       });
     });
 
@@ -8864,6 +8873,23 @@ process.exit(1);`,
           geo_locations: { countries: ["GB"] }
         });
       });
+    });
+
+    // Placements are Facebook + Instagram only: an ad set naming any other platform is refused before
+    // the CLI runs, and an omitted list is never sent (it would be Meta's automatic placements).
+    it("adset create refuses Audience Network, Messenger, WhatsApp and Threads before spawning the CLI", async () => {
+      for (const platform of ["audience_network", "messenger", "whatsapp", "threads"]) {
+        await withTmp(async (dir) => {
+          await expect(createMetaAdSet(cliCredential(dir, { id: "120000000000024", status: "PAUSED" }), {
+            name: "Wide",
+            campaignId: "120000000000010",
+            optimizationGoal: "LINK_CLICKS",
+            billingEvent: "IMPRESSIONS",
+            targeting: { geo_locations: { countries: ["US"] }, publisher_platforms: ["facebook", "instagram", platform] }
+          })).rejects.toMatchObject({ code: "meta_placements_facebook_instagram_only", retryable: false });
+          expect(existsSync(join(dir, "argv.json"))).toBe(false);
+        });
+      }
     });
 
     // review BLOCKER (full fix): the CLI's `creative create --image` takes a FILE path. The engine

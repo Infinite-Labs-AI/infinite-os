@@ -7470,6 +7470,8 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
           expect(stripped?.ok).toBe(true);
           expect((calls[1].body as { targeting: Record<string, unknown> }).targeting).toEqual({
             age_min: 18,
+            // Placements: Facebook + Instagram only, named on every create.
+            publisher_platforms: ["facebook", "instagram"],
             targeting_automation: { advantage_audience: 0 }
           });
           const advantage = await handlers.create_meta_ad_set?.(
@@ -7487,6 +7489,7 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
           expect(advantage?.ok).toBe(true);
           expect((calls[2].body as { targeting: Record<string, unknown> }).targeting).toEqual({
             geo_locations: { countries: ["US"] },
+            publisher_platforms: ["facebook", "instagram"],
             targeting_automation: { advantage_audience: 1 }
           });
           // Wrong types fail typed, before any POST.

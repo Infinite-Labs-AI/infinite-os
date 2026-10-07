@@ -11763,16 +11763,37 @@ export interface MetaAdSetCreateInput {
   customEventType?: string;
 }
 
-// Resolve the effective manual-targeting object for an ad-set create, or undefined when the
-// caller sent only the legacy countries shape (which keeps its pre-A3 wire form untouched).
-function metaAdSetTargetingSpec(input: MetaAdSetCreateInput): MetaAdSetTargeting | undefined {
-  if (!input.targeting) {
-    return undefined;
+// Placements: Facebook + Instagram only. An ad set sent with no publisher_platforms gets Meta's
+// automatic placements (Audience Network, Messenger, WhatsApp, Threads), and Meta has no "automatic
+// minus Audience Network", so every create names the platforms: the two apps when the caller named
+// none (positions inside them stay automatic), the caller's own list when it names only those two
+// (or one of them), and a typed, non-retryable refusal for any other platform.
+export const META_AD_SET_PUBLISHER_PLATFORMS: readonly string[] = ["facebook", "instagram"];
+
+function metaAdSetPublisherPlatforms(requested: string[] | undefined): string[] {
+  if (requested === undefined) {
+    return [...META_AD_SET_PUBLISHER_PLATFORMS];
   }
-  const spec: MetaAdSetTargeting = { ...input.targeting };
+  const normalized = requested.map((platform) => platform.trim().toLowerCase());
+  if (normalized.length === 0 || normalized.some((platform) => !META_AD_SET_PUBLISHER_PLATFORMS.includes(platform))) {
+    throw new ConnectorError(
+      "meta_placements_facebook_instagram_only",
+      "Ad sets run on Facebook and Instagram only: Audience Network, Messenger, WhatsApp and Threads are not allowed. Leave publisher_platforms out, or name only facebook and instagram.",
+      false
+    );
+  }
+  return [...new Set(normalized)];
+}
+
+// Resolve the effective targeting object for an ad-set create. Always a targeting object, because
+// the countries-only shape names no platform: its countries ride inside as geo_locations (folded in
+// only when the JSON carries none, so a country is never dropped silently).
+function metaAdSetTargetingSpec(input: MetaAdSetCreateInput): MetaAdSetTargeting {
+  const spec: MetaAdSetTargeting = { ...(input.targeting ?? {}) };
   if (!spec.geo_locations && input.targetingCountries && input.targetingCountries.length > 0) {
     spec.geo_locations = { countries: [...input.targetingCountries] };
   }
+  spec.publisher_platforms = metaAdSetPublisherPlatforms(input.targeting?.publisher_platforms);
   return spec;
 }
 
@@ -12452,15 +12473,10 @@ export async function createMetaAdSet(
   //   `targeting` minimum shape — Graph usually demands at least geo_locations.
   //   The inner key geo_locations.countries is [CONFIRMED-SDK]; whether the CLI
   //   adds default targeting_automation/placements is [INFERRED].
-  const manualTargeting = metaAdSetTargetingSpec(input);
-  if (manualTargeting) {
-    params.targeting = {
-      ...manualTargeting,
-      targeting_automation: { advantage_audience: input.advantageAudience === true ? 1 : 0 }
-    };
-  } else if (input.targetingCountries && input.targetingCountries.length > 0) {
-    params.targeting = { geo_locations: { countries: input.targetingCountries } }; // VERIFY against a real Meta sandbox capture before live use
-  }
+  params.targeting = {
+    ...metaAdSetTargetingSpec(input),
+    targeting_automation: { advantage_audience: input.advantageAudience === true ? 1 : 0 }
+  };
   // promoted_object only on an event conversion goal, pixel + event together (metaPromotedObjectFor).
   // FIX 3: custom_event_type is an enum → normalize+validate before the POST.
   const promotedObject = metaPromotedObjectFor(optimizationGoal, input, META_CUSTOM_EVENT_TYPE_VALUES);
@@ -14677,14 +14693,10 @@ async function createMetaAdSetViaCli(
   const dsaPayor = metaDsaString(input.dsaPayor, "DSA payor");
   if (dsaBeneficiary !== undefined) args.push("--dsa-beneficiary", dsaBeneficiary);
   if (dsaPayor !== undefined) args.push("--dsa-payor", dsaPayor);
-  const manualTargeting = metaAdSetTargetingSpec(input);
-  if (manualTargeting) {
-    // A3: the CLI's raw-JSON escape hatch. Per `meta ads adset create --help` it REPLACES
-    // --targeting-countries (geo_locations rides inside the JSON) — never send both.
-    args.push("--targeting", JSON.stringify(manualTargeting));
-  } else if (input.targetingCountries && input.targetingCountries.length > 0) {
-    args.push("--targeting-countries", input.targetingCountries.join(","));
-  }
+  // A3: the CLI's raw-JSON escape hatch. Per `meta ads adset create --help` it REPLACES
+  // --targeting-countries (geo_locations rides inside the JSON) — never send both. Always sent, so the
+  // platforms are always named (metaAdSetTargetingSpec).
+  args.push("--targeting", JSON.stringify(metaAdSetTargetingSpec(input)));
   // Explicit on/off: omission lets the CLI choose a default, which is not an acceptable product
   // contract. Undefined remains OFF for callers that predate this field.
   args.push(input.advantageAudience === true ? "--advantage-audience" : "--no-advantage-audience");
