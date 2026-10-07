@@ -30,6 +30,7 @@ import {
   withMetaWriteDiagnostics,
   type ConnectionTestResult,
   type MetaAdSetTargeting,
+  META_AD_SET_FORBIDDEN_POSITION_KEYS,
   type MetaAssetFeedSpec,
   type MetaAdsCredential,
   type MetaAdsCliExecution,
@@ -2588,6 +2589,14 @@ function metaAdSetTargetingInput(input: unknown): MetaAdSetTargeting | undefined
   }
   if (!isRecord(raw)) {
     throw metaTypedError("invalid_targeting", "invalid_targeting: targeting must be an object");
+  }
+  // Facebook + Instagram only: another platform's position list is refused typed (never silently dropped, which would
+  // let a card promise Audience Network positions the create then quietly leaves out).
+  if (META_AD_SET_FORBIDDEN_POSITION_KEYS.some((key: string) => raw[key] !== undefined)) {
+    throw metaTypedError(
+      "meta_placements_facebook_instagram_only",
+      "Ad sets run on Facebook and Instagram only: Audience Network, Messenger, WhatsApp and Threads positions are not allowed."
+    );
   }
   const spec: MetaAdSetTargeting = {};
   const age = (key: "age_min" | "age_max"): void => {
