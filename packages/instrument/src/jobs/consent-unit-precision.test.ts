@@ -1,4 +1,5 @@
 import { expect, it } from "vitest"
+import { performance } from "node:perf_hooks"
 import { frozenUnitAt, isConsentText, restoreFrozenUnits, sourceUnits } from "./consent-units.js"
 
 it("attaches a leading consent comment to its unit while keeping its neighbor editable", () => {
@@ -71,10 +72,19 @@ it.each([
   "send( /* ** a *** */ 'consent', 'revoke');",
   "posthog.opt_out_capturing /* a */ ?. /* b */ ();",
   "send( // a\n 'consent', // b\n 'default');",
+  "send(/* examples use src/* patterns */ 'consent', 'revoke');",
 ])("keeps consent recognition across bounded comments: %s", source => {
   expect(isConsentText(source)).toBe(true)
 })
 
 it("does not cross a closed comment to turn unrelated text into a consent command", () => {
   expect(isConsentText("send( /* a */ value); /* b */ 'consent', 'revoke';")).toBe(false)
+})
+
+it("bounds the raw scan for repeated closed and unterminated comment prefixes", () => {
+  for (const source of ["f( /* a */ x);\n".repeat(150_000), "f( /* a ".repeat(20_000) + "\nconst label = 'consent';"]) {
+    const started = performance.now()
+    expect(isConsentText(source)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(1_000)
+  }
 })

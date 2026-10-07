@@ -1,10 +1,8 @@
 /** The owner's consent boundary is a byte freeze of top-level source units, not a control-flow model. */
 import { createHash } from "node:crypto"
 
-// Comments between call tokens are whitespace, even when earlier syntax makes splitting uncertain.
-const RAW_TRIVIA = String.raw`(?:\s|/\*(?:[^*]|\*(?!/))*\*/|//[^\r\n]*(?:\r?\n|$))*`
 export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
-  new RegExp(String.raw`[([,]${RAW_TRIVIA}['"\x60]consent['"\x60]${RAW_TRIVIA},${RAW_TRIVIA}['"\x60](?:default|update|grant|revoke)['"\x60]`),
+  /[([,]\s*['"`]consent['"`]\s*,\s*['"`](?:default|update|grant|revoke)['"`]/,
   /(?:\b(?:gtag|fbq)\b|\[\s*['"`](?:gtag|fbq)['"`]\s*\])\s*(?:\?\.\s*)?\(\s*['"`]consent['"`]/,
   /(?:\b(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\b|\[\s*['"`](?:opt_in_capturing|opt_out_capturing)['"`]\s*\])\s*(?:\?\.\s*)?\(/,
   /\b(?:__tcfapi|__uspapi|__gpp|__cmp|OneTrust|Optanon\w*|Cookiebot|CookieConsent|Didomi\w*|UC_UI|usercentrics|klaro)\b/i,
@@ -13,11 +11,42 @@ export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
   /cdn\.cookielaw\.org|otSDKStub\.js|consent\.cookiebot\.com|usercentrics\.eu/,
   /\bOnetrustActiveGroups\b/i,
   /\bdata-cookieconsent\b|<script(?=\s|\/?>)(?:[^<>"']|"[^"]*"|'[^']*')*?\stype\s*=\s*(?:"text\/plain"|'text\/plain'|text\/plain(?=[\s/>]))/i,
-  new RegExp(String.raw`\b(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\b${RAW_TRIVIA}(?:\?\.${RAW_TRIVIA})?\(`)
 ]
+
+/** Raw comments are call-token whitespace, including when syntax elsewhere is uncertain. Each
+ * trivia suffix is computed once, so failed candidates never re-scan a long or unclosed comment. */
+function hasCommentSeparatedConsent(text: string): boolean {
+  if ((!text.includes("/*") && !text.includes("//")) || !/consent|capturing/.test(text)) return false
+  const ends = new Uint32Array(text.length + 1)
+  ends[text.length] = text.length
+  let blockClose = -1; let lineEnd = text.length
+  for (let i = text.length - 1; i >= 0; i--) {
+    ends[i] = i
+    if (text.startsWith("*/", i)) blockClose = i
+    if (text[i] === "\r" || text[i] === "\n") lineEnd = i
+    if (/\s/.test(text[i]!)) ends[i] = ends[i + 1]!
+    else if (text.startsWith("//", i)) ends[i] = ends[lineEnd]!
+    else if (text.startsWith("/*", i) && blockClose >= i + 2) ends[i] = ends[blockClose + 2]!
+  }
+  for (const match of text.matchAll(/[([,]|\b(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\b/g)) {
+    let at = ends[match.index! + match[0].length]!
+    if (match[0].length > 1) {
+      if (text.startsWith("?.", at)) at = ends[at + 2]!
+      if (text[at] === "(") return true
+      continue
+    }
+    if (!/['"`]/.test(text[at] ?? "") || text.slice(at + 1, at + 8) !== "consent" || !/['"`]/.test(text[at + 8] ?? "")) continue
+    at = ends[at + 9]!
+    if (text[at] !== ",") continue
+    at = ends[at + 1]!
+    if (/['"`]/.test(text[at] ?? "") && /^(?:default|update|grant|revoke)['"`]/.test(text.slice(at + 1, at + 9))) return true
+  }
+  return false
+}
+
 /** Recognition deliberately includes comments and prose; uncertain syntax never hides a raw marker. */
 export function isConsentText(text: string): boolean {
-  return CONSENT_CALL_PATTERNS.some(pattern => pattern.test(text))
+  return CONSENT_CALL_PATTERNS.some(pattern => pattern.test(text)) || hasCommentSeparatedConsent(text)
 }
 
 /** Only the basename is inspected; no directory, importer, reader or caller is followed. */
