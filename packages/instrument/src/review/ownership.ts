@@ -120,7 +120,8 @@ export class InstallReceiptUnreadableError extends Error {
 export async function wizardOwnership(
   deps: Pick<WizardDeps, "fs">,
   root: string,
-  existedAtBase: (path: string) => Promise<boolean | null>
+  existedAtBase: (path: string) => Promise<boolean | null>,
+  appRoot = "."
 ): Promise<WizardOwnership> {
   const text = await deps.fs.readText(join(root, INSTALL_MANIFEST_FILE))
   let receipt: ReceiptLike = {}
@@ -177,7 +178,7 @@ export async function wizardOwnership(
   const agentWhole = new Set<string>()
   for (const edit of (Array.isArray(receipt.edits) ? receipt.edits as ReceiptEdit[] : [])) {
     if (!edit || edit.by !== "agent" || typeof edit.file !== "string") continue
-    if (edit.beforeHash === null || isPolicyPath(edit.file)) { agentWhole.add(edit.file); continue }
+    if (edit.beforeHash === null || isPolicyPath(edit.file, appRoot)) { agentWhole.add(edit.file); continue }
     if (!Array.isArray(edit.textEdits) || edit.textEdits.length === 0) continue
     const current = await deps.fs.readText(join(root, edit.file))
     if (current === null) continue

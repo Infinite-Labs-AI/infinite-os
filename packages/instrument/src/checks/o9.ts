@@ -386,7 +386,7 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
         return [checkResult("click_id_capture", "pass", "S", ctx, { reason: "The exact managed capture is loaded before the pixel from the fixed app entry", evidence: capture.record.entrypoints.map(file => ({ file, line: 1 })) })]
       }
       const target = item?.id === "meta_improve:capture" ? item.allow?.files.find((file) => /\.[cm]?[jt]s$/i.test(file)) : undefined
-      return checkClickIdCapture({ files: filesOf(input), ...(target ? { requireModuleCaptureFile: target } : {}) }).findings.map((finding) => setupFindingResult(finding, ctx, "click_id_capture"))
+      return checkClickIdCapture({ files: filesOf(input), appRoot: ".", ...(target ? { requireModuleCaptureFile: target } : {}) }).findings.map((finding) => setupFindingResult(finding, ctx, "click_id_capture"))
     }),
     // LF4-P1-2: the autoConfig job is checked on ITS work: in the job's own files, every adopted pixel initialised
     // there queues `fbq('set','autoConfig',false,id)` before its init. The job's other checks (the mirror's event id)

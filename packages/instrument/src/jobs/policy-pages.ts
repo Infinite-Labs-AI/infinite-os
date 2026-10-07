@@ -16,9 +16,11 @@ const pageExtension = /\.(?:[cm]?[jt]sx?|mdx?|astro|vue|svelte)$/i
 const testBasename = /\.(?:test|spec)\.[^/]+$/i
 
 function segments(route: string, framework = false): string[] {
-  const parts = route.split("/").filter(part => part && (!framework || (!/^\(.*\)$/.test(part) && !part.startsWith("@") && !/^\[\[?locale\]?\]$/.test(part))))
+  const parts = route.split("/").filter(part => part && (!framework || (!/^\(.*\)$/.test(part) && !part.startsWith("@"))))
   while (parts.length && /^(?:index|page)$/i.test(parts[parts.length - 1]!)) parts.pop()
-  return parts.map(normalizeName)
+  // A single dynamic parameter or locale directory does not add policy route depth. Catch-all
+  // parameters still do: they can stand for an arbitrary number of ordinary route segments.
+  return parts.filter((part, index) => index === parts.length - 1 || !/^(?:\[[^.[\]]+\]|\[\[[^.[\]]+\]\]|[a-z]{2}(?:-[a-z]{2})?)$/i.test(part)).map(normalizeName)
 }
 
 /** No import graph, URL metadata, source inspection or component-to-page inference. */
@@ -66,9 +68,7 @@ export function isPolicyPath(path: string, appRoot = "."): boolean {
   const route = pageRoute(relative)
   if (!route?.length) return false
   const last = route[route.length - 1]!
-  const name = POLICY_PAGE_NAMES.find(name => last === name || last.endsWith(`-${name}`))
-  if (!name) return false
-  if (name === "legal") return route.length === 1
-  if (name === "cookies") return route.length === 1 || /^(?:legal|policies)$/.test(route[route.length - 2] ?? "")
-  return true
+  return POLICY_PAGE_NAMES.some(name => name.includes("-")
+    ? last === name || last.endsWith(`-${name}`)
+    : last === name && (route.length === 1 || /^(?:legal|policies)$/.test(route[route.length - 2] ?? "")))
 }

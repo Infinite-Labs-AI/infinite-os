@@ -127,7 +127,7 @@ async function sessionOwnership(session: Session): Promise<WizardOwnership> {
       } catch {
         return null
       }
-    })
+    }, session.ctx.appRoot)
   }
   return session.ownership
 }

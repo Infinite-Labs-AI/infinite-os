@@ -103,6 +103,8 @@ const MAX_NAMED_PAGES = 5
 
 export interface ClickIdCaptureInput {
   files: ReadonlyMap<string, string>
+  /** Root used by file keys; app-relative source maps use '.'. */
+  appRoot?: string
   /** Supplied only after the exact module and initial entry order have been validated from the receipt. */
   managedCaptureEntries?: readonly string[]
   /** Job 5's plain-module target needs the added capture, not merely an adopted pixel. */
@@ -135,7 +137,7 @@ export function checkClickIdCapture(input: ClickIdCaptureInput): SetupCheckResul
         // is installation evidence too, but this check specifically requires an init call.
         entry.provider === "meta" && /^(?:window\.)?fbq\s*\(/.test(unit.text.slice(entry.offset))))
     if (initialises) initFiles.push(file)
-    if (isHtmlPage(file, contents) && !(input.managedCaptureEntries && isPolicyPath(file))) (initialises ? htmlPagesWith : htmlPagesWithout).push(file)
+    if (isHtmlPage(file, contents) && !(input.managedCaptureEntries && isPolicyPath(file, input.appRoot ?? "."))) (initialises ? htmlPagesWith : htmlPagesWithout).push(file)
   }
 
   if (input.requireModuleCaptureFile && /\.[cm]?[jt]s$/i.test(input.requireModuleCaptureFile) && !executableModuleFiles.has(input.requireModuleCaptureFile)) {

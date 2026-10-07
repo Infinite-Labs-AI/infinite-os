@@ -37,7 +37,7 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
     } catch {
       return null
     }
-  })
+  }, ctx.appRoot)
   // The receipt may outlive a retired job's entry in state. Read only its job/run metadata;
   // never open a policy file, inspect embedded policy text, or undo an earlier edit.
   const priorPolicyEdits = hasRecordedPolicyEdits(state.jobs) || ownership.recordedPolicyEdits?.(runId) === true

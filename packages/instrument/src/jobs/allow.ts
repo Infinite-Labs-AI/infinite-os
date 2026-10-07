@@ -33,10 +33,10 @@ export function normalizeRepoPath(path: string): string | null {
 export type DenyReason = { kind: "global_deny"; glob: string } | { kind: "cmp_file" } | { kind: "invalid_path" } | { kind: "policy_file" }
 
 /** Why a path may never be touched by any agent job, or null when the global deny does not cover it. */
-export function globalDenyReason(path: string, cmpFiles: readonly string[]): DenyReason | null {
+export function globalDenyReason(path: string, cmpFiles: readonly string[], appRoot = "."): DenyReason | null {
   const normalized = normalizeRepoPath(path)
   if (normalized === null) return { kind: "invalid_path" }
-  if (isPolicyPath(normalized)) return { kind: "policy_file" }
+  if (isPolicyPath(normalized, appRoot)) return { kind: "policy_file" }
   const glob = firstMatchingGlob(normalized, GLOBAL_DENY_GLOBS)
   if (glob !== null) return { kind: "global_deny", glob }
   if (cmpFiles.includes(normalized)) return { kind: "cmp_file" }
@@ -64,13 +64,13 @@ export interface AllowSpec {
  * Builds a job's allowlist from candidate paths: normalised, de-duplicated, sorted, and with every
  * globally denied path (and every CMP file) REMOVED, so a list can never include one.
  */
-export function buildAllow(files: readonly string[], create: readonly string[], cmpFiles: readonly string[]): AllowSpec {
+export function buildAllow(files: readonly string[], create: readonly string[], cmpFiles: readonly string[], appRoot = "."): AllowSpec {
   const clean = (paths: readonly string[]): string[] => {
     const out = new Set<string>()
     for (const path of paths) {
       const normalized = normalizeRepoPath(path)
       if (normalized === null) continue
-      if (globalDenyReason(normalized, cmpFiles) !== null) continue
+      if (globalDenyReason(normalized, cmpFiles, appRoot) !== null) continue
       out.add(normalized)
     }
     return [...out].sort()
@@ -90,10 +90,10 @@ export type EditVerdict =
  * Whether one edit is inside an item's allowlist (§3e.2). The global deny wins over the job's own list;
  * no v1 job deletes a file; a new file must be listed in `create`.
  */
-export function checkEdit(allow: AllowSpec, path: string, kind: EditKind, cmpFiles: readonly string[]): EditVerdict {
+export function checkEdit(allow: AllowSpec, path: string, kind: EditKind, cmpFiles: readonly string[], appRoot = "."): EditVerdict {
   const normalized = normalizeRepoPath(path)
   if (normalized === null) return { ok: false, reason: "denied", path, deny: { kind: "invalid_path" } }
-  const deny = globalDenyReason(normalized, cmpFiles)
+  const deny = globalDenyReason(normalized, cmpFiles, appRoot)
   if (deny !== null) return { ok: false, reason: "denied", path: normalized, deny }
   if (kind === "delete") return { ok: false, reason: "deletion_refused", path: normalized }
   if (kind === "create") {
@@ -103,10 +103,11 @@ export function checkEdit(allow: AllowSpec, path: string, kind: EditKind, cmpFil
 }
 
 /** The union of several allowlists (job 15 `build_fix` and job 16 `review_comments` use the run's union). */
-export function unionAllow(specs: readonly AllowSpec[], cmpFiles: readonly string[]): AllowSpec {
+export function unionAllow(specs: readonly AllowSpec[], cmpFiles: readonly string[], appRoot = "."): AllowSpec {
   return buildAllow(
     specs.flatMap((spec) => spec.files),
     specs.flatMap((spec) => spec.create),
-    cmpFiles
+    cmpFiles,
+    appRoot
   )
 }

@@ -355,7 +355,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   const d = scan.detections
   const framework = scan.framework
   const cmpFiles = d.cmp.files
-  const allow = (files: readonly string[], create: readonly string[] = []): AllowSpec => buildAllow(files, create, cmpFiles)
+  const allow = (files: readonly string[], create: readonly string[] = []): AllowSpec => buildAllow(files, create, cmpFiles, scan.snapshot.appRoot)
   const out: CandidateInput[] = []
 
   // 1 server_lane_mount
@@ -850,10 +850,11 @@ export interface JobRegistryOptions {
 }
 
 /** The union of the run's agent allowlists (jobs 15 and 16 work inside it; widening = ASK). */
-export function unionAllowedFiles(items: readonly ChecklistItem[], cmpFiles: readonly string[]): AllowSpec {
+export function unionAllowedFiles(items: readonly ChecklistItem[], cmpFiles: readonly string[], appRoot = "."): AllowSpec {
   return unionAllow(
     items.filter((item) => item.owner === "agent").map((item) => item.allow),
-    cmpFiles
+    cmpFiles,
+    appRoot
   )
 }
 
@@ -890,7 +891,7 @@ export function createJobRegistry(options: JobRegistryOptions): O8JobRegistry {
     },
     allowedFiles(item) {
       // Re-filtered through the global deny and the CMP files every time: a stored list can never widen past them.
-      return buildAllow(item.allow.files, item.allow.create, cmpFiles)
+      return buildAllow(item.allow.files, item.allow.create, cmpFiles, seedSnapshot?.appRoot ?? options.briefFacts()?.appRoot ?? ".")
     },
     brief(items) {
       const facts = options.briefFacts()

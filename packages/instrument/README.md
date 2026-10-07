@@ -39,26 +39,35 @@ adds; it does not connect them to the site's own banner. The wizard defaults to 
 when it finds a recognised consent pattern or banner sign, and to "collect by default" when it finds
 none. This is a default choice you can change, not verification of the banner.
 
-Policy pages are page files whose last route segment (ignoring `index` and `page`) or basename matches
-this explicit list, after lower-casing, splitting PascalCase and normalising separators; framework
-route groups and `[locale]` are ignored:
+Policy pages are page files whose last route segment or basename matches the list below after
+splitting PascalCase, lower-casing and normalising separators. Route depth starts at the selected
+application root. Terminal `index` and `page`, framework route groups and parallel slots, any single
+dynamic directory (`[locale]`, `[lang]`, `[market]`, `[[lang]]`), and locale directories of two letters
+or `xx-YY` are ignored. Catch-all dynamic directories still count towards depth.
 
-`privacy`, `privacy-policy`, `privacypolicy`, `terms`, `terms-of-use`, `terms-of-service`,
-`terms-and-conditions`, `termsofservice`, `tos`, `cookie-policy`, `cookies-policy`, `cookies`,
-`legal`, `eula`, `disclaimer`, `impressum`, `imprint`, `datenschutz`, `datenschutzerklaerung`,
-`data-protection`, `gdpr`, `ccpa`, `dpa`, `agb`, `mentions-legales`, `politica-de-privacidad`.
+`privacy`, `privacy-policy`, `privacypolicy`, `privacy-notice`, `privacynotice`,
+`terms`, `terms-of-use`, `terms-ofuse`, `termsof-use`, `termsofuse`, `terms-of-service`,
+`terms-ofservice`, `termsof-service`, `termsofservice`, `terms-and-conditions`, `terms-conditions`,
+`termsconditions`, `tos`, `cookie-policy`, `cookiepolicy`, `cookies-policy`, `cookiespolicy`,
+`cookie-notice`, `cookienotice`, `cookies-notice`, `cookiesnotice`, `cookies`, `legal`, `eula`,
+`disclaimer`, `impressum`, `imprint`, `datenschutz`, `datenschutzerklaerung`, `data-protection`,
+`gdpr`, `ccpa`, `dpa`, `agb`, `mentions-legales`, `politica-de-privacidad`, `refund-policy`,
+`acceptable-use`, `acceptable-use-policy`, `subprocessors`, `cookie-settings`.
 
-Product prefixes such as `product-terms-of-use` also match. `cookies` matches only at route depth one
-or directly under `legal/` or `policies/`; `legal` itself matches only at depth one. The rule covers
-Next pages and app routes (including route groups and `[locale]`), Remix routes, Astro, SvelteKit,
-Vue views, HTML/PHP documents and root/content Markdown or MDX. Documentation Markdown, components,
-libraries and API source routes do not count as page files; real HTML/PHP pages under docs, api or
-test directories still do. An unrelated word earlier in a route does not make the page a policy page.
+Listed names containing a hyphen match as the whole last segment at any depth, or as a
+`<prefix>-<name>` suffix such as `product-terms-of-use`. Names without a hyphen, including compact
+aliases such as `privacypolicy`, match only as the whole last segment at depth one or directly under
+`legal/` or `policies/`. Thus `payment-terms.html`, `chocolate-cookies.html` and `blog/gdpr.html`
+do not match. The rule covers Next pages and app routes, Remix routes, Astro, SvelteKit, Vue views,
+HTML/PHP documents and root/content Markdown or MDX. Documentation Markdown, components, libraries
+and API source routes do not count as page files. HTML/PHP pages under docs, api or test directories
+use the same name and depth rules. An unrelated earlier route word does not make a page a policy page.
 The wizard does not infer routes from source, templates or imports, so unlisted routes and policy
 text in shared components are outside this path rule.
 The policy check follows page filenames, not their imports; shared components or templates used by a policy page can still be changed.
-Measurement reads only files changed by the measured commit; an unreadable unchanged file does not
-block it. An unreadable changed file is reported as unchecked for that file.
+Before a commit, measurement reads only the paths selected for staging. For a recorded commit, it
+reads only that commit's changed files; unrelated working-tree changes and unreadable unchanged files
+do not block it. An unreadable selected or committed file is reported as unchecked for that file.
 
 
 **By [Infinite](https://infinite.fast) — the agent-first growth operator for founders.** Docs, dashboards and the server lane live at [infinite.fast](https://infinite.fast); source on [GitHub](https://github.com/Infinite-Labs-AI/infinite-os/tree/main/packages/instrument).
