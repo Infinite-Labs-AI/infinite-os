@@ -106,10 +106,14 @@ export function netlifyEdgeFunctionSource(input: TargetBuildInput): string {
     String.raw`${edgeLaneCoreSource({ ...input, exported: false })}
 
 /** The Netlify Edge Function context: https://docs.netlify.com/build/edge-functions/api/ */
+function infiniteIgnoreTaskFailure(task: Promise<unknown>): void {
+  void task.catch(() => undefined)
+}
+
 interface InfiniteNetlifyContext {
   /** "A string containing the client IP address." */
   ip?: string
-  waitUntil?: (promise: Promise<unknown>) => void // eslint-disable-line no-unused-vars
+  waitUntil?: typeof infiniteIgnoreTaskFailure
 }
 
 /** Netlify.env.get(name) is the documented reader; Deno.env is the fallback for local netlify dev. */
@@ -131,6 +135,7 @@ export default async (request: Request, context: InfiniteNetlifyContext): Promis
         clientIp: context.ip
       })
       if (typeof context.waitUntil === "function") context.waitUntil(task)
+      else infiniteIgnoreTaskFailure(task)
     }
   } catch {
     // The lane never affects the response.

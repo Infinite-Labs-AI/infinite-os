@@ -59,12 +59,12 @@ describe("the Next files the installer writes", () => {
     }
   })
 
-  it.each(["plugin:@typescript-eslint/recommended", "next/typescript"])("passes non-Next emitted files with %s and both unused-variable rules", async (preset) => {
+  it.each(["plugin:@typescript-eslint/recommended", "next/typescript"].flatMap(preset => ["off", "error"].map(core => [preset, core])))("passes non-Next emitted files with %s and core no-unused-vars=%s", async (preset, core) => {
     const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "../..")
     const lint = new LegacyESLint({
       cwd: packageRoot,
       useEslintrc: false,
-      overrideConfig: { parser: "@typescript-eslint/parser", extends: [preset], plugins: ["@typescript-eslint"], rules: { "no-unused-vars": "error", "@typescript-eslint/no-unused-vars": "error" } },
+      overrideConfig: { parser: "@typescript-eslint/parser", extends: [preset], plugins: ["@typescript-eslint"], reportUnusedDisableDirectives: true, rules: { "no-unused-vars": core, "@typescript-eslint/no-unused-vars": "error" } },
       resolvePluginsRelativeTo: packageRoot,
       ignore: false
     })

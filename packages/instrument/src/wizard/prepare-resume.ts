@@ -59,7 +59,16 @@ export async function prepareResume(ctx: WizardContext, deps: WizardDeps): Promi
       }
     } catch { return park("The saved managed-refresh.json record is unreadable. Restore or remove that damaged record before resuming.") }
   }
-  if (pending && (pending.runId !== ship.runId || pending.sha !== await ship.git.head())) return park("The pending generated-file refresh no longer matches this branch's HEAD.")
+  if (pending) {
+    const head = await ship.git.head()
+    if (pending.runId !== ship.runId || !await ship.git.isAncestor(pending.sha, head)) return park(`The pending generated-file refresh is not an ancestor of this branch. Restore branch ${state.git!.branch} containing commit ${pending.sha}, then run \`npx infinite-tag\` again.`)
+    // A user's merge/pull may advance HEAD while retaining the refresh commit. Continue from that
+    // descendant instead of requiring equality with the pre-pull commit forever.
+    if (pending.sha !== head) {
+      pending = { ...pending, sha: head }
+      await deps.fs.writeTextAtomic(pendingPath, JSON.stringify(pending), 0o600)
+    }
+  }
   const scan = await deps.installer.scan({ root: ctx.root, appRoot: ctx.appRoot, hosting: inputs.hosting })
   const plan = deps.installer.buildPlan(scan, inputs.keys, inputs.before, await planCandidates(ctx, deps))
   // Reuse the approved decisions, even when the new scan labels an installed provider as an update.
@@ -86,7 +95,10 @@ export async function prepareResume(ctx: WizardContext, deps: WizardDeps): Promi
   if (!pending) return null
   const git = ctx.state.get().git!
   const pushed = await pushBranch({ ctx, deps, git: ship.git, scanner: ship.scanner, hostKind: deps.host.kind, base: git.base, branch: git.branch, title: "Infinite analytics" })
-  if (pushed.kind !== "pushed") return park(`The refreshed generated files were committed but could not be pushed: ${pushed.message}`)
+  if (pushed.kind !== "pushed") {
+    const remote = state.pushTarget?.kind === "fork" ? state.pushTarget.remoteUrl : "origin"
+    return park(`The refreshed generated files were committed but could not be pushed: ${pushed.message}. Run \`git pull --no-rebase ${remote} ${git.branch}\`, resolve any conflicts and commit the merge, then run \`npx infinite-tag\` again.`)
+  }
   const head = await ship.git.head()
   await deps.fs.writeTextAtomic(pendingPath, "null\n", 0o600)
   ctx.state.update(draft => {

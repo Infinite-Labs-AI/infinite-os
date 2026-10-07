@@ -49,11 +49,15 @@ export function cloudflarePagesMiddlewareSource(input: TargetBuildInput): string
     String.raw`${edgeLaneCoreSource({ ...input, exported: false })}
 
 /** The Pages Functions context: https://developers.cloudflare.com/pages/functions/api-reference/ */
+function infiniteIgnoreTaskFailure(task: Promise<unknown>): void {
+  void task.catch(() => undefined)
+}
+
 interface InfiniteCloudflareContext {
   request: Request
   env: Record<string, string | undefined>
   next: () => Promise<Response>
-  waitUntil: (promise: Promise<unknown>) => void // eslint-disable-line no-unused-vars
+  waitUntil: typeof infiniteIgnoreTaskFailure
 }
 
 export const onRequest = async (context: InfiniteCloudflareContext): Promise<Response> => {
@@ -61,13 +65,13 @@ export const onRequest = async (context: InfiniteCloudflareContext): Promise<Res
     const request = context.request
     const path = new URL(request.url).pathname
     if (isInfiniteDocumentRequest(request, path)) {
-      context.waitUntil(
-        recordInfiniteDocumentRequest(request, {
+      const task = recordInfiniteDocumentRequest(request, {
           secret: context.env[${JSON.stringify(SERVER_LANE_SECRET_ENV)}] ?? "",
           sourceKey: context.env[${JSON.stringify(SERVER_LANE_SOURCE_KEY_ENV)}] ?? "",
           clientIp: request.headers.get("cf-connecting-ip") ?? undefined
-        })
-      )
+      })
+      if (typeof context.waitUntil === "function") context.waitUntil(task)
+      else infiniteIgnoreTaskFailure(task)
     }
   } catch {
     // The lane never affects the response.

@@ -14,7 +14,7 @@ import { runWizard } from "./engine.js"
 const fixtures: GitFixture[] = []
 afterEach(() => { while (fixtures.length) fixtures.pop()!.cleanup() })
 
-it.each(["refresh", "blocked", "closed", "merged", "push_retry", "other_branch", "corrupt", "provisioned"] as const)("prepares managed bytes before resumed agents: %s", async (mode) => {
+it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pull", "other_branch", "corrupt", "provisioned"] as const)("prepares managed bytes before resumed agents: %s", async (mode) => {
   const fx = createGitFixture({ files: { "lib/infinite-analytics.ts": "// Managed by Infinite\ntype Track = (unused: string) => void\n", ".infinite/install.json": mode === "provisioned" ? JSON.stringify({ providers: ["infinite"], ids: { infinite: { siteSourceKey: "site_saved_fixture" } } }) : "{}\n", ".gitignore": ".infinite/wizard/\n" } })
   fixtures.push(fx)
   const gh = createFakeGh({ dir: fx.dir, remote: fx.remote, env: fx.env })
@@ -55,7 +55,7 @@ it.each(["refresh", "blocked", "closed", "merged", "push_retry", "other_branch",
     keys.infinite = { ...keys.infinite, status: "not_provisioned", productionHosts: [], siteSourceKey: null }
     const hosting = await deps.bridge.hosting()
     if (hosting.vercel) hosting.vercel.productionDomains = []
-    fx.write(".infinite/wizard/before.json", JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId: RUN_ID, measuredAt: ctx.now().toISOString(), facts: { keys, hosting, census: { entries: [] }, dryLive: null, observedProductionHost: null, localValidation: "measured", baselineBuild: { ok: true, signatureVersion: 2, failureSignature: [], durationMs: 1 } } }))
+    fx.write(".infinite/wizard/before.json", JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId: RUN_ID, measuredAt: ctx.now().toISOString(), facts: { keys, hosting, census: { entries: [] }, dryLive: null, observedProductionHost: null, localValidation: "measured", baselineBuild: { ok: true, signatureVersion: 3, failureSignature: [], durationMs: 1 } } }))
   }
   await savePlanApprovals(ctx, deps, { planHash: ctx.state.get().plan!.hash, beforeAt: null, candidates: [], approvals: { approved: [], declined: [], edits: {} }, privacyText: null })
   const steps = Object.fromEntries(WIZARD_STEP_IDS.map(id => [id, { id, requiredCapabilities: [], inputHash: () => id, async run() {
@@ -64,13 +64,21 @@ it.each(["refresh", "blocked", "closed", "merged", "push_retry", "other_branch",
       expect(await git.head()).not.toBe(baseSha)
       expect(fx.remoteSha(branch)).toBe(await git.head())
       expect(await git.showFile("HEAD", "lib/infinite-analytics.ts")).toBe(fresh)
-      expect(fx.git(["log", "-1", "--format=%(trailers:key=Infinite-Tag-Run,valueonly)"]).trim()).toBe(RUN_ID)
+      const trailers = fx.git(["log", mode === "push_retry_pull" ? "-3" : "-1", "--format=%(trailers:key=Infinite-Tag-Run,valueonly)"]).trim()
+      expect(trailers).toContain(RUN_ID)
     }
     return { kind: "ok", status: id }
   } }])) as unknown as WizardStepRecord
   if (mode === "other_branch") await git.switchTo("main")
   if (mode === "corrupt") fx.write(".infinite/wizard/managed-refresh.json", "{broken")
   if (mode === "closed" || mode === "merged") gh.update(state => { state.prs![0]!.state = mode.toUpperCase() })
+  if (mode === "push_retry_pull") {
+    const remote = fx.git(["commit-tree", `${baseSha}^{tree}`, "-p", baseSha, "-m", "remote advance fixture"]).trim()
+    fx.git(["push", "origin", `${remote}:refs/heads/${branch}`])
+    expect((await runWizard(ctx, deps, { steps, afterStep: async () => {} })).exitCode).toBe(3)
+    fx.git(["pull", "--no-rebase", "--no-edit", "origin", branch])
+    order.length = 0
+  }
   if (mode === "push_retry") {
     const push = git.push.bind(git)
     let attempts = 0
@@ -95,7 +103,8 @@ it.each(["refresh", "blocked", "closed", "merged", "push_retry", "other_branch",
     expect(await git.head()).toBe(baseSha)
   } else {
     expect(result.exitCode).toBe(0)
-    expect(order.slice(0, mode === "push_retry" ? 2 : 3)).toEqual(mode === "push_retry" ? ["refresh", "agent"] : ["link", "refresh", "agent"])
+    const retry = mode === "push_retry" || mode === "push_retry_pull"
+    expect(order.slice(0, retry ? 2 : 3)).toEqual(retry ? ["refresh", "agent"] : ["link", "refresh", "agent"])
     expect(await deps.fs.readText(join(fx.root, "lib/infinite-analytics.ts"))).toBe(fresh)
   }
 })

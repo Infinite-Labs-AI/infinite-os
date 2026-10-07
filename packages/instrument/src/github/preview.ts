@@ -116,9 +116,11 @@ export async function previewUrlForSha(gh: GhClient, sha: string, projectName: s
     const statuses = await gh.json<RawDeploymentStatus[]>(["api", `repos/{owner}/{repo}/deployments/${deployment.id}/statuses?per_page=20`])
     attempts.push({ deployment, latest: statuses.find((status) => status.state !== "inactive"), index })
   }
-  // Multiple matching deployment rows are ambiguous; their ordering is not project identity.
+  // Several explicitly named rows can be retries of one project. A generic Preview row alongside
+  // another candidate still cannot establish project identity from a hostname prefix alone.
   const candidates = previews.length === 1 ? attempts : projectName === null ? [] : attempts.filter(({ deployment, latest }) => matchesProject(deployment, latest?.environment_url ?? null, projectName))
-  if (candidates.length !== 1) return null
-  const newest = candidates[0]
+  const environments = new Set(candidates.map(({ deployment }) => deployment.environment?.toLowerCase()))
+  if (candidates.length > 1 && (environments.size !== 1 || environments.has("preview"))) return null
+  const newest = [...candidates].sort((a, b) => (Date.parse(b.deployment.created_at ?? "") || 0) - (Date.parse(a.deployment.created_at ?? "") || 0) || a.index - b.index)[0]
   return newest?.latest?.state === "success" && isUsablePreviewUrl(newest.latest.environment_url) ? newest.latest.environment_url : null
 }
