@@ -1,29 +1,23 @@
 /** The owner's consent boundary is a byte freeze of top-level source units, not a control-flow model. */
 import { createHash } from "node:crypto"
-import { maskCommentsAndStrings } from "../frameworks/shared.js"
-import { htmlScripts } from "../html-scripts.js"
 
 // Comments between call tokens are whitespace, even when earlier syntax makes splitting uncertain.
 const RAW_TRIVIA = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\r\n]*(?:\r?\n|$))*`
 export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
-  new RegExp(String.raw`[([,]${RAW_TRIVIA}['"]consent['"]${RAW_TRIVIA}(?:[,\])]|$)`),
+  new RegExp(String.raw`[([,]${RAW_TRIVIA}['"\x60]consent['"\x60]${RAW_TRIVIA},${RAW_TRIVIA}['"\x60](?:default|update|grant|revoke)['"\x60]`),
   /(?:\b(?:gtag|fbq)\b|\[\s*['"`](?:gtag|fbq)['"`]\s*\])\s*(?:\?\.\s*)?\(\s*['"`]consent['"`]/,
-  new RegExp("(?:\\b(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\\b|\\[\\s*['\"`](?:opt_in_capturing|opt_out_capturing)['\"`]\\s*\\])" + RAW_TRIVIA + "(?:\\?\\." + RAW_TRIVIA + ")?\\("),
-  /\b(?:__tcfapi|__uspapi|__gpp|__cmp|OneTrust|Optanon\w*|Cookiebot|CookieConsent|Didomi\w*|UC_UI|usercentrics|klaro)\b(?:\s*(?:\?\.|\.)\s*[\w$]+|\s*\[\s*['"`][^'"`]+['"`]\s*\])*\s*(?:\?\.\s*)?\(/i
+  /(?:\b(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\b|\[\s*['"`](?:opt_in_capturing|opt_out_capturing)['"`]\s*\])\s*(?:\?\.\s*)?\(/,
+  /\b(?:__tcfapi|__uspapi|__gpp|__cmp|OneTrust|Optanon\w*|Cookiebot|CookieConsent|Didomi\w*|UC_UI|usercentrics|klaro)\b/i,
+  /['"`]consent['"`]\s*,\s*['"`](?:default|update)['"`]/,
+  /\b(?:ad_storage|analytics_storage|ad_user_data|ad_personalization|functionality_storage|personalization_storage|security_storage|wait_for_update)\b/,
+  /cdn\.cookielaw\.org|otSDKStub\.js|consent\.cookiebot\.com|usercentrics\.eu/,
+  /\bOnetrustActiveGroups\b/i,
+  /\bdata-cookieconsent\b|\btype\s*=\s*['"]text\/plain['"]/i,
+  new RegExp(String.raw`\b(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\b${RAW_TRIVIA}(?:\?\.${RAW_TRIVIA})?\(`)
 ]
+/** Recognition deliberately includes comments and prose; uncertain syntax never hides a raw marker. */
 export function isConsentText(text: string): boolean {
-  const parsed = tokenize(text)
-  let withoutComments = "", from = 0
-  for (const [start, end] of parsed.comments) {
-    withoutComments += text.slice(from, start) + text.slice(start, end).replace(/[^\n]/g, " ")
-    from = end
-  }
-  withoutComments += text.slice(from)
-  // A confident scan can distinguish real comments. With awkward JSX/CSS or an unclosed construct,
-  // scan the entire raw text as well: a tokenizer's early stop must never hide a later consent call.
-  const raw = parsed.confident ? maskCommentsAndStrings(withoutComments, false) : withoutComments
-  return CONSENT_CALL_PATTERNS.some(pattern => pattern.test(raw)) ||
-    CONSENT_CALL_PATTERNS.some(pattern => pattern.test(parsed.tokens.map(token => token.text).join(" ")))
+  return CONSENT_CALL_PATTERNS.some(pattern => pattern.test(text))
 }
 
 interface Token { text: string; start: number; end: number; line: number; depth: number }
@@ -38,36 +32,16 @@ const OPEN: Record<string, string> = { "(": ")", "[": "]", "{": "}" }
 const CLOSE = new Set(Object.values(OPEN))
 
 /** Strings/comments/regex are opaque bracket-wise. Uncertain syntax makes the file one unit. */
-function tokenize(source: string): { tokens: Token[]; confident: boolean; comments: Array<readonly [number, number]> } {
+function tokenize(source: string): { tokens: Token[]; confident: boolean } {
   const tokens: Token[] = []; const stack: string[] = []
-  const comments: Array<readonly [number, number]> = [], lexicalComments: Array<readonly [number, number]> = []
-  const markup = /^\s*(?:<!doctype\s+html\b|<html(?:\s|>))/i.test(source)
-  const scripts = markup ? htmlScripts(source, true) : []
-  let line = 1; let confident = true; let completeLexing = true
-  const uncertain = () => { confident = false; completeLexing = false }
+  let line = 1; let confident = true
   for (let i = 0; i < source.length;) {
     const c = source[i]!
     if (/\s/.test(c)) { if (c === "\n") line++; i++; continue }
-    // This branch is never visited inside a quoted token. Script bodies are excluded because JS
-    // legacy <!-- syntax comments only a line, and must not hide live code through a later -->.
-    if (markup && source.startsWith("<!--", i) && !scripts.some(script => script.bodyStart <= i && i < script.bodyEnd)) {
-      confident = false // Recognizing a comment does not make HTML units safely splittable.
-      const end = source.indexOf("-->", i + 4)
-      if (end < 0) return { tokens, comments, confident: false }
-      comments.push([i, end + 3]); line += source.slice(i, end + 3).split("\n").length - 1; i = end + 3; continue
-    }
-    if (source.startsWith("//", i)) {
-      const end = source.indexOf("\n", i), stop = end < 0 ? source.length : end
-      if (confident) lexicalComments.push([i, stop])
-      i = stop; continue
-    }
+    if (source.startsWith("//", i)) { const end = source.indexOf("\n", i); i = end < 0 ? source.length : end; continue }
     if (source.startsWith("/*", i)) {
       const end = source.indexOf("*/", i + 2)
-      if (end < 0) return { tokens, comments, confident: false }
-      const previous = tokens.at(-1)
-      const jsxComment = previous?.text === "{" && /^\s*$/.test(source.slice(previous.end, i)) && /^\s*}/.test(source.slice(end + 2))
-      if (jsxComment) comments.push([i, end + 2])
-      else if (confident) lexicalComments.push([i, end + 2])
+      if (end < 0) return { tokens, confident: false }
       line += source.slice(i, end + 2).split("\n").length - 1; i = end + 2; continue
     }
     const start = i; const firstLine = line; const depth = stack.length
@@ -75,44 +49,40 @@ function tokenize(source: string): { tokens: Token[]; confident: boolean; commen
       i++
       while (i < source.length && source[i] !== c) {
         if (source[i] === "\\") { if (source[i + 1] === "\n") line++; i += 2; continue }
-        if (source[i] === "\n") { if (c !== "`") uncertain(); line++ }
-        if (c === "`" && source.startsWith("${", i)) uncertain()
+        if (source[i] === "\n") { if (c !== "`") confident = false; line++ }
+        if (c === "`" && source.startsWith("${", i)) confident = false
         i++
       }
-      if (source[i] !== c) uncertain()
+      if (source[i] !== c) confident = false
       else i++
     } else if (c === "/" && /^(?:|[=(,:;!&|?{}]|return|throw|=>)$/.test(tokens.at(-1)?.text ?? "")) {
       i++; let inClass = false
       while (i < source.length) {
         if (source[i] === "\\") { i += 2; continue }
-        if (source[i] === "\n") { uncertain(); break }
+        if (source[i] === "\n") { confident = false; break }
         if (source[i] === "[") inClass = true
         if (source[i] === "]") inClass = false
         if (source[i] === "/" && !inClass) break
         i++
       }
-      if (source[i] !== "/") uncertain()
+      if (source[i] !== "/") confident = false
       else { i++; while (i < source.length && /[a-z]/i.test(source[i]!)) i++ }
     } else {
       const word = /^(?:[A-Za-z_$][\w$]*|\d+(?:\.\d+)?|===|!==|=>|\?\.|&&|\|\||\?\?|==|!=|<=|>=|\+\+|--|\+=|-=|\*\*|\.\.\.)/.exec(source.slice(i))
       if (word) i += word[0].length
       else {
-        if (!/[{}()[\];,.?:~!+\-*/%&|^=<>]/.test(c)) uncertain()
+        if (!/[{}()[\];,.?:~!+\-*/%&|^=<>]/.test(c)) confident = false
         // JSX/HTML and angle assertions need a full language parser. They freeze as a whole file.
         if (c === "<" && /[A-Za-z/!>]/.test(source[i + 1] ?? "")) confident = false
         i++
       }
       const text = source.slice(start, i)
       if (OPEN[text]) stack.push(text)
-      else if (CLOSE.has(text) && OPEN[stack.pop() ?? ""] !== text) uncertain()
+      else if (CLOSE.has(text) && OPEN[stack.pop() ?? ""] !== text) confident = false
     }
     tokens.push({ text: source.slice(start, i), start, end: i, line: firstLine, depth })
   }
-  // JSX can make unit splitting uncertain while comment/quote boundaries are still complete.
-  // Any actual lexical failure retains raw text for those ordinary-comment candidates.
-  if (completeLexing && stack.length === 0) comments.push(...lexicalComments)
-  comments.sort((a, b) => a[0] - b[0])
-  return { tokens, comments, confident: confident && stack.length === 0 }
+  return { tokens, confident: confident && stack.length === 0 }
 }
 
 function bindingInfo(tokens: Token[]): { key: string; names: string[] } {

@@ -90,14 +90,19 @@ it.each([
   "const title = 'Cookiebot uses ad_storage';\n",
   "// fbq('consent', 'revoke');\nexport const title = 'Example';\n",
   "/* gtag('consent', 'default', {}); */\nexport const title = 'Example';\n",
-  "function readTrackingConsent() { return localStorage.getItem('choice'); }\n",
   "const DENIED = { analytics_storage: 'denied', ad_storage: 'denied' };\n",
-])("does not freeze inert comments or prose: %s", source => {
-  expect(sourceUnits(source).units.some(unit => unit.frozen)).toBe(false)
+])("conservatively freezes raw recognized markers in comments or prose: %s", source => {
+  expect(sourceUnits(source).units.some(unit => unit.frozen)).toBe(true)
 })
 
 it.each(["__tcfapi('getTCData', 2, callback);", "Cookiebot.renew();", "Cookiebot?.renew();", "OneTrust?.AllowAll();", "posthog?.opt_out_capturing();", "send('consent', 'revoke');", "send.apply(null, ['consent', 'revoke']);"])("freezes recognized consent calls: %s", call => {
   const before = `function owner() { ${call} }\n`
   expect(sourceUnits(before).units.some(unit => unit.frozen)).toBe(true)
   expect(restoreFrozenUnits(before, before.replace(call, "")).text).toBe(before)
+})
+
+
+it("does not infer a consent pattern from a site-specific helper name alone", () => {
+  const source = "function readTrackingConsent() { return localStorage.getItem('choice'); }\n"
+  expect(sourceUnits(source).units.some(unit => unit.frozen)).toBe(false)
 })

@@ -31,7 +31,7 @@ it("restores a frozen module statement moved past an existing sibling", () => {
   const config = "gtag('config','G-FAKE00001');\n"
   expect(restoreFrozenUnits(consent + config, config + consent).text).toBe(consent + config)
 })
-it("shares token-normalized call patterns, including comments and computed optional members", () => {
+it("recognizes raw call patterns, including comment spacing and computed optional members", () => {
   for (const call of ["fbq /* spaced */ ?. /* spaced */ ('consent','revoke');", "window['gtag'] /* spaced */ ('consent','default',{analytics_storage:'denied'});", "posthog?.['opt_out_capturing']?.();"]) {
     expect(restoreFrozenUnits("", call).changes.length).toBeGreaterThan(0)
   }
@@ -55,11 +55,11 @@ it("declares ambiguous anonymous-unit correspondence frozen as a whole before an
   expect(sourceUnits(before).units[0]?.frozen).toBe(true)
   expect(restoreFrozenUnits(before, after).text).toBe(before)
 })
-it("does not infer consent from storage names or readers of an ordinary value map", () => {
+it("freezes a recognized Consent Mode map without following its readers", () => {
   const before = "const DENIED = { analytics_storage: 'denied' };\nsend(safe);\nsend(DENIED);\n"
-  const after = "const DENIED = { analytics_storage: 'denied' };\nsend(DENIED);\nsend(improved);\n"
-  expect(sourceUnits(before).units.some(unit => unit.frozen)).toBe(false)
-  expect(restoreFrozenUnits(before, after).text).toBe(after)
+  const after = before.replace("'denied'", "'granted'").replace("send(safe)", "send(improved)")
+  expect(sourceUnits(before).units.some(unit => unit.frozen)).toBe(true)
+  expect(restoreFrozenUnits(before, after).text).toBe(before.replace("send(safe)", "send(improved)"))
 })
 
 it("never loses raw consent behind awkward inserted syntax before the call", () => {
@@ -68,17 +68,13 @@ it("never loses raw consent behind awkward inserted syntax before the call", () 
     "f( /* owner choice */ 'consent' /* owner action */, 'revoke');", "f.call(null, // owner choice\n 'consent', 'revoke');",
     "posthog.opt_out_capturing /* owner choice */ ();"]
   const prefix = "export const label = 'fixture';\n"
-  let frozen = 0, comments = 0
+  let frozen = 0
   for (const call of calls) for (const fragment of fragments) for (let at = 0; at <= prefix.length; at++) {
     const source = prefix.slice(0, at) + fragment + prefix.slice(at) + call + "\n"
-    // These insertions comment out the whole call, rather than hide a live call behind awkward syntax.
-    const lineComment = fragment === "//" && at === prefix.length && !call.includes("\n")
-    const closedBlock = fragment === "/*" && call === calls[5] && (at <= prefix.indexOf("'") || at > prefix.lastIndexOf("'"))
-    const commentOnly = lineComment || closedBlock
-    expect(sourceUnits(source).units.some(unit => unit.frozen), `${fragment} at ${at}: ${call}`).toBe(!commentOnly)
-    if (commentOnly) comments++; else frozen++
+    expect(sourceUnits(source).units.some(unit => unit.frozen), `${fragment} at ${at}: ${call}`).toBe(true)
+    frozen++
   }
-  expect({ frozen, comments }).toEqual({ frozen: 1554, comments: 30 })
+  expect(frozen).toBe(1584)
 })
 
 it("freezes raw consent arguments after a JSX glob even when comments separate the argument", () => {
@@ -102,9 +98,9 @@ it.each([
   'export default function X() { return <div>{ /* fbq("consent", "revoke"); */ }</div> }',
   '<html><!-- gtag("consent", "default", {}); --><body>Hello</body></html>',
   'export default function X() { /* fbq("consent", "revoke"); */ return <div />; }',
-])("does not freeze calls contained in proven complete markup comments", source => {
-  expect(sourceUnits(source).units.some(unit => unit.frozen)).toBe(false)
-  expect(restoreFrozenUnits(source, source.replace("revoke", "grant").replace("default", "update")).changes).toEqual([])
+])("conservatively freezes raw consent patterns inside complete markup comments", source => {
+  expect(sourceUnits(source).units.some(unit => unit.frozen)).toBe(true)
+  expect(restoreFrozenUnits(source, source.replace("revoke", "grant").replace("default", "update")).text).toBe(source)
 })
 
 it.each([

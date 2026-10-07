@@ -68,9 +68,9 @@ describe("top-level consent units: real fence table", () => {
     expect(result.text).toBe(module.replace("return 1", "return 2") + capture)
   })
 
-  it("does not infer consent calls from a map and its readers", async () => {
+  it("freezes a recognized map while keeping separate readers editable", async () => {
     const before = "const GRANTED_MODE = { analytics_storage: 'granted' };\nfunction readTrackingMode() { return GRANTED_MODE; }\nfunction unrelated() { return 1; }\n"
-    const result = await turn(before, before.replace("return GRANTED_MODE", "return {}").replace("return 1", "return 2"))
+    const result = await turn(before, before.replace("analytics_storage: 'granted'", "analytics_storage: 'denied'").replace("return GRANTED_MODE", "return {}").replace("return 1", "return 2"))
     expect(result.text).toBe(before.replace("return GRANTED_MODE", "return {}").replace("return 1", "return 2"))
   })
 
@@ -80,9 +80,12 @@ describe("top-level consent units: real fence table", () => {
   })
 })
 
-it("does not freeze value maps without a recognized consent call", async () => {
-  const before = "const unrelated = 0, DENIED = { analytics_storage: 'denied' };\nfunction readTracking() { return DENIED; }\n"
-  expect((await turn(before, before.replace("return DENIED", "return {}"))).text).toBe(before.replace("return DENIED", "return {}"))
+it.each([["denied", "granted"], ["granted", "denied"]])("restores a separate Consent Mode map flip from %s to %s", async (from, to) => {
+  const before = `const unrelated = 0, DENIED = { analytics_storage: '${from}' };\nfunction readTracking() { return DENIED; }\n`
+  const after = before.replace(`analytics_storage: '${from}'`, `analytics_storage: '${to}'`).replace("return DENIED", "return {}")
+  const result = await turn(before, after)
+  expect(result.text).toBe(before.replace("return DENIED", "return {}"))
+  expect(result.warning.length).toBeGreaterThan(0)
 })
 
 it("allows worker-added API definitions without recognized consent calls", async () => {
