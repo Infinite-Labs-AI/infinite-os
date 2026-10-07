@@ -37,3 +37,11 @@ it("keeps uncategorized legacy security text open despite a passing check", () =
   const finding: TriageItem = { source: "reviewer", threadId: null, findingId: "F3", item: "R2", severity: "should", path: "src/main.ts", line: 1, body: "PII phone is sent to Meta", suggestedFix: null }
   expect(triage([finding], { allowlist: [finding.path!], declinedKeys: new Set(), passingChecks: new Set(["census_one_per_tool"]), answerFor: () => null })[0]!.action).toBe("FIX")
 })
+
+it("redacts a secret before a display limit can split its literal", async () => {
+  const { safeDisplayText } = await import("./display.js")
+  const secret = "opaqueFixtureCredentialValueForRedaction"
+  const scanner = createScanner({ literals: [{ value: secret, kind: "env_value" }], allowedIds: [] })
+  const text = safeDisplayText(scanner, "safe ".repeat(13_104) + " " + secret)
+  expect(text).not.toContain("opaqueFixture")
+})
