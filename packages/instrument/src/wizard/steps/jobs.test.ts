@@ -56,7 +56,7 @@ function setup(input: {
     jobs: structuredClone(input.items ?? ITEMS)
   })
   const { ctx, recorded, state: current } = makeCtx({ root, state, options: input.options, answer: input.answer as never })
-  const deps = makeDeps({ bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } })
+  const deps = makeDeps({ root, bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } })
   return { root, fakes, ctx, deps, recorded, current, checkCalls, bridgeCalls, briefs, recordedEdits, runner }
 }
 
@@ -116,6 +116,56 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
     const metaReply = records(t.fakes).filter((entry) => entry.kind === "mcp" && entry.tool === "job_claim")[1]?.reply?.result?.structuredContent
     expect(metaReply).toMatchObject({ error: expect.stringContaining("unknown job_id preview_guard:meta") }) // Never offered to the agent.
+  })
+
+  it("keeps code-owned wiring handoffs informational and includes them in the closing summary", async () => {
+    const item: ChecklistItem = {
+      ...agentItem("meta_improve:capture", ["app/layout.tsx"]), owner: "code", state: "left_for_you",
+      ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx", line: 1 },
+      note: "Not changed by us: capture wiring reaches your consent code. Add the wiring yourself."
+    }
+    const t = setup({ scenario: {}, items: [item] })
+    const outcome = await step.run(t.ctx, t.deps)
+    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("1 left for you (1 not changed by us)") })
+    expect(t.current().jobs[0]).toMatchObject({ state: "left_for_you", note: item.note, ownerBoundary: item.ownerBoundary })
+    expect(runs(t.fakes)).toHaveLength(0)
+    expect(t.checkCalls.run).toHaveLength(0)
+  })
+
+  it("rechecks a frozen preview guard without turning its owner task into a blocked job", async () => {
+    const file = "src/tracking.ts"
+    const source = "export function start() {\n  fbq('consent', 'grant');\n  fbq('init', '1234567890123456');\n}\n"
+    const item: ChecklistItem = {
+      ...agentItem("preview_guard:meta", [file]), state: "left_for_you",
+      trigger: { finding: "Meta initialization", evidence: [{ file, line: 3 }] },
+      ownerBoundary: { kind: "frozen_unit", file, line: 3 }
+    }
+    const t = setup({ scenario: {}, items: [item] })
+    write(t.root, file, source)
+    runGit(t.root, ["add", file])
+    runGit(t.root, ["commit", "-m", "tracking fixture"])
+    expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "ok" })
+    expect(t.current().jobs[0]).toMatchObject({ state: "left_for_you", note: expect.stringContaining("preview and local visits keep counting in Meta pixel") })
+    expect(readFileSync(join(t.root, file), "utf8")).toBe(source)
+    expect(runs(t.fakes)).toHaveLength(0)
+  })
+
+  it("keeps policy and restored handoffs separate without reporting either as blocked", async () => {
+    const policy: ChecklistItem = {
+      ...agentItem("preview_guard:ga4", ["terms.html"]), state: "left_for_you",
+      ownerBoundary: { kind: "policy_page", file: "terms.html", line: 1 },
+      note: "Not changed by us: terms.html is a policy page, which is yours."
+    }
+    const restored: ChecklistItem = {
+      ...agentItem("preview_guard:meta", ["app/layout.tsx"]), state: "left_for_you",
+      ownerBoundary: { kind: "restored_unit", file: "app/layout.tsx", line: 1 },
+      note: "Put back: an edit reached consent code at app/layout.tsx:1."
+    }
+    const t = setup({ scenario: {}, items: [policy, restored] })
+    const outcome = await step.run(t.ctx, t.deps)
+    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("2 left for you (1 not changed by us; 1 put back: reached consent code)") })
+    expect(t.current().jobs.map(item => ({ state: item.state, note: item.note }))).toEqual([policy, restored].map(item => ({ state: item.state, note: item.note })))
+    expect(runs(t.fakes)).toHaveLength(0)
   })
 
   it("does not turn an agent progress sentence into file counts or a writing phase", async () => {

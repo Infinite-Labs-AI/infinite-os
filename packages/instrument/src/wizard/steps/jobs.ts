@@ -1508,12 +1508,13 @@ class JobsIo {
     const claimed = count(["claimed"])
     const needYou = agent.filter((item) => item.state === "blocked" && item.blockedReason === "needs_you").length
     // LF4-P3-1: a failed job (its change made, the wizard's check did not pass) is not "blocked".
-    const left = count(["left_for_you"])
+    const ownerHandoffs = this.items().filter(item => item.state === "left_for_you")
+    const left = ownerHandoffs.length
     const failed = count(["failed"])
     const blocked = count(["blocked"]) - needYou
     const parts = [`${done} of ${agent.length} jobs done in code (checked by the wizard, not the agent)`]
     if (left > 0) {
-      const restored = agent.filter(item => item.state === "left_for_you" && item.ownerBoundary?.kind === "restored_unit").length
+      const restored = ownerHandoffs.filter(item => item.ownerBoundary?.kind === "restored_unit").length
       const unchanged = left - restored
       parts.push(`${left} left for you (${[unchanged ? `${unchanged} not changed by us` : "", restored ? `${restored} put back: reached consent code` : ""].filter(Boolean).join("; ")})`)
     }

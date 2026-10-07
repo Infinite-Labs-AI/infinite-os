@@ -152,7 +152,7 @@ function world(input: {
     jobs: [...run4Items([JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE]), ...(input.extraItems ?? [])]
   })
   const { ctx, recorded: events, state: current } = makeCtx({ root, state })
-  const deps = { ...makeDeps({ bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } }), clock }
+  const deps = { ...makeDeps({ root, bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } }), clock }
   return { root, ctx, deps, current, calls, recorded, events, merged }
 }
 
@@ -426,7 +426,7 @@ describe("R4-6: the thinking beat says how far the jobs are and how much of the 
       jobs: run4Items([JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE])
     })
     const { ctx, recorded } = makeCtx({ root, state })
-    await step.run(ctx, makeDeps({ bridge, agents: runner as never, env: { HOME: root } }))
+    await step.run(ctx, makeDeps({ root, bridge, agents: runner as never, env: { HOME: root } }))
     const beats = recorded.events.filter((event) => event.type === "narrate").map((event) => (event.fields as { text: string }).text)
     expect(beats).toContain(`Thinking · 254 s · 1 of 5 claimed · 0 of ${AGENT_LIMITS.jobs.wallMs / 60_000} min`)
     // Other beats are left as the runner said them.

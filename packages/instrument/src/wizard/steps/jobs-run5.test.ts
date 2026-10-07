@@ -54,7 +54,7 @@ function setup(input: { pasted: boolean; rh: "problem" | "not_run" }) {
     jobs: [spaItem(input.rh)]
   })
   const { ctx, state: current } = makeCtx({ root, state })
-  const deps = makeDeps({ bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } })
+  const deps = makeDeps({ root, bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } })
   return { ctx, deps, current, fakes, briefs }
 }
 

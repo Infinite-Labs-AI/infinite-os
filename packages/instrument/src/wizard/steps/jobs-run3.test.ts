@@ -95,7 +95,7 @@ function setup(scenario: unknown, items: ChecklistItem[]) {
     jobs: items
   })
   const { ctx, recorded: events, state: current } = makeCtx({ root, state })
-  const deps = makeDeps({ bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } })
+  const deps = makeDeps({ root, bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } })
   return { root, fakes, ctx, deps, current, calls, recorded, events }
 }
 

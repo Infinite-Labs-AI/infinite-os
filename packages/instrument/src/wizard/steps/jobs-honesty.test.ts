@@ -54,7 +54,7 @@ function setup(input: {
       return checks.turnGate(...args)
     }
   }
-  const deps = makeDeps({ bridge, agents: runner, checks: spyChecks, registry: input.registry ?? fakeRegistry().registry, installer, env: { HOME: fakes.home } })
+  const deps = makeDeps({ root, bridge, agents: runner, checks: spyChecks, registry: input.registry ?? fakeRegistry().registry, installer, env: { HOME: fakes.home } })
   return { root, ctx, deps, recorded, current, checkCalls, bridgeCalls, recordedEdits, gateIds, read: (rel: string) => readFileSync(join(root, rel), "utf8") }
 }
 
