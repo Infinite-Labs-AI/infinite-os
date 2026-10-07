@@ -45,3 +45,13 @@ it("does not render a stale R6 assertion from report notes as a new measured cla
   expect(renderMarkdown(report)).not.toContain("this run changed neither")
   expect(report.notes.join(" ")).not.toContain("this run changed neither")
 })
+
+it.each(["gtag('config', 'G-FAKE');", "fbq('init', '123456789');", "posthog.init('phc_fake', { defaults: '2026-01-30' });"])("renders a real single-statement guard diff without a placeholder: %s", async statement => {
+  const { ownerGuardHandoff } = await import("./owner-boundary.js")
+  const source = `function boot() {\n  ${statement}\n  fbq('consent', 'revoke');\n}\n`
+  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
+  expect(handoff.guard).toContain(`-  ${statement}\n+  if (hostAllowed) ${statement}`)
+  expect(handoff.guard).toContain("@@ -2,1 +2,1 @@")
+  expect(handoff.guard).not.toContain("Existing analytics")
+  expect(handoff.guard).not.toContain("revoke")
+})

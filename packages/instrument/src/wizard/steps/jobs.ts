@@ -35,8 +35,8 @@ import { join } from "node:path"
 
 import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
 import { git } from "../../agents/git-exec.js"
-import { frozenEditPlace } from "../../jobs/consent-units.js"
-import { frozenJobNote, LEGACY_OWNER_BOUNDARY } from "../../jobs/owner-boundary.js"
+import { scopeOwnerJob } from "../../jobs/owner-scope.js"
+import { LEGACY_OWNER_BOUNDARY } from "../../jobs/owner-boundary.js"
 import { reanchorOwnerLocations } from "../../jobs/owner-locations.js"
 import { measureOwnerDiff } from "../../jobs/owner-diff.js"
 import { leaveForOwner } from "../../jobs/state-machine.js"
@@ -193,19 +193,19 @@ async function runJobsStep(ctx: WizardContext, deps: WizardDeps): Promise<StepOu
       io.put(leaveForOwner(saved, (saved.edits?.length ?? 0) > 0 ? LEGACY_OWNER_BOUNDARY : "Privacy policy work is retired; it belongs to the site owner.", { kind: "legacy_policy" }))
       continue
     }
-    if (saved.ownerBoundary?.kind === "restored_unit" || saved.ownerBoundary?.kind === "policy_page") continue
+    if (saved.ownerBoundary?.kind === "restored_unit" || saved.ownerBoundary?.kind === "policy_page" || saved.ownerBoundary?.kind === "unproven_wiring") continue
     if (!OPEN_STATES.includes(saved.state) && saved.state !== "left_for_you" && saved.blockedReason !== "consent_touched") continue
     const sources = new Map<string, string>()
     for (const evidence of saved.trigger.evidence) if ("file" in evidence) {
       const source = await readFile(join(ctx.root, evidence.file), "utf8").catch(() => null)
       if (source !== null) sources.set(evidence.file, source)
     }
-    const frozen = frozenEditPlace(saved, sources)
-    if (frozen) {
-      io.put(leaveForOwner(saved, frozenJobNote(saved, frozen), { ...saved.ownerBoundary, kind: "frozen_unit", file: frozen.file, line: frozen.line, unitHash: frozen.unit.hash, lineOffset: frozen.line - frozen.unit.startLine, unitOrdinal: frozen.unit.ordinal }))
+    const scoped = scopeOwnerJob(saved, sources)
+    if (scoped !== saved) {
+      io.put({ item: scoped, changed: true, by: "wizard", note: scoped.note })
     } else if (saved.blockedReason === "consent_touched") io.put(blockItem(saved, "consent_touched"))
     else if (saved.state === "left_for_you") {
-      // R6 could derive this state from an agent's words. Without wizard evidence it is ordinary unfinished work.
+      // Older versions could derive this state from an agent's words. Without wizard evidence it is ordinary unfinished work.
       io.put(blockItem({ ...saved, ownerBoundary: undefined }, "agent_blocked", saved.claim?.note ?? "No frozen-unit evidence supports the earlier owner-only status."))
     }
   }
@@ -1511,7 +1511,11 @@ class JobsIo {
     const failed = count(["failed"])
     const blocked = count(["blocked"]) - needYou
     const parts = [`${done} of ${agent.length} jobs done in code (checked by the wizard, not the agent)`]
-    if (left > 0) parts.push(`${left} left for you (consent code is in the way)`)
+    if (left > 0) {
+      const restored = agent.filter(item => item.state === "left_for_you" && item.ownerBoundary?.kind === "restored_unit").length
+      const unchanged = left - restored
+      parts.push(`${left} left for you (${[unchanged ? `${unchanged} not changed by us` : "", restored ? `${restored} put back: reached consent code` : ""].filter(Boolean).join("; ")})`)
+    }
     if (claimed > 0) parts.push(`${claimed} not checked by the wizard`)
     if (needYou > 0) parts.push(`${needYou} need you`)
     if (failed > 0) parts.push(`${failed} did not pass the wizard's checks`)

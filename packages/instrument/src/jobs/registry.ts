@@ -1,3 +1,5 @@
+import { isContinuedWork } from "../install/plan-permission.js"
+import { scopeOwnerJob } from "./owner-scope.js"
 // The checklist job registry (lane O8; §3e.1, §3e.7). It turns what `before` measured into CANDIDATE
 // checklist items, keeps only the ones the user's plan approved, hands each agent job its allowlist and
 // brief, and computes item states from the wizard's own check results.
@@ -28,8 +30,6 @@ import {
   type ScanResult
 } from "../wizard/contracts/jobs.js"
 import type { TestTool } from "../wizard/contracts/test-engine.js"
-import { frozenEditPlace } from "./consent-units.js"
-import { frozenJobNote } from "./owner-boundary.js"
 import { buildAllow, unionAllow, isConsentLine, type AllowSpec } from "./allow.js"
 import { buildBrief, prescribedPasteOf, type BriefFacts } from "./briefs.js"
 import {
@@ -663,14 +663,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   const items = out.map(input => {
     const item = makeItem(input, framework)
     if (item.state === "blocked" && item.allow.files.length === 0) return item
-    const frozen = frozenEditPlace(item, scan.snapshot.files)
-    if (frozen) {
-      const unit = frozen.unit
-      item.state = "left_for_you"; item.checks = []; delete item.blockedReason
-      item.note = frozenJobNote(item, frozen)
-      item.ownerBoundary = { kind: "frozen_unit", file: frozen.file, line: frozen.line, unitHash: unit.hash, lineOffset: frozen.line - unit.startLine, unitOrdinal: unit.ordinal }
-    }
-    return item
+    return scopeOwnerJob(item, scan.snapshot.files)
   })
   const unique = new Map<string, ChecklistItem>()
   for (const item of items) if (!unique.has(item.id)) unique.set(item.id, item)
@@ -710,8 +703,9 @@ const PLAN_WIDE_KINDS: ReadonlySet<PlanLineKind> = new Set(["server_lane", "conv
  *   with no bound approved name is dropped, whatever the line says. Job 14 needs the approved paragraph.
  */
 export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: PlanModel, approvals: PlanApprovals): ChecklistItem[] {
-  const declined = new Set(approvals.declined)
-  const approved = new Set(approvals.approved)
+  const automatic = plan.lines.filter(isContinuedWork).map(line => line.id)
+  const declined = new Set(approvals.declined.filter(id => !automatic.includes(id)))
+  const approved = new Set([...approvals.approved, ...automatic])
   const conversionNames = approvedConversionNames(plan, approvals)
   const out: ChecklistItem[] = []
   for (const candidate of candidates) {

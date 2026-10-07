@@ -196,10 +196,10 @@ function liveLines(input: FrameInput, width: number, feedLines: number = FEED_LI
   }
   const shownJobs = row.id === "jobs" ? (snapshot.jobs ?? []) : row.id === "review" ? (snapshot.jobs ?? []).filter((job) => job.id.startsWith("review_comments:")) : row.id === "rehearsal" ? (snapshot.jobs ?? []).filter((job) => job.id.startsWith("build_fix:")) : []
   if (shownJobs.length > 0) {
-    const labels = { waiting: "waiting", agent_claim: "agent claims done", agent_blocked: "agent says blocked", agent_not_needed: "agent says not needed", checking: "wizard checking", could_not_check: "could not be checked", done_in_code: "passed in code", waiting_deploy: "in the pull request, prove after deploy", waiting_real_event: "waiting for a real event", proven: "proven live", not_needed: "not needed", left_for_you: "left for you: consent code is in the way", failed: "failed", blocked: "blocked" } as const
+    const labels = { waiting: "waiting", agent_claim: "agent claims done", agent_blocked: "agent says blocked", agent_not_needed: "agent says not needed", checking: "wizard checking", could_not_check: "could not be checked", done_in_code: "passed in code", waiting_deploy: "in the pull request, prove after deploy", waiting_real_event: "waiting for a real event", proven: "proven live", not_needed: "not needed", left_for_you: "left for you", failed: "failed", blocked: "blocked" } as const
     for (const [index, job] of shownJobs.entries()) {
       const glyph = job.state === "done_in_code" || job.state === "proven" ? s.ok("✓") : job.state === "failed" ? s.bad("✗") : job.state === "blocked" || job.state === "agent_blocked" || job.state === "could_not_check" ? s.warn("!") : job.state === "checking" ? s.accent(spinner) : s.dim("·")
-      const words = job.state === "blocked" && job.note ? `blocked: ${sanitize(job.note, 100)}` : job.state === "could_not_check" && job.note ? `could not be checked: ${sanitize(job.note, 100)}` : labels[job.state]
+      const words = job.state === "left_for_you" && job.note ? sanitize(job.note, 400) : job.state === "blocked" && job.note ? `blocked: ${sanitize(job.note, 100)}` : job.state === "could_not_check" && job.note ? `could not be checked: ${sanitize(job.note, 100)}` : labels[job.state]
       lines.push(...wrapRows(`  ${glyph} ${index + 1}/${shownJobs.length} ${sanitize(job.title, 100)} · ${words}`, width, 4, 2))
     }
     return lines

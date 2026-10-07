@@ -1,3 +1,4 @@
+import { isRepositoryWork } from "../install/plan-permission.js"
 // The terminal round (final verify F1, F3, F5 and the terminal QA's display items): what a customer SEES.
 // Every test here fails on the code before the round (each was checked against the old source).
 import { describe, expect, it, vi } from "vitest"
@@ -35,13 +36,12 @@ function readable(lines: readonly string[]): string {
     .replace(/\s+/g, " ")
 }
 
-const line = (id: string, kind: PlanLine["kind"], text: string, extra: Partial<PlanLine> = {}): PlanLine => ({ id, kind, text, requires: "approval", editable: false, ...extra })
+const line = (id: string, kind: PlanLine["kind"], text: string, extra: Partial<PlanLine> = {}): PlanLine => ({ id, kind, text, requires: isRepositoryWork({ kind }) || kind === "agent_budget" ? "info" : "approval", editable: false, ...extra })
 
 /** The plan of the recorded QA run: 15 lines, the wizard's own wording (10 of them were cut at 96 characters). */
 const PLAN_LINES: PlanLine[] = [
   line("consent_mode", "consent_mode", "Consent: choose — collect by default, or wait for your cookie banner's yes (covers Infinite only)", { editable: true }),
   line("conversion_names", "conversion_names", "Conversions: signup", { editable: true }),
-  line("privacy_text", "privacy_text", "Privacy: 4 drafted lines for app/privacy/page.tsx", { editable: true }),
   line("npm_install", "npm_install", "Install the server-lane package (runs its install scripts): npm install @vercel/functions", { editable: true }),
   line("install_provider:infinite", "install_provider", "Install Infinite"),
   line(
@@ -66,7 +66,7 @@ const PLAN_LINES: PlanLine[] = [
 
 const planPayload = (lines: PlanLine[] = PLAN_LINES): AskPayloads["plan"] => ({
   lines,
-  decisions: { consentMode: null, conversionNames: ["signup"], privacyText: "one\ntwo\nthree\nfour", npmInstall: "npm install @vercel/functions" }
+  decisions: { consentMode: null, conversionNames: ["signup"], privacyText: null, npmInstall: "npm install @vercel/functions" }
 })
 
 function planFrame(width: number, height: number, payload = planPayload(), keys = ""): string[] {
@@ -98,7 +98,7 @@ describe("F1: the plan screen shows the FULL text of every line the user approve
       for (const row of box) expect(row).not.toContain("…")
       for (const row of lines) expect(visibleWidth(row)).toBeLessThan(width)
       // The keys stay on screen below the lines.
-      expect(text).toContain("ENTER approve")
+      expect(text).toContain("ENTER continue")
       expect(text).toContain("ESC later")
     })
   }
@@ -106,12 +106,12 @@ describe("F1: the plan screen shows the FULL text of every line the user approve
   it("a wrapped line continues under its own text (a hanging indent), and the box border stays closed in colour", () => {
     const lines = planFrame(80, 90)
     const rows = lines.map(stripAnsi)
-    const first = rows.findIndex((row) => row.includes("[✓] Server lane (Next.js middleware)"))
+    const first = rows.findIndex((row) => row.includes("Server lane (Next.js middleware)"))
     expect(first).toBeGreaterThan(0)
     const textColumn = rows[first]!.indexOf("Server lane")
     // The next row is the same plan line: it starts exactly under the text, with no marker.
     expect(rows[first + 1]!.slice(0, textColumn).replace(/[│ ]/g, "")).toBe("")
-    expect(rows[first + 1]!.charAt(textColumn)).not.toBe(" ")
+    expect(rows[first + 1]!.charAt(textColumn), JSON.stringify([rows[first], rows[first + 1], textColumn])).not.toBe(" ")
     expect(rows[first + 1]).not.toContain("[✓]")
     // Every box row ends with the dim border: a style open at a break never bleeds into it.
     for (const row of lines.filter((candidate) => stripAnsi(candidate).includes("│"))) expect(row.endsWith("\x1b[2m│\x1b[22m")).toBe(true)
@@ -125,7 +125,7 @@ describe("F1: the plan screen shows the FULL text of every line the user approve
   it("negative: a 300-character line is shown in full at 80, 100 and 120 columns (it was cut at 96)", () => {
     const long = `Meta: ${"a very long sentence about one existing tag that must be read before it is approved ".repeat(4)}`.trim().slice(0, 300)
     expect(long.length).toBe(300)
-    const payload = planPayload([PLAN_LINES[0]!, line("remove_duplicate:meta", "remove_duplicate", long), PLAN_LINES[14]!])
+    const payload = planPayload([PLAN_LINES[0]!, line("remove_duplicate:meta", "remove_duplicate", long), PLAN_LINES.at(-1)!])
     for (const width of [80, 100, 120]) {
       const lines = planFrame(width, 40, payload)
       expect(readable(lines), `${width} columns`).toContain(long.replace(/\s+/g, " "))
@@ -150,7 +150,7 @@ describe("F1: the plan screen shows the FULL text of every line the user approve
     expect([...seen].sort()).toEqual(PLAN_LINES.map((planLine) => planLine.id).sort())
     // What is not on screen is counted, so the user knows there is more to read.
     expect(readable(planFrame(120, 36))).toMatch(/↓ \d+ more lines? below/)
-    expect(readable(planFrame(120, 36, planPayload(), "↓".repeat(14)))).toMatch(/↑ \d+ more lines? above/)
+    expect(readable(planFrame(120, 36, planPayload(), "↓".repeat(PLAN_LINES.length - 1)))).toMatch(/↑ \d+ more lines? above/)
   })
 
   it("QA #14: after E the consent line itself says what was chosen (not only the summary above)", () => {
@@ -395,7 +395,7 @@ describe("F1b: every plan line can be read in full in a short terminal", () => {
         // The whole line, not its first row (it read "… or wait for your cookie" and stopped at 80×24).
         expect(text, PLAN_LINES[down]!.id).toContain(fullText(PLAN_LINES[down]!))
         // The question, the keys and the box's bottom border are still on screen.
-        expect(text).toContain("Approve the plan: 14 lines to approve.")
+        expect(text).toContain("Here is what this run will do · 4 explicit choices.")
         expect(text).toContain("ESC later")
         expect(lines.map(stripAnsi).some((row) => row.includes("╰"))).toBe(true)
         expect(lines.map(stripAnsi).join("\n")).not.toContain("…")
@@ -406,7 +406,7 @@ describe("F1b: every plan line can be read in full in a short terminal", () => {
   it("80×24: more than one line is on screen at once, and what is not is counted (it was ONE row of one line)", () => {
     const text = readable(drivePlan(80, 24, planPayload(), []).frames[0]!)
     for (const planLine of PLAN_LINES.slice(0, 4)) expect(text).toContain(fullText(planLine))
-    expect(text).toMatch(/The plan · lines 1–\d+ of 15/)
+    expect(text).toMatch(/The plan · lines 1–\d+ of 14/)
     expect(text).toMatch(/↓ \d+ more lines below/)
     // The summary gave its rows to the lines; the consent decision is still on screen, on its own line.
     expect(text).not.toContain("Your decisions")
@@ -418,7 +418,7 @@ describe("F1b: every plan line can be read in full in a short terminal", () => {
     expect(text).toContain("Your decisions")
     expect(text).toContain("The plan (one screen)")
     expect(text).toContain("Check the live site")
-    expect(text).toContain("ENTER approve")
+    expect(text).toContain("ENTER continue")
   })
 
   it("a line taller than the box scrolls by its wrapped rows: ↓ reads on, every word is shown, then the cursor moves on", () => {
@@ -453,21 +453,22 @@ describe("F1b: every plan line can be read in full in a short terminal", () => {
 })
 
 describe("F11: ENTER never approves a plan line that was not on screen", () => {
-  const needUser = PLAN_LINES.filter((planLine) => planLine.requires !== "info")
+  const needUser = PLAN_LINES
+  const defaultAnswer = { approved: ["consent_mode", "conversion_names"], declined: ["npm_install", "meta_relay"], edits: {} }
 
   it("120×36: the first ENTER shows the next unread lines and says how many are left; it approves only after every line was shown", () => {
     const opened = drivePlan(120, 36, chosenPayload(), [])
     const unreadAtOpen = needUser.filter((planLine) => !readable(opened.frames[0]!).includes(fullText(planLine)))
     expect(unreadAtOpen.length).toBeGreaterThan(3)
     expect(readable(opened.frames[0]!)).toContain("ENTER read on")
-    expect(readable(opened.frames[0]!)).not.toContain("ENTER approve")
+    expect(readable(opened.frames[0]!)).not.toContain("ENTER continue")
 
     const once = drivePlan(120, 36, chosenPayload(), ["enter"])
     expect(once.answer).toBeUndefined()
     // It moved to the first line that was not on screen, and that line is now on screen in full.
     expect(PLAN_LINES[once.state.cursor]!.id).toBe(unreadAtOpen[0]!.id)
     expect(readable(once.frames.at(-1)!)).toContain(fullText(unreadAtOpen[0]!))
-    expect(readable(once.frames.at(-1)!)).toMatch(/(\d+ more lines? to read before you approve: ENTER shows the next, ↓ scrolls\.|That is the whole plan\. ENTER approves it as shown\.)/)
+    expect(readable(once.frames.at(-1)!)).toMatch(/(\d+ more lines? to read before you continue: ENTER shows the next, ↓ scrolls\.|That is the whole plan\. ENTER continues with it as shown\.)/)
 
     // ENTER again and again: it answers in the end, and by then every line was on a screen in full.
     const keys: PlanKey[] = []
@@ -476,12 +477,12 @@ describe("F11: ENTER never approves a plan line that was not on screen", () => {
       keys.push("enter")
       run = drivePlan(120, 36, chosenPayload(), keys)
     }
-    expect(keys.length).toBeGreaterThan(2)
+    expect(keys.length).toBeGreaterThanOrEqual(2)
     const everShown = run.frames.map(readable).join(" ")
     for (const planLine of needUser) expect(everShown, planLine.id).toContain(fullText(planLine))
-    expect(readable(run.frames.at(-1)!)).toContain("That is the whole plan. ENTER approves it as shown.")
-    expect(readable(run.frames.at(-1)!)).toContain("ENTER approve")
-    expect(run.answer).toEqual({ approved: needUser.map((planLine) => planLine.id), declined: [], edits: {} })
+    expect(readable(run.frames.at(-1)!)).toContain("That is the whole plan. ENTER continues with it as shown.")
+    expect(readable(run.frames.at(-1)!)).toContain("ENTER continue")
+    expect(run.answer).toEqual(defaultAnswer)
   })
 
   for (const [width, height] of [
@@ -496,15 +497,15 @@ describe("F11: ENTER never approves a plan line that was not on screen", () => {
       while (run.answer === undefined && keys.length < 40) {
         keys.push("enter")
         run = drivePlan(width, height, chosenPayload(), keys)
-        const count = /(\d+) more lines? to read before you approve/.exec(readable(run.frames.at(-1)!))?.[1]
+        const count = /(\d+) more lines? to read before you continue/.exec(readable(run.frames.at(-1)!))?.[1]
         if (run.answer === undefined && count) left.push(Number(count))
       }
-      expect(keys.length).toBeGreaterThan(2)
+      expect(keys.length).toBeGreaterThanOrEqual(2)
       expect(left.length).toBeGreaterThan(0)
       expect([...left].sort((a, b) => b - a)).toEqual(left)
       const everShown = run.frames.map(readable).join(" ")
       for (const planLine of needUser) expect(everShown, planLine.id).toContain(fullText(planLine))
-      expect(run.answer).toMatchObject({ declined: [] })
+      expect(run.answer).toMatchObject({ declined: defaultAnswer.declined })
     })
   }
 
@@ -512,16 +513,16 @@ describe("F11: ENTER never approves a plan line that was not on screen", () => {
     const toMeta = PLAN_LINES.findIndex((planLine) => planLine.id === "meta_relay")
     const keys: PlanKey[] = [...Array<PlanKey>(toMeta).fill("↓"), "space", "↓", "↓", "enter"]
     const run = drivePlan(80, 24, chosenPayload(), keys)
-    expect(run.answer).toEqual({ approved: needUser.filter((planLine) => planLine.id !== "meta_relay").map((planLine) => planLine.id), declined: ["meta_relay"], edits: {} })
+    expect(run.answer).toEqual({ approved: [...defaultAnswer.approved, "meta_relay"], declined: ["npm_install"], edits: {} })
   })
 
-  it("negative: a plan that is on screen whole is approved by the first ENTER, and an unread note does not hold it", () => {
-    expect(drivePlan(120, 90, chosenPayload(), ["enter"]).answer).toMatchObject({ declined: [] })
-    // The 7-day note (`requires: "info"`) is nothing the user decides: with every other line read, ENTER approves.
-    const state = { ...OVERLAYS.plan.init(chosenPayload()), seen: needUser.map((planLine) => planLine.id) }
+  it("a fully shown plan continues on ENTER; unread work still needs to be shown", () => {
+    expect(drivePlan(120, 90, chosenPayload(), ["enter"]).answer).toMatchObject({ declined: defaultAnswer.declined })
+    // The 7-day note (`requires: "info"`) is nothing the user decides: with every other line read, ENTER continues.
+    const state = { ...OVERLAYS.plan.init(chosenPayload()), seen: needUser.filter(line => line.id !== "checkin").map((planLine) => planLine.id) }
     const ctx: OverlayContext = { width: 74, maxBodyLines: 8, styles: makeStyles(false), sanitize: makeTestSanitizer(), spinner: "⠋" }
     expect(state.seen).not.toContain("checkin")
-    expect("answer" in OVERLAYS.plan.onKey(chosenPayload(), state, { name: "enter" }, ctx)).toBe(true)
+    expect("answer" in OVERLAYS.plan.onKey(chosenPayload(), state, { name: "enter" }, ctx)).toBe(false)
   })
 
   it("the consent choice still comes first: with none chosen ENTER asks for it, whatever was read", () => {
@@ -540,7 +541,7 @@ describe("F11: ENTER never approves a plan line that was not on screen", () => {
     stdin.type("\r")
     await flushMicrotasks()
     expect(store.answers).toEqual([])
-    expect(readable(ui.lastFrame())).toMatch(/\d+ more lines? to read before you approve/)
+    expect(readable(ui.lastFrame())).toMatch(/\d+ more lines? to read before you continue/)
     for (let presses = 0; presses < 40 && store.answers.length === 0; presses += 1) {
       stdin.type("\r")
       await flushMicrotasks()

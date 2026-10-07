@@ -79,8 +79,8 @@ function decisionsView(payload: PlanPayload, state: PlanState, ctx: OverlayConte
 function lineMark(line: PlanLine, state: PlanState, ctx: OverlayContext): string {
   const s = ctx.styles
   if (line.requires === "approval") return state.skipped.includes(line.id) ? s.dim("[ ]") : s.ok("[✓]")
-  if (line.requires === "user_action") return s.you(" → ")
-  return s.dim(" · ")
+  if (line.requires === "user_action") return ` ${s.you("→")} `
+  return ` ${s.dim("·")} `
 }
 
 function lineText(line: PlanLine, state: PlanState, ctx: OverlayContext): string {
