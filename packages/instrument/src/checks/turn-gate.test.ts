@@ -9,6 +9,7 @@ import { diffLines, hunkLines, splitLines } from "../agents/line-diff.js"
 import { FIXED_NOW } from "../../test/wizard/fixture-fetch.js"
 import { renderInfiniteBrowserTag } from "../runtime/infinite-browser.js"
 import { buildServerLaneModuleSource } from "../server-lane/runtime-source.js"
+import { META_PAGE_CHANGE_SCRIPT } from "../jobs/briefs.js"
 import { HOST_DENY_V1 } from "../wizard/contracts/host-deny.js"
 import type { TurnDiff } from "../wizard/contracts/jobs.js"
 
@@ -218,6 +219,11 @@ describe("review I1 P1-3: code the wizard's own build executes is gated like a c
     expect(rules(diff("index.html", '<script>fetch("https://api.example.com/x")</script>'))).not.toContain("build_time_fetch")
     // A relative-path request is still fine in server code.
     expect(rules(diff("app/api/signup/route.ts", '  await fetch("/api/other")'))).not.toContain("build_time_fetch")
+  })
+
+  it("accepts the supplied Meta page-change script in server-compiled page code without weakening computed-global checks", () => {
+    expect(rules(diff("app/layout.tsx", META_PAGE_CHANGE_SCRIPT.split("\n")), server("export default function RootLayout() {}\n"))).not.toContain("computed_global")
+    expect(rules(diff("app/layout.tsx", "Reflect.get(window, name)"), server("export default function RootLayout() {}\n"))).toContain("computed_global")
   })
 
   it("an unreadable file is treated as executed (fail closed)", () => {

@@ -88,15 +88,15 @@ export function capturePasteAsWritten(context: "component" | "html" | "typescrip
  */
 export const GA4_PAGE_CHANGE_SCRIPT = [
   "(function () {",
-  "  var marker = '__infiniteGa4PageChange';",
-  "  if (Reflect.get(window, marker)) return;",
-  "  Reflect.set(window, marker, true);",
+  "  var browser = Object(window);",
+  "  if (browser.__infiniteGa4PageChange) return;",
+  "  browser.__infiniteGa4PageChange = true;",
   "  var last = location.pathname + location.search;",
   "  function pageChanged() {",
   "    var next = location.pathname + location.search;",
   "    if (next === last) return;",
   "    last = next;",
-  "    var send = Reflect.get(window, 'gtag');",
+  "    var send = browser.gtag;",
   "    if (typeof send === 'function') send('event', 'page_view', { page_location: location.href, page_title: document.title });",
   "  }",
   "  var originalPushState = history.pushState;",
@@ -110,7 +110,7 @@ export const GA4_PAGE_CHANGE_SCRIPT = [
 /** The same bounded History API subscription, emitting only on a changed page after initial load. */
 export const META_PAGE_CHANGE_SCRIPT = GA4_PAGE_CHANGE_SCRIPT
   .replaceAll("__infiniteGa4PageChange", "__infiniteMetaPageChange")
-  .replace("Reflect.get(window, 'gtag')", "Reflect.get(window, 'fbq')")
+  .replace("browser.gtag", "browser.fbq")
   .replace("send('event', 'page_view', { page_location: location.href, page_title: document.title })", "send('track', 'PageView')")
 
 /** R4-6: the one line that turns Meta's automatic events off on pixel `pixelId`, placed right before its init. */
