@@ -97,7 +97,7 @@ exports[`renderFrame > draws the pending ask as one overlay box in place of the 
  │   [✓] Consent setting                                                                                              │
  │    →  Connect GA4 in Infinite                                                                                      │
  │                                                                                                                    │
- │ ENTER continue  ·  SPACE select explicit choice  ·  E edit a line  ·  ↑↓ move  ·  ESC later                        │
+ │ ENTER continue  ·  SPACE include/exclude  ·  E edit a line  ·  ↑↓ move  ·  ESC later                               │
  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  Ctrl+C stop"
 `;
