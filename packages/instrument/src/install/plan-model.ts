@@ -282,7 +282,7 @@ export function seedItemsAfterApprovals(
     lines ??
     plan.lines.map((planLine) => ({
       id: planLine.id,
-      approved: isContinuedWork(planLine) ? true : planLine.requires !== "approval" ? null : approvals.declined.includes(planLine.id) ? false : approvals.approved.includes(planLine.id) ? true : null
+      approved: approvals.declined.includes(planLine.id) ? false : isContinuedWork(planLine) ? true : planLine.requires !== "approval" ? null : approvals.approved.includes(planLine.id) ? true : null
     }))
   return gateSeededItems(plan, { lines: [...lineStates] }, applied)
 }
@@ -1268,7 +1268,7 @@ export function resolvePlanAnswers(
   options: { consentFlag: "required" | "not_required" | null }
 ): ResolvedPlanAnswers {
   const known = new Map(plan.lines.map((planLine) => [planLine.id, planLine]))
-  const declined = new Set((answer?.declined ?? []).filter((id) => known.has(id) && !isContinuedWork(known.get(id)!)))
+  const declined = new Set((answer?.declined ?? []).filter((id) => known.has(id)))
   const edits: Record<string, string> = {}
   for (const [id, value] of Object.entries(answer?.edits ?? {})) {
     const planLine = known.get(id)
@@ -1281,7 +1281,7 @@ export function resolvePlanAnswers(
       .filter((id) => known.get(id)!.requires === "approval")
   )
 
-  for (const planLine of plan.lines) if (isContinuedWork(planLine)) approved.add(planLine.id)
+  for (const planLine of plan.lines) if (isContinuedWork(planLine) && !declined.has(planLine.id)) approved.add(planLine.id)
   let consentMode: ResolvedPlanAnswers["consentMode"] = null
   if (options.consentFlag) {
     consentMode = options.consentFlag
@@ -1311,7 +1311,7 @@ export function resolvePlanAnswers(
   const npmAsked = known.has(DECISION_LINE_IDS.npmInstall)
   const lines = plan.lines.map((planLine) => ({
     id: planLine.id,
-    approved: isContinuedWork(planLine) ? true : planLine.requires !== "approval" ? null : approved.has(planLine.id) ? true : declined.has(planLine.id) ? false : null
+    approved: declined.has(planLine.id) ? false : isContinuedWork(planLine) ? true : planLine.requires !== "approval" ? null : approved.has(planLine.id) ? true : null
   }))
   return {
     consentMode,

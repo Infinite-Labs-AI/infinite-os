@@ -704,8 +704,8 @@ const PLAN_WIDE_KINDS: ReadonlySet<PlanLineKind> = new Set(["server_lane", "conv
  */
 export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: PlanModel, approvals: PlanApprovals): ChecklistItem[] {
   const automatic = plan.lines.filter(isContinuedWork).map(line => line.id)
-  const declined = new Set(approvals.declined.filter(id => !automatic.includes(id)))
-  const approved = new Set([...approvals.approved, ...automatic])
+  const declined = new Set(approvals.declined)
+  const approved = new Set([...approvals.approved, ...automatic].filter(id => !declined.has(id)))
   const conversionNames = approvedConversionNames(plan, approvals)
   const out: ChecklistItem[] = []
   for (const candidate of candidates) {

@@ -26,6 +26,8 @@ export interface SavedPlanApprovals {
   /** The candidates `before` seeded, exactly as the plan saw them (state.jobs is replaced after the plan). */
   candidates: ChecklistItem[]
   approvals: PlanApprovals
+  /** Explicit exclusions survive plan changes, including a temporarily absent line. */
+  excluded?: string[]
   /** Legacy persistence field; current plans always store null. */
   privacyText: string | null
   /**

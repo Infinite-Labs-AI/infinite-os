@@ -59,23 +59,23 @@ function setup(options: Partial<WizardOptions>, answers: AnswersFile | null = nu
   return { store, asks }
 }
 
-const NEVER_LINES = ["L7", "L8", "L9", "L10", "L11", "L12", "L13", "L14", "L15", "L16", "L17", "L18"]
+const NEVER_LINES = ["L8", "L9", "L10", "L18"]
 
 describe("--yes (§3d.4 YES_POLICY)", () => {
   it("approves exactly the yes-lines and leaves every never-line unanswered", async () => {
     const { store, asks } = setup({ yes: true })
     const answer = await asks.ask("plan", PLAN)
     expect(store.getSnapshot().pendingAsk).toBeNull()
-    expect(answer).toEqual({ approved: ["L1", "L2", "L4", "L6"], declined: [], edits: {} })
+    expect(answer).toEqual({ approved: ["L1", "L2", "L4", "L6", "L7", "L11", "L12", "L13", "L14", "L15", "L16", "L17"], declined: [], edits: {} })
     for (const id of NEVER_LINES) expect(JSON.stringify(answer)).not.toContain(`"${id}"`)
     expect(PLAN_LINE_KINDS.every((kind) => kind in YES_POLICY)).toBe(true)
   })
 
-  it("a forced --yes approval of a never-line throws (negative: conversion names, privacy, an adopted improve)", () => {
+  it("a forced --yes approval of a human decision throws; repository improvements are included", () => {
     expect(() => approveUnderYes(line("x", "conversion_names"))).toThrow(YesPolicyViolation)
     expect(() => approveUnderYes(line("x", "privacy_text"))).toThrow(YesPolicyViolation)
-    expect(() => approveUnderYes(line("x", "improve_additive", { ownership: "adopted" }))).toThrow(YesPolicyViolation)
-    expect(() => approveUnderYes(line("x", "improve_additive"))).toThrow(YesPolicyViolation)
+    expect(approveUnderYes(line("x", "improve_additive", { ownership: "adopted" }))).toBe("x")
+    expect(approveUnderYes(line("x", "improve_additive"))).toBe("x")
     expect(approveUnderYes(line("x", "install_provider"))).toBe("x")
   })
 
@@ -167,21 +167,22 @@ describe("nested mode (§3d.7): user-only asks stay human", () => {
   it("an answers file carrying consentMode / conversion names / privacy / changes to existing tags is IGNORED for those lines", async () => {
     const { asks } = setup({ nested: true, json: true }, nestedAnswers)
     const answer = (await asks.ask("plan", PLAN)) as { approved: string[]; declined: string[]; edits: Record<string, string> }
-    expect(answer.approved).toEqual(["L1"])
+    expect(answer.approved).toEqual(["L1", "L11"])
     expect(answer.edits).toEqual({})
-    for (const id of ["L8", "L9", "L10", "L11", "L18"]) expect(answer.approved).not.toContain(id)
+    for (const id of ["L8", "L9", "L10", "L18"]) expect(answer.approved).not.toContain(id)
   })
 
   it("negative: outside nested mode the same file DOES answer them", async () => {
     const { asks } = setup({ nested: false, json: true }, nestedAnswers)
     const answer = (await asks.ask("plan", PLAN)) as { approved: string[]; edits: Record<string, string> }
-    expect(answer.approved).toEqual(expect.arrayContaining(["L8", "L9", "L10", "L11", "L18"]))
+    expect(answer.approved).toEqual(expect.arrayContaining(["L8", "L9", "L10", "L18"]))
     expect(answer.edits.L8).toBe("required")
   })
 
   it("asks the user-only lines through the wizard's own /dev/tty prompt when there is one", async () => {
     const asked: string[] = []
     const tty: TtyPrompter = {
+      showPlan: async () => {},
       planLine: async (planLine) => {
         asked.push(planLine.id)
         return planLine.kind === "consent_mode" ? { approved: true, edit: "not_required" } : { approved: false }
@@ -258,4 +259,32 @@ describe("a display-only ask closes on its own signal (O1-01)", () => {
     await expect(asks.ask("link-code", LINK, { signal: close.signal })).resolves.toBe("__cancelled__")
     expect(store.getSnapshot().pendingAsk).toBeNull()
   })
+})
+
+it("nested mode shows every plan line before asking decisions and preserves file refusals", async () => {
+  const shown: string[] = []
+  const tty: TtyPrompter = {
+    showPlan: async payload => { shown.push(...payload.lines.map(item => item.id)) },
+    planLine: async () => { expect(shown).toEqual(PLAN.lines.map(item => item.id)); return null },
+    ask: async () => ASK_TIMEOUT as never,
+    close() {}
+  }
+  const { asks } = setup({ nested: true, yes: true }, { v: 1, plan: { declined: ["L7", "L11", "L18"] } }, tty)
+  const answer = await asks.ask("plan", PLAN)
+  expect(shown).toEqual(PLAN.lines.map(item => item.id))
+  expect(answer).toMatchObject({ declined: ["L7", "L11", "L18"] })
+})
+
+it("nested mode continues shown repository work without inventing another question", async () => {
+  const payload: AskPayloads["plan"] = { ...PLAN, lines: [line("repo", "improve_additive", { requires: "info" })] }
+  const shown: string[] = []
+  const tty: TtyPrompter = {
+    showPlan: async value => { shown.push(...value.lines.map(item => item.id)) },
+    planLine: async () => { throw new Error("Repository work needs no approval question") },
+    ask: async () => ASK_TIMEOUT as never,
+    close() {}
+  }
+  const { asks } = setup({ nested: true }, null, tty)
+  expect(await asks.ask("plan", payload)).toEqual({ approved: [], declined: [], edits: {} })
+  expect(shown).toEqual(["repo"])
 })

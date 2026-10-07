@@ -16,6 +16,7 @@
 //   verify F18), so it is marked on the next key, once it was drawn.
 // - the box keeps its height while the plan scrolls (F19): the body takes every row it was given, so a notice
 //   or a shorter window never shrinks the box and brings the step list back above it.
+import { isContinuedWork } from "../../install/plan-permission.js"
 import { ASK_CANCELLED, type AskPayloads, type PlanLine } from "../../wizard/contracts/asks.js"
 import { wrapAnsi } from "../ansi.js"
 import type { Key } from "../keys.js"
@@ -25,7 +26,7 @@ import { OVERLAY_TEXT_CAPS } from "./types.js"
 
 export interface PlanState {
   cursor: number
-  /** Per approval line: false = skipped. Absent = approved (the plan as shown). */
+  /** Excluded repository actions and unchecked explicit choices. */
   skipped: string[]
   edits: Record<string, string>
   editing: { lineId: string; buffer: string } | null
@@ -78,13 +79,17 @@ function decisionsView(payload: PlanPayload, state: PlanState, ctx: OverlayConte
 
 function lineMark(line: PlanLine, state: PlanState, ctx: OverlayContext): string {
   const s = ctx.styles
+  if (isContinuedWork(line)) return state.skipped.includes(line.id) ? s.dim("[-]") : s.ok("[+]")
   if (line.requires === "approval") return state.skipped.includes(line.id) ? s.dim("[ ]") : s.ok("[✓]")
   if (line.requires === "user_action") return ` ${s.you("→")} `
   return ` ${s.dim("·")} `
 }
 
 function lineText(line: PlanLine, state: PlanState, ctx: OverlayContext): string {
-  let text = ctx.sanitize(line.text, Math.max(OVERLAY_TEXT_CAPS.line, line.text.length))
+  let text = line.text.split("\n").map(row => {
+    const indent = /^ */.exec(row)![0]
+    return indent + ctx.sanitize(row.slice(indent.length), Math.max(OVERLAY_TEXT_CAPS.line, row.length))
+  }).join("\n")
   if (line.measured) text += ctx.styles.dim(` (${ctx.sanitize(String(line.measured.value), 40)} · ${ctx.sanitize(line.measured.window, 40)})`)
   const edit = state.edits[line.id]
   // The consent line's edit is one of two values: the marker says it in words (never the stored value).
@@ -104,7 +109,10 @@ function lineRows(line: PlanLine, index: number, state: PlanState, ctx: OverlayC
   const s = ctx.styles
   const pointer = index === state.cursor ? s.accent("▸") : " "
   const body = `${pointer} ${lineMark(line, state, ctx)} ${lineText(line, state, ctx)}`
-  return wrapAnsi(index === state.cursor ? s.bold(body) : body, ctx.width, ROW_PREFIX_WIDTH)
+  return body.split("\n").flatMap((row, n) => {
+    const text = n === 0 ? row : " ".repeat(ROW_PREFIX_WIDTH) + row
+    return wrapAnsi(index === state.cursor ? s.bold(text) : text, ctx.width, ROW_PREFIX_WIDTH)
+  })
 }
 
 /**
@@ -238,7 +246,7 @@ function render(payload: PlanPayload, state: PlanState, ctx: OverlayContext): Ov
     body: [...at.top, ...rows, ...hold, ...at.footer],
     keys: state.editing
       ? ["ENTER save", "ESC stop editing"]
-      : [unread > 0 ? "ENTER read on" : "ENTER continue", "SPACE select explicit choice", "E edit a line", "↑↓ move", "ESC later"]
+      : [unread > 0 ? "ENTER read on" : "ENTER continue", "SPACE include/exclude", "E edit a line", "↑↓ move", "ESC later"]
   }
 }
 
@@ -304,7 +312,7 @@ function handleKey(payload: PlanPayload, state: PlanState, key: Key, ctx: Overla
     case "tab":
       return { state: scrollInLine(payload, state, ctx, 1) ?? { ...state, notice: null, lineScroll: 0, cursor: lines.length ? (state.cursor + 1) % lines.length : 0 } }
     case "space": {
-      if (!current || current.requires !== "approval") return { state }
+      if (!current || (current.requires !== "approval" && !isContinuedWork(current))) return { state }
       const skipped = state.skipped.includes(current.id) ? state.skipped.filter((id) => id !== current.id) : [...state.skipped, current.id]
       return { state: { ...state, skipped } }
     }
@@ -329,7 +337,7 @@ function handleKey(payload: PlanPayload, state: PlanState, key: Key, ctx: Overla
       // there is no screen to have missed a line on.
       const more = ctx ? readOn(payload, state, ctx) : null
       if (more) return { state: more }
-      const approvalLines = lines.filter((line) => line.requires === "approval")
+      const approvalLines = lines.filter((line) => line.requires === "approval" || isContinuedWork(line))
       const approved = approvalLines.filter((line) => !state.skipped.includes(line.id)).map((line) => line.id)
       const declined = approvalLines.filter((line) => state.skipped.includes(line.id)).map((line) => line.id)
       return { state, answer: { approved, declined, edits: { ...state.edits } } }
@@ -354,7 +362,7 @@ function onKey(payload: PlanPayload, state: PlanState, key: Key, ctx?: OverlayCo
 
 export const planOverlay: Overlay<"plan", PlanState> = {
   kind: "plan",
-  init: (payload) => ({ cursor: 0, skipped: payload.lines.filter(line => line.requires === "approval" && !["consent_mode", "conversion_names"].includes(line.kind)).map(line => line.id), edits: {}, editing: null, notice: null, seen: [], lineScroll: 0, readRows: {} }),
+  init: (payload) => ({ cursor: 0, skipped: [...new Set([...(payload.excluded ?? []), ...payload.lines.filter(line => line.requires === "approval" && !["consent_mode", "conversion_names"].includes(line.kind)).map(line => line.id)])], edits: {}, editing: null, notice: null, seen: [], lineScroll: 0, readRows: {} }),
   render,
   onKey
 }

@@ -4,7 +4,7 @@
 //
 // The rules, in order of precedence:
 // - NESTED mode (§3d.7, R2-14): an `--answers` file never satisfies a user-only item (consent mode,
-//   conversion names, privacy text, `meta_relay`, every line that changes an existing tag, teammate
+//   conversion names, account writes, packages, API budgets, `meta_relay`, teammate
 //   comments, uninstall pieces, "start fresh?"). Those are asked only through a prompt the wizard opens on
 //   /dev/tty itself; with no controlling terminal they stay unanswered and the step parks NEEDS_ANSWERS.
 //   Every other nested ask is answered from the answers file, or not at all (exit 3, resumable).
@@ -14,6 +14,7 @@
 // - An `--answers` file (outside nested mode) answers what it names.
 // - Otherwise the ask opens in the store and the UI answers it.
 import { readFileSync } from "node:fs"
+import { isContinuedWork } from "../install/plan-permission.js"
 
 import {
   ASK_CANCELLED,
@@ -150,7 +151,7 @@ export class YesPolicyViolation extends Error {
   }
 }
 
-/** The one place `--yes` approves a line. Throws for every kind YES_POLICY marks "never" (and an adopted improve). */
+/** The one place `--yes` approves a line. Throws for every kind YES_POLICY marks "never". */
 export function approveUnderYes(line: Pick<PlanLine, "id" | "kind" | "ownership">): string {
   if (!yesApproves(line)) throw new YesPolicyViolation(line)
   return line.id
@@ -184,6 +185,8 @@ export function yesPlanAnswer(lines: readonly PlanLine[], consentMode: WizardOpt
 
 /** A prompt the WIZARD opens on the controlling terminal (never the parent agent's stdin). */
 export interface TtyPrompter {
+  /** Shows the complete plan, including repository work and owner handoffs, before decision prompts. */
+  showPlan(payload: AskPayloads["plan"]): Promise<void>
   /** Asks one plan line ("Approve: <text>? [y/N]"); consent and names lines take the typed value. */
   planLine(line: PlanLine): Promise<{ approved: boolean; edit?: string } | null>
   ask<K extends AskKind>(kind: K, payload: AskPayloads[K]): Promise<AskAnswer<K>>
@@ -265,14 +268,14 @@ export function planAnswerFromFile(lines: readonly PlanLine[], answers: AnswersF
   return { approved: [...approved], declined: [...declined], edits }
 }
 
-/** Removes every user-only line from a plan answer (nested mode: a file never answers them). */
+/** Removes user-only approvals and edits; a refusal is always binding, including in nested mode. */
 export function withoutUserOnlyLines(lines: readonly PlanLine[], answer: AskAnswers["plan"]): AskAnswers["plan"] {
   const userOnly = new Set(lines.filter((line) => isNestedUserOnly(line)).map((line) => line.id))
   const edits: Record<string, string> = {}
   for (const [id, value] of Object.entries(answer.edits)) if (!userOnly.has(id)) edits[id] = value
   return {
     approved: answer.approved.filter((id) => !userOnly.has(id)),
-    declined: answer.declined.filter((id) => !userOnly.has(id)),
+    declined: [...answer.declined],
     edits
   }
 }
@@ -342,6 +345,7 @@ export function createWizardAsks(input: WizardAsksOptions): WizardAsks {
     if (options.yes) answer = mergePlanAnswers(withoutUserOnlyLines(payload.lines, yesPlanAnswer(payload.lines, null)), answer)
     // The user-only lines: only through the wizard's own /dev/tty prompt, never the file.
     if (ttyPrompter) {
+      await ttyPrompter.showPlan(payload)
       for (const line of payload.lines) {
         if (!isNestedUserOnly(line) || line.requires !== "approval") continue
         const reply = await ttyPrompter.planLine(line)
@@ -354,7 +358,7 @@ export function createWizardAsks(input: WizardAsksOptions): WizardAsks {
       }
     }
     const anything = answer.approved.length + answer.declined.length + Object.keys(answer.edits).length > 0
-    return announce("plan", payload, anything ? answer : ASK_TIMEOUT)
+    return announce("plan", payload, anything || payload.lines.some(isContinuedWork) ? answer : ASK_TIMEOUT)
   }
 
   const ask = (async <K extends AskKind>(kind: K, payload: AskPayloads[K], askOptions?: AskOptions): Promise<AskAnswer<K>> => {

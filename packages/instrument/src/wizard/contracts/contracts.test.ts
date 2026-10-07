@@ -1111,7 +1111,7 @@ describe("YES_POLICY (§3d.4)", () => {
     expect(yesApproves({ kind: "improve_additive", ownership: "managed" })).toBe(true)
   })
 
-  it("negatives: --yes never approves a line that changes an existing tag, sends data, or is the user's decision", () => {
+  it("negatives: --yes never approves questions, packages, account writes or metered costs", () => {
     for (const kind of [
       "npm_install",
       "account_settings",
@@ -1119,21 +1119,14 @@ describe("YES_POLICY (§3d.4)", () => {
       "consent_mode",
       "conversion_names",
       "privacy_text",
-      "remove_duplicate",
-      "preview_guard_adopted",
-      "autoconfig_off_adopted",
-      "sensitive_pages",
-      "posthog_defaults_bump_adopted",
-      "capture_beside_adopted_pixel",
-      "retire_fbc_writer",
       "meta_relay",
       "user_action"
     ] as const) {
       expect(yesApproves({ kind }), kind).toBe(false)
     }
-    expect(yesApproves({ kind: "improve_additive", ownership: "adopted" })).toBe(false)
-    // Fail-safe: a line that does not say whose provider it improves is treated as adopted.
-    expect(yesApproves({ kind: "improve_additive" })).toBe(false)
+    expect(yesApproves({ kind: "improve_additive", ownership: "adopted" })).toBe(true)
+    // Repository permission applies to existing providers too; explicit declines still win.
+    expect(yesApproves({ kind: "improve_additive" })).toBe(true)
     expect(NESTED_USER_ONLY_LINE_KINDS).toContain("consent_mode")
     expect(NESTED_USER_ONLY_LINE_KINDS).toContain("meta_relay")
     expect(NESTED_USER_ONLY_LINE_KINDS).not.toContain("install_provider")
@@ -1302,10 +1295,10 @@ describe("allowlist, nested mode, run state and git (§3e, §3d.7, §3g)", () =>
     }
   })
 
-  it("nested mode: a managed improve_additive is not user-only; an adopted or unspecified one is; never kinds always are", () => {
+  it("nested mode: repository improvements are shown; human decisions stay user-only", () => {
     expect(isNestedUserOnly({ kind: "improve_additive", ownership: "managed" })).toBe(false)
-    expect(isNestedUserOnly({ kind: "improve_additive", ownership: "adopted" })).toBe(true)
-    expect(isNestedUserOnly({ kind: "improve_additive" })).toBe(true)
+    expect(isNestedUserOnly({ kind: "improve_additive", ownership: "adopted" })).toBe(false)
+    expect(isNestedUserOnly({ kind: "improve_additive" })).toBe(false)
     expect(isNestedUserOnly({ kind: "consent_mode" })).toBe(true)
     expect(isNestedUserOnly({ kind: "install_provider" })).toBe(false)
     for (const kind of NESTED_USER_ONLY_LINE_KINDS) if (kind !== "improve_additive") expect(isNestedUserOnly({ kind }), kind).toBe(true)

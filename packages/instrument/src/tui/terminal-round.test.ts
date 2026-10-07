@@ -454,7 +454,7 @@ describe("F1b: every plan line can be read in full in a short terminal", () => {
 
 describe("F11: ENTER never approves a plan line that was not on screen", () => {
   const needUser = PLAN_LINES
-  const defaultAnswer = { approved: ["consent_mode", "conversion_names"], declined: ["npm_install", "meta_relay"], edits: {} }
+  const defaultAnswer = { approved: PLAN_LINES.filter(line => line.requires === "info" && isRepositoryWork(line) || ["consent_mode", "conversion_names"].includes(line.kind)).map(line => line.id), declined: ["npm_install", "meta_relay"], edits: {} }
 
   it("120×36: the first ENTER shows the next unread lines and says how many are left; it approves only after every line was shown", () => {
     const opened = drivePlan(120, 36, chosenPayload(), [])

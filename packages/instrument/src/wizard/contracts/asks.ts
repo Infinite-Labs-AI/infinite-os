@@ -62,11 +62,7 @@ export const PLAN_LINE_KINDS = [
 ] as const
 export type PlanLineKind = (typeof PLAN_LINE_KINDS)[number]
 
-/**
- * §3d.3 `PlanLine`. `ownership` is an ADDITIVE field (F0 deviation, see the F0 note): `improve_additive`
- * is auto-approvable under `--yes` only on a MANAGED provider (the wizard's own code) and never on an
- * ADOPTED one, so the line must say which. Absent = treated as adopted (fail-safe: never auto-approved).
- */
+/** A shown repository action, explicit decision, or owner handoff. Ownership is explanatory. */
 export interface PlanLine {
   id: string
   kind: PlanLineKind
@@ -88,8 +84,8 @@ export interface PlanDecisionsPayload {
 /** `yes` = `--yes` approves it; `never` = only the user; `n/a` = shown only (user_action lines). */
 export type YesPolicyValue = "yes" | "never" | "n/a"
 
-/** §3d.4 `YES_POLICY`. `improve_additive` depends on the provider's ownership (R2-10). */
-export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue | { managed: "yes"; adopted: "never" } } = {
+/** Repository work continues under wizard permission; questions, costs and account writes stay explicit. */
+export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue } = {
   install_provider: "yes",
   server_lane: "yes",
   npm_install: "never",
@@ -97,24 +93,24 @@ export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue | { mana
   preview_guard_managed: "yes",
   agent_budget: "never",
   // It rewrites the customer's api_host / capture_pageview on an adopted provider.
-  improve_additive: { managed: "yes", adopted: "never" },
+  improve_additive: "yes",
   // Needs --consent-mode; a missing consent mode parks the run at `plan`.
   consent_mode: "never",
   conversion_names: "never",
   privacy_text: "never",
-  // Each changes an existing tag or sends data.
-  remove_duplicate: "never",
-  preview_guard_adopted: "never",
-  autoconfig_off_adopted: "never",
-  sensitive_pages: "never",
-  posthog_defaults_bump_adopted: "never",
-  capture_beside_adopted_pixel: "never",
-  retire_fbc_writer: "never",
+  // Repository improvements can be excluded; --yes is not permission to ignore a no.
+  remove_duplicate: "yes",
+  preview_guard_adopted: "yes",
+  autoconfig_off_adopted: "yes",
+  sensitive_pages: "yes",
+  posthog_defaults_bump_adopted: "yes",
+  capture_beside_adopted_pixel: "yes",
+  retire_fbc_writer: "yes",
   meta_relay: "never",
-  // §3x.3 (F6): a change to the customer's own Meta tag.
-  meta_spa_page_views: "never",
-  // R4-8: a change to the customer's own GA4 tag.
-  ga4_spa_page_views: "never",
+  // Repository page-view fixes are included with the rest of the shown plan.
+  meta_spa_page_views: "yes",
+  // GA4 page-view fix, subject to the same exclusions.
+  ga4_spa_page_views: "yes",
   // The D16 recommendation: an informational default the user can change.
   meta_goal: "n/a",
   // GTM edit, Traffic Permissions, connect a tool, the GA4 page-change setting: shown only.
@@ -126,30 +122,15 @@ export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue | { mana
 /** Whether `--yes` approves this line. */
 export function yesApproves(line: Pick<PlanLine, "kind" | "ownership">): boolean {
   const policy = YES_POLICY[line.kind]
-  if (typeof policy === "object") return (line.ownership ?? "adopted") === "managed" && policy.managed === "yes"
   return policy === "yes"
 }
 
-/**
- * The plan line kinds that MAY stay HUMAN in nested-agent mode (§3d.7, R2-14): every `never` kind (consent,
- * conversion names, privacy text, meta_relay, every line that changes an existing tag) plus `improve_additive`,
- * which is user-only ONLY when it improves an ADOPTED provider. A kind-level list cannot say that, so this is the
- * conservative superset; decide a concrete line with `isNestedUserOnly(line)`.
- */
-export const NESTED_USER_ONLY_LINE_KINDS: readonly PlanLineKind[] = PLAN_LINE_KINDS.filter((kind) => {
-  const policy = YES_POLICY[kind]
-  return policy === "never" || typeof policy === "object"
-})
+/** Questions, package installs, account writes and metered costs stay human in nested mode. */
+export const NESTED_USER_ONLY_LINE_KINDS: readonly PlanLineKind[] = PLAN_LINE_KINDS.filter(kind => YES_POLICY[kind] === "never")
 
-/**
- * Whether a concrete plan line stays HUMAN in nested mode (§3d.7): an `--answers` file never satisfies it; the
- * wizard asks it only through a prompt it opens on /dev/tty itself. A managed `improve_additive` is NOT user-only
- * (it is a `--yes` line); an adopted or unspecified one is (fail-safe, as in `yesApproves`).
- */
+/** A parent agent may refuse any line, but cannot approve these human decisions. */
 export function isNestedUserOnly(line: Pick<PlanLine, "kind" | "ownership">): boolean {
-  const policy = YES_POLICY[line.kind]
-  if (typeof policy === "object") return (line.ownership ?? "adopted") !== "managed" || policy.managed !== "yes"
-  return policy === "never"
+  return YES_POLICY[line.kind] === "never"
 }
 
 /** §3d.4 "Asks under --yes" (R2-15): `--yes` answers none of these. */
@@ -174,7 +155,7 @@ export interface AskPayloads {
   single: { question: string; options: AskOption[]; default?: string }
   multi: { question: string; options: AskOption[]; default?: string[] }
   text: { question: string; maxLength: number }
-  plan: { lines: PlanLine[]; decisions: PlanDecisionsPayload }
+  plan: { lines: PlanLine[]; decisions: PlanDecisionsPayload; excluded?: string[] }
   "agent-questions": { questions: Array<{ itemId: string; question: string; options?: AskOption[]; why: string }> }
   "teammate-comments": { comments: Array<{ threadId: string; author: string; path: string; line: number | null; excerpt: string }> }
   /** §3x.6 (R3-6) `incomplete`: what the PR lacks that the plan approved (the in-PR verdict's words); absent = nothing. */

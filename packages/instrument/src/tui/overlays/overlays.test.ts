@@ -182,6 +182,24 @@ it("never opts into package installs, API costs or connected-account changes on 
     { id: "account_settings:ga4", kind: "account_settings", requires: "approval", editable: false, text: "Mark GA4 key events" },
     { id: "install_provider:infinite", kind: "install_provider", requires: "info", editable: false, text: "Install Infinite" }
   ], decisions: { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: "npm install fixture" } }
-  expect(drive("plan", payload, ENTER).answer).toEqual({ approved: [], declined: ["npm_install", "agent_budget", "account_settings:ga4"], edits: {} })
-  expect(drive("plan", payload, DOWN + " " + ENTER).answer).toEqual({ approved: ["agent_budget"], declined: ["npm_install", "account_settings:ga4"], edits: {} })
+  expect(drive("plan", payload, ENTER).answer).toEqual({ approved: ["install_provider:infinite"], declined: ["npm_install", "agent_budget", "account_settings:ga4"], edits: {} })
+  expect(drive("plan", payload, DOWN + " " + ENTER).answer).toEqual({ approved: ["agent_budget", "install_provider:infinite"], declined: ["npm_install", "account_settings:ga4"], edits: {} })
+})
+
+it("SPACE excludes shown repository work and a second SPACE includes it again", () => {
+  const payload: AskPayloads["plan"] = { lines: [
+    { id: "install_provider:infinite", kind: "install_provider", requires: "info", editable: false, text: "Install Infinite" }
+  ], decisions: { consentMode: null, conversionNames: [], privacyText: null, npmInstall: null } }
+  expect(drive("plan", payload, " " + ENTER).answer).toEqual({ approved: [], declined: ["install_provider:infinite"], edits: {} })
+  expect(drive("plan", payload, "  " + ENTER).answer).toEqual({ approved: ["install_provider:infinite"], declined: [], edits: {} })
+  const excluded = { ...payload, excluded: ["install_provider:infinite"] }
+  expect(drive("plan", excluded, ENTER).answer).toEqual({ approved: [], declined: excluded.excluded, edits: {} })
+})
+
+it("preserves the lines of a copyable owner snippet", () => {
+  const payload: AskPayloads["plan"] = { lines: [
+    { id: "user_action:guard", kind: "user_action", requires: "user_action", editable: false, text: "Add this guard:\n```js\nif (isProduction) {\n  start();\n}\n```" }
+  ], decisions: { consentMode: null, conversionNames: [], privacyText: null, npmInstall: null } }
+  const view = OVERLAYS.plan.render(payload, OVERLAYS.plan.init(payload), ctx())
+  expect(view.body.map(stripAnsi).join("\n")).toContain("      if (isProduction) {\n        start();\n      }")
 })

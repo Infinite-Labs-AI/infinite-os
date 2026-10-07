@@ -52,17 +52,18 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   // carries the selected conversion names too).
   const saved = ctx.state.get().plan
   const savedFile = await loadPlanApprovals(ctx, deps)
+  const earlierNo = [...new Set([...(savedFile?.excluded ?? []), ...(savedFile?.approvals.declined ?? []), ...(saved?.lines.filter(line => line.approved === false).map(line => line.id) ?? [])])]
   let answer =
-    saved && saved.hash === plan.hash && (saved.answers.consentMode !== null || !planAsksConsent(plan)) && savedFile?.planHash === plan.hash ? savedFile.approvals : null
+    !ctx.options.answersFile && saved && saved.hash === plan.hash && (saved.answers.consentMode !== null || !planAsksConsent(plan)) && savedFile?.planHash === plan.hash ? savedFile.approvals : null
   if (!answer) {
     const asked = await deps.installer.planAsk(plan)
-    const reply = await ctx.ask("plan", asked)
+    const reply = await ctx.ask("plan", { ...asked, excluded: earlierNo.filter(id => plan.lines.some(line => line.id === id)) })
     if (reply === ASK_CANCELLED || reply === ASK_TIMEOUT) {
       ctx.state.update((state) => {
         state.plan = {
           hash: plan.hash,
           answers: { consentMode: null, conversions: [], privacyApproved: null, npmInstall: null, metaGoal: null },
-          lines: plan.lines.map((line) => ({ id: line.id, approved: null }))
+          lines: plan.lines.map((line) => ({ id: line.id, approved: earlierNo.includes(line.id) ? false : null }))
         }
       })
       await ctx.state.save()
@@ -71,6 +72,11 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     answer = reply
   }
 
+  const currentAnswer = answer
+  const keptNo = earlierNo.filter(id => !currentAnswer.approved.includes(id) || currentAnswer.declined.includes(id))
+  answer = { ...answer, declined: [...new Set([...keptNo, ...answer.declined])] }
+  const visibleKeptNo = keptNo.filter(id => plan.lines.some(line => line.id === id))
+  if (visibleKeptNo.length > 0) sub(ctx, `kept your earlier no to: ${visibleKeptNo.slice(0, 20).join(", ")}${visibleKeptNo.length > 20 ? " …" : ""}`, "info")
   const resolved = resolvePlanAnswers(plan, answer, { consentFlag: ctx.options.consentMode })
   ctx.state.update((state) => {
     state.plan = {
@@ -92,6 +98,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     beforeAt: ctx.state.get().steps.before?.at ?? null,
     candidates: originalCandidates,
     approvals: resolved.approvals,
+    excluded: answer.declined,
     privacyText: resolved.privacyText,
     guard: (plan as Partial<WizardPlanModel>).guard ?? null,
     plan: { hash: plan.hash, lines: plan.lines, decisions: plan.decisions }

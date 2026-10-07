@@ -163,15 +163,15 @@ describe("adopted providers: repository work runs after the plan is shown and co
     expect(plan.lines.map((line) => line.id)).not.toContain(`install_provider:posthog:${IDS.posthog}`)
     const improve = plan.lines.find((line) => line.id === "improve_additive:posthog:proxy")!
     expect(improve).toMatchObject({ ownership: "adopted", requires: "info", jobIds: ["posthog_improve:proxy"] })
-    // --yes never approves an improvement to an ADOPTED provider.
-    expect(yesApproves(improve)).toBe(false)
+    // Repository work is included under --yes, subject to explicit exclusions.
+    expect(yesApproves(improve)).toBe(true)
   })
 
   it("an adopted PostHog improvement runs without a separate line approval", () => {
     const candidates = [candidate("posthog_improve", "proxy"), candidate("identify_reset", "auth")]
     const plan = buildPlanModel(input({ scan: posthogAdopted, candidates }))
     const declined = resolvePlanAnswers(plan, { approved: ["consent_mode"], declined: ["improve_additive:posthog:proxy"], edits: { consent_mode: "not_required" } }, { consentFlag: null })
-    expect(gateSeededItems(plan, declined, candidates).map((item) => item.id)).toEqual(["posthog_improve:proxy", "identify_reset:auth"])
+    expect(gateSeededItems(plan, declined, candidates).map((item) => item.id)).toEqual(["identify_reset:auth"])
     const unanswered = resolvePlanAnswers(plan, { approved: ["consent_mode"], declined: [], edits: { consent_mode: "not_required" } }, { consentFlag: null })
     const gated = gateSeededItems(plan, unanswered, candidates)
     expect(gated.find((item) => item.id === "posthog_improve:proxy")).toMatchObject({ state: "pending" })
@@ -205,7 +205,7 @@ describe("adopted providers: repository work runs after the plan is shown and co
     for (const line of job3Lines) expect(line.text).not.toMatch(/one init|starts \d+ times|remove/i)
     const dup = plan.lines.find((line) => line.kind === "remove_duplicate")!
     expect(dup).toMatchObject({ id: `remove_duplicate:posthog:${dupTarget}`, jobIds: [`duplicates_remove:${dupTarget}`], text: expect.stringContaining("starts 2 times") })
-    expect(YES_POLICY.remove_duplicate).toBe("never")
+    expect(YES_POLICY.remove_duplicate).toBe("yes")
   })
 
   it("an adopted Meta pixel without a guard → a Meta preview_guard_adopted line with the measured preview share (raw counts below 50)", () => {
@@ -227,7 +227,7 @@ describe("adopted providers: repository work runs after the plan is shown and co
     expect(line.kind).toBe("preview_guard_adopted")
     expect(line.text).toMatch(/^Meta/)
     expect(line.measured).toEqual({ value: "7 of 39 page views were previews", window: "28 days" })
-    expect(yesApproves(line)).toBe(false)
+    expect(yesApproves(line)).toBe(true)
   })
 
   it("NEGATIVE: with no baseline the preview share is '—', never 0", () => {
@@ -379,7 +379,7 @@ describe("review fixes (O7 fix round)", () => {
   const census = (entries: Array<Record<string, unknown>>) =>
     ({ entries, envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }) as unknown as WizardBeforeFactsCensus
 
-  it("two duplicate repairs remain separate jobs and both run on continue", () => {
+  it("two duplicate repairs remain separate jobs and an excluded repair does not run", () => {
     const before = fakeBefore({
       census: census([
         { tool: "ga4", kind: "gtag_config", id: "G-AAAA1111", file: "index.html", line: 3, owner: "adopted" },
@@ -395,7 +395,7 @@ describe("review fixes (O7 fix round)", () => {
     const [lineA, lineB] = dupLines
     const answers = resolvePlanAnswers(plan, { approved: ["consent_mode", lineA!.id, "agent_budget"], declined: [lineB!.id], edits: consent }, { consentFlag: null })
     const seeded = gateSeededItems(plan, answers, candidates)
-    expect(seeded.map((item) => item.id)).toEqual(candidates.map(item => item.id))
+    expect(seeded.map((item) => item.id)).toEqual([candidates[0]!.id])
     expect(seeded[0]!.state).toBe("pending")
   })
 
@@ -415,7 +415,7 @@ describe("review fixes (O7 fix round)", () => {
     const approve = resolvePlanAnswers(plan, { approved: ["consent_mode", defaults.id, "agent_budget"], declined: [], edits: consent }, { consentFlag: null })
     expect(gateSeededItems(plan, approve, plan.seeds).find((item) => item.id === "posthog_improve:defaults")?.state).toBe("pending")
     const decline = resolvePlanAnswers(plan, { approved: ["consent_mode", "agent_budget"], declined: [defaults.id], edits: consent }, { consentFlag: null })
-    expect(gateSeededItems(plan, decline, plan.seeds).map((item) => item.id)).toContain("posthog_improve:defaults")
+    expect(gateSeededItems(plan, decline, plan.seeds).map((item) => item.id)).not.toContain("posthog_improve:defaults")
   })
 
   it("P2-10: metaGoal is data; with no recommendation the line is info and the answer is null (never StartTrial from copy)", () => {

@@ -166,13 +166,44 @@ describe("step plan", () => {
     expect(h.ctx.asks.length).toBe(asked)
   })
 
+  it.each(["approval file", "legacy state"])("keeps an earlier no from %s across a changed plan hash", async source => {
+    const excluded = "improve_additive:posthog:proxy"
+    const h = await setup({ files: { "index.html": ADOPTED_POSTHOG_HTML }, consentFlag: "not_required", answers: [
+      { approved: [], declined: [excluded], edits: {} },
+      { approved: [], declined: [], edits: {} }
+    ] })
+    await planStep.run(h.ctx, h.deps)
+    if (source === "legacy state") await h.deps.fs.writeTextAtomic(`${h.ctx.root}/.infinite/wizard/plan-approvals.json`, "{}")
+    const buildPlan = h.deps.installer.buildPlan.bind(h.deps.installer)
+    h.deps.installer.buildPlan = (...args) => ({ ...buildPlan(...args), hash: "sha256:changed-plan" })
+    await planStep.run(h.ctx, h.deps)
+    expect(h.ctx.asks).toHaveLength(2)
+    expect(h.ctx.asks[1]!.payload).toMatchObject({ excluded: [excluded] })
+    expect(h.ctx.stateValue().plan!.lines.find(line => line.id === excluded)?.approved).toBe(false)
+    expect(h.ctx.stateValue().jobs.map(item => item.id)).not.toContain("posthog_improve:proxy")
+    expect(JSON.stringify(h.ctx.events)).toContain("kept your earlier no to:")
+    expect((await loadPlanApprovals(h.ctx, h.deps))!.approvals.declined).toContain(excluded)
+  })
+
+  it("reads a new answers file even when the saved plan hash is unchanged", async () => {
+    const excluded = "improve_additive:posthog:proxy"
+    const h = await setup({ files: { "index.html": ADOPTED_POSTHOG_HTML }, consentFlag: "not_required", answers: [
+      { approved: [], declined: [], edits: {} }, { approved: [], declined: [excluded], edits: {} }
+    ] })
+    await planStep.run(h.ctx, h.deps)
+    h.ctx.options.answersFile = "answers.json"
+    await planStep.run(h.ctx, h.deps)
+    expect(h.ctx.asks).toHaveLength(2)
+    expect(h.ctx.stateValue().plan!.lines.find(line => line.id === excluded)?.approved).toBe(false)
+  })
+
   it("adopted PostHog repository improvements run on continue without per-line approvals", async () => {
     const candidates = [candidate("posthog_improve", "proxy"), candidate("posthog_improve", "history_change"), candidate("identify_reset", "auth")]
     const answer = { approved: ["consent_mode", "agent_budget"], declined: ["improve_additive:posthog:proxy"], edits: { consent_mode: "not_required" } }
     const h = await setup({ files: { "index.html": ADOPTED_POSTHOG_HTML.replace(", defaults: '2025-05-24'", "") }, answers: [answer], candidates })
     expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
     const jobs = h.ctx.stateValue().jobs
-    expect(jobs.map((item) => item.id)).toContain("posthog_improve:proxy")
+    expect(jobs.map((item) => item.id)).not.toContain("posthog_improve:proxy")
     expect(jobs.find((item) => item.id === "posthog_improve:history_change")).toMatchObject({ state: "pending" })
     expect(jobs.find((item) => item.id === "identify_reset:auth")?.state).toBe("pending")
   })
@@ -584,12 +615,12 @@ describe("review fixes (O7 fix round)", () => {
     expect(read(h.ctx.root, "index.html")).toBe(STATIC_HTML)
   })
 
-  it("continuing a plan authorizes installation even with a legacy per-line decline", async () => {
+  it("an explicit Infinite decline prevents its installation while other tools continue", async () => {
     const h = await setup({ files: { "index.html": STATIC_HTML }, consentFlag: "not_required", answers: [] })
-    autoApprove(h.ctx, (id) => !id.startsWith("install_provider:infinite"))
+    h.ctx.ask = (async () => ({ approved: [], declined: ["install_provider:infinite"], edits: {} })) as typeof h.ctx.ask
     await planStep.run(h.ctx, h.deps)
     expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
-    expect(h.siteSourceCalls).toHaveLength(1)
+    expect(h.siteSourceCalls).toHaveLength(0)
     expect(read(h.ctx.root, "index.html")).toContain(IDS.ga4)
   })
 

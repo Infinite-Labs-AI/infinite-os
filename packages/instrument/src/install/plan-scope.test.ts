@@ -74,9 +74,9 @@ it("drops stale and malicious approvals for owner-only and informational lines",
     expect(answer.approvals.approved).not.toContain(id)
     expect(answer.approvals.edits).not.toHaveProperty(id)
   }
-  // One Continue still includes repository work despite stale per-line declines.
-  expect(answer.approvals.approved).toContain("install_provider:infinite")
-  expect(answer.approvals.declined).not.toContain("install_provider:infinite")
+  // Explicit exclusions stay binding even when repository work normally continues.
+  expect(answer.approvals.approved).not.toContain("install_provider:infinite")
+  expect(answer.approvals.declined).toContain("install_provider:infinite")
   expect(answer.approvals.approved).not.toContain("account_settings:ga4")
   const explicit = resolvePlanAnswers(plan, { approved: ["account_settings:ga4"], declined: [], edits: {} }, { consentFlag: "not_required" })
   expect(explicit.approvals.approved).toContain("account_settings:ga4")
