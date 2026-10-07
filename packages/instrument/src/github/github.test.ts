@@ -246,7 +246,7 @@ describe("the GitHub adapter (§3g.2)", () => {
       ]
     })
     expect(await adapter.productionDeployment(SHA)).toEqual({ state: "ready" })
-    expect(await adapter.productionDeployment(OTHER)).toEqual({ state: "failed" })
+    expect(await adapter.productionDeployment(OTHER)).toEqual({ state: "failed", reason: "Vercel production deployment failed", blocked: false })
     expect(await adapter.productionDeployment("d".repeat(40))).toEqual({ state: "not_found" })
     // The newest SUCCESSFUL production deployment (the failed newer one is skipped).
     expect(await adapter.latestProductionDeployment()).toEqual({ sha: SHA, createdAt: "2026-10-03T05:47:00Z" })

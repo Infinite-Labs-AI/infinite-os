@@ -1,3 +1,5 @@
+import { buildScanner, runPublicIds } from "../../review/context.js"
+import { safeDisplayText } from "../../review/display.js"
 import { loadPlanApprovals } from "../../install/step-inputs.js"
 import type { ChecklistItem } from "../contracts/jobs.js"
 import { withheldPreviewTools, previewScope } from "../../review/preview-scope.js"
@@ -117,16 +119,16 @@ async function descends(deps: WizardDeps, mergeSha: string, serving: string, pro
 }
 
 /** §3y.4: what one GitHub read says about the merge's production deploy. */
-export type GithubDeployRead = { deployed: true; sha: string; how: "github_deployment" | "serving_descends" } | { failed: true } | { waiting: "building" | "not_found" }
+export type GithubDeployRead = { deployed: true; sha: string; how: "github_deployment" | "serving_descends" } | { failed: true; reason?: string; blocked?: boolean } | { waiting: "building" | "not_found" }
 
 export async function githubDeployRead(deps: WizardDeps, reader: DeploymentReader, mergeSha: string, productionBranch: string | null): Promise<GithubDeployRead> {
-  const own = await reader.productionDeployment(mergeSha).catch(() => ({ state: "not_found" as const }))
+  const own = await reader.productionDeployment(mergeSha).catch(() => ({ state: "not_found" as const, reason: undefined, blocked: undefined }))
   if (own.state === "ready") return { deployed: true, sha: mergeSha, how: "github_deployment" }
   // A later successful production deployment that contains the merge serves it too (a canceled or failed merge build).
   const latest = await reader.latestProductionDeployment().catch(() => null)
   if (latest && latest.sha === mergeSha) return { deployed: true, sha: mergeSha, how: "github_deployment" }
   if (latest && (await descends(deps, mergeSha, latest.sha, productionBranch))) return { deployed: true, sha: latest.sha, how: "serving_descends" }
-  if (own.state === "failed") return { failed: true }
+  if (own.state === "failed") return { failed: true, ...(own.reason ? { reason: own.reason } : {}), ...(own.blocked ? { blocked: true } : {}) }
   return { waiting: own.state === "building" ? "building" : "not_found" }
 }
 
@@ -144,7 +146,7 @@ export interface DeploySignals {
  * `no_signal`: the claim was proven, but it says nothing about THIS merge's deploy (the file was already served before
  * it), and no other signal exists; the step then asks, as it does with no signal at all.
  */
-export type DeployOutcome = (DeployWait & { deployed: true }) | { deployed: false; why: "timeout" | "failed" | "no_signal" | "claim_gone" }
+export type DeployOutcome = (DeployWait & { deployed: true }) | { deployed: false; why: "timeout" | "failed" | "no_signal" | "claim_gone"; reason?: string; blocked?: boolean }
 
 /**
  * Review P3-1: the cloud reading the proof file shows THIS merge deployed only when the merge brought that file:
@@ -224,7 +226,7 @@ async function waitForDeploy(
     if (signals.github) {
       const read = await githubDeployRead(deps, signals.github, mergeSha, input.productionBranch)
       if ("deployed" in read) return read
-      if ("failed" in read) return { deployed: false, why: "failed" }
+      if ("failed" in read) return { deployed: false, why: "failed", reason: read.reason, blocked: read.blocked }
       say(read.waiting === "building" ? `GitHub: Vercel is building ${mergeSha.slice(0, 7)}…` : `GitHub shows no production deployment for ${mergeSha.slice(0, 7)} yet`)
     }
     const now = deps.clock.now().getTime()
@@ -1024,7 +1026,10 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   // §3y.4: every signal this run can wait on. GitHub counts only when it shows Vercel deploying this repo.
   const reader = deploymentReader(deps.host)
   let github: DeploymentReader | null = null
-  if (reader && hosting.provider !== "vercel") {
+  if (reader && hosting.provider === "vercel") {
+    reader.setPreviewProject?.(hosting.vercel?.projectName ?? null)
+    github = reader
+  } else if (reader) {
     const vercel = await resolveVercelSignal(ctx, deps, hosting)
     reader.setPreviewProject?.(vercel.projectName)
     if (vercel.signal || (await reader.latestProductionDeployment().catch(() => null)) !== null) github = reader
@@ -1085,10 +1090,12 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
       deploy = said
     } else if (!waited.deployed) {
       if (waited.why === "failed") {
+        const scanner = buildScanner(ctx, deps, await runPublicIds(ctx, deps))
+        const reason = waited.reason ? safeDisplayText(scanner, waited.reason) : null
         return {
           kind: "parked",
           code: "INF_WIZ_DEPLOY_FAILED",
-          reason: `The deploy of ${mergeSha.slice(0, 7)} failed (GitHub shows the Vercel production deployment failed).`,
+          reason: reason ? `The deploy of ${mergeSha.slice(0, 7)} ${waited.blocked ? "is blocked" : "failed"}: ${reason}` : `The deploy of ${mergeSha.slice(0, 7)} failed (GitHub shows the Vercel production deployment failed).`,
           resumeHint: "Fix it and run npx infinite-tag again."
         }
       }

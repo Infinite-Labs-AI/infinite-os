@@ -5,7 +5,7 @@ import { prChecks, type PrCheck } from "../github/checks.js"
 import type { GhClient } from "../github/gh.js"
 import { comment, createDraftPr, findPr, findWizardPrs, markReady, readPr, updateBranch, updateOwnComment } from "../github/pr.js"
 import { previewFailureForSha, previewUrlForSha } from "../github/preview.js"
-import { latestProductionDeployment, productionDeploymentForSha, productionDeploymentUrl, vercelDeploymentSeen, type GhDeployState, type LatestProductionDeployment } from "../github/deployments.js"
+import { latestProductionDeployment, productionDeploymentForSha, productionDeploymentUrl, vercelDeploymentSeen, type ProductionDeploymentRead, type LatestProductionDeployment } from "../github/deployments.js"
 import { createViewerFork, ghAuthStatus, ghRepoFacts, type GhRepoFacts } from "../github/repo.js"
 import { postCommentReview } from "../github/review.js"
 import { baseRules } from "../github/rules.js"
@@ -32,7 +32,7 @@ export interface GitHubHostAdapter extends GitHostAdapter, GitHostAdapterExtras 
   previewUrl(sha: string): Promise<string | null>
   previewFailure(sha: string): Promise<{ reason: string; blocked: boolean } | null>
   /** §3y.4: the merge SHA's production deployment (GitHub Deployments; the linked project picks in a monorepo). */
-  productionDeployment(sha: string): Promise<{ state: GhDeployState }>
+  productionDeployment(sha: string): Promise<ProductionDeploymentRead>
   /** §3x.6: the merge SHA's production deployment's own preview-class address (`*.vercel.app`), or null. */
   productionDeploymentUrl(sha: string): Promise<string | null>
   /** §3y.4: the newest successful production deployment, or null. */
@@ -43,7 +43,7 @@ export interface GitHubHostAdapter extends GitHostAdapter, GitHostAdapterExtras 
 
 /** The deploy reads a host offers (§3y.4): the GitHub adapter's, or none (another host, or a test fake). */
 export interface DeploymentReader {
-  productionDeployment(sha: string): Promise<{ state: GhDeployState }>
+  productionDeployment(sha: string): Promise<ProductionDeploymentRead>
   /** §3x.6 the merge SHA's production deployment's own preview-class address, or null. */
   productionDeploymentUrl?(sha: string): Promise<string | null>
   latestProductionDeployment(): Promise<LatestProductionDeployment | null>

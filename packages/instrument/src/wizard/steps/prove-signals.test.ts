@@ -250,3 +250,17 @@ describe("prove: the site-file claim (§3y.4)", () => {
     expect(proofs).toBeLessThanOrEqual(PROVE_LIMITS.claimGraceMs / PROVE_LIMITS.claimGracePollMs + 2)
   })
 })
+
+it.each([false, true])("stops immediately on a production author block and names it (Infinite hosting=%s)", connected => {
+  const bundle = connected ? fakeDeps({ bridge: { deploy: [{ mergeDeployment: { state: "building", readyAt: null }, serving: null, target: "production" }] } }) : world({})
+  const reason = "Vercel - Git author must have access to the project on Vercel to create deployments"
+  Object.assign(bundle.deps.host, { productionDeployment: async () => ({ state: "failed", blocked: true, reason }), latestProductionDeployment: async () => null, vercelDeploymentSeen: async () => true })
+  const ctx = fakeContext(mergedState(answeredSite(false)), {}, bundle.clock)
+  const started = bundle.clock.now().getTime()
+  return step.run(ctx, bundle.deps).then(outcome => {
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_DEPLOY_FAILED", reason: expect.stringContaining(reason) })
+    expect((outcome as { reason: string }).reason).toContain("is blocked")
+    expect(bundle.clock.now().getTime() - started).toBeLessThan(PROVE_LIMITS.deployPollMs)
+    expect(bundle.log.names("bridge")).not.toContain("bridge.claimProof")
+  })
+})

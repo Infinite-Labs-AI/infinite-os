@@ -4,7 +4,8 @@
 // environment NAME is what marks production. Read-only `gh api` calls; never a guess: an ambiguous monorepo is
 // `not_found`.
 import type { GhClient } from "./gh.js"
-import { matchesProject, type RawDeployment, type RawDeploymentStatus } from "./preview.js"
+import { blockedPreview } from "./checks.js"
+import { commitHostingFailureForSha, matchesProject, type RawDeployment, type RawDeploymentStatus } from "./preview.js"
 import { HOST_DENY_V1, normalizeHost } from "../wizard/contracts/host-deny.js"
 
 export interface RawProductionDeployment extends RawDeployment {
@@ -13,6 +14,7 @@ export interface RawProductionDeployment extends RawDeployment {
 }
 
 export type GhDeployState = "ready" | "failed" | "building" | "not_found"
+export interface ProductionDeploymentRead { state: GhDeployState; reason?: string; blocked?: boolean }
 
 /** Production iff `production_environment` OR the environment name starts with "Production". */
 export function isProductionDeployment(deployment: RawProductionDeployment): boolean {
@@ -30,7 +32,7 @@ export function deploymentState(statuses: readonly RawDeploymentStatus[]): GhDep
   if (meaningful.length === 0) return "not_found"
   const newest = meaningful[0]!.state
   if (newest === "success") return "ready"
-  if (newest === "failure" || newest === "error") return "failed"
+  if (newest === "failure" || newest === "error" || newest === "blocked" || newest === "cancelled" || newest === "canceled") return "failed"
   if (newest === "queued" || newest === "pending" || newest === "in_progress") return "building"
   return "not_found"
 }
@@ -50,14 +52,24 @@ async function statusesOf(gh: GhClient, id: number): Promise<RawDeploymentStatus
 }
 
 /** The merge SHA's production deployment, as GitHub shows it. */
-export async function productionDeploymentForSha(gh: GhClient, sha: string, projectName: string | null): Promise<{ state: GhDeployState }> {
+export async function productionDeploymentForSha(gh: GhClient, sha: string, projectName: string | null): Promise<ProductionDeploymentRead> {
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("productionDeploymentForSha needs a full SHA")
   const rows = await gh.json<RawProductionDeployment[]>(["api", `repos/{owner}/{repo}/deployments?sha=${sha}&per_page=20`])
   const production = pickProduction(rows, projectName)
-  if (production === null || production.length === 0) return { state: "not_found" }
+  if (production === null) return { state: "not_found" }
+  if (production.length === 0) {
+    const failure = await commitHostingFailureForSha(gh, sha, projectName)
+    return failure ? { state: "failed", ...failure } : { state: "not_found" }
+  }
   // Several attempts for one SHA (a redeploy): the newest deployment speaks.
   const newest = [...production].sort((a, b) => Date.parse(b.created_at ?? "") - Date.parse(a.created_at ?? ""))[0]!
-  return { state: deploymentState(await statusesOf(gh, newest.id)) }
+  const statuses = await statusesOf(gh, newest.id)
+  const state = deploymentState(statuses)
+  const latest = statuses.find(status => status.state !== "inactive")
+  if (state !== "failed") return { state }
+  const reason = latest?.description?.trim() || "Vercel production deployment failed"
+  const explicit = latest?.state === "failure" || latest?.state === "error" ? undefined : latest?.state
+  return { state, reason, blocked: blockedPreview({ name: "Vercel", bucket: "fail", state: latest?.state ?? "failure", deploymentState: explicit, description: reason }) }
 }
 
 /** The newest successful production deployment: its SHA and time. */
