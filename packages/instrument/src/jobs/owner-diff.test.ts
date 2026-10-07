@@ -90,3 +90,35 @@ it("does not treat an unreadable working source as a deleted consent-free file",
     expect(measured.issues).toContainEqual({ file: "src/tracking.ts", reason: "the changed source could not be inspected" })
   } finally { fixture.cleanup() }
 })
+
+it.each([undefined, []])("does not report a pass when no wizard commit record is available: %j", async wizardCommits => {
+  const fixture = createGitFixture({ files: { "tracking.ts": "export const count = 1;\n" } })
+  try {
+    const baseSha = fixture.git(["rev-parse", "HEAD"]).trim()
+    fixture.write("tracking.ts", "export const count = 2;\n")
+    fixture.git(["add", "tracking.ts"]); fixture.git(["commit", "-m", "older run fixture"])
+    const headSha = fixture.git(["rev-parse", "HEAD"]).trim()
+    const result = await measureWizardCommits({ root: fixture.root, baseSha, headSha, wizardCommits })
+    expect(result.state).toBe("not_checked")
+    expect(result.unverifiedReason).toMatch(/record|no wizard commits/i)
+    expect(result.measuredCommitCount).toBe(0)
+    expect(result.files).toContain("tracking.ts")
+  } finally { fixture.cleanup() }
+})
+
+it.each(["amended", "missing"])("retains an explicit unverified result for a %s wizard SHA", async mode => {
+  const fixture = createGitFixture({ files: { "tracking.ts": "export const count = 1;\n" } })
+  try {
+    const baseSha = fixture.git(["rev-parse", "HEAD"]).trim()
+    fixture.write("tracking.ts", "export const count = 2;\n")
+    fixture.git(["add", "tracking.ts"]); fixture.git(["commit", "-m", "wizard fixture"])
+    const wizardSha = fixture.git(["rev-parse", "HEAD"]).trim()
+    fixture.git(["commit", "--amend", "-m", "owner amended fixture"])
+    const headSha = fixture.git(["rev-parse", "HEAD"]).trim()
+    const result = await measureWizardCommits({ root: fixture.root, baseSha, headSha, wizardCommits: [mode === "missing" ? "f".repeat(40) : wizardSha] })
+    expect(result.state).toBe("not_checked")
+    expect(result.unverifiedReason).toMatch(mode === "missing" ? /unavailable|missing|no longer exists/ : /amended|squashed|reachable/)
+    expect(result.measuredCommitCount).toBe(0)
+    expect(result.files).toContain("tracking.ts")
+  } finally { fixture.cleanup() }
+})

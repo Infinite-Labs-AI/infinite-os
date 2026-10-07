@@ -15,6 +15,11 @@ export interface OwnerBoundaryMeasurement {
   issues: Array<{ file: string; reason: string }>
   /** Exact reachable SHAs from the run's own commit record that were measured against their parents. */
   wizardCommits?: string[]
+  /** Positive only after actually comparing a recorded commit to its parent. */
+  measuredCommitCount?: number
+  /** History gaps are reported, never converted into a successful measurement. */
+  unverifiedReason?: string
+  fileScope?: "wizard_commits" | "branch_history"
 }
 const metadata = (path: string) => path.startsWith(".infinite/") || /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?)$/.test(path)
 
@@ -44,11 +49,11 @@ export async function measureOwnerDiff(input: { root: string; baseSha: string; r
     return result.code === 0 ? { bytes: result.stdout } : { bytes: null, error: "an existing source blob could not be read" }
   }
   measurement.state = "checked"
+  measurement.files = [...paths].sort()
   for (const path of [...paths].sort()) {
     if (metadata(path)) continue
     if (path.startsWith("/") || path.split("/").includes("..")) { measurement.state = "not_checked"; fail(path, "invalid diff path"); continue }
     if (isPolicyPath(path, input.appRoot ?? ".")) { measurement.state = "changed"; fail(path, "a routed privacy/terms policy page is in the final diff"); continue }
-    measurement.files.push(path)
     const beforeBlob = await blob(input.baseSha, path)
     if (beforeBlob.error) { measurement.state = "not_checked"; fail(path, beforeBlob.error); continue }
     let after: Buffer | null
@@ -81,14 +86,22 @@ export function ownerBoundaryStop(measurement: OwnerBoundaryMeasurement): string
 }
 
 /** Measure only SHAs this run recorded creating. Other commits are owner work, never inferred from trailers. */
-export async function measureWizardCommits(input: { root: string; appRoot?: string; baseSha: string; headSha: string; wizardCommits: readonly string[] }): Promise<OwnerBoundaryMeasurement> {
-  const result: OwnerBoundaryMeasurement = { state: "not_checked", scope: "commit", baseSha: input.baseSha, headSha: input.headSha, files: [], issues: [], wizardCommits: [] }
-  if (![input.baseSha, input.headSha, ...input.wizardCommits].every(sha => /^[a-f0-9]{40}$/.test(sha))) { result.issues.push({ file: "(git)", reason: "the recorded commit SHAs are invalid" }); return result }
+export async function measureWizardCommits(input: { root: string; appRoot?: string; baseSha: string; headSha: string; wizardCommits?: readonly string[]; historyReason?: string }): Promise<OwnerBoundaryMeasurement> {
+  const result: OwnerBoundaryMeasurement = { state: "not_checked", scope: "commit", baseSha: input.baseSha, headSha: input.headSha, files: [], issues: [], wizardCommits: [], measuredCommitCount: 0, fileScope: "wizard_commits" }
+  const recorded = input.wizardCommits ?? []
+  if (![input.baseSha, input.headSha, ...recorded].every(sha => /^[a-f0-9]{40}$/.test(sha))) { result.issues.push({ file: "(git)", reason: "the recorded commit SHAs are invalid" }); return result }
   for (const sha of [input.baseSha, input.headSha]) if ((await git(input.root, ["rev-parse", "--verify", `${sha}^{commit}`])).code !== 0) { result.issues.push({ file: "(git)", reason: "the pushed history could not be read" }); return result }
   result.state = "checked"
-  for (const sha of [...new Set(input.wizardCommits)]) {
+  if (input.historyReason) result.unverifiedReason = input.historyReason
+  else if (input.wizardCommits === undefined) result.unverifiedReason = "the run has no saved wizard commit record"
+  else if (recorded.length === 0) result.unverifiedReason = "no wizard commits were recorded or measured"
+  for (const sha of [...new Set(recorded)]) {
+    if ((await git(input.root, ["rev-parse", "--verify", `${sha}^{commit}`])).code !== 0) {
+      result.unverifiedReason = "a recorded wizard commit is unavailable or no longer exists"
+      continue
+    }
     const reachable = await git(input.root, ["merge-base", "--is-ancestor", sha, input.headSha])
-    if (reachable.code === 1) continue
+    if (reachable.code === 1) { result.unverifiedReason = "a recorded wizard commit is no longer reachable from this branch (it may have been amended or squashed)"; continue }
     if (reachable.code !== 0) { result.state = "not_checked"; result.issues.push({ file: "(git)", reason: `recorded wizard commit ${sha} could not be read` }); continue }
     const entry = await git(input.root, ["rev-list", "--parents", "-n", "1", sha])
     if (entry.code !== 0) { result.state = "not_checked"; result.issues.push({ file: "(git)", reason: `recorded wizard commit ${sha} has unreadable parents` }); continue }
@@ -96,9 +109,19 @@ export async function measureWizardCommits(input: { root: string; appRoot?: stri
     result.wizardCommits!.push(sha)
     if (parents.length !== 1) { result.state = "not_checked"; result.issues.push({ file: "(git)", reason: `wizard commit ${sha} does not have exactly one parent` }); continue }
     const measured = await measureOwnerDiff({ root: input.root, appRoot: input.appRoot, baseSha: parents[0]!, revision: sha })
+    result.measuredCommitCount!++
     result.files.push(...measured.files)
     result.issues.push(...measured.issues.map(issue => ({ ...issue, reason: `${sha.slice(0, 12)}: ${issue.reason}` })))
     if (measured.state === "not_checked" || (measured.state === "changed" && result.state !== "not_checked")) result.state = measured.state
+  }
+  if (result.unverifiedReason || result.measuredCommitCount === 0) {
+    result.unverifiedReason ??= "no wizard commits could be measured"
+    if (result.state === "checked") result.state = "not_checked"
+    // Attribution is unavailable; show the actual branch diff, explicitly labelled as such.
+    const paths = await git(input.root, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", input.baseSha, input.headSha, "--"])
+    if (paths.code === 0) result.files.push(...paths.stdout.toString("utf8").split("\0").filter(Boolean))
+    else result.issues.push({ file: "(git)", reason: "changed files could not be listed" })
+    result.fileScope = "branch_history"
   }
   result.files = [...new Set(result.files)].sort()
   return result
