@@ -41,9 +41,9 @@ describe("a preview's terminal GitHub status", () => {
     expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: "Owner action needed", blocked: true })
   })
 
-  it("does not override an explicit failed deployment state with a fallback phrase", async () => {
-    const client = gh([{ id: 7, environment: "Preview", creator: { login: "vercel[bot]" } }], [{ state: "failure", description: "Authorization required" }])
-    expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: "Authorization required", blocked: false })
+  it.each(["Authorization required", "Deployment was blocked"])("uses an exact fallback for GitHub coarse failure state: %s", async description => {
+    const client = gh([{ id: 7, environment: "Preview", creator: { login: "vercel[bot]" } }], [{ state: "failure", description }])
+    expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: description, blocked: true })
   })
 
   it.each(["Build failed: blocked import", "Build failed: requires authorization", "Build failed: must have access"])("does not classify fallback build text as a hosting block: %s", async description => {

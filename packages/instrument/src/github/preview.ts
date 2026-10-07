@@ -40,8 +40,11 @@ export async function previewFailureForSha(gh: GhClient, sha: string, projectNam
     const latest = newest.latest
     if (latest && ["failure", "error", "cancelled", "canceled", "blocked"].includes(latest.state ?? "")) {
       const reason = latest.description?.trim() || (latest.state === "blocked" ? "Vercel preview deployment blocked" : "Vercel preview deployment failed")
-      // A deployment has its own state; prose must not turn a failed build into an access block.
-      return { reason, blocked: blockedPreview({ name: "Vercel", bucket: "fail", state: latest.state!, deploymentState: latest.state, description: reason }) }
+      // GitHub failure/error are coarse outcomes: its REST enum has no access-block state.
+      // Use the exact known hosting phrases only for those outcomes; preserve any specific state.
+      // https://docs.github.com/en/rest/deployments/statuses#create-a-deployment-status
+      const deploymentState = latest.state === "failure" || latest.state === "error" ? undefined : latest.state
+      return { reason, blocked: blockedPreview({ name: "Vercel", bucket: "fail", state: latest.state!, deploymentState, description: reason }) }
     }
   }
   // A commit status can fail before GitHub publishes a deployment row.
