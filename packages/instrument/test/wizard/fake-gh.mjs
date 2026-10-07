@@ -324,12 +324,33 @@ if (group === "api") {
     created_at: entry.created_at ?? "2026-10-02T10:00:00Z",
     creator: { login: entry.creator }
   })
+  const suitesForHead = /\/commits\/([a-f0-9]{40})\/check-suites/.exec(path)
+  if (suitesForHead) {
+    if (state.unreadableCheckActivity) fail("check suite inventory unavailable")
+    const suites = state.checkSuites ?? [{ id: 100, status: "completed", conclusion: "success" }]
+    out({ total_count: suites.length, check_suites: suites.map(row => ({ ...row, head_sha: suitesForHead[1] })) })
+  }
+  const runsForHead = /\/actions\/runs\?head_sha=([a-f0-9]{40})/.exec(path)
+  if (runsForHead) {
+    if (state.unreadableCheckActivity) fail("workflow inventory unavailable")
+    const runs = state.workflowRuns ?? []
+    out({ total_count: runs.length, workflow_runs: runs.map(row => ({ ...row, head_sha: runsForHead[1] })) })
+  }
+  if (/\/contents\/\.github\/workflows\?/.test(path)) {
+    const paths = [...new Set([...Object.keys(state.headWorkflowFiles ?? {}), ...Object.values(state.workflows ?? {}).map(row => row.path)])]
+    out(paths.map(path => ({ path, type: "file" })))
+  }
+  if (/\/check-suites\/\d+\/check-runs/.test(path) || /\/actions\/runs\/\d+\/jobs/.test(path)) {
+    const rows = Object.values(state.checks).flat().map(row => ({ name: row.name, conclusion: row.bucket === "fail" ? "failure" : row.bucket === "pass" ? "success" : "skipped", html_url: row.link, details_url: row.link }))
+    out({ total_count: rows.length, [path.includes("/jobs") ? "jobs" : "check_runs"]: rows })
+  }
   const workflowRun = /\/actions\/runs\/(\d+)$/.exec(path)
   if (workflowRun && state.workflows?.[workflowRun[1]]) out({ path: state.workflows[workflowRun[1]].path })
   const workflowFile = /\/contents\/(\.github\/workflows\/[^?]+)\?/.exec(path)
   if (workflowFile) {
     const workflow = Object.values(state.workflows ?? {}).find(entry => entry.path === workflowFile[1])
-    if (workflow) out({ encoding: "base64", content: Buffer.from(workflow.source).toString("base64") })
+    const source = state.headWorkflowFiles?.[workflowFile[1]] ?? workflow?.source
+    if (source !== undefined) out({ encoding: "base64", content: Buffer.from(source).toString("base64") })
   }
   if (/\/commits\/[^/]+\/check-runs/.test(path)) out({ check_runs: (state.baseChecks ?? []).map(check => ({ ...check, status: "completed" })) })
   if (/\/commits\/[^/]+\/status\?/.test(path)) out({ statuses: [] })

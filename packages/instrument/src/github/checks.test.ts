@@ -1,6 +1,6 @@
 import type { GhClient } from "./gh.js"
 import { describe, expect, it } from "vitest"
-import { checksSummary, checkPolicy, workflowPrTrigger, prChecks } from "./checks.js"
+import { checksSummary, checkPolicy, workflowPrTrigger, withDeploymentStates, headCheckActivity, headPrWorkflows } from "./checks.js"
 
 describe("PR check classification", () => {
   it("keeps a cancelled first poll pending for another read", () => {
@@ -52,9 +52,68 @@ it("does not infer absent PR triggers from partially understood YAML event keys"
 })
 
 
-it("preserves structured deployment evidence supplied by a check reader", async () => {
-  const gh = { json: async () => [{ name: "Vercel", bucket: "fail", state: "FAILURE", deploymentState: "failure", description: "Deployment was blocked" }] } as unknown as GhClient
-  const rows = await prChecks(gh, 42)
+it("requests authoritative deployment statuses for the head SHA", async () => {
+  const calls: string[][] = []
+  const gh = { json: async (args: string[]) => {
+    calls.push(args)
+    if (args[1]!.includes("/statuses")) return [{ state: "failure", description: "Deployment was blocked" }]
+    return [{ id: 7, creator: { login: "vercel[bot]" }, environment: "Preview" }]
+  } } as unknown as GhClient
+  const rows = await withDeploymentStates(gh, "a".repeat(40), [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }])
   expect(rows[0]!.deploymentState).toBe("failure")
   expect(checkPolicy(rows, []).failing).toHaveLength(1)
+  expect(calls[0]![1]).toContain(`deployments?sha=${"a".repeat(40)}`)
+  expect(calls[1]![1]).toContain("deployments/7/statuses")
+})
+
+
+it("does not count skipped CI as a passing measurement", () => {
+  expect(checksSummary([{ name: "ci", bucket: "skipping", state: "SKIPPED" }])).toEqual({ pass: 0, fail: 0, pending: 0, total: 1 })
+})
+
+
+it("does not trust suites returned for a different SHA", async () => {
+  const gh = { json: async (args: string[]) => args[1]!.includes("check-suites") ? { total_count: 1, check_suites: [{ id: 1, head_sha: "b".repeat(40), status: "completed", conclusion: "success" }] } : { total_count: 0, workflow_runs: [] } } as unknown as GhClient
+  await expect(headCheckActivity(gh, "a".repeat(40))).rejects.toThrow("head SHA")
+})
+
+it("reads workflows introduced only in the PR head", async () => {
+  const calls: string[][] = []
+  const gh = { json: async (args: string[]) => {
+    calls.push(args)
+    return args[1]!.includes("workflows?") ? [{ path: ".github/workflows/new.yml", type: "file" }] : { encoding: "base64", content: Buffer.from("on: pull_request\njobs: {}").toString("base64") }
+  } } as unknown as GhClient
+  expect(await headPrWorkflows(gh, "a".repeat(40))).toEqual({ expected: [".github/workflows/new.yml"], unknown: false })
+  expect(calls.every(args => args[1]!.includes(`ref=${"a".repeat(40)}`))).toBe(true)
+})
+
+
+it("reads later suite pages before deciding that the head finished", async () => {
+  const sha = "a".repeat(40)
+  const gh = { json: async (args: string[]) => {
+    if (args[1]!.includes("/actions/runs?")) return { total_count: 0, workflow_runs: [] }
+    const queued = args[1]!.includes("page=2")
+    return { total_count: 101, check_suites: queued ? [{ id: 101, head_sha: sha, status: "queued", conclusion: null }] : Array.from({ length: 100 }, (_, id) => ({ id, head_sha: sha, status: "completed", conclusion: "success" })) }
+  } } as unknown as GhClient
+  expect((await headCheckActivity(gh, sha)).pending).toEqual(["Check suite 101"])
+})
+
+it("reads a failed suite's actual jobs instead of guessing its failed check name", async () => {
+  const sha = "a".repeat(40)
+  const gh = { json: async (args: string[]) => {
+    if (args[1]!.includes("/actions/runs?")) return { total_count: 0, workflow_runs: [] }
+    if (args[1]!.includes("/check-runs")) return { total_count: 1, check_runs: [{ name: "lint", conclusion: "failure" }] }
+    return { total_count: 1, check_suites: [{ id: 7, head_sha: sha, status: "completed", conclusion: "failure" }] }
+  } } as unknown as GhClient
+  const result = await headCheckActivity(gh, sha)
+  expect(result.failed).toEqual([])
+  expect(result.results).toMatchObject([{ name: "lint", bucket: "fail" }])
+  expect(checkPolicy(result.results, [{ name: "lint", bucket: "fail", state: "failure" }]).existing).toHaveLength(1)
+})
+
+
+it("does not use a completed push event as proof of a PR-triggered workflow", async () => {
+  const sha = "a".repeat(40)
+  const gh = { json: async (args: string[]) => args[1]!.includes("/actions/runs?") ? { total_count: 1, workflow_runs: [{ id: 7, head_sha: sha, path: ".github/workflows/ci.yml", event: "push", status: "completed", conclusion: "success" }] } : { total_count: 0, check_suites: [] } } as unknown as GhClient
+  expect((await headCheckActivity(gh, sha)).workflowPaths).toEqual([])
 })
