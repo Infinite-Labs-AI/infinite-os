@@ -58,6 +58,19 @@ function withoutGuardTypeAnnotations(expression: string): string {
     .replace(/\}\)\(h\), i\s*:\s*number;/, "})(h), i;")
 }
 
+/** Both shipped emissions use the same approved host lists and guard body. */
+function matchesKnownEmission(expression: string, emitted: string, templateLiteral: boolean): boolean {
+  const variants = [emitted]
+  const safeHost = '})(typeof location !== "undefined" ? location.hostname : "")'
+  const emptyHostCheck = "})(h), i; if (!n) return false;"
+  if (emitted.endsWith(safeHost) && emitted.includes(emptyHostCheck)) {
+    // Before the browserless guard, the emitter passed location.hostname directly and allowed an
+    // empty host. Keep precisely those historical bytes; no host lists or other logic may differ.
+    variants.push(emitted.slice(0, -safeHost.length).replace(emptyHostCheck, "})(h), i;") + "})(location.hostname)")
+  }
+  return variants.some(variant => expression === (templateLiteral ? escapeForTemplateLiteral(variant) : variant))
+}
+
 function wholeParens(text: string): string {
   let value = text.trim()
   while (value.startsWith("(") && matchingBracket(value, 0) === value.length - 1) value = value.slice(1, -1).trim()
@@ -105,7 +118,7 @@ function matchesEmissionShape(expression: string, templateLiteral: boolean): boo
     const emitted = marker === "var x = "
       ? buildHostGuardExpression({ mode: "deny", exempt: hosts, deny: [] })
       : buildHostGuardExpression({ mode: "allow", hosts })
-    return expression === (templateLiteral ? escapeForTemplateLiteral(emitted) : emitted)
+    return matchesKnownEmission(expression, emitted, templateLiteral)
   } catch {
     return false
   }
@@ -117,9 +130,9 @@ function isExactEmittedGuard(condition: string, expected: string | null, templat
   return parts.some((part) => {
     const expression = wholeParens(part)
     if (!EMITTED_GUARD_START.test(expression)) return false
-    if (templateLiteral) return expected !== null ? expression === escapeForTemplateLiteral(expected) : matchesEmissionShape(expression, true)
+    if (templateLiteral) return expected !== null ? matchesKnownEmission(expression, expected, true) : matchesEmissionShape(expression, true)
     const normalised = withoutGuardTypeAnnotations(expression)
-    if (expected !== null) return normalised === expected
+    if (expected !== null) return matchesKnownEmission(normalised, expected, false)
     return normalised === expression && matchesEmissionShape(expression, false)
   })
 }

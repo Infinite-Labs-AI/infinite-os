@@ -19,6 +19,36 @@ const GUARDED_IIFE = [
 const GUARDED_CALL = "if (infiniteHostAllowed(['acme.com'])) {\n  gtag('config', 'G-ABC123')\n}"
 
 describe("adopted init host guard", () => {
+  it.each([
+    { legacy: false, typed: false },
+    { legacy: true, typed: false },
+    { legacy: false, typed: true },
+    { legacy: true, typed: true }
+  ])("accepts the exact approved emission and rejects changed hosts or guard logic (legacy=$legacy, typed=$typed)", ({ legacy, typed }) => {
+    const expected = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
+    let expression = legacy
+      ? expected.replace(' if (!n) return false;', '').replace('})(typeof location !== "undefined" ? location.hostname : "")', '})(location.hostname)')
+      : expected
+    if (typed) expression = expression.replaceAll("(function (h) {", "(function (h: string) {").replace("})(h), i;", "})(h), i: number;")
+    const read = (guard: string) => checkHostGuard({
+      files: files({ "src/meta.ts": `function start() { if (!(${guard})) return; fbq('init', '111222333444555'); }` }),
+      strict: true,
+      productionHosts: ["acme.example"],
+      expectedEmittedGuard: expected
+    }).findings.map(finding => finding.code)
+    expect(read(expression)).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])
+    expect(read(expression.replace('"acme.example"', '"other.example"'))).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
+    expect(read(expression.replace("if (d[i] === n) return false;", "if (d[i] === n) return true;"))).toEqual(["INF_SETUP_HOST_GUARD_MISSING"])
+  })
+
+  it("recognises the legacy raw and escaped emissions before a production host is known", () => {
+    const expression = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
+      .replace(' if (!n) return false;', '').replace('})(typeof location !== "undefined" ? location.hostname : "")', '})(location.hostname)')
+    const raw = `function start() { if (!(${expression})) return; fbq('init', '111222333444555'); }`
+    const escaped = `<Script>{\`if (!(${escapeForTemplateLiteral(expression)})) return; fbq('init', '111222333444555');\`}</Script>`
+    for (const source of [raw, escaped]) expect(checkHostGuard({ files: files({ "src/meta.tsx": source }), strict: true }).findings.map(finding => finding.code)).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])
+  })
+
   it("accepts a verbatim escaped guard in a template-literal Script", () => {
     const emitted = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
     const source = `<Script id="analytics">{\`if (!(${escapeForTemplateLiteral(emitted)})) return; gtag('config', 'G-ABC123');\`}</Script>`
