@@ -310,6 +310,7 @@ it.each([false, true])("stops immediately on a production author block and names
   return step.run(ctx, bundle.deps).then(outcome => {
     expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_DEPLOY_FAILED", reason: expect.stringContaining(reason) })
     expect((outcome as { reason: string }).reason).toContain("is blocked")
+    expect((outcome as { reason: string }).reason).toMatch(/\.$/)
     expect((outcome as { resumeHint: string }).resumeHint).toMatch(/member of (?:the|your) hosting team/i)
     expect((outcome as { resumeHint: string }).resumeHint).toMatch(/redeploy.*merge|merge.*redeploy/i)
     expect((outcome as { resumeHint: string }).resumeHint).toContain("npx infinite-tag")

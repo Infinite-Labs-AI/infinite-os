@@ -1107,7 +1107,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
         return {
           kind: "parked",
           code: "INF_WIZ_DEPLOY_FAILED",
-          reason: reason ? `The deploy of ${mergeSha.slice(0, 7)} ${waited.blocked ? "is blocked" : "failed"}: ${reason}` : `The deploy of ${mergeSha.slice(0, 7)} failed (GitHub shows the Vercel production deployment failed).`,
+          reason: reason ? `The deploy of ${mergeSha.slice(0, 7)} ${waited.blocked ? "is blocked" : "failed"}: ${reason}${/[.!?]$/.test(reason) ? "" : "."}` : `The deploy of ${mergeSha.slice(0, 7)} failed (GitHub shows the Vercel production deployment failed).`,
           resumeHint: waited.blocked
             ? "A member of the hosting team must redeploy this merge in the hosting dashboard, or merge a follow-up change to trigger a permitted deployment. Once it is live, run npx infinite-tag again."
             : "Fix it and run npx infinite-tag again."
