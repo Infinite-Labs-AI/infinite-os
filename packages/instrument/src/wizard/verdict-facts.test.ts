@@ -3,6 +3,13 @@ import { item } from "../../test/wizard/repo.js"
 import { verdictFactsFor } from "./verdict-facts.js"
 import { buildReport, renderMarkdown, renderTerminal } from "./report.js"
 
+it("carries installed consent activation metadata into the shared report facts", async () => {
+  const ctx = { root: "/fixture", appRoot: ".", runId: "fixture", state: { get: () => ({ runId: "fixture", jobs: [], git: null, plan: { answers: { consentMode: "required" } } }) } }
+  const deps = { env: {}, bridge: {}, git: {}, fs: { readText: async (path: string) => path.endsWith("/install.json") ? JSON.stringify({ ids: { infinite: { siteSourceKey: "public-fixture-id" } }, managedCapture: { mode: "required", module: "public/infinite-meta-click-id.js" } }) : null } }
+  const facts = await verdictFactsFor(ctx as never, deps as never)
+  expect(facts.consentActivation).toEqual({ mode: "required", infinite: true, capture: true })
+})
+
 it.each([false, true])("sanitizes owner locations and preserves only safe executable snippets (secret=%s)", async unsafe => {
   const secret = "sk_test_" + "fixtureCredentialValue".repeat(2)
   const path = `src/<!-- @here [open](https://example.test)/${secret}.tsx`

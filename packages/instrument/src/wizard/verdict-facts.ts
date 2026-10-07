@@ -43,8 +43,10 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
   const currentHead = typeof git.head === "function" ? await git.head().catch(() => null) : null
   const measured = await ownerBoundaryForState(ctx.root, ctx.appRoot, state, currentHead)
   const ownerBoundary = { ...measured, files: measured.files.map(display), issues: measured.issues.map(issue => ({ file: display(issue.file), reason: display(issue.reason) })),
-    ...(measured.unverifiedReason ? { unverifiedReason: display(measured.unverifiedReason) } : {}) }  const reviewUnreliable = reviewReliabilityWarning(ledger.rounds.at(-1)?.review?.findings ?? ledger.findings ?? [])
+    ...(measured.unverifiedReason ? { unverifiedReason: display(measured.unverifiedReason) } : {}) }
+  const reviewUnreliable = reviewReliabilityWarning(ledger.rounds.at(-1)?.review?.findings ?? ledger.findings ?? [])
   return {
+    consentActivation: await consentActivationFor(ctx, deps),
     ...(reviewUnreliable ? { reviewUnreliable } : {}),
     tagNotInstalled: (await loadPlanApprovals(ctx, deps))?.ownerWiring?.canWire === false,
     ...(ownerBoundary ? { ownerBoundary } : {}),
@@ -75,3 +77,4 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
     installedUnknown: state.proof?.installedUnknown ?? null
   }
 }
+import { consentActivationFor } from "../install/consent-handoff.js"
