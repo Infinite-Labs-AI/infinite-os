@@ -1009,26 +1009,16 @@ export class Fence {
     return this.manifest.allow.filter((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel))).map((rule) => rule.itemId)
   }
 
-  /**
-   * §3x.2 Which items one hunk of `rel` belongs to. Candidates are the turn's items whose allowlist covers the file:
-   * (a) those that claimed `done` naming the file (or naming no files); (b) when (a) gives more than one, those whose
-   * trigger evidence in the file lies within the hunk's OLD range ±3 lines (else all of (a)); (c) when (a) is empty,
-   * the candidates whose evidence lies in the hunk, else every candidate.
-   */
-  attributeHunk(rel: string, hunk: LineHunk, claims: readonly Claim[]): string[] {
+  /** Ownership comes from the wizard's recorded edit places. An agent claim cannot remove
+   * an unclaimed co-owner. With no matching place, all covering jobs must verify the hunk. */
+  attributeHunk(rel: string, hunk: LineHunk, _claims: readonly Claim[]): string[] {
     const candidates = this.manifest.allow.filter((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel)))
     const evidenceIn = (rule: FenceItemAllow, slack: number) =>
       (rule.evidence ?? []).some((entry) => entry.file === rel && entry.line >= hunk.aStart + 1 - slack && entry.line <= Math.max(hunk.aEnd, hunk.aStart + 1) + slack)
-    const claimedDone = candidates.filter((rule) =>
-      claims.some((claim) => claim.jobId === rule.itemId && claim.status === "done" && (claim.files === undefined || claim.files.length === 0 || claim.files.map(normalizeRelPath).includes(rel)))
-    )
-    if (claimedDone.length === 1) return [claimedDone[0]!.itemId]
-    if (claimedDone.length > 1) {
-      const near = claimedDone.filter((rule) => evidenceIn(rule, 3))
-      return (near.length > 0 ? near : claimedDone).map((rule) => rule.itemId)
-    }
-    const inHunk = candidates.filter((rule) => evidenceIn(rule, 0))
-    return (inHunk.length > 0 ? inHunk : candidates).map((rule) => rule.itemId)
+    const exact = candidates.filter(rule => evidenceIn(rule, 0))
+    if (exact.length > 0) return exact.map(rule => rule.itemId)
+    const near = candidates.filter(rule => evidenceIn(rule, 3))
+    return (near.length > 0 ? near : candidates).map(rule => rule.itemId)
   }
 
   private jobFor(rel: string, claims: readonly Claim[]): string | null {

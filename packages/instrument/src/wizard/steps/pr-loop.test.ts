@@ -1,3 +1,4 @@
+import { editHash } from "../../jobs/settle-edits.js"
 // Lane O4: the `rehearsal`, `review` and `merge` steps end to end over a real git fixture (bare remote + clone),
 // the stateful fake gh, a recording fake bridge and scripted agents. No network, no real agent, no prompt.
 import { existsSync, readFileSync } from "node:fs"
@@ -734,6 +735,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(readFileSync(join(w.fx.root, "app/layout.tsx"), "utf8")).toBe(source)
     expect(readFileSync(join(w.fx.root, ".infinite/install.json"), "utf8")).toBe(receipt)
     expect(w.fx.git(["diff", "--cached", "--name-only"]).trim()).toBe("")
+    expect(w.ctx.state.get().jobs.find(job => job.id === "build_fix:pr_checks")).toMatchObject({ state: "left_for_you", edits: [], note: expect.stringContaining("put back") })
   })
 
   it("gives the worker the CI failure near the log tail with the correct label", async () => {
@@ -926,7 +928,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     })
     w.deps.checks = { ...fakeChecks(), build: async () => ({ ok: false, failureSignature: [], durationMs: 1, error: "sandbox unavailable" }) }
     expectOk(await reviewStep.run(w.ctx, w.deps))
-    expect(w.fx.remoteSha(BRANCH)).not.toBe(w.head)
+    expect(w.fx.remoteSha(BRANCH)).toBe(w.head)
     expect(w.ctx.state.get().jobs.find(job => job.id === "review_comments:F1")!.checks.find(check => check.id === "build")!.state).toBe("undetermined")
     expect(w.gh.traffic()).not.toContain("broke the build")
   })
@@ -1007,10 +1009,13 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
   }
 
   const fixLayout = (input: RunJobsInput, _round: number, w: World): Partial<AgentRunResult> => {
+    const before = readFileSync(join(w.fx.root, "app/layout.tsx"), "utf8")
     w.fx.write("app/layout.tsx", `export default function Layout() {\n  // managed: fbq('init', '${PIXEL_ID}') (once)\n  return null\n}\n`)
     for (const item of input.items) input.onClaim({ jobId: item.id, status: "done", note: `fixed; the key ${STRIPE} was never needed`, at: "2026-10-02T10:01:00.000Z" })
     input.onProgress({ jobId: input.items[0]!.id, text: "Editing app/layout.tsx for jane.doe@acme-store.com" })
-    return { edits: [{ id: "a1", file: "app/layout.tsx", jobId: "review_comments", planLineId: null, by: "agent", beforeHash: "sha256:a", afterHash: "sha256:b", textEdits: [], runId: RUN_ID }] }
+    const after = readFileSync(join(w.fx.root, "app/layout.tsx"), "utf8")
+    return { edits: [{ id: "a1", file: "app/layout.tsx", jobId: input.items[0]!.jobId, planLineId: null, by: "agent", beforeHash: editHash(before), afterHash: editHash(after), textEdits: [{ offset: 0, removed: before, inserted: after }], runId: RUN_ID }],
+      attribution: [{ editId: "a1", itemIds: input.items.map(item => item.id), textEditItems: [input.items.map(item => item.id)] }] } as Partial<AgentRunResult>
   }
 
   /** The live run's Codex answer (pr2-codex-review.md): every item cant_tell, changes_suggested, no finding. */
@@ -1258,9 +1263,11 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
       fix: (input, round, world) => {
         n += 1
         const file = input.items[0]!.allow.files[0]!
-        world.fx.write(file, `${readFileSync(join(world.fx.root, file), "utf8")}// fix ${round}\n`)
+        const before = readFileSync(join(world.fx.root, file), "utf8")
+        const after = `${before}// fix ${round}\n`
+        world.fx.write(file, after)
         for (const item of input.items) input.onClaim({ jobId: item.id, status: "done", note: "done", at: "2026-10-02T10:01:00.000Z" })
-        return { edits: [{ id: `a${n}`, file, jobId: "review_comments", planLineId: null, by: "agent", beforeHash: "sha256:a", afterHash: "sha256:b", textEdits: [], runId: RUN_ID }] }
+        return { edits: [{ id: `a${n}`, file, jobId: "review_comments", planLineId: null, by: "agent", beforeHash: editHash(before), afterHash: editHash(after), textEdits: [{ offset: 0, removed: before, inserted: after }], runId: RUN_ID }] }
       },
       answers: { "teammate-comments": { actOn: [] } }
     })
@@ -1336,7 +1343,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
       fix: fixLayout,
       answers: { "teammate-comments": { actOn: [] }, single: "fix" }
     })
-    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED" })
     expect(w.agents.jobCalls).toEqual([])
     expect(w.ctx.asks.filter((ask) => ask.kind === "single")).toEqual([])
   })
@@ -1367,7 +1374,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
       builds += 1
       return build0()
     }
-    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED" })
     const threads = w.gh.read().threads.filter((thread) => thread.comments[0]!.author === "acme-dev")
     const reply = (id: string) => threads.find((thread) => thread.comments[0]!.body.includes(id))!.comments[1]!.body
     expect(reply("F1")).toMatch(/^Not fixed: the agent ran out of its 10 minutes before changing anything\. It stays open\./)
@@ -1644,7 +1651,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(f1.isResolved).toBe(true)
     const job = w.ctx.state.get().jobs.find((candidate) => candidate.id === "review_comments:F1")!
     expect(job.state).toBe("done_in_code")
-    expect(job.checks.map((check) => `${check.tier}:${check.id}:${check.state}`)).toEqual(["S:pr_checks_pass:pass", "B:build:pass"])
+    expect(job.checks.map((check) => `${check.tier}:${check.id}:${check.state}`)).toEqual(["B:build:pass"])
   })
 
   it("reports a failed site test by name on a pushed review fix, even when branch protection marks no checks required", async () => {
@@ -1655,42 +1662,18 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     })
     expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: expect.stringContaining("test") })
     const job = w.ctx.state.get().jobs.find((candidate) => candidate.id === "review_comments:F1")!
-    expect(job.checks.find((check) => check.id === "pr_checks_pass")).toMatchObject({ state: "problem", reason: expect.stringContaining("test") })
+    expect(job.checks.find((check) => check.id === "build")).toMatchObject({ state: "pass" })
     expect(w.gh.traffic()).not.toContain("--required")
     expect(w.gh.read().prs[0]).toMatchObject({ isDraft: true })
   })
 
-  it("P2-3: a resume after the worker ran out of usage continues round 1 from its saved review (one review post, one reviewer run)", async () => {
-    let calls = 0
-    const w = await opened({
-      reviews: [
-        review([
-          { id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null },
-          // Declined in round 1 before the park: on the resume it is still a decline, never "raised again".
-          { id: "F2", item: "R2", severity: "nit", path: "next.config.js", line: null, body: "Add a first-party proxy for GA4.", suggested_fix: null }
-        ]),
-        review([])
-      ],
-      fix: (input, round, world) => {
-        calls += 1
-        if (calls === 1) return { outcome: "out_of_usage" }
-        return fixLayout(input, round, world)
-      },
-      answers: { "teammate-comments": { actOn: [] } }
-    })
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE" })
-    expect(w.agents.reviewCalls).toHaveLength(1)
+  it("a review worker usage limit leaves the repair for its owner and readies a green PR", async () => {
+    const w = await opened({ reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null }])], fix: () => ({ outcome: "out_of_usage" }) })
     expectOk(await reviewStep.run(w.ctx, w.deps))
-    // Round 1 was never re-run or re-posted; round 2 re-reviewed the fix.
-    expect(w.agents.reviewCalls).toHaveLength(2)
-    expect(w.agents.reviewCalls[1]!.brief).toMatch(/RE-REVIEW/)
-    const rounds = w.gh
-      .read()
-      .calls.filter((call) => call.stdin?.includes("addPullRequestReview(input"))
-      .map((call) => /round=(\d)/.exec(JSON.parse(call.stdin!).variables.body as string)![1])
-    expect(rounds).toEqual(["1", "2"])
-    const final = (w.gh.read().prs[0]!.comments as Array<{ body: string }>).at(-1)!.body
-    expect(final).not.toMatch(/raised again/i)
+    expect(w.agents.reviewCalls).toHaveLength(1)
+    expect(w.fx.remoteSha(BRANCH)).toBe(w.head)
+    expect(w.ctx.state.get().jobs.find(job => job.id === "review_comments:F1")).toMatchObject({ state: "left_for_you", edits: [] })
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
   })
 
   it("P2-3: a closed PR stops the review with a fresh-run offer (nothing reviewed, fixed or pushed)", async () => {

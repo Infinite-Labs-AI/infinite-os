@@ -653,10 +653,12 @@ async function repairCi(session: Session, checks: PrCheck[], base: PrCheck[] | n
     ctx.state.update(state => { state.jobs = [...state.jobs.filter(job => !fix.items.some(item => item.id === job.id)), ...fix.items.map(notDoneItem)] })
     return false
   }
-  const restoreUncommitted = async () => {
+  const restoreUncommitted = async (reason = "The repair could not be committed, so its edits were put back.") => {
     if (await ship.git.head() !== previous) return
     await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
     await ship.git.unstage(snapshots.map(snapshot => snapshot.path))
+    ctx.state.update(state => { state.jobs = state.jobs.map(job => fix.items.some(item => item.id === job.id)
+      ? { ...job, state: "left_for_you", edits: [], note: ship.scanner.redact(reason).text } : job) })
   }
   try {
     const verified = await settleFixRound(ctx, deps, ship.runId, fix)
@@ -668,14 +670,14 @@ async function repairCi(session: Session, checks: PrCheck[], base: PrCheck[] | n
     await deps.installer.recordEdits(verified.edits)
     const commit = await stageAndCommit({ ctx, deps, git: ship.git, step: "review", scanner: ship.scanner, runId: ship.runId, message: "infinite-tag: fix PR checks", round: 1, allowlist: [...files], managed, npmFiles: [], connectionIds: ship.facts.connectionIds })
     if (commit.kind !== "committed") {
-      await restoreUncommitted()
+      await restoreUncommitted(`The repair was put back because the commit was ${commit.kind}${"message" in commit ? `: ${commit.message}` : ""}.`)
       return false
     }
     const synced = await syncHead(session, previous, commit.sha)
     if ("head" in synced) session.notes.push("The CI repair was committed after the review; it has not had a separate second review.")
     return "head" in synced
   } catch (error) {
-    await restoreUncommitted()
+    await restoreUncommitted(`The repair was put back: ${error instanceof Error ? error.message : String(error)}`)
     session.notes.push(ship.scanner.redact(`The CI repair could not be committed: ${error instanceof Error ? error.message : String(error)}`).text)
     return false
   }
@@ -1105,7 +1107,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       sub(ctx, "review", `${AGENT_LABEL[worker]} is fixing ${items.length} comment${items.length === 1 ? "" : "s"}…`, "pending")
       const prevHead = head
       // The files the round may change AND create (a created file is removed again if the round fails; B29).
-      const snapshots = await snapshotFiles(deps, ctx.root, items.flatMap((item) => [...item.allow.files, ...item.allow.create]))
+      const snapshots = await snapshotFiles(deps, ctx.root, [".infinite/install.json", ...items.flatMap((item) => [...item.allow.files, ...item.allow.create])])
       const fix = await runFixRound(ctx, deps, { step: "review", worker, items, scanner: prepared.scanner })
       const edited = fix.run.edits.map((edit) => edit.file)
       for (const [index, decision] of fixes.entries()) {
@@ -1154,8 +1156,17 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
           safeDisplayText(prepared.scanner, `Round ${round}: the wizard could not accept the fixes (${verified.buildReason ?? 'validation failed'}), so it put the files back and did not commit them.${leftOver.length > 0 ? ` Remove ${leftOver.join(", ")} (the agent created it).` : ""}`)
         )
       } else if (verified.edits.length > 0) {
-        await deps.installer.recordEdits(verified.edits)
-        const commit = await stageAndCommit({
+        const restoreRepair = async (reason: string) => {
+          if (await prepared.git.head() !== prevHead) return
+          await restoreFiles(deps, ctx.root, snapshots, verified.edits)
+          await prepared.git.unstage(snapshots.map(snapshot => snapshot.path))
+          const note = safeDisplayText(prepared.scanner, `The repair was put back: ${reason}`)
+          finalItems = finalItems.map(item => ({ ...item, state: "left_for_you", edits: [], note }))
+          session.notes.push(note)
+        }
+        const commit = await (async () => { try {
+          await deps.installer.recordEdits(verified.edits)
+          return await stageAndCommit({
           ctx,
           deps,
           git: prepared.git,
@@ -1168,10 +1179,10 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
           managed,
           npmFiles: [],
           connectionIds: prepared.facts.connectionIds
-        })
-        const stop = commitStop(commit)
-        if (stop) return stop
-        if (commit.kind === "committed") {
+          })
+        } catch (error) { await restoreRepair(error instanceof Error ? error.message : String(error)); return null } })()
+        if (commit && commit.kind !== "committed") await restoreRepair(`commit ${commit.kind}${"message" in commit ? `: ${commit.message}` : ""}`)
+        if (commit?.kind === "committed") {
           const synced = await syncHead(session, prevHead, commit.sha)
           if (!("head" in synced)) return synced
           fixSha = synced.head

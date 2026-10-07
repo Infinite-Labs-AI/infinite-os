@@ -472,3 +472,19 @@ describe("the final tree seal (B5/B29: verified again right before staging)", ()
     expect(verdict?.changed).toContain("app/layout.tsx")
   })
 })
+
+
+it("a claim cannot remove an unclaimed co-owner at the same edit place or absorb a separate hunk", async () => {
+  const { root } = makeFenceFixture()
+  const home = tempDir("infinite-tag-attribution-")
+  dirs.push(root, home)
+  const a = { ...item("preview_guard:meta", ["app/layout.tsx"]), trigger: { finding: "guard", evidence: [{ file: "app/layout.tsx", line: 10 }] } }
+  const b = { ...item("meta_improve:capture", ["app/layout.tsx"]), trigger: { finding: "capture", evidence: [{ file: "app/layout.tsx", line: 10 }] } }
+  const c = { ...item("preview_guard:ga4", ["app/layout.tsx"]), trigger: { finding: "guard", evidence: [{ file: "app/layout.tsx", line: 30 }] } }
+  const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 1), runId: RUN_ID, turn: 1, items: [a, b, c] })
+  const claims = [{ jobId: a.id, status: "done" as const, note: "done", at: "2026-10-07T00:00:00Z" }]
+  expect(fence.attributeHunk("app/layout.tsx", { aStart: 9, aEnd: 10, bStart: 9, bEnd: 11 }, claims)).toEqual([a.id, b.id])
+  expect(fence.attributeHunk("app/layout.tsx", { aStart: 29, aEnd: 30, bStart: 30, bEnd: 31 }, claims)).toEqual([c.id])
+  expect(fence.attributeHunk("app/layout.tsx", { aStart: 50, aEnd: 51, bStart: 52, bEnd: 54 }, claims)).toEqual([a.id, b.id, c.id])
+  await fence.abort()
+})
