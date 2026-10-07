@@ -8,8 +8,13 @@ export function neutralizeUntrustedMarkup(text: string): string {
     .replace(/(!?)\[([^\]\n]*)\](?=\s*(?:\(|\[|:))/g, "$1［$2］")
     .replace(/\b(https?|mailto):/gi, "$1[:]")
 }
-export function safeDisplayText(scanner: Scanner, text: string): string {
+/** Preserve code/Markdown syntax, but redact both before and after control stripping, before any cap. */
+export function redactDisplayText(scanner: Scanner, text: string): string {
   const rawRedacted = scanner.redact(text).text
   const cleaned = sanitizeUntrustedBlock(rawRedacted, Math.max(1, rawRedacted.length))
-  return neutralizeUntrustedMarkup(sanitizeUntrustedBlock(scanner.redact(cleaned).text, 65_536))
+  return sanitizeUntrustedBlock(scanner.redact(cleaned).text, 65_536)
+}
+
+export function safeDisplayText(scanner: Scanner, text: string): string {
+  return neutralizeUntrustedMarkup(redactDisplayText(scanner, text))
 }

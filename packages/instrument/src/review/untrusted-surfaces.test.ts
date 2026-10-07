@@ -1,7 +1,7 @@
 import { expect, it } from "vitest"
 import { verdictFactsFor } from "../wizard/verdict-facts.js"
 import { triage, type TriageItem } from "./triage.js"
-import { buildReviewPost } from "./post.js"
+import { buildReviewPost, buildReply, safeText, buildFinalComment, buildChecklist } from "./post.js"
 import { createScanner } from "./scan.js"
 
 it("redacts owner-category review text before it reaches report facts", async () => {
@@ -44,4 +44,62 @@ it("redacts a secret before a display limit can split its literal", async () => 
   const scanner = createScanner({ literals: [{ value: secret, kind: "env_value" }], allowedIds: [] })
   const text = safeDisplayText(scanner, "safe ".repeat(13_104) + " " + secret)
   expect(text).not.toContain("opaqueFixture")
+})
+
+
+it("redacts whole literals before the assembled PR size cap", () => {
+  const secret = "opaqueFixtureCredentialValueForRedaction"
+  const scanner = createScanner({ literals: [{ value: secret, kind: "env_value" }], allowedIds: [] })
+  expect(safeText(scanner, "safe ".repeat(13_104) + " " + secret).includes("opaqueFixture")).toBe(false)
+})
+
+it("redacts and neutralizes failed-fix explanations before excerpting", () => {
+  const secret = "opaqueFixtureCredentialValueForRedaction"
+  const scanner = createScanner({ literals: [{ value: secret, kind: "env_value" }], allowedIds: [] })
+  const decision = { action: "FIX", item: { path: "src/main.ts" }, reason: "fix" } as never
+  for (const outcome of ["undone", "gate_refused", "blocked", "checks_failed"] as const) {
+    for (const why of [`${secret} <!-- @here [open](https://example.test)`, "x".repeat(190) + secret]) {
+      const reply = buildReply(scanner, decision, { kind: "not_fixed", outcome, why })
+      expect(reply).not.toContain("opaqueFixture")
+      expect(reply).not.toContain("<!-- @here")
+      expect(reply).not.toContain("@here")
+      expect(reply).not.toContain("](https:")
+    }
+  }
+})
+
+it("keeps generated owner snippets executable while neutralizing checklist prose", () => {
+  const guard = 'if (location.pathname !== "/private") { posthog.init("public-key"); }'
+  const jobs = [{ title: "<!-- @here [open](https://example.test)", state: "left_for_you", jobId: "posthog_improve", allow: { files: ["src/main.ts"] }, ownerBoundary: { kind: "frozen_unit", file: "src/main.ts", line: 1, guard } }] as never
+  const body = buildFinalComment({ runId: "fixture", reportMarkdown: "report", reviewer: null, reviewed: false, jobs, decisions: [], untrusted: [], notes: [], scanner: createScanner({ literals: [], allowedIds: [] }) })
+  expect(body).toContain(guard)
+  expect(body).not.toContain("<!-- @here")
+  expect(body).not.toContain("@here")
+  expect(body).not.toContain("](https:")
+})
+
+
+it("keeps repo backticks inside owner snippet fences without rewriting source", () => {
+  const guard = '/*\n```\n<!-- @here [open](https://example.test)\n*/\nif (location.pathname !== "/private") posthog.init("public-key");'
+  const job = { title: "Owner guard", state: "left_for_you", allow: { files: ["src/main.ts"] }, ownerBoundary: { kind: "frozen_unit", guard } } as never
+  const body = buildChecklist([job])
+  expect(body).toContain(`\n\n\`\`\`\`js\n${guard}\n\`\`\`\``)
+})
+
+it("rescans a literal exposed by stripping terminal controls", () => {
+  const secret = "opaqueFixtureCredentialValueForRedaction"
+  const scanner = createScanner({ literals: [{ value: secret, kind: "env_value" }], allowedIds: [] })
+  const disguised = secret.slice(0, 13) + "\u001b[0m" + secret.slice(13)
+  expect(safeText(scanner, disguised)).toBe("[redacted: env_value]")
+})
+
+
+it("withholds an unsafe owner snippet instead of presenting redacted code as copyable", () => {
+  const secret = "opaqueFixtureCredentialValueForRedaction"
+  const scanner = createScanner({ literals: [{ value: secret, kind: "env_value" }], allowedIds: [] })
+  const job = { title: "Owner guard", state: "left_for_you", allow: { files: ["src/main.ts"] }, ownerBoundary: { kind: "frozen_unit", guard: `if (ok) start("${secret}");` } } as never
+  const body = buildFinalComment({ runId: "fixture", reportMarkdown: "report", reviewer: null, reviewed: false, jobs: [job], decisions: [], untrusted: [], notes: [], scanner })
+  expect(body).toContain("snippet was withheld")
+  expect(body).not.toContain(secret)
+  expect(body).not.toContain('start("[redacted:')
 })

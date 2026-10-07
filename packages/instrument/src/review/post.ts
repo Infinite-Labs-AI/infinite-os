@@ -1,4 +1,4 @@
-import { safeDisplayText, neutralizeUntrustedMarkup } from "./display.js"
+import { safeDisplayText, neutralizeUntrustedMarkup, redactDisplayText } from "./display.js"
 // Everything the wizard posts on the PR (lane O4, §3g.3–§3g.5), built here and scanned here:
 // the PR body, the ONE review (`event: COMMENT`; a finding outside a diff hunk goes into the body), the replies,
 // and the final comment. Statuses are plain text the wizard owns: a literal `- [ ]` (which anyone can tick) is
@@ -11,7 +11,7 @@ import { AGENT_LIMITS, type AgentKind, type ReviewResult } from "../wizard/contr
 import { FORBIDDEN_CHECKBOX, PR_MARKERS } from "../wizard/contracts/git-host.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 import { lineInHunk, type DiffFile } from "./diff.js"
-import { mostlyRedacted, type Scanner } from "./scan.js"
+import { createScanner, mostlyRedacted, type Scanner } from "./scan.js"
 import type { TriageDecision } from "./triage.js"
 import { escapeMarkdownCell } from "../text-escape.js"
 
@@ -34,7 +34,7 @@ export function stripControl(text: string): string {
 
 /** The scan + control-strip every posted string goes through. */
 export function safeText(scanner: Scanner, text: string): string {
-  return scanner.redact(stripControl(text)).text
+  return redactDisplayText(scanner, text)
 }
 
 const ID_SHAPES = [/\bG-[A-Z0-9]{6,12}\b/g, /\bphc_[A-Za-z0-9]{20,}\b/g, /(?<![0-9A-Za-z])\d{15,16}(?![0-9A-Za-z])/g]
@@ -164,8 +164,8 @@ export type NotFixedOutcome = "timeout" | "toolless" | "error" | "no_change" | "
 /** The fix round's time budget in whole minutes, as every reply says it. */
 export const FIX_ROUND_MINUTES = Math.round(AGENT_LIMITS.reviewFix.wallMsPerRound / 60_000)
 
-export function notFixedReply(outcome: NotFixedOutcome, why?: string | null): string {
-  const said = why ? stripControl(why).slice(0, 200) : null
+export function notFixedReply(outcome: NotFixedOutcome, why?: string | null, scanner: Scanner = createScanner({ literals: [], allowedIds: [] })): string {
+  const said = why ? safeDisplayText(scanner, why).slice(0, 200) : null
   switch (outcome) {
     case "undone":
       return `Not fixed: ${said ?? "the agent stopped before it finished"}. It stays open.`
@@ -182,7 +182,7 @@ export function notFixedReply(outcome: NotFixedOutcome, why?: string | null): st
     case "no_change":
       return "Not fixed: the agent finished without changing anything. It stays open."
     case "checks_failed":
-      return `Not fixed this round: the agent's change did not pass the wizard's checks${why ? ` (${stripControl(why).slice(0, 200)})` : ""}. It stays open.`
+      return `Not fixed this round: the agent's change did not pass the wizard's checks${said ? ` (${said})` : ""}. It stays open.`
   }
 }
 
@@ -199,7 +199,7 @@ export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixR
         ? `Fixed in ${fix.sha.slice(0, 7)}; the wizard re-ran its checks and the rehearsal on that commit.`
         : fix?.kind === "unverified"
           ? `Changed in ${fix.sha.slice(0, 7)}. The required checks had not finished, so the wizard has not marked it done; it stays open.`
-          : notFixedReply(fix?.kind === "not_fixed" ? (fix.outcome ?? "checks_failed") : "checks_failed", fix?.kind === "not_fixed" ? fix.why : null)
+          : notFixedReply(fix?.kind === "not_fixed" ? (fix.outcome ?? "checks_failed") : "checks_failed", fix?.kind === "not_fixed" ? fix.why : null, scanner)
       : decision.action === "INFINITE"
         ? `This is ${decision.label ?? "Infinite's own code"} (${safeDisplayText(scanner, decision.item.path ?? "general")}), which the wizard never hands to your agent. The finding is recorded in this run's report for Infinite to fix.`
       : decision.action === "ASK" && decision.leftByOwner
@@ -239,19 +239,26 @@ export function jobStateCell(job: ChecklistItem): string {
   return `${state}${job.blockedReason ? ` (${job.blockedReason.replace(/_/g, " ")})` : ""}`
 }
 
+/** Fence length is chosen from the source so a comment/string cannot escape into live Markdown. */
+function ownerSnippet(text: string, language: string, scanner: Scanner): string {
+  if (safeText(scanner, text) !== text) return "The copyable snippet was withheld because it contains private data, terminal controls, or exceeds the display limit. Review the named file locally."
+  const fence = "`".repeat(Math.max(3, ...[...text.matchAll(/`+/g)].map(match => match[0].length + 1)))
+  return `${fence}${language}\n${text}\n${fence}`
+}
+
 /** Shared merge-time and final checklist; scan the returned Markdown before posting. */
-export function buildChecklist(jobs: readonly ChecklistItem[]): string {
+export function buildChecklist(jobs: readonly ChecklistItem[], scanner: Scanner = createScanner({ literals: [], allowedIds: [] })): string {
   if (jobs.length === 0) return ""
   const rows = jobs.map((job) => `| ${escapeCell(job.title)} | ${escapeCell(jobStateCell(job))} |`).join("\n")
   const guards = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.kind === "frozen_unit" && job.ownerBoundary.guard).map(job => {
     const scope = job.ownerBoundary!
     const where = escapeCell(`${scope.file ?? job.allow.files[0] ?? "the noted file"}:${scope.line ?? 1}`)
-    return `**For the site owner: ${escapeCell(job.title)}**\n\nApply this condition to the analytics start-up at ${where}. Keep your consent, grant and revoke code outside the guard. This snippet is for you to copy; the wizard did not edit that unit.\n\n\`\`\`js\n${scope.guard}\n\`\`\``
+    return `**For the site owner: ${escapeCell(job.title)}**\n\nApply this condition to the analytics start-up at ${where}. Keep your consent, grant and revoke code outside the guard. This snippet is for you to copy; the wizard did not edit that unit.\n\n${ownerSnippet(scope.guard!, "js", scanner)}`
   })
   const wiring = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.wiring).map(job => {
     const scope = job.ownerBoundary!
     const where = escapeCell(scope.file ?? job.allow.files[0] ?? "the noted entrypoint")
-    return `**For the site owner: wiring at ${where}**\n\nThe wizard left this entrypoint untouched. The import, mount or script below is for you to place; it has not been applied.\n\n\`\`\`\`text\n${scope.wiring}\n\`\`\`\``
+    return `**For the site owner: wiring at ${where}**\n\nThe wizard left this entrypoint untouched. The import, mount or script below is for you to place; it has not been applied.\n\n${ownerSnippet(scope.wiring!, "text", scanner)}`
   })
   return [`**Checklist (the wizard's own checks, never the agent's word)**\n\n| Job | State |\n|---|---|\n${rows}`, ...guards, ...wiring].join("\n\n")
 }
@@ -290,7 +297,7 @@ export function buildFinalComment(input: FinalCommentInput): string {
     FINAL_COMMENT_TITLE,
     review,
     input.reportMarkdown.trim(),
-    buildChecklist(input.jobs),
+    buildChecklist(input.jobs, input.scanner),
     ownerInfo.length > 0 ? `**Information for the site owner**\n\n${ownerInfo.join("\n")}` : "",
     declined.length > 0 ? `**Declined, with reasons**\n\n${declined.join("\n")}` : "",
     // Live run 5 (P3): a reviewer's question the wizard answered from this run's measurements. On a brief review there is
