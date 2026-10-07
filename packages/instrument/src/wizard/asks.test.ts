@@ -62,6 +62,11 @@ function setup(options: Partial<WizardOptions>, answers: AnswersFile | null = nu
 const NEVER_LINES = ["L8", "L9", "L10", "L18"]
 
 describe("--yes (§3d.4 YES_POLICY)", () => {
+  it("uses the shown consent default under --yes without a separate flag", async () => {
+    const { asks } = setup({ yes: true })
+    const answer = await asks.ask("plan", { ...PLAN, decisions: { ...PLAN.decisions, consentMode: "not_required" } })
+    expect(answer).toMatchObject({ approved: expect.arrayContaining(["L8"]), edits: { L8: "not_required" } })
+  })
   it("approves exactly the yes-lines and leaves every never-line unanswered", async () => {
     const { store, asks } = setup({ yes: true })
     const answer = await asks.ask("plan", PLAN)
@@ -156,6 +161,17 @@ describe("--answers <file>", () => {
 })
 
 describe("nested mode (§3d.7): user-only asks stay human", () => {
+  it.each(["not_required", "required"] as const)("nested --yes accepts the wizard's shown %s default, not a file's mode", async mode => {
+    const { asks } = setup({ nested: true, yes: true, json: true }, { v: 1, consentMode: mode === "required" ? "not_required" : "required" })
+    const answer = await asks.ask("plan", { ...PLAN, decisions: { ...PLAN.decisions, consentMode: mode } })
+    expect(answer).toMatchObject({ approved: expect.arrayContaining(["L8"]), edits: { L8: mode } })
+  })
+  it("nested --yes retains an explicit consent decline over the shown default", async () => {
+    const { asks } = setup({ nested: true, yes: true, json: true }, { v: 1, plan: { declined: ["L8"] }, consentMode: "required" })
+    const answer = await asks.ask("plan", { ...PLAN, decisions: { ...PLAN.decisions, consentMode: "not_required" } })
+    expect(answer).toMatchObject({ declined: expect.arrayContaining(["L8"]) })
+    expect((answer as { approved: string[] }).approved).not.toContain("L8")
+  })
   const nestedAnswers: AnswersFile = {
     v: 1,
     plan: { approved: ["L1", "L11", "L18"] },

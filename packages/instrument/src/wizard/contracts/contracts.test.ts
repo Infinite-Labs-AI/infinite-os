@@ -1104,19 +1104,18 @@ describe("YES_POLICY (§3d.4)", () => {
     expect(Object.keys(YES_ASK_POLICY).sort()).toEqual([...ASK_KINDS].sort())
   })
 
-  it("--yes approves the additive and managed kinds", () => {
-    for (const kind of ["install_provider", "server_lane", "preview_guard_managed"] as const) {
+  it("--yes approves repository work and the shown consent default", () => {
+    for (const kind of ["install_provider", "server_lane", "preview_guard_managed", "consent_mode"] as const) {
       expect(yesApproves({ kind }), kind).toBe(true)
     }
     expect(yesApproves({ kind: "improve_additive", ownership: "managed" })).toBe(true)
   })
 
-  it("negatives: --yes never approves questions, packages, account writes or metered costs", () => {
+  it("negatives: --yes leaves other questions, packages, account writes and metered costs explicit", () => {
     for (const kind of [
       "npm_install",
       "account_settings",
       "agent_budget",
-      "consent_mode",
       "conversion_names",
       "privacy_text",
       "meta_relay",

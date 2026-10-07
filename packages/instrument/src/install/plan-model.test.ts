@@ -96,7 +96,7 @@ describe("the plan model asks ONLY the three decisions", () => {
     const editable = plan.lines.filter((line) => line.editable).map((line) => line.id)
     expect(editable.sort()).toEqual([...EDITABLE_LINE_IDS].sort())
     expect(plan.decisions).toEqual({
-      consentMode: null,
+      consentMode: "not_required",
       conversionNames: ["start_trial"],
       privacyText: null,
       npmInstall: "pnpm add @vercel/functions"

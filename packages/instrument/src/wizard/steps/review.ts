@@ -20,6 +20,7 @@ import type { CheckResult } from "../contracts/jobs.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import { verdictFactsFor } from "../verdict-facts.js"
+import { missingApprovedFixes } from "../verdict.js"
 import { isGloballyDenied } from "../../git/commit.js"
 import { commentEditor, isGitHubAdapter, type GitHubHostAdapter } from "../../hosts/github.js"
 import { isUnsupported } from "../../hosts/other.js"
@@ -618,6 +619,7 @@ async function replyAndResolve(
 class PrChecksStop extends Error {
   constructor(message: string, readonly failed: boolean) { super(message) }
 }
+class ApprovedFixesStop extends Error {}
 
 /** One bounded CI repair, only for an actual base-green regression with a log naming this run's edits. */
 async function repairCi(session: Session, checks: PrCheck[], base: PrCheck[] | null): Promise<boolean> {
@@ -746,6 +748,11 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
 async function finish(session: Session, options: { once?: boolean } = {}): Promise<void> {
   const { ctx, deps, ship } = session
   const state = ctx.state.get()
+  const openApproved = missingApprovedFixes(state.jobs)
+  if (openApproved.length) {
+    await saveLedger(session)
+    throw new ApprovedFixesStop(ship.scanner.redact(`Approved fixes remain open: ${openApproved.map(job => `${job.title}${job.note ? ` — ${job.note}` : ""}`).join("; ")}`).text)
+  }
   if (session.github && session.number !== null && (await session.github.readPr(session.number)).state === "OPEN") {
     const verdict = await requiredChecksResult(session, ship.runId)
     if (verdict) session.notes.push(verdict.reason ?? "PR checks not measured")
@@ -808,6 +815,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     reviewed: session.reviewed,
     completeness: session.ledger.completeness ?? null,
     jobs: ctx.state.get().jobs,
+    ...((verdictFacts.ownerPolicyFindings?.length ?? 0) > 0 ? { ownerInformationInReport: true } : {}),
     decisions: [...session.decisions, ...openFromLedger],
     untrusted: session.untrusted,
     notes: session.notes,
@@ -888,6 +896,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   try {
     return await reviewRun(ctx, deps)
   } catch (error) {
+    if (error instanceof ApprovedFixesStop) { await ctx.state.save(); return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `${error.message}. This run will not mark the pull request ready.`, resumeHint: "Complete the named fixes, or leave them for the owner with a recorded reason, then run `npx infinite-tag` again." } }
     if (error instanceof PrChecksStop) { await ctx.state.save(); return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `${error.message}. The pull request stays draft.`, resumeHint: error.failed ? "Resolve the named checks, then run `npx infinite-tag` again." : "Run `npx infinite-tag` again when the checks have finished or can be read." } }
     const stop = bridgeStop(error)
     if (stop) {

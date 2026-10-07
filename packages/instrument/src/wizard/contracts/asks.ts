@@ -94,8 +94,8 @@ export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue } = {
   agent_budget: "never",
   // It rewrites the customer's api_host / capture_pageview on an adopted provider.
   improve_additive: "yes",
-  // Needs --consent-mode; a missing consent mode parks the run at `plan`.
-  consent_mode: "never",
+  // yesPlanAnswer uses the shown mode default (or explicit flag); a null mode is never invented here.
+  consent_mode: "yes",
   conversion_names: "never",
   privacy_text: "never",
   // Repository improvements can be excluded; --yes is not permission to ignore a no.
@@ -126,11 +126,11 @@ export function yesApproves(line: Pick<PlanLine, "kind" | "ownership">): boolean
 }
 
 /** Questions, package installs, account writes and metered costs stay human in nested mode. */
-export const NESTED_USER_ONLY_LINE_KINDS: readonly PlanLineKind[] = PLAN_LINE_KINDS.filter(kind => YES_POLICY[kind] === "never")
+export const NESTED_USER_ONLY_LINE_KINDS: readonly PlanLineKind[] = PLAN_LINE_KINDS.filter(kind => kind === "consent_mode" || YES_POLICY[kind] === "never")
 
 /** A parent agent may refuse any line, but cannot approve these human decisions. */
 export function isNestedUserOnly(line: Pick<PlanLine, "kind" | "ownership">): boolean {
-  return YES_POLICY[line.kind] === "never"
+  return line.kind === "consent_mode" || YES_POLICY[line.kind] === "never"
 }
 
 /** §3d.4 "Asks under --yes" (R2-15): `--yes` answers none of these. */

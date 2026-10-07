@@ -43,7 +43,7 @@ function verdicts(jobs: readonly ChecklistItem[], jobId: JobId, runId: string): 
 const PLAIN_NAME = /^[A-Za-z0-9_.-]{1,40}$/
 
 export function consentWords(mode: "not_required" | "required"): string {
-  return mode === "required" ? "ask first (consent required)" : "collect by default"
+  return mode === "required" ? "wait for my banner's yes" : "collect by default"
 }
 
 /**

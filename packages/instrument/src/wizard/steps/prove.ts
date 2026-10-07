@@ -839,7 +839,7 @@ function spaFacts(result: TestResult, grades: Record<TestTool, CheckResult>, ins
 }
 
 function consentWords(mode: "not_required" | "required"): string {
-  return mode === "required" ? "ask first (consent required)" : "collect by default"
+  return mode === "required" ? "wait for my banner's yes" : "collect by default"
 }
 
 function liveTestRow(lanes: Array<[ReceiptLane, string]>, receipts: ReceiptsResponseFields, at: string): RowCellInput {
@@ -1292,7 +1292,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   for (const tool of toolsUnderTest(expect, installed, visit?.result ?? null)) {
     const lane = receipts.lanes[TOOL_LANES[tool]]
     const fired = lane.state === "verified" || lane.state === "delivering"
-    ctx.emit.emit("step.sub", { step: "prove", text: `${fired ? "✓" : "·"} ${TOOL_LABELS[tool]} · ${receiptWords(tool, lane, expect[tool] !== undefined)}`, tone: fired ? "ok" : "warn" })
+    const conditional = tool === "infinite" && keys.infinite.consentMode === "required" && !!keys.infinite.consentStorageKey
+    ctx.emit.emit("step.sub", { step: "prove", text: conditional && fired ? `· ${TOOL_LABELS[tool]} · receipt under a test grant; waiting on your banner signal (not verified)` : `${fired ? "✓" : "·"} ${TOOL_LABELS[tool]} · ${receiptWords(tool, lane, expect[tool] !== undefined)}`, tone: conditional && fired ? "info" : fired ? "ok" : "warn" })
   }
 
   // Review I1 P1-1: once this run holds the claim, nothing between here and the PATCH may leave the cloud run

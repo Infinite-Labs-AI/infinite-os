@@ -831,6 +831,14 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
   })
 
+  it("keeps the PR draft while an approved lead conversion remains open", async () => {
+    const w = await opened({ reviews: [review([])] })
+    w.ctx.state.update(state => { state.jobs = [{ ...SIGNUP_JOB, state: "failed", note: "Approved lead completion remains unwired." }] })
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: expect.stringContaining("Send sign_up to the tools") })
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+  })
+
   it("keeps a base-red check and an authorization-blocked preview blocking ready", async () => {
     const w = await opened({ reviews: [review([])], gh: {
       baseChecks: [{ name: "test", conclusion: "failure" }],

@@ -14,6 +14,27 @@ function planInput(sources: Record<string, string>): PlanModelInput {
 }
 
 describe("the owner banner handoff", () => {
+  it("defaults a site with no recognized consent or banner signs to collection", () => {
+    const plan = buildPlanModel(planInput({ "app/page.tsx": "export default function Page(){ return <main>Example</main> }" }))
+    expect(plan.decisions.consentMode).toBe("not_required")
+    expect(plan.lines.find(line => line.kind === "consent_mode")?.text).toContain("Default: no banner or consent call was recognized")
+  })
+  it.each(["MarketingConsent", "SiteConsentBanner", "GdprBanner"])("uses the requested %s banner sign only as a default", name => {
+    const input = planInput({ [`components/${name}.tsx`]: `export function ${name}(){ return null }` })
+    expect(buildPlanModel(input).decisions.consentMode).toBe("required")
+    expect(buildPlanModel({ ...input, consentFlag: "not_required" }).decisions.consentMode).toBe("not_required")
+  })
+  it("uses the explicit react-cookie-consent import as a default sign", () => {
+    expect(buildPlanModel(planInput({ "app/page.tsx": 'import Banner from "react-cookie-consent"; export default function Page(){ return <Banner /> }' })).decisions.consentMode).toBe("required")
+  })
+  it.each([
+    '<script src="https://consent.cookiebot.com/uc.js"></script>',
+    '<script type="text/plain" data-cookieconsent="statistics">startAnalytics();</script>'
+  ])("uses a script-tag CMP sign only as a consent default: %s", source => {
+    const input = planInput({ "index.html": source })
+    expect(buildPlanModel(input).decisions.consentMode).toBe("required")
+    expect(buildPlanModel({ ...input, consentFlag: "not_required" }).decisions.consentMode).toBe("not_required")
+  })
   it.each<Record<string, string>>([
     { "src/pixel.ts": "fbq('consent', 'revoke');" },
     { "components/CookieBanner.tsx": "export function CookieBanner(){ return <button>Accept</button> }" }
@@ -50,8 +71,16 @@ describe("the owner banner handoff", () => {
       expect(text).toContain("NOT ACTIVE YET (waiting on your banner signal)")
       expect(text).toContain('window.dispatchEvent(new CustomEvent("infinite:analytics-consent-change", { detail: { granted: true } }));')
       expect(text).toContain('window.dispatchEvent(new CustomEvent("infinite:analytics-consent-change", { detail: { granted: false } }));')
-      expect(text).toContain("actual yes/no button handler")
+      expect(text).toContain("wherever your banner's state changes")
+      expect(text).toContain("Withdrawal or expiry:")
     }
+  })
+
+  it("prints each waiting activation status only once in the terminal", () => {
+    const report = buildReport({ runId: "00000000-0000-4000-8000-000000000001", tagVersion: "fixture", site: { repoLabel: "example/site", productionHost: "example.test" }, columns: { live_today: null, in_pr: null, proven_live: null }, provenLivePending: "deploy", day7: null, notes: [], verdictFacts: { jobs: [], openFindings: [], tools: null, installedUnknown: null, consentActivation: { mode: "required", infinite: true, capture: true } } })
+    const text = renderTerminal(report, 160)
+    expect(text.split("Infinite tag: NOT ACTIVE YET")).toHaveLength(2)
+    expect(text.split("Meta ad-click capture: NOT ACTIVE YET")).toHaveLength(2)
   })
 
   it("does not leave aggregate activation cells passed because a sandbox grant worked", () => {

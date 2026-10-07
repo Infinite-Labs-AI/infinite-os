@@ -47,6 +47,17 @@ async function runProve(bundle: FakeDepsBundle, options: Parameters<typeof fakeC
 const subs = (ctx: ReturnType<typeof fakeContext>) =>
   ctx.events.filter((event) => event.type === "step.sub").map((event) => (event.fields as { text: string }).text)
 
+it("labels an Infinite receipt under a synthetic consent grant as conditional", async () => {
+  const keys = keysFixture()
+  keys.infinite.consentMode = "required"
+  const bundle = fakeDeps({ bridge: { keys } })
+  const { outcome, ctx } = await runProve(bundle)
+  expect(outcome.kind).toBe("ok")
+  const line = subs(ctx).find(text => text.includes("Infinite pixel ·"))!
+  expect(line).toContain("receipt under a test grant; waiting on your banner signal")
+  expect(line).not.toContain("✓")
+})
+
 describe("prove: waiting for the deploy of the MERGE commit", () => {
   it("waits while the merge build is building, then proceeds when it is ready", async () => {
     const bundle = fakeDeps({

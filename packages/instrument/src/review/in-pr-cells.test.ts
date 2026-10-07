@@ -153,7 +153,7 @@ describe("F12: the 'In this pull request' column is filled from the wizard's own
     expect(unread.finishLine.consent_recorded!.state).toBe("info")
     const keys = fakeKeys()
     const other = preMergeCells({ jobs: [], plan: PLAN }, { at: AT, runId: RUN_ID, keys: { ...keys, infinite: { ...keys.infinite, consentMode: "required" } } })
-    expect(other.cells.consent_setting).toMatchObject({ state: "problem", display: 'the plan chose "collect by default"; Infinite has "ask first (consent required)"' })
+    expect(other.cells.consent_setting).toMatchObject({ state: "problem", display: 'the plan chose "collect by default"; Infinite has "wait for my banner\'s yes"' })
   })
 
   it("the rehearsal's own numbers decide the tool rows: a duplicate GA4 tag reads '2', a direct PostHog is a problem", () => {

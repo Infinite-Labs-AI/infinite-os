@@ -5,6 +5,7 @@ import type { WizardContext, WizardDeps } from "../wizard/contracts/deps.js"
 
 export const CONSENT_YES = 'window.dispatchEvent(new CustomEvent("infinite:analytics-consent-change", { detail: { granted: true } }));'
 export const CONSENT_NO = 'window.dispatchEvent(new CustomEvent("infinite:analytics-consent-change", { detail: { granted: false } }));'
+export const CONSENT_WITHDRAWAL = CONSENT_NO
 export const CONSENT_WAITING = "NOT ACTIVE YET (waiting on your banner signal)"
 export const CAPTURE_WAITING = "Installed, waiting on your banner signal. Offline check: works when consent is granted; banner integration has not been checked."
 export interface ConsentActivation { mode: "required" | "not_required"; infinite: boolean; capture: boolean }
@@ -14,15 +15,15 @@ export function recognizedConsentHandling(sources: Readonly<Record<string, strin
     if (isConsentText(source)) return true
     if (!/\.(?:[cm]?[jt]sx?|vue|svelte)$/i.test(path)) return false
     const basename = path.split("/").at(-1)!.replace(/[-_]/g, "")
-    if (/^(?:cookie|consent)(?:banner|notice|dialog|modal|manager)\./i.test(basename)) return true
+    if (/^(?:(?:cookie|consent)(?:banner|notice|dialog|modal|manager)|MarketingConsent|GdprBanner|.*Consent.*Banner.*)\./i.test(basename)) return true
     const states = lexicalStates(source)
-    return [...source.matchAll(/\b(?:Cookie|Consent)(?:Banner|Notice|Dialog|Modal|Manager)\b/g)].some(match => states[match.index!] === 0)
+    return /["']react-cookie-consent["']/.test(source) || [...source.matchAll(/\b(?:(?:Cookie|Consent)(?:Banner|Notice|Dialog|Modal|Manager)|MarketingConsent|GdprBanner|[A-Za-z_$]*Consent[A-Za-z_$]*Banner[A-Za-z_$]*)\b/g)].some(match => states[match.index!] === 0)
   })
 }
 export function consentHandoff(activation: ConsentActivation): string | null {
   if (activation.mode !== "required" || (!activation.infinite && !activation.capture)) return null
   const subject = activation.infinite && activation.capture ? "Infinite's tag and the ad-click capture stay" : activation.infinite ? "Infinite's tag stays" : "The ad-click capture stays"
-  return `${subject} off until your banner tells them the visitor said yes. Add this one line where your banner records a yes (and the matching line for a no):\n\nIn your actual yes/no button handler, immediately after the visitor's click or key press. A background restored-consent callback is not enough; the signal requires a recent user gesture. The wizard does not edit your banner.\n\nYes:\n${CONSENT_YES}\n\nNo or revoke:\n${CONSENT_NO}`
+  return `${subject} off until your banner tells them the visitor said yes. Call these lines wherever your banner's state changes. Only a yes needs a recent visitor click or key press. A no, withdrawal or expiry is always honored, without a gesture. The wizard does not edit your banner.\n\nYes (after the visitor chooses yes):\n${CONSENT_YES}\n\nNo:\n${CONSENT_NO}\n\nWithdrawal or expiry:\n${CONSENT_WITHDRAWAL}`
 }
 export function consentActivationNotes(activation?: ConsentActivation): string[] {
   if (activation?.mode !== "required") return []

@@ -284,7 +284,7 @@ function ga4PageViewsPerVisit(dry: LiveTodaySource["dryLive"]): number | null {
 }
 
 function consentWords(mode: "not_required" | "required"): string {
-  return mode === "required" ? "ask first (consent required)" : "collect by default"
+  return mode === "required" ? "wait for my banner's yes" : "collect by default"
 }
 
 function rowsFor(

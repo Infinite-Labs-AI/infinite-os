@@ -598,7 +598,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   // consent gate of the managed tags and the Meta click-id capture. Conversion names govern the conversion jobs, the
   // emitted helpers and Infinite's declared conversions. Neither is asked, or pre-checked, when none of that exists.
   const ownerConsentFound = recognizedConsentHandling(scan.sources)
-  const consentProposed = input.consentFlag ?? (ownerConsentFound ? "required" : keys.infinite.consentMode ?? null)
+  const consentProposed = input.consentFlag ?? (ownerConsentFound ? "required" : keys.infinite.consentMode ?? "not_required")
   const consentLine = line({
       id: DECISION_LINE_IDS.consentMode,
       kind: "consent_mode",
@@ -606,7 +606,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         consentProposed === "required"
           ? `Consent for Infinite's tag and the Meta ad-click cookie this run adds: wait for my banner's yes.${ownerConsentFound ? " Default: found consent handling or a banner." : ""} You must connect the yes/no signal below.`
           : consentProposed === "not_required"
-            ? "Consent for Infinite's tag and the Meta ad-click cookie this run adds: collect by default; DNT/GPC visitors are skipped. This is independent of your other banner until you connect it."
+            ? `Consent for Infinite's tag and the Meta ad-click cookie this run adds: collect by default; DNT/GPC visitors are skipped unless they explicitly opted in.${!ownerConsentFound ? " Default: no banner or consent call was recognized." : ""} This is independent of your other banner until you connect it.`
             : "Consent for Infinite's tag and the Meta ad-click cookie this run adds: choose collect by default, or wait for my banner's yes. Other banners do not control them until you connect their yes/no signal.",
       requires: "approval",
       editable: true
@@ -975,7 +975,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         line({
           id: `user_action:connect_${tool}`,
           kind: "user_action",
-          text: `${TOOL_NAME[tool]} (${adopted.key ? `${maskPublicId(adopted.key)} in your code` : "in your code"}): connect it in Infinite so the wizard can check that ID is yours; nothing is changed until then.`,
+          text: `${TOOL_NAME[tool]} (${adopted.key ? `${maskPublicId(adopted.key)} in your code` : "in your code"}): connect it in Infinite so the wizard can check that ID is yours. The repository changes shown in this plan can still run.`,
           requires: "user_action"
         })
       )

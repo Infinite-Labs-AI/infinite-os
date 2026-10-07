@@ -83,8 +83,8 @@ describe("W19 live run 3's before facts and plan", () => {
     const adoptedByScan = [...new Set(plan.lines.filter((line) => line.id.startsWith("user_action:connect_") && line.text.includes("in your code")).map((line) => line.id.replace("user_action:connect_", "")))].sort()
     expect(adoptedByScan).toEqual(adoptedByCensus)
     const text = (id: string) => plan.lines.find((line) => line.id === id)?.text
-    expect(text("user_action:connect_ga4")).toBe("GA4 (G-TEST…0000 in your code): connect it in Infinite so the wizard can check that ID is yours; nothing is changed until then.")
-    expect(text("user_action:connect_meta")).toBe("Meta (777700…2222 in your code): connect it in Infinite so the wizard can check that ID is yours; nothing is changed until then.")
+    expect(text("user_action:connect_ga4")).toBe("GA4 (G-TEST…0000 in your code): connect it in Infinite so the wizard can check that ID is yours. The repository changes shown in this plan can still run.")
+    expect(text("user_action:connect_meta")).toBe("Meta (777700…2222 in your code): connect it in Infinite so the wizard can check that ID is yours. The repository changes shown in this plan can still run.")
     expect(plan.lines.some((line) => line.id === "user_action:meta_traffic_permissions")).toBe(true)
   })
 })

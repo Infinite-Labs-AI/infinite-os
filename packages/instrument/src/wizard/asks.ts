@@ -350,12 +350,21 @@ export function createWizardAsks(input: WizardAsksOptions): WizardAsks {
   const nestedPlan = async (payload: AskPayloads["plan"]): Promise<AskAnswer<"plan">> => {
     const fromFile = answers ? planAnswerFromFile(payload.lines, answers) : null
     let answer: AskAnswers["plan"] = fromFile ? withoutUserOnlyLines(payload.lines, fromFile) : { approved: [], declined: [], edits: {} }
-    if (options.yes) answer = mergePlanAnswers(withoutUserOnlyLines(payload.lines, yesPlanAnswer(payload.lines, null)), answer)
+    if (options.yes) {
+      const automatic = withoutUserOnlyLines(payload.lines, yesPlanAnswer(payload.lines, null))
+      const consent = payload.lines.find(line => line.kind === "consent_mode")
+      if (consent && payload.decisions.consentMode) {
+        automatic.approved.push(consent.id)
+        automatic.edits[consent.id] = payload.decisions.consentMode
+      }
+      answer = mergePlanAnswers(automatic, answer)
+    }
     // The user-only lines: only through the wizard's own /dev/tty prompt, never the file.
     if (ttyPrompter) {
       await ttyPrompter.showPlan(payload)
       for (const line of payload.lines) {
         if (!isNestedUserOnly(line) || line.requires !== "approval") continue
+        if (options.yes && line.kind === "consent_mode" && payload.decisions.consentMode !== null) continue
         const reply = await ttyPrompter.planLine(line)
         if (!reply) continue
         answer = mergePlanAnswers(answer, {
@@ -380,7 +389,7 @@ export function createWizardAsks(input: WizardAsksOptions): WizardAsks {
     if (options.yes) {
       if (kind === "plan") {
         const plan = payload as AskPayloads["plan"]
-        let answer = yesPlanAnswer(plan.lines, options.consentMode)
+        let answer = yesPlanAnswer(plan.lines, options.consentMode ?? plan.decisions.consentMode)
         const fromFile = answers ? planAnswerFromFile(plan.lines, answers) : null
         if (fromFile) answer = mergePlanAnswers(answer, fromFile)
         return announce(kind, payload, answer)
