@@ -392,11 +392,11 @@ export function fakeReport(markdown = "| Row | Live site today | In this pull re
         rows: [],
         day7: { measuredAt: null, window: null, cell: null },
         finishLine: [],
-        notes: input.notes,
+        notes: [...input.notes, ...(input.verdictFacts?.ownerPolicyFindings ?? [])],
         verdict: null
       }) as ReportV2,
     renderTerminal: () => markdown,
-    renderMarkdown: () => markdown,
+    renderMarkdown: report => [markdown, ...report.notes.filter(note => note.startsWith("About your consent or privacy pages (yours to decide)"))].join("\n\n"),
     payload: (report) => report
   }
 }
