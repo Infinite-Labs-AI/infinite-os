@@ -61,12 +61,12 @@ import { basename, dirname, join, relative, sep } from "node:path"
 
 import type { ManagedTextEdit } from "../types.js"
 import type { ChecklistItem, CheckResult, Claim, TurnDiff, WizardEditRecord } from "../wizard/contracts/jobs.js"
+import { isPolicyPath } from "../jobs/owner-boundary.js"
 import { GLOBAL_DENY_GLOBS } from "../wizard/contracts/jobs.js"
 import { git, gitOk, parsePorcelainZ, type StatusEntry } from "./git-exec.js"
 import { matchesAnyGlob, normalizeRelPath } from "./glob.js"
 import { TURN_GATE_RULES, type TurnGateRule } from "../checks/turn-gate.js"
 import { applySomeHunks, hunkLines, hunksOf, hunksToTextEdits, splitLines, type LineHunk } from "./line-diff.js"
-import { changedConsentRanges } from "./consent-model.js"
 import { lexicalStates } from "../lexical-states.js"
 
 export const FENCE_SNAPSHOT_SCHEMA = "infinite-tag.fence-snapshot.v1" as const
@@ -157,6 +157,8 @@ export interface FenceBlock {
 export interface FenceStray {
   path: string
   note: string
+  /** The fence’s own refusal kind; absent only on old persisted results. */
+  reason?: FenceBlockReason
 }
 
 export interface FenceEndResult {
@@ -263,7 +265,6 @@ interface GitSnapshot {
 }
 
 interface FenceManifest {
-  expectedPreviewGuard?: string | null
   schema: typeof FENCE_SNAPSHOT_SCHEMA
   root: string
   runId: string
@@ -284,7 +285,6 @@ interface FenceManifest {
 }
 
 export interface FenceBeginOptions {
-  expectedPreviewGuard?: string | null
   /** Repo root (absolute). */
   root: string
   /** The snapshot dir (absolute, outside the repo and $TMPDIR). Created 0700. */
@@ -317,7 +317,7 @@ export class Fence {
   private settled = false
   private closing: { kind: "abort" | "end"; promise: Promise<unknown> } | null = null
   private readonly editSnapshots = new Map<string, string>()
-  private readonly editActivities = new Map<string, Array<{ itemId: string; hunks: LineHunk[]; consent: boolean }>>()
+  private readonly editActivities = new Map<string, Array<{ itemId: string | null; hunks: LineHunk[]; consent: boolean }>>()
 
   /** Called on a completed editing tool event, with the job that was active when that edit began. */
   recordEditActivity(itemId: string | null, path: string): void {
@@ -332,16 +332,18 @@ export class Fence {
       const current = readFileSync(join(this.manifest.root, rel), "utf8")
       const previous = this.editSnapshots.get(rel) ?? original
       this.editSnapshots.set(rel, current)
-      if (!itemId || !this.manifest.allow.some((rule) => rule.itemId === itemId)) return
+      if (itemId && !this.manifest.allow.some((rule) => rule.itemId === itemId)) itemId = null
       const recent = hunksOf(splitLines(previous), splitLines(current))
       const changed = hunksOf(splitLines(original), splitLines(current)).filter((hunk) => recent.some((change) => overlaps(change.bStart, change.bEnd, hunk.bStart, hunk.bEnd)))
-      const activity = { itemId, hunks: changed, consent: consentChangedHunks(previous, current, this.manifest.expectedPreviewGuard).length > 0 }
+      const activity = { itemId, hunks: changed, consent: consentChangedHunks(previous, current).length > 0 }
       this.editActivities.set(rel, [...this.editActivities.get(rel) ?? [], activity])
     } catch { /* A missing/non-text path is handled by the normal fence settle. */ }
   }
 
   private consentOwners(rel: string, hunk: LineHunk): string[] {
-    return [...new Set((this.editActivities.get(rel) ?? []).filter((activity) => activity.consent && activity.hunks.some((changed) => overlaps(changed.aStart, changed.aEnd, hunk.aStart, hunk.aEnd))).map((activity) => activity.itemId))]
+    const observed = (this.editActivities.get(rel) ?? []).filter((activity) => activity.consent && activity.hunks.some((changed) => overlaps(changed.aStart, changed.aEnd, hunk.aStart, hunk.aEnd)))
+    if (observed.some(activity => activity.itemId === null)) return []
+    return [...new Set(observed.flatMap(activity => activity.itemId ? [activity.itemId] : []))]
   }
 
   private constructor(private readonly manifest: FenceManifest, private readonly dir: string) {}
@@ -382,12 +384,12 @@ export class Fence {
       const current = decodeText(bytes)
       const original = decodeText(await this.originalBytes(rel) ?? Buffer.from(""))
       if (current === null || original === null) continue
-      const unsafe = consentChangedHunks(original, current, this.manifest.expectedPreviewGuard)
+      const unsafe = consentChangedHunks(original, current)
       for (const hunk of unsafe) {
         const owners = this.consentOwners(rel, hunk)
         const mine = (this.editActivities.get(rel) ?? []).some((activity) => activity.itemId === itemId && activity.hunks.some((changed) => overlaps(changed.aStart, changed.aEnd, hunk.aStart, hunk.aEnd)))
-        const soleOwner = this.manifest.allow.filter((entry) => entry.files.includes(rel) || entry.create.includes(rel)).length === 1
-        if (owners.includes(itemId) || (owners.length === 0 && soleOwner)) problems.push(`${rel}: your edit changed a consent call or when it runs. Restore its tokens and conditions; use only the emitted early-return preview guard before the pixel bootstrap.`)
+        if (owners.includes(itemId)) problems.push(`${rel}: your edit touched consent code. Restore its exact bytes, including whitespace. Consent is out of bounds; leave this task for the site owner if it cannot be done without touching consent.`)
+        else if (owners.length === 0) problems.push(`${rel}: consent code changed, and the runner cannot identify the responsible job. Every job claiming this file must restore its exact bytes; its hunk will be reverted. Leave this task for the site owner if consent code is in the way.`)
         else if (mine) problems.push(`${rel}: your neighboring line will be reverted with a consent change, redo it separately after restoring that consent change.`)
       }
     }
@@ -424,7 +426,7 @@ export class Fence {
         if (entry.from) toCopy.add(entry.from)
         continue
       }
-      if (matchesAnyGlob(entry.path, GLOBAL_DENY_GLOBS)) {
+      if (isDenied(entry.path)) {
         toCopy.add(entry.path)
         continue
       }
@@ -437,7 +439,7 @@ export class Fence {
       }
     }
     const tracked = (await gitOk(root, ["ls-files", "-z"])).toString("utf8").split("\0").filter(Boolean)
-    for (const path of tracked) if (matchesAnyGlob(path, GLOBAL_DENY_GLOBS) && !underHeavy(path, heavyDirs)) toCopy.add(path)
+    for (const path of tracked) if (isDenied(path) && !underHeavy(path, heavyDirs)) toCopy.add(path)
     const gitInternal = await listGitInternal(root)
     for (const path of gitInternal) toCopy.add(path)
 
@@ -477,7 +479,6 @@ export class Fence {
       }
     }
     const manifest: FenceManifest = {
-      expectedPreviewGuard: options.expectedPreviewGuard ?? null,
       schema: FENCE_SNAPSHOT_SCHEMA,
       root,
       runId: options.runId,
@@ -593,7 +594,7 @@ export class Fence {
     const block = (rel: string, reason: FenceBlockReason, note: string, attributed?: readonly string[]) => {
       const owners = attributed ?? this.itemsFor(rel, options.claims ?? [])
       // Review P2-3: no job owns the path, so no job is failed for it: only the path was put back, and the turn says so.
-      if (owners.length === 0 && !strays.has(rel)) strays.set(rel, { path: rel, note })
+      if (owners.length === 0 && !strays.has(rel)) strays.set(rel, { path: rel, note, reason })
       for (const itemId of owners) {
         const key = `${itemId}\u0000${reason}`
         const existing = blocks.get(key)
@@ -689,14 +690,14 @@ export class Fence {
       const afterLines = splitLines(after)
       const hunks = hunksOf(beforeLines, afterLines)
       const keep = hunks.map(() => true)
-      const unsafe = consentChangedHunks(before, after, this.manifest.expectedPreviewGuard)
+      const unsafe = consentChangedHunks(before, after)
       hunks.forEach((hunk, index) => {
         if (unsafe.some((entry) => entry.aStart === hunk.aStart && entry.aEnd === hunk.aEnd && entry.bStart === hunk.bStart && entry.bEnd === hunk.bEnd)) {
           keep[index] = false
           const observed = this.consentOwners(rel, hunk)
           const candidates = this.manifest.allow.filter((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel)))
-          const owners = observed.length > 0 ? observed : candidates.length === 1 ? [candidates[0]!.itemId] : []
-          block(rel, "consent_touched", `Undid a change to a consent call in ${rel}: consent is never the agent's job. Use the early-return preview guard before the pixel bootstrap without moving that call.`, owners)
+          const owners = observed.length > 0 ? observed : this.manifest.allow.length === 1 && candidates.length === 1 ? [candidates[0]!.itemId] : []
+          block(rel, "consent_touched", `Undid a change to a consent call in ${rel}: consent is out of bounds. Left for you: this file’s consent code is in the way.`, owners)
         }
       })
       candidates.push({ rel, before: beforeBytes === null ? null : before, after, beforeLines, afterLines, hunks, keep })
@@ -1076,7 +1077,7 @@ function sameOrGlob(pattern: string, rel: string): boolean {
 }
 
 function isDenied(rel: string): boolean {
-  return rel === ".git" || matchesAnyGlob(rel, GLOBAL_DENY_GLOBS)
+  return rel === ".git" || isPolicyPath(rel) || matchesAnyGlob(rel, GLOBAL_DENY_GLOBS)
 }
 
 function segmentsOf(rel: string): string[] {
@@ -1277,24 +1278,14 @@ function consentHunkChanged(before: readonly string[], after: readonly string[],
     added.some((line) => inSpans(line.line, spansAfter)) || removed.some((line) => inSpans(line.line, spansBefore))
 }
 
-function consentChangedHunks(before: string, after: string, expectedGuard: string | null = null): LineHunk[] {
+function consentChangedHunks(before: string, after: string): LineHunk[] {
   const beforeLines = splitLines(before)
   const afterLines = splitLines(after)
-  const onlyCode = (text: string) => {
-    const states = lexicalStates(text)
-    return splitLines(text.split("").map((char, index) => states[index] === 0 || char === "\n" ? char : " ").join(""))
-  }
-  const codeBefore = onlyCode(before)
-  const codeAfter = onlyCode(after)
-  const semantic = changedConsentRanges(before, after, expectedGuard)
-  return hunksOf(beforeLines, afterLines).filter((hunk) => {
-    if (semantic.before.some(([start, end]) => hunk.aStart < hunk.aEnd && hunk.aStart < end && hunk.aEnd >= start) || semantic.after.some(([start, end]) => hunk.bStart < hunk.bEnd && hunk.bStart < end && hunk.bEnd >= start)) return true
-    if (semantic.recognized) return false
-    // Keep protection for CMP declarations outside a call; whitespace by itself is never a change.
-    if (!consentHunkChanged(codeBefore, codeAfter, hunk, [], [])) return false
-    const { added, removed } = hunkLines(beforeLines, afterLines, hunk)
-    return added.map((line) => line.text.trim()).join("").replace(/\s+/g, "") !== removed.map((line) => line.text.trim()).join("").replace(/\s+/g, "")
-  })
+  const spansBefore = consentLineSpans(before)
+  const spansAfter = consentLineSpans(after)
+  // Consent belongs to the site owner. No structural model and no formatting/guard exemption:
+  // every changed consent line or line within a consent-call span is reverted.
+  return hunksOf(beforeLines, afterLines).filter(hunk => consentHunkChanged(beforeLines, afterLines, hunk, spansBefore, spansAfter))
 }
 
 /** 1-based, inclusive line ranges of every consent call in `text` (its whole bracket span). */

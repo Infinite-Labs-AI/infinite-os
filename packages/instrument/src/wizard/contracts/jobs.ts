@@ -232,9 +232,9 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
   privacy_paragraph: {
     jobId: "privacy_paragraph",
     n: 14,
-    title: "Add the privacy paragraph",
+    title: "Privacy policy (legacy; owner only)",
     requiresApprovedLine: ["privacy_text"],
-    checks: [p("S", "privacy_names_installed_tools")],
+    checks: [],
     donePath: ["done_in_code", "proven"]
   },
   build_fix: {
@@ -271,6 +271,7 @@ export const PLAN_DECIDED_TOPICS = ["consent", "conversion_names", "privacy", "b
 export const NEVER_AGENT_JOBS = [
   "cookie_banner",
   "consent_calls",
+  "privacy_policy_and_terms",
   "conversion_names",
   "gtm_container_edits",
   "meta_domain_settings",
@@ -332,6 +333,7 @@ export const JOB_ITEM_STATES = [
   "waiting_real_event",
   "proven",
   "not_needed",
+  "left_for_you",
   "blocked",
   "failed"
 ] as const

@@ -8,12 +8,13 @@
 //   every detected CMP / banner file, and any hunk touching a consent call or a CMP API.
 // - No v1 job deletes a file; a deletion is refused.
 // - New files are allowed only where a job lists them in `create`.
+import { isPolicyPath } from "./owner-boundary.js"
 import { GLOBAL_DENY_GLOBS } from "../wizard/contracts/jobs.js"
 import { firstMatchingGlob } from "./glob.js"
 
 /** The global deny as one sentence, for the briefs. */
 export const GLOBAL_DENY_TEXT =
-  "Never touch .git, any .env file, a lockfile, package.json, .infinite, .claude, .codex, build output or node_modules, or a cookie-banner / consent-manager file. No file is ever deleted."
+  "Never touch .git, any .env file, a lockfile, package.json, .infinite, .claude, .codex, build output or node_modules, or a cookie-banner / consent-manager file, privacy policy or terms page. No file is ever deleted."
 
 /** Normalises a repo-relative path, or null when it is absolute, escapes the repo or is empty. */
 export function normalizeRepoPath(path: string): string | null {
@@ -28,12 +29,13 @@ export function normalizeRepoPath(path: string): string | null {
   return segments.length === 0 ? null : segments.join("/")
 }
 
-export type DenyReason = { kind: "global_deny"; glob: string } | { kind: "cmp_file" } | { kind: "invalid_path" }
+export type DenyReason = { kind: "global_deny"; glob: string } | { kind: "cmp_file" } | { kind: "invalid_path" } | { kind: "policy_file" }
 
 /** Why a path may never be touched by any agent job, or null when the global deny does not cover it. */
 export function globalDenyReason(path: string, cmpFiles: readonly string[]): DenyReason | null {
   const normalized = normalizeRepoPath(path)
   if (normalized === null) return { kind: "invalid_path" }
+  if (isPolicyPath(normalized)) return { kind: "policy_file" }
   const glob = firstMatchingGlob(normalized, GLOBAL_DENY_GLOBS)
   if (glob !== null) return { kind: "global_deny", glob }
   if (cmpFiles.includes(normalized)) return { kind: "cmp_file" }

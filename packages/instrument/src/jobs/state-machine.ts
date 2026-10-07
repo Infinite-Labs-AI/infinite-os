@@ -20,6 +20,7 @@
 // Live checks before the deploy (review P2-1): an item whose path waits for a real event (job 10's click
 // test) reaches `waiting_real_event` only once its live checks pass, and a failing rehearsal check sends
 // an item back to `pending` with the failure (budget left) or to `failed` (budget spent), like a local one.
+import { CONSENT_LEFT_FOR_YOU, isOwnerOnlyFinding } from "./owner-boundary.js"
 import { checkWords } from "./check-words.js"
 import { sanitizeUntrusted } from "../agents/sanitize.js"
 import {
@@ -115,6 +116,7 @@ export function applyClaim(
   claim: Claim,
   reverify: (item: ChecklistItem) => { agrees: boolean; evidence: Evidence[] }
 ): Transition {
+  if (item.jobId === "privacy_paragraph") return leaveForOwner(item, "Left for you: privacy policies and terms belong to the site owner.")
   if (item.owner !== "agent") return { item, changed: false, by: "agent_claim", note: "claim ignored: a code job is not the agent's" }
   if (item.state !== "pending" && item.state !== "claimed") {
     return { item, changed: false, by: "agent_claim", note: `claim ignored: the item is ${item.state}` }
@@ -126,6 +128,7 @@ export function applyClaim(
     delete next.blockedReason
     return { item: next, changed: true, by: "agent_claim", note: "claimed done; the wizard will run its own checks" }
   }
+  if (claim.status === "blocked" && isOwnerOnlyFinding({ body: claim.note })) return leaveForOwner(next)
   if (claim.status === "blocked") {
     next.state = "blocked"
     next.blockedReason = "agent_blocked"
@@ -162,7 +165,16 @@ export function unblockItem(item: ChecklistItem, note: string): Transition {
 }
 
 /** Marks an item blocked with one of the §3e.5 reasons (the fence, the post-turn gate, usage, …). */
+export function leaveForOwner(item: ChecklistItem, note = CONSENT_LEFT_FOR_YOU): Transition {
+  const next = withNote(clone(item), note)
+  next.state = "left_for_you"
+  next.checks = []
+  delete next.blockedReason
+  return { item: next, changed: item.state !== "left_for_you", by: "wizard", note }
+}
+
 export function blockItem(item: ChecklistItem, reason: BlockedReason, note?: string): Transition {
+  if (reason === "consent_touched") return leaveForOwner(item)
   const next = withNote(clone(item), note)
   next.state = "blocked"
   next.blockedReason = reason
@@ -174,6 +186,8 @@ export function blockItem(item: ChecklistItem, reason: BlockedReason, note?: str
  * from another run (or with no run id) is ignored, so it can never pass a check.
  */
 export function applyResults(item: ChecklistItem, results: readonly CheckResult[], runId: string, options: ApplyOptions): Transition {
+  if (item.jobId === "privacy_paragraph") return leaveForOwner(item, "Left for you: privacy policies and terms belong to the site owner.")
+  if (item.state === "left_for_you") return { item, changed: false, by: "wizard" }
   const next = clone(item)
   let merged = false
   const floor = productionFloor(item, options.liveSince)
@@ -304,9 +318,10 @@ function advance(item: ChecklistItem, runId: string, options: ApplyOptions): { i
 
 /**
  * `proven (= merged)`: items whose done path ends at `proven` but which have no live or passive check
- * (job 14's privacy paragraph, job 16's comments) are proven by the merge itself.
+ * (job 16's comments) are proven by the merge itself.
  */
 export function markMerged(item: ChecklistItem): Transition {
+  if (item.jobId === "privacy_paragraph") return leaveForOwner(item, "Left for you: privacy policies and terms belong to the site owner.")
   if (item.state !== "done_in_code") return { item, changed: false, by: "wizard" }
   const path = donePathOf(item)
   if (path[path.length - 1] !== "proven" || checksIn(item, [...LIVE_TIERS, ...PASSIVE_TIERS]).length > 0) {

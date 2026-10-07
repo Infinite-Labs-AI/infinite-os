@@ -56,7 +56,7 @@ function jobsInput(over: Partial<RunJobsInput> = {}) {
 const CLAIM_DONE = { tool: "job_claim", args: { job_id: "meta_improve:landing", status: "done", note: "trial button wired" } }
 
 describe("runJobs with Claude (fake)", () => {
-  it.each(["claude", "codex"] as const)("keeps %s edit ownership when progress changes before completion", async (worker) => {
+  it.each(["claude", "codex"] as const)("does not trust %s progress as ownership even when it changes during an edit", async (worker) => {
     const { root, fakes } = setup({})
     const file = "app/layout.tsx"
     const initial = "function boot() {\n  fbq('consent', 'grant');\n}\n"
@@ -74,51 +74,49 @@ describe("runJobs with Claude (fake)", () => {
       { emit: start },
       { tool: "report_progress", args: { job_id: "preview_guard:ga4", text: "Other job progress" } },
       { emit: { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "unrelated-read", content: "read" }] } } },
-      { edit: { path: file, content: initial.replace("  fbq", "  if (allow) return;\n  fbq"), silent: true } },
+      { edit: { path: file, content: initial.replace("  fbq", "  if (allow) return;\n    fbq"), silent: true } },
       { emit: complete },
       ...["preview_guard:ga4", "preview_guard:meta"].map(job_id => ({ tool: "job_claim", args: { job_id, status: "done", note: "done" } }))
     ] }] }))
     const items = ["preview_guard:ga4", "preview_guard:meta"].map(id => item(id, [file]))
     const result = await makeRunner(fakes, root, { preferWorker: worker }).runJobs(jobsInput({ items }).input)
-    expect(result.blocked.map(entry => entry.itemId)).toEqual(["preview_guard:meta"])
+    expect(result.blocked).toEqual([])
+    const claimReplies = records(fakes).filter(entry => entry.kind === "mcp" && entry.tool === "job_claim").map(entry => JSON.stringify(entry.reply))
+    expect(claimReplies).toHaveLength(2)
+    expect(claimReplies.every(reply => reply.includes("runner cannot identify"))).toBe(true)
   })
 
-  it.each(["claude", "codex"] as const)("attributes %s edits before claims and warns the neighboring job in-turn", async (worker) => {
+  it.each(["claude", "codex"] as const)("warns every %s claimant with no progress events and no trusted shared-file owner", async (worker) => {
     const file = "app/layout.tsx"
     const initial = "function boot() {\n  fbq('init', '123');\n  fbq('consent', 'grant');\n}\n"
     const capture = initial.replace("'123'", "'456'")
     const wrapped = capture.replace("  fbq('consent', 'grant');", "  if (allowed) {\n    fbq('consent', 'grant');\n  }")
     const { root, fakes } = setup({ turns: [{ steps: [
       { tool: "job_list" },
-      { tool: "report_progress", args: { job_id: "meta_improve:capture", text: "Editing capture" } },
       { edit: { path: file, content: capture } },
-      { tool: "report_progress", args: { job_id: "preview_guard:meta", text: "Editing Meta guard" } },
       { edit: { path: file, content: wrapped } },
       ...["preview_guard:ga4", "meta_improve:capture", "preview_guard:meta"].map((job_id) => ({ tool: "job_claim", args: { job_id, status: "done", note: "done" } }))
     ] }] })
     write(root, file, initial)
     const items = ["preview_guard:ga4", "meta_improve:capture", "preview_guard:meta"].map((id) => item(id, [file]))
     const result = await makeRunner(fakes, root, { preferWorker: worker }).runJobs(jobsInput({ items }).input)
-    expect(result.blocked.map((entry) => entry.itemId)).toEqual(["preview_guard:meta"])
+    expect(result.blocked).toEqual([])
     const replies = records(fakes).filter((entry) => entry.kind === "mcp" && entry.tool === "job_claim").map((entry) => JSON.stringify(entry.reply))
-    expect(replies[0]).not.toContain("consent")
-    expect(replies[1]).toContain("reverted with a consent change, redo it")
-    expect(replies[2]).toContain("early-return")
+    expect(replies.every(reply => reply.includes("runner cannot identify"))).toBe(true)
     expect(readFileSync(join(root, file), "utf8")).toBe(initial)
   })
 
   it("returns a moved consent call as claim-time feedback before the turn settles", async () => {
     const { root, fakes } = setup({ turns: [{ steps: [
       { tool: "job_list" },
-      { tool: "report_progress", args: { job_id: "meta_improve:landing", text: "Editing the tag" } },
       { edit: { path: "app/layout.tsx", content: `${POST_INSTALL_LAYOUT}if (allowHost()) { fbq('consent', 'grant') }\n` } },
       { tool: "job_claim", args: { job_id: "meta_improve:landing", status: "done", note: "guarded" } }
     ] }] })
     // This call was already in the site; the edit adds a condition around it.
     write(root, "app/layout.tsx", `${POST_INSTALL_LAYOUT}fbq('consent', 'grant')\n`)
-    const result = await makeRunner(fakes, root).runJobs(jobsInput().input)
+    const result = await makeRunner(fakes, root).runJobs(jobsInput({ items: [ITEMS[0]!] }).input)
     const reply = records(fakes).find((entry) => entry.kind === "mcp" && entry.tool === "job_claim")?.reply
-    expect(reply?.result?.structuredContent).toMatchObject({ staticChecks: { state: "problem", problems: [expect.stringContaining("early-return")] } })
+    expect(reply?.result?.structuredContent).toMatchObject({ staticChecks: { state: "problem", problems: [expect.stringContaining("consent code")] } })
     expect(result.blocked).toEqual(expect.arrayContaining([expect.objectContaining({ itemId: "meta_improve:landing", reason: "consent_touched" })]))
   })
 

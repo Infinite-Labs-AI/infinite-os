@@ -17,6 +17,7 @@
 // The pinned models live in ONE constant (`AGENT_MODELS`, River 10-02); if the user's plan or CLI rejects
 // one, the turn is retried ONCE with the user's default model at the same effort, and the user is told.
 // Never a provider switch, never Infinite-paid inference, never a real prompt in tests (fakes only).
+import { OWNER_BOUNDARY_INSTRUCTION, isOwnerOnlyFinding } from "../jobs/owner-boundary.js"
 import { randomUUID } from "node:crypto"
 import { access, chmod, open, readFile, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
@@ -81,9 +82,9 @@ export const WORKER_KICKOFF =
 export const WORKER_RESUME_KICKOFF =
   "Continue. The wizard ran its own checks; its notes and any answers from the user are at the end of your instructions. Fix what failed, then claim again with job_claim and finish with the JSON your output schema asks for."
 /** The first line of every Claude system prompt: the value after `--append-system-prompt` never starts with "-". */
-export const SYSTEM_PROMPT_HEADER = "Infinite tag wizard: your instructions for this run."
+export const SYSTEM_PROMPT_HEADER = `Infinite tag wizard: your instructions for this run.\n${OWNER_BOUNDARY_INSTRUCTION}`
 export const REVIEWER_KICKOFF =
-  "Review the pull request checked out in this folder against your checklist (R1 to R16). Read only. Answer only with the JSON your output schema asks for."
+  "Review the pull request checked out in this folder against your supplied checklist. Consent, privacy policies and terms are outside the review: do not evaluate or comment on them. Read only. Answer only with the JSON your output schema asks for."
 
 /** How long Codex has to reach the claim channel before the run is called toolless. */
 export const CODEX_STARTUP_TIMEOUT_MS = 45_000
@@ -140,7 +141,6 @@ export function runExtras(result: AgentRunResult, items: readonly { id: string }
 }
 
 export interface AgentRunnerOptions {
-  expectedPreviewGuard?(): string | null
   /** The repo root (absolute). */
   root: string
   /** The user's home (absolute): scratch, snapshots and the sensitive-path list come from it. */
@@ -186,6 +186,8 @@ interface AttemptResult {
 }
 
 export class AgentRunnerImpl implements AgentRunner {
+  // Set ONLY by the runner's dispatch record. A multi-item child has no trustworthy current-job
+  // identity; agent report_progress / claim order must never turn that uncertainty into blame.
   private activeJob: string | null = null
   private readonly pendingEdits = new Map<string, { path: string; owner: string | null }>()
   private readonly codexEditOwners = new Map<string, string | null>()
@@ -291,14 +293,12 @@ export class AgentRunnerImpl implements AgentRunner {
           if (this.pendingEdits.size > 0) return { state: "undetermined", problems: ["An editing tool is still running. Wait for it to finish, then claim again."] }
           if (!this.activeFence || !(await this.activeFence.claimCheckSafe())) return { state: "undetermined", problems: ["The safety fence found an out-of-scope or changing file; no static check ran. The turn will be settled before any further checks."] }
           const consentProblems = await this.activeFence.claimConsentProblems(claim.jobId)
-          if (consentProblems.length > 0) return { state: "problem", problems: consentProblems }
+          if (consentProblems.length > 0) return { state: claim.status === "blocked" && isOwnerOnlyFinding({ body: claim.note }) ? "undetermined" : "problem", problems: consentProblems }
           const feedback = await input.onClaim(claim)
-          if (this.activeJob === claim.jobId && feedback?.state !== "problem") this.activeJob = null
           return feedback && typeof feedback === "object" ? feedback : undefined
         },
         onAsk: (question) => input.onAsk(question),
         onProgress: (progress) => {
-          this.activeJob = progress.jobId
           input.onProgress(progress)
           narrator.beat(progress.text)
         }
@@ -318,7 +318,7 @@ export class AgentRunnerImpl implements AgentRunner {
     this.activeJob = input.items.length === 1 ? input.items[0]!.id : null
     this.pendingEdits.clear()
     this.codexEditOwners.clear()
-    let fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir(), runId, turn, items: input.items, expectedPreviewGuard: this.options.expectedPreviewGuard?.() })
+    let fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir(), runId, turn, items: input.items })
     this.activeFence = fence
     let modelFallback = false
     try {
@@ -328,7 +328,7 @@ export class AgentRunnerImpl implements AgentRunner {
         modelFallback = true
         input.onNarrate({ agent: kind, role: "worker", text: `${this.models()[kind].label} isn't on your plan: using your default model` })
         if (!fence.isSettled) await fence.abort()
-        fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir("-retry"), runId, turn: `${turn}-retry`, items: input.items, expectedPreviewGuard: this.options.expectedPreviewGuard?.() })
+        fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir("-retry"), runId, turn: `${turn}-retry`, items: input.items })
         this.activeFence = fence
         this.pendingEdits.clear()
         this.codexEditOwners.clear()

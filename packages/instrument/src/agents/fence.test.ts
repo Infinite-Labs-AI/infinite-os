@@ -78,7 +78,7 @@ describe("fence end: outside the allowlist", () => {
     const result = await fence.end({ claims: [{ jobId: "meta_improve:landing", status: "done", note: "done", at: "2026-10-03T00:00:00.000Z" }] })
     expect(existsSync(join(root, "lib/stray.ts"))).toBe(false)
     expect(result.reverted).toEqual(["lib/stray.ts"])
-    expect(result.strays).toEqual([{ path: "lib/stray.ts", note: "Undid the change to lib/stray.ts: a new file no job may create." }])
+    expect(result.strays).toEqual([{ path: "lib/stray.ts", note: "Undid the change to lib/stray.ts: a new file no job may create.", reason: "outside_allowlist" }])
     // The done claim's own file passed: its edit is kept and the job is not blocked (one stray used to undo it all).
     expect(result.blocked).toEqual([])
     expect(result.edits.map((edit) => edit.file)).toEqual(["app/layout.tsx"])
@@ -196,18 +196,18 @@ describe("fence end: outside the allowlist", () => {
 })
 
 describe("fence end: consent hunks, text edits, the gate", () => {
-  it("rejects a new enclosing condition even when the consent line stays byte-identical", async () => {
+  it("rejects wrapping that touches a consent line", async () => {
     const { root } = makeFenceFixture()
     const home = tempDir("infinite-tag-home-")
     dirs.push(root, home)
     const file = "src/common/tracking.ts"
     write(root, file, "export function boot() {\n  fbq('consent', 'grant');\n}\n")
     const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 91), runId: RUN_ID, turn: 91, items: [item("preview_guard:meta", [file])] })
-    write(root, file, "export function boot() {\n  if (allowHost()) {\n  fbq('consent', 'grant');\n  }\n}\n")
+    write(root, file, "export function boot() {\n  if (allowHost()) {\n    fbq('consent', 'grant');\n  }\n}\n")
     expect((await fence.end({ claims: [{ jobId: "preview_guard:meta", status: "done", note: "done", at: "2026-10-06T21:00:00Z" }] })).blocked).toEqual([expect.objectContaining({ reason: "consent_touched" })])
   })
 
-  it("keeps a formatting-only reindent of a consent call", async () => {
+  it("reverts a formatting-only reindent of a consent call", async () => {
     const { root } = makeFenceFixture()
     const home = tempDir("infinite-tag-home-")
     dirs.push(root, home)
@@ -216,8 +216,8 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     const fence = await Fence.begin({ root, snapshotDir: snapshotDir(home, RUN_ID, 92), runId: RUN_ID, turn: 92, items: [item("preview_guard:meta", [file])] })
     write(root, file, "export function boot() {\n    fbq('consent', 'grant');\n}\n")
     const result = await fence.end({ claims: [{ jobId: "preview_guard:meta", status: "done", note: "done", at: "2026-10-06T21:00:00Z" }] })
-    expect(result.blocked).toEqual([])
-    expect(readFileSync(join(root, file), "utf8")).toContain("    fbq('consent', 'grant');")
+    expect(result.blocked).toEqual([expect.objectContaining({ reason: "consent_touched" })])
+    expect(readFileSync(join(root, file), "utf8")).toContain("\n  fbq('consent', 'grant');")
   })
 
   it("does not blame the first claimant for an earlier edit made by another job", async () => {
@@ -282,7 +282,7 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     edited = edited.replace("  fbq('init', '1234567890123456');\n  fbq('consent', 'grant');\n  fbq('track', 'PageView');", "  if (allowHost()) {\n    fbq('init', '1234567890123456');\n    fbq('consent', 'grant');\n    fbq('track', 'PageView');\n  }")
     write(root, file, edited)
     fence.recordEditActivity("preview_guard:meta", file)
-    expect((await fence.claimConsentProblems("preview_guard:meta")).join(" ")).toMatch(/consent call.*early-return/i)
+    expect((await fence.claimConsentProblems("preview_guard:meta")).join(" ")).toMatch(/consent code.*out of bounds/i)
     edited = edited.replace("gtag('config', 'G-FAKE00001');", "if (allowHost()) gtag('config', 'G-FAKE00001');")
     write(root, file, edited)
     fence.recordEditActivity("preview_guard:ga4", file)
@@ -318,8 +318,8 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     const claims = items.map((entry) => ({ jobId: entry.id, status: "done" as const, note: "done", at: "2026-10-06T21:00:00.000Z" }))
     const settled = await fence.end({ claims })
     expect(settled.blocked).toEqual([])
-    expect(settled.strays).toEqual([])
-    expect(readFileSync(join(root, file), "utf8")).toContain("    fbq('consent', 'grant');")
+    expect(settled.strays).toHaveLength(1)
+    expect(readFileSync(join(root, file), "utf8")).toContain("\n  fbq('consent', 'grant');")
   })
 
   it("reverts only the consent hunk, keeps the rest, blocks consent_touched", async () => {
@@ -329,6 +329,7 @@ describe("fence end: consent hunks, text edits, the gate", () => {
       "import './globals.css'\nimport { infiniteMetaMirror } from '../lib/meta-mirror'"
     ).replace("      <body>{children}</body>", "      <body>{children}</body>\n      <script>{`gtag('consent', 'update', { analytics_storage: 'granted' })`}</script>")
     write(root, "app/layout.tsx", edited)
+    fence.recordEditActivity("meta_improve:landing", "app/layout.tsx")
     const result = await fence.end()
     const now = read("app/layout.tsx")
     expect(now).toContain("infiniteMetaMirror")
@@ -345,7 +346,8 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     write(root, "app/layout.tsx", edited)
     write(root, "app/privacy/page.tsx", "export default function Privacy() {\n  return <p>We use PostHog and GA4.</p>\n}\n")
     const result = await fence.end()
-    expect(result.edits.map((edit) => edit.file).sort()).toEqual(["app/layout.tsx", "app/privacy/page.tsx"])
+    expect(result.edits.map((edit) => edit.file).sort()).toEqual(["app/layout.tsx"])
+    expect(result.reverted).toContain("app/privacy/page.tsx")
     const layout = result.edits.find((edit) => edit.file === "app/layout.tsx")!
     expect(layout.textEdits.length).toBeGreaterThanOrEqual(3)
     expect(reverseTextEdits(read("app/layout.tsx"), layout.textEdits)).toBe(POST_INSTALL_LAYOUT)
@@ -353,8 +355,6 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     expect(layout.runId).toBe(RUN_ID)
     expect(layout.jobId).toBe("meta_improve")
     expect(layout.beforeHash).toMatch(/^sha256:[0-9a-f]{64}$/)
-    const privacy = result.edits.find((edit) => edit.file === "app/privacy/page.tsx")!
-    expect(privacy.jobId).toBe("privacy_paragraph")
     // Negative: corrupt one edit and the reversal refuses.
     expect(() => reverseTextEdits(`${read("app/layout.tsx")}x`.replace("data-x", "data-y"), layout.textEdits)).toThrow()
   })
@@ -424,8 +424,8 @@ describe("fence abort, load and report mode", () => {
     expect(result.reportedOutside).toEqual(["app/page.tsx", "lib/stray.ts"])
     expect(read("app/page.tsx")).not.toContain("gtag('consent'")
     expect(readFileSync(join(dir, "rejected", "app/page.tsx"), "utf8")).toContain("gtag('consent'")
-    // the outside edit blocks no job (no job owns it); the consent hunk blocks its own
-    expect(blockedFor(result, "meta_improve:landing")).toEqual(["consent_touched"])
+    // No runner job identity exists in a multi-job nested turn: refuse the hunk without guessed blame.
+    expect(blockedFor(result, "meta_improve:landing")).toEqual([])
     expect(blockedFor(result, "privacy_paragraph:page")).toEqual([])
     // only the rejected bytes survive the settle (the snapshot copies are deleted)
     expect(readdirSync(dir)).toEqual(["rejected"])

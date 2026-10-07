@@ -184,14 +184,14 @@ describe("checks decide (§3e.5)", () => {
     expect(applyResults(withEdit, [], RUN, { budgetLeft: true }).item.state).toBe("claimed")
   })
 
-  it("the privacy paragraph is proven by the merge; a job with live checks is not", () => {
-    const done = item("privacy_paragraph", "done_in_code")
+  it("a review-comment job is proven by the merge; a job with live checks is not", () => {
+    const done = item("review_comments", "done_in_code")
     expect(markMerged(done).item.state).toBe("proven")
     expect(markMerged(item("preview_guard", "done_in_code")).changed).toBe(false)
   })
 
-  it("blocks with a reason", () => {
-    expect(blockItem(item("csp"), "consent_touched").item).toMatchObject({ state: "blocked", blockedReason: "consent_touched" })
+  it("leaves consent refusals for the owner as information", () => {
+    expect(blockItem(item("csp"), "consent_touched").item).toMatchObject({ state: "left_for_you", checks: [] })
   })
 })
 
