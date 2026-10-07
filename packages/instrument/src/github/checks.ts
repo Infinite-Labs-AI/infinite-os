@@ -44,7 +44,7 @@ export function blockedPreview(check: PrCheck): boolean {
   // GitHub compresses provider access failures into failure/error. Only these coarse states
   // may use an exact known access explanation; a specific native build failure stays failed.
   if (deploymentState && !["failure", "error"].includes(deploymentState)) return false
-  return /^(?:Deployment (?:was |is |has been )?blocked|Authorization required|Vercel - Git author must have access to the project on Vercel to create deployments)\.?$/i.test((check.description ?? "").trim())
+  return /^(?:Deployment (?:was |is |has been )?blocked|Authorization required(?: to deploy)?|Vercel - Git author must have access to the project on Vercel to create deployments)\.?$/i.test((check.description ?? "").trim())
 }
 
 /** Actual conclusions only. Neutral/skipped are unmeasured, never a passing execution. */
@@ -60,7 +60,7 @@ export function checkBucket(state: string): string {
 /** Read actual runs and commit statuses on this exact SHA; no suites or workflow-file inference. */
 export async function commitChecks(gh: GhClient, sha: string): Promise<PrCheck[]> {
   const [runs, statuses] = await Promise.all([
-    collection<{ name: string; head_sha: string; status: string; conclusion: string | null; details_url?: string }>(gh, `repos/{owner}/{repo}/commits/${sha}/check-runs?filter=latest`, "check_runs"),
+    collection<{ name: string; head_sha: string; status: string; conclusion: string | null; details_url?: string; output?: { summary?: string } }>(gh, `repos/{owner}/{repo}/commits/${sha}/check-runs?filter=latest`, "check_runs"),
     collection<{ context: string; state: string; description?: string; target_url?: string }>(gh, `repos/{owner}/{repo}/commits/${sha}/status`, "statuses")
   ])
   if (runs.some(row => row.head_sha !== sha || typeof row.name !== "string" || !row.name || typeof row.status !== "string") ||
@@ -68,7 +68,7 @@ export async function commitChecks(gh: GhClient, sha: string): Promise<PrCheck[]
   return [
     ...runs.map(row => {
       const state = row.status === "completed" ? row.conclusion ?? row.status : row.status
-      return { name: row.name, bucket: checkBucket(state), state, link: row.details_url }
+      return { name: row.name, bucket: checkBucket(state), state, link: row.details_url, ...(row.output?.summary ? { description: row.output.summary } : {}) }
     }),
     ...statuses.filter((row, index, all) => all.findIndex(other => other.context === row.context) === index).map(row => ({ name: row.context, bucket: checkBucket(row.state), state: row.state, description: row.description, link: row.target_url }))
   ]
@@ -92,7 +92,6 @@ async function collection<T>(gh: GhClient, path: string, key: string): Promise<T
 /** Deployment status is a separate API: match the explicit environment/project name, never URLs. */
 export async function withDeploymentStates(gh: GhClient, sha: string, checks: PrCheck[]): Promise<PrCheck[]> {
   const provider = (name: string) => /^(vercel|netlify|cloudflare)(?:\b|[-:])/i.exec(name)?.[1]?.toLowerCase() ?? null
-  if (!checks.some(check => check.bucket !== "skipping" && provider(check.name))) return checks
   const deployments = await gh.json<Array<{ id: number; creator?: { login?: string }; environment?: string }>>(["api", `repos/{owner}/{repo}/deployments?sha=${sha}&per_page=100`])
   if (!Array.isArray(deployments) || deployments.length >= 100) throw new Error("Hosting deployment inventory could not be read completely")
   const evidence = await Promise.all(deployments.map(async deployment => {
@@ -102,7 +101,7 @@ export async function withDeploymentStates(gh: GhClient, sha: string, checks: Pr
   }))
   const normalize = (name: string) => name.trim().toLowerCase().replace(/\s*[-–—:]\s*/g, "-")
   const project = (name: string, prefix: string) => normalize(name.replace(new RegExp(`^${prefix}(?:\\s*[-–—:]\\s*|\\s+|$)`, "i"), ""))
-  return checks.map(check => {
+  const mapped = checks.map(check => {
     const host = provider(check.name)
     if (!host || check.bucket === "skipping") return check
     const namedProject = project(check.name, host)
@@ -112,7 +111,8 @@ export async function withDeploymentStates(gh: GhClient, sha: string, checks: Pr
     const latest = candidates.filter((entry, index) => candidates.findIndex(other => normalize(other.deployment.environment ?? "") === normalize(entry.deployment.environment ?? "")) === index)
     if (latest.length === 0) return check
     const states = latest.map(entry => entry.status?.state?.toLowerCase() ?? "unknown")
-    const failing = latest.find(entry => checkBucket(entry.status?.state ?? "") === "fail")
+    const failures = latest.filter(entry => checkBucket(entry.status?.state ?? "") === "fail")
+    const failing = failures.find(entry => !blockedPreview({ name: check.name, bucket: "fail", state: entry.status?.state ?? "unknown", deploymentState: entry.status?.state, description: entry.status?.description ?? undefined })) ?? failures[0]
     const state = failing?.status?.state?.toLowerCase() ?? (states.every(value => value === "success") ? "success" : states.find(value => checkBucket(value) === "unknown") ?? states.find(value => value !== "success")!)
     const description = failing?.status?.description?.trim() || (latest.length === 1 ? latest[0]?.status?.description?.trim() : undefined)
     const deploymentBucket = checkBucket(state)
@@ -120,4 +120,40 @@ export async function withDeploymentStates(gh: GhClient, sha: string, checks: Pr
     const bucket = check.bucket === "fail" || check.bucket === "cancel" || deploymentBucket === "pass" ? check.bucket : deploymentBucket
     return { ...check, bucket, state: bucket === check.bucket ? check.state : state, deploymentState: state, ...(description ? { description } : {}) }
   })
+  for (const entry of evidence.filter((entry, index) => evidence.findIndex(other => other.deployment.creator?.login === entry.deployment.creator?.login && normalize(other.deployment.environment ?? "") === normalize(entry.deployment.environment ?? "")) === index)) {
+    const host = provider(entry.deployment.creator?.login ?? "")
+    if (!host) continue
+    const environment = entry.deployment.environment ?? ""
+    if (checks.some(check => provider(check.name) === host && (!project(check.name, host) || project(check.name, host) === normalize(environment) || project(check.name, host) === project(environment, "(?:preview|production)")))) continue
+    const state = entry.status?.state ?? "unknown"
+    mapped.push({ name: `${host} - ${environment}`, bucket: checkBucket(state), state, deploymentState: state, description: entry.status?.description ?? undefined })
+  }
+  return mapped
+}
+
+/** Only the two explicit readiness exceptions; neither is evidence of passing CI. */
+export function readinessChecks(checks: readonly PrCheck[], base: readonly PrCheck[]): { checks: PrCheck[]; notes: string[] } {
+  const notes: string[] = []
+  const measured = checks.filter(check => {
+    if (blockedPreview(check)) {
+      notes.push(`${check.name}: preview not measured — deployment blocked. A hosting team member can authorise this GitHub author or redeploy.`)
+      return false
+    }
+    if (check.bucket === "fail" && ["failure", "error"].includes(check.state.toLowerCase()) && base.some(prior => prior.name === check.name && prior.bucket === "fail" && ["failure", "error"].includes(prior.state.toLowerCase()))) {
+      notes.push(`${check.name}: already failing before this pull request.`)
+      return false
+    }
+    return true
+  })
+  return { checks: measured, notes }
+}
+
+/** Retry transient unreadable responses, without treating them as an empty inventory. */
+export async function retryCheckRead<T>(read: () => Promise<T>, sleep: (ms: number) => Promise<void>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try { return await read() } catch (error) {
+      if (attempt === 2) throw error
+      await sleep(10_000)
+    }
+  }
 }

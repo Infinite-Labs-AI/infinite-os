@@ -1,6 +1,6 @@
 import type { GhClient } from "./gh.js"
 import { expect, it } from "vitest"
-import { blockedPreview, checkBucket, checksSummary, commitChecks, withDeploymentStates } from "./checks.js"
+import { blockedPreview, checkBucket, checksSummary, commitChecks, withDeploymentStates, readinessChecks, retryCheckRead } from "./checks.js"
 
 const SHA = "a".repeat(40)
 it.each(["failure", "error", "timed_out", "action_required", "cancelled", "canceled", "startup_failure"])("keeps %s blocking", state => expect(checkBucket(state)).toBe("fail"))
@@ -73,8 +73,8 @@ it.each(["pending", "fail", "skipping"])("does not promote a %s check from a suc
   const gh = { json: async (args: string[]) => args[1]!.includes("/statuses") ? [{ state: "success" }] : [{ id: 7, creator: { login: "vercel[bot]" }, environment: "Preview" }] } as unknown as GhClient
   expect((await withDeploymentStates(gh, SHA, [{ name: "Vercel", bucket, state: bucket }]))[0]!.bucket).toBe(bucket)
 })
-it("leaves skipped hosting checks unmeasured without querying deployments", async () => {
-  const gh = { json: async () => { throw new Error("must not read a deployment for a skipped check") } } as unknown as GhClient
+it("leaves skipped hosting checks unmeasured", async () => {
+  const gh = { json: async () => [] } as unknown as GhClient
   const skipped = [{ name: "Vercel", bucket: "skipping", state: "skipped" }]
   expect(await withDeploymentStates(gh, SHA, skipped)).toEqual(skipped)
 })
@@ -94,4 +94,36 @@ it.each(["failure", "error"])("retains authoritative hosting access details from
   expect(checks[0]).toMatchObject({ deploymentState: state, description, bucket: "fail" })
   expect(blockedPreview(checks[0]!)).toBe(true)
   expect(calls[0]![1]).toContain(`deployments?sha=${SHA}`)
+})
+
+it.each(["Authorization required to deploy.", "Deployment was blocked", "Authorization required"])("does not hold a known blocked hosting status: %s", description => {
+  const result = readinessChecks([{ name: "Vercel", state: "failure", bucket: "fail", description }], [])
+  expect(result.checks).toEqual([])
+  expect(result.notes[0]).toContain("preview not measured")
+})
+it("keeps real build failures and cancelled checks despite base-red failures", () => {
+  const checks = [{ name: "Vercel", bucket: "fail", state: "failure", description: "Build failed" }, { name: "test", bucket: "fail", state: "cancelled" }]
+  expect(readinessChecks(checks, [{ name: "test", bucket: "fail", state: "failure" }]).checks).toEqual(checks)
+})
+it("reads blocked deployment evidence even with no commit status", async () => {
+  const gh = { json: async (args: string[]) => args[1]!.includes("/statuses") ? [{ state: "failure", description: "Authorization required to deploy." }] : [{ id: 8, creator: { login: "vercel[bot]" }, environment: "Preview" }] } as unknown as GhClient
+  const checks = await withDeploymentStates(gh, SHA, [])
+  expect(checks).toHaveLength(1)
+  expect(readinessChecks(checks, []).checks).toEqual([])
+})
+it("retries unreadable reads three times ten seconds apart", async () => {
+  const slept: number[] = []; let attempts = 0
+  await expect(retryCheckRead(async () => { attempts++; throw new Error("offline") }, async ms => { slept.push(ms) })).rejects.toThrow("offline")
+  expect(attempts).toBe(3); expect(slept).toEqual([10_000, 10_000])
+})
+it("recovers from one transient unreadable response", async () => {
+  const slept: number[] = []; let attempts = 0
+  expect(await retryCheckRead(async () => { if (++attempts === 1) throw new Error("offline"); return [] }, async ms => { slept.push(ms) })).toEqual([])
+  expect(slept).toEqual([10_000])
+})
+it("does not hide a real build failure behind another environment's access block", async () => {
+  const gh = { json: async (args: string[]) => args[1]!.includes("/statuses") ? [{ state: "failure", description: args[1]!.includes("/1/") ? "Deployment was blocked" : "Build failed" }] : [{ id: 1, creator: { login: "vercel[bot]" }, environment: "Preview – docs" }, { id: 2, creator: { login: "vercel[bot]" }, environment: "Preview – store" }] } as unknown as GhClient
+  const checks = await withDeploymentStates(gh, SHA, [{ name: "Vercel", bucket: "fail", state: "failure" }])
+  expect(readinessChecks(checks, []).checks).toHaveLength(1)
+  expect(checks[0]!.description).toBe("Build failed")
 })
