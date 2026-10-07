@@ -153,7 +153,7 @@ describe("F12: the 'In this pull request' column is filled from the wizard's own
     expect(unread.finishLine.consent_recorded!.state).toBe("info")
     const keys = fakeKeys()
     const other = preMergeCells({ jobs: [], plan: PLAN }, { at: AT, runId: RUN_ID, keys: { ...keys, infinite: { ...keys.infinite, consentMode: "required" } } })
-    expect(other.cells.consent_setting).toMatchObject({ state: "info", display: 'the plan chose "collect by default"; Infinite has "ask first (consent required)"' })
+    expect(other.cells.consent_setting).toMatchObject({ state: "problem", display: 'the plan chose "collect by default"; Infinite has "ask first (consent required)"' })
   })
 
   it("the rehearsal's own numbers decide the tool rows: a duplicate GA4 tag reads '2', a direct PostHog is a problem", () => {
@@ -221,4 +221,11 @@ describe("R4-10 (live run 4): ONE rehearsal count, in the terminal and the repor
     expect(Object.values(run4.grades).length).toBe(4)
     expect(rehearsalToolCount(run4).tested).not.toBe(4)
   })
+})
+
+it.each([false, true])("R7 scopes preview failures to non-withheld tools (other failure=%s)", otherFailure => {
+  const left: ChecklistItem = { ...job("preview_guard", "ga4", [], "left_for_you"), ownerBoundary: { kind: "frozen_unit", file: "src/tracking.ts", line: 2 } }
+  const ctx = column({ jobs: [left], outcome: outcome({ previewGrades: { ga4: grade("ga4", "problem", "previews_send_data — GA4 sends"), posthog: grade("posthog", "pass"), meta: grade("meta", otherFailure ? "problem" : "pass", otherFailure ? "previews_send_data — Meta sends" : undefined) } }) })
+  expect(ctx.state.get().report.in_pr!.finishLine.previews_silent?.state).toBe(otherFailure ? "problem" : "info")
+  if (!otherFailure) expect(ctx.state.get().report.in_pr!.finishLine.previews_silent?.display).toContain("NOT DONE")
 })

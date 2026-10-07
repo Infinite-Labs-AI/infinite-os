@@ -1,3 +1,5 @@
+import type { ChecklistItem } from "../contracts/jobs.js"
+import { withheldPreviewTools, previewScope } from "../../review/preview-scope.js"
 // Step 11 `prove` (§3d.1): after the merge is deployed, ONE real test visit and the best proof each tool
 // can give, from THIS run.
 //
@@ -528,6 +530,7 @@ export function unloaded(error: string | null, what: string): Extract<PostDeploy
 }
 
 export interface ProvenColumnInput {
+  jobs?: readonly ChecklistItem[]
   runId: string
   mergeSha: string
   at: string
@@ -636,7 +639,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
       facts.push({ input: "t1.redirect_walk", state: result.state, at: result.at, checkId: result.checkId, display: t1Words(result) })
     }
   }
-  if (input.postDeploy) facts.push(...postDeployFacts(input.postDeploy, input.installed, expect, at))
+  if (input.postDeploy) facts.push(...postDeployFacts(input.postDeploy, input.installed, expect, at, input.jobs))
 
   // §3x.6 Receipts, per tool under test: a beacon with a receipt, a receipt problem, or an installed tool that sent
   // NOTHING (the cloud cannot know it is installed, so only the visit can say it was silent; run 3's Meta pixel).
@@ -761,7 +764,7 @@ function toolReceiptFact(tool: TestTool, visit: ProvenColumnInput["visit"], lane
 }
 
 /** §3x.6 The post-deploy measurements as facts: production's own bytes, the merge's own deployment, a page change. */
-function postDeployFacts(post: NonNullable<ProvenColumnInput["postDeploy"]>, installed: readonly TestTool[] | null, expect: TestExpect, at: string): ColumnFact[] {
+function postDeployFacts(post: NonNullable<ProvenColumnInput["postDeploy"]>, installed: readonly TestTool[] | null, expect: TestExpect, at: string, jobs?: readonly ChecklistItem[]): ColumnFact[] {
   const facts: ColumnFact[] = []
   for (const check of post.byteCensus.filter((entry) => entry.checkId === "byte_census")) {
     facts.push({
@@ -772,10 +775,14 @@ function postDeployFacts(post: NonNullable<ProvenColumnInput["postDeploy"]>, ins
       checkId: check.checkId
     })
   }
+  const leftPreview = withheldPreviewTools(jobs)
   if (post.mergePreview.kind === "none") {
     facts.push({ input: "merge_preview.graded", state: "undetermined", display: post.mergePreview.said ?? "the merge's own deployment address was not loaded", at, reason: post.mergePreview.reason })
   } else {
+    const scoped = leftPreview.length ? previewScope(post.mergePreview.grades, leftPreview) : null
+    if (scoped && (scoped.state === "pass" || scoped.state === "info")) facts.push({ input: "merge_preview.graded", state: "info", display: scoped.note, at, checkId: "preview_self_silent" })
     for (const tool of ["ga4", "posthog", "meta"] as const) {
+      if (leftPreview.includes(tool) || (scoped && (scoped.state === "pass" || scoped.state === "info"))) continue
       const grade = post.mergePreview.grades[tool]
       if (!grade || grade.state === "info") continue
       const code = gradeReasonCode(grade)
@@ -1339,6 +1346,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
 
     const at = deps.clock.now().toISOString()
     const column = buildProvenColumn({
+      jobs: ctx.state.get().jobs,
       runId,
       mergeSha,
       at,
@@ -1538,7 +1546,9 @@ async function measureAfterDeploy(
       : unloaded(loaded.error, "the page change after the deploy")
   }
   if (mergePreview.kind === "graded") {
-    liveChecks.push(...(await deps.checks.gradeTestRunChecks(mergePreview.result, expect, "dry_live", input.gradeCtx(mergePreview.result))).filter((check) => check.checkId === "preview_self_silent").map((check) => ({ ...check, tier: "RH" as const })))
+    const left = withheldPreviewTools(ctx.state.get().jobs)
+    const scoped = left.length ? previewScope(mergePreview.grades, left) : null
+    liveChecks.push(...(await deps.checks.gradeTestRunChecks(mergePreview.result, expect, "dry_live", input.gradeCtx(mergePreview.result))).filter(check => check.checkId === "preview_self_silent").map(check => ({ ...check, ...(scoped ? { state: scoped.state, reason: scoped.state === "pass" ? "Non-withheld preview guards were read as silent" : scoped.state === "info" ? scoped.note : scoped.state === "problem" ? "previews_send_data — A non-withheld tool sends from the preview" : "not_exercised — A non-withheld preview tool could not be graded" } : {}), tier: "RH" as const })))
   }
   if (deployedDry.kind === "graded") {
     for (const fact of spaFacts(deployedDry.result, deployedDry.grades, input.gradeCtx(deployedDry.result).installedTools, expect, deployedDry.result.startedAt)) {

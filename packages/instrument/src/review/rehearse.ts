@@ -1,3 +1,4 @@
+import { withheldPreviewTools, previewScope } from "./preview-scope.js"
 // The rehearsal (lane O4, §3d.1 step 8, §3h): the PR head's Vercel preview loaded UNDER THE PRODUCTION
 // HOSTNAME in the desktop's hidden window (`rehearsal` mode: every beacon recorded and cancelled, nothing sent),
 // plus a `dry_live` load of the preview's OWN URL (`preview_self`: guarded tools must stay silent there). The
@@ -500,7 +501,7 @@ const UNDETERMINED_REASON: Record<RehearsalUndetermined, Reason> = {
 }
 
 /** Writes the rehearsal's `in_pr` cells for `head` (only the cells the rehearsal measures; other lanes keep theirs). */
-export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string; at: string; runId: string }): Pick<ReportColumnSnapshot, "cells" | "finishLine"> {
+export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string; at: string; runId: string; jobs?: readonly ChecklistItem[] }): Pick<ReportColumnSnapshot, "cells" | "finishLine"> {
   const { at, runId } = input
   const finishLine: Partial<Record<FinishLineId, Cell>> = {}
   const cells: Partial<Record<ReportRowId, Cell>> = {}
@@ -524,6 +525,14 @@ export function rehearsalCells(outcome: RehearsalOutcome, input: { head: string;
     Object.keys(preview).length === 0
       ? makeCell("undetermined", null, NULL_DISPLAY, at, runId, "not_exercised", "preview_self_silent")
       : finishCell(aggregate(outcome, preview, ["previews_send_data"], GUARDED), { pass: "preview link sent nothing", problem: "the preview link sends data" }, at, runId, "preview_self_silent")
+  const leftPreview = withheldPreviewTools(input.jobs)
+  if (leftPreview.length > 0 && Object.keys(preview).length > 0) {
+    const scoped = previewScope(preview, leftPreview, [...outcome.expectedTools ?? [], ...outcome.installedTools ?? []])
+    finishLine.previews_silent = scoped.state === "pass" || scoped.state === "info"
+      ? makeCell("info", "not_done", scoped.note, at, runId, undefined, "preview_self_silent")
+      : scoped.state === "problem" ? makeCell("problem", "problem", `A non-withheld tool sends from the preview; ${scoped.note}`, at, runId, undefined, "preview_self_silent")
+      : makeCell("undetermined", null, NULL_DISPLAY, at, runId, "not_exercised", "preview_self_silent")
+  }
   // RH posthog_via_proxy_once: PostHog graded "fires once, right key" AND its beacons went same-origin.
   const posthog = grades.posthog
   if (!posthog || (posthog.state !== "pass" && posthog.state !== "problem") || outcome.facts.posthogSameOrigin === null) {
@@ -646,15 +655,20 @@ export function rehearsalCountWords(count: { passing: number; tested: number }):
  * check id, plus one `click_test` per conversion item (matched by the conversion name after `conversions_to_tools:`).
  * Built from O6's grades and the click facts; nothing here is the agent's word.
  */
-export function rehearsalCheckResults(outcome: RehearsalOutcome, input: { at: string; runId: string }): { shared: CheckResult[]; clicks: Map<string, CheckResult> } {
+export function rehearsalCheckResults(outcome: RehearsalOutcome, input: { at: string; runId: string; jobs?: readonly ChecklistItem[] }): { shared: CheckResult[]; clicks: Map<string, CheckResult> } {
   const shared: CheckResult[] = []
   const clicks = new Map<string, CheckResult>()
   if (outcome.state === "undetermined") return { shared, clicks }
-  const { finishLine } = rehearsalCells(outcome, { head: "", at: input.at, runId: input.runId })
+  const { finishLine } = rehearsalCells(outcome, { head: "", at: input.at, runId: input.runId, jobs: input.jobs })
   for (const cell of Object.values(finishLine)) {
     const checkId = cell?.provenance.checkId
     if (!cell || !checkId || (cell.state !== "pass" && cell.state !== "problem" && cell.state !== "undetermined")) continue
     shared.push({ checkId, tier: "RH", state: cell.state, ...(cell.reason ? { reason: cell.reason } : cell.state === "problem" ? { reason: cell.display } : {}), at: input.at, runId: input.runId })
+  }
+  const left = withheldPreviewTools(input.jobs)
+  if (left.length > 0 && !shared.some(check => check.checkId === "preview_self_silent")) {
+    const scoped = previewScope(outcome.previewGrades, left, [...outcome.expectedTools ?? [], ...outcome.installedTools ?? []])
+    if (scoped.state === "pass") shared.push({ checkId: "preview_self_silent", tier: "RH", state: "pass", reason: "The non-withheld preview guards were read as silent; owner targets excluded", at: input.at, runId: input.runId })
   }
   // The per-tool RH checks of jobs 4 and 5, straight from O6's grade of that tool (an `info` grade, a tool neither
   // connected nor installed, gives no result). GA4's "one page view" is a problem only for a duplicate or a silent
@@ -700,7 +714,7 @@ export function rehearsalCheckResults(outcome: RehearsalOutcome, input: { at: st
  */
 export function recordRehearsalCells(ctx: WizardContext, outcome: RehearsalOutcome, input: { head: string; runId: string; keys?: TagKeys | null }): void {
   const at = ctx.now().toISOString()
-  const fresh = rehearsalCells(outcome, { ...input, at })
+  const fresh = rehearsalCells(outcome, { ...input, at, jobs: ctx.state.get().jobs })
   ctx.state.update((state) => {
     const previous = state.report.in_pr
     // §3i.3 rule 7: in_pr cells are keyed to the head and rebuilt on a new head. Cells that do not depend on the
@@ -757,7 +771,7 @@ function keepHeadIndependent<K extends string>(cells: Partial<Record<K, Cell>> |
 }
 
 /** One line per tool, the design's rehearsal sub-statuses. */
-export function rehearsalLines(outcome: RehearsalOutcome): Array<{ text: string; tone: "ok" | "warn" | "info" }> {
+export function rehearsalLines(outcome: RehearsalOutcome, jobs?: readonly ChecklistItem[]): Array<{ text: string; tone: "ok" | "warn" | "info" }> {
   if (outcome.state === "undetermined") {
     const why: Record<RehearsalUndetermined, string> = {
       not_vercel: "Rehearsal: undetermined (no Vercel preview found for this site)",
@@ -786,9 +800,10 @@ export function rehearsalLines(outcome: RehearsalOutcome): Array<{ text: string;
     else if (result.state === "undetermined") lines.push({ text: `${TOOL_LABEL[tool]}: undetermined (${reasonCode(result).replace(/_/g, " ") || "unknown"})`, tone: "info" })
   }
   if (outcome.clickTested.length > 0) lines.push({ text: `✓ Conversions fire on the right buttons (${outcome.clickTested.length})`, tone: "ok" })
-  const silent = rehearsalCells(outcome, { head: "", at: "", runId: "" }).finishLine.previews_silent?.state
+  const silent = rehearsalCells(outcome, { head: "", at: "", runId: "", jobs }).finishLine.previews_silent?.state
   if (silent === "problem") lines.push({ text: "The preview link itself sends data", tone: "warn" })
   else if (silent === "pass") lines.push({ text: "✓ Preview links themselves send nothing", tone: "ok" })
+  else if (silent === "info" && withheldPreviewTools(jobs).length) lines.push({ text: previewScope(outcome.previewGrades, withheldPreviewTools(jobs)).note, tone: "info" })
   return lines
 }
 
@@ -810,7 +825,7 @@ export async function applyRehearsalToJobs(
   sha: string,
   step: WizardStepId
 ): Promise<void> {
-  const { shared, clicks } = rehearsalCheckResults(outcome, { at: ctx.now().toISOString(), runId })
+  const { shared, clicks } = rehearsalCheckResults(outcome, { at: ctx.now().toISOString(), runId, jobs: ctx.state.get().jobs })
   // R4-5: the rehearsal's own results, kept whole for the review's triage (a check no job carries still decides).
   ctx.state.update((state) => {
     state.rehearsalChecks = shared

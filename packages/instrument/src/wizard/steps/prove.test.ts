@@ -626,3 +626,16 @@ describe("live run 6: post-deploy checks reach the checklist", () => {
     }
   })
 })
+
+it.each([false, true])("R7 a withheld preview guard is informational after deploy without hiding other failures (%s)", otherFailure => {
+  const at = "2026-10-02T09:43:00.000Z"
+  const previewGrade = (state: "pass" | "problem") => ({ checkId: "preview_self_silent", state, tier: "RH" as const, at, runId: RUN_ID, reason: state === "problem" ? "previews_send_data — tool sends" : "silent" })
+  const result = realVisitResult()
+  const column = buildProvenColumn({ runId: RUN_ID, mergeSha: MERGE_SHA, installed: ["ga4", "posthog", "meta"], at, keys: keysFixture(), expect: {}, visit: null, receipts: receiptsAll(), t1: [], serverLaneInstalled: false, conversionsWaiting: 0,
+    jobs: [{ id: "preview_guard:ga4", jobId: "preview_guard", state: "left_for_you", n: 7, title: "Guard GA4", owner: "agent", trigger: { finding: "Frozen owner unit", evidence: [] }, allow: { files: ["src/tracking.ts"], create: [] }, checks: [], ownerBoundary: { kind: "frozen_unit" } }],
+    postDeploy: { byteCensus: [], deployedDry: { kind: "none", reason: "not_exercised" }, mergePreview: { kind: "graded", result, grades: { ga4: previewGrade("problem"), posthog: previewGrade("pass"), meta: previewGrade(otherFailure ? "problem" : "pass"), infinite: previewGrade("pass") } } }
+  } as Parameters<typeof buildProvenColumn>[0])
+  expect(column.finishLine.previews_silent?.state).toBe(otherFailure ? "problem" : "info")
+  expect(column.finishLine.previews_silent?.provenance.source).toBe("desktop_test")
+  if (!otherFailure) expect(column.finishLine.previews_silent?.display).toContain("NOT DONE")
+})

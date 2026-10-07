@@ -100,7 +100,7 @@ export function preMergeCells(state: Pick<WizardRunState, "jobs" | "plan">, inpu
         ? cell("info", chosen, `"${consentWords(chosen)}" recorded`, "cloud_read", at, runId)
         : held === null
           ? cell("info", chosen, `"${consentWords(chosen)}" chosen in the plan (not read back from Infinite)`, "plan_answer", at, runId)
-          : cell("info", held, `the plan chose "${consentWords(chosen)}"; Infinite has "${consentWords(held)}"`, "cloud_read", at, runId)
+          : cell("problem", held, `the plan chose "${consentWords(chosen)}"; Infinite has "${consentWords(held)}"`, "cloud_read", at, runId, { reason: "test_error" })
     finishLine.consent_recorded = consent
     cells.consent_setting = consent
   }
