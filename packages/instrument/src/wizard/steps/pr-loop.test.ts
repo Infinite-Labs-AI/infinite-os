@@ -693,6 +693,31 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
 })
 
 describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
+  it("waits two minutes even after a completed suite so a check arriving at ninety seconds is seen", async () => {
+    const clock = fakeClock()
+    const w = await opened({ clock, reviews: [review([])], gh: { checks: { "42": [] }, checkSuites: [{ id: 1, status: "completed", conclusion: "success" }] } })
+    const sleep = clock.sleep.bind(clock)
+    let elapsed = 0
+    clock.sleep = async (ms, signal) => {
+      expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+      await sleep(ms, signal)
+      elapsed += ms
+      if (elapsed >= 90_000) w.gh.update(state => { state.checks = { "42": [{ name: "external validation", bucket: "fail", state: "FAILURE" }] } })
+    }
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("external validation") })
+    expect(elapsed).toBe(120_000)
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+  })
+
+  it.each(["no CI", "idle suite", "unrecognised workflow"])("readies after two minutes with no check runs despite %s", async mode => {
+    const clock = fakeClock()
+    const w = await opened({ clock, reviews: [review([])], gh: { checks: { "42": [] }, checkSuites: mode === "idle suite" ? [{ id: 1, status: "queued", conclusion: null }] : [], headWorkflowFiles: mode === "unrecognised workflow" ? { ".github/workflows/release.yml": "on:\n  push:\n    tags: ['v*']\n  pull_request:\n    types: [ready_for_review]\njobs: {}" } : {} } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(clock.slept.reduce((total, ms) => total + ms, 0)).toBe(120_000)
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
+    expect(w.gh.traffic()).not.toContain("/check-suites")
+    expect(w.gh.traffic()).not.toContain("/contents/.github/workflows")
+  })
   it.each(["commit", "stage", "receipt"])("restores both edits and receipt when a CI repair fails during %s", async (failure) => {
     const w = await opened({ reviews: [review([])], fix: fixLayout, gh: {
       baseChecks: [{ name: "test", conclusion: "success" }], failedLogs: { "123": "app/layout.tsx:2: error TS2304" },
@@ -723,177 +748,80 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     w.ctx.state.update(state => { state.jobs[0]!.edits = [{ editId: "prior", file: "app/layout.tsx" }] })
     await reviewStep.run(w.ctx, w.deps)
   })
-  it.each(["pending", "cancel", "unreadable"])("keeps draft when a base-green check is %s", async (state) => {
-    const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "test", conclusion: "success" }], checks: { "42": state === "missing" ? [] : [{ name: "test", bucket: state, state: state.toUpperCase() }] } } })
-    if (state === "unreadable") w.host.checks = async () => { throw new Error("fixture unavailable") }
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED" })
+  it.each(["queued", "in_progress", "failure", "timed_out", "cancelled", "action_required", "unreadable"])("keeps draft and names an actual head check in state %s", async state => {
+    const clock = fakeClock()
+    const w = await opened({ clock, reviews: [review([])], gh: { headCheckRuns: [{ id: 1, name: "site validation", status: ["queued", "in_progress"].includes(state) ? state : "completed", conclusion: ["queued", "in_progress"].includes(state) ? null : state }] } })
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("site validation") })
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(["queued", "in_progress"].includes(state) ? 600_000 : 120_000)
+    const progress = w.ctx.events.filter(event => event.type === "step.status").map(event => JSON.stringify(event.fields)).join("\n")
+    expect(progress).toContain("2:00 remaining")
+    expect(progress).toContain("0:30 remaining")
+    if (["queued", "in_progress"].includes(state)) expect(progress).toContain("site validation")
   })
 
-  it("allows an authorization-blocked preview after registration with a truthful note", async () => {
-    const w = await opened({ reviews: [review([])], gh: { deployments: [], baseChecks: [{ name: "Vercel", conclusion: "success" }], checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
-    expectOk(await reviewStep.run(w.ctx, w.deps))
-    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
-    expect(eventText(w.ctx)).toContain("preview not measured")
+  it("keeps an authorization-blocked deployment draft with its actual hosting reason", async () => {
+    const w = await opened({ reviews: [review([])], gh: { deployments: [{ id: 7, sha: "*", environment: "Preview", creator: "vercel[bot]", statuses: [{ state: "failure", description: "Deployment was blocked" }] }], checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE" }] } } })
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("Vercel") })
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+    expect(eventText(w.ctx)).toContain("hosting team member")
   })
 
-  it("waits the full window for a missing base-green check with unknown triggers", async () => {
-    const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "release", conclusion: "success" }], checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } } })
-    expectOk(await reviewStep.run(w.ctx, w.deps))
-    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
-    expect(w.gh.traffic()).toContain("did not appear in the full check window: not measured")
-  })
-
-  it.each([false, true])("uses the recorded push time and actual workflow triggers (PR trigger %s)", async onPr => {
-    const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "release", conclusion: "success", details_url: "https://github.com/example/site/actions/runs/123" }], workflows: { "123": { path: ".github/workflows/release.yml", source: onPr ? "on: [push, pull_request]\njobs: {}" : "on: push\njobs: {}" } }, checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } } })
-    const clock = fakeClock()
-    w.deps.clock = clock
-    w.ctx.state.update(state => { state.lastPush = { sha: state.git!.headSha!, at: new Date(clock.now().getTime() - 90_000).toISOString() } })
-    const outcome = await reviewStep.run(w.ctx, w.deps)
-    if (onPr) expect(outcome).toMatchObject({ kind: "parked", reason: expect.stringContaining("Expected PR workflows") })
-    else expectOk(outcome)
-    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(onPr ? 510_000 : 0)
-    const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8"))
-    if (!onPr) expect(w.gh.traffic()).toContain("workflow triggers checked")
-    expect(JSON.stringify(ledger)).not.toContain('"pr_checks_pass","tier":"S","state":"pass"')
-  })
-
-  it("waits the full push window for a quoted pull_request workflow event", async () => {
-    const w = await opened({ reviews: [review([])], gh: {
-      baseChecks: [{ name: "release", conclusion: "success", details_url: "https://github.com/example/site/actions/runs/123" }],
-      workflows: { "123": { path: ".github/workflows/release.yml", source: "on:\n  push:\n  'pull_request':\njobs: {}" } },
-      checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] }
-    } })
-    const clock = fakeClock()
-    w.deps.clock = clock
-    w.ctx.state.update(state => { state.lastPush = { sha: state.git!.headSha!, at: new Date(clock.now().getTime() - 90_000).toISOString() } })
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("Expected PR workflows") })
-    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(510_000)
-    expect(w.gh.traffic()).not.toContain("does not run on pull requests")
-  })
-
-  it("does not let a same-named push-only workflow hide a PR-triggered workflow", async () => {
-    const w = await opened({ reviews: [review([])], gh: {
-      baseChecks: [123, 124].map(id => ({ name: "release", conclusion: "success", details_url: `https://github.com/example/site/actions/runs/${id}` })),
-      workflows: { "123": { path: ".github/workflows/pr.yml", source: "on: pull_request\njobs: {}" }, "124": { path: ".github/workflows/push.yml", source: "on: push\njobs: {}" } },
-      checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] }
-    } })
-    const clock = fakeClock()
-    w.deps.clock = clock
-    w.ctx.state.update(state => { state.lastPush = { sha: state.git!.headSha!, at: new Date(clock.now().getTime() - 90_000).toISOString() } })
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("Expected PR workflows") })
-    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(510_000)
-    expect(w.gh.traffic()).not.toContain("does not run on pull requests")
-  })
-
-  it("keeps a pushed fix's check verdict unmeasured when a base-green check never registers", async () => {
+  it("notes a base-green check that did not run without blocking actual successful head checks", async () => {
     const w = await opened({
-      reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null }]), review([])],
-      fix: fixLayout,
+      reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null }]), review([])], fix: fixLayout,
       gh: { baseChecks: [{ name: "release", conclusion: "success" }], checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } }
     })
     expectOk(await reviewStep.run(w.ctx, w.deps))
-    expect(w.ctx.state.get().jobs.find(job => job.id === "review_comments:F1")!.checks.find(check => check.id === "pr_checks_pass")!.state).toBe("undetermined")
+    expect(w.gh.traffic()).toContain("release did not run on this pull request: not measured")
+    expect(w.ctx.state.get().jobs.find(job => job.id === "review_comments:F1")!.checks.find(check => check.id === "pr_checks_pass")!.state).toBe("pass")
   })
 
-  it.each([false, true])("holds draft for a late-registering failed CI check (base lint %s)", async lintOnBase => {
-    const w = await opened({ reviews: [review([])], gh: {
-      baseChecks: lintOnBase ? [{ name: "lint", conclusion: "success" }] : [],
-      checks: { "42": lintOnBase ? [{ name: "lint", bucket: "pass", state: "SUCCESS" }] : [] },
-      checkSuites: [{ id: 1, status: "queued", conclusion: null }],
-      workflowRuns: [{ id: 456, path: ".github/workflows/ci.yml", status: "queued", conclusion: null, event: "pull_request" }],
-      headWorkflowFiles: { ".github/workflows/ci.yml": "on: pull_request\njobs:\n  ci:\n    runs-on: ubuntu-latest" }
-    } })
+  it("counts the registration wait from the recorded push and does not repeat it on resume", async () => {
     const clock = fakeClock()
+    const w = await opened({ clock, reviews: [review([])], gh: { checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } } })
+    w.ctx.state.update(state => { state.lastPush = { sha: state.git!.headSha!, at: new Date(clock.now().getTime() - 90_000).toISOString() } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(clock.slept).toEqual([30_000])
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(clock.slept).toEqual([30_000])
+    expect(w.gh.traffic()).not.toContain("/check-suites")
+    expect(w.gh.traffic()).not.toContain("/actions/runs?")
+  })
+
+  it("catches a non-Actions commit status that first registers at ninety seconds", async () => {
+    const clock = fakeClock()
+    const w = await opened({ clock, reviews: [review([])], gh: { checks: { "42": [{ name: "lint", bucket: "pass", state: "SUCCESS" }] } } })
+    const sleep = clock.sleep.bind(clock)
     let elapsed = 0
-    w.deps.clock = { now: clock.now, async sleep(ms, signal) {
-      await clock.sleep(ms, signal)
-      elapsed += ms
-      if (elapsed >= 90_000) w.gh.update(state => {
-        state.checkSuites = [{ id: 1, status: "completed", conclusion: "failure" }]
-        state.workflowRuns = [{ id: 456, path: ".github/workflows/ci.yml", status: "completed", conclusion: "failure", event: "pull_request" }]
-        state.checks = { "42": [{ name: "ci", bucket: "fail", state: "FAILURE" }] }
-      })
-    } }
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("ci") })
-    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
-    expect(elapsed).toBeGreaterThanOrEqual(90_000)
+    clock.sleep = async (ms, signal) => {
+      await sleep(ms, signal); elapsed += ms
+      if (elapsed >= 90_000) w.gh.update(state => { state.commitStatuses = { "42": [{ context: "external deployment", state: "failure" }] } })
+    }
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("external deployment") })
+    expect(elapsed).toBe(120_000)
   })
 
-  it.each(["queued", "in_progress", "unreadable", "head_only"])("holds draft across the full window for unresolved head CI: %s", async mode => {
-    const w = await opened({ reviews: [review([])], gh: {
-      baseChecks: [{ name: "release", conclusion: "success", details_url: "https://github.com/example/site/actions/runs/123" }],
-      workflows: { "123": { path: ".github/workflows/release.yml", source: "on: push\njobs: {}" } },
-      checks: { "42": [{ name: "release", bucket: "pass", state: "SUCCESS" }] },
-      checkSuites: [{ id: 1, status: mode === "head_only" ? "completed" : "queued", conclusion: mode === "head_only" ? "success" : null }],
-      workflowRuns: mode === "head_only" ? [] : [{ id: 456, path: ".github/workflows/new.yml", status: mode === "in_progress" ? "in_progress" : "queued", conclusion: null }],
-      headWorkflowFiles: { ".github/workflows/new.yml": "on: pull_request\njobs:\n  release:\n    runs-on: ubuntu-latest" },
-      unreadableCheckActivity: mode === "unreadable"
-    } })
-    const clock = fakeClock()
-    w.deps.clock = clock
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked" })
-    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(600_000)
-    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
-    expect(w.gh.traffic()).toContain(`head_sha=${w.ctx.state.get().git!.headSha}`)
-  })
-
-  it.each(["pass", "skipping"])("records the actual completed workflow verdict without an idle grace: %s", async bucket => {
+  it.each([false, true])("reports pass only if at least one check ran, with neutral/skipped unmeasured (ran %s)", async ran => {
     const w = await opened({
       reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null }]), review([])], fix: fixLayout,
-      gh: { checks: { "42": [{ name: "ci", bucket, state: bucket === "pass" ? "SUCCESS" : "SKIPPED" }] },
-        headWorkflowFiles: { ".github/workflows/ci.yml": "on: pull_request\njobs: {}" },
-        workflowRuns: [{ id: 456, path: ".github/workflows/ci.yml", status: "completed", conclusion: "success", event: "pull_request" }]
-      }
+      gh: { checks: { "42": [ ...(ran ? [{ name: "test", bucket: "pass", state: "SUCCESS" }] : []), { name: "optional", bucket: "skipping", state: "SKIPPED" }, { name: "advisory", bucket: "skipping", state: "NEUTRAL" }] } }
     })
-    const clock = fakeClock()
-    w.deps.clock = clock
     expectOk(await reviewStep.run(w.ctx, w.deps))
-    expect(clock.slept).toEqual([])
-    expect(w.ctx.state.get().jobs.find(job => job.id === "review_comments:F1")!.checks.find(check => check.id === "pr_checks_pass")!.state).toBe(bucket === "pass" ? "pass" : "undetermined")
+    expect(w.ctx.state.get().jobs.find(job => job.id === "review_comments:F1")!.checks.find(check => check.id === "pr_checks_pass")!.state).toBe(ran ? "pass" : "undetermined")
+    expect(w.gh.traffic()).toContain("optional: skipped, not measured")
+    expect(w.gh.traffic()).toContain("advisory: neutral, not measured")
   })
 
-  it("reads a resumed blocked host check without repeating registration waits", async () => {
-    const w = await opened({ reviews: [review([])], gh: { deployments: [], checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
+  it("keeps unreadable actual check inventories draft after registration", async () => {
     const clock = fakeClock()
-    w.deps.clock = clock
-    expectOk(await reviewStep.run(w.ctx, w.deps))
-    const slept = clock.slept.length
-    expectOk(await reviewStep.run(w.ctx, w.deps))
-    expect(clock.slept).toHaveLength(slept)
-  })
-
-  it.each(["cancel", "unreadable"])("rereads %s on resume and parks without another idle wait", async bucket => {
-    const w = await opened({ reviews: [review([])], gh: { checks: { "42": [{ name: "test", bucket, state: bucket.toUpperCase() }] } } })
-    const clock = fakeClock()
-    w.deps.clock = clock
-    if (bucket === "unreadable") w.host.checks = async () => { throw new Error("fixture unreadable") }
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked" })
+    const w = await opened({ clock, reviews: [review([])], gh: { unreadableChecks: true } })
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("could not be read") })
+    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(120_000)
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
     const slept = clock.slept.length
     expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked" })
     expect(clock.slept).toHaveLength(slept)
-    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
-  })
-
-  it("waits for Actions to register even when only a blocked preview was initially reported", async () => {
-    const w = await opened({ reviews: [review([])], gh: { deployments: [],
-      checkSuites: [{ id: 123, status: "queued", conclusion: null }],
-      workflowRuns: [{ id: 456, path: ".github/workflows/ci.yml", event: "pull_request", status: "queued", conclusion: null }],
-      headWorkflowFiles: { ".github/workflows/ci.yml": "on: pull_request\njobs: {}" },
-      checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
-    const clock = fakeClock()
-    w.deps.clock = { now: clock.now, async sleep(ms, signal) {
-      expect(w.gh.read().prs[0]!.isDraft).toBe(true)
-      await clock.sleep(ms, signal)
-      w.gh.update(state => {
-        state.checks = { "42": [{ name: "test", bucket: "pending", state: "PENDING" }] }
-        state.checkSuites = [{ id: 123, status: "in_progress", conclusion: null }]
-        state.workflowRuns = [{ id: 456, path: ".github/workflows/ci.yml", event: "pull_request", status: "in_progress", conclusion: null }]
-      })
-    } }
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("pending") })
-    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(600_000)
-    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
   })
 
   it("never marks a draft PR ready when its checks are red and no review fix was committed", async () => {
@@ -903,16 +831,14 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
   })
 
-  it("notes a base-red check and an authorization-blocked preview without blocking ready", async () => {
+  it("keeps a base-red check and an authorization-blocked preview blocking ready", async () => {
     const w = await opened({ reviews: [review([])], gh: {
       baseChecks: [{ name: "test", conclusion: "failure" }],
       deployments: [],
       checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE" }, { name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] }
     } })
-    expectOk(await reviewStep.run(w.ctx, w.deps))
-    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
-    expect(eventText(w.ctx)).toContain("also fails on the base")
-    expect(eventText(w.ctx)).toContain("preview not measured")
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("test") })
+    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
   })
 
   it("a resumed round with no fix SHA and a newer HEAD cannot ready a base-green failing PR", async () => {
@@ -974,7 +900,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
   })
 
-  it("polls again after cancellation instead of treating the first poll as a failure", async () => {
+  it("waits the full registration period before deciding from the eventual check results", async () => {
     const w = await opened({ reviews: [review([])], gh: {
       checkSuites: [{ id: 123, status: "completed", conclusion: "cancelled" }],
       workflowRuns: [{ id: 456, path: ".github/workflows/ci.yml", event: "pull_request", status: "completed", conclusion: "cancelled" }],
@@ -994,8 +920,8 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
       })
     } }
     expectOk(await reviewStep.run(w.ctx, w.deps))
-    expect(polls).toBe(2)
-    expect(clock.slept).toEqual([30_000, 30_000])
+    expect(polls).toBe(4)
+    expect(clock.slept).toEqual([30_000, 30_000, 30_000, 30_000])
     expect(w.gh.read().prs[0]!.isDraft).toBe(false)
   })
 

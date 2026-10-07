@@ -33,6 +33,10 @@ export interface FakeGhState {
   workflowRuns?: Array<{ id: number; status: string; conclusion?: string | null; path: string; event?: string }>
   headWorkflowFiles?: Record<string, string>
   unreadableCheckActivity?: boolean
+  unreadableChecks?: boolean
+  headCheckRuns?: Array<{ id: number; name: string; status: string; conclusion: string | null; head_sha?: string; details_url?: string }>
+  commitStatuses?: Record<string, Array<{ context: string; state: string; description?: string; target_url?: string }>>
+  baseStatuses?: Array<{ context: string; state: string; description?: string; target_url?: string }>
   failedLogs?: Record<string, string>
   calls?: FakeGhCall[]
   nextPrNumber?: number

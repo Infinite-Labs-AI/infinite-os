@@ -324,36 +324,25 @@ if (group === "api") {
     created_at: entry.created_at ?? "2026-10-02T10:00:00Z",
     creator: { login: entry.creator }
   })
-  const suitesForHead = /\/commits\/([a-f0-9]{40})\/check-suites/.exec(path)
-  if (suitesForHead) {
-    if (state.unreadableCheckActivity) fail("check suite inventory unavailable")
-    const suites = state.checkSuites ?? [{ id: 100, status: "completed", conclusion: "success" }]
-    out({ total_count: suites.length, check_suites: suites.map(row => ({ ...row, head_sha: suitesForHead[1] })) })
+  const checksAt = /\/commits\/([a-f0-9]{40})\/(check-runs|status)(?:\?|$)/.exec(path)
+  if (checksAt) {
+    const sha = checksAt[1]
+    const pr = state.prs.find(entry => headOf(entry) === sha)
+    if (state.unreadableChecks || state.unreadableCheckActivity) fail("head check run or commit status inventory unavailable")
+    const query = new URL(path, "https://fixture.invalid").searchParams
+    const page = Number(query.get("page") ?? "1"), size = Number(query.get("per_page") ?? "100")
+    const rows = pr ? state.checks[String(pr.number)] ?? [] : (state.baseChecks ?? []).map(check => ({ ...check, state: check.conclusion, link: check.details_url }))
+    if (checksAt[2] === "check-runs") {
+      const runs = pr && state.headCheckRuns ? state.headCheckRuns : rows.map((check, index) => {
+        const value = String(check.state ?? check.conclusion ?? "").toLowerCase()
+        const active = ["pending", "queued", "in_progress", "waiting", "requested"].includes(value)
+        return { id: index + 1, name: check.name, head_sha: sha, status: active ? value === "pending" ? "queued" : value : "completed", conclusion: active ? null : value === "cancel" ? "cancelled" : value, details_url: check.link, ...(check.description ? { output: { summary: check.description } } : {}) }
+      })
+      out({ total_count: runs.length, check_runs: runs.slice((page - 1) * size, page * size).map(row => ({ head_sha: sha, ...row })) })
+    }
+    const statuses = pr ? state.commitStatuses?.[sha] ?? state.commitStatuses?.[String(pr.number)] ?? [] : state.baseStatuses ?? []
+    out({ sha, total_count: statuses.length, statuses: statuses.slice((page - 1) * size, page * size) })
   }
-  const runsForHead = /\/actions\/runs\?head_sha=([a-f0-9]{40})/.exec(path)
-  if (runsForHead) {
-    if (state.unreadableCheckActivity) fail("workflow inventory unavailable")
-    const runs = state.workflowRuns ?? []
-    out({ total_count: runs.length, workflow_runs: runs.map(row => ({ ...row, head_sha: runsForHead[1] })) })
-  }
-  if (/\/contents\/\.github\/workflows\?/.test(path)) {
-    const paths = [...new Set([...Object.keys(state.headWorkflowFiles ?? {}), ...Object.values(state.workflows ?? {}).map(row => row.path)])]
-    out(paths.map(path => ({ path, type: "file" })))
-  }
-  if (/\/check-suites\/\d+\/check-runs/.test(path) || /\/actions\/runs\/\d+\/jobs/.test(path)) {
-    const rows = Object.values(state.checks).flat().map(row => ({ name: row.name, conclusion: row.bucket === "fail" ? "failure" : row.bucket === "pass" ? "success" : "skipped", html_url: row.link, details_url: row.link }))
-    out({ total_count: rows.length, [path.includes("/jobs") ? "jobs" : "check_runs"]: rows })
-  }
-  const workflowRun = /\/actions\/runs\/(\d+)$/.exec(path)
-  if (workflowRun && state.workflows?.[workflowRun[1]]) out({ path: state.workflows[workflowRun[1]].path })
-  const workflowFile = /\/contents\/(\.github\/workflows\/[^?]+)\?/.exec(path)
-  if (workflowFile) {
-    const workflow = Object.values(state.workflows ?? {}).find(entry => entry.path === workflowFile[1])
-    const source = state.headWorkflowFiles?.[workflowFile[1]] ?? workflow?.source
-    if (source !== undefined) out({ encoding: "base64", content: Buffer.from(source).toString("base64") })
-  }
-  if (/\/commits\/[^/]+\/check-runs/.test(path)) out({ check_runs: (state.baseChecks ?? []).map(check => ({ ...check, status: "completed" })) })
-  if (/\/commits\/[^/]+\/status\?/.test(path)) out({ statuses: [] })
   const newestFirst = (rows) => [...rows].sort((a, b) => Date.parse(b.created_at ?? "") - Date.parse(a.created_at ?? ""))
   const deployments = /^repos\/\{owner\}\/\{repo\}\/deployments\?sha=([0-9a-f]{40})/.exec(path)
   if (deployments) {

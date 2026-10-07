@@ -33,7 +33,7 @@ import { commentTrust, hasFinalMarker, hasReplyMarker, parseReviewMarker, stripM
 import { AGENT_LABEL, buildFinalComment, buildReply, buildReviewPost, excerpt, FIX_ROUND_MINUTES, notFixedReply, redactIdsNotInDiff, safeText, type FixReplyState, type NotFixedOutcome } from "../../review/post.js"
 import { applyRehearsalToJobs, recordRehearsalCells, rehearse } from "../../review/rehearse.js"
 import { mergeRequirementLine } from "../../github/rules.js"
-import { checksSummary, checkPolicy, commitChecks, headCheckActivity, headPrWorkflows, withDeploymentStates, checkRunsOnPr, type PrCheck } from "../../github/checks.js"
+import { checksSummary, blockedPreview, commitChecks, withDeploymentStates, type PrCheck } from "../../github/checks.js"
 import { DETERMINISTIC_CHECKS_BY_ITEM, fileRoleOf, isRepoRelativePath, leftByOwnerReason, pageHelperCalls, triage, triageKey, type FileRole, type PageHelperCall, type TriageDecision, type TriageItem } from "../../review/triage.js"
 import { escapeRegExp } from "../../text-escape.js"
 import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
@@ -678,98 +678,67 @@ async function repairCi(session: Session, checks: PrCheck[], base: PrCheck[] | n
 
 const CHECKS_POLL_MS = 30_000
 const CHECKS_WAIT_MS = 10 * 60_000
-/** gh says "no required checks reported" both when none are required and before GitHub registers them. */
-const CHECKS_EMPTY_GRACE_MS = 60_000
+const CHECKS_REGISTRATION_MS = 120_000
 
-/**
- * Job 16's `pr_checks_pass` (S) on the pushed fix: polls all reported PR checks until they settle (every 30 s,
- * ≤ 10 minutes). Empty, cancelled, unreadable and blocked-preview checks remain unmeasured.
- * New failures get a bounded scoped repair; known base failures are reported without blocking.
- */
+/** Wait two minutes from the push, then judge only check runs and statuses reported on that SHA. */
 async function requiredChecksResult(session: Session, runId: string, repair = true): Promise<(CheckResult & { ready: boolean }) | null> {
   const { github, number, deps, ctx } = session
   if (!github || number === null) return null
   const started = deps.clock.now().getTime()
   const checkedHead = await session.ship.git.head()
-  const registeredOnResume = session.ledger.checkRegistration?.sha === checkedHead
   const pushed = ctx.state.get().lastPush
-  const pushedAt = pushed?.sha === checkedHead ? Date.parse(pushed.at) : started
-  const registrationStart = Number.isFinite(pushedAt) ? Math.min(started, pushedAt) : started
+  const pushedAt = pushed?.sha === checkedHead ? Date.parse(pushed.at) : NaN
+  const savedStart = session.ledger.checkRegistration?.sha === checkedHead ? Date.parse(session.ledger.checkRegistration.startedAt ?? "") : NaN
+  const registrationStart = Number.isFinite(pushedAt) ? Math.min(started, pushedAt) : Number.isFinite(savedStart) ? Math.min(started, savedStart) : started
   const result = (state: CheckResult["state"], reason: string, ready = false): CheckResult & { ready: boolean } => ({ checkId: "pr_checks_pass", tier: "S", state, reason: safeDisplayText(session.ship.scanner, reason), at: ctx.now().toISOString(), runId, ready })
-  let waitingReason = "PR checks could not be read"
-  const base = await commitChecks(github.gh, ctx.state.get().git!.baseSha).catch(() => null)
-  const workflows = await headPrWorkflows(github.gh, checkedHead).catch(() => null)
-  const triggers = new Map<string, boolean | null>()
-  for (const check of base ?? []) if (check.bucket === "pass") {
-    const next = await checkRunsOnPr(github.gh, check, checkedHead)
-    const previous = triggers.get(check.name)
-    // Distinct workflows may give their jobs the same name. Only infer push-only when every
-    // matching workflow is known not to run on PRs; a PR trigger or unknown trigger keeps the wait.
-    triggers.set(check.name, previous === undefined ? next : previous === true || next === true ? true : previous === null || next === null ? null : false)
+  const note = (text: string) => {
+    const safe = safeDisplayText(session.ship.scanner, text)
+    if (!session.notes.includes(safe)) { session.notes.push(safe); sub(ctx, "review", safe, "warn") }
   }
-  sub(ctx, "review", "Checking the new commit's CI checks…", "pending")
+  session.ledger.checkRegistration = { sha: checkedHead, startedAt: new Date(registrationStart).toISOString(), complete: false }
+  await saveLedger(session)
+  if (!Number.isFinite(pushedAt) && !Number.isFinite(savedStart)) note("No push time was saved for this head; waiting two minutes from this check before deciding readiness.")
+  while (deps.clock.now().getTime() - registrationStart < CHECKS_REGISTRATION_MS) {
+    if (ctx.signal.aborted) return result("undetermined", "Check registration wait was interrupted")
+    const remaining = CHECKS_REGISTRATION_MS - (deps.clock.now().getTime() - registrationStart)
+    const seconds = Math.ceil(remaining / 1000)
+    const countdown = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`
+    status(ctx, "review", `Waiting for checks to register · ${countdown} remaining`)
+    sub(ctx, "review", `Waiting for checks to register · ${countdown} remaining`, "pending")
+    await deps.clock.sleep(Math.min(CHECKS_POLL_MS, remaining), ctx.signal)
+  }
+  session.ledger.checkRegistration.complete = true
+  await saveLedger(session)
+  const base = await commitChecks(github.gh, ctx.state.get().git!.baseSha).catch(() => null)
+  if (base === null) note("Base checks could not be read; this decision uses the checks reported on the PR head.")
   for (;;) {
-    const elapsed = deps.clock.now().getTime() - started
-    const registered = registeredOnResume || deps.clock.now().getTime() - registrationStart >= CHECKS_EMPTY_GRACE_MS
-    if (registered && session.ledger.checkRegistration?.sha !== checkedHead) {
-      session.ledger.checkRegistration = { sha: checkedHead, complete: true }
-      await saveLedger(session)
+    let checks: PrCheck[]
+    try { checks = await withDeploymentStates(github.gh, checkedHead, await commitChecks(github.gh, checkedHead)) }
+    catch (error) { return result("undetermined", `GitHub head check runs, commit statuses or hosting deployments could not be read: ${error instanceof Error ? error.message : String(error)}`) }
+    const failed = checks.filter(check => check.bucket === "fail" || check.bucket === "cancel")
+    if (failed.length > 0) {
+      for (const check of failed.filter(blockedPreview)) note(`${check.name}: deployment blocked. A hosting team member can authorise this GitHub author or redeploy; the pull request stays draft.`)
+      if (repair && failed.every(check => ["failure", "error"].includes(check.state.toLowerCase())) && await repairCi(session, failed, base)) return requiredChecksResult(session, runId, false)
+      return result("problem", `Failed PR checks: ${failed.map(check => `${check.name} (${check.state})`).join(", ")}`)
     }
-    const activity = await headCheckActivity(github.gh, checkedHead).catch(() => null)
-    const rawChecks = await github.checks(number).catch(() => null)
-    const checks = rawChecks === null ? null : await withDeploymentStates(github.gh, checkedHead, [...rawChecks, ...(activity?.results ?? []).filter(row => !rawChecks.some(current => current.name === row.name && current.bucket === row.bucket))]).catch(() => null)
-    if (checks !== null && !isUnsupported(checks)) {
+    const unreadable = checks.filter(check => !["pass", "pending", "skipping"].includes(check.bucket))
+    if (unreadable.length) return result("undetermined", `PR check states could not be read: ${unreadable.map(check => `${check.name} (${check.state})`).join(", ")}`)
+    const pending = checks.filter(check => check.bucket === "pending")
+    if (!pending.length) {
+      const currentPr = await github.readPr(number).catch(() => null)
+      if (!currentPr || currentPr.headRefOid !== checkedHead) return result("undetermined", "The pull request head changed or could not be read while checking CI; review its current head again")
+      for (const check of (base ?? []).filter(check => check.bucket === "pass" && !checks.some(current => current.name === check.name))) note(`${check.name} did not run on this pull request: not measured.`)
       const summary = checksSummary(checks)
-      const policy = checkPolicy(checks, base)
-      for (const check of policy.blocked) {
-        const note = safeDisplayText(session.ship.scanner, `${check.name}: preview not measured. Ask a hosting team member to authorise the deployment or give this GitHub author access to the linked project.`)
-        if (!session.notes.includes(note)) { session.notes.push(note); sub(ctx, "review", note, "warn") }
-      }
-      for (const check of policy.existing) {
-        const note = safeDisplayText(session.ship.scanner, `${check.name} also fails on the base commit; it does not block this run.`)
-        if (!session.notes.includes(note)) { session.notes.push(note); sub(ctx, "review", note, "warn") }
-      }
-      if (policy.failing.length > 0) {
-        if (repair && await repairCi(session, policy.failing, base)) return requiredChecksResult(session, runId, false)
-        return result("problem", `Failed PR checks: ${policy.failing.map(check => check.name).join(", ")}${base === null ? " (base checks could not be read)" : ""}`)
-      }
-      if (activity?.failed.length) return result("problem", `Failed CI suite or workflow: ${activity.failed.join(", ")}`)
-      const missingWorkflows = workflows?.expected.filter(path => !activity?.workflowPaths.includes(path)) ?? []
-      const absent = (base ?? []).filter(check => check.bucket === "pass" && !checks.some(current => current.name === check.name))
-      const cancelled = checks.filter(check => check.bucket === "cancel")
-      const pending = checks.filter(check => check.bucket === "pending")
-      const unknown = checks.filter(check => !["pass", "fail", "pending", "cancel", "skipping"].includes(check.bucket))
-      waitingReason = base === null ? "The base commit's checks could not be read" : cancelled.length > 0 ? `PR checks cancelled: ${cancelled.map(check => check.name).join(", ")}`
-        : pending.length > 0 ? `PR checks are still pending: ${pending.map(check => check.name).join(", ")}`
-        : unknown.length > 0 ? `PR check states could not be read: ${unknown.map(check => check.name).join(", ")}`
-        : "No PR checks have been reported"
-      const waitingForAbsent = absent.some(check => triggers.get(check.name) !== false) && deps.clock.now().getTime() - registrationStart < CHECKS_WAIT_MS
-      if (absent.length > 0) waitingReason = `Missing PR checks: ${absent.map(check => check.name).join(", ")}; not measured`
-      if (!activity) waitingReason = "The head commit's check suites or workflow runs could not be read"
-      else if (activity.pending.length) waitingReason = `CI suites or workflows are still pending: ${activity.pending.join(", ")}`
-      else if (!workflows || workflows.unknown) waitingReason = "The PR head's workflow triggers could not be determined"
-      else if (missingWorkflows.length) waitingReason = `Expected PR workflows have not completed: ${missingWorkflows.join(", ")}; not measured`
-      const registrationUnknown = !activity?.observed && checks.length === 0 && deps.clock.now().getTime() - registrationStart < CHECKS_WAIT_MS
-      const activitySettled = activity !== null && activity.pending.length === 0 && workflows !== null && !workflows.unknown && missingWorkflows.length === 0
-      if ((registered || (activitySettled && activity.observed)) && !registrationUnknown && activitySettled && !waitingForAbsent && base !== null && summary.pending === 0 && unknown.length === 0) {
-        if (session.ledger.checkRegistration?.sha !== checkedHead) {
-          session.ledger.checkRegistration = { sha: checkedHead, complete: true }
-          await saveLedger(session)
-        }
-        for (const check of absent) {
-          const note = safeDisplayText(session.ship.scanner, triggers.get(check.name) === false ? `${check.name} does not run on pull requests: not measured (workflow triggers checked).` : `${check.name} did not appear in the full check window: not measured.`)
-          if (!session.notes.includes(note)) { session.notes.push(note); sub(ctx, "review", note, "info") }
-        }
-        if (checks.length === 0) return result("undetermined", base.length === 0 ? "no checks reported: not measured; the base commit also has no checks" : "No checks reported on this pull request after registration: not measured", true)
-        return result(summary.pass > 0 && !checks.some(check => check.bucket === "skipping") && absent.length === 0 && policy.blocked.length === 0 ? "pass" : "undetermined", summary.pass > 0 ? `${summary.pass} PR check(s) pass; unavailable previews and base-only checks remain not measured` : "PR checks not measured; only skipped checks, blocked previews or existing failures reported", true)
-      }
-      if (registeredOnResume && activitySettled && !registrationUnknown && !waitingForAbsent && pending.length === 0) return result("undetermined", waitingReason)
-    } else {
-      waitingReason = "PR checks could not be read"
-      if (registeredOnResume) return result("undetermined", waitingReason)
+      for (const check of checks.filter(check => check.bucket === "skipping")) note(`${check.name}: ${check.state.toLowerCase()}, not measured.`)
+      if (checks.length === 0) return result("undetermined", "no checks reported: not measured", true)
+      return result(summary.pass > 0 ? "pass" : "undetermined", summary.pass > 0 ? `${summary.pass} PR check(s) ran and succeeded; neutral and skipped checks are not measured` : "Only neutral or skipped checks were reported: not measured", true)
     }
-    if (ctx.signal.aborted || elapsed >= CHECKS_WAIT_MS || deps.clock.now().getTime() - registrationStart >= CHECKS_WAIT_MS) return result("undetermined", waitingReason)
-    await deps.clock.sleep(CHECKS_POLL_MS, ctx.signal)
+    const names = safeDisplayText(session.ship.scanner, pending.map(check => check.name).join(", "))
+    status(ctx, "review", `Waiting on PR checks: ${names}`)
+    sub(ctx, "review", `Waiting on PR checks: ${names}`, "pending")
+    const remaining = CHECKS_WAIT_MS - (deps.clock.now().getTime() - registrationStart)
+    if (ctx.signal.aborted || remaining <= 0) return result("undetermined", `PR checks still pending at the check window: ${names}`)
+    await deps.clock.sleep(Math.min(CHECKS_POLL_MS, remaining), ctx.signal)
   }
 }
 

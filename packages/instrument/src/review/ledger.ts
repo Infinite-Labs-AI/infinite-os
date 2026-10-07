@@ -13,7 +13,7 @@ export const REVIEW_LEDGER_PATH = ".infinite/wizard/review-ledger.json"
 
 export interface ReviewLedger {
   version: 1
-  checkRegistration?: { sha: string; complete: true }
+  checkRegistration?: { sha: string; complete: boolean; startedAt?: string }
   runId: string
   declined: Array<{ key: string; reason: string; round: number }>
   /** ASK items not yet answered: they go into the final comment under "You decide". */
