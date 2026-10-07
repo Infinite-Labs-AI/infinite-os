@@ -1027,7 +1027,8 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("(l) a dev server writing build output parks DEV_SERVER_RUNNING before any agent turn (exit 3)", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await wiredWorld()
+    // This separate writer uses wall time, so the quiet-window probe must use wall time too.
+    const w = await wiredWorld({ env: { E2E_FAST_CLOCK: "0" } })
     mkdirSync(join(w.site.repo, ".next"), { recursive: true })
     const writer = spawn(process.execPath, ["-e", "const fs=require('fs');setInterval(()=>fs.writeFileSync('.next/dev-server.txt',String(Date.now())),100)"], { cwd: w.site.repo, stdio: "ignore" })
     try {
