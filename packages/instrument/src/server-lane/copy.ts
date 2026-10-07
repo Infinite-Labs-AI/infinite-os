@@ -34,6 +34,8 @@ import {
   webCryptoHelperSnippet
 } from "./snippets.js"
 
+import { OWNER_BOUNDARY_INSTRUCTION } from "../jobs/owner-boundary.js"
+
 export const SERVER_LANE_POSITIONING =
   "server-side analytics: every page your server serves and every outcome it confirms, counted where ad-blockers can't reach. A floor for people, never an exact share — installed by your agent in ten minutes."
 
@@ -632,6 +634,8 @@ export function renderServerLaneBrief(input: ServerLaneBriefInput): string {
     SERVER_LANE_BRIEF_BANNER,
     `# ${serverLaneCopy.title}`,
     "",
+    OWNER_BOUNDARY_INSTRUCTION,
+    "",
     `> ${SERVER_LANE_POSITIONING}`,
     "",
     "## What this is (and why)",
@@ -803,6 +807,8 @@ export function renderServerLanePointer(input: ServerLaneBriefInput & { guidePat
   return [
     SERVER_LANE_BRIEF_BANNER,
     `# ${serverLaneCopy.title}`,
+    "",
+    OWNER_BOUNDARY_INSTRUCTION,
     "",
     `> ${SERVER_LANE_POSITIONING}`,
     "",

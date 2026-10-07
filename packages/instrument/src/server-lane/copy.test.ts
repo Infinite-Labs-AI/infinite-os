@@ -24,6 +24,7 @@ describe("the agent brief", () => {
 
   it("opens with the managed banner and the positioning line", () => {
     expect(brief.startsWith(`${SERVER_LANE_BRIEF_BANNER}\n# `)).toBe(true)
+    expect(brief.slice(0, 900)).toContain("Consent, cookie banners, CMP code, privacy policies and terms pages belong to the site owner")
     expect(brief).toContain(`> ${SERVER_LANE_POSITIONING}`)
     expect(SERVER_LANE_POSITIONING).toBe(
       "server-side analytics: every page your server serves and every outcome it confirms, counted where ad-blockers can't reach. A floor for people, never an exact share — installed by your agent in ten minutes."

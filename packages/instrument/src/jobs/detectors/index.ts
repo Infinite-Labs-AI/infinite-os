@@ -12,7 +12,7 @@ import { detectCspOwners, type CspOwnerFinding } from "./csp-owner.js"
 import { detectFbcWriters, type FbcWriterFinding } from "./fbc-writers.js"
 import { detectLayout, type LayoutFinding } from "./layout.js"
 import { detectConversionElements, detectConversionSuccessPaths, detectOutcomes, type ConversionElementFinding, type OutcomeFinding } from "./outcomes.js"
-import { detectPrivacyPages, type PrivacyPageFinding } from "./privacy-page.js"
+import type { PrivacyPageFinding } from "./privacy-page.js"
 import { detectRedirects, type RedirectFinding } from "./redirects.js"
 import { detectMiddlewareFiles, detectServerMount, type ServerMountFinding } from "./server-mount.js"
 import { isNonProductPath, routePathOf, type Finding } from "./shared.js"
@@ -85,7 +85,7 @@ export function detectStatic(snapshot: RepoSnapshot, framework: string): StaticD
     auth: detectAuth(snapshot),
     csp: detectCspOwners(snapshot),
     redirects: detectRedirects(snapshot, countedPaths),
-    privacy: detectPrivacyPages(snapshot),
+    privacy: [], // Owner-only: never inspect or evaluate privacy policy copy.
     fbcWriters: detectFbcWriters(snapshot),
     metaBrowserStandardEvents: detectMetaBrowserStandardEvents(snapshot),
     cmp: detectCmp(snapshot),

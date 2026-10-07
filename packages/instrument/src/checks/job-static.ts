@@ -19,7 +19,6 @@ import { detectAuth } from "../jobs/detectors/auth.js"
 import { detectCspOwners } from "../jobs/detectors/csp-owner.js"
 import { detectConversionSuccessPaths, detectOutcomes, isServerFile } from "../jobs/detectors/outcomes.js"
 import { matchingBracket } from "../setup-checks/code-view.js"
-import { PRIVACY_TOOL_NAMES, privacyVisibleText } from "../jobs/detectors/privacy-page.js"
 import { boundConversionNames } from "../jobs/plan-data.js"
 import { capturesPageviewManually, META_STANDARD_EVENTS, POSTHOG_HISTORY_DEFAULTS_FROM, posthogApiHostUnset } from "../jobs/detectors/adopted-tags.js"
 import { POSTHOG_DEFAULTS_CURRENT } from "../install/improve.js"
@@ -47,7 +46,6 @@ export const JOB_STATIC_CHECK_IDS = [
   "identify_on_auth_success",
   "reset_on_every_signout",
   "csp_hosts",
-  "privacy_names_installed_tools",
   "pr_checks_pass",
   // LF4 close round 2 (P1-1): each job target's own proof that its change is in the code.
   "conversion_tracked",
@@ -64,9 +62,9 @@ export interface JobStaticRunContext {
   expect?: TestExpect
   /** The conversion names the user approved in the plan. */
   conversionNames?: readonly string[]
-  /** The approved privacy paragraph, verbatim (null = none approved). */
+  /** Legacy input, ignored. Policy content is never checked. */
   privacyText?: string | null
-  /** The tools this run newly installs (the privacy page must name each). */
+  /** Legacy input, ignored by policy checks (which are retired). */
   newTools?: readonly TestTool[]
   /** The same-origin rewrites the run's managed install relies on (Infinite's collect path, PostHog's /ingest). */
   proxy?: ProxyInput
@@ -589,24 +587,6 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
           : result("csp_hosts", ctx, "problem", `${owner.file} adds a new 'unsafe-inline'`, owner.file, owner.line)
       }
       return result("csp_hosts", ctx, "pass", `${owner.file} allows every tool's hosts and nothing broader`, owner.file, owner.line)
-    }),
-
-    // Job 14: the privacy page names every newly installed tool, and carries the approved paragraph verbatim.
-    privacy_names_installed_tools: run("privacy_names_installed_tools", (input, ctx) => {
-      const scope = itemFiles(input)
-      const page = [...scope][0]
-      if (!page) return missing("privacy_names_installed_tools", ctx, "the privacy page is gone")
-      const [file, text] = page
-      const visible = privacyVisibleText(file, text).replace(/[{}"'`]/g, " ").replace(/\s+/g, " ").toLowerCase()
-      const run = context()
-      if (run.privacyText) {
-        const wanted = run.privacyText.replace(/[{}"'`]/g, " ").replace(/\s+/g, " ").trim().toLowerCase()
-        if (!visible.includes(wanted)) return missing("privacy_names_installed_tools", ctx, `${file} does not carry the approved paragraph verbatim`, file)
-      }
-      if (!run.newTools) return result("privacy_names_installed_tools", ctx, "undetermined", "the tools this run installs are not known", file)
-      const unnamed = run.newTools.filter((tool) => !PRIVACY_TOOL_NAMES[tool].test(visible))
-      if (unnamed.length > 0) return result("privacy_names_installed_tools", ctx, "problem", `${file} does not name ${unnamed.join(", ")}`, file)
-      return result("privacy_names_installed_tools", ctx, "pass", `${file} names every tool this run installs`, file)
     }),
 
     // LF4 close round 2 (P1-1) Job 10, click conversions: `infiniteTrack(<approved name>)` (or

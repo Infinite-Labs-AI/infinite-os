@@ -1,5 +1,14 @@
 # infinite-tag
 
+Consent, cookie banners, CMP code, privacy policies and terms pages belong to the site owner.
+The wizard and its agents do not edit, move, wrap, reformat, evaluate, grade or comment on them.
+Every changed consent line or consent-call span is reverted, including whitespace-only changes.
+A task that cannot fit around that boundary is informational: **left for you: this file’s consent code is in the way**.
+Preview guards never go between an init and a later revoke, deny or opt-out. Privacy wording, if supplied,
+is copy-only report material for the owner; the wizard never inserts it into a page. The owner’s
+`consent_mode` answer is still recorded, and click-id capture reads its existing consent gate.
+
+
 **By [Infinite](https://infinite.fast) — the agent-first growth operator for founders.** Docs, dashboards and the server lane live at [infinite.fast](https://infinite.fast); source on [GitHub](https://github.com/Infinite-Labs-AI/infinite-os/tree/main/packages/instrument).
 
 `infinite-tag` installs browser analytics into an existing web app using public
@@ -35,8 +44,8 @@ steps and resumes where it stopped:
    what it finds ("Live site today").
 4. **Keys** — the connection ids (GA4 stream, PostHog project, Meta pixel) come from Infinite, never
    from the repo or a guess.
-5. **Plan** — one screen with every change and the four decisions only you can make (consent mode,
-   conversion names, the privacy text, the npm install). A 7-day check-in follows the deploy.
+5. **Plan** — one screen with every change and the three decisions only you can make (consent mode,
+   conversion names, the npm install). A 7-day check-in follows the deploy.
 6. **Install** — the managed tags, the approved edits, the preview guard and a build check, with a
    full rollback if the build breaks.
 7. **Jobs** — the agent does the code jobs the plan approved, fenced to the files each job may touch;
@@ -60,8 +69,7 @@ Exit codes: `0` done · `1` failed · `2` usage or environment · `3` parked (re
 `npx infinite-tag --resume`) · `4` needs the Infinite app · `130` interrupted.
 
 Flags: `--json` (one NDJSON event per line, for agents and CI), `--answers <file>`, `--yes` (approves
-only the plan lines that are safe to approve for you; never consent, conversion names, the privacy
-text or a change to a tag you already had), `--resume`, `--fresh` (set an unfinished run aside and
+only the plan lines that are safe to approve for you; never consent, conversion names or a change to a tag you already had), `--resume`, `--fresh` (set an unfinished run aside and
 start over), `--root`, `--app-root`, `--no-agent`, `--worker claude|codex`,
 `--reviewer claude|codex|brief|none`, `--consent-mode not_required|required`, `--no-prove`.
 `npx infinite-tag --version` prints the version.
@@ -69,7 +77,7 @@ start over), `--root`, `--app-root`, `--no-agent`, `--worker claude|codex`,
 **Run by an agent.** When another agent starts the wizard (`--json`, no terminal), no agent is
 spawned: the code jobs go to the agent that started it (`job.seeded` events and
 `.infinite/wizard/agent-brief.md`), and `npx infinite-tag --resume --json` fences and checks what it
-changed. Questions only you can answer (consent mode, conversion names, the privacy text, Meta server
+changed. Questions only you can answer (consent mode, conversion names, Meta server
 events, any change to an existing tag) are never answered from a file in that mode: the run parks and
 asks you to finish in your own terminal.
 
@@ -82,7 +90,6 @@ an error, so a typo never silently answers nothing.
   "plan": { "approved": ["install_provider:ga4"], "declined": ["server_lane"], "edits": { "consent_mode": "required" } },
   "consentMode": "required",
   "conversionNames": ["signup"],
-  "privacyText": true,
   "npmInstall": false,
   "asks": [{ "kind": "single", "match": "GA4", "answer": "G-XXXXXXXXXX" }]
 }

@@ -109,7 +109,6 @@ describe("seedCandidates", () => {
       ["conversions_to_tools:signup", "pending", null],
       ["setup_check_fixes:conversion_placement", "pending", null],
       ["csp:next_config_mjs", "pending", null],
-      ["privacy_paragraph:page", "pending", null]
     ])
     const identify = items.find((item) => item.id === "identify_reset:auth")!
     // The signOut in a test file is ignored; the CMP file is never allowed.
@@ -176,7 +175,6 @@ describe("seedCandidates", () => {
       "preview_guard:meta": "preview_guard_adopted",
       "server_conversions:signup": "conversion_names",
       "conversions_to_tools:signup": "conversion_names",
-      "privacy_paragraph:page": "privacy_text",
       "identify_reset:auth": null,
       "csp:next_config_mjs": null
     })
@@ -296,12 +294,12 @@ describe("review fixes: what is seeded, under which line, with which files and c
     expect(applyApprovalsTo(candidates, plan([names]), { approved: [], declined: [], edits: {} }).filter((item) => conversionIds.includes(item.id)).every((item) => item.state === "blocked")).toBe(true)
   })
 
-  it("job 14 survives only with an approved paragraph", () => {
+  it("legacy privacy job never returns even with approved paragraph", () => {
     const candidates = seedCandidatesFrom(scanOf(), facts({ census: census([]) }))
     const privacy = line("privacy_text", "privacy_text", ["privacy_paragraph:page"])
     const run = (privacyText: string | null, edits: Record<string, string> = {}) =>
       applyApprovalsTo(candidates, { ...plan([privacy]), decisions: { ...plan([]).decisions, privacyText } }, { approved: ["privacy_text"], declined: [], edits }).some((item) => item.id === "privacy_paragraph:page")
-    expect(run("We use PostHog.")).toBe(true)
+    expect(run("We use PostHog.")).toBe(false)
     expect(run(null)).toBe(false)
     expect(run("We use PostHog.", { privacy_text: "  " })).toBe(false)
   })
@@ -453,8 +451,8 @@ describe("briefs carry the plan's decisions as data (review P0-1)", () => {
     expect(block("server_conversions:signup")).toContain("type: <an approved conversion name from Plan data>")
   })
 
-  it("hands over the approved privacy paragraph verbatim, the guard expression and the connection IDs", () => {
-    expect(block("privacy_paragraph:page")).toContain(JSON.stringify("We use Infinite analytics and PostHog to count visits.\nNo ads cookies."))
+  it("omits privacy copy while handing over the guard expression and connection IDs", () => {
+    expect(brief).not.toContain("We use Infinite analytics and PostHog to count visits.")
     expect(block("preview_guard:meta")).toContain('"guardExpression":"__infiniteHostAllowed(location.hostname)"')
     expect(block("preview_guard:meta")).toContain('"productionHostsExempt":["acme-store.com"]')
     expect(block("posthog_improve:proxy")).toMatch(/"posthogUiHost":"https:\/\/[a-z.]+posthog\.com"/)
@@ -466,7 +464,7 @@ describe("briefs carry the plan's decisions as data (review P0-1)", () => {
   it("refuses to brief a job whose decision is missing (negative: no names, no paragraph, no guard)", () => {
     const noPlan = { ...briefFacts, plan: null }
     expect(() => buildBrief(seeded.filter((item) => item.jobId === "server_conversions"), noPlan)).toThrow(/conversion names/)
-    expect(() => buildBrief(seeded.filter((item) => item.jobId === "privacy_paragraph"), { ...briefFacts, plan: { ...briefFacts.plan, privacyText: null } })).toThrow(/privacy paragraph/)
+    expect(buildBrief(seeded.filter((item) => item.jobId === "privacy_paragraph"), briefFacts)).not.toContain("### Job")
     expect(() => buildBrief(seeded.filter((item) => item.jobId === "preview_guard"), { ...briefFacts, previewGuard: null })).toThrow(/preview-guard expression/)
     // B13: the Meta job-7 brief carries the exact adopted-pixel wrap; without it the brief refuses to guess.
     const metaGuard = seeded.filter((item) => item.id === "preview_guard:meta")

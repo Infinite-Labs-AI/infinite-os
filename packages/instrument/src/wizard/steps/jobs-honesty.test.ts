@@ -167,7 +167,7 @@ describe("F19: under --yes, a question and a done claim for one job in one turn"
     const item = t.current().jobs[0]!
     expect(item.state).toBe("blocked")
     expect(item.blockedReason).toBe("needs_you")
-    expect(t.checkCalls.run).toEqual([])
+    expect(t.checkCalls.run.map(call => call.checkId)).toEqual(["meta_mirror_wired"])
     expect(t.checkCalls.build).toBe(0)
   })
 })
@@ -197,7 +197,7 @@ describe("F11: a write after the turn settled stops the step before any build or
     const outcome = await step.run(t.ctx, t.deps)
     expect(outcome).toMatchObject({ kind: "blocked", code: "INF_WIZ_FENCE_TAMPER" })
     expect((outcome as { reason: string }).reason).toContain("next.config.mjs")
-    expect(t.checkCalls.run).toEqual([])
+    expect(t.checkCalls.run.map(call => call.checkId)).toEqual(["no_fbq_standard_on_click"])
     expect(t.checkCalls.build).toBe(0)
     expect(t.checkCalls.t0).toEqual([])
   })
@@ -228,15 +228,15 @@ describe("nested mode (F6, F7, F8)", () => {
     expect(t.current().snapshot).toBeNull()
   })
 
-  it("F7: a second run WITHOUT --resume settles the open snapshot: the parent's consent edit is undone and blocks the job", async () => {
+  it("F7: a second run WITHOUT --resume settles the open snapshot: the parent's consent edit is undone and leaves an informational task", async () => {
     const t = nested([agentItem("meta_improve:landing", ["app/layout.tsx"])])
     expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "parked" })
     write(t.root, "app/layout.tsx", `${POST_INSTALL_LAYOUT}gtag('consent', 'update', { ad_storage: 'granted' })\n`)
     const second = await step.run(t.ctx, t.deps) // no --resume
     expect(second.kind).toBe("ok")
     expect(t.read("app/layout.tsx")).toBe(POST_INSTALL_LAYOUT)
-    expect(t.current().jobs[0]!.state).toBe("blocked")
-    expect(t.current().jobs[0]!.blockedReason).toBe("consent_touched")
+    expect(t.current().jobs[0]!.state).toBe("left_for_you")
+    expect(t.current().jobs[0]!.blockedReason).toBeUndefined()
   })
 
   it("F8: the nested gate gets the connection's IDs from bridge.keys(), never an empty list", async () => {

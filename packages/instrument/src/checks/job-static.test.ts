@@ -61,7 +61,7 @@ describe("registration", () => {
     registerJobStaticChecks(runner, {})
     for (const id of JOB_STATIC_CHECK_IDS) expect(runner.registered()).toContain(id)
     const sChecks = Object.values(JOB_TABLE).flatMap((spec) => spec.checks.filter((entry) => entry.tier === "S").map((entry) => entry.checkId))
-    for (const id of ["server_lane_mount_order", "rescan_app_found", "next_rewrites_exact", "outcome_after_success", "outcome_declared", "event_id_stable", "no_pii_in_outcome", "identify_on_auth_success", "reset_on_every_signout", "csp_hosts", "privacy_names_installed_tools"]) {
+    for (const id of ["server_lane_mount_order", "rescan_app_found", "next_rewrites_exact", "outcome_after_success", "outcome_declared", "event_id_stable", "no_pii_in_outcome", "identify_on_auth_success", "reset_on_every_signout", "csp_hosts"]) {
       expect(sChecks).toContain(id)
     }
   })
@@ -211,20 +211,9 @@ describe("job 12: the CSP hosts", () => {
   })
 })
 
-// ---- job 14 ----
-describe("job 14: the privacy paragraph", () => {
-  const job14 = item("privacy_paragraph", "page", ["app/privacy/page.tsx"])
-  const text = "We use Google Analytics and PostHog to measure visits."
-  it("does not treat a JSX comment as the approved visible paragraph", async () => {
-    const source = `export default function Privacy() { return <main>{/* ${text} */}</main> }`
-    expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": source }, job14, { privacyText: text, newTools: ["ga4", "posthog"] })).state).toBe("problem")
-  })
-  it("the approved paragraph naming every new tool passes; a missing tool or an edited paragraph is a problem", async () => {
-    const page = (body: string) => `export default function Privacy() {\n  return (\n    <main>\n      <p>\n        ${body}\n      </p>\n    </main>\n  )\n}\n`
-    expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": page(text) }, job14, { privacyText: text, newTools: ["ga4", "posthog"] })).state).toBe("pass")
-    expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": page("We use Google Analytics.") }, job14, { privacyText: null, newTools: ["ga4", "posthog"] })).reason).toMatch(/posthog/)
-    expect((await check("privacy_names_installed_tools", { "app/privacy/page.tsx": page("We use Google Analytics and PostHog.") }, job14, { privacyText: text, newTools: ["ga4", "posthog"] })).reason).toMatch(/verbatim/)
-  })
+it("does not register any privacy-policy check", () => {
+  expect(Object.keys(jobStaticCheckFunctions({}))).not.toContain("privacy_names_installed_tools")
+  expect(JOB_TABLE.privacy_paragraph.checks).toEqual([])
 })
 
 describe("§3x.3 (B3, W4) track_after_success: job 10 sends an outcome where it succeeds, never from its link", () => {

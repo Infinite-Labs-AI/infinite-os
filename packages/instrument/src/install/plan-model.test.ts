@@ -85,8 +85,8 @@ const adoptedPosthogLines: ImproveLine[] = [
   { id: "posthog_defaults_bump_adopted:posthog:defaults", kind: "posthog_defaults_bump_adopted", provider: "posthog", target: "defaults", text: "PostHog: defaults bump.", owner: "agent", evidence: { file: "index.html", line: 5 } }
 ]
 
-describe("the plan model asks ONLY the four decisions", () => {
-  it("consent, conversion names, privacy text and the npm line are the only editable lines; everything else is a line", () => {
+describe("the plan model asks ONLY the three decisions", () => {
+  it("consent, conversion names and the npm line are the only editable lines; everything else is a line", () => {
     const plan = buildPlanModel(
       input({
         scan: scanFacts({ serverLane: { targetLabel: "Vercel root middleware", installPackages: ["@vercel/functions"] }, npm: { commandLine: "pnpm add @vercel/functions" } }),
@@ -98,7 +98,7 @@ describe("the plan model asks ONLY the four decisions", () => {
     expect(plan.decisions).toEqual({
       consentMode: null,
       conversionNames: ["start_trial"],
-      privacyText: expect.stringContaining("We use Infinite (Ultima Inc.)"),
+      privacyText: null,
       npmInstall: "pnpm add @vercel/functions"
     })
     expect(planAskPayload(plan).lines.every((line) => Object.keys(line).every((key) => ["id", "kind", "text", "requires", "editable", "measured", "jobIds", "ownership"].includes(key)))).toBe(true)
@@ -469,15 +469,14 @@ describe("review fixes (O7 fix round)", () => {
     expect(withGuardHosts([candidate("preview_guard", "meta")], { emit: false, reason: "no_production_host" })[0]!.trigger.finding).not.toContain("ALWAYS fire")
   })
 
-  it("P3-24: the privacy draft follows the approved lines — no server-lane sentence when the lane is declined", () => {
+  it("legacy privacy approvals and edits never produce agent policy text", () => {
     const plan = buildPlanModel(input())
-    expect(plan.decisions.privacyText).toContain("Our server also tells Infinite")
-    const approvedLines = plan.lines.filter((line) => line.requires === "approval").map((line) => line.id)
-    const withLane = resolvePlanAnswers(plan, { approved: approvedLines, declined: [], edits: consent }, { consentFlag: null })
-    expect(withLane.privacyText).toContain("Our server also tells Infinite")
-    const noLane = resolvePlanAnswers(plan, { approved: approvedLines.filter((id) => id !== "server_lane"), declined: ["server_lane"], edits: consent }, { consentFlag: null })
-    expect(noLane.privacyText).not.toContain("Our server also tells Infinite")
-    expect(noLane.privacyText).toContain("We use Infinite")
+    expect(plan.decisions.privacyText).toBeNull()
+    const legacy = { ...plan, decisions: { ...plan.decisions, privacyText: "Old policy copy" } }
+    const answer = resolvePlanAnswers(legacy, { approved: ["privacy_text"], declined: [], edits: { privacy_text: "Revised policy copy" } }, { consentFlag: null })
+    expect(answer.privacyText).toBeNull()
+    expect(answer.privacyApproved).toBeNull()
+    expect(answer.approvals.approved).not.toContain("privacy_text")
   })
 
   it("P1-6: Infinite that cannot be installed (a static site off Vercel) is a user-action line, never an install line", () => {

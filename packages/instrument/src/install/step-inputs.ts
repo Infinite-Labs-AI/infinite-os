@@ -25,7 +25,7 @@ export interface SavedPlanApprovals {
   /** The candidates `before` seeded, exactly as the plan saw them (state.jobs is replaced after the plan). */
   candidates: ChecklistItem[]
   approvals: PlanApprovals
-  /** The approved privacy paragraph (job 14 inserts it verbatim), or null. */
+  /** Legacy persistence field; current plans always store null. */
   privacyText: string | null
   /**
    * The preview guard the plan decided (exempt production hosts + deny list), persisted so job 7 (the

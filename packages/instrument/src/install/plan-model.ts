@@ -1,6 +1,6 @@
 // §3d.3–§3d.4 and step 4 of the wizard: the ONE plan screen.
 //
-// The plan model ASKS ONLY FOUR THINGS — consent mode, conversion names, privacy text and the npm
+// The plan model ASKS ONLY THREE THINGS — consent mode, conversion names and the npm
 // line. Those four are the only `editable` lines. Everything else is a line the user approves or
 // declines (or an info / user-action line shown only). Rules it enforces (R2-10, R2-11, R2-21):
 //   • every agent job that touches an ADOPTED provider (jobs 3, 4, 5, 6, 7) is seeded only behind an
@@ -303,7 +303,7 @@ export const DECISION_LINE_IDS = {
 } as const
 
 /** The ONLY editable lines (the four user decisions). */
-export const EDITABLE_LINE_IDS: readonly string[] = Object.values(DECISION_LINE_IDS)
+export const EDITABLE_LINE_IDS: readonly string[] = Object.values(DECISION_LINE_IDS).filter(id => id !== "privacy_text")
 
 /** §3h.6 (R1-34): the server-lane probe disclosure, on the plan line and in the report. */
 export const SERVER_LANE_PROBE_DISCLOSURE =
@@ -457,8 +457,7 @@ export function guardDecision(input: {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * The privacy draft: one plain sentence per NEWLY installed tool (job 14 inserts it verbatim after
- * the user approves it). The Infinite sentences say what the installed lanes send, from the same
+ * Optional copy-only disclosure wording for the site owner. Never a plan question or agent instruction. The Infinite sentences say what the installed lanes send, from the same
  * facts as the harness's disclosure notice.
  */
 export function draftPrivacyParagraph(tools: readonly ProviderId[], serverLane: boolean): string | null {
@@ -592,21 +591,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       })
     )
   }
-  const privacyText = draftPrivacyParagraph(tools, serverLaneApprovable)
-  if (privacyText) {
-    const privacyJobs = candidates.filter((item) => item.jobId === "privacy_paragraph").map((item) => item.id)
-    const where = candidates.find((item) => item.jobId === "privacy_paragraph")?.trigger.evidence.find((entry) => "file" in entry)
-    lines.push(
-      line({
-        id: DECISION_LINE_IDS.privacyText,
-        kind: "privacy_text",
-        text: `Privacy: ${privacyText.split("\n").length} drafted lines for ${where && "file" in where ? where.file : "your privacy page"}`,
-        requires: "approval",
-        editable: true,
-        ...(privacyJobs.length > 0 ? { jobIds: privacyJobs } : {})
-      })
-    )
-  }
+  const privacyText = null // Owner-only; suggested wording is copy-only report material.
   let npmInstall: string | null = null
   if (scan.serverLane && scan.serverLane.installPackages.length > 0 && serverLaneApprovable && lineRunnable("npm_install", facts).ok) {
     if (scan.npm && "commandLine" in scan.npm) {
@@ -696,14 +681,15 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
 
   // ---- the preview guard ----
   const guardedNew = tools.filter((tool): tool is "ga4" | "posthog" | "meta" => tool === "ga4" || tool === "posthog" || tool === "meta")
-  const adoptedGuardLines = scan.improve.filter((entry) => entry.kind === "preview_guard_adopted")
+  const consentObstructed = new Set(candidates.filter(item => item.jobId === "preview_guard" && item.state === "left_for_you").map(item => itemTarget(item)))
+  const adoptedGuardLines = scan.improve.filter((entry) => entry.kind === "preview_guard_adopted" && !consentObstructed.has(entry.provider))
   const guard = guardDecision({
     keys,
     hosting,
     observedProductionHost: before.observedProductionHost,
     runProductionHost: facts.productionHost,
     newGuardedTools: guardedNew,
-    adoptedGuardWanted: adoptedGuardLines.length > 0 || candidates.some((item) => item.jobId === "preview_guard"),
+    adoptedGuardWanted: adoptedGuardLines.length > 0 || candidates.some((item) => item.jobId === "preview_guard" && item.state !== "left_for_you"),
     productionDeniedConflict: input.productionDeniedConflict
   })
   if (guard.emit && guardedNew.length > 0) {
@@ -750,7 +736,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
 
   // ---- adopted providers: improve lines, linked to the candidates that need them ----
-  const improveLines = scan.improve.filter((entry) => entry.kind !== "preview_guard_adopted" || guard.emit)
+  const improveLines = scan.improve.filter((entry) => entry.kind !== "preview_guard_adopted" || (guard.emit && !consentObstructed.has(entry.provider)))
   /**
    * Lines a candidate links to, by EXACT identity (kind + provider + normalised target). There is no
    * "first line of the kind" fallback: a candidate that matches no line gets a line of its own, so
@@ -798,6 +784,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   // left unlinked. A duplicate (job 6) is always its own line, one per candidate: the measured wording
   // comes from `before` when the same tool + id was found there.
   for (const item of candidates) {
+    if (item.state === "left_for_you" || item.jobId === "privacy_paragraph") continue
     const kind = lineKindForCandidate(item)
     // Plan-wide kinds are decided by their own one line (consent/names/privacy/server lane), never per candidate.
     if (kind === null || kind === "conversion_names" || kind === "privacy_text" || kind === "server_lane") continue
@@ -877,6 +864,10 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         jobIds: metaSpaItems.map((item) => item.id)
       })
     )
+  }
+
+  for (const item of candidates.filter(entry => entry.state === "left_for_you")) {
+    lines.push(line({ id: `owner_only:${item.id}`, kind: "user_action", text: `${item.title}: ${item.note}`, requires: "user_action" }))
   }
 
   // ---- things only the user can do ----
@@ -1235,26 +1226,12 @@ export function resolvePlanAnswers(
     else conversions = names
   }
 
-  const privacyAsked = known.has(DECISION_LINE_IDS.privacyText)
-  let privacyText = plan.decisions.privacyText
-  if (approved.has(DECISION_LINE_IDS.privacyText) && edits[DECISION_LINE_IDS.privacyText] !== undefined) {
-    const edited = edits[DECISION_LINE_IDS.privacyText]!.trim()
-    if (edited === "") approved.delete(DECISION_LINE_IDS.privacyText)
-    else privacyText = edited
-  }
+  // Ignore even legacy approvals: the wizard never sends policy copy to an agent.
+  approved.delete(DECISION_LINE_IDS.privacyText)
+  const privacyAsked = false
+  const privacyText = null
 
-  // The privacy draft follows the approved lines (P3-24): a declined tool or a declined server lane is
-  // not described. An edited paragraph is the user's own words and is kept as written.
   const wizardPlan = plan as Partial<WizardPlanModel>
-  if (approved.has(DECISION_LINE_IDS.privacyText) && edits[DECISION_LINE_IDS.privacyText] === undefined && wizardPlan.installTools) {
-    const kept = wizardPlan.installTools.filter((tool) => {
-      const installLine = plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
-      return (installLine !== undefined && approved.has(installLine.id)) || (wizardPlan.managedTools ?? []).includes(tool)
-    })
-    privacyText = draftPrivacyParagraph(kept, Boolean(wizardPlan.serverLaneOffered) && kept.includes("infinite") && approved.has("server_lane"))
-    if (privacyText === null) approved.delete(DECISION_LINE_IDS.privacyText)
-  }
-
   const npmAsked = known.has(DECISION_LINE_IDS.npmInstall)
   const lines = plan.lines.map((planLine) => ({
     id: planLine.id,

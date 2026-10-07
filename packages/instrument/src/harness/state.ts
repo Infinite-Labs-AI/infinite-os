@@ -1,3 +1,4 @@
+import { OWNER_BOUNDARY, OWNER_BOUNDARY_INSTRUCTION } from "../jobs/owner-boundary.js"
 import {
   HARNESS_PROVIDER_ORDER,
   type HarnessMode,
@@ -18,10 +19,11 @@ export const HARNESS_HANDOFF_LINE =
 export const HARNESS_REPORT_RELATIVE_PATH = ".infinite/REPORT.md"
 
 export const IMPLEMENTATION_CHECKLIST = [
+  OWNER_BOUNDARY_INSTRUCTION,
   "Map editable source, build-time injection, generated output and deployed routes before editing. Update the existing owner; never patch generated output or install a second bootstrap just to get a green check.",
   "Compare the project's pinned tag and adopted custom bootstraps with the running installer. Adoption does not upgrade dependencies or apply newer provider settings; preserve existing consent and sensitive-page exclusions.",
   "Write an event matrix for each relevant view, attempt, confirmed success, failure, retry and exit. Use bounded names and properties in each independent provider; a click or animation is not a server-confirmed conversion. Keep outcomes on the server that owns them.",
-  "Test the real handlers: one observation per action, keyboard and pointer submission, async errors, retries, consent denial/revocation, and navigation before delivery. Preserve identity correlation across browser, authentication and server outcomes without logging identifiers or secrets.",
+  "Test the real handlers: one observation per action, keyboard and pointer submission, async errors, retries, and navigation before delivery. Preserve identity correlation across browser, authentication and server outcomes without logging identifiers or secrets.",
   "Inspect provider-added URL metadata as well as custom properties. OAuth callbacks, emails, verification codes and handoff secrets must not leak through page URLs, DOM autocapture or replay. Exercise success and failure callbacks.",
   "Build and inspect every affected deployed route for the intended runtime/configuration and duplicate bootstraps. Then trigger representative actions in a real browser and read back a receipt per provider. Static HTTP inspection does not run JavaScript; record manual or unavailable checks as incomplete.",
   "When a CLI or app is distributed, repeat the audit using the actual packaged executable outside the checkout and through its installed launcher. Source tests alone do not prove the shipped package layout works."
@@ -245,6 +247,8 @@ function markdownCell(value: string): string {
 export function renderReportMarkdown(report: HarnessReport): string {
   const lines: string[] = [
     "# Infinite analytics harness report",
+    "",
+    OWNER_BOUNDARY,
     "",
     `- Mode: \`${report.mode}\``,
     `- Started: ${report.startedAt}`,

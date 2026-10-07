@@ -53,7 +53,6 @@ export const CHECK_LABELS: Readonly<Record<string, string>> = {
   csp_header: "Your live security policy allows the tags",
   no_csp_violation: "Your security policy does not block the tags",
   redirect_walk: "Campaign details survive redirects",
-  privacy_names_installed_tools: "Privacy text names the installed tools",
   build_green_or_baseline: "No new build failures",
   pr_checks_pass: "Pull request checks pass",
   turn_gate: "Changes stay within the approved work"

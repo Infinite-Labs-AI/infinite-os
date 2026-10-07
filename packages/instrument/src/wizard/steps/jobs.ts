@@ -35,6 +35,7 @@ import { join } from "node:path"
 
 import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
 import { git } from "../../agents/git-exec.js"
+import { isConsentLine } from "../../jobs/allow.js"
 import { reanchorEvidence } from "../../jobs/reanchor.js"
 import { buildVerdict, isBuildOutputPath } from "../../checks/build.js"
 import { readBeforeFactsFile } from "../handoff/before-facts.js"
@@ -169,8 +170,13 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     return { kind: "failed", code: "INF_WIZ_BRIDGE_PROTOCOL", message: `The Infinite app is missing ${missing.join(", ")}; update the app.`, next: "halt" }
   }
   const io = new JobsIo(ctx, deps)
+  for (const saved of io.items()) {
+    const consentInGuardFile = saved.jobId === "preview_guard" && OPEN_STATES.includes(saved.state) && (await Promise.all(saved.allow.files.map(async file => isConsentLine(await readFile(join(ctx.root, file), "utf8").catch(() => ""))))).some(Boolean)
+    if (consentInGuardFile || saved.blockedReason === "consent_touched" || saved.jobId === "privacy_paragraph") io.put(blockItem(saved, "consent_touched"))
+  }
+  await io.save()
   const agentItems = io.items().filter((item) => item.owner === "agent" && OPEN_STATES.includes(item.state))
-  if (agentItems.length === 0 && !ctx.state.get().snapshot) return { kind: "ok", status: "No agent jobs in this run" }
+  if (agentItems.length === 0 && !ctx.state.get().snapshot) return { kind: "ok", status: io.items().some(item => item.state === "left_for_you") ? io.summary() : "No agent jobs in this run" }
 
   if (ctx.options.nested) {
     try {
@@ -1466,9 +1472,11 @@ class JobsIo {
     const claimed = count(["claimed"])
     const needYou = agent.filter((item) => item.state === "blocked" && item.blockedReason === "needs_you").length
     // LF4-P3-1: a failed job (its change made, the wizard's check did not pass) is not "blocked".
+    const left = count(["left_for_you"])
     const failed = count(["failed"])
     const blocked = count(["blocked"]) - needYou
     const parts = [`${done} of ${agent.length} jobs done in code (checked by the wizard, not the agent)`]
+    if (left > 0) parts.push(`${left} left for you (consent code is in the way)`)
     if (claimed > 0) parts.push(`${claimed} not checked by the wizard`)
     if (needYou > 0) parts.push(`${needYou} need you`)
     if (failed > 0) parts.push(`${failed} did not pass the wizard's checks`)

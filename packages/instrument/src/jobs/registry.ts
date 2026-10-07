@@ -28,7 +28,8 @@ import {
   type ScanResult
 } from "../wizard/contracts/jobs.js"
 import type { TestTool } from "../wizard/contracts/test-engine.js"
-import { buildAllow, unionAllow, type AllowSpec } from "./allow.js"
+import { CONSENT_LEFT_FOR_YOU } from "./owner-boundary.js"
+import { buildAllow, unionAllow, isConsentLine, type AllowSpec } from "./allow.js"
 import { buildBrief, prescribedPasteOf, type BriefFacts } from "./briefs.js"
 import {
   capturesPageviewManually,
@@ -39,7 +40,7 @@ import {
 import { detectDuplicates } from "./detectors/duplicates.js"
 import { OUTCOME_CONVERSION_TYPES } from "./detectors/outcomes.js"
 import { isJobScan, scanForJobs, type JobScan } from "./detectors/index.js"
-import { approvedConversionNames, approvedPrivacyText, boundConversionNames } from "./plan-data.js"
+import { approvedConversionNames, boundConversionNames } from "./plan-data.js"
 import { repoPath, type RepoSnapshot } from "./repo-files.js"
 import { applyResults } from "./state-machine.js"
 import { MANAGED_NEXT_CONFIG_FILE } from "../frameworks/vercel-config.js"
@@ -236,6 +237,7 @@ interface CandidateInput {
   evidence: Evidence[]
   allow: AllowSpec
   blockedReason?: BlockedReason
+  leftForYou?: string
 }
 
 const TOOL_TITLE: Readonly<Record<string, string>> = { ga4: "GA4", posthog: "PostHog", meta: "Meta pixel", infinite: "Infinite" }
@@ -274,6 +276,7 @@ function makeItem(input: CandidateInput, framework: string): ChecklistItem {
     state: blockedReason ? "blocked" : "pending"
   }
   if (blockedReason) item.blockedReason = blockedReason
+  if (input.leftForYou) { item.state = "left_for_you"; item.note = input.leftForYou; item.checks = []; delete item.blockedReason }
   return item
 }
 
@@ -514,7 +517,8 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
       target: tool,
       finding: `The site's own ${tool === "ga4" ? "GA4" : tool === "posthog" ? "PostHog" : "Meta pixel"} fires on preview deployments too`,
       evidence: fileEvidence(findings),
-      allow: allow(filesOf(findings))
+      allow: allow(filesOf(findings)),
+      ...(findings.some(finding => isConsentLine(scan.snapshot.files.get(finding.file) ?? "")) ? { leftForYou: CONSENT_LEFT_FOR_YOU } : {})
     })
   }
 
@@ -655,19 +659,6 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
     })
   }
 
-  // 14 privacy_paragraph (newly installed tools + a privacy page that does not name them yet)
-  const newTools = newlyInstalledTools(facts)
-  const page = d.privacy.find((finding) => newTools.some((tool) => !finding.names[tool]))
-  if (page && newTools.length > 0) {
-    out.push({
-      jobId: "privacy_paragraph",
-      target: "page",
-      finding: `This run installs ${newTools.join(", ")}; the privacy page does not name ${newTools.filter((tool) => !page.names[tool]).join(", ")}`,
-      evidence: fileEvidence([page]),
-      allow: allow([page.file])
-    })
-  }
-
   const items = out.map((input) => makeItem(input, framework))
   const unique = new Map<string, ChecklistItem>()
   for (const item of items) if (!unique.has(item.id)) unique.set(item.id, item)
@@ -710,9 +701,10 @@ export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: Pla
   const declined = new Set(approvals.declined)
   const approved = new Set(approvals.approved)
   const conversionNames = approvedConversionNames(plan, approvals)
-  const privacyText = approvedPrivacyText(plan, approvals)
   const out: ChecklistItem[] = []
   for (const candidate of candidates) {
+    if (candidate.jobId === "privacy_paragraph") continue // Retired; never revive an old approved job.
+    if (candidate.state === "left_for_you") { out.push(candidate); continue }
     const lines = plan.lines.filter((line) => line.jobIds?.includes(candidate.id))
     if (lines.some((line) => declined.has(line.id))) continue
     const kind = requiredLineKind(candidate)
@@ -726,8 +718,6 @@ export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: Pla
         item.state = "blocked"
         item.blockedReason = "needs_you"
       } else if (kind === "conversion_names" && boundConversionNames(itemTarget(candidate), conversionNames).length === 0) {
-        continue
-      } else if (kind === "privacy_text" && privacyText === null) {
         continue
       }
     }

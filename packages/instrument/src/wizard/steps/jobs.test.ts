@@ -66,7 +66,7 @@ function stateOf(items: ChecklistItem[], id: string) {
 }
 
 describe("step jobs: claims are only claims; the wizard checks", () => {
-  it("a wrapped Meta consent call blocks its own job while four other shared-file jobs pass", async () => {
+  it("a consent obstruction is informational while other shared-file jobs pass", async () => {
     const file = "src/common/tracking.ts"
     const base = [
       "declare const gtag: (...args: unknown[]) => void;",
@@ -108,15 +108,16 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     runGit(t.root, ["commit", "-m", "tracking fixture"])
     expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
     const jobs = t.current().jobs
-    expect(jobs.find((job) => job.id === ids[1])).toMatchObject({ state: "blocked", blockedReason: "consent_touched" })
-    for (const id of [ids[0]!, ...ids.slice(2)]) expect(jobs.find((job) => job.id === id)?.state, id).toMatch(/done_in_code|waiting_deploy/)
+    expect(jobs.find((job) => job.id === ids[1])).toMatchObject({ state: "left_for_you" })
+    for (const id of ids.filter(id => id.startsWith("preview_guard:"))) expect(jobs.find(job => job.id === id)?.state).toBe("left_for_you")
+    for (const id of ids.filter(id => !id.startsWith("preview_guard:"))) expect(jobs.find(job => job.id === id)?.state, id).toMatch(/done_in_code|waiting_deploy/)
     const final = readFileSync(join(t.root, file), "utf8")
     expect(final).toContain("mask_all_text: true")
     expect(final).not.toContain("  if (allowHost()) {")
     const program = ts.createProgram([join(t.root, file)], { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, lib: ["lib.es2020.d.ts", "lib.dom.d.ts"], skipLibCheck: true })
     expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
     const metaReply = records(t.fakes).filter((entry) => entry.kind === "mcp" && entry.tool === "job_claim")[1]?.reply?.result?.structuredContent
-    expect(metaReply).toMatchObject({ staticChecks: { state: "problem", problems: [expect.stringContaining("early-return")] } })
+    expect(metaReply).toMatchObject({ error: expect.stringContaining("unknown job_id preview_guard:meta") }) // Never offered to the agent.
   })
 
   it("does not turn an agent progress sentence into file counts or a writing phase", async () => {
@@ -460,7 +461,7 @@ describe("step jobs: nested mode (§3d.7)", () => {
     expect(readFileSync(join(dir, "rejected", "lib/stray.ts"), "utf8")).toBe("export const stray = 1\n")
     expect(t.recorded.events.some((event) => /edit\(s\) undone: .*lib\/stray\.ts/.test(String(event.fields.text ?? "")))).toBe(true)
     expect(readFileSync(join(t.root, "app/layout.tsx"), "utf8")).toBe(POST_INSTALL_LAYOUT)
-    expect(stateOf(t.current().jobs, "meta_improve:landing")).toBe("blocked:consent_touched")
+    expect(stateOf(t.current().jobs, "meta_improve:landing")).not.toMatch(/^blocked|failed/)
     expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
     expect(t.current().snapshot).toBeNull()
     expect(t.recordedEdits.flat().map((edit) => edit.file)).toEqual(["app/page.tsx"])

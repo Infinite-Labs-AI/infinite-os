@@ -1,6 +1,6 @@
 // What the user's approved plan decided, in the shape the registry and the briefs need (lane O8).
 //
-// Conversion names and the privacy paragraph are USER decisions (§3e.1 "never the agent's job", R2-14).
+// Conversion names are user decisions. Policy text is a legacy field, always null; never agent work.
 // The agent never chooses them: `applyApprovals` keeps a conversion job only for a type the user
 // approved a name for, and the brief hands the agent that name, and the approved paragraph, as DATA.
 //
@@ -39,13 +39,9 @@ export function approvedConversionNames(plan: PlanModel, approvals: PlanApproval
   return [...names].sort()
 }
 
-/** The privacy paragraph the user approved (after their edit), verbatim, or null. */
-export function approvedPrivacyText(plan: PlanModel, approvals: PlanApprovals): string | null {
-  const line = approvedLinesOfKind(plan, approvals, "privacy_text")[0]
-  if (!line) return null
-  const edit = approvals.edits[line.id]
-  const text = (edit !== undefined ? edit : (plan.decisions.privacyText ?? "")).trim()
-  return text === "" ? null : text
+/** Kept to decode old plan files; a saved approval never authorizes policy edits now. */
+export function approvedPrivacyText(_plan: PlanModel, _approvals: PlanApprovals): string | null {
+  return null
 }
 
 /**
@@ -82,7 +78,7 @@ export interface BriefPlanLine {
 export interface BriefPlan {
   /** Approved conversion names (after the user's edits). */
   conversionNames: string[]
-  /** The approved privacy paragraph, verbatim; null = not approved. */
+  /** Legacy persistence field; always null in current briefs. */
   privacyText: string | null
   /** Every approved line that names checklist items. */
   lines: BriefPlanLine[]
