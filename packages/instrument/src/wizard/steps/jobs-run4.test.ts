@@ -127,7 +127,18 @@ function world(input: {
   ;(checks as { run: typeof checks.run }).run = async (...args) => {
     nearTheEnd()
     const [checkId, checkInput] = args as [string, Parameters<CheckFn>[0]]
-    if (!realIds.has(checkId)) return run(...args)
+    if (!realIds.has(checkId)) {
+      const result = await run(...args)
+      // These accounting fixtures use a deliberately small guard; their fake checks must still
+      // measure the final tree after settlement, rather than passing a guard or deletion put back.
+      const layout = readFileSync(join(root, "app/layout.tsx"), "utf8")
+      const checksLayout = ["adopted_init_guarded", "census_one_per_tool", "census_ga4_config_once"].includes(checkId)
+      if (!checksLayout) return result
+      const target = (checkInput as { item?: ChecklistItem }).item?.id === META_GUARD ? "meta-pixel" : "ga4"
+      const script = layout.split(`<Script id="${target}"`)[1]?.split("</Script>")[0] ?? ""
+      const present = checkId === "adopted_init_guarded" ? script.includes("if (location.hostname ===") : !layout.includes('id="ga4-again"')
+      return { ...(Array.isArray(result) ? result[0]! : result), state: present ? "pass" as const : "problem" as const, reason: present ? "Fixture change present" : "Fixture change missing after restoration", absent: !present }
+    }
     calls.run.push({ checkId, input: checkInput })
     const [result] = (await realFns[checkId]!(checkInput, { runId: STEP_RUN_ID, now: FIXED_NOW })) as Awaited<ReturnType<typeof run>>[]
     return result!
@@ -146,11 +157,22 @@ function world(input: {
   runner = makeRunner(fakes, root, { connectionIds: () => [] })
   const { registry } = fakeRegistry()
   const { installer, recorded } = fakeInstaller()
+  const seeded = [...run4Items([JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE]), ...(input.extraItems ?? [])]
+  if (!archived) {
+    // The archived job evidence describes a different layout. Keep target coordinates tied to
+    // this fixture so per-hunk ownership measures the edit place actually offered to the agent.
+    const initial = FREE_ENTRY.installed.split("\n")
+    for (const item of seeded) {
+      const marker = item.id === JOB6 ? 'id="ga4-again"' : item.id === GA4_GUARD ? "gtag('config'" : "fbq('init'"
+      const line = initial.findIndex(text => text.includes(marker)) + 1
+      item.trigger.evidence = item.trigger.evidence.map(evidence => "file" in evidence && evidence.file === "app/layout.tsx" ? { ...evidence, line } : evidence)
+    }
+  }
   const state = baseState({
     root,
     runId: STEP_RUN_ID,
     agent: { worker: "claude_code", reviewer: "codex", workerSession: null, whoPays: { worker: null, reviewer: null } },
-    jobs: [...run4Items([JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE]), ...(input.extraItems ?? [])]
+    jobs: seeded
   })
   const { ctx, recorded: events, state: current } = makeCtx({ root, state })
   const deps = { ...makeDeps({ root, bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } }), clock }
@@ -158,47 +180,31 @@ function world(input: {
 }
 
 describe("consent-separated entry: the budget ends with kept edits in the tree", () => {
-  it("job 5 (its capture shipped) is never 'undone': failed with the wizard's real reason, and its change is said to stay in the pull request", async () => {
+  it("puts back shared hunks of an unfinished capture and preserves the independent verified signup", async () => {
     const w = world({ round1Claims: [JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE], fbcCapture: ["problem"] })
     const outcome = await step.run(w.ctx, w.deps)
     const jobs = w.current().jobs
-    const stateOf = (id: string) => jobs.find((item) => item.id === id)!
-
-    // The tree the pull request commits holds job 5's capture (it shares app/layout.tsx's lines with kept jobs).
     const layout = readFileSync(join(w.root, "app/layout.tsx"), "utf8")
-    expect(layout).toBe(w.merged)
+    expect(layout).not.toContain("meta-fbc-capture")
+    expect(layout).not.toContain('id="ga4-again"')
+    expect(layout).toContain("if (location.hostname ===")
+    expect(layout).not.toContain("fbq('set', 'autoConfig', false")
     expect(readFileSync(join(w.root, OWNER_BOOTSTRAP_PATH), "utf8")).toBe(OWNER_BOOTSTRAP)
-    expect(layout).toContain('<Script id="meta-fbc-capture"')
-
-    for (const id of [JOB6, GA4_GUARD, META_GUARD, SIGNUP]) expect(DONE, id).toContain(stateOf(id).state)
-    const capture = stateOf(CAPTURE)
-    expect(capture.state).toBe("failed")
-    expect(capture.note).toContain("The agent ran out of time before fixing it")
+    expect(readFileSync(join(w.root, "app/signup/page.tsx"), "utf8")).toBe(run4("merged-5e6f3f3/app/signup/page.tsx"))
+    for (const id of [SIGNUP, JOB6, GA4_GUARD]) expect(DONE, id).toContain(jobs.find(item => item.id === id)!.state)
+    expect(jobs.find(item => item.id === META_GUARD)!.state).toBe("left_for_you")
+    const capture = jobs.find(item => item.id === CAPTURE)!
+    expect(capture.state).toBe("left_for_you")
     expect(capture.note).toContain("fbc_capture")
-    expect(capture.note).toContain("Its change stays in the pull request (it shares lines in app/layout.tsx with a job that passed).")
-    // Never the live run's false sentence, anywhere.
-    const said = JSON.stringify([outcome, jobs, w.events.events])
-    expect(said).not.toContain("its edits were undone")
-    expect(said).not.toContain("edits were undone")
-    // Its edit is recorded on it (the receipt and the verdict read that as "in the code").
-    expect(capture.edits?.map((edit) => edit.file)).toEqual(["app/layout.tsx"])
-
-    // The step line says what IS done, not that nothing survived.
-    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_AGENT_TIMEOUT", next: "continue" })
-    expect((outcome as { message: string }).message).toBe(
-      "The agent ran out of time · 4 of 5 jobs done in code (checked by the wizard, not the agent) · 1 did not pass the wizard's checks"
-    )
-    // "Not done" names the job with its real reason and where its change is.
-    expect(notDoneLines(jobs).join("\n")).toContain("! Not done: Improve the existing Meta pixel (The agent ran out of time before fixing it")
-    // The merge card / headline clause: in the code, but it did not pass (never "not in the code").
-    expect(approvedFixClauses(missingApprovedFixes(jobs))).toEqual([
-      "1 approved fix is in the code but did not pass the wizard's checks (Improve the existing Meta pixel)"
-    ])
+    expect(capture.note).toContain("Its own edits were put back")
+    expect(capture.edits).toEqual([])
+    expect(outcome.kind).toBe("ok")
+    expect(notDoneLines(jobs).join("\n")).toContain("Not done, left for you")
+    expect(approvedFixClauses(missingApprovedFixes(jobs))).toEqual([])
   })
 
-  it("LF4-P1-2 round 1 (the verifier's repro): job 5 never claimed its capture, which IS in the committed tree, so its own fbc_capture check runs on that tree: pass → done in code, claim-less, never 'not in the code'", async () => {
-    // Round 1 claims only four; job 5's capture is in the tree, and the fence credited those hunks to the jobs that
-    // claimed app/layout.tsx. Attribution says who claimed, never what the code does: job 5's OWN check decides.
+  it("verifies an unclaimed capture through its own passing check", async () => {
+    // The capture has no claim, but its offered edit place owns the hunk and its own check decides.
     const w = world({ round1Claims: [JOB6, GA4_GUARD, META_GUARD, SIGNUP], fbcCapture: ["pass"] })
     const outcome = await step.run(w.ctx, w.deps)
     const layout = readFileSync(join(w.root, "app/layout.tsx"), "utf8")
@@ -209,14 +215,14 @@ describe("consent-separated entry: the budget ends with kept edits in the tree",
     expect(DONE).toContain(capture.state)
     expect(capture.claim).toBeUndefined()
     expect(w.calls.t0.flat().map((scenario) => scenario.checkId)).toContain("fbc_capture")
-    expect((outcome as { message: string }).message).toBe("The agent ran out of time · 5 of 5 jobs done in code (checked by the wizard, not the agent)")
+    expect(outcome.kind).toBe("ok")
     // NEGATIVE: never run 4's false words on any surface.
     expect(approvedFixClauses(missingApprovedFixes(jobs))).toEqual([])
     expect(notDoneLines(jobs)).toEqual([])
     expect(JSON.stringify([outcome, jobs])).not.toContain("before finishing this job")
   })
 
-  it("LF4-P1-2 round 1: an autoConfig job nobody claimed is decided by its own REAL check on the tree: the free entry turns autoConfig off before init → done; without the opt-out → blocked, not in the code", async () => {
+  it("verifies an unclaimed autoConfig change and hands missing changes to the owner", async () => {
     const autoconfig = () =>
       untouched(CAPTURE, "meta_improve:autoconfig_off_adopted", "Turn off autoConfig on the adopted pixel", itemChecksFor("meta_improve", "autoconfig_off_adopted", "next-app-router"))
     const optOut = "fbq('set', 'autoConfig', false, '7777000011112222');\n"
@@ -240,14 +246,14 @@ describe("consent-separated entry: the budget ends with kept edits in the tree",
     })
     await step.run(without.ctx, without.deps)
     const job = without.current().jobs.find((item) => item.id === "meta_improve:autoconfig_off_adopted")!
-    expect(job.state).toBe("blocked")
+    expect(job.state).toBe("left_for_you")
     expect(job.note).toContain("meta_autoconfig_off")
-    expect(job.note).toContain("The agent ran out of time before finishing this job")
+    expect(job.note).toContain("the agent did not do it")
     expect(job.edits ?? []).toEqual([])
-    expect(approvedFixClauses(missingApprovedFixes(without.current().jobs))).toEqual(["1 approved fix is not in the code (Turn off autoConfig on the adopted pixel)"])
+    expect(approvedFixClauses(missingApprovedFixes(without.current().jobs))).toEqual([])
   })
 
-  it("LF4-P1-2 negative: an untouched GA4 page-change job is never 'in the code'", async () => {
+  it("leaves an untouched GA4 page-change job for the owner", async () => {
     const spa = untouched(JOB6, "ga4_improve:spa_page_view", "Send a GA4 page_view on every page change", [
       { id: "ga4_spa_page_view", tier: "RH", state: "not_run" },
       { id: "ga4_one_page_view", tier: "RH", state: "not_run" },
@@ -256,13 +262,13 @@ describe("consent-separated entry: the budget ends with kept edits in the tree",
     const w = world({ round1Claims: [JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE], fbcCapture: ["pass"], extraItems: [spa] })
     await step.run(w.ctx, w.deps)
     const job = w.current().jobs.find((item) => item.id === spa.id)!
-    expect(job.state).toBe("blocked")
+    expect(job.state).toBe("left_for_you")
     expect(job.note).toContain("before finishing this job")
     // Never "in the code but the wizard could not check it" / "did not pass": nothing of it is in the code.
-    expect(approvedFixClauses(missingApprovedFixes(w.current().jobs))).toEqual(["1 approved fix is not in the code (Send a GA4 page_view on every page change)"])
+    expect(approvedFixClauses(missingApprovedFixes(w.current().jobs))).toEqual([])
   })
 
-  it("LF4-P1-2 round 1 negative: an unclaimed job with nothing of it in the tree, whose own check FAILS there, is blocked with what that check found and listed as not in the code (other jobs' lines in its file never tick it)", async () => {
+  it("reports an absent unclaimed capture without crediting another job's file edits", async () => {
     // Round 1 keeps the other jobs' layout edits but no capture at all; job 5's own check finds the problem.
     const merged = FREE_ENTRY.edited
     const from = merged.indexOf('        <Script id="meta-fbc-capture"')
@@ -273,20 +279,17 @@ describe("consent-separated entry: the budget ends with kept edits in the tree",
     expect(readFileSync(join(w.root, "app/layout.tsx"), "utf8")).not.toContain("meta-fbc-capture")
     const jobs = w.current().jobs
     const capture = jobs.find((item) => item.id === CAPTURE)!
-    expect(capture.state).toBe("blocked")
-    expect(capture.note).toContain("The agent ran out of time before finishing this job")
-    expect(capture.note).toContain("the wizard's check of the code found fbc_capture")
-    expect(capture.note).not.toContain("before fixing it")
+    expect(capture.state).toBe("left_for_you")
+    expect(capture.note).toContain("the agent did not do it")
+    expect(capture.note).toContain("fbc_capture: no_fbc_capture")
     expect(capture.claim).toBeUndefined()
-    expect(approvedFixClauses(missingApprovedFixes(jobs))).toEqual(["1 approved fix is not in the code (Improve the existing Meta pixel)"])
-    expect((outcome as { message: string }).message).toBe(
-      "The agent ran out of time · 4 of 5 jobs done in code (checked by the wizard, not the agent) · 1 blocked"
-    )
+    expect(approvedFixClauses(missingApprovedFixes(jobs))).toEqual([])
+    expect(outcome.kind).toBe("ok")
   })
 
-  it("LF4-P1-2: no claim is made up — an unclaimed job whose OWN change is in the tree is decided by its own local checks only, and stays claim-less", async () => {
-    // Round 1 claims only the signup page; nobody claims app/layout.tsx, so the fence credits each layout hunk to every
-    // job covering that file. Each such job is checked on the tree as it stands, with no agent claim recorded on it.
+  it("does not invent claims for changes verified by their own checks", async () => {
+    // Only the signup is claimed; layout ownership follows the offered edit places.
+    // Each layout job is checked without inventing an agent claim.
     const w = world({ round1Claims: [SIGNUP], fbcCapture: ["pass"] })
     await step.run(w.ctx, w.deps)
     const jobs = w.current().jobs
@@ -298,21 +301,21 @@ describe("consent-separated entry: the budget ends with kept edits in the tree",
     expect(JSON.stringify(jobs)).not.toContain("the wizard checked the change it had left")
   })
 
-  it("LF4-P1-2 negative: an unclaimed job with its own kept change but no check the wizard can run before the deploy is never 'done' (no made-up claim, no recorded diff standing in for a check)", async () => {
+  it("never verifies an unclaimed job without a runnable check", async () => {
     const spa = untouched(JOB6, "ga4_improve:spa_page_view", "Send a GA4 page_view on every page change", itemChecksFor("ga4_improve", "spa_page_view", "next-app-router"))
     const w = world({ round1Claims: [SIGNUP], fbcCapture: ["pass"], extraItems: [spa] })
     await step.run(w.ctx, w.deps)
     const job = w.current().jobs.find((item) => item.id === spa.id)!
     expect(DONE).not.toContain(job.state)
-    expect(job.state).toBe("blocked")
+    expect(job.state).toBe("left_for_you")
     expect(job.claim).toBeUndefined()
   })
 
-  it("LF4-P1-2 negative: an unclaimed job whose own local check FAILS on the tree is failed with that check, never ticked", async () => {
+  it("leaves an unclaimed job whose local check fails for the owner", async () => {
     const w = world({ round1Claims: [SIGNUP], fbcCapture: ["problem"] })
     await step.run(w.ctx, w.deps)
     const capture = w.current().jobs.find((item) => item.id === CAPTURE)!
-    expect(capture.state).toBe("failed")
+    expect(capture.state).toBe("left_for_you")
     expect(capture.note).toContain("fbc_capture")
     expect(capture.claim).toBeUndefined()
   })
@@ -332,10 +335,10 @@ describe("consent-separated entry: a job is done in code only when the committed
     const job = w.current().jobs.find((item) => item.id === download.id)!
     expect(readFileSync(join(w.root, "app/signup/page.tsx"), "utf8") + readFileSync(join(w.root, "app/layout.tsx"), "utf8")).not.toMatch(/download/i)
     expect(DONE).not.toContain(job.state)
-    expect(job.state).toBe("blocked")
+    expect(job.state).toBe("left_for_you")
     expect(job.checks.find((check) => check.id === "conversion_tracked")).toMatchObject({ state: "problem" })
-    expect((outcome as { message: string }).message).toBe("The agent ran out of time · 5 of 6 jobs done in code (checked by the wizard, not the agent) · 1 blocked")
-    expect(approvedFixClauses(missingApprovedFixes(w.current().jobs))).toEqual(["1 approved fix is not in the code (Send the download conversion to GA4 and PostHog)"])
+    expect(outcome.kind).toBe("ok")
+    expect(approvedFixClauses(missingApprovedFixes(w.current().jobs))).toEqual([])
   })
 
   it("(a) an untouched mirror job is never done: the event-id check passes on a page with no Meta event; meta_mirror_wired finds no infiniteMetaMirror", async () => {
@@ -346,57 +349,49 @@ describe("consent-separated entry: a job is done in code only when the committed
     expect(readFileSync(join(w.root, "app/layout.tsx"), "utf8")).not.toContain("infiniteMetaMirror")
     expect(job.checks.find((check) => check.id === "meta_event_id_from_helper")).toMatchObject({ state: "pass" })
     expect(DONE).not.toContain(job.state)
-    expect(job.state).toBe("blocked")
-    expect(approvedFixClauses(missingApprovedFixes(w.current().jobs))).toContain("1 approved fix is not in the code (Send Meta conversions through the server-instructed mirror)")
+    expect(job.state).toBe("left_for_you")
+    expect(approvedFixClauses(missingApprovedFixes(w.current().jobs))).toEqual([])
   })
 
-  it("(b) unclaimed jobs that pass on the tree keep the hunks they were checked on: the PR commits that tree, and the failing claimed capture says its change stays", async () => {
+  it("does not retain the failed claimant's hunks merely because unrelated checks passed on its file", async () => {
     const w = world({ round1Claims: [SIGNUP, CAPTURE], fbcCapture: ["problem"] })
-    await step.run(w.ctx, w.deps)
+    const outcome = await step.run(w.ctx, w.deps)
     const layout = readFileSync(join(w.root, "app/layout.tsx"), "utf8")
-    // At 709c10b: the layout went back to the installed version while the three jobs below were reported done.
-    expect(layout).toBe(w.merged)
-    const jobs = w.current().jobs
-    for (const id of [JOB6, GA4_GUARD, META_GUARD]) {
-      const job = jobs.find((item) => item.id === id)!
-      expect(DONE, id).toContain(job.state)
-      expect(job.claim, id).toBeUndefined()
-      expect((job.edits ?? []).map((edit) => edit.file), id).toContain("app/layout.tsx")
-    }
-    const capture = jobs.find((item) => item.id === CAPTURE)!
-    expect(capture.state).toBe("failed")
-    // Final round (P3): its lines stay only because claim-less jobs were checked on the whole layout, not because a
-    // passing job's own change shares them, and the note says which.
-    expect(capture.note).toContain("Its change stays in the pull request (a job that passed was checked on the whole of app/layout.tsx, claiming no lines of its own)")
-    expect(capture.note).not.toContain("shares lines")
-    expect(approvedFixClauses(missingApprovedFixes(jobs))).toEqual(["1 approved fix is in the code but did not pass the wizard's checks (Improve the existing Meta pixel)"])
+    expect(layout).not.toContain("meta-fbc-capture")
+    expect(layout).not.toContain('id="ga4-again"')
+    expect(layout).toContain("if (location.hostname ===")
+    expect(layout).not.toContain("fbq('set', 'autoConfig', false")
+    const capture = w.current().jobs.find(item => item.id === CAPTURE)!
+    expect(capture.state).toBe("left_for_you")
+    expect(capture.edits).toEqual([])
+    expect(capture.note).toContain("put back")
+    expect(outcome.kind).toBe("ok")
+    expect(approvedFixClauses(missingApprovedFixes(w.current().jobs))).toEqual([])
   })
 
-  it("(b) the autoConfig job decided claim-less is done only on the tree the PR commits: the real O9 check passes again on the committed layout", async () => {
+  it("rechecks autoConfig after an unfinished capture restores their shared hunk", async () => {
     const autoconfig = untouched(CAPTURE, "meta_improve:autoconfig_off_adopted", "Turn off autoConfig on the adopted pixel", itemChecksFor("meta_improve", "autoconfig_off_adopted", "next-app-router"))
     const w = world({ round1Claims: [SIGNUP, CAPTURE], fbcCapture: ["problem"], extraItems: [autoconfig] })
     await step.run(w.ctx, w.deps)
     const job = w.current().jobs.find((item) => item.id === autoconfig.id)!
-    expect(DONE).toContain(job.state)
+    expect(job.state).toBe("left_for_you")
     const input = w.calls.run.find((call) => call.checkId === "meta_autoconfig_off")!.input as Parameters<CheckFn>[0]
     const again = (await o9CheckFunctions({ version: "t", root: w.root }).meta_autoconfig_off!(input, { runId: STEP_RUN_ID, now: FIXED_NOW })) as Array<{ state: string }>
-    expect(again.map((result) => result.state)).toEqual(["pass"])
-    expect(readFileSync(join(w.root, "app/layout.tsx"), "utf8")).toContain("fbq('set', 'autoConfig', false")
+    expect(again.map((result) => result.state)).toEqual(["problem"])
+    expect(readFileSync(join(w.root, "app/layout.tsx"), "utf8")).not.toContain("fbq('set', 'autoConfig', false")
   })
 
-  it("(P2-2) a never-claimed capture whose change IS in the tree and whose own check fails 'did not pass the wizard's checks on the code', never 'not in the code'", async () => {
+  it("puts back an unclaimed capture whose own check fails instead of shipping unverified code", async () => {
     const w = world({ round1Claims: [JOB6, GA4_GUARD, META_GUARD, SIGNUP], fbcCapture: ["problem"] })
     const outcome = await step.run(w.ctx, w.deps)
-    expect(readFileSync(join(w.root, "app/layout.tsx"), "utf8")).toContain("meta-fbc-capture")
-    const jobs = w.current().jobs
-    const capture = jobs.find((item) => item.id === CAPTURE)!
-    expect(capture.state).toBe("failed")
+    expect(readFileSync(join(w.root, "app/layout.tsx"), "utf8")).not.toContain("meta-fbc-capture")
+    const capture = w.current().jobs.find(item => item.id === CAPTURE)!
+    expect(capture.state).toBe("left_for_you")
     expect(capture.claim).toBeUndefined()
-    expect(capture.note).toContain("The agent never claimed it; it did not pass the wizard's checks on the code: fbc_capture")
-    const clauses = approvedFixClauses(missingApprovedFixes(jobs))
-    expect(clauses).toEqual(["1 approved fix did not pass the wizard's checks on the code (never claimed: Improve the existing Meta pixel)"])
-    expect(clauses.join(" ")).not.toContain("not in the code")
-    expect((outcome as { message: string }).message).toBe("The agent ran out of time · 4 of 5 jobs done in code (checked by the wizard, not the agent) · 1 did not pass the wizard's checks")
+    expect(capture.note).toContain("fbc_capture")
+    expect(capture.edits ?? []).toEqual([])
+    expect(outcome.kind).toBe("ok")
+    expect(approvedFixClauses(missingApprovedFixes(w.current().jobs))).toEqual([])
   })
 })
 
