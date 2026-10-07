@@ -72,6 +72,7 @@ export interface BriefPlanLine {
   kind: PlanLineKind
   text: string
   jobIds: string[]
+  sensitivePaths?: string[]
 }
 
 /** The approved plan, as the brief carries it. */
@@ -92,7 +93,7 @@ export function briefPlanFrom(plan: PlanModel, approvals: PlanApprovals): BriefP
     privacyText: approvedPrivacyText(plan, approvals),
     lines: plan.lines
       .filter((line) => approved.has(line.id) && !declined.has(line.id) && (line.jobIds?.length ?? 0) > 0)
-      .map((line) => ({ id: line.id, kind: line.kind, text: line.text, jobIds: [...(line.jobIds ?? [])] }))
+      .map((line) => ({ id: line.id, kind: line.kind, text: line.text, jobIds: [...(line.jobIds ?? [])], ...(line.sensitivePaths ? { sensitivePaths: [...line.sensitivePaths] } : {}) }))
   }
 }
 

@@ -54,13 +54,20 @@ describe("O9 guard context", () => {
     const runId = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
     const beforeAt = "2030-01-02T03:04:05.000Z"
     const guard = { emit: true, exempt: ["acme.example"], deny: ["localhost"] }
+    const plan = { hash: "sha256:current", decisions: { consentMode: "not_required", conversionNames: ["lead"], privacyText: null, npmInstall: null }, lines: [
+      { id: "conversion_names", kind: "conversion_names", text: "lead", jobIds: ["conversions_to_tools:lead"] },
+      { id: "sensitive", kind: "sensitive_pages", text: "Off on /login", sensitivePaths: ["/login"], jobIds: ["posthog_improve:sensitive_pages"] }
+    ] }
     writeFileSync(join(root, WIZARD_PATHS.beforeFacts), JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId, facts: { keys: fakeKeys(), hosting: { provider: "none", vercel: null }, observedProductionHost: "acme.example" } }))
-    writeFileSync(join(root, WIZARD_PATHS.planApprovals), JSON.stringify({ schema: "infinite-tag.plan-approvals.v1", planHash: "sha256:current", beforeAt, guard }))
+    writeFileSync(join(root, WIZARD_PATHS.planApprovals), JSON.stringify({ schema: "infinite-tag.plan-approvals.v1", planHash: "sha256:current", beforeAt, guard, plan, approvals: { approved: ["conversion_names", "sensitive"], declined: [], edits: {} } }))
     const state = { runId, plan: { hash: "sha256:current" }, steps: { before: { at: beforeAt } } }
     writeFileSync(join(root, WIZARD_PATHS.state), JSON.stringify(state))
     expect(o9RunContext(root, runId)?.expectedEmittedGuard).toBe(buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny }))
+    expect(o9RunContext(root, runId)).toMatchObject({ conversionNames: ["lead"], posthogSensitivePaths: ["/login"] })
     writeFileSync(join(root, WIZARD_PATHS.state), JSON.stringify({ ...state, plan: { hash: "sha256:other" } }))
     expect(o9RunContext(root, runId)?.expectedEmittedGuard).toBeUndefined()
+    expect(o9RunContext(root, runId)?.conversionNames).toBeUndefined()
+    expect(o9RunContext(root, runId)?.posthogSensitivePaths).toBeUndefined()
   })
 })
 

@@ -136,7 +136,7 @@ describe("run 4 SPA regression with separate recorded-consent and runnable world
     const item = candidates.find((candidate) => candidate.id === SPA)
     expect(item).toBeDefined()
     expect(item!.allow.files).toEqual(["app/layout.tsx"])
-    expect(item!.checks.map((check) => `${check.tier}:${check.id}`)).toEqual(["RH:ga4_one_page_view", "RH:ga4_spa_page_view", "PV:ga4_seen_leaving"])
+    expect(item!.checks.map((check) => `${check.tier}:${check.id}`)).toEqual(["S:spa_page_view_applied", "RH:ga4_one_page_view", "RH:ga4_spa_page_view", "PV:ga4_seen_leaving"])
     expect(requiredLineKind(item!)).toBe("ga4_spa_page_views")
 
     const root = makeSite(files)

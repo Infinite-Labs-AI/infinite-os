@@ -109,7 +109,7 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
     title: "Improve the existing GA4",
     requiresApprovedLine: ["improve_additive"],
     // R4-8: one GA4 page_view per client-side page change, measured by the rehearsal's page change.
-    checks: [c("T1", "ga4_loader_id"), c("RH", "ga4_one_page_view"), c("RH", "ga4_spa_page_view"), c("PV", "ga4_seen_leaving")],
+    checks: [p("S", "ga4_id_applied"), p("S", "spa_page_view_applied"), c("T1", "ga4_loader_id"), c("RH", "ga4_one_page_view"), c("RH", "ga4_spa_page_view"), c("PV", "ga4_seen_leaving")],
     donePath: ["done_in_code", "waiting_deploy", "proven"]
   },
   meta_improve: {
@@ -129,6 +129,7 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
       c("RH", "meta_pixel_once"),
       // §3x.3 (F6): one PageView per client-side navigation, measured by the rehearsal's page change.
       c("RH", "meta_spa_page_view"),
+      p("S", "spa_page_view_applied"),
       p("T0", "fbc_capture"),
       c("PV", "meta_seen_leaving")
     ],
@@ -708,6 +709,7 @@ export interface JobRegistry {
  */
 export type PastePlacement =
   | { kind: "after_ga4_config"; measurementId: string }
+  | { kind: "after_meta_pageview" }
   | { kind: "before_meta_init_element" }
   | { kind: "before_meta_init"; pixelId: string }
 

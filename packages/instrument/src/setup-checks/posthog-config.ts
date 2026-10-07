@@ -13,6 +13,9 @@
 // replay changed by an edit → problem, unless a D17 sensitive-pages line was approved.
 import { readPosthogOption } from "../inspect.js"
 import { posthogRegion } from "../checks/posthog-hosts.js"
+import { sensitivePosthogOptions } from "../install/posthog-sensitive.js"
+import { maskCommentsAndStrings } from "../frameworks/shared.js"
+import { lexicalStates } from "../lexical-states.js"
 
 import { codeView, groupFindings, isHtmlFile, sourceUnits, unitLine } from "./code-view.js"
 import {
@@ -34,6 +37,8 @@ export interface PosthogConfigRead {
   /** False when the options are a variable / expression: nothing below can be trusted. */
   readable: boolean
   options: Partial<Record<PosthogOptionKey, string>>
+  /** The literal object, retained for exact checks of approved additions and overriding spreads. */
+  optionsSource?: string
 }
 
 const INIT = /\bposthog\.init\s*\(/g
@@ -53,7 +58,8 @@ export function readPosthogConfigs(files: ReadonlyMap<string, string>): PosthogC
         line: unitLine(unit, match.index ?? 0),
         managed: unit.managed,
         readable,
-        options: readable ? readOptions(unit.text.slice(optionsAt, objectEnd(code, optionsAt))) : {}
+        options: readable ? readOptions(unit.text.slice(optionsAt, objectEnd(code, optionsAt))) : {},
+        ...(readable ? { optionsSource: unit.text.slice(optionsAt, objectEnd(code, optionsAt)) } : {})
       })
     }
     for (const match of code.matchAll(PROVIDER)) {
@@ -69,7 +75,8 @@ export function readPosthogConfigs(files: ReadonlyMap<string, string>): PosthogC
         line: unitLine(unit, match.index ?? 0),
         managed: unit.managed,
         readable,
-        options: readable ? readOptions(unit.text.slice(objectAt, objectEnd(code, objectAt))) : {}
+        options: readable ? readOptions(unit.text.slice(objectAt, objectEnd(code, objectAt))) : {},
+        ...(readable ? { optionsSource: unit.text.slice(objectAt, objectEnd(code, objectAt)) } : {})
       })
     }
   }
@@ -184,18 +191,33 @@ export function checkPosthogConfig(input: PosthogConfigInput): SetupCheckResult 
 
 /**
  * Job 3's guard (`posthog_config`): an edit must leave autocapture and session replay exactly as they
- * were, unless a D17 sensitive-pages line was approved. Compares the reads before and after, per file.
+ * were, except the exact appended restrictive options from an approved sensitive-pages line.
+ * Approval never permits turning either option on, changing the fallback, or adding another spread.
  */
 export function posthogConfigDrift(
   before: readonly PosthogConfigRead[],
   after: readonly PosthogConfigRead[],
-  options: { sensitivePagesApproved: boolean } = { sensitivePagesApproved: false }
+  options: { sensitivePagesApproved?: boolean; sensitivePaths?: readonly string[] } = {}
 ): SetupFinding[] {
-  if (options.sensitivePagesApproved) return []
   const findings: SetupFinding[] = []
+  const occurrence = new Map<string, number>()
   for (const previous of before.filter((read) => !read.managed && read.readable)) {
-    const next = after.find((read) => read.file === previous.file && !read.managed)
+    const index = occurrence.get(previous.file) ?? 0
+    occurrence.set(previous.file, index + 1)
+    const next = after.filter((read) => read.file === previous.file && !read.managed)[index]
     if (!next) continue
+    if (previous.optionsSource && next.optionsSource) {
+      const was = privacyMembers(previous.optionsSource)
+      if (was === privacyMembers(next.optionsSource)) continue
+      const stripped = stripSensitivePosthogAddition(next.optionsSource, options.sensitivePaths ?? [])
+      const now = privacyMembers(stripped ?? next.optionsSource)
+      if (was !== now) findings.push({
+        check: "posthog_config", code: "INF_SETUP_POSTHOG_PRIVACY_CHANGED", state: "problem", confidence: "certain",
+        file: next.file, line: next.line,
+        message: "The PostHog privacy options changed beyond the approved restrictive addition. Keep existing options and append only the supplied replay/autocapture OFF options on the approved paths."
+      })
+      continue
+    }
     for (const option of ["autocapture", "disable_session_recording"] as const) {
       const was = previous.options[option] ?? "(PostHog's default)"
       const now = next.readable ? (next.options[option] ?? "(PostHog's default)") : "(unreadable)"
@@ -212,4 +234,43 @@ export function posthogConfigDrift(
     }
   }
   return findings
+}
+
+/** Remove formatting outside strings; paths and other literal values remain exact. */
+function compactCode(source: string): string {
+  const states = lexicalStates(source)
+  return source.split("").filter((char, index) => states[index] !== 3 && !(states[index] === 0 && /\s/.test(char))).join("")
+}
+
+function objectMembers(source: string): string[] {
+  const masked = maskCommentsAndStrings(source, true)
+  let depth = 0
+  let start = masked.indexOf("{") + 1
+  const members: string[] = []
+  for (let index = start; index < masked.length; index += 1) {
+    const char = masked[index]
+    if (char === "{" || char === "[" || char === "(") depth += 1
+    else if (char === "}" && depth === 0) { members.push(source.slice(start, index)); break }
+    else if (char === "}" || char === "]" || char === ")") depth -= 1
+    else if (char === "," && depth === 0) { members.push(source.slice(start, index)); start = index + 1 }
+  }
+  return members.map(member => member.trim()).filter(Boolean)
+}
+
+/** Keep every unknown member too: spreads, computed keys, getters and shorthand can override privacy. */
+function privacyMembers(source: string): string {
+  return objectMembers(source).map(compactCode).filter(member => !/^["']?(?:api_host|ui_host|defaults|capture_pageview)["']?:/.test(member)).join(",")
+}
+
+/** The accepted edit is the emitted addition, last in the object. No customer configuration runs. */
+export function stripSensitivePosthogAddition(source: string, paths: readonly string[]): string | null {
+  if (paths.length === 0) return null
+  const members = objectMembers(source)
+  const last = members.at(-1)
+  if (!last) return null
+  const existing = `{${members.slice(0, -1).join(",")}}`
+  const expected = sensitivePosthogOptions(`posthog.init('key', ${existing})`, paths)
+  const both = sensitivePosthogOptions(undefined, paths)!
+  if (![expected, both].some(paste => paste && compactCode(last) === compactCode(paste).replace(/,$/, ""))) return null
+  return existing
 }

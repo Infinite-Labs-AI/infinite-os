@@ -23,6 +23,7 @@ export interface ConversionPlacementInput {
   /** App-root-relative path → file contents. */
   files: ReadonlyMap<string, string>
   lanes: readonly ConversionLane[]
+  approvedConversionNames?: readonly string[]
 }
 
 export function checkConversionPlacement(input: ConversionPlacementInput): SetupCheckResult {
@@ -40,7 +41,7 @@ export function checkConversionPlacement(input: ConversionPlacementInput): Setup
     return { check: "conversion_placement", state: "undetermined", findings }
   }
 
-  const known = knownConversionValues(input.lanes)
+  const known = [...new Set([...knownConversionValues(input.lanes), ...(input.approvedConversionNames ?? [])])]
 
   for (const [file, contents] of input.files) {
     for (const site of elementSites(contents)) {

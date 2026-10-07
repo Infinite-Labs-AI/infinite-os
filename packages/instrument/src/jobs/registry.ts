@@ -173,15 +173,15 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
   posthog_improve: (target, framework) =>
     target === "proxy"
       ? ["S:posthog_config", "S:posthog_improve_applied", ...(framework.startsWith("next") ? ["S:next_rewrites_exact"] : []), "RH:posthog_via_proxy_once", "PV:posthog_distinct_id_receipt"]
-      : target === "history_change" || target === "defaults"
+      : target === "history_change" || target === "defaults" || target === "sensitive_pages"
         ? ["S:posthog_config", "S:posthog_improve_applied", "PV:posthog_distinct_id_receipt"]
         : ["S:posthog_config", "PV:posthog_distinct_id_receipt"],
   // R4-8: a page-change page_view is proven by the rehearsal's own page change (one GA4 page_view after it, never two).
   ga4_improve: (target) =>
     target === "id"
-      ? ["T1:ga4_loader_id", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
+      ? ["S:ga4_id_applied", "T1:ga4_loader_id", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
       : target === "spa_page_view"
-        ? ["RH:ga4_spa_page_view", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
+        ? ["S:spa_page_view_applied", "RH:ga4_spa_page_view", "RH:ga4_one_page_view", "PV:ga4_seen_leaving"]
         : ["RH:ga4_one_page_view", "PV:ga4_seen_leaving"],
   // R4-2: the capture beside an adopted pixel is checked like the writer it replaces: one `_fbc`, holding the last
   // click, on the page as the agent left it (`item-t0.ts` builds that page from the job's files).
@@ -189,7 +189,7 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
     target === "retire_fbc_writer" || target === "capture"
       ? ["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"]
       : target === "spa_page_view"
-        ? ["RH:meta_spa_page_view"]
+        ? ["S:spa_page_view_applied", "RH:meta_spa_page_view"]
         : target === "autoconfig_off_adopted"
           ? // LF4-P1-2: its own work is checked (the mirror's event-id check passed on a page with nothing of it).
             ["S:meta_autoconfig_off", "PV:meta_seen_leaving"]
@@ -596,7 +596,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
 
   // 11 setup_check_fixes (static setup-check problems with file evidence)
   const setupProblems = facts.checks.filter(
-    (check) => check.state === "problem" && check.tier === "S" && (check.evidence ?? []).some((entry) => "file" in entry)
+    (check) => check.state === "problem" && check.tier === "S" && !!check.reason?.trim() && check.reason.trim() !== "problem" && (check.evidence ?? []).some((entry) => "file" in entry)
   )
   for (const check of [...setupProblems].sort((a, b) => (a.checkId < b.checkId ? -1 : a.checkId > b.checkId ? 1 : 0))) {
     const evidence = (check.evidence ?? []).filter((entry): entry is { file: string; line: number } => "file" in entry)

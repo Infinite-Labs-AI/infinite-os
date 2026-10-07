@@ -24,8 +24,10 @@ describe("a form that submits and emits nothing", () => {
     expect(finding.line).toBe(1)
     expect(finding.message.startsWith("Worth checking:")).toBe(true)
     expect(finding.message).toContain("it has a type=submit button")
-    expect(finding.message).toContain('add `data-conversion="signup"` to the <form> tag itself')
-    expect(finding.message).toContain("ignore this line")
+    expect(finding.message).toContain("matching data-conversion marker on the <form> itself")
+    expect(finding.message).toContain("does not follow imported or custom handlers")
+    expect(finding.message).not.toContain("no analytics call")
+    expect(finding.message).not.toContain("nothing here ever tries")
   })
 
   it("goes quiet once the form is marked", () => {

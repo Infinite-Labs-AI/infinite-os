@@ -8,6 +8,8 @@ export const CHECK_LABELS: Readonly<Record<string, string>> = {
   posthog_distinct_id_receipt: "PostHog received this visit",
   server_lane_probe_receipt: "Server reporting reached Infinite",
   ga4_loader_id: "GA4 ID matches your connection",
+  ga4_id_applied: "GA4 setup matches your connection",
+  spa_page_view_applied: "Page-change tracking is in the code",
   byte_census: "Each tag once per page",
   one_beacon_per_tool: "Each tag once per page",
   ga4_spa_page_view: "GA4: one page view per page change",

@@ -28,7 +28,7 @@ import { sanitizeUntrusted } from "../agents/sanitize.js"
 import { openTagBridge } from "../bridge/client.js"
 import { envProxyFetch } from "../checks/live/env-proxy-fetch.js"
 import { registerJobStaticChecks, type JobStaticRunContext } from "../checks/job-static.js"
-import { registerO9Checks } from "../checks/o9.js"
+import { registerO9Checks, type O9RunContext } from "../checks/o9.js"
 import { runCensus } from "../checks/census.js"
 import { lexicalStates } from "../lexical-states.js"
 import { createCheckRunner } from "../checks/registry.js"
@@ -113,7 +113,7 @@ function runKeys(root: string, runId: string | null): TagKeys | null {
 }
 
 /** O9's run context: the exempt production hosts (§3h.9) and the run's expectation (the connection's ids). */
-export function o9RunContext(root: string, runId: string | null): { productionHosts?: string[]; expect?: TestExpect; expectedEmittedGuard?: string } | undefined {
+export function o9RunContext(root: string, runId: string | null): O9RunContext | undefined {
   const before = readBeforeFactsSync(root, runId)
   if (!before) return undefined
   const keys = applyKeysChoices(before.facts.keys, readKeysResultSync(root, runId))
@@ -131,7 +131,11 @@ export function o9RunContext(root: string, runId: string | null): { productionHo
   const currentPlan = isRecord(runState) && runState.runId === runId && isRecord(runState.plan) && runState.plan.hash === saved?.planHash && isRecord(runState.steps) && isRecord(runState.steps.before) && runState.steps.before.at === saved?.beforeAt
   const approved = currentPlan ? saved?.guard : null
   const expectedEmittedGuard = approved?.emit ? buildHostGuardExpression({ mode: "deny", exempt: approved.exempt, deny: approved.deny }) : null
-  return { productionHosts: [...new Set(hosts)], expect: testExpectFromKeys(keys), ...(expectedEmittedGuard ? { expectedEmittedGuard } : {}) }
+  const plan = currentPlan && saved?.plan ? briefPlanFrom(saved.plan, saved.approvals) : null
+  return {
+    productionHosts: [...new Set(hosts)], expect: testExpectFromKeys(keys), ...(expectedEmittedGuard ? { expectedEmittedGuard } : {}),
+    ...(plan ? { conversionNames: plan.conversionNames, posthogSensitivePaths: [...new Set(plan.lines.filter(line => line.kind === "sensitive_pages").flatMap(line => line.sensitivePaths ?? []))] } : {})
+  }
 }
 
 /**

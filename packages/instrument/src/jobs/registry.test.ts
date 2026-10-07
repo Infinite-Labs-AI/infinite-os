@@ -148,6 +148,15 @@ describe("seedCandidates", () => {
     expect(ids.some((id) => id.startsWith("setup_check_fixes") || id.startsWith("csp:"))).toBe(false)
   })
 
+  it("does not manufacture a setup owner action without a finding to act on", () => {
+    const file = "src/analytics.ts"
+    const scan = scanOf({ [file]: "function boot() { posthog.opt_out_capturing(); }" })
+    for (const reason of [undefined, "", "  ", "problem"]) {
+      const seeded = seedCandidatesFrom(scan, facts({ checks: [check("silent_form", "S", "problem", { reason, evidence: [{ file, line: 1 }] })] }))
+      expect(seeded.some(item => item.jobId === "setup_check_fixes")).toBe(false)
+    }
+  })
+
   it("parks a nonce / strict-dynamic CSP for the user, and a CSP that is not in the repo", () => {
     const nonce = { ...SITE, "next.config.mjs": "headers: [{ key: 'Content-Security-Policy', value: `script-src 'nonce-${n}' 'strict-dynamic'` }]\n" }
     expect(seedCandidatesFrom(scanOf(nonce), facts()).find((item) => item.jobId === "csp")).toMatchObject({ state: "blocked", blockedReason: "needs_you" })

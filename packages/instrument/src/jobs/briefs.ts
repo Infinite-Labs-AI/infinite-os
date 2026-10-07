@@ -23,6 +23,7 @@ import { boundConversionNames, type BriefConnections, type BriefPlan } from "./p
 import { buildMetaClickIdCaptureJavascript, buildMetaClickIdCaptureScript, buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
 import { adoptedMetaModuleGuardRecipe } from "../providers/meta.js"
 import { escapeForTemplateLiteral, escapeRegExp } from "../text-escape.js"
+import { sensitivePosthogOptions } from "../install/posthog-sensitive.js"
 
 export { escapeForTemplateLiteral }
 
@@ -104,6 +105,11 @@ export const GA4_PAGE_CHANGE_SCRIPT = [
   "})();"
 ].join("\n")
 
+/** The same bounded History API subscription, emitting only on a changed page after initial load. */
+export const META_PAGE_CHANGE_SCRIPT = GA4_PAGE_CHANGE_SCRIPT
+  .replaceAll("__infiniteGa4PageChange", "__infiniteMetaPageChange")
+  .replace("if (typeof window.gtag === 'function') window.gtag('event', 'page_view', { page_location: location.href, page_title: document.title });", "if (typeof window.fbq === 'function') window.fbq('track', 'PageView');")
+
 /** R4-6: the one line that turns Meta's automatic events off on pixel `pixelId`, placed right before its init. */
 export function autoConfigOffLine(pixelId: string): string {
   return `fbq('set', 'autoConfig', false, '${pixelId}');`
@@ -147,12 +153,15 @@ export const JOB_GISTS: { readonly [J in JobId]: string } = {
 
 /** Narrower gists for item targets whose job covers several fixes (the job gist still applies). */
 export const TARGET_GISTS: Readonly<Record<string, string>> = {
+  "posthog_improve:sensitive_pages": "Here: append `sensitiveOptions` from Plan data LAST inside each existing posthog.init options object. Preserve all existing options and exclusions. The addition turns replay and autocapture OFF only on the approved paths and descendants; it never turns either ON anywhere.",
+  "setup_check_fixes:silent_form": "Here: use an approved name as data-conversion on the <form> itself, and call infiniteTrack with that same name inside its successful response branch, before navigation. A marker alone does not send a completed conversion. Use the supplied helper import when present.",
   "posthog_improve:proxy": "Here: route PostHog through `/ingest` (`api_host: '/ingest'` + the exact rewrite) and set `ui_host` from the connection's region.",
   "posthog_improve:history_change": "Here: set `capture_pageview: 'history_change'` so single-page navigations are counted.",
   "ga4_improve:id": "Here: make the configured measurement id the connection's id, only where the plan line says so.",
   "ga4_improve:spa_page_view":
     "Here: paste `pageViewOnPageChange.pasteAsWritten` from Plan data exactly, as the next statement after `pageViewOnPageChange.insertAfter`, inside the same script and block (so any preview guard around it covers it too). It sends one page_view per page change and never on the first load. Change nothing else.",
   "meta_improve:mirror": "Here: move the browser standard conversions named below onto `infiniteMetaMirror(metaEventId)`.",
+  "meta_improve:spa_page_view": "Here: paste `pageViewOnPageChange.pasteAsWritten` from Plan data exactly as the next statement after the existing fbq('track', 'PageView'), inside the same script and block. It sends nothing on the first load. Change nothing else.",
   "meta_improve:capture":
     "Here: paste `capture.pasteAsWritten` from Plan data exactly at `capture.insertBefore`. In a plain module it is a top-level statement after imports, outside the pixel function and every preview or consent early return; its own consent gate waits for a grant when required and writes nothing on a recorded no, DNT or GPC. In JSX or HTML it is its own element before the pixel. Never write your own capture, host-guard it or change the pixel.",
   "meta_improve:autoconfig_off_adopted": "Here: put `autoConfigOff.lineAsWritten` from Plan data on its own line right before `autoConfigOff.insertBefore`. Change nothing else.",
@@ -165,6 +174,7 @@ export const TARGET_GISTS: Readonly<Record<string, string>> = {
  * Review I1 P1-2: the user's own Next config gets the managed rewrites; no tag goes in any page.
  */
 export const TARGET_WHAT: Readonly<Record<string, string>> = {
+  "posthog_improve:sensitive_pages": "Turn PostHog replay and autocapture off on the approved sensitive paths with the supplied restrictive addition.",
   // R4-6: the job's own task, never the whole job's gist (run 4's capture job read "Boot the pixel…; send browser
   // conversions only through infiniteMetaMirror…" above "paste the capture").
   "meta_improve:capture": "Add Infinite's `_fbc` capture beside the existing pixel, exactly as Plan data gives it.",
@@ -172,7 +182,7 @@ export const TARGET_WHAT: Readonly<Record<string, string>> = {
   "ga4_improve:spa_page_view": "Make the existing GA4 send one page_view per client-side page change, with the bytes Plan data gives.",
   // §3x.3 (F6).
   "meta_improve:spa_page_view":
-    "Add exactly one fbq('track', 'PageView') per client-side navigation from the router's navigation hook. Never on the first load (the bootstrap already sends it) and never inside a click handler.",
+    "Make the existing Meta pixel send one PageView per client-side page change, with the bytes Plan data gives. Never send on the first load or from a click handler.",
   "unusual_layout:next_config_rewrites":
     "Add exactly the rewrites quoted under Why to the existing Next config's async rewrites() (create the function if it has none). Change nothing else in the file; never put a tag in a page."
 }
@@ -290,6 +300,13 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
   const target = itemTargetOf(item)
   const plan = facts.plan ?? null
   switch (item.jobId) {
+    case "setup_check_fixes": {
+      if (target !== "silent_form" && target !== "conversion_placement") return {}
+      const names = plan?.conversionNames ?? []
+      const file = item.allow.files[0]
+      return { approvedConversionNames: names, acceptedShape: '<form data-conversion="<approved name>" onSubmit={handler}>; in handler: if (response.ok) { infiniteTrack("<approved name>"); }',
+        ...(file && facts.helpers?.module ? { helperImport: helperImportFor(file, facts.helpers.module) } : {}) }
+    }
     case "server_conversions":
     case "conversions_to_tools": {
       if (!plan) return new Error(`the brief for ${item.id} needs the approved plan (conversion names)`)
@@ -327,6 +344,11 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
         : { guardExpression: guard.expression, productionHostsExempt: guard.exemptHosts, ...(target === "meta" ? { metaGuardRecipe: guard.metaRecipe } : {}) }
     }
     case "posthog_improve": {
+      if (target === "sensitive_pages") {
+        const paths = [...new Set((plan?.lines ?? []).filter(line => line.kind === "sensitive_pages" && line.jobIds.includes(item.id)).flatMap(line => line.sensitivePaths ?? []))]
+        if (paths.length === 0) return new Error(`the brief for ${item.id} needs the sensitive paths from the approved plan`)
+        return { sensitivePaths: paths, sensitiveOptions: sensitivePosthogOptions(undefined, paths) }
+      }
       if (!facts.connections) return new Error(`the brief for ${item.id} needs the connections' public IDs`)
       const posthog = facts.connections.posthog
       return { posthogUiHost: posthog?.uiHost ?? null, posthogRegion: posthog?.region ?? null }
@@ -349,6 +371,10 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
       if (!facts.connections) return new Error(`the brief for ${item.id} needs the connections' public IDs`)
       const data: Record<string, unknown> = { connectedMetaPixelIds: facts.connections.metaPixelIds }
       const site = (facts.guardSites ?? []).find((entry) => entry.tool === "meta" && item.allow.files.includes(entry.file))
+      if (target === "spa_page_view") {
+        if (!site) return new Error(`the brief for ${item.id} needs where the adopted Meta pixel starts`)
+        data.pageViewOnPageChange = { insertAfter: `fbq('track', 'PageView') after the init at ${site.file}:${site.line}`, pasteAsWritten: site.context === "template_literal" ? escapeForTemplateLiteral(META_PAGE_CHANGE_SCRIPT) : META_PAGE_CHANGE_SCRIPT }
+      }
       if (target === "capture") {
         // R4-6: the exact bytes and the exact place; the agent never writes its own capture.
         if (!site) return new Error(`the brief for ${item.id} needs where the adopted Meta pixel starts`)
@@ -395,6 +421,9 @@ export function prescribedPasteOf(item: ChecklistItem, facts: BriefFacts): Presc
     text = pick("pageViewOnPageChange", "pasteAsWritten")
     // Review 2 P3-c: only the job's own measurement id anchors it (a config of any id is not "where the brief puts it").
     if (site.publicId) placement = { kind: "after_ga4_config", measurementId: site.publicId }
+  } else if (item.jobId === "meta_improve" && target === "spa_page_view") {
+    text = pick("pageViewOnPageChange", "pasteAsWritten")
+    placement = { kind: "after_meta_pageview" }
   } else if (item.jobId === "meta_improve" && target === "capture") {
     text = pick("capture", "pasteAsWritten")
     placement = { kind: "before_meta_init_element" }
@@ -416,6 +445,7 @@ export function pastedInPlace(source: string, paste: PrescribedPaste): boolean {
     const end = at + paste.text.length
     const placement = paste.placement
     if (placement.kind === "after_ga4_config" && followsGa4Config(source, lexed, at, placement.measurementId)) return true
+    if (placement.kind === "after_meta_pageview" && followsMetaPageview(source, lexed, at)) return true
     if (placement.kind === "before_meta_init_element" && precedesMetaInitElement(source, lexed, end)) return true
     if (placement.kind === "before_meta_init" && onItsOwnLine(source, at) && precedesMetaInit(source, end, placement.pixelId)) return true
   }
@@ -528,6 +558,16 @@ function followsGa4Config(source: string, lexed: Lexed, at: number, measurementI
   const found = match.exec(source)
   if (!found) return false
   let rest = lexed.skipBlank(start + found[0].length)
+  if (source[rest] === ";") rest = lexed.skipBlank(rest + 1)
+  return rest >= at
+}
+
+function followsMetaPageview(source: string, lexed: Lexed, at: number): boolean {
+  const start = lexed.codeStart("fbq(", at)
+  if (start < 0) return false
+  const call = /^fbq\(\s*(['"])track\1\s*,\s*(['"])PageView\2\s*\)/.exec(source.slice(start))
+  if (!call) return false
+  let rest = lexed.skipBlank(start + call[0].length)
   if (source[rest] === ";") rest = lexed.skipBlank(rest + 1)
   return rest >= at
 }

@@ -31,7 +31,11 @@ import { readAppSources, setupChecksOver, validatedCaptureContext, type SetupChe
 import { checkMetaEventId } from "../setup-checks/meta-event-id.js"
 import { checkPosthogConfig, posthogConfigDrift, readPosthogConfigs, type PosthogConfigRead } from "../setup-checks/posthog-config.js"
 import type { SetupFinding } from "../setup-checks/types.js"
-import type { TagHosting } from "../wizard/contracts/bridge.js"
+import { CONVERSION_TYPES, type TagHosting } from "../wizard/contracts/bridge.js"
+import { boundConversionNames } from "../jobs/plan-data.js"
+import { formRegions, literalAttributeValue } from "../setup-checks/markup.js"
+import { runtimeConversionLanes } from "../setup-checks/contract.js"
+import { jobStaticCheckFunctions } from "./job-static.js"
 import type { ChecklistItem, CheckContext, CheckFn, CheckResult, CheckRunner, EnvSourcedId, TurnDiff } from "../wizard/contracts/jobs.js"
 import type { TestExpect } from "../wizard/contracts/test-engine.js"
 
@@ -110,6 +114,9 @@ export interface JobInput {
 
 /** What the run knows that a check's input does not carry (I1 wires it from the keys verb and the plan). */
 export interface O9RunContext {
+  /** Names and paths from this run's approved plan, never an agent's claim. */
+  conversionNames?: readonly string[]
+  posthogSensitivePaths?: readonly string[]
   /** The exempt production hosts (site source ∪ hosting domains + aliases ∪ the observed host). */
   productionHosts?: readonly string[]
   /** The approved preview guard's exact emitted bytes for job 7. */
@@ -224,7 +231,7 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
 
   const filesOf = (input: Record<string, unknown>) => readAppSources(appRootOf(input, deps))
   const rootOf = (input: Record<string, unknown>) => deps.root ?? (typeof input.root === "string" ? input.root : undefined)
-  const setupContext = (input: Record<string, unknown>) => validatedCaptureContext(rootOf(input) ?? appRootOf(input, deps), appRootOf(input, deps), (input.context as SetupChecksContext | undefined) ?? {})
+  const setupContext = (input: Record<string, unknown>) => validatedCaptureContext(rootOf(input) ?? appRootOf(input, deps), appRootOf(input, deps), { conversionNames: deps.run?.()?.conversionNames, ...((input.context as SetupChecksContext | undefined) ?? {}) })
   /** Findings narrowed to the item's scope (all of them when the input has no item). */
   const scoped = <T extends { file?: string; code?: string }>(input: Record<string, unknown>, findings: readonly T[]): T[] => {
     const inScope = itemScope(input, appRootOf(input, deps), rootOf(input))
@@ -294,7 +301,7 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
       const appRoot = appRootOf(input, deps)
       const files = filesOf(input)
       const after = readPosthogConfigs(files)
-      const findings = scoped(input, checkPosthogConfig({ files, ...(typeof input.expectedApiHost === "string" ? { expectedApiHost: input.expectedApiHost } : {}) }).findings)
+      const findings = scoped(input, checkPosthogConfig({ files, ...(typeof input.expectedApiHost === "string" ? { expectedApiHost: input.expectedApiHost } : {}) }).findings).filter(finding => finding.state !== "info")
       // The config BEFORE the job: given, or read at the base commit for every file that inits PostHog now.
       let before: PosthogConfigRead[] | null = Array.isArray(input.before) ? (input.before as PosthogConfigRead[]) : null
       if (before === null) {
@@ -316,7 +323,7 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
           })
         )
       }
-      const drift = before === null ? [] : scoped(input, posthogConfigDrift(before, after, { sensitivePagesApproved: input.sensitivePagesApproved === true }))
+      const drift = before === null ? [] : scoped(input, posthogConfigDrift(before, after, { sensitivePaths: deps.run?.()?.posthogSensitivePaths }))
       results.push(...[...drift, ...findings].map((finding) => setupFindingResult(finding, ctx, "posthog_config")))
       return results.length > 0 ? results : [checkResult("posthog_config", "pass", "S", ctx, { reason: "the site's PostHog config reads cleanly and its privacy settings are unchanged" })]
     }),
@@ -424,9 +431,32 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
       const unread = verdicts.find((verdict) => verdict.reason !== "opted_out_before_init")!
       return [checkResult("meta_autoconfig_off", "undetermined", "S", ctx, { reason: `automatic events on pixel ${unread.pixelId}: ${unread.reason}` })]
     }),
-    setup_rerun_clean: wrap("setup_rerun_clean", "S", (input, ctx) => {
-      const report = setupChecksOver(filesOf(input), setupContext(input))
-      const findings = scoped(input, report.findings)
+    setup_rerun_clean: wrap("setup_rerun_clean", "S", async (input, ctx) => {
+      const sources = filesOf(input)
+      const report = setupChecksOver(sources, setupContext(input))
+      const item = input.item as JobInput["item"] | undefined
+      const target = item?.id.startsWith("setup_check_fixes:") ? item.id.slice("setup_check_fixes:".length) : null
+      const ownCheck = report.checks.some(check => check.check === target)
+      let findings = scoped(input, report.findings).filter(finding => !ownCheck || finding.check === target || (target === "silent_form" && finding.check === "conversion_placement"))
+      if (target === "silent_form" && item) {
+        const inScope = itemScope(input, appRootOf(input, deps), rootOf(input))
+        const forms = [...sources].filter(([file]) => !inScope || inScope({ file })).flatMap(([, source]) => formRegions(source))
+        const names = setupContext(input).conversionNames ?? []
+        const marker = forms.length === 1 ? literalAttributeValue(forms[0]!.site.openingTag, "data-conversion") : null
+        const runtimeMarker = runtimeConversionLanes().some(lane => lane.value === marker)
+        // A helper name is not a submit listener. A source-verifiable success call is required.
+        if (forms.length === 1 && names.length > 0 && !runtimeMarker) {
+          const types = CONVERSION_TYPES.filter(type => boundConversionNames(type, names).some(name => marker === null || name === marker))
+          const check = jobStaticCheckFunctions({ root: rootOf(input), run: () => ({ conversionNames: names }) }).track_after_success
+          const checks: CheckResult[] = []
+          for (const type of types) {
+            const read = await check({ ...input, item: { ...item, jobId: "conversions_to_tools", id: `conversions_to_tools:${type}` } }, ctx)
+            checks.push(...(Array.isArray(read) ? read : [read]))
+          }
+          if (checks.some(result => result.state === "pass")) findings = findings.filter(finding => finding.check !== "silent_form")
+          else if (marker !== null && names.includes(marker)) return [{ ...(checks[0] ?? checkResult("setup_rerun_clean", "undetermined", "S", ctx, { reason: "the approved marker has no success handler the wizard can verify" })), checkId: "setup_rerun_clean" }]
+        }
+      }
       const problems = findings.filter((finding) => finding.state === "problem")
       const undetermined = findings.filter((finding) => finding.state === "undetermined")
       if (problems.length > 0) {

@@ -772,6 +772,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       line({
         id: "sensitive_pages:posthog:managed",
         kind: "sensitive_pages",
+        sensitivePaths: [...scan.sensitivePaths],
         text: `PostHog: no session replay and no autocapture on sensitive pages (${scan.sensitivePaths.join(", ")}).`,
         requires: "approval",
         ownership: "managed"
@@ -811,6 +812,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
             : entry.text,
       requires: "approval",
       ownership: "adopted",
+      ...(entry.kind === "sensitive_pages" ? { sensitivePaths: [...scan.sensitivePaths] } : {}),
       ...(measured ? { measured } : {})
     })
     lines.push(planLine)

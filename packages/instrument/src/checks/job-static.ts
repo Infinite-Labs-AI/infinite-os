@@ -32,6 +32,8 @@ import { runCensus } from "./census.js"
 import { analyzeCsp, cspNeeds, parseCspPolicies } from "./live/csp.js"
 import { checkResult, isolated } from "./result.js"
 import { escapeRegExp } from "../text-escape.js"
+import { GA4_PAGE_CHANGE_SCRIPT, META_PAGE_CHANGE_SCRIPT, pastedInPlace } from "../jobs/briefs.js"
+import { readPosthogConfigs, stripSensitivePosthogAddition } from "../setup-checks/posthog-config.js"
 
 /** The check ids this module registers (the job table's S checks that had no implementation). */
 export const JOB_STATIC_CHECK_IDS = [
@@ -50,7 +52,9 @@ export const JOB_STATIC_CHECK_IDS = [
   // LF4 close round 2 (P1-1): each job target's own proof that its change is in the code.
   "conversion_tracked",
   "meta_mirror_wired",
-  "posthog_improve_applied"
+  "posthog_improve_applied",
+  "spa_page_view_applied",
+  "ga4_id_applied"
 ] as const
 export type JobStaticCheckId = (typeof JOB_STATIC_CHECK_IDS)[number]
 
@@ -62,6 +66,7 @@ export interface JobStaticRunContext {
   expect?: TestExpect
   /** The conversion names the user approved in the plan. */
   conversionNames?: readonly string[]
+  posthogSensitivePaths?: readonly string[]
   /** Legacy input, ignored. Policy content is never checked. */
   privacyText?: string | null
   /** Legacy input, ignored by policy checks (which are retired). */
@@ -339,6 +344,29 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
   })
 
   return {
+    spa_page_view_applied: run("spa_page_view_applied", (input, ctx) => {
+      const tool = input.item.jobId === "ga4_improve" ? "ga4" : "meta"
+      const script = tool === "ga4" ? GA4_PAGE_CHANGE_SCRIPT : META_PAGE_CHANGE_SCRIPT
+      const ids = context().expect?.ga4 ?? []
+      if (tool === "ga4" && ids.length === 0) return result("spa_page_view_applied", ctx, "undetermined", "the connected GA4 measurement ids are not known")
+      for (const [file, text] of itemFiles(input)) {
+        const placements = tool === "ga4" ? ids.map(measurementId => ({ kind: "after_ga4_config" as const, measurementId })) : [{ kind: "after_meta_pageview" as const }]
+        if (placements.some(placement => pastedInPlace(text, { file, text: script, placement }))) {
+          return result("spa_page_view_applied", ctx, "pass", `the supplied ${tool === "ga4" ? "GA4" : "Meta"} page-change subscription is immediately after its initial page-view statement`, file)
+        }
+      }
+      return missing("spa_page_view_applied", ctx, "the supplied page-change subscription is not in its prescribed place")
+    }),
+    ga4_id_applied: run("ga4_id_applied", (input, ctx) => {
+      const ids = context().expect?.ga4
+      if (!ids?.length) return result("ga4_id_applied", ctx, "undetermined", "the connected GA4 measurement ids are not known")
+      const files = new Set(itemFiles(input).keys())
+      const entries = runCensus({ root: input.root, appRoot: input.appRoot }).entries.filter(entry => entry.tool === "ga4" && entry.kind !== "gtm" && entry.owner === "adopted" && files.has(entry.file))
+      if (entries.length === 0) return missing("ga4_id_applied", ctx, "no adopted GA4 config in the job's files")
+      if (entries.some(entry => entry.id === null)) return result("ga4_id_applied", ctx, "undetermined", "an adopted GA4 id is not a readable literal")
+      if (entries.some(entry => !ids.includes(entry.id!))) return missing("ga4_id_applied", ctx, "the adopted GA4 id does not match the connected measurement id")
+      return result("ga4_id_applied", ctx, "pass", "every adopted GA4 config in the job's files uses a connected measurement id")
+    }),
     // Job 1: the lane is mounted before the routes (a Node server), or wraps the exported middleware (Next).
     server_lane_mount_order: run("server_lane_mount_order", (input, ctx) => {
       const scope = itemFiles(input)
@@ -636,6 +664,15 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
     posthog_improve_applied: run("posthog_improve_applied", (input, ctx) => {
       const target = itemTarget(input.item)
       const scope = itemFiles(input)
+      if (target === "sensitive_pages") {
+        const paths = context().posthogSensitivePaths
+        if (!paths?.length) return result("posthog_improve_applied", ctx, "undetermined", "the approved sensitive paths are not available")
+        const inits = readPosthogConfigs(scope).filter(read => !read.managed)
+        if (!inits.length) return missing("posthog_improve_applied", ctx, "no adopted PostHog init in the job's files")
+        if (inits.some(read => !read.readable || !read.optionsSource)) return result("posthog_improve_applied", ctx, "undetermined", "the adopted PostHog options are not a readable literal object")
+        if (inits.some(read => stripSensitivePosthogAddition(read.optionsSource!, paths) === null)) return missing("posthog_improve_applied", ctx, "the exact restrictive sensitive-page addition is not last in every adopted PostHog options object")
+        return result("posthog_improve_applied", ctx, "pass", `the approved addition turns replay and autocapture off on ${paths.join(", ")} and descendants without enabling collection elsewhere`)
+      }
       const inits = [...scope].filter(([, text]) => /\bposthog\s*\.\s*init\s*\(/.test(maskCommentsAndStrings(text, false)))
       if (inits.length === 0) return result("posthog_improve_applied", ctx, "undetermined", `no posthog.init in ${files([...scope.keys()]) || "the job's files"}, so the setting cannot be read`)
       const manualPageview = capturesPageviewManually(snapshotOf(scope, input.appRoot))

@@ -10,6 +10,7 @@ import { FIXED_NOW, fixtureFetch } from "../../test/wizard/fixture-fetch.js"
 import type { CheckFn, CheckId } from "../wizard/contracts/jobs.js"
 import { buildHostGuardExpression } from "../host-guard.js"
 import { buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
+import { sensitivePosthogOptions } from "../install/posthog-sensitive.js"
 
 import { O9_CHECK_IDS, O9_RUNNER_METHODS, o9CheckFunctions, registerO9Checks } from "./o9.js"
 
@@ -108,7 +109,7 @@ describe("O9 registration", () => {
     const item = { id: "posthog_improve:proxy", allow: { files: ["src/ph.ts"], create: [] }, trigger: { finding: "posthog_not_proxied", evidence: [] } }
     const fns = o9CheckFunctions({ version: "t", root })
     const drift = (await fns.posthog_config!({ item, root, appRoot: root, runId: "run-9" }, ctx)) as Array<{ state: string; reason?: string }>
-    expect(drift.map((result) => result.state)).toEqual(["problem", "problem"])
+    expect(drift.map((result) => result.state)).toEqual(["problem"])
     expect(drift[0]!.reason).toContain("INF_SETUP_POSTHOG_PRIVACY_CHANGED")
     // Negative: nothing changed since the base commit.
     const same = repo({ "src/ph.ts": base }, {})
@@ -119,6 +120,43 @@ describe("O9 registration", () => {
     const unknown = (await o9CheckFunctions({ version: "t", root: noGit }).posthog_config!({ item, root: noGit, appRoot: noGit, runId: "run-9" }, ctx)) as Array<{ state: string }>
     expect(unknown.map((result) => result.state)).toContain("undetermined")
     expect(unknown.map((result) => result.state)).not.toContain("pass")
+  })
+
+  it("accepts the approved restrictive sensitive-page edit without failing other PostHog jobs", async () => {
+    const file = "app/providers.tsx"
+    const base = "posthog.init('phc_abcdefghijklmnop', { api_host: '/ingest', defaults: '2026-01-30' })"
+    const paste = sensitivePosthogOptions(base, ["/login"])!
+    const edited = base.replace(" })", `, ${paste} })`)
+    const root = repo({ [file]: base }, { [file]: edited })
+    const fns = o9CheckFunctions({ version: "t", root, run: () => ({ posthogSensitivePaths: ["/login"] }) })
+    for (const target of ["sensitive_pages", "proxy", "history_change", "defaults"]) {
+      const item = { id: `posthog_improve:${target}`, allow: { files: [file], create: [] }, trigger: { finding: "PostHog", evidence: [] } }
+      expect(await fns.posthog_config({ item, root, appRoot: root }, ctx), target).toMatchObject([{ state: "pass" }])
+    }
+  })
+
+  it("rejects turning collection on even with sensitive-page approval", async () => {
+    const file = "app/providers.tsx"
+    const base = "posthog.init('phc_abcdefghijklmnop', { api_host: '/ingest', defaults: '2026-01-30', autocapture: false, disable_session_recording: true })"
+    const root = repo({ [file]: base }, { [file]: base.replace("autocapture: false", "autocapture: true") })
+    const fns = o9CheckFunctions({ version: "t", root })
+    const results = await fns.posthog_config({ appRoot: root, sensitivePagesApproved: true }, ctx) as Array<{ state: string }>
+    expect(results.some(result => result.state === "problem")).toBe(true)
+  })
+
+  it("verifies an approved lead marker and successful conversion call without unrelated setup findings", async () => {
+    const file = "app/contact/page.tsx"
+    const form = `export default function Contact() {\n async function send() {\n const response = await fetch('/api/contact', { method: 'POST' });\n if (response.ok) { infiniteTrack('lead'); }\n }\n return <><form data-conversion="lead" onSubmit={send}><input type="email" /><button type="submit">Send</button></form><script>posthog.init('phc_abcdefghijklmnop', customOptions)</script></>\n}`
+    const root = app({ [file]: form })
+    const item = { id: "setup_check_fixes:silent_form", allow: { files: [file], create: [] }, trigger: { finding: "Setup check silent_form: INF_SETUP_FORM_NO_CONVERSION", evidence: [{ file, line: 1 }] } }
+    const check = o9CheckFunctions({ version: "t", root, run: () => ({ conversionNames: ["lead"] }) }).setup_rerun_clean
+    expect(await check({ item, root, appRoot: root }, ctx)).toMatchObject([{ state: "pass" }])
+    writeFileSync(join(root, file), form.replace("infiniteTrack('lead');", ""))
+    expect(await check({ item, root, appRoot: root }, ctx)).toMatchObject([{ state: "problem" }])
+    writeFileSync(join(root, file), form.replace(' data-conversion="lead"', ""))
+    expect(await check({ item, root, appRoot: root }, ctx)).toMatchObject([{ state: "pass" }])
+    writeFileSync(join(root, file), form.replaceAll("lead", "not_approved"))
+    expect(await check({ item, root, appRoot: root }, ctx)).toMatchObject([{ state: "problem" }])
   })
 
   it("adopted_init_guarded takes the production hosts from the run (review P1-7)", async () => {

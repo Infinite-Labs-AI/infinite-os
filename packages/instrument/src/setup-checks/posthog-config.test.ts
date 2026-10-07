@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest"
 
 import { buildManagedHtmlBlock } from "../frameworks/managed-html.js"
+import { sensitivePosthogOptions } from "../install/posthog-sensitive.js"
 
 import { checkPosthogConfig, posthogConfigDrift, readPosthogConfigs } from "./posthog-config.js"
 
@@ -63,14 +64,34 @@ describe("posthog config", () => {
     expect(checkPosthogConfig({ files: files({ "index.html": html }) }).findings).toEqual([])
   })
 
-  it("drift: an edit that changes autocapture or replay is a problem unless D17 was approved", () => {
+  it("drift: only the exact approved restrictive addition may change privacy options", () => {
     const before = readPosthogConfigs(files({ "src/ph.ts": "posthog.init('phc_abcdefghijklmnop', { api_host: 'https://us.i.posthog.com' })" }))
     const after = readPosthogConfigs(files({ "src/ph.ts": "posthog.init('phc_abcdefghijklmnop', { api_host: '/ingest', autocapture: false })" }))
     expect(posthogConfigDrift(before, after).map((finding) => finding.code)).toEqual(["INF_SETUP_POSTHOG_PRIVACY_CHANGED"])
-    expect(posthogConfigDrift(before, after, { sensitivePagesApproved: true })).toEqual([])
+    expect(posthogConfigDrift(before, after, { sensitivePagesApproved: true })).toMatchObject([{ state: "problem" }])
     // Negative: only the proxy changed.
     const proxyOnly = readPosthogConfigs(files({ "src/ph.ts": "posthog.init('phc_abcdefghijklmnop', { api_host: '/ingest' })" }))
     expect(posthogConfigDrift(before, proxyOnly)).toEqual([])
+  })
+
+  it.each([
+    "autocapture: true, disable_session_recording: false,",
+    "autocapture: false, disable_session_recording: true,",
+    "autocapture: false,",
+    "disable_session_recording: true,",
+    "...existing,",
+    ""
+  ])("preserves every existing privacy option around the approved addition: %s", options => {
+    const base = `posthog.init('phc_fixture', { ${options} api_host: '/ingest' });`
+    const paste = sensitivePosthogOptions(base, ["/login", "/checkout"]) ?? sensitivePosthogOptions(undefined, ["/login", "/checkout"])!
+    const amended = base.replace(" });", `, ${paste} });`)
+    const reads = (source: string) => readPosthogConfigs(files({ "src/ph.ts": source }))
+    expect(posthogConfigDrift(reads(base), reads(amended), { sensitivePaths: ["/login", "/checkout"] })).toEqual([])
+    expect(posthogConfigDrift(reads(amended), reads(amended), { sensitivePaths: ["/login", "/checkout"] })).toEqual([])
+    for (const wrong of [amended.replace("autocapture: false", "autocapture: true"), amended.replace("disable_session_recording: true", "disable_session_recording: false"), amended.replace('"/checkout"', '"/public"'), amended.replace("} : {}", "} : { autocapture: true }")]) {
+      if (wrong === amended) continue
+      expect(posthogConfigDrift(reads(base), reads(wrong), { sensitivePaths: ["/login", "/checkout"] })).toMatchObject([{ state: "problem" }])
+    }
   })
 
   it("groups the same finding across pages into one line", () => {

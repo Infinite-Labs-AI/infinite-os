@@ -72,6 +72,8 @@ export interface PlanLine {
   measured?: { value: string | number; window: string }
   jobIds?: string[]
   ownership?: "managed" | "adopted"
+  /** Exact paths shown by an approved sensitive-pages line; never rediscovered after edits. */
+  sensitivePaths?: string[]
 }
 
 export interface PlanDecisionsPayload {

@@ -75,6 +75,8 @@ export interface SetupChecksContext {
   repoRoot?: string
   /** Root used by supplied file keys; readAppSources always returns app-relative keys. */
   appRoot?: string
+  /** Approved helper event names. These markers label success handlers, not runtime submit events. */
+  conversionNames?: readonly string[]
   /** Internal validated entry facts; O9 and runSetupChecks replace any supplied value from disk. */
   managedCaptureEntries?: readonly string[]
   /** The connected PostHog project's `apiHost`: enables the region verdict. */
@@ -98,7 +100,7 @@ export function validatedCaptureContext(root: string, appRootAbsolute: string, c
 /** The same checks over files already read (the wizard re-runs them between agent turns). */
 export function setupChecksOver(files: ReadonlyMap<string, string>, context: SetupChecksContext = {}): SetupChecksReport {
   const checks = [
-    checkConversionPlacement({ files, lanes: runtimeConversionLanes() }),
+    checkConversionPlacement({ files, lanes: runtimeConversionLanes(), approvedConversionNames: context.conversionNames }),
     checkSilentForms({ files }),
     checkClickIdCapture({ files, appRoot: context.appRoot, managedCaptureEntries: context.managedCaptureEntries }),
     checkMetaPixelConfig({ files }),

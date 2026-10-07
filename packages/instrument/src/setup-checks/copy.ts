@@ -89,16 +89,11 @@ export function silentFormMessage(input: {
 }): string {
   return (
     `Worth checking: the <form> at ${input.file}:${input.line} submits (${input.submitVia}) and ` +
-    `emits no conversion event — there is no \`data-conversion\` on the form or anywhere inside it, ` +
-    `no \`data-analytics-cta-id\` on its submit control, and no analytics call in this file. It ` +
-    `looks like a lead form (${input.leadSignal}). A form like this is usually the most valuable ` +
-    `event on the site and the easiest one to miss, because a missing event is indistinguishable ` +
-    `from nobody filling it in — the harness's receipt lanes can only ask whether an event arrived, ` +
-    `and nothing here ever tries to send one. If it IS a conversion, add \`data-conversion="signup"\` ` +
-    `to the <form> tag itself (not to the button — see the placement check) and re-run verify. If it ` +
-    `is NOT — search, filtering, login, newsletter, comments — ignore this line; this check writes ` +
-    `nothing and changes nothing. Ignored, the cost is that every submission stays invisible, so ads ` +
-    `and pages that actually produce customers cannot be told apart from ones that produce nothing.`
+    `the source check did not find supported conversion marking. It looks like a lead form ` +
+    `(${input.leadSignal}). This check does not follow imported or custom handlers; an existing ` +
+    `success handler may already report it. Check that handler before adding anything. If it needs ` +
+    `tracking, use this run's approved conversion name in its successful response branch and put ` +
+    `the matching data-conversion marker on the <form> itself. A marker alone does not send a completed conversion.`
   )
 }
 
