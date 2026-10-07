@@ -273,7 +273,8 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     const clickTested = new Set(run.clickTestedConversions)
     const keyEventNames = approved.filter((name) => clickTested.has(name))
     let marked: string[] = []
-    if (keyEventNames.length > 0 && plan.lines.some(line => line.id === "account_settings:ga4" && line.approved === true)) {
+    const ga4AccountApproved = plan.lines.some(line => line.id === "account_settings:ga4" && line.approved === true)
+    if (keyEventNames.length > 0 && ga4AccountApproved) {
       try {
         const response = await deps.bridge.markGa4KeyEvents({ runId, names: keyEventNames }, { signal: ctx.signal })
         marked = [...response.created, ...response.alreadyExisted]
@@ -285,7 +286,9 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
         if (!pieceLine(ctx, error, "GA4 key events")) throw error
       }
     } else if (approved.length > 0) {
-      sub(ctx, "settings", "GA4 key events: none yet (each is marked once its click test passes)", "info")
+      sub(ctx, "settings", ga4AccountApproved
+        ? "GA4 key events: none yet (each is marked once its click test passes)"
+        : "GA4 key events: not marked (account changes were not approved in the plan)", "info")
     }
 
     // 4. Meta relay (approved line AND available).

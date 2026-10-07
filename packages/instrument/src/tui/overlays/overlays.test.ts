@@ -175,11 +175,13 @@ describe("plan overlay", () => {
   })
 })
 
-it("never opts into package installs or connected-account changes on a plain continue", () => {
+it("never opts into package installs, API costs or connected-account changes on a plain continue", () => {
   const payload: AskPayloads["plan"] = { lines: [
     { id: "npm_install", kind: "npm_install", requires: "approval", editable: true, text: "npm install fixture" },
+    { id: "agent_budget", kind: "agent_budget", requires: "approval", editable: false, text: "Up to $5 API spend" },
     { id: "account_settings:ga4", kind: "account_settings", requires: "approval", editable: false, text: "Mark GA4 key events" },
     { id: "install_provider:infinite", kind: "install_provider", requires: "info", editable: false, text: "Install Infinite" }
   ], decisions: { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: "npm install fixture" } }
-  expect(drive("plan", payload, ENTER).answer).toEqual({ approved: [], declined: ["npm_install", "account_settings:ga4"], edits: {} })
+  expect(drive("plan", payload, ENTER).answer).toEqual({ approved: [], declined: ["npm_install", "agent_budget", "account_settings:ga4"], edits: {} })
+  expect(drive("plan", payload, DOWN + " " + ENTER).answer).toEqual({ approved: ["agent_budget"], declined: ["npm_install", "account_settings:ga4"], edits: {} })
 })

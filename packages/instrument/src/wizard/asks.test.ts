@@ -113,6 +113,22 @@ describe("--yes (§3d.4 YES_POLICY)", () => {
   })
 })
 
+describe("explicit cost and account approvals", () => {
+  const lines = ["agent_budget", "npm_install", "account_settings"].map(kind => line(kind, kind as PlanLine["kind"]))
+  const payload: AskPayloads["plan"] = { ...PLAN, lines }
+
+  it("--yes leaves API spend, package installs and account changes unanswered", async () => {
+    const { asks } = setup({ yes: true })
+    await expect(asks.ask("plan", payload)).resolves.toEqual({ approved: [], declined: [], edits: {} })
+    for (const item of lines) expect(() => approveUnderYes(item)).toThrow(YesPolicyViolation)
+  })
+
+  it("nested --yes and an answers file cannot opt into those actions without the user's own tty", async () => {
+    const { asks } = setup({ yes: true, nested: true }, { v: 1, plan: { approved: lines.map(item => item.id) } })
+    await expect(asks.ask("plan", payload)).resolves.toBe(ASK_TIMEOUT)
+  })
+})
+
 describe("--answers <file>", () => {
   it("answers the plan by line ids and decision keys, and other asks by kind + match", async () => {
     const answers = parseAnswersFile(

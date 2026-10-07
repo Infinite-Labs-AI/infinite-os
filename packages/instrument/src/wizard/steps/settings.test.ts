@@ -269,6 +269,24 @@ describe("step settings", () => {
   })
 })
 
+describe("connected-account settings require their own approval", () => {
+  for (const approved of [false, null] as const) {
+    it(`does not imply GA4 will be marked after a passed click test when approval is ${approved}`, async () => {
+      const { bridge, harness, deps } = await setup({
+        conversions: ["signup"],
+        lines: [{ id: "account_settings:ga4", approved }],
+        approved: ["signup"],
+        clickTested: ["signup"]
+      })
+      await step.run(harness.ctx, deps)
+      expect(bridge.callsFor("ga4-key-events")).toHaveLength(0)
+      expect(bridge.callsFor("server-lane.provision-env")).toHaveLength(0)
+      expect(harness.subs()).toContain("GA4 key events: not marked (account changes were not approved in the plan)")
+      expect(harness.subs().join("\n")).not.toContain("each is marked once its click test passes")
+    })
+  }
+})
+
 describe("step settings: the customer's Vercel is written only with the user's yes", () => {
   for (const [label, lines] of [
     ["no server_lane line in the plan (e.g. a static site, or no Infinite pixel)", [{ id: "meta_relay", approved: false }]],
