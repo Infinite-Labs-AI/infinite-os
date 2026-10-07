@@ -8,7 +8,8 @@ afterEach(() => cleanup(...dirs.splice(0)))
 
 it("scans unfamiliar provider keys in agent progress, claims, questions and structured fallbacks", async () => {
   const token = "aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY"
-  const examples = ["whsec_" + token, "sb_secret_" + token, "sk-ant-api03-" + token, "sk-proj-" + token, `AWS_SECRET_ACCESS_KEY=${token}/+xQ5R2Z`, `postgres://user:${token}@db.example/app`, `api_key=${token}`]
+  // Generic values require an uppercase assignment-style secret name; provider formats stand alone.
+  const examples = ["whsec_" + token, "sb_secret_" + token, "sk-ant-api03-" + token, "sk-proj-" + token, `AWS_SECRET_ACCESS_KEY=${token}/+xQ5R2Z`, `postgres://user:${token}@db.example/app`, `API_KEY=${token}`]
   const { root } = makeFenceFixture()
   const job = item("meta_improve:landing", ["app/page.tsx"])
   const fallback = item("posthog_improve:proxy", ["app/layout.tsx"])
