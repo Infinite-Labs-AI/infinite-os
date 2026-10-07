@@ -685,7 +685,7 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
   const pushed = ctx.state.get().lastPush
   const pushedAt = pushed?.sha === checkedHead ? Date.parse(pushed.at) : started
   const registrationStart = Number.isFinite(pushedAt) ? Math.min(started, pushedAt) : started
-  const result = (state: CheckResult["state"], reason: string, ready = false): CheckResult & { ready: boolean } => ({ checkId: "pr_checks_pass", tier: "S", state, reason, at: ctx.now().toISOString(), runId, ready })
+  const result = (state: CheckResult["state"], reason: string, ready = false): CheckResult & { ready: boolean } => ({ checkId: "pr_checks_pass", tier: "S", state, reason: safeDisplayText(session.ship.scanner, reason), at: ctx.now().toISOString(), runId, ready })
   let waitingReason = "PR checks could not be read"
   const base = await commitChecks(github.gh, ctx.state.get().git!.baseSha).catch(() => null)
   const triggers = new Map<string, boolean | null>()
@@ -709,11 +709,11 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
       const summary = checksSummary(checks)
       const policy = checkPolicy(checks, base)
       for (const check of policy.blocked) {
-        const note = `${check.name}: preview not measured. Ask a hosting team member to authorise the deployment or give this GitHub author access to the linked project.`
+        const note = safeDisplayText(session.ship.scanner, `${check.name}: preview not measured. Ask a hosting team member to authorise the deployment or give this GitHub author access to the linked project.`)
         if (!session.notes.includes(note)) { session.notes.push(note); sub(ctx, "review", note, "warn") }
       }
       for (const check of policy.existing) {
-        const note = `${check.name} also fails on the base commit; it does not block this run.`
+        const note = safeDisplayText(session.ship.scanner, `${check.name} also fails on the base commit; it does not block this run.`)
         if (!session.notes.includes(note)) { session.notes.push(note); sub(ctx, "review", note, "warn") }
       }
       if (policy.failing.length > 0) {
@@ -732,7 +732,7 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
       if (absent.length > 0) waitingReason = `Missing PR checks: ${absent.map(check => check.name).join(", ")}; not measured`
       if (registered && !waitingForAbsent && base !== null && summary.pending === 0 && unknown.length === 0) {
         for (const check of absent) {
-          const note = triggers.get(check.name) === false ? `${check.name} does not run on pull requests: not measured (workflow triggers checked).` : `${check.name} did not appear in the full check window: not measured.`
+          const note = safeDisplayText(session.ship.scanner, triggers.get(check.name) === false ? `${check.name} does not run on pull requests: not measured (workflow triggers checked).` : `${check.name} did not appear in the full check window: not measured.`)
           if (!session.notes.includes(note)) { session.notes.push(note); sub(ctx, "review", note, "info") }
         }
         if (checks.length === 0) return result("undetermined", base.length === 0 ? "no checks reported: not measured; the base commit also has no checks" : "No checks reported on this pull request after registration: not measured", true)
@@ -1053,7 +1053,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
     // §3x.3 A finding on Infinite's own code reaches Infinite through the run's report, never through the agent.
     for (const decision of decisions.filter((entry) => entry.action === "INFINITE")) {
       const where = `${decision.item.path ?? "general"}${decision.item.line ? `:${decision.item.line}` : ""}`
-      const note = `Review finding on ${decision.label ?? "Infinite's own code"}: ${decision.item.item ?? "review"} ${where} (${decision.item.severity})`.slice(0, 300)
+      const note = safeDisplayText(prepared.scanner, `Review finding on ${decision.label ?? "Infinite's own code"}: ${decision.item.item ?? "review"} ${where} (${decision.item.severity})`).slice(0, 300)
       // The report's note is built from the ledger's open findings at `done` (one source); this is the PR's copy.
       session.notes.push(note)
     }
@@ -1102,10 +1102,11 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       // the wizard then undid (a stop mid-change, the safety check, a file outside the job), never `edits` alone.
       if (edited.length === 0) {
         const { outcome, why } = noKeptChangeOutcome(fix.run)
-        const words = notFixedReply(outcome, why)
+        const safeWhy = why ? safeDisplayText(prepared.scanner, why) : null
+        const words = notFixedReply(outcome, safeWhy)
         session.notes.push(`Round ${round}: ${words}`)
         sub(ctx, "review", `! ${words}`, "warn")
-        for (const decision of fixes) if (decision.item.threadId) notFixed.set(decision.item.threadId, { kind: "not_fixed", outcome, why })
+        for (const decision of fixes) if (decision.item.threadId) notFixed.set(decision.item.threadId, { kind: "not_fixed", outcome, why: safeWhy })
         await replyAndResolve(session, decisions, gathered.teammateOk, null, fixState, notFixed)
         await saveLedger(session)
         await ctx.state.save()
@@ -1118,13 +1119,13 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
         const item = finalItems.find((candidate) => candidate.id === items[index]!.id)
         const failing = item?.checks.find((check) => check.state === "problem")
         const why = !verified.buildOk ? `build: ${verified.buildReason ?? "validation failed"}` : failing ? `${failing.id}: ${failing.reason ?? "problem"}` : null
-        if (decision.item.threadId) notFixed.set(decision.item.threadId, { kind: "not_fixed", outcome: "checks_failed", why: why ? why.slice(0, 160) : null })
+        if (decision.item.threadId) notFixed.set(decision.item.threadId, { kind: "not_fixed", outcome: "checks_failed", why: why ? safeDisplayText(prepared.scanner, why).slice(0, 160) : null })
       }
       if (!verified.buildOk) {
         // Put the files back: nothing uncommitted stays on the PR branch, and nothing reaches the receipt.
         const leftOver = await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
         session.notes.push(
-          `Round ${round}: the wizard could not accept the fixes (${verified.buildReason ?? 'validation failed'}), so it put the files back and did not commit them.${leftOver.length > 0 ? ` Remove ${leftOver.join(", ")} (the agent created it).` : ""}`
+          safeDisplayText(prepared.scanner, `Round ${round}: the wizard could not accept the fixes (${verified.buildReason ?? 'validation failed'}), so it put the files back and did not commit them.${leftOver.length > 0 ? ` Remove ${leftOver.join(", ")} (the agent created it).` : ""}`)
         )
       } else if (edited.length > 0) {
         await deps.installer.recordEdits(fix.run.edits)
@@ -1160,7 +1161,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
             session.ledger.rounds[session.ledger.rounds.length - 1]!.fixSha = fixSha
             await saveLedger(session)
             await ctx.state.save()
-            const reason = prepared.scanner.redact(checksResult.reason ?? "a PR check failed").text
+            const reason = safeDisplayText(prepared.scanner, checksResult.reason ?? "a PR check failed")
             sub(ctx, "review", `PR checks: ${reason}`, "warn")
             return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `The PR checks are not ready (${reason}). The pull request stays draft.`, resumeHint: checksResult.state === "problem" ? "Resolve the named checks, then run `npx infinite-tag` again." : "Run `npx infinite-tag` again when the checks have finished or can be read." }
           }

@@ -1350,6 +1350,20 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(thread.comments[1]!.body).not.toMatch(/without changing anything/)
   })
 
+  it("redacts and neutralizes an uncommitted fix's gate reason before terminal output", async () => {
+    const note = `The gate refused ${STRIPE} <!-- @outsider [open](https://example.com)`
+    const w = await opened({
+      reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the existing init in place.", suggested_fix: null }])],
+      fix: input => ({ outcome: "completed", edits: [], reverted: ["app/layout.tsx"], blocked: [], gateHits: [{ rule: "turn_gate", file: "app/layout.tsx", line: 2, hunk: 0, itemIds: [input.items[0]!.id], note }] }) as Partial<AgentRunResult>
+    })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    const terminal = eventText(w.ctx)
+    expect(terminal).not.toContain(STRIPE)
+    expect(terminal).not.toContain("<!--")
+    expect(terminal).not.toContain("@outsider")
+    expect(terminal).not.toContain("[open](")
+  })
+
   it("review P1-4 / P2-3: a round whose every change was a file no job owns says the fence's words", async () => {
     const w = await opened({
       reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the existing init in place instead.", suggested_fix: "Keep one init." }]), review([])],
