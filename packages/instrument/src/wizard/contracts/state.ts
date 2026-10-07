@@ -8,6 +8,7 @@
 import type { AgentReviewerKind, AgentWorkerKind, WhoPays } from "./agents.js"
 import type { AskKind } from "./asks.js"
 import type { RuntimeVariant } from "./bridge.js"
+import type { OwnerBoundaryMeasurement } from "../../jobs/owner-diff.js"
 import type { WizardCode } from "./codes.js"
 import type { ChecklistItem } from "./jobs.js"
 import { CHECKLIST_ITEM_SHAPE } from "./jobs.js"
@@ -145,6 +146,7 @@ export interface WizardRunState {
     cloudReviewer?: AgentReviewerKind
   } | null
   git: { base: string; baseSource: BaseSource; branch: string; baseSha: string; headSha: string | null } | null
+  ownerBoundary?: OwnerBoundaryMeasurement
   pushTarget?: PushTarget
   pr: {
     host: GitHostKind
@@ -269,7 +271,7 @@ export const WIZARD_RUN_STATE_SHAPE = shapeOf<WizardRunState>()(
     "report",
     "snapshot"
   ],
-  ["runStartedAt", "site", "proof", "rehearsalChecks", "pushTarget"],
+  ["runStartedAt", "site", "proof", "rehearsalChecks", "pushTarget", "ownerBoundary"],
   {
     pushTarget: shapeOf<PushTarget>()("RunState.pushTarget", ["kind", "remoteUrl", "headOwner"], []),
     rehearsalChecks: arrayOf(shapeOf<NonNullable<WizardRunState["rehearsalChecks"]>[number]>()("RunState.rehearsalCheck", ["checkId", "state", "sha"], [])),

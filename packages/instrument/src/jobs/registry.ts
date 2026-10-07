@@ -28,7 +28,8 @@ import {
   type ScanResult
 } from "../wizard/contracts/jobs.js"
 import type { TestTool } from "../wizard/contracts/test-engine.js"
-import { CONSENT_LEFT_FOR_YOU } from "./owner-boundary.js"
+import { frozenEditPlace } from "./consent-units.js"
+import { frozenJobNote } from "./owner-boundary.js"
 import { buildAllow, unionAllow, isConsentLine, type AllowSpec } from "./allow.js"
 import { buildBrief, prescribedPasteOf, type BriefFacts } from "./briefs.js"
 import {
@@ -518,7 +519,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
       finding: `The site's own ${tool === "ga4" ? "GA4" : tool === "posthog" ? "PostHog" : "Meta pixel"} fires on preview deployments too`,
       evidence: fileEvidence(findings),
       allow: allow(filesOf(findings)),
-      ...(findings.some(finding => isConsentLine(scan.snapshot.files.get(finding.file) ?? "")) ? { leftForYou: CONSENT_LEFT_FOR_YOU } : {})
+
     })
   }
 
@@ -659,7 +660,18 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
     })
   }
 
-  const items = out.map((input) => makeItem(input, framework))
+  const items = out.map(input => {
+    const item = makeItem(input, framework)
+    if (item.state === "blocked" && item.allow.files.length === 0) return item
+    const frozen = frozenEditPlace(item, scan.snapshot.files)
+    if (frozen) {
+      const unit = frozen.unit
+      item.state = "left_for_you"; item.checks = []; delete item.blockedReason
+      item.note = frozenJobNote(item, frozen)
+      item.ownerBoundary = { kind: "frozen_unit", file: frozen.file, line: frozen.line, unitHash: unit.hash, lineOffset: frozen.line - unit.startLine, unitOrdinal: unit.ordinal }
+    }
+    return item
+  })
   const unique = new Map<string, ChecklistItem>()
   for (const item of items) if (!unique.has(item.id)) unique.set(item.id, item)
   const sorted = [...unique.values()].sort((a, b) => a.n - b.n || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
@@ -704,7 +716,12 @@ export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: Pla
   const out: ChecklistItem[] = []
   for (const candidate of candidates) {
     if (candidate.jobId === "privacy_paragraph") continue // Retired; never revive an old approved job.
-    if (candidate.state === "left_for_you") { out.push(candidate); continue }
+    if (candidate.state === "left_for_you") {
+      const instruction = plan.lines.find(line => line.id === `owner_only:${candidate.id}`)?.text
+      const guard = instruction ? /\n```js\n([\s\S]*?)\n```/.exec(instruction)?.[1] : undefined
+      out.push(instruction ? { ...candidate, trigger: { ...candidate.trigger, finding: instruction }, ...(candidate.ownerBoundary ? { ownerBoundary: { ...candidate.ownerBoundary, ...(guard ? { guard } : {}) } } : {}) } : candidate)
+      continue
+    }
     const lines = plan.lines.filter((line) => line.jobIds?.includes(candidate.id))
     if (lines.some((line) => declined.has(line.id))) continue
     const kind = requiredLineKind(candidate)

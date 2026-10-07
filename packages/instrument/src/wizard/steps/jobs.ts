@@ -35,7 +35,11 @@ import { join } from "node:path"
 
 import { connectionIdsFromKeys } from "../../agents/connection-ids.js"
 import { git } from "../../agents/git-exec.js"
-import { isConsentLine } from "../../jobs/allow.js"
+import { frozenEditPlace } from "../../jobs/consent-units.js"
+import { frozenJobNote, LEGACY_OWNER_BOUNDARY } from "../../jobs/owner-boundary.js"
+import { reanchorOwnerLocations } from "../../jobs/owner-locations.js"
+import { measureOwnerDiff } from "../../jobs/owner-diff.js"
+import { leaveForOwner } from "../../jobs/state-machine.js"
 import { reanchorEvidence } from "../../jobs/reanchor.js"
 import { buildVerdict, isBuildOutputPath } from "../../checks/build.js"
 import { readBeforeFactsFile } from "../handoff/before-facts.js"
@@ -165,14 +169,45 @@ class SealBroken extends Error {
 }
 
 async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
+  const outcome = await runJobsStep(ctx, deps)
+  if (outcome.kind === "ok") {
+    const reanchored = await reanchorOwnerLocations(ctx.root, ctx.state.get().jobs)
+    ctx.state.update(state => { state.jobs = reanchored })
+    const measured = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.appRoot, baseSha: ctx.state.get().git?.baseSha ?? "" })
+    ctx.state.update(state => { state.ownerBoundary = measured })
+    await ctx.state.save()
+  }
+  return outcome
+}
+
+async function runJobsStep(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const missing = META.requiredCapabilities.filter((capability) => !deps.bridge.has(capability))
   if (missing.length > 0) {
     return { kind: "failed", code: "INF_WIZ_BRIDGE_PROTOCOL", message: `The Infinite app is missing ${missing.join(", ")}; update the app.`, next: "halt" }
   }
   const io = new JobsIo(ctx, deps)
+  const reanchored = await reanchorOwnerLocations(ctx.root, io.items())
+  ctx.state.update(state => { state.jobs = reanchored })
   for (const saved of io.items()) {
-    const consentInGuardFile = saved.jobId === "preview_guard" && OPEN_STATES.includes(saved.state) && (await Promise.all(saved.allow.files.map(async file => isConsentLine(await readFile(join(ctx.root, file), "utf8").catch(() => ""))))).some(Boolean)
-    if (consentInGuardFile || saved.blockedReason === "consent_touched" || saved.jobId === "privacy_paragraph") io.put(blockItem(saved, "consent_touched"))
+    if (saved.jobId === "privacy_paragraph") {
+      io.put(leaveForOwner(saved, (saved.edits?.length ?? 0) > 0 ? LEGACY_OWNER_BOUNDARY : "Privacy policy work is retired; it belongs to the site owner.", { kind: "legacy_policy" }))
+      continue
+    }
+    if (saved.ownerBoundary?.kind === "restored_unit" || saved.ownerBoundary?.kind === "policy_page") continue
+    if (!OPEN_STATES.includes(saved.state) && saved.state !== "left_for_you" && saved.blockedReason !== "consent_touched") continue
+    const sources = new Map<string, string>()
+    for (const evidence of saved.trigger.evidence) if ("file" in evidence) {
+      const source = await readFile(join(ctx.root, evidence.file), "utf8").catch(() => null)
+      if (source !== null) sources.set(evidence.file, source)
+    }
+    const frozen = frozenEditPlace(saved, sources)
+    if (frozen) {
+      io.put(leaveForOwner(saved, frozenJobNote(saved, frozen), { ...saved.ownerBoundary, kind: "frozen_unit", file: frozen.file, line: frozen.line, unitHash: frozen.unit.hash, lineOffset: frozen.line - frozen.unit.startLine, unitOrdinal: frozen.unit.ordinal }))
+    } else if (saved.blockedReason === "consent_touched") io.put(blockItem(saved, "consent_touched"))
+    else if (saved.state === "left_for_you") {
+      // R6 could derive this state from an agent's words. Without wizard evidence it is ordinary unfinished work.
+      io.put(blockItem({ ...saved, ownerBoundary: undefined }, "agent_blocked", saved.claim?.note ?? "No frozen-unit evidence supports the earlier owner-only status."))
+    }
   }
   await io.save()
   const agentItems = io.items().filter((item) => item.owner === "agent" && OPEN_STATES.includes(item.state))

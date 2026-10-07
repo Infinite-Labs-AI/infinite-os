@@ -83,8 +83,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     ].join("\n")
     const capture = buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "not_required" } })
     const withCapture = `${capture}\n${base}`
-    const wrapped = withCapture.replace("  fbq('init', '1234567890123456');\n  fbq('consent', 'grant');\n  fbq('track', 'PageView');", "  if (allowHost()) {\n    fbq('init', '1234567890123456');\n    fbq('consent', 'grant');\n    fbq('track', 'PageView');\n  }")
-    const gaGuarded = wrapped.replace("gtag('config', 'G-FAKE00001');", "if (allowHost()) gtag('config', 'G-FAKE00001');")
+    const gaGuarded = withCapture.replace("gtag('config', 'G-FAKE00001');", "if (allowHost()) gtag('config', 'G-FAKE00001');")
     const phGuarded = gaGuarded.replace("posthog.init('phc_FAKE', { api_host: 'https://us.i.posthog.com' });", "if (allowHost()) posthog.init('phc_FAKE', { api_host: '/ingest' });")
     const sensitive = phGuarded.replace("api_host: '/ingest'", "api_host: '/ingest', mask_all_text: true")
     const ids = ["meta_improve:capture", "preview_guard:meta", "preview_guard:ga4", "preview_guard:posthog", "posthog_improve:sensitive_pages"]
@@ -93,7 +92,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
         { tool: "report_progress", args: { job_id: ids[0], text: "Capture" } },
         { edit: { path: file, content: withCapture } }, claim(ids[0]!),
         { tool: "report_progress", args: { job_id: ids[1], text: "Meta guard" } },
-        { edit: { path: file, content: wrapped } }, claim(ids[1]!),
+        claim(ids[1]!),
         { tool: "report_progress", args: { job_id: ids[2], text: "GA guard" } },
         { edit: { path: file, content: gaGuarded } }, claim(ids[2]!),
         { tool: "report_progress", args: { job_id: ids[3], text: "PostHog guard" } },
@@ -101,7 +100,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
         { tool: "report_progress", args: { job_id: ids[4], text: "Sensitive pages" } },
         { edit: { path: file, content: sensitive } }, claim(ids[4]!)
       ] }] },
-      items: ids.map((id) => agentItem(id, [file]))
+      items: ids.map((id, index) => ({ ...agentItem(id, [file]), trigger: { finding: "Fixture edit place", evidence: [{ file, line: [8, 8, 5, 6, 6][index]! }] } }))
     })
     write(t.root, file, base)
     runGit(t.root, ["add", file])
@@ -109,8 +108,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
     const jobs = t.current().jobs
     expect(jobs.find((job) => job.id === ids[1])).toMatchObject({ state: "left_for_you" })
-    for (const id of ids.filter(id => id.startsWith("preview_guard:"))) expect(jobs.find(job => job.id === id)?.state).toBe("left_for_you")
-    for (const id of ids.filter(id => !id.startsWith("preview_guard:"))) expect(jobs.find(job => job.id === id)?.state, id).toMatch(/done_in_code|waiting_deploy/)
+    for (const id of ids.filter(id => id !== "preview_guard:meta")) expect(jobs.find(job => job.id === id)?.state, id).toMatch(/done_in_code|waiting_deploy/)
     const final = readFileSync(join(t.root, file), "utf8")
     expect(final).toContain("mask_all_text: true")
     expect(final).not.toContain("  if (allowHost()) {")

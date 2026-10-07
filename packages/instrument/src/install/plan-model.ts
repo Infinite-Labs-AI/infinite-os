@@ -13,6 +13,8 @@
 //     Infinite does not list it, NO guard is emitted and a blocking line says why;
 //   • the server-lane line carries the probe disclosure (§3h.6);
 //   • nothing here is computed from agent output.
+import { buildHostGuardExpression } from "../host-guard.js"
+import { ownerGuardHandoff } from "../jobs/owner-boundary.js"
 import { automaticEventsPerVisitOf } from "../checks/grade-test-run.js"
 import { applyApprovalsTo, itemChecksFor, requiredLineKind } from "../jobs/registry.js"
 import { createHash } from "node:crypto"
@@ -689,7 +691,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     observedProductionHost: before.observedProductionHost,
     runProductionHost: facts.productionHost,
     newGuardedTools: guardedNew,
-    adoptedGuardWanted: adoptedGuardLines.length > 0 || candidates.some((item) => item.jobId === "preview_guard" && item.state !== "left_for_you"),
+    adoptedGuardWanted: adoptedGuardLines.length > 0 || candidates.some((item) => item.jobId === "preview_guard"),
     productionDeniedConflict: input.productionDeniedConflict
   })
   if (guard.emit && guardedNew.length > 0) {
@@ -867,7 +869,9 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
 
   for (const item of candidates.filter(entry => entry.state === "left_for_you")) {
-    lines.push(line({ id: `owner_only:${item.id}`, kind: "user_action", text: `${item.title}: ${item.note}`, requires: "user_action" }))
+    const handoff = item.jobId === "preview_guard" && item.ownerBoundary && guard.emit
+      ? ownerGuardHandoff(item.note ?? item.trigger.finding, item.ownerBoundary, buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny })) : null
+    lines.push(line({ id: `owner_only:${item.id}`, kind: "user_action", text: handoff?.text ?? item.note ?? item.trigger.finding, requires: "user_action" }))
   }
 
   // ---- things only the user can do ----
@@ -1276,7 +1280,7 @@ export function gateSeededItems(plan: PlanModel, answers: Pick<ResolvedPlanAnswe
   // The go-ahead cost line (P2-18): unless it is approved, no agent job runs — each waits for the user.
   const budget = plan.lines.find((planLine) => planLine.id === "agent_budget" && planLine.requires === "approval")
   if (!budget || approval.get(budget.id) === true) return gated
-  return gated.map((item) => (item.owner === "agent" && item.state !== "blocked" ? { ...item, state: "blocked" as const, blockedReason: "needs_you" as const } : item))
+  return gated.map((item) => (item.owner === "agent" && item.state !== "blocked" && item.state !== "left_for_you" ? { ...item, state: "blocked" as const, blockedReason: "needs_you" as const } : item))
 }
 
 function gateByLines(plan: PlanModel, approval: Map<string, boolean | null>, items: readonly ChecklistItem[]): ChecklistItem[] {
@@ -1284,6 +1288,7 @@ function gateByLines(plan: PlanModel, approval: Map<string, boolean | null>, ite
   for (const planLine of plan.lines) for (const jobId of planLine.jobIds ?? []) lineOf.set(jobId, planLine)
   const out: ChecklistItem[] = []
   for (const item of items) {
+    if (item.state === "left_for_you" && item.ownerBoundary) { out.push(item); continue }
     const planLine = lineOf.get(item.id)
     if (!planLine) {
       if (ADOPTED_PROVIDER_JOBS.includes(item.jobId as JobId)) continue

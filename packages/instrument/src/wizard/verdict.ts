@@ -96,7 +96,7 @@ function notCheckedLiveHeadline(input: VerdictInput): string {
 /** The agent items of approved plan lines that are not in the code (an unanswered line's item is not approved). */
 export function missingApprovedFixes(jobs: readonly ChecklistItem[]): ChecklistItem[] {
   return jobs.filter((item) => {
-    if (item.owner !== "agent" || item.state === "left_for_you" || item.blockedReason === "consent_touched" || item.jobId === "privacy_paragraph" || NOT_PLAN_JOBS.has(item.jobId)) return false
+    if (item.owner !== "agent" || (item.state === "left_for_you" && item.ownerBoundary !== undefined) || item.jobId === "privacy_paragraph" || NOT_PLAN_JOBS.has(item.jobId)) return false
     if (DONE_STATES.includes(item.state)) return false
     // A plan line the user never answered seeds its item `blocked:needs_you` with no wizard note: not approved.
     if (item.state === "blocked" && item.blockedReason === "needs_you" && item.note === undefined) return false
