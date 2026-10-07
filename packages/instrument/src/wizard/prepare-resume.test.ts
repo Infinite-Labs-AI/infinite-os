@@ -14,8 +14,8 @@ import { runWizard } from "./engine.js"
 const fixtures: GitFixture[] = []
 afterEach(() => { while (fixtures.length) fixtures.pop()!.cleanup() })
 
-it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pull", "push_retry_pull_decline", "other_branch", "corrupt", "provisioned"] as const)("prepares managed bytes before resumed agents: %s", async (mode) => {
-  const fx = createGitFixture({ files: { "lib/infinite-analytics.ts": "// Managed by Infinite\ntype Track = (unused: string) => void\n", ".infinite/install.json": mode === "provisioned" ? JSON.stringify({ providers: ["infinite"], ids: { infinite: { siteSourceKey: "site_saved_fixture" } } }) : "{}\n", ".gitignore": ".infinite/wizard/\n" } })
+it.each(["refresh", "refresh_owner", "refresh_owner_decline", "blocked", "closed", "merged", "push_retry", "push_retry_pull", "push_retry_pull_decline", "other_branch", "corrupt", "provisioned"] as const)("prepares managed bytes before resumed agents: %s", async (mode) => {
+  const fx = createGitFixture({ files: { "src/consent.ts": 'fbq("consent", "revoke");\n', "lib/infinite-analytics.ts": "// Managed by Infinite\ntype Track = (unused: string) => void\n", ".infinite/install.json": mode === "provisioned" ? JSON.stringify({ providers: ["infinite"], ids: { infinite: { siteSourceKey: "site_saved_fixture" } } }) : "{}\n", ".gitignore": ".infinite/wizard/\n" } })
   fixtures.push(fx)
   const gh = createFakeGh({ dir: fx.dir, remote: fx.remote, env: fx.env })
   const git = createGitOps({ cwd: fx.root, env: gh.env })
@@ -43,9 +43,9 @@ it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pul
     return { changedFiles: ["lib/infinite-analytics.ts", ".infinite/install.json"], blocked: [] }
   }
   const ctx = testContext({ root: fx.root, answers: { confirm: payload => {
-    expect(payload.question).toContain("remote advance fixture")
+    expect(payload.question).toContain(mode.startsWith("refresh_owner") ? "owner consent fixture" : "remote advance fixture")
     expect(payload.question).toContain("own commit record")
-    return mode !== "push_retry_pull_decline"
+    return mode !== "push_retry_pull_decline" && mode !== "refresh_owner_decline"
   } }, state: initialState({ root: fx.root, git: { base: "main", baseSource: "vercel", baseSha, headSha: baseSha, branch }, pr: { host: "github", number: pr.number, url: pr.url, nodeId: pr.nodeId, isDraft: true, round: 1, reviewedSha: baseSha, handledThreadIds: [], mergeSha: null } }) })
   ctx.state.update(state => {
     for (const id of WIZARD_STEP_IDS) state.steps[id] = { outcome: "ok", inputHash: id, at: ctx.now().toISOString() }
@@ -74,6 +74,10 @@ it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pul
     return { kind: "ok", status: id }
   } }])) as unknown as WizardStepRecord
   if (mode === "other_branch") await git.switchTo("main")
+  if (mode.startsWith("refresh_owner")) {
+    fx.write("src/consent.ts", 'fbq("consent", "grant");\n')
+    fx.git(["add", "src/consent.ts"]); fx.git(["commit", "-m", `owner consent fixture\n\nInfinite-Tag-Run: ${RUN_ID}`])
+  }
   if (mode === "corrupt") fx.write(".infinite/wizard/managed-refresh.json", "{broken")
   if (mode === "closed" || mode === "merged") gh.update(state => { state.prs![0]!.state = mode.toUpperCase() })
   if (mode.startsWith("push_retry_pull")) {
@@ -93,8 +97,8 @@ it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pul
     order.length = 0
   }
   const result = await runWizard(ctx, deps, { steps, afterStep: async () => {} })
-  if (mode.startsWith("push_retry_pull")) expect(ctx.asks.filter(ask => ask.kind === "confirm")).toHaveLength(1)
-  if (mode === "push_retry_pull_decline") {
+  if (mode.startsWith("push_retry_pull") || mode.startsWith("refresh_owner")) expect(ctx.asks.filter(ask => ask.kind === "confirm")).toHaveLength(1)
+  if (mode === "push_retry_pull_decline" || mode === "refresh_owner_decline") {
     expect(result.exitCode).toBe(3)
     expect(order).not.toContain("agent")
     expect(fx.remoteSha(branch)).not.toBe(await git.head())

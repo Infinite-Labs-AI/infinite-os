@@ -18,6 +18,7 @@ import { gitignoreChangeIsFenceOnly } from "../git/status.js"
 import { hostLinkFor, parseRemote } from "../hosts/index.js"
 import { isUnsupported } from "../hosts/other.js"
 import { parseUnifiedDiff } from "./diff.js"
+import { safeDisplayText } from "./display.js"
 import type { Scanner, ScanHit } from "./scan.js"
 import { sub } from "./context.js"
 import { DEPENDENCY_INSTALL_RECORD } from "../wizard/local-validation.js"
@@ -252,7 +253,7 @@ export async function pushBranch(input: {
   const foreign = await unrecordedCommits({ root: ctx.root, baseSha: state.git?.baseSha ?? "", headSha: measuredSha, wizardCommits: state.wizardCommits ?? [], approvedForeignCommits: state.approvedForeignCommits ?? [] })
   if (foreign === null) return { kind: "failed", message: "Nothing pushed: the commits outside the wizard's record could not be listed." }
   if (foreign.length > 0) {
-    const list = foreign.map(commit => `${commit.sha.slice(0, 12)} ${input.scanner.redact(commit.subject).text}`).join("\n")
+    const list = foreign.map(commit => `${commit.sha.slice(0, 12)} ${safeDisplayText(input.scanner, commit.subject)}`).join("\n")
     if (await ctx.ask("confirm", { question: `These commits are not in this wizard's own commit record and would be pushed:\n${list}\nPush these owner commits to the recorded branch?`, defaultYes: false }) !== true) return { kind: "failed", message: "The additional commits were not approved for push. They remain local." }
     if (await git.head() !== measuredSha) return { kind: "failed", message: "The branch changed while approving the push. Run again to review its current commits." }
     ctx.state.update(draft => { draft.approvedForeignCommits = [...new Set([...(draft.approvedForeignCommits ?? []), ...foreign.map(commit => commit.sha)])] })
