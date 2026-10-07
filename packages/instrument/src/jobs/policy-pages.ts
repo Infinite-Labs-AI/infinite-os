@@ -1,9 +1,12 @@
 /** Policy pages are identified only by explicit page paths and their last route segment. */
 export const POLICY_PAGE_NAMES = [
-  "privacy", "privacy-policy", "privacypolicy", "terms", "terms-of-use", "terms-of-service",
-  "terms-and-conditions", "termsofservice", "tos", "cookie-policy", "cookies-policy", "cookies",
+  "privacy", "privacy-policy", "privacypolicy", "privacy-notice", "privacynotice",
+  "terms", "terms-of-use", "terms-ofuse", "termsof-use", "termsofuse", "terms-of-service",
+  "terms-ofservice", "termsof-service", "termsofservice", "terms-and-conditions", "terms-conditions", "termsconditions", "tos",
+  "cookie-policy", "cookiepolicy", "cookies-policy", "cookiespolicy", "cookie-notice", "cookienotice", "cookies-notice", "cookiesnotice", "cookies",
   "legal", "eula", "disclaimer", "impressum", "imprint", "datenschutz", "datenschutzerklaerung",
-  "data-protection", "gdpr", "ccpa", "dpa", "agb", "mentions-legales", "politica-de-privacidad"
+  "data-protection", "gdpr", "ccpa", "dpa", "agb", "mentions-legales", "politica-de-privacidad",
+  "refund-policy", "acceptable-use", "acceptable-use-policy", "subprocessors", "cookie-settings"
 ] as const
 
 const normalizePath = (value: string) => value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "")
