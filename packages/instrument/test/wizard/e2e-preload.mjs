@@ -89,6 +89,7 @@ if (process.env.E2E_FAST_CLOCK === "1") {
 if (process.env.E2E_TTY_ANSWERS) {
   const answers = JSON.parse(readFileSync(process.env.E2E_TTY_ANSWERS, "utf8"))
   wiring.ttyPrompter = () => ({
+    showPlan: async (payload) => { record({ kind: "tty-plan", payload }) },
     planLine: async (line) => {
       record({ kind: "tty", line: line.id })
       return answers.lines?.[line.kind] ?? { approved: answers.default === true }
