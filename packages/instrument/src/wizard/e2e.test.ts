@@ -121,7 +121,7 @@ async function wiredWorld(input: { scenario?: unknown; bridge?: Record<string, u
     const path = join(made.site.repo, "app/layout.tsx")
     const inline = readFileSync(path, "utf8")
     const script = /        <Script id="consent-default"[\s\S]*?        <\/Script>/.exec(inline)![0]
-    writeFileSync(path, inline.replace('import { Providers } from "./providers"', 'import { Providers } from "./providers"\nimport { ConsentDefaults } from "./consent-defaults"').replace(script, "        <ConsentDefaults />"))
+    writeFileSync(path, inline.replace('import { Providers } from "./providers"', 'import { Providers } from "./providers"\nimport { ConsentDefaults as BootstrapDefaults } from "./consent-defaults"').replace(script, "        <BootstrapDefaults />"))
     git(made.site.repo, "add", "app/layout.tsx")
     git(made.site.repo, "commit", "-q", "-m", "separate owner consent fixture")
     git(made.site.repo, "push", "-q", "origin", "main")
