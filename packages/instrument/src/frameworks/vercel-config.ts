@@ -18,6 +18,7 @@ import type {
   PosthogProxySpec
 } from "../types.js"
 import { computeContentHash } from "../manifest.js"
+import { reverseEditRecord, sha256Tagged } from "../install/edits.js"
 import { isManagedInfiniteFile, managedFileBanner } from "./managed-files.js"
 import { firstExistingPath, normalizeAppRelativePath, writeFileIfChanged } from "./shared.js"
 
@@ -650,6 +651,23 @@ export interface NextConfigProxyPlan {
   deferred?: Array<{ path: string; snippet: string }>
 }
 
+/** A receipt extension must reverse exactly to the generator's original ownership anchor. */
+function recordedConfigState(source: string, path: string, ownership: ManagedConfigOwnership | undefined, manifest?: InstallManifest | null): "original" | "recorded" | "unverified" {
+  if (ownership?.kind !== "created") return "unverified"
+  const fullPath = normalizeAppRelativePath(manifest?.appRoot ?? ".", path)
+  const edits = manifest?.edits?.filter(edit => edit.file === fullPath) ?? []
+  if (edits.length && edits.at(-1)!.afterHash !== sha256Tagged(source)) return "unverified"
+  if (computeContentHash(source) === ownership.installedHash) return "original"
+  let before = source
+  for (const edit of [...edits].reverse()) {
+    const reversed = reverseEditRecord(before, edit)
+    if (!reversed.ok || reversed.content === null) return "unverified"
+    before = reversed.content
+    if (computeContentHash(before) === ownership.installedHash) return "recorded"
+  }
+  return "unverified"
+}
+
 /**
  * Create a hash-owned config when absent, validate ownership on reapply, or statically prove that
  * an unmanaged config already contains every exact rewrite. Unproven configs remain plan-only.
@@ -658,7 +676,7 @@ export function planNextConfigProxy(
   root: string,
   proxy: ProxyInput,
   ownership?: Record<string, ManagedConfigOwnership>,
-  options: { deferUnmanaged?: boolean } = {}
+  options: { deferUnmanaged?: boolean; previousManifest?: InstallManifest | null } = {}
 ): NextConfigProxyPlan {
   const existingPaths = nextConfigCandidates.filter((candidate) =>
     existsSync(join(root, candidate))
@@ -675,10 +693,12 @@ export function planNextConfigProxy(
   const existing = existingPaths[0] ?? null
   const source = existing ? readFileSync(join(root, existing), "utf8") : null
   const existingIsManaged = source !== null && isManagedInfiniteFile(source)
+  let recordedConfig = false
 
-  if (existing && existingIsManaged) {
+  if (existing && (existingIsManaged || ownership?.[existing]?.kind === "created")) {
     const expected = ownership?.[existing]
-    if (expected?.kind !== "created" || expected.installedHash !== computeContentHash(source!)) {
+    const state = recordedConfigState(source!, existing, expected, options.previousManifest)
+    if (state === "unverified") {
       return {
         files: [existing],
         instructions: [],
@@ -687,9 +707,12 @@ export function planNextConfigProxy(
         ]
       }
     }
+    recordedConfig = state === "recorded"
   }
 
-  if (existing && !existingIsManaged) {
+  // Preserve recorded extensions like a verified agent proxy. Re-rendering the original template
+  // would erase them; the original installedHash also remains needed after uninstall reverses them.
+  if (existing && (!existingIsManaged || recordedConfig)) {
     if (hasExactNextConfigRewrites(source!, proxy)) {
       return { files: [], instructions: [], blockers: [] }
     }

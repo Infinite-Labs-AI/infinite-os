@@ -84,7 +84,7 @@ export const nextAppRouterAdapter: FrameworkAdapter = {
     const layoutFile = firstExistingPath(root, layoutCandidates)
     const proxy = { posthog: options?.posthogProxy, infinite: options?.infiniteProxy }
     const proxyPlan = proxy.posthog || proxy.infinite
-      ? planNextConfigProxy(root, proxy, options?.configOwnership, { deferUnmanaged: options?.deferUnmanagedNextConfig === true })
+      ? planNextConfigProxy(root, proxy, options?.configOwnership, { deferUnmanaged: options?.deferUnmanagedNextConfig === true, previousManifest: options?.previousManifest })
       : null
 
     if (!layoutFile) {
