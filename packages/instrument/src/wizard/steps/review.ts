@@ -1,6 +1,4 @@
 import { branchUpdateCommits } from "../../github/update-branch.js"
-import { loadRepoSnapshot } from "../../jobs/repo-files.js"
-import { policyContentPaths } from "../../jobs/policy-pages.js"
 import { reviewReliabilityWarning } from "../../review/integrity.js"
 import { safeDisplayText } from "../../review/display.js"
 // Step 9 `review` (§3d.1, §3g.4, lane O4): the OTHER agent reviews the PR read-only in a detached worktree of
@@ -1074,9 +1072,8 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
     const ownership = await sessionOwnership(session)
     const routing = await triageRouting(session, gathered.items, ownership)
     const appRoot = ctx.state.get().appRoot
-    const policyFiles = policyContentPaths(loadRepoSnapshot(ctx.root, appRoot).files, appRoot)
     const triaged = triage(gathered.items, {
-      isPolicyContent: path => policyFiles.has(path),
+      appRoot,
       // §3x.3: the customer's agent works inside the jobs' allowlists only; Infinite's own files are never its.
       allowlist: allowlistUnion(ctx.state.get().jobs),
       ownership: ownership.classify,

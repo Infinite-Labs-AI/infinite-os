@@ -4,8 +4,7 @@ import { lstat, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { git } from "../agents/git-exec.js"
 import { restoreFrozenUnits } from "./consent-units.js"
-import { isPolicyPath, policyContentPaths } from "./owner-boundary.js"
-import { policySourceTree } from "./policy-tree.js"
+import { isPolicyPath } from "./owner-boundary.js"
 
 export interface OwnerBoundaryMeasurement {
   state: "checked" | "changed" | "not_checked"
@@ -44,10 +43,6 @@ export async function measureOwnerDiff(input: { root: string; baseSha: string; r
   }
   measurement.files = [...paths].sort()
   measurement.filesAvailable = true
-  const beforeSources = await policySourceTree(input.root, input.baseSha)
-  const afterSources = await policySourceTree(input.root, input.revision)
-  for (const snapshot of [beforeSources, afterSources]) if (snapshot.issue) return fail(snapshot.issue.file, snapshot.issue.reason)
-  const policy = new Set([...policyContentPaths(beforeSources.sources, input.appRoot), ...policyContentPaths(afterSources.sources, input.appRoot)])
   const blob = async (revision: string, path: string): Promise<{ bytes: Buffer | null; error?: string }> => {
     const entry = await git(input.root, ["ls-tree", "-z", revision, "--", path])
     if (entry.code !== 0) return { bytes: null, error: "the source tree entry could not be read" }
@@ -60,7 +55,7 @@ export async function measureOwnerDiff(input: { root: string; baseSha: string; r
   for (const path of [...paths].sort()) {
     if (metadata(path)) continue
     if (path.startsWith("/") || path.split("/").includes("..")) { measurement.state = "not_checked"; fail(path, "invalid diff path"); continue }
-    if (policy.has(path) || isPolicyPath(path, input.appRoot ?? ".")) { measurement.state = "changed"; fail(path, "a routed privacy/terms policy page is in the final diff"); continue }
+    if (isPolicyPath(path, input.appRoot ?? ".")) { measurement.state = "changed"; fail(path, "a routed privacy/terms policy page is in the final diff"); continue }
     const beforeBlob = await blob(input.baseSha, path)
     if (beforeBlob.error) { measurement.state = "not_checked"; fail(path, beforeBlob.error); continue }
     let after: Buffer | null

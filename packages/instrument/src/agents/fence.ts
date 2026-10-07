@@ -61,7 +61,7 @@ import { basename, dirname, join, relative, sep } from "node:path"
 
 import type { ManagedTextEdit } from "../types.js"
 import type { ChecklistItem, CheckResult, Claim, TurnDiff, WizardEditRecord } from "../wizard/contracts/jobs.js"
-import { isPolicyPath, policyContentPaths, isPolicySourceFile } from "../jobs/owner-boundary.js"
+import { isPolicyPath } from "../jobs/owner-boundary.js"
 import { GLOBAL_DENY_GLOBS } from "../wizard/contracts/jobs.js"
 import { git, gitOk, parsePorcelainZ, type StatusEntry } from "./git-exec.js"
 import { matchesAnyGlob, normalizeRelPath } from "./glob.js"
@@ -236,8 +236,6 @@ interface FenceManifest {
   mode: "revert" | "report"
   allow: FenceItemAllow[]
   entries: ManifestEntry[]
-  /** Policy scope captured before the worker can remove or change page imports. */
-  policyFiles?: string[]
   appRoot?: string
   statusBefore: Array<[string, string]>
   heavyDirs: string[]
@@ -290,7 +288,7 @@ export class Fence {
   /** Called on a completed editing tool event, with the job that was active when that edit began. */
   recordEditActivity(itemId: string | null, path: string): void {
     const rel = normalizeRelPath(path)
-    if (!isInside(join(this.manifest.root, rel), this.manifest.root) || isDenied(rel, this.manifest.policyFiles, this.manifest.appRoot)) return
+    if (!isInside(join(this.manifest.root, rel), this.manifest.root) || isDenied(rel, this.manifest.appRoot)) return
     if (!this.manifest.allow.some((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel)))) return
     try {
       const info = lstatSync(join(this.manifest.root, rel))
@@ -337,9 +335,7 @@ export class Fence {
     for (const rel of await listGitInternal(root)) if (!this.entry(rel)) return false
     const touched = await this.touched()
     if (touched.tamper.length > 0) return false
-    const tracked = (await gitOk(root, ["ls-files", "-z"])).toString("utf8").split("\0").filter(Boolean)
-    const policyFiles = [...this.manifest.policyFiles ?? [], ...await policyFilesForTree(root, [...tracked, ...touched.paths], this.manifest.heavyDirs, this.manifest.appRoot)]
-    return touched.paths.every((rel) => !isDenied(rel, policyFiles, this.manifest.appRoot) && this.manifest.allow.some((item) => [...item.files, ...item.create].some((pattern) => sameOrGlob(pattern, rel))))
+    return touched.paths.every((rel) => !isDenied(rel, this.manifest.appRoot) && this.manifest.allow.some((item) => [...item.files, ...item.create].some((pattern) => sameOrGlob(pattern, rel))))
   }
 
   private rememberConsentRestore(rel: string, before: string, current: string, restored: FrozenUnitRestore): void {
@@ -396,8 +392,7 @@ export class Fence {
     }))
 
     const tracked = (await gitOk(root, ["ls-files", "-z"])).toString("utf8").split("\0").filter(Boolean)
-    const policyFiles = await policyFilesForTree(root, [...tracked, ...statusBefore.map(entry => entry.path)], heavyDirs, options.appRoot)
-    const toCopy = new Set<string>(policyFiles)
+    const toCopy = new Set<string>()
     const fingerprintOnly: string[] = []
     for (const rule of allow) for (const file of [...rule.files, ...rule.create]) if (!file.includes("*")) toCopy.add(file)
     let ignoredBytes = 0
@@ -407,7 +402,7 @@ export class Fence {
         if (entry.from) toCopy.add(entry.from)
         continue
       }
-      if (isDenied(entry.path, policyFiles, options.appRoot)) {
+      if (isDenied(entry.path, options.appRoot)) {
         toCopy.add(entry.path)
         continue
       }
@@ -419,7 +414,7 @@ export class Fence {
         fingerprintOnly.push(entry.path)
       }
     }
-    for (const path of tracked) if (isDenied(path, policyFiles, options.appRoot) && !underHeavy(path, heavyDirs)) toCopy.add(path)
+    for (const path of tracked) if (isDenied(path, options.appRoot) && !underHeavy(path, heavyDirs)) toCopy.add(path)
     const gitInternal = await listGitInternal(root)
     for (const path of gitInternal) toCopy.add(path)
 
@@ -467,7 +462,6 @@ export class Fence {
       mode: options.mode ?? "revert",
       allow,
       entries,
-      policyFiles,
       appRoot: options.appRoot,
       statusBefore: statusBefore.map((entry) => [entry.path, entry.xy]),
       heavyDirs,
@@ -569,8 +563,6 @@ export class Fence {
       await this.dispose()
       throw new FenceTamperError(touched.tamper)
     }
-    const tracked = (await gitOk(root, ["ls-files", "-z"])).toString("utf8").split("\0").filter(Boolean)
-    const policyFiles = [...manifest.policyFiles ?? [], ...await policyFilesForTree(root, [...tracked, ...touched.paths, ...manifest.entries.map(entry => entry.rel)], manifest.heavyDirs, manifest.appRoot)]
     const blocks = new Map<string, FenceBlock>()
     const strays = new Map<string, FenceStray>()
     const reverted = new Set<string>()
@@ -638,7 +630,7 @@ export class Fence {
       const absolute = join(root, rel)
       const beforeBytes = await this.originalBytes(rel)
       const nowInfo = await lstatOrNull(absolute)
-      const denied = isDenied(rel, policyFiles, manifest.appRoot)
+      const denied = isDenied(rel, manifest.appRoot)
       const deleted = beforeBytes !== null && !nowInfo
       const created = beforeBytes === null
       const allowedFile = this.allowsFile(rel)
@@ -1065,20 +1057,8 @@ function sameOrGlob(pattern: string, rel: string): boolean {
   return pattern.includes("*") ? matchesAnyGlob(rel, [pattern]) : normalizeRelPath(pattern) === rel
 }
 
-async function policyFilesForTree(root: string, paths: readonly string[], heavyDirs: readonly string[], appRoot = "."): Promise<string[]> {
-  const sources = new Map<string, string>()
-  for (const path of new Set(paths)) {
-    if (!isPolicySourceFile(path) || underHeavy(path, heavyDirs) || path.startsWith(".infinite/")) continue
-    const info = await lstatOrNull(join(root, path))
-    if (!info?.isFile() || info.size > IGNORED_COPY_LIMITS.perFileBytes) continue
-    const bytes = await readFile(join(root, path))
-    if (!bytes.includes(0)) sources.set(path, bytes.toString("utf8"))
-  }
-  return [...policyContentPaths(sources, appRoot)]
-}
-
-function isDenied(rel: string, policyFiles: readonly string[] = [], appRoot = "."): boolean {
-  return rel === ".git" || policyFiles.includes(rel) || isPolicyPath(rel, appRoot) || matchesAnyGlob(rel, GLOBAL_DENY_GLOBS)
+function isDenied(rel: string, appRoot = "."): boolean {
+  return rel === ".git" || isPolicyPath(rel, appRoot) || matchesAnyGlob(rel, GLOBAL_DENY_GLOBS)
 }
 
 function segmentsOf(rel: string): string[] {

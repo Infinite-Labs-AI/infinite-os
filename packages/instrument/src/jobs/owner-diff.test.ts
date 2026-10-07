@@ -127,17 +127,18 @@ it.each(["amended", "squashed", "missing"])("retains an explicit unverified resu
   } finally { fixture.cleanup() }
 })
 
-it("measures policy-only components from both historical trees even after the cwd changes", async () => {
+it("measures a changed component without following its policy-page imports or the current working tree", async () => {
   const fixture = createGitFixture({ files: { "app/privacy/page.tsx": 'import Content from "../../components/Content"; export default Content;\n', "components/Content.tsx": "export default function Content(){return <p>Original policy</p>}\n" } })
   try {
     const baseSha = fixture.git(["rev-parse", "HEAD"]).trim()
     fixture.write("components/Content.tsx", "export default function Content(){return <p>Changed policy</p>}\n")
     fixture.git(["add", "components/Content.tsx"]); fixture.git(["commit", "-m", "wizard component fixture"])
     const revision = fixture.git(["rev-parse", "HEAD"]).trim()
-    // A later owner edit/removal of the policy import cannot change what the earlier commit touched.
+    // An uncommitted page edit is outside this historical commit measurement.
     fixture.write("app/privacy/page.tsx", "export default function Page(){return null}\n")
     const measured = await measureOwnerDiff({ root: fixture.root, baseSha, revision })
-    expect(measured.state).toBe("changed")
-    expect(measured.issues).toContainEqual(expect.objectContaining({ file: "components/Content.tsx" }))
+    expect(measured.state).toBe("checked")
+    expect(measured.files).toEqual(["components/Content.tsx"])
+    expect(measured.issues).toEqual([])
   } finally { fixture.cleanup() }
 })

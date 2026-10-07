@@ -5,7 +5,7 @@
 // source walk (`harness/scan.ts`: source extensions only, the installer's skip lists, 2,000 files,
 // 512 KB per file, never following symlinks) and adds the handful of non-source files the jobs need:
 // host config (`vercel.json`, `netlify.toml`, `_headers`, `_redirects`), package manifests (monorepo
-// layout + dependencies) and Markdown and template page content (including ordinary importers of shared components).
+// layout + dependencies) and Markdown and template page content.
 //
 // Every path in a snapshot is REPO-ROOT relative and POSIX (`apps/web/app/layout.tsx`), so allowlists
 // are monorepo-safe (§3e.2). The snapshot never holds `.env*` files: nothing here reads them.

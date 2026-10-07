@@ -10,7 +10,7 @@ const original = "export default function PolicyContent() { return <p>Owner poli
 const policy = "app/privacy/page.tsx"
 const policySource = 'import Policy from "../../components/PolicyContent"; export default Policy\n'
 
-it("freezes a component used only by policy pages even when the agent removes its page import", async () => {
+it("restores a changed policy page without treating its imported component as a policy page", async () => {
   const { root } = makeFenceFixture()
   const home = tempDir("policy-content-")
   dirs.push(root, home)
@@ -21,8 +21,8 @@ it("freezes a component used only by policy pages even when the agent removes it
   write(root, component, original.replace("Owner policy", "Changed policy"))
   expect(await fence.claimCheckSafe()).toBe(false)
   const result = await fence.end()
-  expect(result.reverted).toContain(component)
-  expect(readFileSync(join(root, component), "utf8")).toBe(original)
+  expect(result.reverted).not.toContain(component)
+  expect(readFileSync(join(root, component), "utf8")).toContain("Changed policy")
   expect(readFileSync(join(root, policy), "utf8")).toBe(policySource)
 })
 
@@ -42,7 +42,7 @@ it("allows a shared component and ordinary cookie utility to change", async () =
   expect(readFileSync(join(root, "lib/cookies.ts"), "utf8")).toContain("20")
 })
 
-it("also protects a component that becomes exclusive policy content during the turn", async () => {
+it("does not infer policy scope when a component loses its ordinary-page importer", async () => {
   const { root } = makeFenceFixture()
   const home = tempDir("policy-new-scope-")
   dirs.push(root, home)
@@ -52,19 +52,23 @@ it("also protects a component that becomes exclusive policy content during the t
   const fence = await Fence.begin({ root, snapshotDir: join(home, "fence"), runId: "policy", turn: 1, items: [item("build_fix:repo", [component, "app/page.tsx"])] })
   write(root, "app/page.tsx", "export default function Home() { return null }\n")
   write(root, component, original.replace("Owner policy", "Changed policy"))
-  expect((await fence.end()).reverted).toContain(component)
-  expect(readFileSync(join(root, component), "utf8")).toBe(original)
+  expect((await fence.end()).reverted).not.toContain(component)
+  expect(readFileSync(join(root, component), "utf8")).toContain("Changed policy")
 })
 
-it("recognizes policy component imports beneath a custom application root", async () => {
+it("protects only the policy page file beneath a custom application root", async () => {
   const { root } = makeFenceFixture()
   const home = tempDir("policy-app-root-")
   dirs.push(root, home)
   const appRoot = "frontend/site"
   write(root, `${appRoot}/${policy}`, policySource)
   write(root, `${appRoot}/${component}`, original)
-  const fence = await Fence.begin({ root, appRoot, snapshotDir: join(home, "fence"), runId: "policy", turn: 1, items: [item("build_fix:repo", [`${appRoot}/${component}`])] })
+  const fence = await Fence.begin({ root, appRoot, snapshotDir: join(home, "fence"), runId: "policy", turn: 1, items: [item("build_fix:repo", [`${appRoot}/${component}`, `${appRoot}/${policy}`])] })
   write(root, `${appRoot}/${component}`, original.replace("Owner policy", "Changed policy"))
-  expect((await fence.end()).reverted).toContain(`${appRoot}/${component}`)
-  expect(readFileSync(join(root, appRoot, component), "utf8")).toBe(original)
+  write(root, `${appRoot}/${policy}`, "export default function Privacy() { return null }\n")
+  const result = await fence.end()
+  expect(result.reverted).toContain(`${appRoot}/${policy}`)
+  expect(result.reverted).not.toContain(`${appRoot}/${component}`)
+  expect(readFileSync(join(root, appRoot, policy), "utf8")).toBe(policySource)
+  expect(readFileSync(join(root, appRoot, component), "utf8")).toContain("Changed policy")
 })

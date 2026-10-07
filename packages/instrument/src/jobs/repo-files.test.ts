@@ -86,7 +86,7 @@ describe("loadRepoSnapshot", () => {
   })
 })
 
-it("loads policy and ordinary MDX importers plus mapped templates for one-hop policy scope", () => {
+it("loads Markdown and template page sources in the bounded snapshot", () => {
   const root = repo({
     "app/terms/page.mdx": 'import Body from "../../components/Body"; export default Body',
     "app/about/page.mdx": 'import Body from "../../components/Body"; export default Body',

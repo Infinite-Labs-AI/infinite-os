@@ -1,4 +1,4 @@
-export { isPolicyPath, policyContentPaths, isPolicySourceFile } from "./policy-pages.js"
+export { isPolicyPath } from "./policy-pages.js"
 import { safeDisplayText } from "../review/display.js"
 import { createScanner, type Scanner } from "../review/scan.js"
 import type { OwnerBoundaryMeasurement } from "./owner-diff.js"

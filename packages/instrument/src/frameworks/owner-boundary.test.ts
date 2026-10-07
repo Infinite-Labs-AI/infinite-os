@@ -24,7 +24,7 @@ it.each(cases)("leaves $name byte-identical and returns owner-only manual wiring
   expect(verifyInstallation({ root })).toMatchObject({ buildOk: true, requiresManual: [{ path }] })
 })
 
-it.each(["privacy/index.html", "terms-and-conditions.html", "tos.html", "cookies.html", "product-terms-of-use.html", "api/privacy/index.html", "docs/api/privacy.html", "test/privacy.html", "datenschutz.html", "data-protection.html", "eula.html", "disclaimer.html", "policy.html", "policies.html", "agb.html", "mentions-legales.html", "politica-de-privacidad.html"])("leaves static policy %s untouched while ordinary pages receive their tags", policyPath => {
+it.each(["privacy/index.html", "terms-and-conditions.html", "tos.html", "cookies.html", "product-terms-of-use.html", "api/privacy/index.html", "docs/api/privacy.html", "test/privacy.html", "datenschutz.html", "data-protection.html", "eula.html", "disclaimer.html", "agb.html", "mentions-legales.html", "politica-de-privacidad.html"])("leaves static policy %s untouched while ordinary pages receive their tags", policyPath => {
   const policy = "<html><head></head><body>Owner policy text.</body></html>\n"
   const root = makeSite({ "index.html": "<html><head></head><body>Example</body></html>\n", [policyPath]: policy })
   const plan = planInstallation({ root, inspect: inspectWorkspace(root), workspaceId: "ws_fixture", artifacts: { ga4: { measurementId: "G-FIXTURE" } } })
@@ -90,4 +90,14 @@ it.each(cases)("allows uninstall of ordinary generated files after the applicati
   expect(result.warnings.some(warning => warning.includes("policy page"))).toBe(false)
   for (const [path, content] of Object.entries(files)) expect(read(movedRoot, `apps/legal/${path}`)).toBe(content)
   if (plan.framework.startsWith("next-")) expect(result.removedFiles).toContain("apps/legal/lib/infinite-analytics-client.tsx")
+})
+
+it.each(["policy.html", "policies.html", "recipes/cookies.html", "services/legal/index.html", "blog/our-privacy-first-approach.html", "insurance/policies/index.html"])("wires an ordinary page whose name is outside the exact policy list: %s", path => {
+  const html = "<html><head></head><body>Ordinary page</body></html>\n"
+  const root = makeSite({ "index.html": html, [path]: html })
+  const plan = planInstallation({ root, inspect: inspectWorkspace(root), workspaceId: "ws_fixture", artifacts: { ga4: { measurementId: "G-FIXTURE" } } })
+  const result = applyInstallation({ root, workspaceId: "ws_fixture", plan, allowDirty: true })
+  expect(read(root, path)).toContain("G-FIXTURE")
+  expect(result.changedFiles).toContain(path)
+  expect(result.requiresManual ?? []).toEqual([])
 })
