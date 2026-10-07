@@ -193,17 +193,25 @@ describe("P0-2: a standing ruling is never a worker FIX, whatever the item label
 })
 
 describe("P1-1: the scan never blocks the wizard's own PostHog /ingest rewrite", () => {
-  it("public hosts, NEXT_PUBLIC_* values and .env.example are not secrets; a webhook URL and a password still are", () => {
+  it("public URL paths stay ordinary while explicit webhook formats and passwords stay protected", () => {
     const dir = mkdtempSync(join(tmpdir(), "o4-env-fix-"))
     try {
       writeFileSync(join(dir, ".env.example"), "NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com\nAPI_TOKEN=replace-me-with-yours\n")
       writeFileSync(
         join(dir, ".env.local"),
-        `POSTHOG_HOST=https://us.i.posthog.com\nNEXT_PUBLIC_POSTHOG_KEY=phc_publicProjectKey1234567890\nSLACK_WEBHOOK=https://hooks.slack.com/services/T0/B0/abcdefgh12345678\nSTRIPE_SECRET_KEY=${STRIPE}\n`
+        `POSTHOG_HOST=https://us.i.posthog.com\nAPI_ENDPOINT=https://api.example/v1/events\nNEXT_PUBLIC_POSTHOG_KEY=phc_publicProjectKey1234567890\nSLACK_WEBHOOK=https://hooks.slack.com/services/T0/B0/abcdefgh12345678\nDISCORD_WEBHOOK=https://discord.com/api/webhooks/123456789012345678/abcdefgh12345678\nSTRIPE_SECRET_KEY=${STRIPE}\n`
       )
       const literals = collectEnvLiterals([dir]).map((literal) => literal.value)
-      expect(literals).toEqual(["https://hooks.slack.com/services/T0/B0/abcdefgh12345678", STRIPE])
+      expect(literals).toEqual([STRIPE])
       const scanner = createScanner({ literals: collectEnvLiterals([dir]), allowedIds: [PIXEL] })
+      const endpoint = "https://api.example/v1/events"
+      expect(scanner.redact(endpoint)).toEqual({ text: endpoint, hits: [] })
+      expect(scanner.findInCommit([{ path: "src/api.ts", added: [{ line: 1, text: `const endpoint = "${endpoint}"` }] }], () => false)).toEqual([])
+      for (const hook of ["https://hooks.slack.com/services/T0/B0/abcdefgh12345678", "https://discord.com/api/webhooks/123456789012345678/abcdefgh12345678"]) {
+        expect(literals).not.toContain(hook)
+        expect(scanner.redact(hook)).toEqual({ text: "[redacted: webhook_url]", hits: [{ kind: "webhook_url" }] })
+        expect(scanner.findInCommit([{ path: "src/api.ts", added: [{ line: 1, text: `const hook = "${hook}"` }] }], () => false)).toEqual([{ kind: "webhook_url", file: "src/api.ts", line: 1 }])
+      }
       // The managed vercel.json rewrite (frameworks/vercel-config.ts) commits.
       const rewrite = { path: "vercel.json", added: [{ line: 4, text: '      "destination": "https://us.i.posthog.com/:path*"' }] }
       expect(scanner.findInCommit([rewrite], () => false)).toEqual([])

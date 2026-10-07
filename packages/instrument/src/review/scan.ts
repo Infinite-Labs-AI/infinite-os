@@ -217,8 +217,7 @@ function isPlainPublicUrl(value: string): boolean {
   if (!/^https?:\/\//i.test(value)) return false
   try {
     const url = new URL(value)
-    // Origin only: a path can carry a secret (a Slack or Discord webhook URL).
-    return url.username === "" && url.password === "" && url.search === "" && url.hash === "" && url.pathname === "/" && !/^https?:\/\/[^/]+\/./i.test(value)
+    return url.username === "" && url.password === "" && url.search === "" && url.hash === ""
   } catch {
     return false
   }
