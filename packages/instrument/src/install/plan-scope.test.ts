@@ -2,11 +2,12 @@ import { expect, it } from "vitest"
 import { buildPlanModel, resolvePlanAnswers, seedItemsAfterApprovals } from "./plan-model.js"
 import { fakeBefore, fakeKeys, fakeProductionDeniedConflict } from "../../test/wizard/o7-fakes.js"
 const base = { keys: fakeKeys(), before: fakeBefore(), candidates: [], agent: { worker: "claude_code" as const, whoPays: { payer: "plan" as const, label: "plan" } }, consentFlag: "not_required" as const, productionDeniedConflict: fakeProductionDeniedConflict }
-it("scopes improvement-generated jobs before offering the plan or counting its budget", () => {
+it.each([false, true])("scopes sensitive-page work before offering the plan or budget (detector candidate %s)", (hasCandidate) => {
   const file = "src/tracking.ts"
-  const plan = buildPlanModel({ ...base, scan: { framework: "next-app-router", managedProviders: [], adopted: [{ provider: "posthog", via: "snippet", file, line: 2, key: "phc_fake" }], improve: [{ id: "sensitive", owner: "agent", kind: "sensitive_pages", provider: "posthog", target: "sensitive_pages", text: "Protect sensitive pages", evidence: { file, line: 2 } }], serverLane: null, npm: null, sensitivePaths: ["/account"], sources: { [file]: "function boot() {\nposthog.init('phc_fake', {});\nposthog.opt_out_capturing();\n}\n" } } } as Parameters<typeof buildPlanModel>[0])
-  const item = plan.seeds.find(item => item.id === "posthog_improve:sensitive_pages")!
+  const plan = buildPlanModel({ ...base, candidates: hasCandidate ? [{ id: "posthog_improve:sensitive_pages", jobId: "posthog_improve", n: 3, title: "Sensitive pages", owner: "agent", state: "pending", checks: [], allow: { files: [file], create: [] }, trigger: { finding: "Protect sensitive pages", evidence: [{ file, line: 2 }] } }] : [], scan: { framework: "next-app-router", managedProviders: [], adopted: [{ provider: "posthog", via: "snippet", file, line: 2, key: "phc_fake" }], improve: [{ id: "sensitive", owner: "agent", kind: "sensitive_pages", provider: "posthog", target: "sensitive_pages", text: "Protect sensitive pages", evidence: { file, line: 2 } }], serverLane: null, npm: null, sensitivePaths: ["/account"], sources: { [file]: "function boot() {\nposthog.init('phc_fake', {});\nposthog.opt_out_capturing();\n}\n" } } } as Parameters<typeof buildPlanModel>[0])
+  const item = [...plan.scopedCandidates ?? [], ...plan.seeds].find(item => item.id === "posthog_improve:sensitive_pages")!
   expect(item.state).toBe("left_for_you")
+  expect(plan.lines.find(line => line.id === "sensitive")?.requires).toBe("user_action")
   expect(plan.lines.filter(line => line.requires === "approval").some(line => line.jobIds?.includes(item.id))).toBe(false)
   expect(plan.lines.some(line => line.id === "agent_budget")).toBe(false)
 })
@@ -28,24 +29,26 @@ it("shows an unwritable entry first and does not offer unused provider installs"
   expect(plan.lines.some(line => line.id === "install_provider:infinite")).toBe(false)
 })
 
-it.each([[true, false], [false, false], [true, true]])("plans managed capture from the entry before jobs (entry writable %s, formerly frozen %s)", (canWire, formerlyFrozen) => {
+it.each([[true, false, true, true], [false, false, true, true], [true, true, true, true], [false, true, true, true], [false, true, false, true], [true, true, true, false]])("plans managed capture from the entry before jobs (entry writable %s, formerly frozen %s, sources available %s, needs entry edit %s)", (canWire, formerlyFrozen, withSources, needsEntryEdit) => {
   const entry = "pages/_app.tsx"
   const pixel = "src/pixel.ts"
   const candidates = formerlyFrozen ? [{ id: "meta_improve:capture", jobId: "meta_improve" as const, n: 5, title: "Capture", owner: "agent" as const, state: "left_for_you" as const, checks: [], allow: { files: [pixel], create: [] }, trigger: { finding: "Missing capture", evidence: [{ file: pixel, line: 1 }] }, ownerBoundary: { kind: "frozen_unit" as const, file: pixel, line: 1 } }] : []
-  const plan = buildPlanModel({ ...base, candidates, scan: { framework: "next-pages-router", managedProviders: [], adopted: [{ provider: "meta", via: "snippet", file: pixel, line: 1, key: "123456789" }], improve: [{ id: "capture_beside_adopted_pixel:meta:capture", kind: "capture_beside_adopted_pixel", owner: "code", provider: "meta", target: "capture", text: "Save click ids", evidence: { file: pixel, line: 1 } }], serverLane: null, npm: null, sensitivePaths: [], sources: { [pixel]: "fbq('consent', 'revoke');", [entry]: "export default function App() { return null }" }, managedCapture: { canWire, module: "lib/infinite-meta-click-id.js", entrypoints: canWire ? [entry] : [], editEntrypoints: canWire ? [entry] : [], pixelFiles: [pixel], strategy: "first_import", requirements: canWire ? [] : [{ path: entry, reason: "Entry handles owner consent", snippet: 'import "../lib/infinite-meta-click-id.js"', ownerBoundary: { kind: "frozen_unit", file: entry, line: 1 } }] } } })
+  const plan = buildPlanModel({ ...base, candidates, scan: { framework: "next-pages-router", managedProviders: [], adopted: [{ provider: "meta", via: "snippet", file: pixel, line: 1, key: "123456789" }], improve: [{ id: "capture_beside_adopted_pixel:meta:capture", kind: "capture_beside_adopted_pixel", owner: "code", provider: "meta", target: "capture", text: "Save click ids", evidence: { file: pixel, line: 1 } }], serverLane: null, npm: null, sensitivePaths: [], sources: withSources ? { [pixel]: "fbq('consent', 'revoke');", [entry]: needsEntryEdit ? "export default function App() { return null }" : "fbq('consent', 'revoke');" } : undefined, managedCapture: { canWire, module: "lib/infinite-meta-click-id.js", entrypoints: canWire ? [entry] : [], editEntrypoints: canWire && needsEntryEdit ? [entry] : [], pixelFiles: [pixel], strategy: "first_import", requirements: canWire ? [] : [{ path: entry, reason: "Entry handles owner consent", snippet: 'import "../lib/infinite-meta-click-id.js"', ownerBoundary: { kind: "frozen_unit", file: entry, line: 1 } }] } } })
   const capture = [...plan.scopedCandidates ?? [], ...plan.seeds].find(item => item.id === "meta_improve:capture")!
   expect(capture.owner).toBe("code")
   expect(capture.state).toBe(canWire ? "pending" : "left_for_you")
   expect(capture.allow.files).not.toContain(pixel)
   expect(plan.lines.some(line => line.id === "agent_budget")).toBe(false)
   if (canWire) {
-    expect(capture.allow.files).toEqual([entry])
+    expect(capture.allow.files).toEqual(needsEntryEdit ? [entry] : [])
     expect(capture.checks.map(check => `${check.tier}:${check.id}`)).toEqual(["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"])
     expect(plan.lines.find(line => line.kind === "capture_beside_adopted_pixel")?.requires).toBe("info")
   } else {
     expect(capture.ownerBoundary?.file).toBe(entry)
     expect(capture.ownerBoundary?.wiring).toContain("infinite-meta-click-id")
     expect(capture.note).toContain("does not save")
+    expect(plan.lines.find(line => line.kind === "capture_beside_adopted_pixel")?.requires).toBe("user_action")
+    expect(plan.lines.find(line => line.id === "owner_only:meta_improve:capture")?.text).toContain('import "../lib/infinite-meta-click-id.js"')
   }
 })
 

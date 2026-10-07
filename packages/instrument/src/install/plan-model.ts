@@ -849,10 +849,12 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     if (!planLine || (planLine.jobIds?.length ?? 0) > 0) continue
     const rawSeed = seedForImproveLine(entry.kind === "capture_beside_adopted_pixel" && scan.managedCapture ? { ...entry, owner: "agent" } : entry, scan.appRoot ?? ".", scan.framework)
     const seed = rawSeed ? captureScope(rawSeed) : null
-    if (!seed || takenIds.has(seed.id)) continue
+    if (!seed) continue
+    // An already-scoped detector candidate still owns this line, even when the owner must do it.
+    planLine.jobIds = [seed.id]
+    if (takenIds.has(seed.id)) continue
     takenIds.add(seed.id)
     seeds.push(seed)
-    planLine.jobIds = [seed.id]
   }
 
   // ---- Meta: the goal (D16) and the server-events relay (D11) ----
@@ -900,6 +902,9 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   if (sources) {
     candidates = candidates.map(item => scopeOwnerJob(item, sources))
     seeds = seeds.map(item => scopeOwnerJob(item, sources))
+  }
+  {
+    // Capture planning and the registry may already have scoped items without scan source text.
     const left = new Map([...candidates, ...seeds].filter(item => item.state === "left_for_you").map(item => [item.id, item]))
     for (const planLine of lines) {
       if (!planLine.jobIds?.some(id => left.has(id))) continue
@@ -921,7 +926,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     const handoff = item.jobId === "preview_guard" && item.ownerBoundary && guard.emit
       ? ownerGuardHandoff(item.note ?? item.trigger.finding, item.ownerBoundary, buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny }), sources?.get(item.ownerBoundary.file ?? "")) : null
     if (handoff && item.ownerBoundary) item.ownerBoundary.guard = handoff.guard
-    lines.push(line({ id: `owner_only:${item.id}`, kind: "user_action", text: handoff?.text ?? item.note ?? item.trigger.finding, requires: "user_action" }))
+    lines.push(line({ id: `owner_only:${item.id}`, kind: "user_action", text: handoff?.text ?? [item.note ?? item.trigger.finding, item.ownerBoundary?.wiring ? `Owner-only wiring:\n${item.ownerBoundary.wiring}` : null].filter(Boolean).join("\n\n"), requires: "user_action" }))
   }
 
   if (keys.ga4.status === "connected") lines.push(line({ id: "account_settings:ga4", kind: "account_settings", requires: "approval", text: "Allow Infinite to mark the selected, click-tested conversions as key events in your connected GA4 property." }))
