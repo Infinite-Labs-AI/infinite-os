@@ -254,7 +254,7 @@ export async function pushBranch(input: {
   ctx.state.update(state => { state.ownerBoundary = boundary })
   await ctx.state.save()
   if (boundary.state === "changed" || boundary.issues.length > 0 || (boundary.state === "not_checked" && !boundary.unverifiedReason)) return { kind: "failed", message: safeDisplayText(input.scanner, ownerBoundaryStop(boundary)) }
-  if (!await acknowledgeUnverifiedHistory(ctx, measuredSha, boundary)) return { kind: "failed", message: "Continuing with the unverified earlier history was declined. Nothing was pushed." }
+  if (!await acknowledgeUnverifiedHistory(ctx, measuredSha, boundary)) return { kind: "failed", message: "Continuing with the unverified earlier history was not confirmed. Nothing was pushed." }
   if (await git.head() !== measuredSha) return { kind: "failed", message: "The branch changed while reviewing its history. Run again to review the current commits." }
   const foreign = await unrecordedCommits({ root: ctx.root, baseSha: state.git?.baseSha ?? "", headSha: measuredSha, wizardCommits: state.wizardCommits ?? [], approvedForeignCommits: state.approvedForeignCommits ?? [], priorHistoryHeads: ctx.state.get().commitHistory?.priorHeads })
   if (foreign === null) return { kind: "failed", message: "Nothing pushed: the commits outside the wizard's record could not be listed." }

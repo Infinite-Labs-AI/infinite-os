@@ -246,7 +246,7 @@ it.each([ASK_CANCELLED, ASK_TIMEOUT])("stops an interactive push when the existi
   w.fx.write(path, source.replace("count = 1", "count = 2"))
   w.fx.git(["add", path]); w.fx.git(["commit", "-m", "unknown earlier fixture"])
   w.ctx.state.update(state => { delete state.wizardCommits; delete state.commitHistory })
-  expect(await w.push()).toMatchObject({ kind: "failed", message: expect.stringContaining("Nothing was pushed") })
+  expect(await w.push()).toMatchObject({ kind: "failed", message: "Continuing with the unverified earlier history was not confirmed. Nothing was pushed." })
   expect(w.fx.remoteSha(w.branch)).toBeNull()
   expect(w.ctx.state.get().commitHistory?.resolution).toBeUndefined()
   expect(w.ctx.asks).toHaveLength(1)
