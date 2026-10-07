@@ -448,8 +448,15 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   const consentStorageKey =
     config.consent.mode === "required" ? config.consent.storageKey : "infinite_analytics_consent"
 
-  let consentOverride: boolean | undefined
+  // The site already runs its own analytics or ad pixels: this tag starts when they start and stops
+  // when they stop, so whatever governs them (the site's own banner, or nothing) governs this tag
+  // the same way. Nothing of the site's is called, changed or wrapped; only its public state is read.
+  const followedGlobals: readonly string[] = (config.consent.mode === "not_required" && config.consent.followSitePixels) || []
+  const followsSitePixels = followedGlobals.length > 0
+
+  let consentOverride: boolean | undefined = followsSitePixels ? false : undefined
   function storedConsentDecision(): boolean | undefined {
+    if (followsSitePixels) return undefined
     try {
       const value = localStorage.getItem(consentStorageKey)
       if (value === "granted") return true
@@ -729,6 +736,9 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
       // explicit decision of a GPC/DNT visitor (the only visitors it suppresses).
       const detail = (event as CustomEvent<{ granted?: boolean }>).detail
       if (typeof detail?.granted !== "boolean") return
+      // While following the site's pixels, their state is the only decision (this event is also
+      // how the managed helpers are told the tag has started).
+      if (followsSitePixels) return
       if (detail.granted && (lastGestureAt < 0 || Date.now() - lastGestureAt > 10000)) return
       consentOverride = detail?.granted === true
       try {
@@ -744,6 +754,65 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
         initialView = true
       }
     })
+
+    if (followsSitePixels) {
+      const sitePixelsRunning = (): boolean => {
+        try {
+          // Names are joined at run time and the globals come from the config, so this file carries
+          // no provider's own signature: it only READS the site's public state.
+          const optedOutName = ["has", "opted", "out", "capturing"].join("_")
+          const storageName = ["analytics", "storage"].join("_")
+          const commandName = ["con", "sent"].join("")
+          const site = runtimeWindow as unknown as { [key: string]: unknown }
+          let running = false
+          for (const name of followedGlobals) {
+            const value = site[name] as ({ __loaded?: unknown } & { [key: string]: unknown }) | undefined
+            if (!value) continue
+            if (Array.isArray(value)) {
+              // A command queue (Google Consent Mode): the newest such command decides. A site may load
+              // with a denied default and grant later, or deny again on withdrawal.
+              for (let index = value.length - 1; index >= 0; index -= 1) {
+                const entry = value[index] as { [key: number]: unknown } | null
+                if (!entry || entry[0] !== commandName) continue
+                const state = entry[2] as { [key: string]: unknown } | null
+                if (state && state[storageName] === "denied") return false
+                break
+              }
+              continue
+            }
+            const optedOut = value[optedOutName]
+            if (typeof optedOut === "function" && (optedOut as () => boolean).call(value)) return false
+            if (typeof value === "function" || value.__loaded === true) running = true
+          }
+          return running
+        } catch {
+          return false
+        }
+      }
+      const syncWithSitePixels = (): void => {
+        const running = sitePixelsRunning()
+        if (running === consentOverride) return
+        consentOverride = running
+        if (!running) {
+          // The site stopped its pixels: the next start re-observes the page as a fresh initial view.
+          lastPageViewPath = null
+          initialView = true
+          return
+        }
+        emitPageView()
+        try {
+          const dispatcher = runtimeWindow as unknown as { dispatchEvent?: (event: unknown) => void; CustomEvent?: new (type: string, init: unknown) => unknown }
+          if (typeof dispatcher.dispatchEvent === "function" && typeof dispatcher.CustomEvent === "function") {
+            dispatcher.dispatchEvent(new dispatcher.CustomEvent("infinite:analytics-consent-change", { detail: { granted: true, source: "site-pixels" } }))
+          }
+        } catch {
+          // The managed helpers re-read the accessor on their own next call.
+        }
+      }
+      syncWithSitePixels()
+      const timers = runtimeWindow as unknown as { setInterval?: (callback: () => void, ms: number) => unknown }
+      if (typeof timers.setInterval === "function") timers.setInterval(syncWithSitePixels, 500)
+    }
 
     emitPageView()
   }

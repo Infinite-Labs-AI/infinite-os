@@ -77,6 +77,14 @@ describe("infinite provider plan", () => {
     expect(snippet).toContain("infinite_analytics_consent")
   })
 
+  it("names the site's pixel globals in the config only when it follows them", () => {
+    const follow = { ...validArtifact, consentMode: "not_required" as const, followSitePixels: true }
+    const snippet = infiniteProviderAdapter.plan("static-html", follow, context({ infinite: follow })).instructions[0]!.snippet
+    expect(snippet).toContain('"consent":{"mode":"not_required","followSitePixels":["fbq","gtag","posthog","dataLayer"]}')
+    const plain = { ...validArtifact, consentMode: "not_required" as const }
+    expect(infiniteProviderAdapter.plan("static-html", plain, context({ infinite: plain })).instructions[0]!.snippet).not.toContain("followSitePixels")
+  })
+
   it("blocks Infinite collection until consent mode is explicitly selected", () => {
     const { consentMode: _, ...artifactWithoutConsent } = validArtifact
     const planned = infiniteProviderAdapter.plan(

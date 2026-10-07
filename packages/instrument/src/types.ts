@@ -245,6 +245,11 @@ export interface InfinitePublicArtifact {
    * hosts). Absent/false = the production default (bots are never counted). See the runtime.
    */
   allowAutomation?: boolean
+  /**
+   * `true` when the site already runs its own analytics or ad pixels: the tag starts when they start
+   * and stops when they stop, so the site's own banner governs it the same way. Absent = start on load.
+   */
+  followSitePixels?: boolean
 }
 
 export interface InfiniteBrowserConfig {
@@ -253,7 +258,11 @@ export interface InfiniteBrowserConfig {
   productionHosts: string[]
   respectDnt: boolean
   consent:
-    | { mode: "not_required" }
+    | {
+        mode: "not_required"
+        /** The site's own pixel globals to follow (the tag itself names no provider). Absent = start on load. */
+        followSitePixels?: readonly string[]
+      }
     | { mode: "required"; storageKey: "infinite_analytics_consent" }
   /** Conversion destination for app_download_click detection. Absent = "/download". */
   downloadDestinationPath?: string

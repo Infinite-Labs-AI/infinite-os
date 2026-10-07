@@ -90,7 +90,8 @@ export const infiniteProviderAdapter: ProviderAdapter = {
       respectDnt: true,
       consent:
         consentMode === "not_required"
-          ? { mode: "not_required" }
+          ? // Only `true` is serialized: an absent flag keeps the runtime config byte-identical.
+            { mode: "not_required", ...(infinite?.followSitePixels === true ? { followSitePixels: ["fbq", "gtag", "posthog", "dataLayer"] } : {}) }
           : { mode: "required", storageKey: "infinite_analytics_consent" },
       ...(downloadDestinationPath !== undefined ? { downloadDestinationPath } : {}),
       // Only `false` is serialized — an absent flag keeps the runtime config byte-identical to 0.6.2.

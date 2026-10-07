@@ -400,7 +400,7 @@ export class WizardInstaller implements Installer {
     const answers = resolvePlanAnswers(plan, approvals, { consentFlag: this.options.consentFlag() })
     const approved = new Set(answers.lines.filter((entry) => entry.approved === true).map((entry) => entry.id))
     const served = siteServing(scan, internals.before, keys)
-    const all = artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode ?? "not_required" }, { posthogProxy: served.posthogProxy })
+    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode ?? "not_required" }, { posthogProxy: served.posthogProxy }), scan.detected)
     const artifacts: WizardInstallArtifacts = { ...(all.productionHosts ? { productionHosts: all.productionHosts } : {}) }
     for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) {
       const lineForTool = plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
@@ -455,7 +455,7 @@ export class WizardInstaller implements Installer {
 
     // ---- the artifacts: approved tools from the connections; an already-managed tool whose update
     // was not approved is KEPT exactly as the receipt recorded it (never dropped from the page) ----
-    const all = artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode }, { posthogProxy: served.posthogProxy })
+    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode }, { posthogProxy: served.posthogProxy }), scan.detected)
     const installLine = (tool: ProviderId) =>
       plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
     const previous = scan.manifest
@@ -598,8 +598,9 @@ export class WizardInstaller implements Installer {
       // 2. approved improve-in-place code edits (each recorded, reversible)
       for (const entry of codeImprove) {
         if (entry.kind === "capture_beside_adopted_pixel") {
+          // Following the site's pixels, the click-id module waits for the tag's start instead of running at import.
           if (answers.consentMode === null) throw new Error("The capture requires the owner's recorded consent-mode answer")
-          const applied = applyManagedCapture({ root, appRoot: scan.appRoot, framework: scan.framework, pixels: scan.facts.meta, htmlPages: scan.inspect.detectedFiles.filter(file => /\.html?$/i.test(file)), mode: answers.consentMode, runId, seq })
+          const applied = applyManagedCapture({ root, appRoot: scan.appRoot, framework: scan.framework, pixels: scan.facts.meta, htmlPages: scan.inspect.detectedFiles.filter(file => /\.html?$/i.test(file)), mode: artifacts.infinite?.followSitePixels === true ? "required" : answers.consentMode, runId, seq })
           ownerRequirements.push(...applied.plan?.requirements ?? [])
           edits.push(...applied.edits); seq += applied.edits.length
           changedFiles.push(...applied.changedFiles)
@@ -1034,4 +1035,15 @@ export function nextConfigRewritesNeeded(scan: Pick<WizardScanResult, "root"> & 
   if (!scan.unmanagedNextConfig || !keys.infinite.collectPath) return null
   const infinite = { path: keys.infinite.collectPath, destination: infiniteCollectDestination(INFINITE_API_ORIGIN) }
   return ownConfigHas(scan.root, scan.unmanagedNextConfig, { infinite }) ? null : { path: scan.unmanagedNextConfig, snippet: buildManualNextConfigInstruction({ infinite }) }
+}
+
+/**
+ * A site that already runs its own analytics or ad pixels gets a tag that starts when they start and
+ * stops when they stop, so the site's own banner (or the lack of one) governs it the same way. A site
+ * with no pixels of its own gets a tag that starts on load. Nothing is asked either way.
+ */
+function followSitePixels(artifacts: WizardInstallArtifacts, detected: readonly DetectedProviderEvidence[]): WizardInstallArtifacts {
+  const sitePixels = detected.some((entry) => entry.provider === "ga4" || entry.provider === "posthog" || entry.provider === "meta")
+  if (!sitePixels || !artifacts.infinite || artifacts.infinite.consentMode !== "not_required") return artifacts
+  return { ...artifacts, infinite: { ...artifacts.infinite, followSitePixels: true } }
 }

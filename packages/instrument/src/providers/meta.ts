@@ -168,7 +168,7 @@ export const metaProviderAdapter: ProviderAdapter = {
         "Meta wiring will use only the public pixelId artifact.",
         consentMode === "required"
           ? "Meta ad-click capture is NOT ACTIVE YET: it waits for your banner's yes signal to Infinite before saving _fbc. Connect the yes/no signal in the owner instructions. Offline capture checks work when consent is granted; they do not test your banner connection."
-          : "Meta ad-click capture runs on page load like a standard pixel and does not read your cookie banner. It saves _fbc on ad landings, skips DNT/GPC visitors, and sends nothing.",
+          : "Meta ad-click capture starts with Infinite's tag. It saves _fbc on ad landings and sends nothing.",
         advancedMatching
           ? "Manual Advanced Matching is ON: the page will define window.infiniteMetaAdvancedMatch, which hashes the raw email / external id YOUR code passes it. It never reads the page and never runs on its own."
           : "Manual Advanced Matching is OFF (default): the pixel sends no visitor contact details. Turn it on with --meta-advanced-matching on."
