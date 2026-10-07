@@ -45,8 +45,8 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
   const ownerBoundary = { ...measured, files: measured.files.map(display), issues: measured.issues.map(issue => ({ file: display(issue.file), reason: display(issue.reason) })),
     ...(measured.unverifiedReason ? { unverifiedReason: display(measured.unverifiedReason) } : {}) }
   const savedPlan = await loadPlanApprovals(ctx, deps)
-  const excluded = savedPlan?.excluded ?? savedPlan?.approvals.declined ?? state.plan?.lines?.filter(line => line.approved === false).map(line => line.id) ?? []
-  const excludedLines = [...new Set(excluded)].map(id => display(savedPlan?.plan?.lines.find(line => line.id === id)?.text ?? id))
+  const excluded = savedPlan?.excluded ?? savedPlan?.approvals?.declined ?? state.plan?.lines?.filter(line => line.approved === false).map(line => line.id) ?? []
+  const excludedLines = [...new Set(excluded)].map(id => display(savedPlan?.plan?.lines?.find(line => line.id === id)?.text ?? id))
   return {
     consentActivation: await consentActivationFor(ctx, deps),
     excludedLines,

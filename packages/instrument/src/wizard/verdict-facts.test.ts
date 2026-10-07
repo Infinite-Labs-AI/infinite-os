@@ -46,3 +46,13 @@ it("carries current and earlier exclusions into the shared report facts without 
   expect(facts.excludedLines!.join("\n")).not.toContain("@here")
   expect(facts.excludedLines![1]).toBe("old:choice")
 })
+
+it.each([undefined, {}])("uses recorded state exclusions when a legacy approval record lacks answers (plan=%s)", async plan => {
+  const state = { runId: "fixture", jobs: [], git: null, plan: { answers: { consentMode: null }, lines: [{ id: "install_provider:infinite", approved: false }] } }
+  const saved = { schema: "infinite-tag.plan-approvals.v1", ownerWiring: { canWire: false }, plan }
+  const ctx = { root: "/fixture", appRoot: ".", runId: "fixture", state: { get: () => state } }
+  const deps = { env: {}, bridge: {}, git: {}, fs: { readText: async (path: string) => path.endsWith("plan-approvals.json") ? JSON.stringify(saved) : null } }
+  const facts = await verdictFactsFor(ctx as never, deps as never)
+  expect(facts.excludedLines).toEqual(["install_provider:infinite"])
+  expect(facts.tagNotInstalled).toBe(true)
+})
