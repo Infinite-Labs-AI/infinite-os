@@ -133,7 +133,7 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boo
 }
 
 /** Validates the review shape and normalizes only explicit finding labels in place. */
-export function isReviewResult(value: unknown): value is ReviewResult {
+export function isReviewResult(value: unknown, normalizeLabels = true): value is ReviewResult {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false
   const review = value as Record<string, unknown>
   if (!exactKeys(review, ["verdict", "summary", "checklist", "findings"])) return false
@@ -146,26 +146,30 @@ export function isReviewResult(value: unknown): value is ReviewResult {
     if (!exactKeys(entry, ["item", "status", "note"])) return false
     if (!ITEMS.has(String(entry.item)) || !STATUSES.has(String(entry.status)) || typeof entry.note !== "string" || entry.note.length > 500) return false
   }
+  const normalized: Array<() => void> = []
   for (const row of review.findings as unknown[]) {
     if (typeof row !== "object" || row === null) return false
     const entry = row as Record<string, unknown>
     if (!exactKeys(entry, ["id", "item", "severity", "path", "line", "body", "suggested_fix", ...(entry.category === undefined ? [] : ["category"])])) return false
     if (typeof entry.severity !== "string" || (entry.category !== undefined && typeof entry.category !== "string")) return false
+    if (typeof entry.id !== "string" || !/^F[0-9]{1,2}$/.test(entry.id)) return false
+    if (!ITEMS.has(String(entry.item))) return false
+    if (typeof entry.path !== "string" || entry.path.length > 300) return false
+    if (entry.line !== null && !Number.isInteger(entry.line)) return false
+    if (typeof entry.body !== "string" || entry.body.length > 1500) return false
+    if (entry.suggested_fix !== null && (typeof entry.suggested_fix !== "string" || entry.suggested_fix.length > 1500)) return false
     const severity = entry.severity.toLowerCase()
     const category = typeof entry.category === "string" ? entry.category.toLowerCase() : undefined
     const unknown: string[] = []
     if (!SEVERITIES.has(severity) && severity !== "critical" && severity !== "high") unknown.push(`severity: ${entry.severity}`)
     if (category !== undefined && !["analytics", "security", "owner_consent_privacy", "request_ga4_proxy", "request_meta_unsupported", "request_meta_deletion"].includes(category)) unknown.push(`category: ${entry.category}`)
-    entry.severity = unknown.length || severity === "critical" || severity === "high" ? "blocker" : severity
-    if (category !== undefined) entry.category = unknown.some(value => value.startsWith("category:")) ? "analytics" : category
-    if (unknown.length && typeof entry.body === "string") entry.body = `[Unknown review label (${unknown.join("; ")}); treated as blocker.] ${entry.body}`
-    if (typeof entry.id !== "string" || !/^F[0-9]{1,2}$/.test(entry.id)) return false
-    if (!ITEMS.has(String(entry.item)) || !SEVERITIES.has(String(entry.severity))) return false
-    if (typeof entry.path !== "string" || entry.path.length > 300) return false
-    if (entry.line !== null && !Number.isInteger(entry.line)) return false
-    if (typeof entry.body !== "string" || entry.body.replace(/^\[Unknown review label \([^\n]*\); treated as blocker\.\] /, "").length > 1500) return false
-    if (entry.suggested_fix !== null && (typeof entry.suggested_fix !== "string" || entry.suggested_fix.length > 1500)) return false
+    normalized.push(() => {
+      entry.severity = unknown.length || severity === "critical" || severity === "high" ? "blocker" : severity
+      if (category !== undefined) entry.category = unknown.some(value => value.startsWith("category:")) ? "analytics" : category
+      if (unknown.length && typeof entry.body === "string") entry.body = `[Unknown review label (${unknown.map(label => label.replace(/[\r\n\x00-\x1f\x7f]/g, " ").slice(0, 120)).join("; ")}); treated as blocker.] ${entry.body}`
+    })
   }
+  if (normalizeLabels) for (const apply of normalized) apply()
   return true
 }
 

@@ -996,6 +996,18 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
     let review: ReviewResult
     const resumed = round === firstRound && savedReview !== null
     if (resumed) {
+      if (agentReviewer && session.ledger.completeness?.unchecked.includes("read-check missing or incorrect")) {
+        const unreadIds = new Set(savedReview!.findings.map(finding => finding.id))
+        const unreadKeys = new Set(savedReview!.findings.map(finding => triageKey(finding)))
+        const unreadRound = session.ledger.rounds.find(entry => entry.round === round)
+        if (unreadRound) delete unreadRound.review
+        session.ledger.findings = session.ledger.findings?.filter(entry => entry.round !== round || entry.findingId === null || !unreadIds.has(entry.findingId))
+        session.ledger.open = session.ledger.open.filter(entry => entry.round !== round || !unreadKeys.has(entry.key))
+        session.ledger.declined = session.ledger.declined.filter(entry => entry.round !== round || !unreadKeys.has(entry.key))
+        session.ledger.left = session.ledger.left?.filter(entry => entry.round !== round || !unreadKeys.has(entry.key))
+        await blindFallback(session, agentReviewer, prepared)
+        break
+      }
       review = savedReview!
       sub(ctx, "review", `Resuming round ${round} from its saved review`, "info")
     } else if (round === 1 && briefReview) {

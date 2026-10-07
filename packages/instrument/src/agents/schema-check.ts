@@ -70,7 +70,7 @@ export function parseStructuredClaims(value: unknown): StructuredClaims | null {
 /** The review, or null when it does not match `review.schema.json` exactly. */
 export function parseReview(value: unknown): ReviewResult | null {
   const parsed = typeof value === "string" ? tryJson(value) : value
-  if (!isReviewResult(parsed)) return null
+  if (!isReviewResult(parsed, false)) return null
   return parsed as ReviewResult
 }
 

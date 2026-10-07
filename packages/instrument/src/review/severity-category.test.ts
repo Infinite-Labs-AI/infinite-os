@@ -72,6 +72,16 @@ it("requires every rubric row before calling a review complete", () => {
 it("unknown labels promote only their own finding", () => {
   const base = { id: "F1", item: "R7", severity: "nit", category: "analytics", path: "a.ts", line: 1, body: "Specific reason", suggested_fix: null }
   const parsed = parseReview({ verdict: "changes_suggested", summary: "Read", checklist: [], findings: [{ ...base, severity: "mystery" }, { ...base, id: "F2" }] })
+  expect(isReviewResult(parsed)).toBe(true)
   expect(parsed?.findings.map(finding => finding.severity)).toEqual(["blocker", "nit"])
   expect(parsed?.findings[0]?.body).toContain("mystery")
+})
+
+it("keeps a full finding body with an unknown multiline label", () => {
+  const body = "x".repeat(1500)
+  const parsed = parseReview({ verdict: "changes_suggested", summary: "Read", checklist: [], findings: [{ id: "F1", item: "R7", severity: "unknown\nlabel", category: "analytics", path: "a.ts", line: 1, body, suggested_fix: null }] })
+  expect(isReviewResult(parsed)).toBe(true)
+  expect(parsed?.findings[0]?.severity).toBe("blocker")
+  expect(parsed?.findings[0]?.body).toContain(body)
+  expect(parsed?.findings[0]?.body).toContain("unknown label")
 })

@@ -34,6 +34,7 @@ import { createGitHubAdapter } from "../../hosts/github.js"
 import { ensurePushTarget } from "../push-target.js"
 import { createGitLabAdapter } from "../../hosts/gitlab.js"
 import { createOtherAdapter } from "../../hosts/other.js"
+import { triageKey } from "../../review/triage.js"
 import { REVIEW_LEDGER_PATH } from "../../review/ledger.js"
 import { reviewSentence } from "./merge.js"
 import { FAKE_BRIDGE_TOKEN, type TagHosting } from "../contracts/bridge.js"
@@ -1009,6 +1010,20 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     summary: "Review blocked: file-access tooling is unavailable, and your instructions prohibit commands. No repository contents were inspected.",
     checklist: (["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16"] as const).map((item) => ({ item, status: "cant_tell" as const, note: "Could not inspect files." })),
     findings: []
+  })
+
+  it("does not act on an explicitly unread review saved by an earlier run", async () => {
+    const unread = review([{ id: "F1", item: "R16", severity: "blocker", category: "analytics", path: "app/layout.tsx", line: 2, body: "Saved unread defect", suggested_fix: "Change file" }])
+    const w = await opened({ reviews: [] })
+    const head = await w.deps.git.head()
+    const key = triageKey(unread.findings[0]!)
+    w.fx.write(REVIEW_LEDGER_PATH, JSON.stringify({ version: 1, runId: RUN_ID, rounds: [{ round: 1, reviewedSha: head, reviewer: "codex", fixSha: null, review: unread }], open: [{ key, path: "app/layout.tsx", reason: "Ask", excerpt: "Saved unread defect", round: 1 }], findings: [{ key, findingId: "F1", item: "R16", severity: "blocker", path: "app/layout.tsx", line: 2, action: "ASK", ruling: null, label: null, round: 1, body: "Saved unread defect" }], declined: [], completeness: { reviewer: "codex", state: "incomplete", unchecked: ["read-check missing or incorrect"] } }))
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(w.agents.reviewCalls).toHaveLength(0)
+    expect(w.agents.jobCalls).toHaveLength(0)
+    expect(JSON.stringify(w.gh.read())).not.toContain("Saved unread defect")
+    expect(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8")).not.toContain("Saved unread defect")
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toContain("Review incomplete")
   })
 
   it("a missing read-check twice posts no findings and never runs a fix", async () => {
