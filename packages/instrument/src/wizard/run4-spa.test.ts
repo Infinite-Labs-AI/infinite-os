@@ -1,8 +1,9 @@
 // R4-8 (live run 4), replayed end to end through the wizard's own pieces on run 4's site and `before.json`: GA4 sent
 // nothing on the test load's client-side page change (Meta's page-change PageView proved the page changed), the
 // headline named "spa page views", and no plan line or job fixed it. Now:
-//   before facts → a `ga4_improve:spa_page_view` candidate → an approvable `ga4_spa_page_views` line → the brief's exact
+//   Separate-consent world: before facts → a `ga4_improve:spa_page_view` candidate → an excludable plan line → the brief's exact
 //   bytes → pasted where the brief says → the page sends ONE page_view per page change → the rehearsal's RH check.
+//   Recorded inline-consent world: owner handoff, no executable checks, and the original bytes stay frozen.
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { runInNewContext } from "node:vm"
@@ -16,6 +17,7 @@ import { buildBrief, GA4_PAGE_CHANGE_SCRIPT } from "../jobs/briefs.js"
 import { jobScanFrom } from "../jobs/detectors/index.js"
 import { briefConnectionsFrom, briefPlanFrom } from "../jobs/plan-data.js"
 import { applyApprovalsTo, dryNavigated, requiredLineKind, seedCandidatesFrom } from "../jobs/registry.js"
+import { restoreFrozenUnits } from "../jobs/consent-units.js"
 import { snapshotFromFiles } from "../jobs/repo-files.js"
 import { rehearsalCheckResults, type RehearsalOutcome } from "../review/rehearse.js"
 import { cookTemplateLiteral, inlineScriptsOf } from "../t0/inline-scripts.js"
@@ -76,10 +78,35 @@ function pageViews(layout: string): { firstLoad: number; afterPush: number; afte
   return { firstLoad, afterPush, afterSameReplace, afterBack: count() - firstLoad - afterPush - afterSameReplace }
 }
 
-describe("R4-8 live run 4: GA4's page change gets a job, a line, exact bytes and a check", () => {
+/** The runnable world keeps the recorded consent script verbatim in a separate owner component. */
+function consentSeparatedSiteFiles(): Record<string, string> {
   const files = siteFiles()
+  const layout = files["app/layout.tsx"]!
+  const consent = /<Script id="consent-default"[^>]*>[\s\S]*?<\/Script>/.exec(layout)?.[0]
+  if (!consent) throw new Error("Recorded consent-default script is missing")
+  files["app/consent-defaults.tsx"] = `import Script from 'next/script'\nexport function ConsentDefaults() { return (${consent}) }\n`
+  files["app/layout.tsx"] = `import { ConsentDefaults } from './consent-defaults'\n${layout.replace(consent, "<ConsentDefaults />")}`
+  return files
+}
+
+describe("run 4 SPA regression with separate recorded-consent and runnable worlds", () => {
+  const files = consentSeparatedSiteFiles()
   const scan = () => jobScanFrom(scanResult({ framework: "next-app-router" }), snapshotFromFiles(files))
   const facts = before.facts as unknown as BeforeFacts
+
+  it("leaves the original recorded inline-consent layout as an owner handoff without checks", () => {
+    const recorded = siteFiles()
+    const layout = recorded["app/layout.tsx"]!
+    expect(layout).toContain("gtag('consent', 'default'")
+    const recordedScan = jobScanFrom(scanResult({ framework: "next-app-router" }), snapshotFromFiles(recorded))
+    const item = seedCandidatesFrom(recordedScan, facts).find(candidate => candidate.id === SPA)!
+    expect(item).toMatchObject({ state: "left_for_you", ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx" }, checks: [] })
+    expect(item.note).toContain("Not changed by us:")
+    const changed = layout.replace("gtag('config', 'G-QWERT67890');", "gtag('config', 'G-QWERT67890');\n" + GA4_PAGE_CHANGE_SCRIPT)
+    const restored = restoreFrozenUnits(layout, changed)
+    expect(restored.changes.length).toBeGreaterThan(0)
+    expect(restored.text).toBe(layout)
+  })
 
   it("the dry load's page change is seen (Meta sent after it); the run-4 predicate (GA4 or Infinite only) missed it", () => {
     const dry = facts.dryLive!
@@ -104,7 +131,7 @@ describe("R4-8 live run 4: GA4's page change gets a job, a line, exact bytes and
     expect(dryNavigated(quiet)).toBe(false)
   })
 
-  it("seeds the job (its own RH check), and the plan offers the line the user approves", async () => {
+  it("seeds the runnable job with its own RH checks and an excludable plan line", async () => {
     const candidates = seedCandidatesFrom(scan(), facts)
     const item = candidates.find((candidate) => candidate.id === SPA)
     expect(item).toBeDefined()
@@ -123,9 +150,9 @@ describe("R4-8 live run 4: GA4's page change gets a job, a line, exact bytes and
     })
     const plan = installer.buildPlan(await installer.scan({ root, hosting: fakeHosting() }), before.facts.keys, before.facts as unknown as WizardBeforeFacts, candidates)
     const line = plan.lines.find((entry) => entry.kind === "ga4_spa_page_views")
-    expect(line).toMatchObject({ requires: "approval", jobIds: [SPA], text: "GA4: send one page_view per page change in your app (today GA4 counts only the first page of each visit)." })
+    expect(line).toMatchObject({ requires: "info", jobIds: [SPA], text: "GA4: send one page_view per page change in your app (today GA4 counts only the first page of each visit)." })
     expect(applyApprovalsTo(candidates, plan, { approved: [line!.id], declined: [], edits: {} }).map((entry) => entry.id)).toContain(SPA)
-    // NEGATIVE: not approved → no job (the wizard never changes the customer's tag on its own say-so).
+    // An explicit refusal still excludes the shown repository job.
     expect(applyApprovalsTo(candidates, plan, { approved: [], declined: [line!.id], edits: {} }).map((entry) => entry.id)).not.toContain(SPA)
   })
 
