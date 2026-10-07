@@ -832,8 +832,13 @@ describe("the negative variants (§4.3 a–h)", () => {
   it.each(["not_required", "required"] as const)("(d) --yes accepts the shown %s consent default without a flag", { timeout: RUN_TIMEOUT }, async consentMode => {
     const w = await wiredWorld()
     if (consentMode === "not_required") {
-      writeFileSync(join(w.site.repo, "app/consent-defaults.tsx"), "export function ConsentDefaults() { return null }\n")
-      git(w.site.repo, "add", "app/consent-defaults.tsx")
+      // A consent-named file or declaration is itself a recognized sign, even with a null body.
+      rmSync(join(w.site.repo, "app/consent-defaults.tsx"))
+      const layoutPath = join(w.site.repo, "app/layout.tsx")
+      writeFileSync(layoutPath, readFileSync(layoutPath, "utf8")
+        .replace('import { ConsentDefaults as BootstrapDefaults } from "./consent-defaults"\n', "")
+        .replace("        <BootstrapDefaults />\n", ""))
+      git(w.site.repo, "add", "app/consent-defaults.tsx", "app/layout.tsx")
       git(w.site.repo, "commit", "-q", "-m", "fixture without consent signs")
       git(w.site.repo, "push", "-q", "origin", "main")
       w.site.initialSha = git(w.site.repo, "rev-parse", "HEAD")
@@ -1668,7 +1673,7 @@ describe("the second reviewer: incomplete opinions stay visible, never 'nothing 
     const gh = readGhState(w.ghState)
     expect(agentRuns(w, "codex", "reviewer")).toHaveLength(1)
     expect(gh.prs[0]!.reviews).toHaveLength(1)
-    expect(gh.prs[0]!.reviews[0]!.body).toContain("**Second review by Codex (round 1): incomplete — it could not check R10, R12.**")
+    expect(gh.prs[0]!.reviews[0]!.body).toContain("**Second review by Codex (round 1): incomplete — unchecked: R10, R12.**")
     expect(gh.prs[0]!.reviews[0]!.body).not.toContain("read-check")
     expect(gh.prs[0]!.reviews[0]!.body).not.toContain(": looks good.")
     expect(gh.prs[0]!.reviews[0]!.body).not.toMatch(/(?<![a-f0-9])[a-f0-9]{16}(?![a-f0-9])/)
