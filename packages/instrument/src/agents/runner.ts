@@ -18,6 +18,8 @@
 // one, the turn is retried ONCE with the user's default model at the same effort, and the user is told.
 // Never a provider switch, never Infinite-paid inference, never a real prompt in tests (fakes only).
 import { OWNER_BOUNDARY_INSTRUCTION } from "../jobs/owner-boundary.js"
+import { createScanner } from "../review/scan.js"
+import { redactDisplayText } from "../review/display.js"
 import { randomUUID } from "node:crypto"
 import { access, chmod, open, readFile, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
@@ -280,7 +282,13 @@ export class AgentRunnerImpl implements AgentRunner {
     const now = this.options.now ?? (() => new Date())
     let token = ""
     const literals = () => [token, ...(this.options.secretLiterals?.() ?? [])].filter((literal) => literal.length >= 8)
-    const redact = (text: string) => literals().reduce((acc, literal) => acc.split(literal).join("[redacted]"), text)
+    const allowedIds = await this.options.connectionIds()
+    // Claims, questions and progress reach the terminal before the later report scan. Use the same
+    // provider/context rules here, before limits can truncate a key. The MCP token arrives after setup.
+    const redact = (text: string) => redactDisplayText(createScanner({
+      literals: literals().map(value => ({ value, kind: "mcp_token" as const })),
+      allowedIds
+    }), text)
     const narrator = new Narrator({ agent: kind, role: "worker", emit: (beat) => input.onNarrate(beat), now: () => now().getTime(), throttleMs: this.options.narrationThrottleMs })
     // One claim channel PER ATTEMPT (review O3 F20): a model-fallback retry must not inherit the first
     // attempt's claims or its `initialized` count (that would hide a toolless retry).

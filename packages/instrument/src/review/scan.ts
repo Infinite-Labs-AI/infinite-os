@@ -23,6 +23,11 @@ export type ScanKind =
   | "env_value"
   | "authorization"
   | "stripe_key"
+  | "supabase_key"
+  | "anthropic_key"
+  | "openai_key"
+  | "generic_secret"
+  | "url_password"
   | "github_token"
   | "slack_token"
   | "aws_key"
@@ -58,10 +63,13 @@ export interface ScannerOptions {
 
 const SHAPES: ReadonlyArray<{ kind: ScanKind; pattern: RegExp; postOnly?: true }> = [
   { kind: "private_key", pattern: /-----BEGIN [A-Z0-9 ]*-----[\s\S]*?(?:-----END [A-Z0-9 ]*-----|$)/g },
-  { kind: "stripe_key", pattern: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{8,}/g },
+  { kind: "stripe_key", pattern: /\b(?:(?:sk|rk)_(?:live|test)_|whsec_)[A-Za-z0-9]{8,}/g },
+  { kind: "supabase_key", pattern: /\b(?:sb_secret_|sbp_)[A-Za-z0-9_-]{8,}/g },
+  { kind: "anthropic_key", pattern: /\bsk-ant-(?:api\d+|oat\d+)-[A-Za-z0-9_-]{8,}/g },
+  { kind: "openai_key", pattern: /\bsk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_-]{8,}|[A-Za-z0-9]{32,})/g },
   { kind: "github_token", pattern: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}/g },
   { kind: "slack_token", pattern: /\bxox[abpsr]-[A-Za-z0-9-]{10,}/g },
-  { kind: "aws_key", pattern: /\bAKIA[0-9A-Z]{16}\b/g },
+  { kind: "aws_key", pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
   { kind: "google_api_key", pattern: /\bAIza[0-9A-Za-z_-]{35}/g },
   { kind: "jwt", pattern: /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/g },
   { kind: "posthog_personal_key", pattern: /\bphx_[A-Za-z0-9]{20,}/g },
@@ -72,6 +80,37 @@ const SHAPES: ReadonlyArray<{ kind: ScanKind; pattern: RegExp; postOnly?: true }
   { kind: "private_path", pattern: /[^\s"'`()<>]*\.growth-os[^\s"'`()<>]*/g },
   { kind: "private_path", pattern: /(?:[~/][^\s"'`()<>]*)?Application Support\/Infinite[^\s"'`()<>]*/g }
 ]
+
+// Match the value, keeping its label. Prefix-free keys (AWS secret access keys included) have no
+// globally unique shape: require a key-ish label AND a long, varied token rather than masking hashes/IDs.
+const NAMED_TOKEN = /\b((?:[A-Za-z_][A-Za-z0-9_.-]{0,127}?)?(?:key|token|secret|password|passwd|credentials?)[A-Za-z0-9_.-]{0,127}(?:[ \t]+(?:api|access|signing|private|key|token|secret|password|credential)){0,3})(["']?(?:\s*[:=]\s*|[ \t]+))(?:(['"`])([^\r\n'"`]{24,})|([^\s'"`<>,;()[\]{}]{24,}))/gi
+// A URL's user-info password is a credential even when it is short. Preserve the scheme, username,
+// host and path; percent escapes, punctuation and empty usernames (Redis) are all valid here.
+const URL_PASSWORD = /([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/:@"'`<>]*:)([^\s/@"'`<>]+)(?=@)/g
+
+function isKeyLabel(name: string): boolean {
+  const words = name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/)
+  return words.some(word => /^(?:key|token|secret|password|passwd|credential|credentials|apikey|accesstoken|clientsecret)$/.test(word))
+}
+
+function isHighEntropyToken(value: string): boolean {
+  // Source expressions are instructions to retrieve a key, not a key. Never turn a public env lookup
+  // into a false commit blocker. Repeated placeholders also fall below the entropy threshold.
+  if (value.length < 24 || /\s/.test(value) || /^(?:process\.env\.|import\.meta\.env\.|env\.|config\.)/.test(value)) return false
+  const counts = new Map<string, number>()
+  for (const char of value) counts.set(char, (counts.get(char) ?? 0) + 1)
+  let entropy = 0
+  for (const count of counts.values()) {
+    const probability = count / value.length
+    entropy -= probability * Math.log2(probability)
+  }
+  return entropy >= 3.5
+}
+
+/** Public provider keys are intended for the browser; the run's exact allowed IDs cover other formats. */
+function isPublicKey(value: string): boolean {
+  return /^(?:phc_|sb_publishable_|pk_(?:live|test)_)[A-Za-z0-9_-]+$/.test(value)
+}
 
 const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g
 const UUID = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g
@@ -123,6 +162,25 @@ export function createScanner(options: ScannerOptions): Scanner {
     .filter((literal) => literal.value.length >= 8 && !allowed.has(literal.value))
     .sort((a, b) => b.value.length - a.value.length)
 
+  function isNamedSecret(name: string, value: string): boolean {
+    return isKeyLabel(name) && !allowed.has(value) && !isPublicKey(value) && isHighEntropyToken(value)
+  }
+
+  function namedSecrets(text: string): Array<{ value: string; offset: number; multiline: boolean }> {
+    const pattern = new RegExp(NAMED_TOKEN.source, NAMED_TOKEN.flags)
+    const matches: Array<{ value: string; offset: number; multiline: boolean }> = []
+    for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+      const quoted = match[3] !== undefined
+      // A sentence's trailing dots are punctuation, not part of its public ID. Quoted values keep
+      // every character, including punctuation inside a password.
+      const value = quoted ? match[4]! : match[5]!.replace(/\.+$/, "")
+      if (isNamedSecret(match[1]!, value)) matches.push({ value, offset: match.index + match[1]!.length + match[2]!.length + (quoted ? 1 : 0), multiline: match[2]!.includes("\n") })
+      // A rejected label such as "monkey" must not consume the next actual API_KEY assignment.
+      else pattern.lastIndex = match.index + match[1]!.length
+    }
+    return matches
+  }
+
   function redactSecrets(text: string, hits: ScanHit[], mode: "post" | "commit", literalExempt?: (literal: ScanLiteral) => boolean): string {
     let out = text
     for (const literal of literals) {
@@ -132,12 +190,20 @@ export function createScanner(options: ScannerOptions): Scanner {
         out = out.split(literal.value).join(`[redacted: ${literal.kind}]`)
       }
     }
+    out = out.replace(new RegExp(URL_PASSWORD.source, URL_PASSWORD.flags), (_match, prefix: string) => {
+      hits.push({ kind: "url_password" })
+      return `${prefix}[redacted: url_password]`
+    })
     for (const shape of SHAPES) {
       if (shape.postOnly && mode === "commit") continue
       out = out.replace(new RegExp(shape.pattern.source, shape.pattern.flags), () => {
         hits.push({ kind: shape.kind })
         return `[redacted: ${shape.kind}]`
       })
+    }
+    for (const match of namedSecrets(out).reverse()) {
+      hits.push({ kind: "generic_secret" })
+      out = `${out.slice(0, match.offset)}[redacted: generic_secret]${out.slice(match.offset + match.value.length)}`
     }
     return out
   }
@@ -188,6 +254,24 @@ export function createScanner(options: ScannerOptions): Scanner {
             local.push({ kind: "phone" })
           }
           for (const hit of local) hits.push({ ...hit, file: file.path, line: added.line })
+        }
+        // A key and its value can be on separate added lines. Only join adjacent additions: a
+        // different hunk (or intervening unchanged line) must never lend a label to unrelated text.
+        const blocks: Array<Array<{ line: number; text: string }>> = []
+        for (const added of file.added) {
+          const current = blocks.at(-1)
+          if (current && current.at(-1)!.line + 1 === added.line) current.push(added)
+          else blocks.push([added])
+        }
+        for (const block of blocks) {
+          if (block.length < 2) continue
+          const text = block.map(added => added.text).join("\n")
+          for (const match of namedSecrets(text)) {
+            if (!match.multiline) continue
+            const line = block[0]!.line + text.slice(0, match.offset).split("\n").length - 1
+            // A prefixed provider key may already have been found on the value's own line.
+            if (!hits.some(hit => hit.file === file.path && hit.line === line)) hits.push({ kind: "generic_secret", file: file.path, line })
+          }
         }
       }
       return hits
