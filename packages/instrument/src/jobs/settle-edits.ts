@@ -97,11 +97,12 @@ export async function settleAgentEdits(deps: Pick<WizardDeps, "fs">, root: strin
 /** A terminal state retains the actual checks and the agent's note for every report. */
 export function notDoneItem(item: ChecklistItem): ChecklistItem {
   if (item.owner !== "agent" || jobVerified(item) || item.state === "not_needed" || item.state === "left_for_you") return item
-  const check = item.checks.find(check => check.state !== "pass" && ["S", "B", "T0"].includes(check.tier))
+  const local = item.checks.filter(check => check.state !== "pass" && ["S", "B", "T0"].includes(check.tier))
+  const check = local.find(check => check.state === "problem") ?? local.find(check => check.state === "undetermined") ?? local[0]
   const reason = item.claim?.status === "blocked" ? `the agent said it was blocked: ${item.claim.note}`
     : !item.claim && !item.edits?.length ? `the agent did not do it${item.note ? ` — ${item.note}` : ""}`
-    : item.note ?? (check ? `the wizard could not verify it (${check.id}: ${check.state}${check.reason ? ` — ${check.reason}` : ""})`
-      : "the wizard could not verify it (no completed check proves this change)")
+    : check ? `the wizard could not verify it (${check.id}: ${check.state}${check.reason ? ` — ${check.reason}` : ""})`
+      : item.note ?? "the wizard could not verify it (no completed check proves this change)"
   return { ...item, state: "left_for_you", note: reason, edits: [] }
 }
 

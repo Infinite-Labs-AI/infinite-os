@@ -1,3 +1,4 @@
+import { notDoneJobs, notDoneDescription } from "../jobs/settle-edits.js"
 import { ownerInformationOnly, protectedFinding, OWNER_INFORMATION_HEADING } from "./integrity.js"
 import { safeDisplayText, neutralizeTaskCheckboxes, quoteDisplayNote, redactDisplayText } from "./display.js"
 // Everything the wizard posts on the PR (lane O4, §3g.3–§3g.5), built here and scanned here:
@@ -262,7 +263,10 @@ function ownerSnippet(text: string, language: string, scanner: Scanner): string 
 /** Shared merge-time and final checklist; scan the returned Markdown before posting. */
 export function buildChecklist(jobs: readonly ChecklistItem[], scanner: Scanner = createScanner({ literals: [], allowedIds: [] }), alreadyShownOwnerText = ""): string {
   if (jobs.length === 0) return ""
-  const rows = jobs.map((job) => {
+  const unfinished = new Set(notDoneJobs(jobs).map(item => item.id))
+  const notDone = alreadyShownOwnerText.includes("### Not done, left for you") ? "" : unfinished.size > 0
+    ? `### Not done, left for you\n\n${notDoneJobs(jobs).map(item => `- ${escapeCell(notDoneDescription(item), scanner)}`).join("\n")}` : ""
+  const rows = jobs.filter(job => !unfinished.has(job.id)).map((job) => {
     const ownerShown = job.state === "left_for_you" && job.ownerBoundary && job.note && alreadyShownOwnerText.includes(safeDisplayText(scanner, job.note))
     return `| ${escapeCell(job.title, scanner)} | ${escapeCell(ownerShown ? "Left for you; see the owner action above." : jobStateCell(job), scanner)} |`
   }).join("\n")
@@ -276,7 +280,7 @@ export function buildChecklist(jobs: readonly ChecklistItem[], scanner: Scanner 
     const where = escapeCell(scope.file ?? job.allow.files[0] ?? "the noted entrypoint", scanner)
     return `**For the site owner: wiring at ${where}**\n\nThe wizard left this entrypoint untouched. The import, mount or script below is for you to place; it has not been applied.\n\n${ownerSnippet(scope.wiring!, "text", scanner)}`
   })
-  return [`**Checklist (the wizard's own checks, never the agent's word)**\n\n| Job | State |\n|---|---|\n${rows}`, ...guards, ...wiring].join("\n\n")
+  return [notDone, `**Checklist (the wizard's own checks, never the agent's word)**\n\n| Job | State |\n|---|---|\n${rows}`, ...guards, ...wiring].filter(Boolean).join("\n\n")
 }
 
 /** §3g.4 step 9: the before/after table, the checklist states, declined items with reasons, and what the user decides. */
@@ -339,7 +343,7 @@ export const FINAL_COMMENT_MERGE_LINE = "Merge when you're happy. After it deplo
 export const FINAL_COMMENT_UPDATED_LINE = "Updated after the live check: the table above is the run's final report, the same one as in the terminal and in Infinite."
 
 /** The sections that follow the report in `buildFinalComment` (the report ends where the first of them starts). */
-const AFTER_REPORT = ["\n\n**Checklist (the wizard's own checks", "\n\n**Declined, with reasons**", "\n\n**You decide**", "\n\n**Left by the repo owner**", "\n\n**Questions answered from this run's checks**", "\n\n**Comments from people outside the repo", "\n\n> ", `\n\n${FINAL_COMMENT_MERGE_LINE}`, `\n\n${FINAL_COMMENT_UPDATED_LINE}`, "\n\n<!-- infinite-tag:"]
+const AFTER_REPORT = ["\n\n**Checklist (the wizard's own checks", "\n\n**Declined, with reasons**", "\n\n**You decide**", "\n\n**Left by the repo owner**", "\n\n**Questions answered from this run's checks**", "\n\n**Comments from people outside the repo", `\n\n${FINAL_COMMENT_MERGE_LINE}`, `\n\n${FINAL_COMMENT_UPDATED_LINE}`, "\n\n<!-- infinite-tag:"]
 
 /**
  * R2-5 (live run 2): the "what happened" comment with its report replaced by the final one (after Prove), so the PR,

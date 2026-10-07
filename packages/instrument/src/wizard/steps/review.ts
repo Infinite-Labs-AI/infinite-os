@@ -20,20 +20,20 @@ import type { CheckResult } from "../contracts/jobs.js"
 import { WIZARD_PATHS } from "../contracts/state.js"
 import { WIZARD_STEP_META } from "../contracts/steps.js"
 import { verdictFactsFor } from "../verdict-facts.js"
-import { missingApprovedFixes } from "../verdict.js"
 import { isGloballyDenied } from "../../git/commit.js"
 import { commentEditor, isGitHubAdapter, type GitHubHostAdapter } from "../../hosts/github.js"
 import { isUnsupported } from "../../hosts/other.js"
 import { classifyReview, isReviewResult, parseBriefReview, printedReviewBrief, reviewerBrief, type ClassifiedReview } from "../../review/brief.js"
 import { allowlistUnion, assertNoAgentAlive, bestEffortBridge, bridgeStop, manifestFiles, status, sub } from "../../review/context.js"
 import { parseUnifiedDiff } from "../../review/diff.js"
-import { ciFixItem, job16Item, restoreFiles, runFixRound, snapshotFiles, verifyFix } from "../../review/fix.js"
+import { ciFixItem, job16Item, restoreFiles, runFixRound, snapshotFiles, settleFixRound } from "../../review/fix.js"
 import { openFindings, parseLedger, recordDecisions, REVIEW_LEDGER_PATH, type ReviewLedger } from "../../review/ledger.js"
 import { wizardOwnership, type WizardOwnership } from "../../review/ownership.js"
 import { commentTrust, hasFinalMarker, hasReplyMarker, parseReviewMarker, stripMarkers } from "../../review/markers.js"
 import { AGENT_LABEL, buildFinalComment, buildReply, buildReviewPost, excerpt, FIX_ROUND_MINUTES, notFixedReply, redactIdsNotInDiff, safeText, type FixReplyState, type NotFixedOutcome } from "../../review/post.js"
 import { applyRehearsalToJobs, recordRehearsalCells, rehearse } from "../../review/rehearse.js"
 import { mergeRequirementLine } from "../../github/rules.js"
+import { notDoneItem } from "../../jobs/settle-edits.js"
 import { checksSummary, readinessChecks, retryCheckRead, commitChecks, withDeploymentStates, type PrCheck } from "../../github/checks.js"
 import { DETERMINISTIC_CHECKS_BY_ITEM, fileRoleOf, isRepoRelativePath, leftByOwnerReason, pageHelperCalls, triage, triageKey, type FileRole, type PageHelperCall, type TriageDecision, type TriageItem } from "../../review/triage.js"
 import { escapeRegExp } from "../../text-escape.js"
@@ -620,7 +620,7 @@ async function replyAndResolve(
 class PrChecksStop extends Error {
   constructor(message: string, readonly failed: boolean) { super(message) }
 }
-class ApprovedFixesStop extends Error {}
+class ReviewBlockerStop extends Error {}
 
 /** One bounded CI repair, only for an actual base-green regression with a log naming this run's edits. */
 async function repairCi(session: Session, checks: PrCheck[], base: PrCheck[] | null): Promise<boolean> {
@@ -650,6 +650,7 @@ async function repairCi(session: Session, checks: PrCheck[], base: PrCheck[] | n
   const fix = await runFixRound(ctx, deps, { step: "review", worker, items: [item], scanner: ship.scanner })
   if (fix.run.outcome !== "completed") {
     await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
+    ctx.state.update(state => { state.jobs = [...state.jobs.filter(job => !fix.items.some(item => item.id === job.id)), ...fix.items.map(notDoneItem)] })
     return false
   }
   const restoreUncommitted = async () => {
@@ -658,12 +659,13 @@ async function repairCi(session: Session, checks: PrCheck[], base: PrCheck[] | n
     await ship.git.unstage(snapshots.map(snapshot => snapshot.path))
   }
   try {
-    const verified = await verifyFix(ctx, deps, { runId: ship.runId, items: fix.items, editedFiles: fix.run.edits.map(edit => edit.file), edits: fix.run.edits })
-    if (!verified.buildOk || fix.run.edits.length === 0 || fix.run.edits.some(edit => !files.has(edit.file))) {
+    const verified = await settleFixRound(ctx, deps, ship.runId, fix)
+    ctx.state.update(state => { state.jobs = [...state.jobs.filter(job => !verified.items.some(item => item.id === job.id)), ...verified.items] })
+    if (!verified.buildOk || verified.edits.length === 0 || verified.edits.some(edit => !files.has(edit.file))) {
       await restoreUncommitted()
       return false
     }
-    await deps.installer.recordEdits(fix.run.edits)
+    await deps.installer.recordEdits(verified.edits)
     const commit = await stageAndCommit({ ctx, deps, git: ship.git, step: "review", scanner: ship.scanner, runId: ship.runId, message: "infinite-tag: fix PR checks", round: 1, allowlist: [...files], managed, npmFiles: [], connectionIds: ship.facts.connectionIds })
     if (commit.kind !== "committed") {
       await restoreUncommitted()
@@ -756,10 +758,15 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
 async function finish(session: Session, options: { once?: boolean } = {}): Promise<void> {
   const { ctx, deps, ship } = session
   const state = ctx.state.get()
-  const openApproved = missingApprovedFixes(state.jobs)
-  if (openApproved.length) {
+  const blockers = openFindings(session.ledger, state.jobs).filter(finding => finding.severity === "blocker")
+  if (blockers.length) {
     await saveLedger(session)
-    throw new ApprovedFixesStop(ship.scanner.redact(`Approved fixes remain open: ${openApproved.map(job => `${job.title}${job.note ? ` — ${job.note}` : ""}`).join("; ")}`).text)
+    const quotes = blockers.map(blocker => {
+      const entry = session.ledger.findings?.find(finding => finding.findingId === blocker.findingId && finding.path === blocker.path && finding.item === blocker.item)
+      const saved = [...session.ledger.rounds].reverse().flatMap(round => round.review?.findings ?? []).find(finding => finding.id === blocker.findingId && finding.path === blocker.path)
+      return `${blocker.path ?? "general"}${blocker.line ? `:${blocker.line}` : ""}: “${entry?.body ?? saved?.body ?? "Open blocker finding"}”`
+    })
+    throw new ReviewBlockerStop(ship.scanner.redact(`Second review blocker: ${quotes.join("; ")}`).text)
   }
   if (session.github && session.number !== null && (await session.github.readPr(session.number)).state === "OPEN") {
     const verdict = await requiredChecksResult(session, ship.runId)
@@ -904,7 +911,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   try {
     return await reviewRun(ctx, deps)
   } catch (error) {
-    if (error instanceof ApprovedFixesStop) { await ctx.state.save(); return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `${error.message}. This run will not mark the pull request ready.`, resumeHint: "Complete the named fixes, or leave them for the owner with a recorded reason, then run `npx infinite-tag` again." } }
+    if (error instanceof ReviewBlockerStop) { await ctx.state.save(); return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `${error.message}. This run will not mark the pull request ready.`, resumeHint: "Fix or dismiss the quoted blocker, then run `npx infinite-tag` again." } }
     if (error instanceof PrChecksStop) { await ctx.state.save(); return { kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: `${error.message}. The pull request stays draft.`, resumeHint: error.failed ? "Resolve the named checks, then run `npx infinite-tag` again." : "Run `npx infinite-tag` again when the checks have finished or can be read." } }
     const stop = bridgeStop(error)
     if (stop) {
@@ -1100,18 +1107,6 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       // The files the round may change AND create (a created file is removed again if the round fails; B29).
       const snapshots = await snapshotFiles(deps, ctx.root, items.flatMap((item) => [...item.allow.files, ...item.allow.create]))
       const fix = await runFixRound(ctx, deps, { step: "review", worker, items, scanner: prepared.scanner })
-      if (fix.run.outcome === "out_of_usage") {
-        // Nothing half-done stays in the tree; the resume runs the round again.
-        await restoreFiles(deps, ctx.root, snapshots, fix.run.edits)
-        await saveLedger(session)
-        await ctx.state.save()
-        return {
-          kind: "parked",
-          code: "INF_WIZ_AGENT_OUT_OF_USAGE",
-          reason: `The worker agent is out of usage${fix.run.resetsAt ? `; it resets at ${fix.run.resetsAt}` : ""}.`,
-          resumeHint: "Run `npx infinite-tag` again to resume the review fixes."
-        }
-      }
       const edited = fix.run.edits.map((edit) => edit.file)
       for (const [index, decision] of fixes.entries()) {
         if (fix.items.find(item => item.id === items[index]!.id)?.state !== "left_for_you") continue
@@ -1131,6 +1126,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       // nothing "failed the checks". Review P1-4: the fence's own record decides whether the agent changed anything
       // the wizard then undid (a stop mid-change, the safety check, a file outside the job), never `edits` alone.
       if (edited.length === 0) {
+        ctx.state.update(state => { state.jobs = [...state.jobs.filter(job => !fix.items.some(item => item.id === job.id)), ...fix.items.map(notDoneItem)] })
         const { outcome, why } = noKeptChangeOutcome(fix.run)
         const safeWhy = why ? safeDisplayText(prepared.scanner, why) : null
         const words = notFixedReply(outcome, safeWhy)
@@ -1142,7 +1138,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
         await ctx.state.save()
         break
       }
-      const verified = await verifyFix(ctx, deps, { runId: prepared.runId, items: fix.items, editedFiles: edited, edits: fix.run.edits })
+      const verified = await settleFixRound(ctx, deps, prepared.runId, fix)
       let finalItems = verified.items
       // The real reason a fix did not pass, per thread (the first failing check of its item).
       for (const [index, decision] of fixes.entries()) {
@@ -1157,8 +1153,8 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
         session.notes.push(
           safeDisplayText(prepared.scanner, `Round ${round}: the wizard could not accept the fixes (${verified.buildReason ?? 'validation failed'}), so it put the files back and did not commit them.${leftOver.length > 0 ? ` Remove ${leftOver.join(", ")} (the agent created it).` : ""}`)
         )
-      } else if (edited.length > 0) {
-        await deps.installer.recordEdits(fix.run.edits)
+      } else if (verified.edits.length > 0) {
+        await deps.installer.recordEdits(verified.edits)
         const commit = await stageAndCommit({
           ctx,
           deps,

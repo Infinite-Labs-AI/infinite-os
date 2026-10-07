@@ -468,7 +468,8 @@ describe("step jobs: questions, usage, fence", () => {
     const item = t.current().jobs.find((entry) => entry.id === "meta_improve:landing")!
     // Never "outside the job's files": the file was allowed; the safety check refused one line.
     expect(item.blockedReason).not.toBe("outside_allowlist")
-    expect(item.note).toBe("the wizard's safety check refused next.config.mjs:1: the edit starts a child process")
+    expect(item.note).toContain("turn_gate: problem")
+    expect(item.note).toContain("child process")
     expect(item.checks.find((check) => check.id === "turn_gate")).toMatchObject({ tier: "S", state: "problem" })
     expect(t.checkCalls.build).toBe(0)
   })

@@ -855,12 +855,21 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
   })
 
-  it("keeps the PR draft while an approved lead conversion remains open", async () => {
+  it("readies the PR and lists an unfinished approved lead conversion for its owner", async () => {
     const w = await opened({ reviews: [review([])] })
     w.ctx.state.update(state => { state.jobs = [{ ...SIGNUP_JOB, state: "failed", note: "Approved lead completion remains unwired." }] })
     const outcome = await reviewStep.run(w.ctx, w.deps)
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: expect.stringContaining("Send sign_up to the tools") })
+    expect(outcome).toMatchObject({ kind: "ok" })
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
+  })
+
+  it("holds an open second-review blocker and quotes its text before any ready action", async () => {
+    const blocker = { id: "F1", item: "R8" as const, severity: "blocker" as const, category: "analytics" as const, path: "app/signup/page.tsx", line: 2, body: "The changed handler sends a success event before it succeeds.", suggested_fix: null }
+    const w = await opened({ reviews: [review([blocker])], fix: async () => ({ outcome: "completed", edits: [], claims: [] }) })
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED", reason: expect.stringContaining(blocker.body), resumeHint: expect.stringContaining("Fix or dismiss") })
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+    expect(w.gh.read().calls.some(call => call.argv[0] === "pr" && call.argv[1] === "ready")).toBe(false)
   })
 
   it("allows a base-red check and an authorization-blocked preview", async () => {

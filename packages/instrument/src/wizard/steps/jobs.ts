@@ -14,7 +14,7 @@
 // on the resulting tree. Usage limits, blocked claims and idle workers do not stop the run.
 // Infrastructure tampering still stops execution before site code can be built or tested.
 import { createHash } from "node:crypto"
-import { readFile, rm, writeFile } from "node:fs/promises"
+import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -50,7 +50,7 @@ import { finalSealPath, snapshotDir, wizardCacheRoot } from "../../agents/paths.
 import { runExtras } from "../../agents/runner.js"
 import { settleAgentEdits, jobVerified, notDoneItem, notDoneJobs } from "../../jobs/settle-edits.js"
 import { LOCAL_TIERS, applyClaim, applyResults, blockItem, failItem, unblockItem, withNote, type Transition } from "../../jobs/state-machine.js"
-import { ITEM_NOTE_MAX_CHARS, checkProvesChange } from "../contracts/jobs.js"
+import { checkProvesChange } from "../contracts/jobs.js"
 import { sanitizeUntrusted } from "../../agents/sanitize.js"
 import { redactDisplayText, safeDisplayText } from "../../review/display.js"
 import { buildScanner, runPublicIds } from "../../review/context.js"
@@ -1146,12 +1146,8 @@ class JobsIo {
     }
   }
 
-  /**
-   * At every exit of the step: the edits of a job that ended failed, blocked or not needed are undone
-   * (newest first, only when the file is still exactly what that edit left); every other edit goes in
-   * the edit receipt (`installer.recordEdits`) and on its item. An edit a later kept edit built on cannot
-   * be undone exactly; it is kept, recorded, and said.
-   */
+  /** Restore every unverified hunk, replay independent verified hunks at their exact offsets,
+   * and recheck the retained jobs on the resulting tree before recording the edit receipt. */
   async settleEdits(): Promise<void> {
     let entries = this.pendingEdits
     this.pendingEdits = []

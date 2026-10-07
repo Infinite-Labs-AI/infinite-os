@@ -1,3 +1,4 @@
+import { notDoneJobs, notDoneDescription } from "../jobs/settle-edits.js"
 import { createScanner } from "../review/scan.js"
 import { quoteDisplayNote } from "../review/display.js"
 // `ReportBuilder` (§3i, schema `infinite-tag.report.v2`): the before/after report the user ends with,
@@ -562,6 +563,7 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     day7: input.day7 ?? { measuredAt: null, window: null, cell: null },
     finishLine,
     notes: [...new Set([
+      ...notDoneJobs(input.verdictFacts?.jobs ?? []).map(item => `Not done, left for you: ${notDoneDescription(item)}`),
       ...activationNotes,
       ...(activationNotes.length ? ["Your banner connection is unverified in this run. Required-mode offline and browser checks supply a test grant; passing those checks does not confirm your banner signal."] : []),
       ...(input.verdictFacts?.consentActivation?.mode === "not_required" && (input.verdictFacts.consentActivation.infinite || input.verdictFacts.consentActivation.capture) ? ["This run's tag and ad-click capture collect by default, independently of other banners until you connect their yes/no signal to Infinite. An Infinite-recorded no and DNT/GPC without an explicit grant are respected."] : []),
@@ -661,7 +663,7 @@ function sentence(text: string): string {
 /** The report's own notes, then the footnotes, each said once (a note may already say a footnote's words). */
 function notesAndFootnotes(report: ReportV2, ownerJobs: readonly ChecklistItem[] = []): string[] {
   const shown = new Set([...ownerInstructions(ownerJobs).map(instruction => boundedNotes([instruction.note])[0]!), ...consentActivationNotes(consentActivationFromNotes(report.notes))])
-  return [...new Set([...report.notes.filter(note => !isOwnerBoundaryStatement(note) && !shown.has(note)), ...footnotes(report)])]
+  return [...new Set([...report.notes.filter(note => !isOwnerBoundaryStatement(note) && !shown.has(note) && !note.startsWith("Not done, left for you:")), ...footnotes(report)])]
 }
 
 function cellText(cell: Cell, ownerPreviewNote?: string): string {
@@ -792,6 +794,8 @@ export function renderTerminal(report: ReportV2, width: number, options: Termina
   const run = options.displayId ?? report.runId.slice(0, 8)
   const took = options.durationMs === undefined || options.durationMs === null ? null : durationWords(options.durationMs)
   lines.push(...hanging("◆ ", [verdictLine(report), `run ${run}`, ...(took ? [took] : [])].join(" · "), total))
+  const notDone = options.ownerJobs ? notDoneJobs(options.ownerJobs).map(notDoneDescription) : report.notes.filter(note => note.startsWith("Not done, left for you:")).map(note => note.slice("Not done, left for you: ".length))
+  if (notDone.length > 0) lines.push("", "Not done, left for you", ...notDone.flatMap(text => hanging("- ", text, total)))
   lines.push("")
   lines.push(...wrapPlain(`Before and after · ${site}`, total))
   if (total >= TERMINAL_TABLE_MIN_COLUMNS) {
@@ -824,7 +828,7 @@ export function renderTerminal(report: ReportV2, width: number, options: Termina
   const handoff = activation && consentHandoff(activation)
   if (handoff) {
     lines.push("", "Owner action: banner signal", "", ...handoff.split("\n"))
-    lines.push("", "Finish line", ...consentActivationNotes(activation))
+    lines.push("", CONSENT_WAITING)
   }
   for (const note of notesAndFootnotes(report, options.ownerJobs)) lines.push(...hanging("", note, total))
   for (const instruction of ownerInstructions(options.ownerJobs ?? [])) {
@@ -849,6 +853,8 @@ export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMe
     out.push("")
     for (const line of reasons) out.push(`- ${md(line)}`)
   }
+  const notDone = ownerJobs.length > 0 ? notDoneJobs(ownerJobs).map(notDoneDescription) : report.notes.filter(note => note.startsWith("Not done, left for you:")).map(note => note.slice("Not done, left for you: ".length))
+  if (notDone.length > 0) out.push("", "### Not done, left for you", "", ...notDone.map(text => `- ${md(text)}`))
   out.push("")
   out.push(withOwnerBoundary(report.notes.filter(isOwnerBoundaryStatement).join("\n\n"), hasLegacyOwnerHistory(report.notes), ownerBoundary))
   out.push("")

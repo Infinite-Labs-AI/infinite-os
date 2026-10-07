@@ -32,7 +32,7 @@ A reviewer that fails the file read-check twice contributes no findings or fixes
 includes every required rubric row. Finding labels ignore case; `critical` and `high` mean blocker.
 An unknown label makes only that finding a blocker, with the unknown label retained.
 
-The current adopted-PostHog privacy-drift check cannot validate a sensitive-pages option edit, so that approved task can keep the PR draft and needs owner review.
+At the end of the agent jobs and each review or CI repair, only jobs whose checks ran and passed keep their edits. Every other job's own hunks are put back, and the remaining jobs are checked again on that tree. These jobs are listed once under **Not done, left for you**, with the agent's blocked note or the exact check result. They do not hold the pull request or fail the run. An open blocker from the second review holds the draft, quoting the finding: fix or dismiss it, then run again. PR checks also hold the draft while failing, cancelled, unreadable after retries, or pending beyond the waiting window (apart from blocked hosting authorization and checks already failing on the base).
 
 A task inside that boundary is left for the site owner, with its file and line. For a withheld preview
 guard, the wizard provides the snippet to copy and explains that preview and local visits keep counting.

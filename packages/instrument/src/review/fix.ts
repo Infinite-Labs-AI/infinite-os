@@ -1,4 +1,6 @@
 import { redactDisplayText } from "./display.js"
+import { settleAgentEdits, jobVerified, notDoneItem, type AttributedEdit } from "../jobs/settle-edits.js"
+import { runExtras } from "../agents/runner.js"
 // Fix rounds (lane O4, §3g.4 step 5): job 16 (`review_comments`) through the user's worker agent, with the
 // comment text QUOTED AS DATA. The agent only claims; the wizard then re-runs the item's checks and the build
 // (B), and the job registry computes the item's state (§3e.5). Claim notes and progress text pass through the
@@ -35,7 +37,7 @@ export function quoteAsData(label: string, text: string): string {
 }
 
 function itemChecks(jobId: JobId): ChecklistItem["checks"] {
-  const spec = JOB_TABLE[jobId].checks.map((check) => ({ id: check.checkId, tier: check.tier, state: "not_run" as const }))
+  const spec = JOB_TABLE[jobId].checks.filter(check => check.checkId !== "pr_checks_pass").map((check) => ({ id: check.checkId, tier: check.tier, state: "not_run" as const }))
   return spec.some((check) => check.tier === "B") ? spec : [...spec, { id: "build", tier: "B", state: "not_run" }]
 }
 
@@ -282,7 +284,7 @@ async function rerunT0(ctx: WizardContext, deps: WizardDeps, runId: string): Pro
 export async function verifyFix(
   ctx: WizardContext,
   deps: WizardDeps,
-  input: { runId: string; items: readonly ChecklistItem[]; editedFiles: readonly string[]; edits: ReadonlyArray<{ id: string; file: string }> }
+  input: { runId: string; items: readonly ChecklistItem[]; editedFiles: readonly string[]; edits: ReadonlyArray<{ id: string; file: string }>; attribution?: readonly AttributedEdit[] }
 ): Promise<{ items: ChecklistItem[]; buildOk: boolean; buildReason?: string }> {
   const at = ctx.now().toISOString()
   // An unmeasured local build remains UNDETERMINED. It may reach the draft PR, whose checks
@@ -291,7 +293,7 @@ export async function verifyFix(
   const verdict = before?.localValidation === "not_measured"
     ? { state: "undetermined" as const, reason: "Local validation was not measured; the PR checks decide." }
     : await buildVerdict(await deps.checks.build(), async () => before?.baselineBuild ?? await deps.checks.buildBaseline())
-  let buildOk = verdict.state !== "problem"
+  let buildOk = verdict.state === "pass"
   const results: CheckResult[] = [
     { checkId: "build", tier: "B", state: verdict.state, ...(verdict.reason && verdict.state !== "pass" ? { reason: verdict.reason } : {}), at, runId: input.runId }
   ]
@@ -311,10 +313,49 @@ export async function verifyFix(
   // LF4 close round 2 (P1-1): a review fix's only local check (`pr_checks_pass`) does not prove its change is in the
   // code, so a claimed fix is ticked by its recorded, in-scope diff: the round's kept edits to the item's own files (only
   // when the round stands; a broken build puts the files back and records nothing).
-  const withEdits = input.items.map((item) => {
-    const mine = buildOk ? input.edits.filter((edit) => item.allow.files.includes(edit.file)).map((edit) => ({ editId: edit.id, file: edit.file })) : []
-    return mine.length === 0 ? item : { ...item, edits: [...(item.edits ?? []), ...mine] }
-  })
-  const items = deps.registry.apply(withEdits, results, input.runId)
+  const items: ChecklistItem[] = []
+  for (const item of input.items) {
+    const mine = buildOk ? input.edits.filter(edit => input.attribution
+      ? input.attribution.some(entry => entry.edit.id === edit.id && entry.itemIds.includes(item.id))
+      : input.items.filter(candidate => candidate.allow.files.includes(edit.file)).length === 1 && item.allow.files.includes(edit.file)
+    ).map(edit => ({ editId: edit.id, file: edit.file })) : []
+    const ownResults = results.flatMap(result => result.tier === "B"
+      ? item.checks.filter(check => check.tier === "B").map(check => ({ ...result, checkId: check.id })) : [result])
+    for (const check of item.checks.filter(check => check.tier === "S")) {
+      try {
+        const raw = await deps.checks.run(check.id, { item, root: ctx.root, appRoot: ctx.appRoot, runId: input.runId })
+        ownResults.push(...(Array.isArray(raw) ? raw : [raw]).map(result => ({ ...result, runId: input.runId })))
+      } catch (error) {
+        ownResults.push({ checkId: check.id, tier: "S", state: "undetermined", reason: error instanceof Error ? error.message : String(error), runId: input.runId, at })
+      }
+    }
+    const candidate = { ...item, ...((item.state === "claimed" || jobVerified(item)) ? { state: mine.length > 0 ? "claimed" as const : "pending" as const } : {}), edits: mine }
+    const [checked] = deps.registry.apply([candidate], ownResults, input.runId)
+    items.push(checked ?? candidate)
+  }
   return { items, buildOk, buildReason: verdict.reason }
+}
+
+
+/** The same exact-hunk settlement applies before a review or CI repair can create a commit. */
+export async function settleFixRound(ctx: WizardContext, deps: WizardDeps, runId: string, fix: FixRoundResult) {
+  const extras = runExtras(fix.run as AgentRunResult, fix.items)
+  let entries: AttributedEdit[] = fix.run.edits.map(edit => {
+    const attributed = extras.attribution.find(entry => entry.editId === edit.id)
+    const candidates = fix.items.filter(item => item.jobId === edit.jobId && [...item.allow.files, ...item.allow.create].includes(edit.file))
+    const ids = candidates.length === 1 ? [candidates[0]!.id] : []
+    const textEditItems = attributed?.textEditItems ?? edit.textEdits.map(() => ids)
+    return { edit, itemIds: [...new Set(textEditItems.flat())], textEditItems }
+  })
+  let checked = await verifyFix(ctx, deps, { runId, items: fix.items, editedFiles: entries.map(entry => entry.edit.file), edits: entries.map(entry => entry.edit), attribution: entries })
+  for (;;) {
+    const verified = new Set(checked.items.filter(jobVerified).map(item => item.id))
+    const settled = await settleAgentEdits(deps, ctx.root, entries, verified)
+    entries = settled.kept
+    const items = checked.items.map(item => settled.dependent.has(item.id)
+      ? { ...item, state: "left_for_you" as const, edits: [], note: "Its edit depended on an unverified hunk that was put back." } : item)
+    if (settled.undone.size === 0) { checked.items = items; break }
+    checked = await verifyFix(ctx, deps, { runId, items, editedFiles: entries.map(entry => entry.edit.file), edits: entries.map(entry => entry.edit), attribution: entries })
+  }
+  return { ...checked, items: checked.items.map(notDoneItem), edits: entries.map(entry => entry.edit) }
 }

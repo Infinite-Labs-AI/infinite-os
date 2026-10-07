@@ -1,6 +1,7 @@
+import { editHash } from "../jobs/settle-edits.js"
 // Review I1 P2-1: a review fix round's B verdict is the jobs step's (B26): a build that could not run, or ended
 // red with no failure signature, stays UNDETERMINED while the draft PR checks judge the change.
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -9,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { fakeBridge, fakeChecks, fakeRegistry, initialState, RUN_ID, testContext, testDeps } from "../../test/wizard/o4-fakes.js"
 import { buildVerdict } from "../checks/build.js"
 import type { BuildResult, ChecklistItem } from "../wizard/contracts/jobs.js"
-import { verifyFix } from "./fix.js"
+import { verifyFix, settleFixRound } from "./fix.js"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -44,16 +45,16 @@ async function verifyWith(build: BuildResult & { error?: string | null }, baseli
 describe("verifyFix: the B verdict (review I1 P2-1)", () => {
   it("a build that could not run (sandbox unavailable) defers to PR checks, and the B check is undetermined, never pass", async () => {
     const result = await verifyWith({ ok: false, failureSignature: [], durationMs: 1, error: "sandbox-exec could not apply the profile" })
-    expect(result.buildOk).toBe(true)
+    expect(result.buildOk).toBe(false)
     const b = result.items[0]!.checks.find((check) => check.tier === "B")!
     expect(b.state).toBe("undetermined")
     expect(b.reason).toMatch(/^test_error/)
-    expect(result.items[0]!.state).toBe("claimed")
+    expect(result.items[0]!.state).toBe("pending")
   })
 
   it("red with no failure signature is undetermined, never a vacuous pass", async () => {
     const result = await verifyWith({ ok: false, failureSignature: [], durationMs: 1 })
-    expect(result.buildOk).toBe(true)
+    expect(result.buildOk).toBe(false)
     expect(result.items[0]!.checks.find((check) => check.tier === "B")!.state).toBe("undetermined")
   })
 
@@ -87,7 +88,7 @@ describe("verifyFix: a review fix is ticked by its recorded change (LF4 close ro
     expect(green.items[0]!.edits).toEqual([{ editId: "e1", file: "app/layout.tsx" }])
     // NEGATIVE: a broken build puts the files back, so nothing is recorded on the item.
     const red = await verifyWith({ ok: false, failureSignature: ["TS2304 app/layout.tsx"], durationMs: 1 }, { ok: true, failureSignature: [], durationMs: 1 })
-    expect(red.items[0]!.edits).toBeUndefined()
+    expect(red.items[0]!.edits).toEqual([])
   })
 })
 
@@ -104,4 +105,27 @@ describe("buildVerdict (the one B26 rule)", () => {
     expect((await buildVerdict({ ok: false, failureSignature: ["x"], durationMs: 1 }, baseline)).state).toBe("problem")
     expect(reads).toBe(1)
   })
+})
+
+
+it("restores a shared review hunk and cannot close its verified co-owner after all edits are gone", async () => {
+  const root = mkdtempSync(join(tmpdir(), "fix-settlement-"))
+  dirs.push(root)
+  const file = "app/layout.tsx"
+  mkdirSync(join(root, "app"))
+  writeFileSync(join(root, file), "changed\n", { mode: 0o755 })
+  const a = { ...item(), claim: { status: "done" as const, note: "Changed it", at: "2026-10-07T00:00:00Z" } }
+  const b = { ...item(), id: "review_comments:f2", state: "blocked" as const, claim: { status: "blocked" as const, note: "Missing context", at: "2026-10-07T00:00:00Z" } }
+  const deps = testDeps({ bridge: fakeBridge({ capabilities: [] }), agents: {} as never, git: {} as never, host: {} as never, checks: fakeChecks(), registry: fakeRegistry() })
+  const ctx = testContext({ root, state: initialState() })
+  const edit = { id: "one", jobId: "review_comments", by: "agent" as const, planLineId: null, file, runId: RUN_ID,
+    beforeHash: editHash("original\n"), afterHash: editHash("changed\n"), textEdits: [{ offset: 0, removed: "original\n", inserted: "changed\n" }] }
+  const settled = await settleFixRound(ctx, deps, RUN_ID, { items: [a, b], run: {
+    outcome: "completed", session: null, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [edit],
+    attribution: [{ editId: edit.id, itemIds: [a.id, b.id], textEditItems: [[a.id, b.id]] }]
+  } as never })
+  expect(readFileSync(join(root, file), "utf8")).toBe("original\n")
+  expect(statSync(join(root, file)).mode & 0o777).toBe(0o755)
+  expect(settled.edits).toEqual([])
+  expect(settled.items.map(item => item.state)).toEqual(["left_for_you", "left_for_you"])
 })
