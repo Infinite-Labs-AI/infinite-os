@@ -119,17 +119,20 @@ async function descends(deps: WizardDeps, mergeSha: string, serving: string, pro
 }
 
 /** §3y.4: what one GitHub read says about the merge's production deploy. */
-export type GithubDeployRead = { deployed: true; sha: string; how: "github_deployment" | "serving_descends" } | { failed: true; reason?: string; blocked?: boolean } | { waiting: "building" | "not_found" }
+export type GithubDeployRead = { deployed: true; sha: string; how: "github_deployment" | "serving_descends" } | { failed: true; reason?: string; blocked?: boolean } | { waiting: "building" | "not_found" } | { unavailable: true; reason: string }
 
 export async function githubDeployRead(deps: WizardDeps, reader: DeploymentReader, mergeSha: string, productionBranch: string | null): Promise<GithubDeployRead> {
-  const own = await reader.productionDeployment(mergeSha).catch(() => ({ state: "not_found" as const, reason: undefined, blocked: undefined }))
-  if (own.state === "ready") return { deployed: true, sha: mergeSha, how: "github_deployment" }
+  const own = await reader.productionDeployment(mergeSha).catch(() => null)
+  if (own?.state === "ready") return { deployed: true, sha: mergeSha, how: "github_deployment" }
   // A later successful production deployment that contains the merge serves it too (a canceled or failed merge build).
-  const latest = await reader.latestProductionDeployment().catch(() => null)
+  const latest = await reader.latestProductionDeployment().catch(() => undefined)
   if (latest && latest.sha === mergeSha) return { deployed: true, sha: mergeSha, how: "github_deployment" }
   if (latest && (await descends(deps, mergeSha, latest.sha, productionBranch))) return { deployed: true, sha: latest.sha, how: "serving_descends" }
-  if (own.state === "failed") return { failed: true, ...(own.reason ? { reason: own.reason } : {}), ...(own.blocked ? { blocked: true } : {}) }
-  return { waiting: own.state === "building" ? "building" : "not_found" }
+  if (own?.state === "failed") return { failed: true, ...(own.reason ? { reason: own.reason } : {}), ...(own.blocked ? { blocked: true } : {}) }
+  if (own?.state === "building") return { waiting: "building" }
+  if (own === null || latest === undefined) return { unavailable: true, reason: "GitHub's production deployment status could not be read; whether this merge is live is unknown." }
+  if (latest === null) return { unavailable: true, reason: "GitHub shows no production deployment status for this merge and no earlier successful production deployment; whether this merge is live is unknown." }
+  return { waiting: "not_found" }
 }
 
 /** The signals `prove` can wait on this run (§3y.4). With none, it asks instead of waiting. */
@@ -143,8 +146,8 @@ export interface DeploySignals {
 }
 
 /**
- * `no_signal`: the claim was proven, but it says nothing about THIS merge's deploy (the file was already served before
- * it), and no other signal exists; the step then asks, as it does with no signal at all.
+ * `no_signal`: no remaining source can report THIS merge's deploy. GitHub may have no visible production history,
+ * or a proven claim's file was already served before this merge. The step asks rather than guessing success.
  */
 export type DeployOutcome = (DeployWait & { deployed: true }) | { deployed: false; why: "timeout" | "failed" | "no_signal" | "claim_gone"; reason?: string; blocked?: boolean }
 
@@ -217,8 +220,10 @@ async function waitForDeploy(
   const say = waitLines(ctx, deps)
   let lastClaimPoll = -Infinity
   let claimLive = signals.claim
+  let unavailableReason: string | undefined
   ctx.emit.emit("step.sub", { step: "prove", text: `Waiting for the deploy of ${mergeSha.slice(0, 7)}…`, tone: "pending" })
   for (;;) {
+    let githubLive = signals.github !== null
     if (signals.infinite) {
       const result = await mergeIsDeployed(deps, mergeSha, input.productionBranch)
       if (result.deployed) return result
@@ -227,7 +232,13 @@ async function waitForDeploy(
       const read = await githubDeployRead(deps, signals.github, mergeSha, input.productionBranch)
       if ("deployed" in read) return read
       if ("failed" in read) return { deployed: false, why: "failed", reason: read.reason, blocked: read.blocked }
-      say(read.waiting === "building" ? `GitHub: Vercel is building ${mergeSha.slice(0, 7)}…` : `GitHub shows no production deployment for ${mergeSha.slice(0, 7)} yet`)
+      if ("unavailable" in read) {
+        githubLive = false
+        if (unavailableReason !== read.reason) ctx.emit.emit("step.sub", { step: "prove", text: read.reason, tone: "warn" })
+        unavailableReason = read.reason
+      } else {
+        say(read.waiting === "building" ? `GitHub: Vercel is building ${mergeSha.slice(0, 7)}…` : `GitHub shows no production deployment for ${mergeSha.slice(0, 7)} yet`)
+      }
     }
     const now = deps.clock.now().getTime()
     if (claimLive && now - lastClaimPoll >= PROVE_LIMITS.claimPollMs) {
@@ -244,14 +255,15 @@ async function waitForDeploy(
           text: `The proof file was already on ${input.host ?? "your site"} before this merge, so it does not show that ${mergeSha.slice(0, 7)} deployed`,
           tone: "info"
         })
-        if (!signals.infinite && !signals.github) return { deployed: false, why: "no_signal" }
+        if (!signals.infinite && !githubLive) return { deployed: false, why: "no_signal", reason: unavailableReason }
       } else if (answer?.state === "none") {
         // Review P1-1: the claim is gone (expired, or another source took the site); waiting on it can never prove.
         claimLive = false
         input.onGone()
-        if (!signals.infinite && !signals.github) return { deployed: false, why: "claim_gone" }
+        if (!signals.infinite && !githubLive) return { deployed: false, why: "claim_gone" }
       } else if (input.host) say(`Checking ${input.host}/.well-known/infinite-site-verification.txt…`)
     }
+    if (!signals.infinite && !githubLive && !claimLive) return { deployed: false, why: "no_signal", reason: unavailableReason }
     if (deps.clock.now().getTime() - started >= PROVE_LIMITS.deployWaitMs) return { deployed: false, why: "timeout" }
     await deps.clock.sleep(PROVE_LIMITS.deployPollMs, ctx.signal)
   }
@@ -1050,12 +1062,12 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   }
 
   // No way to see the deploy: ONE question instead of a 20-minute wait (never under --yes / --json).
-  const askDeployed = async (): Promise<Extract<DeployWait, { deployed: true }> | null> => {
+  const askDeployed = async (reason?: string): Promise<Extract<DeployWait, { deployed: true }> | null> => {
     const asked =
       ctx.options.yes || ctx.options.json || ctx.options.nested
         ? false
         : await ctx.ask("confirm", {
-            question: `Infinite can't see when ${productionHost ?? "your site"} deploys (no Vercel connection, no GitHub deployments). Is pull request #${state.pr?.number ?? "?"} live on ${productionHost ?? "your site"} now?`,
+            question: `${reason ?? `Infinite can't see when ${productionHost ?? "your site"} deploys (no Vercel connection, no GitHub deployments).`} Is pull request #${state.pr?.number ?? "?"} live on ${productionHost ?? "your site"} now?`,
             defaultYes: false
           })
     return asked === true ? { deployed: true, sha: mergeSha, how: "you_said" } : null
@@ -1085,8 +1097,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     }
     if (!waited.deployed && waited.why === "no_signal") {
       await ctx.state.save()
-      const said = await askDeployed()
-      if (!said) return cannotSee
+      const said = await askDeployed(waited.reason)
+      if (!said) return waited.reason ? { ...cannotSee, reason: waited.reason, resumeHint: "Check this merge's production deployment in the hosting dashboard, then run npx infinite-tag again once it is live." } : cannotSee
       deploy = said
     } else if (!waited.deployed) {
       if (waited.why === "failed") {
@@ -1096,7 +1108,9 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
           kind: "parked",
           code: "INF_WIZ_DEPLOY_FAILED",
           reason: reason ? `The deploy of ${mergeSha.slice(0, 7)} ${waited.blocked ? "is blocked" : "failed"}: ${reason}` : `The deploy of ${mergeSha.slice(0, 7)} failed (GitHub shows the Vercel production deployment failed).`,
-          resumeHint: "Fix it and run npx infinite-tag again."
+          resumeHint: waited.blocked
+            ? "A member of the hosting team must redeploy this merge in the hosting dashboard, or merge a follow-up change to trigger a permitted deployment. Once it is live, run npx infinite-tag again."
+            : "Fix it and run npx infinite-tag again."
         }
       }
       return {

@@ -123,6 +123,56 @@ describe("prove: GitHub Deployments as the deploy signal (no Infinite Vercel con
     expect(outcome.kind).not.toBe("parked")
     expect(subs.join(" ")).toContain(`a later commit, ${SERVING_SHA.slice(0, 7)}, includes it`)
   })
+
+  it("no visible production history parks immediately with an unknown result and a hosting-dashboard next step", async () => {
+    const bundle = world({ deployments: { forSha: ["not_found"], latest: [null] } })
+    const started = bundle.clock.now().getTime()
+    const { outcome, subs } = await run(bundle, mergedState(answeredSite(false)), { yes: true })
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_DEPLOY_TIMEOUT", reason: expect.stringContaining("no earlier successful production deployment"), resumeHint: expect.stringContaining("hosting dashboard") })
+    expect((outcome as { reason: string }).reason).toContain("unknown")
+    expect(bundle.clock.now().getTime()).toBe(started)
+    expect(bundle.log.names("host").filter(name => name === "host.productionDeployment")).toHaveLength(1)
+    expect(bundle.log.names("bridge")).not.toContain("bridge.claimProof")
+    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
+    expect(subs.some(text => text.startsWith("✓ Deployed"))).toBe(false)
+  })
+
+  it("an unreadable production status is unknown immediately, not an empty-history claim or a twenty-minute wait", async () => {
+    const bundle = world({ deployments: { forSha: ["not_found"], latest: [null] } })
+    Object.assign(bundle.deps.host, { latestProductionDeployment: async () => { throw new Error("fake unreadable deployment history") } })
+    const started = bundle.clock.now().getTime()
+    const { outcome } = await run(bundle, mergedState(answeredSite(false)), { yes: true })
+    expect(outcome).toMatchObject({ kind: "parked", reason: expect.stringContaining("could not be read") })
+    expect((outcome as { reason: string }).reason).toContain("unknown")
+    expect((outcome as { reason: string }).reason).not.toContain("no earlier")
+    expect(bundle.clock.now().getTime()).toBe(started)
+    expect(bundle.log.names("bridge")).not.toContain("bridge.startTest")
+  })
+
+  it("empty GitHub history still lets the pending site-file claim prove the merge", async () => {
+    const bundle = world({ deployments: { forSha: ["not_found"], latest: [null] }, siteProve: [pending(), proven], keysAfterProof: true, files: MERGE_ADDED_FILE })
+    const { outcome, subs } = await run(bundle, mergedState(answeredSite(true)))
+    expect(outcome.kind).not.toBe("parked")
+    expect(subs.some(text => text.includes("Infinite read its proof file"))).toBe(true)
+    expect(bundle.log.names("bridge").filter(name => name === "bridge.proveSite")).toHaveLength(2)
+  })
+
+  it("keeps reading GitHub while a site-file claim supplies the wait, even if GitHub was initially empty", async () => {
+    const bundle = world({ deployments: { forSha: ["not_found", "ready"], latest: [null] }, siteProve: [pending(), proven], keysAfterProof: true, files: MERGE_ADDED_FILE })
+    const { outcome, subs } = await run(bundle, mergedState(answeredSite(true)))
+    expect(outcome.kind).not.toBe("parked")
+    expect(subs).toContain(`✓ Deployed ${MERGE_SHA.slice(0, 7)} (GitHub deployment)`)
+    expect(bundle.log.names("host").filter(name => name === "host.productionDeployment")).toHaveLength(2)
+  })
+
+  it("an earlier successful production deployment keeps the wait open for this merge", async () => {
+    const bundle = world({ deployments: { forSha: ["not_found", "ready"], latest: [{ sha: "a".repeat(40), createdAt: "2026-10-01T09:40:00.000Z" }] } })
+    const started = bundle.clock.now().getTime()
+    const { outcome, subs } = await run(bundle, mergedState(answeredSite(false)))
+    expect(outcome.kind).not.toBe("parked")
+    expect(bundle.clock.now().getTime()).toBeGreaterThan(started)
+    expect(subs).toContain(`✓ Deployed ${MERGE_SHA.slice(0, 7)} (GitHub deployment)`)
+  })
 })
 
 describe("prove: no signal at all → ONE question instead of a wait", () => {
@@ -260,6 +310,9 @@ it.each([false, true])("stops immediately on a production author block and names
   return step.run(ctx, bundle.deps).then(outcome => {
     expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_DEPLOY_FAILED", reason: expect.stringContaining(reason) })
     expect((outcome as { reason: string }).reason).toContain("is blocked")
+    expect((outcome as { resumeHint: string }).resumeHint).toMatch(/member of (?:the|your) hosting team/i)
+    expect((outcome as { resumeHint: string }).resumeHint).toMatch(/redeploy.*merge|merge.*redeploy/i)
+    expect((outcome as { resumeHint: string }).resumeHint).toContain("npx infinite-tag")
     expect(bundle.clock.now().getTime() - started).toBeLessThan(PROVE_LIMITS.deployPollMs)
     expect(bundle.log.names("bridge")).not.toContain("bridge.claimProof")
   })
