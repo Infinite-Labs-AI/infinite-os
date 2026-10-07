@@ -1,3 +1,4 @@
+import { branchUpdateCommits } from "../../github/update-branch.js"
 import { safeDisplayText } from "../../review/display.js"
 // Step 9 `review` (§3d.1, §3g.4, lane O4): the OTHER agent reviews the PR read-only in a detached worktree of
 // the head → the wizard scans the review and posts it as ONE `event: COMMENT` review → reads the threads back
@@ -32,7 +33,7 @@ import { commentTrust, hasFinalMarker, hasReplyMarker, parseReviewMarker, stripM
 import { AGENT_LABEL, buildFinalComment, buildReply, buildReviewPost, excerpt, FIX_ROUND_MINUTES, notFixedReply, redactIdsNotInDiff, safeText, type FixReplyState, type NotFixedOutcome } from "../../review/post.js"
 import { applyRehearsalToJobs, recordRehearsalCells, rehearse } from "../../review/rehearse.js"
 import { mergeRequirementLine } from "../../github/rules.js"
-import { checksSummary, checkPolicy, commitChecks, checkRunsOnPr, type PrCheck } from "../../github/checks.js"
+import { checksSummary, checkPolicy, commitChecks, headCheckActivity, headPrWorkflows, withDeploymentStates, checkRunsOnPr, type PrCheck } from "../../github/checks.js"
 import { DETERMINISTIC_CHECKS_BY_ITEM, fileRoleOf, isRepoRelativePath, leftByOwnerReason, pageHelperCalls, triage, triageKey, type FileRole, type PageHelperCall, type TriageDecision, type TriageItem } from "../../review/triage.js"
 import { escapeRegExp } from "../../text-escape.js"
 import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
@@ -568,7 +569,18 @@ async function syncHead(session: Session, prevHead: string, newHead: string): Pr
         updated = false
         conflict()
       }
-      if (updated) head = (await ship.git.pullFfOnly(gitState.branch)).headSha
+      if (updated) {
+        const integrated = (await ship.git.pullFfOnly(gitState.branch)).headSha
+        const baseHead = await ship.git.remoteBranchSha(gitState.base)
+        const known = baseHead ? await branchUpdateCommits(ctx.root, ship.git, head, integrated, baseHead) : null
+        if (known === null) return failed("INF_WIZ_PUSH_REFUSED", "The updated branch did not match the requested base merge; its new commits were not approved automatically.")
+        head = integrated
+        ctx.state.update(state => {
+          state.approvedForeignCommits = [...new Set([...(state.approvedForeignCommits ?? []), ...known])]
+          state.lastPush = { sha: head, at: ctx.now().toISOString() }
+        })
+        await ctx.state.save()
+      }
     }
   }
   ctx.state.update((state) => {
@@ -688,6 +700,7 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
   const result = (state: CheckResult["state"], reason: string, ready = false): CheckResult & { ready: boolean } => ({ checkId: "pr_checks_pass", tier: "S", state, reason: safeDisplayText(session.ship.scanner, reason), at: ctx.now().toISOString(), runId, ready })
   let waitingReason = "PR checks could not be read"
   const base = await commitChecks(github.gh, ctx.state.get().git!.baseSha).catch(() => null)
+  const workflows = await headPrWorkflows(github.gh, checkedHead).catch(() => null)
   const triggers = new Map<string, boolean | null>()
   for (const check of base ?? []) if (check.bucket === "pass") {
     const next = await checkRunsOnPr(github.gh, check, checkedHead)
@@ -704,7 +717,9 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
       session.ledger.checkRegistration = { sha: checkedHead, complete: true }
       await saveLedger(session)
     }
-    const checks = await github.checks(number).catch(() => null)
+    const activity = await headCheckActivity(github.gh, checkedHead).catch(() => null)
+    const rawChecks = await github.checks(number).catch(() => null)
+    const checks = rawChecks === null ? null : await withDeploymentStates(github.gh, checkedHead, [...rawChecks, ...(activity?.results ?? []).filter(row => !rawChecks.some(current => current.name === row.name && current.bucket === row.bucket))]).catch(() => null)
     if (checks !== null && !isUnsupported(checks)) {
       const summary = checksSummary(checks)
       const policy = checkPolicy(checks, base)
@@ -720,6 +735,8 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
         if (repair && await repairCi(session, policy.failing, base)) return requiredChecksResult(session, runId, false)
         return result("problem", `Failed PR checks: ${policy.failing.map(check => check.name).join(", ")}${base === null ? " (base checks could not be read)" : ""}`)
       }
+      if (activity?.failed.length) return result("problem", `Failed CI suite or workflow: ${activity.failed.join(", ")}`)
+      const missingWorkflows = workflows?.expected.filter(path => !activity?.workflowPaths.includes(path)) ?? []
       const absent = (base ?? []).filter(check => check.bucket === "pass" && !checks.some(current => current.name === check.name))
       const cancelled = checks.filter(check => check.bucket === "cancel")
       const pending = checks.filter(check => check.bucket === "pending")
@@ -730,20 +747,30 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
         : "No PR checks have been reported"
       const waitingForAbsent = absent.some(check => triggers.get(check.name) !== false) && deps.clock.now().getTime() - registrationStart < CHECKS_WAIT_MS
       if (absent.length > 0) waitingReason = `Missing PR checks: ${absent.map(check => check.name).join(", ")}; not measured`
-      if (registered && !waitingForAbsent && base !== null && summary.pending === 0 && unknown.length === 0) {
+      if (!activity) waitingReason = "The head commit's check suites or workflow runs could not be read"
+      else if (activity.pending.length) waitingReason = `CI suites or workflows are still pending: ${activity.pending.join(", ")}`
+      else if (!workflows || workflows.unknown) waitingReason = "The PR head's workflow triggers could not be determined"
+      else if (missingWorkflows.length) waitingReason = `Expected PR workflows have not completed: ${missingWorkflows.join(", ")}; not measured`
+      const registrationUnknown = !activity?.observed && checks.length === 0 && deps.clock.now().getTime() - registrationStart < CHECKS_WAIT_MS
+      const activitySettled = activity !== null && activity.pending.length === 0 && workflows !== null && !workflows.unknown && missingWorkflows.length === 0
+      if ((registered || (activitySettled && activity.observed)) && !registrationUnknown && activitySettled && !waitingForAbsent && base !== null && summary.pending === 0 && unknown.length === 0) {
+        if (session.ledger.checkRegistration?.sha !== checkedHead) {
+          session.ledger.checkRegistration = { sha: checkedHead, complete: true }
+          await saveLedger(session)
+        }
         for (const check of absent) {
           const note = safeDisplayText(session.ship.scanner, triggers.get(check.name) === false ? `${check.name} does not run on pull requests: not measured (workflow triggers checked).` : `${check.name} did not appear in the full check window: not measured.`)
           if (!session.notes.includes(note)) { session.notes.push(note); sub(ctx, "review", note, "info") }
         }
         if (checks.length === 0) return result("undetermined", base.length === 0 ? "no checks reported: not measured; the base commit also has no checks" : "No checks reported on this pull request after registration: not measured", true)
-        return result(summary.pass > 0 && absent.length === 0 && policy.blocked.length === 0 ? "pass" : "undetermined", summary.pass > 0 ? `${summary.pass} PR check(s) pass; unavailable previews and base-only checks remain not measured` : "PR checks not measured; only blocked previews or existing failures reported", true)
+        return result(summary.pass > 0 && !checks.some(check => check.bucket === "skipping") && absent.length === 0 && policy.blocked.length === 0 ? "pass" : "undetermined", summary.pass > 0 ? `${summary.pass} PR check(s) pass; unavailable previews and base-only checks remain not measured` : "PR checks not measured; only skipped checks, blocked previews or existing failures reported", true)
       }
-      if (registeredOnResume && !waitingForAbsent && pending.length === 0) return result("undetermined", waitingReason)
+      if (registeredOnResume && activitySettled && !registrationUnknown && !waitingForAbsent && pending.length === 0) return result("undetermined", waitingReason)
     } else {
       waitingReason = "PR checks could not be read"
       if (registeredOnResume) return result("undetermined", waitingReason)
     }
-    if (ctx.signal.aborted || elapsed >= CHECKS_WAIT_MS) return result("undetermined", waitingReason)
+    if (ctx.signal.aborted || elapsed >= CHECKS_WAIT_MS || deps.clock.now().getTime() - registrationStart >= CHECKS_WAIT_MS) return result("undetermined", waitingReason)
     await deps.clock.sleep(CHECKS_POLL_MS, ctx.signal)
   }
 }
