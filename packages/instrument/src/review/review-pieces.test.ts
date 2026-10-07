@@ -27,7 +27,7 @@ const RUN = "7f3c2a91-b0de-4c55-9a11-23456789abcd"
 const scanner = createScanner({ literals: [{ value: FAKE_BRIDGE_TOKEN, kind: "bridge_token" }], allowedIds: [PIXEL, "G-ABC123XYZ9"] })
 
 describe("the secret / PII scan (§3g.5)", () => {
-  it("redacts secrets, the bridge token, emails, phone numbers and private paths in posted text", () => {
+  it("redacts secrets, the bridge token, emails and private paths while preserving phone numbers in posted text", () => {
     const text = [
       `key ${STRIPE}`,
       `token ${FAKE_BRIDGE_TOKEN}`,
@@ -40,10 +40,10 @@ describe("the secret / PII scan (§3g.5)", () => {
       "Authorization: Bearer abcdefghijklmnop"
     ].join("\n")
     const { text: redacted, hits } = scanner.redact(text)
-    for (const secret of [STRIPE, FAKE_BRIDGE_TOKEN, GH_TOKEN, JWT, "jane.doe@acme-store.com", "555-0132", ".growth-os", "Application Support/Infinite", "abcdefghijklmnop"]) {
+    for (const secret of [STRIPE, FAKE_BRIDGE_TOKEN, GH_TOKEN, JWT, "jane.doe@acme-store.com", ".growth-os", "Application Support/Infinite", "abcdefghijklmnop"]) {
       expect(redacted).not.toContain(secret)
     }
-    expect(new Set(hits.map((hit) => hit.kind))).toEqual(new Set(["bridge_token", "stripe_key", "github_token", "jwt", "email", "phone", "private_path", "authorization"]))
+    expect(new Set(hits.map((hit) => hit.kind))).toEqual(new Set(["bridge_token", "stripe_key", "github_token", "jwt", "email", "private_path", "authorization"]))
   })
 
   it("keeps the connection's Meta pixel id, UUIDs, dates, SHAs and noreply/example emails (negative)", () => {
@@ -66,11 +66,11 @@ describe("the secret / PII scan (§3g.5)", () => {
     ])
   })
 
-  it("a review body with a real-looking phone number is redacted; the same digits as the pixel id are not (both ways)", () => {
-    expect(scanner.redact("Customer phone 415 555 0132 is in the URL").text).toBe("Customer phone [redacted: phone] is in the URL")
+  it("phone numbers and pixel ids remain ordinary data in either scanner mode", () => {
+    expect(scanner.redact("Customer phone 415 555 0132 is in the URL").text).toBe("Customer phone 415 555 0132 is in the URL")
     expect(scanner.redact(`The pixel ${PIXEL} is right`).text).toBe(`The pixel ${PIXEL} is right`)
     const strict = createScanner({ literals: [], allowedIds: [] })
-    expect(strict.redact("call 4155550132").text).toBe("call [redacted: phone]")
+    expect(strict.redact("call 4155550132").text).toBe("call 4155550132")
   })
 
   it("reads .env* values ≥ 8 chars as literals, skipping plain words, booleans and browser-public values", () => {

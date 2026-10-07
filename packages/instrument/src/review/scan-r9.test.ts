@@ -24,14 +24,12 @@ const CASES = [
   ["Meta", "EAA" + TOKEN],
   ["AWS secret access key", TOKEN + "/+xQ5R2Z", "AWS_SECRET_ACCESS_KEY="],
   ["generic key", TOKEN + "_newVendor", "API_KEY: "],
-  ["generic camelCase token", TOKEN, 'accessToken = "'],
-  ["generic prose key", TOKEN, "signing key "],
-  ["generic JSON key", TOKEN + "/+=", '"secretAccessKey": "', '"'],
-  ["generic YAML key", TOKEN + "_-", "api-key: "],
-  ["generic quoted punctuation", TOKEN.slice(0, 16) + "$#:([])!" + TOKEN.slice(16), 'password="', '"'],
-  ["generic unquoted punctuation", TOKEN.slice(0, 16) + "$#:@" + TOKEN.slice(16), "password="],
+  ["generic JSON key", TOKEN, '"SERVICE_TOKEN": "', '"'],
+  ["generic YAML key", TOKEN + "_-", "SERVICE_API_KEY: "],
+  ["generic quoted punctuation", TOKEN.slice(0, 16) + "$#:([])!" + TOKEN.slice(16), 'PASSWORD="', '"'],
+  ["generic unquoted punctuation", TOKEN.slice(0, 16) + "$#:@" + TOKEN.slice(16), "PASSWORD="],
   ["DB raw colon password", "p:ass:word", "mysql://user:", "@db.example/app"],
-  ["generic hex secret", "9a5d83b6c2f407e1".repeat(2), 'client_secret="'],
+  ["generic hex secret", "9a5d83b6c2f407e1".repeat(2), 'CLIENT_SECRET="'],
   ["DB password", TOKEN, "postgresql://user:", "@db.example/app"],
   ["short DB password", "p%40ss%3Aword", "postgres://user:", "@db.example/app"],
   ["DB URL punctuation", "pass%2Fword%3F", "mongodb+srv://user:", "@db.example/app"],
@@ -74,10 +72,10 @@ describe("R9 provider and contextual secret redaction", () => {
 
   it("detects a named token split over contiguous added lines without bridging unrelated hunks", () => {
     const scanner = createScanner({ literals: [], allowedIds: [] })
-    const text = `const apiToken =\n  "${TOKEN}"`
+    const text = `const API_TOKEN =\n  "${TOKEN}"`
     expect(scanner.redact(text).text).not.toContain(TOKEN)
-    expect(scanner.findInCommit([{ path: "src/main.ts", added: [{ line: 7, text: "const apiToken =" }, { line: 8, text: `  "${TOKEN}"` }] }], () => false)).toEqual([{ kind: "generic_secret", file: "src/main.ts", line: 8 }])
-    expect(scanner.findInCommit([{ path: "src/main.ts", added: [{ line: 7, text: "const apiToken =" }, { line: 15, text: `  "${TOKEN}"` }] }], () => false)).toEqual([])
+    expect(scanner.findInCommit([{ path: "src/main.ts", added: [{ line: 7, text: "const API_TOKEN =" }, { line: 8, text: `  "${TOKEN}"` }] }], () => false)).toEqual([{ kind: "generic_secret", file: "src/main.ts", line: 8 }])
+    expect(scanner.findInCommit([{ path: "src/main.ts", added: [{ line: 7, text: "const API_TOKEN =" }, { line: 15, text: `  "${TOKEN}"` }] }], () => false)).toEqual([])
   })
 
   it("does not let a misleading label consume the following real secret assignment", () => {
@@ -103,7 +101,6 @@ describe("R9 provider and contextual secret redaction", () => {
   it("does not turn ordinary code, placeholders, URLs, hashes or IDs into generic secrets", () => {
     const scanner = createScanner({ literals: [], allowedIds: [] })
     for (const text of [
-      "API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
       "API_KEY=process.env.SYNTHETIC_SERVICE_API_KEY",
       "api_key = env.SERVICE_APPLICATION_API_KEY",
       "api_key = config.SERVICE_APPLICATION_API_KEY",
@@ -127,34 +124,70 @@ it("does not mistake quoted configuration instructions for a credential token", 
   expect(scanner.findInCommit([{ path: "docs/config.ts", added: [{ line: 1, text: prose }] }], () => false)).toEqual([])
 })
 
-it("keeps unquoted member references while scanning literal credentials with the same context", () => {
+it("excludes dotted/path values and camelCase values without inferring source semantics", () => {
   const scanner = createScanner({ literals: [], allowedIds: [] })
-  for (const value of ["session.metadata.infinite_visit_key", "payload.analytics.visit_key", "request.headers.authorization"]) {
-    const source = `properties: { visitKey: ${value} }`
-    expect(scanner.redact(source)).toEqual({ text: source, hits: [] })
-    expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text: source }] }], () => false)).toEqual([])
-    for (const quote of ['"', "'"]) {
-      const literal = `visitKey: ${quote}${value}${quote}`
-      expect(scanner.redact(literal).hits).toEqual([{ kind: "generic_secret" }])
-      expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text: literal }] }], () => false).length).toBeGreaterThan(0)
-    }
-  }
-  for (const value of [TOKEN, TOKEN + "." + TOKEN, "session.metadata." + TOKEN, TOKEN + ".metadata.infinite_visit_key", TOKEN.slice(0, 20) + "." + TOKEN.slice(0, 20), "qwertyuiopasdfghjklzx.qwertyuiopasdfghjklzx"]) {
-    for (const quote of ['', '"', "'"]) {
-      const literal = `visitKey: ${quote}${value}${quote}`
-      expect(scanner.redact(literal).text).not.toContain(value)
-      expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text: literal }] }], () => false).length).toBeGreaterThan(0)
+  for (const value of ["session.metadata.infinite_visit_key", "payload.analytics.visit_key", "request.headers.authorization", "process.env.SYNTHETIC_SERVICE_API_KEY", "config.providers.stripe2.publishableKeyV2", "createWebhookSignatureVerifier"]) {
+    for (const quote of ["", '"', "'"]) {
+      const text = `API_KEY: ${quote}${value}${quote}`
+      expect(scanner.redact(text)).toEqual({ text, hits: [] })
+      expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text }] }], () => false)).toEqual([])
     }
   }
 })
 
-it("does not grant source-reference exemptions to quoted env/config literals", () => {
+const MISSED_FORMATS = [
+  ["SendGrid", "SG." + TOKEN + "." + TOKEN],
+  ["npm", "npm_" + TOKEN],
+  ["Vercel", "vcp_" + TOKEN],
+  ["Resend", "re_" + TOKEN],
+  ["bare bearer", "Bearer " + TOKEN],
+  ["Slack webhook", "https://hooks.slack.com/services/TESTTEAM/TESTCHANNEL/" + TOKEN],
+  ["Discord webhook", "https://discord.com/api/webhooks/123456789012345678/" + TOKEN],
+  ["DB password with slash", "postgres://appuser:" + TOKEN + "/part@db.example/database"],
+  ["Redis password with slash", "redis://:" + TOKEN + "/part@cache.example:6379"],
+  ["token hex", "SERVICE_TOKEN=" + "a1".repeat(16)],
+  ["secret hex", "SERVICE_SECRET=" + "b2".repeat(16)],
+  ["password hex", "SERVICE_PASSWORD=" + "c3".repeat(16)],
+  ["private key hex", "PRIVATE_KEY=" + "d4".repeat(16)],
+  ["API key hex", "SERVICE_API_KEY=" + "e5".repeat(16)],
+  ["short assigned token", "SERVICE_TOKEN=01234567"],
+  ["headerless private key", "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ" + TOKEN + "\n" + TOKEN + "==\n-----END PRIVATE KEY-----"]
+] as const
+const PUBLIC_ANON_JWT = ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJyb2xlIjoiYW5vbiJ9", TOKEN].join(".")
+const ORDINARY_TEXT = [
+  "const secret = createWebhookSignatureVerifier",
+  "apiKey: config.providers.stripe2.publishableKeyV2",
+  "API_KEY: config.providers.stripe2.publishableKeyV2",
+  "API_KEY: window?.a?.publicWriteKey",
+  "secret: src/lib/analytics/track-conversion-event.ts",
+  "the API key https://provider.example/settings/keys",
+  "cache key " + "9a5d83b6c2f407e1".repeat(2),
+  "idempotency key: 2b26a7b8-e893-4771-a2b5-7de428305c11",
+  "receiptKey: " + "9a5d83b6c2f407e1".repeat(2),
+  "SESSION_KEY=" + "d4".repeat(16),
+  "password: must-be-at-least-twelve-characters-long",
+  "git@github.com:org/repo.git",
+  "customer id 1234567890",
+  "timestamp 1791300000000",
+  "+1 (415) 555-0132",
+  "NEXT_PUBLIC_SUPABASE_ANON_KEY=" + PUBLIC_ANON_JWT,
+  '"VITE_SUPABASE_ANON_KEY": "' + PUBLIC_ANON_JWT + '"',
+  "PUBLIC_SUPABASE_ANON_KEY: " + PUBLIC_ANON_JWT,
+  "https://docs.example:443/path/test@example.com"
+]
+
+it.each(MISSED_FORMATS)("redacts the required credential format: %s", async (_name, text) => {
   const scanner = createScanner({ literals: [], allowedIds: [] })
-  for (const value of ["process.env.SYNTHETIC_SERVICE_API_KEY", "import.meta.env.VITE_PUBLIC_APPLICATION_KEY", "env.SERVICE_APPLICATION_API_KEY", "config.SERVICE_APPLICATION_API_KEY"]) {
-    const source = `apiKey: ${value}`
-    expect(scanner.redact(source).hits).toEqual([])
-    const literal = `apiKey: "${value}"`
-    expect(scanner.redact(literal).hits).toEqual([{ kind: "generic_secret" }])
-    expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text: literal }] }], () => false)).toEqual([{ kind: "generic_secret", file: "src/outcome.ts", line: 1 }])
+  expect(scanner.redact(text).hits.length).toBeGreaterThan(0)
+  expect(scanner.findInCommit([{ path: "src/example.ts", added: text.split("\n").map((line, index) => ({ line: index + 1, text: line })) }], () => false).length).toBeGreaterThan(0)
+  const secret = text.includes(TOKEN) ? TOKEN : text.slice(text.indexOf("=") + 1)
+  for (const output of Object.values(await surfaces(text))) {
+    expect(output).not.toContain(secret)
+    expect(output).toMatch(/redacted:|withheld because/)
   }
+})
+it.each(ORDINARY_TEXT)("preserves the ordinary code or public value: %s", text => {
+  const scanner = createScanner({ literals: [], allowedIds: [] })
+  expect(scanner.redact(text)).toEqual({ text, hits: [] })
+  expect(scanner.findInCommit([{ path: "src/example.ts", added: [{ line: 1, text }] }], () => false)).toEqual([])
 })

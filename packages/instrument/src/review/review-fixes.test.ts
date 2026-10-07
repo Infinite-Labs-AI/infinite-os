@@ -301,13 +301,13 @@ describe("P3-2: quoted comment text cannot close its fence", () => {
   })
 })
 
-describe("P3-3: phone redaction false positives", () => {
+describe("phone-like values are not credentials", () => {
   const scanner = createScanner({ literals: [], allowedIds: [] })
-  it("keeps line ranges and plain 15-digit ids; still redacts a written phone number", () => {
+  it("keeps line ranges, ids and written phone numbers", () => {
     expect(scanner.redact("See lines 1200-1310").text).toBe("See lines 1200-1310")
     expect(scanner.redact("Pixel 111222333444555 fired twice").text).toBe("Pixel 111222333444555 fired twice")
-    expect(scanner.redact("call +1 (415) 555-0132").text).toBe("call [redacted: phone]")
-    expect(scanner.redact("call 555-0132").text).toBe("call [redacted: phone]")
+    expect(scanner.redact("call +1 (415) 555-0132").text).toBe("call +1 (415) 555-0132")
+    expect(scanner.redact("call 555-0132").text).toBe("call 555-0132")
   })
 })
 

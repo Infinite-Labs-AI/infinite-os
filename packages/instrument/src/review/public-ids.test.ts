@@ -1,7 +1,7 @@
 // LF4-P3-5: every scanner that writes a reason (rehearsal, jobs, done) allows the public ids the run READ from the site:
 // the census's literal ids, the dry load's GA4 / Meta ids and the real visit's. Live run 4's done step got this (R4-9);
 // the rehearsal and jobs scanners still turned a masked, unconnected site pixel id in a live-bytes reason into
-// "[redacted: phone]". A real phone number stays redacted.
+// "[redacted: phone]". Number-only masking has since been removed.
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -38,19 +38,19 @@ describe("LF4-P3-5: runPublicIds", () => {
     expect(ids).toContain(PIXEL)
   })
 
-  it("a scanner given them keeps a masked site pixel id; a real phone is still redacted", async () => {
+  it("a scanner keeps a masked site pixel id and ordinary phone data", async () => {
     const { ctx, deps } = await world()
     const reason = `live bytes: Meta pixel ${maskIdentifier(PIXEL)} sent PageView; call +1 415.555.0123`
     const scanner = buildScanner(ctx, deps, await runPublicIds(ctx, deps))
     const out = scanner.redact(reason).text
     expect(out).toContain(maskIdentifier(PIXEL))
-    expect(out).toContain("[redacted: phone]")
-    expect(out).not.toContain("415.555.0123")
+    expect(out).not.toContain("[redacted: phone]")
+    expect(out).toContain("415.555.0123")
   })
 
-  it("NEGATIVE: without the site's ids (connections only, as rehearsal and jobs had), the masked id read as a phone", async () => {
+  it("masked ids remain intact even before the site ids are known", async () => {
     const { ctx, deps } = await world()
-    expect(buildScanner(ctx, deps, []).redact(`Meta pixel ${maskIdentifier(PIXEL)}`).text).toContain("[redacted: phone]")
+    expect(buildScanner(ctx, deps, []).redact(`Meta pixel ${maskIdentifier(PIXEL)}`).text).toContain(maskIdentifier(PIXEL))
   })
 
   it("another run's before file gives nothing (never another run's ids)", async () => {
