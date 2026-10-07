@@ -1,7 +1,7 @@
 import { expect, it } from "vitest"
 import { isReviewResult, omitOwnerPolicyReview } from "./brief.js"
 import { emptyLedger, openFindings, recordDecisions } from "./ledger.js"
-import { triage, type TriageItem } from "./triage.js"
+import { RULINGS, triage, triageKey, type TriageItem } from "./triage.js"
 import { ciFixItem } from "./fix.js"
 import { applyClaim } from "../jobs/state-machine.js"
 import { item } from "../../test/wizard/repo.js"
@@ -118,4 +118,56 @@ it("keeps manual installer wiring distinct from a preview guard", async () => {
   expect(text).toContain(wiring)
   expect(text).toContain("has not been applied")
   expect(text).not.toContain("Apply this condition")
+})
+
+const requestRulings = [
+  ["request_ga4_proxy", "ga4_proxy", "R11"],
+  ["request_meta_unsupported", "meta_never_list", "R8"],
+  ["request_meta_deletion", "no_deletion", null]
+] as const
+
+it("does not decline security or legacy findings because their text mentions a standing ruling", () => {
+  for (const category of [undefined, "security"] as const) {
+    for (const body of ["PII phone sent to the Meta pixel unhashed", "GA4 proxy sends a secret header to the browser", "Delete leaked credentials from Meta payloads"]) {
+      const current: TriageItem = { ...triageItem, category, path: "src/capture.ts", severity: "should", item: "R11", body }
+      expect(triage([current], { ...context, allowlist: [current.path!], passingChecks: new Set(["posthog_via_proxy_once"]) })[0]?.action).toBe("FIX")
+    }
+  }
+})
+
+it("reopens legacy and security ruling declines when resuming either ledger format", () => {
+  for (const format of ["findings", "rounds"] as const) {
+    for (const category of [undefined, "security", "analytics"] as const) {
+      for (const [, rulingId] of requestRulings) {
+        const current: TriageItem = { ...triageItem, category, path: "src/capture.ts", severity: "should" }
+        const ruling = RULINGS.find(entry => entry.id === rulingId)!
+        const ledger = emptyLedger("fixture")
+        if (format === "findings") recordDecisions(ledger, [{ item: current, action: "DECLINE", ruling: ruling.id, reason: ruling.reply }], 1)
+        else {
+          ledger.rounds = [{ round: 1, reviewedSha: "a".repeat(40), reviewer: "codex", fixSha: null, review: { ...review, findings: [{ ...finding, path: current.path!, category, severity: "should" }] } }]
+          ledger.declined = [{ key: triageKey(current), reason: ruling.reply, round: 1 }]
+        }
+        expect(openFindings(ledger, []), `${format}: ${category}: ${rulingId}`).toHaveLength(1)
+      }
+    }
+  }
+})
+
+it("only closes structured requests with a matching ruling and no blocker or violation", () => {
+  for (const [category, rulingId, violationItem] of requestRulings) {
+    const ruling = RULINGS.find(entry => entry.id === rulingId)!
+    for (const format of ["findings", "rounds"] as const) {
+      for (const variant of ["request", "blocker", "mismatch", ...(violationItem ? ["violation"] : [])]) {
+        const current: TriageItem = { ...triageItem, category, path: "src/capture.ts", severity: variant === "blocker" ? "blocker" : "should", item: variant === "violation" ? violationItem : "R1" }
+        const chosen = variant === "mismatch" ? RULINGS.find(entry => entry.id === "banner_consent")! : ruling
+        const ledger = emptyLedger("fixture")
+        if (format === "findings") recordDecisions(ledger, [{ item: current, action: "DECLINE", ruling: chosen.id, reason: chosen.reply }], 1)
+        else {
+          ledger.rounds = [{ round: 1, reviewedSha: "a".repeat(40), reviewer: "codex", fixSha: null, review: { ...review, findings: [{ ...finding, category, path: current.path!, severity: current.severity, item: current.item! }] } }]
+          ledger.declined = [{ key: triageKey(current), reason: chosen.reply, round: 1 }]
+        }
+        expect(openFindings(ledger, []), `${format}: ${category}: ${variant}`).toHaveLength(variant === "request" ? 0 : 1)
+      }
+    }
+  }
 })

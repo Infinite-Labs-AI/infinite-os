@@ -7,7 +7,7 @@ import { isOwnerOnlyFinding } from "../jobs/owner-boundary.js"
 import type { ChecklistItem, JobItemState } from "../wizard/contracts/jobs.js"
 import type { InfiniteOwnLabel } from "./post.js"
 import type { TriageAction, TriageDecision } from "./triage.js"
-import { RULINGS, triageKey } from "./triage.js"
+import { RULINGS, rulingForCategory, triageKey } from "./triage.js"
 
 export const REVIEW_LEDGER_PATH = ".infinite/wizard/review-ledger.json"
 
@@ -114,7 +114,12 @@ export function openFindings(
   for (const finding of latest.values()) {
     if (finding.action === "ANSWER") continue
     if (finding.action === "OWNER_INFO" && !(finding.path !== null && (ownership?.(finding.path, finding.line) || writtenByRun?.(finding.path, finding.line)))) continue
-    if (finding.action === "DECLINE" && finding.ruling !== null) continue
+    // Resumed ledgers can contain old keyword declines. Only a matching structured request
+    // can still be closed; blockers and reports of a broken ruling stay open, as in fresh triage.
+    const ruling = rulingForCategory(finding.category)
+    if (finding.action === "DECLINE" && ruling && finding.severity !== "blocker"
+      && (ruling.violationItem === null || finding.item !== ruling.violationItem)
+      && (finding.ruling === ruling.id || finding.ruling === ruling.reply)) continue
     if (finding.action === "FIX" && finding.findingId !== null) {
       const job = jobs.find((entry) => entry.id === `review_comments:${finding.findingId}`)
       if (job && CLOSING_STATES.includes(job.state)) continue

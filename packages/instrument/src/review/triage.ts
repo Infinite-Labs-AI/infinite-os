@@ -100,6 +100,14 @@ export const RULINGS: readonly Ruling[] = [
   }
 ]
 
+/** Only explicit requests can invoke a standing ruling; finding prose never grants that authority. */
+export function rulingForCategory(category: TriageItem["category"]): Ruling | undefined {
+  const id = category === "request_ga4_proxy" ? "ga4_proxy"
+    : category === "request_meta_unsupported" ? "meta_never_list"
+      : category === "request_meta_deletion" ? "no_deletion" : null
+  return RULINGS.find(ruling => ruling.id === id)
+}
+
 const CONVERSION_NAMES = /conversion[\s_-]*name|rename[^.\n]{0,30}(conversion|event)|event name|name (the|this) (conversion|event)/i
 
 /** Which passing wizard checks contradict a reviewer's opinion on an item (deterministic > opinion). */
@@ -319,9 +327,8 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     if (located !== null && isPolicyPath(located)) return { item, action: "ASK", askReason: "owner_file", reason: "This finding remains open. Policy pages are read-only for the wizard; the site owner must address it." }
     const text = `${item.body}\n${item.suggestedFix ?? ""}`
     const declinedBefore = ctx.declinedKeys.has(triageKey(item))
-    // Rulings first, whatever the item label: a ruling match is never a FIX (and never offered as one).
-    const categoryRuling = { request_ga4_proxy: "ga4_proxy", request_meta_unsupported: "meta_never_list", request_meta_deletion: "no_deletion" } as const
-    const ruling = RULINGS.find(candidate => candidate.id === categoryRuling[item.category as keyof typeof categoryRuling])
+    // An explicit out-of-scope request is never offered as a worker FIX.
+    const ruling = rulingForCategory(item.category)
     if (ruling) {
       if (item.severity === "blocker") return { item, action: "ASK", askReason: "ruling_violation", ruling: ruling.id, reason: "A blocker remains open for review; the wizard does not automatically dismiss it or perform the requested out-of-scope action." }
       if (declinedBefore) {
