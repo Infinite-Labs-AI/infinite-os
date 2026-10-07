@@ -63,6 +63,7 @@ function setup(options: {
   checks?: Parameters<typeof fakeChecks>[1]
   state?: Partial<WizardRunState>
   files?: Record<string, string>
+  framework?: string
   fsFiles?: Record<string, string>
   defaultBranch?: string | null
   latestProduction?: Parameters<typeof fakeHost>[2]
@@ -79,7 +80,7 @@ function setup(options: {
   const fs = memoryFs(log, { "/repo/.env": SITE[".env"], ...(options.fsFiles ?? {}) })
   const { ctx, events } = context(state, log, options.ctx ?? {})
   const registry = spyRegistry(log, createJobRegistry({ briefFacts: () => null }))
-  const wizardDeps = deps({ bridge: bridge.client, git: git.git, host: fakeHost(log, options.defaultBranch === undefined ? "main" : options.defaultBranch, options.latestProduction ?? null, options.viewerPermission ?? "WRITE", options.allowForking ?? true), checks: checks.checks, installer: fakeInstaller(log), registry, fs: fs.fs })
+  const wizardDeps = deps({ bridge: bridge.client, git: git.git, host: fakeHost(log, options.defaultBranch === undefined ? "main" : options.defaultBranch, options.latestProduction ?? null, options.viewerPermission ?? "WRITE", options.allowForking ?? true), checks: checks.checks, installer: fakeInstaller(log, options.framework ? { framework: options.framework } : {}), registry, fs: fs.fs })
   if (options.clockStepMs) {
     let now = Date.parse("2026-10-02T09:05:00.000Z")
     wizardDeps.clock = { now: () => new Date((now += options.clockStepMs!)), sleep: async () => {} }
@@ -770,4 +771,12 @@ describe("step before: the hand-off", () => {
   it("the dry fixture is the production load (sanity)", () => {
     expect(fixtureDryLive().loads[0]!.label).toBe("home")
   })
+})
+
+it("stops an unsupported repository before publishing facts or seeding a plan", async () => {
+  const s = setup({ framework: "unsupported" })
+  expect(await s.run()).toMatchObject({ kind: "failed", message: expect.stringContaining("Unsupported repository shape") })
+  expect(s.log.some(line => line.startsWith("registry.seedCandidates"))).toBe(false)
+  expect(s.fs.store.has(BEFORE_FACTS_PATH_ABS)).toBe(false)
+  expect(s.fs.store.has("/repo/.gitignore")).toBe(false)
 })

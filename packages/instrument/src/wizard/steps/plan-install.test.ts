@@ -1,6 +1,6 @@
 // Steps `plan` and `install` (lane O7), run against fakes (bridge, registry, agents) and a real
 // fixture site on disk. No network, no agent, no cloud.
-import { existsSync } from "node:fs"
+import { existsSync, rmSync } from "node:fs"
 import { join } from "node:path"
 
 import { afterEach, describe, expect, it } from "vitest"
@@ -34,7 +34,7 @@ import type { ChecklistItem } from "../contracts/jobs.js"
 import type { ClaimPublic, RunPatch, SiteClaimBody, SiteClaimResponse, SiteSourceBody } from "../contracts/bridge.js"
 import type { WizardDeps } from "../contracts/deps.js"
 
-import { GITIGNORE_FENCE_BLOCK } from "../../harness/outputs.js"
+import { ensureGitignoreFence, GITIGNORE_FENCE_BLOCK } from "../../harness/outputs.js"
 import { reverseEditRecord, sha256Tagged } from "../../install/edits.js"
 import { GITIGNORE_FENCE_LINE_ID, ownerLayoutJobs, siteSourceHosts, step as installStep } from "./install.js"
 import { step as planStep } from "./plan.js"
@@ -801,4 +801,18 @@ it("excluding the only installed provider leaves no helper-dependent jobs, rewri
   expect(read(h.ctx.root, "app/layout.tsx")).toBe(layout)
   expect(h.ctx.stateValue().jobs).toEqual([])
   expect(h.ctx.events).toContainEqual({ type: "step.sub", fields: { step: "plan", tone: "result", text: "You said no to: install_provider:infinite" } })
+})
+
+it("restores the gitignore fence when resuming an unsupported install", async () => {
+  const original = "node_modules/"
+  const h = await setup({ files: { "index.html": STATIC_HTML, ".gitignore": original }, consentFlag: "not_required", answers: [{ approved: [], declined: [], edits: {} }] })
+  expect(await planStep.run(h.ctx, h.deps)).toMatchObject({ kind: "ok" })
+  rmSync(join(h.ctx.root, "index.html"))
+  ensureGitignoreFence(h.ctx.root)
+  Object.assign(h.deps.git, { statusEntries() {}, unstage() {}, stagedDiff() {}, showFile: async () => original })
+  const outcome = await installStep.run(h.ctx, h.deps)
+  expect(outcome).toMatchObject({ kind: "failed", message: expect.stringContaining("Unsupported repository shape") })
+  expect(read(h.ctx.root, ".gitignore")).toBe(original)
+  expect(h.siteSourceCalls).toHaveLength(0)
+  expect(readInstallManifest(h.ctx.root)).toBeNull()
 })

@@ -28,6 +28,7 @@ import { gradeContextFrom } from "../../checks/grade-context.js"
 import { BEFORE_FACTS_SCHEMA, writeBeforeFactsFile, type BeforeFactsFile } from "../handoff/before-facts.js"
 import { createHash } from "node:crypto"
 import { join } from "node:path"
+import { isSupportedFramework } from "../../frameworks/index.js"
 import { prepareLocalValidation } from "../local-validation.js"
 
 import { scanForJobs, jobScanFrom, type JobScan } from "../../jobs/detectors/index.js"
@@ -511,6 +512,9 @@ export function createBeforeStep(options: BeforeStepOptions = {}): WizardStep<"b
         if ("kind" in local) return local
         const { baselineBuild, localValidation } = local
         const scan = await deps.installer.scan({ root: ctx.root, appRoot: ctx.appRoot, hosting })
+        if (!isSupportedFramework(scan.framework)) {
+          return { kind: "failed", code: "INF_WIZ_APPLY_ROLLED_BACK", message: "Unsupported repository shape for instrumentation. No install or plan was started. Choose a supported website root with --app-root.", next: "halt" }
+        }
         sub(`Scanning ${scan.fileCount} files…`, "pending")
         if (scan.truncated) sub(`! The scan stopped at ${scan.fileCount} files; some code was not read`, "warn")
         const census = await deps.checks.census(ctx.root, scan.appRoot)

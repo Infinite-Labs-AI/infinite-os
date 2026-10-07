@@ -20,6 +20,8 @@ import { bridgeFailureLine, bridgeFailureOutcome, bridgeFailureState, hardStopOu
 import { makeEditRecord } from "../../install/edits.js"
 import { isProofBody, PROOF_FILE_PLAN_LINE_ID, proofFileTarget } from "../../install/proof-file.js"
 import { isPreviewShapedHost, resolveProductionHost } from "../site-host.js"
+import { isSupportedFramework } from "../../frameworks/index.js"
+import { restoreUninstalledFence } from "../uninstalled-fence.js"
 import { GITIGNORE_FENCE_START } from "../../harness/outputs.js"
 import { wizardGitExtras } from "../../git/index.js"
 import type { InstallerApplyResult } from "../contracts/jobs.js"
@@ -203,6 +205,10 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     return { kind: "failed", code: "INF_WIZ_BRIDGE_PROTOCOL", message: `The Infinite app does not offer ${inputs.missingCapability}; update the app.`, next: "halt" }
   }
   const scan = await deps.installer.scan({ root: ctx.root, ...(ctx.appRoot !== "." ? { appRoot: ctx.appRoot } : {}), hosting: inputs.hosting })
+  if (!isSupportedFramework(scan.framework)) {
+    const restored = await restoreUninstalledFence(ctx.root, deps)
+    return { kind: "failed", code: "INF_WIZ_APPLY_ROLLED_BACK", message: `Unsupported repository shape for instrumentation. No install was started.${restored ? " The wizard's gitignore change was restored." : " The gitignore file contains other changes; it was left untouched."}`, next: "halt" }
+  }
   const candidates = await planCandidates(ctx, deps)
   let keys = keysOnly(inputs.keys)
 
