@@ -143,6 +143,8 @@ export function runExtras(result: Omit<AgentRunResult, "session">, items: readon
 }
 
 export interface AgentRunnerOptions {
+  /** Repo-relative application directory used for policy page routing. */
+  appRoot?: string
   /** The repo root (absolute). */
   root: string
   /** The user's home (absolute): scratch, snapshots and the sensitive-path list come from it. */
@@ -326,7 +328,7 @@ export class AgentRunnerImpl implements AgentRunner {
     this.activeJob = input.items.length === 1 ? input.items[0]!.id : null
     this.pendingEdits.clear()
     this.codexEditOwners.clear()
-    let fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir(), runId, turn, items: input.items })
+    let fence = await Fence.begin({ root: this.options.root, appRoot: this.options.appRoot, snapshotDir: turnDir(), runId, turn, items: input.items })
     this.activeFence = fence
     let modelFallback = false
     try {
@@ -336,7 +338,7 @@ export class AgentRunnerImpl implements AgentRunner {
         modelFallback = true
         input.onNarrate({ agent: kind, role: "worker", text: `${this.models()[kind].label} isn't on your plan: using your default model` })
         if (!fence.isSettled) await fence.abort()
-        fence = await Fence.begin({ root: this.options.root, snapshotDir: turnDir("-retry"), runId, turn: `${turn}-retry`, items: input.items })
+        fence = await Fence.begin({ root: this.options.root, appRoot: this.options.appRoot, snapshotDir: turnDir("-retry"), runId, turn: `${turn}-retry`, items: input.items })
         this.activeFence = fence
         this.pendingEdits.clear()
         this.codexEditOwners.clear()

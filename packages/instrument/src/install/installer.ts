@@ -8,6 +8,7 @@
 import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { recordGeneratedApi } from "../jobs/generated-api.js"
+import { loadRepoSnapshot } from "../jobs/repo-files.js"
 import { previewOwnerWiring, type OwnerWiringPreview } from "../frameworks/owner-wiring-preview.js"
 import { planManagedCapture, applyManagedCapture, type ManagedCapturePlan } from "./managed-capture.js"
 import { join } from "node:path"
@@ -351,7 +352,7 @@ export class WizardInstaller implements Installer {
     }
     const facts: PlanScanFacts & { ownerWiring?: OwnerWiringPreview; managedCapture?: ManagedCapturePlan } = {
       managedCapture: wizardScan.managedCapture,
-      sources: Object.fromEntries(scanSourceFiles(join(wizardScan.root, wizardScan.appRoot), { includePublic: wizardScan.framework === "static-html" }).files.map(file => [normalizeAppRelativePath(wizardScan.appRoot, file), readFileSync(join(wizardScan.root, wizardScan.appRoot, file), "utf8")])),
+      sources: Object.fromEntries([...loadRepoSnapshot(wizardScan.root, wizardScan.appRoot).files, ...scanSourceFiles(join(wizardScan.root, wizardScan.appRoot), { includePublic: wizardScan.framework === "static-html" }).files.map(file => [normalizeAppRelativePath(wizardScan.appRoot, file), readFileSync(join(wizardScan.root, wizardScan.appRoot, file), "utf8")] as const)]),
       framework: wizardScan.framework,
       managedProviders: [...managed],
       adopted: wizardScan.detected

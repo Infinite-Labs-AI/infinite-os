@@ -588,7 +588,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       trigger: { finding: `The installer adds ${capture.module} and wires it before the pixel from ${capture.entrypoints.join(", ")}. The pixel's own file is unchanged; capture reads the existing consent gate.`, evidence: capture.editEntrypoints.map(file => ({ file, line: 1 })) } }
   }
   const sensitiveNeeded = (file: string | undefined) => sensitivePosthogOptions(file ? scan.sources?.[file] : undefined, scan.sensitivePaths) !== null
-  let candidates = input.candidates.filter(item => item.id !== "posthog_improve:sensitive_pages" || sensitiveNeeded(item.allow.files[0])).filter((item) => !withheld.includes(item.id)).map(captureScope).map(item => sources ? scopeOwnerJob(item, sources) : item)
+  let candidates = input.candidates.filter(item => item.id !== "posthog_improve:sensitive_pages" || sensitiveNeeded(item.allow.files[0])).filter((item) => !withheld.includes(item.id)).map(captureScope).map(item => sources ? scopeOwnerJob(item, sources, scan.appRoot) : item)
 
   // ---- the four decisions ----
   // R2-6 (live run 2): a decision is asked only when something it governs can be installed or recorded this run.
@@ -911,8 +911,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
 
   if (sources) {
-    candidates = candidates.map(item => scopeOwnerJob(item, sources))
-    seeds = seeds.map(item => scopeOwnerJob(item, sources))
+    candidates = candidates.map(item => scopeOwnerJob(item, sources, scan.appRoot))
+    seeds = seeds.map(item => scopeOwnerJob(item, sources, scan.appRoot))
   }
   {
     // Capture planning and the registry may already have scoped items without scan source text.

@@ -4,11 +4,11 @@ import { leaveForOwner } from "./state-machine.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 
 /** The same deterministic scope decision for detector candidates, plan seeds and runtime backstops. */
-export function scopeOwnerJob(item: ChecklistItem, sources: ReadonlyMap<string, string>): ChecklistItem {
+export function scopeOwnerJob(item: ChecklistItem, sources: ReadonlyMap<string, string>, appRoot = "."): ChecklistItem {
   if (item.owner === "code" && item.state === "left_for_you" && item.ownerBoundary) return item
   if (item.ownerBoundary?.kind === "restored_unit" || item.jobId === "privacy_paragraph") return item
   if (item.state === "blocked" && item.allow.files.length === 0) return item
-  const policy = item.allow.files.find(file => isPolicyPath(file))
+  const policy = item.allow.files.find(file => isPolicyPath(file, appRoot, sources))
   if (policy) return leaveForOwner(item, `Not changed by us: ${policy} is a policy page, which is yours.`, { kind: "policy_page", file: policy, line: 1 }).item
   const place = frozenEditPlace(item, sources)
   if (!place) return item

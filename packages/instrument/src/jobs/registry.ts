@@ -663,7 +663,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   const items = out.map(input => {
     const item = makeItem(input, framework)
     if (item.state === "blocked" && item.allow.files.length === 0) return item
-    return scopeOwnerJob(item, scan.snapshot.files)
+    return scopeOwnerJob(item, scan.snapshot.files, scan.snapshot.appRoot)
   })
   const unique = new Map<string, ChecklistItem>()
   for (const item of items) if (!unique.has(item.id)) unique.set(item.id, item)

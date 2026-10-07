@@ -342,6 +342,7 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
 
   const agents = new AgentRunnerImpl({
     root,
+    appRoot: input.appRoot,
     home,
     env,
     isTTY: !options.json && !options.nested,
