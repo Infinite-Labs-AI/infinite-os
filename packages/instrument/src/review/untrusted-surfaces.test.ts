@@ -169,3 +169,18 @@ it("quotes every owner-report note line after redaction without rewriting the sn
   expect(output).toContain("> ## Forged success")
   expect(output).toContain(snippet)
 })
+
+it("does not restore an unredacted blocked claim after the review worker returns", async () => {
+  const { runFixRound, job16Item } = await import("./fix.js")
+  const secret = "OpaqueFixtureEnvironmentValue0123456789"
+  const scanner = createScanner({ literals: [{ value: secret, kind: "env_value" }], allowedIds: [] })
+  const finding = { source: "reviewer", threadId: null, findingId: "F1", item: "R1", severity: "should", path: "src/example.ts", line: 1, body: "Fix the analytics call", suggestedFix: null } as never
+  const job = job16Item({ item: finding, action: "FIX", reason: "in scope" }, 0)
+  const claim = { jobId: job.id, status: "blocked", note: "Blocked by " + secret, at: "2026-10-07T00:00:00Z" } as const
+  const result = await runFixRound({ root: "/fixture", emit: { emit() {} } } as never, {
+    fs: { readText: async () => null }, registry: { brief: () => "Fixture" }, clock: { now: () => new Date("2026-10-07T00:00:00Z") },
+    agents: { runJobs: async (input: { onClaim: (claim: unknown) => void }) => { input.onClaim(claim); return { outcome: "completed", claims: [claim], questions: [], edits: [], reverted: [], turnsUsed: 1, permissionDenials: 0, session: null } } }
+  } as never, { step: "review", worker: "codex", items: [job], scanner })
+  expect(result.items[0]?.claim?.note).not.toContain(secret)
+  expect(result.items[0]?.claim?.note).toContain("redacted:")
+})

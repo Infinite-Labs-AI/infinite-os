@@ -189,7 +189,7 @@ export async function runFixRound(
     const affected = known.has(item.id) || (claimed && unknown.some(path => firstMatchingGlob(path, [...item.allow.files, ...item.allow.create]) !== null))
     if (!affected) {
       const claim = [...run.claims].reverse().find(claim => claim.jobId === item.id) ?? item.claim
-      return claim?.status === "blocked" ? { ...item, state: "blocked" as const, blockedReason: "agent_blocked" as const, claim: { status: claim.status, note: claim.note, at: claim.at } } : item
+      return claim?.status === "blocked" ? { ...item, state: "blocked" as const, blockedReason: "agent_blocked" as const, claim: { status: claim.status, note: clean(claim.note, 500), at: claim.at } } : item
     }
     const transition = leaveForOwner(item, "Put back: an edit reached code that handles consent.", { kind: "restored_unit" })
     ctx.emit.emit("job.state", { itemId: item.id, state: transition.item.state, by: "wizard", note: transition.note })
