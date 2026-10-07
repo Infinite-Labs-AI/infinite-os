@@ -301,7 +301,9 @@ describe("the offline end-to-end run (§4.3)", () => {
       const result = testResultFor(request)
       if (result && request.mode === "real_visit") {
         // Unlike the static recording used below, this measurement occurs after this subprocess's merge.
-        result.startedAt = new Date().toISOString()
+        const clockFile = w.env.E2E_CLOCK_FILE!
+        const offset = existsSync(clockFile) ? (JSON.parse(readFileSync(clockFile, "utf8")) as { offset: number }).offset : 0
+        result.startedAt = new Date(Date.now() + offset).toISOString()
         result.finishedAt = result.startedAt
       }
       return result
