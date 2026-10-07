@@ -54,6 +54,7 @@ function githubHost(states: Array<PrSummary["state"]>): GitHostAdapter & { reads
   const host = {
     kind: "github" as const,
     reads: 0,
+    gh: { json: async (args: string[]) => args[1]?.includes("/check-runs") ? { check_runs: [] } : args[1]?.includes("/status?") ? { statuses: [] } : [] },
     auth: async () => ({ ok: true, login: "acme-dev" }),
     readThreadDetails: async () => [],
     readPr: async () => {
@@ -157,4 +158,36 @@ describe("§3x.6 (W22) run 3 at merge-ready: the card says incomplete, and the i
     const payload = ctx.asks.find((ask) => ask.kind === "merge-ready")!.payload as { incomplete?: string }
     expect(payload.incomplete).toBeUndefined()
   })
+})
+
+describe("fresh merge-card checks", () => {
+  it("does not invite a merge when a newly read check is failing", async () => {
+    const { ctx, deps, host } = setup(["OPEN"], async () => "later")
+    ;(host as unknown as { gh: { json: (args: string[]) => Promise<unknown> } }).gh.json = async args => args[1]!.includes("/check-runs") ? { check_runs: [{ name: "lint", head_sha: args[1]!.includes("a".repeat(40)) ? "a".repeat(40) : "b".repeat(40), status: "completed", conclusion: args[1]!.includes("a".repeat(40)) ? "success" : "failure" }] } : args[1]!.includes("/status?") ? { statuses: [] } : []
+    expect(await step.run(ctx, deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("lint (failure)") })
+    expect(ctx.asks).toEqual([])
+  })
+  it("shows the freshly read successful state on the merge card", async () => {
+    const { ctx, deps, host } = setup(["OPEN"], async () => "later")
+    ;(host as unknown as { gh: { json: (args: string[]) => Promise<unknown> } }).gh.json = async args => args[1]!.includes("/check-runs") ? { check_runs: [{ name: "lint", head_sha: args[1]!.includes("a".repeat(40)) ? "a".repeat(40) : "b".repeat(40), status: "completed", conclusion: "success" }] } : args[1]!.includes("/status?") ? { statuses: [] } : []
+    await step.run(ctx, deps)
+    expect((ctx.asks[0]!.payload as { summary: string }).summary).toContain("lint: success")
+  })
+})
+
+it("keeps polling a resumed merge step inside the saved check window", async () => {
+  const { ctx, deps, host, clock } = setup(["OPEN"], async () => "later")
+  ctx.state.update(state => { state.lastPush = { sha: "b".repeat(40), at: new Date(clock.now().getTime() - 300_000).toISOString() } })
+  let headReads = 0
+  ;(host as unknown as { gh: { json: (args: string[]) => Promise<unknown> } }).gh.json = async args => {
+    if (args[1]!.includes("/check-runs")) {
+      const base = args[1]!.includes("a".repeat(40)); const pending = !base && ++headReads === 1
+      return { check_runs: [{ name: "lint", head_sha: base ? "a".repeat(40) : "b".repeat(40), status: pending ? "in_progress" : "completed", conclusion: pending ? null : "success" }] }
+    }
+    return args[1]!.includes("/status?") ? { statuses: [] } : []
+  }
+  await step.run(ctx, deps)
+  expect(headReads).toBe(2)
+  expect((ctx.asks[0]!.payload as { summary: string }).summary).toContain("lint: success")
+  expect(clock.slept[0]).toBe(30_000)
 })

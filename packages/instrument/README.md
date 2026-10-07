@@ -107,6 +107,8 @@ steps and resumes where it stopped:
 12. **Prove** — after the deploy, it checks the live site again with this run's own test events.
 13. **Done** — the before/after report, in your terminal, the pull request and Infinite.
 
+Hosting access blocks are “preview not measured”: a hosting team member must authorise the GitHub author or redeploy. Checks already failing on the base are reported as already failing before the pull request. Neither holds readiness; new failures, cancelled checks, unreadable checks after three attempts ten seconds apart, and checks still pending at the ten-minute window do. The merge card reads checks again before inviting a merge.
+
 A check that first appears later than two minutes after the push, or only once the pull request is no longer a draft, is not seen by the wizard.
 
 On GitHub, the wizard checks push access before the code work starts. If you cannot push and the

@@ -34,7 +34,7 @@ import { commentTrust, hasFinalMarker, hasReplyMarker, parseReviewMarker, stripM
 import { AGENT_LABEL, buildFinalComment, buildReply, buildReviewPost, excerpt, FIX_ROUND_MINUTES, notFixedReply, redactIdsNotInDiff, safeText, type FixReplyState, type NotFixedOutcome } from "../../review/post.js"
 import { applyRehearsalToJobs, recordRehearsalCells, rehearse } from "../../review/rehearse.js"
 import { mergeRequirementLine } from "../../github/rules.js"
-import { checksSummary, blockedPreview, commitChecks, withDeploymentStates, type PrCheck } from "../../github/checks.js"
+import { checksSummary, readinessChecks, retryCheckRead, commitChecks, withDeploymentStates, type PrCheck } from "../../github/checks.js"
 import { DETERMINISTIC_CHECKS_BY_ITEM, fileRoleOf, isRepoRelativePath, leftByOwnerReason, pageHelperCalls, triage, triageKey, type FileRole, type PageHelperCall, type TriageDecision, type TriageItem } from "../../review/triage.js"
 import { escapeRegExp } from "../../text-escape.js"
 import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
@@ -716,11 +716,18 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
   if (base === null) note("Base checks could not be read; this decision uses the checks reported on the PR head.")
   for (;;) {
     let checks: PrCheck[]
-    try { checks = await withDeploymentStates(github.gh, checkedHead, await commitChecks(github.gh, checkedHead)) }
+    try { checks = await retryCheckRead(async () => {
+      const found = await withDeploymentStates(github.gh, checkedHead, await commitChecks(github.gh, checkedHead))
+      const unknown = found.filter(check => !["pass", "fail", "cancel", "pending", "skipping"].includes(check.bucket))
+      if (unknown.length) throw new Error(`PR check states could not be read: ${unknown.map(check => `${check.name} (${check.state})`).join(", ")}`)
+      return found
+    }, ms => deps.clock.sleep(ms, ctx.signal)) }
     catch (error) { return result("undetermined", `GitHub head check runs, commit statuses or hosting deployments could not be read: ${error instanceof Error ? error.message : String(error)}`) }
+    const classified = readinessChecks(checks, base ?? [])
+    classified.notes.forEach(note)
+    checks = classified.checks
     const failed = checks.filter(check => check.bucket === "fail" || check.bucket === "cancel")
     if (failed.length > 0) {
-      for (const check of failed.filter(blockedPreview)) note(`${check.name}: deployment blocked. A hosting team member can authorise this GitHub author or redeploy; the pull request stays draft.`)
       if (repair && failed.every(check => ["failure", "error"].includes(check.state.toLowerCase())) && await repairCi(session, failed, base)) return requiredChecksResult(session, runId, false)
       return result("problem", `Failed PR checks: ${failed.map(check => `${check.name} (${check.state})`).join(", ")}`)
     }

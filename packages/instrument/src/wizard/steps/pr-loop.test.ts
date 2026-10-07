@@ -753,17 +753,17 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     const w = await opened({ clock, reviews: [review([])], gh: { headCheckRuns: [{ id: 1, name: "site validation", status: ["queued", "in_progress"].includes(state) ? state : "completed", conclusion: ["queued", "in_progress"].includes(state) ? null : state }] } })
     expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("site validation") })
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
-    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(["queued", "in_progress"].includes(state) ? 600_000 : 120_000)
+    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(["queued", "in_progress"].includes(state) ? 600_000 : state === "unreadable" ? 140_000 : 120_000)
     const progress = w.ctx.events.filter(event => event.type === "step.status").map(event => JSON.stringify(event.fields)).join("\n")
     expect(progress).toContain("2:00 remaining")
     expect(progress).toContain("0:30 remaining")
     if (["queued", "in_progress"].includes(state)) expect(progress).toContain("site validation")
   })
 
-  it("keeps an authorization-blocked deployment draft with its actual hosting reason", async () => {
+  it("allows an authorization-blocked deployment with its actual hosting reason", async () => {
     const w = await opened({ reviews: [review([])], gh: { deployments: [{ id: 7, sha: "*", environment: "Preview", creator: "vercel[bot]", statuses: [{ state: "failure", description: "Deployment was blocked" }] }], checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE" }] } } })
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("Vercel") })
-    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
     expect(eventText(w.ctx)).toContain("hosting team member")
   })
 
@@ -787,6 +787,16 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(clock.slept).toEqual([30_000])
     expect(w.gh.traffic()).not.toContain("/check-suites")
     expect(w.gh.traffic()).not.toContain("/actions/runs?")
+  })
+
+  it("resumes pending checks inside the saved window and polls until success", async () => {
+    const clock = fakeClock()
+    const w = await opened({ clock, reviews: [review([])], gh: { checks: { "42": [{ name: "test", bucket: "pending", state: "PENDING" }] } } })
+    w.ctx.state.update(state => { state.lastPush = { sha: state.git!.headSha!, at: new Date(clock.now().getTime() - 300_000).toISOString() } })
+    const sleep = clock.sleep.bind(clock)
+    clock.sleep = async (ms, signal) => { await sleep(ms, signal); w.gh.update(state => { state.checks = { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } }) }
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(clock.slept).toEqual([30_000])
   })
 
   it("catches a non-Actions commit status that first registers at ninety seconds", async () => {
@@ -813,15 +823,28 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.gh.traffic()).toContain("advisory: neutral, not measured")
   })
 
+  it("recovers a transient unreadable GitHub inventory before parking", async () => {
+    const clock = fakeClock()
+    const w = await opened({ clock, reviews: [review([])], gh: { unreadableChecks: true } })
+    const sleep = clock.sleep.bind(clock)
+    clock.sleep = async (ms, signal) => {
+      await sleep(ms, signal)
+      if (ms === 10_000) w.gh.update(state => { state.unreadableChecks = false })
+    }
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(clock.slept).toContain(10_000)
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
+  })
+
   it("keeps unreadable actual check inventories draft after registration", async () => {
     const clock = fakeClock()
     const w = await opened({ clock, reviews: [review([])], gh: { unreadableChecks: true } })
     expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("could not be read") })
-    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(120_000)
+    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(140_000)
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
     const slept = clock.slept.length
     expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked" })
-    expect(clock.slept).toHaveLength(slept)
+    expect(clock.slept).toHaveLength(slept + 2)
   })
 
   it("never marks a draft PR ready when its checks are red and no review fix was committed", async () => {
@@ -839,14 +862,14 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
   })
 
-  it("keeps a base-red check and an authorization-blocked preview blocking ready", async () => {
+  it("allows a base-red check and an authorization-blocked preview", async () => {
     const w = await opened({ reviews: [review([])], gh: {
       baseChecks: [{ name: "test", conclusion: "failure" }],
       deployments: [],
       checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE" }, { name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] }
     } })
-    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("test") })
-    expect(w.gh.read().prs[0]!.isDraft).toBe(true)
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
   })
 
   it("a resumed round with no fix SHA and a newer HEAD cannot ready a base-green failing PR", async () => {
