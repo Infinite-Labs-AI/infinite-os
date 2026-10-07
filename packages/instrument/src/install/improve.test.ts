@@ -269,3 +269,9 @@ describe("applyImproveEdit: the deterministic code edits (approved lines only)",
     expect(withSensitivePaths({}, ["/account"])).toEqual({})
   })
 })
+
+
+it("offers no sensitive-page edit when adopted PostHog has replay and autocapture off already", () => {
+  const html = `<html><head><script>posthog.init('${IDS.posthog}', {autocapture: false, disable_session_recording: true});</script></head><body></body></html>`
+  expect(linesFor({ "index.html": html }, "static-html", fakeKeys(), ["/account"]).lines.some(line => line.kind === "sensitive_pages")).toBe(false)
+})

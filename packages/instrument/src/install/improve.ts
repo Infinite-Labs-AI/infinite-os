@@ -16,6 +16,7 @@
 //
 // A REDUCTION (one init, one config per id, removing a hand-written gtag) is never an improve line:
 // it is only `remove_duplicate` → job 6 (R2-10).
+import { sensitivePosthogOptions } from "./posthog-sensitive.js"
 import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
@@ -49,6 +50,7 @@ export const CAPTURE_JSX_MARKER = "{/* infinite-tag:improve capture_beside_adopt
 // ---------------------------------------------------------------------------------------------
 
 export interface AdoptedPosthogFact {
+  source?: string
   file: string
   line: number
   key: string | null
@@ -233,6 +235,7 @@ export function detectAdoptedFacts(appRootAbsolute: string, detected: readonly D
     const guarded = guardedBefore(contents, offset)
     if (entry.provider === "posthog") {
       facts.posthog.push({
+        source: contents,
         file: entry.file,
         line: entry.line,
         key: entry.key ?? null,
@@ -366,7 +369,7 @@ export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): 
         evidence
       })
     }
-    if (ctx.sensitivePaths.length > 0) {
+    if (sensitivePosthogOptions(posthog.source, ctx.sensitivePaths) !== null) {
       lines.push({
         id: lineId("sensitive_pages", "posthog", "replay_autocapture"),
         kind: "sensitive_pages",

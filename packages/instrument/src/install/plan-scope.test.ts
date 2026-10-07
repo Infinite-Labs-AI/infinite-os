@@ -54,7 +54,7 @@ it.each([[true, false, true, true], [false, false, true, true], [true, true, tru
     expect(capture.ownerBoundary?.wiring).toContain("infinite-meta-click-id")
     expect(capture.note).toContain("does not save")
     expect(plan.lines.find(line => line.kind === "capture_beside_adopted_pixel")?.requires).toBe("user_action")
-    expect(plan.lines.find(line => line.id === "owner_only:meta_improve:capture")?.text).toContain('import "../lib/infinite-meta-click-id.js"')
+    expect(plan.lines.filter(line => line.text.includes('import "../lib/infinite-meta-click-id.js"'))).toHaveLength(1)
   }
 })
 

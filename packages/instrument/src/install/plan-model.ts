@@ -1,3 +1,4 @@
+import { sensitivePosthogOptions } from "./posthog-sensitive.js"
 import type { ManagedCapturePlan } from "./managed-capture.js"
 import type { OwnerWiringPreview } from "../frameworks/owner-wiring-preview.js"
 import { scopeOwnerJob } from "../jobs/owner-scope.js"
@@ -585,7 +586,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       allow: { files: [...capture.editEntrypoints], create: [capture.module] },
       trigger: { finding: `The installer adds ${capture.module} and wires it before the pixel from ${capture.entrypoints.join(", ")}. The pixel's own file is unchanged; capture reads the existing consent gate.`, evidence: capture.editEntrypoints.map(file => ({ file, line: 1 })) } }
   }
-  let candidates = input.candidates.filter((item) => !withheld.includes(item.id)).map(captureScope).map(item => sources ? scopeOwnerJob(item, sources) : item)
+  const sensitiveNeeded = (file: string | undefined) => sensitivePosthogOptions(file ? scan.sources?.[file] : undefined, scan.sensitivePaths) !== null
+  let candidates = input.candidates.filter(item => item.id !== "posthog_improve:sensitive_pages" || sensitiveNeeded(item.allow.files[0])).filter((item) => !withheld.includes(item.id)).map(captureScope).map(item => sources ? scopeOwnerJob(item, sources) : item)
 
   // ---- the four decisions ----
   // R2-6 (live run 2): a decision is asked only when something it governs can be installed or recorded this run.
@@ -766,7 +768,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
 
   // ---- adopted providers: improve lines, linked to the candidates that need them ----
-  const improveLines = scan.improve.filter((entry) => entry.kind !== "preview_guard_adopted" || (guard.emit && !consentObstructed.has(entry.provider)))
+  const improveLines = scan.improve.filter(entry => entry.kind !== "sensitive_pages" || sensitiveNeeded(entry.evidence?.file)).filter((entry) => entry.kind !== "preview_guard_adopted" || (guard.emit && !consentObstructed.has(entry.provider)))
   /**
    * Lines a candidate links to, by EXACT identity (kind + provider + normalised target). There is no
    * "first line of the kind" fallback: a candidate that matches no line gets a line of its own, so
@@ -910,7 +912,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       if (!planLine.jobIds?.some(id => left.has(id))) continue
       const runnable = planLine.jobIds.filter(id => !left.has(id))
       if (runnable.length) planLine.jobIds = runnable
-      else { planLine.requires = "user_action"; planLine.editable = false; planLine.text = planLine.jobIds.map(id => left.get(id)?.note ?? "Left for the owner").join("\n"); planLine.jobIds = [] }
+      else { planLine.requires = "user_action"; planLine.editable = false; planLine.text = planLine.jobIds.map(id => left.get(id)?.note ?? "Left for the owner").join("\n"); planLine.jobIds = [...planLine.jobIds] }
     }
   }
   if (scan.managedCapture?.canWire) {
@@ -918,15 +920,17 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   }
   for (const item of [...candidates, ...seeds].filter(entry => entry.state === "left_for_you")) {
     if (item.id === "posthog_improve:sensitive_pages" && item.ownerBoundary) {
-      const matches = `${JSON.stringify(scan.sensitivePaths)}.some(function (path) { return location.pathname === path || location.pathname.indexOf(path + "/") === 0; })`
-      item.note = `${item.note ?? "Not changed by us."} Replay and autocapture keep their existing settings on the listed pages until you change the initialization yourself.`
-      item.ownerBoundary.wiring = `autocapture: !(${matches}),\ndisable_session_recording: (${matches}),`
-      lines.push(line({ id: `owner_options:${item.id}`, kind: "user_action", requires: "user_action", text: `${item.note}\nOwner-only options for the existing posthog.init at ${item.ownerBoundary.file}:${item.ownerBoundary.line}; merge them yourself without changing consent code:\n${item.ownerBoundary.wiring}` }))
+      const options = sensitivePosthogOptions(sources?.get(item.ownerBoundary.file ?? ""), scan.sensitivePaths)
+      item.note = `${item.note ?? "Not changed by us."} Keep existing exclusions; this addition only turns collection off on the listed pages.`
+      if (options) item.ownerBoundary.wiring = `// Add last inside the existing posthog.init options object.\n${options}`
     }
     const handoff = item.jobId === "preview_guard" && item.ownerBoundary && guard.emit
       ? ownerGuardHandoff(item.note ?? item.trigger.finding, item.ownerBoundary, buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny }), sources?.get(item.ownerBoundary.file ?? "")) : null
     if (handoff && item.ownerBoundary) item.ownerBoundary.guard = handoff.guard
-    lines.push(line({ id: `owner_only:${item.id}`, kind: "user_action", text: handoff?.text ?? [item.note ?? item.trigger.finding, item.ownerBoundary?.wiring ? `Owner-only wiring:\n${item.ownerBoundary.wiring}` : null].filter(Boolean).join("\n\n"), requires: "user_action" }))
+    const text = handoff?.text ?? [item.note ?? item.trigger.finding, item.ownerBoundary?.wiring ? `Owner-only wiring:\n${item.ownerBoundary.wiring}` : null].filter(Boolean).join("\n\n")
+    const prior = lines.find(planLine => planLine.requires === "user_action" && planLine.id !== "user_action:owner_wiring" && (planLine.jobIds?.includes(item.id) || planLine.text === item.note))
+    if (prior) prior.text = text
+    else lines.push(line({ id: `owner_only:${item.id}`, kind: "user_action", text, requires: "user_action" }))
   }
 
   if (keys.ga4.status === "connected") lines.push(line({ id: "account_settings:ga4", kind: "account_settings", requires: "approval", text: "Allow Infinite to mark the selected, click-tested conversions as key events in your connected GA4 property." }))
