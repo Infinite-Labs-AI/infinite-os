@@ -4,6 +4,8 @@ import { join } from "node:path"
 import type { FrameworkAdapter } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
 import { ownerWiringRequirement } from "./owner-boundary.js"
+import { recordGeneratedApi } from "../jobs/generated-api.js"
+import { upsertAppSource, CLIENT_IMPORT_LINE as clientImportLine, CLIENT_TAG as clientTag } from "./entry-wiring.js"
 
 import {
   buildAnalyticsModuleSource,
@@ -31,8 +33,6 @@ const indexCandidates = ["pages/index.tsx", "pages/index.ts", "pages/index.jsx",
 const appFilePath = "pages/_app.tsx"
 const clientComponentPath = "lib/infinite-analytics-client.tsx"
 const analyticsModulePath = "lib/infinite-analytics.ts"
-const clientImportLine = 'import { InfiniteAnalyticsClient } from "../lib/infinite-analytics-client"'
-const clientTag = "<InfiniteAnalyticsClient />"
 const missingAppBlocker =
   "Next.js Pages Router apply requires pages/_app.* so the managed client component can be mounted safely."
 
@@ -157,6 +157,8 @@ export const nextPagesRouterAdapter: FrameworkAdapter = {
     const nextApp = upsertAppSource(currentApp)
     const nextClientComponent = buildClientComponentSource()
     const nextAnalyticsModule = buildAnalyticsModuleSource(context.plan)
+    recordGeneratedApi(context.root, normalizeAppRelativePath(context.appRoot, analyticsModulePath), nextAnalyticsModule)
+    recordGeneratedApi(context.root, normalizeAppRelativePath(context.appRoot, clientComponentPath), nextClientComponent)
 
     const changedFiles: string[] = []
     const configOwnership = {}
@@ -265,21 +267,5 @@ function removeAppWiring(source: string): string {
     /<>\n {6}<InfiniteAnalyticsClient \/>\n {6}(<Component\b[^>]*\/>)\n {4}<\/>/,
     (_match, component: string) => component
   )
-  return next
-}
-
-function upsertAppSource(source: string): string {
-  let next = source
-  if (!next.includes(clientImportLine)) {
-    next = `${clientImportLine}\n${next}`
-  }
-
-  if (!next.includes(clientTag)) {
-    next = next.replace(
-      /<Component\b[^>]*\/>/,
-      (match) => `<>\n      ${clientTag}\n      ${match}\n    </>`
-    )
-  }
-
   return next
 }

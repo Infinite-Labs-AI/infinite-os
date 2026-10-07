@@ -24,13 +24,13 @@ it.each(cases)("leaves $name byte-identical and returns owner-only manual wiring
   expect(verifyInstallation({ root })).toMatchObject({ buildOk: true, requiresManual: [{ path }] })
 })
 
-it("does not instrument a routed static policy page, while ordinary pages receive their tags", () => {
+it.each(["privacy/index.html", "terms-and-conditions.html", "tos.html", "cookies.html", "product-terms-of-use.html"])("leaves static policy %s untouched while ordinary pages receive their tags", policyPath => {
   const policy = "<html><head></head><body>Owner policy text.</body></html>\n"
-  const root = makeSite({ "index.html": "<html><head></head><body>Example</body></html>\n", "privacy/index.html": policy })
+  const root = makeSite({ "index.html": "<html><head></head><body>Example</body></html>\n", [policyPath]: policy })
   const plan = planInstallation({ root, inspect: inspectWorkspace(root), workspaceId: "ws_fixture", artifacts: { ga4: { measurementId: "G-FIXTURE" } } })
   const result = applyInstallation({ root, workspaceId: "ws_fixture", plan, allowDirty: true })
-  expect(read(root, "privacy/index.html")).toBe(policy)
+  expect(read(root, policyPath)).toBe(policy)
   expect(read(root, "index.html")).toContain("G-FIXTURE")
-  expect(result.requiresManual).toEqual([expect.objectContaining({ path: "privacy/index.html", ownerBoundary: expect.objectContaining({ kind: "policy_page" }) })])
-  expect(verifyInstallation({ root })).toMatchObject({ buildOk: true, requiresManual: [{ path: "privacy/index.html" }] })
+  expect(result.requiresManual).toEqual([expect.objectContaining({ path: policyPath, ownerBoundary: expect.objectContaining({ kind: "policy_page" }) })])
+  expect(verifyInstallation({ root })).toMatchObject({ buildOk: true, requiresManual: [{ path: policyPath }] })
 })

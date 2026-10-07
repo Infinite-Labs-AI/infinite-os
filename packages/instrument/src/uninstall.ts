@@ -15,6 +15,7 @@ import { reverseServerLane } from "./server-lane/install.js"
 import { reverseEditRecord } from "./install/edits.js"
 import { writeFileAtomic } from "./frameworks/shared.js"
 import type { InstallManifest, UninstallResult } from "./types.js"
+import { GENERATED_API_RECORD } from "./jobs/generated-api.js"
 
 export interface UninstallInstallationOptions {
   root: string
@@ -187,6 +188,8 @@ export function uninstallInstallation(options: UninstallInstallationOptions): Un
   const manifestPath = installManifestPath(options.root)
   if (!dryRun && !hasWiringLeftover) {
     rmSync(manifestPath)
+    rmSync(join(options.root, GENERATED_API_RECORD), { force: true })
+    removeDirIfEmpty(dirname(join(options.root, GENERATED_API_RECORD)))
     removeDirIfEmpty(dirname(manifestPath))
     // Also prune empty lib dirs left by adapter file removals
     const appRoot = manifest.appRoot === "." ? options.root : join(options.root, manifest.appRoot)

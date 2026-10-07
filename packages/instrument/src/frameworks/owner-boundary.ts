@@ -5,15 +5,15 @@ import type { ManualRequirement } from "../types.js"
 
 export function policyWiringRequirement(path: string, snippet: string, appRoot = "."): ManualRequirement | null {
   return isPolicyPath(path, appRoot) ? { path, snippet,
-    reason: `Not changed by us: ${path} is a privacy/terms policy page, which belongs to you. Analytics wiring here is left for you.`,
+    reason: `Not changed by us: ${path} is a policy page, which is yours. This page does not get the tag from this run.`,
     ownerBoundary: { kind: "policy_page", file: path, line: 1 } } : null
 }
 
-export function ownerWiringRequirement(path: string, before: string | null, after: string, snippet: string, appRoot = "."): ManualRequirement | null {
+export function ownerWiringRequirement(path: string, before: string | null, after: string, snippet: string, appRoot = ".", trustedGenerated: readonly string[] = []): ManualRequirement | null {
   if (before === after) return null
   const policy = policyWiringRequirement(path, snippet, appRoot)
   if (policy) return policy
-  const changed = restoreFrozenUnits(before ?? "", after).changes[0]
+  const changed = restoreFrozenUnits(before ?? "", after, { trustedGenerated }).changes[0]
   if (!changed) return null
   const unit = changed.before ?? changed.after!
   return { path, snippet,

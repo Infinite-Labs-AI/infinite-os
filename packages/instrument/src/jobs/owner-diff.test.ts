@@ -57,3 +57,13 @@ it("distinguishes an unreadable committed blob from an absent source file", asyn
     expect(measured.issues).toEqual([{ file: "tracking.ts", reason: "an existing source blob could not be read" }])
   } finally { fixture.cleanup() }
 })
+
+it.each(["liquid", "php", "ejs", "njk"])("measures consent changes in %s templates like the fence", async extension => {
+  const path = `view.${extension}`
+  const fixture = createGitFixture({ files: { [path]: "fbq('consent','revoke');\n" } })
+  try {
+    const baseSha = fixture.git(["rev-parse", "HEAD"]).trim()
+    fixture.write(path, "fbq('consent','grant');\n")
+    expect((await measureOwnerDiff({ root: fixture.root, baseSha })).state).toBe("changed")
+  } finally { fixture.cleanup() }
+})

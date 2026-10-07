@@ -12,7 +12,7 @@ it("does not confuse real newly emitted analytics modules with edits to the owne
     buildPostHogBootstrapSnippet("phc_FAKEtestProjectKeyNotReal000", "https://us.i.posthog.com"),
     buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "required" } })
   ]
-  for (const script of scripts) expect(restoreFrozenUnits("", script).changes, script.slice(0, 80)).toEqual([])
+  for (const script of scripts) expect(restoreFrozenUnits("", script, { trustedGenerated: [script] }).changes, script.slice(0, 80)).toEqual([])
 })
 
 it("allows the actual module-level capture beside a frozen bootstrap", () => {
@@ -61,4 +61,24 @@ it("declares repeated statement identities ambiguous when one reads a consent ma
   expect(sourceUnits(before).confident).toBe(false)
   expect(sourceUnits(before).units).toHaveLength(1)
   expect(restoreFrozenUnits(before, after).text).toBe(before)
+})
+
+it("never loses raw consent behind awkward inserted syntax before the call", () => {
+  const fragments = ["/*", "*/", "//", "`", "${", "</script>", "'", "/x/"]
+  const calls = ["fbq('consent','revoke');", "gtag('consent','update',{analytics_storage:'denied'});", "posthog?.opt_out_capturing();"]
+  const prefix = "export const label = 'fixture';\n"
+  for (const call of calls) for (const fragment of fragments) for (let at = 0; at <= prefix.length; at++) {
+    const source = prefix.slice(0, at) + fragment + prefix.slice(at) + call + "\n"
+    expect(sourceUnits(source).units.some(unit => unit.frozen), `${fragment} at ${at}: ${call}`).toBe(true)
+  }
+})
+
+it("authorizes only exact emitted bytes, with no allowance to a worker or to another API assignment", () => {
+  const emitted = buildGa4BootstrapSnippet("G-FAKE00001")
+  expect(restoreFrozenUnits("", emitted).changes.length).toBeGreaterThan(0)
+  expect(restoreFrozenUnits("", emitted, { trustedGenerated: [emitted] }).changes).toEqual([])
+  const malicious = `${emitted}\nwindow.fbq = () => {};\n`
+  const result = restoreFrozenUnits("", malicious, { trustedGenerated: [emitted] })
+  expect(result.changes.length).toBeGreaterThan(0)
+  expect(result.text).not.toContain("window.fbq =")
 })

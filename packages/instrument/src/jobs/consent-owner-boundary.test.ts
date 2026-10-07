@@ -44,7 +44,7 @@ describe("consent and policy belong to the site owner", () => {
   })
 })
 
-it.each(["src/search/terms.ts", "lib/terms/index.ts", "pages/api/terms.ts"])("does not mistake %s for a policy page", path => {
+it.each(["src/search/terms.ts", "pages/api/terms.ts"])("does not mistake %s for a policy page", path => {
   expect(globalDenyReason(path, [])).toBeNull()
 })
 

@@ -1,9 +1,24 @@
 /** The owner's consent boundary is a byte freeze of top-level source units, not a control-flow model. */
 import { createHash } from "node:crypto"
+import { hunksOf, splitLines } from "../agents/line-diff.js"
 
 export const CONSENT_API_NAMES = ["gtag", "fbq", "posthog", "dataLayer", "__tcfapi", "__uspapi", "__gpp", "__cmp", "OneTrust", "Optanon", "Cookiebot", "CookieConsent", "Didomi", "UC_UI", "usercentrics", "klaro"] as const
 const API_NAMES = new Set<string>(CONSENT_API_NAMES)
+const API_WORD = `(?:${CONSENT_API_NAMES.join("|")}|Optanon[A-Za-z0-9_$]*|Didomi[A-Za-z0-9_$]*)`
+const API_TARGET = `(?:\\b${API_WORD}\\b|\\[\\s*['\"]${API_WORD}['\"]\\s*\\])`
+/** Syntactic writes/definitions/aliases only; this does not evaluate or model control flow. */
+const API_WRITE_PATTERNS = [
+  new RegExp(`${API_TARGET}\\s*(?:=(?!=|>)|[+*/%&|^-]=|&&=|\\|\\|=|\\?\\?=|\\+\\+|--)`, "g"),
+  new RegExp(`\\bdelete\\b[^;\\n]*${API_TARGET}`, "g"),
+  new RegExp(`\\b(?:const|let|var|function|class|interface|type|enum|namespace)\\s+(?:${API_WORD}\\b|[\\[{][^;=]*\\b${API_WORD}\\b)`, "g"),
+  new RegExp(`\\b(?:import|export)\\s*[^;\\n]*\\b${API_WORD}\\b[^;\\n]*(?:from\\b|})`, "g"),
+  new RegExp(`\\b(?:Object|Reflect)\\s*\\.\\s*(?:defineProperty|defineProperties|set)\\s*\\([^;]*?['\"]${API_WORD}['\"]`, "g"),
+  new RegExp(`(?:\\b${API_WORD}\\b|['\"]${API_WORD}['\"])\\s*:(?!:)`, "g"),
+  new RegExp(`=\\s*(?:(?:[\\w$]+|\\([^;\\n)]*\\))\\s*(?:\\?\\.)?\\.\\s*)*${API_TARGET}(?![\\w$]|\\s*(?:\\?\\.)?\\()`, "g"),
+  new RegExp(`=\\s*(?:(?:[\\w$]+|\\([^;\\n)]*\\))\\s*(?:\\?\\.)?\\.\\s*)*[\\w$]+\\s*\\[\\s*['\"]${API_WORD}['\"]\\s*\\]`, "g")
+]
 export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
+  /[([,]\s*['"]consent['"]\s*(?:[,\])]|$)/,
   /(?:\b(?:gtag|fbq)\b|\[\s*['"`](?:gtag|fbq)['"`]\s*\])\s*(?:\?\.\s*)?\(\s*['"`]consent['"`]/,
   /(?:\b(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\b|\[\s*['"`](?:opt_in_capturing|opt_out_capturing)['"`]\s*\])\s*(?:\?\.\s*)?\(/,
   /\b(?:__tcfapi|__uspapi|__gpp|__cmp|OneTrust|Optanon\w*|Cookiebot|CookieConsent|Didomi\w*|UC_UI|usercentrics|klaro)\b/i,
@@ -132,7 +147,16 @@ function bindingInfo(tokens: Token[]): { key: string; names: string[]; apiBindin
 /** Split only at depth zero. Bracket bodies stay inseparable regardless of the constructs they hold. */
 export function sourceUnits(source: string): SourceUnits {
   const parsed = tokenize(source)
+  // The tokenizer is not authoritative about whether raw source contains owner consent. It may
+  // stop inside JSX prose, CSS URLs, or a malformed comment before reaching the protected text.
+  const rawConsent = CONSENT_CALL_PATTERNS.some(pattern => pattern.test(source))
   const ts = parsed.tokens
+  if (!parsed.confident || (ts.length === 0 && rawConsent)) {
+    const info = bindingInfo(ts)
+    return { confident: false, tail: "", units: source ? [{ start: 0, end: source.length, startLine: 1, endLine: source.split("\n").length,
+      text: source, prefix: "", ...info, key: "whole-file", hash: hash(source), ordinal: 0,
+      references: new Set(source.match(/\b[A-Za-z_$][\w$]*\b/g) ?? []), frozen: rawConsent || info.names.some(name => /consent/i.test(name)) }] : [] }
+  }
   const spans: Array<[number, number]> = []
   let from = 0
   const finish = (to: number) => { if (from <= to) spans.push([from, to]); from = to + 1 }
@@ -184,11 +208,17 @@ export function sourceUnits(source: string): SourceUnits {
     units[0]!.text = source; units[0]!.prefix = ""; units[0]!.hash = hash(source); previousEnd = source.length
   }
   markReferences(units)
+  if (rawConsent) {
+    // In a consent-bearing file, keep the API definitions/aliases beside the calls inseparable too.
+    // This is the same raw syntactic rule used for additions, with no alias or flow evaluation.
+    for (const unit of units) if (API_WRITE_PATTERNS.some(pattern => { pattern.lastIndex = 0; return pattern.test(unit.text) })) unit.frozen = true
+    markReferences(units)
+  }
   // Repeated statement/declaration identities cannot identify which occurrence moved or changed.
   // Declare the whole file frozen before seeding, rather than overwrite an editable neighbor.
   const counts = new Map<string, number>()
   for (const unit of units) counts.set(unit.key, (counts.get(unit.key) ?? 0) + 1)
-  if (units.some(unit => unit.frozen && (counts.get(unit.key) ?? 0) > 1) || ((counts.get("statement::") ?? 0) > 1 && units.some(unit => unit.frozen))) {
+  if ((rawConsent && !units.some(unit => unit.frozen)) || units.some(unit => unit.frozen && (counts.get(unit.key) ?? 0) > 1) || ((counts.get("statement::") ?? 0) > 1 && units.some(unit => unit.frozen))) {
     return { confident: false, tail: "", units: [{ ...units[0]!, start: 0, end: source.length, startLine: 1, endLine: source.split("\n").length, prefix: "", text: source, key: "whole-file", hash: hash(source), ordinal: 0, frozen: true, names: units.flatMap(unit => unit.names), references: new Set(units.flatMap(unit => [...unit.references])) }] }
   }
   return { units, tail: source.slice(previousEnd), confident }
@@ -214,9 +244,38 @@ function markReferences(units: SourceUnit[], initial: readonly string[] = []): s
 export interface FrozenUnitChange { before: SourceUnit | null; after: SourceUnit | null }
 export interface FrozenUnitRestore { text: string; changes: FrozenUnitChange[]; before: SourceUnits; after: SourceUnits }
 
+export interface FrozenUnitOptions {
+  /** Exact bytes produced by the trusted deterministic emitter. Never supplied to a worker fence. */
+  trustedGenerated?: readonly string[]
+}
+
+function freezeAddedApiWrites(before: string, after: string, units: SourceUnit[], trusted: readonly string[]): void {
+  const lines = splitLines(after)
+  const offsets = [0]
+  for (const line of lines) offsets.push(offsets.at(-1)! + line.length)
+  const added = hunksOf(splitLines(before), lines).filter(hunk => hunk.bEnd > hunk.bStart).map(hunk => [offsets[hunk.bStart]!, offsets[hunk.bEnd]!] as const)
+  const allowed = [...new Set(trusted)].filter(Boolean).flatMap(text => { const start = after.indexOf(text); return start < 0 ? [] : [[start, start + text.length] as const] })
+  for (const pattern of API_WRITE_PATTERNS) {
+    pattern.lastIndex = 0
+    for (const match of after.matchAll(pattern)) {
+      const start = match.index!, end = start + match[0].length
+      if (!added.some(([a, b]) => start < b && end > a) || allowed.some(([a, b]) => a <= start && end <= b)) continue
+      for (const unit of units) if (unit.start < end && unit.end > start) unit.frozen = true
+    }
+  }
+}
+
 /** Ordered alignment preserves editable neighbors. No semantic edit is ever exempt inside a unit. */
-export function restoreFrozenUnits(beforeText: string, afterText: string): FrozenUnitRestore {
+export function restoreFrozenUnits(beforeText: string, afterText: string, options: FrozenUnitOptions = {}): FrozenUnitRestore {
+  const beforeBom = beforeText.startsWith("\ufeff"), afterBom = afterText.startsWith("\ufeff")
+  if (beforeBom || afterBom) {
+    const restored = restoreFrozenUnits(beforeBom ? beforeText.slice(1) : beforeText, afterBom ? afterText.slice(1) : afterText, options)
+    const protectedFile = restored.before.units.some(unit => unit.frozen) || restored.after.units.some(unit => unit.frozen)
+    if (beforeBom !== afterBom && protectedFile) restored.changes.push({ before: restored.before.units[0] ?? null, after: restored.after.units[0] ?? null })
+    return { ...restored, text: ((restored.changes.length > 0 ? beforeBom : afterBom) ? "\ufeff" : "") + restored.text }
+  }
   let before = sourceUnits(beforeText); let after = sourceUnits(afterText)
+  freezeAddedApiWrites(beforeText, afterText, after.units, options.trustedGenerated ?? [])
   const names = markReferences(before.units)
   markReferences(after.units, names)
   const existingReferences = new Set(before.units.flatMap(unit => [...unit.references]))

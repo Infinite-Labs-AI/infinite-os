@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { git } from "../agents/git-exec.js"
 import { restoreFrozenUnits } from "./consent-units.js"
 import { isPolicyPath } from "./owner-boundary.js"
+import { generatedApiTexts } from "./generated-api.js"
 
 export interface OwnerBoundaryMeasurement {
   state: "checked" | "changed" | "not_checked"
@@ -12,8 +13,9 @@ export interface OwnerBoundaryMeasurement {
   headSha: string
   files: string[]
   issues: Array<{ file: string; reason: string }>
+  /** Exact reachable SHAs from the run's own commit record that were measured against their parents. */
+  wizardCommits?: string[]
 }
-const SOURCE = /\.(?:[cm]?[jt]sx?|vue|svelte|astro|html?|mdx?|json)$/i
 const metadata = (path: string) => path.startsWith(".infinite/") || /(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?)$/.test(path)
 
 export async function measureOwnerDiff(input: { root: string; baseSha: string; revision?: string; appRoot?: string }): Promise<OwnerBoundaryMeasurement> {
@@ -46,7 +48,6 @@ export async function measureOwnerDiff(input: { root: string; baseSha: string; r
     if (metadata(path)) continue
     if (path.startsWith("/") || path.split("/").includes("..")) { measurement.state = "not_checked"; fail(path, "invalid diff path"); continue }
     if (isPolicyPath(path, input.appRoot ?? ".")) { measurement.state = "changed"; fail(path, "a routed privacy/terms policy page is in the final diff"); continue }
-    if (!SOURCE.test(path)) continue
     measurement.files.push(path)
     const beforeBlob = await blob(input.baseSha, path)
     if (beforeBlob.error) { measurement.state = "not_checked"; fail(path, beforeBlob.error); continue }
@@ -65,12 +66,52 @@ export async function measureOwnerDiff(input: { root: string; baseSha: string; r
     if ([before, after].some(bytes => bytes && (bytes.includes(0) || !Buffer.from(bytes.toString("utf8"), "utf8").equals(bytes)))) {
       measurement.state = "not_checked"; fail(path, "the changed source could not be decoded"); continue
     }
-    const comparison = restoreFrozenUnits(before?.toString("utf8") ?? "", after?.toString("utf8") ?? "")
+    let trustedGenerated: string[]
+    try { trustedGenerated = generatedApiTexts(input.root, path) }
+    catch { measurement.state = "not_checked"; fail(path, "the trusted generated-code record could not be read"); continue }
+    const comparison = restoreFrozenUnits(before?.toString("utf8") ?? "", after?.toString("utf8") ?? "", { trustedGenerated })
     if (comparison.changes.length > 0) { measurement.state = "changed"; fail(path, "a consent-bearing top-level unit differs from the recorded base") }
   }
   return measurement
 }
 
 export function ownerBoundaryStop(measurement: OwnerBoundaryMeasurement): string {
-  return `Nothing pushed: consent/privacy final-diff check ${measurement.state === "changed" ? "found a change" : "could not finish"} in ${measurement.issues.map(issue => issue.file).join(", ") || "(git)"}. These bytes may include owner-authored or earlier edits, so the wizard cannot safely overwrite them. Restore the named owner code yourself, then run npx infinite-tag again.`
+  return `Nothing pushed: the wizard's consent/privacy diff check ${measurement.state === "changed" ? "found a change" : "could not finish"} in ${measurement.issues.map(issue => issue.file).join(", ") || "(git)"}. Review the named wizard edits before continuing. Owner-authored commits are left alone.`
+}
+
+/** Measure only SHAs this run recorded creating. Other commits are owner work, never inferred from trailers. */
+export async function measureWizardCommits(input: { root: string; appRoot?: string; baseSha: string; headSha: string; wizardCommits: readonly string[] }): Promise<OwnerBoundaryMeasurement> {
+  const result: OwnerBoundaryMeasurement = { state: "not_checked", scope: "commit", baseSha: input.baseSha, headSha: input.headSha, files: [], issues: [], wizardCommits: [] }
+  if (![input.baseSha, input.headSha, ...input.wizardCommits].every(sha => /^[a-f0-9]{40}$/.test(sha))) { result.issues.push({ file: "(git)", reason: "the recorded commit SHAs are invalid" }); return result }
+  const list = await git(input.root, ["rev-list", "--parents", "--reverse", `${input.baseSha}..${input.headSha}`])
+  if (list.code !== 0) { result.issues.push({ file: "(git)", reason: "the pushed history could not be read" }); return result }
+  const recorded = new Set(input.wizardCommits)
+  result.state = "checked"
+  for (const entry of list.stdout.toString("utf8").trim().split("\n").filter(Boolean)) {
+    const [sha, ...parents] = entry.split(" ")
+    if (!sha || !recorded.has(sha)) continue
+    result.wizardCommits!.push(sha)
+    if (parents.length !== 1) { result.state = "not_checked"; result.issues.push({ file: "(git)", reason: `wizard commit ${sha} does not have exactly one parent` }); continue }
+    const measured = await measureOwnerDiff({ root: input.root, appRoot: input.appRoot, baseSha: parents[0]!, revision: sha })
+    result.files.push(...measured.files)
+    result.issues.push(...measured.issues.map(issue => ({ ...issue, reason: `${sha.slice(0, 12)}: ${issue.reason}` })))
+    if (measured.state === "not_checked" || (measured.state === "changed" && result.state !== "not_checked")) result.state = measured.state
+  }
+  result.files = [...new Set(result.files)].sort()
+  return result
+}
+
+export async function unrecordedCommits(input: { root: string; baseSha: string; headSha: string; wizardCommits: readonly string[]; approvedForeignCommits: readonly string[] }): Promise<Array<{ sha: string; subject: string }> | null> {
+  if (![input.baseSha, input.headSha, ...input.wizardCommits, ...input.approvedForeignCommits].every(sha => /^[a-f0-9]{40}$/.test(sha))) return null
+  const list = await git(input.root, ["log", "--reverse", "--format=%H%x00%s", "-z", `${input.baseSha}..${input.headSha}`])
+  if (list.code !== 0) return null
+  const fields = list.stdout.toString("utf8").split("\0")
+  const known = new Set([...input.wizardCommits, ...input.approvedForeignCommits])
+  const result: Array<{ sha: string; subject: string }> = []
+  for (let at = 0; at + 1 < fields.length; at += 2) {
+    const sha = fields[at]!.trim()
+    if (!/^[a-f0-9]{40}$/.test(sha)) return null
+    if (!known.has(sha)) result.push({ sha, subject: fields[at + 1]! })
+  }
+  return result
 }

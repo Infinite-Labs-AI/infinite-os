@@ -7,6 +7,7 @@
 // the bridge; this module only reads and writes the repo).
 import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { recordGeneratedApi } from "../jobs/generated-api.js"
 import { join } from "node:path"
 
 import { restoreSnapshot, snapshotFiles, type FileSnapshot } from "../apply.js"
@@ -714,7 +715,10 @@ export class WizardInstaller implements Installer {
     if (blocked.length > 0 || changed.length === 0) return { changedFiles: [], blocked }
     const snapshot = snapshotFiles(root, [...changed.map(entry => entry.file), installManifestRelativePath])
     try {
-      for (const entry of changed) writeFileAtomic(join(root, entry.file), entry.after)
+      for (const entry of changed) {
+        recordGeneratedApi(root, entry.file, entry.after)
+        writeFileAtomic(join(root, entry.file), entry.after)
+      }
       const edits = changed.map((entry, seq) => makeEditRecord({ ...entry, jobId: null, planLineId: "managed_resume_refresh", by: "wizard", runId, seq: (current.edits?.length ?? 0) + seq }))
       const configOwnership = { ...current.configOwnership }
       for (const entry of changed) if (configOwnership[entry.file]?.kind === "created") configOwnership[entry.file] = { kind: "created", installedHash: computeContentHash(entry.after) }

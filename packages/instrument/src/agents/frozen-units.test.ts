@@ -88,10 +88,10 @@ it("derives every binding in a multi-declarator Consent Mode map unit", async ()
   expect((await turn(before, before.replace("return DENIED", "return {}"))).text).toBe(before)
 })
 
-it("allows a new ordinary analytics API definition when it shadows no existing API", async () => {
+it("refuses worker-added API definitions even when no existing API was referenced", async () => {
   const before = "export const title = 'Example';\n"
   const after = before + "function gtag() { dataLayer.push(arguments); }\n"
-  expect((await turn(before, after)).text).toBe(after)
+  expect((await turn(before, after)).text).toBe(before)
 })
 
 it.each([
@@ -106,4 +106,41 @@ it.each([
   const result = await turn(before, after)
   expect(result.text).toBe(before.replace("return 1", "return 2"))
   expect(result.warning.length).toBeGreaterThan(0)
+})
+
+it.each([
+  ["JSX glob text", "export default function Page(){ return <p>Use src/* here</p>; }\n"],
+  ["JSX double-star text", "export default function Page(){ return <code>pages/**</code>; }\n"],
+  ["HTML style glob", "<style>.x { background:url(img/*.png) }</style>\n"],
+])("raw consent after %s remains frozen despite tokenizer early exit", async (_name, prefix) => {
+  const before = prefix + "fbq('consent','revoke');\n"
+  expect((await turn(before, before.replace("revoke", "grant"))).text).toBe(before)
+})
+
+it.each([
+  "window.fbq = () => {};",
+  "function helper(){ (window as any).gtag = () => {}; }",
+  "Object.defineProperty(window, 'gtag', { value: () => {} });",
+  "declare const fbq: (...args: unknown[]) => void;",
+  "delete window.fbq;",
+  "const f = window.fbq;",
+])("restores an added API write or alias anywhere: %s", async addition => {
+  const before = "function boot(){ fbq('consent','revoke'); }\nfunction other(){ return 1; }\n"
+  const result = await turn(before, before.replace("return 1", "return 2") + addition + "\n")
+  expect(result.text).toBe(before.replace("return 1", "return 2"))
+  expect(result.warning.length).toBeGreaterThan(0)
+})
+
+it.each(["const f = window.fbq;\nf('consent','revoke');\n", "fbq.apply(null, ['consent','revoke']);\n"])("freezes aliased consent arguments: %s", async before => {
+  expect((await turn(before, before.replace("revoke", "grant"))).text).toBe(before)
+})
+
+it("keeps the API alias binding frozen beside an aliased consent call", async () => {
+  const before = "const f = window.fbq;\nf('consent','revoke');\nfunction other(){ return 1; }\n"
+  expect((await turn(before, before.replace("window.fbq", "() => {}").replace("return 1", "return 2"))).text).toBe(before.replace("return 1", "return 2"))
+})
+
+it("restores a deleted first frozen unit without duplicating a byte-order mark", async () => {
+  const before = "\ufefffbq('consent','revoke');\nfunction other(){ return 1; }\n"
+  expect((await turn(before, "\ufefffunction other(){ return 2; }\n")).text).toBe(before.replace("return 1", "return 2"))
 })

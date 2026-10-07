@@ -4,6 +4,8 @@ import { join } from "node:path"
 import type { FrameworkAdapter, InstallInstruction, ManualRequirement } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
 import { ownerWiringRequirement, policyWiringRequirement } from "./owner-boundary.js"
+import { recordGeneratedApi } from "../jobs/generated-api.js"
+import { staticManagedBlockFor } from "./entry-wiring.js"
 
 import {
   fileExists,
@@ -137,12 +139,7 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     }
 
     // Provider snippets are page-agnostic — every page receives the same managed block.
-    const providerSnippets = context.plan.instructions
-      .filter((instruction) => (instruction.provider || instruction.helpers) && isHtmlPath(instruction.path))
-      .map((instruction) => instruction.snippet.trim())
-      .filter((snippet) => snippet.length > 0)
-
-    const managedBlock = buildManagedHtmlBlock(providerSnippets)
+    const managedBlock = staticManagedBlockFor(context.plan.instructions)
 
     const changedFiles: string[] = []
     const configOwnership = {}
@@ -157,10 +154,11 @@ export const staticHtmlAdapter: FrameworkAdapter = {
       }
 
       const nextHtml = upsertManagedHtmlBlock(html, managedBlock)
-      const manual = ownerWiringRequirement(path, html, nextHtml, managedBlock, context.appRoot)
+      const manual = ownerWiringRequirement(path, html, nextHtml, managedBlock, context.appRoot, [managedBlock])
       if (manual) requiresManual.push(manual)
-      else if (writeFileIfChanged(appRoot, page, nextHtml)) {
-        changedFiles.push(normalizeAppRelativePath(context.appRoot, page))
+      else {
+        recordGeneratedApi(context.root, path, managedBlock)
+        if (writeFileIfChanged(appRoot, page, nextHtml)) changedFiles.push(path)
       }
     }
 
@@ -292,11 +290,12 @@ const ignoredDirNames = new Set([
  * discovery inside the workspace root. index.html is hoisted to the front; the
  * remaining pages are sorted for deterministic plans, manifests, and output.
  */
-function findHtmlPages(appRoot: string): string[] {
+export function findHtmlPages(appRoot: string): string[] {
   return walkHtmlFiles(appRoot).filter(
     (page) => page === "index.html" || !isVerificationTokenFile(join(appRoot, page))
   )
 }
+
 
 /** The .html files under the app root that are domain-verification tokens, not pages. */
 function findVerificationFiles(appRoot: string): string[] {

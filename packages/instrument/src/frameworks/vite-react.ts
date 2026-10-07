@@ -9,6 +9,8 @@
 // has no entrypoint surface to get wrong.
 import { join } from "node:path"
 import { ownerWiringRequirement } from "./owner-boundary.js"
+import { recordGeneratedApi } from "../jobs/generated-api.js"
+import { managedBlockFor } from "./entry-wiring.js"
 
 import type { FrameworkAdapter, InstallInstruction, ManualRequirement } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
@@ -42,13 +44,6 @@ function indexHtmlCanInject(html: string): boolean {
 }
 
 /** The provider `<script>…</script>` snippets targeting index.html, assembled into the managed block. */
-function managedBlockFor(instructions: InstallInstruction[]): string {
-  const providerSnippets = instructions
-    .filter((instruction) => (instruction.provider || instruction.helpers) && instruction.path.endsWith(INDEX_HTML))
-    .map((instruction) => instruction.snippet.trim())
-    .filter((snippet) => snippet.length > 0)
-  return buildManagedHtmlBlock(providerSnippets)
-}
 
 export const viteReactAdapter: FrameworkAdapter = {
   id: "vite-react",
@@ -150,10 +145,11 @@ export const viteReactAdapter: FrameworkAdapter = {
       const html = readRequiredFile(appRoot, INDEX_HTML)
       if (indexHtmlCanInject(html)) {
         const nextHtml = upsertManagedHtmlBlock(html, managedBlock)
-        const manual = ownerWiringRequirement(indexRootRelative, html, nextHtml, managedBlock, context.appRoot)
+        const manual = ownerWiringRequirement(indexRootRelative, html, nextHtml, managedBlock, context.appRoot, [managedBlock])
         if (manual) { requiresManual.push(manual); warnings.push(manual.reason) }
-        else if (writeFileIfChanged(appRoot, INDEX_HTML, nextHtml)) {
-          changedFiles.push(indexRootRelative)
+        else {
+          recordGeneratedApi(context.root, indexRootRelative, managedBlock)
+          if (writeFileIfChanged(appRoot, INDEX_HTML, nextHtml)) changedFiles.push(indexRootRelative)
         }
       } else {
         // Genuine edge: no </head> to inject into. Fail closed with the exact block to add by hand.
