@@ -1,3 +1,5 @@
+import { mkdirSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { afterEach, expect, it } from "vitest"
 import { createGitFixture, type GitFixture } from "../../test/wizard/git-fixture.js"
 import { fakeBridge, initialState, RUN_ID, testContext, testDeps } from "../../test/wizard/o4-fakes.js"
@@ -250,4 +252,21 @@ it.each([ASK_CANCELLED, ASK_TIMEOUT])("stops an interactive push when the existi
   expect(w.fx.remoteSha(w.branch)).toBeNull()
   expect(w.ctx.state.get().commitHistory?.resolution).toBeUndefined()
   expect(w.ctx.asks).toHaveLength(1)
+})
+
+it.each([
+  { name: "Latin-1 HTML", file: "legacy/about-us.html", bytes: Buffer.from("<p>caf\u00e9</p>", "latin1") },
+  { name: "UTF-16 Markdown", file: "notes/readme.md", bytes: Buffer.from("# Legacy notes\n", "utf16le") },
+  { name: "binary vendor JavaScript", file: "vendor/lib.min.js", bytes: Buffer.from([0, 255, 10, 128]) },
+])("commits and pushes an ordinary edit beside unchanged $name", async ({ file, bytes }) => {
+  const w = await setup(true)
+  mkdirSync(dirname(join(w.fx.root, file)), { recursive: true })
+  writeFileSync(join(w.fx.root, file), bytes)
+  w.fx.git(["add", file]); w.fx.git(["commit", "-m", "existing encoded fixture"] )
+  w.fx.write(path, source.replace("count = 1", "count = 2"))
+  const result = await stageAndCommit({ ...w, step: "rehearsal", runId: RUN_ID, message: "wizard neighbor fixture", round: null, allowlist: [path], managed: [], npmFiles: [], connectionIds: [] })
+  expect(result.kind).toBe("committed")
+  expect(await w.push()).toMatchObject({ kind: "pushed" })
+  expect(w.fx.remoteSha(w.branch)).toBe(await w.git.head())
+  expect(w.ctx.state.get().ownerBoundary).toMatchObject({ state: "checked", measuredCommitCount: 1, files: [path], issues: [] })
 })
