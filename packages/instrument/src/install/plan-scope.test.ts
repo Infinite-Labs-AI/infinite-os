@@ -81,3 +81,15 @@ it("drops stale and malicious approvals for owner-only and informational lines",
   const explicit = resolvePlanAnswers(plan, { approved: ["account_settings:ga4"], declined: [], edits: {} }, { consentFlag: "not_required" })
   expect(explicit.approvals.approved).toContain("account_settings:ga4")
 })
+
+it("names a missing successful conversion handler at the plan without promising an unanswered question", () => {
+  const plan = buildPlanModel({ ...base, candidates: [{ id: "conversions_to_tools:lead", jobId: "conversions_to_tools", n: 10, title: "Lead", owner: "agent", state: "blocked", blockedReason: "needs_you", allow: { files: [], create: [] }, checks: [], trigger: { finding: "No successful lead handler was found", evidence: [] } }], scan: { framework: "next-app-router", managedProviders: [], adopted: [], improve: [], serverLane: null, npm: null, sensitivePaths: [] } })
+  expect(plan.lines.find(line => line.id === "user_action:conversion_target:conversions_to_tools:lead")?.text).toContain("successful completion")
+  expect(plan.scopedCandidates?.[0]?.note).toContain("not wired")
+})
+
+it("does not claim no tag installs when only a server conversion's lane is unavailable", () => {
+  const plan = buildPlanModel({ ...base, candidates: [{ id: "server_conversions:lead", jobId: "server_conversions", n: 8, title: "Lead", owner: "agent", state: "pending", allow: { files: ["api/lead.ts"], create: [] }, checks: [], trigger: { finding: "Lead outcome", evidence: [] } }], scan: { framework: "next-app-router", managedProviders: [], adopted: [], improve: [], serverLane: null, npm: null, sensitivePaths: [] } })
+  expect(plan.installTools).toContain("infinite")
+  expect(plan.lines.find(line => line.id === "user_action:conversions_unwired")?.text).not.toContain("installs neither")
+})

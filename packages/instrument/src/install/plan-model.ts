@@ -1,3 +1,4 @@
+import { configRewriteJobs } from "./config-rewrite-jobs.js"
 import { sensitivePosthogOptions } from "./posthog-sensitive.js"
 import type { ManagedCapturePlan } from "./managed-capture.js"
 import type { OwnerWiringPreview } from "../frameworks/owner-wiring-preview.js"
@@ -93,7 +94,7 @@ export interface PlanScanFacts {
    * Review I1 P1-2: a Next app's own config (repo-relative) that lacks Infinite's collect rewrite. The installer
    * never edits it; the plan says the rewrite is an agent job (checked by the wizard) before anything is written.
    */
-  nextConfigRewrites?: { path: string } | null
+  nextConfigRewrites?: { path: string; snippet?: string } | null
   /** Review I1 P1-2: why the install cannot be applied as planned (a dry plan's blocker), or null. */
   installBlocked?: string | null
 }
@@ -204,7 +205,7 @@ export const RUNNABILITY_TEXT = {
   claimWording: (host: string) =>
     `Infinite confirms ${host} is yours after your merge, from a one-line file this pull request adds (/.well-known/infinite-site-verification.txt). Until then it records nothing.`,
   conversionsUnwired: (names: readonly string[]) =>
-    `Conversions (${names.join(", ") || "none named"}): wired once Infinite's tag or a connected tool is installed; this run installs neither.`
+    `Conversions (${names.join(", ") || "none named"}): not wired in this run because their required browser helper or server lane is unavailable.`
 } as const
 
 /** The source is verified: an existing site source (not a pending claim), or a Vercel connection serving the host. */
@@ -623,6 +624,11 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       })
     )
   }
+  for (const item of candidates) {
+    if (item.jobId !== "conversions_to_tools" || item.state !== "blocked" || item.blockedReason !== "needs_you" || item.allow.files.length > 0 || item.allow.create.length > 0) continue
+    item.note = `${item.title}: not wired. No successful completion handler was found in the browser code; add or identify that success handler before this conversion can be sent. A link or button click alone is not a completed outcome.`
+    lines.push(line({ id: `user_action:conversion_target:${item.id}`, kind: "user_action", requires: "user_action", text: item.note }))
+  }
   const privacyText = null // Owner-only; suggested wording is copy-only report material.
   let npmInstall: string | null = null
   if (scan.serverLane && scan.serverLane.installPackages.length > 0 && serverLaneApprovable && lineRunnable("npm_install", facts).ok) {
@@ -689,9 +695,11 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     lines.push(
       line({
         id: "user_action:next_config_rewrites",
-        kind: "user_action",
+        kind: "improve_additive",
+        ownership: "managed",
+        jobIds: ["unusual_layout:next_config_rewrites"],
         text: `Your own ${scan.nextConfigRewrites.path} is never edited by the installer: Infinite's collect rewrite goes in it as an agent job the wizard checks (or you add it). Until it is there, Infinite's tag records nothing.`,
-        requires: "user_action"
+        requires: "info"
       })
     )
   }
@@ -844,7 +852,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
 
   // An improve line no candidate links, whose change is (partly) the agent's, gets its own item, so an
   // approved line always has a job or a code edit behind it (P2-14).
-  let seeds: ChecklistItem[] = []
+  let seeds: ChecklistItem[] = scan.nextConfigRewrites && tools.includes("infinite")
+    ? configRewriteJobs([{ path: scan.nextConfigRewrites.path, snippet: scan.nextConfigRewrites.snippet ?? "Add the Infinite collect rewrite named by the install plan." }], candidates) : []
   const takenIds = new Set(candidates.map((item) => item.id))
   for (const entry of improveLines) {
     const planLine = lines.find((candidateLine) => candidateLine.id === entry.id)

@@ -753,3 +753,13 @@ it("keeps different owner-boundary placements separate within one installer resp
   expect(jobs.map(job => job.ownerBoundary)).toEqual(requirements.map(requirement => ({ ...requirement.ownerBoundary, wiring: requirement.snippet })))
   expect(ownerLayoutJobs(requirements, jobs)).toEqual(jobs)
 })
+
+it("counts the deferred Next config rewrite in the plan budget before install seeds it", async () => {
+  const h = await setup({ files: { "package.json": '{"dependencies":{"next":"15.0.0","react":"19.0.0"}}', "app/layout.tsx": "export default function Layout({children}) { return <html><body>{children}</body></html> }", "next.config.mjs": "export default {}" }, consentFlag: "not_required", answers: [{ approved: [], declined: [], edits: {} }] })
+  expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
+  const payload = h.ctx.asks[0]!.payload as AskPayloads["plan"]
+  expect(payload.lines.find(line => line.id === "agent_budget")?.text).toContain("up to 1 job")
+  expect(h.ctx.stateValue().jobs.find(job => job.id === "unusual_layout:next_config_rewrites")?.state).toBe("pending")
+  expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
+  expect(h.ctx.stateValue().jobs.filter(job => job.owner === "agent" && job.state === "pending")).toHaveLength(1)
+})

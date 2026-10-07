@@ -71,7 +71,7 @@ import { buildCreatedMiddlewareSource, buildServerLaneModuleSource } from "../se
 import { SERVER_LANE_GUIDE_FILE } from "../server-lane/copy.js"
 import { normalizeAppRelativePath, writeFileAtomic } from "../frameworks/shared.js"
 import { DEFAULT_POSTHOG_PROXY_PATH, INFINITE_API_ORIGIN, infiniteCollectDestination } from "../workspace-artifacts.js"
-import { hasExactNextConfigRewrites, type ManagedProxySpec } from "../frameworks/vercel-config.js"
+import { buildManualNextConfigInstruction, hasExactNextConfigRewrites, type ManagedProxySpec } from "../frameworks/vercel-config.js"
 import { buildAnalyticsModuleSource, buildClientComponentSource, isManagedInfiniteFile } from "../frameworks/managed-files.js"
 import { findLockfile, runNpmJob } from "./npm.js"
 import { proofFileBlockedText, proofFileTarget } from "./proof-file.js"
@@ -1030,8 +1030,8 @@ function ownConfigHas(root: string, file: string, proxy: ManagedProxySpec | null
  * Review I1 P1-2: the plan line's fact. A Next app with its own config that lacks Infinite's collect rewrite:
  * the installer leaves the file as it is and the rewrite is an agent job, so the plan says so up front.
  */
-export function nextConfigRewritesNeeded(scan: Pick<WizardScanResult, "root"> & { unmanagedNextConfig?: string | null }, keys: TagKeys): { path: string } | null {
+export function nextConfigRewritesNeeded(scan: Pick<WizardScanResult, "root"> & { unmanagedNextConfig?: string | null }, keys: TagKeys): { path: string; snippet: string } | null {
   if (!scan.unmanagedNextConfig || !keys.infinite.collectPath) return null
   const infinite = { path: keys.infinite.collectPath, destination: infiniteCollectDestination(INFINITE_API_ORIGIN) }
-  return ownConfigHas(scan.root, scan.unmanagedNextConfig, { infinite }) ? null : { path: scan.unmanagedNextConfig }
+  return ownConfigHas(scan.root, scan.unmanagedNextConfig, { infinite }) ? null : { path: scan.unmanagedNextConfig, snippet: buildManualNextConfigInstruction({ infinite }) }
 }

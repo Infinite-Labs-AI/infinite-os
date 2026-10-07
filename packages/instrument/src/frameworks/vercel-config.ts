@@ -626,7 +626,7 @@ export function buildNextConfigSource(proxy: ProxyInput): string {
 }
 
 /** Human-readable snippet for the "add these to your existing next.config" manual instruction. */
-function buildManualNextConfigInstruction(proxy: ProxyInput): string {
+export function buildManualNextConfigInstruction(proxy: ProxyInput): string {
   const rewriteLiterals = buildManagedRewritePairs(proxy)
     .map(
       (pair) =>
