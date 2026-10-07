@@ -102,7 +102,8 @@ async function setup(options: {
 
 const ALL_APPROVED: PlanLines = [
   { id: "install_provider:infinite", approved: true },
-  { id: "server_lane", approved: true },
+  { id: "account_settings:ga4", approved: true },
+  { id: "account_settings:hosting", approved: true },
   { id: "meta_relay", approved: true }
 ]
 
@@ -181,7 +182,7 @@ describe("step settings", () => {
       const { bridge, harness, deps } = await setup({
         conversions: ["signup"],
         lines: [
-          { id: "server_lane", approved: true },
+          { id: "account_settings:hosting", approved: true },
           { id: "meta_relay", approved }
         ],
         approved: ["signup"],
@@ -234,7 +235,7 @@ describe("step settings", () => {
   it("a declined server-lane line → no env write", async () => {
     const { bridge, harness, deps } = await setup({
       conversions: [],
-      lines: [{ id: "server_lane", approved: false }],
+      lines: [{ id: "account_settings:hosting", approved: false }],
       approved: [],
       clickTested: []
     })
@@ -271,7 +272,7 @@ describe("step settings", () => {
 describe("step settings: the customer's Vercel is written only with the user's yes", () => {
   for (const [label, lines] of [
     ["no server_lane line in the plan (e.g. a static site, or no Infinite pixel)", [{ id: "meta_relay", approved: false }]],
-    ["a server_lane line left unanswered", [{ id: "server_lane", approved: null }]]
+    ["a server_lane line left unanswered", [{ id: "account_settings:hosting", approved: null }]]
   ] as const) {
     it(`${label} → no env write (negative)`, async () => {
       const { bridge, harness, deps } = await setup({ conversions: [], lines: [...lines], approved: [], clickTested: [] })
@@ -404,4 +405,11 @@ describe("settings inputHash (review I1 P3-1)", () => {
     expect(step.inputHash(ctxWith([item("waiting_real_event", "not_run")], "b"))).toBe(base)
     expect(step.inputHash(ctxWith([item("done_in_code", "pass")], "a"))).not.toBe(base)
   })
+})
+
+it("a continued repository install never authorizes connected-account writes", async () => {
+  const { bridge, harness, deps } = await setup({ conversions: ["signup"], lines: [{ id: "install_provider:infinite", approved: true }, { id: "server_lane", approved: true }], approved: ["signup"], clickTested: ["signup"] })
+  await step.run(harness.ctx, deps)
+  expect(bridge.callsFor("server-lane.provision-env")).toHaveLength(0)
+  expect(bridge.callsFor("ga4-key-events")).toHaveLength(0)
 })

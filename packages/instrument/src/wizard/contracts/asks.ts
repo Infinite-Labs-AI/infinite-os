@@ -36,6 +36,7 @@ export const PLAN_LINE_KINDS = [
   "install_provider",
   "server_lane",
   "npm_install",
+  "account_settings",
   "preview_guard_managed",
   "agent_budget",
   "improve_additive",
@@ -91,7 +92,8 @@ export type YesPolicyValue = "yes" | "never" | "n/a"
 export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue | { managed: "yes"; adopted: "never" } } = {
   install_provider: "yes",
   server_lane: "yes",
-  npm_install: "yes",
+  npm_install: "never",
+  account_settings: "never",
   preview_guard_managed: "yes",
   agent_budget: "yes",
   // It rewrites the customer's api_host / capture_pageview on an adopted provider.
@@ -114,7 +116,7 @@ export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue | { mana
   // R4-8: a change to the customer's own GA4 tag.
   ga4_spa_page_views: "never",
   // The D16 recommendation: an informational default the user can change.
-  meta_goal: "yes",
+  meta_goal: "never",
   // GTM edit, Traffic Permissions, connect a tool, the GA4 page-change setting: shown only.
   user_action: "n/a",
   // B28: an information line; nothing to approve.

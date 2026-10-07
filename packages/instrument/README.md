@@ -46,11 +46,14 @@ steps and resumes where it stopped:
    what it finds ("Live site today").
 4. **Keys** — the connection ids (GA4 stream, PostHog project, Meta pixel) come from Infinite, never
    from the repo or a guess.
-5. **Plan** — one screen with every change and the three decisions only you can make (consent mode,
-   conversion names, the npm install). A 7-day check-in follows the deploy.
-6. **Install** — the managed tags, the approved edits, the preview guard and a build check, with a
+5. **Plan** — shows the repository changes and what stays with the owner, with one continue. Running
+   the wizard authorizes repository improvements to existing tools; there are no per-job approvals.
+   It asks only what it cannot know: the live address, consent mode and conversions. Package installs,
+   paid agent usage and changes to connected-tool settings still require an explicit yes. The plan
+   hash records what was shown and continued. A 7-day check-in follows the deploy.
+6. **Install** — the managed tags, the planned edits, the preview guard and a build check, with a
    full rollback if the build breaks.
-7. **Jobs** — the agent does the code jobs the plan approved, fenced to the files each job may touch;
+7. **Jobs** — the agent does the code jobs the plan showed, fenced to the files each job may touch;
    the wizard checks every job itself (static checks, the build, an offline browser test).
 8. **Settings** — through the app: the approved conversions, GA4 key events for conversions whose
    offline click test passed, the server-lane settings on Vercel (only when approved; production is not
@@ -71,7 +74,7 @@ Exit codes: `0` done · `1` failed · `2` usage or environment · `3` parked (re
 `npx infinite-tag --resume`) · `4` needs the Infinite app · `130` interrupted.
 
 Flags: `--json` (one NDJSON event per line, for agents and CI), `--answers <file>`, `--yes` (approves
-only the plan lines that are safe to approve for you; never consent, conversion names or a change to a tag you already had), `--resume`, `--fresh` (set an unfinished run aside and
+the plan continue; never consent, conversion names, package installs, paid usage or connected-tool settings), `--resume`, `--fresh` (set an unfinished run aside and
 start over), `--root`, `--app-root`, `--no-agent`, `--worker claude|codex`,
 `--reviewer claude|codex|brief|none`, `--consent-mode not_required|required`, `--no-prove`.
 `npx infinite-tag --version` prints the version.
@@ -89,7 +92,7 @@ an error, so a typo never silently answers nothing.
 ```json
 {
   "v": 1,
-  "plan": { "approved": ["install_provider:ga4"], "declined": ["server_lane"], "edits": { "consent_mode": "required" } },
+  "plan": { "approved": [], "declined": ["account_settings:hosting"], "edits": { "consent_mode": "required" } },
   "consentMode": "required",
   "conversionNames": ["signup"],
   "npmInstall": false,

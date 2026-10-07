@@ -128,7 +128,7 @@ async function serverLaneStillRunnable(ctx: WizardContext, deps: WizardDeps): Pr
 }
 
 async function provisionServerLane(ctx: WizardContext, deps: WizardDeps): Promise<"saved" | "needs_you" | "skipped" | "not_offered"> {
-  const approval = lineApproval(ctx, "server_lane")
+  const approval = ctx.state.get().plan?.lines.find(line => line.id === "account_settings:hosting")?.approved
   if (approval !== true) {
     const userAction = (ctx.state.get().plan?.lines ?? []).some((line) => line.id === "user_action:server_lane")
     if (userAction) {
@@ -273,7 +273,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     const clickTested = new Set(run.clickTestedConversions)
     const keyEventNames = approved.filter((name) => clickTested.has(name))
     let marked: string[] = []
-    if (keyEventNames.length > 0) {
+    if (keyEventNames.length > 0 && plan.lines.some(line => line.id === "account_settings:ga4" && line.approved === true)) {
       try {
         const response = await deps.bridge.markGa4KeyEvents({ runId, names: keyEventNames }, { signal: ctx.signal })
         marked = [...response.created, ...response.alreadyExisted]

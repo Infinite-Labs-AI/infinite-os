@@ -133,18 +133,18 @@ describe("plan overlay", () => {
     decisions: { consentMode, conversionNames: ["start_trial", "signup"], privacyText: "a\nb", npmInstall: "npm install @vercel/functions" }
   })
 
-  it("ENTER approves every approval line as shown", () => {
+  it("ENTER continues without opting into explicit approval actions", () => {
     expect(drive("plan", payload("not_required"), ENTER).answer).toEqual({
-      approved: ["install_provider:infinite", "consent_mode", "conversion_names", "remove_duplicate:ga4_gtag"],
-      declined: [],
+      approved: ["consent_mode", "conversion_names"],
+      declined: ["install_provider:infinite", "remove_duplicate:ga4_gtag"],
       edits: {}
     })
   })
 
-  it("SPACE skips a line (its job is skipped); user_action lines cannot be toggled", () => {
+  it("SPACE opts into an explicit approval; owner information cannot be toggled", () => {
     const answer = drive("plan", payload("not_required"), DOWN + DOWN + DOWN + " " + DOWN + " " + ENTER).answer as { approved: string[]; declined: string[] }
-    expect(answer.declined).toEqual(["remove_duplicate:ga4_gtag"])
-    expect(answer.approved).not.toContain("remove_duplicate:ga4_gtag")
+    expect(answer.declined).toEqual(["install_provider:infinite"])
+    expect(answer.approved).toContain("remove_duplicate:ga4_gtag")
     expect(answer.approved).not.toContain("user_action:connect_ga4")
   })
 
@@ -171,6 +171,15 @@ describe("plan overlay", () => {
     expect(text).toContain("Conversions: start_trial · signup")
     expect(text).toContain("(2 page views per visit · dry load)")
     expect(text).toContain(" →  Connect GA4 in Infinite")
-    expect(text).toContain("4 lines to approve · 1 thing only you can do")
+    expect(text).toContain("4 explicit choices · 1 thing only you can do")
   })
+})
+
+it("never opts into package installs or connected-account changes on a plain continue", () => {
+  const payload: AskPayloads["plan"] = { lines: [
+    { id: "npm_install", kind: "npm_install", requires: "approval", editable: true, text: "npm install fixture" },
+    { id: "account_settings:ga4", kind: "account_settings", requires: "approval", editable: false, text: "Mark GA4 key events" },
+    { id: "install_provider:infinite", kind: "install_provider", requires: "info", editable: false, text: "Install Infinite" }
+  ], decisions: { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: "npm install fixture" } }
+  expect(drive("plan", payload, ENTER).answer).toEqual({ approved: [], declined: ["npm_install", "account_settings:ga4"], edits: {} })
 })
