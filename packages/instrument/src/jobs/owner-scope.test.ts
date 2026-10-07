@@ -2,6 +2,15 @@ import { expect, it } from "vitest"
 import { item } from "../../test/wizard/repo.js"
 import { scopeOwnerJob } from "./owner-scope.js"
 
+it("keeps the actual setup finding in an owner handoff", () => {
+  const file = "src/analytics.ts"
+  const sources = new Map([[file, "function boot() {\n posthog.opt_out_capturing();\n}\n"]])
+  const finding = "Setup check silent_form: add the approved lead call to the form's success handler"
+  const scoped = scopeOwnerJob({ ...item("setup_check_fixes:silent_form", [file]), jobId: "setup_check_fixes", trigger: { finding, evidence: [{ file, line: 2 }] } }, sources)
+  expect(scoped.state).toBe("left_for_you")
+  expect(scoped.note).toContain(finding)
+})
+
 it("preserves the plan's copyable owner text when jobs rescope the same frozen unit", () => {
   const file = "src/analytics.ts"
   const sources = new Map([[file, "function boot() {\n posthog.init('phc_fixture', {});\n posthog.opt_out_capturing();\n}\n"]])
