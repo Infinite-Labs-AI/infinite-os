@@ -11,7 +11,7 @@ import type { WizardContext, WizardDeps } from "./contracts/deps.js"
 
 const RUN = "11111111-1111-4111-8111-111111111111"
 const LEGACY = "Consent and your privacy policy are yours. An earlier version of this run recorded policy edits; this continuation left them alone."
-const LEGACY_UNMEASURED = "Your consent code and privacy policy are yours. An earlier version of this run recorded policy edits; their final diff has not been checked."
+const LEGACY_UNMEASURED = "This run could not check its own commits against your consent code and policy pages (an earlier version of this run recorded policy edits); please review the changed files."
 const legacyJob = leaveForOwner({ ...item("privacy_paragraph:page", ["app/privacy/page.tsx"]), state: "done_in_code", edits: [{ editId: "legacy-policy-edit", file: "app/privacy/page.tsx" }] }).item
 const facts = (jobs: VerdictFacts["jobs"] = []): VerdictFacts => ({ jobs, openFindings: [], tools: null, installedUnknown: null })
 const reportFor = (verdictFacts = facts()) => buildReport({
@@ -26,7 +26,7 @@ describe("report owner boundary preserves legacy edit history", () => {
   // recorded policy work. Retiring a job does not erase that history or reverse its files.
   it("uses saved job edit references without reading policy, and serializes the exception in notes", () => {
     const report = reportFor(facts([legacyJob]))
-    expect(report.notes).toContain(LEGACY_UNMEASURED)
+    expect(report.notes.join("\n")).toContain(LEGACY_UNMEASURED)
     for (const output of [renderMarkdown(report), renderTerminal(report, 240)]) {
       expect(output).toContain(LEGACY_UNMEASURED)
       expect(output).not.toContain(OWNER_BOUNDARY)
@@ -53,7 +53,7 @@ describe("report owner boundary preserves legacy edit history", () => {
       throw new Error("Policy content must never be read")
     } } } as unknown as WizardDeps
     const report = reportFor(await verdictFactsFor(ctx, deps))
-    expect(renderMarkdown(report)).toContain(sameRun ? LEGACY_UNMEASURED : OWNER_BOUNDARY_UNMEASURED)
+    expect(renderMarkdown(report)).toContain(sameRun ? LEGACY_UNMEASURED : "the saved base or current branch head could not be read")
     expect(read.some(path => path.includes("app/privacy/"))).toBe(false)
     expect(read.filter(path => path === "/fixture/.infinite/install.json")).toHaveLength(1)
   })

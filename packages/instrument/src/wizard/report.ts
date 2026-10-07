@@ -15,7 +15,7 @@
 import type { OwnerBoundaryMeasurement } from "../jobs/owner-diff.js"
 import type { ChecklistItem } from "./contracts/jobs.js"
 import { consentActivationFromNotes, consentActivationNotes, consentHandoff, CONSENT_WAITING } from "../install/consent-handoff.js"
-import { OWNER_BOUNDARY, OWNER_BOUNDARY_UNMEASURED, LEGACY_OWNER_BOUNDARY, hasRecordedPolicyEdits, withOwnerBoundary, isOwnerBoundaryStatement, hasLegacyOwnerHistory } from "../jobs/owner-boundary.js"
+import { OWNER_BOUNDARY, OWNER_BOUNDARY_UNMEASURED, LEGACY_OWNER_BOUNDARY, hasRecordedPolicyEdits, withOwnerBoundary, ownerBoundaryNotes, isOwnerBoundaryStatement, hasLegacyOwnerHistory } from "../jobs/owner-boundary.js"
 import {
   CELL_STATES,
   FINISH_LINE_IDS,
@@ -102,7 +102,11 @@ const REPORT_NOTE_MAX_CHARS = 300
 const REPORT_NOTE_LIMIT = 20
 function boundedNotes(notes: readonly string[]): string[] {
   const summaries = [...new Set(notes.map(note => note.replace(/\s+/g, " ").trim()).filter(Boolean).map(note => note.length > REPORT_NOTE_MAX_CHARS ? `${note.slice(0, REPORT_NOTE_MAX_CHARS - 1)}…` : note))]
-  return summaries.length <= REPORT_NOTE_LIMIT ? summaries : [...summaries.slice(0, REPORT_NOTE_LIMIT - 2), `${summaries.length - REPORT_NOTE_LIMIT + 1} additional notes are omitted from this compact report; see the local checklist and review ledger.`, summaries.at(-1)!]
+  if (summaries.length <= REPORT_NOTE_LIMIT) return summaries
+  const boundary = summaries.filter(isOwnerBoundaryStatement)
+  const other = summaries.filter(note => !isOwnerBoundaryStatement(note))
+  const kept = other.slice(0, REPORT_NOTE_LIMIT - boundary.length - 1)
+  return [...kept, `${other.length - kept.length} additional notes are omitted from this compact report; see the local checklist and review ledger.`, ...boundary]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -590,7 +594,8 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     report.verdict.state = "unconfirmed"
     report.verdict.headline = `${input.site.productionHost ?? input.site.repoLabel}: ${activationNotes.join("; ")}`
   }
-  report.notes.push(withOwnerBoundary("", hasLegacyOwnerHistory(report.notes), input.verdictFacts?.ownerBoundary))
+  const boundaryNotes = ownerBoundaryNotes(input.notes.filter(isOwnerBoundaryStatement).join("\n\n"), hasLegacyOwnerHistory(report.notes), input.verdictFacts?.ownerBoundary)
+  report.notes = [...report.notes.filter(note => !isOwnerBoundaryStatement(note)), ...boundaryNotes]
   report.notes = boundedNotes(report.notes)
   assertReport(report, input.runStartedAt ?? null)
   return report
@@ -812,7 +817,7 @@ export function renderTerminal(report: ReportV2, width: number, options: Termina
       }
     }
   }
-  lines.push(...wrapPlain(withOwnerBoundary("", hasLegacyOwnerHistory(report.notes), options.ownerBoundary), total))
+  lines.push(...wrapPlain(withOwnerBoundary(report.notes.filter(isOwnerBoundaryStatement).join("\n\n"), hasLegacyOwnerHistory(report.notes), options.ownerBoundary), total))
   lines.push(...hanging("7 days later: ", day7Text(report), total))
   const activation = consentActivationFromNotes(report.notes)
   const handoff = activation && consentHandoff(activation)
@@ -844,7 +849,7 @@ export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMe
     for (const line of reasons) out.push(`- ${md(line)}`)
   }
   out.push("")
-  out.push(withOwnerBoundary("", hasLegacyOwnerHistory(report.notes), ownerBoundary))
+  out.push(withOwnerBoundary(report.notes.filter(isOwnerBoundaryStatement).join("\n\n"), hasLegacyOwnerHistory(report.notes), ownerBoundary))
   out.push("")
   out.push(`### Before and after · ${md(site)}`)
   out.push("")

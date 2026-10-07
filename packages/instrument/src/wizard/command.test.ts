@@ -905,9 +905,23 @@ describe("a resumed run whose PR was closed offers a fresh run; --fresh sets a r
 })
 
 describe("uninstall --pr with no saved run links through the link step (O1-09)", () => {
+  function realUninstallRepo() {
+    const fixture = createGitFixture({ files: { "app/layout.tsx": "export default function Layout(){return <main>Installed</main>}\n", ".infinite/install.json": "{}\n", ".gitignore": ".infinite/wizard/\n" } })
+    roots.push(fixture.dir)
+    return fixture
+  }
+  function useRealUninstallGit(spy: WiringSpy, fixture: ReturnType<typeof realUninstallRepo>) {
+    spy.bundle.deps.git = createGitOps({ cwd: fixture.root, env: fixture.env })
+    const uninstall = spy.bundle.deps.installer.uninstall.bind(spy.bundle.deps.installer)
+    spy.bundle.deps.installer.uninstall = async input => {
+      const result = await uninstall(input)
+      if (!input.dryRun) fixture.write("app/layout.tsx", "export default function Layout(){return <main>Removed</main>}\n")
+      return result
+    }
+  }
   it("runs the link step on an in-memory state, then asks and changes each piece in Infinite", async () => {
-    const root = tempDir("wizard-cmd-")
-    const { io } = fakeIo(root)
+    const fixture = realUninstallRepo(), root = fixture.root
+    const { io, err } = fakeIo(root)
     const linkRan: string[] = []
     const spy = fakeWiring(
       {
@@ -921,19 +935,21 @@ describe("uninstall --pr with no saved run links through the link step (O1-09)",
       },
       (kind) => (kind === "single" ? "now" : "__cancelled__")
     )
-    expect(await runWizardUninstall(["--pr", "--json", "--base", "main"], { io, wiring: spy.wiring })).toBe(0)
+    useRealUninstallGit(spy, fixture)
+    expect(await runWizardUninstall(["--pr", "--json", "--base", "main"], { io, wiring: spy.wiring }), err.join("")).toBe(0)
     expect(linkRan).toEqual(["link"])
     expect(spy.bundle.log.names("bridge")).toEqual(["bridge.removeServerLaneEnv", "bridge.disableSiteSource", "bridge.revokeLink"])
     expect(existsSync(join(root, ".infinite/wizard/state.json"))).toBe(false)
   })
 
   it("negative: a link the user declines leaves every piece 'NOT changed' and exits 4", async () => {
-    const root = tempDir("wizard-cmd-")
+    const fixture = realUninstallRepo(), root = fixture.root
     const { io, err } = fakeIo(root)
     const spy = fakeWiring({
       link: async () => ({ kind: "failed", code: "INF_WIZ_LINK_DECLINED", message: "The link was declined in Infinite.", next: "halt" })
     })
-    expect(await runWizardUninstall(["--pr", "--json", "--base", "main"], { io, wiring: spy.wiring })).toBe(4)
+    useRealUninstallGit(spy, fixture)
+    expect(await runWizardUninstall(["--pr", "--json", "--base", "main"], { io, wiring: spy.wiring }), err.join("")).toBe(4)
     expect(spy.bundle.log.names("bridge")).toEqual([])
     expect(err.join("")).toContain("Could not link this machine to Infinite: The link was declined in Infinite.")
   })

@@ -13,6 +13,7 @@ export interface OwnerBoundaryMeasurement {
   baseSha: string
   headSha: string
   files: string[]
+  filesAvailable?: boolean
   issues: Array<{ file: string; reason: string }>
   /** Exact reachable SHAs from the run's own commit record that were measured against their parents. */
   wizardCommits?: string[]
@@ -42,6 +43,7 @@ export async function measureOwnerDiff(input: { root: string; baseSha: string; r
     for (const path of extra.stdout.toString("utf8").split("\0").filter(Boolean)) paths.add(path)
   }
   measurement.files = [...paths].sort()
+  measurement.filesAvailable = true
   const beforeSources = await policySourceTree(input.root, input.baseSha)
   const afterSources = await policySourceTree(input.root, input.revision)
   for (const snapshot of [beforeSources, afterSources]) if (snapshot.issue) return fail(snapshot.issue.file, snapshot.issue.reason)
@@ -116,6 +118,7 @@ export async function measureWizardCommits(input: { root: string; appRoot?: stri
     const measured = await measureOwnerDiff({ root: input.root, appRoot: input.appRoot, baseSha: parents[0]!, revision: sha })
     result.measuredCommitCount!++
     result.files.push(...measured.files)
+    if (measured.filesAvailable) result.filesAvailable = true
     result.issues.push(...measured.issues.map(issue => ({ ...issue, reason: `${sha.slice(0, 12)}: ${issue.reason}` })))
     if (measured.state === "not_checked" || (measured.state === "changed" && result.state !== "not_checked")) result.state = measured.state
   }
@@ -124,7 +127,7 @@ export async function measureWizardCommits(input: { root: string; appRoot?: stri
     if (result.state === "checked") result.state = "not_checked"
     // Attribution is unavailable; show the actual branch diff, explicitly labelled as such.
     const paths = await git(input.root, ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", input.baseSha, input.headSha, "--"])
-    if (paths.code === 0) result.files.push(...paths.stdout.toString("utf8").split("\0").filter(Boolean))
+    if (paths.code === 0) { result.files.push(...paths.stdout.toString("utf8").split("\0").filter(Boolean)); result.filesAvailable = true }
     else result.issues.push({ file: "(git)", reason: "changed files could not be listed" })
     result.fileScope = "branch_history"
   }

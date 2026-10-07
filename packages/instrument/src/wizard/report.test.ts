@@ -297,7 +297,7 @@ describe("renderers", () => {
       ""
     ])
     graded.verdict = { state: "properly", headline: "acme-store.com collects analytics properly now", reasons: [], installed: [] }
-    expect(renderMarkdown(graded).split("\n").slice(0, 3)).toEqual(["**acme-store.com collects analytics properly now**", "", "Your consent code and privacy policy are yours; the final diff has not been checked."])
+    expect(renderMarkdown(graded).split("\n").slice(0, 3)).toEqual(["**acme-store.com collects analytics properly now**", "", "This run could not check its own commits against your consent code and policy pages (no wizard commits were measured); please review the changed files."])
   })
 
   it("the terminal table fits the width: three columns at 160, stacked below 140", () => {

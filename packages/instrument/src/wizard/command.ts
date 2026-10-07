@@ -39,6 +39,9 @@ import { wizardGitExtras } from "../git/index.js"
 import { runUninstallFlow, type UninstallLinkFn } from "./uninstall-flow.js"
 import { getWizardWiring, type WizardIo, type WizardWiring } from "./wiring.js"
 import { sanitizeUntrusted } from "../agents/sanitize.js"
+import { ownerBoundaryForState } from "./owner-proof.js"
+import { buildScanner } from "../review/context.js"
+import { safeDisplayText } from "../review/display.js"
 
 export const WIZARD_NOT_BUILT_MESSAGE =
   "The infinite-tag setup wizard is not built yet in this build (its parts are not wired together). Use `npx infinite-tag harness` or `npx infinite-tag install` for now."
@@ -384,9 +387,12 @@ async function runLocked(input: LockedRun): Promise<number> {
       if (preEngineStop && store.getSnapshot().exit) store.setExit({ ...store.getSnapshot().exit!, ...preEngineStop })
       if (report) {
         const startedAt = Date.parse(state?.createdAt ?? "")
-        const proof = state?.ownerBoundary
-        const proofHead = proof?.scope === "commit" && deps ? await deps.git.head().catch(() => null) : null
-        const ownerBoundary = proof?.state === "checked" && proof.baseSha === state?.git?.baseSha && proof.headSha === proofHead && proof.issues.length === 0 ? proof : undefined
+        const proofHead = deps ? await deps.git.head().catch(() => null) : null
+        const measured = await ownerBoundaryForState(root, state?.appRoot ?? appRoot, state, proofHead)
+        const scanner = buildScanner({ root, appRoot: state?.appRoot ?? appRoot }, { bridge: deps?.bridge as WizardDeps["bridge"], env: deps?.env ?? {}, agents: deps?.agents }, [])
+        const display = (text: string) => safeDisplayText(scanner, text)
+        const ownerBoundary = { ...measured, files: measured.files.map(display), issues: measured.issues.map(issue => ({ file: display(issue.file), reason: display(issue.reason) })),
+          ...(measured.unverifiedReason ? { unverifiedReason: display(measured.unverifiedReason) } : {}) }
         store.setOutro(
           renderTerminal(report, outroWidth(io.stdout.columns), {
             displayId: state?.displayId ?? null,

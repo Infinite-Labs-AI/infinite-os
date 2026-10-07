@@ -9,6 +9,7 @@ import { safeDisplayText } from "../review/display.js"
 import { join } from "node:path"
 import { reanchorOwnerLocations } from "../jobs/owner-locations.js"
 import { hasRecordedPolicyEdits } from "../jobs/owner-boundary.js"
+import { ownerBoundaryForState } from "./owner-proof.js"
 
 import { openFindings, parseLedger, REVIEW_LEDGER_PATH } from "../review/ledger.js"
 import { wizardOwnership } from "../review/ownership.js"
@@ -39,10 +40,10 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
   // The receipt may outlive a retired job's entry in state. Read only its job/run metadata;
   // never open a policy file, inspect embedded policy text, or undo an earlier edit.
   const priorPolicyEdits = hasRecordedPolicyEdits(state.jobs) || ownership.recordedPolicyEdits?.(runId) === true
-  const proof = state.ownerBoundary
-  const currentHead = proof?.state === "checked" && proof.scope === "commit" && typeof git.head === "function" ? await git.head().catch(() => null) : null
-  const ownerBoundary = proof?.scope === "commit" && proof.baseSha === base && proof.headSha === currentHead && proof.issues.length === 0 ? proof : undefined
-  const reviewUnreliable = reviewReliabilityWarning(ledger.rounds.at(-1)?.review?.findings ?? ledger.findings ?? [])
+  const currentHead = typeof git.head === "function" ? await git.head().catch(() => null) : null
+  const measured = await ownerBoundaryForState(ctx.root, ctx.appRoot, state, currentHead)
+  const ownerBoundary = { ...measured, files: measured.files.map(display), issues: measured.issues.map(issue => ({ file: display(issue.file), reason: display(issue.reason) })),
+    ...(measured.unverifiedReason ? { unverifiedReason: display(measured.unverifiedReason) } : {}) }  const reviewUnreliable = reviewReliabilityWarning(ledger.rounds.at(-1)?.review?.findings ?? ledger.findings ?? [])
   return {
     ...(reviewUnreliable ? { reviewUnreliable } : {}),
     tagNotInstalled: (await loadPlanApprovals(ctx, deps))?.ownerWiring?.canWire === false,

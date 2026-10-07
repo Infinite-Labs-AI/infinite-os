@@ -20,6 +20,12 @@ function report(): HarnessReport {
   })
 }
 
+it("does not claim a consent or policy measurement in an unmeasured harness report", () => {
+  const markdown = renderReportMarkdown(report())
+  expect(markdown).not.toContain("changed neither")
+  expect(markdown).not.toContain("checked against the commits it made")
+})
+
 describe("provider state machine", () => {
   it("starts every one of the seven providers as absent, in a fixed order", () => {
     const states = initialProviderStates()

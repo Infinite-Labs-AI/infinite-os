@@ -16,7 +16,7 @@ it.each([undefined, { state: "checked" as const }, { ...proof, measuredCommitCou
   expect(output).toContain("This run could not check its own commits against your consent code and policy pages (")
   expect(output).not.toContain("changed neither")
   expect(output).not.toContain(OWNER_BOUNDARY)
-  if (measured?.unverifiedReason) expect(output).toContain(measured.unverifiedReason)
+  if (measured && "unverifiedReason" in measured && measured.unverifiedReason) expect(output).toContain(measured.unverifiedReason)
 })
 
 it("bounds and sanitises changed paths and does not duplicate them on re-render", () => {

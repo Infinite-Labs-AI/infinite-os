@@ -1,4 +1,4 @@
-import { OWNER_BOUNDARY, OWNER_BOUNDARY_INSTRUCTION } from "../jobs/owner-boundary.js"
+import { OWNER_BOUNDARY_INSTRUCTION } from "../jobs/owner-boundary.js"
 import {
   HARNESS_PROVIDER_ORDER,
   type HarnessMode,
@@ -247,8 +247,6 @@ function markdownCell(value: string): string {
 export function renderReportMarkdown(report: HarnessReport): string {
   const lines: string[] = [
     "# Infinite analytics harness report",
-    "",
-    OWNER_BOUNDARY,
     "",
     `- Mode: \`${report.mode}\``,
     `- Started: ${report.startedAt}`,
