@@ -94,6 +94,26 @@ describe("uninstall --pr", () => {
     expect(result).toMatchObject({ exitCode: 0, record: { pr: { number: 43 } } })
   })
 
+  it("explains policy skips in terminal and PR text with safe display filenames", async () => {
+    const root = tempRoot()
+    const bundle = fakeDeps()
+    const secret = "PolicyFilenameFixture42"
+    const policy = "terms-and-conditions.html"
+    const sensitivePolicy = `terms-${secret}-<!--@owner-[link](target).html`
+    writeFileSync(join(root, ".env.local"), `PRIVATE_TOKEN=${secret}\n`)
+    bundle.deps.installer.uninstall = async () => ({ reversed: ["app/layout.tsx"], leftAsIs: [policy, sensitivePolicy] })
+    const result = await run(root, bundle, answering({ server_lane_env: "after_merge" }))
+    const terminal = result.lines.join("\n")
+    const prBody = readFileSync(join(root, ".infinite/wizard/uninstall-pr-body.md"), "utf8")
+    for (const text of [terminal, prBody]) {
+      expect(text).toContain(`Not changed by us: ${policy} is a policy page, which is yours.`)
+      expect(text).not.toMatch(/changed since the install/i)
+      for (const raw of [secret, "<!--", "@owner", "[link]("]) expect(text).not.toContain(raw)
+      expect(text).toContain("‹!--＠owner-［link］(target).html is a policy page, which is yours.")
+    }
+    expect(bundle.log.calls.find(call => call.what === "stage")?.args[0]).toEqual(["app/layout.tsx", ".infinite/install.json"])
+  })
+
   it("negative: when the branch cannot be created, nothing is reversed (the user's branch is never edited)", async () => {
     const root = tempRoot()
     const bundle = fakeDeps({ git: { createBranchFails: true } })

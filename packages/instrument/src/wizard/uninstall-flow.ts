@@ -35,6 +35,7 @@ import type { WizardGitOps } from "./contracts/git-host.js"
 import { forkTargetMatches } from "./push-target.js"
 import { readOriginHead } from "./steps/before.js"
 import { measureOwnerDiff, measureWizardCommits, unrecordedCommits, ownerBoundaryStop, type OwnerBoundaryMeasurement } from "../jobs/owner-diff.js"
+import { isPolicyPath } from "../jobs/owner-boundary.js"
 import { gitlabMergeRequestPushOptions } from "../git/push.js"
 
 export const UNINSTALL_RECORD_SCHEMA = "infinite-tag.wizard-uninstall.v1" as const
@@ -385,12 +386,15 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
 
   // 2. Reverse the install on that branch; commit; push; PR.
   const reversal = await deps.installer.uninstall({ root: ctx.root, dryRun: false })
-  for (const file of reversal.leftAsIs) lines.push(`Changed since the install, left as is: ${file}`)
+  const scanner = buildScanner({ root: ctx.root, appRoot: ctx.state?.appRoot ?? "." }, deps, [])
+  const leftAsIsNotes = reversal.leftAsIs.map(file => safeDisplayText(scanner, isPolicyPath(file, ctx.state?.appRoot ?? ".")
+    ? `Not changed by us: ${file} is a policy page, which is yours.`
+    : `Left as is (changed since the install): ${file}`))
+  lines.push(...leftAsIsNotes)
   let pr: UninstallRecord["pr"] = null
   if (reversal.reversed.length === 0) {
     lines.push("Nothing in the code to reverse.")
   } else {
-    const scanner = buildScanner({ root: ctx.root, appRoot: ctx.state?.appRoot ?? "." }, deps, [])
     const working = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.state?.appRoot ?? ".", baseSha: await deps.git.head() })
     if (working.state !== "checked") return stop("INF_WIZ_PUSH_REFUSED", safeDisplayText(scanner, ownerBoundaryStop(working)), lines)
     await deps.git.stage([...new Set([...reversal.reversed, WIZARD_PATHS.installManifest])])
@@ -426,7 +430,7 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
       "This pull request removes the analytics install infinite-tag added, file by file.",
       "",
       ...reversal.reversed.map((file) => `Reversed: ${file}`),
-      ...reversal.leftAsIs.map((file) => `Left as is (changed since the install): ${file}`),
+      ...leftAsIsNotes,
       "",
       "Infinite's settings for this site stay as they are until this is merged and deployed."
     ].join("\n")
