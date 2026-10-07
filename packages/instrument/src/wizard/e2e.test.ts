@@ -840,7 +840,7 @@ describe("the negative variants (§4.3 a–h)", () => {
     }
     // Only the GA4 stream (a key choice --yes never makes): everything else is --yes's.
     const answers = writeAnswers(w, { v: 1, asks: [{ kind: "single", match: "GA4", answer: "G-FAKE00001" }, { kind: "merge-ready", answer: "later" }] })
-    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--yes", "--answers", answers], timeoutMs: RUN_TIMEOUT })
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--yes", "--answers", answers], respond: ask => ask.kind === "merge-ready" ? "later" : undefined, timeoutMs: RUN_TIMEOUT })
     expect(stepOutcomes(run), trace(run)).toContain("plan:ok")
     expect(stepOutcomes(run)).not.toContain("plan:parked:INF_WIZ_NEEDS_ANSWERS")
     const saved = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/state.json"), "utf8"))
@@ -1530,7 +1530,7 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
       cwd: w.site.repo,
       env: w.env,
       args: ["--json", "--answers", writeAnswers(w)],
-      respond: ask => ask.kind === "single" && (ask.payload as { question?: string }).question?.startsWith("Which address is your live site?") ? "__none__" : undefined,
+      respond: ask => ask.kind === "single" && (ask.payload as { question?: string }).question?.startsWith("Which address is your live site?") ? "__none__" : ask.kind === "merge-ready" ? "later" : undefined,
       timeoutMs: RUN_TIMEOUT
     })
     expect(run.code, trace(run)).toBe(3)
