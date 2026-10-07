@@ -1,4 +1,4 @@
-import { routePathOf } from "./detectors/shared.js"
+export { isPolicyPath, policyContentPaths, isPolicySourceFile } from "./policy-pages.js"
 /** Customer-owned policy is outside every installer, worker, reviewer and check. */
 const OLD_FINAL_BOUNDARY = "Your consent code and privacy policy are yours; this run changed neither (checked against the final diff)."
 export const OWNER_BOUNDARY = "Your consent code and privacy policy are yours; this run changed neither (checked against this run’s recorded commits)."
@@ -6,22 +6,6 @@ export const OWNER_BOUNDARY_UNMEASURED = "Your consent code and privacy policy a
 const OLD_OWNER_BOUNDARY = "Consent and your privacy policy are yours; this run changed neither."
 export const CONSENT_LEFT_FOR_YOU = "Left for you: this file’s consent code is in the way."
 export const OWNER_BOUNDARY_INSTRUCTION = "Consent, cookie banners, CMP code, privacy policies and terms pages belong to the site owner. Do not edit, move, wrap, reindent, evaluate, grade or comment on them. If a task cannot be completed without touching them, skip it with: left for you: this file’s consent code is in the way. No exceptions for preview guards or formatting."
-
-/** Policy routes and source/content names are protected; only explicit non-policy code is exempt. */
-export function isPolicyPath(path: string, appRoot = "."): boolean {
-  const normalized = path.replaceAll("\\", "/")
-  if (/(?:^|\/)api(?:\/|$)|(?:^|\/)(?:__tests__|tests?|specs?)(?:\/|$)|(?:^|\/)search\/terms\.[^/]+$|\.(?:test|spec)\.[^/]+$/i.test(normalized)) return false
-  const words = (value: string) => value.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
-  const vocabulary = new Set(["privacy", "terms", "tos", "cookie", "cookies", "legal", "gdpr", "ccpa", "dpa", "imprint", "impressum"])
-  if (words(normalized).some(word => vocabulary.has(word))) return true
-  const roots = [appRoot]
-  const workspace = /^(?:apps|packages)\/[^/]+/.exec(normalized)?.[0]
-  if (workspace && appRoot === ".") roots.push(workspace)
-  const route = roots.map(root => routePathOf(normalized, root)).find(value => value !== null)
-  // Keep the previous routed-page recognizer too: collapsed route spellings were
-  // already protected before source/content vocabulary widened the boundary.
-  return route !== undefined && route !== null && /(?:^|\/)(?:privacy(?:[-_]?(?:policy|notice))?|terms(?:[-_]?(?:of[-_]?(?:service|use)|conditions))?|cookies?[-_]?(?:policy|notice))(?:\/|$)/i.test(route)
-}
 
 /** Only the reviewer’s structured category labels owner choices; prose and paths never establish scope. */
 export function isOwnerOnlyFinding(input: { category?: string; item?: string | null; path?: string | null; body?: string; suggestedFix?: string | null; suggested_fix?: string | null }): boolean {
