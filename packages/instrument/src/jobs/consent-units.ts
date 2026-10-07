@@ -153,14 +153,9 @@ function bindingInfo(tokens: Token[]): { key: string; names: string[] } {
       if (ts[i] !== ",") break
       i++
     }
-  } else if (["function", "class", "interface", "type", "enum", "namespace"].includes(kind)) {
+  } else if (["function", "class"].includes(kind)) {
     const name = ts[at + (ts[at + 1] === "*" ? 2 : 1)]
     if (name && IDENTIFIER.test(name)) names.push(name)
-  } else if (kind === "import") {
-    for (let i = at + 1; i < ts.length && ts[i] !== "from"; i++) {
-      if (!IDENTIFIER.test(ts[i]!) || ["as", "type"].includes(ts[i]!) || ts[i + 1] === "as") continue
-      names.push(ts[i]!)
-    }
   }
   const callAt = ts.indexOf("(")
   const firstArgument = callAt >= 0 && /^['"`]/.test(ts[callAt + 1] ?? "") ? ts[callAt + 1] : ""

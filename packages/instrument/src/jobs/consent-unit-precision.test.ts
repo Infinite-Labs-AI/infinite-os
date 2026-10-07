@@ -21,11 +21,13 @@ it.each([
   "function hasConsent() { return true; }",
   "export function MarketingCONSENT() { return true; }",
   "const consentState = true;",
+  "export let consentState = true;",
+  "var consentState = true;",
+  "export default class ConsentController {}",
   "class ConsentController {}",
   "export const { hasConsent } = settings;",
   "export const { enabled: hasConsent } = settings;",
   "const [hasConsent] = settings;",
-  "import { enabled as hasConsent } from './settings';",
 ])("freezes a unit with a declared consent name: %s", declaration => {
   const before = `${declaration}\nfunction ordinary() { return 1; }\n`
   expect(sourceUnits(before).units.map(unit => unit.frozen)).toEqual([true, false])
@@ -33,6 +35,17 @@ it.each([
 })
 
 it.each([
+  "import BannerConsent from './BannerConsent';",
+  "import { enabled as hasConsent } from './settings';",
+  "import type { ConsentOptions } from './settings';",
+  "export { hasConsent } from './settings';",
+  "export { enabled as hasConsent } from './settings';",
+  "export type { ConsentOptions } from './settings';",
+  "type ConsentOptions = boolean;",
+  "interface ConsentOptions {}",
+  "enum ConsentOptions { Enabled }",
+  "namespace ConsentOptions {}",
+  "export * as ConsentOptions from './settings';",
   "function enabled() { return preferences; }",
   "const enabled = consentMap;",
   "function enabled(consent: boolean) { return consent; }",
@@ -87,4 +100,11 @@ it("bounds the raw scan for repeated closed and unterminated comment prefixes", 
     expect(isConsentText(source)).toBe(false)
     expect(performance.now() - started).toBeLessThan(1_000)
   }
+})
+
+it("keeps an import-only JSX entry editable without following its consent component", () => {
+  const source = "import BannerConsent from '../components/BannerConsent';\nexport default function App() { return <BannerConsent />; }\n"
+  expect(isConsentText(source)).toBe(false)
+  expect(sourceUnits(source, "pages/_app.tsx").units.every(unit => !unit.frozen)).toBe(true)
+  expect(restoreFrozenUnits(source, source + "\nexport const ordinary = true;\n", "pages/_app.tsx").changes).toEqual([])
 })
