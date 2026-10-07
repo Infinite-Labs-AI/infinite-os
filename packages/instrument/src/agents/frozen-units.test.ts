@@ -144,3 +144,18 @@ it("restores a deleted first frozen unit without duplicating a byte-order mark",
   const before = "\ufefffbq('consent','revoke');\nfunction other(){ return 1; }\n"
   expect((await turn(before, "\ufefffunction other(){ return 2; }\n")).text).toBe(before.replace("return 1", "return 2"))
 })
+
+it("warns the job when a comment-separated API assignment is added without a same-file consent call", async () => {
+  const before = "function other(){ return 1; }\n"
+  const expected = before.replace("return 1", "return 2")
+  const result = await turn(before, expected + "window.fbq /* owner API */ = () => {};\n")
+  expect(result.text).toBe(expected)
+  expect(result.warning.join(" ")).toContain("your change there was put back")
+})
+
+it("warns the job when only an API assignment continuation changes", async () => {
+  const before = "window.fbq =\n  realPixel;\nfunction other(){ return 1; }\n"
+  const result = await turn(before, before.replace("realPixel", "fakePixel").replace("return 1", "return 2"))
+  expect(result.text).toBe(before.replace("return 1", "return 2"))
+  expect(result.warning.join(" ")).toContain("your change there was put back")
+})

@@ -92,3 +92,34 @@ it("authorizes only exact emitted bytes, with no allowance to a worker or to ano
   expect(result.changes.length).toBeGreaterThan(0)
   expect(result.text).not.toContain("window.fbq =")
 })
+
+it.each([
+  "window.fbq /* owner API */ = () => {};",
+  "function* fbq() {}",
+  "Object.defineProperty(window, `gtag`, {value: () => {}});",
+  "const f = window?.fbq;",
+  "const f = window /* owner API */ .fbq;",
+  "function helper(fbq) { return 1; }",
+  "const lib = { fbq() {} };",
+  "let harmless = 1, fbq;",
+  "function outer(){ function helper(fbq) {} }",
+  "function outer(){ let harmless = 1, fbq; }",
+  "Object['defineProperty'](window, 'gtag', {value: () => {}});",
+  "delete\n window.fbq;",
+  "const f = (window.fbq);",
+  "const lib = {fbq};",
+])("restores added API syntax even in a file without an existing consent call: %s", addition => {
+  const before = "export const title = 'Example';\n"
+  const result = restoreFrozenUnits(before, before + addition + "\n")
+  expect(result.text).toBe(before)
+  expect(result.changes.length).toBeGreaterThan(0)
+})
+
+it.each([
+  "window.fbq =\n  realPixel;\n",
+  "Object.defineProperty(window, 'fbq', {\n  value: realPixel,\n});\n",
+])("restores changed continuation lines of an API assignment: %s", before => {
+  const result = restoreFrozenUnits(before, before.replace("realPixel", "fakePixel"))
+  expect(result.text).toBe(before)
+  expect(result.changes.length).toBeGreaterThan(0)
+})

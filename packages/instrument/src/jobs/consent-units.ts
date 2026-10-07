@@ -7,17 +7,25 @@ const API_NAMES = new Set<string>(CONSENT_API_NAMES)
 // Scan the complete raw source even when a glob or malformed construct stops tokenization.
 const RAW_TRIVIA = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\r\n]*(?:\r?\n|$))*`
 const API_WORD = `(?:${CONSENT_API_NAMES.join("|")}|Optanon[A-Za-z0-9_$]*|Didomi[A-Za-z0-9_$]*)`
-const API_TARGET = `(?:\\b${API_WORD}\\b|\\[\\s*['\"]${API_WORD}['\"]\\s*\\])`
+const API_LITERAL = `['\"\x60]${API_WORD}['\"\x60]`
+const API_TARGET = `(?:\\b${API_WORD}\\b|\\[\\s*${API_LITERAL}\\s*\\])`
+const API_RECEIVER = `(?:(?:[\\w$]+|\\([^;\\n)]*\\))\\s*(?:\\?\\.|\\.)\\s*)*`
+// Comments are JavaScript whitespace; this raw scan must not depend on tokenizer confidence.
+const apiWritePattern = (pattern: string) => new RegExp(pattern.replaceAll(String.raw`\s*`, RAW_TRIVIA).replaceAll(String.raw`\s+`, `${RAW_TRIVIA.slice(0, -1)}+`), "g")
 /** Syntactic writes/definitions/aliases only; this does not evaluate or model control flow. */
 const API_WRITE_PATTERNS = [
-  new RegExp(`${API_TARGET}\\s*(?:=(?!=|>)|[+*/%&|^-]=|&&=|\\|\\|=|\\?\\?=|\\+\\+|--)`, "g"),
-  new RegExp(`\\bdelete\\b[^;\\n]*${API_TARGET}`, "g"),
-  new RegExp(`\\b(?:const|let|var|function|class|interface|type|enum|namespace)\\s+(?:${API_WORD}\\b|[\\[{][^;=]*\\b${API_WORD}\\b)`, "g"),
-  new RegExp(`\\b(?:import|export)\\s*[^;\\n]*\\b${API_WORD}\\b[^;\\n]*(?:from\\b|})`, "g"),
-  new RegExp(`\\b(?:Object|Reflect)\\s*\\.\\s*(?:defineProperty|defineProperties|set)\\s*\\([^;]*?['\"]${API_WORD}['\"]`, "g"),
-  new RegExp(`(?:\\b${API_WORD}\\b|['\"]${API_WORD}['\"])\\s*:(?!:)`, "g"),
-  new RegExp(`=\\s*(?:(?:[\\w$]+|\\([^;\\n)]*\\))\\s*(?:\\?\\.)?\\.\\s*)*${API_TARGET}(?![\\w$]|\\s*(?:\\?\\.)?\\()`, "g"),
-  new RegExp(`=\\s*(?:(?:[\\w$]+|\\([^;\\n)]*\\))\\s*(?:\\?\\.)?\\.\\s*)*[\\w$]+\\s*\\[\\s*['\"]${API_WORD}['\"]\\s*\\]`, "g")
+  apiWritePattern(`${API_TARGET}\\s*(?:=(?!=|>)|[+*/%&|^-]=|&&=|\\|\\|=|\\?\\?=|\\+\\+|--)`),
+  apiWritePattern(`\\bdelete\\b[^;]*${API_TARGET}`),
+  apiWritePattern(`\\b(?:const|let|var|function|class|interface|type|enum|namespace)\\s+(?:${API_WORD}\\b|[\\[{][^;=]*\\b${API_WORD}\\b)`),
+  apiWritePattern(`\\b(?:const|let|var)\\b[^;]*?,\\s*${API_TARGET}(?=\\s*[,;=:)}])`),
+  apiWritePattern(`\\bfunction\\b[^;{}(]*\\([^;)]*\\b${API_WORD}\\b`),
+  apiWritePattern(`\\b(?:import|export)\\s*[^;\\n]*\\b${API_WORD}\\b[^;\\n]*(?:from\\b|})`),
+  apiWritePattern(`\\b(?:Object|Reflect)\\s*(?:\\.\\s*(?:defineProperty|defineProperties|set)|\\[\\s*['\"\x60](?:defineProperty|defineProperties|set)['\"\x60]\\s*\\])\\s*\\([^;]*?${API_LITERAL}`),
+  apiWritePattern(`(?:\\b${API_WORD}\\b|${API_LITERAL})\\s*:(?!:)`),
+  apiWritePattern(`[{,]\\s*${API_WORD}\\s*(?=[,}])`),
+  apiWritePattern(`${API_TARGET}\\s*\\([^;{}]*\\)\\s*(?::[^;{}]*)?\\{`),
+  apiWritePattern(`=\\s*(?:\\(\\s*)*${API_RECEIVER}${API_TARGET}(?![\\w$]|\\s*(?:\\?\\.)?\\()`),
+  apiWritePattern(`=\\s*${API_RECEIVER}[\\w$]+\\s*(?:\\?\\.)?\\s*\\[\\s*${API_LITERAL}\\s*\\]`)
 ]
 export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
   new RegExp(String.raw`[([,]${RAW_TRIVIA}['"]consent['"]${RAW_TRIVIA}(?:[,\])]|$)`),
@@ -257,12 +265,15 @@ function freezeAddedApiWrites(before: string, after: string, units: SourceUnit[]
   for (const line of lines) offsets.push(offsets.at(-1)! + line.length)
   const added = hunksOf(splitLines(before), lines).filter(hunk => hunk.bEnd > hunk.bStart).map(hunk => [offsets[hunk.bStart]!, offsets[hunk.bEnd]!] as const)
   const allowed = [...new Set(trusted)].filter(Boolean).flatMap(text => { const start = after.indexOf(text); return start < 0 ? [] : [[start, start + text.length] as const] })
+  const changed = (unit: SourceUnit) => added.some(([a, b]) => unit.start < b && unit.end > a)
+  // A changed RHS or descriptor continuation belongs to its complete assignment unit.
+  for (const unit of units) if (unit.apiBinding && changed(unit) && !allowed.some(([a, b]) => a <= unit.start && unit.end <= b)) unit.frozen = true
   for (const pattern of API_WRITE_PATTERNS) {
     pattern.lastIndex = 0
     for (const match of after.matchAll(pattern)) {
       const start = match.index!, end = start + match[0].length
-      if (!added.some(([a, b]) => start < b && end > a) || allowed.some(([a, b]) => a <= start && end <= b)) continue
-      for (const unit of units) if (unit.start < end && unit.end > start) unit.frozen = true
+      if (allowed.some(([a, b]) => a <= start && end <= b)) continue
+      for (const unit of units) if (unit.start < end && unit.end > start && changed(unit)) unit.frozen = true
     }
   }
 }
