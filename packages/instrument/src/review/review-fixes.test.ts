@@ -177,10 +177,10 @@ describe("P0-2: a standing ruling is never a worker FIX, whatever the item label
     expect(decisions.map((decision) => decision.ruling)).toEqual([undefined, "ga4_proxy", "meta_never_list"])
   })
 
-  it("a repeated owner-only review is unreliable and remains open without a worker fix", () => {
+  it("a repeated non-blocker owner finding remains information without a worker fix", () => {
     const [again] = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Really, add the consent banner." })], context({ declinedKeys: new Set(["app/layout.tsx|R16"]) }))
-    expect(again).toMatchObject({ action: "ASK", askReason: "owner_file" })
-    expect(again!.reason).toContain("review unreliable")
+    expect(again).toMatchObject({ action: "OWNER_INFO" })
+    expect(again!.reason).toContain("About your consent or privacy pages")
   })
 
   it("P3-6: an absolute or traversing path is unlocated, never an allowlist widening", () => {

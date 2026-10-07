@@ -3,7 +3,7 @@
 // a loop), which decisions are still open for the user, and which round ran on which head. The run state's
 // `pr.handledThreadIds` stays the record of replied threads.
 import type { ReviewChecklistItemId, ReviewResult } from "../wizard/contracts/agents.js"
-import { ownerInformationOnly, protectedFinding, reviewReliabilityWarning } from "./integrity.js"
+import { ownerInformationOnly, protectedFinding } from "./integrity.js"
 import type { ChecklistItem, JobItemState } from "../wizard/contracts/jobs.js"
 import type { InfiniteOwnLabel } from "./post.js"
 import type { TriageAction, TriageDecision } from "./triage.js"
@@ -109,7 +109,7 @@ export function openFindings(
           severity: finding.severity,
           path: finding.path,
           line: finding.line,
-          action: ownerInformationOnly(finding) && !ownership?.(finding.path, finding.line) && !writtenByRun?.(finding.path, finding.line) ? "OWNER_INFO" : declined ? "DECLINE" : "FIX",
+          action: ownerInformationOnly(finding) ? "OWNER_INFO" : declined ? "DECLINE" : "FIX",
           ruling: declined && rulingReplies.has(declined.reason) ? declined.reason : null,
           label: null,
           round: round.round
@@ -117,16 +117,15 @@ export function openFindings(
       }
     }
   }
-  const unreliable = reviewReliabilityWarning(ledger.rounds.at(-1)?.review?.findings ?? [...latest.values()])
   const out: OpenFinding[] = []
   for (const finding of latest.values()) {
     if (finding.action === "ANSWER" && !protectedFinding(finding)) continue
-    if (finding.action === "OWNER_INFO" && !unreliable && ownerInformationOnly(finding) && !(finding.path !== null && (ownership?.(finding.path, finding.line) || writtenByRun?.(finding.path, finding.line)))) continue
+    if (ownerInformationOnly(finding)) continue
     // Resumed ledgers can contain old keyword declines. Only a matching structured request
     // can still be closed; blockers and reports of a broken ruling stay open, as in fresh triage.
     const ruling = rulingForCategory(finding.category)
-    if (finding.action === "DECLINE" && finding.path !== null && isRepoRelativePath(finding.path) && ruling && !protectedFinding(finding)
-      && (ruling.violationItem === null || finding.item !== ruling.violationItem)
+    if (finding.action === "DECLINE" && ruling && !protectedFinding(finding)
+
       && (finding.ruling === ruling.id || finding.ruling === ruling.reply)) continue
     if (finding.action === "FIX" && finding.findingId !== null) {
       const job = jobs.find((entry) => entry.id === `review_comments:${finding.findingId}`)

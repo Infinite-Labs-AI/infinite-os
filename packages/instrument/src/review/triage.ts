@@ -1,4 +1,4 @@
-import { ownerInformationOnly, protectedFinding, reviewReliabilityWarning } from "./integrity.js"
+import { ownerInformationOnly, protectedFinding, OWNER_INFORMATION_HEADING } from "./integrity.js"
 // Triage of trusted review items (lane O4, §3g.4 step 4). Precedence: standing RULINGS > the wizard's
 // DETERMINISTIC checks > the checklist > reviewer opinion. Each item becomes:
 // - FIX: in scope and inside the run's allowlist → job 16 through the worker;
@@ -307,7 +307,6 @@ function inAllowlist(path: string, allowlist: readonly string[]): boolean {
 }
 
 export function triage(items: readonly TriageItem[], ctx: TriageContext): TriageDecision[] {
-  const unreliable = reviewReliabilityWarning(items.filter(item => item.source === "reviewer"))
   // Two reviewers (the agent and a teammate) on the same line with different fixes → the user decides.
   const conflicts = new Set<TriageItem>()
   for (const a of items) {
@@ -320,6 +319,7 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     }
   }
   return items.map((item): TriageDecision => {
+    if (ownerInformationOnly(item)) return { item, action: "OWNER_INFO", reason: OWNER_INFORMATION_HEADING }
     const located = item.path !== null && isRepoRelativePath(item.path) ? item.path : null
     // LF4-P1-3 (round 1): OWNERSHIP FIRST. §3x.3 Infinite's own code and the wizard's own change are never handed to the
     // customer's agent, whatever the finding says.
@@ -327,19 +327,13 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     if (owner !== null) {
       return { item, action: "INFINITE", label: owner, reason: `This is ${owner} (${item.path}): recorded for Infinite to fix.` }
     }
-    if (item.category === "owner_consent_privacy" && !(located !== null && ctx.writtenByRun?.(located, item.line))) {
-      if (unreliable) return { item, action: "ASK", askReason: "owner_file", reason: `${unreliable}. This finding stays open for independent review; the wizard does not change consent or policy code.` }
-      if (ownerInformationOnly(item)) return { item, action: "OWNER_INFO", reason: "About the site owner’s consent/privacy: not ours to change." }
-      if (protectedFinding(item)) return { item, action: "ASK", askReason: "owner_file", reason: "A blocker or security finding was labelled owner-only. The label cannot dismiss it: it stays open for independent review." }
-    }
-    if (located === null) return { item, action: "ASK", askReason: "unlocated", reason: "The finding has no safe file location, so it remains open for the site owner to scope." }
-    if (isPolicyPath(located, ctx.appRoot)) return { item, action: "ASK", askReason: "owner_file", reason: "This finding remains open. Policy pages are read-only for the wizard; the site owner must address it." }
+    if (item.category === "owner_consent_privacy" && protectedFinding(item)) return { item, action: "ASK", askReason: "owner_file", reason: "The reviewer marked this finding as a blocker. It stays open for you; the wizard does not edit owner consent or policy code." }
     const text = `${item.body}\n${item.suggestedFix ?? ""}`
     const declinedBefore = ctx.declinedKeys.has(triageKey(item))
     // An explicit out-of-scope request is never offered as a worker FIX.
     const ruling = rulingForCategory(item.category)
     if (ruling) {
-      if (protectedFinding(item)) return { item, action: "ASK", askReason: "ruling_violation", ruling: ruling.id, reason: "A blocker or security finding remains open for review; the wizard does not automatically dismiss it or perform the requested out-of-scope action." }
+      if (protectedFinding(item)) return { item, action: "ASK", askReason: "ruling_violation", ruling: ruling.id, reason: "A blocker remains open for review; the wizard does not automatically dismiss it or perform the requested out-of-scope action." }
       if (declinedBefore) {
         return {
           item,
@@ -349,17 +343,11 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
           reason: `${ruling.reply} It was raised again after the wizard declined it: you decide, outside the wizard.`
         }
       }
-      if (ruling.violationItem !== null && item.item === ruling.violationItem) {
-        return {
-          item,
-          action: "ASK",
-          askReason: "ruling_violation",
-          ruling: ruling.id,
-          reason: "The reviewer says this pull request breaks a standing rule. The wizard never hands consent, a GA4 proxy or Meta's never-list to an agent: you decide."
-        }
-      }
       return { item, action: "DECLINE", ruling: ruling.id, reason: ruling.reply }
     }
+
+    if (located === null) return { item, action: "ASK", askReason: "unlocated", reason: "The finding has no safe file location, so it remains open for the site owner to scope." }
+    if (isPolicyPath(located, ctx.appRoot)) return { item, action: "ASK", askReason: "owner_file", reason: "This finding remains open. Policy pages are read-only for the wizard; the site owner must address it." }
 
     // LF4-P1-3: a finding that asks to change a name only Infinite's runtime defines asks to change Infinite's code,
     // even on the customer's call line.

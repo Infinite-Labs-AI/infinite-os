@@ -1,4 +1,4 @@
-import { ownerInformationOnly, protectedFinding, reviewReliabilityWarning } from "./integrity.js"
+import { ownerInformationOnly, protectedFinding, OWNER_INFORMATION_HEADING } from "./integrity.js"
 import { safeDisplayText, neutralizeUntrustedMarkup, redactDisplayText } from "./display.js"
 // Everything the wizard posts on the PR (lane O4, §3g.3–§3g.5), built here and scanned here:
 // the PR body, the ONE review (`event: COMMENT`; a finding outside a diff hunk goes into the body), the replies,
@@ -92,13 +92,13 @@ export function buildReviewPost(input: {
   reviewer: AgentKind
   /** §3y.7: the items the reviewer could not check (an incomplete review says so in its header). */
   unchecked?: readonly string[]
-  isRunCode?: (path: string, line: number | null) => boolean
+  completeness?: "complete" | "incomplete" | "blind"
 }): ReviewPost {
   input = { ...input, review: omitOwnerPolicyReview(input.review) }
   const marker = PR_MARKERS.review({ runId: input.runId, round: input.round, head: input.head, reviewer: input.reviewer })
-  const unreliable = reviewReliabilityWarning(input.review.findings)
   const threads: ReviewPost["threads"] = []
   const bodyFindings: string[] = []
+  const ownerFindings: string[] = []
   const inBody: string[] = []
   for (const finding of input.review.findings) {
     const raw = `${finding.body}${finding.suggested_fix ? `\n\nSuggested fix: ${finding.suggested_fix}` : ""}`
@@ -109,8 +109,13 @@ export function buildReviewPost(input: {
     const text = mostlyRedacted(raw, scanned)
       ? `A finding on ${location} was withheld because it quoted a secret or personal data.`
       : scanned
-    const ownerInfo = !unreliable && ownerInformationOnly(finding) && !input.isRunCode?.(finding.path, finding.line)
-    const label = `${ownerInfo ? "About the site owner’s consent/privacy: not ours to change.\n\n" : ""}**[${finding.item} ${finding.severity}]** ${finding.id}`
+    const ownerInfo = ownerInformationOnly(finding)
+    const label = `**[${finding.item} ${finding.severity}]** ${finding.id}`
+    if (ownerInfo) {
+      inBody.push(finding.id)
+      ownerFindings.push(`- ${label} ${location}: ${text.replace(/\n+/g, " ")}`)
+      continue
+    }
     if (finding.line !== null && path === finding.path && lineInHunk(input.diffFiles, finding.path, finding.line)) {
       threads.push({ path: finding.path, line: finding.line, body: `${neutralizeCheckboxes(`${label}\n\n${text}`)}\n\n${marker}` })
     } else {
@@ -121,18 +126,20 @@ export function buildReviewPost(input: {
   const checklist = input.review.checklist
     .map((row) => `| ${row.item} | ${STATUS_TEXT[row.status]} | ${escapeCell(safeDisplayText(input.scanner, row.note))} |`)
     .join("\n")
-  const onlyInfo = input.review.findings.length > 0 && input.review.findings.every(finding => ownerInformationOnly(finding) && !input.isRunCode?.(finding.path, finding.line))
+  const onlyInfo = input.review.findings.length > 0 && input.review.findings.every(ownerInformationOnly)
   const protectedOpen = input.review.findings.some(protectedFinding)
-  const verdict = unreliable ? unreliable : protectedOpen ? "changes suggested" : onlyInfo && input.review.checklist.every(row => row.status !== "fail") ? "owner information only" : input.review.verdict === "looks_good" ? "looks good" : "changes suggested"
-  const unchecked = input.unchecked ?? []
+  const verdict = protectedOpen ? "changes suggested" : onlyInfo && input.review.checklist.every(row => row.status !== "fail") ? "owner information only" : input.review.verdict === "looks_good" ? "looks good" : "changes suggested"
+  const unchecked = input.unchecked?.length ? input.unchecked : input.review.checklist.length === 0 ? ["no checklist rows"] : input.completeness !== "complete" ? ["read-check not verified"] : []
   const header =
     unchecked.length > 0
       ? `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): incomplete — it could not check ${unchecked.join(", ")}.** Posted by infinite-tag; a review is an opinion, not a receipt.`
       : `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): ${verdict}.** Posted by infinite-tag; a review is an opinion, not a receipt.`
   const content = [
     header,
+    "Owner actions and copyable handoffs are in the pull request body and .infinite/wizard/report.md.",
     `**Reviewer summary (quoted):**\n\n${safeDisplayText(input.scanner, input.review.summary).split("\n").map(line => `> ${line}`).join("\n")}`,
     checklist ? `| Item | Status | Note |\n|---|---|---|\n${checklist}` : "",
+    ownerFindings.length > 0 ? `**${OWNER_INFORMATION_HEADING}**\n\n${ownerFindings.join("\n")}` : "",
     bodyFindings.length > 0 ? `**Notes outside the changed lines**\n\n${bodyFindings.join("\n")}` : ""
   ]
     .filter(Boolean)
@@ -205,7 +212,7 @@ export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixR
           : notFixedReply(fix?.kind === "not_fixed" ? (fix.outcome ?? "checks_failed") : "checks_failed", fix?.kind === "not_fixed" ? fix.why : null, scanner)
       : decision.action === "INFINITE"
         ? `This is ${decision.label ?? "Infinite's own code"} (${safeDisplayText(scanner, decision.item.path ?? "general")}), which the wizard never hands to your agent. The finding is recorded in this run's report for Infinite to fix.`
-      : decision.action === "ASK" && decision.leftByOwner
+      : decision.action === "ASK" && decision.leftByOwner && !ownerInformationOnly(decision.item)
         ? safeDisplayText(scanner, decision.reason)
       : decision.action === "ASK"
         ? `Waiting on the repo owner: ${safeDisplayText(scanner, decision.reason)}`
@@ -214,6 +221,8 @@ export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixR
 }
 
 export interface FinalCommentInput {
+  /** The structured report already rendered the non-blocker owner findings. */
+  ownerInformationInReport?: boolean
   ownerBoundary?: OwnerBoundaryMeasurement
   runId: string
   reportMarkdown: string
@@ -271,31 +280,27 @@ export function buildChecklist(jobs: readonly ChecklistItem[], scanner: Scanner 
 export function buildFinalComment(input: FinalCommentInput): string {
   input = { ...input, decisions: input.decisions.map(decision => ({ ...decision, reason: safeDisplayText(input.scanner, decision.reason), item: { ...decision.item, body: safeDisplayText(input.scanner, decision.item.body), path: decision.item.path === null ? null : safeDisplayText(input.scanner, decision.item.path) } })), notes: input.notes.map(note => safeDisplayText(input.scanner, note)), untrusted: input.untrusted.map(entry => ({ ...entry, author: safeDisplayText(input.scanner, entry.author), excerpt: safeDisplayText(input.scanner, entry.excerpt), path: entry.path === null ? null : safeDisplayText(input.scanner, entry.path) })) }
 
-  const reliability = input.completeness
-    ? input.completeness.unchecked.find(note => note.startsWith("review unreliable:")) ?? null
-    : reviewReliabilityWarning(input.decisions.map(decision => decision.item))
-  const ownerInfo = input.decisions.filter(decision => decision.action === "OWNER_INFO" && !reliability && ownerInformationOnly(decision.item)).map(decision => `- ${decision.reason} ${decision.item.path ?? "general"}: ${excerpt(decision.item.body)}`)
+  const ownerInfo = input.decisions.filter(decision => ownerInformationOnly(decision.item)).map(decision => `- ${decision.item.path ?? "general"}: ${excerpt(decision.item.body)}`)
   const declined = input.decisions
-    .filter((decision) => decision.action === "DECLINE" && !protectedFinding(decision.item))
+    .filter((decision) => decision.action === "DECLINE" && !ownerInformationOnly(decision.item) && !protectedFinding(decision.item))
     .map((decision) => `- ${decision.item.path ? `\`${decision.item.path}\`` : "general"}: ${decision.reason}`)
   const open = input.decisions
-    .filter((decision) => (decision.action === "ASK" && !decision.leftByOwner) || (decision.action === "OWNER_INFO" && (reliability || !ownerInformationOnly(decision.item))) || ((decision.action === "DECLINE" || decision.action === "ANSWER") && protectedFinding(decision.item)))
+    .filter((decision) => !ownerInformationOnly(decision.item) && ((decision.action === "ASK" && !decision.leftByOwner) || (decision.action === "OWNER_INFO" && !ownerInformationOnly(decision.item)) || ((decision.action === "DECLINE" || decision.action === "ANSWER") && protectedFinding(decision.item))))
     .map((decision) => `- ${decision.item.path ? `\`${decision.item.path}\`` : "general"}: ${decision.reason} (${excerpt(decision.item.body)})`)
   const left = input.decisions
-    .filter((decision) => decision.action === "ASK" && decision.leftByOwner)
+    .filter((decision) => decision.action === "ASK" && decision.leftByOwner && !ownerInformationOnly(decision.item))
     .map((decision) => `- ${decision.item.path ? `\`${decision.item.path}\`` : "general"}: ${decision.reason} (${excerpt(decision.item.body)})`)
   const answered = input.decisions
-    .filter((decision) => decision.action === "ANSWER" && !protectedFinding(decision.item))
+    .filter((decision) => decision.action === "ANSWER" && !ownerInformationOnly(decision.item) && !protectedFinding(decision.item))
     .map((decision) => `- ${decision.item.path ? `\`${decision.item.path}${decision.item.line ? `:${decision.item.line}` : ""}\`` : "general"}: ${excerpt(decision.item.body)} → ${decision.reason}`)
   const agentLabel = input.reviewer === "claude_code" || input.reviewer === "codex" ? AGENT_LABEL[input.reviewer] : null
   const review =
-    reliability ? `${input.reviewer === "brief" ? "Reviewed from the printed review brief" : agentLabel ? `Reviewed by ${agentLabel}` : "Second review"}: ${reliability}. A review is an opinion; only a receipt from this run means "proven".` :
     agentLabel && input.completeness?.state === "blind"
       ? `No second review (${agentLabel} could not read the files).`
       : input.reviewer === "brief" && input.reviewed
         ? // Live run 5 (P2): a review posted from the printed brief and read back IS a second review. The wizard does not
           // know which agent wrote it, so it names where it came from, never an agent it cannot vouch for.
-          `Reviewed from the printed review brief (an agent you chose posted it here). A review is an opinion; only a receipt from this run means "proven".`
+          `Reviewed from the printed review brief${input.completeness?.state === "incomplete" ? " (review incomplete: " + input.completeness.unchecked.join(", ") + ")" : ""} (an agent you chose posted it here). A review is an opinion; only a receipt from this run means "proven".`
       : input.reviewer === null || input.reviewer === "brief" || !input.reviewed || !agentLabel
         ? "No second review ran on this pull request."
         : input.completeness?.state === "incomplete"
@@ -306,7 +311,7 @@ export function buildFinalComment(input: FinalCommentInput): string {
     review,
     input.reportMarkdown.trim(),
     buildChecklist(input.jobs, input.scanner, input.reportMarkdown),
-    ownerInfo.length > 0 ? `**Information for the site owner**\n\n${ownerInfo.join("\n")}` : "",
+    ownerInfo.length > 0 && !input.ownerInformationInReport ? `**${OWNER_INFORMATION_HEADING}**\n\n${ownerInfo.join("\n")}` : "",
     declined.length > 0 ? `**Declined, with reasons**\n\n${declined.join("\n")}` : "",
     // Live run 5 (P3): a reviewer's question the wizard answered from this run's measurements. On a brief review there is
     // no inline thread to reply on, so the answer appears here, never nowhere.

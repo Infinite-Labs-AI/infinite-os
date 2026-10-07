@@ -28,12 +28,11 @@ it("keeps secret/PII findings regardless of consent words or a policy page path"
 
 it("uses structured owner category for information while retaining the finding", () => {
   const owner = { ...triageItem, category: "owner_consent_privacy", severity: "nit", body: "Owner wording in the terms page" } as TriageItem
-  const others = Array.from({ length: 3 }, () => ({ ...triageItem, category: "analytics" as const }))
-  const decision = triage([owner, ...others], context)[0]!
+  const decision = triage([owner], context)[0]!
   expect(decision.action).toBe("OWNER_INFO")
   const ledger = emptyLedger("fixture")
   recordDecisions(ledger, [decision], 1)
-  ledger.rounds = [{ round: 1, reviewedSha: "a".repeat(40), reviewer: "codex", fixSha: null, review: { ...review, findings: [{ ...finding, category: "owner_consent_privacy", severity: "nit", body: owner.body }, ...others.map((entry, index) => ({ ...finding, id: `F${index + 2}`, category: entry.category }))] } }]
+  ledger.rounds = [{ round: 1, reviewedSha: "a".repeat(40), reviewer: "codex", fixSha: null, review: { ...review, findings: [{ ...finding, category: "owner_consent_privacy", severity: "nit", body: owner.body }] } }]
   expect(ledger.findings).toHaveLength(1)
   expect(openFindings(ledger, [])).toHaveLength(0)
 })
@@ -63,9 +62,9 @@ it("selects the failing step section when Actions logs include step markers", ()
   expect(excerpt).not.toContain("Setup")
 })
 
-it("keeps a category-labelled finding on the run's agent-written capture fixable", () => {
+it("keeps a blocker on run-written capture open for the owner", () => {
   const decision = triage([{ ...triageItem, path: "src/capture.ts", category: "owner_consent_privacy" }], { ...context, allowlist: ["src/capture.ts"], writtenByRun: () => true })[0]!
-  expect(decision.action).toBe("FIX")
+  expect(decision.action).toBe("ASK")
 })
 
 it("accepts structured category in fresh reviews and leaves legacy missing-category findings in scope", () => {
@@ -74,14 +73,14 @@ it("accepts structured category in fresh reviews and leaves legacy missing-categ
   expect(isReviewResult({ ...review, findings: [{ ...finding, category: "trust_me" }] })).toBe(false)
 })
 
-it("uses receipt edit ranges to keep a real capture finding in scope", async () => {
+it("keeps a blocker open even when its owner category refers to this run's code", async () => {
   const { wizardOwnership } = await import("./ownership.js")
   const source = "function capture() {\n  if (!window.__infiniteConsentAllowed()) return;\n}\n"
   const receipt = { edits: [{ by: "agent", file: "src/tracking.ts", beforeHash: "prior", textEdits: [{ offset: 0, removed: "", inserted: source }] }] }
   const ownership = await wizardOwnership({ fs: { readText: async (path: string) => path.endsWith("install.json") ? JSON.stringify(receipt) : path.endsWith("src/tracking.ts") ? source : null } } as never, "/fixture", async () => true)
   const current: TriageItem = { ...triageItem, path: "src/tracking.ts", category: "owner_consent_privacy", body: "Our new capture's gate does not read the existing decision" }
   expect(ownership.writtenByRun?.(current.path!, 2)).toBe(true)
-  expect(triage([current], { ...context, allowlist: [current.path!], ownership: ownership.classify, writtenByRun: ownership.writtenByRun })[0]?.action).toBe("FIX")
+  expect(triage([current], { ...context, allowlist: [current.path!], ownership: ownership.classify, writtenByRun: ownership.writtenByRun })[0]?.action).toBe("ASK")
   const ledger = emptyLedger("fixture")
   recordDecisions(ledger, [{ item: current, action: "OWNER_INFO", reason: "stale category" }], 1)
   expect(openFindings(ledger, [], ownership.classify, ownership.writtenByRun)).toHaveLength(1)
@@ -161,7 +160,7 @@ it("reopens legacy and security ruling declines when resuming either ledger form
   }
 })
 
-it("only closes structured requests with a matching ruling and no blocker or violation", () => {
+it("only closes structured non-blocker requests with a matching ruling", () => {
   for (const [category, rulingId, violationItem] of requestRulings) {
     const ruling = RULINGS.find(entry => entry.id === rulingId)!
     for (const format of ["findings", "rounds"] as const) {
@@ -174,7 +173,7 @@ it("only closes structured requests with a matching ruling and no blocker or vio
           ledger.rounds = [{ round: 1, reviewedSha: "a".repeat(40), reviewer: "codex", fixSha: null, review: { ...review, findings: [{ ...finding, category, path: current.path!, severity: current.severity, item: current.item!, body: current.body }] } }]
           ledger.declined = [{ key: triageKey(current), reason: chosen.reply, round: 1 }]
         }
-        expect(openFindings(ledger, []), `${format}: ${category}: ${variant}`).toHaveLength(variant === "request" ? 0 : 1)
+        expect(openFindings(ledger, []), `${format}: ${category}: ${variant}`).toHaveLength(variant === "request" || variant === "violation" ? 0 : 1)
       }
     }
   }

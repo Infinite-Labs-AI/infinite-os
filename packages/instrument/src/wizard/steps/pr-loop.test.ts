@@ -1054,39 +1054,31 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     findings: []
   })
 
-  it("§3y.7 the live run's blind review → one retry → still blind: NO review posted, the brief path, and never 'nothing to change'", async () => {
-    const w = await opened({ reviews: [liveBlindReview(), liveBlindReview()], blindReviewer: true, answers: { "teammate-comments": { actOn: [] } } })
+  it("a missing read-check retries once and keeps the incomplete findings visible", async () => {
+    const unread: ReviewResult = { ...liveBlindReview(), findings: [{ id: "F1", item: "R16", severity: "should", category: "owner_consent_privacy", path: "app/layout.tsx", line: 2, body: "Owner decides the banner wording", suggested_fix: null }] }
+    const w = await opened({ reviews: [unread, unread], blindReviewer: true, answers: { "teammate-comments": { actOn: [] } } })
     const outcome = await reviewStep.run(w.ctx, w.deps)
     expectOk(outcome)
-    expect(outcome.status).toContain("no second review (Codex could not read the files)")
-    // One retry with a fresh session, the same worktree, and the "read them now" note.
+    expect(outcome.status).toContain("reviewed by Codex (incomplete)")
     expect(w.agents.reviewCalls).toHaveLength(2)
     expect(w.agents.reviewCalls[1]!.worktreeDir).toBe(w.agents.reviewCalls[0]!.worktreeDir)
-    expect(w.agents.reviewCalls[1]!.brief).toContain("Your last answer shows you could not read the files.")
-    // Nothing posted as a review; the final comment says why; the terminal warns and points at the brief.
     const state = w.gh.read()
-    expect(state.calls.filter((call) => call.stdin?.includes("addPullRequestReview(input"))).toEqual([])
-    const final = (state.prs[0] as { comments?: Array<{ body: string }> }).comments?.map((comment) => comment.body).join("\n") ?? ""
-    expect(final).toContain("No second review (Codex could not read the files).")
-    expect(final).not.toContain("Reviewed by Codex")
-    const text = eventText(w.ctx)
-    expect(text).toContain("! Codex could not read the pull request's files, so there is no second review.")
-    expect(text).toContain("The review brief is in .infinite/wizard/review-brief.md.")
-    expect(text).not.toContain("nothing to change")
-    expect(existsSync(join(w.fx.root, ".infinite/wizard/review-brief.md"))).toBe(true)
-    // The merge card says the same.
-    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toBe("No second review (Codex could not read the files)")
+    expect(state.calls.filter(call => call.stdin?.includes("addPullRequestReview(input"))).toHaveLength(1)
+    const final = (state.prs[0] as { comments?: Array<{ body: string }> }).comments?.map(comment => comment.body).join("\n") ?? ""
+    expect(final).toContain("Reviewed by Codex (incomplete")
+    expect(final).toContain("Owner decides the banner wording")
+    expect(eventText(w.ctx)).not.toContain("nothing to change")
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toContain("Review incomplete")
+    expect(w.agents.jobCalls).toEqual([])
   })
 
-  it("review P3-3: the RIGHT nonce but every item cant_tell is blind → one retry → still blind: nothing posted, never 'nothing to change'", async () => {
-    // Not `blindReviewer`: the scripted reviewer reads its folder and quotes the right nonce both times.
-    const w = await opened({ reviews: [liveBlindReview(), liveBlindReview()], answers: { "teammate-comments": { actOn: [] } } })
+  it("an all-unchecked checklist remains a visible incomplete review", async () => {
+    const w = await opened({ reviews: [liveBlindReview()], answers: { "teammate-comments": { actOn: [] } } })
     const outcome = await reviewStep.run(w.ctx, w.deps)
     expectOk(outcome)
-    expect(outcome.status).toContain("no second review (Codex could not read the files)")
-    expect(w.agents.reviewCalls).toHaveLength(2)
-    expect(w.agents.reviewCalls[1]!.brief).toContain("Your last answer shows you could not read the files.")
-    expect(w.gh.read().calls.filter((call) => call.stdin?.includes("addPullRequestReview(input"))).toEqual([])
+    expect(outcome.status).toContain("reviewed by Codex (incomplete)")
+    expect(w.agents.reviewCalls).toHaveLength(1)
+    expect(w.gh.read().calls.filter(call => call.stdin?.includes("addPullRequestReview(input"))).toHaveLength(1)
     expect(eventText(w.ctx)).not.toContain("nothing to change")
   })
 
@@ -1115,12 +1107,12 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(ledger).toContain("[read-check]")
   })
 
-  it("§3y.7 a missing nonce alone is blind (even with every item checked)", async () => {
+  it("a missing nonce alone is incomplete even with every item checked", async () => {
     const good = review([])
     const w = await opened({ reviews: [good, good], blindReviewer: true, answers: { "teammate-comments": { actOn: [] } } })
     const outcome = await reviewStep.run(w.ctx, w.deps)
     expectOk(outcome)
-    expect(outcome.status).toContain("no second review")
+    expect(outcome.status).toContain("reviewed by Codex (incomplete)")
     expect(eventText(w.ctx)).not.toContain("nothing to change")
   })
 
@@ -1197,7 +1189,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(reviewCalls).toHaveLength(2)
     for (const call of reviewCalls) expect(JSON.parse(call.stdin!).query).toMatch(/event: COMMENT/)
     const first = JSON.parse(reviewCalls[0]!.stdin!) as { variables: { body: string; threads: Array<{ path: string; line: number }> } }
-    expect(first.variables.threads.map((thread) => `${thread.path}:${thread.line}`)).toEqual(["app/layout.tsx:2", "app/layout.tsx:3"])
+    expect(first.variables.threads.map((thread) => `${thread.path}:${thread.line}`)).toEqual(["app/layout.tsx:2"])
     expect(first.variables.body).toContain("`lib/other.ts:9`")
 
     // The fix commit is a descendant with the round trailer.
@@ -1207,15 +1199,15 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.fx.git(["log", "-1", "--format=%(trailers:key=Infinite-Review-Round,valueonly)", fixHead]).trim()).toBe("1")
     expect(w.fx.git(["log", "-1", "--format=%(trailers:key=Infinite-Tag-Run,valueonly)", fixHead]).trim()).toBe(RUN_ID)
 
-    // Replies: the fixed thread is resolved; an owner-heavy review leaves the owner finding open.
+    // The fixed thread is resolved; owner information is shown in the body, not an actionable thread.
     const own = state.threads.filter((thread) => thread.comments[0]!.author === "acme-dev")
     const f1 = own.find((thread) => thread.comments[0]!.body.includes("F1"))!
     const f2 = own.find((thread) => thread.comments[0]!.body.includes("F2"))!
     expect(f1.comments[1]!.body).toMatch(new RegExp(`Fixed in ${fixHead.slice(0, 7)}`))
     expect(f1.isResolved).toBe(true)
-    expect(f2.comments).toHaveLength(2)
-    expect(f2.comments[1]!.body).toContain("review unreliable")
-    expect(f2.isResolved).toBe(false)
+    expect(f2).toBeUndefined()
+    expect(first.variables.body).toContain("About your consent or privacy pages (yours to decide)")
+    expect(first.variables.body).toContain("F2")
     // An un-OK'd teammate thread and a stranger's thread get no reply.
     expect(state.threads.find((thread) => thread.id === "PRRT_teammate")!.comments).toHaveLength(1)
     expect(state.threads.find((thread) => thread.id === "PRRT_stranger")!.comments).toHaveLength(1)
@@ -1347,8 +1339,9 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.agents.jobCalls).toHaveLength(1)
     expect(w.agents.jobCalls[0]!.items.map((item) => item.id)).toEqual(["review_comments:F2"])
     const final = (w.gh.read().prs[0]!.comments as Array<{ body: string }>).at(-1)!.body
-    expect(final).toContain("review unreliable")
-    expect(final).toContain("**You decide**")
+    expect(final).toContain("About your consent or privacy pages (yours to decide)")
+    expect(final).not.toContain("review unreliable")
+    expect(final).not.toContain("**You decide**")
     expect(final).toContain("add the consent banner")
   })
 
@@ -1519,7 +1512,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(finals[0]!.edited).toBe(true)
     expect(finals[0]!.body).toMatch(/Reviewed from the printed review brief/)
     expect(finals[0]!.body).not.toMatch(/No second review ran/)
-    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "brief")).toContain("Reviewed from the printed review brief: review unreliable")
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "brief")).toContain("Reviewed from the printed review brief (review incomplete)")
   })
 
   it("when the base moved, updates the branch with a merge commit (never a rebase) and fast-forwards", async () => {

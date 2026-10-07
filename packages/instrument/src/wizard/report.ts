@@ -560,7 +560,6 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     day7: input.day7 ?? { measuredAt: null, window: null, cell: null },
     finishLine,
     notes: [...new Set([
-      ...(input.verdictFacts?.reviewUnreliable ? [input.verdictFacts.reviewUnreliable] : []),
       ...activationNotes,
       ...(activationNotes.length ? ["Your banner connection is unverified in this run. Required-mode offline and browser checks supply a test grant; passing those checks does not confirm your banner signal."] : []),
       ...(input.verdictFacts?.consentActivation?.mode === "not_required" && (input.verdictFacts.consentActivation.infinite || input.verdictFacts.consentActivation.capture) ? ["This run's tag and ad-click capture collect by default, independently of other banners until you connect their yes/no signal to Infinite. An Infinite-recorded no and DNT/GPC without an explicit grant are respected."] : []),
@@ -582,8 +581,7 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
       jobs: input.verdictFacts.jobs,
       openFindings: input.verdictFacts.openFindings,
       tools: input.verdictFacts.tools,
-      installedUnknown: input.verdictFacts.installedUnknown,
-      reviewUnreliable: input.verdictFacts.reviewUnreliable
+      installedUnknown: input.verdictFacts.installedUnknown
     })
   }
   if (input.verdictFacts?.tagNotInstalled && report.verdict) {

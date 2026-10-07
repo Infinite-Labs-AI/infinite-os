@@ -1,5 +1,4 @@
 import { branchUpdateCommits } from "../../github/update-branch.js"
-import { reviewReliabilityWarning } from "../../review/integrity.js"
 import { safeDisplayText } from "../../review/display.js"
 // Step 9 `review` (§3d.1, §3g.4, lane O4): the OTHER agent reviews the PR read-only in a detached worktree of
 // the head → the wizard scans the review and posts it as ONE `event: COMMENT` review → reads the threads back
@@ -266,13 +265,11 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
     const first = await once(brief)
     if ("error" in first) return first
     let classified = classifyReview(first, nonce)
-    if (classified.state === "blind") {
-      sub(ctx, "review", `${AGENT_LABEL[reviewer]}'s review shows it could not read the files; asking once more`, "info")
+    if (classified.unchecked.includes("read-check missing or incorrect")) {
+      sub(ctx, "review", `${AGENT_LABEL[reviewer]}'s review is missing its read-check; asking once more`, "info")
       const retry = await once(`${brief}\n\n${BLIND_RETRY_NOTE}`)
-      if ("error" in retry && (retry.error === "out_of_usage" || retry.error === "timeout")) return retry
       if (!("error" in retry)) classified = classifyReview(retry, nonce)
     }
-    if (classified.state === "blind") return { blind: true }
     return { review: classified.review, classified }
   } finally {
     await ship.git.worktreeRemove(worktree.dir)
@@ -285,8 +282,7 @@ async function postRound(session: Session, review: ReviewResult, reviewer: Agent
   const state = ctx.state.get()
   const fullDiff = await ship.git.diff(state.git!.baseSha, head)
   const unchecked = classified?.state === "incomplete" ? classified.unchecked : []
-  const ownership = await sessionOwnership(session)
-  const post = buildReviewPost({ isRunCode: ownership.writtenByRun, review, diffFiles: parseUnifiedDiff(fullDiff), scanner: ship.scanner, runId: ship.runId, round, head, reviewer, unchecked })
+  const post = buildReviewPost({ review, diffFiles: parseUnifiedDiff(fullDiff), scanner: ship.scanner, runId: ship.runId, round, head, reviewer, unchecked, completeness: classified?.state })
   const redact = (text: string) => (ship.isPrivate ? text : redactIdsNotInDiff(text, fullDiff, ship.facts.connectionIds))
   const body = redact(post.body)
   const threads = post.threads.map((thread) => ({ ...thread, body: redact(thread.body) }))
@@ -307,10 +303,8 @@ async function postRound(session: Session, review: ReviewResult, reviewer: Agent
  */
 export function reviewFoundLines(reviewer: string, review: Pick<ReviewResult, "verdict" | "findings" | "checklist">, round: number, classified: Pick<ClassifiedReview, "state" | "unchecked"> | null): Array<{ text: string; tone: "ok" | "info" | "warn" }> {
   const lines: Array<{ text: string; tone: "ok" | "info" | "warn" }> = []
-  const unreliable = reviewReliabilityWarning(review.findings)
-  if (unreliable) lines.push({ text: `! ${reviewer}: ${unreliable}`, tone: "warn" })
-  const complete = !unreliable && (classified === null || classified.state === "complete")
-  const unchecked = classified?.unchecked.filter(item => !item.startsWith("review unreliable:")) ?? []
+  const complete = classified?.state === "complete" && review.checklist.length > 0
+  const unchecked = classified?.unchecked ?? []
   if (classified?.state === "incomplete" && unchecked.length > 0) {
     const total = review.checklist.length
     lines.push({ text: `! ${reviewer}'s review is incomplete: it could not check ${unchecked.join(", ")} (${Math.max(0, total - unchecked.length)} of ${total} checked)`, tone: "warn" })
@@ -1019,7 +1013,9 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       review = savedReview!
       sub(ctx, "review", `Resuming round ${round} from its saved review`, "info")
     } else if (round === 1 && briefReview) {
-      review = briefReview
+      const classified = classifyReview(briefReview, "")
+      review = classified.review
+      session.ledger.completeness = { reviewer: "brief", state: classified.state, unchecked: classified.unchecked }
     } else if (agentReviewer) {
       const openItems = session.ledger.open.map((entry) => `${entry.path ?? "general"}: ${entry.excerpt.slice(0, 120)}`)
       const result = await runReviewer(session, agentReviewer, round, head, round === 1 ? gitState.baseSha : reviewedSha, openItems)
@@ -1046,12 +1042,6 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       await postRound(session, review, agentReviewer, round, head, result.classified)
     } else {
       break
-    }
-    const unreliable = reviewReliabilityWarning(review.findings)
-    session.notes = session.notes.filter(note => !note.startsWith("review unreliable:"))
-    if (unreliable) {
-      session.ledger.completeness = { reviewer: agentReviewer ?? "brief", state: "incomplete", unchecked: [unreliable] }
-      if (!session.notes.includes(unreliable)) session.notes.push(unreliable)
     }
     session.reviewed = true
     reviewedSha = head
@@ -1268,11 +1258,10 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
   const rehearsalText = once === "pass" ? "rehearsal passed on the latest commit" : once === "problem" ? "rehearsal found a problem" : "rehearsal undetermined"
   const blind = session.ledger.completeness?.state === "blind" && agentReviewer !== null
   const incomplete = session.ledger.completeness?.state === "incomplete"
-  const unreliable = reviewReliabilityWarning(session.ledger.rounds.at(-1)?.review?.findings ?? [])
   const who = blind
     ? `no second review (${AGENT_LABEL[agentReviewer!]} could not read the files)`
     : session.reviewed
-      ? `reviewed by ${agentReviewer ? AGENT_LABEL[agentReviewer] : "your agent (brief)"}${unreliable ? " (review unreliable)" : incomplete ? " (incomplete)" : ""}`
+      ? `reviewed by ${agentReviewer ? AGENT_LABEL[agentReviewer] : "your agent (brief)"}${incomplete ? " (incomplete)" : ""}`
       : "no second review"
   const found = session.reviewed ? reviewTally(session.ledger.rounds) : null
   const line = [`${final.pr?.number ? `Pull request #${final.pr.number}` : "Branch"}`, who, ...(found ? [found] : []), rehearsalText].join(" · ")

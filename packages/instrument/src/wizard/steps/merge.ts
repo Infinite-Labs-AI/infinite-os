@@ -1,4 +1,3 @@
-import { reviewReliabilityWarning } from "../../review/integrity.js"
 // Step 10 `merge` (§3d.1, §3g.4 "Merge gate", lane O4). The USER merges; the wizard never runs `gh pr merge`,
 // never `--admin`, never pushes to the base. It asks `merge-ready` (ENTER open on GitHub · ESC later), then polls
 // `gh pr view --json state,mergedAt,mergeCommit` every 30 s while the terminal is open. Merged → the merge commit
@@ -91,10 +90,8 @@ async function saveMerge(ctx: WizardContext, deps: WizardDeps, runId: string, me
 export async function reviewSentence(ctx: Pick<WizardContext, "root">, deps: Pick<WizardDeps, "fs">, runId: string, reviewer: string | null): Promise<string> {
   const label = reviewer === "codex" ? "Codex" : reviewer === "claude_code" ? "Claude Code" : null
   const ledger = parseLedger(await deps.fs.readText(join(ctx.root, REVIEW_LEDGER_PATH)), runId)
-  const unreliable = reviewReliabilityWarning(ledger.rounds.at(-1)?.review?.findings ?? [])
-  if (unreliable) return `${reviewer === "brief" ? "Reviewed from the printed review brief" : label ? `Reviewed by ${label}` : "Second review"}: ${unreliable}`
   // Live run 5 (P2): a review posted from the printed brief and read back is a review (its round is in the ledger).
-  if (!label) return reviewer === "brief" && ledger.rounds.some((round) => round.reviewer === "brief") ? "Reviewed from the printed review brief" : "No second review"
+  if (!label) return reviewer === "brief" && ledger.rounds.some((round) => round.reviewer === "brief") ? `Reviewed from the printed review brief${ledger.completeness?.state === "incomplete" ? " (review incomplete)" : ""}` : "No second review"
   const completeness = ledger.completeness
   if (completeness?.state === "blind") return `No second review (${label} could not read the files)`
   if (completeness?.state === "incomplete") {

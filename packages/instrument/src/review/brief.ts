@@ -1,4 +1,3 @@
-import { reviewReliabilityWarning } from "./integrity.js"
 // The second-agent review brief (lane O4, §3g.4; items R1–R16 from wf4-pr-review-loop §2, with R6 reading
 // "no edits to any banner or consent code; consent mode only recorded"). The same text is:
 // - the reviewer agent's appended system prompt (Claude `--append-system-prompt`, Codex stdin);
@@ -85,7 +84,7 @@ export function reviewerBrief(input: BriefInput): string {
     "Check each item and give it pass / fail / cant_tell:",
     itemsBlock(),
     'An item that does not apply to this change is "pass" with the note "not applicable: <why>". Use "cant_tell" only when you could not check it.',
-    "Every finding must set category: security for any PII, secret or credential defect (never an unsupported-feature request); request_ga4_proxy, request_meta_unsupported or request_meta_deletion only when requesting those new actions; analytics for other defects (including our own capture/gate), or owner_consent_privacy only for the site owner’s existing policy/consent choices. Do not raise findings about those choices. An isolated, located, non-security owner-only finding may be retained as information. Blockers, R7/R8 findings, PII, secrets and security defects always remain in scope; a missing path is never a reason to discard a finding. More than 25% owner-labelled findings makes the review unreliable. Never categorize a defect in code this run wrote as owner-only.",
+    "Every finding must set category: security for security defects; request_ga4_proxy, request_meta_unsupported or request_meta_deletion for those requested actions; analytics for other defects; owner_consent_privacy for the site owner's consent/privacy choices. Mark severity accurately: every blocker stays open, whatever its category. Non-blocker owner-category findings are information for the owner, never worker tasks. The wizard uses these labels without second-guessing your words.",
     "Return JSON only, matching the schema: {verdict, summary, checklist:[{item, status, note}], findings:[{id, item, category, severity, path, line, body, suggested_fix}]}. " +
       "Keep each finding to one concrete problem with its file (repo-relative) and line. Finding ids are F1, F2, …"
   ].join("\n\n")
@@ -230,20 +229,18 @@ export function redactReadCheck(review: ReviewResult, nonce: string): ReviewResu
 }
 
 /**
- * `blind`: the nonce is missing or wrong, OR every item is `cant_tell`; `incomplete`: the nonce is right and 1–15
- * items are `cant_tell`; `complete`: the nonce is right and none is. The nonce is redacted either way
+ * A complete review has a verified read-check and at least one checklist row, with none left unchecked.
+ * Missing evidence stays visible as an incomplete review. The nonce is redacted either way
  * (`redactReadCheck`).
  */
 export function classifyReview(review: ReviewResult, nonce: string): ClassifiedReview {
   const summary = review.summary.trimStart()
-  const quoted = nonce.length > 0 && summary.startsWith(`${READ_CHECK_PREFIX} ${nonce}`)
+  const quoted = nonce.length > 0 && summary.startsWith(`${READ_CHECK_PREFIX} `) && summary.slice(READ_CHECK_PREFIX.length).trimStart().split(/\s/, 1)[0] === nonce
   const clean = omitOwnerPolicyReview(redactReadCheck(review, nonce))
-  const unchecked = clean.checklist.filter((row) => row.status === "cant_tell").map((row) => row.item)
-  const everyItemUnchecked = clean.checklist.length > 0 && unchecked.length === clean.checklist.length
-  if (!quoted || everyItemUnchecked) return { state: "blind", review: clean, unchecked }
-  const unreliable = reviewReliabilityWarning(clean.findings)
-  if (unreliable) return { state: "incomplete", review: { ...clean, verdict: "changes_suggested" }, unchecked: [...unchecked, unreliable] }
-  return { state: unchecked.length > 0 ? "incomplete" : "complete", review: clean, unchecked }
+  const unchecked: string[] = clean.checklist.filter((row) => row.status === "cant_tell").map((row) => row.item)
+  if (!quoted) unchecked.unshift("read-check missing or incorrect")
+  if (clean.checklist.length === 0) unchecked.push("no checklist rows")
+  return { state: unchecked.length > 0 ? "incomplete" : "complete", review: unchecked.length > 0 ? { ...clean, verdict: "changes_suggested" } : clean, unchecked }
 }
 
 /** Retired consent rubric rows are not graded. Findings and prose are never keyword-filtered. */

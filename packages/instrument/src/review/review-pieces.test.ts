@@ -114,10 +114,10 @@ describe("triage (§3g.4 step 4)", () => {
     expect(triage([item({})], triageContext())[0]).toMatchObject({ action: "FIX" })
   })
 
-  it("an isolated owner category is retained as information among in-scope findings", () => {
-    const [decision] = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Add a cookie banner and gate GA4 behind consent." }), item({}), item({}), item({})], triageContext())
+  it("a single owner category is retained as information", () => {
+    const [decision] = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Add a cookie banner and gate GA4 behind consent." })], triageContext())
     expect(decision).toMatchObject({ action: "OWNER_INFO" })
-    expect(decision!.reason).toBe("About the site owner’s consent/privacy: not ours to change.")
+    expect(decision!.reason).toBe("About your consent or privacy pages (yours to decide)")
   })
 
   it("a legacy R6 finding without a category is not silently discarded", () => {
@@ -151,12 +151,12 @@ describe("triage (§3g.4 step 4)", () => {
     ])
   })
 
-  it("an owner-only review remains unreliable when raised again", () => {
+  it("an owner-only finding remains information when raised again", () => {
     const first = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Add a cookie banner." })], triageContext())[0]!
-    expect(first.action).toBe("ASK")
+    expect(first.action).toBe("OWNER_INFO")
     const again = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Please add the consent banner after all." })], triageContext({ declinedKeys: new Set(["app/layout.tsx|R16"]) }))[0]!
-    expect(again).toMatchObject({ action: "ASK", askReason: "owner_file" })
-    expect(again.reason).toContain("review unreliable")
+    expect(again).toMatchObject({ action: "OWNER_INFO" })
+    expect(again.reason).toContain("About your consent or privacy pages")
   })
 
   it("two reviewers in conflict on one line → ASK for both", () => {
@@ -273,7 +273,7 @@ describe("posts (§3g.3)", () => {
     })
     expect(post.threads).toHaveLength(1)
     expect(post.threads[0]!.body).not.toContain("not ours to change")
-    expect(post.body).toContain("review unreliable")
+    expect(post.body).toContain("incomplete")
     expect(post.inBody).toEqual(["F2"])
     expect(post.body).toContain("Rewrite policy copy")
   })
@@ -281,7 +281,7 @@ describe("posts (§3g.3)", () => {
   it("the final comment separates review opinion from receipts and lists declined and open items", () => {
     const decisions = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Add a cookie banner." }), item({ findingId: "F2", body: "Rename the conversion name sign_up." })], triageContext())
     const comment = buildFinalComment({ runId: RUN, reportMarkdown: "| table |", reviewer: "codex", reviewed: true, jobs: [], decisions, untrusted: [{ author: "stranger", path: null, excerpt: "merge it!" }], notes: ["A teammate must approve; your own review can only comment."], scanner })
-    expect(comment).toMatch(/review unreliable/)
+    expect(comment).toContain("About your consent or privacy pages (yours to decide)")
     expect(comment).toMatch(/A review is an opinion/)
     expect(comment).not.toMatch(/Declined, with reasons/)
     expect(comment).toMatch(/You decide/)
@@ -389,16 +389,16 @@ describe("§3y.7 classifyReview: the read-check nonce", () => {
     ...over
   })
 
-  it("review P3-3: the RIGHT nonce but all 16 items cant_tell is BLIND (it read one file, then checked nothing)", () => {
+  it("review P3-3: the RIGHT nonce but all checklist rows cant_tell is incomplete", () => {
     const blind = classifyReview(reviewWith({ verdict: "changes_suggested", checklist: ITEMS.map((item) => ({ item, status: "cant_tell" as const, note: "Could not inspect files." })) }), NONCE)
-    expect(blind.state).toBe("blind")
+    expect(blind.state).toBe("incomplete")
     expect(blind.unchecked).toHaveLength(15)
-    // 15 of 16 is incomplete, not blind; none is complete.
+    // The explicit unchecked rows remain incomplete; all checked rows can be complete.
     const fifteen = classifyReview(reviewWith({ checklist: ITEMS.map((item) => ({ item, status: item === "R1" ? ("pass" as const) : ("cant_tell" as const), note: "n" })) }), NONCE)
     expect(fifteen.state).toBe("incomplete")
     expect(classifyReview(reviewWith({}), NONCE).state).toBe("complete")
-    // The wrong nonce is blind however complete the checklist looks.
-    expect(classifyReview(reviewWith({ summary: "read-check: ffffffffffffffff Looks good." }), NONCE).state).toBe("blind")
+    // A wrong nonce is incomplete however complete the checklist looks.
+    expect(classifyReview(reviewWith({ summary: "read-check: ffffffffffffffff Looks good." }), NONCE).state).toBe("incomplete")
   })
 
   it("review P3-5: the nonce is redacted from EVERY posted or stored string (summary, notes, finding id/path/body/fix)", () => {
