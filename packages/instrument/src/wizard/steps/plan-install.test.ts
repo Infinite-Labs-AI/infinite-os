@@ -235,21 +235,27 @@ describe("step install", () => {
     expect(h.siteSourceCalls[0]?.productionHosts).toEqual(["acme-store.com"])
   })
 
-  it("a page the installer cannot edit becomes an open job 2, never 'installed'", async () => {
+  it("stops at the plan with manual wiring when a missing HTML head leaves no installable work", async () => {
+    const html = "<html><body><div id=root></div></body></html>\n"
     const h = await setup({
-      files: { "package.json": `{"dependencies":{"react":"18.0.0","vite":"5.0.0"}}\n`, "index.html": "<html><body><div id=root></div></body></html>\n", "vercel.json": "{}\n" },
+      files: { "package.json": `{"dependencies":{"react":"18.0.0","vite":"5.0.0"}}\n`, "index.html": html, "vercel.json": "{}\n" },
       consentFlag: "not_required",
       answers: []
     })
-    const ctx = h.ctx
-    ctx.ask = (async (kind: never, payload: never) => {
-      ctx.asks.push({ kind, payload })
-      return approveAllFrom(ctx)
-    }) as typeof ctx.ask
-    await planStep.run(ctx, h.deps)
-    const outcome = await installStep.run(ctx, h.deps)
-    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("not live yet") })
-    expect(ctx.stateValue().jobs.find((item) => item.id === "unusual_layout:index.html")).toMatchObject({ jobId: "unusual_layout", n: 2, state: "pending", allow: { files: ["index.html"] } })
+    const outcome = await planStep.run(h.ctx, h.deps)
+    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: expect.stringContaining("Add these lines yourself") })
+    if (outcome.kind !== "parked") throw new Error("Expected manual owner wiring")
+    expect(outcome.reason).toContain("NOT installed")
+    expect(outcome.reason).toContain("index.html")
+    expect(outcome.reason).toContain("<script")
+    expect(h.ctx.asks).toHaveLength(0)
+    expect(h.ctx.stateValue().jobs).toEqual([])
+    // A direct caller cannot bypass the stopped plan to create an unused tag or source.
+    expect(await installStep.run(h.ctx, h.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS" })
+    expect(h.siteSourceCalls).toEqual([])
+    expect(h.claimCalls).toEqual([])
+    expect(read(h.ctx.root, "index.html")).toBe(html)
+    expect(readInstallManifest(h.ctx.root)).toBeNull()
   })
 
   it("NEGATIVE (engine invariant §3a.9.4): no site-source call while an agent child is alive", async () => {
