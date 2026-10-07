@@ -57,7 +57,7 @@ export function ownerGuardHandoff(note: string, location: { file?: string; line?
   // arguments. An unbraced branch or a compound expression needs owner placement.
   const boundary = previous === undefined || (!/^(?:\/\/|\/\*|\*)/.test(previous) && /[;{}]$/.test(previous))
   const statement = lines?.slice(at).join("\n") ?? ""
-  const candidate = boundary && location.file && /^([ \t]*)((?:(?:window|globalThis)\.)?(?:gtag\(\s*['"]config['"]|fbq\(\s*['"]init['"]|posthog\.init\())(?:[^'"();`/]|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*')*\)[ \t]*(;)?[ \t]*(?:\n|$)/.exec(statement)
+  const candidate = boundary && location.file && /^([ \t]*)((?:[A-Za-z_$][\w$]*\.)?(?:gtag\(\s*['"]config['"]|fbq\(\s*['"]init['"]|posthog\.init\())(?:[^'"();`/]|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*')*\)[ \t]*(;)?[ \t]*(?:\n|$)/.exec(statement)
   const tail = candidate ? statement.slice(candidate[0].length).trimStart() : ""
   const continuation = /^(?:[([`.,+\-*/%&|^?:<>=!]|(?:in|instanceof)\b)/.test(tail)
   const init = candidate && (candidate[3] || !continuation) ? candidate : null

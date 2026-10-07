@@ -90,3 +90,12 @@ it.each(["&& fbq('consent', 'revoke');", ", fbq('consent', 'revoke');", "?.then(
   const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
   expect(handoff.guard).toBe("if (hostAllowed)")
 })
+
+it.each(["x.gtag('config', 'G-FAKE');", "x.fbq('init', '123456789');"])("renders an apply-ready diff for an initialization on a local receiver: %s", async statement => {
+  const { ownerGuardHandoff } = await import("./owner-boundary.js")
+  const source = `function boot(x) {\n  ${statement}\n  x.fbq('consent', 'revoke');\n}\n`
+  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
+  expect(handoff.guard).toContain(`-  ${statement}\n+  if (hostAllowed) ${statement}`)
+  expect(handoff.text).not.toContain("not an apply-ready edit")
+  expect(handoff.guard).not.toContain("revoke")
+})
