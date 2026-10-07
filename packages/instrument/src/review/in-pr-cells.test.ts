@@ -84,39 +84,39 @@ describe("F12: the 'In this pull request' column is filled from the wizard's own
   it("every row with evidence has a value: 9 of 9 rows, each with a source the report allows (it was 3 of 9)", () => {
     const built = report(column({ marked: 1 }))
     const cells = inPr(built)
-    expect(cells.checks_passing).toMatchObject({ state: "pass", display: "11 pass · 0 problems · 3 not testable of 14", value: "11/11", provenance: { source: "wizard_check" } })
+    expect(cells.checks_passing).toMatchObject({ state: "pass", display: "10 pass · 0 problems · 3 not testable of 13", value: "10/10", provenance: { source: "wizard_check" } })
     expect(cells.ga4_page_views_per_visit).toMatchObject({ state: "pass", display: "1", provenance: { source: "desktop_test" } })
     expect(cells.posthog_route).toMatchObject({ state: "pass", display: "through /ingest", provenance: { source: "desktop_test" } })
     expect(cells.meta_pixel).toMatchObject({ state: "pass", display: "fires once, right ID (nothing sent)", provenance: { source: "desktop_test" } })
     expect(cells.preview_share).toMatchObject({ state: "pass", display: "guard added · the preview link sent nothing", provenance: { source: "desktop_test" } })
     expect(cells.server_conversions).toMatchObject({ state: "pass", display: "2 wired (sign_up, purchase)", value: 2, provenance: { source: "wizard_check" } })
     expect(cells.ga4_key_events).toMatchObject({ state: "info", display: "1 marked as key event (click test passed)", provenance: { source: "cloud_read" } })
-    expect(cells.consent_setting).toMatchObject({ state: "pass", display: '"collect by default" recorded', provenance: { source: "cloud_read" } })
+    expect(cells.consent_setting).toMatchObject({ state: "info", display: '"collect by default" recorded', provenance: { source: "cloud_read" } })
     expect(cells.live_test_per_tool).toMatchObject({ state: "pass", display: "rehearsal: 4 of 4 tools fire once, right ID (nothing sent)", provenance: { source: "desktop_test" } })
     const filled = REPORT_ROWS.filter((row) => row.id !== "day7_checkin" && cells[row.id].value !== null)
     expect(filled).toHaveLength(9)
     // Every cell is this run's, and the terminal and the pull request comment show the same words.
     for (const row of filled) expect(cells[row.id].provenance.runId).toBe(RUN_ID)
     const terminal = renderTerminal(built, 100)
-    expect(terminal).toMatch(/In this pull request:\s+11 pass · 0 problems · 3 not testable of 14/)
+    expect(terminal).toMatch(/In this pull request:\s+10 pass · 0 problems · 3 not testable of 13/)
     expect(renderMarkdown(built)).toContain("| Conversions sent from the server | — | 2 wired (sign_up, purchase) |")
   })
 
-  it("'Checks passing' is counted over all 14: the two it cannot test before the merge are named, never counted as passing", () => {
+  it("'Checks passing' is counted over 13 analytics checks: the two it cannot test before the merge are named, never counted as passing", () => {
     const built = report(column({ marked: 1 }))
     const states = Object.fromEntries(built.finishLine.map((line) => [line.id, line.cells.in_pr.state]))
     expect(states).toMatchObject({
       conversions_server_side: "pass",
       identity_joined: "pass",
-      consent_recorded: "pass",
+      consent_recorded: "info",
       keeps_being_checked: "pass",
       ga4_key_events_received: "info",
       proof_from_real_visit: "not_measured",
       // No pre-merge evidence for the redirect walk (it runs on the live site): "—", and it leaves the count.
       utms_survive_redirects: "not_measured"
     })
-    expect(built.finishLine.filter((line) => line.cells.in_pr.state === "pass")).toHaveLength(11)
-    expect(inPr(built).checks_passing.display).toBe("11 pass · 0 problems · 3 not testable of 14")
+    expect(built.finishLine.filter((line) => line.cells.in_pr.state === "pass")).toHaveLength(10)
+    expect(inPr(built).checks_passing.display).toBe("10 pass · 0 problems · 3 not testable of 13")
   })
 
   it("negative: a job the wizard did not check is never 'wired' (a claim, another run's check, or a failing check)", () => {
@@ -147,13 +147,13 @@ describe("F12: the 'In this pull request' column is filled from the wizard's own
   })
 
   it("the consent setting says 'recorded' only when Infinite holds the plan's choice", () => {
-    expect(preMergeCells({ jobs: [], plan: PLAN }, { at: AT, runId: RUN_ID, keys: fakeKeys() }).cells.consent_setting).toMatchObject({ state: "pass", display: '"collect by default" recorded', provenance: { source: "cloud_read" } })
+    expect(preMergeCells({ jobs: [], plan: PLAN }, { at: AT, runId: RUN_ID, keys: fakeKeys() }).cells.consent_setting).toMatchObject({ state: "info", display: '"collect by default" recorded', provenance: { source: "cloud_read" } })
     const unread = preMergeCells({ jobs: [], plan: PLAN }, { at: AT, runId: RUN_ID, keys: null })
     expect(unread.cells.consent_setting).toMatchObject({ state: "info", display: '"collect by default" chosen in the plan (not read back from Infinite)', provenance: { source: "plan_answer" } })
     expect(unread.finishLine.consent_recorded!.state).toBe("info")
     const keys = fakeKeys()
     const other = preMergeCells({ jobs: [], plan: PLAN }, { at: AT, runId: RUN_ID, keys: { ...keys, infinite: { ...keys.infinite, consentMode: "required" } } })
-    expect(other.cells.consent_setting).toMatchObject({ state: "problem", display: 'the plan chose "collect by default"; Infinite has "ask first (consent required)"' })
+    expect(other.cells.consent_setting).toMatchObject({ state: "info", display: 'the plan chose "collect by default"; Infinite has "ask first (consent required)"' })
   })
 
   it("the rehearsal's own numbers decide the tool rows: a duplicate GA4 tag reads '2', a direct PostHog is a problem", () => {
@@ -180,7 +180,7 @@ describe("F12: the 'In this pull request' column is filled from the wizard's own
     for (const id of ["ga4_page_views_per_visit", "posthog_route", "meta_pixel", "live_test_per_tool"] as const) expect(cells[id].value, id).toBeNull()
     expect(cells.preview_share).toMatchObject({ state: "info", display: "guard added (the preview link was not loaded)", provenance: { source: "wizard_check" } })
     expect(cells.server_conversions.display).toBe("2 wired (sign_up, purchase)")
-    expect(cells.checks_passing).toMatchObject({ state: "undetermined", display: "4 pass · 0 problems · 7 unknown · 3 not testable of 14" })
+    expect(cells.checks_passing).toMatchObject({ state: "undetermined", display: "3 pass · 0 problems · 7 unknown · 3 not testable of 13" })
   })
 
   it("a new head rebuilds the column: checks measured on the old head are gone, Infinite's answers stay", () => {

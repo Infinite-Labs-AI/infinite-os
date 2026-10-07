@@ -3,6 +3,7 @@
 // a loop), which decisions are still open for the user, and which round ran on which head. The run state's
 // `pr.handledThreadIds` stays the record of replied threads.
 import type { ReviewChecklistItemId, ReviewResult } from "../wizard/contracts/agents.js"
+import { isOwnerOnlyFinding, isPolicyPath } from "../jobs/owner-boundary.js"
 import type { ChecklistItem, JobItemState } from "../wizard/contracts/jobs.js"
 import type { InfiniteOwnLabel } from "./post.js"
 import type { TriageAction, TriageDecision } from "./triage.js"
@@ -65,7 +66,7 @@ export interface OpenFinding {
 }
 
 /** The job item states that close a FIX'd finding (its job-16 item was done and checked by the wizard). */
-const CLOSING_STATES: readonly JobItemState[] = ["done_in_code", "waiting_deploy", "waiting_real_event", "proven", "not_needed"]
+const CLOSING_STATES: readonly JobItemState[] = ["done_in_code", "waiting_deploy", "waiting_real_event", "proven", "not_needed", "left_for_you"]
 
 /**
  * §3x.3 / DECISIONS §1.5 THE one definition of an open review finding: every trusted finding that is not closed. Closed =
@@ -86,6 +87,7 @@ export function openFindings(
     const rulingReplies = new Set(RULINGS.map((ruling) => ruling.reply))
     for (const round of ledger.rounds) {
       for (const finding of round.review?.findings ?? []) {
+        if (isOwnerOnlyFinding(finding)) continue
         const key = triageKey({ path: finding.path, item: finding.item })
         const declined = ledger.declined.find((entry) => entry.key === key)
         latest.set(findingKey(key, finding.id), {
@@ -105,7 +107,7 @@ export function openFindings(
   }
   const out: OpenFinding[] = []
   for (const finding of latest.values()) {
-    if (finding.action === "ANSWER") continue
+    if (finding.action === "ANSWER" || finding.action === "SKIP" || finding.item === "R6" || isPolicyPath(finding.path ?? "")) continue
     if (finding.action === "DECLINE" && finding.ruling !== null) continue
     if (finding.action === "FIX" && finding.findingId !== null) {
       const job = jobs.find((entry) => entry.id === `review_comments:${finding.findingId}`)

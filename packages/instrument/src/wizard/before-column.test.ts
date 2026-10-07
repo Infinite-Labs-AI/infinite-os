@@ -56,7 +56,7 @@ describe("liveTodayColumnInput", () => {
     expect(byInput("t1.redirect_walk")).toEqual([{ input: "t1.redirect_walk", state: "problem", at: AT, checkId: "redirect_walk" }])
     expect(byInput("baseline.preview_share")[0]).toMatchObject({ state: "problem", display: "5 of 44 page views from previews" })
     // The fixture site has no consent mode recorded yet.
-    expect(byInput("keys.consent_mode")[0]).toMatchObject({ state: "problem", display: "not recorded" })
+    expect(byInput("keys.consent_mode")[0]).toMatchObject({ state: "info", display: "not recorded" })
     expect(input.rows.preview_share).toMatchObject({ value: 5, raw: { numerator: 5, denominator: 44 }, state: "problem", source: "cloud_read" })
     expect(input.rows.meta_pixel).toMatchObject({ state: "problem", display: "blocked on www.acme-store.com", source: "desktop_test" })
     expect(input.rows.live_test_per_tool).toMatchObject({ value: "3/4", state: "problem" })

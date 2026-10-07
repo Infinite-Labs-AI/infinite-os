@@ -658,7 +658,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
 
   facts.push({
     input: "keys.consent_mode",
-    state: input.keys.infinite.consentMode ? "pass" : "problem",
+    state: "info",
     display: input.keys.infinite.consentMode ? consentWords(input.keys.infinite.consentMode) : "not recorded",
     at
   })
@@ -666,8 +666,8 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
   // Rows.
   const rows: Parameters<typeof buildColumn>[1]["rows"] = {}
   rows.consent_setting = input.keys.infinite.consentMode
-    ? { value: input.keys.infinite.consentMode, display: consentWords(input.keys.infinite.consentMode), state: "pass", source: "cloud_read", at }
-    : { value: "not recorded", display: "not recorded", state: "problem", source: "cloud_read", at }
+    ? { value: input.keys.infinite.consentMode, display: consentWords(input.keys.infinite.consentMode), state: "info", source: "cloud_read", at }
+    : { value: "not recorded", display: "not recorded", state: "info", source: "cloud_read", at }
   rows.preview_share = { value: null, state: "not_measured", source: "cloud_read", at, reason: "needs_7_days" }
   rows.ga4_key_events = { value: null, state: "pending", source: "cloud_read", at, reason: "needs_7_days" }
   rows.server_conversions =

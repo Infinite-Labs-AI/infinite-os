@@ -172,14 +172,14 @@ describe("P0-2: a standing ruling is never a worker FIX, whatever the item label
     )
     for (const decision of decisions) {
       expect(decision.action).not.toBe("FIX")
-      expect(decision.ruling).toBeDefined()
+      if (decision.action !== "SKIP") expect(decision.ruling).toBeDefined()
     }
-    expect(decisions.map((decision) => decision.ruling)).toEqual(["banner_consent", "ga4_proxy", "meta_never_list"])
+    expect(decisions.map((decision) => decision.ruling)).toEqual([undefined, "ga4_proxy", "meta_never_list"])
   })
 
-  it("a banner request raised again after its decline is an ASK that carries the ruling (so it is never offered as a fix)", () => {
+  it("a repeated banner request is omitted without an ask or fix", () => {
     const [again] = triage([item({ item: "R16", body: "Really, add the consent banner." })], context({ declinedKeys: new Set(["app/layout.tsx|R16"]) }))
-    expect(again).toMatchObject({ action: "ASK", askReason: "raised_after_decline", ruling: "banner_consent" })
+    expect(again).toMatchObject({ action: "SKIP" })
   })
 
   it("P3-6: an absolute or traversing path is unlocated, never an allowlist widening", () => {

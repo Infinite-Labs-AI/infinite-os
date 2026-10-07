@@ -5,6 +5,7 @@
 // - ANSWER: a question, answered from this run's checks and receipts;
 // - ASK: the user decides (conversion names, privacy text, widening the allowlist, two reviewers in
 //   conflict, an item raised again after a DECLINE, a finding with no file). Never a loop.
+import { OWNER_BOUNDARY, isOwnerOnlyFinding } from "../jobs/owner-boundary.js"
 import type { ReviewChecklistItemId } from "../wizard/contracts/agents.js"
 import { allowEntryMatches } from "../git/commit.js"
 import { escapeRegExp } from "../text-escape.js"
@@ -13,7 +14,7 @@ import { escapeRegExp } from "../text-escape.js"
  * `INFINITE` (§3x.3): a finding on Infinite's own managed code or on the wizard's own change. It is never FIX (the
  * customer's agent never edits Infinite's runtime); it is replied to honestly and recorded for Infinite to fix.
  */
-export type TriageAction = "FIX" | "DECLINE" | "ANSWER" | "ASK" | "INFINITE"
+export type TriageAction = "FIX" | "DECLINE" | "ANSWER" | "ASK" | "INFINITE" | "SKIP"
 export type AskReason =
   | "conversion_names"
   | "privacy_text"
@@ -103,7 +104,6 @@ export const RULINGS: readonly Ruling[] = [
 ]
 
 const CONVERSION_NAMES = /conversion[\s_-]*name|rename[^.\n]{0,30}(conversion|event)|event name|name (the|this) (conversion|event)/i
-const PRIVACY_TEXT = /privacy[\s-]*(policy|text|paragraph|page|notice)/i
 
 /** Which passing wizard checks contradict a reviewer's opinion on an item (deterministic > opinion). */
 export const DETERMINISTIC_CHECKS_BY_ITEM: Partial<Record<ReviewChecklistItemId, readonly string[]>> = {
@@ -310,6 +310,7 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     }
   }
   return items.map((item): TriageDecision => {
+    if (isOwnerOnlyFinding(item)) return { item, action: "SKIP", reason: OWNER_BOUNDARY }
     const text = `${item.body}\n${item.suggestedFix ?? ""}`
     const declinedBefore = ctx.declinedKeys.has(triageKey(item))
     // Rulings first, whatever the item label: a ruling match is never a FIX (and never offered as one).
@@ -365,9 +366,6 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     }
     if (CONVERSION_NAMES.test(text)) {
       return { item, action: "ASK", askReason: "conversion_names", reason: "Conversion names are your call; the wizard never changes them on a reviewer's say-so." }
-    }
-    if (PRIVACY_TEXT.test(text)) {
-      return { item, action: "ASK", askReason: "privacy_text", reason: "Privacy text is your call; the wizard inserts only the paragraph you approved." }
     }
     if (item.severity === "question") {
       const answer = ctx.answerFor(item)
