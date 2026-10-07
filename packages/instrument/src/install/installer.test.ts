@@ -137,6 +137,20 @@ describe("WizardInstaller.apply: a new install on a static site", () => {
     const result = await subject.apply(plan, { approved: [], declined: [], edits: {} })
     expect(result.ok).toBe(true)
     expect(read(root, "index.html")).not.toBe(STATIC_HTML)
+    // No pixels of the site's own here: the tag starts on load.
+    expect(read(root, "index.html")).not.toContain('"followSitePixels"')
+  })
+
+  it("on a site that already runs its own pixel, the tag is installed to follow it", async () => {
+    const withPixel = STATIC_HTML.replace("</head>", "<script>!function(f){if(f.fbq)return;var n=f.fbq=function(){n.queue.push(arguments)};n.queue=[]}(window);fbq('init', '555500001111222');fbq('track', 'PageView');</script></head>")
+    expect(withPixel).not.toBe(STATIC_HTML)
+    const root = makeSite({ "index.html": withPixel })
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    const result = await subject.apply(plan, { approved: [], declined: [], edits: {} })
+    expect(result.ok).toBe(true)
+    expect(read(root, "index.html")).toContain('"followSitePixels":["fbq","gtag","posthog","dataLayer"]')
   })
 })
 
