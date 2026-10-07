@@ -198,8 +198,10 @@ export function assertSafeGitArgv(args: readonly string[], context: GitGuardCont
         positional.push(arg)
       }
       if (positional.length !== 2 || (positional[0] !== "origin" && positional[0] !== context.pushRemote)) throw new GitSafetyError("push must target origin or the approved fork")
-      const branch = positional[1]!
-      if (branch.includes(":") || branch.startsWith("+")) throw new GitSafetyError(`push refspec ${branch} is never used`)
+      const ref = positional[1]!
+      const pinned = /^[a-f0-9]{40}:refs\/heads\/([A-Za-z0-9._/-]+)$/.exec(ref)
+      const branch = pinned?.[1] ?? ref
+      if (branch.includes(":") || branch.startsWith("+")) throw new GitSafetyError(`push refspec ${ref} is never used`)
       if (context.base && (branch === context.base || branch === `refs/heads/${context.base}`)) {
         throw new GitSafetyError(`never push to the base branch ${context.base}`)
       }

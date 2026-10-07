@@ -112,8 +112,11 @@ export function createGitOps(options: CreateGitOpsOptions): WizardGitOps {
       if (value !== null && !/^https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+\.git$/.test(value) && !/^git@github\.com:[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+\.git$/.test(value)) throw new Error("unsafe fork remote")
       pushRemote = value
     },
-    pushCommand(branch) {
-      return pushRemote ? `git push ${pushRemote} ${branch}` : `git push -u origin ${branch}`
+    pushCommand(branch, sha) {
+      if (!isSafeBranchName(branch)) throw new Error("Unsafe push branch")
+      const argv = pushArgv(branch, [], pushRemote ?? "origin", sha)
+      assertSafeGitArgv(argv, { base, pushRemote })
+      return `git ${argv.join(" ")}`
     },
 
     async isRepo() {
@@ -169,12 +172,12 @@ export function createGitOps(options: CreateGitOpsOptions): WizardGitOps {
       const hookRewrote = staged.filter((path) => before.has(path) && before.get(path) !== after.get(path))
       return { sha, hookRewrote }
     },
-    async push(branch) {
-      const result = await git(pushArgv(branch, [], pushRemote ?? "origin"), { allowFail: true })
+    async push(branch, sha) {
+      const result = await git(pushArgv(branch, [], pushRemote ?? "origin", sha), { allowFail: true })
       if (result.status !== 0 || result.error) throw classifyPushFailure(`${result.stderr}\n${result.error ?? ""}`)
     },
-    async pushWithOptions(branch, pushOptions) {
-      const result = await git(pushArgv(branch, pushOptions, pushRemote ?? "origin"), { allowFail: true })
+    async pushWithOptions(branch, pushOptions, sha) {
+      const result = await git(pushArgv(branch, pushOptions, pushRemote ?? "origin", sha), { allowFail: true })
       if (result.status !== 0 || result.error) throw classifyPushFailure(`${result.stderr}\n${result.error ?? ""}`)
     },
     async pullFfOnly(branch) {

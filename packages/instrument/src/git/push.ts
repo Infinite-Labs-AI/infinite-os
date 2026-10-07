@@ -35,9 +35,10 @@ export function classifyPushFailure(stderr: string): GitPushError {
 }
 
 /** The argv for a push, with GitLab's merge-request push options when given (§3g.2). */
-export function pushArgv(branch: string, pushOptions: readonly string[] = [], remote = "origin"): string[] {
+export function pushArgv(branch: string, pushOptions: readonly string[] = [], remote = "origin", sha?: string): string[] {
+  if (sha !== undefined && !/^[a-f0-9]{40}$/.test(sha)) throw new Error("A pinned push requires a full commit SHA")
   const options = pushOptions.flatMap((option) => ["-o", option])
-  return ["push", ...(remote === "origin" ? ["-u"] : []), ...options, remote, branch]
+  return ["push", ...(remote === "origin" ? ["-u"] : []), ...options, remote, sha ? `${sha}:refs/heads/${branch}` : branch]
 }
 
 /** GitLab opens a draft MR from push options; `glab` is never needed (§3g.2). */
