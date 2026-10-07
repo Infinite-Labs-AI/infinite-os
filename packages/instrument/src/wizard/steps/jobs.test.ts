@@ -14,7 +14,6 @@ import type { CheckResult, ChecklistItem, CheckRunner } from "../contracts/jobs.
 import { NESTED_BRIEF_PATH, NESTED_SANDBOX_HINT, step } from "./jobs.js"
 import { verifyFinalSeal } from "../../agents/fence.js"
 import { finalSealPath } from "../../agents/paths.js"
-import { buildMetaClickIdCaptureTypescript } from "../../providers/meta-browser/click-id.js"
 
 // These spawn real node fakes, the built mcp-proxy and git for up to 4 rounds: the 5 s default is too
 // tight under a loaded full-suite run (review O3 F15).
@@ -66,13 +65,15 @@ function stateOf(items: ChecklistItem[], id: string) {
 }
 
 describe("step jobs: claims are only claims; the wizard checks", () => {
-  it("a consent obstruction is informational while other shared-file jobs pass", async () => {
+  it("frozen Meta jobs are withheld while unrelated same-file jobs pass with separate ambient declarations", async () => {
     const file = "src/common/tracking.ts"
-    const base = [
+    const ambient = [
       "declare const gtag: (...args: unknown[]) => void;",
       "declare const posthog: { init(key: string, options: object): void };",
       "declare const fbq: (...args: unknown[]) => void;",
-      "declare function allowHost(): boolean;",
+      "declare function allowHost(): boolean;"
+    ].join("\n")
+    const base = [
       "export function ga() { gtag('config', 'G-FAKE00001'); }",
       "export function ph() { posthog.init('phc_FAKE', { api_host: 'https://us.i.posthog.com' }); }",
       "export function meta() {",
@@ -81,16 +82,14 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
       "  fbq('track', 'PageView');",
       "}", ""
     ].join("\n")
-    const capture = buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "not_required" } })
-    const withCapture = `${capture}\n${base}`
-    const gaGuarded = withCapture.replace("gtag('config', 'G-FAKE00001');", "if (allowHost()) gtag('config', 'G-FAKE00001');")
+    const gaGuarded = base.replace("gtag('config', 'G-FAKE00001');", "if (allowHost()) gtag('config', 'G-FAKE00001');")
     const phGuarded = gaGuarded.replace("posthog.init('phc_FAKE', { api_host: 'https://us.i.posthog.com' });", "if (allowHost()) posthog.init('phc_FAKE', { api_host: '/ingest' });")
     const sensitive = phGuarded.replace("api_host: '/ingest'", "api_host: '/ingest', mask_all_text: true")
     const ids = ["meta_improve:capture", "preview_guard:meta", "preview_guard:ga4", "preview_guard:posthog", "posthog_improve:sensitive_pages"]
     const t = setup({
       scenario: { turns: [{ steps: [
         { tool: "report_progress", args: { job_id: ids[0], text: "Capture" } },
-        { edit: { path: file, content: withCapture } }, claim(ids[0]!),
+        claim(ids[0]!),
         { tool: "report_progress", args: { job_id: ids[1], text: "Meta guard" } },
         claim(ids[1]!),
         { tool: "report_progress", args: { job_id: ids[2], text: "GA guard" } },
@@ -100,19 +99,23 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
         { tool: "report_progress", args: { job_id: ids[4], text: "Sensitive pages" } },
         { edit: { path: file, content: sensitive } }, claim(ids[4]!)
       ] }] },
-      items: ids.map((id, index) => ({ ...agentItem(id, [file]), trigger: { finding: "Fixture edit place", evidence: [{ file, line: [8, 8, 5, 6, 6][index]! }] } }))
+      items: ids.map((id, index) => ({ ...agentItem(id, [file]), trigger: { finding: "Fixture edit place", evidence: [{ file, line: [4, 4, 1, 2, 2][index]! }] } }))
     })
     write(t.root, file, base)
-    runGit(t.root, ["add", file])
+    const declarations = "src/tracking-globals.d.ts"
+    write(t.root, declarations, ambient)
+    runGit(t.root, ["add", file, declarations])
     runGit(t.root, ["commit", "-m", "tracking fixture"])
     expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
     const jobs = t.current().jobs
-    expect(jobs.find((job) => job.id === ids[1])).toMatchObject({ state: "left_for_you" })
-    for (const id of ids.filter(id => id !== "preview_guard:meta")) expect(jobs.find(job => job.id === id)?.state, id).toMatch(/done_in_code|waiting_deploy/)
+    for (const id of ids.slice(0, 2)) expect(jobs.find((job) => job.id === id)).toMatchObject({ state: "left_for_you", ownerBoundary: { kind: "frozen_unit", file } })
+    for (const id of ids.slice(2)) expect(jobs.find(job => job.id === id)?.state, id).toMatch(/done_in_code|waiting_deploy/)
     const final = readFileSync(join(t.root, file), "utf8")
     expect(final).toContain("mask_all_text: true")
     expect(final).not.toContain("  if (allowHost()) {")
-    const program = ts.createProgram([join(t.root, file)], { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, lib: ["lib.es2020.d.ts", "lib.dom.d.ts"], skipLibCheck: true })
+    expect(final).toContain(base.slice(base.indexOf("export function meta()")))
+    expect(readFileSync(join(t.root, declarations), "utf8")).toBe(ambient)
+    const program = ts.createProgram([join(t.root, file), join(t.root, declarations)], { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, lib: ["lib.es2020.d.ts", "lib.dom.d.ts"], skipLibCheck: true })
     expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])
     const metaReply = records(t.fakes).filter((entry) => entry.kind === "mcp" && entry.tool === "job_claim")[1]?.reply?.result?.structuredContent
     expect(metaReply).toMatchObject({ error: expect.stringContaining("unknown job_id preview_guard:meta") }) // Never offered to the agent.

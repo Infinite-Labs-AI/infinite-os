@@ -1,6 +1,5 @@
-// Live run 3 replayed through the REAL jobs step (real runner over the fake claude binary, real fence, the REAL
-// post-turn gate, a real git fixture made from the run-3 site). DECISIONS W1 and W3: correct agent work survives
-// the wizard's checks, and a refused line fails only the job that made it, with its real reason.
+// Run 3 job contracts through the real runner, fence and post-turn gate. The historical inline-consent
+// entry is owner-only. Independent attribution/retry coverage uses an explicit consent-separated entry.
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
@@ -13,6 +12,9 @@ import type { AgentRunnerImpl } from "../../agents/runner.js"
 import { turnGate } from "../../checks/turn-gate.js"
 import type { ChecklistItem } from "../contracts/jobs.js"
 import { notDoneLines, step } from "./jobs.js"
+import { consentSeparatedEntry, OWNER_BOOTSTRAP, OWNER_BOOTSTRAP_PATH } from "../../../test/wizard/consent-separated-entry.js"
+
+const FREE_ENTRY = consentSeparatedEntry("G-TEST0000000")
 
 vi.setConfig({ testTimeout: 60_000 })
 beforeAll(() => assertBuilt())
@@ -38,15 +40,20 @@ const SITE_FILES = [
 ]
 const INSTALL_FILES = ["app/layout.tsx", "lib/infinite-analytics-client.tsx", "lib/infinite-analytics.ts", "next.config.mjs"]
 
-/** The smoke repo at 6d16d8f, committed, with f1abea9's install files written on top (uncommitted, as `install` leaves them). */
-function run3Repo(): string {
+/** Archive replay or an explicit free-entry variant; install files remain uncommitted as the jobs step expects. */
+function run3Repo(entry: "consent-separated" | "archived"): string {
   const root = tempDir("infinite-tag-run3-")
   runGit(root, ["init", "-q", "-b", "main"])
   write(root, ".gitignore", "node_modules/\n.env*\n.next/\n")
   for (const rel of SITE_FILES) write(root, rel, run3File(`site-6d16d8f/${rel}`))
+  if (entry === "consent-separated") {
+    write(root, "app/layout.tsx", FREE_ENTRY.base)
+    write(root, OWNER_BOOTSTRAP_PATH, OWNER_BOOTSTRAP)
+  }
   runGit(root, ["add", "-A"])
   runGit(root, ["commit", "-q", "-m", "6d16d8f"])
   for (const rel of INSTALL_FILES) write(root, rel, run3File(`install-f1abea9/${rel}`))
+  if (entry === "consent-separated") write(root, "app/layout.tsx", FREE_ENTRY.installed)
   return root
 }
 
@@ -60,7 +67,7 @@ function run3Items(ids: readonly string[]): ChecklistItem[] {
     delete item.edits
     item.state = "pending"
     item.checks = item.checks.map((check) => ({ id: check.id, tier: check.tier, state: "not_run" }))
-    // The evidence stays as `before` found it on the base commit (27/32/41): the step re-anchors it (§2.2).
+    // Archived evidence is retained; setup supplies the corresponding locations for the synthetic free entry.
     return item
   })
 }
@@ -71,8 +78,11 @@ const META_GUARD = "preview_guard:meta"
 const SIGNUP = "conversions_to_tools:signup"
 const claim = (jobId: string, status = "done", note = "done") => ({ tool: "job_claim", args: { job_id: jobId, status, note, files: ["app/layout.tsx"] } })
 
-function setup(scenario: unknown, items: ChecklistItem[]) {
-  const root = run3Repo()
+function setup(scenario: unknown, items: ChecklistItem[], entry: "consent-separated" | "archived" = "consent-separated") {
+  const root = run3Repo(entry)
+  if (entry === "consent-separated") for (const item of items) for (const evidence of item.trigger.evidence) {
+    if ("file" in evidence && evidence.file === "app/layout.tsx") evidence.line = FREE_ENTRY.base.split("\n").findIndex(line => line.includes(item.id === META_GUARD ? "fbq('init'" : "gtag('config'")) + 1
+  }
   const fakes = fakeAgents(scenario)
   dirs.push(root, fakes.home)
   const { checks, calls } = fakeChecks()
@@ -101,9 +111,9 @@ function setup(scenario: unknown, items: ChecklistItem[]) {
 
 const DONE = ["done_in_code", "waiting_deploy", "waiting_real_event", "proven"]
 
-describe("W1 live run 3: Claude Code's real edit is kept (the wrap and dedupe re-emit the site's own ids)", () => {
+describe("consent-separated entry: approved ordinary edits keep the site's own ids", () => {
   it("jobs 6, 7 GA4 and 7 Meta are done in code; the edit is kept; no 'outside the job's files' line", async () => {
-    const edited = run3EditedLayout()
+    const edited = FREE_ENTRY.edited
     const t = setup(
       {
         turns: [
@@ -128,6 +138,7 @@ describe("W1 live run 3: Claude Code's real edit is kept (the wrap and dedupe re
     // The edit is in the tree and in the receipt.
     const layout = readFileSync(join(t.root, "app/layout.tsx"), "utf8")
     expect(layout).toBe(edited)
+    expect(readFileSync(join(t.root, OWNER_BOOTSTRAP_PATH), "utf8")).toBe(OWNER_BOOTSTRAP)
     expect(layout.match(/gtag\('config'/g)).toHaveLength(1)
     expect(layout.match(/\.vercel\.app/g)).toHaveLength(2)
     expect(t.recorded.flat().map((edit) => edit.file)).toEqual(["app/layout.tsx"])
@@ -138,12 +149,12 @@ describe("W1 live run 3: Claude Code's real edit is kept (the wrap and dedupe re
   })
 })
 
-describe("W3 a refused line fails only the job it belongs to, with the real reason; the rest is kept", () => {
+describe("consent-separated entry: a refused line fails only the job it belongs to, with the real reason; the rest is kept", () => {
   // Round 1: the dedupe (job 6) and the GA4 guard (job 7) are right; the Meta guard adds a FALLBACK pixel id.
   const metaFallback = (layout: string) => layout.replace("fbq('init', '7777000011112222');", "fbq('init', window.PIXEL || '7777000011112222');")
 
   it("the Meta guard's fallback is refused: only that job is pending, with the note; round 2 fixes it", async () => {
-    const good = run3EditedLayout()
+    const good = FREE_ENTRY.edited
     const bad = metaFallback(good)
     expect(bad).not.toBe(good)
     const t = setup(
@@ -175,7 +186,7 @@ describe("W3 a refused line fails only the job it belongs to, with the real reas
   // config line is refused. Run 3's job 6 and job 7 GA4 both carry that config line as trigger evidence and both claim
   // app/layout.tsx, so §3x.2's attribution honestly gives the hunk to both; the unambiguous world is the Meta case above.
   it("a refused GA4 fallback at the duplicated config line is attributed to BOTH jobs with evidence there (6 and 7 GA4); the Meta job is unaffected", async () => {
-    const good = run3EditedLayout()
+    const good = FREE_ENTRY.edited
     const bad = good.replace("gtag('js', new Date());", "gtag('js', new Date());\nvar ga4Id = window.GA_ID || 'G-TEST0000000';")
     const t = setup({ turns: [{ steps: [{ edit: { path: "app/layout.tsx", content: bad } }, claim(JOB6), claim(GA4_GUARD), claim(META_GUARD)] }] }, run3Items([JOB6, GA4_GUARD, META_GUARD]))
     await step.run(t.ctx, t.deps)
@@ -192,14 +203,15 @@ describe("W3 a refused line fails only the job it belongs to, with the real reas
     const layout = readFileSync(join(t.root, "app/layout.tsx"), "utf8")
     expect(layout).not.toContain("window.GA_ID")
     expect(layout).toContain("ga4-again")
-    expect(layout).toContain("window.fbq.__infiniteSilenced = true")
+    expect(layout).toContain("if (location.hostname === 'shop.examplebrand.com'")
+    expect(layout).not.toContain("window.fbq =")
   })
 })
 
-describe("review P2-3: one stray file no longer throws away the turn's correct work", () => {
+describe("consent-separated entry: one stray file no longer throws away the turn's correct work", () => {
   it("a helper file no job may create is undone ALONE; jobs 6 and 7 stay done and their edit is kept; the agent is told", async () => {
-    const edited = run3EditedLayout()
-    // Run 3's real edit plus a helper file the agent invented (claims name app/layout.tsx only).
+    const edited = FREE_ENTRY.edited
+    // An ordinary edit plus a helper file the agent invented (claims name app/layout.tsx only).
     const t = setup(
       {
         turns: [
@@ -229,4 +241,20 @@ describe("review P2-3: one stray file no longer throws away the turn's correct w
 it("the fixture is the real run (sanity: the dir and the edit exist)", () => {
   expect(RUN3_DIR).toMatch(/fixtures\/run3$/)
   expect(run3EditedLayout()).toContain("shop.examplebrand.com")
+})
+
+
+it("the archived inline-consent entry is left for its owner before any worker starts", async () => {
+  const t = setup({ turns: [{ steps: [{ edit: { path: "app/layout.tsx", content: run3EditedLayout() } }, claim(JOB6), claim(GA4_GUARD), claim(META_GUARD)] }] }, run3Items([JOB6, GA4_GUARD, META_GUARD]), "archived")
+  const before = readFileSync(join(t.root, "app/layout.tsx"), "utf8")
+  expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "ok" })
+  expect(t.current().jobs).toHaveLength(3)
+  for (const job of t.current().jobs) {
+    expect(job).toMatchObject({ state: "left_for_you", ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx" } })
+    expect(job.claim).toBeUndefined()
+    expect(job.edits ?? []).toEqual([])
+  }
+  expect(readFileSync(join(t.root, "app/layout.tsx"), "utf8")).toBe(before)
+  expect(runs(t.fakes)).toHaveLength(0)
+  expect(t.recorded).toEqual([])
 })

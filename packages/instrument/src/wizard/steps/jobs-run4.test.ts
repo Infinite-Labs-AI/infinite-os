@@ -1,15 +1,10 @@
-// R4-1 (live run 4), replayed through the REAL jobs step: the real runner over the fake `claude`, the real fence, the
-// run-4 site. Round 1 makes run 4's edit (the duplicate removed, both guards, the `_fbc` capture, the signup call) and
-// claims the jobs; the wizard's own `fbc_capture` check fails; round 2 hangs until the wall clock ends it.
-//
-// Live run 4 then stamped job 5 "The agent ran out of time; its edits were undone." while its capture (kept from round
-// 1) shipped, and the step line said the same of every job. Now each job's state is what its own checks say about the
-// tree the pull request commits, and the words say where its change is.
+// Run 4 timeout/accounting contracts through the real jobs step and fence. Archived inline consent
+// is owner-only; ordinary job behavior uses a named minimal entry with a separate owner bootstrap.
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
-import { assertBuilt, fakeAgents, makeRunner } from "../../../test/wizard/agents.js"
+import { assertBuilt, fakeAgents, makeRunner, runs } from "../../../test/wizard/agents.js"
 import { baseState, fakeBridge, fakeChecks, fakeInstaller, fakeRegistry, makeCtx, makeDeps, STEP_RUN_ID } from "../../../test/wizard/agent-step-harness.js"
 import { cleanup, runGit, tempDir, write } from "../../../test/wizard/repo.js"
 import type { AgentRunnerImpl } from "../../agents/runner.js"
@@ -21,6 +16,9 @@ import { o9CheckFunctions } from "../../checks/o9.js"
 import { jobStaticCheckFunctions } from "../../checks/job-static.js"
 import { FIXED_NOW } from "../../../test/wizard/fixture-fetch.js"
 import { notDoneLines, step } from "./jobs.js"
+import { consentSeparatedEntry, OWNER_BOOTSTRAP, OWNER_BOOTSTRAP_PATH } from "../../../test/wizard/consent-separated-entry.js"
+
+const FREE_ENTRY = consentSeparatedEntry("G-QWERT67890", true)
 
 vi.setConfig({ testTimeout: 60_000 })
 beforeAll(() => assertBuilt())
@@ -79,20 +77,23 @@ function world(input: {
   fbcCapture: Array<"pass" | "problem" | "absent">
   extraItems?: ChecklistItem[]
   results?: Record<string, Array<"pass" | "problem">>
-  /** Round 1's layout (default: run 4's merged layout). */
+  /** Round 1's edit in the selected world (the free entry by default). */
   layout?: string
   /** LF4 close round 2: more checks that run as the REAL functions over the tree (O9 and the job-table S checks). */
   real?: string[]
+  entry?: "consent-separated" | "archived"
 }) {
   const root = tempDir("infinite-tag-run4-")
   runGit(root, ["init", "-q", "-b", "main"])
   write(root, ".gitignore", "node_modules/\n.env*\n.next/\n")
-  write(root, "app/layout.tsx", run4("site-b7c8347/app/layout.tsx"))
+  const archived = input.entry === "archived"
+  write(root, "app/layout.tsx", archived ? run4("site-b7c8347/app/layout.tsx") : FREE_ENTRY.base)
+  if (!archived) write(root, OWNER_BOOTSTRAP_PATH, OWNER_BOOTSTRAP)
   write(root, "app/signup/page.tsx", run4("site-b7c8347/app/signup/page.tsx"))
   runGit(root, ["add", "-A"])
   runGit(root, ["commit", "-q", "-m", "b7c8347"])
-  write(root, "app/layout.tsx", installedLayout())
-  const merged = input.layout ?? run4("merged-5e6f3f3/app/layout.tsx")
+  write(root, "app/layout.tsx", archived ? installedLayout() : FREE_ENTRY.installed)
+  const merged = input.layout ?? (archived ? run4("merged-5e6f3f3/app/layout.tsx") : FREE_ENTRY.edited)
   const fakes = fakeAgents({
     turns: [
       {
@@ -153,10 +154,10 @@ function world(input: {
   })
   const { ctx, recorded: events, state: current } = makeCtx({ root, state })
   const deps = { ...makeDeps({ root, bridge, agents: runner, checks, registry, installer, env: { HOME: fakes.home } }), clock }
-  return { root, ctx, deps, current, calls, recorded, events, merged }
+  return { root, ctx, deps, current, calls, recorded, events, merged, fakes }
 }
 
-describe("R4-1 live run 4: the budget ends with kept edits in the tree", () => {
+describe("consent-separated entry: the budget ends with kept edits in the tree", () => {
   it("job 5 (its capture shipped) is never 'undone': failed with the wizard's real reason, and its change is said to stay in the pull request", async () => {
     const w = world({ round1Claims: [JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE], fbcCapture: ["problem"] })
     const outcome = await step.run(w.ctx, w.deps)
@@ -166,6 +167,7 @@ describe("R4-1 live run 4: the budget ends with kept edits in the tree", () => {
     // The tree the pull request commits holds job 5's capture (it shares app/layout.tsx's lines with kept jobs).
     const layout = readFileSync(join(w.root, "app/layout.tsx"), "utf8")
     expect(layout).toBe(w.merged)
+    expect(readFileSync(join(w.root, OWNER_BOOTSTRAP_PATH), "utf8")).toBe(OWNER_BOOTSTRAP)
     expect(layout).toContain('<Script id="meta-fbc-capture"')
 
     for (const id of [JOB6, GA4_GUARD, META_GUARD, SIGNUP]) expect(DONE, id).toContain(stateOf(id).state)
@@ -214,11 +216,11 @@ describe("R4-1 live run 4: the budget ends with kept edits in the tree", () => {
     expect(JSON.stringify([outcome, jobs])).not.toContain("before finishing this job")
   })
 
-  it("LF4-P1-2 round 1: an autoConfig job nobody claimed is decided by its own REAL check on the tree: run 4's merged layout turns autoConfig off before init → done; without the opt-out → blocked, not in the code", async () => {
+  it("LF4-P1-2 round 1: an autoConfig job nobody claimed is decided by its own REAL check on the tree: the free entry turns autoConfig off before init → done; without the opt-out → blocked, not in the code", async () => {
     const autoconfig = () =>
       untouched(CAPTURE, "meta_improve:autoconfig_off_adopted", "Turn off autoConfig on the adopted pixel", itemChecksFor("meta_improve", "autoconfig_off_adopted", "next-app-router"))
     const optOut = "fbq('set', 'autoConfig', false, '7777000011112222');\n"
-    expect(run4("merged-5e6f3f3/app/layout.tsx")).toContain(optOut)
+    expect(FREE_ENTRY.edited).toContain(optOut)
 
     const done = world({ round1Claims: [JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE], fbcCapture: ["pass"], extraItems: [autoconfig()] })
     await step.run(done.ctx, done.deps)
@@ -234,7 +236,7 @@ describe("R4-1 live run 4: the budget ends with kept edits in the tree", () => {
       round1Claims: [JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE],
       fbcCapture: ["pass"],
       extraItems: [autoconfig()],
-      layout: run4("merged-5e6f3f3/app/layout.tsx").replace(optOut, "")
+      layout: FREE_ENTRY.edited.replace(optOut, "")
     })
     await step.run(without.ctx, without.deps)
     const job = without.current().jobs.find((item) => item.id === "meta_improve:autoconfig_off_adopted")!
@@ -262,7 +264,7 @@ describe("R4-1 live run 4: the budget ends with kept edits in the tree", () => {
 
   it("LF4-P1-2 round 1 negative: an unclaimed job with nothing of it in the tree, whose own check FAILS there, is blocked with what that check found and listed as not in the code (other jobs' lines in its file never tick it)", async () => {
     // Round 1 keeps the other jobs' layout edits but no capture at all; job 5's own check finds the problem.
-    const merged = run4("merged-5e6f3f3/app/layout.tsx")
+    const merged = FREE_ENTRY.edited
     const from = merged.indexOf('        <Script id="meta-fbc-capture"')
     const to = merged.indexOf("        </Script>\n", from) + "        </Script>\n".length
     // The real T0 on a page with no capture says `no_fbc_capture` (the change missing): "absent".
@@ -321,7 +323,7 @@ describe("R4-1 live run 4: the budget ends with kept edits in the tree", () => {
 // the mirror) was ticked untouched; (b) a claim-less pass was decided BEFORE `settleEdits` put the layout back to the
 // install's version (its hunks were credited only to a failing claimed job). And (P2-2) a never-claimed job whose own
 // check failed on code that IS in the tree was called "not in the code".
-describe("close round 2: a job is done in code only when the committed tree holds its change", () => {
+describe("consent-separated entry: a job is done in code only when the committed tree holds its change", () => {
   it("(a) an untouched click conversion on Next (download) is never done: its only local check passes on absence; its own proof finds the call missing", async () => {
     const download = untouched(SIGNUP, "conversions_to_tools:download", "Send the download conversion to GA4 and PostHog", itemChecksFor("conversions_to_tools", "download", "next-app-router"))
     expect(download.checks.map((check) => `${check.tier}:${check.id}`)).toContain("S:conversion_tracked")
@@ -398,11 +400,12 @@ describe("close round 2: a job is done in code only when the committed tree hold
   })
 })
 
-describe("R4-6: the thinking beat says how far the jobs are and how much of the budget is gone", () => {
-  it("'Thinking · N s' carries the claims so far and the minutes used of the measured budget", async () => {
+describe("structured activity reports job progress and measured budget use", () => {
+  it("a thinking activity updates measured status while narration stays verbatim", async () => {
     const root = tempDir("infinite-tag-run4-progress-")
     runGit(root, ["init", "-q", "-b", "main"])
-    write(root, "app/layout.tsx", run4("site-b7c8347/app/layout.tsx"))
+    write(root, "app/layout.tsx", FREE_ENTRY.base)
+    write(root, OWNER_BOOTSTRAP_PATH, OWNER_BOOTSTRAP)
     runGit(root, ["add", "-A"])
     runGit(root, ["commit", "-q", "-m", "base"])
     dirs.push(root)
@@ -412,7 +415,8 @@ describe("R4-6: the thinking beat says how far the jobs are and how much of the 
       detect: async () => ({ worker: null, reviewer: null, available: [] }),
       review: async () => ({ error: "unparseable" as const }),
       runJobs: async (input: Parameters<AgentRunnerImpl["runJobs"]>[0]) => {
-        input.onClaim({ jobId: CAPTURE, status: "done", note: "", at: "2026-10-03T20:52:22.000Z" })
+        await input.onClaim({ jobId: CAPTURE, status: "done", note: "", at: "2026-10-03T20:52:22.000Z" })
+        input.onActivity?.({ kind: "thinking", seconds: 254 })
         input.onNarrate({ agent: "claude_code", role: "worker", text: "Thinking · 254 s" })
         input.onNarrate({ agent: "claude_code", role: "worker", text: "Editing app/layout.tsx" })
         return { outcome: "timeout" as const, session: { kind: "claude" as const, sessionId: "s" }, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [] }
@@ -428,10 +432,28 @@ describe("R4-6: the thinking beat says how far the jobs are and how much of the 
     const { ctx, recorded } = makeCtx({ root, state })
     await step.run(ctx, makeDeps({ root, bridge, agents: runner as never, env: { HOME: root } }))
     const beats = recorded.events.filter((event) => event.type === "narrate").map((event) => (event.fields as { text: string }).text)
-    expect(beats).toContain(`Thinking · 254 s · 1 of 5 claimed · 0 of ${AGENT_LIMITS.jobs.wallMs / 60_000} min`)
-    // Other beats are left as the runner said them.
+    const status = recorded.events.filter(event => event.type === "step.status").map(event => String(event.fields.text))
+    expect(status).toContainEqual(expect.stringContaining("1 of 5 claimed"))
+    expect(status).toContainEqual(expect.stringContaining("thinking 254 s"))
+    expect(status).toContainEqual(expect.stringContaining(`0 of ${AGENT_LIMITS.jobs.wallMs / 60_000} min`))
+    expect(beats).toContain("Thinking · 254 s")
     expect(beats).toContain("Editing app/layout.tsx")
-    // NEGATIVE: the bare beat run 4 printed is gone.
-    expect(beats).not.toContain("Thinking · 254 s")
   })
+})
+
+
+it("the archived inline-consent entry stays byte-identical while the independent signup edit runs", async () => {
+  const w = world({ entry: "archived", round1Claims: [JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE], fbcCapture: ["pass"] })
+  await step.run(w.ctx, w.deps)
+  expect(readFileSync(join(w.root, "app/layout.tsx"), "utf8")).toBe(installedLayout())
+  for (const id of [JOB6, GA4_GUARD, META_GUARD, CAPTURE]) {
+    const job = w.current().jobs.find(item => item.id === id)!
+    expect(job).toMatchObject({ state: "left_for_you", ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx" } })
+    expect(job.claim).toBeUndefined()
+    expect(job.edits ?? []).toEqual([])
+  }
+  expect(DONE).toContain(w.current().jobs.find(item => item.id === SIGNUP)?.state)
+  expect(readFileSync(join(w.root, "app/signup/page.tsx"), "utf8")).toBe(run4("merged-5e6f3f3/app/signup/page.tsx"))
+  expect(runs(w.fakes)).toHaveLength(1)
+  expect(w.calls.t0.flat().map(scenario => scenario.checkId)).not.toContain("fbc_capture")
 })
