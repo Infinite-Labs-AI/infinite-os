@@ -318,9 +318,16 @@ describe("the offline end-to-end run (§4.3)", () => {
     writeFileSync(join(w.site.repo, "app/layout.tsx"), inline)
     w.site.initialSha = git(w.site.repo, "rev-parse", "HEAD")
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
-    expect(run.code, trace(run)).toBe(0)
+    expect(run.code, trace(run)).toBe(3)
+    expect(stepOutcomes(run).at(-1)).toBe("review:parked:INF_WIZ_MERGE_PARKED")
+    expect(run.ofType("step.done").find(event => event.step === "review")?.reason).toContain("Approved fixes remain open")
+    expect(readGhState(w.ghState).prs[0]).toMatchObject({ state: "OPEN", isDraft: true })
     expect(readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8")).toBe(inline)
-    expect(stepOutcomes(run)).toContain("prove:skipped")
+    expect(stepOutcomes(run).some(outcome => outcome.startsWith("prove:") || outcome.startsWith("merge:"))).toBe(false)
+    expect(w.bridge.callsFor("runs.proof-claim")).toEqual([])
+    expect(w.bridge.callsFor("test.start").some(call => (call.body as TestRunRequest).mode === "real_visit")).toBe(false)
+    expect(existsSync(join(w.site.repo, "lib/infinite-analytics.ts"))).toBe(false)
+    expect(existsSync(join(w.site.repo, "app/infinite-analytics-client.tsx"))).toBe(false)
     const plan = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/plan-approvals.json"), "utf8"))
     expect(plan.ownerWiring.canWire).toBe(false)
     const ownerWiring = finalJobs(w).find(job => job.id === "unusual_layout:app/layout.tsx" && job.state === "left_for_you")
@@ -755,11 +762,18 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(agentRuns(w, "claude")).toEqual([])
   })
 
-  it("(c) no agents (the resolver injected EMPTY) → deterministic lanes only, agent jobs need you, still reaches done", { timeout: RUN_TIMEOUT }, async () => {
+  it("(c) no agents (the resolver injected EMPTY) → deterministic lanes only, agent jobs need you, keeps the pull request draft", { timeout: RUN_TIMEOUT }, async () => {
     const w = await wiredWorld({ env: { E2E_NO_AGENTS: "1" } })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
-    expect(run.code, trace(run)).toBe(0)
-    expect(stepOutcomes(run).at(-1)).toBe("done:ok")
+    expect(run.code, trace(run)).toBe(3)
+    expect(stepOutcomes(run).at(-1)).toBe("review:parked:INF_WIZ_MERGE_PARKED")
+    const parked = run.ofType("step.done").find(event => event.step === "review")
+    expect(parked?.reason).toContain("Approved fixes remain open")
+    expect(parked?.reason).toContain("No agent ran")
+    expect(readGhState(w.ghState).prs[0]).toMatchObject({ state: "OPEN", isDraft: true })
+    expect(run.ofType("ask.open").some(event => event.kind === "merge-ready")).toBe(false)
+    expect(w.bridge.callsFor("runs.proof-claim")).toEqual([])
+    expect(w.bridge.callsFor("test.start").some(call => (call.body as TestRunRequest).mode === "real_visit")).toBe(false)
     // The fakes are still on PATH; nothing spawned them.
     expect(agentRuns(w, "claude")).toEqual([])
     expect(agentRuns(w, "codex")).toEqual([])
@@ -768,7 +782,7 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(agentJobs.length).toBeGreaterThan(0)
     for (const job of agentJobs) expect(job, job.id).toMatchObject({ state: "blocked", blockedReason: "needs_you" })
     expect(existsSync(join(w.site.repo, ".infinite/wizard/review-brief.md"))).toBe(true)
-    // The deterministic install shipped anyway.
+    // The draft contains the deterministic install; the unfinished agent work keeps it unmerged.
     const head = headOfBranch(w)!
     expect(bareShow(w.site.bare, head.head, "lib/infinite-analytics.ts")).toContain("Managed by Infinite")
   })
@@ -1001,8 +1015,8 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
     expect(w.bridge.callsFor("report").map((call) => (call.body as { phase: string }).phase)).toContain("proven_live")
   })
 
-  it("review I1 P1-2: a Next site with its own next.config.mjs installs (exit 0), its config untouched, the rewrite left as a job", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await wiredWorld()
+  it("review I1 P1-2: a Next site with its own next.config.mjs installs with its config untouched and stays draft while the rewrite is unfinished", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await wiredWorld({ scenario: agentScenario() })
     const own = "/** @type {import('next').NextConfig} */\nconst nextConfig = { reactStrictMode: true }\n\nexport default nextConfig\n"
     writeFileSync(join(w.site.repo, "next.config.mjs"), own)
     git(w.site.repo, "add", "next.config.mjs")
@@ -1010,10 +1024,16 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
     git(w.site.repo, "push", "-q", "origin", "main")
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(stepOutcomes(run), trace(run)).toContain("install:ok")
-    expect(run.code, trace(run)).toBe(0)
+    expect(run.code, trace(run)).toBe(3)
+    expect(stepOutcomes(run).at(-1)).toBe("review:parked:INF_WIZ_MERGE_PARKED")
+    expect(run.ofType("step.done").find(event => event.step === "review")?.reason).toContain("Approved fixes remain open")
+    expect(readGhState(w.ghState).prs[0]).toMatchObject({ state: "OPEN", isDraft: true })
+    expect(w.bridge.callsFor("runs.proof-claim")).toEqual([])
     const head = headOfBranch(w)!
     expect(bareShow(w.site.bare, head.head, "next.config.mjs")).toBe(own)
-    expect(finalJobs(w).some((job) => job.id === "unusual_layout:next_config_rewrites")).toBe(true)
+    const rewrite = finalJobs(w).find(job => job.id === "unusual_layout:next_config_rewrites")
+    expect(rewrite).toBeDefined()
+    expect(["pending", "claimed", "blocked", "failed"]).toContain(rewrite!.state)
   })
 
   it("review I1 P3-1: a parked, unmerged run re-run as is re-sends no cloud write and re-tests no preview", { timeout: 2 * RUN_TIMEOUT }, async () => {
@@ -1358,6 +1378,9 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
     const gh = readGhState(w.ghState) as unknown as { deployments: unknown[] }
     gh.deployments.push({ id: 7050, sha: mainSha, environment: "Production", production_environment: false, creator: "vercel[bot]", created_at: "2026-10-02T08:00:00Z", statuses: [{ state: "success", environment_url: `https://${VERCEL_HASH_URL}` }] })
     saveGhState(w.ghState, gh)
+    // This host/report world keeps the signup outcome but has no unrelated login/logout instrumentation.
+    for (const file of ["app/api/auth/login/route.ts", "app/api/auth/logout/route.ts"]) rmSync(join(w.site.repo, file))
+    commitAndPush(w, "Host-only fixture without an account login flow")
     const asked: Array<{ kind: string; payload: unknown }> = []
     const typed = [`https://${VERCEL_ALIAS}/`, VERCEL_BRANCH_ALIAS]
     const respond = (ask: { kind: string; payload: unknown }) => {
@@ -1375,12 +1398,22 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
     // With no host, Infinite is not installed; the consent decision is still asked because it governs the Meta
     // click-id capture beside the site's own pixel (§3x.6: the pixel inside the <Script> template literal is now
     // seen as adopted, as it was in live run 3), so the answers carry it.
-    const answers = writeAnswers(w)
+    // The owner explicitly leaves these unrelated provider repairs for another run.
+    const chosen = answersFile()
+    const choices = chosen.plan as { approved: string[]; declined: string[] }
+    const excluded = ["improve_additive:posthog:proxy", "improve_additive:posthog:history_change", "posthog_defaults_bump_adopted:posthog:defaults", "sensitive_pages:posthog:replay_autocapture", "remove_duplicate:ga4:ga4_config:G-FAKE00001"]
+    choices.approved = choices.approved.filter(id => !excluded.includes(id))
+    choices.declined.push(...excluded)
+    const answers = writeAnswers(w, chosen)
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond, timeoutMs: RUN_TIMEOUT })
     const why = trace(run)
     const outcomes = stepOutcomes(run)
     expect(outcomes.slice(0, 5), why).toEqual(["link:ok", "agent:ok", "before:ok", "keys:ok", "plan:ok"])
+    expect(run.code, why).toBe(0)
     expect(outcomes.at(-1), why).toBe("done:ok")
+    const approvals = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/plan-approvals.json"), "utf8"))
+    expect(approvals.approvals.declined).toEqual(expect.arrayContaining(excluded))
+    expect(finalJobs(w).some(job => job.owner === "agent" && ["pending", "claimed", "blocked", "failed"].includes(job.state))).toBe(false)
     expect(w.tripwire.connections).toEqual([])
 
     // The host ask offered no vercel.app (the CNAME's alias dropped, nothing derived from the deployment URL).
@@ -1428,9 +1461,39 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
     expect(w.tripwire.connections).toEqual([])
   })
 
+  it("no live address with the original login flow and no agents stays draft with its identity job open", { timeout: RUN_TIMEOUT }, async () => {
+    // Identity currently has no separate exclusion line. Keep this original fixture as a negative;
+    // no host is a reason to skip proof, not permission to waive an unfinished approved job.
+    const w = await wiredWorld({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_NO_AGENTS: "1" } })
+    const run = await runWizard({
+      cwd: w.site.repo,
+      env: w.env,
+      args: ["--json", "--answers", writeAnswers(w)],
+      respond: ask => ask.kind === "single" && (ask.payload as { question?: string }).question?.startsWith("Which address is your live site?") ? "__none__" : undefined,
+      timeoutMs: RUN_TIMEOUT
+    })
+    expect(run.code, trace(run)).toBe(3)
+    expect(stepOutcomes(run).at(-1)).toBe("review:parked:INF_WIZ_MERGE_PARKED")
+    const parked = run.ofType("step.done").find(event => event.step === "review")
+    expect(parked?.reason).toContain("Approved fixes remain open")
+    expect(parked?.reason).toContain("Join visits to accounts")
+    expect(finalJobs(w).find(job => job.id === ITEMS.identify)).toMatchObject({ state: "blocked", blockedReason: "needs_you", note: "No agent ran: this job is listed for you." })
+    expect(readGhState(w.ghState).prs[0]).toMatchObject({ state: "OPEN", isDraft: true })
+    expect(readGhState(w.ghState).calls.some(call => call.argv[0] === "pr" && call.argv[1] === "ready")).toBe(false)
+    expect(run.ofType("ask.open").some(event => event.kind === "merge-ready")).toBe(false)
+    expect(agentRuns(w, "claude")).toEqual([])
+    expect(agentRuns(w, "codex")).toEqual([])
+    for (const verb of ["site-claim", "site-prove", "runs.proof-claim", "runs.patch(proofState)", "runs.patch(approvedConversions)", "conversions"]) expect(w.bridge.calls.map(label)).not.toContain(verb)
+    expect(w.bridge.callsFor("test.start").some(call => (call.body as TestRunRequest).mode === "real_visit")).toBe(false)
+    expect(w.tripwire.connections).toEqual([])
+  })
+
   it("no live address (the user says it isn't live yet): no conversion question, consent only for the Meta click-id capture, and Proven live holds no pass and no problem", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
     // No agents: this world is about the plan and the report, not the jobs (they would need conversions it withholds).
     const w = await wiredWorld({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_NO_AGENTS: "1" } })
+    // This host/report world keeps the signup outcome but has no unrelated login/logout instrumentation.
+    for (const file of ["app/api/auth/login/route.ts", "app/api/auth/logout/route.ts"]) rmSync(join(w.site.repo, file))
+    commitAndPush(w, "Host-only fixture without an account login flow")
     const asked: Array<{ kind: string; payload: unknown }> = []
     const respond = (ask: { kind: string; payload: unknown }) => {
       asked.push(ask)
@@ -1445,12 +1508,22 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
     }
     // The consent decision is asked ONLY for what it governs here: the Meta click-id capture beside the site's own
     // pixel (§3x.6 one detector: the pixel inside the <Script> template literal is adopted). The answers carry it.
-    const answers = writeAnswers(w)
+    // The owner explicitly leaves these unrelated provider repairs for another run.
+    const chosen = answersFile()
+    const choices = chosen.plan as { approved: string[]; declined: string[] }
+    const excluded = ["improve_additive:posthog:proxy", "improve_additive:posthog:history_change", "posthog_defaults_bump_adopted:posthog:defaults", "sensitive_pages:posthog:replay_autocapture", "remove_duplicate:ga4:ga4_config:G-FAKE00001"]
+    choices.approved = choices.approved.filter(id => !excluded.includes(id))
+    choices.declined.push(...excluded)
+    const answers = writeAnswers(w, chosen)
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond, timeoutMs: RUN_TIMEOUT })
     const why = trace(run)
     const outcomes = stepOutcomes(run)
     expect(outcomes.slice(0, 5), why).toEqual(["link:ok", "agent:ok", "before:ok", "keys:ok", "plan:ok"])
+    expect(run.code, why).toBe(0)
     expect(outcomes.at(-1), why).toBe("done:ok")
+    const approvals = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/plan-approvals.json"), "utf8"))
+    expect(approvals.approvals.declined).toEqual(expect.arrayContaining(excluded))
+    expect(finalJobs(w).some(job => job.owner === "agent" && ["pending", "claimed", "blocked", "failed"].includes(job.state))).toBe(false)
 
     // R2-6: nothing consent or the conversion names govern can be installed, so neither is asked or pre-checked.
     const planAsk = run.ofType("ask.open").find((event) => event.kind === "plan")!.payload as { lines: Array<{ id: string; kind: string; requires: string }> }
