@@ -23,6 +23,7 @@ import type { TagHosting, TagKeys } from "./contracts/bridge.js"
 import type { ReportV2 } from "./contracts/report.js"
 import { renderTerminal } from "./report.js"
 import { buildHostGuardExpression } from "../host-guard.js"
+import { META_PAGE_CHANGE_SCRIPT } from "../jobs/briefs.js"
 import type { TestResult, TestRunRequest } from "./contracts/test-engine.js"
 import {
   BUILT_CLI,
@@ -700,21 +701,22 @@ describe("the offline end-to-end run (§4.3)", () => {
 describe("a strict pages-router site with adopted tags and fork-only access", () => {
   it("runs a scripted worker through annotated guard, rewrites and capture while refusing a privacy edit", { timeout: RUN_TIMEOUT }, async () => {
     const guard = buildHostGuardExpression({ mode: "deny", exempt: [PRODUCTION_HOST, `www.${PRODUCTION_HOST}`, "acme-store.vercel.app"], deny: [] })
+      .replace("if (h === null) return true; ", "")
+      .replace('typeof location !== "undefined" ? location.hostname : null', 'typeof location !== "undefined" ? location.hostname : ""')
       .replaceAll("(function (h) {", "(function (h: string) {")
       .replace("})(h), i;", "})(h), i: number;")
     const remote = "posthog.init('phc_FAKEtestProjectKeyNotReal000', { api_host: 'https://us.i.posthog.com' });"
     const proxy = "posthog.init('phc_FAKEtestProjectKeyNotReal000', { api_host: '/ingest', ui_host: 'https://us.posthog.com', capture_pageview: 'history_change', defaults: '2026-01-30' });"
-    const start = `declare const gtag: (...args: unknown[]) => void;\ndeclare const fbq: (...args: unknown[]) => void;\ndeclare const posthog: { init(key: string, options: object): void };\nexport function boot() {\n  gtag('config', 'G-FAKE00001');\n  ${remote}\n  fbq('init', '${FIXTURE_PIXEL_ID}');\n}\n`
-    const init = `  fbq('init', '${FIXTURE_PIXEL_ID}');`
-    const guardedInit = `  if (typeof window !== 'undefined' && ${guard}) {\n    fbq('init', '${FIXTURE_PIXEL_ID}');\n  }`
+    const start = `"use client";\ndeclare const gtag: (...args: unknown[]) => void;\ndeclare const fbq: (...args: unknown[]) => void;\ndeclare const posthog: { init(key: string, options: object): void };\nexport function boot() {\n  gtag('config', 'G-FAKE00001');\n  ${remote}\n  fbq('init', '${FIXTURE_PIXEL_ID}');\n  fbq('track', 'PageView');\n}\n`
+    const finalTracking = `"use client";\ndeclare const gtag: (...args: unknown[]) => void;\ndeclare const fbq: (...args: unknown[]) => void;\ndeclare const posthog: { init(key: string, options: object): void };\nexport function boot() {\n  if (typeof window !== 'undefined' && ${guard}) {\n    gtag('config', 'G-FAKE00001');\n  }\n  if (typeof window !== 'undefined' && ${guard}) {\n    ${proxy}\n  }\n  if (typeof window !== 'undefined' && ${guard}) {\n    fbq('set', 'autoConfig', false, '${FIXTURE_PIXEL_ID}');\n    fbq('init', '${FIXTURE_PIXEL_ID}');\n    fbq('track', 'PageView');\n${META_PAGE_CHANGE_SCRIPT}\n  }\n}\n`
     const posthogRules = "{ source: '/ingest/static/:path(.*)', destination: 'https://us-assets.i.posthog.com/static/:path' },\n{ source: '/ingest/array/:path(.*)', destination: 'https://us-assets.i.posthog.com/array/:path' },\n{ source: '/ingest/:path(.*)', destination: 'https://us.i.posthog.com/:path' },\n{ source: '/infinite/ledger', destination: 'https://api.ultima.inc/api/analytics/events/collect' },\n"
     const claim = (job_id: string) => ({ tool: "job_claim", args: { job_id, status: "done", note: "Applied the approved change and checked its placement." } })
     const scenario = agentScenario({ round1: [
       { tool: "job_list" },
       // Capture is installer-owned. Preserve its entry wiring and the installer's existing opt-out.
-      replaceStep("src/common/tracking.ts", init, guardedInit), claim("preview_guard:meta"),
-      replaceStep("src/common/tracking.ts", remote, proxy),
-      { replace: { path: "next.config.js", find: "return [\n", replace: `return [\n${posthogRules}` } }, claim("posthog_improve:proxy"), claim("unusual_layout:next_config_rewrites"),
+      { edit: { path: "src/common/tracking.ts", content: finalTracking } },
+      claim("preview_guard:ga4"), claim("preview_guard:meta"), claim("meta_improve:spa_page_view"),
+      { replace: { path: "next.config.js", find: "return [\n", replace: `return [\n${posthogRules}` } }, claim("posthog_improve:proxy"), claim("preview_guard:posthog"), claim("unusual_layout:next_config_rewrites"),
       { edit: { path: "pages/privacy.tsx", content: "export default function Privacy() { return <p>We use Infinite analytics to measure visits.</p> }\n" } }, claim("privacy_paragraph:page")
     ] }) as { claude: { turns: unknown[] }; codex: { turns: unknown[] } }
     scenario.codex.turns = [{ final: { verdict: "looks_good", summary: "The four edits pass their checks.", checklist: [], findings: [] } }]
@@ -1140,7 +1142,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   it("§3z.12 item 4: newly managed GA4 and PostHog ship with the preview guard and the sensitive-path options in the emitted bytes", { timeout: RUN_TIMEOUT }, async () => {
     const w = await wiredWorld({ env: { E2E_NO_AGENTS: "1" } })
     // The site has no GA4 and no PostHog yet (the Meta pixel stays adopted): both become NEW managed installs.
-    writeFileSync(join(w.site.repo, "app/layout.tsx"), readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8").replace(/ {8}<ConsentDefaults \/>[\s\S]*?<Script id="meta-pixel"/, '        <Script id="meta-pixel"'))
+    writeFileSync(join(w.site.repo, "app/layout.tsx"), readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8").replace(/ {8}<BootstrapDefaults \/>[\s\S]*?<Script id="meta-pixel"/, '        <Script id="meta-pixel"'))
     writeFileSync(join(w.site.repo, "app/providers.tsx"), 'export function Providers({ children }: { children: React.ReactNode }) {\n  return <>{children}</>\n}\n')
     // This deterministic install world has no account-login instrumentation; keep the login page
     // itself so the emitted sensitive-path options are still exercised below.

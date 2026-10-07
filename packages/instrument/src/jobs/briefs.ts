@@ -88,19 +88,21 @@ export function capturePasteAsWritten(context: "component" | "html" | "typescrip
  */
 export const GA4_PAGE_CHANGE_SCRIPT = [
   "(function () {",
-  "  if (window.__infiniteGa4PageChange) return;",
-  "  window.__infiniteGa4PageChange = true;",
+  "  var marker = '__infiniteGa4PageChange';",
+  "  if (Reflect.get(window, marker)) return;",
+  "  Reflect.set(window, marker, true);",
   "  var last = location.pathname + location.search;",
   "  function pageChanged() {",
   "    var next = location.pathname + location.search;",
   "    if (next === last) return;",
   "    last = next;",
-  "    if (typeof window.gtag === 'function') window.gtag('event', 'page_view', { page_location: location.href, page_title: document.title });",
+  "    var send = Reflect.get(window, 'gtag');",
+  "    if (typeof send === 'function') send('event', 'page_view', { page_location: location.href, page_title: document.title });",
   "  }",
-  "  ['pushState', 'replaceState'].forEach(function (method) {",
-  "    var original = history[method];",
-  "    history[method] = function () { var result = original.apply(this, arguments); pageChanged(); return result; };",
-  "  });",
+  "  var originalPushState = history.pushState;",
+  "  history.pushState = function (...args) { var result = originalPushState.apply(history, args); pageChanged(); return result; };",
+  "  var originalReplaceState = history.replaceState;",
+  "  history.replaceState = function (...args) { var result = originalReplaceState.apply(history, args); pageChanged(); return result; };",
   "  window.addEventListener('popstate', pageChanged);",
   "})();"
 ].join("\n")
@@ -108,7 +110,8 @@ export const GA4_PAGE_CHANGE_SCRIPT = [
 /** The same bounded History API subscription, emitting only on a changed page after initial load. */
 export const META_PAGE_CHANGE_SCRIPT = GA4_PAGE_CHANGE_SCRIPT
   .replaceAll("__infiniteGa4PageChange", "__infiniteMetaPageChange")
-  .replace("if (typeof window.gtag === 'function') window.gtag('event', 'page_view', { page_location: location.href, page_title: document.title });", "if (typeof window.fbq === 'function') window.fbq('track', 'PageView');")
+  .replace("Reflect.get(window, 'gtag')", "Reflect.get(window, 'fbq')")
+  .replace("send('event', 'page_view', { page_location: location.href, page_title: document.title })", "send('track', 'PageView')")
 
 /** R4-6: the one line that turns Meta's automatic events off on pixel `pixelId`, placed right before its init. */
 export function autoConfigOffLine(pixelId: string): string {
