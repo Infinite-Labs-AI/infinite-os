@@ -27,6 +27,7 @@ import { WIZARD_PATHS, type WizardRunState } from "./contracts/state.js"
 import { guardBridge } from "./engine.js"
 import { buildScanner } from "../review/context.js"
 import { safeText } from "../review/post.js"
+import { safeDisplayText } from "../review/display.js"
 import { mergeIsDeployed } from "./steps/prove.js"
 import { HARNESS_OUTPUTS_RELATIVE_PATH } from "../harness/outputs.js"
 import { canPush } from "../github/repo.js"
@@ -389,18 +390,18 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
   if (reversal.reversed.length === 0) {
     lines.push("Nothing in the code to reverse.")
   } else {
+    const scanner = buildScanner({ root: ctx.root, appRoot: ctx.state?.appRoot ?? "." }, deps, [])
     const working = await measureOwnerDiff({ root: ctx.root, appRoot: ctx.state?.appRoot ?? ".", baseSha: await deps.git.head() })
-    if (working.state !== "checked") return stop("INF_WIZ_PUSH_REFUSED", ownerBoundaryStop(working), lines)
+    if (working.state !== "checked") return stop("INF_WIZ_PUSH_REFUSED", safeDisplayText(scanner, ownerBoundaryStop(working)), lines)
     await deps.git.stage([...new Set([...reversal.reversed, WIZARD_PATHS.installManifest])])
     const runId = ctx.state?.runId ?? null
     const committed = await deps.git.commit({ message: UNINSTALL_COMMIT_MESSAGE, trailers: runId ? { "Infinite-Tag-Run": runId } : {} })
     record.wizardCommits!.push(committed.sha)
     await writeRecord(deps, ctx.root, record)
     const head = await deps.git.head()
-    const scanner = buildScanner({ root: ctx.root, appRoot: ctx.state?.appRoot ?? "." }, deps, [])
     record.ownerBoundary = await measureWizardCommits({ root: ctx.root, appRoot: ctx.state?.appRoot ?? ".", baseSha, headSha: head, wizardCommits: record.wizardCommits! })
     await writeRecord(deps, ctx.root, record)
-    if (record.ownerBoundary.state !== "checked") return stop("INF_WIZ_PUSH_REFUSED", ownerBoundaryStop(record.ownerBoundary), lines, record)
+    if (record.ownerBoundary.state !== "checked") return stop("INF_WIZ_PUSH_REFUSED", safeDisplayText(scanner, ownerBoundaryStop(record.ownerBoundary)), lines, record)
     const foreign = await unrecordedCommits({ root: ctx.root, baseSha, headSha: head, wizardCommits: record.wizardCommits!, approvedForeignCommits: [] })
     if (foreign === null) return stop("INF_WIZ_PUSH_REFUSED", "Nothing pushed: unrecorded uninstall-branch commits could not be listed.", lines, record)
     if (foreign.length) {

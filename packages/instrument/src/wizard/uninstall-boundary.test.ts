@@ -12,8 +12,7 @@ import type { AskFn } from "./contracts/deps.js"
 
 const fixtures: GitFixture[] = []
 afterEach(() => { while (fixtures.length) fixtures.pop()!.cleanup() })
-async function fixture(unsafe = false, gitlab = false) {
-  const path = "src/tracking.ts"
+async function fixture(unsafe = false, gitlab = false, path = "src/tracking.ts") {
   const source = unsafe ? "function boot(){ fbq('consent','revoke'); }\n" : "export const count = 1;\n"
   const fx = createGitFixture({ files: { [path]: source, ".infinite/install.json": "{}\n", ".gitignore": ".infinite/wizard/\n" } }); fixtures.push(fx)
   const git = createGitOps({ cwd: fx.root, env: fx.env })
@@ -39,6 +38,35 @@ it("refuses an uninstall change to an owner unit before committing or pushing", 
   expect(result.lines.join("\n")).toContain(w.path)
   expect(await w.git.head()).toBe(base)
   expect(w.git.calls.some(args => args[0] === "push")).toBe(false)
+})
+
+it.each(["working_tree", "commit"])("redacts env literals and neutralizes markup in %s boundary filenames", async scope => {
+  const rootSecret = "RootSensitiveFixture42", appSecret = "AppSensitiveFixture73"
+  const path = `apps/web/src/${rootSecret}-${appSecret}-<!--@owner-[link](target)-![image](target).ts`
+  const w = await fixture(scope === "working_tree", false, path)
+  w.state.appRoot = "apps/web"
+  w.fx.write(".git/info/exclude", ".env*\n")
+  w.fx.write(".env.local", `PRIVATE_TOKEN=${rootSecret}\n`)
+  w.fx.write("apps/web/.env.local", `PRIVATE_TOKEN=${appSecret}\n`)
+  if (scope === "commit") {
+    const commit = w.git.commit.bind(w.git)
+    w.git.commit = async input => {
+      w.fx.write(path, "fbq('consent','grant');\n")
+      w.fx.git(["add", "--", path])
+      return commit(input)
+    }
+  }
+  const result = await w.run()
+  expect(result.code).toBe("INF_WIZ_PUSH_REFUSED")
+  const displayed = result.lines.join("\n")
+  for (const unsafe of [rootSecret, appSecret, "<!--", "@owner", "[link](", "![image]("]) expect(displayed).not.toContain(unsafe)
+  expect(displayed).toContain("‹!--＠owner-［link］(target)-!［image］(target).ts")
+  expect(w.git.calls.some(args => args[0] === "push")).toBe(false)
+  expect(readFileSync(join(w.fx.root, path), "utf8")).toContain("'consent','grant'")
+  if (scope === "commit") {
+    expect(result.record?.ownerBoundary?.issues.map(issue => issue.file)).toContain(path)
+    expect(w.fx.git(["show", `HEAD:${path}`])).toContain("'consent','grant'")
+  }
 })
 
 it.each([
