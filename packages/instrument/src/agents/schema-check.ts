@@ -67,7 +67,7 @@ export function parseStructuredClaims(value: unknown): StructuredClaims | null {
   return parsed as StructuredClaims
 }
 
-/** The review, or null when it does not match `review.schema.json` exactly. */
+/** Validate transport shape; the wizard normalizes finding labels once before using the review. */
 export function parseReview(value: unknown): ReviewResult | null {
   const parsed = typeof value === "string" ? tryJson(value) : value
   if (!isReviewResult(parsed, false)) return null

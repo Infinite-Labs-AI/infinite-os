@@ -1,3 +1,4 @@
+import { REVIEW_ITEMS } from "../../src/wizard/contracts/agents.js"
 // Lane O4's test doubles for WizardDeps: a recording fake bridge, scripted agents, a fake check runner /
 // registry / installer / report builder, a fake clock, a real-disk WizardFs, and a WizardContext with an
 // in-memory run state, an event log and scripted ask answers. No network, no real agent, no real desktop.
@@ -555,7 +556,7 @@ export function review(findings: ReviewResult["findings"], verdict: ReviewResult
   return {
     verdict,
     summary: findings.length > 0 ? "A few things to fix." : "Looks good.",
-    checklist: [{ item: "R1", status: "pass", note: "Scope is fine." }],
+    checklist: REVIEW_ITEMS.filter(item => item !== "R6").map(item => ({ item, status: "pass", note: "Checked." })),
     findings
   }
 }

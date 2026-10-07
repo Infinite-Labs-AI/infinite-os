@@ -1106,7 +1106,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     const state = w.gh.read()
     const posted = state.calls.filter((call) => call.stdin?.includes("addPullRequestReview(input")).map((call) => (JSON.parse(call.stdin!) as { variables: { body: string } }).variables.body)
     expect(posted).toHaveLength(1)
-    expect(posted[0]).toContain("**Second review by Codex (round 1): incomplete — it could not check R10, R12.**")
+    expect(posted[0]).toContain("**Second review by Codex (round 1): incomplete — unchecked: R10, R12.**")
     expect(posted[0]).not.toMatch(/read-check/)
     const final = (state.prs[0] as { comments?: Array<{ body: string }> }).comments?.map((comment) => comment.body).join("\n") ?? ""
     expect(final).toContain("Reviewed by Codex (incomplete: R10, R12 not checked).")
