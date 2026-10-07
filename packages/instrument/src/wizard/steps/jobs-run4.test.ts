@@ -444,11 +444,16 @@ describe("structured activity reports job progress and measured budget use", () 
 
 it("the archived inline-consent entry stays byte-identical while the independent signup edit runs", async () => {
   const w = world({ entry: "archived", round1Claims: [JOB6, GA4_GUARD, META_GUARD, SIGNUP, CAPTURE], fbcCapture: ["pass"] })
+  const before = readFileSync(join(w.root, "app/layout.tsx"), "utf8")
+  expect(before).toBe(installedLayout())
+  expect(before).toContain("gtag('consent', 'default'")
   await step.run(w.ctx, w.deps)
-  expect(readFileSync(join(w.root, "app/layout.tsx"), "utf8")).toBe(installedLayout())
+  expect(readFileSync(join(w.root, "app/layout.tsx"), "utf8")).toBe(before)
   for (const id of [JOB6, GA4_GUARD, META_GUARD, CAPTURE]) {
     const job = w.current().jobs.find(item => item.id === id)!
     expect(job).toMatchObject({ state: "left_for_you", ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx" } })
+    expect(job.note).toContain("Not changed by us:")
+    expect(job.ownerBoundary?.unitHash).toMatch(/^[a-f0-9]+$/)
     expect(job.claim).toBeUndefined()
     expect(job.edits ?? []).toEqual([])
   }

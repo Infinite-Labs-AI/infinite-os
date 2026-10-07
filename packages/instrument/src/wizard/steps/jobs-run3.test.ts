@@ -247,13 +247,18 @@ it("the fixture is the real run (sanity: the dir and the edit exist)", () => {
 it("the archived inline-consent entry is left for its owner before any worker starts", async () => {
   const t = setup({ turns: [{ steps: [{ edit: { path: "app/layout.tsx", content: run3EditedLayout() } }, claim(JOB6), claim(GA4_GUARD), claim(META_GUARD)] }] }, run3Items([JOB6, GA4_GUARD, META_GUARD]), "archived")
   const before = readFileSync(join(t.root, "app/layout.tsx"), "utf8")
+  expect(before).toBe(run3File("install-f1abea9/app/layout.tsx"))
+  expect(before).toContain("gtag('consent', 'default'")
   expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "ok" })
   expect(t.current().jobs).toHaveLength(3)
   for (const job of t.current().jobs) {
     expect(job).toMatchObject({ state: "left_for_you", ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx" } })
+    expect(job.note).toContain("Not changed by us:")
+    expect(job.ownerBoundary?.unitHash).toMatch(/^[a-f0-9]+$/)
     expect(job.claim).toBeUndefined()
     expect(job.edits ?? []).toEqual([])
   }
+  expect(t.calls.run).toEqual([])
   expect(readFileSync(join(t.root, "app/layout.tsx"), "utf8")).toBe(before)
   expect(runs(t.fakes)).toHaveLength(0)
   expect(t.recorded).toEqual([])
