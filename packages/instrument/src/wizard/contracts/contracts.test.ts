@@ -1105,7 +1105,7 @@ describe("YES_POLICY (§3d.4)", () => {
   })
 
   it("--yes approves the additive and managed kinds", () => {
-    for (const kind of ["install_provider", "server_lane", "npm_install", "preview_guard_managed", "agent_budget", "meta_goal"] as const) {
+    for (const kind of ["install_provider", "server_lane", "preview_guard_managed"] as const) {
       expect(yesApproves({ kind }), kind).toBe(true)
     }
     expect(yesApproves({ kind: "improve_additive", ownership: "managed" })).toBe(true)
@@ -1113,6 +1113,9 @@ describe("YES_POLICY (§3d.4)", () => {
 
   it("negatives: --yes never approves a line that changes an existing tag, sends data, or is the user's decision", () => {
     for (const kind of [
+      "npm_install",
+      "account_settings",
+      "agent_budget",
       "consent_mode",
       "conversion_names",
       "privacy_text",

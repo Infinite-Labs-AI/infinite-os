@@ -95,7 +95,7 @@ export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue | { mana
   npm_install: "never",
   account_settings: "never",
   preview_guard_managed: "yes",
-  agent_budget: "yes",
+  agent_budget: "never",
   // It rewrites the customer's api_host / capture_pageview on an adopted provider.
   improve_additive: { managed: "yes", adopted: "never" },
   // Needs --consent-mode; a missing consent mode parks the run at `plan`.
@@ -116,7 +116,7 @@ export const YES_POLICY: { readonly [K in PlanLineKind]: YesPolicyValue | { mana
   // R4-8: a change to the customer's own GA4 tag.
   ga4_spa_page_views: "never",
   // The D16 recommendation: an informational default the user can change.
-  meta_goal: "never",
+  meta_goal: "n/a",
   // GTM edit, Traffic Permissions, connect a tool, the GA4 page-change setting: shown only.
   user_action: "n/a",
   // B28: an information line; nothing to approve.

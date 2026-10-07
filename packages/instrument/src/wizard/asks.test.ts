@@ -66,7 +66,7 @@ describe("--yes (§3d.4 YES_POLICY)", () => {
     const { store, asks } = setup({ yes: true })
     const answer = await asks.ask("plan", PLAN)
     expect(store.getSnapshot().pendingAsk).toBeNull()
-    expect(answer).toEqual({ approved: ["L1", "L2", "L3", "L4", "L5", "L6", "L19"], declined: [], edits: {} })
+    expect(answer).toEqual({ approved: ["L1", "L2", "L4", "L6"], declined: [], edits: {} })
     for (const id of NEVER_LINES) expect(JSON.stringify(answer)).not.toContain(`"${id}"`)
     expect(PLAN_LINE_KINDS.every((kind) => kind in YES_POLICY)).toBe(true)
   })
@@ -175,7 +175,7 @@ describe("nested mode (§3d.7): user-only asks stay human", () => {
     }
     const { asks } = setup({ nested: true, json: true }, nestedAnswers, tty)
     const answer = (await asks.ask("plan", PLAN)) as { approved: string[]; declined: string[]; edits: Record<string, string> }
-    expect(asked).toEqual(NEVER_LINES)
+    expect(asked).toEqual(["L3", "L5", ...NEVER_LINES])
     expect(answer.edits).toEqual({ L8: "not_required" })
     expect(answer.approved).toContain("L8")
   })
