@@ -17,7 +17,7 @@
 // The pinned models live in ONE constant (`AGENT_MODELS`, River 10-02); if the user's plan or CLI rejects
 // one, the turn is retried ONCE with the user's default model at the same effort, and the user is told.
 // Never a provider switch, never Infinite-paid inference, never a real prompt in tests (fakes only).
-import { OWNER_BOUNDARY_INSTRUCTION, isOwnerOnlyFinding } from "../jobs/owner-boundary.js"
+import { OWNER_BOUNDARY_INSTRUCTION } from "../jobs/owner-boundary.js"
 import { randomUUID } from "node:crypto"
 import { access, chmod, open, readFile, rm, writeFile } from "node:fs/promises"
 import { basename, dirname, join } from "node:path"
@@ -116,7 +116,7 @@ export type AgentRunResultWithExtras = AgentRunResult & AgentRunExtras
  * job the fence blocked (review O3 F14), so when it reverted anything and gave no `blocked` list, every
  * item of the turn is blocked (fail closed) instead of none.
  */
-export function runExtras(result: AgentRunResult, items: readonly { id: string }[] = []): AgentRunExtras {
+export function runExtras(result: Omit<AgentRunResult, "session">, items: readonly { id: string }[] = []): AgentRunExtras {
   const extras = result as Partial<AgentRunExtras>
   let blocked: FenceBlock[]
   if (Array.isArray(extras.blocked)) blocked = extras.blocked
@@ -293,7 +293,7 @@ export class AgentRunnerImpl implements AgentRunner {
           if (this.pendingEdits.size > 0) return { state: "undetermined", problems: ["An editing tool is still running. Wait for it to finish, then claim again."] }
           if (!this.activeFence || !(await this.activeFence.claimCheckSafe())) return { state: "undetermined", problems: ["The safety fence found an out-of-scope or changing file; no static check ran. The turn will be settled before any further checks."] }
           const consentProblems = await this.activeFence.claimConsentProblems(claim.jobId)
-          if (consentProblems.length > 0) return { state: claim.status === "blocked" && isOwnerOnlyFinding({ body: claim.note }) ? "undetermined" : "problem", problems: consentProblems }
+          if (consentProblems.length > 0) return { state: "problem", problems: consentProblems }
           const feedback = await input.onClaim(claim)
           return feedback && typeof feedback === "object" ? feedback : undefined
         },

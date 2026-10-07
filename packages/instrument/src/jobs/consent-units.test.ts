@@ -1,0 +1,64 @@
+import { expect, it } from "vitest"
+import { sourceUnits, restoreFrozenUnits } from "./consent-units.js"
+import { renderInfiniteBrowserTag } from "../runtime/infinite-browser.js"
+import { buildGa4BootstrapSnippet } from "../providers/ga4.js"
+import { buildPostHogBootstrapSnippet } from "../providers/posthog.js"
+import { buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
+
+it("does not confuse real newly emitted analytics modules with edits to the owner's consent units", () => {
+  const scripts = [
+    renderInfiniteBrowserTag({ siteSourceKey: "site_fixture", collectPath: "/infinite/ledger", productionHosts: ["example.test"], respectDnt: true, consent: { mode: "required", storageKey: "infinite_analytics_consent" } }),
+    buildGa4BootstrapSnippet("G-FAKE00001"),
+    buildPostHogBootstrapSnippet("phc_FAKEtestProjectKeyNotReal000", "https://us.i.posthog.com"),
+    buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "required" } })
+  ]
+  for (const script of scripts) expect(restoreFrozenUnits("", script).changes, script.slice(0, 80)).toEqual([])
+})
+
+it("allows the actual module-level capture beside a frozen bootstrap", () => {
+  const before = "export function boot() {\n  fbq('init','123');\n  fbq?.('consent','revoke');\n}\n"
+  const capture = buildMetaClickIdCaptureTypescript({ gate: { kind: "infinite-consent", mode: "required" } })
+  const after = `${capture}\n${before}`
+  expect(sourceUnits(before).confident).toBe(true)
+  expect(sourceUnits(after).confident).toBe(true)
+  expect(restoreFrozenUnits(before, after).text).toBe(after)
+  expect(restoreFrozenUnits(before, after).changes).toEqual([])
+})
+
+it("restores a frozen module statement moved past an existing sibling", () => {
+  const consent = "gtag('consent','default',{analytics_storage:'denied'});\n"
+  const config = "gtag('config','G-FAKE00001');\n"
+  expect(restoreFrozenUnits(consent + config, config + consent).text).toBe(consent + config)
+})
+it("shares token-normalized call patterns, including comments and computed optional members", () => {
+  for (const call of ["fbq /* spaced */ ?. /* spaced */ ('consent','revoke');", "window['gtag'] /* spaced */ ('consent','default',{analytics_storage:'denied'});", "posthog?.['opt_out_capturing']?.();"]) {
+    expect(restoreFrozenUnits("", call).changes.length).toBeGreaterThan(0)
+  }
+})
+it.each([
+  ["if/else with an unbraced first arm", "if (enabled) start(); else fbq('consent','revoke');\n", "if (changed) start(); else fbq('consent','revoke');\n"],
+  ["do/while across a newline", "do { fbq('consent','revoke'); }\nwhile (enabled);\n", "do { fbq('consent','revoke'); }\nwhile (changed);\n"],
+  ["destructured API parameter", "fbq('consent','revoke');\nfunction helper(){ return 1; }\n", "fbq('consent','revoke');\nfunction helper({fbq}){ return 1; }\n"],
+])("keeps a complete top-level statement frozen: %s", (_name, before, after) => {
+  expect(restoreFrozenUnits(before!, after!).text).toBe(before)
+})
+it("freezes an ambiguous newline tagged template as one whole file", () => {
+  const before = "const action = tag\n`gtag('consent','default',{})`;\n"
+  expect(sourceUnits(before).confident).toBe(false)
+  expect(restoreFrozenUnits(before, before.replace("= tag", "= otherTag")).text).toBe(before)
+})
+it("declares ambiguous anonymous-unit correspondence frozen as a whole before any job can edit a neighbor", () => {
+  const before = "(function(){ ga4(); })();\n(function(){ fbq('consent','revoke'); })();\n"
+  const after = "(function(){ fbq('consent','revoke'); })();\n(function(){ ga4Improved(); })();\n"
+  expect(sourceUnits(before).confident).toBe(false)
+  expect(sourceUnits(before).units).toHaveLength(1)
+  expect(sourceUnits(before).units[0]?.frozen).toBe(true)
+  expect(restoreFrozenUnits(before, after).text).toBe(before)
+})
+it("declares repeated statement identities ambiguous when one reads a consent map", () => {
+  const before = "const DENIED = { analytics_storage: 'denied' };\nsend(safe);\nsend(DENIED);\n"
+  const after = "const DENIED = { analytics_storage: 'denied' };\nsend(DENIED);\nsend(improved);\n"
+  expect(sourceUnits(before).confident).toBe(false)
+  expect(sourceUnits(before).units).toHaveLength(1)
+  expect(restoreFrozenUnits(before, after).text).toBe(before)
+})

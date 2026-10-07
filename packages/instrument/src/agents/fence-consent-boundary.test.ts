@@ -26,7 +26,7 @@ it.each([
   const fence = await Fence.begin({ root, snapshotDir: join(home, "fence"), runId: "boundary", turn: 1, items: [item("meta_improve:capture", [file])] })
   write(root, file, after)
   fence.recordEditActivity("meta_improve:capture", file)
-  expect((await fence.claimConsentProblems("meta_improve:capture")).join(" ")).toContain("exact bytes")
+  expect((await fence.claimConsentProblems("meta_improve:capture")).join(" ")).toContain("your change there was put back")
   expect((await fence.end()).blocked).toEqual([expect.objectContaining({ itemId: "meta_improve:capture", reason: "consent_touched" })])
   expect(readFileSync(join(root, file), "utf8")).toBe(before)
 })
@@ -40,7 +40,7 @@ it("warns every claimant with no progress events, reverts consent, and keeps a s
   const ids = ["preview_guard:meta", "meta_improve:capture"]
   const fence = await Fence.begin({ root, snapshotDir: join(home, "fence"), runId: "boundary", turn: 1, items: ids.map(id => item(id, [file])) })
   write(root, file, original.replace("  gtag", "    gtag").replace("version = 1", "version = 2"))
-  for (const id of ids) expect((await fence.claimConsentProblems(id)).join(" ")).toContain("runner cannot identify")
+  for (const id of ids) expect((await fence.claimConsentProblems(id)).join(" ")).toContain("your change there was put back")
   expect((await fence.end()).blocked).toEqual([])
   expect(readFileSync(join(root, file), "utf8")).toBe(original.replace("version = 1", "version = 2"))
 })

@@ -67,7 +67,8 @@ import { git, gitOk, parsePorcelainZ, type StatusEntry } from "./git-exec.js"
 import { matchesAnyGlob, normalizeRelPath } from "./glob.js"
 import { TURN_GATE_RULES, type TurnGateRule } from "../checks/turn-gate.js"
 import { applySomeHunks, hunkLines, hunksOf, hunksToTextEdits, splitLines, type LineHunk } from "./line-diff.js"
-import { lexicalStates } from "../lexical-states.js"
+import { restoreFrozenUnits, sourceUnits, type FrozenUnitRestore } from "../jobs/consent-units.js"
+export { CONSENT_CALL_PATTERNS } from "../jobs/consent-units.js"
 
 export const FENCE_SNAPSHOT_SCHEMA = "infinite-tag.fence-snapshot.v1" as const
 
@@ -76,44 +77,6 @@ export const HEAVY_DIR_NAMES = ["node_modules", ".next", "dist", "build", "out"]
 
 /** Other ignored files are copied up to these caps; above them they are fingerprinted (a change → tamper). */
 export const IGNORED_COPY_LIMITS = { perFileBytes: 2 * 1024 * 1024, totalBytes: 64 * 1024 * 1024 } as const
-
-/**
- * A hunk that adds or removes a line matching one of these touches a consent call: never the agent's job
- * (§3e.1 "Never the agent's job"). `gtag('consent'` is the §3e.2 example; the rest are the common CMP APIs.
- */
-export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
-  /gtag\s*\(\s*['"`]consent['"`]/,
-  /fbq\s*\(\s*['"`]consent['"`]/,
-  /\b__tcfapi\s*\(/,
-  /\b__uspapi\s*\(/,
-  /\b__gpp\s*\(/,
-  /\b(OneTrust|Optanon)\b/,
-  /\bCookiebot\b/,
-  /\bDidomi\b/,
-  /\bUC_UI\b|\busercentrics\b/i,
-  /\bklaro\b/i,
-  /\bposthog\s*\.\s*(opt_in_capturing|opt_out_capturing)\b/,
-  /['"`]consent['"`]\s*,\s*['"`](default|update)['"`]/,
-  // Google Consent Mode keys: a line naming one is consent state, wherever the call starts.
-  /\b(ad_storage|analytics_storage|ad_user_data|ad_personalization|functionality_storage|personalization_storage|security_storage|wait_for_update)\b/
-]
-
-/**
- * Where a consent CALL starts (review O3 F3). A hunk that changes any line inside the call's bracket span
- * (in the text before OR after the turn) touches consent, so a key flipped on a continuation line of a
- * Prettier-formatted `gtag('consent', 'default', {\n ad_storage: … })` is caught like a one-line call.
- * `call` = the match holds the call's own "(" (the span runs to its matching ")"); `enclosing` = the match
- * is inside the arguments (the span runs to the bracket that closes them, e.g. `dataLayer.push([…])`).
- */
-const CONSENT_SPAN_STARTS: ReadonlyArray<{ pattern: RegExp; mode: "call" | "enclosing" }> = [
-  { pattern: /gtag\s*\(\s*['"`]consent['"`]/g, mode: "call" },
-  { pattern: /fbq\s*\(\s*['"`]consent['"`]/g, mode: "call" },
-  { pattern: /\b__tcfapi\s*\(/g, mode: "call" },
-  { pattern: /\b__uspapi\s*\(/g, mode: "call" },
-  { pattern: /\b__gpp\s*\(/g, mode: "call" },
-  { pattern: /\bposthog\s*\.\s*(?:opt_in_capturing|opt_out_capturing)\s*\(/g, mode: "call" },
-  { pattern: /['"`]consent['"`]\s*,\s*['"`](?:default|update)['"`]/g, mode: "enclosing" }
-]
 
 /**
  * `outside_allowlist` = a path outside every allowlist, a global-deny path, a deletion, a token in the diff, git's
@@ -317,6 +280,7 @@ export class Fence {
   private settled = false
   private closing: { kind: "abort" | "end"; promise: Promise<unknown> } | null = null
   private readonly editSnapshots = new Map<string, string>()
+  private readonly consentRefusals = new Map<string, Array<{ owners: string[] }>>()
   private readonly editActivities = new Map<string, Array<{ itemId: string | null; hunks: LineHunk[]; consent: boolean }>>()
 
   /** Called on a completed editing tool event, with the job that was active when that edit began. */
@@ -335,7 +299,7 @@ export class Fence {
       if (itemId && !this.manifest.allow.some((rule) => rule.itemId === itemId)) itemId = null
       const recent = hunksOf(splitLines(previous), splitLines(current))
       const changed = hunksOf(splitLines(original), splitLines(current)).filter((hunk) => recent.some((change) => overlaps(change.bStart, change.bEnd, hunk.bStart, hunk.bEnd)))
-      const activity = { itemId, hunks: changed, consent: consentChangedHunks(previous, current).length > 0 }
+      const activity = { itemId, hunks: changed, consent: restoreFrozenUnits(previous, current).changes.length > 0 }
       this.editActivities.set(rel, [...this.editActivities.get(rel) ?? [], activity])
     } catch { /* A missing/non-text path is handled by the normal fence settle. */ }
   }
@@ -372,28 +336,37 @@ export class Fence {
     return touched.paths.every((rel) => !isDenied(rel) && this.manifest.allow.some((item) => [...item.files, ...item.create].some((pattern) => sameOrGlob(pattern, rel))))
   }
 
-  /** Preview a consent refusal while the agent can still repair its own edit. No files are changed here. */
+  private rememberConsentRestore(rel: string, before: string, current: string, restored: FrozenUnitRestore): void {
+    const changed = hunksOf(splitLines(before), splitLines(current))
+    for (const unit of restored.changes) {
+      const relevant = changed.filter(hunk => (unit.before && overlaps(hunk.aStart, hunk.aEnd, unit.before.startLine - 1, unit.before.endLine)) || (unit.after && overlaps(hunk.bStart, hunk.bEnd, unit.after.startLine - 1, unit.after.endLine)))
+      const owners = [...new Set(relevant.flatMap(hunk => this.consentOwners(rel, hunk)))]
+      if (owners.length === 0 && this.manifest.allow.length === 1) owners.push(this.manifest.allow[0]!.itemId)
+      this.consentRefusals.set(rel, [...this.consentRefusals.get(rel) ?? [], { owners }])
+    }
+  }
+
+  /** Put back frozen units before answering a claim; the refusal survives to final settlement. */
   async claimConsentProblems(itemId: string): Promise<string[]> {
     this.assertOpen()
-    const rule = this.manifest.allow.find((entry) => entry.itemId === itemId)
+    const rule = this.manifest.allow.find(entry => entry.itemId === itemId)
     if (!rule) return []
-    const problems: string[] = []
-    for (const rel of [...new Set([...rule.files, ...rule.create])].filter((path) => !path.includes("*"))) {
+    const paths = [...new Set([...rule.files, ...rule.create, ...this.editSnapshots.keys()])].filter(path => !path.includes("*") && [...rule.files, ...rule.create].some(pattern => sameOrGlob(pattern, path)))
+    for (const rel of paths) {
       const bytes = await readFile(join(this.manifest.root, rel)).catch(() => null)
       if (bytes === null) continue
       const current = decodeText(bytes)
       const original = decodeText(await this.originalBytes(rel) ?? Buffer.from(""))
       if (current === null || original === null) continue
-      const unsafe = consentChangedHunks(original, current)
-      for (const hunk of unsafe) {
-        const owners = this.consentOwners(rel, hunk)
-        const mine = (this.editActivities.get(rel) ?? []).some((activity) => activity.itemId === itemId && activity.hunks.some((changed) => overlaps(changed.aStart, changed.aEnd, hunk.aStart, hunk.aEnd)))
-        if (owners.includes(itemId)) problems.push(`${rel}: your edit touched consent code. Restore its exact bytes, including whitespace. Consent is out of bounds; leave this task for the site owner if it cannot be done without touching consent.`)
-        else if (owners.length === 0) problems.push(`${rel}: consent code changed, and the runner cannot identify the responsible job. Every job claiming this file must restore its exact bytes; its hunk will be reverted. Leave this task for the site owner if consent code is in the way.`)
-        else if (mine) problems.push(`${rel}: your neighboring line will be reverted with a consent change, redo it separately after restoring that consent change.`)
-      }
+      const restored = restoreFrozenUnits(original, current)
+      if (restored.changes.length === 0) continue
+      this.rememberConsentRestore(rel, original, current, restored)
+      if (await this.originalBytes(rel) === null && restored.text === "") await this.restore(rel)
+      else await writeFile(join(this.manifest.root, rel), restored.text)
+      this.editSnapshots.set(rel, restored.text)
     }
-    return [...new Set(problems)]
+    return paths.flatMap(rel => (this.consentRefusals.get(rel) ?? []).some(refusal => refusal.owners.length === 0 || refusal.owners.includes(itemId))
+      ? [`${rel}: that code handles consent and belongs to the site owner; your change there was put back; skip it.`] : [])
   }
 
   static async begin(options: FenceBeginOptions): Promise<Fence> {
@@ -642,6 +615,11 @@ export class Fence {
       keep: boolean[]
     }
     const candidates: Candidate[] = []
+    const recordRefusals = (rel: string) => {
+      for (const refusal of this.consentRefusals.get(rel) ?? []) block(rel, "consent_touched", "Put back: an edit reached code that handles consent.", refusal.owners)
+      reverted.add(rel)
+    }
+    for (const rel of this.consentRefusals.keys()) recordRefusals(rel)
     for (const rel of touched.paths) {
       // Report mode spans two wizard runs: the wizard's own run files (state.json, run.lock, the hand-offs)
       // change between the hand-off and the resume by the wizard itself, never by the parent agent's job.
@@ -676,30 +654,30 @@ export class Fence {
       }
       const afterBytes = await readFile(absolute)
       const before = beforeBytes === null ? "" : decodeText(beforeBytes)
-      const after = decodeText(afterBytes)
+      let after = decodeText(afterBytes)
       if (before === null || after === null) {
         await revert(rel, "outside_allowlist", `Undid the change to ${rel}: not a text file.`)
         continue
       }
       const literals = (options.secretLiterals ?? []).filter((literal) => literal.length >= 8)
-      if (literals.some((literal) => after.includes(literal) && !before.includes(literal))) {
+      if (literals.some((literal) => after!.includes(literal) && !before.includes(literal))) {
         await revert(rel, "outside_allowlist", `Undid the change to ${rel}: it contained a wizard token.`)
         continue
+      }
+      const restored = restoreFrozenUnits(before, after)
+      if (restored.changes.length > 0) {
+        this.rememberConsentRestore(rel, before, after, restored)
+        recordRefusals(rel)
+        await keepRejected(rel)
+        if (report && !reportedOutside.includes(rel)) reportedOutside.push(rel)
+        after = restored.text
+        if (created && after === "") { await this.restore(rel); continue }
+        await writeFile(absolute, after)
       }
       const beforeLines = splitLines(before)
       const afterLines = splitLines(after)
       const hunks = hunksOf(beforeLines, afterLines)
       const keep = hunks.map(() => true)
-      const unsafe = consentChangedHunks(before, after)
-      hunks.forEach((hunk, index) => {
-        if (unsafe.some((entry) => entry.aStart === hunk.aStart && entry.aEnd === hunk.aEnd && entry.bStart === hunk.bStart && entry.bEnd === hunk.bEnd)) {
-          keep[index] = false
-          const observed = this.consentOwners(rel, hunk)
-          const candidates = this.manifest.allow.filter((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel)))
-          const owners = observed.length > 0 ? observed : this.manifest.allow.length === 1 && candidates.length === 1 ? [candidates[0]!.itemId] : []
-          block(rel, "consent_touched", `Undid a change to a consent call in ${rel}: consent is out of bounds. Left for you: this file’s consent code is in the way.`, owners)
-        }
-      })
       candidates.push({ rel, before: beforeBytes === null ? null : before, after, beforeLines, afterLines, hunks, keep })
     }
 
@@ -1270,115 +1248,9 @@ async function heavyDirsReplaced(root: string, inodes: readonly HeavyInode[]): P
   return out
 }
 
-// ---- consent call spans (review O3 F3) ----
-
-function consentHunkChanged(before: readonly string[], after: readonly string[], hunk: LineHunk, spansBefore: ReadonlyArray<[number, number]>, spansAfter: ReadonlyArray<[number, number]>): boolean {
-  const { added, removed } = hunkLines(before, after, hunk)
-  return [...added, ...removed].some((line) => CONSENT_CALL_PATTERNS.some((pattern) => pattern.test(line.text))) ||
-    added.some((line) => inSpans(line.line, spansAfter)) || removed.some((line) => inSpans(line.line, spansBefore))
-}
-
-function consentChangedHunks(before: string, after: string): LineHunk[] {
-  const beforeLines = splitLines(before)
-  const afterLines = splitLines(after)
-  const spansBefore = consentLineSpans(before)
-  const spansAfter = consentLineSpans(after)
-  // Consent belongs to the site owner. No structural model and no formatting/guard exemption:
-  // every changed consent line or line within a consent-call span is reverted.
-  return hunksOf(beforeLines, afterLines).filter(hunk => consentHunkChanged(beforeLines, afterLines, hunk, spansBefore, spansAfter))
-}
-
-/** 1-based, inclusive line ranges of every consent call in `text` (its whole bracket span). */
+/** Kept for callers needing evidence ranges: consent is now protected as complete source units. */
 export function consentLineSpans(text: string): Array<[number, number]> {
-  if (text === "") return []
-  const lineStarts: number[] = [0]
-  for (let index = 0; index < text.length; index += 1) if (text.charCodeAt(index) === 10) lineStarts.push(index + 1)
-  const lineOf = (offset: number) => {
-    let low = 0
-    let high = lineStarts.length - 1
-    while (low < high) {
-      const mid = (low + high + 1) >> 1
-      if (lineStarts[mid]! <= offset) low = mid
-      else high = mid - 1
-    }
-    return low + 1
-  }
-  const spans: Array<[number, number]> = []
-  for (const { pattern, mode } of CONSENT_SPAN_STARTS) {
-    pattern.lastIndex = 0
-    for (const match of text.matchAll(pattern)) {
-      const start = match.index ?? 0
-      const end = mode === "call" ? callEnd(text, start) : enclosingEnd(text, start + match[0].length)
-      const span: [number, number] = [lineOf(start), lineOf(Math.max(start, end))]
-      if (!spans.some(([first, last]) => first === span[0] && last === span[1])) spans.push(span)
-    }
-  }
-  return spans.sort((a, b) => a[0] - b[0] || a[1] - b[1])
-}
-
-function inSpans(line: number, spans: ReadonlyArray<[number, number]>): boolean {
-  return spans.some(([first, last]) => line >= first && line <= last)
-}
-
-const SPAN_SCAN_LIMIT = 20_000
-const OPENERS = new Set(["(", "[", "{"])
-const CLOSERS = new Set([")", "]", "}"])
-
-/** Offset of the bracket that closes the first "(" at or after `from` (or the scan limit). */
-function callEnd(text: string, from: number): number {
-  const open = text.indexOf("(", from)
-  if (open === -1) return from
-  let depth = 0
-  return scan(text, open, (char, index) => {
-    if (OPENERS.has(char)) depth += 1
-    else if (CLOSERS.has(char)) {
-      depth -= 1
-      if (depth <= 0) return index
-    }
-    return null
-  })
-}
-
-/** Offset of the bracket that closes the group `from` sits inside (or the scan limit). */
-function enclosingEnd(text: string, from: number): number {
-  let depth = 0
-  return scan(text, from, (char, index) => {
-    if (OPENERS.has(char)) depth += 1
-    else if (CLOSERS.has(char)) {
-      if (depth === 0) return index
-      depth -= 1
-    }
-    return null
-  })
-}
-
-/** Walks code from `from`, skipping strings and comments; `visit` returns an offset to stop there. */
-function scan(text: string, from: number, visit: (char: string, index: number) => number | null): number {
-  const limit = Math.min(text.length, from + SPAN_SCAN_LIMIT)
-  let index = from
-  while (index < limit) {
-    const char = text[index]!
-    if (char === "'" || char === '"' || char === "`") {
-      index += 1
-      while (index < limit && text[index] !== char) index += text[index] === "\\" ? 2 : 1
-      index += 1
-      continue
-    }
-    if (char === "/" && text[index + 1] === "/") {
-      const newline = text.indexOf("\n", index)
-      index = newline === -1 ? limit : newline
-      continue
-    }
-    if (char === "/" && text[index + 1] === "*") {
-      const close = text.indexOf("*/", index + 2)
-      index = close === -1 ? limit : close + 2
-      continue
-    }
-    const stop = visit(char, index)
-    if (stop !== null) return stop
-    index += 1
-  }
-  return limit - 1
+  return sourceUnits(text).units.filter(unit => unit.frozen).map(unit => [unit.startLine, unit.endLine])
 }
 
 // ---- the seal (review O3 F11) ----

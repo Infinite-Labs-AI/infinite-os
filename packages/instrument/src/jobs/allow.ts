@@ -8,6 +8,7 @@
 //   every detected CMP / banner file, and any hunk touching a consent call or a CMP API.
 // - No v1 job deletes a file; a deletion is refused.
 // - New files are allowed only where a job lists them in `create`.
+import { isConsentText as isConsentLine } from "./consent-units.js"
 import { isPolicyPath } from "./owner-boundary.js"
 import { GLOBAL_DENY_GLOBS } from "../wizard/contracts/jobs.js"
 import { firstMatchingGlob } from "./glob.js"
@@ -46,30 +47,8 @@ export function globalDenyReason(path: string, cmpFiles: readonly string[]): Den
  * Consent calls and CMP APIs. Any added or removed line matching one makes the hunk a consent hunk: the
  * fence reverts it and the job is `blocked:consent_touched`. Infinite never changes consent wiring.
  */
-export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
-  /\bgtag\s*\(\s*["'`]consent["'`]/,
-  /\bdataLayer\s*\.\s*push\s*\(\s*\[?\s*["'`]consent["'`]/,
-  /\bfbq\s*\(\s*["'`]consent["'`]/,
-  /\b__tcfapi\s*\(/,
-  /\b__cmp\s*\(/,
-  /\b__uspapi\s*\(/,
-  /\b__gpp\s*\(/,
-  /\bOneTrust\s*\./,
-  /\bOptanon\w*/,
-  /\bCookiebot\s*\./,
-  /\bCookieConsent\s*\./,
-  /\bUC_UI\s*\./,
-  /\bDidomi\w*\s*\./,
-  /\bposthog\s*\.\s*(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\b/,
-  /\bINFINITE_CONSENT_STORAGE_KEY\b/,
-  /\blocalStorage\s*\.\s*(?:setItem|removeItem)\s*\([^)]*consent/i,
-  /cdn\.cookielaw\.org|otSDKStub\.js|consent\.cookiebot\.com|usercentrics\.eu/
-]
-
-/** True when the line is a consent call / CMP API use. */
-export function isConsentLine(text: string): boolean {
-  return CONSENT_CALL_PATTERNS.some((pattern) => pattern.test(text))
-}
+export { CONSENT_CALL_PATTERNS } from "./consent-units.js"
+export { isConsentText as isConsentLine } from "./consent-units.js"
 
 /** True when any line of the hunk (added or removed) touches consent. */
 export function touchesConsent(lines: ReadonlyArray<string>): boolean {

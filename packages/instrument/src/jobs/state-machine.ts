@@ -20,7 +20,7 @@
 // Live checks before the deploy (review P2-1): an item whose path waits for a real event (job 10's click
 // test) reaches `waiting_real_event` only once its live checks pass, and a failing rehearsal check sends
 // an item back to `pending` with the failure (budget left) or to `failed` (budget spent), like a local one.
-import { CONSENT_LEFT_FOR_YOU, isOwnerOnlyFinding } from "./owner-boundary.js"
+import { CONSENT_LEFT_FOR_YOU } from "./owner-boundary.js"
 import { checkWords } from "./check-words.js"
 import { sanitizeUntrusted } from "../agents/sanitize.js"
 import {
@@ -128,7 +128,6 @@ export function applyClaim(
     delete next.blockedReason
     return { item: next, changed: true, by: "agent_claim", note: "claimed done; the wizard will run its own checks" }
   }
-  if (claim.status === "blocked" && isOwnerOnlyFinding({ body: claim.note })) return leaveForOwner(next)
   if (claim.status === "blocked") {
     next.state = "blocked"
     next.blockedReason = "agent_blocked"
@@ -165,16 +164,17 @@ export function unblockItem(item: ChecklistItem, note: string): Transition {
 }
 
 /** Marks an item blocked with one of the §3e.5 reasons (the fence, the post-turn gate, usage, …). */
-export function leaveForOwner(item: ChecklistItem, note = CONSENT_LEFT_FOR_YOU): Transition {
+export function leaveForOwner(item: ChecklistItem, note = CONSENT_LEFT_FOR_YOU, ownerBoundary?: ChecklistItem["ownerBoundary"]): Transition {
   const next = withNote(clone(item), note)
   next.state = "left_for_you"
+  if (ownerBoundary) next.ownerBoundary = ownerBoundary
   next.checks = []
   delete next.blockedReason
   return { item: next, changed: item.state !== "left_for_you", by: "wizard", note }
 }
 
 export function blockItem(item: ChecklistItem, reason: BlockedReason, note?: string): Transition {
-  if (reason === "consent_touched") return leaveForOwner(item)
+  if (reason === "consent_touched") return leaveForOwner(item, "Put back: an edit reached code that handles consent.", { kind: "restored_unit" })
   const next = withNote(clone(item), note)
   next.state = "blocked"
   next.blockedReason = reason

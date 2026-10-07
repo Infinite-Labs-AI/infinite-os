@@ -83,7 +83,7 @@ describe("runJobs with Claude (fake)", () => {
     expect(result.blocked).toEqual([])
     const claimReplies = records(fakes).filter(entry => entry.kind === "mcp" && entry.tool === "job_claim").map(entry => JSON.stringify(entry.reply))
     expect(claimReplies).toHaveLength(2)
-    expect(claimReplies.every(reply => reply.includes("runner cannot identify"))).toBe(true)
+    expect(claimReplies.every(reply => reply.includes("code handles consent"))).toBe(true)
   })
 
   it.each(["claude", "codex"] as const)("warns every %s claimant with no progress events and no trusted shared-file owner", async (worker) => {
@@ -102,7 +102,7 @@ describe("runJobs with Claude (fake)", () => {
     const result = await makeRunner(fakes, root, { preferWorker: worker }).runJobs(jobsInput({ items }).input)
     expect(result.blocked).toEqual([])
     const replies = records(fakes).filter((entry) => entry.kind === "mcp" && entry.tool === "job_claim").map((entry) => JSON.stringify(entry.reply))
-    expect(replies.every(reply => reply.includes("runner cannot identify"))).toBe(true)
+    expect(replies.every(reply => reply.includes("code handles consent"))).toBe(true)
     expect(readFileSync(join(root, file), "utf8")).toBe(initial)
   })
 
@@ -116,7 +116,7 @@ describe("runJobs with Claude (fake)", () => {
     write(root, "app/layout.tsx", `${POST_INSTALL_LAYOUT}fbq('consent', 'grant')\n`)
     const result = await makeRunner(fakes, root).runJobs(jobsInput({ items: [ITEMS[0]!] }).input)
     const reply = records(fakes).find((entry) => entry.kind === "mcp" && entry.tool === "job_claim")?.reply
-    expect(reply?.result?.structuredContent).toMatchObject({ staticChecks: { state: "problem", problems: [expect.stringContaining("consent code")] } })
+    expect(reply?.result?.structuredContent).toMatchObject({ staticChecks: { state: "problem", problems: [expect.stringContaining("code handles consent")] } })
     expect(result.blocked).toEqual(expect.arrayContaining([expect.objectContaining({ itemId: "meta_improve:landing", reason: "consent_touched" })]))
   })
 

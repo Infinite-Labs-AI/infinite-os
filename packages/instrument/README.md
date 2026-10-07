@@ -2,8 +2,8 @@
 
 Consent, cookie banners, CMP code, privacy policies and terms pages belong to the site owner.
 The wizard and its agents do not edit, move, wrap, reformat, evaluate, grade or comment on them.
-Every changed consent line or consent-call span is reverted, including whitespace-only changes.
-A task that cannot fit around that boundary is informational: **left for you: this file’s consent code is in the way**.
+Every top-level source unit that handles consent is frozen byte for byte, including whitespace. If source boundaries or correspondence are uncertain, the whole file is frozen.
+A task inside that boundary is left for the site owner, with its file and line. For a withheld preview guard, the wizard provides the snippet to copy and explains that preview and local visits keep counting.
 Preview guards never go between an init and a later revoke, deny or opt-out. Privacy wording, if supplied,
 is copy-only report material for the owner; the wizard never inserts it into a page. The owner’s
 `consent_mode` answer is still recorded, and click-id capture reads its existing consent gate.

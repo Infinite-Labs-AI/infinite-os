@@ -376,6 +376,8 @@ export interface ChecklistItem {
   checks: ChecklistItemCheck[]
   claim?: { status: ClaimStatus; note: string; at: string }
   state: JobItemState
+  /** Wizard-derived owner boundary; never accepted from an agent claim or its prose. */
+  ownerBoundary?: { kind: "frozen_unit" | "restored_unit" | "legacy_policy" | "policy_page"; file?: string; line?: number; unitHash?: string; lineOffset?: number; unitOrdinal?: number; guard?: string; wiring?: string }
   /** Set when state is `blocked`. */
   blockedReason?: BlockedReason
   edits?: EditRef[]
@@ -726,7 +728,7 @@ const EVIDENCE_SHAPE = oneOf(
 export const CHECKLIST_ITEM_SHAPE = shapeOf<ChecklistItem>()(
   "ChecklistItem",
   ["id", "jobId", "n", "title", "owner", "trigger", "allow", "checks", "state"],
-  ["claim", "blockedReason", "edits", "note"],
+  ["claim", "blockedReason", "edits", "note", "ownerBoundary"],
   {
     trigger: shapeOf<ChecklistItem["trigger"]>()("ChecklistItem.trigger", ["finding", "evidence"], [], { evidence: arrayOf(EVIDENCE_SHAPE) }),
     allow: shapeOf<ChecklistItem["allow"]>()("ChecklistItem.allow", ["files", "create"], []),

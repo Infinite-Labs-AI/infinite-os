@@ -249,7 +249,7 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     write(root, file, "export function boot() {\n  fbq('init', '456');\n  if (allowHost()) {\n    fbq('consent', 'grant');\n  }\n}\n")
     fence.recordEditActivity("preview_guard:meta", file)
     await fence.claimConsentProblems("preview_guard:meta")
-    expect((await fence.claimConsentProblems("meta_improve:capture")).join(" ")).toMatch(/reverted with a consent change, redo it/i)
+    expect((await fence.claimConsentProblems("meta_improve:capture")).join(" ")).toMatch(/code handles consent.*put back/i)
   })
 
   it("a wrapped Meta consent call rejects only its guard hunk and claimant in a shared tracking module", async () => {
@@ -282,8 +282,8 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     edited = edited.replace("  fbq('init', '1234567890123456');\n  fbq('consent', 'grant');\n  fbq('track', 'PageView');", "  if (allowHost()) {\n    fbq('init', '1234567890123456');\n    fbq('consent', 'grant');\n    fbq('track', 'PageView');\n  }")
     write(root, file, edited)
     fence.recordEditActivity("preview_guard:meta", file)
-    expect((await fence.claimConsentProblems("preview_guard:meta")).join(" ")).toMatch(/consent code.*out of bounds/i)
-    edited = edited.replace("gtag('config', 'G-FAKE00001');", "if (allowHost()) gtag('config', 'G-FAKE00001');")
+    expect((await fence.claimConsentProblems("preview_guard:meta")).join(" ")).toMatch(/code handles consent.*put back/i)
+    edited = readFileSync(join(root, file), "utf8").replace("gtag('config', 'G-FAKE00001');", "if (allowHost()) gtag('config', 'G-FAKE00001');")
     write(root, file, edited)
     fence.recordEditActivity("preview_guard:ga4", file)
     expect(await fence.claimConsentProblems("preview_guard:ga4")).toEqual([])
@@ -322,7 +322,7 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     expect(readFileSync(join(root, file), "utf8")).toContain("\n  fbq('consent', 'grant');")
   })
 
-  it("reverts only the consent hunk, keeps the rest, blocks consent_touched", async () => {
+  it("freezes the whole JSX file when top-level units cannot be split confidently", async () => {
     const { read, root, fence } = await setup()
     const edited = POST_INSTALL_LAYOUT.replace(
       "import './globals.css'",
@@ -332,12 +332,10 @@ describe("fence end: consent hunks, text edits, the gate", () => {
     fence.recordEditActivity("meta_improve:landing", "app/layout.tsx")
     const result = await fence.end()
     const now = read("app/layout.tsx")
-    expect(now).toContain("infiniteMetaMirror")
+    expect(now).toBe(POST_INSTALL_LAYOUT)
     expect(now).not.toContain("gtag('consent'")
     expect(blockedFor(result, "meta_improve:landing")).toEqual(["consent_touched"])
-    expect(result.edits).toHaveLength(1)
-    // Negative: the kept edit alone reverses to the snapshot bytes exactly.
-    expect(reverseTextEdits(now, result.edits[0]!.textEdits)).toBe(POST_INSTALL_LAYOUT)
+    expect(result.edits).toHaveLength(0)
   })
 
   it("records exact textEdits that reverse to the snapshot bytes (several hunks, no trailing newline)", async () => {
