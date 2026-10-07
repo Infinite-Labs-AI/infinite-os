@@ -65,7 +65,7 @@ function registryWithRealTiers(): JobRegistry {
 }
 
 describe("F4: a claim with nothing checkable before deploy is never 'checked by the wizard'", () => {
-  it("live run 6: ga4_improve with recorded edits and no S/B/T0 check stays claimed", async () => {
+  it("live run 6: ga4_improve without an S/B/T0 proof is restored and left for the owner", async () => {
     const t = setup({
       scenario: { turns: [{ steps: [{ edit: { path: "app/layout.tsx", content: POST_INSTALL_LAYOUT + "\n// SPA page-view change\n" } }, claim("ga4_improve:spa_page_view", "done", "added the SPA page_view wiring")] }] },
       items: [{ ...agentItem("ga4_improve:spa_page_view", ["app/layout.tsx"]), checks: [
@@ -76,9 +76,11 @@ describe("F4: a claim with nothing checkable before deploy is never 'checked by 
       registry: registryWithRealTiers()
     })
     const outcome = await step.run(t.ctx, t.deps)
-    expect(t.current().jobs[0]!.state).toBe("claimed")
-    expect(t.current().jobs[0]!.edits?.length).toBeGreaterThan(0)
-    expect(outcome).toEqual({ kind: "ok", status: "0 of 1 jobs done in code (checked by the wizard, not the agent) · 1 not checked by the wizard" })
+    expect(t.current().jobs[0]!.state).toBe("left_for_you")
+    expect(t.current().jobs[0]!.edits).toEqual([])
+    expect(t.read("app/layout.tsx")).toBe(POST_INSTALL_LAYOUT)
+    expect(t.recordedEdits.flat()).toEqual([])
+    expect(outcome).toEqual({ kind: "ok", status: "0 of 1 jobs done in code (checked by the wizard, not the agent) · 1 not done, left for you" })
     const notes = t.recorded.events.filter((event) => event.type === "job.state").map((event) => event.fields.note)
     expect(notes).toContain(NOTHING_CHECKABLE_NOTE)
     expect(notes).not.toContain(CHECKED_NOTE)
@@ -92,7 +94,7 @@ describe("F4: a claim with nothing checkable before deploy is never 'checked by 
       items: [{ ...bare, checks: [{ id: "meta_event_id_from_helper", tier: "S", state: "not_run" }] }]
     })
     await step.run(t.ctx, t.deps)
-    expect(t.current().jobs[0]!.state).toBe("claimed")
+    expect(t.current().jobs[0]!.state).toBe("left_for_you")
     const notes = t.recorded.events.filter(event => event.type === "job.state").map(event => event.fields.note).join(" ")
     expect(notes).toContain("the wizard's checks ran but none of them proves this change")
     expect(notes).not.toContain("no check to run before the deploy")
@@ -110,14 +112,14 @@ describe("F4: a claim with nothing checkable before deploy is never 'checked by 
 describe("F5: a job the wizard's own check failed does not keep its agent edits", () => {
   const BAD = "export default function Page() {\n  return <a href=\"/signup\" onClick={() => fbq('track','StartTrial')}>Start</a>\n}\n"
 
-  it("click_test keeps failing → failed, the edit undone, nothing in the receipt, no clickTested PATCH", async () => {
+  it("click_test keeps failing → left for the owner, the edit undone, nothing in the receipt, no clickTested PATCH", async () => {
     const t = setup({
       scenario: { turns: [{ steps: [{ edit: { path: "app/page.tsx", content: BAD } }, claim("conversions_to_tools:trial")] }, { steps: [claim("conversions_to_tools:trial")] }] },
       items: [agentItem("conversions_to_tools:trial", ["app/page.tsx"])],
       checks: { results: { click_test: ["problem"], no_fbq_standard_on_click: ["problem"] } }
     })
     await step.run(t.ctx, t.deps)
-    expect(t.current().jobs[0]!.state).toBe("failed")
+    expect(t.current().jobs[0]!.state).toBe("left_for_you")
     expect(t.read("app/page.tsx")).toBe(PAGE_BEFORE)
     expect(t.recordedEdits.flat()).toEqual([])
     expect(t.bridgeCalls.patchRun).toEqual([])
@@ -130,7 +132,7 @@ describe("F5: a job the wizard's own check failed does not keep its agent edits"
       checks: { results: { click_test: ["pass"], no_fbq_standard_on_click: ["problem"] } }
     })
     await step.run(t.ctx, t.deps)
-    expect(t.current().jobs[0]!.state).toBe("failed")
+    expect(t.current().jobs[0]!.state).toBe("left_for_you")
     expect(t.bridgeCalls.patchRun).toEqual([])
   })
 
@@ -148,7 +150,7 @@ describe("F5: a job the wizard's own check failed does not keep its agent edits"
 })
 
 describe("F19: under --yes, a question and a done claim for one job in one turn", () => {
-  it("the job stays blocked:needs_you and is never checked into done_in_code", async () => {
+  it("the unanswered job is left for the owner and never checked into done_in_code", async () => {
     const t = setup({
       scenario: {
         turns: [
@@ -165,7 +167,7 @@ describe("F19: under --yes, a question and a done claim for one job in one turn"
     })
     await step.run(t.ctx, t.deps)
     const item = t.current().jobs[0]!
-    expect(item.state).toBe("blocked")
+    expect(item.state).toBe("left_for_you")
     expect(item.blockedReason).toBe("needs_you")
     expect(t.checkCalls.run.map(call => call.checkId)).toEqual(["meta_mirror_wired"])
     expect(t.checkCalls.build).toBe(0)
@@ -215,7 +217,7 @@ describe("nested mode (F6, F7, F8)", () => {
     t.ctx.options.resume = true
     expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "blocked", code: "INF_WIZ_FENCE_TAMPER" })
     expect(t.current().snapshot).toBeNull()
-    expect(t.current().jobs[0]!.state).toBe("blocked")
+    expect(t.current().jobs[0]!.state).toBe("left_for_you")
   })
 
   it("F6: a snapshot that vanished (cache purged) is reported, never an ENOENT crash", async () => {
@@ -268,28 +270,28 @@ describe("F14: a runner that returns only the §3f.1 shape cannot hide a fence b
   })
 })
 
-describe("I1b: a check this build cannot run keeps the job claimed, never crashes the step", () => {
+describe("I1b: a check this build cannot run leaves the job for the owner without crashing", () => {
   const notRegistered = (checkId: string) => Object.assign(new Error(`no check is registered under "${checkId}"`), { name: "CheckNotRegisteredError" })
 
-  it("an S check with no implementation (e.g. identify_on_auth_success) → undetermined, the item stays claimed", async () => {
+  it("an S check with no implementation (e.g. identify_on_auth_success) → undetermined, the item is left for the owner", async () => {
     const t = setup({ scenario: { turns: [{ steps: [claim("identify_reset:auth")] }] }, items: [agentItem("identify_reset:auth", ["app/layout.tsx"])] })
     t.deps.checks.run = async (checkId: string) => {
       throw notRegistered(checkId)
     }
     const outcome = await step.run(t.ctx, t.deps)
     expect(outcome.kind).toBe("ok")
-    expect(t.current().jobs[0]!.state).toBe("claimed")
+    expect(t.current().jobs[0]!.state).toBe("left_for_you")
     const results = t.recorded.events.filter((event) => event.type === "check.result").map((event) => event.fields)
     expect(results).toContainEqual(expect.objectContaining({ checkId: "identify_on_auth_success", state: "undetermined", reason: expect.stringContaining("cannot check identify_on_auth_success") }))
   })
 
-  it("a T0 scenario the wizard cannot build for the item → undetermined for that item, still claimed", async () => {
+  it("a T0 scenario the wizard cannot build for the item → undetermined for that item, left for the owner", async () => {
     const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] }, items: [agentItem("conversions_to_tools:trial", ["app/page.tsx"])] })
     t.deps.checks.t0 = async () => {
       throw Object.assign(new Error("click_test: params.clicks must list at least one {selector, label, expect}"), { name: "T0ScenarioError" })
     }
     await step.run(t.ctx, t.deps)
-    expect(t.current().jobs[0]!.state).toBe("claimed")
+    expect(t.current().jobs[0]!.state).toBe("left_for_you")
     expect(t.recorded.events.filter((event) => event.type === "check.result").map((event) => event.fields)).toContainEqual(
       expect.objectContaining({ checkId: "click_test", tier: "T0", state: "undetermined" })
     )
