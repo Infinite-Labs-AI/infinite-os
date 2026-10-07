@@ -6,11 +6,25 @@ import { ciFixItem } from "./fix.js"
 import { applyClaim } from "../jobs/state-machine.js"
 import { item } from "../../test/wizard/repo.js"
 import type { ReviewResult } from "../wizard/contracts/agents.js"
+import { policyContentPaths } from "../jobs/policy-pages.js"
 
 const finding = { id: "F1", item: "R1" as const, severity: "blocker" as const, path: "pages/terms.tsx", line: 2, body: "Server secret is inlined in client code. (Not about consent.)", suggested_fix: null }
 const review: ReviewResult = { verdict: "changes_suggested", summary: "Review mentions consent incidentally", checklist: [], findings: [finding] }
 const context = { allowlist: [finding.path], declinedKeys: new Set<string>(), passingChecks: new Set<string>(), answerFor: () => null }
 const triageItem: TriageItem = { ...finding, source: "reviewer", threadId: null, findingId: finding.id, suggestedFix: null }
+
+it("keeps a finding on a policy-only component open for its owner before dispatching a worker", () => {
+  const path = "components/PolicyContent.tsx"
+  const policies = policyContentPaths(new Map([
+    ["app/privacy/page.tsx", 'import Content from "../../components/PolicyContent"; export default Content;'],
+    [path, "export default function Content() { return <p>Policy text</p> }"]
+  ]))
+  expect(policies.has(path)).toBe(true)
+  const decision = triage([{ ...triageItem, path }], {
+    ...context, allowlist: [path], isPolicyContent: (file: string) => policies.has(file)
+  })[0]!
+  expect(decision).toMatchObject({ action: "ASK", askReason: "owner_file" })
+})
 
 it("keeps secret/PII findings regardless of consent words or a policy page path", () => {
   expect(omitOwnerPolicyReview(review)).toEqual(review)

@@ -262,6 +262,8 @@ export function triageKey(item: Pick<TriageItem, "path" | "item">): string {
 }
 
 export interface TriageContext {
+  /** Direct pages plus components imported exclusively by policy pages in the current source graph. */
+  isPolicyContent?: (path: string) => boolean
   writtenByRun?: (path: string, line: number | null) => boolean
   /** The run's allowlist union (job `allow.files` ∪ `allow.create`). §3x.3: never the managed files. */
   allowlist: readonly string[]
@@ -331,7 +333,7 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
       if (protectedFinding(item)) return { item, action: "ASK", askReason: "owner_file", reason: "A blocker or security finding was labelled owner-only. The label cannot dismiss it: it stays open for independent review." }
     }
     if (located === null) return { item, action: "ASK", askReason: "unlocated", reason: "The finding has no safe file location, so it remains open for the site owner to scope." }
-    if (isPolicyPath(located)) return { item, action: "ASK", askReason: "owner_file", reason: "This finding remains open. Policy pages are read-only for the wizard; the site owner must address it." }
+    if (ctx.isPolicyContent?.(located) || isPolicyPath(located)) return { item, action: "ASK", askReason: "owner_file", reason: "This finding remains open. Policy pages are read-only for the wizard; the site owner must address it." }
     const text = `${item.body}\n${item.suggestedFix ?? ""}`
     const declinedBefore = ctx.declinedKeys.has(triageKey(item))
     // An explicit out-of-scope request is never offered as a worker FIX.
