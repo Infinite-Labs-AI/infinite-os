@@ -115,8 +115,7 @@ measured. `--yes` cannot authorize creation of a fork.
 
 Report redaction checks known credential formats and configured secret values before escaping or
 truncating text. Its generic rule matches uppercase assignment names containing `SECRET`, `TOKEN`,
-`PASSWORD`, `PASSWD`, `PRIVATE_KEY`, `API_KEY` or `AUTH`, or ending in `_KEY`, including quoted JSON
-and YAML keys. Values must be single tokens of at least eight characters, without slashes, dots,
+`PASSWORD`, `PASSWD`, `PRIVATE_KEY`, `API_KEY` or `AUTH`, including quoted JSON and YAML keys. Values must be single tokens of at least eight characters, without slashes, dots,
 whitespace or a camelCase identifier shape. `NEXT_PUBLIC_`, `VITE_` and `PUBLIC_` assignments are exempt
 from this generic rule. It does not infer secrets from prose or mask phone-like numbers.
 Unnamed or unrecognised credentials may not be identified; review the changed files locally.
