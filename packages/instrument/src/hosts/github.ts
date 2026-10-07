@@ -3,7 +3,7 @@
 import type { GitHostAdapter, GitHostAdapterExtras, PrComment, PrSummary } from "../wizard/contracts/git-host.js"
 import { prChecks, type PrCheck } from "../github/checks.js"
 import type { GhClient } from "../github/gh.js"
-import { comment, createDraftPr, findPr, markReady, readPr, updateBranch, updateOwnComment } from "../github/pr.js"
+import { comment, createDraftPr, findPr, findWizardPrs, markReady, readPr, updateBranch, updateOwnComment } from "../github/pr.js"
 import { previewFailureForSha, previewUrlForSha } from "../github/preview.js"
 import { latestProductionDeployment, productionDeploymentForSha, productionDeploymentUrl, vercelDeploymentSeen, type GhDeployState, type LatestProductionDeployment } from "../github/deployments.js"
 import { createViewerFork, ghAuthStatus, ghRepoFacts, type GhRepoFacts } from "../github/repo.js"
@@ -90,6 +90,7 @@ export function createGitHubAdapter(gh: GhClient): GitHubHostAdapter {
     },
     createFork: async (preferSsh) => createViewerFork(gh, await repo(), preferSsh),
     findPr: (branch, headOwner) => findPr(gh, branch, headOwner),
+    olderWizardPrs: async branch => (await findWizardPrs(gh)).filter(row => row.pr.state === "OPEN" && row.branch !== branch).map(row => ({ number: row.pr.number })),
     createDraftPr: (input): Promise<PrSummary> => createDraftPr(gh, input),
     readPr: (number) => readPr(gh, number),
     async readThreadDetails(number) {

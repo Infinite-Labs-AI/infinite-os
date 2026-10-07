@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest"
 
 import type { ChecklistItem } from "../contracts/jobs.js"
-import { notCheckedNotes } from "./rehearsal.js"
+import { notCheckedNotes, olderWizardPrNotes } from "./rehearsal.js"
 
 const base = (state: ChecklistItem["state"], owner: ChecklistItem["owner"] = "agent"): ChecklistItem => ({
   id: "identify_reset:auth",
@@ -37,4 +37,32 @@ it("request 3 P3-body: name only jobs actually checked by rehearsal; no clause w
   expect(notes).toContain("The preview rehearsal checked: GA4 page changes.")
   expect(notes).not.toContain("The preview rehearsal checked: Join visits")
   expect(notCheckedNotes([base("claimed"), spa]).join(" ")).not.toContain("rehearsal")
+})
+
+
+it("notices older open wizard PRs with one owner command and never closes them", async () => {
+  const branches: string[] = []
+  const host = { olderWizardPrs: async (branch: string) => { branches.push(branch); return [{ number: 12 }, { number: 12 }, { number: 31 }] } }
+  expect(await olderWizardPrNotes(host as never, "infinite/tag/current")).toEqual([
+    "Older wizard pull request #12 is still open on another branch. To close it yourself: gh pr close 12",
+    "Older wizard pull request #31 is still open on another branch. To close it yourself: gh pr close 31"
+  ])
+  expect(branches).toEqual(["infinite/tag/current"])
+})
+
+it("lists only other open marked wizard branches through the GitHub adapter", async () => {
+  const { createGitHubAdapter } = await import("../../hosts/github.js")
+  const calls: readonly string[][] = []
+  const rows = [
+    { number: 1, branch: "infinite/tag/current", state: "OPEN", marked: true },
+    { number: 2, branch: "infinite/tag/old", state: "OPEN", marked: true },
+    { number: 3, branch: "infinite/tag/closed", state: "CLOSED", marked: true },
+    { number: 4, branch: "feature/unrelated", state: "OPEN", marked: true },
+    { number: 5, branch: "infinite/tag/unmarked", state: "OPEN", marked: false }
+  ].map(row => ({ number: row.number, headRefName: row.branch, state: row.state, url: `https://github.com/example/site/pull/${row.number}`, body: row.marked ? "<!-- infinite-tag:pr v1 run=11111111-1111-4111-8111-111111111111 -->" : "Unrelated" }))
+  const host = createGitHubAdapter({ json: async (args: string[]) => { (calls as string[][]).push(args); return rows } } as never)
+  expect(await host.olderWizardPrs!("infinite/tag/current")).toEqual([{ number: 2 }])
+  expect(calls).toHaveLength(1)
+  expect(calls[0]!.slice(0, 2)).toEqual(["pr", "list"])
+  expect(calls[0]).toContain("@me")
 })

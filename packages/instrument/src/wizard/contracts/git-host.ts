@@ -117,6 +117,8 @@ export interface GitHostAdapter {
   /** Creates the viewer's fork only after the early shipping choice was approved. */
   createFork?(preferSsh: boolean): Promise<{ remoteUrl: string; headOwner: string }>
   findPr(branch: string, headOwner?: string | null): Promise<PrSummary | null | Unsupported>
+  /** Read-only notice of this author's older marked wizard PRs on other branches. */
+  olderWizardPrs?(branch: string): Promise<Array<{ number: number }>>
   createDraftPr(input: { base: string; head: string; title: string; bodyFile: string }): Promise<PrSummary | Unsupported>
   readPr(number: number): Promise<PrSummary | Unsupported>
   readThreads(number: number): Promise<ReviewThread[] | Unsupported>

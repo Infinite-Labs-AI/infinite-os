@@ -215,12 +215,25 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   }
 }
 
+/** Existing runs remain the owner's choice; this helper never closes or changes a PR. */
+export async function olderWizardPrNotes(host: WizardDeps["host"], branch: string): Promise<string[]> {
+  if (!host.olderWizardPrs) return []
+  try {
+    const rows = await host.olderWizardPrs(branch)
+    return [...new Set(rows.map(row => row.number).filter(number => Number.isSafeInteger(number) && number > 0))]
+      .map(number => `Older wizard pull request #${number} is still open on another branch. To close it yourself: gh pr close ${number}`)
+  } catch {
+    return ["Could not check for older open wizard pull requests; review your repository's open pull requests."]
+  }
+}
+
 async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const prepared = await prepareShip(ctx, deps)
   if (!isShipContext(prepared)) return prepared
   const { runId, git, facts, scanner } = prepared
   const state = ctx.state.get()
   const gitState = state.git!
+  for (const note of await olderWizardPrNotes(deps.host, gitState.branch)) sub(ctx, "rehearsal", note, "info")
   const { managed, npmFiles } = await manifestFiles(deps, ctx.root)
   const allowlist = allowlistUnion(state.jobs)
 
