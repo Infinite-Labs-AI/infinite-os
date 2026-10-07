@@ -147,9 +147,9 @@ export interface HostGuardExpressionOptions {
  * `wrapGuardedSnippet`; never emit it as a bare `if (...) return;` at script top level.
  */
 export function buildHostGuardExpression(spec: HostGuardSpec, options: HostGuardExpressionOptions = {}): string {
-  const host = options.hostExpression ?? 'typeof location !== "undefined" ? location.hostname : ""'
+  const host = options.hostExpression ?? 'typeof location !== "undefined" ? location.hostname : null'
   const normalized = normalizeHostGuardSpec(spec)
-  const prologue = `var n = (${normalizeHostSource})(h), i; if (!n) return false;`
+  const prologue = `${options.hostExpression === undefined ? "if (h === null) return true; " : ""}var n = (${normalizeHostSource})(h), i; if (!n) return false;`
   if (normalized.mode === "allow") {
     return [
       "(function (h) {",

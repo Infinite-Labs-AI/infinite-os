@@ -61,12 +61,17 @@ function withoutGuardTypeAnnotations(expression: string): string {
 /** Both shipped emissions use the same approved host lists and guard body. */
 function matchesKnownEmission(expression: string, emitted: string, templateLiteral: boolean): boolean {
   const variants = [emitted]
+  const browserlessAllowHost = '})(typeof location !== "undefined" ? location.hostname : null)'
+  if (emitted.endsWith(browserlessAllowHost)) {
+    variants.push(emitted.replace("if (h === null) return true; ", "").replace(browserlessAllowHost, '})(typeof location !== "undefined" ? location.hostname : "")'))
+  }
   const safeHost = '})(typeof location !== "undefined" ? location.hostname : "")'
   const emptyHostCheck = "})(h), i; if (!n) return false;"
-  if (emitted.endsWith(safeHost) && emitted.includes(emptyHostCheck)) {
+  const previous = variants.find(variant => variant.endsWith(safeHost))
+  if (previous && previous.includes(emptyHostCheck)) {
     // Before the browserless guard, the emitter passed location.hostname directly and allowed an
     // empty host. Keep precisely those historical bytes; no host lists or other logic may differ.
-    variants.push(emitted.slice(0, -safeHost.length).replace(emptyHostCheck, "})(h), i;") + "})(location.hostname)")
+    variants.push(previous.slice(0, -safeHost.length).replace(emptyHostCheck, "})(h), i;") + "})(location.hostname)")
   }
   return variants.some(variant => expression === (templateLiteral ? escapeForTemplateLiteral(variant) : variant))
 }

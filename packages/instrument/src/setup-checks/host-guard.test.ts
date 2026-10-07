@@ -27,7 +27,7 @@ describe("adopted init host guard", () => {
   ])("accepts the exact approved emission and rejects changed hosts or guard logic (legacy=$legacy, typed=$typed)", ({ legacy, typed }) => {
     const expected = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
     let expression = legacy
-      ? expected.replace(' if (!n) return false;', '').replace('})(typeof location !== "undefined" ? location.hostname : "")', '})(location.hostname)')
+      ? expected.replace('if (h === null) return true; ', '').replace(' if (!n) return false;', '').replace('})(typeof location !== "undefined" ? location.hostname : null)', '})(location.hostname)')
       : expected
     if (typed) expression = expression.replaceAll("(function (h) {", "(function (h: string) {").replace("})(h), i;", "})(h), i: number;")
     const read = (guard: string) => checkHostGuard({
@@ -43,7 +43,7 @@ describe("adopted init host guard", () => {
 
   it("recognises the legacy raw and escaped emissions before a production host is known", () => {
     const expression = buildHostGuardExpression({ mode: "deny", exempt: ["acme.example"], deny: [] })
-      .replace(' if (!n) return false;', '').replace('})(typeof location !== "undefined" ? location.hostname : "")', '})(location.hostname)')
+      .replace('if (h === null) return true; ', '').replace(' if (!n) return false;', '').replace('})(typeof location !== "undefined" ? location.hostname : null)', '})(location.hostname)')
     const raw = `function start() { if (!(${expression})) return; fbq('init', '111222333444555'); }`
     const escaped = `<Script>{\`if (!(${escapeForTemplateLiteral(expression)})) return; fbq('init', '111222333444555');\`}</Script>`
     for (const source of [raw, escaped]) expect(checkHostGuard({ files: files({ "src/meta.tsx": source }), strict: true }).findings.map(finding => finding.code)).toEqual(["INF_SETUP_HOST_GUARD_PRESENT"])

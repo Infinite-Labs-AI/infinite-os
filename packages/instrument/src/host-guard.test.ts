@@ -36,10 +36,15 @@ const GUARD: HostGuardSpec = {
   deny: []
 }
 
-it("keeps the emitted preview guard inert outside a browser", () => {
-  expect(runInNewContext(buildHostGuardExpression(GUARD), {})).toBe(false)
-  expect(runInNewContext(wrapGuardedSnippet('throw new Error("must not initialize");', GUARD), {})).toBeUndefined()
-  expect(runInNewContext(wrapGuardedSnippet('throw new Error("must not initialize");', GUARD, 'window.fbq = function () {};'), {})).toBeUndefined()
+it("allows an init outside a browser while denying preview hosts", () => {
+  expect(runInNewContext(buildHostGuardExpression(GUARD), {})).toBe(true)
+  expect(runInNewContext(buildHostGuardExpression(GUARD), { location: { hostname: "acme.com" } })).toBe(true)
+  for (const hostname of [...HOST_DENY_V1.deny.exact, ...HOST_DENY_V1.deny.suffix.map(suffix => `preview${suffix}`)]) {
+    expect(runInNewContext(buildHostGuardExpression(GUARD), { location: { hostname } }), hostname).toBe(false)
+  }
+  const context = { started: false }
+  runInNewContext(wrapGuardedSnippet("started = true;", GUARD), context)
+  expect(context.started).toBe(true)
 })
 
 it("emits a guard accepted by strict TypeScript and by the adopted-init checker", async () => {
