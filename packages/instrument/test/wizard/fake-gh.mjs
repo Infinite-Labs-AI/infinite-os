@@ -1,5 +1,4 @@
-import { Buffer } from "node:buffer"
-/* global process */
+/* global process, URL */
 // A fake `gh` for lane O4's tests (and I1's offline E2E). It keeps its state in the JSON file named by
 // FAKE_GH_STATE, appends every call (argv + stdin) to `<FAKE_GH_STATE>.calls.jsonl`, and answers the subset of gh
 // the wizard uses:
