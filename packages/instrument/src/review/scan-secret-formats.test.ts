@@ -109,10 +109,10 @@ describe("provider and contextual secret redaction", () => {
   it("does not turn ordinary code, placeholders, URLs, hashes or IDs into generic secrets", () => {
     const scanner = createScanner({ literals: [], allowedIds: [] })
     for (const text of [
-      "API_KEY=process.env.SYNTHETIC_SERVICE_API_KEY",
-      "api_key = env.SERVICE_APPLICATION_API_KEY",
-      "api_key = config.SERVICE_APPLICATION_API_KEY",
-      "apiKey: import.meta.env.VITE_PUBLIC_APPLICATION_KEY",
+      "const API_KEY=process.env.SYNTHETIC_SERVICE_API_KEY",
+      "const api_key = env.SERVICE_APPLICATION_API_KEY",
+      "const api_key = config.SERVICE_APPLICATION_API_KEY",
+      "const apiKey = import.meta.env.VITE_PUBLIC_APPLICATION_KEY",
       `commit ${"9a5d83b6c2f407e1".repeat(2)}`,
       `request_id=${TOKEN}`,
       `https://docs.example/${TOKEN}`,
@@ -136,12 +136,12 @@ it("preserves unquoted source expressions without exempting quoted secret values
   const scanner = createScanner({ literals: [], allowedIds: [] })
   for (const value of ["session.metadata.infinite_visit_key", "payload.analytics.visit_key", "request.headers.authorization", "process.env.SYNTHETIC_SERVICE_API_KEY", "config.providers.stripe2.publishableKeyV2", "createWebhookSignatureVerifier"]) {
     for (const quote of ["", '"', "'"]) {
-      const text = `API_KEY: ${quote}${value}${quote}`
+      const text = `const API_KEY = ${quote}${value}${quote}`
       if (quote === "") {
         expect(scanner.redact(text)).toEqual({ text, hits: [] })
         expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text }] }], () => false)).toEqual([])
       } else {
-        expect(scanner.redact(text).text).toBe(`API_KEY: ${quote}[redacted: generic_secret]${quote}`)
+        expect(scanner.redact(text).text).toBe(`const API_KEY = ${quote}[redacted: generic_secret]${quote}`)
         expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text }] }], () => false)).toEqual([{ kind: "generic_secret", file: "src/outcome.ts", line: 1 }])
       }
     }
@@ -169,10 +169,10 @@ const MISSED_FORMATS = [
 const PUBLIC_ANON_JWT = ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJyb2xlIjoiYW5vbiJ9", TOKEN].join(".")
 const ORDINARY_TEXT = [
   "const secret = createWebhookSignatureVerifier",
-  "apiKey: config.providers.stripe2.publishableKeyV2",
-  "API_KEY: config.providers.stripe2.publishableKeyV2",
-  "API_KEY: window?.a?.publicWriteKey",
-  "secret: src/lib/analytics/track-conversion-event.ts",
+  "const apiKey = config.providers.stripe2.publishableKeyV2",
+  "const API_KEY = config.providers.stripe2.publishableKeyV2",
+  "const API_KEY = window?.a?.publicWriteKey",
+  "source: src/lib/analytics/track-conversion-event.ts",
   "the API key https://provider.example/settings/keys",
   "cache key " + "9a5d83b6c2f407e1".repeat(2),
   "idempotency key: 2b26a7b8-e893-4771-a2b5-7de428305c11",

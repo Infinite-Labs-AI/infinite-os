@@ -97,9 +97,7 @@ const SECRET_WORD = /^(?:secret|token|password|passwd|apikey|privatekey|auth)$/
 const NON_SECRET_QUALIFIER = /^(?:name|path|url|provider|expiry|ttl|algorithm|header|type)$/
 const SECRET_KEY_WORD = /^(?:api|session|encryption|signing|master|private)$/
 const PUBLIC_NAME = /^(?:NEXT_PUBLIC_|VITE_|PUBLIC_)/
-const CAMEL_IDENTIFIER = /^[a-z_$][a-z_$]*(?:[A-Z][a-z_$]+)+(?:[0-9]+)?$/
-const MEMBER_EXPRESSION = /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)+$/
-const SOURCE_PATH = /^(?:[\w.-]+\/)+[\w.-]+\.[cm]?[jt]sx?$/
+const SOURCE_EXPRESSION_VALUE = /^[A-Za-z_$][\w$]*(?:\??\.[A-Za-z_$][\w$]*)*$/
 const PLACEHOLDER = /^(?:changeme|x{4,}|your_api_key_here|<[^>]*>|\$\{[^}]*\})$/i
 const NUMBER_OR_BOOLEAN = /^(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|true|false)$/i
 const PUBLIC_PEM = /-----BEGIN ((?:[A-Z0-9]+ )*(?:PUBLIC KEY|CERTIFICATE))-----[\s\S]*?-----END \1-----/g
@@ -110,13 +108,18 @@ const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}
 
 interface Span { start: number; end: number }
 interface SecretSpan extends Span { kind: ScanKind }
-interface Assignment extends Span { name: string; value: string; quoted: boolean }
+interface Assignment extends Span { name: string; value: string; sourceExpression: boolean }
 function assignments(text: string): Assignment[] {
   return [...text.matchAll(ASSIGNMENT)].map(match => {
     const value = match[4] ?? match[5]!
     const valueAt = match[1]!.length + match[2]!.length + (match[3] ? 1 : 0)
     const start = match.index + valueAt
-    return { name: match[1]!, value, quoted: Boolean(match[3]), start, end: start + value.length }
+    const end = start + value.length
+    const prefix = text.slice(0, match.index)
+    const declaration = match[2]!.includes("=") && /\b(?:const|let|var)\s+$/.test(prefix)
+    const objectProperty = match[2]!.includes(":") && /(?:[=(]|\breturn)\s*\{\s*["']?$/.test(prefix) && /^\s*\}/.test(text.slice(end))
+    const sourceExpression = !match[3] && SOURCE_EXPRESSION_VALUE.test(value) && (declaration || objectProperty)
+    return { name: match[1]!, value, sourceExpression, start, end }
   })
 }
 function isSecretName(name: string): boolean {
@@ -174,10 +177,10 @@ export function createScanner(options: ScannerOptions): Scanner {
     }
     for (const entry of named) {
       if (!isSecretName(entry.name) || entry.value.length < 8 || /\s/.test(entry.value) || PLACEHOLDER.test(entry.value) || NUMBER_OR_BOOLEAN.test(entry.value) || allowed.has(entry.value) || isPublicKey(entry.value)) continue
-      // URL credentials have their own password-only rule above. Unquoted code remains executable;
-      // quotes make a value literal, including base64/base64url values with slashes or dots.
+      // URL credentials have their own password-only rule above. Preserve source expressions only
+      // with explicit declarations/object delimiters; a standalone env/YAML value may contain dots.
       if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(entry.value)) continue
-      if (!entry.quoted && (CAMEL_IDENTIFIER.test(entry.value) || MEMBER_EXPRESSION.test(entry.value) || SOURCE_PATH.test(entry.value))) continue
+      if (entry.sourceExpression) continue
       add(entry.start, entry.end, "generic_secret")
     }
     for (const match of text.matchAll(EMAIL)) {

@@ -37,6 +37,24 @@ describe("explicit assignment secret names", () => {
     }
   })
 
+  it.each(["NEXTAUTH_SECRET=abcdefghi.xyz", "API_KEY=aaaa.bbbb", "API_KEY=aaaa/bbbb.ts", "api_key: abcdefghi.xyz", "API_KEY: config.providers.key", "API_KEY=someSecretValue"])("redacts the ambiguous standalone assignment %s", text => {
+    expect(scanner.redact(text).hits).toEqual([{ kind: "generic_secret" }])
+    expect(commitHits(text)).toEqual([{ kind: "generic_secret", file: "src/config.ts", line: 1 }])
+  })
+
+  it.each([
+    "const API_KEY = config.providers.key;",
+    "let API_KEY = options.apiKey;",
+    "var secret = secretfromenvironment;",
+    "const options = { apiKey: config.providers.key };",
+    'const options = { "apiKey": config.providers.key };',
+    "return { secret: request.headers.authorization }",
+    "configure({ token: process.env.SERVICE_TOKEN });"
+  ])("preserves the explicit source expression %s", text => {
+    expect(scanner.redact(text)).toEqual({ text, hits: [] })
+    expect(commitHits(text)).toEqual([])
+  })
+
   it.each(["AUTHOR", "GIT_AUTHOR_NAME", "OAUTH_CALLBACK_PATH", "AUTH_PROVIDER", "PASSWORD_HASH_ALGORITHM",
     "TOKEN_NAME", "TOKEN_PATH", "TOKEN_URL", "TOKEN_PROVIDER", "TOKEN_EXPIRY_MS", "TOKEN_TTL",
     "TOKEN_ALGORITHM", "TOKEN_HEADER", "TOKEN_TYPE", "authProvider", "passwordHashAlgorithm"])("keeps the setting named %s", name => {
