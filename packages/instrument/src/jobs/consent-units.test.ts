@@ -123,3 +123,29 @@ it.each([
   expect(result.text).toBe(before)
   expect(result.changes.length).toBeGreaterThan(0)
 })
+
+it("keeps ordinary exported calls editable beside consent when their options contain braces", () => {
+  const before = "export function ph() { posthog.init('phc_FAKE', { api_host: '/ingest' }); }\nfunction owner() { fbq('consent', 'revoke'); }\n"
+  const after = before.replace("api_host: '/ingest'", "api_host: '/ingest', mask_all_text: true")
+  expect(sourceUnits(before).units.find(unit => unit.key === "function:ph")?.frozen).toBe(false)
+  expect(restoreFrozenUnits(before, after).text).toBe(after)
+  expect(restoreFrozenUnits(before, after).changes).toEqual([])
+})
+
+it.each([
+  "import fbq from './owner';",
+  "import { fbq as send } from './owner';",
+  "import { send as fbq } from './owner';",
+  "import type { fbq } from './owner';",
+  "import * as posthog from './owner';",
+  "import {\n fbq as send,\n} from './owner';",
+  "export { fbq as send };",
+  "export { send as fbq } from './owner';",
+  "export type { fbq } from './owner';",
+  "export {\n send as fbq,\n} from './owner';",
+  "export * as posthog from './owner';",
+])("restores actual API import/export binding clauses: %s", addition => {
+  const result = restoreFrozenUnits("", addition + "\n")
+  expect(result.text).toBe("")
+  expect(result.changes.length).toBeGreaterThan(0)
+})

@@ -19,7 +19,9 @@ const API_WRITE_PATTERNS = [
   apiWritePattern(`\\b(?:const|let|var|function|class|interface|type|enum|namespace)\\s+(?:${API_WORD}\\b|[\\[{][^;=]*\\b${API_WORD}\\b)`),
   apiWritePattern(`\\b(?:const|let|var)\\b[^;]*?,\\s*${API_TARGET}(?=\\s*[,;=:)}])`),
   apiWritePattern(`\\bfunction\\b[^;{}(]*\\([^;)]*\\b${API_WORD}\\b`),
-  apiWritePattern(`\\b(?:import|export)\\s*[^;\\n]*\\b${API_WORD}\\b[^;\\n]*(?:from\\b|})`),
+  // Match binding clauses, never an exported function's body or an options-object closing brace.
+  apiWritePattern(`\\bimport\\s+(?=[^;()]*\\b${API_WORD}\\b[^;()]*\\bfrom\\b)(?:type\\s+)?(?:[\\w$]+\\s*,?\\s*)?(?:\\{[^}]*\\}|\\*\\s+as\\s+[\\w$]+)?\\s*from\\b`),
+  apiWritePattern(`\\bexport\\s+(?:type\\s+)?(?:\\{[^}]*\\b${API_WORD}\\b[^}]*\\}|\\*\\s+as\\s+${API_WORD}\\b)`),
   apiWritePattern(`\\b(?:Object|Reflect)\\s*(?:\\.\\s*(?:defineProperty|defineProperties|set)|\\[\\s*['\"\x60](?:defineProperty|defineProperties|set)['\"\x60]\\s*\\])\\s*\\([^;]*?${API_LITERAL}`),
   apiWritePattern(`(?:\\b${API_WORD}\\b|${API_LITERAL})\\s*:(?!:)`),
   apiWritePattern(`[{,]\\s*${API_WORD}\\s*(?=[,}])`),
