@@ -40,7 +40,9 @@ it("gives sensitive pages its own restrictive brief and the approved paths", () 
 })
 
 it("states the accepted lead success-handler shape in the silent-form brief", () => {
-  const brief = buildBrief([item("setup_check_fixes:silent_form", ["app/contact/page.tsx"])], facts)
+  const job = item("setup_check_fixes:silent_form", ["app/contact/page.tsx"])
+  const brief = buildBrief([job], facts)
+  expect(job.checks.map(check => `${check.tier}:${check.id}`)).toEqual(["S:setup_rerun_clean"])
   expect(brief).toContain('approvedConversionNames')
   expect(brief).toContain('data-conversion')
   expect(brief).toContain('infiniteTrack')

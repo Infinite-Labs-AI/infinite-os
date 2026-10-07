@@ -213,6 +213,8 @@ const TARGET_CHECKS: Partial<Record<JobId, (target: string, framework: string) =
       : // LF4 close round 2 (P1-1): on a framework whose click test runs in the rehearsal, `no_fbq_standard_on_click`
         // was the click conversion's only local check, and it passes with nothing of the job in the code.
         ["T0:click_test", "RH:click_test", "S:no_fbq_standard_on_click", "S:conversion_tracked", "P:first_real_conversion"],
+  // A form's completed outcome cannot run in the no-send click rehearsal (its POST is cancelled).
+  setup_check_fixes: target => target === "silent_form" ? ["S:setup_rerun_clean"] : null,
   preview_guard: (target, framework) => {
     const t0 = T0_CLICK_FRAMEWORKS.has(framework) ? ["T0:host_matrix"] : []
     return target === "meta"
