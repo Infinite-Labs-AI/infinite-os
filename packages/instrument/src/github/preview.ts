@@ -3,6 +3,7 @@
 // `vercel[bot]` whose environment starts with `Preview`, then the first `success` status's
 // `environment_url`. A monorepo with several Vercel projects has one Preview deployment per project: pick
 // the one whose environment or URL names the linked project; when that cannot be told, none (never a guess).
+import { blockedPreview } from "./checks.js"
 import type { GhClient } from "./gh.js"
 
 export interface RawDeployment {
@@ -37,9 +38,10 @@ export async function previewFailureForSha(gh: GhClient, sha: string, projectNam
   const newest = [...candidates].sort((a, b) => (Date.parse(b.deployment.created_at ?? "") || 0) - (Date.parse(a.deployment.created_at ?? "") || 0) || a.index - b.index)[0]
   if (newest) {
     const latest = newest.latest
-    if (latest && ["failure", "error", "cancelled", "canceled"].includes(latest.state ?? "")) {
-      const reason = latest.description?.trim() || "Vercel preview deployment failed"
-      return { reason, blocked: /\bblocked\b|needs? authori[sz]ation|requires? authori[sz]ation/i.test(reason) }
+    if (latest && ["failure", "error", "cancelled", "canceled", "blocked"].includes(latest.state ?? "")) {
+      const reason = latest.description?.trim() || (latest.state === "blocked" ? "Vercel preview deployment blocked" : "Vercel preview deployment failed")
+      // A deployment has its own state; prose must not turn a failed build into an access block.
+      return { reason, blocked: blockedPreview({ name: "Vercel", bucket: "fail", state: latest.state!, deploymentState: latest.state, description: reason }) }
     }
   }
   // A commit status can fail before GitHub publishes a deployment row.
@@ -61,7 +63,8 @@ export async function previewFailureForSha(gh: GhClient, sha: string, projectNam
     })
     if (failed) {
       const reason = failed.description?.trim() || "Vercel preview deployment failed"
-      return { reason, blocked: /\bblocked\b/i.test(reason) }
+      // Commit failure/error states do not describe deployment access. Use only the shared exact phrases.
+      return { reason, blocked: blockedPreview({ name: "Vercel", bucket: "fail", state: failed.state!, description: reason }) }
     }
   }
   return null

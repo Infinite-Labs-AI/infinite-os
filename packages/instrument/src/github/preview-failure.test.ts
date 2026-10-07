@@ -31,6 +31,31 @@ describe("a preview's terminal GitHub status", () => {
     expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: "Build failed", blocked: false })
   })
 
+  it.each(["Build failed: requires authorization", "Build failed: blocked import", "Build failed: user must have access"])("keeps an explicit failed deployment as a code failure: %s", async description => {
+    const client = gh([{ id: 7, environment: "Preview", creator: { login: "vercel[bot]" } }], [{ state: "error", description }])
+    expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: description, blocked: false })
+  })
+
+  it("uses an explicit blocked deployment state without requiring a magic phrase", async () => {
+    const client = gh([{ id: 7, environment: "Preview", creator: { login: "vercel[bot]" } }], [{ state: "blocked", description: "Owner action needed" }])
+    expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: "Owner action needed", blocked: true })
+  })
+
+  it("does not override an explicit failed deployment state with a fallback phrase", async () => {
+    const client = gh([{ id: 7, environment: "Preview", creator: { login: "vercel[bot]" } }], [{ state: "failure", description: "Authorization required" }])
+    expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: "Authorization required", blocked: false })
+  })
+
+  it.each(["Build failed: blocked import", "Build failed: requires authorization", "Build failed: must have access"])("does not classify fallback build text as a hosting block: %s", async description => {
+    const client = gh([], [], [{ context: "Vercel", state: "failure", description }])
+    expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: description, blocked: false })
+  })
+
+  it.each(["Authorization required", "Vercel - Git author must have access to the project on Vercel to create deployments"])("accepts only known fallback hosting phrases: %s", async description => {
+    const client = gh([], [], [{ context: "Vercel", state: "failure", description }])
+    expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: description, blocked: true })
+  })
+
   it("reads the Vercel commit status when a deployment row has not appeared yet", async () => {
     const client = gh([], [], [{ context: "Vercel", state: "failure", description: "Deployment was blocked" }])
     expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: "Deployment was blocked", blocked: true })
