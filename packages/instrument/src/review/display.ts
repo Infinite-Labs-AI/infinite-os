@@ -7,6 +7,8 @@ export function neutralizeUntrustedMarkup(text: string): string {
     .replace(/@(?=[A-Za-z0-9_])/g, "＠")
     .replace(/(!?)\[([^\]\n]*)\](?=\s*(?:\(|\[|:))/g, "$1［$2］")
     .replace(/\b(https?|mailto):/gi, "$1[:]")
+    .replace(/#(?=\d+\b)/g, "＃")
+    .replace(/\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?=\s+(?:(?:[\w.-]+\/)?[\w.-]+)?＃\d+\b)/gi, "$1 [quoted]")
 }
 /** Preserve code/Markdown syntax, but redact both before and after control stripping, before any cap. */
 export function redactDisplayText(scanner: Scanner, text: string): string {

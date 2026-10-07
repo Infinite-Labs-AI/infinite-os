@@ -4,14 +4,16 @@ import { triage, type TriageItem } from "./triage.js"
 import { buildReviewPost, buildReply, safeText, buildFinalComment, buildChecklist } from "./post.js"
 import { createScanner } from "./scan.js"
 
-it("redacts owner-category review text before it reaches report facts", async () => {
+it("keeps an owner-labelled secret blocker open without presenting it as owner information", async () => {
   const secret = "sk_test_" + "fixtureSecretValue".repeat(2)
   const body = `${secret} <!-- @here [open](https://example.test) ![image](https://example.test)`
   const ledger = { version: 1, runId: "fixture", rounds: [], declined: [], open: [], findings: [{ key: "x", findingId: "F1", category: "owner_consent_privacy", item: "R1", severity: "blocker", path: "src/main.ts", line: 1, action: "OWNER_INFO", body }] }
   const ctx = { root: "/fixture", appRoot: ".", runId: "fixture", state: { get: () => ({ runId: "fixture", jobs: [], git: null }) } }
   const deps = { env: {}, bridge: {}, git: {}, fs: { readText: async (path: string) => path.endsWith("review-ledger.json") ? JSON.stringify(ledger) : null } }
   const facts = await verdictFactsFor(ctx as never, deps as never)
-  const text = facts.ownerPolicyFindings!.join("\n")
+  expect(facts.ownerPolicyFindings).toEqual([])
+  expect(facts.openFindings).toHaveLength(1)
+  const text = JSON.stringify(facts)
   expect(text).not.toContain(secret)
   for (const active of ["<!--", "@here", "](https:"]) expect(text).not.toContain(active)
   const post = buildReviewPost({ review: { verdict: "changes_suggested", summary: body, checklist: [], findings: [{ id: "F1", item: "R1", severity: "blocker", category: "owner_consent_privacy", path: "src/main.ts", line: null, body, suggested_fix: null }] }, diffFiles: [], scanner: createScanner({ literals: [], allowedIds: [] }), runId: "fixture", round: 1, head: "a".repeat(40), reviewer: "codex" })

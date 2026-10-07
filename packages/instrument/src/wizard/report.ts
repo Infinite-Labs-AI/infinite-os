@@ -540,6 +540,7 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     day7: input.day7 ?? { measuredAt: null, window: null, cell: null },
     finishLine,
     notes: [...new Set([
+      ...(input.verdictFacts?.reviewUnreliable ? [input.verdictFacts.reviewUnreliable] : []),
       ...(input.verdictFacts?.tagNotInstalled ? ["Infinite’s tag is NOT installed by this run. Add the owner wiring before testing it live."] : []),
       ...(ownerPreviewNote ? [ownerPreviewNote] : []),
       ...input.notes.filter(note => !isOwnerBoundaryStatement(note)),
@@ -558,7 +559,8 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
       jobs: input.verdictFacts.jobs,
       openFindings: input.verdictFacts.openFindings,
       tools: input.verdictFacts.tools,
-      installedUnknown: input.verdictFacts.installedUnknown
+      installedUnknown: input.verdictFacts.installedUnknown,
+      reviewUnreliable: input.verdictFacts.reviewUnreliable
     })
   }
   if (input.verdictFacts?.tagNotInstalled && report.verdict) {

@@ -1,3 +1,4 @@
+import { ownerInformationOnly, reviewReliabilityWarning } from "../review/integrity.js"
 import { loadPlanApprovals } from "../install/step-inputs.js"
 import { buildScanner, runPublicIds } from "../review/context.js"
 import { safeDisplayText } from "../review/display.js"
@@ -41,11 +42,13 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
   const proof = state.ownerBoundary
   const currentHead = proof?.state === "checked" && proof.scope === "commit" && typeof git.head === "function" ? await git.head().catch(() => null) : null
   const ownerBoundary = proof?.scope === "commit" && proof.baseSha === base && proof.headSha === currentHead && proof.issues.length === 0 ? proof : undefined
+  const reviewUnreliable = reviewReliabilityWarning(ledger.rounds.at(-1)?.review?.findings ?? ledger.findings ?? [])
   return {
+    ...(reviewUnreliable ? { reviewUnreliable } : {}),
     tagNotInstalled: (await loadPlanApprovals(ctx, deps))?.ownerWiring?.canWire === false,
     ...(ownerBoundary ? { ownerBoundary } : {}),
     ...(priorPolicyEdits ? { priorPolicyEdits: true } : {}),
-    ownerPolicyFindings: (ledger.findings ?? []).filter(finding => finding.action === "OWNER_INFO" && !(finding.path !== null && ownership.writtenByRun?.(finding.path, finding.line))).map(finding => display(`About the site owner’s consent/privacy: not ours to change. ${finding.path ?? "general"}: ${finding.body ?? "Recorded reviewer finding"}`)),
+    ownerPolicyFindings: (ledger.findings ?? []).filter(finding => finding.action === "OWNER_INFO" && !reviewUnreliable && ownerInformationOnly(finding) && !(finding.path !== null && ownership.writtenByRun?.(finding.path, finding.line))).map(finding => display(`About the site owner’s consent/privacy: not ours to change. ${finding.path ?? "general"}: ${finding.body ?? "Recorded reviewer finding"}`)),
     jobs: state.jobs.map(job => {
       // These are report-only copies: source paths and executable text in state stay untouched.
       const boundary = job.ownerBoundary ? { ...job.ownerBoundary } : undefined

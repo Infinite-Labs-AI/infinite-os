@@ -3,11 +3,11 @@
 // a loop), which decisions are still open for the user, and which round ran on which head. The run state's
 // `pr.handledThreadIds` stays the record of replied threads.
 import type { ReviewChecklistItemId, ReviewResult } from "../wizard/contracts/agents.js"
-import { isOwnerOnlyFinding } from "../jobs/owner-boundary.js"
+import { ownerInformationOnly, protectedFinding, reviewReliabilityWarning } from "./integrity.js"
 import type { ChecklistItem, JobItemState } from "../wizard/contracts/jobs.js"
 import type { InfiniteOwnLabel } from "./post.js"
 import type { TriageAction, TriageDecision } from "./triage.js"
-import { RULINGS, rulingForCategory, triageKey } from "./triage.js"
+import { RULINGS, isRepoRelativePath, rulingForCategory, triageKey } from "./triage.js"
 
 export const REVIEW_LEDGER_PATH = ".infinite/wizard/review-ledger.json"
 
@@ -44,6 +44,7 @@ export interface ReviewLedger {
 export interface LedgerFinding {
   category?: "analytics" | "security" | "owner_consent_privacy" | "request_ga4_proxy" | "request_meta_unsupported" | "request_meta_deletion"
   body?: string
+  suggestedFix?: string | null
   key: string
   findingId: string | null
   item: ReviewChecklistItemId | null
@@ -86,7 +87,12 @@ export function openFindings(
 ): OpenFinding[] {
   const latest = new Map<string, LedgerFinding>()
   if (ledger.findings && ledger.findings.length > 0) {
-    for (const finding of ledger.findings) latest.set(findingKey(finding.key, finding.findingId), finding)
+    for (const finding of ledger.findings) {
+      // Older ledgers omitted suggestions from their triage rows; recover only that
+      // scope evidence from the matching saved review before deciding to close it.
+      const original = ledger.rounds.find(round => round.round === finding.round)?.review?.findings.find(entry => entry.id === finding.findingId && triageKey(entry) === finding.key)
+      latest.set(findingKey(finding.key, finding.findingId), { ...finding, suggestedFix: finding.suggestedFix ?? original?.suggested_fix })
+    }
   } else {
     const rulingReplies = new Set(RULINGS.map((ruling) => ruling.reply))
     for (const round of ledger.rounds) {
@@ -98,11 +104,12 @@ export function openFindings(
           findingId: finding.id,
           category: finding.category,
           body: finding.body,
+          suggestedFix: finding.suggested_fix,
           item: finding.item,
           severity: finding.severity,
           path: finding.path,
           line: finding.line,
-          action: isOwnerOnlyFinding(finding) && !ownership?.(finding.path, finding.line) && !writtenByRun?.(finding.path, finding.line) ? "OWNER_INFO" : declined ? "DECLINE" : "FIX",
+          action: ownerInformationOnly(finding) && !ownership?.(finding.path, finding.line) && !writtenByRun?.(finding.path, finding.line) ? "OWNER_INFO" : declined ? "DECLINE" : "FIX",
           ruling: declined && rulingReplies.has(declined.reason) ? declined.reason : null,
           label: null,
           round: round.round
@@ -110,14 +117,15 @@ export function openFindings(
       }
     }
   }
+  const unreliable = reviewReliabilityWarning(ledger.rounds.at(-1)?.review?.findings ?? [...latest.values()])
   const out: OpenFinding[] = []
   for (const finding of latest.values()) {
-    if (finding.action === "ANSWER") continue
-    if (finding.action === "OWNER_INFO" && !(finding.path !== null && (ownership?.(finding.path, finding.line) || writtenByRun?.(finding.path, finding.line)))) continue
+    if (finding.action === "ANSWER" && !protectedFinding(finding)) continue
+    if (finding.action === "OWNER_INFO" && !unreliable && ownerInformationOnly(finding) && !(finding.path !== null && (ownership?.(finding.path, finding.line) || writtenByRun?.(finding.path, finding.line)))) continue
     // Resumed ledgers can contain old keyword declines. Only a matching structured request
     // can still be closed; blockers and reports of a broken ruling stay open, as in fresh triage.
     const ruling = rulingForCategory(finding.category)
-    if (finding.action === "DECLINE" && ruling && finding.severity !== "blocker"
+    if (finding.action === "DECLINE" && finding.path !== null && isRepoRelativePath(finding.path) && ruling && !protectedFinding(finding)
       && (ruling.violationItem === null || finding.item !== ruling.violationItem)
       && (finding.ruling === ruling.id || finding.ruling === ruling.reply)) continue
     if (finding.action === "FIX" && finding.findingId !== null) {
@@ -170,6 +178,7 @@ export function recordDecisions(ledger: ReviewLedger, decisions: readonly Triage
       findingId: decision.item.findingId,
       category: decision.item.category,
       body: decision.item.body,
+      suggestedFix: decision.item.suggestedFix,
       item: decision.item.item,
       severity: decision.item.severity,
       path: decision.item.path,

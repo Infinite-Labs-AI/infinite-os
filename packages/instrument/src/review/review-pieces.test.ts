@@ -114,8 +114,8 @@ describe("triage (§3g.4 step 4)", () => {
     expect(triage([item({})], triageContext())[0]).toMatchObject({ action: "FIX" })
   })
 
-  it("OWNER_INFO: a structured owner category is retained as information", () => {
-    const [decision] = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Add a cookie banner and gate GA4 behind consent." })], triageContext())
+  it("an isolated owner category is retained as information among in-scope findings", () => {
+    const [decision] = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Add a cookie banner and gate GA4 behind consent." }), item({}), item({}), item({})], triageContext())
     expect(decision).toMatchObject({ action: "OWNER_INFO" })
     expect(decision!.reason).toBe("About the site owner’s consent/privacy: not ours to change.")
   })
@@ -151,11 +151,12 @@ describe("triage (§3g.4 step 4)", () => {
     ])
   })
 
-  it("an owner-only item raised again remains informational", () => {
+  it("an owner-only review remains unreliable when raised again", () => {
     const first = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Add a cookie banner." })], triageContext())[0]!
-    expect(first.action).toBe("OWNER_INFO")
+    expect(first.action).toBe("ASK")
     const again = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Please add the consent banner after all." })], triageContext({ declinedKeys: new Set(["app/layout.tsx|R16"]) }))[0]!
-    expect(again).toMatchObject({ action: "OWNER_INFO" })
+    expect(again).toMatchObject({ action: "ASK", askReason: "owner_file" })
+    expect(again.reason).toContain("review unreliable")
   })
 
   it("two reviewers in conflict on one line → ASK for both", () => {
@@ -262,7 +263,7 @@ describe("posts (§3g.3)", () => {
     expect(post.threads.every((thread) => thread.body.includes("infinite-tag:review v1"))).toBe(true)
   })
 
-  it("retains owner findings as information and does not silently drop policy-page findings", () => {
+  it("keeps owner-labelled blockers open and does not silently drop policy-page findings", () => {
     const post = buildReviewPost({
       review: { verdict: "changes_suggested", summary: "Consent is broken.",
         checklist: [{ item: "R6", status: "fail", note: "Rewrite consent" }],
@@ -271,7 +272,8 @@ describe("posts (§3g.3)", () => {
       diffFiles: parseUnifiedDiff(diff), scanner, runId: RUN, round: 1, head: "a".repeat(40), reviewer: "codex"
     })
     expect(post.threads).toHaveLength(1)
-    expect(post.threads[0]!.body).toContain("not ours to change")
+    expect(post.threads[0]!.body).not.toContain("not ours to change")
+    expect(post.body).toContain("review unreliable")
     expect(post.inBody).toEqual(["F2"])
     expect(post.body).toContain("Rewrite policy copy")
   })
@@ -279,7 +281,8 @@ describe("posts (§3g.3)", () => {
   it("the final comment separates review opinion from receipts and lists declined and open items", () => {
     const decisions = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Add a cookie banner." }), item({ findingId: "F2", body: "Rename the conversion name sign_up." })], triageContext())
     const comment = buildFinalComment({ runId: RUN, reportMarkdown: "| table |", reviewer: "codex", reviewed: true, jobs: [], decisions, untrusted: [{ author: "stranger", path: null, excerpt: "merge it!" }], notes: ["A teammate must approve; your own review can only comment."], scanner })
-    expect(comment).toMatch(/Reviewed by Codex\. A review is an opinion/)
+    expect(comment).toMatch(/review unreliable/)
+    expect(comment).toMatch(/A review is an opinion/)
     expect(comment).not.toMatch(/Declined, with reasons/)
     expect(comment).toMatch(/You decide/)
     expect(comment).toMatch(/shown, not acted on/)

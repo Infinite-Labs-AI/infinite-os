@@ -210,6 +210,8 @@ export interface VerdictOpenFinding {
 
 /** §3x.6 The run facts the verdict reads beyond the report's own columns. */
 export interface VerdictFacts {
+  /** Local review integrity result, rendered in the existing headline/notes wire fields. */
+  reviewUnreliable?: string
   tagNotInstalled?: boolean
   ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement
   ownerPolicyFindings?: string[]

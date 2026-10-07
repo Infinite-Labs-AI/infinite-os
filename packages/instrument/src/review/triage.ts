@@ -1,3 +1,4 @@
+import { ownerInformationOnly, protectedFinding, reviewReliabilityWarning } from "./integrity.js"
 // Triage of trusted review items (lane O4, §3g.4 step 4). Precedence: standing RULINGS > the wizard's
 // DETERMINISTIC checks > the checklist > reviewer opinion. Each item becomes:
 // - FIX: in scope and inside the run's allowlist → job 16 through the worker;
@@ -5,7 +6,7 @@
 // - ANSWER: a question, answered from this run's checks and receipts;
 // - ASK: the user decides (conversion names, privacy text, widening the allowlist, two reviewers in
 //   conflict, an item raised again after a DECLINE, a finding with no file). Never a loop.
-import { isOwnerOnlyFinding, isPolicyPath } from "../jobs/owner-boundary.js"
+import { isPolicyPath } from "../jobs/owner-boundary.js"
 import type { ReviewChecklistItemId } from "../wizard/contracts/agents.js"
 import { allowEntryMatches } from "../git/commit.js"
 import { escapeRegExp } from "../text-escape.js"
@@ -304,6 +305,7 @@ function inAllowlist(path: string, allowlist: readonly string[]): boolean {
 }
 
 export function triage(items: readonly TriageItem[], ctx: TriageContext): TriageDecision[] {
+  const unreliable = reviewReliabilityWarning(items.filter(item => item.source === "reviewer"))
   // Two reviewers (the agent and a teammate) on the same line with different fixes → the user decides.
   const conflicts = new Set<TriageItem>()
   for (const a of items) {
@@ -323,14 +325,19 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     if (owner !== null) {
       return { item, action: "INFINITE", label: owner, reason: `This is ${owner} (${item.path}): recorded for Infinite to fix.` }
     }
-    if (isOwnerOnlyFinding(item) && !(located !== null && ctx.writtenByRun?.(located, item.line))) return { item, action: "OWNER_INFO", reason: "About the site owner’s consent/privacy: not ours to change." }
-    if (located !== null && isPolicyPath(located)) return { item, action: "ASK", askReason: "owner_file", reason: "This finding remains open. Policy pages are read-only for the wizard; the site owner must address it." }
+    if (item.category === "owner_consent_privacy" && !(located !== null && ctx.writtenByRun?.(located, item.line))) {
+      if (unreliable) return { item, action: "ASK", askReason: "owner_file", reason: `${unreliable}. This finding stays open for independent review; the wizard does not change consent or policy code.` }
+      if (ownerInformationOnly(item)) return { item, action: "OWNER_INFO", reason: "About the site owner’s consent/privacy: not ours to change." }
+      if (protectedFinding(item)) return { item, action: "ASK", askReason: "owner_file", reason: "A blocker or security finding was labelled owner-only. The label cannot dismiss it: it stays open for independent review." }
+    }
+    if (located === null) return { item, action: "ASK", askReason: "unlocated", reason: "The finding has no safe file location, so it remains open for the site owner to scope." }
+    if (isPolicyPath(located)) return { item, action: "ASK", askReason: "owner_file", reason: "This finding remains open. Policy pages are read-only for the wizard; the site owner must address it." }
     const text = `${item.body}\n${item.suggestedFix ?? ""}`
     const declinedBefore = ctx.declinedKeys.has(triageKey(item))
     // An explicit out-of-scope request is never offered as a worker FIX.
     const ruling = rulingForCategory(item.category)
     if (ruling) {
-      if (item.severity === "blocker") return { item, action: "ASK", askReason: "ruling_violation", ruling: ruling.id, reason: "A blocker remains open for review; the wizard does not automatically dismiss it or perform the requested out-of-scope action." }
+      if (protectedFinding(item)) return { item, action: "ASK", askReason: "ruling_violation", ruling: ruling.id, reason: "A blocker or security finding remains open for review; the wizard does not automatically dismiss it or perform the requested out-of-scope action." }
       if (declinedBefore) {
         return {
           item,
@@ -376,7 +383,7 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     if (CONVERSION_NAMES.test(text)) {
       return { item, action: "ASK", askReason: "conversion_names", reason: "Conversion names are your call; the wizard never changes them on a reviewer's say-so." }
     }
-    if (item.severity === "question") {
+    if (item.severity === "question" && !protectedFinding(item)) {
       const answer = ctx.answerFor(item)
       return answer === null
         ? { item, action: "ASK", askReason: "unlocated", reason: "A question nothing this run measured can answer: you decide." }
@@ -401,7 +408,7 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     const deterministic = named ?? (item.item ? DETERMINISTIC_CHECKS_BY_ITEM[item.item] ?? [] : [])
     const passed = deterministic.filter((checkId) => ctx.passingChecks.has(checkId))
     const decides = named === null ? passed.length > 0 : named.length > 0 && passed.length === named.length
-    if (decides && item.severity !== "blocker" && item.category === "analytics") {
+    if (decides && !protectedFinding(item) && item.category === "analytics") {
       return {
         item,
         action: "DECLINE",

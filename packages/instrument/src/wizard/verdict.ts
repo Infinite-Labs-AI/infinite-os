@@ -29,6 +29,7 @@ import type { TestTool } from "./contracts/test-engine.js"
 export type ToolProofFact = VerdictToolFact
 
 export interface VerdictInput {
+  reviewUnreliable?: string
   /** The production host, else the repo label. */
   site: string
   /** The finish line as the report holds it (all three columns). */
@@ -159,7 +160,7 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
     if (missing.length > 0) reasons.push(reason("approved_fix_missing", missing.map((item) => item.title)))
     const blockers = input.openFindings.filter((finding) => finding.severity === "blocker")
     if (blockers.length > 0) reasons.push(reason("review_blocker_open", blockers.map(openFindingName)))
-    return { state: "not_checked_live", headline: notCheckedLiveHeadline(input).slice(0, VERDICT_LIMITS.headlineMaxChars), reasons, installed }
+    return { state: "not_checked_live", headline: `${notCheckedLiveHeadline(input)}${input.reviewUnreliable ? " · review unreliable; an independent review is needed" : ""}`.slice(0, VERDICT_LIMITS.headlineMaxChars), reasons, installed }
   }
 
   const liveProblems = input.finishLine.filter((line) => line.cells.proven_live.state === "problem").map((line) => label(line.id))
@@ -187,7 +188,7 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
   let state: ReportVerdict["state"]
   if (reasons.some((entry) => PROBLEM_REASON_KINDS.includes(entry.kind))) state = "problems"
   else if (reasons.length > 0 || proof?.state !== "pass") state = "unconfirmed"
-  else state = "properly"
+  else state = input.reviewUnreliable ? "unconfirmed" : "properly"
 
   let headline: string
   if (state === "problems") {
@@ -227,6 +228,9 @@ export function computeVerdict(input: VerdictInput): ReportVerdict {
       return cell.state === "pending" && (cell.reason === "waiting_real_event" || cell.reason === "needs_7_days")
     }).length
     headline = `${input.site} collects analytics properly now${waiting > 0 ? ` · ${waiting} ${plural(waiting, "check waits", "checks wait")} for real visitors or the 7-day check-in` : ""}`
+  }
+  if (input.reviewUnreliable) {
+    headline = state === "unconfirmed" ? `${input.site}: ${input.reviewUnreliable}` : `${headline} · review unreliable; an independent review is needed`
   }
   return { state, headline: headline.slice(0, VERDICT_LIMITS.headlineMaxChars), reasons, installed }
 }

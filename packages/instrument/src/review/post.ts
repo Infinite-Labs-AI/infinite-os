@@ -1,3 +1,4 @@
+import { ownerInformationOnly, protectedFinding, reviewReliabilityWarning } from "./integrity.js"
 import { safeDisplayText, neutralizeUntrustedMarkup, redactDisplayText } from "./display.js"
 // Everything the wizard posts on the PR (lane O4, §3g.3–§3g.5), built here and scanned here:
 // the PR body, the ONE review (`event: COMMENT`; a finding outside a diff hunk goes into the body), the replies,
@@ -95,6 +96,7 @@ export function buildReviewPost(input: {
 }): ReviewPost {
   input = { ...input, review: omitOwnerPolicyReview(input.review) }
   const marker = PR_MARKERS.review({ runId: input.runId, round: input.round, head: input.head, reviewer: input.reviewer })
+  const unreliable = reviewReliabilityWarning(input.review.findings)
   const threads: ReviewPost["threads"] = []
   const bodyFindings: string[] = []
   const inBody: string[] = []
@@ -107,7 +109,7 @@ export function buildReviewPost(input: {
     const text = mostlyRedacted(raw, scanned)
       ? `A finding on ${location} was withheld because it quoted a secret or personal data.`
       : scanned
-    const ownerInfo = finding.category === "owner_consent_privacy" && !input.isRunCode?.(finding.path, finding.line)
+    const ownerInfo = !unreliable && ownerInformationOnly(finding) && !input.isRunCode?.(finding.path, finding.line)
     const label = `${ownerInfo ? "About the site owner’s consent/privacy: not ours to change.\n\n" : ""}**[${finding.item} ${finding.severity}]** ${finding.id}`
     if (finding.line !== null && path === finding.path && lineInHunk(input.diffFiles, finding.path, finding.line)) {
       threads.push({ path: finding.path, line: finding.line, body: `${neutralizeCheckboxes(`${label}\n\n${text}`)}\n\n${marker}` })
@@ -119,8 +121,9 @@ export function buildReviewPost(input: {
   const checklist = input.review.checklist
     .map((row) => `| ${row.item} | ${STATUS_TEXT[row.status]} | ${escapeCell(safeDisplayText(input.scanner, row.note))} |`)
     .join("\n")
-  const onlyInfo = input.review.findings.length > 0 && input.review.findings.every(finding => finding.category === "owner_consent_privacy" && !input.isRunCode?.(finding.path, finding.line))
-  const verdict = onlyInfo && input.review.checklist.every(row => row.status !== "fail") ? "owner information only" : input.review.verdict === "looks_good" ? "looks good" : "changes suggested"
+  const onlyInfo = input.review.findings.length > 0 && input.review.findings.every(finding => ownerInformationOnly(finding) && !input.isRunCode?.(finding.path, finding.line))
+  const protectedOpen = input.review.findings.some(protectedFinding)
+  const verdict = unreliable ? unreliable : protectedOpen ? "changes suggested" : onlyInfo && input.review.checklist.every(row => row.status !== "fail") ? "owner information only" : input.review.verdict === "looks_good" ? "looks good" : "changes suggested"
   const unchecked = input.unchecked ?? []
   const header =
     unchecked.length > 0
@@ -128,7 +131,7 @@ export function buildReviewPost(input: {
       : `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): ${verdict}.** Posted by infinite-tag; a review is an opinion, not a receipt.`
   const content = [
     header,
-    safeDisplayText(input.scanner, input.review.summary),
+    `**Reviewer summary (quoted):**\n\n${safeDisplayText(input.scanner, input.review.summary).split("\n").map(line => `> ${line}`).join("\n")}`,
     checklist ? `| Item | Status | Note |\n|---|---|---|\n${checklist}` : "",
     bodyFindings.length > 0 ? `**Notes outside the changed lines**\n\n${bodyFindings.join("\n")}` : ""
   ]
@@ -267,21 +270,25 @@ export function buildChecklist(jobs: readonly ChecklistItem[], scanner: Scanner 
 export function buildFinalComment(input: FinalCommentInput): string {
   input = { ...input, decisions: input.decisions.map(decision => ({ ...decision, reason: safeDisplayText(input.scanner, decision.reason), item: { ...decision.item, body: safeDisplayText(input.scanner, decision.item.body), path: decision.item.path === null ? null : safeDisplayText(input.scanner, decision.item.path) } })), notes: input.notes.map(note => safeDisplayText(input.scanner, note)), untrusted: input.untrusted.map(entry => ({ ...entry, author: safeDisplayText(input.scanner, entry.author), excerpt: safeDisplayText(input.scanner, entry.excerpt), path: entry.path === null ? null : safeDisplayText(input.scanner, entry.path) })) }
 
-  const ownerInfo = input.decisions.filter(decision => decision.action === "OWNER_INFO").map(decision => `- ${decision.reason} ${decision.item.path ?? "general"}: ${excerpt(decision.item.body)}`)
+  const reliability = input.completeness
+    ? input.completeness.unchecked.find(note => note.startsWith("review unreliable:")) ?? null
+    : reviewReliabilityWarning(input.decisions.map(decision => decision.item))
+  const ownerInfo = input.decisions.filter(decision => decision.action === "OWNER_INFO" && !reliability && ownerInformationOnly(decision.item)).map(decision => `- ${decision.reason} ${decision.item.path ?? "general"}: ${excerpt(decision.item.body)}`)
   const declined = input.decisions
-    .filter((decision) => decision.action === "DECLINE")
+    .filter((decision) => decision.action === "DECLINE" && !protectedFinding(decision.item))
     .map((decision) => `- ${decision.item.path ? `\`${decision.item.path}\`` : "general"}: ${decision.reason}`)
   const open = input.decisions
-    .filter((decision) => decision.action === "ASK" && !decision.leftByOwner)
+    .filter((decision) => (decision.action === "ASK" && !decision.leftByOwner) || (decision.action === "OWNER_INFO" && (reliability || !ownerInformationOnly(decision.item))) || ((decision.action === "DECLINE" || decision.action === "ANSWER") && protectedFinding(decision.item)))
     .map((decision) => `- ${decision.item.path ? `\`${decision.item.path}\`` : "general"}: ${decision.reason} (${excerpt(decision.item.body)})`)
   const left = input.decisions
     .filter((decision) => decision.action === "ASK" && decision.leftByOwner)
     .map((decision) => `- ${decision.item.path ? `\`${decision.item.path}\`` : "general"}: ${decision.reason} (${excerpt(decision.item.body)})`)
   const answered = input.decisions
-    .filter((decision) => decision.action === "ANSWER")
+    .filter((decision) => decision.action === "ANSWER" && !protectedFinding(decision.item))
     .map((decision) => `- ${decision.item.path ? `\`${decision.item.path}${decision.item.line ? `:${decision.item.line}` : ""}\`` : "general"}: ${excerpt(decision.item.body)} → ${decision.reason}`)
   const agentLabel = input.reviewer === "claude_code" || input.reviewer === "codex" ? AGENT_LABEL[input.reviewer] : null
   const review =
+    reliability ? `${input.reviewer === "brief" ? "Reviewed from the printed review brief" : agentLabel ? `Reviewed by ${agentLabel}` : "Second review"}: ${reliability}. A review is an opinion; only a receipt from this run means "proven".` :
     agentLabel && input.completeness?.state === "blind"
       ? `No second review (${agentLabel} could not read the files).`
       : input.reviewer === "brief" && input.reviewed

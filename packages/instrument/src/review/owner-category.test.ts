@@ -21,11 +21,13 @@ it("keeps secret/PII findings regardless of consent words or a policy page path"
 })
 
 it("uses structured owner category for information while retaining the finding", () => {
-  const owner = { ...triageItem, category: "owner_consent_privacy" } as TriageItem
-  const decision = triage([owner], context)[0]!
+  const owner = { ...triageItem, category: "owner_consent_privacy", severity: "nit", body: "Owner wording in the terms page" } as TriageItem
+  const others = Array.from({ length: 3 }, () => ({ ...triageItem, category: "analytics" as const }))
+  const decision = triage([owner, ...others], context)[0]!
   expect(decision.action).toBe("OWNER_INFO")
   const ledger = emptyLedger("fixture")
   recordDecisions(ledger, [decision], 1)
+  ledger.rounds = [{ round: 1, reviewedSha: "a".repeat(40), reviewer: "codex", fixSha: null, review: { ...review, findings: [{ ...finding, category: "owner_consent_privacy", severity: "nit", body: owner.body }, ...others.map((entry, index) => ({ ...finding, id: `F${index + 2}`, category: entry.category }))] } }]
   expect(ledger.findings).toHaveLength(1)
   expect(openFindings(ledger, [])).toHaveLength(0)
 })
@@ -158,12 +160,12 @@ it("only closes structured requests with a matching ruling and no blocker or vio
     const ruling = RULINGS.find(entry => entry.id === rulingId)!
     for (const format of ["findings", "rounds"] as const) {
       for (const variant of ["request", "blocker", "mismatch", ...(violationItem ? ["violation"] : [])]) {
-        const current: TriageItem = { ...triageItem, category, path: "src/capture.ts", severity: variant === "blocker" ? "blocker" : "should", item: variant === "violation" ? violationItem : "R1" }
+        const current: TriageItem = { ...triageItem, category, path: "src/capture.ts", body: "Please add this unsupported capability", severity: variant === "blocker" ? "blocker" : "should", item: variant === "violation" ? violationItem : "R1" }
         const chosen = variant === "mismatch" ? RULINGS.find(entry => entry.id === "banner_consent")! : ruling
         const ledger = emptyLedger("fixture")
         if (format === "findings") recordDecisions(ledger, [{ item: current, action: "DECLINE", ruling: chosen.id, reason: chosen.reply }], 1)
         else {
-          ledger.rounds = [{ round: 1, reviewedSha: "a".repeat(40), reviewer: "codex", fixSha: null, review: { ...review, findings: [{ ...finding, category, path: current.path!, severity: current.severity, item: current.item! }] } }]
+          ledger.rounds = [{ round: 1, reviewedSha: "a".repeat(40), reviewer: "codex", fixSha: null, review: { ...review, findings: [{ ...finding, category, path: current.path!, severity: current.severity, item: current.item!, body: current.body }] } }]
           ledger.declined = [{ key: triageKey(current), reason: chosen.reply, round: 1 }]
         }
         expect(openFindings(ledger, []), `${format}: ${category}: ${variant}`).toHaveLength(variant === "request" ? 0 : 1)
