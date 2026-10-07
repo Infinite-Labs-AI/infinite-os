@@ -4,6 +4,8 @@ import { hunksOf, splitLines } from "../agents/line-diff.js"
 
 export const CONSENT_API_NAMES = ["gtag", "fbq", "posthog", "dataLayer", "__tcfapi", "__uspapi", "__gpp", "__cmp", "OneTrust", "Optanon", "Cookiebot", "CookieConsent", "Didomi", "UC_UI", "usercentrics", "klaro"] as const
 const API_NAMES = new Set<string>(CONSENT_API_NAMES)
+// Scan the complete raw source even when a glob or malformed construct stops tokenization.
+const RAW_TRIVIA = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\r\n]*(?:\r?\n|$))*`
 const API_WORD = `(?:${CONSENT_API_NAMES.join("|")}|Optanon[A-Za-z0-9_$]*|Didomi[A-Za-z0-9_$]*)`
 const API_TARGET = `(?:\\b${API_WORD}\\b|\\[\\s*['\"]${API_WORD}['\"]\\s*\\])`
 /** Syntactic writes/definitions/aliases only; this does not evaluate or model control flow. */
@@ -18,9 +20,9 @@ const API_WRITE_PATTERNS = [
   new RegExp(`=\\s*(?:(?:[\\w$]+|\\([^;\\n)]*\\))\\s*(?:\\?\\.)?\\.\\s*)*[\\w$]+\\s*\\[\\s*['\"]${API_WORD}['\"]\\s*\\]`, "g")
 ]
 export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
-  /[([,]\s*['"]consent['"]\s*(?:[,\])]|$)/,
+  new RegExp(String.raw`[([,]${RAW_TRIVIA}['"]consent['"]${RAW_TRIVIA}(?:[,\])]|$)`),
   /(?:\b(?:gtag|fbq)\b|\[\s*['"`](?:gtag|fbq)['"`]\s*\])\s*(?:\?\.\s*)?\(\s*['"`]consent['"`]/,
-  /(?:\b(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\b|\[\s*['"`](?:opt_in_capturing|opt_out_capturing)['"`]\s*\])\s*(?:\?\.\s*)?\(/,
+  new RegExp("(?:\\b(?:opt_in_capturing|opt_out_capturing|has_opted_in_capturing|has_opted_out_capturing|clear_opt_in_out_capturing)\\b|\\[\\s*['\"`](?:opt_in_capturing|opt_out_capturing)['\"`]\\s*\\])" + RAW_TRIVIA + "(?:\\?\\." + RAW_TRIVIA + ")?\\("),
   /\b(?:__tcfapi|__uspapi|__gpp|__cmp|OneTrust|Optanon\w*|Cookiebot|CookieConsent|Didomi\w*|UC_UI|usercentrics|klaro)\b/i,
   /['"`]consent['"`]\s*,\s*['"`](?:default|update)['"`]/,
   /\b(?:ad_storage|analytics_storage|ad_user_data|ad_personalization|functionality_storage|personalization_storage|security_storage|wait_for_update)\b/,

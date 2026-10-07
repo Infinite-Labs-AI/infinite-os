@@ -65,12 +65,22 @@ it("declares repeated statement identities ambiguous when one reads a consent ma
 
 it("never loses raw consent behind awkward inserted syntax before the call", () => {
   const fragments = ["/*", "*/", "//", "`", "${", "</script>", "'", "/x/"]
-  const calls = ["fbq('consent','revoke');", "gtag('consent','update',{analytics_storage:'denied'});", "posthog?.opt_out_capturing();"]
+  const calls = ["fbq('consent','revoke');", "gtag('consent','update',{analytics_storage:'denied'});", "posthog?.opt_out_capturing();",
+    "f( /* owner choice */ 'consent' /* owner action */, 'revoke');", "f.call(null, // owner choice\n 'consent', 'revoke');",
+    "posthog.opt_out_capturing /* owner choice */ ();"]
   const prefix = "export const label = 'fixture';\n"
   for (const call of calls) for (const fragment of fragments) for (let at = 0; at <= prefix.length; at++) {
     const source = prefix.slice(0, at) + fragment + prefix.slice(at) + call + "\n"
     expect(sourceUnits(source).units.some(unit => unit.frozen), `${fragment} at ${at}: ${call}`).toBe(true)
   }
+})
+
+it("freezes raw consent arguments after a JSX glob even when comments separate the argument", () => {
+  const before = "export default function Page(){ return <p>Use src/* here</p>; }\nf( /* owner choice */ 'consent', 'revoke');\n"
+  expect(sourceUnits(before).confident).toBe(false)
+  expect(sourceUnits(before).units).toHaveLength(1)
+  expect(sourceUnits(before).units[0]?.text).toBe(before)
+  expect(restoreFrozenUnits(before, before.replace("revoke", "grant")).text).toBe(before)
 })
 
 it("authorizes only exact emitted bytes, with no allowance to a worker or to another API assignment", () => {
