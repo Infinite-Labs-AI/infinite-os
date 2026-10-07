@@ -136,6 +136,39 @@ it("does not prove a shadowed Script alias or a head in an uncalled helper", asy
   expect(await readManagedCapture(site.root, nodeWizardFs.readText)).toBeNull()
 })
 
+it("does not prove capture order when a native script precedes the fixed HTML head", async () => {
+  const site = await installed("static-html")
+  const entry = read(site.root, site.entry)
+  writeFileSync(join(site.root, site.entry), '<script src="/assets/pixel.js"></script>\n' + entry)
+  expect(await readManagedCapture(site.root, nodeWizardFs.readText)).toBeNull()
+  const scan = await site.subject.scan({ root: site.root })
+  expect(scan.managedCapture?.canWire).toBe(false)
+})
+
+it("does not infer Next module order for a pixel emitted as a native script", async () => {
+  const site = await installed("next-app-router")
+  writeFileSync(join(site.root, site.pixelFile), 'export default function Pixel(){ return <script>{`fbq("init","7777000011112222");`}</script>; }\n')
+  expect(await readManagedCapture(site.root, nodeWizardFs.readText)).toBeNull()
+  const scan = await site.subject.scan({ root: site.root })
+  expect(scan.managedCapture?.canWire).toBe(false)
+})
+
+it("uses a valid owner-added loader in a frozen entry without editing that entry", async () => {
+  const entry = 'import "../lib/infinite-meta-click-id.js"\n' + files["pages/_app.tsx"] + "\nconst OWNER_MODE = { analytics_storage: 'denied' };\n"
+  const root = makeSite({ ...files, "pages/_app.tsx": entry })
+  const subject = new WizardInstaller({ root, repoFingerprint: IDS.fingerprint, runId: () => IDS.run, agent: () => null, consentFlag: () => "required", productionDeniedConflict: fakeProductionDeniedConflict })
+  const scan = await subject.scan({ root, hosting: fakeHosting() })
+  const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+  expect(scan.managedCapture).toMatchObject({ canWire: true, entrypoints: ["pages/_app.tsx"], editEntrypoints: [] })
+  const result = await subject.apply(plan, { approved: [], declined: [], edits: { consent_mode: "required" } })
+  expect(result.ok, result.reason ?? "").toBe(true)
+  expect(result.changedFiles).toContain("lib/infinite-meta-click-id.js")
+  expect(result.changedFiles).not.toContain("pages/_app.tsx")
+  expect(read(root, "pages/_app.tsx")).toBe(entry)
+  expect(read(root, "src/pixel.ts")).toBe(pixel)
+  expect(await readManagedCapture(root, nodeWizardFs.readText)).not.toBeNull()
+})
+
 it("accepts a simple const before the unconditional root layout return", async () => {
   const site = await installed("next-app-router")
   const entry = read(site.root, site.entry)

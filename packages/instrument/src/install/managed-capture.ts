@@ -78,7 +78,12 @@ function htmlSlot(source: string, next: boolean): number | null {
   for (const tag of next ? ["head", "body"] : ["head"]) {
     const hits = [...source.matchAll(new RegExp(`<${tag}\\b[^>]*>`, "gi"))].filter(match => states[match.index!] === 0 && source.lastIndexOf("<!--", match.index!) <= source.lastIndexOf("-->", match.index!))
     if (hits.length > 1) return null
-    if (hits.length === 1) return hits[0]!.index! + hits[0]![0].length
+    if (hits.length === 1) {
+      const headAt = hits[0]!.index!
+      // The loader cannot precede an executable script already outside the explicit head.
+      const earlierScript = [...source.slice(0, headAt).matchAll(/<script\b/gi)].some(match => source.lastIndexOf("<!--", match.index!) <= source.lastIndexOf("-->", match.index!))
+      return earlierScript ? null : headAt + hits[0]![0].length
+    }
   }
   return null
 }
@@ -140,6 +145,14 @@ function assetMappingKnown(root: string, appRoot: string, framework: string): bo
   }
   return true
 }
+function pixelOrderKnown(file: string, source: string, strategy: ManagedCaptureRecord["strategy"]): boolean {
+  if (strategy === "blocking_script") return true
+  // Next's module ordering does not establish order against native server-rendered scripts.
+  if (/\.html?$/i.test(file) || /<script\b/.test(source)) return false
+  if (strategy === "first_import" && /(?:^|\/)pages\/_document\./.test(file)) return false
+  if (/\bstrategy\s*=\s*["']beforeInteractive["']/.test(source)) return strategy === "before_interactive" && /(?:^|\/)app\/layout\.tsx$/.test(file)
+  return true
+}
 function proposal(source: string, entry: string, module: string, strategy: ManagedCaptureRecord["strategy"]): { after: string; snippet: string } | null {
   const snippet = strategy === "first_import" ? moduleImport(entry, module) : strategy === "before_interactive" ? `${SCRIPT_IMPORT}\n\n${NEXT_TAG}` : HTML_TAG
   if (wired(source, entry, module, strategy)) return { after: source, snippet }
@@ -172,7 +185,12 @@ export function planManagedCapture(input: ManagedCaptureInput): ManagedCapturePl
   const fixed = input.framework === "next-pages-router" ? ["pages/_app.tsx"] : input.framework === "next-app-router" ? ["app/layout.tsx"] : input.framework === "vite-react" ? ["index.html"] : input.framework === "static-html" ? input.htmlPages ?? ["index.html"] : []
   const targets = fixed.map(file => normalizeAppRelativePath(input.appRoot, file))
   const result: ManagedCapturePlan = { module, strategy, pixelFiles: pixels.map(pixel => normalizeAppRelativePath(input.appRoot, pixel.file)), entrypoints: [], editEntrypoints: [], requirements: [], canWire: false }
-  const earlierPixel = pixels.some(pixel => ((pixel.html || pixel.nextScript) && !pixel.executable) || (strategy === "first_import" && /(?:^|\/)pages\/_document\./.test(pixel.file)))
+  const earlierPixel = pixels.some(pixel => ((pixel.html || pixel.nextScript) && !pixel.executable)) || result.pixelFiles.some(file => {
+    try {
+      assertConfinedManifestFileEntry(input.root, file)
+      return !pixelOrderKnown(file, readFileSync(join(input.root, file), "utf8"), strategy)
+    } catch { return true }
+  })
   const assetMapping = assetMappingKnown(input.root, input.appRoot, input.framework)
   let moduleOwned = true
   if (existsSync(join(input.root, module))) {
@@ -248,7 +266,7 @@ function readCaptureUsing(root: string, readText: (path: string) => string | nul
     if ((record.strategy === "first_import" && framework !== "next-pages-router") || (record.strategy === "before_interactive" && framework !== "next-app-router") || (record.strategy === "blocking_script" && !["static-html", "vite-react"].includes(framework))) return null
     for (const file of record.pixelFiles) {
       const pixel = readText(join(root, file))
-      if (pixel === null || !/\bfbq\s*(?:\?\.)?\(\s*["']init["']/.test(pixel)) return null
+      if (pixel === null || !/\bfbq\s*(?:\?\.)?\(\s*["']init["']/.test(pixel) || !pixelOrderKnown(file, pixel, record.strategy)) return null
     }
     for (const entry of record.entrypoints) {
       const text = readText(join(root, entry))
