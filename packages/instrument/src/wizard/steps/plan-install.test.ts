@@ -24,7 +24,7 @@ import {
   writeKeysChoices,
   type FakeContext
 } from "../../../test/wizard/o7-fakes.js"
-import { loadPlanInputs } from "../../install/step-inputs.js"
+import { loadPlanInputs, loadPlanApprovals } from "../../install/step-inputs.js"
 import { WizardInstaller } from "../../install/installer.js"
 import type { WizardBeforeFacts } from "../../install/plan-model.js"
 import { readInstallManifest } from "../../manifest.js"
@@ -664,4 +664,23 @@ it("stops at the plan with exact owner wiring when an inline-consent entry leave
   expect(JSON.stringify(outcome)).toContain("InfiniteAnalyticsClient")
   expect(h.ctx.asks).toHaveLength(0)
   expect(existsSync(join(h.ctx.root, ".infinite/install.json"))).toBe(false)
+})
+
+
+it("preserves detector candidates across a continued plan with frozen owner work and free repository work", async () => {
+  const layout = "export default function Layout({children}) { gtag('consent', 'default', {}); return <html><body>{children}</body></html> }\n"
+  const candidates = [
+    candidate("preview_guard", "ga4", { allow: { files: ["app/layout.tsx"], create: [] }, trigger: { finding: "Add guard", evidence: [{ file: "app/layout.tsx", line: 1 }] } }),
+    candidate("csp", "headers", { allow: { files: ["headers.js"], create: [] }, trigger: { finding: "Allow analytics", evidence: [{ file: "headers.js", line: 1 }] } })
+  ]
+  const h = await setup({ files: { "package.json": JSON.stringify({ dependencies: { next: "15.0.0", react: "19.0.0" } }), "app/layout.tsx": layout, "headers.js": "export const headers = {}\n" }, candidates, consentFlag: "not_required", answers: [{ approved: [], declined: [], edits: {} }] })
+  expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
+  const hash = h.ctx.stateValue().plan!.hash
+  expect((h.ctx.asks[0]!.payload as AskPayloads["plan"]).lines[0]!.text).toContain("NOT installed")
+  expect((await loadPlanApprovals(h.ctx, h.deps))!.candidates).toEqual(candidates)
+  expect(h.ctx.stateValue().jobs.find(job => job.id === "preview_guard:ga4")?.state).toBe("left_for_you")
+  expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
+  expect(h.ctx.stateValue().plan!.hash).toBe(hash)
+  expect(h.ctx.asks).toHaveLength(1)
+  expect(read(h.ctx.root, "app/layout.tsx")).toBe(layout)
 })

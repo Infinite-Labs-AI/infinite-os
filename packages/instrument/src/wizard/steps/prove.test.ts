@@ -639,3 +639,16 @@ it.each([false, true])("a withheld preview guard is informational after deploy w
   expect(column.finishLine.previews_silent?.provenance.source).toBe("desktop_test")
   if (!otherFailure) expect(column.finishLine.previews_silent?.display).toContain("NOT DONE")
 })
+
+
+it("does not query deployments or run live tests when the plan left the tag unwired", async () => {
+  const bundle = fakeDeps()
+  const ctx = fakeContext(mergedState(), {}, bundle.clock)
+  ctx.ask = async () => { throw new Error("An unwired tag must not prompt for live proof") }
+  await bundle.deps.fs.writeTextAtomic(`${ctx.root}/.infinite/wizard/plan-approvals.json`, JSON.stringify({
+    schema: "infinite-tag.plan-approvals.v1",
+    ownerWiring: { canWire: false, entrypoints: ["app/layout.tsx"], writableEntrypoints: [], requirements: [] }
+  }), 0o600)
+  expect(await step.run(ctx, bundle.deps)).toEqual({ kind: "skipped", reason: "Infinite’s tag was NOT installed by this run. Add the owner wiring before testing it live." })
+  expect(bundle.log.names("bridge")).toEqual([])
+})
