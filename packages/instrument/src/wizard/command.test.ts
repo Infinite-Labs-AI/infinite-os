@@ -432,7 +432,8 @@ describe("nested-agent mode (§3d.7)", { timeout: 30_000 }, () => {
     expect(subs.some((text) => text.includes("2 edit(s) undone: "))).toBe(true)
     // This fixture declares no signup check; the fake runner's generic pass cannot prove that change.
     const jobStates = Object.fromEntries(second.events().filter((event) => event.t === "job.state").map((event) => [event.itemId, event.state]))
-    expect(jobStates[SIGNUP_ITEM.id]).toBe("claimed")
+    expect(second.events().filter(event => event.t === "job.state" && event.itemId === SIGNUP_ITEM.id).map(event => event.state)).toContain("claimed")
+    expect(jobStates[SIGNUP_ITEM.id]).toBe("left_for_you")
     expect(jobStates[LAYOUT_ITEM.id]).not.toBe("blocked") // A multi-job nested turn has no trusted editor identity.
     const signupNotes = second.events().filter(event => event.t === "job.state" && event.itemId === SIGNUP_ITEM.id).map(event => event.note).join(" ")
     expect(signupNotes).toContain("the wizard's checks ran but none of them proves this change")
@@ -484,7 +485,8 @@ describe("nested-agent mode (§3d.7)", { timeout: 30_000 }, () => {
     expect(git(root, "diff", "--name-only").trim()).toBe("")
     const jobStates = Object.fromEntries(second.events().filter((event) => event.t === "job.state").map((event) => [event.itemId, event.state]))
     // A refused hunk fails the job's turn gate; with no further nested round, the job is left for its owner.
-    expect(jobStates[LAYOUT_ITEM.id]).toBe("failed")
+    expect(second.events().filter(event => event.t === "job.state" && event.itemId === LAYOUT_ITEM.id).map(event => event.state)).toContain("failed")
+    expect(jobStates[LAYOUT_ITEM.id]).toBe("left_for_you")
     const final = JSON.parse(readFileSync(join(root, ".infinite/wizard/state.json"), "utf8"))
     expect(final.jobs.map((item: ChecklistItem) => item.state)).toEqual(["left_for_you", "left_for_you"])
   })
