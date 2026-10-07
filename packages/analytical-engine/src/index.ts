@@ -2592,7 +2592,7 @@ function metaAdSetTargetingInput(input: unknown): MetaAdSetTargeting | undefined
   }
   // Facebook + Instagram only: another platform's position list is refused typed (never silently dropped, which would
   // let a card promise Audience Network positions the create then quietly leaves out).
-  if (META_AD_SET_FORBIDDEN_POSITION_KEYS.some((key) => raw[key] !== undefined)) {
+  if (META_AD_SET_FORBIDDEN_POSITION_KEYS.some((key: string) => raw[key] !== undefined)) {
     throw metaTypedError(
       "meta_placements_facebook_instagram_only",
       "Ad sets run on Facebook and Instagram only: Audience Network, Messenger, WhatsApp and Threads positions are not allowed."
