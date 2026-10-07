@@ -145,7 +145,7 @@ A later `NAME`, `PATH`, `URL`, `PROVIDER`, `EXPIRY`, `TTL`, `ALGORITHM`, `HEADER
 that name a setting. Values need at least eight characters and no whitespace; base64/base64url
 characters and dots are accepted. Placeholders (`changeme`, `<…>`, `${…}`, four or more `x` characters,
 `your_api_key_here`), numbers and booleans are preserved. Unquoted identifiers/member expressions
-are preserved in `const`/`let`/`var` declarations and explicitly delimited single-property object
+are preserved in `const`/`let`/`var` declarations and explicitly delimited object
 literals. Ambiguous standalone assignments, including env/YAML values with dots or slashes, are
 treated as credential values; quoted named values are always literals.
 URL passwords are redacted for every scheme; URLs without credentials are preserved. `NEXT_PUBLIC_`,
