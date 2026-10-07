@@ -773,16 +773,24 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(bareShow(w.site.bare, head.head, "lib/infinite-analytics.ts")).toContain("Managed by Infinite")
   })
 
-  it("(d) --yes without --consent-mode parks at `plan` (NEEDS_ANSWERS, exit 3) and never calls site-source", { timeout: RUN_TIMEOUT }, async () => {
+  it.each(["not_required", "required"] as const)("(d) --yes accepts the shown %s consent default without a flag", { timeout: RUN_TIMEOUT }, async consentMode => {
     const w = await wiredWorld()
+    if (consentMode === "not_required") {
+      writeFileSync(join(w.site.repo, "app/consent-defaults.tsx"), "export function ConsentDefaults() { return null }\n")
+      git(w.site.repo, "add", "app/consent-defaults.tsx")
+      git(w.site.repo, "commit", "-q", "-m", "fixture without consent signs")
+      git(w.site.repo, "push", "-q", "origin", "main")
+      w.site.initialSha = git(w.site.repo, "rev-parse", "HEAD")
+    }
     // Only the GA4 stream (a key choice --yes never makes): everything else is --yes's.
-    const answers = writeAnswers(w, { v: 1, asks: [{ kind: "single", match: "GA4", answer: "G-FAKE00001" }] })
+    const answers = writeAnswers(w, { v: 1, asks: [{ kind: "single", match: "GA4", answer: "G-FAKE00001" }, { kind: "merge-ready", answer: "later" }] })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--yes", "--answers", answers], timeoutMs: RUN_TIMEOUT })
-    expect(run.code, trace(run)).toBe(3)
-    expect(stepOutcomes(run).at(-1)).toBe("plan:parked:INF_WIZ_NEEDS_ANSWERS")
-    expect(w.bridge.callsFor("site-source")).toEqual([])
-    expect(w.bridge.callsFor("site-claim")).toEqual([])
-    expect(agentRuns(w, "claude")).toEqual([])
+    expect(stepOutcomes(run), trace(run)).toContain("plan:ok")
+    expect(stepOutcomes(run)).not.toContain("plan:parked:INF_WIZ_NEEDS_ANSWERS")
+    const saved = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/state.json"), "utf8"))
+    expect(saved.plan.answers.consentMode).toBe(consentMode)
+    const registrations = [...w.bridge.callsFor("site-source"), ...w.bridge.callsFor("site-claim")]
+    expect(registrations.some(call => (call.body as { consentMode?: string }).consentMode === consentMode), trace(run)).toBe(true)
   })
 
   it("(e) nested: job.seeded briefs (exit 3) → the parent agent edits → --resume --json fences it; an answers file never answers consent", { timeout: 3 * RUN_TIMEOUT }, async () => {
