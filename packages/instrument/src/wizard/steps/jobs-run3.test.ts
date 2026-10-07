@@ -14,7 +14,13 @@ import type { ChecklistItem } from "../contracts/jobs.js"
 import { notDoneLines, step } from "./jobs.js"
 import { consentSeparatedEntry, OWNER_BOOTSTRAP, OWNER_BOOTSTRAP_PATH } from "../../../test/wizard/consent-separated-entry.js"
 
-const FREE_ENTRY = consentSeparatedEntry("G-TEST0000000")
+const rawFreeEntry = consentSeparatedEntry("G-TEST0000000")
+const signupLink = '        <a href="/signup">Start free trial</a>\n'
+const FREE_ENTRY = {
+  base: rawFreeEntry.base.replace("      <body>\n", `      <body>\n${signupLink}`),
+  installed: rawFreeEntry.installed.replace("      <body>\n", `      <body>\n${signupLink}`),
+  edited: rawFreeEntry.edited.replace("      <body>\n", `      <body>\n${signupLink}`)
+}
 
 vi.setConfig({ testTimeout: 60_000 })
 beforeAll(() => assertBuilt())
@@ -81,7 +87,10 @@ const claim = (jobId: string, status = "done", note = "done") => ({ tool: "job_c
 function setup(scenario: unknown, items: ChecklistItem[], entry: "consent-separated" | "archived" = "consent-separated") {
   const root = run3Repo(entry)
   if (entry === "consent-separated") for (const item of items) for (const evidence of item.trigger.evidence) {
-    if ("file" in evidence && evidence.file === "app/layout.tsx") evidence.line = FREE_ENTRY.base.split("\n").findIndex(line => line.includes(item.id === META_GUARD ? "fbq('init'" : "gtag('config'")) + 1
+    if ("file" in evidence && evidence.file === "app/layout.tsx") {
+      const needle = item.id === META_GUARD ? "fbq('init'" : item.id === SIGNUP ? 'href="/signup"' : "gtag('config'"
+      evidence.line = FREE_ENTRY.base.split("\n").findIndex(line => line.includes(needle)) + 1
+    }
   }
   const fakes = fakeAgents(scenario)
   dirs.push(root, fakes.home)
