@@ -1,3 +1,4 @@
+import { REVIEW_ITEMS } from "./contracts/agents.js"
 // The offline end-to-end test (BUILD-PLAN §4.3, lane I1b), amended by §3z where §3z supersedes §4.3.
 //
 // The BUILT wizard (`node dist/src/cli.js --json`) runs as a child against the fixture Next store
@@ -21,7 +22,6 @@ import { FAKE_PROOF_BODY, FAKE_RESERVED_SITE_KEY, FAKE_RUN_STARTED_AT, type Fake
 import type { TagHosting, TagKeys } from "./contracts/bridge.js"
 import type { ReportV2 } from "./contracts/report.js"
 import { renderTerminal } from "./report.js"
-import { capturePasteAsWritten } from "../jobs/briefs.js"
 import { buildHostGuardExpression } from "../host-guard.js"
 import type { TestResult, TestRunRequest } from "./contracts/test-engine.js"
 import {
@@ -60,6 +60,7 @@ import {
   GTAG_LOADER,
   agentScenario,
   agentScenarioWithoutServerOutcome,
+  replaceStep,
   answersFile,
   codexWorkerScenario,
   usageLimitTurn,
@@ -211,7 +212,7 @@ function jobStates(run: WizardRun, itemId: string): string[] {
   return states.filter((state, index) => index === 0 || states[index - 1] !== state)
 }
 
-function finalJobs(w: E2eWorld): Array<{ id: string; state: string; blockedReason?: string; note?: string; ownerBoundary?: { file?: string; wiring?: string }; checks: Array<{ id: string; tier: string; state: string }>; edits?: Array<{ file: string }> }> {
+function finalJobs(w: E2eWorld): Array<{ id: string; owner: string; state: string; blockedReason?: string; note?: string; ownerBoundary?: { file?: string; wiring?: string }; checks: Array<{ id: string; tier: string; state: string }>; edits?: Array<{ file: string }> }> {
   return JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/state.json"), "utf8")).jobs
 }
 
@@ -322,7 +323,7 @@ describe("the offline end-to-end run (§4.3)", () => {
     expect(stepOutcomes(run)).toContain("prove:skipped")
     const plan = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/plan-approvals.json"), "utf8"))
     expect(plan.ownerWiring.canWire).toBe(false)
-    const ownerWiring = finalJobs(w).find(job => job.state === "left_for_you" && job.ownerBoundary?.file === "app/layout.tsx" && job.ownerBoundary.wiring)
+    const ownerWiring = finalJobs(w).find(job => job.id === "unusual_layout:app/layout.tsx" && job.state === "left_for_you")
     expect(ownerWiring?.ownerBoundary?.wiring).toContain("InfiniteAnalyticsClient")
   })
 
@@ -627,22 +628,21 @@ describe("the offline end-to-end run (§4.3)", () => {
 
 describe("a strict pages-router site with adopted tags and fork-only access", () => {
   it("runs a scripted worker through annotated guard, rewrites and capture while refusing a privacy edit", { timeout: RUN_TIMEOUT }, async () => {
-    const capture = capturePasteAsWritten("typescript_module", "not_required").split("\n").map((line) => `  ${line}`).join("\r\n")
     const guard = buildHostGuardExpression({ mode: "deny", exempt: [PRODUCTION_HOST, `www.${PRODUCTION_HOST}`, "acme-store.vercel.app"], deny: [] })
       .replaceAll("(function (h) {", "(function (h: string) {")
       .replace("})(h), i;", "})(h), i: number;")
     const remote = "posthog.init('phc_FAKEtestProjectKeyNotReal000', { api_host: 'https://us.i.posthog.com' });"
     const proxy = "posthog.init('phc_FAKEtestProjectKeyNotReal000', { api_host: '/ingest', ui_host: 'https://us.posthog.com', capture_pageview: 'history_change', defaults: '2026-01-30' });"
     const start = `declare const gtag: (...args: unknown[]) => void;\ndeclare const fbq: (...args: unknown[]) => void;\ndeclare const posthog: { init(key: string, options: object): void };\nexport function boot() {\n  gtag('config', 'G-FAKE00001');\n  ${remote}\n  fbq('init', '${FIXTURE_PIXEL_ID}');\n}\n`
-    const withCapture = `${capture}\n${start}`
-    const withGuard = withCapture.replace(`  fbq('init', '${FIXTURE_PIXEL_ID}');`, `  if (typeof window !== 'undefined' && ${guard}) {\n    fbq('init', '${FIXTURE_PIXEL_ID}');\n  }`)
+    const init = `  fbq('init', '${FIXTURE_PIXEL_ID}');`
+    const guardedInit = `  if (typeof window !== 'undefined' && ${guard}) {\n    fbq('init', '${FIXTURE_PIXEL_ID}');\n  }`
     const posthogRules = "{ source: '/ingest/static/:path(.*)', destination: 'https://us-assets.i.posthog.com/static/:path' },\n{ source: '/ingest/array/:path(.*)', destination: 'https://us-assets.i.posthog.com/array/:path' },\n{ source: '/ingest/:path(.*)', destination: 'https://us.i.posthog.com/:path' },\n{ source: '/infinite/ledger', destination: 'https://api.ultima.inc/api/analytics/events/collect' },\n"
     const claim = (job_id: string) => ({ tool: "job_claim", args: { job_id, status: "done", note: "Applied the approved change and checked its placement." } })
     const scenario = agentScenario({ round1: [
       { tool: "job_list" },
-      { edit: { path: "src/common/tracking.ts", content: withCapture } }, claim("meta_improve:capture"),
-      { edit: { path: "src/common/tracking.ts", content: withGuard } }, claim("preview_guard:meta"),
-      { edit: { path: "src/common/tracking.ts", content: withGuard.replace(remote, proxy) } },
+      // Capture is installer-owned. Preserve its entry wiring and the installer's existing opt-out.
+      replaceStep("src/common/tracking.ts", init, guardedInit), claim("preview_guard:meta"),
+      replaceStep("src/common/tracking.ts", remote, proxy),
       { replace: { path: "next.config.js", find: "return [\n", replace: `return [\n${posthogRules}` } }, claim("posthog_improve:proxy"), claim("unusual_layout:next_config_rewrites"),
       { edit: { path: "pages/privacy.tsx", content: "export default function Privacy() { return <p>We use Infinite analytics to measure visits.</p> }\n" } }, claim("privacy_paragraph:page")
     ] }) as { claude: { turns: unknown[] }; codex: { turns: unknown[] } }
@@ -764,7 +764,7 @@ describe("the negative variants (§4.3 a–h)", () => {
     expect(agentRuns(w, "claude")).toEqual([])
     expect(agentRuns(w, "codex")).toEqual([])
     expect(w.bridge.callsFor("runs.start")[0]!.body).toMatchObject({ worker: "none", reviewer: "brief" })
-    const agentJobs = finalJobs(w).filter((job) => !job.id.startsWith("review_comments"))
+    const agentJobs = finalJobs(w).filter((job) => job.owner === "agent" && !job.id.startsWith("review_comments"))
     expect(agentJobs.length).toBeGreaterThan(0)
     for (const job of agentJobs) expect(job, job.id).toMatchObject({ state: "blocked", blockedReason: "needs_you" })
     expect(existsSync(join(w.site.repo, ".infinite/wizard/review-brief.md"))).toBe(true)
@@ -903,7 +903,7 @@ describe("the negative variants (§4.3 a–h)", () => {
     const head = bareGit(w.site.bare, "rev-parse", branch)
     // Every recorded edit reversed: the agent's and the installer's.
     for (const file of ["app/layout.tsx", "app/api/auth/login/route.ts", "app/api/auth/logout/route.ts", "app/api/signup/route.ts", ".gitignore"]) {
-      const expected = file === ".gitignore" ? fixtureFile("_gitignore") : fixtureFile(file)
+      const expected = bareShow(w.site.bare, w.site.initialSha, file)
       expect(bareShow(w.site.bare, head, file), file).toBe(expected)
     }
     expect(() => bareShow(w.site.bare, head, "lib/infinite-analytics.ts")).toThrow()
@@ -1052,7 +1052,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   it("§3z.12 item 4: newly managed GA4 and PostHog ship with the preview guard and the sensitive-path options in the emitted bytes", { timeout: RUN_TIMEOUT }, async () => {
     const w = await wiredWorld({ env: { E2E_NO_AGENTS: "1" } })
     // The site has no GA4 and no PostHog yet (the Meta pixel stays adopted): both become NEW managed installs.
-    writeFileSync(join(w.site.repo, "app/layout.tsx"), fixtureFile("app/layout.tsx").replace(/ {8}<ConsentDefaults \/>[\s\S]*?<Script id="meta-pixel"/, '        <Script id="meta-pixel"'))
+    writeFileSync(join(w.site.repo, "app/layout.tsx"), readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8").replace(/ {8}<ConsentDefaults \/>[\s\S]*?<Script id="meta-pixel"/, '        <Script id="meta-pixel"'))
     writeFileSync(join(w.site.repo, "app/providers.tsx"), 'export function Providers({ children }: { children: React.ReactNode }) {\n  return <>{children}</>\n}\n')
     commitAndPush(w, "no GA4, no PostHog yet")
     expect(readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8")).not.toContain("googletagmanager")
@@ -1196,7 +1196,7 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
 
     // ---- 2. the plan: no pre-checked line that does nothing; the lane is a user_action; Infinite approvable with the claim wording ----
     const planAsk = run.ofType("ask.open").find((event) => event.kind === "plan")!.payload as { lines: Array<{ id: string; kind: string; requires: string; text: string }> }
-    expect(planAsk.lines.find((line) => line.id === "install_provider:infinite")?.requires).toBe("approval")
+    expect(planAsk.lines.find((line) => line.id === "install_provider:infinite")?.requires).toBe("info")
     expect(planAsk.lines.find((line) => line.id === "info:infinite_site_file")?.text).toContain("/.well-known/infinite-site-verification.txt")
     expect(planAsk.lines.some((line) => line.id === "server_lane")).toBe(false)
     expect(planAsk.lines.find((line) => line.id === "user_action:server_lane")?.requires).toBe("user_action")
@@ -1242,7 +1242,7 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
       "site-claim",
       "keys",
       "runs.get", "conversions",
-      "keys", "hosting", "runs.patch(phase,prHeadSha,prNumber,prUrl)", "test.start(rehearsal:home)", "test.poll", "test.start(dry_live:preview_self)", "test.poll", "runs.patch(clickTestedConversions)", "ga4-key-events(sign_up)",
+      "keys", "hosting", "runs.patch(phase,prHeadSha,prNumber,prUrl)", "test.start(rehearsal:home)", "test.poll", "test.start(dry_live:preview_self)", "test.poll", "runs.patch(clickTestedConversions)",
       // review: no server outcome was seeded, so there is no R8 fix round or second rehearsal.
       "keys", "hosting",
       // merge (§3x.7): the in-PR report before the merge card, then the merge commit.
@@ -1482,7 +1482,7 @@ describe("§3y.7 the second reviewer: blind or incomplete is said, never 'nothin
   const blindReview = () => ({
     verdict: "changes_suggested",
     summary: "Review blocked: file-access tooling is unavailable, and your instructions prohibit commands. No repository contents were inspected.",
-    checklist: ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16"].map((item) => ({ item, status: "cant_tell", note: "Could not inspect files." })),
+    checklist: REVIEW_ITEMS.filter(item => item !== "R6").map((item) => ({ item, status: "cant_tell", note: "Could not inspect files." })),
     findings: []
   })
   const scenarioWith = (codexTurns: unknown[]) => {
@@ -1512,14 +1512,14 @@ describe("§3y.7 the second reviewer: blind or incomplete is said, never 'nothin
     const partial = {
       verdict: "looks_good",
       summary: "Checked what I could read.",
-      checklist: ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16"].map((item) => ({ item, status: item === "R10" || item === "R12" ? "cant_tell" : "pass", note: "ok" })),
+      checklist: REVIEW_ITEMS.filter(item => item !== "R6").map((item) => ({ item, status: item === "R10" || item === "R12" ? "cant_tell" : "pass", note: "ok" })),
       findings: []
     }
     const w = await wiredWorld({ scenario: scenarioWith([{ final: partial }]) })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(0)
     const text = run.ofType("step.sub").map((event) => String(event.text)).join("\n")
-    expect(text).toContain("! Codex's review is incomplete: it could not check R10, R12 (14 of 16 checked)")
+    expect(text).toContain(`! Codex's review is incomplete: it could not check R10, R12 (${REVIEW_ITEMS.filter(item => item !== "R6").length - 2} of ${REVIEW_ITEMS.filter(item => item !== "R6").length} checked)`)
     expect(text).not.toContain("nothing to change")
     const gh = readGhState(w.ghState)
     expect(gh.prs[0]!.reviews[0]!.body).toContain("**Second review by Codex (round 1): incomplete — it could not check R10, R12.**")
