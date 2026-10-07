@@ -15,11 +15,20 @@ import {
   serverLaneWizardCopy
 } from "./copy.js"
 import { outcomeHelperSource } from "./targets/shared.js"
+import { createScanner } from "../review/scan.js"
 
 describe("the agent brief", () => {
   const brief = renderServerLaneBrief({
     status: { kind: "other-stack", framework: "Express" },
     moduleImportPath: "./lib/infinite-server-lane"
+  })
+
+  it("keeps generated source-reference examples publishable through the real secret scanner", () => {
+    const guide = renderServerLaneBrief({ status: { kind: "created", middlewarePath: "middleware.ts", modulePath: "lib/infinite-server-lane.ts" }, siteSourceKey: "site_fixture", productionHosts: ["example.test"] })
+    const scanner = createScanner({ literals: [], allowedIds: [] })
+    expect(guide).toContain("visitKey: session.metadata.infinite_visit_key")
+    expect(scanner.redact(guide).hits).toEqual([])
+    expect(scanner.findInCommit([{ path: "docs/infinite-server-lane.md", added: guide.split("\n").map((text, index) => ({ text, line: index + 1 })) }], () => false)).toEqual([])
   })
 
   it("opens with the managed banner and the positioning line", () => {
