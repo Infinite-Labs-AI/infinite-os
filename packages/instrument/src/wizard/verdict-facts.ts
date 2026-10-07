@@ -3,6 +3,7 @@
 // the run's checklist, the review's open findings (`openFindings`, the one definition) and the real visit's per-tool
 // facts (`state.proof`, written by `prove`).
 import { join } from "node:path"
+import { hasRecordedPolicyEdits } from "../jobs/owner-boundary.js"
 
 import { openFindings, parseLedger, REVIEW_LEDGER_PATH } from "../review/ledger.js"
 import { wizardOwnership } from "../review/ownership.js"
@@ -26,7 +27,11 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
       return null
     }
   })
+  // The receipt may outlive a retired job's entry in state. Read only its job/run metadata;
+  // never open a policy file, inspect embedded policy text, or undo an earlier edit.
+  const priorPolicyEdits = hasRecordedPolicyEdits(state.jobs) || ownership.recordedPolicyEdits?.(runId) === true
   return {
+    ...(priorPolicyEdits ? { priorPolicyEdits: true } : {}),
     jobs: state.jobs,
     openFindings: openFindings(ledger, state.jobs, ownership.classify),
     tools: state.proof?.tools ?? null,

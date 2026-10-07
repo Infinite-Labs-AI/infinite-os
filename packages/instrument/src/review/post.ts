@@ -2,6 +2,8 @@
 // the PR body, the ONE review (`event: COMMENT`; a finding outside a diff hunk goes into the body), the replies,
 // and the final comment. Statuses are plain text the wizard owns: a literal `- [ ]` (which anyone can tick) is
 // never posted. On a public repo, a provider ID that is not already in the diff is shown as `<id>`.
+import { hasRecordedPolicyEdits, withOwnerBoundary } from "../jobs/owner-boundary.js"
+import { omitOwnerPolicyReview } from "./brief.js"
 import { sanitizeUntrustedBlock } from "../agents/sanitize.js"
 import { AGENT_LIMITS, type AgentKind, type ReviewResult } from "../wizard/contracts/agents.js"
 import { FORBIDDEN_CHECKBOX, PR_MARKERS } from "../wizard/contracts/git-host.js"
@@ -61,7 +63,7 @@ export function buildPrBody(input: {
   notes?: readonly string[]
 }): string {
   const parts = [input.reportMarkdown.trim(), ...(input.notes ?? []).map((note) => `> ${note}`), input.howToReview.trim()]
-  let body = neutralizeCheckboxes(safeText(input.scanner, parts.filter(Boolean).join("\n\n")))
+  let body = neutralizeCheckboxes(safeText(input.scanner, withOwnerBoundary(parts.filter(Boolean).join("\n\n"))))
   if (!input.isPrivate) body = redactIdsNotInDiff(body, input.diffText, input.connectionIds)
   return `${body}\n\n${PR_MARKERS.pr(input.runId)}\n`
 }
@@ -87,6 +89,7 @@ export function buildReviewPost(input: {
   /** §3y.7: the items the reviewer could not check (an incomplete review says so in its header). */
   unchecked?: readonly string[]
 }): ReviewPost {
+  input = { ...input, review: omitOwnerPolicyReview(input.review) }
   const marker = PR_MARKERS.review({ runId: input.runId, round: input.round, head: input.head, reviewer: input.reviewer })
   const threads: ReviewPost["threads"] = []
   const bodyFindings: string[] = []
@@ -221,6 +224,7 @@ export interface FinalCommentInput {
  * (`failed: <note>` / `blocked: <note>`), never only a state code ("blocked (outside allowlist)").
  */
 export function jobStateCell(job: ChecklistItem): string {
+  if (job.state === "left_for_you" || job.blockedReason === "consent_touched") return "left for you: this file’s consent code is in the way"
   const state = job.state.replace(/_/g, " ")
   if ((job.state === "failed" || job.state === "blocked" || ((job.state === "done_in_code" || job.state === "claimed") && job.note && /^(?:Not checked after the deploy:|Checked, but not tied to this deploy:|Waiting for the Infinite app's results:)/.test(job.note))) && job.note) return `${state}: ${job.note}`
   return `${state}${job.blockedReason ? ` (${job.blockedReason.replace(/_/g, " ")})` : ""}`
@@ -260,7 +264,7 @@ export function buildFinalComment(input: FinalCommentInput): string {
         : input.completeness?.state === "incomplete"
           ? `Reviewed by ${agentLabel} (incomplete: ${input.completeness.unchecked.join(", ")} not checked). A review is an opinion; only a receipt from this run means "proven".`
           : `Reviewed by ${agentLabel}. A review is an opinion; only a receipt from this run means "proven".`
-  const text = [
+  const text = withOwnerBoundary([
     FINAL_COMMENT_TITLE,
     review,
     input.reportMarkdown.trim(),
@@ -280,7 +284,7 @@ export function buildFinalComment(input: FinalCommentInput): string {
     FINAL_COMMENT_MERGE_LINE
   ]
     .filter(Boolean)
-    .join("\n\n")
+    .join("\n\n"), hasRecordedPolicyEdits(input.jobs))
   return `${neutralizeCheckboxes(safeText(input.scanner, text))}\n\n${PR_MARKERS.final(input.runId)}\n`
 }
 
@@ -319,7 +323,7 @@ export function withFinalReport(body: string, reportMarkdown: string, checklistM
     if (checklistMarkdown.trim()) tail = `\n\n${neutralizeCheckboxes(checklistMarkdown.trim())}${tail}`
   }
   const spliced = `${body.slice(0, start)}${neutralizeCheckboxes(reportMarkdown.trim())}${tail}`
-  return spliced.replace(`\n\n${FINAL_COMMENT_MERGE_LINE}`, `\n\n${FINAL_COMMENT_UPDATED_LINE}`)
+  return withOwnerBoundary(spliced).replace(`\n\n${FINAL_COMMENT_MERGE_LINE}`, `\n\n${FINAL_COMMENT_UPDATED_LINE}`)
 }
 
 /** The comment's title line (`buildFinalComment`'s first paragraph). */

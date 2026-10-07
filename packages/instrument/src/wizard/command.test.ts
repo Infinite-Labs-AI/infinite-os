@@ -432,12 +432,13 @@ describe("nested-agent mode (§3d.7)", { timeout: 30_000 }, () => {
     expect(subs.some((text) => text.includes("2 edit(s) undone: "))).toBe(true)
     // This fixture declares no signup check; the fake runner's generic pass cannot prove that change.
     const jobStates = Object.fromEntries(second.events().filter((event) => event.t === "job.state").map((event) => [event.itemId, event.state]))
-    expect(jobStates).toEqual({ [SIGNUP_ITEM.id]: "claimed", [LAYOUT_ITEM.id]: "blocked" })
+    expect(jobStates[SIGNUP_ITEM.id]).toBe("claimed")
+    expect(jobStates[LAYOUT_ITEM.id]).not.toBe("blocked") // A multi-job nested turn has no trusted editor identity.
     const signupNotes = second.events().filter(event => event.t === "job.state" && event.itemId === SIGNUP_ITEM.id).map(event => event.note).join(" ")
     expect(signupNotes).toContain("the wizard's checks ran but none of them proves this change")
     expect(signupNotes).not.toContain("Checked after the parent agent's turn")
     const final = JSON.parse(readFileSync(join(root, ".infinite/wizard/state.json"), "utf8"))
-    expect(final.jobs.find((item: ChecklistItem) => item.id === LAYOUT_ITEM.id).blockedReason).toBe("consent_touched")
+    expect(final.jobs.find((item: ChecklistItem) => item.id === LAYOUT_ITEM.id).blockedReason).not.toBe("consent_touched")
     expect(resumed.bundle.log.names("checks")).toContain("checks.turnGate")
     expect(resumed.bundle.log.names("agents")).not.toContain("agents.runJobs")
   })

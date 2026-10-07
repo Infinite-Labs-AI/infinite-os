@@ -24,12 +24,12 @@ export type SubTone = "ok" | "warn" | "info" | "pending"
 export const STORE_NARRATION_KEPT = 8
 
 const settledJobState = (state: NonNullable<WizardStoreSnapshot["jobs"]>[number]["state"]): boolean =>
-  state === "done_in_code" || state === "waiting_deploy" || state === "waiting_real_event" || state === "proven" || state === "not_needed" || state === "failed" || state === "blocked"
+  state === "done_in_code" || state === "waiting_deploy" || state === "waiting_real_event" || state === "proven" || state === "not_needed" || state === "left_for_you" || state === "failed" || state === "blocked"
 
 export function jobDisplayState(state: string, by: "agent_claim" | "wizard" = "wizard"): NonNullable<WizardStoreSnapshot["jobs"]>[number]["state"] {
   if (state === "pending") return "waiting"
   if (state === "claimed") return by === "wizard" ? "could_not_check" : "agent_claim"
-  if (state === "done_in_code" || state === "waiting_deploy" || state === "waiting_real_event" || state === "proven" || state === "not_needed" || state === "failed" || state === "blocked") return state
+  if (state === "done_in_code" || state === "waiting_deploy" || state === "waiting_real_event" || state === "proven" || state === "not_needed" || state === "left_for_you" || state === "failed" || state === "blocked") return state
   return "waiting"
 }
 

@@ -525,7 +525,7 @@ describe("the offline end-to-end run (§4.3)", () => {
     expect(headFile("app/signup/page.tsx")).not.toContain(CONSENT_LINE.trim())
     const jobs = finalJobs(w)
     const job = (id: string) => jobs.find((entry) => entry.id === id)!
-    expect(job(ITEMS.conversionsToTools)).toMatchObject({ state: "blocked", blockedReason: "consent_touched" })
+    expect(job(ITEMS.conversionsToTools).blockedReason).not.toBe("consent_touched") // Unknown multi-job ownership never becomes guessed blame.
     expect(job(ITEMS.posthogDefaults)).toMatchObject({ state: "blocked", blockedReason: "outside_allowlist" })
 
     // ---- 6. a claimed job with a failing check is never ticked; jobs 8 and 9 are now checked by the wizard ----
@@ -597,7 +597,7 @@ describe("the offline end-to-end run (§4.3)", () => {
 // ---------------------------------------------------------------------------------------------
 
 describe("a strict pages-router site with adopted tags and fork-only access", () => {
-  it("runs a scripted worker through annotated guard, escaped-source rewrites, privacy, and landing capture checks", { timeout: RUN_TIMEOUT }, async () => {
+  it("runs a scripted worker through annotated guard, rewrites and capture while refusing a privacy edit", { timeout: RUN_TIMEOUT }, async () => {
     const capture = capturePasteAsWritten("typescript_module", "not_required").split("\n").map((line) => `  ${line}`).join("\r\n")
     const guard = buildHostGuardExpression({ mode: "deny", exempt: [PRODUCTION_HOST, `www.${PRODUCTION_HOST}`, "acme-store.vercel.app"], deny: [] })
       .replaceAll("(function (h) {", "(function (h: string) {")
@@ -636,7 +636,7 @@ describe("a strict pages-router site with adopted tags and fork-only access", ()
     ;(plan as { edits?: Record<string, string> }).edits = { privacy_text: "We use Infinite analytics to measure visits." }
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w, approvals)], respond: (ask) => ask.kind === "merge-ready" ? "later" : undefined, timeoutMs: RUN_TIMEOUT })
     const jobs = finalJobs(w)
-    for (const id of ["meta_improve:capture", "preview_guard:meta", "posthog_improve:proxy", "privacy_paragraph:page", "unusual_layout:next_config_rewrites"]) {
+    for (const id of ["meta_improve:capture", "preview_guard:meta", "posthog_improve:proxy", "unusual_layout:next_config_rewrites"]) {
       const job = jobs.find((entry) => entry.id === id)
       expect(job, `${id}: ${trace(run)}`).toBeDefined()
       expect(job!.checks.some((check) => check.tier === "S" && check.state === "pass"), `${id}: ${JSON.stringify(job)}`).toBe(true)
@@ -646,7 +646,8 @@ describe("a strict pages-router site with adopted tags and fork-only access", ()
     expect(jobs.find((entry) => entry.id === "meta_improve:capture")!.checks).toEqual(expect.arrayContaining([expect.objectContaining({ id: "fbc_capture", tier: "T0", state: "pass" })]))
     expect(readFileSync(join(w.site.repo, "src/common/tracking.ts"), "utf8")).toContain("function (h: string)")
     expect(readFileSync(join(w.site.repo, "next.config.js"), "utf8")).toContain("\\x28")
-    expect(readFileSync(join(w.site.repo, "pages/privacy.tsx"), "utf8")).toContain("We use Infinite analytics to measure visits.")
+    expect(readFileSync(join(w.site.repo, "pages/privacy.tsx"), "utf8")).toContain("We measure visits.")
+    expect(jobs.some(entry => entry.id.startsWith("privacy_paragraph:"))).toBe(false)
     expect(readGhState(w.ghState).prs).toHaveLength(1)
     const program = ts.createProgram([join(w.site.repo, "src/common/tracking.ts")], { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020, lib: ["lib.es2020.d.ts", "lib.dom.d.ts"], skipLibCheck: true })
     expect(ts.getPreEmitDiagnostics(program).map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"))).toEqual([])

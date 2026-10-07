@@ -8,6 +8,7 @@
 // The facts come from the install receipt (`.infinite/install.json`) and the PR's base commit (a file absent there
 // was created by this run), never from the reviewer.
 import { join } from "node:path"
+import { hasRecordedPolicyEdits } from "../jobs/owner-boundary.js"
 
 import type { WizardDeps } from "../wizard/contracts/deps.js"
 import type { InfiniteOwnLabel } from "./post.js"
@@ -31,6 +32,8 @@ interface ReceiptEdit {
 }
 
 export interface WizardOwnership {
+  /** Metadata from the already parsed receipt; never reads a policy file for this fact. */
+  recordedPolicyEdits?(runId: string): boolean
   /** Every file the wizard itself wrote (the reviewer's `plan.json` `wizardFiles`): managed ∪ the wizard's own edits. */
   wizardFiles: string[]
   /** Whose code a finding at `path:line` is on; null = the customer's. */
@@ -179,6 +182,7 @@ export async function wizardOwnership(
   const receiptEditFiles = new Set(edits.map((edit) => edit.file))
   const wizardFiles = [...new Set([...managed, ...receiptEditFiles, INSTALL_MANIFEST_FILE])].sort()
   return {
+    recordedPolicyEdits: runId => hasRecordedPolicyEdits([], receipt, runId),
     wizardFiles,
     runtimeInternals,
     runtimeExports,

@@ -214,7 +214,7 @@ export interface StoreStepRow {
   subs: Array<{ text: string; tone: "ok" | "warn" | "info" | "pending"; at: string }>
 }
 
-export type JobDisplayState = "waiting" | "agent_claim" | "agent_blocked" | "agent_not_needed" | "checking" | "could_not_check" | "done_in_code" | "waiting_deploy" | "waiting_real_event" | "proven" | "not_needed" | "failed" | "blocked"
+export type JobDisplayState = "waiting" | "agent_claim" | "agent_blocked" | "agent_not_needed" | "checking" | "could_not_check" | "done_in_code" | "waiting_deploy" | "waiting_real_event" | "proven" | "not_needed" | "left_for_you" | "failed" | "blocked"
 
 /** Renderer-agnostic: what a UI needs to draw one frame. `version` bumps on every change. */
 export interface WizardStoreSnapshot {

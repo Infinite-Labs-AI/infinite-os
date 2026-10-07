@@ -210,6 +210,8 @@ export interface VerdictOpenFinding {
 
 /** §3x.6 The run facts the verdict reads beyond the report's own columns. */
 export interface VerdictFacts {
+  /** Metadata-only history of policy edits made by an older version in this same run. */
+  priorPolicyEdits?: boolean
   jobs: readonly ChecklistItem[]
   openFindings: readonly VerdictOpenFinding[]
   /** Per tool under test; null = no real-visit facts this run. */
@@ -421,9 +423,9 @@ export const FINISH_LINE_SOURCES: { readonly [F in FinishLineId]: { n: number } 
   },
   consent_recorded: {
     n: 9,
-    live_today: src("keys.consent_mode"),
-    in_pr: src("plan.answer", "site_source.response"),
-    proven_live: src("keys.consent_mode")
+    live_today: { ...src("keys.consent_mode"), fixedState: "info" },
+    in_pr: { ...src("plan.answer", "site_source.response"), fixedState: "info" },
+    proven_live: { ...src("keys.consent_mode"), fixedState: "info" }
   },
   csp_allows: {
     n: 10,

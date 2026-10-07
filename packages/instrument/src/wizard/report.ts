@@ -12,6 +12,7 @@
 // 7. `in_pr` cells are keyed to `columns.in_pr.sha` and rebuilt on each new head.
 // A finish-line cell is computed ONLY from the inputs FINISH_LINE_SOURCES names for its column; a cell
 // whose inputs are absent is `not_measured` ("—") and leaves N, the determinable count.
+import { OWNER_BOUNDARY, LEGACY_OWNER_BOUNDARY, hasRecordedPolicyEdits } from "../jobs/owner-boundary.js"
 import {
   CELL_STATES,
   FINISH_LINE_IDS,
@@ -346,6 +347,7 @@ export function checksPassingCell(finishLine: Partial<Record<FinishLineId, Cell>
   let unknown = 0
   let pending = 0
   for (const id of FINISH_LINE_IDS) {
+    if (id === "consent_recorded") continue // Recording a choice is never a compliance grade.
     const cell = finishLine[id]
     if (!cell) continue
     if (cell.state === "pass") pass += 1
@@ -359,7 +361,7 @@ export function checksPassingCell(finishLine: Partial<Record<FinishLineId, Cell>
   const determinable = pass + problems + unknown
   if (determinable === 0) return dashCell("wizard_check", at, runId, "not_exercised")
   const state: CellState = problems > 0 ? "problem" : unknown > 0 ? (pending === unknown ? "pending" : "undetermined") : "pass"
-  const total = FINISH_LINE_IDS.length
+  const total = FINISH_LINE_IDS.length - 1 // consent_recorded is information, not a check
   const notTestable = total - determinable
   const words = [`${pass} pass`, `${problems} problem${problems === 1 ? "" : "s"}`, ...(unknown > 0 ? [`${unknown} unknown`] : []), ...(notTestable > 0 ? [`${notTestable} not testable`] : [])]
   return assertCell("rows.checks_passing", {
@@ -443,6 +445,12 @@ function validateSnapshotCells(column: ReportColumnId, snapshot: ReportColumnSna
 }
 
 export function buildReport(input: BuildInput, now: () => Date = () => new Date()): ReportV2 {
+  input = { ...input, columns: Object.fromEntries(Object.entries(input.columns).map(([key, snapshot]) => {
+    if (!snapshot) return [key, snapshot]
+    const asInfo = (cell: Cell | undefined) => cell && (cell.state === "pass" || cell.state === "problem") ? { ...cell, state: "info" as const } : cell
+    const finishLine = { ...snapshot.finishLine, consent_recorded: asInfo(snapshot.finishLine.consent_recorded) }
+    return [key, { ...snapshot, finishLine, cells: { ...snapshot.cells, consent_setting: asInfo(snapshot.cells.consent_setting), checks_passing: checksPassingCell(finishLine, input.runId, snapshot.meta.measuredAt ?? new Date(0).toISOString()) } }]
+  })) as BuildInput["columns"] }
   const { runId } = input
   const generatedAt = now().toISOString()
   const pending = input.provenLivePending
@@ -508,7 +516,10 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     rows,
     day7: input.day7 ?? { measuredAt: null, window: null, cell: null },
     finishLine,
-    notes: [...input.notes],
+    notes: [...new Set([
+      ...input.notes.filter(note => note !== OWNER_BOUNDARY),
+      ...(input.verdictFacts?.priorPolicyEdits || hasRecordedPolicyEdits(input.verdictFacts?.jobs ?? []) ? [LEGACY_OWNER_BOUNDARY] : [])
+    ])],
     verdict: null
   }
   // §3x.6 THE verdict, from the finished columns and the run's facts (one predicate; every surface renders it).
@@ -585,7 +596,7 @@ function sentence(text: string): string {
 
 /** The report's own notes, then the footnotes, each said once (a note may already say a footnote's words). */
 function notesAndFootnotes(report: ReportV2): string[] {
-  return [...new Set([...report.notes, ...footnotes(report)])]
+  return [...new Set([...report.notes.filter(note => note !== LEGACY_OWNER_BOUNDARY && note !== OWNER_BOUNDARY), ...footnotes(report)])]
 }
 
 function cellText(cell: Cell): string {
@@ -735,6 +746,7 @@ export function renderTerminal(report: ReportV2, width: number, options: Termina
       }
     }
   }
+  lines.push(...wrapPlain(report.notes.includes(LEGACY_OWNER_BOUNDARY) ? LEGACY_OWNER_BOUNDARY : OWNER_BOUNDARY, total))
   lines.push(...hanging("7 days later: ", day7Text(report), total))
   for (const note of notesAndFootnotes(report)) lines.push(...hanging("", note, total))
   return lines.join("\n")
@@ -757,6 +769,8 @@ export function renderMarkdown(report: ReportV2): string {
     for (const line of reasons) out.push(`- ${md(line)}`)
   }
   out.push("")
+  out.push(report.notes.includes(LEGACY_OWNER_BOUNDARY) ? LEGACY_OWNER_BOUNDARY : OWNER_BOUNDARY)
+  out.push("")
   out.push(`### Before and after · ${md(site)}`)
   out.push("")
   out.push(`| | ${REPORT_COLUMN_IDS.map((column) => COLUMN_LABELS[column]).join(" | ")} |`)
@@ -768,7 +782,7 @@ export function renderMarkdown(report: ReportV2): string {
   out.push("")
   out.push(`**7 days later:** ${md(day7Text(report))}`)
   out.push("")
-  out.push("<details><summary>The 14 checks</summary>")
+  out.push("<details><summary>Checks and recorded settings</summary>")
   out.push("")
   out.push(`| # | Check | ${REPORT_COLUMN_IDS.map((column) => COLUMN_LABELS[column]).join(" | ")} |`)
   out.push(`|---|---|${REPORT_COLUMN_IDS.map(() => "---").join("|")}|`)

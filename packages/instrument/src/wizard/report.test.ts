@@ -193,7 +193,7 @@ describe("buildColumn (typed inputs → one column)", () => {
     expect(column.finishLine.each_tool_once).toMatchObject({ state: "problem", display: "GA4 configured twice", provenance: { source: "wizard_check" } })
     expect(column.finishLine.csp_allows).toMatchObject({ state: "pass", provenance: { source: "wizard_check" } })
     expect(column.finishLine.no_pii).toMatchObject({ state: "not_measured", value: null, display: "—" })
-    expect(column.cells.checks_passing).toMatchObject({ value: "1/2", display: "1 pass · 1 problem · 12 not testable of 14", state: "problem" })
+    expect(column.cells.checks_passing).toMatchObject({ value: "1/2", display: "1 pass · 1 problem · 11 not testable of 13", state: "problem" })
   })
 
   it("N determinable: undetermined and pending count as unknown; not measured and info do not count", () => {
@@ -208,7 +208,7 @@ describe("buildColumn (typed inputs → one column)", () => {
       RUN,
       AT
     )
-    expect(cell).toMatchObject({ value: "1/3", display: "1 pass · 0 problems · 2 unknown · 11 not testable of 14", state: "undetermined" })
+    expect(cell).toMatchObject({ value: "1/3", display: "1 pass · 0 problems · 2 unknown · 10 not testable of 13", state: "undetermined" })
   })
 
   it("refuses an agent-shaped input: an unknown input id, or a 'verified' reading with no receipt (negatives)", () => {
@@ -296,7 +296,7 @@ describe("renderers", () => {
       ""
     ])
     graded.verdict = { state: "properly", headline: "acme-store.com collects analytics properly now", reasons: [], installed: [] }
-    expect(renderMarkdown(graded).split("\n").slice(0, 3)).toEqual(["**acme-store.com collects analytics properly now**", "", "### Before and after · www.acme-store.com"])
+    expect(renderMarkdown(graded).split("\n").slice(0, 3)).toEqual(["**acme-store.com collects analytics properly now**", "", "Consent and your privacy policy are yours; this run changed neither."])
   })
 
   it("the terminal table fits the width: three columns at 160, stacked below 140", () => {
@@ -311,17 +311,17 @@ describe("renderers", () => {
   })
 })
 
-describe("the before/after wording: one count of 14, footnotes that match what is shown", () => {
+describe("the before/after wording: 13 analytics checks, consent information excluded, footnotes that match what is shown", () => {
   const report = buildFrom(snapshotsOf(example))
   const outputs = () => [renderMarkdown(report), renderTerminal(report, 160), renderTerminal(report, 120), renderTerminal(report, 70)]
 
-  it("the row is 'Checks passing' and every cell counts all 14 (never '(of 14)' over 'of 12 determinable')", () => {
+  it("the row is 'Checks passing' and every cell counts 13 analytics checks (never '(of 14)' over 'of 12 determinable')", () => {
     const row = report.rows.find((entry) => entry.id === "checks_passing")!
     expect(row.label).toBe("Checks passing")
-    expect(row.cells.live_today.display).toBe("4 pass · 8 problems · 2 not testable of 14")
-    expect(row.cells.proven_live.display).toBe("9 pass · 0 problems · 3 unknown · 2 not testable of 14")
+    expect(row.cells.live_today.display).toBe("4 pass · 7 problems · 2 not testable of 13")
+    expect(row.cells.proven_live.display).toBe("10 pass · 0 problems · 3 unknown of 13")
     // §3i semantics unchanged: the value is pass over the determinable count.
-    expect(row.cells.live_today.value).toBe("4/12")
+    expect(row.cells.live_today.value).toBe("4/11")
     for (const text of outputs()) {
       expect(text).not.toContain("(of 14)")
       expect(text).not.toContain("determinable")

@@ -329,7 +329,7 @@ export function providerMultipleIdsMessage(input: { tool: string; ids: ReadonlyA
 export function posthogUnreadableMessage(input: { file: string; line: number }): string {
   return (
     `The PostHog init at ${input.file}:${input.line} takes its options from a variable or expression, so its proxy, ` +
-    `page-view and privacy settings could not be read from source. This is "not checked", not "fine".`
+    `page-view, session replay and click-capture settings could not be read from source. This is "not checked", not "fine".`
   )
 }
 
@@ -360,7 +360,7 @@ export function posthogRegionMismatchMessage(input: { file: string; line: number
 export function posthogPrivacyChangedMessage(input: { file: string; option: string; before: string; after: string }): string {
   return (
     `\`${input.option}\` in ${input.file} changed from ${input.before} to ${input.after}. Session replay and click ` +
-    `capture are the site owner's privacy and billing choices; infinite-tag never changes them without an approved ` +
+    `capture are the site owner's tracking and billing choices; infinite-tag never changes them without an approved ` +
     `sensitive-pages plan line. Revert this edit.`
   )
 }
