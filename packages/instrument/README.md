@@ -47,7 +47,7 @@ libraries and API source routes do not count as page files; real HTML/PHP pages 
 test directories still do. An unrelated word earlier in a route does not make the page a policy page.
 The wizard does not infer routes from source, templates or imports, so unlisted routes and policy
 text in shared components are outside this path rule.
-Shared components and templates imported by policy pages are not classified as policy pages; the wizard checks the page files themselves.
+The policy check follows page filenames, not their imports; shared components or templates used by a policy page can still be changed.
 Measurement reads only files changed by the measured commit; an unreadable unchanged file does not
 block it. An unreadable changed file is reported as unchecked for that file.
 
