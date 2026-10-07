@@ -82,7 +82,7 @@ describe("WizardInstaller.apply: a new install on a static site", () => {
     expect(manifest.ids).toEqual({ ga4: [IDS.ga4], posthog: { projectKey: IDS.posthog, apiHost: "/ingest" }, meta: [IDS.meta], infinite: { siteSourceKey: IDS.siteSource } })
   })
 
-  it("repository installation runs on continue despite a legacy per-line decline", async () => {
+  it("an explicit Meta install decline leaves its tag and manifest id absent", async () => {
     const root = makeSite({ "index.html": STATIC_HTML })
     const subject = installer()
     const scan = await subject.scan({ root, hosting: fakeHosting() })
@@ -91,8 +91,41 @@ describe("WizardInstaller.apply: a new install on a static site", () => {
     const metaLine = `install_provider:meta:${IDS.meta}`
     const result = (await subject.apply(plan, { ...answer, approved: answer.approved.filter((id) => id !== metaLine), declined: [metaLine] })) as WizardApplyResult
     expect(result.ok).toBe(true)
-    expect(read(root, "index.html")).toContain(IDS.meta)
-    expect(readInstallManifest(root)!.ids?.meta).toEqual([IDS.meta])
+    expect(read(root, "index.html")).not.toContain(IDS.meta)
+    expect(readInstallManifest(root)!.ids?.meta ?? []).toEqual([])
+  })
+
+  it("excluded Infinite, managed guard and sensitive-page edits never reach installer artifacts", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML, "login.html": STATIC_HTML })
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    const declined = ["install_provider:infinite", "preview_guard_managed", "sensitive_pages:posthog:managed"]
+    for (const id of declined) expect(plan.lines.map(line => line.id)).toContain(id)
+    const result = await subject.apply(plan, { ...approveAll(plan), declined }) as WizardApplyResult
+    expect(result.ok).toBe(true)
+    expect(result.artifacts.infinite).toBeUndefined()
+    expect(result.artifacts.hostGuard).toBeUndefined()
+    expect(result.artifacts.posthog?.sensitivePaths).toBeUndefined()
+    expect(read(root, "index.html")).not.toContain(IDS.siteSource)
+    expect(read(root, "index.html")).not.toContain("/login")
+    expect(read(root, "index.html")).not.toContain(".vercel.app")
+    expect(readInstallManifest(root)!.ids?.infinite).toBeNull()
+  })
+
+  it("excluded managed Meta capture creates no capture module or entry import", async () => {
+    const root = makeSite({ "index.html": ADOPTED_META_HTML })
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    const capture = plan.lines.find(line => line.kind === "capture_beside_adopted_pixel")!
+    expect(capture.requires).toBe("info")
+    const result = await subject.apply(plan, { ...approveAll(plan), declined: [capture.id] }) as WizardApplyResult
+    expect(result.ok).toBe(true)
+    expect(result.edits.some(edit => edit.planLineId === capture.id)).toBe(false)
+    expect(result.changedFiles.some(file => file.includes("infinite-meta-click-id"))).toBe(false)
+    expect(read(root, "index.html")).not.toContain("infinite-meta-click-id")
+    expect(exists(root, "infinite-meta-click-id.js")).toBe(false)
   })
 
   it("NEGATIVE: apply refuses without an answered consent mode (the run parks at plan instead)", async () => {
@@ -397,15 +430,14 @@ describe("the receipt in a fresh process (O3 records agent edits, O4 refreshes a
     await expect(installer().recordEdits([makeEditRecord({ file: "index.html", before: "a", after: "b", jobId: null, planLineId: null, by: "agent", runId: IDS.run })])).rejects.toThrow(/needs a scan/)
   })
 
-  it("continuing the plan installs repository work even when legacy line choices decline it", async () => {
+  it("excluding every repository action writes no tag bytes", async () => {
     const root = makeSite({ "index.html": STATIC_HTML })
     const subject = installer()
     const scan = await subject.scan({ root, hosting: fakeHosting() })
     const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
-    const declineAll = { approved: ["consent_mode"], declined: plan.lines.filter((line) => line.requires === "approval" && line.id !== "consent_mode").map((line) => line.id), edits: { consent_mode: "not_required" } }
+    const declineAll = { approved: ["consent_mode"], declined: plan.lines.filter((line) => line.id !== "consent_mode").map((line) => line.id), edits: { consent_mode: "not_required" } }
     expect((await subject.apply(plan, declineAll)).ok).toBe(true)
-    expect(exists(root, ".infinite/install.json")).toBe(true)
-    expect(read(root, "index.html")).toContain(IDS.ga4)
+    expect(read(root, "index.html")).toBe(STATIC_HTML)
   })
 })
 
