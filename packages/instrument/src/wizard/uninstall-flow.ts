@@ -319,6 +319,11 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
   const lines: string[] = []
 
   const existing = await readRecord(ctx.root)
+  // The commit record is saved before the boundary check and push. An interrupted/refused
+  // publication is not a completed uninstall whose cloud cleanup can be resumed.
+  if (existing?.wizardCommits?.length && !existing.lastPush) {
+    return stop("INF_WIZ_PUSH_REFUSED", `The uninstall is paused: recorded commit${existing.wizardCommits.length === 1 ? "" : "s"} ${existing.wizardCommits.join(", ")} on branch ${existing.branch} ${existing.wizardCommits.length === 1 ? "has" : "have"} no confirmed measured push. Cloud settings and links were left alone. Review this branch and complete the uninstall explicitly.`, lines, existing)
+  }
   if (existing && UNINSTALL_PIECES.some((piece) => PENDING_STATES.has(existing.pieces[piece]))) {
     return followUp(ctx, deps, existing, lines)
   }
@@ -414,7 +419,7 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
       record.lastPush = { sha: head, at: ctx.now().toISOString() }
       await writeRecord(deps, ctx.root, record)
     } catch (error) {
-      return stop("INF_WIZ_PUSH_REFUSED", `Push refused: ${error instanceof Error ? error.message : String(error)}`, lines)
+      return stop("INF_WIZ_PUSH_REFUSED", `Push refused: ${error instanceof Error ? error.message : String(error)}`, lines, record)
     }
     const body = [
       "This pull request removes the analytics install infinite-tag added, file by file.",
