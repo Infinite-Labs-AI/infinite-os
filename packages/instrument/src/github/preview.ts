@@ -120,7 +120,7 @@ export async function previewUrlForSha(gh: GhClient, sha: string, projectName: s
   // another candidate still cannot establish project identity from a hostname prefix alone.
   const candidates = previews.length === 1 ? attempts : projectName === null ? [] : attempts.filter(({ deployment, latest }) => matchesProject(deployment, latest?.environment_url ?? null, projectName))
   const environments = new Set(candidates.map(({ deployment }) => deployment.environment?.toLowerCase()))
-  if (candidates.length > 1 && (environments.size !== 1 || environments.has("preview"))) return null
+  if (candidates.length > 1 && (environments.size !== 1 || (environments.has("preview") && candidates.length !== attempts.length))) return null
   const newest = [...candidates].sort((a, b) => (Date.parse(b.deployment.created_at ?? "") || 0) - (Date.parse(a.deployment.created_at ?? "") || 0) || a.index - b.index)[0]
   return newest?.latest?.state === "success" && isUsablePreviewUrl(newest.latest.environment_url) ? newest.latest.environment_url : null
 }

@@ -22,6 +22,10 @@ describe("a preview's terminal GitHub status", () => {
     ]
     expect(await previewUrlForSha(gh(rows, { "8": [{ state: "success", environment_url: "https://chosen-project-new.vercel.app" }], "7": [{ state: "success", environment_url: "https://chosen-project-old.vercel.app" }] }), SHA, "chosen-project")).toBe("https://chosen-project-new.vercel.app")
   })
+  it("R7 selects the newest plain Preview row for the linked single project", async () => {
+    const rows = [8, 7].map(id => ({ id, environment: "Preview", creator: { login: "vercel[bot]" } }))
+    expect(await previewUrlForSha(gh(rows, { "8": [{ state: "success", environment_url: "https://chosen-project-new.vercel.app" }], "7": [{ state: "success", environment_url: "https://chosen-project-old.vercel.app" }] }), SHA, "chosen-project")).toBe("https://chosen-project-new.vercel.app")
+  })
   it("returns a failed deployment's reason immediately", async () => {
     const client = gh([{ id: 7, environment: "Preview", creator: { login: "vercel[bot]" } }], [{ state: "error", description: "Build failed" }])
     expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: "Build failed", blocked: false })

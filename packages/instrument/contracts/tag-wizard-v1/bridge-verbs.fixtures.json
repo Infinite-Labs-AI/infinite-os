@@ -2022,7 +2022,7 @@
               "live_today": {
                 "value": "not recorded",
                 "display": "not recorded",
-                "state": "problem",
+                "state": "info",
                 "provenance": {
                   "source": "cloud_read",
                   "at": "2026-10-02T09:09:00.000Z",
@@ -2032,7 +2032,7 @@
               "in_pr": {
                 "value": "not_required",
                 "display": "\"collect by default\" recorded",
-                "state": "pass",
+                "state": "info",
                 "provenance": {
                   "source": "plan_answer",
                   "at": "2026-10-02T09:20:00.000Z",
@@ -2042,7 +2042,7 @@
               "proven_live": {
                 "value": "not_required",
                 "display": "collect by default",
-                "state": "pass",
+                "state": "info",
                 "provenance": {
                   "source": "cloud_read",
                   "at": "2026-10-02T09:44:00.000Z",
@@ -2430,7 +2430,7 @@
               "live_today": {
                 "value": "problem",
                 "display": "problem",
-                "state": "problem",
+                "state": "info",
                 "provenance": {
                   "source": "cloud_read",
                   "at": "2026-10-02T09:13:00.000Z",
@@ -2440,7 +2440,7 @@
               "in_pr": {
                 "value": "pass",
                 "display": "pass",
-                "state": "pass",
+                "state": "info",
                 "provenance": {
                   "source": "plan_answer",
                   "at": "2026-10-02T09:30:00.000Z",
@@ -2450,7 +2450,7 @@
               "proven_live": {
                 "value": "pass",
                 "display": "pass",
-                "state": "pass",
+                "state": "info",
                 "provenance": {
                   "source": "cloud_read",
                   "at": "2026-10-02T09:44:00.000Z",
