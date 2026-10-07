@@ -302,7 +302,10 @@ describe("consent-separated entry: the budget ends with kept edits in the tree",
   })
 
   it("never verifies an unclaimed job without a runnable check", async () => {
-    const spa = untouched(JOB6, "ga4_improve:spa_page_view", "Send a GA4 page_view on every page change", itemChecksFor("ga4_improve", "spa_page_view", "next-app-router"))
+    // Model a job with only later rehearsal/deployment checks explicitly: the real SPA job now has a local proof.
+    const laterChecks = itemChecksFor("ga4_improve", "spa_page_view", "next-app-router").filter(check => check.tier === "RH" || check.tier === "PV")
+    expect(laterChecks.length).toBeGreaterThan(0)
+    const spa = untouched(JOB6, "ga4_improve:spa_page_view", "Send a GA4 page_view on every page change", laterChecks)
     const w = world({ round1Claims: [SIGNUP], fbcCapture: ["pass"], extraItems: [spa] })
     await step.run(w.ctx, w.deps)
     const job = w.current().jobs.find((item) => item.id === spa.id)!
