@@ -10,6 +10,7 @@
   var FB_COOKIE = /^fb\.[0-9]{1,2}\.[0-9]{1,20}\.[A-Za-z0-9_%.-]{1,512}$/;
   var FBCLID = /^[A-Za-z0-9_%.-]{1,400}$/;
   var MAX_AGE = 7776000;
+  var captureConsentDecision = "";
   var lastConsentGestureAt = 0;
   function recordConsentGesture() { lastConsentGestureAt = Date.now(); }
   try {
@@ -17,16 +18,19 @@
   document.addEventListener("keydown", recordConsentGesture, true);
   window.addEventListener("infinite:analytics-consent-change", function () {
     var event = arguments[0];
-    if (typeof window.__infiniteConsentAllowed === "function") return;
-    if (!lastConsentGestureAt || Date.now() - lastConsentGestureAt > 10000) return;
     if (!event || !event.detail || typeof event.detail.granted !== "boolean") return;
+    if (event.detail.granted && (!lastConsentGestureAt || Date.now() - lastConsentGestureAt > 10000)) return;
+    captureConsentDecision = event.detail.granted ? "granted" : "denied";
+    if (typeof window.__infiniteConsentAllowed === "function") { if (event.detail.granted) captureConsentDecision = ""; return; }
     try { localStorage.setItem("infinite_analytics_consent", event.detail.granted ? "granted" : "denied"); } catch (_error) {}
   });
   } catch (_error) {}
   function infiniteConsentAllows() {
+    if (captureConsentDecision === "denied") return false;
     try {
       if (typeof window.__infiniteConsentAllowed === "function") return window.__infiniteConsentAllowed() === true;
     } catch (_error) { return false; }
+    if (captureConsentDecision === "granted") return true;
     var decision = null;
     try { decision = localStorage.getItem("infinite_analytics_consent"); } catch (_error) { decision = null; }
     if (decision === "granted") return true;
@@ -37,10 +41,12 @@
     return true;
   }
   function infiniteConsentGate(start) {
-    if (infiniteConsentAllows()) { start(); return; }
-    var started = false;
+    var started = infiniteConsentAllows();
+    if (started) start();
     try {
       window.addEventListener("infinite:analytics-consent-change", function () {
+        var event = arguments[0];
+        if (event && event.detail && event.detail.granted === false) started = false;
         setTimeout(function () {
           if (started || !infiniteConsentAllows()) return;
           started = true;
@@ -114,6 +120,18 @@
     for (var size = 2; size <= labels.length; size += 1) domains.push(labels.slice(labels.length - size).join("."));
     return domains;
   }
+  var ownedFbcValue = "", ownedFbcDomain = "";
+  try { window.addEventListener("infinite:analytics-consent-change", function () {
+    var event = arguments[0];
+    if (!event || !event.detail || event.detail.granted !== false) return;
+    try {
+      var visibleFbcs = storedFbcs(false);
+      if (ownedFbcValue && visibleFbcs.length === 1 && visibleFbcs[0] === ownedFbcValue) {
+        document.cookie = "_fbc=;path=/;max-age=0;samesite=Lax" + (ownedFbcDomain ? ";domain=" + ownedFbcDomain : "") + (location.protocol === "https:" ? ";secure" : "");
+      }
+    } catch (_error) {}
+    ownedFbcValue = ""; ownedFbcDomain = "";
+  }); } catch (_error) {}
   window.infiniteMetaClickId = function () {
     if (!infiniteConsentAllows()) return "";
     var fresh = newClick();
@@ -135,6 +153,7 @@
         var value = format(domainIndex(domains[index]), fbclid);
         document.cookie = "_fbc=" + value + ";domain=" + domains[index] + attributes;
         if (storedFbcs(true).indexOf(value) === -1) continue;
+        ownedFbcValue = value; ownedFbcDomain = domains[index];
         // Rule 3 on a subdomain: a copy on a NARROWER domain than the one just written
         // (www.acme.com beside acme.com) would still be listed first if it is older.
         if (storedFbcs(false).length > 1) {
@@ -145,14 +164,16 @@
         return;
       }
       // No Domain cookie was accepted (localhost, an IP): host-only, indexed by the host itself.
-      document.cookie = "_fbc=" + format(domainIndex(hostName()), fbclid) + attributes;
+      var hostValue = format(domainIndex(hostName()), fbclid);
+      document.cookie = "_fbc=" + hostValue + attributes;
+      if (storedFbcs(false).indexOf(hostValue) !== -1) { ownedFbcValue = hostValue; ownedFbcDomain = ""; }
     } catch (_error) {}
   });
 })();
 </script>
 <script>
 (function () {
-if (!((function (h) { var n = (function (h) { h = String(h == null ? "" : h).replace(/^\s+|\s+$/g, "").toLowerCase(); return h.charAt(h.length - 1) === "." ? h.slice(0, -1) : h; })(h), i; var x = ["acme-git-main-x.vercel.app","acme.com","www.acme.com"], d = ["localhost","127.0.0.1","::1","[::1]","0.0.0.0"], s = [".localhost",".local",".vercel.app",".netlify.app",".pages.dev"]; for (i = 0; i < x.length; i += 1) if (x[i] === n) return true; for (i = 0; i < d.length; i += 1) if (d[i] === n) return false; for (i = 0; i < s.length; i += 1) if (n.length > s[i].length && n.slice(n.length - s[i].length) === s[i]) return false; return true; })(location.hostname))) { if (typeof window.fbq !== 'function') { window.fbq = function () {}; window.fbq.__infiniteSilenced = true; } return; }
+if (!((function (h) { var n = (function (h) { h = String(h == null ? "" : h).replace(/^\s+|\s+$/g, "").toLowerCase(); return h.charAt(h.length - 1) === "." ? h.slice(0, -1) : h; })(h), i; if (!n) return false; var x = ["acme-git-main-x.vercel.app","acme.com","www.acme.com"], d = ["localhost","127.0.0.1","::1","[::1]","0.0.0.0"], s = [".localhost",".local",".vercel.app",".netlify.app",".pages.dev"]; for (i = 0; i < x.length; i += 1) if (x[i] === n) return true; for (i = 0; i < d.length; i += 1) if (d[i] === n) return false; for (i = 0; i < s.length; i += 1) if (n.length > s[i].length && n.slice(n.length - s[i].length) === s[i]) return false; return true; })(typeof location !== "undefined" ? location.hostname : ""))) { if (typeof window !== 'undefined' && typeof window.fbq !== 'function') { window.fbq = function () {}; window.fbq.__infiniteSilenced = true; } return; }
 !function(f,b,e,v,n,t,s)
 {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
 n.callMethod.apply(n,arguments):n.queue.push(arguments)};

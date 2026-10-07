@@ -95,6 +95,7 @@ export function classifyHost(host: string, guard: { exempt: readonly string[]; d
 
 /** The TS twin of the emitted expression: does a managed bootstrap start on this host? */
 export function hostGuardAllows(host: string, spec: HostGuardSpec): boolean {
+  if (!normalizeHost(host)) return false
   if (spec.mode === "allow") {
     const normalized = normalizeHost(host)
     return spec.hosts.some((value) => normalizeHost(value) === normalized)
@@ -146,9 +147,9 @@ export interface HostGuardExpressionOptions {
  * `wrapGuardedSnippet`; never emit it as a bare `if (...) return;` at script top level.
  */
 export function buildHostGuardExpression(spec: HostGuardSpec, options: HostGuardExpressionOptions = {}): string {
-  const host = options.hostExpression ?? "location.hostname"
+  const host = options.hostExpression ?? 'typeof location !== "undefined" ? location.hostname : ""'
   const normalized = normalizeHostGuardSpec(spec)
-  const prologue = `var n = (${normalizeHostSource})(h), i;`
+  const prologue = `var n = (${normalizeHostSource})(h), i; if (!n) return false;`
   if (normalized.mode === "allow") {
     return [
       "(function (h) {",
@@ -211,7 +212,7 @@ export function resolveArtifactHostGuard(artifacts: {
 export function wrapGuardedSnippet(body: string, spec: HostGuardSpec, onDenied?: string): string {
   // The body is not re-indented: a snippet's bytes stay exactly what its builder emitted.
   const check = onDenied
-    ? [`if (!(${buildHostGuardExpression(spec)})) {`, onDenied, "return;", "}"].join("\n")
+    ? [`if (!(${buildHostGuardExpression(spec)})) {`, 'if (typeof window !== "undefined") {', onDenied, "}", "return;", "}"].join("\n")
     : `if (!(${buildHostGuardExpression(spec)})) return;`
   return ["(function () {", check, body, "})();"].join("\n")
 }

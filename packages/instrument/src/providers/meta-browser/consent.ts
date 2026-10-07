@@ -55,6 +55,7 @@ export const INFINITE_CONSENT_EVENT = "infinite:analytics-consent-change"
 export function captureConsentDecisionSource(gate: MetaBrowserGate): string {
   if (gate.kind === "none") return ""
   return [
+    'var captureConsentDecision = "";',
     "var lastConsentGestureAt = 0;",
     "function recordConsentGesture() { lastConsentGestureAt = Date.now(); }",
     "try {",
@@ -62,10 +63,11 @@ export function captureConsentDecisionSource(gate: MetaBrowserGate): string {
     'document.addEventListener("keydown", recordConsentGesture, true);',
     `window.addEventListener("${INFINITE_CONSENT_EVENT}", function () {`,
     "  var event = arguments[0];",
-    // Infinite owns the decision whenever its runtime is present, including its in-memory fallback.
-    `  if (typeof window.${INFINITE_CONSENT_ACCESSOR} === "function") return;`,
-    "  if (!lastConsentGestureAt || Date.now() - lastConsentGestureAt > 10000) return;",
     '  if (!event || !event.detail || typeof event.detail.granted !== "boolean") return;',
+    "  if (event.detail.granted && (!lastConsentGestureAt || Date.now() - lastConsentGestureAt > 10000)) return;",
+    '  captureConsentDecision = event.detail.granted ? "granted" : "denied";',
+    // A refusal also governs capture when storage cannot be written. The runtime owns its own key.
+    `  if (typeof window.${INFINITE_CONSENT_ACCESSOR} === "function") { if (event.detail.granted) captureConsentDecision = ""; return; }`,
     `  try { localStorage.setItem("${INFINITE_CONSENT_STORAGE_KEY}", event.detail.granted ? "granted" : "denied"); } catch (_error) {}`,
     "});",
     "} catch (_error) {}"
@@ -77,7 +79,7 @@ export function captureConsentDecisionSource(gate: MetaBrowserGate): string {
  * backticks, no `${` and no `</`, so it can sit in an HTML `<script>` and in the Next module's
  * string literal alike.
  */
-export function consentAllowsSource(gate: MetaBrowserGate): string {
+export function consentAllowsSource(gate: MetaBrowserGate, captureDecision = false): string {
   if (gate.kind === "none") {
     return "function infiniteConsentAllows() { return true; }"
   }
@@ -85,9 +87,11 @@ export function consentAllowsSource(gate: MetaBrowserGate): string {
   const ignoreSignal = gate.privacySignal === "ignored"
   return [
     "function infiniteConsentAllows() {",
+    ...(captureDecision ? ['  if (captureConsentDecision === "denied") return false;'] : []),
     "  try {",
     `    if (typeof window.${INFINITE_CONSENT_ACCESSOR} === "function") return window.${INFINITE_CONSENT_ACCESSOR}(${ignoreSignal ? "{ privacySignal: false }" : ""}) === true;`,
     "  } catch (_error) { return false; }",
+    ...(captureDecision ? ['  if (captureConsentDecision === "granted") return true;'] : []),
     "  var decision = null;",
     `  try { decision = localStorage.getItem("${INFINITE_CONSENT_STORAGE_KEY}"); } catch (_error) { decision = null; }`,
     '  if (decision === "granted") return true;',
@@ -105,8 +109,8 @@ export function consentAllowsSource(gate: MetaBrowserGate): string {
 }
 
 /**
- * Browser source for `function infiniteConsentGate(start)`: runs `start` once, now or after a later
- * grant. Under the Infinite hook a grant is noticed through the runtime's consent event and then
+ * Browser source for `function infiniteConsentGate(start)`: runs `start` once per grant, now or later.
+ * Withdrawal resets it so a later valid grant can capture again. A grant is noticed through the event and then
  * re-read from storage a tick later — so only a decision the runtime accepted (gesture-checked) and
  * persisted can open it, and the order in which the two listeners run does not matter.
  */
@@ -116,10 +120,12 @@ export function consentGateSource(gate: MetaBrowserGate): string {
   }
   return [
     "function infiniteConsentGate(start) {",
-    "  if (infiniteConsentAllows()) { start(); return; }",
-    "  var started = false;",
+    "  var started = infiniteConsentAllows();",
+    "  if (started) start();",
     "  try {",
     `    window.addEventListener("${INFINITE_CONSENT_EVENT}", function () {`,
+    "      var event = arguments[0];",
+    "      if (event && event.detail && event.detail.granted === false) started = false;",
     "      setTimeout(function () {",
     "        if (started || !infiniteConsentAllows()) return;",
     "        started = true;",

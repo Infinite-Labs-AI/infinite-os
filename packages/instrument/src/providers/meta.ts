@@ -265,7 +265,7 @@ export const META_SILENCED_FLAG = "__infiniteSilenced"
  * accessor treat it as no pixel. The site's own `fbq('track', …)` on a preview cannot throw and strand a
  * click. One line, so the job-7 recipe can carry it on its guard line.
  */
-export const META_SILENCED_STUB = `if (typeof window.fbq !== 'function') { window.fbq = function () {}; window.fbq.${META_SILENCED_FLAG} = true; }`
+export const META_SILENCED_STUB = `if (typeof window !== 'undefined' && typeof window.fbq !== 'function') { window.fbq = function () {}; window.fbq.${META_SILENCED_FLAG} = true; }`
 
 /** The placeholder the adopted-guard recipe uses for the emitted guard expression. */
 export const GUARD_EXPRESSION_PLACEHOLDER = "<GUARD_EXPRESSION>"

@@ -17,6 +17,7 @@ import { createJobRegistry } from "../jobs/registry.js"
 import type { CheckRunner } from "../wizard/contracts/jobs.js"
 import { runSetupChecks } from "../setup-checks/index.js"
 import { renderInfiniteBrowserTag } from "../runtime/infinite-browser.js"
+import { buildMetaClickIdCaptureScript } from "../providers/meta-browser/click-id.js"
 import { CONSENT_YES, consentActivationFor } from "./consent-handoff.js"
 
 afterEach(cleanupSites)
@@ -172,12 +173,62 @@ it.each([false, true])("the exact banner dispatch activates and revokes required
   expect(browser.cookies.values("_fbc")).toHaveLength(1)
   expect(browser.evaluate('window.infiniteMetaClickId()')).not.toBe("")
   if (withRuntime) expect(browser.beacons.length + browser.fetches.length).toBeGreaterThan(0)
-  browser.runScript('window.dispatchEvent({ type: "pointerdown", isTrusted: true });')
+  await browser.advance(10_001)
   browser.runScript(no)
   await browser.advance(0)
   expect(browser.localValues.get("infinite_analytics_consent")).toBe("denied")
   expect(browser.evaluate('window.infiniteMetaClickId()')).toBe("")
+  expect(browser.cookies.values("_fbc")).toEqual([])
   if (withRuntime) expect(browser.evaluate('window.__infiniteConsentAllowed()')).toBe(false)
+  browser.runScript('window.dispatchEvent({ type: "pointerdown", isTrusted: true });')
+  browser.runScript(yes)
+  await browser.advance(0)
+  expect(browser.cookies.values("_fbc")).toHaveLength(1)
+})
+
+it.each([false, true].flatMap(withRuntime => ["none", "recent", "expired"].map(gesture => ({ withRuntime, gesture }))))("withdrawal removes this instance's cookie without requiring a gesture: $withRuntime / $gesture", async ({ withRuntime, gesture }) => {
+  const browser = createBrowserVm({ url: "https://example.test/?fbclid=storedGrant", localStorage: { infinite_analytics_consent: "granted" } })
+  browser.runScript(buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: "required" } }))
+  if (withRuntime) browser.runHtml(renderInfiniteBrowserTag({ siteSourceKey: "site_fixture_key", collectPath: "/infinite/ledger", respectDnt: true, consent: { mode: "required", storageKey: "infinite_analytics_consent" }, productionHosts: ["example.test"] }))
+  expect(browser.cookies.values("_fbc")).toHaveLength(1)
+  if (gesture !== "none") browser.runScript('window.dispatchEvent({ type: "pointerdown" });')
+  if (gesture === "expired") await browser.advance(10_001)
+  browser.runScript('window.dispatchEvent({ type: "infinite:analytics-consent-change", detail: { granted: false } });')
+  await browser.advance(0)
+  expect(browser.cookies.values("_fbc")).toEqual([])
+  expect(browser.evaluate('window.infiniteMetaClickId()')).toBe("")
+  expect(browser.localValues.get("infinite_analytics_consent")).toBe("denied")
+  if (withRuntime) expect(browser.evaluate('window.__infiniteConsentAllowed()')).toBe(false)
+})
+
+it("a refusal survives unavailable storage and does not delete a foreign replacement cookie", () => {
+  const browser = createBrowserVm({ url: "https://example.test/?fbclid=ownedClick", storageThrows: true })
+  browser.runScript(buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: "not_required" } }))
+  browser.cookies.write("_fbc=fb.1.1000000000000.foreign;domain=example.test;path=/")
+  browser.runScript('window.dispatchEvent({ type: "infinite:analytics-consent-change", detail: { granted: false } });')
+  expect(browser.scriptErrors).toEqual([])
+  expect(browser.cookies.values("_fbc")).toEqual(["fb.1.1000000000000.foreign"])
+  expect(browser.evaluate('window.infiniteMetaClickId()')).toBe("")
+})
+
+it("does not mistake a shadow copy for ownership of a foreign replacement", () => {
+  const browser = createBrowserVm({ url: "https://www.example.test/?fbclid=ownedClick" })
+  browser.runScript(buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: "not_required" } }))
+  const own = browser.cookies.values("_fbc")[0]!
+  browser.cookies.write(`_fbc=${own};path=/`)
+  browser.cookies.write("_fbc=fb.1.1000000000000.foreign;domain=example.test;path=/")
+  browser.runScript('window.dispatchEvent({ type: "infinite:analytics-consent-change", detail: { granted: false } });')
+  expect(browser.cookies.values("_fbc")).toEqual(expect.arrayContaining([own, "fb.1.1000000000000.foreign"]))
+})
+
+it("an in-memory standalone grant cannot override a later runtime denial", async () => {
+  const browser = createBrowserVm({ url: "https://example.test/?fbclid=ownedClick", storageThrows: true })
+  browser.runScript(buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: "required" } }))
+  browser.runScript('window.dispatchEvent({ type: "pointerdown" }); window.dispatchEvent({ type: "infinite:analytics-consent-change", detail: { granted: true } });')
+  await browser.advance(0)
+  expect(browser.evaluate('window.infiniteMetaClickId()')).not.toBe("")
+  browser.window.__infiniteConsentAllowed = () => false
+  expect(browser.evaluate('window.infiniteMetaClickId()')).toBe("")
 })
 
 it("a new Meta-only install obeys required mode without an Infinite artifact", async () => {

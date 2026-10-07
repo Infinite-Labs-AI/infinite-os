@@ -8,6 +8,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import ts from "typescript"
+import { runInNewContext } from "node:vm"
 
 import { createBrowserVm } from "../test/site-code/browser-vm.js"
 
@@ -34,6 +35,12 @@ const GUARD: HostGuardSpec = {
   exempt: ["acme.com", "www.acme.com", "acme-git-main-x.vercel.app"],
   deny: []
 }
+
+it("keeps the emitted preview guard inert outside a browser", () => {
+  expect(runInNewContext(buildHostGuardExpression(GUARD), {})).toBe(false)
+  expect(runInNewContext(wrapGuardedSnippet('throw new Error("must not initialize");', GUARD), {})).toBeUndefined()
+  expect(runInNewContext(wrapGuardedSnippet('throw new Error("must not initialize");', GUARD, 'window.fbq = function () {};'), {})).toBeUndefined()
+})
 
 it("emits a guard accepted by strict TypeScript and by the adopted-init checker", async () => {
   const dir = mkdtempSync(join(tmpdir(), "infinite-guard-ts-"))

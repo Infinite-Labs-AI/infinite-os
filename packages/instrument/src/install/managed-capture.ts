@@ -40,7 +40,7 @@ function canonicalCapture(mode: ManagedCaptureRecord["mode"], strategy: ManagedC
   const emitted = strategy === "first_import" ? buildMetaClickIdCaptureJavascript({ gate }) : buildMetaClickIdCaptureScript({ gate })
   // The standalone file is linted as customer source. These are the fixed factory's mutable locals;
   // all other declarations are constants. Consent and cookie behavior remains the same factory code.
-  const mutable = new Set(["decision", "started", "newest", "index", "size", "other", "narrower", "lastConsentGestureAt"])
+  const mutable = new Set(["decision", "started", "newest", "index", "size", "other", "narrower", "lastConsentGestureAt", "captureConsentDecision", "ownedFbcValue"])
   const modern = emitted.replace(/\bvar\s+([A-Za-z_$][\w$]*)/g, (_match, name: string) => `${mutable.has(name) ? "let" : "const"} ${name}`).replace(/catch\s*\(_error\)/g, "catch").replace(/catch\s*\{\s*\}/g, "catch { /* Browser storage or hooks may be unavailable. */ }")
   return "// Managed by Infinite. Public install artifacts only.\n" + modern + "\n"
 }

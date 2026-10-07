@@ -726,8 +726,9 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     runtimeWindow.addEventListener("infinite:analytics-consent-change", (event) => {
       // Accepted in EVERY consent mode: a not_required site still needs to record the
       // explicit decision of a GPC/DNT visitor (the only visitors it suppresses).
-      if (Date.now() - lastGestureAt > 10000) return
       const detail = (event as CustomEvent<{ granted?: boolean }>).detail
+      if (typeof detail?.granted !== "boolean") return
+      if (detail.granted && Date.now() - lastGestureAt > 10000) return
       consentOverride = detail?.granted === true
       try {
         localStorage.setItem(consentStorageKey, detail?.granted ? "granted" : "denied")
