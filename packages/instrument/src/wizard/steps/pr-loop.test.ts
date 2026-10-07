@@ -1072,6 +1072,19 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.agents.jobCalls).toEqual([])
   })
 
+  it("retains an incomplete review's findings when the read-check retry is unavailable", async () => {
+    const partial: ReviewResult = { ...review([{ id: "F1", item: "R16", category: "owner_consent_privacy", severity: "should", path: "app/layout.tsx", line: 2, body: "Owner decides the banner wording", suggested_fix: null }]), summary: "No read-check was returned" }
+    const w = await opened({ reviews: [partial, { error: "out_of_usage" }], blindReviewer: true })
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expectOk(outcome)
+    expect(outcome.status).toContain("reviewed by Codex (incomplete)")
+    expect(w.agents.reviewCalls).toHaveLength(2)
+    const posted = w.gh.read().calls.filter(call => call.stdin?.includes("addPullRequestReview(input"))
+    expect(posted).toHaveLength(1)
+    expect(posted[0]!.stdin).toContain("Owner decides the banner wording")
+    expect(w.agents.jobCalls).toEqual([])
+  })
+
   it("an all-unchecked checklist remains a visible incomplete review", async () => {
     const w = await opened({ reviews: [liveBlindReview()], answers: { "teammate-comments": { actOn: [] } } })
     const outcome = await reviewStep.run(w.ctx, w.deps)
