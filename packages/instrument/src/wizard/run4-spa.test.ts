@@ -85,7 +85,9 @@ function consentSeparatedSiteFiles(): Record<string, string> {
   const consent = /<Script id="consent-default"[^>]*>[\s\S]*?<\/Script>/.exec(layout)?.[0]
   if (!consent) throw new Error("Recorded consent-default script is missing")
   files["app/consent-defaults.tsx"] = `import Script from 'next/script'\nexport function ConsentDefaults() { return (${consent}) }\n`
-  files["app/layout.tsx"] = `import { ConsentDefaults } from './consent-defaults'\n${layout.replace(consent, "<ConsentDefaults />")}`
+  // Keep the caller ordinary: a declared local name containing consent is itself frozen.
+  // The owner component and its consent bytes remain unchanged in the separate consent file.
+  files["app/layout.tsx"] = `import { ConsentDefaults as OwnerBootstrap } from './consent-defaults'\n${layout.replace(consent, "<OwnerBootstrap />")}`
   return files
 }
 

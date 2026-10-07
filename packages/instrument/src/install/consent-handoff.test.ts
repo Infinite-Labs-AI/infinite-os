@@ -76,11 +76,11 @@ describe("the owner banner handoff", () => {
     }
   })
 
-  it("prints each waiting activation status only once in the terminal", () => {
+  it("prints the shared waiting activation status only once in the terminal", () => {
     const report = buildReport({ runId: "00000000-0000-4000-8000-000000000001", tagVersion: "fixture", site: { repoLabel: "example/site", productionHost: "example.test" }, columns: { live_today: null, in_pr: null, proven_live: null }, provenLivePending: "deploy", day7: null, notes: [], verdictFacts: { jobs: [], openFindings: [], tools: null, installedUnknown: null, consentActivation: { mode: "required", infinite: true, capture: true } } })
     const text = renderTerminal(report, 160)
-    expect(text.split("Infinite tag: NOT ACTIVE YET")).toHaveLength(2)
-    expect(text.split("Meta ad-click capture: NOT ACTIVE YET")).toHaveLength(2)
+    expect(text.split("NOT ACTIVE YET")).toHaveLength(2)
+    expect(text).toContain("Infinite's tag and the ad-click capture stay off until your banner tells them the visitor said yes.")
   })
 
   it("does not leave aggregate activation cells passed because a sandbox grant worked", () => {
