@@ -41,7 +41,9 @@ export async function acknowledgeUnverifiedHistory(ctx: WizardContext, headSha: 
   if (ctx.options.yes || ctx.options.nested) resolution = "noninteractive"
   else {
     const answer = await ctx.ask("confirm", { question: `${explanation}\nContinue with that existing local history?`, defaultYes: false })
-    resolution = answer === false ? "declined" : answer === true ? "accepted" : "noninteractive"
+    // An interrupted interactive prompt is not authorization to push. Ask again on resume.
+    if (answer !== true && answer !== false) return false
+    resolution = answer ? "accepted" : "declined"
   }
   ctx.state.update(draft => { draft.commitHistory = { ...history, resolution, priorHeads: resolution === "declined" ? history.priorHeads : [...new Set([...history.priorHeads, history.unclassifiedHead!])] } })
   await ctx.state.save()

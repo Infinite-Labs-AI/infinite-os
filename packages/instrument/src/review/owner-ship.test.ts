@@ -1,6 +1,7 @@
 import { afterEach, expect, it } from "vitest"
 import { createGitFixture, type GitFixture } from "../../test/wizard/git-fixture.js"
 import { fakeBridge, initialState, RUN_ID, testContext, testDeps } from "../../test/wizard/o4-fakes.js"
+import { ASK_CANCELLED, ASK_TIMEOUT, type AskNonAnswer } from "../wizard/contracts/asks.js"
 import { createGitOps } from "../git/index.js"
 import { GitPushError } from "../git/push.js"
 import { createScanner } from "./scan.js"
@@ -10,7 +11,7 @@ const fixtures: GitFixture[] = []
 afterEach(() => { while (fixtures.length) fixtures.pop()!.cleanup() })
 const path = "src/tracking.ts"
 const source = 'export function boot() {\n  fbq?.("consent", "revoke");\n}\nexport const count = 1;\n'
-async function setup(approveForeign = false) {
+async function setup(approveForeign: boolean | AskNonAnswer = false) {
   const fx = createGitFixture({ files: { [path]: source, ".gitignore": ".infinite/\n" } }); fixtures.push(fx)
   const git = createGitOps({ cwd: fx.root, env: fx.env })
   const branch = "infinite/tag/owner-proof"
@@ -238,4 +239,15 @@ it("asks once about unclassified earlier history without calling it owner commit
   const question = JSON.stringify(w.ctx.asks[0]!.payload)
   expect(question).toContain("cannot identify")
   expect(question).not.toContain("owner commits")
+})
+
+it.each([ASK_CANCELLED, ASK_TIMEOUT])("stops an interactive push when the existing-history question is unanswered: %s", async answer => {
+  const w = await setup(answer)
+  w.fx.write(path, source.replace("count = 1", "count = 2"))
+  w.fx.git(["add", path]); w.fx.git(["commit", "-m", "unknown earlier fixture"])
+  w.ctx.state.update(state => { delete state.wizardCommits; delete state.commitHistory })
+  expect(await w.push()).toMatchObject({ kind: "failed", message: expect.stringContaining("Nothing was pushed") })
+  expect(w.fx.remoteSha(w.branch)).toBeNull()
+  expect(w.ctx.state.get().commitHistory?.resolution).toBeUndefined()
+  expect(w.ctx.asks).toHaveLength(1)
 })
