@@ -16,7 +16,8 @@ import { reverseEditRecord } from "./install/edits.js"
 import { writeFileAtomic } from "./frameworks/shared.js"
 import type { InstallManifest, UninstallResult } from "./types.js"
 import { GENERATED_API_RECORD } from "./jobs/generated-api.js"
-import { isPolicyPath } from "./jobs/owner-boundary.js"
+import { loadRepoSnapshot } from "./jobs/repo-files.js"
+import { isPolicyPath, policyContentPaths } from "./jobs/owner-boundary.js"
 
 export interface UninstallInstallationOptions {
   root: string
@@ -74,7 +75,7 @@ export interface ReverseEditsResult {
  * Policy pages are always left to the owner, including edits in legacy receipts.
  * A dry run only reports what it would do.
  */
-export function reverseRecordedEdits(root: string, manifest: Pick<InstallManifest, "edits">, dryRun: boolean): ReverseEditsResult {
+export function reverseRecordedEdits(root: string, manifest: Pick<InstallManifest, "edits"> & Partial<Pick<InstallManifest, "appRoot">>, dryRun: boolean): ReverseEditsResult {
   const reversed: string[] = []
   const leftAsIs: string[] = []
   const warnings: string[] = []
@@ -85,12 +86,31 @@ export function reverseRecordedEdits(root: string, manifest: Pick<InstallManifes
     const absolutePath = join(root, file)
     return existsSync(absolutePath) ? readFileSync(absolutePath, "utf8") : null
   }
+  if ((manifest.edits?.length ?? 0) === 0) return { reversed, leftAsIs, warnings }
+  const appRoot = manifest.appRoot ?? "."
+  const scopeSources = new Map(loadRepoSnapshot(root, appRoot).files)
+  for (const record of manifest.edits ?? []) {
+    const source = read(record.file)
+    if (source !== null) scopeSources.set(record.file, source)
+  }
+  const policyFiles = policyContentPaths(scopeSources, appRoot)
+  // Reconstruct every reachable receipt stage in memory before deciding what may be
+  // reversed. A legacy page edit removing an import cannot unlock its owner content.
+  const unreachable = new Set<string>()
+  for (const record of [...(manifest.edits ?? [])].reverse()) {
+    if (unreachable.has(record.file)) continue
+    const previous = reverseEditRecord(scopeSources.get(record.file) ?? null, record)
+    if (!previous.ok) { unreachable.add(record.file); continue }
+    if (previous.content === null) scopeSources.delete(record.file)
+    else scopeSources.set(record.file, previous.content)
+    for (const path of policyContentPaths(scopeSources, appRoot)) policyFiles.add(path)
+  }
   for (const record of [...(manifest.edits ?? [])].reverse()) {
     if (blocked.has(record.file)) continue
-    if (isPolicyPath(record.file)) {
+    if (record.jobId?.split(":")[0] === "privacy_paragraph" || policyFiles.has(record.file) || isPolicyPath(record.file, appRoot)) {
       blocked.add(record.file)
       leftAsIs.push(record.file)
-      warnings.push(`Not changed by us: ${record.file} is a policy page, which is yours.`)
+      warnings.push(`Not changed by us: ${record.file} is ${isPolicyPath(record.file, appRoot) ? "a policy page" : "policy content"}, which is yours.`)
       continue
     }
     const outcome = reverseEditRecord(read(record.file), record)

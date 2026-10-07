@@ -9,7 +9,7 @@ export function scopeOwnerJob(item: ChecklistItem, sources: ReadonlyMap<string, 
   if (item.ownerBoundary?.kind === "restored_unit" || item.jobId === "privacy_paragraph") return item
   if (item.state === "blocked" && item.allow.files.length === 0) return item
   const policy = item.allow.files.find(file => isPolicyPath(file, appRoot, sources))
-  if (policy) return leaveForOwner(item, `Not changed by us: ${policy} is a policy page, which is yours.`, { kind: "policy_page", file: policy, line: 1 }).item
+  if (policy) return leaveForOwner(item, `Not changed by us: ${policy} is ${isPolicyPath(policy, appRoot) ? "a policy page" : "policy content"}, which is yours.`, { kind: "policy_page", file: policy, line: 1 }).item
   const place = frozenEditPlace(item, sources)
   if (!place) return item
   const saved = item.ownerBoundary

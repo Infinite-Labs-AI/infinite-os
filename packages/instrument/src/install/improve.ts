@@ -22,6 +22,7 @@ import { join } from "node:path"
 
 import { resolveVercelJsonContents, VERCEL_CONFIG_FILE } from "../frameworks/vercel-config.js"
 import { writeFileAtomic } from "../frameworks/shared.js"
+import { loadRepoSnapshot } from "../jobs/repo-files.js"
 import { ownerWiringRequirement, policyWiringRequirement } from "../frameworks/owner-boundary.js"
 import { readPosthogOption } from "../inspect.js"
 import { buildMetaClickIdCaptureScript, META_CLICK_ID_ACCESSOR } from "../providers/meta-browser/click-id.js"
@@ -482,7 +483,7 @@ function proxySpecFor(keys: TagKeys, adoptedApiHost: string | null): PosthogProx
 
 function writeWithRecord(input: ImproveEditInput, file: string, before: string | null, after: string, snippet: string): ImproveEditResult {
   if (before === after) return { ok: true, record: null }
-  const ownerRequirement = ownerWiringRequirement(file, before, after, snippet, input.appRoot)
+  const ownerRequirement = ownerWiringRequirement(file, before, after, snippet, input.appRoot, loadRepoSnapshot(input.root, input.appRoot).files)
   if (ownerRequirement) return { ok: false, reason: ownerRequirement.reason, ownerRequirement }
   writeFileAtomic(join(input.root, file), after)
   return {
@@ -521,7 +522,7 @@ function applyNextCapture(input: ImproveEditInput, appRootAbsolute: string, evid
 export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
   const { line } = input
   if (line.owner !== "code") return { ok: false, reason: `${line.id} is an agent job, not a code edit` }
-  const policy = line.evidence ? policyWiringRequirement(repoRelative(input.appRoot, line.evidence.file), "", input.appRoot) : null
+  const policy = line.evidence ? policyWiringRequirement(repoRelative(input.appRoot, line.evidence.file), "", input.appRoot, loadRepoSnapshot(input.root, input.appRoot).files) : null
   if (policy) return { ok: false, reason: policy.reason, ownerRequirement: policy }
   const appRootAbsolute = input.appRoot === "." ? input.root : join(input.root, input.appRoot)
 

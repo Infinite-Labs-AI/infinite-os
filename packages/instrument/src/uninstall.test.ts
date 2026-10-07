@@ -247,7 +247,7 @@ describe("uninstallInstallation", () => {
   it.each([false, true])("leaves legacy policy receipt edits intact, including created pages (dry run %s)", dryRun => {
     const root = copyFixture("static-html-basic")
     applyFixture(root, { infinite })
-    const policyFiles = ["terms-and-conditions.html", "tos.html", "src/views/Terms.tsx"]
+    const policyFiles = ["terms-and-conditions.html", "tos.html", "src/pages/terms.tsx"]
     const before = "Owner's original policy\n", after = "Owner's policy with a legacy wizard edit\n"
     const records = policyFiles.map((file, index) => {
       mkdirSync(dirname(join(root, file)), { recursive: true })
