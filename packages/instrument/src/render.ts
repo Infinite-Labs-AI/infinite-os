@@ -220,6 +220,8 @@ export function renderApplied(input: {
   verify: VerifyResult
 }): string {
   const { plan, apply, verify } = input
+  const requiresManual = apply.requiresManual ?? []
+  const manualPaths = new Set(requiresManual.map(requirement => requirement.path))
   const installing = installedArtifacts(plan)
   const names = providerNames(installing)
   const hasPixel = Boolean(
@@ -245,7 +247,7 @@ export function renderApplied(input: {
   if (verify.buildOk) {
     // The count is the managed RUNTIME files (plan.files) only; the manifest and the server-lane
     // brief are separate visible artifacts, called out so the number matches the change set.
-    const n = plan.files.length
+    const n = plan.files.filter(file => !manualPaths.has(file)).length
     const wrote: string[] = []
     if (manifestWritten) wrote.push("manifest")
     if (briefWritten) wrote.push("brief")
@@ -258,8 +260,9 @@ export function renderApplied(input: {
   const ids = providerLines(installing).join(", ")
   const idSuffix = ids ? ` (${ids})` : ""
 
-  // An unsatisfied manual step means the pixel is NOT live yet — never render this as a clean "Done".
-  const requiresManual = apply.requiresManual ?? []
+  // Policy exclusions leave ordinary pages wired. Other outstanding entrypoint work
+  // still needs the existing incomplete-install handoff. Both retain exit code 2.
+  const policyOnly = requiresManual.length > 0 && requiresManual.every(requirement => requirement.ownerBoundary?.kind === "policy_page")
   // Honest completion line (#22): only claim the browser pixel when one was actually installed. A
   // server-lane-only install counts server-side but ships no pixel, and says so explicitly.
   const doneLine =
@@ -273,7 +276,9 @@ export function renderApplied(input: {
         "Installing analytics into your site…",
         ...steps,
         "",
-        `⚠ ACTION REQUIRED — pixel not yet live. infinite-tag could not finish the ${names}${idSuffix} install automatically, so nothing loads until you add the step below by hand.`,
+        policyOnly
+          ? "⚠ ACTION REQUIRED — policy pages were left unchanged. Analytics is wired into the ordinary pages. Review the owner-only snippets below if you want analytics on those policy pages."
+          : `⚠ ACTION REQUIRED — pixel not yet live. infinite-tag could not finish the ${names}${idSuffix} install automatically, so nothing loads until you add the step below by hand.`,
         ...requiresManualLines(requiresManual),
         ...adoptedLines(plan),
         "",
@@ -456,7 +461,7 @@ export function renderVerify(verify: VerifyResult): string {
   const pending = verify.requiresManual ?? []
   if (pending.length > 0) {
     // Files can match the manifest while the pixel is not live — say so, never a clean ✅.
-    lines.push("⚠ ACTION REQUIRED — the pixel is not live yet. A manual wiring step is outstanding:")
+    lines.push("⚠ ACTION REQUIRED — manual wiring remains for the files listed below:")
     for (const item of pending) {
       lines.push(`  • ${item.path} — ${item.reason}`)
     }
