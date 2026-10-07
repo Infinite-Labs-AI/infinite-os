@@ -14,6 +14,7 @@ import {
   writeFileIfChanged
 } from "../frameworks/shared.js"
 import { computeContentHash } from "../manifest.js"
+import { recordGeneratedApi } from "../jobs/generated-api.js"
 import type {
   InstallManifest,
   ManagedConfigOwnership,
@@ -540,6 +541,9 @@ export function applyServerLane(input: ApplyServerLaneInput): ApplyServerLaneRes
   } else {
     // Written but kept out of changedFiles: the CLI narrates the runtime files + the root pointer;
     // the guide is a doc the pointer links to, tracked here purely so uninstall can remove it.
+    // Its fixed examples also pass through the owner diff check. Trust only these exact emitted
+    // bytes, never the filename/banner or any additions an agent makes to the guide afterwards.
+    recordGeneratedApi(input.root, guideRootRelative, brief)
     writeFileIfChanged(appRootAbsolute, guideAppRelative, brief)
     manifest.guide = guideRootRelative
     guideWritten = true
