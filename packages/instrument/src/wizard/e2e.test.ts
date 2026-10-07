@@ -1121,12 +1121,18 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
     // The site has no GA4 and no PostHog yet (the Meta pixel stays adopted): both become NEW managed installs.
     writeFileSync(join(w.site.repo, "app/layout.tsx"), readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8").replace(/ {8}<ConsentDefaults \/>[\s\S]*?<Script id="meta-pixel"/, '        <Script id="meta-pixel"'))
     writeFileSync(join(w.site.repo, "app/providers.tsx"), 'export function Providers({ children }: { children: React.ReactNode }) {\n  return <>{children}</>\n}\n')
+    // This deterministic install world has no account-login instrumentation; keep the login page
+    // itself so the emitted sensitive-path options are still exercised below.
+    for (const file of ["app/api/auth/login/route.ts", "app/api/auth/logout/route.ts"]) rmSync(join(w.site.repo, file))
     commitAndPush(w, "no GA4, no PostHog yet")
     expect(readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8")).not.toContain("googletagmanager")
     const answers = answersFile()
     const plan = answers.plan as { approved: string[]; declined: string[] }
+    // The owner leaves unrelated Meta repairs and conversion wiring out of this run.
+    const excluded = ["meta_spa_page_views", "preview_guard_adopted:meta:init", "conversion_names"]
+    plan.declined.push(...excluded)
     const NEW_MANAGED_LINES = ["install_provider:ga4:G-FAKE00001", "install_provider:posthog:phc_FAKEtestProjectKeyNotReal000", "preview_guard_managed", "sensitive_pages:posthog:managed"]
-    const approved = [...plan.approved.filter((id) => !id.includes(":ga4:") && !id.includes(":posthog:")), ...NEW_MANAGED_LINES]
+    const approved = [...plan.approved.filter((id) => !id.includes(":ga4:") && !id.includes(":posthog:") && !excluded.includes(id)), ...NEW_MANAGED_LINES]
     const run = await runWizard({
       cwd: w.site.repo,
       env: w.env,
@@ -1136,6 +1142,11 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
     })
     expect(stepOutcomes(run), trace(run)).toContain("install:ok")
     expect(run.code, trace(run)).toBe(0)
+    const approvals = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/plan-approvals.json"), "utf8"))
+    expect(approvals.approvals.declined).toEqual(expect.arrayContaining(excluded))
+    expect(finalJobs(w).some(job => job.owner === "agent" && ["pending", "claimed", "blocked", "failed"].includes(job.state))).toBe(false)
+    expect(agentRuns(w, "claude")).toEqual([])
+    expect(agentRuns(w, "codex")).toEqual([])
     const lines = (run.ofType("ask.open").find((event) => event.kind === "plan")?.payload as { lines?: Array<{ id: string }> } | undefined)?.lines?.map((line) => line.id) ?? []
     for (const id of NEW_MANAGED_LINES) expect(lines, id).toContain(id)
     // The PR's emitted bytes, EXECUTED (node:vm, a stub DOM): the managed module's bootstrap starts GA4 and
