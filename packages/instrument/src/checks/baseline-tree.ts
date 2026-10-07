@@ -5,20 +5,21 @@ import type { GitOps, WizardGitOps } from "../wizard/contracts/git-host.js"
 
 export class BaselineUnavailableError extends Error {}
 
-type BaselineGit = Pick<GitOps, "worktreeAddDetached" | "worktreeRemove"> & Partial<Pick<WizardGitOps, "head" | "cleanTree" | "worktreeList" | "isIgnored">>
+type BaselineGit = Pick<GitOps, "worktreeAddDetached" | "worktreeRemove"> & Partial<Pick<WizardGitOps, "head" | "cleanTree" | "worktreeList" | "isIgnored" | "ownsBaselineWorktree">>
 
 /** Sweep only our marked worktrees for this repository, and only after their owning process died. */
 export async function sweepBaselineTrees(root: string, git: BaselineGit): Promise<void> {
-  if (!git.worktreeList) return
+  if (!git.worktreeList || !git.ownsBaselineWorktree) return
   const repo = await realpath(root)
   for (const dir of await git.worktreeList()) {
+    if (!git.ownsBaselineWorktree(dir, repo)) continue
     const marker = `${dir}.baseline.json`
     const info = await lstat(marker).catch(() => null)
     if (!info?.isFile()) continue
     let owner: { schema?: string; root?: string; pid?: number } | null
     try { owner = JSON.parse(await readFile(marker, "utf8")) as typeof owner }
     catch { continue } // Malformed/unrelated ownership is never permission to remove a worktree.
-    if (!owner || owner.schema !== "infinite-tag.baseline.v1" || owner.root !== repo || !Number.isSafeInteger(owner.pid) || owner.pid! < 1) continue
+    if (!owner || owner.schema !== "infinite-tag.baseline.v2" || owner.root !== repo || !Number.isSafeInteger(owner.pid) || owner.pid! < 1) continue
     try { process.kill(owner.pid!, 0); continue } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue }
     // A valid dead-owner marker establishes responsibility: cleanup failures must be visible.
     await git.worktreeRemove(dir)
@@ -68,7 +69,10 @@ async function validateIsolatedLinks(tree: string): Promise<void> {
   for (const link of await symlinksIn(tree)) {
     let target: string
     try { target = await realpath(link) }
-    catch { throw new BaselineUnavailableError(`Cannot isolate the base build: link ${relative(tree, link)} is dangling, cyclic or unreadable.`) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && relative(tree, link).split(sep).includes("node_modules") && inside(resolve(dirname(link), await readlink(link)), tree)) continue
+      throw new BaselineUnavailableError(`Cannot isolate the base build: link ${relative(tree, link)} is dangling, cyclic or unreadable.`)
+    }
     if (!inside(target, tree)) throw new BaselineUnavailableError(`Cannot isolate the base build: link ${relative(tree, link)} resolves outside the detached source tree.`)
   }
 }
@@ -100,7 +104,7 @@ export async function baselineTree(root: string, appRoot: string, sha: string, g
   await sweepBaselineTrees(root, git)
   if (git.head && git.cleanTree && await git.head() === sha) {
     const status = await git.cleanTree()
-    if (status.dirtyPaths.every(path => path.startsWith(".infinite/wizard/") || path === ".infinite/harness.json")) return { root, dispose: async () => {} }
+    if (status.dirtyPaths.every(path => path.startsWith(".infinite/"))) return { root, dispose: async () => {} }
   }
   const tree = await git.worktreeAddDetached(sha, "baseline")
   try {

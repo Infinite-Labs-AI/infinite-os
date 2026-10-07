@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, symlinkSync, lstatSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, symlinkSync, lstatSync, unlinkSync } from "node:fs"
 import { join } from "node:path"
 import { createRequire } from "node:module"
 import { expect, it } from "vitest"
 import { createGitFixture } from "../../test/wizard/git-fixture.js"
+import { markBaseline } from "../git/baseline-ownership.js"
 import { createGitOps } from "../git/index.js"
 import { BaselineUnavailableError, baselineTree, sweepBaselineTrees } from "./baseline-tree.js"
 
@@ -14,7 +15,8 @@ it("R6 sweeps only dead owned baseline worktrees and removes their registrations
     const stale = await git.worktreeAddDetached(sha, "baseline")
     const active = await git.worktreeAddDetached(sha, "baseline")
     const review = await git.worktreeAddDetached(sha)
-    writeFileSync(`${stale.dir}.baseline.json`, JSON.stringify({ schema: "infinite-tag.baseline.v1", root: realpathSync(fixture.root), pid: 2147483647 }))
+    unlinkSync(`${stale.dir}.baseline.json`)
+    markBaseline(join(fixture.dir, "worktrees"), stale.dir, fixture.root, 2147483647)
     await sweepBaselineTrees(fixture.root, git)
     expect(existsSync(stale.dir)).toBe(false)
     expect(existsSync(`${stale.dir}.baseline.json`)).toBe(false)
@@ -177,9 +179,76 @@ it("surfaces a stale owned worktree removal failure instead of claiming cleanup 
   try {
     const git = createGitOps({ cwd: fixture.root, env: fixture.env, worktreeRoot: join(fixture.dir, "worktrees") })
     const stale = await git.worktreeAddDetached(fixture.git(["rev-parse", "HEAD"]).trim(), "baseline")
-    writeFileSync(`${stale.dir}.baseline.json`, JSON.stringify({ schema: "infinite-tag.baseline.v1", root: realpathSync(fixture.root), pid: 2147483647 }))
+    unlinkSync(`${stale.dir}.baseline.json`)
+    markBaseline(join(fixture.dir, "worktrees"), stale.dir, fixture.root, 2147483647)
     await expect(sweepBaselineTrees(fixture.root, { ...git, worktreeRemove: async () => { throw new Error("fixture removal denied") } })).rejects.toThrow("fixture removal denied")
     expect(existsSync(stale.dir)).toBe(true)
     await git.worktreeRemove(stale.dir)
+  } finally { fixture.cleanup() }
+})
+
+it("R7 refuses a forged sibling marker on a user worktree outside its cache", async () => {
+  const fixture = createGitFixture({ files: { "source.ts": "base" } })
+  try {
+    const sha = fixture.git(["rev-parse", "HEAD"]).trim()
+    const cache = join(fixture.dir, "owned-cache")
+    const outside = join(fixture.dir, "user-worktree")
+    fixture.git(["worktree", "add", "--detach", outside, sha])
+    writeFileSync(join(outside, "uncommitted.txt"), "keep this")
+    writeFileSync(`${outside}.baseline.json`, JSON.stringify({ schema: "infinite-tag.baseline.v1", root: realpathSync(fixture.root), pid: 2147483647 }))
+    const git = createGitOps({ cwd: fixture.root, env: fixture.env, worktreeRoot: cache })
+    await sweepBaselineTrees(fixture.root, git)
+    expect(readFileSync(join(outside, "uncommitted.txt"), "utf8")).toBe("keep this")
+  } finally { fixture.cleanup() }
+})
+
+it("R7 copies a dangling dependency link without making the baseline unavailable", async () => {
+  const fixture = createGitFixture({ files: { "source.ts": "base", ".gitignore": "node_modules\n" } })
+  try {
+    const sha = fixture.git(["rev-parse", "HEAD"]).trim()
+    fixture.write("source.ts", "changed")
+    mkdirSync(join(fixture.root, "node_modules"))
+    symlinkSync("missing-package", join(fixture.root, "node_modules/dangling"))
+    const git = createGitOps({ cwd: fixture.root, env: fixture.env, worktreeRoot: join(fixture.dir, "worktrees") })
+    const tree = await baselineTree(fixture.root, ".", sha, git)
+    try { expect(lstatSync(join(tree.root, "node_modules/dangling")).isSymbolicLink()).toBe(true) }
+    finally { await tree.dispose() }
+  } finally { fixture.cleanup() }
+})
+
+it("R7 ignores all wizard-local files for an otherwise clean baseline", async () => {
+  const fixture = createGitFixture({ files: { "source.ts": "base" } })
+  try {
+    const sha = fixture.git(["rev-parse", "HEAD"]).trim()
+    fixture.write(".infinite/install.json", "{}")
+    const git = createGitOps({ cwd: fixture.root, env: fixture.env, worktreeRoot: join(fixture.dir, "worktrees") })
+    const tree = await baselineTree(fixture.root, ".", sha, git)
+    try { expect(tree.root).toBe(fixture.root) } finally { await tree.dispose() }
+  } finally { fixture.cleanup() }
+})
+
+it("R7 does not trust a copied marker or follow a symlink into another worktree", async () => {
+  const fixture = createGitFixture({ files: { "source.ts": "base" } })
+  try {
+    const sha = fixture.git(["rev-parse", "HEAD"]).trim()
+    const cache = join(fixture.dir, "worktrees")
+    const git = createGitOps({ cwd: fixture.root, env: fixture.env, worktreeRoot: cache })
+    const valid = await git.worktreeAddDetached(sha, "baseline")
+    unlinkSync(`${valid.dir}.baseline.json`)
+    markBaseline(cache, valid.dir, fixture.root, 2147483647)
+    const marker = readFileSync(`${valid.dir}.baseline.json`, "utf8")
+    const outside = join(fixture.dir, "user-tree")
+    fixture.git(["worktree", "add", "--detach", outside, sha])
+    writeFileSync(join(outside, "keep.txt"), "uncommitted")
+    const link = join(cache, "baseline-redirect")
+    symlinkSync(outside, link)
+    writeFileSync(`${link}.baseline.json`, marker)
+    const copy = await git.worktreeAddDetached(sha, "baseline")
+    writeFileSync(`${copy.dir}.baseline.json`, marker)
+    await sweepBaselineTrees(fixture.root, { ...git, worktreeList: async () => [link, copy.dir] })
+    expect(existsSync(copy.dir)).toBe(true)
+    expect(readFileSync(join(outside, "keep.txt"), "utf8")).toBe("uncommitted")
+    await git.worktreeRemove(copy.dir)
+    await git.worktreeRemove(valid.dir)
   } finally { fixture.cleanup() }
 })

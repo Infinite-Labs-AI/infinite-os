@@ -14,7 +14,7 @@ import { runWizard } from "./engine.js"
 const fixtures: GitFixture[] = []
 afterEach(() => { while (fixtures.length) fixtures.pop()!.cleanup() })
 
-it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pull", "other_branch", "corrupt", "provisioned"] as const)("prepares managed bytes before resumed agents: %s", async (mode) => {
+it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pull", "push_retry_pull_decline", "other_branch", "corrupt", "provisioned"] as const)("prepares managed bytes before resumed agents: %s", async (mode) => {
   const fx = createGitFixture({ files: { "lib/infinite-analytics.ts": "// Managed by Infinite\ntype Track = (unused: string) => void\n", ".infinite/install.json": mode === "provisioned" ? JSON.stringify({ providers: ["infinite"], ids: { infinite: { siteSourceKey: "site_saved_fixture" } } }) : "{}\n", ".gitignore": ".infinite/wizard/\n" } })
   fixtures.push(fx)
   const gh = createFakeGh({ dir: fx.dir, remote: fx.remote, env: fx.env })
@@ -42,7 +42,11 @@ it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pul
     fx.write(".infinite/install.json", '{"refreshed":true}\n')
     return { changedFiles: ["lib/infinite-analytics.ts", ".infinite/install.json"], blocked: [] }
   }
-  const ctx = testContext({ root: fx.root, state: initialState({ root: fx.root, git: { base: "main", baseSource: "vercel", baseSha, headSha: baseSha, branch }, pr: { host: "github", number: pr.number, url: pr.url, nodeId: pr.nodeId, isDraft: true, round: 1, reviewedSha: baseSha, handledThreadIds: [], mergeSha: null } }) })
+  const ctx = testContext({ root: fx.root, answers: { confirm: payload => {
+    expect(payload.question).toContain("remote advance fixture")
+    expect(payload.question).toContain("not created by this wizard")
+    return mode !== "push_retry_pull_decline"
+  } }, state: initialState({ root: fx.root, git: { base: "main", baseSource: "vercel", baseSha, headSha: baseSha, branch }, pr: { host: "github", number: pr.number, url: pr.url, nodeId: pr.nodeId, isDraft: true, round: 1, reviewedSha: baseSha, handledThreadIds: [], mergeSha: null } }) })
   ctx.state.update(state => {
     for (const id of WIZARD_STEP_IDS) state.steps[id] = { outcome: "ok", inputHash: id, at: ctx.now().toISOString() }
     state.steps.link!.inputHash = "old-link"
@@ -64,7 +68,7 @@ it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pul
       expect(await git.head()).not.toBe(baseSha)
       expect(fx.remoteSha(branch)).toBe(await git.head())
       expect(await git.showFile("HEAD", "lib/infinite-analytics.ts")).toBe(fresh)
-      const trailers = fx.git(["log", mode === "push_retry_pull" ? "-3" : "-1", "--format=%(trailers:key=Infinite-Tag-Run,valueonly)"]).trim()
+      const trailers = fx.git(["log", mode.startsWith("push_retry_pull") ? "-3" : "-1", "--format=%(trailers:key=Infinite-Tag-Run,valueonly)"]).trim()
       expect(trailers).toContain(RUN_ID)
     }
     return { kind: "ok", status: id }
@@ -72,7 +76,7 @@ it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pul
   if (mode === "other_branch") await git.switchTo("main")
   if (mode === "corrupt") fx.write(".infinite/wizard/managed-refresh.json", "{broken")
   if (mode === "closed" || mode === "merged") gh.update(state => { state.prs![0]!.state = mode.toUpperCase() })
-  if (mode === "push_retry_pull") {
+  if (mode.startsWith("push_retry_pull")) {
     const remote = fx.git(["commit-tree", `${baseSha}^{tree}`, "-p", baseSha, "-m", "remote advance fixture"]).trim()
     fx.git(["push", "origin", `${remote}:refs/heads/${branch}`])
     expect((await runWizard(ctx, deps, { steps, afterStep: async () => {} })).exitCode).toBe(3)
@@ -89,7 +93,12 @@ it.each(["refresh", "blocked", "closed", "merged", "push_retry", "push_retry_pul
     order.length = 0
   }
   const result = await runWizard(ctx, deps, { steps, afterStep: async () => {} })
-  if (mode === "corrupt") {
+  if (mode.startsWith("push_retry_pull")) expect(ctx.asks.filter(ask => ask.kind === "confirm")).toHaveLength(1)
+  if (mode === "push_retry_pull_decline") {
+    expect(result.exitCode).toBe(3)
+    expect(order).not.toContain("agent")
+    expect(fx.remoteSha(branch)).not.toBe(await git.head())
+  } else if (mode === "corrupt") {
     expect(result.exitCode).toBe(3)
     expect(order).toEqual(["link"])
     expect(await git.head()).toBe(baseSha)

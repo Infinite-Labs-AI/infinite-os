@@ -6,8 +6,8 @@
 // their status codes, a file at a revision, unstaging, the staged diff, a config read, the push-option push
 // for GitLab, the TTY hand-over switch). They are ADDITIVE: every §3g.1 method keeps its contract shape.
 import type { WizardGitOps } from "../wizard/contracts/git-host.js"
-import { constants, accessSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
-import { basename, isAbsolute, join } from "node:path"
+import { constants, accessSync, existsSync, mkdirSync, rmSync } from "node:fs"
+import { basename, dirname, isAbsolute, join } from "node:path"
 
 import type { GitOps } from "../wizard/contracts/git-host.js"
 import { WIZARD_BRANCH_PREFIX } from "../wizard/contracts/state.js"
@@ -16,6 +16,7 @@ import { buildCommitMessage, classifyCommitFailure } from "./commit.js"
 import { classifyPushFailure, pushArgv } from "./push.js"
 import { assertSafeGitArgv, gitChildEnv, spawnProcess, type ProcessResult, type ProcessRunner } from "./run.js"
 import { parsePorcelainZ, type StatusEntry } from "./status.js"
+import { markBaseline, ownsBaseline } from "./baseline-ownership.js"
 import { defaultWorktreeRoot, worktreeDirFor } from "./worktree.js"
 
 export class GitCommandError extends Error {
@@ -48,6 +49,7 @@ export function createGitOps(options: CreateGitOpsOptions): WizardGitOps {
   let base: string | null = null
   let pushRemote: string | null = null
   let ttyHandedOver = false
+  const baselineCache = options.worktreeRoot ?? dirname(dirname(defaultWorktreeRoot(options.runKey ?? "run")))
 
   async function git(args: string[], extra: { input?: string; allowFail?: boolean } = {}): Promise<ProcessResult> {
     assertSafeGitArgv(args, { base, pushRemote })
@@ -182,6 +184,15 @@ export function createGitOps(options: CreateGitOpsOptions): WizardGitOps {
       await git(["merge", "--ff-only", pushRemote ? "FETCH_HEAD" : `origin/${branch}`])
       return { headSha: await trimmed(["rev-parse", "HEAD"]) }
     },
+    ownsBaselineWorktree(dir, root) { return ownsBaseline(baselineCache, dir, root) },
+    async commitsBetween(from, to) {
+      if (![from, to].every(sha => /^[a-f0-9]{40}$/.test(sha))) throw new Error("Commit range requires full SHAs")
+      const output = await git(["log", "--format=%H%x00%s%x00%(trailers:key=Infinite-Tag-Run,valueonly)%x1e", `${from}..${to}`])
+      return output.stdout.split("\x1e").map(row => row.trim()).filter(Boolean).map(row => {
+        const [sha, subject, runId] = row.split("\0")
+        return { sha: sha!, subject: subject ?? "", runId: runId?.trim() || null }
+      })
+    },
     async worktreeList() {
       return (await git(["worktree", "list", "--porcelain", "-z"])).stdout.split("\0").filter(line => line.startsWith("worktree ")).map(line => line.slice(9))
     },
@@ -193,7 +204,7 @@ export function createGitOps(options: CreateGitOpsOptions): WizardGitOps {
       const root = options.worktreeRoot ?? defaultWorktreeRoot(options.runKey ?? "run")
       mkdirSync(root, { recursive: true, mode: 0o700 })
       const dir = purpose === "baseline" ? join(root, basename(worktreeDirFor(root, sha)).replace(/^review-/, "baseline-")) : worktreeDirFor(root, sha)
-      if (purpose === "baseline") writeFileSync(`${dir}.baseline.json`, JSON.stringify({ schema: "infinite-tag.baseline.v1", root: realpathSync(options.cwd), pid: process.pid }), { mode: 0o600 })
+      if (purpose === "baseline") { mkdirSync(dir, { mode: 0o700 }); markBaseline(baselineCache, dir, options.cwd) }
       try { await git(["worktree", "add", "--detach", dir, sha]) }
       catch (error) { if (purpose === "baseline") rmSync(`${dir}.baseline.json`, { force: true }); throw error }
       return { dir }

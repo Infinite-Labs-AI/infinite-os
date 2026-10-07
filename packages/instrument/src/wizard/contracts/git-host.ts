@@ -153,6 +153,8 @@ export interface StatusEntry {
 
 /** `GitOps` plus what the PR loop, the fence and the resume need (lane O4's `createGitOps` implements it). */
 export interface WizardGitOps extends GitOps {
+  commitsBetween?(from: string, to: string): Promise<Array<{ sha: string; subject: string; runId: string | null }>>
+  ownsBaselineWorktree?(dir: string, root: string): boolean
   worktreeList?(): Promise<string[]>
   isIgnored?(path: string): Promise<boolean>
   /** The validated fork destination for pushes and review fast-forwards; origin stays the production base. */
