@@ -3,6 +3,9 @@ import { readdirSync } from "node:fs"
 import { join, relative } from "node:path"
 import { spawnSync } from "node:child_process"
 
+import { providerScanSkippedDirectories, providerScanSkippedFiles } from "./provider-scan-rules.js"
+export { providerScanSkippedDirectories, providerScanSkippedFiles } from "./provider-scan-rules.js"
+
 import { htmlScripts } from "./html-scripts.js"
 import { providerInstallEvidence } from "./provider-evidence.js"
 
@@ -70,29 +73,6 @@ function discoverCandidateRoots(root: string, appRoot?: string): string[] {
 
 /** Source files the provider walk reads. Anything else (markdown, JSON, images) is never opened. */
 const providerScanExtensions = /\.(html|htm|tsx|jsx|ts|js|mjs|cjs|astro|vue|svelte)$/
-/**
- * Files that carry provider signatures WITHOUT being an install: minified vendor bundles, type
- * declarations (`declare function gtag(`), tests/specs/stories/mocks (`posthog.init('phc_test')`).
- * A false positive here silently drops a provider from the install as "adopted" — the worse failure.
- */
-export const providerScanSkippedFiles = /(?:^test[-_.]|\.(?:d\.ts|(?:test|spec|stories)\.[cm]?[jt]sx?|min\.[cm]?js)$)/
-/** Directories the walk never enters: dependencies, build output, VCS, coverage, static assets, tests, mocks, email templates. */
-export const providerScanSkippedDirectories = new Set([
-  "node_modules",
-  ".git",
-  ".next",
-  "dist",
-  "build",
-  "out",
-  ".vercel",
-  "coverage",
-  "public",
-  "static",
-  "__tests__",
-  "__mocks__",
-  ".storybook",
-  "emails"
-])
 /** Bounded so a huge monorepo cannot turn `inspect` into a minutes-long crawl. */
 const providerScanMaxFiles = 2_000
 const providerScanMaxFileBytes = 512 * 1024
