@@ -19,7 +19,7 @@ export async function prChecks(gh: GhClient, number: number): Promise<PrCheck[]>
       ["pr", "checks", String(number), "--json", "name,bucket,state,description,link"],
       { okExitCodes: [1, 8] }
     )
-    return rows.map((row) => ({ name: String(row.name ?? ""), bucket: String(row.bucket ?? ""), state: String(row.state ?? ""), description: row.description, link: row.link }))
+    return rows.map((row) => ({ name: String(row.name ?? ""), bucket: String(row.bucket ?? ""), state: String(row.state ?? ""), description: row.description, ...(row.deploymentState ? { deploymentState: row.deploymentState } : {}), link: row.link }))
   } catch (error) {
     // "no required checks reported" is an empty list, not a failure.
     if (error instanceof GhError && /no (required )?checks reported/i.test(`${error.result.stderr}${error.result.stdout}`)) return []
@@ -74,8 +74,25 @@ export function workflowPrTrigger(source: string): boolean | null {
   const declaration = match[1]!.replace(/\s+#.*$/, "").trim()
   const value = declaration || rest
   if (/[&*!]|<<:/.test(value)) return null
-  const events = declaration ? declaration.replace(/^\[|\]$/g, "").split(",").map(word => word.trim().replace(/^['"]|['"]$/g, ""))
-    : [...rest.matchAll(/^  ([a-z_]+):/gm)].map(row => row[1]!)
+  let events: string[]
+  if (declaration) {
+    events = declaration.replace(/^\[|\]$/g, "").split(",").map(word => word.trim().replace(/^['"]|['"]$/g, ""))
+  } else {
+    const lines = rest.split("\n").filter(line => line.trim() && !line.trimStart().startsWith("#"))
+    if (lines.length === 0 || lines.some(line => /^ *\t/.test(line))) return null
+    const indent = /^ +/.exec(lines[0]!)?.[0].length
+    if (!indent) return null
+    events = []
+    for (const line of lines) {
+      const depth = /^ */.exec(line)![0].length
+      if (depth < indent) return null
+      if (depth !== indent) continue
+      const event = /^(?:([a-z_]+)|"([a-z_]+)"|'([a-z_]+)')\s*:/.exec(line.slice(indent))
+      // Do not silently drop complex or escaped YAML keys: one might be a PR trigger.
+      if (!event) return null
+      events.push(event[1] ?? event[2] ?? event[3]!)
+    }
+  }
   if (events.length === 0) return null
   if (events.includes("pull_request") || events.includes("pull_request_target")) return true
   const known = new Set(["push", "schedule", "workflow_dispatch", "workflow_call", "workflow_run", "release", "merge_group", "repository_dispatch", "issues", "issue_comment", "create", "delete"])

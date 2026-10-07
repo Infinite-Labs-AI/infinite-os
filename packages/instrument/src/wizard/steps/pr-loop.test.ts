@@ -756,6 +756,45 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(JSON.stringify(ledger)).not.toContain('"pr_checks_pass","tier":"S","state":"pass"')
   })
 
+  it("waits the full push window for a quoted pull_request workflow event", async () => {
+    const w = await opened({ reviews: [review([])], gh: {
+      baseChecks: [{ name: "release", conclusion: "success", details_url: "https://github.com/example/site/actions/runs/123" }],
+      workflows: { "123": { path: ".github/workflows/release.yml", source: "on:\n  push:\n  'pull_request':\njobs: {}" } },
+      checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] }
+    } })
+    const clock = fakeClock()
+    w.deps.clock = clock
+    w.ctx.state.update(state => { state.lastPush = { sha: state.git!.headSha!, at: new Date(clock.now().getTime() - 90_000).toISOString() } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(510_000)
+    expect(w.gh.traffic()).toContain("full check window: not measured")
+    expect(w.gh.traffic()).not.toContain("does not run on pull requests")
+  })
+
+  it("does not let a same-named push-only workflow hide a PR-triggered workflow", async () => {
+    const w = await opened({ reviews: [review([])], gh: {
+      baseChecks: [123, 124].map(id => ({ name: "release", conclusion: "success", details_url: `https://github.com/example/site/actions/runs/${id}` })),
+      workflows: { "123": { path: ".github/workflows/pr.yml", source: "on: pull_request\njobs: {}" }, "124": { path: ".github/workflows/push.yml", source: "on: push\njobs: {}" } },
+      checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] }
+    } })
+    const clock = fakeClock()
+    w.deps.clock = clock
+    w.ctx.state.update(state => { state.lastPush = { sha: state.git!.headSha!, at: new Date(clock.now().getTime() - 90_000).toISOString() } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(510_000)
+    expect(w.gh.traffic()).not.toContain("does not run on pull requests")
+  })
+
+  it("keeps a pushed fix's check verdict unmeasured when a base-green check never registers", async () => {
+    const w = await opened({
+      reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null }]), review([])],
+      fix: fixLayout,
+      gh: { baseChecks: [{ name: "release", conclusion: "success" }], checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } }
+    })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(w.ctx.state.get().jobs.find(job => job.id === "review_comments:F1")!.checks.find(check => check.id === "pr_checks_pass")!.state).toBe("undetermined")
+  })
+
   it("reads a resumed blocked host check without repeating registration waits", async () => {
     const w = await opened({ reviews: [review([])], gh: { checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
     const clock = fakeClock()

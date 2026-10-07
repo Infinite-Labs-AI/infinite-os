@@ -1,5 +1,6 @@
+import type { GhClient } from "./gh.js"
 import { describe, expect, it } from "vitest"
-import { checksSummary, checkPolicy, workflowPrTrigger } from "./checks.js"
+import { checksSummary, checkPolicy, workflowPrTrigger, prChecks } from "./checks.js"
 
 describe("PR check classification", () => {
   it("keeps a cancelled first poll pending for another read", () => {
@@ -41,3 +42,19 @@ it.each([
   ["on: [push, pull_request]", true], ["on:\n  pull_request:\njobs: {}", true],
   ["on: *trigger_alias", null], ["invalid yaml", null]
 ])("reads workflow triggers conservatively: %s", (source, expected) => expect(workflowPrTrigger(source as string)).toBe(expected))
+
+it.each(["'pull_request'", '"pull_request_target"'])("does not omit a quoted PR workflow event: %s", event => {
+  expect(workflowPrTrigger(`on:\n  push:\n  ${event}:\njobs: {}`)).toBe(true)
+})
+
+it("does not infer absent PR triggers from partially understood YAML event keys", () => {
+  expect(workflowPrTrigger('on:\n  push:\n  ? pull_request\n  : {}\njobs: {}')).toBeNull()
+})
+
+
+it("preserves structured deployment evidence supplied by a check reader", async () => {
+  const gh = { json: async () => [{ name: "Vercel", bucket: "fail", state: "FAILURE", deploymentState: "failure", description: "Deployment was blocked" }] } as unknown as GhClient
+  const rows = await prChecks(gh, 42)
+  expect(rows[0]!.deploymentState).toBe("failure")
+  expect(checkPolicy(rows, []).failing).toHaveLength(1)
+})

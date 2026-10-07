@@ -689,7 +689,13 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
   let waitingReason = "PR checks could not be read"
   const base = await commitChecks(github.gh, ctx.state.get().git!.baseSha).catch(() => null)
   const triggers = new Map<string, boolean | null>()
-  for (const check of base ?? []) if (check.bucket === "pass") triggers.set(check.name, await checkRunsOnPr(github.gh, check, checkedHead))
+  for (const check of base ?? []) if (check.bucket === "pass") {
+    const next = await checkRunsOnPr(github.gh, check, checkedHead)
+    const previous = triggers.get(check.name)
+    // Distinct workflows may give their jobs the same name. Only infer push-only when every
+    // matching workflow is known not to run on PRs; a PR trigger or unknown trigger keeps the wait.
+    triggers.set(check.name, previous === undefined ? next : previous === true || next === true ? true : previous === null || next === null ? null : false)
+  }
   sub(ctx, "review", "Checking the new commit's CI checks…", "pending")
   for (;;) {
     const elapsed = deps.clock.now().getTime() - started
