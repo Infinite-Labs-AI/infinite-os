@@ -338,7 +338,7 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
   })
   const diffText = await git.diff(gitState.baseSha, head)
   const bodyInput = {
-    reportMarkdown: deps.report.renderMarkdown(report, reportFacts.ownerBoundary, reportFacts.jobs),
+    reportMarkdown: deps.report.renderMarkdown(report, reportFacts.ownerBoundary, reportFacts.jobs, reportFacts.excludedLines),
     ownerBoundary: reportFacts.ownerBoundary,
     howToReview: howToReviewSection(),
     runId,

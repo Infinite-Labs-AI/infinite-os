@@ -839,7 +839,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     }))
   let comment = buildFinalComment({
     runId: ship.runId,
-    reportMarkdown: deps.report.renderMarkdown(report, verdictFacts.ownerBoundary, verdictFacts.jobs),
+    reportMarkdown: deps.report.renderMarkdown(report, verdictFacts.ownerBoundary, verdictFacts.jobs, verdictFacts.excludedLines),
     ownerBoundary: verdictFacts.ownerBoundary,
     reviewer: session.reviewer,
     reviewed: session.reviewed,

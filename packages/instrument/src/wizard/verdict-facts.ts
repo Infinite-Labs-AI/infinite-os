@@ -44,9 +44,13 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
   const measured = await ownerBoundaryForState(ctx.root, ctx.appRoot, state, currentHead)
   const ownerBoundary = { ...measured, files: measured.files.map(display), issues: measured.issues.map(issue => ({ file: display(issue.file), reason: display(issue.reason) })),
     ...(measured.unverifiedReason ? { unverifiedReason: display(measured.unverifiedReason) } : {}) }
+  const savedPlan = await loadPlanApprovals(ctx, deps)
+  const excluded = savedPlan?.excluded ?? savedPlan?.approvals.declined ?? state.plan?.lines?.filter(line => line.approved === false).map(line => line.id) ?? []
+  const excludedLines = [...new Set(excluded)].map(id => display(savedPlan?.plan?.lines.find(line => line.id === id)?.text ?? id))
   const reviewUnreliable = reviewReliabilityWarning(ledger.rounds.at(-1)?.review?.findings ?? ledger.findings ?? [])
   return {
     consentActivation: await consentActivationFor(ctx, deps),
+    excludedLines,
     ...(reviewUnreliable ? { reviewUnreliable } : {}),
     tagNotInstalled: (await loadPlanApprovals(ctx, deps))?.ownerWiring?.canWire === false,
     ...(ownerBoundary ? { ownerBoundary } : {}),

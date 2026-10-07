@@ -34,3 +34,15 @@ it.each([false, true])("sanitizes owner locations and preserves only safe execut
   expect(job.ownerBoundary.wiring).toBe(snippet)
   expect(job.ownerBoundary.file).toBe(path)
 })
+
+it("carries current and earlier exclusions into the shared report facts without active markup", async () => {
+  const state = { runId: "fixture", jobs: [], git: null, plan: { lines: [], answers: { consentMode: null } } }
+  const saved = { schema: "infinite-tag.plan-approvals.v1", excluded: ["install_provider:infinite", "old:choice"], approvals: { approved: [], declined: [], edits: {} }, plan: { lines: [{ id: "install_provider:infinite", text: "Install Infinite @here" }] } }
+  const ctx = { root: "/fixture", appRoot: ".", runId: "fixture", state: { get: () => state } }
+  const deps = { env: {}, bridge: {}, git: {}, fs: { readText: async (path: string) => path.endsWith("plan-approvals.json") ? JSON.stringify(saved) : null } }
+  const facts = await verdictFactsFor(ctx as never, deps as never)
+  expect(facts.excludedLines).toHaveLength(2)
+  expect(facts.excludedLines![0]).toContain("Install Infinite")
+  expect(facts.excludedLines!.join("\n")).not.toContain("@here")
+  expect(facts.excludedLines![1]).toBe("old:choice")
+})

@@ -837,7 +837,7 @@ function md(text: string): string {
 }
 
 /** The PR / app markdown: plain-text statuses, never a `- [ ]`. */
-export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMeasurement, ownerJobs: readonly ChecklistItem[] = []): string {
+export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMeasurement, ownerJobs: readonly ChecklistItem[] = [], excludedLines: readonly string[] = []): string {
   const out: string[] = []
   const site = report.site.productionHost ?? report.site.repoLabel
   // Review P1-3: report.md and the PR comment open with THE verdict's headline (the terminal's own line) and its
@@ -890,6 +890,7 @@ export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMe
     const fence = "`".repeat(Math.max(3, ...[...instruction.snippet.matchAll(/`+/g)].map(match => match[0].length + 1)))
     out.push("", instruction.note, "", instruction.placement, "", `${fence}js`, instruction.snippet, fence)
   }
+  if (excludedLines.length > 0) out.push("", "### You said no to", "", ...[...new Set(excludedLines)].map(line => `- ${md(line)}`))
   const text = out.join("\n")
   if (text.includes(FORBIDDEN_CHECKBOX)) throw new ReportRuleError("the markdown would contain a checkbox")
   return text

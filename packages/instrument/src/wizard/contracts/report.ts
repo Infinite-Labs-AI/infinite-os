@@ -216,6 +216,8 @@ export interface VerdictFacts {
   tagNotInstalled?: boolean
   ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement
   ownerPolicyFindings?: string[]
+  /** Explicit user exclusions, already sanitised for display. */
+  excludedLines?: string[]
   /** Metadata-only history of policy edits made by an older version in this same run. */
   priorPolicyEdits?: boolean
   jobs: readonly ChecklistItem[]
@@ -612,6 +614,6 @@ export interface ReportBuilder {
   }): ReportV2
   renderTerminal(report: ReportV2, width: number, options?: { ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement; ownerJobs?: readonly ChecklistItem[] }): string
   /** Plain-text statuses; never a literal `- [ ]`. */
-  renderMarkdown(report: ReportV2, ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement, ownerJobs?: readonly ChecklistItem[]): string
+  renderMarkdown(report: ReportV2, ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement, ownerJobs?: readonly ChecklistItem[], excludedLines?: readonly string[]): string
   payload(report: ReportV2): ReportV2
 }

@@ -1,3 +1,5 @@
+import { buildPrBody } from "../review/post.js"
+import { createScanner } from "../review/scan.js"
 import { item } from "../../test/wizard/repo.js"
 import { readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -397,4 +399,14 @@ it.each(["frozen_unit", "policy_page", "unproven_wiring", "restored_unit"] as co
   const restored = kind === "restored_unit"
   expect(report.notes.some(note => note.startsWith("Put back:"))).toBe(restored)
   if (!restored) expect(report.notes).toContain("Not changed by us: app/layout.tsx is left for you.")
+})
+
+it("lists every explicit exclusion under You said no to in local and PR report markdown", () => {
+  const excluded = Array.from({ length: 25 }, (_, i) => `Excluded action ${i}`)
+  const markdown = renderMarkdown(example, undefined, [], excluded)
+  expect(markdown).toContain("### You said no to")
+  for (const line of excluded) expect(markdown).toContain(`- ${line}`)
+  const body = buildPrBody({ reportMarkdown: markdown, howToReview: "Review the files", runId: RUN, isPrivate: true, diffText: "", connectionIds: [], scanner: createScanner({ literals: [], allowedIds: [] }) })
+  expect(body).toContain("### You said no to")
+  for (const line of excluded) expect(body).toContain(`- ${line}`)
 })
