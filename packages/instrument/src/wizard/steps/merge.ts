@@ -89,10 +89,11 @@ async function saveMerge(ctx: WizardContext, deps: WizardDeps, runId: string, me
  * (<agent> could not read the files)", an incomplete one names how many items were not checked.
  */
 export async function reviewSentence(ctx: Pick<WizardContext, "root">, deps: Pick<WizardDeps, "fs">, runId: string, reviewer: string | null): Promise<string> {
-  const label = reviewer === "codex" ? "Codex" : reviewer === "claude_code" ? "Claude Code" : null
   const ledger = parseLedger(await deps.fs.readText(join(ctx.root, REVIEW_LEDGER_PATH)), runId)
+  const recordedReviewer = ledger.completeness?.reviewer ?? ledger.rounds.at(-1)?.reviewer ?? reviewer
+  const label = recordedReviewer === "codex" ? "Codex" : recordedReviewer === "claude_code" ? "Claude Code" : null
   // Live run 5 (P2): a review posted from the printed brief and read back is a review (its round is in the ledger).
-  if (!label) return reviewer === "brief" && ledger.rounds.some((round) => round.reviewer === "brief") ? `Reviewed from the printed review brief${ledger.completeness?.state === "incomplete" ? " (review incomplete)" : ""}` : "No second review"
+  if (!label) return recordedReviewer === "brief" && ledger.rounds.some((round) => round.reviewer === "brief") ? `Reviewed from the printed review brief${ledger.completeness?.state === "incomplete" ? " (review incomplete)" : ""}` : "No second review"
   const completeness = ledger.completeness
   if (completeness?.state === "blind") return `Review incomplete (${label} could not read the files)`
   if (completeness?.state === "incomplete") {
