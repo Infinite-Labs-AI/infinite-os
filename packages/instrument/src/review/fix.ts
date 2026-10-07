@@ -1,3 +1,4 @@
+import { redactDisplayText } from "./display.js"
 // Fix rounds (lane O4, §3g.4 step 5): job 16 (`review_comments`) through the user's worker agent, with the
 // comment text QUOTED AS DATA. The agent only claims; the wizard then re-runs the item's checks and the build
 // (B), and the job registry computes the item's state (§3e.5). Claim notes and progress text pass through the
@@ -126,7 +127,7 @@ export async function runFixRound(
   for (const item of items.filter(item => item.state === "left_for_you")) ctx.emit.emit("job.state", { itemId: item.id, state: item.state, by: "wizard", note: item.note })
   if (active.length === 0) return { items, run: { outcome: "completed", session: null, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [], turnsUsed: 0 } }
   const brief = [deps.registry.brief(active), input.extraBrief ?? ""].filter(Boolean).join("\n\n")
-  const clean = (text: string, max: number) => input.scanner.redact(stripControl(text)).text.slice(0, max)
+  const clean = (text: string, max: number) => redactDisplayText(input.scanner, text).slice(0, max)
   // Tool activity, not narration or report_progress prose, controls the phase and counters.
   const started = deps.clock.now().getTime()
   const claimedNow = new Set<string>()

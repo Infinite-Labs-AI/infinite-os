@@ -1,3 +1,4 @@
+import { withNote } from "./state-machine.js"
 /** Relocate an unchanged frozen unit after unrelated code was inserted. Never search for a new placement. */
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
@@ -19,8 +20,8 @@ export async function reanchorOwnerLocations(root: string, items: readonly Check
     if (line === proof.line) { result.push(item); continue }
     const oldLocation = `${proof.file}:${proof.line}`
     const newLocation = `${proof.file}:${line}`
-    result.push({ ...item, ownerBoundary: { ...proof, line }, note: frozenJobNote(item, { file: proof.file, line }),
-      trigger: { finding: item.trigger.finding.replaceAll(oldLocation, newLocation), evidence: item.trigger.evidence.map(entry => "file" in entry && entry.file === proof.file && entry.line === proof.line ? { ...entry, line } : entry) } })
+    result.push(withNote({ ...item, ownerBoundary: { ...proof, line },
+      trigger: { finding: item.trigger.finding.replaceAll(oldLocation, newLocation), evidence: item.trigger.evidence.map(entry => "file" in entry && entry.file === proof.file && entry.line === proof.line ? { ...entry, line } : entry) } }, frozenJobNote(item, { file: proof.file, line })))
   }
   return result
 }

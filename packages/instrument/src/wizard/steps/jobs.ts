@@ -67,6 +67,7 @@ import { applyTextEdits, reverseTextEdits } from "../../server-lane/text-edits.j
 import { LOCAL_TIERS, applyClaim, applyResults, blockItem, failItem, unblockItem, withNote, type Transition } from "../../jobs/state-machine.js"
 import { ITEM_NOTE_MAX_CHARS, checkProvesChange } from "../contracts/jobs.js"
 import { sanitizeUntrusted } from "../../agents/sanitize.js"
+import { redactDisplayText, safeDisplayText } from "../../review/display.js"
 import { buildScanner, runPublicIds } from "../../review/context.js"
 import type { Scanner } from "../../review/scan.js"
 import { outOfUsageResumeLine } from "../../agents/usage-limit.js"
@@ -191,7 +192,7 @@ async function runJobsStep(ctx: WizardContext, deps: WizardDeps): Promise<StepOu
   for (const saved of io.items()) {
     if (saved.owner === "code" && saved.state === "left_for_you" && saved.ownerBoundary) continue
     if (saved.jobId === "privacy_paragraph") {
-      io.put(leaveForOwner(saved, (saved.edits?.length ?? 0) > 0 ? LEGACY_OWNER_BOUNDARY : "Privacy policy work is retired; it belongs to the site owner.", { kind: "legacy_policy" }))
+      io.put(leaveForOwner(saved, (saved.edits?.length ?? 0) > 0 ? LEGACY_OWNER_BOUNDARY : "Privacy policy work is retired; it belongs to the site owner.", { kind: "legacy_policy" }, io.noteScanner))
       continue
     }
     if (saved.ownerBoundary?.kind === "restored_unit" || saved.ownerBoundary?.kind === "policy_page" || saved.ownerBoundary?.kind === "unproven_wiring") continue
@@ -204,10 +205,10 @@ async function runJobsStep(ctx: WizardContext, deps: WizardDeps): Promise<StepOu
     const scoped = scopeOwnerJob(saved, sources, ctx.appRoot)
     if (scoped !== saved) {
       io.put({ item: scoped, changed: true, by: "wizard", note: scoped.note })
-    } else if (saved.blockedReason === "consent_touched") io.put(blockItem(saved, "consent_touched"))
+    } else if (saved.blockedReason === "consent_touched") io.put(blockItem(saved, "consent_touched", undefined, io.noteScanner))
     else if (saved.state === "left_for_you") {
       // Older versions could derive this state from an agent's words. Without wizard evidence it is ordinary unfinished work.
-      io.put(blockItem({ ...saved, ownerBoundary: undefined }, "agent_blocked", saved.claim?.note ?? "No frozen-unit evidence supports the earlier owner-only status."))
+      io.put(blockItem({ ...saved, ownerBoundary: undefined }, "agent_blocked", saved.claim?.note ?? "No frozen-unit evidence supports the earlier owner-only status.", io.noteScanner))
     }
   }
   await io.save()
@@ -251,7 +252,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
 
   const worker = ctx.state.get().agent?.worker ?? null
   if (!worker) {
-    for (const item of agentItems) io.put(blockItem(io.item(item.id) ?? item, "needs_you", "No agent ran: this job is listed for you."))
+    for (const item of agentItems) io.put(blockItem(io.item(item.id) ?? item, "needs_you", "No agent ran: this job is listed for you.", io.noteScanner))
     await io.save()
     return { kind: "ok", status: `No agent: ${agentItems.length} job${agentItems.length === 1 ? "" : "s"} listed for you` }
   }
@@ -338,7 +339,7 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
       })
     } catch (error) {
       if (isTamper(error)) {
-        for (const item of open) io.put(blockItem(io.item(item.id) ?? item, "outside_allowlist", "The agent wrote inside a dependency or build folder."))
+        for (const item of open) io.put(blockItem(io.item(item.id) ?? item, "outside_allowlist", "The agent wrote inside a dependency or build folder.", io.noteScanner))
         await io.save()
         return { kind: "blocked", code: "INF_WIZ_FENCE_TAMPER", reason: error instanceof Error ? error.message : "Reinstall your dependencies; nothing was built." }
       }
@@ -408,12 +409,12 @@ async function runWorker(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
     const undecided = io.undecided(item.id)
     io.put(
       failure !== undefined && io.triedIt(item)
-        ? failItem(item, `Out of rounds: ${failure}`)
+        ? failItem(item, `Out of rounds: ${failure}`, io.noteScanner)
         : failure !== undefined && io.failedOnTheCode(item)
-          ? failItem(item, `${budgetWords}. ${neverClaimedWords(failure)}`)
+          ? failItem(item, `${budgetWords}. ${neverClaimedWords(failure)}`, io.noteScanner)
           : failure !== undefined
-            ? blockItem(item, "agent_blocked", `${budgetWords}. ${notInCodeWords(failure)}`)
-            : blockItem(item, "agent_blocked", undecided !== undefined ? `${budgetWords}. ${undecided}.` : `${budgetWords}.`)
+            ? blockItem(item, "agent_blocked", `${budgetWords}. ${notInCodeWords(failure)}`, io.noteScanner)
+            : blockItem(item, "agent_blocked", undecided !== undefined ? `${budgetWords}. ${undecided}.` : `${budgetWords}.`, io.noteScanner)
     )
   }
   await io.save()
@@ -475,8 +476,8 @@ async function settleRound(
   for (const claim of claims) {
     const item = io.item(claim.jobId)
     if (!item || item.owner !== "agent" || !OPEN_STATES.includes(item.state)) continue
-    const transition = applyClaim(item, claim, (candidate) => io.deps.registry.reverifyNotNeeded(candidate, scan!))
-    io.put(transition, claim.status === "done" ? sanitizeUntrusted(claim.note, 500) : undefined)
+    const transition = applyClaim(item, claim, (candidate) => io.deps.registry.reverifyNotNeeded(candidate, scan!), io.noteScanner)
+    io.put(transition, claim.status === "done" ? sanitizeUntrusted(redactDisplayText(io.noteScanner, claim.note), 500) : undefined)
     if (transition.item.state === "claimed") toCheck.push(transition.item)
     else if (claim.status === "not_needed" && transition.item.state === "pending") feedback.push(`- ${item.id}: ${transition.note ?? "the wizard's detector disagrees"}`)
   }
@@ -489,7 +490,7 @@ async function settleRound(
     io.noteFailure(itemId, note)
     // §3x.2 the gate's refusal is the item's S `turn_gate` verdict on this tree.
     io.markCheckedOnTree(itemId)
-    io.put({ item: withNote(structuredClone(current), note), changed: true, by: "wizard", note })
+    io.put({ item: withNote(structuredClone(current), note, io.noteScanner), changed: true, by: "wizard", note })
     for (const hit of hits) feedback.push(gateFeedbackLine(itemId, hit))
   }
 
@@ -501,10 +502,10 @@ async function settleRound(
       const answer = answers?.[question.jobId]
       const current = io.item(question.jobId)!
       if (answer === undefined) {
-        io.put(blockItem(current, "needs_you", `Needs your answer: ${question.question}`))
+        io.put(blockItem(current, "needs_you", `Needs your answer: ${question.question}`, io.noteScanner))
       } else {
         feedback.push(`- ${question.jobId}: the user answered ${JSON.stringify(sanitizeUntrusted(answer, 200))} to "${question.question}"`)
-        io.put(unblockItem(current, "Answered; back to the agent."))
+        io.put(unblockItem(current, "Answered; back to the agent.", io.noteScanner))
       }
     }
   }
@@ -550,7 +551,7 @@ async function settleRound(
       // edits (they reach the receipt when the step settles), never the claim.
       const current = io.withGateCheck(io.item(item.id)!, hits.length > 0)
       // LF4 close round 2 (P1-1): a job checked with no claim is ticked only by a check that proves its change is there.
-      const transition = applyResults(io.withPendingEdits(current), itemResults, runId, { budgetLeft, claimless: onTree.has(item.id) })
+      const transition = applyResults(io.withPendingEdits(current), itemResults, runId, { budgetLeft, claimless: onTree.has(item.id), scanner: io.noteScanner })
       const next: ChecklistItem = { ...transition.item }
       if (current.edits) next.edits = current.edits
       else delete next.edits
@@ -571,7 +572,7 @@ async function settleRound(
         const why = (thisRound.length > 0 ? thisRound : held).join("; ")
         io.noteFailure(item.id, why)
         note = hits.length > 0 && others.length === 0 ? why : `The wizard's check failed: ${why}`
-        withNote(next, note)
+        withNote(next, note, io.noteScanner)
         if (next.state === "pending") {
           for (const hit of hits) feedback.push(gateFeedbackLine(item.id, hit))
           if (others.length > 0) feedback.push(`- ${item.id}: the wizard's checks failed: ${others.map((result) => `${result.checkId}: ${sanitizeUntrusted(result.reason ?? "problem", 200)}`).join("; ")}`)
@@ -649,7 +650,7 @@ async function runNested(io: JobsIo, agentItems: ChecklistItem[]): Promise<StepO
   const blockOpen = (note: string) => {
     for (const item of agentItems) {
       const current = io.item(item.id)
-      if (current && OPEN_STATES.includes(current.state)) io.put(blockItem(current, "outside_allowlist", note))
+      if (current && OPEN_STATES.includes(current.state)) io.put(blockItem(current, "outside_allowlist", note, io.noteScanner))
     }
   }
   let fence: Fence
@@ -747,7 +748,7 @@ async function recheckClaimed(io: JobsIo, claimed: readonly ChecklistItem[]): Pr
 /** Review I1 P1-3: the wizard's own build (running agent-written code) changed files it may not write. */
 async function buildTamperOutcome(io: JobsIo, changed: string[]): Promise<StepOutcome> {
   for (const item of io.items().filter((entry) => entry.owner === "agent" && OPEN_STATES.includes(entry.state))) {
-    io.put(blockItem(item, "outside_allowlist", "Files changed while the wizard built the site; nothing was kept."))
+    io.put(blockItem(item, "outside_allowlist", "Files changed while the wizard built the site; nothing was kept.", io.noteScanner))
   }
   await io.save()
   return {
@@ -760,7 +761,7 @@ async function buildTamperOutcome(io: JobsIo, changed: string[]): Promise<StepOu
 async function sealBrokenOutcome(io: JobsIo, changed: string[]): Promise<StepOutcome> {
   const error = new SealBroken(changed)
   for (const item of io.items().filter((entry) => entry.owner === "agent" && OPEN_STATES.includes(entry.state))) {
-    io.put(blockItem(item, "outside_allowlist", "Files changed after the agent's turn ended; nothing was checked."))
+    io.put(blockItem(item, "outside_allowlist", "Files changed after the agent's turn ended; nothing was checked.", io.noteScanner))
   }
   await io.save()
   return { kind: "blocked", code: "INF_WIZ_FENCE_TAMPER", reason: error.message }
@@ -770,7 +771,7 @@ function applyBlocks(io: JobsIo, blocks: readonly FenceBlock[]): void {
   for (const block of blocks) {
     const item = io.item(block.itemId)
     if (!item) continue
-    io.put(blockItem(item, block.reason, block.note))
+    io.put(blockItem(item, block.reason, block.note, io.noteScanner))
   }
 }
 
@@ -866,12 +867,12 @@ async function stoppedTurnOutcome(io: JobsIo, open: readonly ChecklistItem[], re
     const undecided = io.undecided(item.id)
     io.put(
       failure !== undefined && io.triedIt(current)
-        ? failItem(current, `${words} before fixing it${undone}. The wizard's check failed: ${failure}`)
+        ? failItem(current, `${words} before fixing it${undone}. The wizard's check failed: ${failure}`, io.noteScanner)
         : failure !== undefined && io.failedOnTheCode(current)
-          ? failItem(current, `${words} before finishing this job${undone}. ${neverClaimedWords(failure)}`)
+          ? failItem(current, `${words} before finishing this job${undone}. ${neverClaimedWords(failure)}`, io.noteScanner)
           : failure !== undefined
-            ? blockItem(current, reason, `${words} before finishing this job${undone}. ${notInCodeWords(failure)}`)
-            : blockItem(current, reason, undecided !== undefined ? `${words} before finishing this job. ${undecided}${undone}.` : `${words} before finishing this job${undone}.`)
+            ? blockItem(current, reason, `${words} before finishing this job${undone}. ${notInCodeWords(failure)}`, io.noteScanner)
+            : blockItem(current, reason, undecided !== undefined ? `${words} before finishing this job. ${undecided}${undone}.` : `${words} before finishing this job${undone}.`, io.noteScanner)
     )
   }
   await io.save()
@@ -986,7 +987,9 @@ class JobsIo {
   constructor(
     readonly ctx: WizardContext,
     readonly deps: WizardDeps
-  ) {}
+  ) { this.noteScanner = buildScanner(ctx, deps, []) }
+
+  noteScanner: Scanner
 
   home(): string {
     return this.deps.env.HOME ?? homedir()
@@ -1009,12 +1012,15 @@ class JobsIo {
 
   sub(text: string, tone: "ok" | "warn" | "info" | "pending"): void {
     if (tone === "ok" || tone === "warn") this.resultSubs += 1
-    this.ctx.emit.emit("step.sub", { step: "jobs", text: sanitizeUntrusted(text, 120), tone })
+    this.ctx.emit.emit("step.sub", { step: "jobs", text: sanitizeUntrusted(safeDisplayText(this.noteScanner, text), 120), tone })
   }
 
   /** Writes a state-machine transition's item back and emits its `job.state` (B7: the step decides nothing). */
   put(transition: Transition, noteOverride?: string): void {
-    const next = transition.item
+    const next = structuredClone(transition.item)
+    withNote(next, next.note, this.noteScanner)
+    if (next.claim) next.claim.note = sanitizeUntrusted(redactDisplayText(this.noteScanner, next.claim.note), 500)
+    for (const check of next.checks) if (check.reason) check.reason = redactDisplayText(this.noteScanner, check.reason)
     this.ctx.state.update((runState) => {
       const index = runState.jobs.findIndex((entry) => entry.id === next.id)
       if (index >= 0) runState.jobs[index] = structuredClone(next)
@@ -1022,7 +1028,7 @@ class JobsIo {
     if (!transition.changed) return
     const note = noteOverride ?? transition.note
     const by = transition.by
-    this.ctx.emit.emit("job.state", { itemId: next.id, state: next.state, by, ...(note ? { note: sanitizeUntrusted(note, 500) } : {}) })
+    this.ctx.emit.emit("job.state", { itemId: next.id, state: next.state, by, ...(note ? { note: sanitizeUntrusted(safeDisplayText(this.noteScanner, note), 500) } : {}) })
   }
 
   /**
@@ -1121,7 +1127,7 @@ class JobsIo {
   }
 
   noteFailure(itemId: string, note: string): void {
-    this.failures.set(itemId, note)
+    this.failures.set(itemId, redactDisplayText(this.noteScanner, note))
   }
 
   lastFailure(itemId: string): string | undefined {
@@ -1129,7 +1135,7 @@ class JobsIo {
   }
 
   noteUndecided(itemId: string, note: string): void {
-    this.undecidedNotes.set(itemId, note)
+    this.undecidedNotes.set(itemId, redactDisplayText(this.noteScanner, note))
   }
 
   undecided(itemId: string): string | undefined {
@@ -1303,7 +1309,7 @@ class JobsIo {
         // The note is capped: the reason is shortened, never the sentence that says where the change is.
         const room = ITEM_NOTE_MAX_CHARS - where.length - 2
         const reason = item.note ? item.note.replace(/[.\s]+$/, "") : ""
-        withNote(item, reason ? `${reason.length > room ? `${reason.slice(0, Math.max(0, room - 1))}…` : reason}. ${where}` : where)
+        withNote(item, reason ? `${reason.length > room ? `${reason.slice(0, Math.max(0, room - 1))}…` : reason}. ${where}` : where, this.noteScanner)
       }
     })
   }
@@ -1319,7 +1325,7 @@ class JobsIo {
   scanner(): Promise<Scanner> {
     // LF4-P3-5: the census's and the dry load's public ids are allowed too (a site-read pixel id is never a "phone").
     this.scannerPromise ??= Promise.all([this.connectionIds(), runPublicIds(this.ctx, this.deps)]).then(([ids, siteIds]) =>
-      buildScanner(this.ctx, this.deps, [...new Set([...ids, ...siteIds])])
+      this.noteScanner = buildScanner(this.ctx, this.deps, [...new Set([...ids, ...siteIds])])
     )
     return this.scannerPromise
   }

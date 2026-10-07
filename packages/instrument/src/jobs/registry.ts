@@ -1,4 +1,5 @@
 import { planExclusions } from "../install/plan-exclusions.js"
+import { withNote } from "./state-machine.js"
 import { isContinuedWork } from "../install/plan-permission.js"
 import { scopeOwnerJob } from "./owner-scope.js"
 // The checklist job registry (lane O8; §3e.1, §3e.7). It turns what `before` measured into CANDIDATE
@@ -278,7 +279,7 @@ function makeItem(input: CandidateInput, framework: string): ChecklistItem {
     state: blockedReason ? "blocked" : "pending"
   }
   if (blockedReason) item.blockedReason = blockedReason
-  if (input.leftForYou) { item.state = "left_for_you"; item.note = input.leftForYou; item.checks = []; delete item.blockedReason }
+  if (input.leftForYou) { item.state = "left_for_you"; withNote(item, input.leftForYou); item.checks = []; delete item.blockedReason }
   return item
 }
 

@@ -513,7 +513,7 @@ async function resolveAsks(session: Session, decisions: TriageDecision[], worker
     const who = decision.item.source === "teammate" ? "A teammate" : "The reviewer"
     const where = `${decision.item.path}${decision.item.line ? `:${decision.item.line}` : ""}`
     const answer = await session.ctx.ask("single", {
-      question: safeDisplayText(session.ship.scanner, `${who} on ${where}: “${excerpt(decision.item.body, 140)}” ${decision.reason} Let the agent fix it?`),
+      question: safeDisplayText(session.ship.scanner, `${who} on ${where}: “${excerpt(safeDisplayText(session.ship.scanner, decision.item.body), 140)}” ${decision.reason} Let the agent fix it?`),
       options: [
         { label: "Fix it", value: "fix" },
         { label: "Leave it", value: "leave" }
