@@ -30,5 +30,10 @@ it.each([
 
 it("keeps a structured security defect open even when unrelated deterministic checks passed", () => {
   const finding: TriageItem = { source: "reviewer", threadId: null, findingId: "F2", item: "R2", severity: "should", category: "security", path: "src/main.ts", line: 1, body: "PII phone is sent to the pixel; credential in the proxy", suggestedFix: null }
-  expect(triage([finding], { allowlist: [finding.path!], declinedKeys: new Set(), passingChecks: new Set(["duplicate_page_views", "one_pageview_per_visit"]), answerFor: () => null })[0]!.action).toBe("FIX")
+  expect(triage([finding], { allowlist: [finding.path!], declinedKeys: new Set(), passingChecks: new Set(["census_one_per_tool"]), answerFor: () => null })[0]!.action).toBe("FIX")
+})
+
+it("keeps uncategorized legacy security text open despite a passing check", () => {
+  const finding: TriageItem = { source: "reviewer", threadId: null, findingId: "F3", item: "R2", severity: "should", path: "src/main.ts", line: 1, body: "PII phone is sent to Meta", suggestedFix: null }
+  expect(triage([finding], { allowlist: [finding.path!], declinedKeys: new Set(), passingChecks: new Set(["census_one_per_tool"]), answerFor: () => null })[0]!.action).toBe("FIX")
 })

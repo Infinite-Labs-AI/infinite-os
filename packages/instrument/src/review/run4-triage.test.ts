@@ -56,7 +56,7 @@ const F5 = {
 } as const
 
 const finding = (input: { item: string; path: string; line: number; body: string; suggestedFix: string }): TriageItem => ({
-  source: "reviewer",
+  source: "reviewer", category: "analytics",
   threadId: null,
   findingId: null,
   item: input.item as TriageItem["item"],

@@ -394,7 +394,7 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     const deterministic = named ?? (item.item ? DETERMINISTIC_CHECKS_BY_ITEM[item.item] ?? [] : [])
     const passed = deterministic.filter((checkId) => ctx.passingChecks.has(checkId))
     const decides = named === null ? passed.length > 0 : named.length > 0 && passed.length === named.length
-    if (decides && item.severity !== "blocker" && item.category !== "security") {
+    if (decides && item.severity !== "blocker" && item.category === "analytics") {
       return {
         item,
         action: "DECLINE",

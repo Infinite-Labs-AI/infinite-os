@@ -168,7 +168,7 @@ describe("triage (§3g.4 step 4)", () => {
 
   it("a question is ANSWERed from the run's checks; a passing deterministic check outranks a non-blocker opinion", () => {
     expect(triage([item({ severity: "question", body: "Did the build pass?" })], triageContext())[0]).toMatchObject({ action: "ANSWER" })
-    const declined = triage([item({ severity: "nit" })], triageContext({ passingChecks: new Set(["census_one_per_tool"]) }))[0]!
+    const declined = triage([item({ severity: "nit", category: "analytics" })], triageContext({ passingChecks: new Set(["census_one_per_tool"]) }))[0]!
     expect(declined.action).toBe("DECLINE")
     expect(declined.reason).toMatch(/census_one_per_tool passed/)
     // Negative: a blocker is still fixed.
