@@ -247,15 +247,15 @@ function ownerSnippet(text: string, language: string, scanner: Scanner): string 
 }
 
 /** Shared merge-time and final checklist; scan the returned Markdown before posting. */
-export function buildChecklist(jobs: readonly ChecklistItem[], scanner: Scanner = createScanner({ literals: [], allowedIds: [] })): string {
+export function buildChecklist(jobs: readonly ChecklistItem[], scanner: Scanner = createScanner({ literals: [], allowedIds: [] }), alreadyShownOwnerText = ""): string {
   if (jobs.length === 0) return ""
   const rows = jobs.map((job) => `| ${escapeCell(job.title)} | ${escapeCell(jobStateCell(job))} |`).join("\n")
-  const guards = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.kind === "frozen_unit" && job.ownerBoundary.guard).map(job => {
+  const guards = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.kind === "frozen_unit" && job.ownerBoundary.guard && !alreadyShownOwnerText.includes(job.ownerBoundary.guard)).map(job => {
     const scope = job.ownerBoundary!
     const where = escapeCell(`${scope.file ?? job.allow.files[0] ?? "the noted file"}:${scope.line ?? 1}`)
     return `**For the site owner: ${escapeCell(job.title)}**\n\nApply this condition to the analytics start-up at ${where}. Keep your consent, grant and revoke code outside the guard. This snippet is for you to copy; the wizard did not edit that unit.\n\n${ownerSnippet(scope.guard!, "js", scanner)}`
   })
-  const wiring = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.wiring).map(job => {
+  const wiring = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.wiring && !alreadyShownOwnerText.includes(job.ownerBoundary.wiring)).map(job => {
     const scope = job.ownerBoundary!
     const where = escapeCell(scope.file ?? job.allow.files[0] ?? "the noted entrypoint")
     return `**For the site owner: wiring at ${where}**\n\nThe wizard left this entrypoint untouched. The import, mount or script below is for you to place; it has not been applied.\n\n${ownerSnippet(scope.wiring!, "text", scanner)}`
@@ -297,7 +297,7 @@ export function buildFinalComment(input: FinalCommentInput): string {
     FINAL_COMMENT_TITLE,
     review,
     input.reportMarkdown.trim(),
-    buildChecklist(input.jobs, input.scanner),
+    buildChecklist(input.jobs, input.scanner, input.reportMarkdown),
     ownerInfo.length > 0 ? `**Information for the site owner**\n\n${ownerInfo.join("\n")}` : "",
     declined.length > 0 ? `**Declined, with reasons**\n\n${declined.join("\n")}` : "",
     // Live run 5 (P3): a reviewer's question the wizard answered from this run's measurements. On a brief review there is
