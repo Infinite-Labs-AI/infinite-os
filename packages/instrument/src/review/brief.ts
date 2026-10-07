@@ -84,7 +84,7 @@ export function reviewerBrief(input: BriefInput): string {
     "Check each item and give it pass / fail / cant_tell:",
     itemsBlock(),
     'An item that does not apply to this change is "pass" with the note "not applicable: <why>". Use "cant_tell" only when you could not check it.',
-    "Every finding must set category: analytics for defects (including our own capture/gate), or owner_consent_privacy only for the site owner’s existing policy/consent choices. Do not raise findings about those choices. An accidental owner-only finding is retained as information. Never categorize a defect in code this run wrote as owner-only.",
+    "Every finding must set category: security for any PII, secret or credential defect (never an unsupported-feature request); request_ga4_proxy, request_meta_unsupported or request_meta_deletion only when requesting those new actions; analytics for other defects (including our own capture/gate), or owner_consent_privacy only for the site owner’s existing policy/consent choices. Do not raise findings about those choices. An accidental owner-only finding is retained as information. Never categorize a defect in code this run wrote as owner-only.",
     "Return JSON only, matching the schema: {verdict, summary, checklist:[{item, status, note}], findings:[{id, item, category, severity, path, line, body, suggested_fix}]}. " +
       "Keep each finding to one concrete problem with its file (repo-relative) and line. Finding ids are F1, F2, …"
   ].join("\n\n")
@@ -150,7 +150,7 @@ export function isReviewResult(value: unknown): value is ReviewResult {
     if (typeof row !== "object" || row === null) return false
     const entry = row as Record<string, unknown>
     if (!exactKeys(entry, ["id", "item", "severity", "path", "line", "body", "suggested_fix", ...(entry.category === undefined ? [] : ["category"])])) return false
-    if (entry.category !== undefined && entry.category !== "analytics" && entry.category !== "owner_consent_privacy") return false
+    if (entry.category !== undefined && !["analytics", "security", "owner_consent_privacy", "request_ga4_proxy", "request_meta_unsupported", "request_meta_deletion"].includes(String(entry.category))) return false
     if (typeof entry.id !== "string" || !/^F[0-9]{1,2}$/.test(entry.id)) return false
     if (!ITEMS.has(String(entry.item)) || !SEVERITIES.has(String(entry.severity))) return false
     if (typeof entry.path !== "string" || entry.path.length > 300) return false

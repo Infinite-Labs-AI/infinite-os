@@ -161,12 +161,12 @@ const context = (overrides: Partial<TriageContext> = {}): TriageContext => ({
 })
 
 describe("P0-2: a standing ruling is never a worker FIX, whatever the item label", () => {
-  it("R6 consent gate, R11 GA4 proxy and R8 ph requests are never FIX", () => {
+  it("consent gate, R11 GA4 proxy and R8 ph requests are never FIX", () => {
     const decisions = triage(
       [
         item({ item: "R6", category: "owner_consent_privacy", body: "GA4 fires before consent. Wrap both inits in a consent gate." }),
-        item({ findingId: "F2", item: "R11", body: "Add a first-party proxy for GA4 so ad blockers do not drop it." }),
-        item({ findingId: "F3", item: "R8", body: "Pass the phone number (ph) to Meta advanced matching." })
+        item({ findingId: "F2", item: "R11", category: "request_ga4_proxy", body: "Add a first-party proxy for GA4 so ad blockers do not drop it." }),
+        item({ findingId: "F3", item: "R8", category: "request_meta_unsupported", body: "Pass the phone number (ph) to Meta advanced matching." })
       ],
       context()
     )

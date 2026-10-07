@@ -42,7 +42,7 @@ export interface ReviewLedger {
 }
 
 export interface LedgerFinding {
-  category?: "analytics" | "owner_consent_privacy"
+  category?: "analytics" | "security" | "owner_consent_privacy" | "request_ga4_proxy" | "request_meta_unsupported" | "request_meta_deletion"
   body?: string
   key: string
   findingId: string | null

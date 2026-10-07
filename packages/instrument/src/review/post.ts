@@ -1,3 +1,4 @@
+import { safeDisplayText, neutralizeUntrustedMarkup } from "./display.js"
 // Everything the wizard posts on the PR (lane O4, §3g.3–§3g.5), built here and scanned here:
 // the PR body, the ONE review (`event: COMMENT`; a finding outside a diff hunk goes into the body), the replies,
 // and the final comment. Statuses are plain text the wizard owns: a literal `- [ ]` (which anyone can tick) is
@@ -22,7 +23,7 @@ export function neutralizeCheckboxes(text: string): string {
 }
 
 function escapeCell(text: string): string {
-  return escapeMarkdownCell(text).trim()
+  return escapeMarkdownCell(neutralizeUntrustedMarkup(text)).trim()
 }
 
 /** Strips C0 control characters (but newlines and tabs) from untrusted text before it is posted. */
@@ -64,7 +65,7 @@ export function buildPrBody(input: {
   scanner: Scanner
   notes?: readonly string[]
 }): string {
-  const parts = [input.reportMarkdown.trim(), ...(input.notes ?? []).map((note) => `> ${note}`), input.howToReview.trim()]
+  const parts = [input.reportMarkdown.trim(), ...(input.notes ?? []).map((note) => `> ${safeDisplayText(input.scanner, note)}`), input.howToReview.trim()]
   let body = neutralizeCheckboxes(safeText(input.scanner, withOwnerBoundary(parts.filter(Boolean).join("\n\n"), false, input.ownerBoundary)))
   if (!input.isPrivate) body = redactIdsNotInDiff(body, input.diffText, input.connectionIds)
   return `${body}\n\n${PR_MARKERS.pr(input.runId)}\n`
@@ -99,9 +100,9 @@ export function buildReviewPost(input: {
   const inBody: string[] = []
   for (const finding of input.review.findings) {
     const raw = `${finding.body}${finding.suggested_fix ? `\n\nSuggested fix: ${finding.suggested_fix}` : ""}`
-    const scanned = safeText(input.scanner, raw)
+    const scanned = safeDisplayText(input.scanner, raw)
     // The path is reviewer text too: it is scanned like the body before it appears anywhere.
-    const path = safeText(input.scanner, finding.path)
+    const path = safeDisplayText(input.scanner, finding.path)
     const location = finding.line === null ? path : `${path}:${finding.line}`
     const text = mostlyRedacted(raw, scanned)
       ? `A finding on ${location} was withheld because it quoted a secret or personal data.`
@@ -116,7 +117,7 @@ export function buildReviewPost(input: {
     }
   }
   const checklist = input.review.checklist
-    .map((row) => `| ${row.item} | ${STATUS_TEXT[row.status]} | ${escapeCell(safeText(input.scanner, row.note))} |`)
+    .map((row) => `| ${row.item} | ${STATUS_TEXT[row.status]} | ${escapeCell(safeDisplayText(input.scanner, row.note))} |`)
     .join("\n")
   const onlyInfo = input.review.findings.length > 0 && input.review.findings.every(finding => finding.category === "owner_consent_privacy" && !input.isRunCode?.(finding.path, finding.line))
   const verdict = onlyInfo && input.review.checklist.every(row => row.status !== "fail") ? "owner information only" : input.review.verdict === "looks_good" ? "looks good" : "changes suggested"
@@ -127,7 +128,7 @@ export function buildReviewPost(input: {
       : `**Second review by ${AGENT_LABEL[input.reviewer]} (round ${input.round}): ${verdict}.** Posted by infinite-tag; a review is an opinion, not a receipt.`
   const content = [
     header,
-    safeText(input.scanner, input.review.summary),
+    safeDisplayText(input.scanner, input.review.summary),
     checklist ? `| Item | Status | Note |\n|---|---|---|\n${checklist}` : "",
     bodyFindings.length > 0 ? `**Notes outside the changed lines**\n\n${bodyFindings.join("\n")}` : ""
   ]
@@ -200,12 +201,12 @@ export function buildReply(scanner: Scanner, decision: TriageDecision, fix: FixR
           ? `Changed in ${fix.sha.slice(0, 7)}. The required checks had not finished, so the wizard has not marked it done; it stays open.`
           : notFixedReply(fix?.kind === "not_fixed" ? (fix.outcome ?? "checks_failed") : "checks_failed", fix?.kind === "not_fixed" ? fix.why : null)
       : decision.action === "INFINITE"
-        ? `This is ${decision.label ?? "Infinite's own code"} (${safeText(scanner, decision.item.path ?? "general")}), which the wizard never hands to your agent. The finding is recorded in this run's report for Infinite to fix.`
+        ? `This is ${decision.label ?? "Infinite's own code"} (${safeDisplayText(scanner, decision.item.path ?? "general")}), which the wizard never hands to your agent. The finding is recorded in this run's report for Infinite to fix.`
       : decision.action === "ASK" && decision.leftByOwner
-        ? safeText(scanner, decision.reason)
+        ? safeDisplayText(scanner, decision.reason)
       : decision.action === "ASK"
-        ? `Waiting on the repo owner: ${safeText(scanner, decision.reason)}`
-        : safeText(scanner, decision.reason)
+        ? `Waiting on the repo owner: ${safeDisplayText(scanner, decision.reason)}`
+        : safeDisplayText(scanner, decision.reason)
   return `${neutralizeCheckboxes(stripControl(text))}\n\n${PR_MARKERS.reply}`
 }
 
@@ -257,6 +258,8 @@ export function buildChecklist(jobs: readonly ChecklistItem[]): string {
 
 /** §3g.4 step 9: the before/after table, the checklist states, declined items with reasons, and what the user decides. */
 export function buildFinalComment(input: FinalCommentInput): string {
+  input = { ...input, decisions: input.decisions.map(decision => ({ ...decision, reason: safeDisplayText(input.scanner, decision.reason), item: { ...decision.item, body: safeDisplayText(input.scanner, decision.item.body), path: decision.item.path === null ? null : safeDisplayText(input.scanner, decision.item.path) } })), notes: input.notes.map(note => safeDisplayText(input.scanner, note)), untrusted: input.untrusted.map(entry => ({ ...entry, author: safeDisplayText(input.scanner, entry.author), excerpt: safeDisplayText(input.scanner, entry.excerpt), path: entry.path === null ? null : safeDisplayText(input.scanner, entry.path) })) }
+
   const ownerInfo = input.decisions.filter(decision => decision.action === "OWNER_INFO").map(decision => `- ${decision.reason} ${decision.item.path ?? "general"}: ${excerpt(decision.item.body)}`)
   const declined = input.decisions
     .filter((decision) => decision.action === "DECLINE")
@@ -297,7 +300,7 @@ export function buildFinalComment(input: FinalCommentInput): string {
     left.length > 0 ? `**Left by the repo owner**\n\n${left.join("\n")}` : "",
     input.untrusted.length > 0
       ? `**Comments from people outside the repo (shown, not acted on)**\n\n${input.untrusted
-          .map((comment) => `- @${comment.author}${comment.path ? ` on \`${comment.path}\`` : ""}: ${excerpt(comment.excerpt)}`)
+          .map((comment) => `- ＠${comment.author}${comment.path ? ` on \`${comment.path}\`` : ""}: ${excerpt(comment.excerpt)}`)
           .join("\n")}`
       : "",
     ...input.notes.map((note) => `> ${note}`),

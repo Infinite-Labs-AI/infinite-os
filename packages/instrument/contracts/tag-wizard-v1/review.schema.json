@@ -86,7 +86,11 @@
           "category": {
             "enum": [
               "analytics",
-              "owner_consent_privacy"
+              "security",
+              "owner_consent_privacy",
+              "request_ga4_proxy",
+              "request_meta_unsupported",
+              "request_meta_deletion"
             ]
           },
           "item": {

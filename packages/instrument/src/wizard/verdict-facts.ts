@@ -1,3 +1,5 @@
+import { buildScanner, runPublicIds } from "../review/context.js"
+import { safeDisplayText } from "../review/display.js"
 // §3x.6 The run facts THE verdict reads beyond the report's columns, gathered in ONE place for every caller (the
 // rehearsal's PR body, the review's final comment, the merge card's in-PR report, `prove`'s PATCH and `done`):
 // the run's checklist, the review's open findings (`openFindings`, the one definition) and the real visit's per-tool
@@ -16,6 +18,8 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
   const reanchoredJobs = await reanchorOwnerLocations(ctx.root, ctx.state.get().jobs)
   // A read-only report can use corrected locations without rewriting saved policy/source files.
   const state = { ...ctx.state.get(), jobs: reanchoredJobs }
+  const scanner = buildScanner(ctx, { ...deps, env: deps.env ?? {} }, await runPublicIds(ctx, deps))
+  const display = (text: string) => safeDisplayText(scanner, text)
   const runId = state.runId ?? ctx.runId ?? ""
   const ledger = parseLedger(await deps.fs.readText(join(ctx.root, REVIEW_LEDGER_PATH)), runId)
   const base = state.git?.baseSha ?? null
@@ -39,9 +43,9 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
   return {
     ...(ownerBoundary ? { ownerBoundary } : {}),
     ...(priorPolicyEdits ? { priorPolicyEdits: true } : {}),
-    ownerPolicyFindings: (ledger.findings ?? []).filter(finding => finding.action === "OWNER_INFO" && !(finding.path !== null && ownership.writtenByRun?.(finding.path, finding.line))).map(finding => `About the site owner’s consent/privacy: not ours to change. ${finding.path ?? "general"}: ${finding.body ?? "Recorded reviewer finding"}`),
-    jobs: state.jobs,
-    openFindings: openFindings(ledger, state.jobs, ownership.classify, ownership.writtenByRun),
+    ownerPolicyFindings: (ledger.findings ?? []).filter(finding => finding.action === "OWNER_INFO" && !(finding.path !== null && ownership.writtenByRun?.(finding.path, finding.line))).map(finding => display(`About the site owner’s consent/privacy: not ours to change. ${finding.path ?? "general"}: ${finding.body ?? "Recorded reviewer finding"}`)),
+    jobs: state.jobs.map(job => ({ ...job, title: display(job.title), ...(job.note ? { note: display(job.note) } : {}) })),
+    openFindings: openFindings(ledger, state.jobs, ownership.classify, ownership.writtenByRun).map(finding => ({ ...finding, path: finding.path === null ? null : display(finding.path) })),
     tools: state.proof?.tools ?? null,
     installedUnknown: state.proof?.installedUnknown ?? null
   }

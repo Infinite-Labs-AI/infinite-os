@@ -28,7 +28,7 @@ export type AskReason =
   | "infinite_design"
 
 export interface TriageItem {
-  category?: "analytics" | "owner_consent_privacy"
+  category?: "analytics" | "security" | "owner_consent_privacy" | "request_ga4_proxy" | "request_meta_unsupported" | "request_meta_deletion"
   source: "reviewer" | "teammate"
   threadId: string | null
   findingId: string | null
@@ -73,7 +73,6 @@ interface Ruling {
    * decides; a worker never edits consent, a GA4 proxy or the Meta never-list), never a FIX.
    */
   violationItem: ReviewChecklistItemId | null
-  pattern: RegExp
   reply: string
 }
 
@@ -82,25 +81,21 @@ export const RULINGS: readonly Ruling[] = [
   {
     id: "banner_consent",
     violationItem: "R6",
-    pattern: /cookie[\s-]*banner|consent[\s-]*(manager|banner|mode|gat(e|ing)|check|wall|pop-?up|platform|prompt|dialog)|\bCMP\b|onetrust|cookiebot|usercentrics|gtag\(\s*['"]consent/i,
     reply: "Not changed: Infinite never adds, changes or checks a cookie banner or consent code. The consent mode is only recorded (standing ruling)."
   },
   {
     id: "ga4_proxy",
     violationItem: "R11",
-    pattern: /(proxy|first[\s-]party|reverse)[^.\n]{0,40}(ga4|gtag|google analytics|googletagmanager)|(ga4|gtag|google analytics)[^.\n]{0,40}proxy/i,
     reply: "Not changed: there is no GA4 proxy (standing ruling); only PostHog goes through /ingest."
   },
   {
     id: "meta_never_list",
     violationItem: "R8",
-    pattern: /\bph\b[^.\n]{0,30}(fbq|advanced matching|meta|pixel)|phone[^.\n]{0,30}(meta|pixel|capi|advanced matching)|autoconfig[^.\n]{0,20}(true|on|enable)|enable[^.\n]{0,20}autoconfig|test_event_code|synthesi[sz]e[^.\n]{0,20}_fbp|fbq\(\s*['"]track['"][^.\n]{0,60}(click|onclick)|event[\s_]?id[^.\n]{0,30}(in the page|client[\s-]side|generate)/i,
     reply: "Not changed: this is on Meta's never-list (no phone numbers, no autoConfig, no test event codes, no page-built event IDs, no click-fired standard events, no synthesised _fbp)."
   },
   {
     id: "no_deletion",
     violationItem: null,
-    pattern: /\bdelete\b[^.\n]{0,40}(pixel|dataset|campaign|ad set|ad account|meta)/i,
     reply: "Not changed: Infinite never deletes anything on Meta (standing ruling)."
   }
 ]
@@ -325,8 +320,10 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     const text = `${item.body}\n${item.suggestedFix ?? ""}`
     const declinedBefore = ctx.declinedKeys.has(triageKey(item))
     // Rulings first, whatever the item label: a ruling match is never a FIX (and never offered as one).
-    const ruling = RULINGS.find((candidate) => candidate.id !== "banner_consent" && candidate.pattern.test(text))
+    const categoryRuling = { request_ga4_proxy: "ga4_proxy", request_meta_unsupported: "meta_never_list", request_meta_deletion: "no_deletion" } as const
+    const ruling = RULINGS.find(candidate => candidate.id === categoryRuling[item.category as keyof typeof categoryRuling])
     if (ruling) {
+      if (item.severity === "blocker") return { item, action: "ASK", askReason: "ruling_violation", ruling: ruling.id, reason: "A blocker remains open for review; the wizard does not automatically dismiss it or perform the requested out-of-scope action." }
       if (declinedBefore) {
         return {
           item,
@@ -397,7 +394,7 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     const deterministic = named ?? (item.item ? DETERMINISTIC_CHECKS_BY_ITEM[item.item] ?? [] : [])
     const passed = deterministic.filter((checkId) => ctx.passingChecks.has(checkId))
     const decides = named === null ? passed.length > 0 : named.length > 0 && passed.length === named.length
-    if (decides && item.severity !== "blocker") {
+    if (decides && item.severity !== "blocker" && item.category !== "security") {
       return {
         item,
         action: "DECLINE",
