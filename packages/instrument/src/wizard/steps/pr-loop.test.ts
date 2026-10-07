@@ -777,7 +777,10 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     })
     expectOk(await reviewStep.run(w.ctx, w.deps))
     expect(w.gh.traffic()).toContain("release did not run on this pull request: not measured")
-    expect(w.ctx.state.get().jobs.find(job => job.id === "review_comments:F1")!.checks.find(check => check.id === "pr_checks_pass")!.state).toBe("pass")
+    const report = (w.gh.read().prs[0]!.comments as Array<{ body: string }>).at(-1)!.body
+    expect(report).toContain("PR check(s) ran and succeeded")
+    expect(report).not.toContain("Only neutral or skipped checks were reported")
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
   })
 
   it("counts the registration wait from the recorded push and does not repeat it on resume", async () => {
@@ -818,10 +821,13 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
   it.each([false, true])("reports pass only if at least one check ran, with neutral/skipped unmeasured (ran %s)", async ran => {
     const w = await opened({
       reviews: [review([{ id: "F1", item: "R3", severity: "should", path: "app/layout.tsx", line: 2, body: "Edit the init in place.", suggested_fix: null }]), review([])], fix: fixLayout,
-      gh: { checks: { "42": [ ...(ran ? [{ name: "test", bucket: "pass", state: "SUCCESS" }] : []), { name: "optional", bucket: "skipping", state: "SKIPPED" }, { name: "advisory", bucket: "skipping", state: "NEUTRAL" }] } }
+      gh: { deployments: [], checks: { "42": [ ...(ran ? [{ name: "test", bucket: "pass", state: "SUCCESS" }] : []), { name: "optional", bucket: "skipping", state: "SKIPPED" }, { name: "advisory", bucket: "skipping", state: "NEUTRAL" }] } }
     })
     expectOk(await reviewStep.run(w.ctx, w.deps))
-    expect(w.ctx.state.get().jobs.find(job => job.id === "review_comments:F1")!.checks.find(check => check.id === "pr_checks_pass")!.state).toBe(ran ? "pass" : "undetermined")
+    const report = (w.gh.read().prs[0]!.comments as Array<{ body: string }>).at(-1)!.body
+    expect(report).toContain(ran ? "1 PR check(s) ran and succeeded" : "Only neutral or skipped checks were reported: not measured")
+    if (!ran) expect(report).not.toContain("PR check(s) ran and succeeded")
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
     expect(w.gh.traffic()).toContain("optional: skipped, not measured")
     expect(w.gh.traffic()).toContain("advisory: neutral, not measured")
   })
