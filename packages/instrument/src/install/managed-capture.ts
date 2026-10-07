@@ -10,7 +10,7 @@ import { lexicalStates } from "../lexical-states.js"
 import { readInstallManifest } from "../manifest.js"
 import { assertConfinedManifestFileEntry, normalizeAppRelativePath, writeFileAtomic } from "../frameworks/shared.js"
 import { ownerWiringRequirement, policyWiringRequirement } from "../frameworks/owner-boundary.js"
-import { recordGeneratedApi } from "../jobs/generated-api.js"
+import { generatedApiTexts, recordGeneratedApi } from "../jobs/generated-api.js"
 import { makeEditRecord } from "./edits.js"
 
 export interface ManagedCapturePlan {
