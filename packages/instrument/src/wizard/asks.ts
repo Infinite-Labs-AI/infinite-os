@@ -264,6 +264,13 @@ export function planAnswerFromFile(lines: readonly PlanLine[], answers: AnswersF
       }
     }
   }
+  // Shorthand values do not erase an explicit refusal in the same answer file.
+  for (const id of answers.plan?.declined ?? []) {
+    if (!known.has(id)) continue
+    declined.add(id)
+    approved.delete(id)
+    delete edits[id]
+  }
   if (approved.size === 0 && declined.size === 0 && Object.keys(edits).length === 0) return null
   return { approved: [...approved], declined: [...declined], edits }
 }

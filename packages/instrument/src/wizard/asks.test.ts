@@ -288,3 +288,11 @@ it("nested mode continues shown repository work without inventing another questi
   expect(await asks.ask("plan", payload)).toEqual({ approved: [], declined: [], edits: {} })
   expect(shown).toEqual(["repo"])
 })
+
+it("explicit file refusals beat shorthand consent and package answers", async () => {
+  const { asks } = setup({ yes: true }, { v: 1, plan: { declined: ["L8", "L3"] }, consentMode: "not_required", npmInstall: true })
+  const answer = await asks.ask("plan", PLAN)
+  expect(answer).toMatchObject({ declined: ["L8", "L3"] })
+  expect((answer as { approved: string[] }).approved).not.toContain("L8")
+  expect((answer as { approved: string[] }).approved).not.toContain("L3")
+})

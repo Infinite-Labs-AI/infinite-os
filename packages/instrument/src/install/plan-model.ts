@@ -1296,7 +1296,7 @@ export function resolvePlanAnswers(
 
   for (const planLine of plan.lines) if (isContinuedWork(planLine) && !declined.has(planLine.id)) approved.add(planLine.id)
   let consentMode: ResolvedPlanAnswers["consentMode"] = null
-  if (options.consentFlag) {
+  if (options.consentFlag && !declined.has(DECISION_LINE_IDS.consentMode)) {
     consentMode = options.consentFlag
     approved.add(DECISION_LINE_IDS.consentMode)
     declined.delete(DECISION_LINE_IDS.consentMode)

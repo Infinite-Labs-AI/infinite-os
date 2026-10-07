@@ -35,3 +35,11 @@ it("honors declines read from an answers file", async () => {
   const answer = planAnswerFromFile(plan.lines, parseAnswersFile(JSON.stringify({ v: 1, plan: no })))
   expect(seedItemsAfterApprovals([item], [], plan, resolvePlanAnswers(plan, answer, { consentFlag: null }).approvals)).toEqual([])
 })
+
+it("an explicit consent refusal is not replaced by the consent flag", () => {
+  const consentPlan: PlanModel = { ...plan, lines: [...plan.lines, { id: "consent_mode", kind: "consent_mode", requires: "approval", editable: true, text: "Choose consent mode" }] }
+  const resolved = resolvePlanAnswers(consentPlan, { approved: [], declined: ["consent_mode"], edits: {} }, { consentFlag: "not_required" })
+  expect(resolved.consentMode).toBeNull()
+  expect(resolved.lines.find(line => line.id === "consent_mode")?.approved).toBe(false)
+  expect(resolved.approvals.declined).toContain("consent_mode")
+})
