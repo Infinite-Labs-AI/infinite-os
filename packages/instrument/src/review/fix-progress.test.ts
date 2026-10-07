@@ -56,6 +56,20 @@ it.each(["known", "unknown", "claimed"] as const)("records %s consent refusals a
     } as never
   } } as never
   const result = await runFixRound(ctx, deps, { step: "review", worker: "claude_code", items, scanner: createScanner({ literals: [], allowedIds: [] }) })
-  expect(result.items[0]).toMatchObject({ state: "left_for_you", checks: [] })
+  expect(result.items[0]).toMatchObject(ownership === "claimed" ? { state: "blocked", blockedReason: "agent_blocked" } : { state: "left_for_you", checks: [] })
   expect(result.items[1]).toMatchObject({ state: "claimed" })
+})
+
+it("R7 never starts a review worker whose edit evidence is in a frozen unit", async () => {
+  const items = [agentItem("review_comments:f1", ["src/tracking.ts"])]
+  items[0]!.trigger.evidence = [{ file: "src/tracking.ts", line: 2 }]
+  const { bridge } = fakeBridge()
+  const { ctx } = makeCtx({ root: "/fixture", state: baseState({ root: "/fixture" }) })
+  let ran = false
+  const deps = makeDeps({ bridge, agents: { runJobs: async () => { ran = true; throw new Error("should not start") } } as never })
+  deps.fs = { ...deps.fs, readText: async () => 'function boot() {\n  fbq?.("consent", "revoke");\n}\n' }
+  const result = await runFixRound(ctx, deps, { step: "review", worker: "claude_code", items, scanner: createScanner({ literals: [], allowedIds: [] }) })
+  expect(ran).toBe(false)
+  expect(result.items[0]).toMatchObject({ state: "left_for_you", ownerBoundary: { kind: "frozen_unit", file: "src/tracking.ts", line: 2 } })
+  expect(result.run.session).toBeNull()
 })

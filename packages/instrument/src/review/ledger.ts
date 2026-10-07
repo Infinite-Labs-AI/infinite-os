@@ -3,7 +3,7 @@
 // a loop), which decisions are still open for the user, and which round ran on which head. The run state's
 // `pr.handledThreadIds` stays the record of replied threads.
 import type { ReviewChecklistItemId, ReviewResult } from "../wizard/contracts/agents.js"
-import { isOwnerOnlyFinding, isPolicyPath } from "../jobs/owner-boundary.js"
+import { isOwnerOnlyFinding } from "../jobs/owner-boundary.js"
 import type { ChecklistItem, JobItemState } from "../wizard/contracts/jobs.js"
 import type { InfiniteOwnLabel } from "./post.js"
 import type { TriageAction, TriageDecision } from "./triage.js"
@@ -13,6 +13,7 @@ export const REVIEW_LEDGER_PATH = ".infinite/wizard/review-ledger.json"
 
 export interface ReviewLedger {
   version: 1
+  checkRegistration?: { sha: string; complete: true }
   runId: string
   declined: Array<{ key: string; reason: string; round: number }>
   /** ASK items not yet answered: they go into the final comment under "You decide". */
@@ -41,6 +42,8 @@ export interface ReviewLedger {
 }
 
 export interface LedgerFinding {
+  category?: "analytics" | "owner_consent_privacy"
+  body?: string
   key: string
   findingId: string | null
   item: ReviewChecklistItemId | null
@@ -66,7 +69,7 @@ export interface OpenFinding {
 }
 
 /** The job item states that close a FIX'd finding (its job-16 item was done and checked by the wizard). */
-const CLOSING_STATES: readonly JobItemState[] = ["done_in_code", "waiting_deploy", "waiting_real_event", "proven", "not_needed", "left_for_you"]
+const CLOSING_STATES: readonly JobItemState[] = ["done_in_code", "waiting_deploy", "waiting_real_event", "proven", "not_needed"]
 
 /**
  * §3x.3 / DECISIONS §1.5 THE one definition of an open review finding: every trusted finding that is not closed. Closed =
@@ -78,7 +81,8 @@ const CLOSING_STATES: readonly JobItemState[] = ["done_in_code", "waiting_deploy
 export function openFindings(
   ledger: Pick<ReviewLedger, "rounds" | "declined" | "findings">,
   jobs: readonly Pick<ChecklistItem, "id" | "state">[],
-  ownership?: (path: string, line: number | null) => InfiniteOwnLabel | null
+  ownership?: (path: string, line: number | null) => InfiniteOwnLabel | null,
+  writtenByRun?: (path: string, line: number | null) => boolean
 ): OpenFinding[] {
   const latest = new Map<string, LedgerFinding>()
   if (ledger.findings && ledger.findings.length > 0) {
@@ -87,17 +91,18 @@ export function openFindings(
     const rulingReplies = new Set(RULINGS.map((ruling) => ruling.reply))
     for (const round of ledger.rounds) {
       for (const finding of round.review?.findings ?? []) {
-        if (isOwnerOnlyFinding(finding)) continue
         const key = triageKey({ path: finding.path, item: finding.item })
         const declined = ledger.declined.find((entry) => entry.key === key)
         latest.set(findingKey(key, finding.id), {
           key,
           findingId: finding.id,
+          category: finding.category,
+          body: finding.body,
           item: finding.item,
           severity: finding.severity,
           path: finding.path,
           line: finding.line,
-          action: declined ? "DECLINE" : "FIX",
+          action: isOwnerOnlyFinding(finding) && !ownership?.(finding.path, finding.line) && !writtenByRun?.(finding.path, finding.line) ? "OWNER_INFO" : declined ? "DECLINE" : "FIX",
           ruling: declined && rulingReplies.has(declined.reason) ? declined.reason : null,
           label: null,
           round: round.round
@@ -107,7 +112,8 @@ export function openFindings(
   }
   const out: OpenFinding[] = []
   for (const finding of latest.values()) {
-    if (finding.action === "ANSWER" || finding.action === "SKIP" || finding.item === "R6" || isPolicyPath(finding.path ?? "")) continue
+    if (finding.action === "ANSWER") continue
+    if (finding.action === "OWNER_INFO" && !(finding.path !== null && (ownership?.(finding.path, finding.line) || writtenByRun?.(finding.path, finding.line)))) continue
     if (finding.action === "DECLINE" && finding.ruling !== null) continue
     if (finding.action === "FIX" && finding.findingId !== null) {
       const job = jobs.find((entry) => entry.id === `review_comments:${finding.findingId}`)
@@ -157,6 +163,8 @@ export function recordDecisions(ledger: ReviewLedger, decisions: readonly Triage
     const entry: LedgerFinding = {
       key,
       findingId: decision.item.findingId,
+      category: decision.item.category,
+      body: decision.item.body,
       item: decision.item.item,
       severity: decision.item.severity,
       path: decision.item.path,

@@ -118,6 +118,7 @@ export interface ReviewResult {
   summary: string
   checklist: Array<{ item: ReviewChecklistItemId; status: "pass" | "fail" | "cant_tell"; note: string }>
   findings: Array<{
+    category?: "analytics" | "owner_consent_privacy"
     id: string
     item: ReviewChecklistItemId
     severity: "blocker" | "should" | "nit" | "question"
@@ -489,6 +490,7 @@ export const REVIEW_SCHEMA = {
         required: ["id", "item", "severity", "path", "line", "body", "suggested_fix"],
         properties: {
           id: { type: "string", pattern: "^F[0-9]{1,2}$" },
+          category: { enum: ["analytics", "owner_consent_privacy"] },
           item: { enum: [...REVIEW_ITEMS] },
           severity: { enum: ["blocker", "should", "nit", "question"] },
           path: { type: "string", maxLength: 300 },

@@ -8,7 +8,7 @@
 // The facts come from the install receipt (`.infinite/install.json`) and the PR's base commit (a file absent there
 // was created by this run), never from the reviewer.
 import { join } from "node:path"
-import { hasRecordedPolicyEdits } from "../jobs/owner-boundary.js"
+import { hasRecordedPolicyEdits, isPolicyPath } from "../jobs/owner-boundary.js"
 
 import type { WizardDeps } from "../wizard/contracts/deps.js"
 import type { InfiniteOwnLabel } from "./post.js"
@@ -32,6 +32,7 @@ interface ReceiptEdit {
 }
 
 export interface WizardOwnership {
+  writtenByRun?(path: string, line: number | null): boolean
   /** Metadata from the already parsed receipt; never reads a policy file for this fact. */
   recordedPolicyEdits?(runId: string): boolean
   /** Every file the wizard itself wrote (the reviewer's `plan.json` `wizardFiles`): managed ∪ the wizard's own edits. */
@@ -172,6 +173,19 @@ export async function wizardOwnership(
       if (range) addLines(edit.file, range)
     }
   }
+  const agentLines = new Map<string, Array<[number, number]>>()
+  const agentWhole = new Set<string>()
+  for (const edit of (Array.isArray(receipt.edits) ? receipt.edits as ReceiptEdit[] : [])) {
+    if (!edit || edit.by !== "agent" || typeof edit.file !== "string") continue
+    if (edit.beforeHash === null || isPolicyPath(edit.file)) { agentWhole.add(edit.file); continue }
+    if (!Array.isArray(edit.textEdits) || edit.textEdits.length === 0) continue
+    const current = await deps.fs.readText(join(root, edit.file))
+    if (current === null) continue
+    for (const change of edit.textEdits ?? []) {
+      const range = insertedLines(current, change.inserted)
+      if (range) agentLines.set(edit.file, [...agentLines.get(edit.file) ?? [], range])
+    }
+  }
   const runtimeSources: string[] = []
   for (const file of runtime) {
     const text = await deps.fs.readText(join(root, file))
@@ -182,6 +196,11 @@ export async function wizardOwnership(
   const receiptEditFiles = new Set(edits.map((edit) => edit.file))
   const wizardFiles = [...new Set([...managed, ...receiptEditFiles, INSTALL_MANIFEST_FILE])].sort()
   return {
+    writtenByRun(path, line) {
+      if (runtime.has(path) || wizardWhole.has(path) || agentWhole.has(path)) return true
+      const ranges = [...wizardLines.get(path) ?? [], ...agentLines.get(path) ?? []]
+      return line === null ? ranges.length > 0 : ranges.some(([first, last]) => line >= first && line <= last)
+    },
     recordedPolicyEdits: runId => hasRecordedPolicyEdits([], receipt, runId),
     wizardFiles,
     runtimeInternals,

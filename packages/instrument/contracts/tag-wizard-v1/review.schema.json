@@ -83,6 +83,12 @@
             "type": "string",
             "pattern": "^F[0-9]{1,2}$"
           },
+          "category": {
+            "enum": [
+              "analytics",
+              "owner_consent_privacy"
+            ]
+          },
           "item": {
             "enum": [
               "R1",

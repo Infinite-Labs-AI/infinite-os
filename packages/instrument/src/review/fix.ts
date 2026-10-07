@@ -4,6 +4,9 @@
 // §3g.5 scan before they reach the terminal. The same runner fixes a commit hook that failed on the wizard's
 // own files (job 15 `build_fix` shape).
 import type { WizardEditRecord } from "../wizard/contracts/jobs.js"
+import { frozenEditPlace, sourceUnits } from "../jobs/consent-units.js"
+import { frozenJobNote } from "../jobs/owner-boundary.js"
+import { leaveForOwner } from "../jobs/state-machine.js"
 import { statSync } from "node:fs"
 import { join } from "node:path"
 
@@ -72,9 +75,24 @@ export function hookFixItem(files: readonly string[], output: string): Checklist
 /** Keep the error and nearby log tail, not thousands of lines of successful setup. */
 export function ciFixItem(files: readonly string[], output: string): ChecklistItem {
   const clean = stripControl(output)
-  const firstError = /(?:\berror\b|\bfatal\b|\bfailed\b|\bFAIL\b)/i.exec(clean)?.index
-  const start = firstError === undefined ? Math.max(0, clean.length - 3_000) : Math.max(0, firstError - 400)
-  const excerpt = clean.slice(start, start + 3_000)
+  // Actions prefixes every line with job and step. Prefer the section carrying an actual
+  // diagnostic/exit failure, rather than successful setup prose that mentions error reporting.
+  const lines = clean.split("\n")
+  const sections = new Map<string, string[]>()
+  let group = ""
+  for (const line of lines) {
+    const step = /^([^\t]+)\t([^\t]+)\t/.exec(line)
+    if (/##\[group\]/.test(line)) group = line
+    const key = step ? `${step[1]}\t${step[2]}` : group
+    sections.set(key, [...sections.get(key) ?? [], line])
+    if (/##\[endgroup\]/.test(line)) group = ""
+  }
+  const failure = /##\[error\]|\bERROR\b|\bFATAL\b|\bFAIL\b|error TS\d+|exited with (?:code|exit code) [1-9]|Process completed with exit code [1-9]|\b(?:build|test|tests|compilation) failed\b/
+  const failingSection = [...sections].filter(([key, section]) => key && failure.test(section.join("\n"))).at(-1)?.[1].join("\n")
+  const selected = failingSection ?? clean
+  const lastError = [...selected.matchAll(/(?:\berror\b|\bfatal\b|\bfailed\b|\bFAIL\b)/gi)].at(-1)?.index
+  const start = lastError === undefined ? Math.max(0, selected.length - 3_000) : Math.max(0, lastError - 400)
+  const excerpt = selected.slice(start, start + 3_000)
   return {
     ...hookFixItem(files, ""),
     id: "build_fix:pr_checks",
@@ -84,7 +102,7 @@ export function ciFixItem(files: readonly string[], output: string): ChecklistIt
 }
 
 export interface FixRoundResult {
-  run: AgentRunResult
+  run: Omit<AgentRunResult, "session"> & { session: AgentRunResult["session"] | null }
   items: ChecklistItem[]
 }
 
@@ -94,8 +112,20 @@ export async function runFixRound(
   deps: WizardDeps,
   input: { step: WizardStepId; worker: AgentKind; items: readonly ChecklistItem[]; scanner: Scanner; extraBrief?: string }
 ): Promise<FixRoundResult> {
-  const items = input.items.map((item) => ({ ...item }))
-  const brief = [deps.registry.brief(items), input.extraBrief ?? ""].filter(Boolean).join("\n\n")
+  const sourceFiles = [...new Set(input.items.flatMap(item => item.trigger.evidence.flatMap(entry => "file" in entry ? [entry.file] : [])))]
+  const sources = new Map<string, string>()
+  for (const file of sourceFiles) {
+    const text = await deps.fs.readText(join(ctx.root, file))
+    if (text !== null) sources.set(file, text)
+  }
+  const items = input.items.map(item => {
+    const place = frozenEditPlace(item, sources)
+    return place ? leaveForOwner(item, frozenJobNote(item, place), { kind: "frozen_unit", file: place.file, line: place.line, unitHash: place.unit.hash, lineOffset: place.line - place.unit.startLine, unitOrdinal: sourceUnits(sources.get(place.file)!).units.filter(unit => unit.hash === place.unit.hash && unit.start < place.unit.start).length }).item : { ...item }
+  })
+  const active = items.filter(item => item.state !== "left_for_you")
+  for (const item of items.filter(item => item.state === "left_for_you")) ctx.emit.emit("job.state", { itemId: item.id, state: item.state, by: "wizard", note: item.note })
+  if (active.length === 0) return { items, run: { outcome: "completed", session: null, claims: [], questions: [], permissionDenials: 0, reverted: [], edits: [], turnsUsed: 0 } }
+  const brief = [deps.registry.brief(active), input.extraBrief ?? ""].filter(Boolean).join("\n\n")
   const clean = (text: string, max: number) => input.scanner.redact(stripControl(text)).text.slice(0, max)
   // Tool activity, not narration or report_progress prose, controls the phase and counters.
   const started = deps.clock.now().getTime()
@@ -106,13 +136,13 @@ export async function runFixRound(
   let phase: "Reading your code" | "Writing the changes" | "Checking its work" = "Reading your code"
   let lastClaim: string | null = null
   const status = () => {
-    const active = phase === "Checking its work" ? lastClaim : items.find((item) => !claimedNow.has(item.id))?.id
-    const position = active ? items.findIndex((item) => item.id === active) + 1 : items.length
-    ctx.emit.emit("step.status", { step: input.step, text: agentStatusLine({ phase, position: Math.max(1, position), total: items.length, read: read.size, edited: edited.size, thinking, claimed: claimedNow.size, elapsedMs: deps.clock.now().getTime() - started, budgetMs: AGENT_LIMITS.reviewFix.wallMsPerRound }) })
+    const activeId = phase === "Checking its work" ? lastClaim : active.find((item) => !claimedNow.has(item.id))?.id
+    const position = activeId ? active.findIndex((item) => item.id === activeId) + 1 : active.length
+    ctx.emit.emit("step.status", { step: input.step, text: agentStatusLine({ phase, position: Math.max(1, position), total: active.length, read: read.size, edited: edited.size, thinking, claimed: claimedNow.size, elapsedMs: deps.clock.now().getTime() - started, budgetMs: AGENT_LIMITS.reviewFix.wallMsPerRound }) })
   }
   status()
   const run = await deps.agents.runJobs({
-    items,
+    items: active,
     brief,
     budget: { maxTurns: AGENT_LIMITS.reviewFix.maxTurnsPerRound, wallMs: AGENT_LIMITS.reviewFix.wallMsPerRound },
     onClaim(claim) {
@@ -125,9 +155,10 @@ export async function runFixRound(
       status()
       if (item) {
         item.claim = { status: claim.status, note, at: claim.at }
-        item.state = "claimed"
+        item.state = claim.status === "blocked" ? "blocked" : "claimed"
+        if (claim.status === "blocked") item.blockedReason = "agent_blocked"
       }
-      ctx.emit.emit("job.state", { itemId: claim.jobId, state: "claimed", by: "agent_claim", note })
+      ctx.emit.emit("job.state", { itemId: claim.jobId, state: claim.status === "blocked" ? "blocked" : "claimed", by: "agent_claim", note })
       sub(ctx, input.step, `${input.worker === "codex" ? "Codex" : "Claude Code"} says ${claim.jobId} is ${claim.status.replace(/_/g, " ")}; checking…`, "pending")
     },
     onAsk() {
@@ -151,16 +182,15 @@ export async function runFixRound(
   const extras = run as typeof run & Partial<import("../agents/runner.js").AgentRunExtras>
   const known = new Set((extras.blocked ?? []).filter(block => block.reason === "consent_touched").map(block => block.itemId))
   const unknown = (extras.strays ?? []).filter(stray => stray.reason === "consent_touched").map(stray => stray.path)
-  const { leaveForOwner } = await import("../jobs/state-machine.js")
   const { firstMatchingGlob } = await import("../jobs/glob.js")
-  const { isOwnerOnlyFinding } = await import("../jobs/owner-boundary.js")
   const settled = items.map(item => {
     const claimed = item.claim !== undefined || run.claims.some(claim => claim.jobId === item.id)
-    const claim = [...run.claims].reverse().find(claim => claim.jobId === item.id) ?? item.claim
-    const leftByWorker = claim?.status === "blocked" && isOwnerOnlyFinding({ body: claim.note })
-    const affected = leftByWorker || known.has(item.id) || (claimed && unknown.some(path => firstMatchingGlob(path, [...item.allow.files, ...item.allow.create]) !== null))
-    if (!affected) return item
-    const transition = leaveForOwner(item)
+    const affected = known.has(item.id) || (claimed && unknown.some(path => firstMatchingGlob(path, [...item.allow.files, ...item.allow.create]) !== null))
+    if (!affected) {
+      const claim = [...run.claims].reverse().find(claim => claim.jobId === item.id) ?? item.claim
+      return claim?.status === "blocked" ? { ...item, state: "blocked" as const, blockedReason: "agent_blocked" as const, claim: { status: claim.status, note: claim.note, at: claim.at } } : item
+    }
+    const transition = leaveForOwner(item, "Put back: an edit reached code that handles consent.", { kind: "restored_unit" })
     ctx.emit.emit("job.state", { itemId: item.id, state: transition.item.state, by: "wizard", note: transition.note })
     return transition.item
   })

@@ -164,7 +164,7 @@ describe("P0-2: a standing ruling is never a worker FIX, whatever the item label
   it("R6 consent gate, R11 GA4 proxy and R8 ph requests are never FIX", () => {
     const decisions = triage(
       [
-        item({ item: "R6", body: "GA4 fires before consent. Wrap both inits in a consent gate." }),
+        item({ item: "R6", category: "owner_consent_privacy", body: "GA4 fires before consent. Wrap both inits in a consent gate." }),
         item({ findingId: "F2", item: "R11", body: "Add a first-party proxy for GA4 so ad blockers do not drop it." }),
         item({ findingId: "F3", item: "R8", body: "Pass the phone number (ph) to Meta advanced matching." })
       ],
@@ -172,14 +172,14 @@ describe("P0-2: a standing ruling is never a worker FIX, whatever the item label
     )
     for (const decision of decisions) {
       expect(decision.action).not.toBe("FIX")
-      if (decision.action !== "SKIP") expect(decision.ruling).toBeDefined()
+      if (decision.action !== "OWNER_INFO") expect(decision.ruling).toBeDefined()
     }
     expect(decisions.map((decision) => decision.ruling)).toEqual([undefined, "ga4_proxy", "meta_never_list"])
   })
 
-  it("a repeated banner request is omitted without an ask or fix", () => {
-    const [again] = triage([item({ item: "R16", body: "Really, add the consent banner." })], context({ declinedKeys: new Set(["app/layout.tsx|R16"]) }))
-    expect(again).toMatchObject({ action: "SKIP" })
+  it("a repeated banner request is retained as information without an ask or fix", () => {
+    const [again] = triage([item({ item: "R16", category: "owner_consent_privacy", body: "Really, add the consent banner." })], context({ declinedKeys: new Set(["app/layout.tsx|R16"]) }))
+    expect(again).toMatchObject({ action: "OWNER_INFO" })
   })
 
   it("P3-6: an absolute or traversing path is unlocated, never an allowlist widening", () => {

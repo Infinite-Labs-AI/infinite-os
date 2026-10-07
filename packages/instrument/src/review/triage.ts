@@ -5,7 +5,7 @@
 // - ANSWER: a question, answered from this run's checks and receipts;
 // - ASK: the user decides (conversion names, privacy text, widening the allowlist, two reviewers in
 //   conflict, an item raised again after a DECLINE, a finding with no file). Never a loop.
-import { OWNER_BOUNDARY, isOwnerOnlyFinding } from "../jobs/owner-boundary.js"
+import { isOwnerOnlyFinding, isPolicyPath } from "../jobs/owner-boundary.js"
 import type { ReviewChecklistItemId } from "../wizard/contracts/agents.js"
 import { allowEntryMatches } from "../git/commit.js"
 import { escapeRegExp } from "../text-escape.js"
@@ -14,10 +14,11 @@ import { escapeRegExp } from "../text-escape.js"
  * `INFINITE` (§3x.3): a finding on Infinite's own managed code or on the wizard's own change. It is never FIX (the
  * customer's agent never edits Infinite's runtime); it is replied to honestly and recorded for Infinite to fix.
  */
-export type TriageAction = "FIX" | "DECLINE" | "ANSWER" | "ASK" | "INFINITE" | "SKIP"
+export type TriageAction = "FIX" | "DECLINE" | "ANSWER" | "ASK" | "INFINITE" | "SKIP" | "OWNER_INFO"
 export type AskReason =
   | "conversion_names"
   | "privacy_text"
+  | "owner_file"
   | "allowlist_widening"
   | "reviewer_conflict"
   | "raised_after_decline"
@@ -27,6 +28,7 @@ export type AskReason =
   | "infinite_design"
 
 export interface TriageItem {
+  category?: "analytics" | "owner_consent_privacy"
   source: "reviewer" | "teammate"
   threadId: string | null
   findingId: string | null
@@ -256,6 +258,7 @@ export function triageKey(item: Pick<TriageItem, "path" | "item">): string {
 }
 
 export interface TriageContext {
+  writtenByRun?: (path: string, line: number | null) => boolean
   /** The run's allowlist union (job `allow.files` ∪ `allow.create`). §3x.3: never the managed files. */
   allowlist: readonly string[]
   /**
@@ -310,11 +313,19 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
     }
   }
   return items.map((item): TriageDecision => {
-    if (isOwnerOnlyFinding(item)) return { item, action: "SKIP", reason: OWNER_BOUNDARY }
+    const located = item.path !== null && isRepoRelativePath(item.path) ? item.path : null
+    // LF4-P1-3 (round 1): OWNERSHIP FIRST. §3x.3 Infinite's own code and the wizard's own change are never handed to the
+    // customer's agent, whatever the finding says.
+    const owner = located !== null ? (ctx.ownership?.(located, item.line) ?? null) : null
+    if (owner !== null) {
+      return { item, action: "INFINITE", label: owner, reason: `This is ${owner} (${item.path}): recorded for Infinite to fix.` }
+    }
+    if (isOwnerOnlyFinding(item) && !(located !== null && ctx.writtenByRun?.(located, item.line))) return { item, action: "OWNER_INFO", reason: "About the site owner’s consent/privacy: not ours to change." }
+    if (located !== null && isPolicyPath(located)) return { item, action: "ASK", askReason: "owner_file", reason: "This finding remains open. Policy pages are read-only for the wizard; the site owner must address it." }
     const text = `${item.body}\n${item.suggestedFix ?? ""}`
     const declinedBefore = ctx.declinedKeys.has(triageKey(item))
     // Rulings first, whatever the item label: a ruling match is never a FIX (and never offered as one).
-    const ruling = RULINGS.find((candidate) => candidate.pattern.test(text))
+    const ruling = RULINGS.find((candidate) => candidate.id !== "banner_consent" && candidate.pattern.test(text))
     if (ruling) {
       if (declinedBefore) {
         return {
@@ -336,13 +347,7 @@ export function triage(items: readonly TriageItem[], ctx: TriageContext): Triage
       }
       return { item, action: "DECLINE", ruling: ruling.id, reason: ruling.reply }
     }
-    const located = item.path !== null && isRepoRelativePath(item.path) ? item.path : null
-    // LF4-P1-3 (round 1): OWNERSHIP FIRST. §3x.3 Infinite's own code and the wizard's own change are never handed to the
-    // customer's agent, whatever the finding says.
-    const owner = located !== null ? (ctx.ownership?.(located, item.line) ?? null) : null
-    if (owner !== null) {
-      return { item, action: "INFINITE", label: owner, reason: `This is ${owner} (${item.path}): recorded for Infinite to fix.` }
-    }
+
     // LF4-P1-3: a finding that asks to change a name only Infinite's runtime defines asks to change Infinite's code,
     // even on the customer's call line.
     const internals = ctx.infiniteInternalsIn?.(text, item.path) ?? []
