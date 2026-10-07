@@ -32,3 +32,34 @@ it.each([true, false])("shows sensitive-page handoff once, or omits it when alre
   expect(plan.lines.filter(line => line.text.includes("collection off on the listed pages"))).toHaveLength(off ? 0 : 1)
   expect(plan.seeds.filter(job => job.id === "posthog_improve:sensitive_pages")).toHaveLength(off ? 0 : 1)
 })
+
+it.each([
+  "const unrelated = { autocapture: false, disable_session_recording: true }; posthog.init('phc_fixture', { autocapture: true, disable_session_recording: false });",
+  "// autocapture: false, disable_session_recording: true\nposthog.init('phc_fixture', { autocapture: true, disable_session_recording: false });",
+  "posthog.init('phc_fixture', { /* autocapture: false, disable_session_recording: true */ autocapture: true, disable_session_recording: false });",
+  "posthog.init('phc_fixture', { autocapture: false, disable_session_recording: true, autocapture: true, disable_session_recording: false });",
+  "posthog.init('phc_fixture', { autocapture: false, disable_session_recording: true, ...override });",
+  "posthog.init('phc_fixture', { autocapture: false, disable_session_recording: true, [field]: value });",
+  "posthog.init('phc_fixture', { autocapture: false, disable_session_recording: true }); posthog.init('phc_other', { autocapture: true, disable_session_recording: false });",
+  "const options = { autocapture: false, disable_session_recording: true }; posthog.init('phc_fixture', options);",
+  "posthog.init('phc_fixture', { autocapture: false, disable_session_recording: true, session_recording: { maskAllInputs: true } });"
+])("keeps restrictive advice when selected init is active or ambiguous: %s", source => {
+  const advice = sensitivePosthogOptions(source, ["/account"])
+  expect(advice).toContain("autocapture: false")
+  expect(advice).toContain("disable_session_recording: true")
+})
+
+it("reads effective duplicate values only inside the actual options object", () => {
+  const source = "const unrelated = {autocapture:true}; posthog.init('phc_fixture', { autocapture: true, disable_session_recording: false, autocapture: false, disable_session_recording: true });"
+  expect(sensitivePosthogOptions(source, ["/account"])).toBeNull()
+})
+
+
+it("ignores commented init calls and reads multiline and quoted options with trailing comments", () => {
+  const source = `// posthog.init('unused', { autocapture: true, disable_session_recording: false });
+posthog.init('phc_fixture', {
+  "autocapture": false, // existing exclusion
+  'disable_session_recording': true /* existing exclusion */
+});`
+  expect(sensitivePosthogOptions(source, ["/account"])).toBeNull()
+})
