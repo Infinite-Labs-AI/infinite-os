@@ -32,6 +32,7 @@ import type { BuildResult, PlanModel } from "../wizard/contracts/jobs.js"
 import { makeEditRecord } from "./edits.js"
 import { WizardInstaller, type InstallerOptions, type WizardApplyResult } from "./installer.js"
 import type { WizardBeforeFacts } from "./plan-model.js"
+import { ownerLayoutJobs } from "../wizard/steps/install.js"
 
 afterEach(cleanupSites)
 
@@ -108,6 +109,23 @@ describe("WizardInstaller.apply: a new install on a static site", () => {
 
 describe("requiresManual is an OPEN JOB, never 'installed' (S1 fix, run.ts apply)", () => {
   const VITE_NO_HEAD = `<!doctype html>\n<html>\n<body><div id="root"></div></body>\n</html>\n`
+
+  it("leaves an inline-consent layout untouched and hands exact wiring to the owner without a worker job", async () => {
+    const original = "export default function RootLayout({children}) { return <html><body><script>{`gtag('consent','default',{analytics_storage:'denied'});`}</script>{children}</body></html> }\n"
+    const root = makeSite({ "package.json": '{"dependencies":{"next":"16.0.0","react":"19.0.0"}}', "app/layout.tsx": original })
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    const result = await subject.apply(plan, approveAll(plan))
+    expect(result).toMatchObject({ ok: true, openJobs: [] })
+    expect(read(root, "app/layout.tsx")).toBe(original)
+    expect(result.changedFiles).not.toContain("app/layout.tsx")
+    const jobs = ownerLayoutJobs(result.ownerRequirements ?? [])
+    expect(jobs).toEqual([expect.objectContaining({ id: "unusual_layout:app/layout.tsx", owner: "code", state: "left_for_you", checks: [], allow: { files: [], create: [] }, ownerBoundary: expect.objectContaining({ kind: "frozen_unit" }) })])
+    expect(jobs[0]?.trigger.finding).toContain('import { InfiniteAnalyticsClient } from "../lib/infinite-analytics-client"')
+    expect(jobs[0]?.trigger.finding).toContain("<InfiniteAnalyticsClient />")
+    expect(readInstallManifest(root)?.requiresManual).toEqual(expect.arrayContaining([expect.objectContaining({ path: "app/layout.tsx" })]))
+  })
 
   it("Vite with no </head>: the installer returns the open job and the provider is not reported live", async () => {
     const root = makeSite({ "package.json": VITE_PACKAGE, "index.html": VITE_NO_HEAD, "vercel.json": "{}\n" })

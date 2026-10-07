@@ -66,6 +66,18 @@ function linesFor(files: Record<string, string>, framework = "static-html", keys
 const edit = (root: string, line: Parameters<typeof applyImproveEdit>[0]["line"], overrides: Partial<Parameters<typeof applyImproveEdit>[0]> = {}) =>
   applyImproveEdit({ root, appRoot: ".", framework: "static-html", line, keys: fakeKeys(), consentMode: "not_required", runId: IDS.run, vercelServed: true, ...overrides })
 
+it("refuses deterministic capture and autoconfig writes before touching a consent-bearing page", () => {
+  const original = ADOPTED_META_HTML.replace("<head>", "<head>\n<script>fbq?.('consent','revoke');</script>")
+  const { root, lines } = linesFor({ "index.html": original })
+  const writes = lines.filter(line => line.kind === "capture_beside_adopted_pixel" || line.kind === "autoconfig_off_adopted")
+  expect(writes).toHaveLength(2)
+  for (const line of writes) {
+    const result = edit(root, line)
+    expect(result).toMatchObject({ ok: false, ownerRequirement: { path: "index.html", ownerBoundary: { kind: "frozen_unit" } } })
+    expect(read(root, "index.html")).toBe(original)
+  }
+})
+
 describe("improve lines for adopted tags (decision 4: optimise in place, never reinstall)", () => {
   it("adopted PostHog → proxy and defaults-bump lines (a separate line each), a preview-guard line, never an install", () => {
     const { lines } = linesFor({ "index.html": ADOPTED_POSTHOG_HTML })

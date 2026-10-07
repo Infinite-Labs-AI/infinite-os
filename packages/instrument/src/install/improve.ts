@@ -21,12 +21,13 @@ import { join } from "node:path"
 
 import { resolveVercelJsonContents, VERCEL_CONFIG_FILE } from "../frameworks/vercel-config.js"
 import { writeFileAtomic } from "../frameworks/shared.js"
+import { ownerWiringRequirement, policyWiringRequirement } from "../frameworks/owner-boundary.js"
 import { readPosthogOption } from "../inspect.js"
 import { buildMetaClickIdCaptureScript, META_CLICK_ID_ACCESSOR } from "../providers/meta-browser/click-id.js"
 import { escapeForTemplateLiteral } from "../text-escape.js"
 import { checkMetaAutoConfigOptOut, type MetaAutoConfigVerdict } from "../providers/meta-browser/autoconfig.js"
 import type { DetectedProviderEvidence } from "../harness/inspect.js"
-import type { ImproveLine, ImproveLineKind, PosthogProxySpec, ProviderId } from "../types.js"
+import type { ImproveLine, ImproveLineKind, PosthogProxySpec, ProviderId, ManualRequirement } from "../types.js"
 import { DEFAULT_POSTHOG_PROXY_PATH } from "../workspace-artifacts.js"
 import type { TagKeys } from "../wizard/contracts/bridge.js"
 
@@ -454,7 +455,7 @@ export interface ImproveEditInput {
 
 export type ImproveEditResult =
   | { ok: true; record: EditRecord | null }
-  | { ok: false; reason: string }
+  | { ok: false; reason: string; ownerRequirement?: ManualRequirement }
 
 const repoRelative = (appRoot: string, file: string): string => (appRoot === "." ? file : `${appRoot}/${file}`)
 
@@ -476,8 +477,10 @@ function proxySpecFor(keys: TagKeys, adoptedApiHost: string | null): PosthogProx
   }
 }
 
-function writeWithRecord(input: ImproveEditInput, file: string, before: string | null, after: string): ImproveEditResult {
+function writeWithRecord(input: ImproveEditInput, file: string, before: string | null, after: string, snippet: string): ImproveEditResult {
   if (before === after) return { ok: true, record: null }
+  const ownerRequirement = ownerWiringRequirement(file, before, after, snippet, input.appRoot)
+  if (ownerRequirement) return { ok: false, reason: ownerRequirement.reason, ownerRequirement }
   writeFileAtomic(join(input.root, file), after)
   return {
     ok: true,
@@ -508,13 +511,15 @@ function applyNextCapture(input: ImproveEditInput, appRootAbsolute: string, evid
   const open = `<${element.name} id="infinite-meta-click-id"${strategy ? ` strategy="${strategy}"` : ""}>`
   const block = `${CAPTURE_JSX_MARKER}\n${indent}${open}\n${indent}  {\`${capture}\`}\n${indent}</${element.name}>\n${indent}`
   const after = before.slice(0, element.start) + block + before.slice(element.start)
-  return writeWithRecord(input, file, before, after)
+  return writeWithRecord(input, file, before, after, block)
 }
 
 /** Applies ONE approved code-owned improve line. Anything else is refused with the reason. */
 export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
   const { line } = input
   if (line.owner !== "code") return { ok: false, reason: `${line.id} is an agent job, not a code edit` }
+  const policy = line.evidence ? policyWiringRequirement(repoRelative(input.appRoot, line.evidence.file), "", input.appRoot) : null
+  if (policy) return { ok: false, reason: policy.reason, ownerRequirement: policy }
   const appRootAbsolute = input.appRoot === "." ? input.root : join(input.root, input.appRoot)
 
   if (line.kind === "improve_additive" && line.provider === "posthog" && line.target === "proxy") {
@@ -534,7 +539,7 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     } catch (error) {
       return { ok: false, reason: error instanceof Error ? error.message : String(error) }
     }
-    return writeWithRecord(input, file, before, after)
+    return writeWithRecord(input, file, before, after, after)
   }
 
   if (line.kind === "capture_beside_adopted_pixel" && line.provider === "meta" && line.evidence && /\.[cm]?[jt]sx$/.test(line.evidence.file)) {
@@ -559,7 +564,7 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     const capture = buildMetaClickIdCaptureScript({ gate: { kind: "infinite-consent", mode: input.consentMode } })
     const block = `${CAPTURE_BLOCK_MARKER}\n${indent}<script>\n${capture}\n${indent}</script>\n${indent}`
     const after = before.slice(0, scriptStart) + block + before.slice(scriptStart)
-    return writeWithRecord(input, file, before, after)
+    return writeWithRecord(input, file, before, after, block)
   }
 
   if (line.kind === "autoconfig_off_adopted" && line.provider === "meta") {
@@ -584,7 +589,7 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     const prefix = before.slice(lineStart, at).trim() === "" ? "" : "\n" + indent
     const insertion = `fbq('set', 'autoConfig', false, '${pixelId}');${prefix === "" ? `\n${indent}` : " "}`
     const after = before.slice(0, at) + insertion + before.slice(at)
-    return writeWithRecord(input, file, before, after)
+    return writeWithRecord(input, file, before, after, insertion.trim())
   }
 
   return { ok: false, reason: `${line.id} has no code edit` }

@@ -49,8 +49,10 @@ async function fbcCapture(layout: string) {
 const PACKAGE = JSON.stringify({ dependencies: { next: "16.0.0", react: "19.0.0" } })
 
 describe("LF4-P2: the capture beside run 4's Next <Script> pixel is a code edit, graded on the page it writes", () => {
-  it("run 4's layout: the plan line is code-owned, the edit writes the capture before the pixel, and the real T0 engine passes it", async () => {
-    const root = site({ "package.json": PACKAGE, "app/layout.tsx": BASE })
+  it("an editable layout gets the capture before the pixel and the real T0 engine passes it", async () => {
+    // A separate positive fixture has no inline owner consent unit. The original below stays frozen.
+    const editable = BASE.replace(/\s*<Script id="consent-default"[\s\S]*?<\/Script>/, "")
+    const root = site({ "package.json": PACKAGE, "app/layout.tsx": editable })
     const { facts, line } = captureLine(root)
     expect(facts.meta[0]).toMatchObject({ nextScript: true, executable: true })
     expect(line.owner).toBe("code")
@@ -60,13 +62,20 @@ describe("LF4-P2: the capture beside run 4's Next <Script> pixel is a code edit,
     expect(after).toContain(CAPTURE_JSX_MARKER)
     expect(after.indexOf('<Script id="infinite-meta-click-id" strategy="afterInteractive">')).toBeLessThan(after.indexOf('<Script id="meta-pixel"'))
     // The pixel's own element is byte-for-byte unchanged.
-    expect(after).toContain(BASE.slice(BASE.indexOf('<Script id="meta-pixel"'), BASE.indexOf("</head>")))
+    expect(after).toContain(editable.slice(editable.indexOf('<Script id="meta-pixel"'), editable.indexOf("</head>")))
     expect(await fbcCapture(after)).toMatchObject({ state: "pass" })
     // NEGATIVE: the base layout has no capture.
-    expect(await fbcCapture(BASE)).toMatchObject({ state: "problem" })
+    expect(await fbcCapture(editable)).toMatchObject({ state: "problem" })
     // The record reverses to the exact original bytes; a second apply changes nothing.
-    expect(result.ok && result.record && reverseTextEdits(after, result.record.textEdits)).toBe(BASE)
+    expect(result.ok && result.record && reverseTextEdits(after, result.record.textEdits)).toBe(editable)
     expect(applyImproveEdit({ root, appRoot: ".", framework: "next-app-router", line, keys: fakeKeys(), consentMode: "not_required", runId: IDS.run, vercelServed: true })).toEqual({ ok: true, record: null })
+  })
+
+  it("leaves the original inline-consent layout byte-identical instead of inserting a capture into its frozen unit", () => {
+    const root = site({ "package.json": PACKAGE, "app/layout.tsx": BASE })
+    const { line } = captureLine(root)
+    expect(applyImproveEdit({ root, appRoot: ".", framework: "next-app-router", line, keys: fakeKeys(), consentMode: "not_required", runId: IDS.run, vercelServed: true })).toMatchObject({ ok: false, ownerRequirement: { ownerBoundary: { kind: "frozen_unit" } } })
+    expect(readFileSync(join(root, "app/layout.tsx"), "utf8")).toBe(BASE)
   })
 
   it("NEGATIVE: a CMP-held <Script> pixel stays the agent's (the capture must wait for the same consent), and a forced edit refuses", () => {

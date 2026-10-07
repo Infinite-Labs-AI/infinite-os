@@ -1,8 +1,9 @@
 import { readFileSync, readdirSync, type Dirent } from "node:fs"
 import { join } from "node:path"
 
-import type { FrameworkAdapter, InstallInstruction } from "../types.js"
+import type { FrameworkAdapter, InstallInstruction, ManualRequirement } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
+import { ownerWiringRequirement, policyWiringRequirement } from "./owner-boundary.js"
 
 import {
   fileExists,
@@ -68,6 +69,7 @@ export const staticHtmlAdapter: FrameworkAdapter = {
       // A single missing tag anywhere blocks the whole plan so no page is silently skipped.
       // (Domain-verification token files are not pages: findHtmlPages never lists them.)
       for (const page of pages) {
+        if (policyWiringRequirement(page, "")) continue
         if (!readRequiredFile(root, page).includes("</head>")) {
           blockers.push(missingHeadMessage(page))
         }
@@ -92,7 +94,7 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     const pageAssumptions = [
       ...(pages.length > 1
         ? [
-            `Static HTML wiring injects the managed analytics block into every discovered page: ${pages.join(", ")}.`
+            `Static HTML wiring targets discovered pages; privacy/terms pages and consent-bearing source stay owner-only: ${pages.join(", ")}.`
           ]
         : [
             "Static HTML wiring uses direct public snippets rather than framework-specific runtime hooks."
@@ -144,21 +146,26 @@ export const staticHtmlAdapter: FrameworkAdapter = {
 
     const changedFiles: string[] = []
     const configOwnership = {}
+    const requiresManual: ManualRequirement[] = []
     for (const page of pages) {
+      const path = normalizeAppRelativePath(context.appRoot, page)
+      const policy = policyWiringRequirement(path, managedBlock, context.appRoot)
+      if (policy) { requiresManual.push(policy); continue }
       const html = readRequiredFile(appRoot, page)
       if (!html.includes("</head>")) {
         throw new Error(missingHeadMessage(page))
       }
 
       const nextHtml = upsertManagedHtmlBlock(html, managedBlock)
-
-      if (writeFileIfChanged(appRoot, page, nextHtml)) {
+      const manual = ownerWiringRequirement(path, html, nextHtml, managedBlock, context.appRoot)
+      if (manual) requiresManual.push(manual)
+      else if (writeFileIfChanged(appRoot, page, nextHtml)) {
         changedFiles.push(normalizeAppRelativePath(context.appRoot, page))
       }
     }
 
     // vercel.json is written exactly ONCE, outside the per-page loop.
-    const warnings: string[] = []
+    const warnings: string[] = requiresManual.map(requirement => requirement.reason)
     const proxy = {
       posthog: context.plan.artifacts.posthog?.proxy,
       infinite: infiniteProxySpec(context.plan.artifacts.infinite)
@@ -184,7 +191,8 @@ export const staticHtmlAdapter: FrameworkAdapter = {
     return {
       changedFiles,
       warnings,
-      configOwnership
+      configOwnership,
+      ...(requiresManual.length ? { requiresManual } : {})
     }
   },
   uninstall(context) {

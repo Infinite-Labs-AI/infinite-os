@@ -39,6 +39,7 @@ import type {
   ImproveLine,
   InspectResult,
   InstallManifest,
+  ManualRequirement,
   ProviderId,
   SupportedFramework,
   WorkspaceInstallArtifacts
@@ -188,6 +189,8 @@ function cacheEditBefores(root: string, records: readonly WizardEditRecord[]): v
 }
 
 export interface WizardApplyResult extends InstallerApplyResult {
+  /** Deterministic edits refused before writing owner source; never dispatched to a worker. */
+  ownerRequirements?: ManualRequirement[]
   /** Repo-root-relative files written this run (managed + improve + npm), for the status line. */
   changedFiles: string[]
   warnings: string[]
@@ -552,6 +555,7 @@ export class WizardInstaller implements Installer {
     const edits: WizardEditRecord[] = []
     const changedFiles: string[] = []
     let openJobs: string[] = []
+    const ownerRequirements: ManualRequirement[] = []
     let seq = 0
     try {
       // 1. the managed install (the harness's own apply + static verification + rollback)
@@ -563,7 +567,8 @@ export class WizardInstaller implements Installer {
         }
         changedFiles.push(...(applied.applyResult?.changedFiles ?? []))
         warnings.push(...(applied.applyResult?.warnings ?? []))
-        openJobs = applied.openJobs.map((requirement) => requirement.path)
+        ownerRequirements.push(...applied.openJobs.filter(requirement => requirement.ownerBoundary))
+        openJobs = applied.openJobs.filter(requirement => !requirement.ownerBoundary).map((requirement) => requirement.path)
         // A file an EARLIER run's recorded edits live in, changed by this run's managed re-render: that
         // change is recorded too, so uninstall (newest first) walks back through it to the earlier
         // edits instead of finding them "changed since" (P1-3).
@@ -590,6 +595,7 @@ export class WizardInstaller implements Installer {
           vercelServed: served.vercelServed
         })
         if (!result.ok) {
+          if (result.ownerRequirement) ownerRequirements.push(result.ownerRequirement)
           warnings.push(`${entry.id}: not changed — ${result.reason}`)
           continue
         }
@@ -643,6 +649,7 @@ export class WizardInstaller implements Installer {
         rolledBack: false,
         edits,
         openJobs,
+        ...(ownerRequirements.length ? { ownerRequirements } : {}),
         changedFiles: [...new Set(changedFiles)],
         warnings,
         reason: null,

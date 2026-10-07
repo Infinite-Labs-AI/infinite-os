@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { readInstallManifest } from "./manifest.js"
-import type { VerifyResult } from "./types.js"
+import type { VerifyResult, ManualRequirement } from "./types.js"
 
 export interface VerifyInstallationOptions {
   root: string
@@ -113,8 +113,9 @@ export function verifyInstallation(options: VerifyInstallationOptions): VerifyRe
  */
 function manualRequirementSatisfied(
   root: string,
-  requirement: { path: string; snippet: string }
+  requirement: ManualRequirement
 ): boolean {
+  if (requirement.ownerBoundary?.kind === "policy_page") return false
   const absolutePath = join(root, requirement.path)
   if (!existsSync(absolutePath)) return false
   const contents = readFileSync(absolutePath, "utf8")

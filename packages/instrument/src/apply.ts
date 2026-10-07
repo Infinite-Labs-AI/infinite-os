@@ -111,14 +111,16 @@ export function applyInstallation(options: ApplyInstallationOptions): ApplyResul
       ...(serverLaneResult?.configOwnership ?? {})
     }
     const requiresManual = frameworkResult.requiresManual ?? []
+    const ownerFiles = new Set(requiresManual.filter(requirement => requirement.ownerBoundary).map(requirement => requirement.path))
+    const managedFiles = options.plan.files.filter(file => !ownerFiles.has(file))
     const manifest: InstallManifest = {
       workspaceId: options.workspaceId,
       appRoot: options.plan.appRoot,
       framework: options.plan.framework as SupportedFramework,
       providers: options.plan.providers as ProviderId[],
-      files: options.plan.files,
+      files: managedFiles,
       envKeys: options.plan.envKeys,
-      contentHashes: computeContentHashes(options.root, options.plan.files),
+      contentHashes: computeContentHashes(options.root, managedFiles),
       ...(Object.keys(configOwnership).length > 0 ? { configOwnership } : {}),
       ...(serverLaneResult ? { serverLane: serverLaneResult.manifest } : {}),
       // The `requires_manual_snippet` state: recorded WITH the snippet so verify can later confirm the

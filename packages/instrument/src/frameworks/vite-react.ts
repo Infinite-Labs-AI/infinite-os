@@ -8,6 +8,7 @@
 // tarpit (comments, templates, type-only imports, aliases, lexical shadows), and index.html injection
 // has no entrypoint surface to get wrong.
 import { join } from "node:path"
+import { ownerWiringRequirement } from "./owner-boundary.js"
 
 import type { FrameworkAdapter, InstallInstruction, ManualRequirement } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
@@ -149,7 +150,9 @@ export const viteReactAdapter: FrameworkAdapter = {
       const html = readRequiredFile(appRoot, INDEX_HTML)
       if (indexHtmlCanInject(html)) {
         const nextHtml = upsertManagedHtmlBlock(html, managedBlock)
-        if (writeFileIfChanged(appRoot, INDEX_HTML, nextHtml)) {
+        const manual = ownerWiringRequirement(indexRootRelative, html, nextHtml, managedBlock, context.appRoot)
+        if (manual) { requiresManual.push(manual); warnings.push(manual.reason) }
+        else if (writeFileIfChanged(appRoot, INDEX_HTML, nextHtml)) {
           changedFiles.push(indexRootRelative)
         }
       } else {

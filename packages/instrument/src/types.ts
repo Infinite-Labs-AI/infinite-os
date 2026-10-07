@@ -174,6 +174,8 @@ export interface ManualRequirement {
   reason: string
   /** The exact lines to add by hand. */
   snippet: string
+  /** The installer itself refused this source edit; it is never delegated to a worker. */
+  ownerBoundary?: { kind: "frozen_unit" | "policy_page"; file: string; line: number; unitHash?: string; lineOffset?: number; unitOrdinal?: number }
 }
 
 export interface ApplyResult {

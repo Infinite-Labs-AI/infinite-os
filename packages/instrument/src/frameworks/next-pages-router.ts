@@ -3,6 +3,7 @@ import { join } from "node:path"
 
 import type { FrameworkAdapter } from "../types.js"
 import { infiniteProxySpec } from "../workspace-artifacts.js"
+import { ownerWiringRequirement } from "./owner-boundary.js"
 
 import {
   buildAnalyticsModuleSource,
@@ -159,7 +160,8 @@ export const nextPagesRouterAdapter: FrameworkAdapter = {
 
     const changedFiles: string[] = []
     const configOwnership = {}
-    if (writeFileIfChanged(appRoot, appFilePath, nextApp)) {
+    const manual = ownerWiringRequirement(normalizeAppRelativePath(context.appRoot, appFilePath), currentApp, nextApp, `${clientImportLine}\n\n${clientTag}`, context.appRoot)
+    if (!manual && writeFileIfChanged(appRoot, appFilePath, nextApp)) {
       changedFiles.push(normalizeAppRelativePath(context.appRoot, appFilePath))
     }
     if (writeFileIfChanged(appRoot, clientComponentPath, nextClientComponent)) {
@@ -191,7 +193,8 @@ export const nextPagesRouterAdapter: FrameworkAdapter = {
 
     return {
       changedFiles,
-      warnings: [],
+      warnings: manual ? [manual.reason] : [],
+      ...(manual ? { requiresManual: [manual] } : {}),
       configOwnership
     }
   },

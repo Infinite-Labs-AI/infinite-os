@@ -54,7 +54,7 @@ afterEach(() => {
 })
 
 describe("static-html multi-page instrumentation", () => {
-  it("injects the managed block into every discovered page and ignores build/vendor/hidden dirs", () => {
+  it("injects the managed block into ordinary pages and leaves policy/build/vendor/hidden paths alone", () => {
     const root = copyFixture("static-html-multipage")
     // HTML that must NOT be instrumented (generated output, third-party, hidden).
     writeNestedFile(
@@ -83,11 +83,10 @@ describe("static-html multi-page instrumentation", () => {
     expect(applied.changedFiles).toEqual([
       "index.html",
       "about.html",
-      "privacy/index.html",
       installManifestRelativePath
     ])
 
-    for (const page of ["index.html", "about.html", "privacy/index.html"]) {
+    for (const page of ["index.html", "about.html"]) {
       const html = readFileSync(join(root, page), "utf8")
       expect(html).toContain("<!-- infinite:start -->")
       expect(html).toContain("G-TEST123")
@@ -99,6 +98,7 @@ describe("static-html multi-page instrumentation", () => {
 
     // Excluded pages remain untouched.
     for (const excluded of [
+      "privacy/index.html",
       "node_modules/pkg/index.html",
       "dist/index.html",
       ".cache/index.html"
@@ -108,7 +108,7 @@ describe("static-html multi-page instrumentation", () => {
 
     // The manifest records every instrumented page, and verify passes over all of them.
     const manifest = JSON.parse(readFileSync(join(root, installManifestRelativePath), "utf8"))
-    expect(manifest.files).toEqual(["index.html", "about.html", "privacy/index.html"])
+    expect(manifest.files).toEqual(["index.html", "about.html"])
     const verify = verifyInstallation({ root })
     expect(verify.buildOk).toBe(true)
   })
@@ -160,7 +160,7 @@ describe("static-html multi-page instrumentation", () => {
     applyInstallation({ root, workspaceId: "ws_test", plan })
 
     const result = uninstallInstallation({ root })
-    expect(result.restoredFiles).toEqual(["index.html", "about.html", "privacy/index.html"])
+    expect(result.restoredFiles).toEqual(["index.html", "about.html"])
 
     const after = ["index.html", "about.html", "privacy/index.html"].map((p) =>
       readFileSync(join(root, p), "utf8")
@@ -172,8 +172,8 @@ describe("static-html multi-page instrumentation", () => {
   it("blocks the whole plan when any page is missing </head>, naming that page", () => {
     const root = copyFixture("static-html-multipage")
     writeFileSync(
-      join(root, "privacy/index.html"),
-      "<!doctype html>\n<html><body><h1>Privacy</h1></body></html>\n"
+      join(root, "about.html"),
+      "<!doctype html>\n<html><body><h1>About</h1></body></html>\n"
     )
 
     const plan = planInstallation({
@@ -185,7 +185,7 @@ describe("static-html multi-page instrumentation", () => {
 
     expect(plan.applyMode).toBe("plan-only")
     expect(plan.blockers).toContain(
-      "Static HTML apply requires a closing </head> tag in privacy/index.html."
+      "Static HTML apply requires a closing </head> tag in about.html."
     )
     expect(() =>
       applyInstallation({
@@ -237,7 +237,6 @@ describe("static-html posthog reverse proxy (vercel.json)", () => {
     expect(applied.changedFiles).toEqual([
       "index.html",
       "about.html",
-      "privacy/index.html",
       "vercel.json",
       installManifestRelativePath
     ])
@@ -254,7 +253,6 @@ describe("static-html posthog reverse proxy (vercel.json)", () => {
     expect(manifest.files).toEqual([
       "index.html",
       "about.html",
-      "privacy/index.html",
       "vercel.json"
     ])
     expect(verifyInstallation({ root }).buildOk).toBe(true)

@@ -8,6 +8,7 @@
 import { createHash } from "node:crypto"
 
 import type { WizardApplyResult } from "../../install/installer.js"
+import type { ManualRequirement } from "../../types.js"
 import { DECISION_LINE_IDS } from "../../install/plan-model.js"
 import { bridgeErrorCode, keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates } from "../../install/step-inputs.js"
 import { bridgeFailureLine, bridgeFailureOutcome, bridgeFailureState, hardStopOutcome } from "../../bridge/outcomes.js"
@@ -122,6 +123,21 @@ export function openLayoutJobs(paths: readonly string[], existing: readonly Chec
       state: "pending"
     }))
     .filter((item) => !existing.some((other) => other.id === item.id))
+}
+
+/** Known installer proposals held at the owner boundary are information, never worker tasks. */
+export function ownerLayoutJobs(requirements: readonly ManualRequirement[]): ChecklistItem[] {
+  const byPath = new Map<string, ManualRequirement[]>()
+  for (const requirement of requirements) if (requirement.ownerBoundary) byPath.set(requirement.path, [...byPath.get(requirement.path) ?? [], requirement])
+  return [...byPath].map(([path, entries]) => {
+    const first = entries[0]!
+    const wiring = [...new Set(entries.map(entry => entry.snippet).filter(Boolean))].join("\n\n")
+    const note = first.reason
+    return { id: `unusual_layout:${path}`, jobId: "unusual_layout", n: JOB_TABLE.unusual_layout.n,
+      title: `Analytics wiring left for you: ${path}`, owner: "code", state: "left_for_you", checks: [], allow: { files: [], create: [] }, note,
+      ownerBoundary: { ...first.ownerBoundary!, ...(wiring ? { wiring } : {}) },
+      trigger: { finding: `${note}${wiring ? `\n\nFor you to copy into ${path}; preserve your consent code. The wizard did not add this wiring.\n\n\`\`\`js\n${wiring}\n\`\`\`` : ""}`, evidence: [{ file: path, line: first.ownerBoundary!.line }] } }
+  })
 }
 
 /** The item id of the rewrite job for the user's own Next config (review I1 P1-2). */
@@ -342,12 +358,15 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     plan,
     savedApprovals.approvals
   )
+  const ownerJobs = ownerLayoutJobs(result.ownerRequirements ?? [])
+  for (const job of ownerJobs) sub(ctx, job.trigger.finding, "info")
   for (const deferred of result.deferredConfigRewrites ?? []) {
     sub(ctx, `Your own ${deferred.path} is left as it is: the agent adds Infinite's collect rewrite there (the wizard checks it)`, "info")
   }
-  if (openJobs.length > 0 || result.edits.length > 0) {
+  if (openJobs.length > 0 || ownerJobs.length > 0 || result.edits.length > 0) {
     ctx.state.update((current) => {
-      current.jobs = [...current.jobs, ...openJobs]
+      const ownerIds = new Set(ownerJobs.map(job => job.id))
+      current.jobs = [...current.jobs.filter(job => !ownerIds.has(job.id)), ...openJobs.filter(job => !ownerIds.has(job.id)), ...ownerJobs]
     })
     await ctx.state.save()
   }
@@ -357,7 +376,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const files = result.changedFiles?.length ?? result.edits.length
   const build = result.build === "passed" ? "build passes" : result.build === "failed_baseline" ? "build was already red" : "build not checked yet"
   const open = result.openJobs.length > 0 ? ` · ${result.openJobs.length} file${result.openJobs.length === 1 ? "" : "s"} need${result.openJobs.length === 1 ? "s" : ""} the agent (not live yet)` : ""
-  return { kind: "ok", status: `${files} file${files === 1 ? "" : "s"} written · ${build}${open}` }
+  return { kind: "ok", status: `${files} file${files === 1 ? "" : "s"} written · ${build}${open}${ownerJobs.length ? ` · ${ownerJobs.length} owner-only wiring step${ownerJobs.length === 1 ? "" : "s"} left for you` : ""}` }
 }
 
 export const step: WizardStep<"install"> = {
