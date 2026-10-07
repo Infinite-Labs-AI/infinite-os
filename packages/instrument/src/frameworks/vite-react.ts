@@ -147,7 +147,7 @@ export const viteReactAdapter: FrameworkAdapter = {
       const html = readRequiredFile(appRoot, INDEX_HTML)
       if (indexHtmlCanInject(html)) {
         const nextHtml = upsertManagedHtmlBlock(html, managedBlock)
-        const manual = ownerWiringRequirement(indexRootRelative, html, nextHtml, managedBlock, context.appRoot, [managedBlock])
+        const manual = ownerWiringRequirement(indexRootRelative, html, nextHtml, managedBlock, context.appRoot)
         if (manual) { requiresManual.push(manual); warnings.push(manual.reason) }
         else {
           recordGeneratedApi(context.root, indexRootRelative, managedBlock)

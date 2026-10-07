@@ -5,7 +5,6 @@ import { join } from "node:path"
 import { git } from "../agents/git-exec.js"
 import { restoreFrozenUnits } from "./consent-units.js"
 import { isPolicyPath } from "./owner-boundary.js"
-import { generatedApiTexts } from "./generated-api.js"
 
 export interface OwnerBoundaryMeasurement {
   state: "checked" | "changed" | "not_checked"
@@ -71,10 +70,7 @@ export async function measureOwnerDiff(input: { root: string; baseSha: string; r
     if ([before, after].some(bytes => bytes && (bytes.includes(0) || !Buffer.from(bytes.toString("utf8"), "utf8").equals(bytes)))) {
       measurement.state = "not_checked"; fail(path, "the changed source could not be decoded"); continue
     }
-    let trustedGenerated: string[]
-    try { trustedGenerated = generatedApiTexts(input.root, path) }
-    catch { measurement.state = "not_checked"; fail(path, "the trusted generated-code record could not be read"); continue }
-    const comparison = restoreFrozenUnits(before?.toString("utf8") ?? "", after?.toString("utf8") ?? "", { trustedGenerated })
+    const comparison = restoreFrozenUnits(before?.toString("utf8") ?? "", after?.toString("utf8") ?? "")
     if (comparison.changes.length > 0) { measurement.state = "changed"; fail(path, "a consent-bearing top-level unit differs from the recorded base") }
   }
   return measurement

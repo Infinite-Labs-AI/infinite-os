@@ -154,7 +154,7 @@ export const staticHtmlAdapter: FrameworkAdapter = {
       }
 
       const nextHtml = upsertManagedHtmlBlock(html, managedBlock)
-      const manual = ownerWiringRequirement(path, html, nextHtml, managedBlock, context.appRoot, [managedBlock])
+      const manual = ownerWiringRequirement(path, html, nextHtml, managedBlock, context.appRoot)
       if (manual) requiresManual.push(manual)
       else {
         recordGeneratedApi(context.root, path, managedBlock)
