@@ -239,7 +239,7 @@ describe("ONE count of the agent jobs (P2-8)", () => {
     expect(planApproved).toBeGreaterThan(0)
   })
 
-  it("legacy per-line declines do not reduce repository work on continue", () => {
+  it("an explicit exclusion lowers the running count and never seeds the declined job", () => {
     const input = world()
     const plan = buildPlanModel(input)
     const duplicateLine = plan.lines.find((line) => line.kind === "remove_duplicate")!
@@ -248,7 +248,14 @@ describe("ONE count of the agent jobs (P2-8)", () => {
     const less = resolvePlanAnswers(plan, { approved: all.filter((id) => id !== duplicateLine.id), declined: [duplicateLine.id], edits: { consent_mode: "not_required" } }, { consentFlag: null })
     const fullN = agentJobsAfterApprovals(input.candidates, plan.seeds, plan, full.approvals).length
     const lessN = agentJobsAfterApprovals(input.candidates, plan.seeds, plan, less.approvals).length
-    expect(lessN).toBe(fullN)
+    expect(lessN).toBe(fullN - 1)
+    const seeded = seedItemsAfterApprovals(input.candidates, plan.seeds, plan, less.approvals, less.lines)
+    for (const id of duplicateLine.jobIds ?? []) expect(seeded.map(item => item.id)).not.toContain(id)
+    expect(duplicateLine.jobIds).toHaveLength(1)
+    expect(runnableAgentJobs(seeded)).toHaveLength(lessN)
+    const jobsStep = seeded.filter(item => item.owner === "agent" && (item.state === "pending" || item.state === "claimed")).length
+    expect(jobsStep).toBe(lessN)
+    expect(budgetN(plan)).toBe(fullN) // The shown budget remains an upper bound before exclusions.
   })
 })
 
