@@ -1125,11 +1125,14 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
 
     // Nothing secret reached gh (argv or stdin) or the terminal events.
     const traffic = w.gh.traffic()
-    for (const secret of [STRIPE, FAKE_BRIDGE_TOKEN, "jane.doe@acme-store.com", "555-0132"]) {
+    for (const secret of [STRIPE, FAKE_BRIDGE_TOKEN, "jane.doe@acme-store.com"]) {
       expect(traffic).not.toContain(secret)
       expect(eventText(w.ctx)).not.toContain(secret)
     }
+    // Phone data and public ids stay readable; the .env value, bridge token and email stay redacted.
+    expect(traffic).toContain("+1 (415) 555-0132")
     expect(traffic).toContain(PIXEL_ID)
+    for (const kind of ["env_value", "bridge_token", "email"]) expect(traffic).toContain(`[redacted: ${kind}]`)
 
     const state = w.gh.read()
     const reviewCalls = state.calls.filter((call) => call.stdin?.includes("addPullRequestReview(input"))
