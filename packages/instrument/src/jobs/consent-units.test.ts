@@ -4,6 +4,7 @@ import { renderInfiniteBrowserTag } from "../runtime/infinite-browser.js"
 import { buildGa4BootstrapSnippet } from "../providers/ga4.js"
 import { buildPostHogBootstrapSnippet } from "../providers/posthog.js"
 import { buildMetaClickIdCaptureTypescript } from "../providers/meta-browser/click-id.js"
+import { ADOPTED_META_HTML } from "../../test/wizard/o7-fakes.js"
 
 it("does not confuse real newly emitted analytics modules with edits to the owner's consent units", () => {
   const scripts = [
@@ -148,4 +149,72 @@ it.each([
   const result = restoreFrozenUnits("", addition + "\n")
   expect(result.text).toBe("")
   expect(result.changes.length).toBeGreaterThan(0)
+})
+
+it.each([
+  "<html><head>\n<script>window.fbq = function () { return 1; };</script>\n</head></html>\n",
+  ADOPTED_META_HTML,
+])("allows an independent HTML loader beside an unchanged owner bootstrap", before => {
+  const after = before.replace("<head>", '<head>\n<script src="/infinite-meta-capture.js"></script>')
+  expect(sourceUnits(before).confident).toBe(false)
+  const result = restoreFrozenUnits(before, after)
+  expect(result.text).toBe(after)
+  expect(result.changes).toEqual([])
+})
+
+it.each([
+  "window.fbq =\n  realPixel;\n",
+  "Object.defineProperty(window, 'fbq', {\n  value: realPixel,\n});\n",
+])("restores an API continuation changed inside an existing HTML script: %s", body => {
+  const before = `<html><head>\n<script>\n${body}</script>\n</head></html>\n`
+  const result = restoreFrozenUnits(before, before.replace("realPixel", "fakePixel"))
+  expect(result.text).toBe(before)
+  expect(result.changes.length).toBeGreaterThan(0)
+})
+
+it("does not exempt a duplicate copy or an attribute change of an existing API script", () => {
+  const script = '<script type="module">window.fbq = () => {};</script>\n'
+  const before = `<html><head>\n${script}</head></html>\n`
+  for (const after of [before.replace("</head>", script + "</head>"), before.replace('type="module"', 'type="text/javascript"')]) {
+    const result = restoreFrozenUnits(before, after)
+    expect(result.text).toBe(before)
+    expect(result.changes.length).toBeGreaterThan(0)
+  }
+})
+
+it("still freezes consent-bearing HTML and newly added API writes beside an unchanged bootstrap", () => {
+  const withConsent = ADOPTED_META_HTML.replace("fbq('init'", "fbq('consent', 'revoke');\n      fbq('init'")
+  const cases = [
+    [withConsent, withConsent.replace("<head>", '<head>\n<script src="/capture.js"></script>')],
+    [ADOPTED_META_HTML, ADOPTED_META_HTML.replace("</head>", "<script>window.fbq = () => {};</script>\n</head>")],
+  ]
+  for (const [before, after] of cases) {
+    const result = restoreFrozenUnits(before!, after!)
+    expect(result.text).toBe(before)
+    expect(result.changes.length).toBeGreaterThan(0)
+  }
+})
+
+it("allows an independent init guard inside the owner script while its complete bootstrap line stays unchanged", () => {
+  const after = ADOPTED_META_HTML.replace("fbq('init'", "if (location.hostname === 'example.test') fbq('init'")
+  const result = restoreFrozenUnits(ADOPTED_META_HTML, after)
+  expect(result.text).toBe(after)
+  expect(result.changes).toEqual([])
+})
+
+it("allows a JSX sibling mount beside an unchanged static API import", () => {
+  const before = "import posthog from 'posthog-js'\nexport default function App() { return <main />; }\n"
+  const after = before.replace("<main />", "<><main /><Analytics /></>")
+  const result = restoreFrozenUnits(before, after)
+  expect(result.text).toBe(after)
+  expect(result.changes).toEqual([])
+})
+
+it("keeps added API assignments and parameters forbidden beside a preserved TSX import", () => {
+  const before = "import posthog from 'posthog-js'\nexport default function App() { return <main />; }\n"
+  for (const addition of ["window.fbq = () => {};", "const helper = (posthog) => {};", "const helper = fbq => {};"]) {
+    const result = restoreFrozenUnits(before, before + addition + "\n")
+    expect(result.text).toBe(before)
+    expect(result.changes.length).toBeGreaterThan(0)
+  }
 })

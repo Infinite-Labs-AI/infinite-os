@@ -19,6 +19,7 @@ const API_WRITE_PATTERNS = [
   apiWritePattern(`\\b(?:const|let|var|function|class|interface|type|enum|namespace)\\s+(?:${API_WORD}\\b|[\\[{][^;=]*\\b${API_WORD}\\b)`),
   apiWritePattern(`\\b(?:const|let|var)\\b[^;]*?,\\s*${API_TARGET}(?=\\s*[,;=:)}])`),
   apiWritePattern(`\\bfunction\\b[^;{}(]*\\([^;)]*\\b${API_WORD}\\b`),
+  apiWritePattern(`(?:\\([^;()]*\\b${API_WORD}\\b[^;()]*\\)|\\b${API_WORD}\\b)\\s*(?::[^;=]*)?=>`),
   // Match binding clauses, never an exported function's body or an options-object closing brace.
   apiWritePattern(`\\bimport\\s+(?=[^;()]*\\b${API_WORD}\\b[^;()]*\\bfrom\\b)(?:type\\s+)?(?:[\\w$]+\\s*,?\\s*)?(?:\\{[^}]*\\}|\\*\\s+as\\s+[\\w$]+)?\\s*from\\b`),
   apiWritePattern(`\\bexport\\s+(?:type\\s+)?(?:\\{[^}]*\\b${API_WORD}\\b[^}]*\\}|\\*\\s+as\\s+${API_WORD}\\b)`),
@@ -262,19 +263,44 @@ export interface FrozenUnitOptions {
 }
 
 function freezeAddedApiWrites(before: string, after: string, units: SourceUnit[], trusted: readonly string[]): void {
-  const lines = splitLines(after)
+  const beforeLines = splitLines(before), lines = splitLines(after)
+  const originalLines = new Set(beforeLines)
   const offsets = [0]
   for (const line of lines) offsets.push(offsets.at(-1)! + line.length)
-  const added = hunksOf(splitLines(before), lines).filter(hunk => hunk.bEnd > hunk.bStart).map(hunk => [offsets[hunk.bStart]!, offsets[hunk.bEnd]!] as const)
+  const added = hunksOf(beforeLines, lines).filter(hunk => hunk.bEnd > hunk.bStart).map(hunk => [offsets[hunk.bStart]!, offsets[hunk.bEnd]!] as const)
   const allowed = [...new Set(trusted)].filter(Boolean).flatMap(text => { const start = after.indexOf(text); return start < 0 ? [] : [[start, start + text.length] as const] })
+  // HTML is still one uncertain unit. An independent tag insertion must not turn an untouched
+  // owner SDK bootstrap into an added API write. Require the complete script's original bytes,
+  // including its attributes, and no added line through it; changed continuations remain guarded.
+  const unchangedScripts = [...after.matchAll(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi)].flatMap(match => {
+    const start = match.index!, end = start + match[0].length
+    return before.includes(match[0]) && !added.some(([a, b]) => start < b && end > a) ? [[start, end] as const] : []
+  })
+  // Complete unchanged source lines provide the same evidence inside a script or before JSX.
+  // Incomplete assignment/descriptor headers cannot pass the balanced-token and terminator checks.
+  const unchangedStatements = lines.flatMap((line, index) => {
+    const start = offsets[index]!, end = offsets[index + 1]!
+    if (!originalLines.has(line) || added.some(([a, b]) => start < b && end > a)) return []
+    const parsed = tokenize(line)
+    if (!parsed.confident) return []
+    const tokens = parsed.tokens, last = tokens.at(-1)?.text ?? ""
+    const staticImport = tokens[0]?.text === "import" && tokens.some(token => token.text === "from") &&
+      (last === ";" || /^['"]/.test(last)) && !/^\s*(?:assert|with)\b/.test(after.slice(end))
+    if (last !== ";" && !staticImport) return []
+    return [{ start, end, staticImport, apiBindings: bindingInfo(tokens).apiBindings }]
+  })
+  const unchanged = [...unchangedScripts, ...unchangedStatements.map(({ start, end }) => [start, end] as const)]
   const changed = (unit: SourceUnit) => added.some(([a, b]) => unit.start < b && unit.end > a)
+  const preservedImport = (unit: SourceUnit) => unit.key === "whole-file" && unchangedStatements.some(statement => statement.staticImport &&
+    statement.start >= unit.start && tokenize(after.slice(unit.start, statement.start)).tokens.length === 0 &&
+    unit.apiBindings.every(name => statement.apiBindings.includes(name)))
   // A changed RHS or descriptor continuation belongs to its complete assignment unit.
-  for (const unit of units) if (unit.apiBinding && changed(unit) && !allowed.some(([a, b]) => a <= unit.start && unit.end <= b)) unit.frozen = true
+  for (const unit of units) if (unit.apiBinding && changed(unit) && !preservedImport(unit) && !allowed.some(([a, b]) => a <= unit.start && unit.end <= b)) unit.frozen = true
   for (const pattern of API_WRITE_PATTERNS) {
     pattern.lastIndex = 0
     for (const match of after.matchAll(pattern)) {
       const start = match.index!, end = start + match[0].length
-      if (allowed.some(([a, b]) => a <= start && end <= b)) continue
+      if ([...allowed, ...unchanged].some(([a, b]) => a <= start && end <= b)) continue
       for (const unit of units) if (unit.start < end && unit.end > start && changed(unit)) unit.frozen = true
     }
   }
