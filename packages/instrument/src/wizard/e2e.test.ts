@@ -1484,7 +1484,7 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
   })
 })
 
-describe("§3y.7 the second reviewer: blind or incomplete is said, never 'nothing to change'", () => {
+describe("the second reviewer: incomplete opinions stay visible, never 'nothing to change'", () => {
   /** The live run's Codex: no file read, every item cant_tell, changes_suggested, no finding. */
   const blindReview = () => ({
     verdict: "changes_suggested",
@@ -1497,22 +1497,36 @@ describe("§3y.7 the second reviewer: blind or incomplete is said, never 'nothin
     return { ...base, codex: { turns: codexTurns } }
   }
 
-  it("a BLIND Codex (it reads nothing, twice) → no review posted, the brief path, 'No second review (Codex could not read the files)' everywhere", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
-    const w = await wiredWorld({ scenario: scenarioWith([{ blind: true, final: blindReview() }, { blind: true, final: blindReview() }]) })
+  it("a missing read-check after retry keeps the review and its finding visible as incomplete", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
+    const finding = "The owner decides whether to update the banner wording."
+    const unverified = { ...blindReview(), findings: [{ id: "F1", item: "R16", category: "owner_consent_privacy", severity: "should", path: "app/layout.tsx", line: 2, body: finding, suggested_fix: null }] }
+    const w = await wiredWorld({ scenario: scenarioWith([{ blind: true, final: unverified }, { blind: true, final: unverified }]) })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(0)
-    const reviewer = agentRuns(w, "codex", "reviewer")
-    expect(reviewer).toHaveLength(2)
+    expect(agentRuns(w, "codex", "reviewer")).toHaveLength(2)
     const gh = readGhState(w.ghState)
-    expect(gh.prs[0]!.reviews).toEqual([])
-    const comments = ((gh.prs[0] as unknown as { comments?: Array<{ body: string }> }).comments ?? []).map((comment) => comment.body).join("\n")
-    expect(comments).toContain("No second review (Codex could not read the files).")
-    const text = run.ofType("step.sub").map((event) => String(event.text)).join("\n")
-    expect(text).toContain("! Codex could not read the pull request's files, so there is no second review.")
+    expect(gh.prs[0]!.reviews).toHaveLength(1)
+    const posted = gh.prs[0]!.reviews[0]!.body
+    expect(posted).toContain("**Second review by Codex (round 1): incomplete")
+    expect(posted).toContain("read-check missing or incorrect")
+    expect(posted).toContain("About your consent or privacy pages (yours to decide)")
+    expect(posted).toContain(finding)
+    expect(posted).not.toContain(": looks good.")
+    // The missing-read-check explanation may name the field; the private nonce itself stays private.
+    expect(posted).not.toMatch(/read-check:\s+[a-f0-9]{16}\b/)
+    const ledger = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/review-ledger.json"), "utf8"))
+    expect(ledger.completeness.state).toBe("incomplete")
+    expect(ledger.rounds[0].review.findings[0].body).toBe(finding)
+    expect(JSON.stringify(ledger.rounds[0].review)).not.toMatch(/(?<![a-f0-9])[a-f0-9]{16}(?![a-f0-9])/)
+    const comments = ((gh.prs[0] as unknown as { comments?: Array<{ body: string }> }).comments ?? []).map(comment => comment.body).join("\n")
+    expect(comments).toContain("Reviewed by Codex (incomplete")
+    expect(comments).toContain(finding)
+    const text = run.ofType("step.sub").map(event => String(event.text)).join("\n")
+    expect(text).toContain("Codex's review is incomplete")
     expect(text).not.toContain("nothing to change")
-    const mergeAsk = run.ofType("ask.open").find((event) => event.kind === "merge-ready")!.payload as { summary: string }
-    expect(mergeAsk.summary).toContain("No second review (Codex could not read the files)")
-    expect(existsSync(join(w.site.repo, ".infinite/wizard/review-brief.md"))).toBe(true)
+    const mergeAsk = run.ofType("ask.open").find(event => event.kind === "merge-ready")!.payload as { summary: string }
+    expect(mergeAsk.summary).toContain("Review incomplete")
+    expect(existsSync(join(w.site.repo, ".infinite/wizard/review-brief.md"))).toBe(false)
   })
 
   it("a Codex that could not check two items → 'review incomplete' in the terminal, the posted review, the merge card and the final comment", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
@@ -1529,8 +1543,12 @@ describe("§3y.7 the second reviewer: blind or incomplete is said, never 'nothin
     expect(text).toContain(`! Codex's review is incomplete: it could not check R10, R12 (${REVIEW_ITEMS.filter(item => item !== "R6").length - 2} of ${REVIEW_ITEMS.filter(item => item !== "R6").length} checked)`)
     expect(text).not.toContain("nothing to change")
     const gh = readGhState(w.ghState)
+    expect(agentRuns(w, "codex", "reviewer")).toHaveLength(1)
+    expect(gh.prs[0]!.reviews).toHaveLength(1)
     expect(gh.prs[0]!.reviews[0]!.body).toContain("**Second review by Codex (round 1): incomplete — it could not check R10, R12.**")
     expect(gh.prs[0]!.reviews[0]!.body).not.toContain("read-check")
+    expect(gh.prs[0]!.reviews[0]!.body).not.toContain(": looks good.")
+    expect(gh.prs[0]!.reviews[0]!.body).not.toMatch(/(?<![a-f0-9])[a-f0-9]{16}(?![a-f0-9])/)
     const mergeAsk = run.ofType("ask.open").find((event) => event.kind === "merge-ready")!.payload as { summary: string }
     expect(mergeAsk.summary).toContain("Review incomplete (Codex could not check 2 items)")
     const comments = ((gh.prs[0] as unknown as { comments?: Array<{ body: string }> }).comments ?? []).map((comment) => comment.body).join("\n")
