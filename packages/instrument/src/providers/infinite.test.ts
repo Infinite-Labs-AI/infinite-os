@@ -82,7 +82,7 @@ describe("infinite provider plan", () => {
     const snippet = infiniteProviderAdapter.plan("static-html", follow, context({ infinite: follow })).instructions[0]!.snippet
     expect(snippet).toContain('"consent":{"mode":"not_required","followSitePixels":["fbq","gtag","posthog","dataLayer"]}')
     const plain = { ...validArtifact, consentMode: "not_required" as const }
-    expect(infiniteProviderAdapter.plan("static-html", plain, context({ infinite: plain })).instructions[0]!.snippet).not.toContain("followSitePixels")
+    expect(infiniteProviderAdapter.plan("static-html", plain, context({ infinite: plain })).instructions[0]!.snippet).toContain('"consent":{"mode":"not_required"}')
   })
 
   it("blocks Infinite collection until consent mode is explicitly selected", () => {
