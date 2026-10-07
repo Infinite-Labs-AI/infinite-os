@@ -86,7 +86,7 @@ export async function measureOwnerDiff(input: {
     if ([before, after].some(bytes => bytes && (bytes.includes(0) || !Buffer.from(bytes.toString("utf8"), "utf8").equals(bytes)))) {
       measurement.state = "not_checked"; fail(path, "the changed source could not be decoded"); continue
     }
-    const comparison = restoreFrozenUnits(before?.toString("utf8") ?? "", after?.toString("utf8") ?? "")
+    const comparison = restoreFrozenUnits(before?.toString("utf8") ?? "", after?.toString("utf8") ?? "", path)
     if (comparison.changes.length > 0) { measurement.state = "changed"; fail(path, "a consent-bearing top-level unit differs from the recorded base") }
   }
   return measurement

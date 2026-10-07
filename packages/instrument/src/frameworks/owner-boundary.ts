@@ -13,7 +13,7 @@ export function ownerWiringRequirement(path: string, before: string | null, afte
   if (before === after) return null
   const policy = policyWiringRequirement(path, snippet, appRoot)
   if (policy) return policy
-  const changed = restoreFrozenUnits(before ?? "", after).changes[0]
+  const changed = restoreFrozenUnits(before ?? "", after, path).changes[0]
   if (!changed) return null
   const unit = changed.before ?? changed.after!
   return { path, snippet,

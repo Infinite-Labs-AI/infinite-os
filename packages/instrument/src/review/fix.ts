@@ -121,7 +121,7 @@ export async function runFixRound(
   }
   const items = input.items.map(item => {
     const place = frozenEditPlace(item, sources)
-    return place ? leaveForOwner(item, frozenJobNote(item, place), { kind: "frozen_unit", file: place.file, line: place.line, unitHash: place.unit.hash, lineOffset: place.line - place.unit.startLine, unitOrdinal: sourceUnits(sources.get(place.file)!).units.filter(unit => unit.hash === place.unit.hash && unit.start < place.unit.start).length }).item : { ...item }
+    return place ? leaveForOwner(item, frozenJobNote(item, place), { kind: "frozen_unit", file: place.file, line: place.line, unitHash: place.unit.hash, lineOffset: place.line - place.unit.startLine, unitOrdinal: sourceUnits(sources.get(place.file)!, place.file).units.filter(unit => unit.hash === place.unit.hash && unit.start < place.unit.start).length }).item : { ...item }
   })
   const active = items.filter(item => item.state !== "left_for_you")
   for (const item of items.filter(item => item.state === "left_for_you")) ctx.emit.emit("job.state", { itemId: item.id, state: item.state, by: "wizard", note: item.note })

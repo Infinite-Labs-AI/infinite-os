@@ -301,7 +301,7 @@ export class Fence {
       if (itemId && !this.manifest.allow.some((rule) => rule.itemId === itemId)) itemId = null
       const recent = hunksOf(splitLines(previous), splitLines(current))
       const changed = hunksOf(splitLines(original), splitLines(current)).filter((hunk) => recent.some((change) => overlaps(change.bStart, change.bEnd, hunk.bStart, hunk.bEnd)))
-      const activity = { itemId, hunks: changed, consent: restoreFrozenUnits(previous, current).changes.length > 0 }
+      const activity = { itemId, hunks: changed, consent: restoreFrozenUnits(previous, current, rel).changes.length > 0 }
       this.editActivities.set(rel, [...this.editActivities.get(rel) ?? [], activity])
     } catch { /* A missing/non-text path is handled by the normal fence settle. */ }
   }
@@ -360,7 +360,7 @@ export class Fence {
       const current = decodeText(bytes)
       const original = decodeText(await this.originalBytes(rel) ?? Buffer.from(""))
       if (current === null || original === null) continue
-      const restored = restoreFrozenUnits(original, current)
+      const restored = restoreFrozenUnits(original, current, rel)
       if (restored.changes.length === 0) continue
       this.rememberConsentRestore(rel, original, current, restored)
       if (await this.originalBytes(rel) === null && restored.text === "") await this.restore(rel)
@@ -667,7 +667,7 @@ export class Fence {
         await revert(rel, "outside_allowlist", `Undid the change to ${rel}: it contained a wizard token.`)
         continue
       }
-      const restored = restoreFrozenUnits(before, after)
+      const restored = restoreFrozenUnits(before, after, rel)
       if (restored.changes.length > 0) {
         this.rememberConsentRestore(rel, before, after, restored)
         recordRefusals(rel)
@@ -1252,8 +1252,8 @@ async function heavyDirsReplaced(root: string, inodes: readonly HeavyInode[]): P
 }
 
 /** Kept for callers needing evidence ranges: consent is now protected as complete source units. */
-export function consentLineSpans(text: string): Array<[number, number]> {
-  return sourceUnits(text).units.filter(unit => unit.frozen).map(unit => [unit.startLine, unit.endLine])
+export function consentLineSpans(text: string, path = ""): Array<[number, number]> {
+  return sourceUnits(text, path).units.filter(unit => unit.frozen).map(unit => [unit.startLine, unit.endLine])
 }
 
 // ---- the seal (review O3 F11) ----

@@ -1,5 +1,5 @@
 /** Our artifacts' activation contract. This does not inspect or grade the owner's consent choices. */
-import { isConsentText } from "../jobs/consent-units.js"
+import { sourceUnits } from "../jobs/consent-units.js"
 import { lexicalStates } from "../lexical-states.js"
 import type { WizardContext, WizardDeps } from "../wizard/contracts/deps.js"
 
@@ -12,7 +12,7 @@ export interface ConsentActivation { mode: "required" | "not_required"; infinite
 
 export function recognizedConsentHandling(sources: Readonly<Record<string, string>> = {}): boolean {
   return Object.entries(sources).some(([path, source]) => {
-    if (isConsentText(source)) return true
+    if (sourceUnits(source, path).units.some(unit => unit.frozen)) return true
     if (!/\.(?:[cm]?[jt]sx?|vue|svelte)$/i.test(path)) return false
     const basename = path.split("/").at(-1)!.replace(/[-_]/g, "")
     if (/^(?:(?:cookie|consent)(?:banner|notice|dialog|modal|manager)|MarketingConsent|GdprBanner|.*Consent.*Banner.*)\./i.test(basename)) return true

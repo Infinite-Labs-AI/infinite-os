@@ -6,10 +6,17 @@ banners and CMP code alone, but cannot verify behavior it does not recognise.
 
 Consent recognition uses simple patterns on raw source text: consent commands, Consent Mode keys,
 CMP names and loader URLs, and gated-script attributes. Comments and prose containing those patterns
-freeze their unit too. A bare `t('consent')` or `register('consent')` is not a consent command;
+freeze their unit too; a leading comment belongs to the following top-level unit. A bare
+`t('consent')` or `register('consent')` is not a consent command;
 `'consent'` followed by `'default'`, `'update'`, `'grant'` or `'revoke'` is recognised on any callee.
-Recognised top-level units are frozen byte for byte, including whitespace. If source boundaries or
-correspondence are uncertain, the whole consent-bearing file is frozen.
+Also frozen: a top-level unit with a declared name containing `consent`, case-insensitively, and
+the whole source file when its basename contains `consent`, `cookiebanner`, `cookie-banner`,
+`cookie_banner` or `cookieconsent`. Directory names do not trigger this file rule. Declared names
+include local bindings; property keys, type references, readers and callers are not followed.
+Recognised top-level units and their leading comments are frozen byte for byte, including whitespace
+inside the unit. If source boundaries or correspondence are uncertain, the whole consent-bearing
+file is frozen. Raw matching text outside every unit, including each unit's prefix, also freezes
+the whole file.
 
 Only when it measured at least one commit and its complete recorded history passed does the wizard
 report: "This run did not edit your privacy or terms pages, or any code where it recognised a consent

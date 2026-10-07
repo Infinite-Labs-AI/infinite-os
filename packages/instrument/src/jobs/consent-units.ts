@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto"
 
 // Comments between call tokens are whitespace, even when earlier syntax makes splitting uncertain.
-const RAW_TRIVIA = String.raw`(?:\s|/\*[\s\S]*?\*/|//[^\r\n]*(?:\r?\n|$))*`
+const RAW_TRIVIA = String.raw`(?:\s|/\*(?:[^*]|\*(?!/))*\*/|//[^\r\n]*(?:\r?\n|$))*`
 export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
   new RegExp(String.raw`[([,]${RAW_TRIVIA}['"\x60]consent['"\x60]${RAW_TRIVIA},${RAW_TRIVIA}['"\x60](?:default|update|grant|revoke)['"\x60]`),
   /(?:\b(?:gtag|fbq)\b|\[\s*['"`](?:gtag|fbq)['"`]\s*\])\s*(?:\?\.\s*)?\(\s*['"`]consent['"`]/,
@@ -18,6 +18,11 @@ export const CONSENT_CALL_PATTERNS: readonly RegExp[] = [
 /** Recognition deliberately includes comments and prose; uncertain syntax never hides a raw marker. */
 export function isConsentText(text: string): boolean {
   return CONSENT_CALL_PATTERNS.some(pattern => pattern.test(text))
+}
+
+/** Only the basename is inspected; no directory, importer, reader or caller is followed. */
+export function isConsentFile(path: string): boolean {
+  return /consent|cookie[-_]?banner/i.test(path.replaceAll("\\", "/").split("/").at(-1) ?? "")
 }
 
 interface Token { text: string; start: number; end: number; line: number; depth: number }
@@ -93,17 +98,40 @@ function bindingInfo(tokens: Token[]): { key: string; names: string[] } {
   const declaration = ["const", "let", "var", "function", "class", "interface", "type", "enum", "namespace", "import"].includes(kind)
   const names: string[] = []
   if (["const", "let", "var"].includes(kind)) {
-    let binding = true
-    for (let i = at + 1; i < ts.length; i++) {
-      if (tokens[i]!.depth === 0 && ts[i] === ",") { binding = true; continue }
-      if (tokens[i]!.depth === 0 && ts[i] === "=") { binding = false; continue }
-      if (binding && IDENTIFIER.test(ts[i]!) && ts[i - 1] !== ":") names.push(ts[i]!)
+    const binding = (at: number): number => {
+      if (IDENTIFIER.test(ts[at] ?? "")) { names.push(ts[at]!); return at + 1 }
+      const close = OPEN[ts[at] ?? ""]
+      if (ts[at] !== "{" && ts[at] !== "[") return at + 1
+      const depth = tokens[at]!.depth + 1
+      const object = ts[at] === "{"
+      let i = at + 1
+      while (i < ts.length && !(tokens[i]!.depth === depth && ts[i] === close)) {
+        if (ts[i] === "," || ts[i] === "...") { i++; continue }
+        // Object property keys are not declared names. Only their binding after ':' is.
+        if (object && ts[i + 1] === ":") i += 2
+        else if (object && ts[i] === "[") {
+          while (i < ts.length && !(tokens[i]!.depth === depth + 1 && ts[i] === "]")) i++
+          i += 2
+        }
+        i = binding(i)
+        while (i < ts.length && !(tokens[i]!.depth === depth && (ts[i] === "," || ts[i] === close))) i++
+      }
+      return i + 1
+    }
+    for (let i = at + 1; i < ts.length;) {
+      i = binding(i)
+      while (i < ts.length && !(tokens[i]!.depth === 0 && (ts[i] === "," || ts[i] === ";"))) i++
+      if (ts[i] !== ",") break
+      i++
     }
   } else if (["function", "class", "interface", "type", "enum", "namespace"].includes(kind)) {
     const name = ts[at + (ts[at + 1] === "*" ? 2 : 1)]
     if (name && IDENTIFIER.test(name)) names.push(name)
   } else if (kind === "import") {
-    for (const token of ts.slice(at + 1)) { if (token === "from") break; if (IDENTIFIER.test(token) && token !== "as" && token !== "type") names.push(token) }
+    for (let i = at + 1; i < ts.length && ts[i] !== "from"; i++) {
+      if (!IDENTIFIER.test(ts[i]!) || ["as", "type"].includes(ts[i]!) || ts[i + 1] === "as") continue
+      names.push(ts[i]!)
+    }
   }
   const callAt = ts.indexOf("(")
   const firstArgument = callAt >= 0 && /^['"`]/.test(ts[callAt + 1] ?? "") ? ts[callAt + 1] : ""
@@ -112,17 +140,19 @@ function bindingInfo(tokens: Token[]): { key: string; names: string[] } {
 }
 
 /** Split only at depth zero. Bracket bodies stay inseparable regardless of the constructs they hold. */
-export function sourceUnits(source: string): SourceUnits {
+export function sourceUnits(source: string, path = ""): SourceUnits {
+  if (isConsentFile(path)) return { confident: false, tail: "", units: source ? [{ start: 0, end: source.length, startLine: 1, endLine: source.split("\n").length,
+    text: source, prefix: "", names: [], key: "whole-file", hash: hash(source), ordinal: 0, frozen: true }] : [] }
   const parsed = tokenize(source)
   // The tokenizer is not authoritative about whether raw source contains owner consent. It may
   // stop inside JSX prose, CSS URLs, or a malformed comment before reaching the protected text.
   const rawConsent = isConsentText(source)
   const ts = parsed.tokens
-  if (!parsed.confident || (ts.length === 0 && rawConsent)) {
+  if (ts.length === 0 && (!parsed.confident || rawConsent)) {
     const info = bindingInfo(ts)
     return { confident: false, tail: "", units: source ? [{ start: 0, end: source.length, startLine: 1, endLine: source.split("\n").length,
       text: source, prefix: "", ...info, key: "whole-file", hash: hash(source), ordinal: 0,
-      frozen: rawConsent }] : [] }
+      frozen: rawConsent || info.names.some(name => /consent/i.test(name)) }] : [] }
   }
   const spans: Array<[number, number]> = []
   let from = 0
@@ -156,18 +186,22 @@ export function sourceUnits(source: string): SourceUnits {
   for (const [first, last] of actual) {
     const firstToken = ts[first]!, lastToken = ts[last]!
     const lineStart = source.lastIndexOf("\n", firstToken.start - 1) + 1
-    const start = /^\s*$/.test(source.slice(Math.max(previousEnd, lineStart), firstToken.start)) ? Math.max(previousEnd, lineStart) : firstToken.start
+    let start = /^\s*$/.test(source.slice(Math.max(previousEnd, lineStart), firstToken.start)) ? Math.max(previousEnd, lineStart) : firstToken.start
+    // A leading comment belongs to the following declaration/statement, including its bytes.
+    // Separating blank lines retain their existing role between independently editable units.
+    if (source.slice(previousEnd, start).trim()) start = previousEnd
     const nextToken = ts[last + 1]
     const newline = source.indexOf("\n", lastToken.end)
     const end = newline >= 0 && (!nextToken || newline < nextToken.start) ? newline + 1 : lastToken.end
     const text = source.slice(start, end)
     const info = bindingInfo(ts.slice(first, last + 1))
+    if (!confident) info.names = spans.flatMap(([from, to]) => bindingInfo(ts.slice(from, to + 1)).names)
     const textHash = hash(text)
     const ordinal = occurrences.get(textHash) ?? 0
     occurrences.set(textHash, ordinal + 1)
     units.push({ start, end, startLine: source.slice(0, start).split("\n").length, endLine: source.slice(0, Math.max(start, end - 1)).split("\n").length,
       text, prefix: source.slice(previousEnd, start), ...info, key: confident ? info.key : "whole-file", hash: textHash, ordinal,
-      frozen: isConsentText(text) })
+      frozen: isConsentText(source.slice(previousEnd, end)) || info.names.some(name => /consent/i.test(name)) })
     previousEnd = end
   }
   if (!confident && units.length) {
@@ -188,15 +222,15 @@ export interface FrozenUnitChange { before: SourceUnit | null; after: SourceUnit
 export interface FrozenUnitRestore { text: string; changes: FrozenUnitChange[]; before: SourceUnits; after: SourceUnits }
 
 /** Ordered alignment preserves editable neighbors. No semantic edit is ever exempt inside a unit. */
-export function restoreFrozenUnits(beforeText: string, afterText: string): FrozenUnitRestore {
+export function restoreFrozenUnits(beforeText: string, afterText: string, path = ""): FrozenUnitRestore {
   const beforeBom = beforeText.startsWith("\ufeff"), afterBom = afterText.startsWith("\ufeff")
   if (beforeBom || afterBom) {
-    const restored = restoreFrozenUnits(beforeBom ? beforeText.slice(1) : beforeText, afterBom ? afterText.slice(1) : afterText)
+    const restored = restoreFrozenUnits(beforeBom ? beforeText.slice(1) : beforeText, afterBom ? afterText.slice(1) : afterText, path)
     const protectedFile = restored.before.units.some(unit => unit.frozen) || restored.after.units.some(unit => unit.frozen)
     if (beforeBom !== afterBom && protectedFile) restored.changes.push({ before: restored.before.units[0] ?? null, after: restored.after.units[0] ?? null })
     return { ...restored, text: ((restored.changes.length > 0 ? beforeBom : afterBom) ? "\ufeff" : "") + restored.text }
   }
-  let before = sourceUnits(beforeText); let after = sourceUnits(afterText)
+  let before = sourceUnits(beforeText, path); let after = sourceUnits(afterText, path)
   if ((!before.confident || !after.confident) && (before.units.some(unit => unit.frozen) || after.units.some(unit => unit.frozen))) {
     const whole = (text: string, model: SourceUnits): SourceUnits => ({ confident: false, tail: "", units: text ? [{ ...(model.units[0] ?? { names: [] }), start: 0, end: text.length, startLine: 1, endLine: text.split("\n").length, text, prefix: "", key: "whole-file", hash: hash(text), ordinal: 0, frozen: true }] : [] })
     before = whole(beforeText, before); after = whole(afterText, after)
@@ -229,8 +263,8 @@ export function restoreFrozenUnits(beforeText: string, afterText: string): Froze
   return { text: output.join("") + after.tail, changes, before, after }
 }
 
-export function frozenUnitAt(source: string, line: number): SourceUnit | null {
-  return sourceUnits(source).units.find(unit => unit.frozen && unit.startLine <= line && line <= unit.endLine) ?? null
+export function frozenUnitAt(source: string, line: number, path = ""): SourceUnit | null {
+  return sourceUnits(source, path).units.find(unit => unit.frozen && unit.startLine <= line && line <= unit.endLine) ?? null
 }
 
 /** Every worker target uses its evidence line. Managed capture is planned at its fixed entry instead. */
@@ -239,7 +273,7 @@ export function frozenEditPlace(item: { id: string; jobId: string; trigger: { ev
     if (!("file" in entry)) continue
     const source = sources.get(entry.file)
     if (source === undefined) continue
-    const unit = frozenUnitAt(source, entry.line)
+    const unit = frozenUnitAt(source, entry.line, entry.file)
     if (unit) return { ...entry, unit }
   }
   return null

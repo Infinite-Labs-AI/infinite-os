@@ -102,7 +102,8 @@ it.each(["__tcfapi('getTCData', 2, callback);", "Cookiebot.renew();", "Cookiebot
 })
 
 
-it("does not infer a consent pattern from a site-specific helper name alone", () => {
+it("freezes a declared consent helper without following its callers", () => {
   const source = "function readTrackingConsent() { return localStorage.getItem('choice'); }\n"
-  expect(sourceUnits(source).units.some(unit => unit.frozen)).toBe(false)
+  expect(sourceUnits(source).units.some(unit => unit.frozen)).toBe(true)
+  expect(sourceUnits("readTrackingConsent();\n").units.some(unit => unit.frozen)).toBe(false)
 })

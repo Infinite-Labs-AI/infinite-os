@@ -14,7 +14,7 @@ export async function reanchorOwnerLocations(root: string, items: readonly Check
     if (proof?.kind !== "frozen_unit" || !proof.file || !proof.unitHash || proof.lineOffset === undefined || proof.file.startsWith("/") || proof.file.split("/").includes("..")) { result.push(item); continue }
     if (!sources.has(proof.file)) sources.set(proof.file, await readFile(join(root, proof.file), "utf8").catch(() => null))
     const source = sources.get(proof.file)
-    const unit = source === null || source === undefined ? null : sourceUnits(source).units.filter(unit => unit.hash === proof.unitHash)[proof.unitOrdinal ?? 0]
+    const unit = source === null || source === undefined ? null : sourceUnits(source, proof.file).units.filter(unit => unit.hash === proof.unitHash)[proof.unitOrdinal ?? 0]
     if (!unit) { result.push(item); continue } // Final-diff measurement will refuse a changed/missing unit.
     const line = unit.startLine + proof.lineOffset
     if (line === proof.line) { result.push(item); continue }
