@@ -33,7 +33,7 @@ it.each(["Build failed: this API requires authorization", "Build failed: test us
 })
 
 it("prefers an explicit deployment state over a misleading description", () => {
-  expect(checkPolicy([{ name: "Vercel", bucket: "fail", state: "FAILURE", deploymentState: "failure", description: "Deployment was blocked" }], []).failing).toHaveLength(1)
+  expect(checkPolicy([{ name: "Vercel", bucket: "fail", state: "FAILURE", deploymentState: "BUILD_FAILED", description: "Deployment was blocked" }], []).failing).toHaveLength(1)
   expect(checkPolicy([{ name: "Vercel", bucket: "fail", state: "FAILURE", deploymentState: "blocked", description: "unavailable" }], []).blocked).toHaveLength(1)
 })
 it.each([
@@ -61,7 +61,7 @@ it("requests authoritative deployment statuses for the head SHA", async () => {
   } } as unknown as GhClient
   const rows = await withDeploymentStates(gh, "a".repeat(40), [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }])
   expect(rows[0]!.deploymentState).toBe("failure")
-  expect(checkPolicy(rows, []).failing).toHaveLength(1)
+  expect(checkPolicy(rows, []).blocked).toHaveLength(1)
   expect(calls[0]![1]).toContain(`deployments?sha=${"a".repeat(40)}`)
   expect(calls[1]![1]).toContain("deployments/7/statuses")
 })
@@ -116,4 +116,22 @@ it("does not use a completed push event as proof of a PR-triggered workflow", as
   const sha = "a".repeat(40)
   const gh = { json: async (args: string[]) => args[1]!.includes("/actions/runs?") ? { total_count: 1, workflow_runs: [{ id: 7, head_sha: sha, path: ".github/workflows/ci.yml", event: "push", status: "completed", conclusion: "success" }] } : { total_count: 0, check_suites: [] } } as unknown as GhClient
   expect((await headCheckActivity(gh, sha)).workflowPaths).toEqual([])
+})
+
+
+it.each(["failure", "error"])("retains the deployment API's exact access explanation with coarse %s state", async state => {
+  const description = "Vercel - Git author must have access to the project on Vercel to create deployments"
+  const gh = { json: async (args: string[]) => args[1]!.includes("/statuses") ? [{ state, description }] : [{ id: 7, creator: { login: "vercel[bot]" } }] } as unknown as GhClient
+  const checks = await withDeploymentStates(gh, "a".repeat(40), [{ name: "Vercel", bucket: "fail", state: "FAILURE" }])
+  expect(checks[0]!.description).toBe(description)
+  expect(checkPolicy(checks, []).blocked).toHaveLength(1)
+  expect(checkPolicy(checks, []).failing).toHaveLength(0)
+})
+
+it("keeps specific deployment failures and ordinary authorization errors failed", async () => {
+  for (const [state, description] of [["BUILD_FAILED", "Deployment was blocked"], ["failure", "Build failed: this API requires authorization"], ["error", "Build failed: test user must have access"]]) {
+    const gh = { json: async (args: string[]) => args[1]!.includes("/statuses") ? [{ state, description }] : [{ id: 7, creator: { login: "vercel[bot]" } }] } as unknown as GhClient
+    const checks = await withDeploymentStates(gh, "a".repeat(40), [{ name: "Vercel", bucket: "fail", state: "FAILURE" }])
+    expect(checkPolicy(checks, []).failing).toHaveLength(1)
+  }
 })

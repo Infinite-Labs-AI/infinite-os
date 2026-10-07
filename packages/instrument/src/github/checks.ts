@@ -39,7 +39,11 @@ export function checksSummary(checks: readonly PrCheck[]): { pass: number; fail:
 /** Hosting access failures do not measure either the code or its preview. */
 export function blockedPreview(check: PrCheck): boolean {
   if (!/vercel|netlify|cloudflare/i.test(check.name)) return false
-  if (check.deploymentState) return check.deploymentState.toLowerCase() === "blocked"
+  const deploymentState = check.deploymentState?.toLowerCase()
+  if (deploymentState === "blocked") return true
+  // GitHub compresses provider access failures into failure/error. Only these coarse states
+  // may use an exact known access explanation; a specific native build failure stays failed.
+  if (deploymentState && !["failure", "error"].includes(deploymentState)) return false
   return /^(?:Deployment (?:was |is |has been )?blocked|Authorization required|Vercel - Git author must have access to the project on Vercel to create deployments)\.?$/i.test((check.description ?? "").trim())
 }
 
@@ -188,7 +192,7 @@ export async function withDeploymentStates(gh: GhClient, sha: string, checks: Pr
   if (!checks.some(check => provider(check.name))) return checks
   const deployments = await gh.json<Array<{ id: number; creator?: { login?: string }; environment?: string }>>(["api", `repos/{owner}/{repo}/deployments?sha=${sha}&per_page=100`])
   if (!Array.isArray(deployments) || deployments.length >= 100) throw new Error("Deployment inventory could not be read completely")
-  const evidence = (await Promise.all(deployments.map(async deployment => ({ deployment, status: (await gh.json<Array<{ state?: string; log_url?: string; environment_url?: string }>>(["api", `repos/{owner}/{repo}/deployments/${deployment.id}/statuses?per_page=100`]))[0] })))).filter(row => row.status?.state !== "inactive")
+  const evidence = (await Promise.all(deployments.map(async deployment => ({ deployment, status: (await gh.json<Array<{ state?: string; description?: string | null; log_url?: string; environment_url?: string }>>(["api", `repos/{owner}/{repo}/deployments/${deployment.id}/statuses?per_page=100`]))[0] })))).filter(row => row.status?.state !== "inactive")
   const out: PrCheck[] = []
   for (const check of checks) {
     const host = provider(check.name)
@@ -199,7 +203,7 @@ export async function withDeploymentStates(gh: GhClient, sha: string, checks: Pr
     const selected = exact.length === 1 ? exact[0] : candidates.length === 1 && checks.filter(row => provider(row.name) === host).length === 1 ? candidates[0] : null
     const state = selected?.status?.state?.toLowerCase() ?? "unknown"
     const bucket = ["queued", "pending", "in_progress", "waiting", "unknown"].includes(state) ? "pending" : ["failure", "error"].includes(state) ? "fail" : check.bucket
-    out.push({ ...check, bucket, deploymentState: state })
+    out.push({ ...check, bucket, deploymentState: state, description: selected?.status?.description?.trim() || check.description })
   }
   return out
 }
