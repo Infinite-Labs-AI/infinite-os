@@ -126,15 +126,19 @@ describe("requiresManual is an OPEN JOB, never 'installed' (S1 fix, run.ts apply
     expect(exists(root, "lib/infinite-analytics.ts")).toBe(false)
   })
 
-  it("Vite with no </head>: the installer returns the open job and the provider is not reported live", async () => {
+  it("Vite with no </head>: owner placement is required without a worker or unused install", async () => {
     const root = makeSite({ "package.json": VITE_PACKAGE, "index.html": VITE_NO_HEAD, "vercel.json": "{}\n" })
     const subject = installer()
     const scan = await subject.scan({ root, hosting: fakeHosting() })
     expect(scan.framework).toBe("vite-react")
     const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    expect(plan.ownerWiring).toMatchObject({ canWire: false, requirements: [expect.objectContaining({ path: "index.html" })] })
+    expect(plan.installTools).toEqual([])
     const result = (await subject.apply(plan, approveAll(plan))) as WizardApplyResult
     expect(result.ok).toBe(true)
-    expect(result.openJobs).toEqual(["index.html"])
+    expect(result.openJobs).toEqual([])
+    expect(result.changedFiles).toEqual([])
+    expect(readInstallManifest(root)).toBeNull()
     expect(read(root, "index.html")).toBe(VITE_NO_HEAD)
   })
 
