@@ -47,6 +47,7 @@ import { INFINITE_API_ORIGIN, infiniteCollectDestination } from "../workspace-ar
 import type { BeforeFacts } from "./contracts/jobs.js"
 import type { BriefFacts } from "../jobs/briefs.js"
 import { adoptedMetaGuardRecipe } from "../providers/meta.js"
+import { buildScanner } from "../review/context.js"
 import { createWizardUi } from "../tui/index.js"
 import type { KeyboardInput } from "../tui/keys.js"
 import type { JsonInput } from "../tui/json-ui.js"
@@ -358,6 +359,18 @@ export async function createDefaultWizardDeps(input: DefaultDepsInput, overrides
 
   const registry = createJobRegistry({
     briefFacts: () => briefFactsFor(root, state()),
+    scanner: () => {
+      const before = readBeforeFactsSync(root, runId())
+      const keys = runKeys(root, runId())
+      const publicIds = [
+        ...(keys ? connectionIdsFromKeys(keys) : []),
+        ...(before?.facts.census?.entries ?? []).flatMap(entry => entry.id ? [entry.id] : []),
+        ...(before?.facts.dryLive?.ga4?.events ?? []).flatMap(event => event.tid ? [event.tid] : []),
+        ...(before?.facts.dryLive?.meta?.tr ?? []).flatMap(event => event.pixelId ? [event.pixelId] : []),
+        ...(state()?.proof?.tools ?? []).flatMap(tool => tool.ids)
+      ]
+      return buildScanner({ root, appRoot: input.appRoot }, { bridge, env, agents }, publicIds)
+    },
     // A production reading counts for an item only after the change could be live: the merge.
     liveSince: () => state()?.steps.merge?.at ?? null
   })

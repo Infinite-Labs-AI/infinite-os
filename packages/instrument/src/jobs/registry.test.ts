@@ -20,6 +20,7 @@ import { fixtureKeys } from "../../test/wizard/o8/fixtures.js"
 import { run3File, run3Json } from "../../test/wizard/run3-fixture.js"
 import { reanchorEvidence } from "./reanchor.js"
 import { buildHostGuardExpression } from "../host-guard.js"
+import { createScanner } from "../review/scan.js"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -390,6 +391,18 @@ describe("the registry object", () => {
     const claimed = { ...posthog, state: "claimed" as const }
     const [next] = registry.apply([claimed], [check("posthog_config", "S", "pass"), check("next_rewrites_exact", "S", "pass"), check("posthog_improve_applied", "S", "pass")], RUN_ID)
     expect(next!.state).toBe("waiting_deploy")
+  })
+
+  it("redacts the run's secret literals before storing check reasons", () => {
+    const secret = "synthetic-configured-" + "value-".repeat(8)
+    const publicId = "public-configuration-id"
+    const scanner = createScanner({ literals: [{ kind: "env_value", value: secret }, { kind: "env_value", value: publicId }], allowedIds: [publicId] })
+    const secured = createJobRegistry({ briefFacts: () => facts0, scanner: () => scanner })
+    const posthog = items.find(item => item.id === "posthog_improve:proxy")!
+    const reason = `read ${secret}; public ${publicId}`
+    const [next] = secured.apply([posthog], [check("posthog_config", "S", "problem", { reason })], RUN_ID)
+    expect(next!.checks.find(check => check.id === "posthog_config")?.reason).toBe(`read [redacted: env_value]; public ${publicId}`)
+    expect(JSON.stringify(next)).not.toContain(secret)
   })
 
   it("re-verifies not_needed against the fresh tree: agrees only when the trigger is gone", () => {

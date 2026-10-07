@@ -13,7 +13,9 @@ import { O9_CHECK_IDS } from "../checks/o9.js"
 import { buildHostGuardExpression } from "../host-guard.js"
 import { fakeKeys } from "../../test/wizard/o7-fakes.js"
 import type { O6CheckRunner } from "../checks/registry.js"
-import { WIZARD_PATHS } from "./contracts/state.js"
+import { MCP_ENV } from "./contracts/agents.js"
+import type { ChecklistItem } from "./contracts/jobs.js"
+import { WIZARD_PATHS, type WizardRunState } from "./contracts/state.js"
 import { parseWizardArgs } from "./command.js"
 import { createDefaultWizardDeps, createDefaultWizardWiring, o9RunContext } from "./deps.js"
 
@@ -63,6 +65,32 @@ describe("O9 guard context", () => {
 })
 
 describe("createDefaultWizardDeps (I1 wiring)", () => {
+  it("stores check reasons with the current run's env and agent token redaction", async () => {
+    const { root, home } = site()
+    const runId = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
+    const envValue = "synthetic-env-" + "value-".repeat(8)
+    const mcpValue = "synthetic-mcp-" + "value-".repeat(8)
+    const agentValue = "synthetic-agent-" + "value-".repeat(8)
+    const publicId = "synthetic-public-id"
+    const appRoot = "web"
+    mkdirSync(join(root, appRoot))
+    writeFileSync(join(root, appRoot, ".env.local"), `SERVICE_SETTING=${envValue}\nSITE_SETTING=${publicId}\n`)
+    mkdirSync(join(root, WIZARD_PATHS.dir), { recursive: true })
+    const keys = fakeKeys()
+    keys.infinite.siteSourceKey = publicId
+    writeFileSync(join(root, WIZARD_PATHS.beforeFacts), JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId, facts: { keys } }))
+    const parsed = parseWizardArgs(["--json"], root)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const wired = await createDefaultWizardDeps({ root, appRoot, options: parsed.value.options, env: { HOME: home, [MCP_ENV.token]: mcpValue }, platform: "darwin", tagVersion: "0.12.0-test", signal: new AbortController().signal, state: () => ({ runId, steps: {} } as WizardRunState) }, { home })
+    wired.agents.secretLiterals = () => [agentValue]
+    const item: ChecklistItem = { id: "posthog_improve:proxy", jobId: "posthog_improve", n: 3, title: "Improve PostHog", owner: "agent", state: "claimed", allow: { files: [], create: [] }, trigger: { finding: "configured", evidence: [] }, checks: [{ id: "posthog_config", tier: "S", state: "not_run" }] }
+    const reason = `read ${envValue}; ${mcpValue}; ${agentValue}; public ${publicId}`
+    const [next] = wired.registry.apply([item], [{ checkId: "posthog_config", tier: "S", state: "problem", at: "2030-01-02T03:04:05.000Z", runId, reason }], runId)
+    const stored = next!.checks[0]!.reason!
+    for (const secret of [envValue, mcpValue, agentValue]) expect(JSON.stringify(next)).not.toContain(secret)
+    expect(stored).toBe(`read [redacted: env_value]; [redacted: mcp_token]; [redacted: mcp_token]; public ${publicId}`)
+  })
+
   it("registers every O9 check on O6's runner (the seams the steps call resolve to O9's functions)", async () => {
     const wired = await deps({})
     const registered = (wired.checks as O6CheckRunner).registered()

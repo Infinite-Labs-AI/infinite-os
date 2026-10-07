@@ -47,6 +47,7 @@ import { approvedConversionNames, boundConversionNames } from "./plan-data.js"
 import { repoPath, type RepoSnapshot } from "./repo-files.js"
 import { applyResults } from "./state-machine.js"
 import { MANAGED_NEXT_CONFIG_FILE } from "../frameworks/vercel-config.js"
+import type { Scanner } from "../review/scan.js"
 
 // ---------------------------------------------------------------------------------------------
 // Item ids and the plan line each candidate needs
@@ -834,6 +835,8 @@ export function reverifyNotNeededIn(item: ChecklistItem, scan: JobScan, seed: Re
 // ---------------------------------------------------------------------------------------------
 
 export interface JobRegistryOptions {
+  /** Current run literals and public IDs, used before check reasons enter stored job state. */
+  scanner?(): Scanner
   /**
    * The brief's context for the current run (the engine reads it from the run state). A brief without a
    * run id is a programming error, so the registry throws instead of writing one.
@@ -903,7 +906,8 @@ export function createJobRegistry(options: JobRegistryOptions): O8JobRegistry {
     },
     apply(items, results, runId, applyOptions) {
       const liveSince = options.liveSince?.() ?? null
-      return items.map((item) => applyResults(item, results, runId, { budgetLeft: true, liveSince, ...applyOptions }).item)
+      const scanner = options.scanner?.()
+      return items.map((item) => applyResults(item, results, runId, { budgetLeft: true, liveSince, scanner, ...applyOptions }).item)
     },
     reverifyNotNeeded(item, scan) {
       const jobScan = toJobScan(scan)
