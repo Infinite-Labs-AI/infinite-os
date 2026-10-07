@@ -93,10 +93,7 @@ function isKeyLabel(name: string): boolean {
   return words.some(word => /^(?:key|token|secret|password|passwd|credential|credentials|apikey|accesstoken|clientsecret)$/.test(word))
 }
 
-function isHighEntropyToken(value: string): boolean {
-  // Source expressions are instructions to retrieve a key, not a key. Never turn a public env lookup
-  // into a false commit blocker. Repeated placeholders also fall below the entropy threshold.
-  if (value.length < 24 || /\s/.test(value) || /^(?:process\.env\.|import\.meta\.env\.|env\.|config\.)/.test(value)) return false
+function characterEntropy(value: string): number {
   const counts = new Map<string, number>()
   for (const char of value) counts.set(char, (counts.get(char) ?? 0) + 1)
   let entropy = 0
@@ -104,7 +101,20 @@ function isHighEntropyToken(value: string): boolean {
     const probability = count / value.length
     entropy -= probability * Math.log2(probability)
   }
-  return entropy >= 3.5
+  return entropy
+}
+
+function isHighEntropyToken(value: string): boolean {
+  // A token is contiguous; repeated placeholders fall below the entropy threshold.
+  if (value.length < 24 || /\s/.test(value)) return false
+  return characterEntropy(value) >= 3.5
+}
+
+/** A member lookup can be long/varied as a whole while each named identifier is ordinary code. */
+function isMemberReference(value: string): boolean {
+  if (/^(?:process\.env\.|import\.meta\.env\.|env\.|config\.)[A-Za-z_$][\w$]*$/.test(value)) return true
+  const parts = value.split(".")
+  return parts.length > 1 && parts.every(part => /^[a-z_$][a-z_$]*(?:[A-Z][a-z_$]*)*$/.test(part) && characterEntropy(part) < 3.5)
 }
 
 /** Public provider keys are intended for the browser; the run's exact allowed IDs cover other formats. */
@@ -174,7 +184,7 @@ export function createScanner(options: ScannerOptions): Scanner {
       // A sentence's trailing dots are punctuation, not part of its public ID. Quoted values keep
       // every character, including punctuation inside a password.
       const value = quoted ? match[4]! : match[5]!.replace(/\.+$/, "")
-      if (isNamedSecret(match[1]!, value)) matches.push({ value, offset: match.index + match[1]!.length + match[2]!.length + (quoted ? 1 : 0), multiline: match[2]!.includes("\n") })
+      if (isNamedSecret(match[1]!, value) && (quoted || !isMemberReference(value))) matches.push({ value, offset: match.index + match[1]!.length + match[2]!.length + (quoted ? 1 : 0), multiline: match[2]!.includes("\n") })
       // A rejected label such as "monkey" must not consume the next actual API_KEY assignment.
       else pattern.lastIndex = match.index + match[1]!.length
     }

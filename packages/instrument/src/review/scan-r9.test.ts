@@ -126,3 +126,35 @@ it("does not mistake quoted configuration instructions for a credential token", 
   expect(scanner.redact(prose)).toEqual({ text: prose, hits: [] })
   expect(scanner.findInCommit([{ path: "docs/config.ts", added: [{ line: 1, text: prose }] }], () => false)).toEqual([])
 })
+
+it("keeps unquoted member references while scanning literal credentials with the same context", () => {
+  const scanner = createScanner({ literals: [], allowedIds: [] })
+  for (const value of ["session.metadata.infinite_visit_key", "payload.analytics.visit_key", "request.headers.authorization"]) {
+    const source = `properties: { visitKey: ${value} }`
+    expect(scanner.redact(source)).toEqual({ text: source, hits: [] })
+    expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text: source }] }], () => false)).toEqual([])
+    for (const quote of ['"', "'"]) {
+      const literal = `visitKey: ${quote}${value}${quote}`
+      expect(scanner.redact(literal).hits).toEqual([{ kind: "generic_secret" }])
+      expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text: literal }] }], () => false).length).toBeGreaterThan(0)
+    }
+  }
+  for (const value of [TOKEN, TOKEN + "." + TOKEN, "session.metadata." + TOKEN, TOKEN + ".metadata.infinite_visit_key", TOKEN.slice(0, 20) + "." + TOKEN.slice(0, 20), "qwertyuiopasdfghjklzx.qwertyuiopasdfghjklzx"]) {
+    for (const quote of ['', '"', "'"]) {
+      const literal = `visitKey: ${quote}${value}${quote}`
+      expect(scanner.redact(literal).text).not.toContain(value)
+      expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text: literal }] }], () => false).length).toBeGreaterThan(0)
+    }
+  }
+})
+
+it("does not grant source-reference exemptions to quoted env/config literals", () => {
+  const scanner = createScanner({ literals: [], allowedIds: [] })
+  for (const value of ["process.env.SYNTHETIC_SERVICE_API_KEY", "import.meta.env.VITE_PUBLIC_APPLICATION_KEY", "env.SERVICE_APPLICATION_API_KEY", "config.SERVICE_APPLICATION_API_KEY"]) {
+    const source = `apiKey: ${value}`
+    expect(scanner.redact(source).hits).toEqual([])
+    const literal = `apiKey: "${value}"`
+    expect(scanner.redact(literal).hits).toEqual([{ kind: "generic_secret" }])
+    expect(scanner.findInCommit([{ path: "src/outcome.ts", added: [{ line: 1, text: literal }] }], () => false)).toEqual([{ kind: "generic_secret", file: "src/outcome.ts", line: 1 }])
+  }
+})
