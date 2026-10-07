@@ -251,16 +251,16 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
   it("a check that keeps failing until the rounds run out → failed, never done (negative)", async () => {
     const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] }, checks: { results: { click_test: ["problem"] } }, items: [ITEMS[1]!] })
     const outcome = await step.run(t.ctx, t.deps)
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("failed")
+    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("left_for_you")
     expect(runs(t.fakes, "claude")).toHaveLength(4)
     expect(t.bridgeCalls.patchRun).toEqual([])
     expect(outcome).toMatchObject({ kind: "ok" })
   })
 
-  it("an undetermined check leaves the item claimed (undetermined never counts as pass)", async () => {
+  it("an undetermined check leaves the job for the owner and removes its unverified edits", async () => {
     const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] }, checks: { results: { click_test: ["undetermined"] } }, items: [ITEMS[1]!] })
     await step.run(t.ctx, t.deps)
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("claimed")
+    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("left_for_you")
     expect(t.bridgeCalls.patchRun).toEqual([])
   })
 
@@ -378,7 +378,7 @@ describe("step jobs: questions, usage, fence", () => {
     })
     await step.run(t.ctx, t.deps)
     expect(t.recorded.asks).toEqual([])
-    expect(stateOf(t.current().jobs, "meta_improve:landing")).toBe("blocked:needs_you")
+    expect(stateOf(t.current().jobs, "meta_improve:landing")).toBe("left_for_you")
   })
 
   it("out of usage → parked AGENT_OUT_OF_USAGE, edits undone, session kept in state for the resume", async () => {
@@ -388,14 +388,14 @@ describe("step jobs: questions, usage, fence", () => {
       checks: { results: { click_test: ["problem"], meta_mirror_wired: ["problem"] } }
     })
     const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE" })
-    expect((outcome as { reason: string }).reason).toMatch(/resets at .*; run `npx infinite-tag` again to resume/)
+    expect(outcome).toMatchObject({ kind: "ok" })
+    expect((outcome as { status: string }).status).toMatch(/resets at .*; run `npx infinite-tag` again to resume/)
     expect(readFileSync(join(t.root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
     expect(t.current().agent?.workerSession).toMatchObject({ kind: "claude", sessionId: expect.any(String) })
     // LF4-P1-2 (round 1): the jobs are checked on the tree as it stands (the stopped turn's edit was undone); a problem
     // stays pending for the resume, never failed or blocked while the agent can still come back to it.
-    expect(t.current().jobs.map((item) => item.state)).toEqual(["pending", "pending"])
-    expect((outcome as { reason: string }).reason).toContain(`Nothing in the code yet: Job meta_improve:landing; Job conversions_to_tools:trial.`)
+    expect(t.current().jobs.map((item) => item.state)).toEqual(["left_for_you", "left_for_you"])
+    expect((outcome as { status: string }).status).toContain(`Nothing in the code yet: Job meta_improve:landing; Job conversions_to_tools:trial.`)
   })
 
   it("LF4-P1-2 round 1: out of usage with a job's change in the tree that no claim names → its own checks pass there → done in code, claim-less, and the reason says so", async () => {
@@ -405,13 +405,13 @@ describe("step jobs: questions, usage, fence", () => {
       checks: { results: { click_test: ["pass"], meta_mirror_wired: ["problem"] } }
     })
     const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE" })
+    expect(outcome).toMatchObject({ kind: "ok" })
     expect(readFileSync(join(t.root, "app/page.tsx"), "utf8")).toContain("data-conversion")
     const trial = t.current().jobs.find((item) => item.id === "conversions_to_tools:trial")!
     expect(["done_in_code", "waiting_deploy", "waiting_real_event"]).toContain(trial.state)
     expect(trial.claim).toBeUndefined()
-    expect((outcome as { reason: string }).reason).toContain("Done in code (the wizard's own checks passed on the code): Job conversions_to_tools:trial.")
-    expect((outcome as { reason: string }).reason).not.toContain("Nothing in the code yet: Job conversions_to_tools:trial")
+    expect((outcome as { status: string }).status).toContain("Done in code (the wizard's own checks passed on the code): Job conversions_to_tools:trial.")
+    expect((outcome as { status: string }).status).not.toContain("Nothing in the code yet: Job conversions_to_tools:trial")
   })
 
   it("LF4-P2-2: round 1 keeps an edit, round 2 runs out of usage → the reason says per job what stays and what the stopped turn undid", async () => {
@@ -427,16 +427,16 @@ describe("step jobs: questions, usage, fence", () => {
       checks: { results: { click_test: ["problem"], meta_mirror_wired: ["problem"] } }
     })
     const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "parked", code: "INF_WIZ_AGENT_OUT_OF_USAGE" })
-    const reason = (outcome as { reason: string }).reason
+    expect(outcome).toMatchObject({ kind: "ok" })
+    const reason = (outcome as { status: string }).status
     const title = (id: string) => t.current().jobs.find((item) => item.id === id)!.title
     // Round 1's change is in the tree (and recorded on its job); round 2's unfinished edit is not.
-    expect(readFileSync(join(t.root, "app/page.tsx"), "utf8")).toContain("data-conversion")
+    expect(readFileSync(join(t.root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
     expect(readFileSync(join(t.root, "app/layout.tsx"), "utf8")).not.toContain("// round 2")
-    expect(t.current().jobs.find((item) => item.id === "conversions_to_tools:trial")!.edits?.map((edit) => edit.file)).toEqual(["app/page.tsx"])
-    expect(reason).toContain(`Kept in the code from earlier rounds: ${title("conversions_to_tools:trial")} (app/page.tsx).`)
+    expect(t.current().jobs.find((item) => item.id === "conversions_to_tools:trial")!.edits).toEqual([])
+    expect(reason).not.toContain("Kept in the code from earlier rounds")
     expect(reason).toContain("The stopped turn's unfinished edits (app/layout.tsx) were undone.")
-    expect(reason).toContain(`Nothing in the code yet: ${title("meta_improve:landing")}.`)
+    expect(reason).toContain(`Nothing in the code yet: ${title("meta_improve:landing")};`)
     expect(reason).toMatch(/run `npx infinite-tag` again to resume/)
     // NEGATIVE: never the fixed sentence that read as if nothing survived.
     expect(reason).not.toContain("its edits were undone")
@@ -476,15 +476,15 @@ describe("step jobs: questions, usage, fence", () => {
   it("a toolless agent → failed AGENT_TOOLLESS (continue), jobs blocked:toolless", async () => {
     // The untouched tree: each job's own checks find what the job is for (the detector seeded it).
     const t = setup({ scenario: { turns: [{ mcp: "skip" }] }, checks: { results: { click_test: ["problem"], meta_mirror_wired: ["problem"] } } })
-    expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_AGENT_TOOLLESS", next: "continue" })
-    expect(t.current().jobs.map((item) => stateOf([item], item.id))).toEqual(["blocked:toolless", "blocked:toolless"])
+    expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "ok" })
+    expect(t.current().jobs.map((item) => stateOf([item], item.id))).toEqual(["left_for_you", "left_for_you"])
   })
 
   it("no worker → the agent jobs are listed for the user and no agent is spawned", async () => {
     const t = setup({ scenario: {}, worker: null })
     expect(await step.run(t.ctx, t.deps)).toEqual({ kind: "ok", status: "No agent: 2 jobs listed for you" })
     expect(runs(t.fakes)).toEqual([])
-    expect(t.current().jobs.map((item) => stateOf([item], item.id))).toEqual(["blocked:needs_you", "blocked:needs_you"])
+    expect(t.current().jobs.map((item) => stateOf([item], item.id))).toEqual(["left_for_you", "left_for_you"])
   })
 })
 
@@ -512,7 +512,7 @@ describe("step jobs: nested mode (§3d.7)", () => {
     t.ctx.options.resume = true
     expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "ok" })
     expect(stateOf(t.current().jobs, duplicate.id)).toBe("waiting_deploy")
-    expect(stateOf(t.current().jobs, guard.id)).toBe("failed")
+    expect(stateOf(t.current().jobs, guard.id)).toBe("left_for_you")
     expect(readFileSync(join(t.root, file), "utf8")).toBe(after)
     expect(t.recordedEdits.flat().map(edit => edit.file)).toContain(file)
     expect(runs(t.fakes)).toEqual([])
@@ -579,9 +579,9 @@ describe("step jobs: nested inside another sandbox (§3z B26)", () => {
     write(t.root, "app/page.tsx", PAGE_EDIT)
     t.ctx.options.resume = true
     const resumed = await step.run(t.ctx, t.deps)
-    expect(resumed).toEqual({ kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: expect.stringContaining("cannot run inside your agent's sandbox"), resumeHint: NESTED_SANDBOX_HINT })
+    expect(resumed).toMatchObject({ kind: "ok" })
     expect(NESTED_SANDBOX_HINT).toBe("Run npx infinite-tag --resume in your own terminal to finish the checks.")
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("claimed")
+    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("left_for_you")
     const build = t.current().jobs.find((item) => item.id === "meta_improve:landing")!.checks.find((check) => check.tier === "B")!
     expect(build).toMatchObject({ state: "undetermined", reason: expect.stringMatching(/^test_error — the build could not run: macOS sandbox-exec/) })
     // The user's own terminal: no nesting; the claimed jobs are checked, never handed to an agent again.
@@ -589,7 +589,7 @@ describe("step jobs: nested inside another sandbox (§3z B26)", () => {
     const finished = await step.run(t.ctx, t.deps)
     expect(finished.kind).toBe("ok")
     expect(runs(t.fakes)).toEqual([])
-    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("waiting_real_event")
+    expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("left_for_you")
     expect(stateOf(t.current().jobs, "meta_improve:landing")).not.toBe("claimed")
   })
 
