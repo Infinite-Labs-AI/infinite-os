@@ -200,7 +200,7 @@ function jobStates(run: WizardRun, itemId: string): string[] {
   return states.filter((state, index) => index === 0 || states[index - 1] !== state)
 }
 
-function finalJobs(w: E2eWorld): Array<{ id: string; state: string; blockedReason?: string; note?: string; checks: Array<{ id: string; tier: string; state: string }>; edits?: Array<{ file: string }> }> {
+function finalJobs(w: E2eWorld): Array<{ id: string; state: string; blockedReason?: string; note?: string; ownerBoundary?: { file?: string; wiring?: string }; checks: Array<{ id: string; tier: string; state: string }>; edits?: Array<{ file: string }> }> {
   return JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/state.json"), "utf8")).jobs
 }
 
@@ -296,6 +296,23 @@ describe("the offline end-to-end run (§4.3)", () => {
     expect(run.code, trace(run)).toBe(0)
     expect(jobStates(run, ITEMS.duplicates), JSON.stringify(finalJobs(w).find(job => job.id === ITEMS.duplicates))).toEqual(["claimed/agent_claim", "waiting_deploy/wizard", "proven/wizard"])
     expect(finalJobs(w).find(job => job.id === ITEMS.duplicates)!.checks.find(check => check.tier === "PV")!.state).toBe("pass")
+  })
+
+  it("R7 leaves an inline-consent layout byte-identical and hands wiring to its owner", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await world()
+    const component = fixtureFile("app/consent-defaults.tsx")
+    const script = component.slice(component.indexOf('        <Script id="consent-default"'), component.indexOf('        </Script>') + '        </Script>'.length)
+    const inline = fixtureFile("app/layout.tsx").replace('import { ConsentDefaults } from "./consent-defaults"\n', "").replace("        <ConsentDefaults />", script)
+    writeFileSync(join(w.site.repo, "app/layout.tsx"), inline)
+    commitAndPush(w, "inline owner unit fixture")
+    w.site.initialSha = git(w.site.repo, "rev-parse", "HEAD")
+    const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
+    expect(run.code, trace(run)).toBe(0)
+    expect(readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8")).toBe(inline)
+    const receipt = JSON.parse(readFileSync(join(w.site.repo, ".infinite/install.json"), "utf8"))
+    expect(JSON.stringify(receipt.requiresManual)).toContain("app/layout.tsx")
+    const ownerWiring = finalJobs(w).find(job => job.state === "left_for_you" && job.ownerBoundary?.file === "app/layout.tsx" && job.ownerBoundary.wiring)
+    expect(ownerWiring?.ownerBoundary?.wiring).toContain("InfiniteAnalyticsClient")
   })
 
   it("runs all 13 steps to run.end with exit 0 and holds every main outcome", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
@@ -1023,7 +1040,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   it("§3z.12 item 4: newly managed GA4 and PostHog ship with the preview guard and the sensitive-path options in the emitted bytes", { timeout: RUN_TIMEOUT }, async () => {
     const w = await world({ env: { E2E_NO_AGENTS: "1" } })
     // The site has no GA4 and no PostHog yet (the Meta pixel stays adopted): both become NEW managed installs.
-    writeFileSync(join(w.site.repo, "app/layout.tsx"), fixtureFile("app/layout.tsx").replace(/ {8}<Script id="consent-default"[\s\S]*?<Script id="meta-pixel"/, '        <Script id="meta-pixel"'))
+    writeFileSync(join(w.site.repo, "app/layout.tsx"), fixtureFile("app/layout.tsx").replace(/ {8}<ConsentDefaults \/>[\s\S]*?<Script id="meta-pixel"/, '        <Script id="meta-pixel"'))
     writeFileSync(join(w.site.repo, "app/providers.tsx"), 'export function Providers({ children }: { children: React.ReactNode }) {\n  return <>{children}</>\n}\n')
     commitAndPush(w, "no GA4, no PostHog yet")
     expect(readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8")).not.toContain("googletagmanager")
