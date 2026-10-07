@@ -1,3 +1,4 @@
+import { safeDisplayText } from "../../review/display.js"
 // Step 9 `review` (§3d.1, §3g.4, lane O4): the OTHER agent reviews the PR read-only in a detached worktree of
 // the head → the wizard scans the review and posts it as ONE `event: COMMENT` review → reads the threads back
 // under the trust rules → triages (FIX / DECLINE / ANSWER / ASK) → fixes through the worker (job 16, ≤ 2 rounds)
@@ -31,7 +32,7 @@ import { commentTrust, hasFinalMarker, hasReplyMarker, parseReviewMarker, stripM
 import { AGENT_LABEL, buildFinalComment, buildReply, buildReviewPost, excerpt, FIX_ROUND_MINUTES, notFixedReply, redactIdsNotInDiff, safeText, type FixReplyState, type NotFixedOutcome } from "../../review/post.js"
 import { applyRehearsalToJobs, recordRehearsalCells, rehearse } from "../../review/rehearse.js"
 import { mergeRequirementLine } from "../../github/rules.js"
-import { checksSummary, checkPolicy, commitChecks, type PrCheck } from "../../github/checks.js"
+import { checksSummary, checkPolicy, commitChecks, checkRunsOnPr, type PrCheck } from "../../github/checks.js"
 import { DETERMINISTIC_CHECKS_BY_ITEM, fileRoleOf, isRepoRelativePath, leftByOwnerReason, pageHelperCalls, triage, triageKey, type FileRole, type PageHelperCall, type TriageDecision, type TriageItem } from "../../review/triage.js"
 import { escapeRegExp } from "../../text-escape.js"
 import { stageAndCommit, failed, pushBranch } from "../../review/ship.js"
@@ -422,7 +423,7 @@ async function gatherItems(session: Session, review: ReviewResult, round: number
       .filter((comment) => !hasReplyMarker(comment.body))
       .map((comment) => `@${comment.author}: ${stripMarkers(comment.body)}`)
       .join("\n\n")
-    const shown = safeText(ship.scanner, text).slice(0, TEAMMATE_TEXT_MAX)
+    const shown = safeDisplayText(ship.scanner, text).slice(0, TEAMMATE_TEXT_MAX)
     if (shown.trim().length > 0) teammateThreads.push({ thread, text: shown })
   }
   for (const item of items) item.threadId = ownThreadByFinding.get(item.findingId ?? "") ?? null
@@ -432,8 +433,8 @@ async function gatherItems(session: Session, review: ReviewResult, round: number
     const answer = await ctx.ask("teammate-comments", {
       comments: teammateThreads.map(({ thread, text }) => ({
         threadId: thread.threadId,
-        author: thread.author,
-        path: thread.path ?? "",
+        author: safeDisplayText(ship.scanner, thread.author),
+        path: safeDisplayText(ship.scanner, thread.path ?? ""),
         line: thread.line,
         excerpt: text
       }))
@@ -513,7 +514,7 @@ async function resolveAsks(session: Session, decisions: TriageDecision[], worker
     const who = decision.item.source === "teammate" ? "A teammate" : "The reviewer"
     const where = `${decision.item.path}${decision.item.line ? `:${decision.item.line}` : ""}`
     const answer = await session.ctx.ask("single", {
-      question: `${who} on ${where}: “${excerpt(decision.item.body, 140)}” ${decision.reason} Let the agent fix it?`,
+      question: safeDisplayText(session.ship.scanner, `${who} on ${where}: “${excerpt(decision.item.body, 140)}” ${decision.reason} Let the agent fix it?`),
       options: [
         { label: "Fix it", value: "fix" },
         { label: "Leave it", value: "leave" }
@@ -681,13 +682,18 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
   const started = deps.clock.now().getTime()
   const checkedHead = await session.ship.git.head()
   const registeredOnResume = session.ledger.checkRegistration?.sha === checkedHead
+  const pushed = ctx.state.get().lastPush
+  const pushedAt = pushed?.sha === checkedHead ? Date.parse(pushed.at) : started
+  const registrationStart = Number.isFinite(pushedAt) ? Math.min(started, pushedAt) : started
   const result = (state: CheckResult["state"], reason: string, ready = false): CheckResult & { ready: boolean } => ({ checkId: "pr_checks_pass", tier: "S", state, reason, at: ctx.now().toISOString(), runId, ready })
   let waitingReason = "PR checks could not be read"
   const base = await commitChecks(github.gh, ctx.state.get().git!.baseSha).catch(() => null)
+  const triggers = new Map<string, boolean | null>()
+  for (const check of base ?? []) if (check.bucket === "pass") triggers.set(check.name, await checkRunsOnPr(github.gh, check, checkedHead))
   sub(ctx, "review", "Checking the new commit's CI checks…", "pending")
   for (;;) {
     const elapsed = deps.clock.now().getTime() - started
-    const registered = registeredOnResume || elapsed >= CHECKS_EMPTY_GRACE_MS
+    const registered = registeredOnResume || deps.clock.now().getTime() - registrationStart >= CHECKS_EMPTY_GRACE_MS
     if (registered && session.ledger.checkRegistration?.sha !== checkedHead) {
       session.ledger.checkRegistration = { sha: checkedHead, complete: true }
       await saveLedger(session)
@@ -716,20 +722,22 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
         : pending.length > 0 ? `PR checks are still pending: ${pending.map(check => check.name).join(", ")}`
         : unknown.length > 0 ? `PR check states could not be read: ${unknown.map(check => check.name).join(", ")}`
         : "No PR checks have been reported"
-      if (registered && base !== null && summary.pending === 0 && unknown.length === 0) {
+      const waitingForAbsent = absent.some(check => triggers.get(check.name) !== false) && deps.clock.now().getTime() - registrationStart < CHECKS_WAIT_MS
+      if (absent.length > 0) waitingReason = `Missing PR checks: ${absent.map(check => check.name).join(", ")}; not measured`
+      if (registered && !waitingForAbsent && base !== null && summary.pending === 0 && unknown.length === 0) {
         for (const check of absent) {
-          const note = `${check.name} does not run on pull requests: not measured (no counterpart after registration).`
+          const note = triggers.get(check.name) === false ? `${check.name} does not run on pull requests: not measured (workflow triggers checked).` : `${check.name} did not appear in the full check window: not measured.`
           if (!session.notes.includes(note)) { session.notes.push(note); sub(ctx, "review", note, "info") }
         }
         if (checks.length === 0) return result("undetermined", base.length === 0 ? "no checks reported: not measured; the base commit also has no checks" : "No checks reported on this pull request after registration: not measured", true)
-        return result(summary.pass > 0 ? "pass" : "undetermined", summary.pass > 0 ? `${summary.pass} PR check(s) pass; unavailable previews and base-only checks remain not measured` : "PR checks not measured; only blocked previews or existing failures reported", true)
+        return result(summary.pass > 0 && absent.length === 0 && policy.blocked.length === 0 ? "pass" : "undetermined", summary.pass > 0 ? `${summary.pass} PR check(s) pass; unavailable previews and base-only checks remain not measured` : "PR checks not measured; only blocked previews or existing failures reported", true)
       }
-      if (registeredOnResume && pending.length === 0) return result("undetermined", waitingReason)
+      if (registeredOnResume && !waitingForAbsent && pending.length === 0) return result("undetermined", waitingReason)
     } else {
       waitingReason = "PR checks could not be read"
       if (registeredOnResume) return result("undetermined", waitingReason)
     }
-    if (ctx.signal.aborted || elapsed + CHECKS_POLL_MS > CHECKS_WAIT_MS) return result("undetermined", waitingReason)
+    if (ctx.signal.aborted || elapsed >= CHECKS_WAIT_MS) return result("undetermined", waitingReason)
     await deps.clock.sleep(CHECKS_POLL_MS, ctx.signal)
   }
 }
@@ -1074,7 +1082,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
       for (const [index, decision] of fixes.entries()) {
         if (fix.items.find(item => item.id === items[index]!.id)?.state !== "left_for_you") continue
         decision.action = "OWNER_INFO"
-        decision.reason = "Put back: an edit reached code that handles consent."
+        decision.reason = fix.items.find(item => item.id === items[index]!.id)?.note ?? "Not changed by us: this edit place belongs to the site owner."
         session.ledger.open = session.ledger.open.filter(entry => entry.key !== triageKey(decision.item))
       }
       if (edited.length === 0 && fixes.every(decision => decision.action === "OWNER_INFO")) {

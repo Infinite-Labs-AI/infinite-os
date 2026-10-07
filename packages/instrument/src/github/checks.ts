@@ -9,6 +9,7 @@ export interface PrCheck {
   bucket: string
   state: string
   description?: string
+  deploymentState?: string
   link?: string
 }
 
@@ -37,7 +38,9 @@ export function checksSummary(checks: readonly PrCheck[]): { pass: number; fail:
 
 /** Hosting access failures do not measure either the code or its preview. */
 export function blockedPreview(check: PrCheck): boolean {
-  return /vercel|netlify|cloudflare/i.test(check.name) && /deployment (?:was |is |has been )?blocked|(?:requires?|needs?) authori[sz]ation|authori[sz]ation required|git author.*(?:access|member)|must (?:be a member|have access)|(?:requires?|needs?|missing) team access/i.test(check.description ?? "")
+  if (!/vercel|netlify|cloudflare/i.test(check.name)) return false
+  if (check.deploymentState) return check.deploymentState.toLowerCase() === "blocked"
+  return /^(?:Deployment (?:was |is |has been )?blocked|Authorization required|Vercel - Git author must have access to the project on Vercel to create deployments)\.?$/i.test((check.description ?? "").trim())
 }
 
 /** Read both Actions check runs and external commit statuses. An unreadable base is never green. */
@@ -61,4 +64,32 @@ export function checkPolicy(checks: readonly PrCheck[], base: readonly PrCheck[]
     return matches.length > 0 && matches.every(previous => previous.bucket === "fail" && !blockedPreview(previous))
   })
   return { failing: red.filter(check => !existing.includes(check)), existing, blocked }
+}
+
+/** Conservative trigger reader: unsupported YAML stays unknown and gets the full wait window. */
+export function workflowPrTrigger(source: string): boolean | null {
+  const match = /^(?:on|"on"|'on'):[ \t]*([^\n]*)(?:\n|$)/m.exec(source)
+  if (!match) return null
+  const rest = source.slice(match.index + match[0].length).split(/\n(?=[^\s#])/)[0] ?? ""
+  const declaration = match[1]!.replace(/\s+#.*$/, "").trim()
+  const value = declaration || rest
+  if (/[&*!]|<<:/.test(value)) return null
+  const events = declaration ? declaration.replace(/^\[|\]$/g, "").split(",").map(word => word.trim().replace(/^['"]|['"]$/g, ""))
+    : [...rest.matchAll(/^  ([a-z_]+):/gm)].map(row => row[1]!)
+  if (events.length === 0) return null
+  if (events.includes("pull_request") || events.includes("pull_request_target")) return true
+  const known = new Set(["push", "schedule", "workflow_dispatch", "workflow_call", "workflow_run", "release", "merge_group", "repository_dispatch", "issues", "issue_comment", "create", "delete"])
+  return events.every(event => known.has(event)) ? false : null
+}
+
+export async function checkRunsOnPr(gh: GhClient, check: PrCheck, sha: string): Promise<boolean | null> {
+  const runId = /\/actions\/runs\/(\d+)/.exec(check.link ?? "")?.[1]
+  if (!runId) return null
+  try {
+    const run = await gh.json<{ path?: string }>(["api", `repos/{owner}/{repo}/actions/runs/${runId}`])
+    if (!run.path?.startsWith(".github/workflows/")) return null
+    const file = await gh.json<{ content?: string; encoding?: string }>(["api", `repos/{owner}/{repo}/contents/${run.path}?ref=${encodeURIComponent(sha)}`])
+    if (!file.content || file.encoding !== "base64") return null
+    return workflowPrTrigger(Buffer.from(file.content, "base64").toString("utf8"))
+  } catch { return null }
 }

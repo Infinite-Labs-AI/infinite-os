@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer"
 /* global process */
 // A fake `gh` for lane O4's tests (and I1's offline E2E). It keeps its state in the JSON file named by
 // FAKE_GH_STATE, appends every call (argv + stdin) to `<FAKE_GH_STATE>.calls.jsonl`, and answers the subset of gh
@@ -323,6 +324,13 @@ if (group === "api") {
     created_at: entry.created_at ?? "2026-10-02T10:00:00Z",
     creator: { login: entry.creator }
   })
+  const workflowRun = /\/actions\/runs\/(\d+)$/.exec(path)
+  if (workflowRun && state.workflows?.[workflowRun[1]]) out({ path: state.workflows[workflowRun[1]].path })
+  const workflowFile = /\/contents\/(\.github\/workflows\/[^?]+)\?/.exec(path)
+  if (workflowFile) {
+    const workflow = Object.values(state.workflows ?? {}).find(entry => entry.path === workflowFile[1])
+    if (workflow) out({ encoding: "base64", content: Buffer.from(workflow.source).toString("base64") })
+  }
   if (/\/commits\/[^/]+\/check-runs/.test(path)) out({ check_runs: (state.baseChecks ?? []).map(check => ({ ...check, status: "completed" })) })
   if (/\/commits\/[^/]+\/status\?/.test(path)) out({ statuses: [] })
   const newestFirst = (rows) => [...rows].sort((a, b) => Date.parse(b.created_at ?? "") - Date.parse(a.created_at ?? ""))

@@ -498,7 +498,7 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(w.fx.remoteSha(BRANCH)).toBeNull()
   })
 
-  it.each(["timeout", "opaque"])("R6 describes a working-tree %s after a measured baseline truthfully", async (kind) => {
+  it.each(["timeout", "opaque"])("describes a working-tree %s after a measured baseline truthfully", async (kind) => {
     const w = await world()
     w.fx.write(".infinite/wizard/before.json", JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId: RUN_ID, measuredAt: w.ctx.now().toISOString(), facts: { keys: await w.bridge.keys(), hosting: fakeHosting(), census: { entries: [] }, dryLive: null, localValidation: "measured", baselineBuild: { ok: true, durationMs: 1, failureSignature: [] } } }))
     w.deps.checks.build = async () => ({ ok: false, durationMs: 1, failureSignature: kind === "timeout" ? ["build: timeout"] : ["build: opaque: exited without a diagnostic"], timedOut: kind === "timeout" })
@@ -681,7 +681,7 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
 })
 
 describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
-  it.each(["commit", "stage", "receipt"])("R6 restores both edits and receipt when a CI repair fails during %s", async (failure) => {
+  it.each(["commit", "stage", "receipt"])("restores both edits and receipt when a CI repair fails during %s", async (failure) => {
     const w = await opened({ reviews: [review([])], fix: fixLayout, gh: {
       baseChecks: [{ name: "test", conclusion: "success" }], failedLogs: { "123": "app/layout.tsx:2: error TS2304" },
       checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE", link: "https://github.com/example/site/actions/runs/123/job/1" }] }
@@ -698,7 +698,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.fx.git(["diff", "--cached", "--name-only"]).trim()).toBe("")
   })
 
-  it("R6 gives the worker the CI failure near the log tail with the correct label", async () => {
+  it("gives the worker the CI failure near the log tail with the correct label", async () => {
     const w = await opened({ reviews: [review([])], gh: {
       baseChecks: [{ name: "test", conclusion: "success" }], failedLogs: { "123": "setup progress\n".repeat(700) + "app/layout.tsx:2: error TS2304: ERROR_TAIL_FIXTURE\n" },
       checks: { "42": [{ name: "test", bucket: "fail", state: "FAILURE", link: "https://github.com/example/site/actions/runs/123/job/1" }] }
@@ -711,28 +711,40 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     w.ctx.state.update(state => { state.jobs[0]!.edits = [{ editId: "prior", file: "app/layout.tsx" }] })
     await reviewStep.run(w.ctx, w.deps)
   })
-  it.each(["pending", "cancel", "unreadable"])("R6 keeps draft when a base-green check is %s", async (state) => {
+  it.each(["pending", "cancel", "unreadable"])("keeps draft when a base-green check is %s", async (state) => {
     const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "test", conclusion: "success" }], checks: { "42": state === "missing" ? [] : [{ name: "test", bucket: state, state: state.toUpperCase() }] } } })
     if (state === "unreadable") w.host.checks = async () => { throw new Error("fixture unavailable") }
     expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", code: "INF_WIZ_MERGE_PARKED" })
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
   })
 
-  it("R7 allows an authorization-blocked preview after registration with a truthful note", async () => {
+  it("allows an authorization-blocked preview after registration with a truthful note", async () => {
     const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "Vercel", conclusion: "success" }], checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
     expectOk(await reviewStep.run(w.ctx, w.deps))
     expect(w.gh.read().prs[0]!.isDraft).toBe(false)
     expect(eventText(w.ctx)).toContain("preview not measured")
   })
 
-  it("R7 reports a base-only push check as not measured after registration", async () => {
+  it("waits the full window for a missing base-green check with unknown triggers", async () => {
     const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "release", conclusion: "success" }], checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } } })
     expectOk(await reviewStep.run(w.ctx, w.deps))
     expect(w.gh.read().prs[0]!.isDraft).toBe(false)
-    expect(w.gh.traffic()).toContain("does not run on pull requests: not measured")
+    expect(w.gh.traffic()).toContain("did not appear in the full check window: not measured")
   })
 
-  it("R7 reads a resumed blocked host check without repeating registration waits", async () => {
+  it.each([false, true])("uses the recorded push time and actual workflow triggers (PR trigger %s)", async onPr => {
+    const w = await opened({ reviews: [review([])], gh: { baseChecks: [{ name: "release", conclusion: "success", details_url: "https://github.com/example/site/actions/runs/123" }], workflows: { "123": { path: ".github/workflows/release.yml", source: onPr ? "on: [push, pull_request]\njobs: {}" : "on: push\njobs: {}" } }, checks: { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } } })
+    const clock = fakeClock()
+    w.deps.clock = clock
+    w.ctx.state.update(state => { state.lastPush = { sha: state.git!.headSha!, at: new Date(clock.now().getTime() - 90_000).toISOString() } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(onPr ? 510_000 : 0)
+    const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8"))
+    expect(w.gh.traffic()).toContain(onPr ? "full check window: not measured" : "workflow triggers checked")
+    expect(JSON.stringify(ledger)).not.toContain('"pr_checks_pass","tier":"S","state":"pass"')
+  })
+
+  it("reads a resumed blocked host check without repeating registration waits", async () => {
     const w = await opened({ reviews: [review([])], gh: { checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
     const clock = fakeClock()
     w.deps.clock = clock
@@ -742,7 +754,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(clock.slept).toHaveLength(slept)
   })
 
-  it.each(["cancel", "unreadable"])("R7 rereads %s on resume and parks without another idle wait", async bucket => {
+  it.each(["cancel", "unreadable"])("rereads %s on resume and parks without another idle wait", async bucket => {
     const w = await opened({ reviews: [review([])], gh: { checks: { "42": [{ name: "test", bucket, state: bucket.toUpperCase() }] } } })
     const clock = fakeClock()
     w.deps.clock = clock

@@ -27,7 +27,8 @@ export interface FakeGhState {
   deployments?: Array<{ id: number; sha: string; environment: string; creator: string; production_environment?: boolean; created_at?: string; statuses: Array<{ state: string; description?: string; environment_url?: string | null }> }>
   rules?: Record<string, Array<{ type: string; parameters?: Record<string, unknown> }>>
   checks?: Record<string, Array<{ name: string; bucket: string; state: string; description?: string; link?: string }>>
-  baseChecks?: Array<{ name: string; conclusion: string }>
+  baseChecks?: Array<{ name: string; conclusion: string; details_url?: string }>
+  workflows?: Record<string, { path: string; source: string }>
   failedLogs?: Record<string, string>
   calls?: FakeGhCall[]
   nextPrNumber?: number
