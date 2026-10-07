@@ -5,6 +5,7 @@ import { GhError, type GhClient } from "./gh.js"
 
 export interface PrCheck {
   name: string
+  source?: "check_run" | "commit_status"
   /** pass / fail / pending / skipping / cancel */
   bucket: string
   state: string
@@ -68,9 +69,9 @@ export async function commitChecks(gh: GhClient, sha: string): Promise<PrCheck[]
   return [
     ...runs.map(row => {
       const state = row.status === "completed" ? row.conclusion ?? row.status : row.status
-      return { name: row.name, bucket: checkBucket(state), state, link: row.details_url, ...(row.output?.summary ? { description: row.output.summary } : {}) }
+      return { name: row.name, source: "check_run" as const, bucket: checkBucket(state), state, link: row.details_url, ...(row.output?.summary ? { description: row.output.summary } : {}) }
     }),
-    ...statuses.filter((row, index, all) => all.findIndex(other => other.context === row.context) === index).map(row => ({ name: row.context, bucket: checkBucket(row.state), state: row.state, description: row.description, link: row.target_url }))
+    ...statuses.filter((row, index, all) => all.findIndex(other => other.context === row.context) === index).map(row => ({ name: row.context, source: "commit_status" as const, bucket: checkBucket(row.state), state: row.state, description: row.description, link: row.target_url }))
   ]
 }
 
@@ -104,6 +105,8 @@ export async function withDeploymentStates(gh: GhClient, sha: string, checks: Pr
   const mapped = checks.map(check => {
     const host = provider(check.name)
     if (!host || check.bucket === "skipping") return check
+    // A deployment is separate evidence: an access block cannot erase an actual failed run.
+    if (["fail", "cancel"].includes(check.bucket) && (check.source === "check_run" || Boolean(check.description?.trim())) && !blockedPreview(check)) return check
     const namedProject = project(check.name, host)
     const candidates = evidence.filter(({ deployment }) => provider(deployment.creator?.login ?? "") === host &&
       (!namedProject || normalize(deployment.environment ?? "") === namedProject || project(deployment.environment ?? "", "(?:preview|production)") === namedProject))

@@ -761,7 +761,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
   })
 
   it("allows an authorization-blocked deployment with its actual hosting reason", async () => {
-    const w = await opened({ reviews: [review([])], gh: { deployments: [{ id: 7, sha: "*", environment: "Preview", creator: "vercel[bot]", statuses: [{ state: "failure", description: "Deployment was blocked" }] }], checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE" }] } } })
+    const w = await opened({ reviews: [review([])], gh: { deployments: [{ id: 7, sha: "*", environment: "Preview", creator: "vercel[bot]", statuses: [{ state: "failure", description: "Deployment was blocked" }] }], headCheckRuns: [], commitStatuses: { "42": [{ context: "Vercel", state: "failure" }] } } })
     expectOk(await reviewStep.run(w.ctx, w.deps))
     expect(w.gh.read().prs[0]!.isDraft).toBe(false)
     expect(eventText(w.ctx)).toContain("hosting team member")

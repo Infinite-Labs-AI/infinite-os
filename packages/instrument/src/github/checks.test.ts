@@ -127,3 +127,20 @@ it("does not hide a real build failure behind another environment's access block
   expect(readinessChecks(checks, []).checks).toHaveLength(1)
   expect(checks[0]!.description).toBe("Build failed")
 })
+it.each([undefined, "Build failed"])("does not replace an actual failed check run with a blocked deployment (%s)", async summary => {
+  const gh = { json: async (args: string[]) => {
+    const path = args[1]!
+    if (path.includes("/check-runs")) return { check_runs: [{ name: "Vercel", head_sha: SHA, status: "completed", conclusion: "failure", ...(summary ? { output: { summary } } : {}) }] }
+    if (path.includes("/status?")) return { statuses: [] }
+    if (path.includes("/statuses")) return [{ state: "failure", description: "Authorization required to deploy." }]
+    return [{ id: 7, creator: { login: "vercel[bot]" }, environment: "Preview" }]
+  } } as unknown as GhClient
+  const checks = await withDeploymentStates(gh, SHA, await commitChecks(gh, SHA))
+  expect(readinessChecks(checks, []).checks).toHaveLength(1)
+})
+it("preserves an explicitly failed hosting status alongside a blocked deployment", async () => {
+  const gh = { json: async (args: string[]) => args[1]!.includes("/statuses") ? [{ state: "failure", description: "Deployment was blocked" }] : [{ id: 7, creator: { login: "vercel[bot]" }, environment: "Preview" }] } as unknown as GhClient
+  const checks = await withDeploymentStates(gh, SHA, [{ name: "Vercel", source: "commit_status", bucket: "fail", state: "failure", description: "Build failed" }])
+  expect(readinessChecks(checks, []).checks).toHaveLength(1)
+  expect(checks[0]!.description).toBe("Build failed")
+})
