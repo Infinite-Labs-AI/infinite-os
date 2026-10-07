@@ -1,3 +1,5 @@
+import { createScanner } from "../review/scan.js"
+import { quoteDisplayNote } from "../review/display.js"
 // `ReportBuilder` (§3i, schema `infinite-tag.report.v2`): the before/after report the user ends with,
 // the same in the terminal, on the PR and in the Infinite app.
 //
@@ -884,9 +886,10 @@ export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMe
     out.push("")
     for (const note of notes) out.push(`${md(note)}  `)
   }
+  const ownerNoteScanner = createScanner({ literals: [], allowedIds: [] })
   for (const instruction of ownerInstructions(ownerJobs)) {
     const fence = "`".repeat(Math.max(3, ...[...instruction.snippet.matchAll(/`+/g)].map(match => match[0].length + 1)))
-    out.push("", instruction.note, "", instruction.placement, "", `${fence}js`, instruction.snippet, fence)
+    out.push("", quoteDisplayNote(ownerNoteScanner, instruction.note), "", quoteDisplayNote(ownerNoteScanner, instruction.placement), "", `${fence}js`, instruction.snippet, fence)
   }
   if (excludedLines.length > 0) out.push("", "### You said no to", "", ...[...new Set(excludedLines)].map(line => `- ${md(line)}`))
   const text = out.join("\n")

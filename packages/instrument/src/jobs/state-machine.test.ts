@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest"
 
 import type { ChecklistItem, CheckResult, CheckTier, JobId } from "../wizard/contracts/jobs.js"
-import { applyClaim, applyResults, blockItem, markMerged, waitsForRealEvent } from "./state-machine.js"
+import { applyClaim, applyResults, blockItem, failItem, leaveForOwner, unblockItem, withNote, markMerged, waitsForRealEvent } from "./state-machine.js"
+import { createScanner } from "../review/scan.js"
 import { JOB_TABLE, checkProvesChange } from "../wizard/contracts/jobs.js"
 
 const RUN = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
@@ -284,4 +285,45 @@ it("request 4 P3-before: failed rehearsal notes use plain words before deploymen
   const out = applyResults(waiting, [{ ...result("one_beacon_per_tool", "RH", "problem"), reason: "duplicate_page_view — ga4: G-ABC123 sent 2 page_view on home" }], RUN, { budgetLeft: false })
   expect(out.item.note).toContain("Each tag once per page (GA4 sent 2 page views on the home page)")
   expect(out.note).not.toMatch(/RH:|one_beacon_per_tool|duplicate_page_view/)
+})
+
+
+describe("notes redact before storage and display limits", () => {
+  const secret = "fixtureDatabasePassword"
+  const note = `Could not connect to postgres://user:${secret}@db.example/app`
+
+  it("stores and returns redacted notes for every transition", () => {
+    const outputs = [
+      withNote(item("posthog_improve"), note),
+      failItem(item("posthog_improve"), note),
+      leaveForOwner(item("posthog_improve"), note),
+      blockItem(item("posthog_improve"), "agent_blocked", note),
+      unblockItem(item("posthog_improve", "blocked"), note)
+    ]
+    for (const output of outputs) {
+      expect(JSON.stringify(output)).not.toContain(secret)
+      expect(JSON.stringify(output)).toContain("[redacted: url_password]")
+    }
+  })
+
+  it.each(["done", "blocked", "not_needed"] as const)("redacts a stored %s claim", status => {
+    const output = applyClaim(item("posthog_improve"), { jobId: "posthog_improve:x", status, note, at: AT }, () => ({ agrees: true, evidence: [] }))
+    expect(JSON.stringify(output)).not.toContain(secret)
+    expect(output.item.claim?.note).toContain("[redacted: url_password]")
+  })
+
+  it("redacts stored check reasons before they become item and transition notes", () => {
+    const output = applyResults(item("posthog_improve", "claimed"), [{ ...result("posthog_config", "S", "problem"), reason: note }], RUN, { budgetLeft: false })
+    expect(JSON.stringify(output)).not.toContain(secret)
+    expect(output.item.checks.find(check => check.id === "posthog_config")?.reason).toContain("[redacted: url_password]")
+    expect(output.note).toContain("[redacted:")
+  })
+
+  it("uses a supplied scanner before truncating environment values", () => {
+    const envSecret = "opaque@fixture|environmentCredential"
+    const scanner = createScanner({ literals: [{ value: envSecret, kind: "env_value" }], allowedIds: [] })
+    const output = withNote(item("posthog_improve"), "x".repeat(280) + envSecret, scanner)
+    expect(output.note).not.toContain("opaque")
+    expect(output.note).toContain("redacted")
+  })
 })

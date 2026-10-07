@@ -1,5 +1,5 @@
 import { ownerInformationOnly, protectedFinding, OWNER_INFORMATION_HEADING } from "./integrity.js"
-import { safeDisplayText, neutralizeUntrustedMarkup, redactDisplayText } from "./display.js"
+import { safeDisplayText, neutralizeTaskCheckboxes, quoteDisplayNote, redactDisplayText } from "./display.js"
 // Everything the wizard posts on the PR (lane O4, §3g.3–§3g.5), built here and scanned here:
 // the PR body, the ONE review (`event: COMMENT`; a finding outside a diff hunk goes into the body), the replies,
 // and the final comment. Statuses are plain text the wizard owns: a literal `- [ ]` (which anyone can tick) is
@@ -9,7 +9,7 @@ import { hasRecordedPolicyEdits, withOwnerBoundary } from "../jobs/owner-boundar
 import { omitOwnerPolicyReview } from "./brief.js"
 import { sanitizeUntrustedBlock } from "../agents/sanitize.js"
 import { AGENT_LIMITS, type AgentKind, type ReviewResult } from "../wizard/contracts/agents.js"
-import { FORBIDDEN_CHECKBOX, PR_MARKERS } from "../wizard/contracts/git-host.js"
+import { PR_MARKERS } from "../wizard/contracts/git-host.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 import { lineInHunk, type DiffFile } from "./diff.js"
 import { createScanner, mostlyRedacted, type Scanner } from "./scan.js"
@@ -20,11 +20,11 @@ export const AGENT_LABEL: Record<AgentKind, string> = { claude_code: "Claude Cod
 
 /** Task-list checkboxes become plain bullets (any collaborator could tick one and fake a "done"). */
 export function neutralizeCheckboxes(text: string): string {
-  return text.replace(/^(\s*[-*+]\s+)\[[ xX]\]\s?/gm, "$1").split(FORBIDDEN_CHECKBOX).join("- ")
+  return neutralizeTaskCheckboxes(text)
 }
 
-function escapeCell(text: string): string {
-  return escapeMarkdownCell(neutralizeUntrustedMarkup(text)).trim()
+function escapeCell(text: string, scanner: Scanner = createScanner({ literals: [], allowedIds: [] })): string {
+  return escapeMarkdownCell(safeDisplayText(scanner, text)).trim()
 }
 
 /** Strips C0 control characters (but newlines and tabs) from untrusted text before it is posted. */
@@ -66,7 +66,7 @@ export function buildPrBody(input: {
   scanner: Scanner
   notes?: readonly string[]
 }): string {
-  const parts = [input.reportMarkdown.trim(), ...(input.notes ?? []).map((note) => `> ${safeDisplayText(input.scanner, note)}`), input.howToReview.trim()]
+  const parts = [input.reportMarkdown.trim(), ...(input.notes ?? []).map((note) => quoteDisplayNote(input.scanner, note)), input.howToReview.trim()]
   let body = neutralizeCheckboxes(safeText(input.scanner, withOwnerBoundary(parts.filter(Boolean).join("\n\n"), false, input.ownerBoundary)))
   if (!input.isPrivate) body = redactIdsNotInDiff(body, input.diffText, input.connectionIds)
   return `${body}\n\n${PR_MARKERS.pr(input.runId)}\n`
@@ -124,7 +124,7 @@ export function buildReviewPost(input: {
     }
   }
   const checklist = input.review.checklist
-    .map((row) => `| ${row.item} | ${STATUS_TEXT[row.status]} | ${escapeCell(safeDisplayText(input.scanner, row.note))} |`)
+    .map((row) => `| ${row.item} | ${STATUS_TEXT[row.status]} | ${escapeCell(row.note, input.scanner)} |`)
     .join("\n")
   const onlyInfo = input.review.findings.length > 0 && input.review.findings.every(ownerInformationOnly)
   const protectedOpen = input.review.findings.some(protectedFinding)
@@ -262,15 +262,15 @@ function ownerSnippet(text: string, language: string, scanner: Scanner): string 
 /** Shared merge-time and final checklist; scan the returned Markdown before posting. */
 export function buildChecklist(jobs: readonly ChecklistItem[], scanner: Scanner = createScanner({ literals: [], allowedIds: [] }), alreadyShownOwnerText = ""): string {
   if (jobs.length === 0) return ""
-  const rows = jobs.map((job) => `| ${escapeCell(job.title)} | ${escapeCell(jobStateCell(job))} |`).join("\n")
+  const rows = jobs.map((job) => `| ${escapeCell(job.title, scanner)} | ${escapeCell(jobStateCell(job), scanner)} |`).join("\n")
   const guards = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.kind === "frozen_unit" && job.ownerBoundary.guard && !alreadyShownOwnerText.includes(job.ownerBoundary.guard)).map(job => {
     const scope = job.ownerBoundary!
-    const where = escapeCell(`${scope.file ?? job.allow.files[0] ?? "the noted file"}:${scope.line ?? 1}`)
-    return `**For the site owner: ${escapeCell(job.title)}**\n\nApply this condition to the analytics start-up at ${where}. Keep your consent, grant and revoke code outside the guard. This snippet is for you to copy; the wizard did not edit that unit.\n\n${ownerSnippet(scope.guard!, "js", scanner)}`
+    const where = escapeCell(`${scope.file ?? job.allow.files[0] ?? "the noted file"}:${scope.line ?? 1}`, scanner)
+    return `**For the site owner: ${escapeCell(job.title, scanner)}**\n\nApply this condition to the analytics start-up at ${where}. Keep your consent, grant and revoke code outside the guard. This snippet is for you to copy; the wizard did not edit that unit.\n\n${ownerSnippet(scope.guard!, "js", scanner)}`
   })
   const wiring = jobs.filter(job => job.state === "left_for_you" && job.ownerBoundary?.wiring && !alreadyShownOwnerText.includes(job.ownerBoundary.wiring)).map(job => {
     const scope = job.ownerBoundary!
-    const where = escapeCell(scope.file ?? job.allow.files[0] ?? "the noted entrypoint")
+    const where = escapeCell(scope.file ?? job.allow.files[0] ?? "the noted entrypoint", scanner)
     return `**For the site owner: wiring at ${where}**\n\nThe wizard left this entrypoint untouched. The import, mount or script below is for you to place; it has not been applied.\n\n${ownerSnippet(scope.wiring!, "text", scanner)}`
   })
   return [`**Checklist (the wizard's own checks, never the agent's word)**\n\n| Job | State |\n|---|---|\n${rows}`, ...guards, ...wiring].join("\n\n")
@@ -278,7 +278,7 @@ export function buildChecklist(jobs: readonly ChecklistItem[], scanner: Scanner 
 
 /** §3g.4 step 9: the before/after table, the checklist states, declined items with reasons, and what the user decides. */
 export function buildFinalComment(input: FinalCommentInput): string {
-  input = { ...input, decisions: input.decisions.map(decision => ({ ...decision, reason: safeDisplayText(input.scanner, decision.reason), item: { ...decision.item, body: safeDisplayText(input.scanner, decision.item.body), path: decision.item.path === null ? null : safeDisplayText(input.scanner, decision.item.path) } })), notes: input.notes.map(note => safeDisplayText(input.scanner, note)), untrusted: input.untrusted.map(entry => ({ ...entry, author: safeDisplayText(input.scanner, entry.author), excerpt: safeDisplayText(input.scanner, entry.excerpt), path: entry.path === null ? null : safeDisplayText(input.scanner, entry.path) })) }
+  input = { ...input, decisions: input.decisions.map(decision => ({ ...decision, reason: safeDisplayText(input.scanner, decision.reason), item: { ...decision.item, body: safeDisplayText(input.scanner, decision.item.body), path: decision.item.path === null ? null : safeDisplayText(input.scanner, decision.item.path) } })), notes: input.notes.map(note => quoteDisplayNote(input.scanner, note)), untrusted: input.untrusted.map(entry => ({ ...entry, author: safeDisplayText(input.scanner, entry.author), excerpt: safeDisplayText(input.scanner, entry.excerpt), path: entry.path === null ? null : safeDisplayText(input.scanner, entry.path) })) }
 
   const ownerInfo = input.decisions.filter(decision => ownerInformationOnly(decision.item)).map(decision => `- ${decision.item.path ?? "general"}: ${excerpt(decision.item.body)}`)
   const declined = input.decisions
@@ -323,7 +323,7 @@ export function buildFinalComment(input: FinalCommentInput): string {
           .map((comment) => `- ＠${comment.author}${comment.path ? ` on \`${comment.path}\`` : ""}: ${excerpt(comment.excerpt)}`)
           .join("\n")}`
       : "",
-    ...input.notes.map((note) => `> ${note}`),
+    ...input.notes,
     FINAL_COMMENT_MERGE_LINE
   ]
     .filter(Boolean)

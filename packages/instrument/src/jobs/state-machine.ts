@@ -24,8 +24,11 @@ import { CONSENT_LEFT_FOR_YOU } from "./owner-boundary.js"
 import { CAPTURE_WAITING } from "../install/consent-handoff.js"
 import { checkWords } from "./check-words.js"
 import { sanitizeUntrusted } from "../agents/sanitize.js"
+import { redactDisplayText } from "../review/display.js"
+import { createScanner, type Scanner } from "../review/scan.js"
 import {
   ITEM_NOTE_MAX_CHARS,
+  CLAIM_LIMITS,
   JOB_TABLE,
   checkProvesChange,
   type BlockedReason,
@@ -46,6 +49,8 @@ export const PASSIVE_TIERS: readonly CheckTier[] = ["P"]
 const PRODUCTION_TIERS: readonly CheckTier[] = ["T1", "PV"]
 
 export interface ApplyOptions {
+  /** The run's known environment literals and public IDs, in addition to provider secret shapes. */
+  scanner?: Scanner
   /** Prove has finished: failure/unknown must no longer be described as waiting for deployment. */
   afterDeploy?: boolean
   awaitingVisit?: boolean
@@ -69,10 +74,17 @@ export interface Transition {
 
 const clone = (item: ChecklistItem): ChecklistItem => JSON.parse(JSON.stringify(item)) as ChecklistItem
 
-/** §3x.2 The item's last wizard note, sanitized and capped like claim notes. */
-export function withNote(item: ChecklistItem, note: string | undefined): ChecklistItem {
+const DEFAULT_SCANNER = createScanner({ literals: [], allowedIds: [] })
+
+/** Redact before controls/limits can split a credential; persisted notes retain their original syntax. */
+function storedNote(note: string, scanner: Scanner, max = ITEM_NOTE_MAX_CHARS): string {
+  return sanitizeUntrusted(redactDisplayText(scanner, note), max)
+}
+
+/** §3x.2 The item's last wizard note, redacted, sanitized and capped like claim notes. */
+export function withNote(item: ChecklistItem, note: string | undefined, scanner: Scanner = DEFAULT_SCANNER): ChecklistItem {
   if (note === undefined || note.trim() === "") return item
-  item.note = sanitizeUntrusted(note, ITEM_NOTE_MAX_CHARS)
+  item.note = storedNote(note, scanner)
   return item
 }
 
@@ -115,7 +127,8 @@ function evidenceText(evidence: readonly Evidence[]): string {
 export function applyClaim(
   item: ChecklistItem,
   claim: Claim,
-  reverify: (item: ChecklistItem) => { agrees: boolean; evidence: Evidence[] }
+  reverify: (item: ChecklistItem) => { agrees: boolean; evidence: Evidence[] },
+  scanner: Scanner = DEFAULT_SCANNER
 ): Transition {
   if (item.jobId === "privacy_paragraph") return leaveForOwner(item, "Left for you: privacy policies and terms belong to the site owner.")
   if (item.owner !== "agent") return { item, changed: false, by: "agent_claim", note: "claim ignored: a code job is not the agent's" }
@@ -123,7 +136,8 @@ export function applyClaim(
     return { item, changed: false, by: "agent_claim", note: `claim ignored: the item is ${item.state}` }
   }
   const next = clone(item)
-  next.claim = { status: claim.status, note: claim.note, at: claim.at }
+  const claimNote = storedNote(claim.note, scanner, CLAIM_LIMITS.noteMaxChars)
+  next.claim = { status: claim.status, note: claimNote, at: claim.at }
   if (claim.status === "done") {
     next.state = "claimed"
     delete next.blockedReason
@@ -133,7 +147,7 @@ export function applyClaim(
     next.state = "blocked"
     next.blockedReason = "agent_blocked"
     // §3x.2 The real reason is the agent's own (quoted, sanitized), never a generic "did not finish".
-    withNote(next, claim.note.trim() === "" ? "the agent said it is blocked" : `the agent said it is blocked: ${claim.note}`)
+    withNote(next, claimNote.trim() === "" ? "the agent said it is blocked" : `the agent said it is blocked: ${claimNote}`, scanner)
     return { item: next, changed: true, by: "agent_claim", note: "the agent is blocked" }
   }
   const verdict = reverify(item)
@@ -144,19 +158,21 @@ export function applyClaim(
   }
   next.state = "pending"
   if (verdict.evidence.length > 0) next.trigger = { finding: next.trigger.finding, evidence: verdict.evidence }
-  return { item: next, changed: true, by: "wizard", note: `agent said not needed; the wizard found ${evidenceText(verdict.evidence)}` }
+  return { item: next, changed: true, by: "wizard", note: storedNote(`agent said not needed; the wizard found ${evidenceText(verdict.evidence)}`, scanner) }
 }
 
 /** The budget is spent (30 turns / 10 minutes, §3f.4) and the item's last wizard check failed: `failed`. */
-export function failItem(item: ChecklistItem, note: string): Transition {
-  const next = withNote(clone(item), note)
+export function failItem(item: ChecklistItem, note: string, scanner: Scanner = DEFAULT_SCANNER): Transition {
+  note = storedNote(note, scanner)
+  const next = withNote(clone(item), note, scanner)
   next.state = "failed"
   delete next.blockedReason
   return { item: next, changed: item.state !== "failed", by: "wizard", note }
 }
 
 /** A question answered: a `blocked:needs_you` item goes back to the agent (`pending`). */
-export function unblockItem(item: ChecklistItem, note: string): Transition {
+export function unblockItem(item: ChecklistItem, note: string, scanner: Scanner = DEFAULT_SCANNER): Transition {
+  note = storedNote(note, scanner)
   if (item.state !== "blocked") return { item, changed: false, by: "wizard" }
   const next = clone(item)
   next.state = "pending"
@@ -165,8 +181,9 @@ export function unblockItem(item: ChecklistItem, note: string): Transition {
 }
 
 /** Marks an item blocked with one of the §3e.5 reasons (the fence, the post-turn gate, usage, …). */
-export function leaveForOwner(item: ChecklistItem, note = CONSENT_LEFT_FOR_YOU, ownerBoundary?: ChecklistItem["ownerBoundary"]): Transition {
-  const next = withNote(clone(item), note)
+export function leaveForOwner(item: ChecklistItem, note = CONSENT_LEFT_FOR_YOU, ownerBoundary?: ChecklistItem["ownerBoundary"], scanner: Scanner = DEFAULT_SCANNER): Transition {
+  note = storedNote(note, scanner)
+  const next = withNote(clone(item), note, scanner)
   next.state = "left_for_you"
   if (ownerBoundary) next.ownerBoundary = ownerBoundary
   next.checks = []
@@ -174,9 +191,10 @@ export function leaveForOwner(item: ChecklistItem, note = CONSENT_LEFT_FOR_YOU, 
   return { item: next, changed: item.state !== "left_for_you", by: "wizard", note }
 }
 
-export function blockItem(item: ChecklistItem, reason: BlockedReason, note?: string): Transition {
+export function blockItem(item: ChecklistItem, reason: BlockedReason, note?: string, scanner: Scanner = DEFAULT_SCANNER): Transition {
   if (reason === "consent_touched") return leaveForOwner(item, "Put back: an edit reached code that handles consent.", { kind: "restored_unit" })
-  const next = withNote(clone(item), note)
+  note = note === undefined ? undefined : storedNote(note, scanner)
+  const next = withNote(clone(item), note, scanner)
   next.state = "blocked"
   next.blockedReason = reason
   return { item: next, changed: item.state !== "blocked" || item.blockedReason !== reason, by: "wizard", ...(note ? { note } : {}) }
@@ -187,6 +205,7 @@ export function blockItem(item: ChecklistItem, reason: BlockedReason, note?: str
  * from another run (or with no run id) is ignored, so it can never pass a check.
  */
 export function applyResults(item: ChecklistItem, results: readonly CheckResult[], runId: string, options: ApplyOptions): Transition {
+  const scanner = options.scanner ?? DEFAULT_SCANNER
   if (item.jobId === "privacy_paragraph") return leaveForOwner(item, "Left for you: privacy policies and terms belong to the site owner.")
   if (item.state === "left_for_you") return { item, changed: false, by: "wizard" }
   const next = clone(item)
@@ -204,7 +223,7 @@ export function applyResults(item: ChecklistItem, results: readonly CheckResult[
     check.state = result.state
     check.at = result.at
     check.runId = runId
-    if (result.reason !== undefined) check.reason = result.reason
+    if (result.reason !== undefined) check.reason = redactDisplayText(scanner, result.reason)
     else delete check.reason
     merged = true
   }
@@ -228,16 +247,16 @@ export function applyResults(item: ChecklistItem, results: readonly CheckResult[
       advanced.item.state = advanced.item.state !== "claimed" && local.length > 0 && allPass(local, runId) ? "done_in_code" : "claimed"
       advanced.note = undecided.length > 0 ? `Not checked after the deploy: ${checkWords(undecided)}` : `Checked, but not tied to this deploy: ${checkWords(live)}`
     } else if (advanced.item.state === "proven") delete advanced.item.note
-    if (advanced.note) withNote(advanced.item, advanced.note)
+    if (advanced.note) withNote(advanced.item, advanced.note, scanner)
   }
   // §3x.2 A check that sent the item back (or failed it) is its note.
-  if (advanced.note && (advanced.item.state === "pending" || advanced.item.state === "failed")) withNote(advanced.item, advanced.note)
+  if (advanced.note && (advanced.item.state === "pending" || advanced.item.state === "failed")) withNote(advanced.item, advanced.note, scanner)
   if (advanced.item.consentActivation === "waiting_banner_signal" && ["done_in_code", "waiting_deploy", "proven"].includes(advanced.item.state)) {
     advanced.item.state = "done_in_code"
     advanced.note = CAPTURE_WAITING
-    withNote(advanced.item, CAPTURE_WAITING)
+    withNote(advanced.item, CAPTURE_WAITING, scanner)
   }
-  return { item: advanced.item, changed: merged || advanced.item.state !== item.state, by: "wizard", ...(advanced.note ? { note: advanced.note } : {}) }
+  return { item: advanced.item, changed: merged || advanced.item.state !== item.state, by: "wizard", ...(advanced.note ? { note: storedNote(advanced.note, scanner) } : {}) }
 }
 
 function sendBack(item: ChecklistItem, failing: readonly ChecklistItemCheck[], options: ApplyOptions): string {

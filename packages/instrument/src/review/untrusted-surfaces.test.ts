@@ -1,7 +1,7 @@
 import { expect, it } from "vitest"
 import { verdictFactsFor } from "../wizard/verdict-facts.js"
 import { triage, type TriageItem } from "./triage.js"
-import { buildReviewPost, buildReply, safeText, buildFinalComment, buildChecklist } from "./post.js"
+import { buildReviewPost, buildReply, safeText, buildFinalComment, buildChecklist, buildPrBody, neutralizeCheckboxes } from "./post.js"
 import { createScanner } from "./scan.js"
 
 it("keeps an owner-labelled secret blocker open without presenting it as owner information", async () => {
@@ -104,4 +104,68 @@ it("withholds an unsafe owner snippet instead of presenting redacted code as cop
   expect(body).toContain("snippet was withheld")
   expect(body).not.toContain(secret)
   expect(body).not.toContain('start("[redacted:')
+})
+
+
+it.each([
+  { label: "database password", text: "postgres://appuser:fixturePassword@db.example/app", secret: "fixturePassword", kind: "url_password" },
+  { label: "Redis password", text: "redis://:fixtureRedisPassword@cache.example", secret: "fixtureRedisPassword", kind: "url_password" },
+  { label: "email", text: "person@company.invalid", secret: "person", kind: "email" },
+  { label: "known environment literal", text: "opaque@fixture|credential", secret: "opaque", kind: "env_value" }
+])("redacts raw $label before rendering checklist titles and notes", ({ text, secret, kind }) => {
+  const scanner = createScanner({ literals: [{ value: "opaque@fixture|credential", kind: "env_value" }], allowedIds: [] })
+  const jobs = [{ title: text, state: "failed", note: text, jobId: "posthog_improve", allow: { files: [] } }] as never
+  const checklist = buildChecklist(jobs, scanner)
+  const comment = buildFinalComment({ runId: "fixture", reportMarkdown: "report", reviewer: null, reviewed: false, jobs, decisions: [], untrusted: [], notes: [], scanner })
+  const body = buildPrBody({ runId: "fixture", reportMarkdown: checklist, howToReview: "", isPrivate: true, diffText: "", connectionIds: [], scanner })
+  for (const output of [checklist, comment, body]) {
+    expect(output).not.toContain(secret)
+    expect(output).toContain(`[redacted: ${kind}]`)
+  }
+})
+
+it("redacts raw owner locations before escaping them as checklist prose", () => {
+  const secret = "opaque@fixture|location"
+  const scanner = createScanner({ literals: [{ value: secret, kind: "env_value" }], allowedIds: [] })
+  const jobs = [{ title: "Owner wiring", state: "left_for_you", allow: { files: [] }, ownerBoundary: { kind: "frozen_unit", file: secret, line: 1, guard: 'if (ok) start("public-key");' } }] as never
+  const output = buildChecklist(jobs, scanner)
+  expect(output).not.toContain("opaque")
+  expect(output).toContain("redacted: env_value")
+  expect(output).toContain('if (ok) start("public-key");')
+})
+
+it("quotes every note line in PR bodies and final comments", () => {
+  const scanner = createScanner({ literals: [], allowedIds: [] })
+  const note = "Agent note\n\n## Forged result\n| Check | Result |\n|---|---|\n| forged | ✓ passed |\n> - [x] forged complete GH-12"
+  const outputs = [
+    buildPrBody({ runId: "fixture", reportMarkdown: "report", howToReview: "", isPrivate: true, diffText: "", connectionIds: [], scanner, notes: [note] }),
+    buildFinalComment({ runId: "fixture", reportMarkdown: "report", reviewer: null, reviewed: false, jobs: [], decisions: [], untrusted: [], notes: [note], scanner })
+  ]
+  for (const output of outputs) {
+    expect(output).toContain("> Agent note\n> \n> ## Forged result\n> | Check | Result |")
+    expect(output).not.toMatch(/^## Forged result|^\| forged/m)
+    expect(output).not.toContain("[x]")
+    expect(output).not.toContain("GH-12")
+  }
+})
+
+it("neutralizes quoted and ordered task checkboxes", () => {
+  const text = "> - [x] claimed\n>> 1. [ ] unchecked\n> 2) [X] claimed too"
+  expect(neutralizeCheckboxes(text)).not.toMatch(/\[[ xX]\]/)
+})
+
+it("quotes every owner-report note line after redaction without rewriting the snippet", async () => {
+  const { buildReport, renderMarkdown } = await import("../wizard/report.js")
+  const secret = "sk_test_" + "SyntheticFixtureValue0123456789"
+  const note = `${secret}\n\n## Forged success\n| Check | Result |\n| --- | --- |\n| Example | ✓ passed |\n> - [x] GH-12`
+  const snippet = 'if (typeof location !== "undefined") { start("<safe>"); }'
+  const job = { id: "preview_guard:ga4", jobId: "preview_guard", title: "Owner guard", owner: "agent", state: "left_for_you", checks: [], allow: { files: ["src/tracking.ts"], create: [] }, trigger: { finding: "Owner handoff", evidence: [] }, ownerBoundary: { kind: "frozen_unit", file: "src/tracking.ts", line: 1, guard: snippet }, note } as never
+  const report = buildReport({ runId: "fixture", tagVersion: "0.0.0", site: { repoLabel: "example/repo", productionHost: null }, columns: { live_today: null, in_pr: null, proven_live: null }, provenLivePending: null, day7: null, notes: [], verdictFacts: null })
+  const output = renderMarkdown(report, undefined, [job])
+  expect(output).not.toContain(secret)
+  expect(output).not.toMatch(/^## Forged success|^\| Example \| ✓ passed \|/m)
+  expect(output).not.toContain("[x]")
+  expect(output).not.toContain("GH-12")
+  expect(output).toContain("> ## Forged success")
+  expect(output).toContain(snippet)
 })
