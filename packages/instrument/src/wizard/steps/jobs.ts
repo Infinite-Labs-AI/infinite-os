@@ -1178,6 +1178,7 @@ class JobsIo {
       if (!invalidated) break
     }
     if (entries.length > 0) await this.deps.installer.recordEdits(entries.map(entry => entry.edit))
+    const normalized: Array<{ itemId: string; note?: string }> = []
     this.ctx.state.update(state => {
       state.jobs = state.jobs.map(item => {
         const mine = entries.filter(entry => entry.itemIds.includes(item.id)).map(entry => ({ editId: entry.edit.id, file: entry.edit.file }))
@@ -1187,8 +1188,15 @@ class JobsIo {
           next.edits = []
           if (undone.has(next.id)) withNote(next, `${next.note ?? "the wizard could not verify it"}. Its own edits were put back.`, this.noteScanner)
         }
+        if (item.state !== "left_for_you" && next.state === "left_for_you") normalized.push({ itemId: next.id, ...(next.note ? { note: next.note } : {}) })
         return next
       })
+    })
+    for (const item of normalized) this.ctx.emit.emit("job.state", {
+      itemId: item.itemId,
+      state: "left_for_you",
+      by: "wizard",
+      ...(item.note ? { note: sanitizeUntrusted(safeDisplayText(this.noteScanner, item.note), 500) } : {})
     })
     await this.save()
   }

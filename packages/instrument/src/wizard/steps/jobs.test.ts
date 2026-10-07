@@ -252,6 +252,12 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     const t = setup({ scenario: { turns: [{ steps: [claim("conversions_to_tools:trial")] }] }, checks: { results: { click_test: ["problem"] } }, items: [ITEMS[1]!] })
     const outcome = await step.run(t.ctx, t.deps)
     expect(stateOf(t.current().jobs, "conversions_to_tools:trial")).toBe("left_for_you")
+    expect(t.recorded.events.filter((event) => event.type === "job.state").map((event) => event.fields)).toContainEqual(expect.objectContaining({
+      itemId: "conversions_to_tools:trial",
+      state: "left_for_you",
+      by: "wizard",
+      note: expect.stringContaining("click_test")
+    }))
     expect(runs(t.fakes, "claude")).toHaveLength(4)
     expect(t.bridgeCalls.patchRun).toEqual([])
     expect(outcome).toMatchObject({ kind: "ok" })
