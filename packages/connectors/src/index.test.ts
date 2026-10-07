@@ -8892,6 +8892,21 @@ process.exit(1);`,
       }
     });
 
+    it("adset create refuses another platform's position list (audience_network_positions, messenger_positions, …)", async () => {
+      for (const key of ["audience_network_positions", "messenger_positions", "whatsapp_positions", "threads_positions"]) {
+        await withTmp(async (dir) => {
+          await expect(createMetaAdSet(cliCredential(dir, { id: "120000000000025", status: "PAUSED" }), {
+            name: "Wide positions",
+            campaignId: "120000000000010",
+            optimizationGoal: "LINK_CLICKS",
+            billingEvent: "IMPRESSIONS",
+            targeting: { geo_locations: { countries: ["US"] }, [key]: ["classic"] } as never
+          })).rejects.toMatchObject({ code: "meta_placements_facebook_instagram_only", retryable: false });
+          expect(existsSync(join(dir, "argv.json"))).toBe(false);
+        });
+      }
+    });
+
     // review BLOCKER (full fix): the CLI's `creative create --image` takes a FILE path. The engine
     // downloads imageUrl to a temp file and passes it as --image. A hash-only input still fails loud.
     it("downloads imageUrl to a temp file and passes it as --image (creative create)", async () => {

@@ -7492,6 +7492,21 @@ describe("Meta Ads management handlers (money-safety + audit + dedup)", () => {
             publisher_platforms: ["facebook", "instagram"],
             targeting_automation: { advantage_audience: 1 }
           });
+          // Another platform's position list is refused typed, before any POST (Facebook + Instagram only).
+          await expect(
+            handlers.create_meta_ad_set?.(
+              {
+                campaignId: "120000000000001",
+                name: "Wide",
+                optimizationGoal: "OFFSITE_CONVERSIONS",
+                billingEvent: "IMPRESSIONS",
+                targeting: { geo_locations: { countries: ["US"] }, audience_network_positions: ["rewarded_video"] },
+                clientToken: "tok_adset_wide_positions"
+              },
+              operatorContext
+            )
+          ).rejects.toMatchObject({ code: "meta_placements_facebook_instagram_only" });
+          expect(calls).toHaveLength(3);
           // Wrong types fail typed, before any POST.
           await expect(
             handlers.create_meta_ad_set?.(

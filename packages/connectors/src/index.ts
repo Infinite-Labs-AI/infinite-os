@@ -11770,17 +11770,29 @@ export interface MetaAdSetCreateInput {
 // (or one of them), and a typed, non-retryable refusal for any other platform.
 export const META_AD_SET_PUBLISHER_PLATFORMS: readonly string[] = ["facebook", "instagram"];
 
+/** Other platforms' position lists: refused with the platforms themselves (Facebook + Instagram only). */
+export const META_AD_SET_FORBIDDEN_POSITION_KEYS: readonly string[] = [
+  "audience_network_positions",
+  "messenger_positions",
+  "whatsapp_positions",
+  "threads_positions"
+];
+
+function metaPlacementsRefusal(): ConnectorError {
+  return new ConnectorError(
+    "meta_placements_facebook_instagram_only",
+    "Ad sets run on Facebook and Instagram only: Audience Network, Messenger, WhatsApp and Threads are not allowed. Leave publisher_platforms out, or name only facebook and instagram.",
+    false
+  );
+}
+
 function metaAdSetPublisherPlatforms(requested: string[] | undefined): string[] {
   if (requested === undefined) {
     return [...META_AD_SET_PUBLISHER_PLATFORMS];
   }
   const normalized = requested.map((platform) => platform.trim().toLowerCase());
   if (normalized.length === 0 || normalized.some((platform) => !META_AD_SET_PUBLISHER_PLATFORMS.includes(platform))) {
-    throw new ConnectorError(
-      "meta_placements_facebook_instagram_only",
-      "Ad sets run on Facebook and Instagram only: Audience Network, Messenger, WhatsApp and Threads are not allowed. Leave publisher_platforms out, or name only facebook and instagram.",
-      false
-    );
+    throw metaPlacementsRefusal();
   }
   return [...new Set(normalized)];
 }
@@ -11789,6 +11801,10 @@ function metaAdSetPublisherPlatforms(requested: string[] | undefined): string[] 
 // the countries-only shape names no platform: its countries ride inside as geo_locations (folded in
 // only when the JSON carries none, so a country is never dropped silently).
 function metaAdSetTargetingSpec(input: MetaAdSetCreateInput): MetaAdSetTargeting {
+  const raw = (input.targeting ?? {}) as Record<string, unknown>;
+  if (META_AD_SET_FORBIDDEN_POSITION_KEYS.some((key) => raw[key] !== undefined)) {
+    throw metaPlacementsRefusal();
+  }
   const spec: MetaAdSetTargeting = { ...(input.targeting ?? {}) };
   if (!spec.geo_locations && input.targetingCountries && input.targetingCountries.length > 0) {
     spec.geo_locations = { countries: [...input.targetingCountries] };
