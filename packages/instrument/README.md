@@ -1,14 +1,55 @@
 # infinite-tag
 
 Consent, cookie banners, CMP code, privacy policies and terms pages belong to the site owner.
-The wizard and its agents do not edit, move, wrap, reformat, evaluate, grade or comment on them.
-Top-level source units where the wizard recognises a consent call are frozen byte for byte, including whitespace. If source boundaries or correspondence are uncertain, the whole consent-bearing file is frozen.
-Only when it measured at least one commit and its complete recorded history passed does the wizard report: "This run did not edit your privacy or terms pages, or any code where it recognised a consent call (checked against the commits it made). Consent and privacy are yours: please review the files this run changed." It lists the changed files. Missing, legacy or rewritten history is explicitly unverified, with a reason and the available changed paths.
-Changes to the site's own non-consent helpers can still affect when its consent code runs; the wizard does not model that, so the second-agent review and the owner's own review remain the check.
-A task inside that boundary is left for the site owner, with its file and line. For a withheld preview guard, the wizard provides the snippet to copy and explains that preview and local visits keep counting.
-Preview guards never go between an init and a later revoke, deny or opt-out. Privacy wording, if supplied,
-is copy-only report material for the owner; the wizard never inserts it into a page. The owner’s
-`consent_mode` answer governs Infinite's tag and the ad-click capture this run adds; it does not connect them to the site's own banner.
+The wizard does not edit recognised consent units or policy page files. It tells its agents to leave
+banners and CMP code alone, but cannot verify behavior it does not recognise.
+
+Consent recognition uses simple patterns on raw source text: consent commands, Consent Mode keys,
+CMP names and loader URLs, and gated-script attributes. Comments and prose containing those patterns
+freeze their unit too. A bare `t('consent')` or `register('consent')` is not a consent command;
+`'consent'` followed by `'default'`, `'update'`, `'grant'` or `'revoke'` is recognised on any callee.
+Recognised top-level units are frozen byte for byte, including whitespace. If source boundaries or
+correspondence are uncertain, the whole consent-bearing file is frozen.
+
+Only when it measured at least one commit and its complete recorded history passed does the wizard
+report: "This run did not edit your privacy or terms pages, or any code where it recognised a consent
+call (checked against the commits it made). Consent and privacy are yours: please review the files
+this run changed." It lists the changed files. Missing, legacy or rewritten history is explicitly
+unverified, with a reason and the available changed paths. A measured edit to a protected unit or
+page is reported as an edit found, not an unavailable check. Cancelling the existing-history question
+stops that push; it does not grant permission to continue.
+Changes to the site's own non-consent helpers can still affect when its consent code runs; the
+wizard does not model that, so the second-agent review and the owner's own review remain the check.
+The second review is another AI's opinion; a mislabelled finding is still shown to you, and the wizard does not second-guess the reviewer's severity.
+
+A task inside that boundary is left for the site owner, with its file and line. For a withheld preview
+guard, the wizard provides the snippet to copy and explains that preview and local visits keep counting.
+Privacy wording, if supplied, is copy-only report material for the owner; the wizard never inserts it
+into a page. The owner's `consent_mode` answer governs Infinite's tag and the ad-click capture this run
+adds; it does not connect them to the site's own banner. The wizard defaults to "wait for my banner's yes"
+when it finds a recognised consent pattern or banner sign, and to "collect by default" when it finds
+none. This is a default choice you can change, not verification of the banner.
+
+Policy pages are page files whose last route segment (ignoring `index` and `page`) or basename matches
+this explicit list, after lower-casing, splitting PascalCase and normalising separators; framework
+route groups and `[locale]` are ignored:
+
+`privacy`, `privacy-policy`, `privacypolicy`, `terms`, `terms-of-use`, `terms-of-service`,
+`terms-and-conditions`, `termsofservice`, `tos`, `cookie-policy`, `cookies-policy`, `cookies`,
+`legal`, `eula`, `disclaimer`, `impressum`, `imprint`, `datenschutz`, `datenschutzerklaerung`,
+`data-protection`, `gdpr`, `ccpa`, `dpa`, `agb`, `mentions-legales`, `politica-de-privacidad`.
+
+Product prefixes such as `product-terms-of-use` also match. `cookies` matches only at route depth one
+or directly under `legal/` or `policies/`; `legal` itself matches only at depth one. The rule covers
+Next pages and app routes (including route groups and `[locale]`), Remix routes, Astro, SvelteKit,
+Vue views, HTML/PHP documents and root/content Markdown or MDX. Documentation Markdown, components,
+libraries and API source routes do not count as page files; real HTML/PHP pages under docs, api or
+test directories still do. An unrelated word earlier in a route does not make the page a policy page.
+The wizard does not infer routes from source, templates or imports, so unlisted routes and policy
+text in shared components are outside this path rule.
+Shared components and templates imported by policy pages are not classified as policy pages; the wizard checks the page files themselves.
+Measurement reads only files changed by the measured commit; an unreadable unchanged file does not
+block it. An unreadable changed file is reported as unchecked for that file.
 
 
 **By [Infinite](https://infinite.fast) — the agent-first growth operator for founders.** Docs, dashboards and the server lane live at [infinite.fast](https://infinite.fast); source on [GitHub](https://github.com/Infinite-Labs-AI/infinite-os/tree/main/packages/instrument).
@@ -64,11 +105,21 @@ steps and resumes where it stopped:
 12. **Prove** — after the deploy, it checks the live site again with this run's own test events.
 13. **Done** — the before/after report, in your terminal, the pull request and Infinite.
 
+A check that first appears later than two minutes after the push, or only once the pull request is no longer a draft, is not seen by the wizard.
+
 On GitHub, the wizard checks push access before the code work starts. If you cannot push and the
 repository allows forks, it asks once to create your fork and opens the pull request from there.
 If forks are disabled, ask the repository owner for write access or permission to fork. A fork PR
 may have no Vercel preview; when no preview appears, the rehearsal reports those checks as not
 measured. `--yes` cannot authorize creation of a fork.
+
+Report redaction checks known credential formats and configured secret values before escaping or
+truncating text. Its generic rule matches uppercase assignment names containing `SECRET`, `TOKEN`,
+`PASSWORD`, `PASSWD`, `PRIVATE_KEY`, `API_KEY` or `AUTH`, or ending in `_KEY`, including quoted JSON
+and YAML keys. Values must be single tokens of at least eight characters, without slashes, dots,
+whitespace or a camelCase identifier shape. `NEXT_PUBLIC_`, `VITE_` and `PUBLIC_` assignments are exempt
+from this generic rule. It does not infer secrets from prose or mask phone-like numbers.
+Unnamed or unrecognised credentials may not be identified; review the changed files locally.
 
 Exit codes: `0` done · `1` failed · `2` usage or environment · `3` parked (resume with
 `npx infinite-tag --resume`) · `4` needs the Infinite app · `130` interrupted.
@@ -379,7 +430,7 @@ the following signal after every grant, denial, or revocation:
 
 ```js
 window.dispatchEvent(new CustomEvent("infinite:analytics-consent-change", {
-  detail: { granted: true } // false on denial or revocation
+  detail: { granted: true } // false on denial, withdrawal or expiry
 }))
 ```
 
@@ -388,8 +439,12 @@ checks that the managed required-mode runtime contains this event bridge, then
 instructs the founder to exercise the external consent UI in a browser; static
 verification cannot prove that an app-owned UI dispatches the event.
 
-The consent signal governs Infinite collection only: a grant (re-)emits the
-current page as the initial view, a revocation stops future Infinite events. It
+The consent signal governs Infinite collection and the ad-click capture this run adds: a grant
+(re-)emits the current page as the initial view; a refusal or revocation stops future Infinite events
+and removes only the `_fbc` value and domain written by the current capture instance, if they still
+match. A replacement written by another script is preserved. After reload, this capture cannot verify
+who wrote an older `_fbc` cookie; the owner's banner remains responsible for clearing those older
+cookies. Grants require a recent user gesture; refusals and withdrawals do not. Call the signal wherever the banner state changes, including withdrawal and expiry. It
 never touches GA4 or PostHog in either mode — those providers run their own
 native consent handling.
 
