@@ -876,15 +876,23 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
   })
 
   it("waits for Actions to register even when only a blocked preview was initially reported", async () => {
-    const w = await opened({ reviews: [review([])], gh: { deployments: [], checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
+    const w = await opened({ reviews: [review([])], gh: { deployments: [],
+      checkSuites: [{ id: 123, status: "queued", conclusion: null }],
+      workflowRuns: [{ id: 456, path: ".github/workflows/ci.yml", event: "pull_request", status: "queued", conclusion: null }],
+      headWorkflowFiles: { ".github/workflows/ci.yml": "on: pull_request\njobs: {}" },
+      checks: { "42": [{ name: "Vercel", bucket: "fail", state: "FAILURE", description: "Deployment was blocked" }] } } })
     const clock = fakeClock()
     w.deps.clock = { now: clock.now, async sleep(ms, signal) {
       expect(w.gh.read().prs[0]!.isDraft).toBe(true)
       await clock.sleep(ms, signal)
-      w.gh.update(state => { state.checks = { "42": [{ name: "test", bucket: "pending", state: "PENDING" }] } })
+      w.gh.update(state => {
+        state.checks = { "42": [{ name: "test", bucket: "pending", state: "PENDING" }] }
+        state.checkSuites = [{ id: 123, status: "in_progress", conclusion: null }]
+        state.workflowRuns = [{ id: 456, path: ".github/workflows/ci.yml", event: "pull_request", status: "in_progress", conclusion: null }]
+      })
     } }
     expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "parked", reason: expect.stringContaining("pending") })
-    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBeGreaterThanOrEqual(60_000)
+    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBe(600_000)
     expect(w.gh.read().prs[0]!.isDraft).toBe(true)
   })
 
@@ -967,17 +975,27 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
   })
 
   it("polls again after cancellation instead of treating the first poll as a failure", async () => {
-    const w = await opened({ reviews: [review([])], gh: { checks: { "42": [{ name: "test", bucket: "cancel", state: "CANCELLED" }] } } })
+    const w = await opened({ reviews: [review([])], gh: {
+      checkSuites: [{ id: 123, status: "completed", conclusion: "cancelled" }],
+      workflowRuns: [{ id: 456, path: ".github/workflows/ci.yml", event: "pull_request", status: "completed", conclusion: "cancelled" }],
+      headWorkflowFiles: { ".github/workflows/ci.yml": "on: pull_request\njobs: {}" },
+      checks: { "42": [{ name: "test", bucket: "cancel", state: "CANCELLED" }] } } })
     const clock = fakeClock()
     let polls = 0
     w.deps.clock = { now: clock.now, async sleep(ms, signal) {
+      expect(w.gh.read().prs[0]!.isDraft).toBe(true)
       polls += 1
       await clock.sleep(ms, signal)
-      w.gh.update(state => { state.checks = { "42": [{ name: "test", bucket: "pass", state: "SUCCESS" }] } })
+      w.gh.update(state => {
+        const complete = polls >= 2
+        state.checks = { "42": [{ name: "test", bucket: complete ? "pass" : "pending", state: complete ? "SUCCESS" : "IN_PROGRESS" }] }
+        state.checkSuites = [{ id: 123, status: complete ? "completed" : "in_progress", conclusion: complete ? "success" : null }]
+        state.workflowRuns = [{ id: 456, path: ".github/workflows/ci.yml", event: "pull_request", status: complete ? "completed" : "in_progress", conclusion: complete ? "success" : null }]
+      })
     } }
     expectOk(await reviewStep.run(w.ctx, w.deps))
-    expect(polls).toBeGreaterThanOrEqual(1)
-    expect(clock.slept.reduce((sum, ms) => sum + ms, 0)).toBeGreaterThanOrEqual(60_000)
+    expect(polls).toBe(2)
+    expect(clock.slept).toEqual([30_000, 30_000])
     expect(w.gh.read().prs[0]!.isDraft).toBe(false)
   })
 
