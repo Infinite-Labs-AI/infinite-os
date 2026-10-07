@@ -242,7 +242,7 @@ describe("fix round (review O6): each rule with the fact that flips it", () => {
     expect(code(full(fixture, { metaPixelOwnership: "adopted" }).tools.meta.reason)).toBe("held_by_consent")
   })
 
-  it("R9: an omitted consentMode makes a silent tool undetermined (test_error), never no_beacon", () => {
+  it("an omitted consentMode makes a silent tool undetermined (test_error), never no_beacon", () => {
     const fixture = byId("dry_live_installed_no_beacon")
     const silent = TEST_TOOLS.filter((tool) => code(full(fixture).tools[tool].reason) === "no_beacon")
     expect(silent.length).toBeGreaterThan(0)

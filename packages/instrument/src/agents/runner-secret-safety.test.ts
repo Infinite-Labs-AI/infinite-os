@@ -6,7 +6,7 @@ import { cleanup, item, makeFenceFixture } from "../../test/wizard/repo.js"
 const dirs: string[] = []
 afterEach(() => cleanup(...dirs.splice(0)))
 
-it("R9 scans unfamiliar provider keys in agent progress, claims, questions and structured fallbacks", async () => {
+it("scans unfamiliar provider keys in agent progress, claims, questions and structured fallbacks", async () => {
   const token = "aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY"
   const examples = ["whsec_" + token, "sb_secret_" + token, "sk-ant-api03-" + token, "sk-proj-" + token, `AWS_SECRET_ACCESS_KEY=${token}/+xQ5R2Z`, `postgres://user:${token}@db.example/app`, `api_key=${token}`]
   const { root } = makeFenceFixture()

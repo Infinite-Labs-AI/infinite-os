@@ -56,7 +56,7 @@ async function surfaces(text: string): Promise<Record<string, string>> {
   }
 }
 
-describe("R9 provider and contextual secret redaction", () => {
+describe("provider and contextual secret redaction", () => {
   it.each(CASES)("redacts $name on every publication surface without env literals", async ({ secret, text }) => {
     for (const [surface, output] of Object.entries(await surfaces(text))) {
       expect(output.includes(secret), `${surface} exposed the synthetic credential`).toBe(false)

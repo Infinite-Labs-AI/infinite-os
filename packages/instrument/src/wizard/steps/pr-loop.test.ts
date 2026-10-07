@@ -1261,7 +1261,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.agents.jobCalls[0]!.items.map((item) => item.id)).toEqual(["review_comments:PRRT_teammate"])
   })
 
-  it("R9 preserves the approved teammate code in a data fence for the worker", async () => {
+  it("preserves the approved teammate code in a data fence for the worker", async () => {
     const w = await opened({ reviews: [review([]), review([])], fix: fixLayout, answers: { "teammate-comments": { actOn: ["PRRT_teammate"] } } })
     seedThreads(w)
     const code = '<Script src="https://example.test/analytics.js" />'
