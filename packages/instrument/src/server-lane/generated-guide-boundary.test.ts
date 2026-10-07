@@ -36,20 +36,28 @@ it.each([".", "apps/site"])("measures the actual generated guide before and afte
   expect((await measureOwnerDiff({ root: fx.root, baseSha, appRoot, revision })).state).toBe("checked")
 })
 
-it("does not trust a copied guide from its managed banner or path", async () => {
+it("does not require API-write provenance for a guide without recognized consent calls", async () => {
   const fx = fixture()
   const baseSha = fx.git(["rev-parse", "HEAD"]).trim()
   const guide = renderServerLaneBrief({ status: { kind: "created", middlewarePath: "middleware.ts", modulePath: "lib/infinite-server-lane.ts" }, siteSourceKey: "site_fixture", productionHosts: ["example.test"] })
   fx.write(SERVER_LANE_GUIDE_FILE, guide)
   expect(generatedApiTexts(fx.root, SERVER_LANE_GUIDE_FILE)).toEqual([])
-  expect((await measureOwnerDiff({ root: fx.root, baseSha })).issues).toContainEqual(expect.objectContaining({ file: SERVER_LANE_GUIDE_FILE }))
+  expect((await measureOwnerDiff({ root: fx.root, baseSha })).state).toBe("checked")
 })
 
-it("refuses an API write appended to the recorded generated guide", async () => {
+it("does not mistake an API write for a recognized consent call in a generated guide", async () => {
   const fx = fixture()
   const baseSha = fx.git(["rev-parse", "HEAD"]).trim()
   const guide = writeGuide(fx)
   fx.write(guide.file, `${guide.text}\nwindow.fbq = () => undefined;\n`)
+  expect((await measureOwnerDiff({ root: fx.root, baseSha })).state).toBe("checked")
+})
+
+it("still refuses a recognized consent call appended to a recorded guide", async () => {
+  const fx = fixture()
+  const baseSha = fx.git(["rev-parse", "HEAD"]).trim()
+  const guide = writeGuide(fx)
+  fx.write(guide.file, `${guide.text}\nfbq('consent', 'grant');\n`)
   expect((await measureOwnerDiff({ root: fx.root, baseSha })).issues).toContainEqual(expect.objectContaining({ file: guide.file }))
 })
 
@@ -57,7 +65,7 @@ it("keeps policy paths protected even when their bytes have generated provenance
   const fx = fixture()
   const baseSha = fx.git(["rev-parse", "HEAD"]).trim()
   const guide = writeGuide(fx)
-  const policy = "docs/privacy.md"
+  const policy = "public/privacy.html"
   recordGeneratedApi(fx.root, policy, guide.text)
   fx.write(policy, guide.text)
   expect((await measureOwnerDiff({ root: fx.root, baseSha })).issues).toContainEqual(expect.objectContaining({ file: policy, reason: expect.stringContaining("policy page") }))

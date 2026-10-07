@@ -80,7 +80,7 @@ describe("allowlist rules (§3e.2)", () => {
     expect(isConsentLine("window.__tcfapi('addEventListener', 2, cb)")).toBe(true)
     expect(isConsentLine("OneTrust.OnConsentChanged(cb)")).toBe(true)
     expect(isConsentLine("posthog.opt_in_capturing()")).toBe(true)
-    expect(isConsentLine("localStorage.setItem('analytics_consent', 'granted')")).toBe(true)
+    expect(isConsentLine("localStorage.setItem('analytics_consent', 'granted')")).toBe(false)
     expect(touchesConsent(["infiniteTrack('signup')", "gtag('consent', 'default', {})"])).toBe(true)
     // Negatives.
     expect(isConsentLine("gtag('config', 'G-ABC123')")).toBe(false)

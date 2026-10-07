@@ -173,13 +173,22 @@ describe("F3: a consent change on a continuation line of a multi-line consent ca
     expect(consentLineSpans("const x = 1\n")).toEqual([])
   })
 
-  it("control: an edit next to (not inside) a multi-line consent call is kept", async () => {
+  it("freezes the complete function containing a multi-line consent call, including its return", async () => {
     const { root, fence, read } = await begin((r) => write(r, "app/page.tsx", layout))
     const next = layout.replace("  return null\n", "  return <span />\n")
     write(root, "app/page.tsx", next)
     const result = await fence.end()
-    expect(result.blocked).toEqual([])
-    expect(read("app/page.tsx")).toBe(next)
+    expect(result.blocked.map(block => block.reason)).toContain("consent_touched")
+    expect(read("app/page.tsx")).toBe(layout)
+  })
+
+  it("keeps an edit in a separate top-level unit beside the frozen call", async () => {
+    const before = layout + "export const title = 'before';\n"
+    const { root, fence, read } = await begin(r => write(r, "app/page.tsx", before))
+    const after = before.replace("title = 'before'", "title = 'after'")
+    write(root, "app/page.tsx", after)
+    expect((await fence.end()).blocked).toEqual([])
+    expect(read("app/page.tsx")).toBe(after)
   })
 })
 
@@ -187,9 +196,13 @@ describe("F9: a throwing gate never leaves the turn half-settled", () => {
   it("the whole turn is restored, the snapshot deleted, and the error goes on", async () => {
     const { root, dir, fence, read } = await begin()
     const before = read("app/layout.tsx")
+    const pageBefore = read("app/page.tsx")
     write(root, "app/layout.tsx", `export const x = 1\n${POST_INSTALL_LAYOUT}gtag('consent', 'update', { ad_storage: 'granted' })\n`)
+    // The consent edit is restored first; an independent ordinary edit still reaches the gate.
+    write(root, "app/page.tsx", "export default function Page() { return null }\n")
     await expect(fence.end({ turnGate: async () => { throw new Error("gate crashed") } })).rejects.toThrow("gate crashed")
     expect(read("app/layout.tsx")).toBe(before)
+    expect(read("app/page.tsx")).toBe(pageBefore)
     expect(existsSync(join(dir, "manifest.json"))).toBe(false)
   })
 })
