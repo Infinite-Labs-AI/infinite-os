@@ -1,3 +1,4 @@
+import { loadPlanApprovals } from "../install/step-inputs.js"
 import { buildScanner, runPublicIds } from "../review/context.js"
 import { safeDisplayText } from "../review/display.js"
 // §3x.6 The run facts THE verdict reads beyond the report's columns, gathered in ONE place for every caller (the
@@ -41,6 +42,7 @@ export async function verdictFactsFor(ctx: WizardContext, deps: WizardDeps): Pro
   const currentHead = proof?.state === "checked" && proof.scope === "commit" && typeof git.head === "function" ? await git.head().catch(() => null) : null
   const ownerBoundary = proof?.scope === "commit" && proof.baseSha === base && proof.headSha === currentHead && proof.issues.length === 0 ? proof : undefined
   return {
+    tagNotInstalled: (await loadPlanApprovals(ctx, deps))?.ownerWiring?.canWire === false,
     ...(ownerBoundary ? { ownerBoundary } : {}),
     ...(priorPolicyEdits ? { priorPolicyEdits: true } : {}),
     ownerPolicyFindings: (ledger.findings ?? []).filter(finding => finding.action === "OWNER_INFO" && !(finding.path !== null && ownership.writtenByRun?.(finding.path, finding.line))).map(finding => display(`About the site owner’s consent/privacy: not ours to change. ${finding.path ?? "general"}: ${finding.body ?? "Recorded reviewer finding"}`)),

@@ -49,11 +49,14 @@ describe("the cloud's report rules (test/wizard/cloud-rules.ts, a port of 1bu-1 
     expect(report.notes.some(note => note.startsWith("NOT DONE for "))).toBe(true)
     expect(report.notes.some(note => note.includes("additional notes are omitted"))).toBe(true)
     expect(JSON.stringify(report)).not.toContain("preview-17.example.test")
-    for (const rendered of [renderMarkdown(report, undefined, jobs), renderTerminal(report, 80, { ownerJobs: jobs })]) {
+    for (const rendered of [renderMarkdown(report, undefined, jobs)]) {
       expect(rendered).toContain(guard)
       expect(rendered).toContain(wiring)
       expect(rendered).toContain("src/tracking.ts:5")
     }
+    const terminal = renderTerminal(report, 80, { ownerJobs: jobs })
+    expect(terminal).toContain("Full text in the pull request and .infinite/wizard/report.md")
+    expect(terminal).not.toContain(guard)
   })
   it("accepts the contract example under each column phase (the port is not vacuous)", () => {
     for (const phase of REPORT_COLUMN_IDS) expect(parseCloudReport(example, tagPost(phase))).toEqual({ ok: true })
@@ -242,4 +245,12 @@ describe("every report the wizard can build for the three phases passes the clou
     expect(refused).toEqual([])
     expect(posts).toBe(cases.reduce((sum, entry) => sum + Object.keys(entry.columns).length, 0))
   })
+})
+
+it("leads cloud and rendered reports with an unwired tag instead of a success claim", () => {
+  const report = buildReport({ runId: example.runId, tagVersion: "0.0.0", site: example.site, columns: { live_today: null, in_pr: null, proven_live: null }, provenLivePending: null, day7: null, notes: [], verdictFacts: { tagNotInstalled: true, jobs: [], openFindings: [], tools: null, installedUnknown: null } })
+  expect(report.verdict?.state).toBe("not_checked_live")
+  expect(report.verdict?.headline).toContain("NOT installed")
+  expect(renderMarkdown(report).split("\n")[0]).toContain("NOT installed")
+  expect(renderTerminal(report, 80)).toContain("NOT installed")
 })

@@ -44,11 +44,11 @@ it("an agent's blocked consent note remains blocked and cannot close a review fi
   expect(openFindings(ledger, [result])).toHaveLength(1)
 })
 
-it("R7 selects the last actual CI error rather than an early success message containing error", () => {
+it("selects the last actual CI error rather than an early success message containing error", () => {
   const output = "error tracking configured successfully\n" + "successful setup\n".repeat(500) + "src/broken.ts:1 ERROR actual failure\n"
   expect(ciFixItem(["src/broken.ts"], output).trigger.finding).toContain("actual failure")
 })
-it("R7 selects the failing step section when Actions logs include step markers", () => {
+it("selects the failing step section when Actions logs include step markers", () => {
   const output = "job\tSetup\t2026-10-07 error tracking configured\n" + "job\tSetup\t2026-10-07 success\n".repeat(200) + "job\tBuild\t2026-10-07 src/broken.ts:1 ERROR actual failure\n" + "job\tCleanup\t2026-10-07 configured error tracking\n"
   const excerpt = ciFixItem(["src/broken.ts"], output).trigger.finding
   expect(excerpt).toContain("actual failure")
@@ -79,7 +79,7 @@ it("uses receipt edit ranges to keep a real capture finding in scope", async () 
   expect(openFindings(ledger, [], ownership.classify, ownership.writtenByRun)).toHaveLength(1)
 })
 
-it("R7 never appends a changed-neither claim to an unmeasured PR or final comment", async () => {
+it("never appends a changed-neither claim to an unmeasured PR or final comment", async () => {
   const { buildPrBody, buildFinalComment } = await import("./post.js")
   const { createScanner } = await import("./scan.js")
   const scanner = createScanner({ literals: [], allowedIds: [] })
@@ -89,7 +89,7 @@ it("R7 never appends a changed-neither claim to an unmeasured PR or final commen
   expect(final).not.toContain("changed neither")
 })
 
-it("R7 shows the exact owner guard and distinguishes a restored edit from a withheld guard", async () => {
+it("shows the exact owner guard and distinguishes a restored edit from a withheld guard", async () => {
   const { buildChecklist, jobStateCell } = await import("./post.js")
   const { buildHostGuardExpression } = await import("../host-guard.js")
   const guard = `if (${buildHostGuardExpression({ mode: "allow", hosts: ["fictional.test"] })}) {\n  // Existing analytics start-up statements go here.\n}`
@@ -102,7 +102,7 @@ it("R7 shows the exact owner guard and distinguishes a restored edit from a with
   expect(jobStateCell({ ...withheld, note: "ignored old note", ownerBoundary: { kind: "restored_unit" } })).toBe("Put back: an edit reached code that handles consent.")
 })
 
-it("R7 treats a stale assertion string as text, never as measurement authority", async () => {
+it("treats a stale assertion string as text, never as measurement authority", async () => {
   const { buildPrBody } = await import("./post.js")
   const { createScanner } = await import("./scan.js")
   const { OWNER_BOUNDARY } = await import("../jobs/owner-boundary.js")

@@ -316,13 +316,12 @@ export function frozenUnitAt(source: string, line: number): SourceUnit | null {
   return sourceUnits(source).units.find(unit => unit.frozen && unit.startLine <= line && line <= unit.endLine) ?? null
 }
 
-/** The existing prescribed capture adds a new module unit; every other target uses its evidence line. */
+/** Every worker target uses its evidence line. Managed capture is planned at its fixed entry instead. */
 export function frozenEditPlace(item: { id: string; jobId: string; trigger: { evidence: readonly ({ file: string; line: number } | { url: string })[] } }, sources: ReadonlyMap<string, string>): { file: string; line: number; unit: SourceUnit } | null {
   for (const entry of item.trigger.evidence) {
     if (!("file" in entry)) continue
     const source = sources.get(entry.file)
     if (source === undefined) continue
-    if (item.jobId === "meta_improve" && /^meta_improve:capture(?::|$)/.test(item.id) && /\.[cm]?[jt]s$/.test(entry.file) && sourceUnits(source).confident && !sourceUnits(source).units.some(unit => unit.key === "statement::")) continue
     const unit = frozenUnitAt(source, entry.line)
     if (unit) return { ...entry, unit }
   }

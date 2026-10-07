@@ -83,13 +83,15 @@ export function ownerBoundaryStop(measurement: OwnerBoundaryMeasurement): string
 export async function measureWizardCommits(input: { root: string; appRoot?: string; baseSha: string; headSha: string; wizardCommits: readonly string[] }): Promise<OwnerBoundaryMeasurement> {
   const result: OwnerBoundaryMeasurement = { state: "not_checked", scope: "commit", baseSha: input.baseSha, headSha: input.headSha, files: [], issues: [], wizardCommits: [] }
   if (![input.baseSha, input.headSha, ...input.wizardCommits].every(sha => /^[a-f0-9]{40}$/.test(sha))) { result.issues.push({ file: "(git)", reason: "the recorded commit SHAs are invalid" }); return result }
-  const list = await git(input.root, ["rev-list", "--parents", "--reverse", `${input.baseSha}..${input.headSha}`])
-  if (list.code !== 0) { result.issues.push({ file: "(git)", reason: "the pushed history could not be read" }); return result }
-  const recorded = new Set(input.wizardCommits)
+  for (const sha of [input.baseSha, input.headSha]) if ((await git(input.root, ["rev-parse", "--verify", `${sha}^{commit}`])).code !== 0) { result.issues.push({ file: "(git)", reason: "the pushed history could not be read" }); return result }
   result.state = "checked"
-  for (const entry of list.stdout.toString("utf8").trim().split("\n").filter(Boolean)) {
-    const [sha, ...parents] = entry.split(" ")
-    if (!sha || !recorded.has(sha)) continue
+  for (const sha of [...new Set(input.wizardCommits)]) {
+    const reachable = await git(input.root, ["merge-base", "--is-ancestor", sha, input.headSha])
+    if (reachable.code === 1) continue
+    if (reachable.code !== 0) { result.state = "not_checked"; result.issues.push({ file: "(git)", reason: `recorded wizard commit ${sha} could not be read` }); continue }
+    const entry = await git(input.root, ["rev-list", "--parents", "-n", "1", sha])
+    if (entry.code !== 0) { result.state = "not_checked"; result.issues.push({ file: "(git)", reason: `recorded wizard commit ${sha} has unreadable parents` }); continue }
+    const [, ...parents] = entry.stdout.toString("utf8").trim().split(" ")
     result.wizardCommits!.push(sha)
     if (parents.length !== 1) { result.state = "not_checked"; result.issues.push({ file: "(git)", reason: `wizard commit ${sha} does not have exactly one parent` }); continue }
     const measured = await measureOwnerDiff({ root: input.root, appRoot: input.appRoot, baseSha: parents[0]!, revision: sha })

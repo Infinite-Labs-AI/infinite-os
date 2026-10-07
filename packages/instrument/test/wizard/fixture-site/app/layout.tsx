@@ -1,13 +1,16 @@
 import Script from "next/script"
 
 import { Providers } from "./providers"
-import { ConsentDefaults } from "./consent-defaults"
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <head>
-        <ConsentDefaults />
+        <Script id="consent-default" strategy="beforeInteractive">
+          {`window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('consent', 'default', { analytics_storage: 'granted' });`}
+        </Script>
         <Script src="https://www.googletagmanager.com/gtag/js?id=G-FAKE00001" strategy="afterInteractive" />
         <Script id="ga4" strategy="afterInteractive">
           {`window.dataLayer = window.dataLayer || [];

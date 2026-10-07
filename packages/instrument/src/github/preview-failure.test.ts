@@ -15,14 +15,14 @@ const gh = (deployments: unknown[], statuses: unknown[] | Record<string, unknown
 }) as unknown as GhClient
 
 describe("a preview's terminal GitHub status", () => {
-  it("R6 uses the newest redeploy of the same project", async () => {
+  it("uses the newest redeploy of the same project", async () => {
     const rows = [
       { id: 8, environment: "Preview - chosen-project", creator: { login: "vercel[bot]" }, created_at: "2026-10-07T02:00:00Z" },
       { id: 7, environment: "Preview - chosen-project", creator: { login: "vercel[bot]" }, created_at: "2026-10-07T01:00:00Z" }
     ]
     expect(await previewUrlForSha(gh(rows, { "8": [{ state: "success", environment_url: "https://chosen-project-new.vercel.app" }], "7": [{ state: "success", environment_url: "https://chosen-project-old.vercel.app" }] }), SHA, "chosen-project")).toBe("https://chosen-project-new.vercel.app")
   })
-  it("R7 selects the newest plain Preview row for the linked single project", async () => {
+  it("selects the newest plain Preview row for the linked single project", async () => {
     const rows = [8, 7].map(id => ({ id, environment: "Preview", creator: { login: "vercel[bot]" } }))
     expect(await previewUrlForSha(gh(rows, { "8": [{ state: "success", environment_url: "https://chosen-project-new.vercel.app" }], "7": [{ state: "success", environment_url: "https://chosen-project-old.vercel.app" }] }), SHA, "chosen-project")).toBe("https://chosen-project-new.vercel.app")
   })

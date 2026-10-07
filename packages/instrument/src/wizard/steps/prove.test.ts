@@ -627,7 +627,7 @@ describe("live run 6: post-deploy checks reach the checklist", () => {
   })
 })
 
-it.each([false, true])("R7 a withheld preview guard is informational after deploy without hiding other failures (%s)", otherFailure => {
+it.each([false, true])("a withheld preview guard is informational after deploy without hiding other failures (%s)", otherFailure => {
   const at = "2026-10-02T09:43:00.000Z"
   const previewGrade = (state: "pass" | "problem") => ({ checkId: "preview_self_silent", state, tier: "RH" as const, at, runId: RUN_ID, reason: state === "problem" ? "previews_send_data — tool sends" : "silent" })
   const result = realVisitResult()

@@ -189,6 +189,7 @@ async function runJobsStep(ctx: WizardContext, deps: WizardDeps): Promise<StepOu
   const reanchored = await reanchorOwnerLocations(ctx.root, io.items())
   ctx.state.update(state => { state.jobs = reanchored })
   for (const saved of io.items()) {
+    if (saved.owner === "code" && saved.state === "left_for_you" && saved.ownerBoundary) continue
     if (saved.jobId === "privacy_paragraph") {
       io.put(leaveForOwner(saved, (saved.edits?.length ?? 0) > 0 ? LEGACY_OWNER_BOUNDARY : "Privacy policy work is retired; it belongs to the site owner.", { kind: "legacy_policy" }))
       continue

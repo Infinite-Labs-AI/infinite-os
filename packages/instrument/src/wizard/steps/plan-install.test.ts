@@ -129,13 +129,13 @@ describe("step plan", () => {
     expect(h.ctx.asks).toHaveLength(1)
     expect(h.ctx.asks[0]!.kind).toBe("plan")
     const payload = h.ctx.asks[0]!.payload as AskPayloads["plan"]
-    expect(payload.lines.filter((line) => line.editable).map((line) => line.id).sort()).toEqual(["consent_mode", "conversion_names", "privacy_text"])
+    expect(payload.lines.filter((line) => line.editable).map((line) => line.id).sort()).toEqual(["consent_mode", "conversion_names"])
     expect(Object.keys(payload.decisions).sort()).toEqual(["consentMode", "conversionNames", "npmInstall", "privacyText"])
     const plan = h.ctx.stateValue().plan!
     expect(plan.answers).toMatchObject({ consentMode: "required", conversions: ["start_trial"] })
     expect(plan.lines.find((line) => line.id === ga4Line)?.approved).toBe(true)
     // Lines the user did not answer stay unanswered (null), never approved by default.
-    expect(plan.lines.find((line) => line.id === `install_provider:meta:${IDS.meta}`)?.approved).toBeNull()
+    expect(plan.lines.find((line) => line.id === `install_provider:meta:${IDS.meta}`)?.approved).toBe(true)
     expect(h.patches).toEqual([{ approvedConversions: ["start_trial"] }])
   })
 
@@ -166,14 +166,14 @@ describe("step plan", () => {
     expect(h.ctx.asks.length).toBe(asked)
   })
 
-  it("adopted PostHog: a declined improve line seeds no job 3; an unanswered one waits for the user", async () => {
+  it("adopted PostHog repository improvements run on continue without per-line approvals", async () => {
     const candidates = [candidate("posthog_improve", "proxy"), candidate("posthog_improve", "history_change"), candidate("identify_reset", "auth")]
     const answer = { approved: ["consent_mode", "agent_budget"], declined: ["improve_additive:posthog:proxy"], edits: { consent_mode: "not_required" } }
     const h = await setup({ files: { "index.html": ADOPTED_POSTHOG_HTML.replace(", defaults: '2025-05-24'", "") }, answers: [answer], candidates })
     expect((await planStep.run(h.ctx, h.deps)).kind).toBe("ok")
     const jobs = h.ctx.stateValue().jobs
-    expect(jobs.map((item) => item.id)).not.toContain("posthog_improve:proxy")
-    expect(jobs.find((item) => item.id === "posthog_improve:history_change")).toMatchObject({ state: "blocked", blockedReason: "needs_you" })
+    expect(jobs.map((item) => item.id)).toContain("posthog_improve:proxy")
+    expect(jobs.find((item) => item.id === "posthog_improve:history_change")).toMatchObject({ state: "pending" })
     expect(jobs.find((item) => item.id === "identify_reset:auth")?.state).toBe("pending")
   })
 
@@ -191,7 +191,7 @@ describe("step plan", () => {
     expect(Number(/^Up to (\d+) agent jobs?/.exec(live)![1])).toBe(inPlan)
     // The closing status counts the jobs that RUN for these answers (§3y.5): never more than the plan's "up to".
     const status = (outcome as { status: string }).status
-    expect(status).toMatch(/^Plan approved · \d+ lines? · \d+ agent jobs?/)
+    expect(status).toMatch(/^Plan shown and continued · \d+ actions? · \d+ agent jobs?/)
     expect(Number(/· (\d+) agent jobs?/.exec(status)![1])).toBeLessThanOrEqual(inPlan)
   })
 })
@@ -578,12 +578,12 @@ describe("review fixes (O7 fix round)", () => {
     expect(read(h.ctx.root, "index.html")).toBe(STATIC_HTML)
   })
 
-  it("P2-20: a declined Infinite line never calls the site-source verb (no hosts merged, no consent written)", async () => {
+  it("continuing a plan authorizes installation even with a legacy per-line decline", async () => {
     const h = await setup({ files: { "index.html": STATIC_HTML }, consentFlag: "not_required", answers: [] })
     autoApprove(h.ctx, (id) => !id.startsWith("install_provider:infinite"))
     await planStep.run(h.ctx, h.deps)
     expect((await installStep.run(h.ctx, h.deps)).kind).toBe("ok")
-    expect(h.siteSourceCalls).toEqual([])
+    expect(h.siteSourceCalls).toHaveLength(1)
     expect(read(h.ctx.root, "index.html")).toContain(IDS.ga4)
   })
 
@@ -655,4 +655,13 @@ describe("a Next site with its OWN next.config (review I1 P1-2)", () => {
     expect((install as { message: string }).message).toContain("Nothing was written")
     expect(h.siteSourceCalls).toHaveLength(0)
   })
+})
+
+it("stops at the plan with exact owner wiring when an inline-consent entry leaves no work", async () => {
+  const h = await setup({ files: { "package.json": JSON.stringify({ dependencies: { next: "15.0.0", react: "19.0.0" } }), "app/layout.tsx": "export default function Layout({children}) { gtag('consent', 'default', {}); return <html><body>{children}</body></html> }\n" }, consentFlag: "not_required" })
+  const outcome = await planStep.run(h.ctx, h.deps)
+  expect(outcome).toMatchObject({ kind: "parked", reason: expect.stringContaining("Add these lines yourself") })
+  expect(JSON.stringify(outcome)).toContain("InfiniteAnalyticsClient")
+  expect(h.ctx.asks).toHaveLength(0)
+  expect(existsSync(join(h.ctx.root, ".infinite/install.json"))).toBe(false)
 })

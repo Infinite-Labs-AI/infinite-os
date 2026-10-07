@@ -60,7 +60,7 @@ it.each(["known", "unknown", "claimed"] as const)("records %s consent refusals a
   expect(result.items[1]).toMatchObject({ state: "claimed" })
 })
 
-it("R7 never starts a review worker whose edit evidence is in a frozen unit", async () => {
+it("never starts a review worker whose edit evidence is in a frozen unit", async () => {
   const items = [agentItem("review_comments:f1", ["src/tracking.ts"])]
   items[0]!.trigger.evidence = [{ file: "src/tracking.ts", line: 2 }]
   const { bridge } = fakeBridge()

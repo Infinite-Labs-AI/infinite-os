@@ -7,7 +7,7 @@ import { markBaseline } from "../git/baseline-ownership.js"
 import { createGitOps } from "../git/index.js"
 import { BaselineUnavailableError, baselineTree, sweepBaselineTrees } from "./baseline-tree.js"
 
-it("R6 sweeps only dead owned baseline worktrees and removes their registrations", async () => {
+it("sweeps only dead owned baseline worktrees and removes their registrations", async () => {
   const fixture = createGitFixture({ files: { "source.ts": "base" } })
   try {
     const sha = fixture.git(["rev-parse", "HEAD"]).trim()
@@ -28,7 +28,7 @@ it("R6 sweeps only dead owned baseline worktrees and removes their registrations
   } finally { fixture.cleanup() }
 })
 
-it("R6 uses the clean recorded base in place, including ignored environment files", async () => {
+it("uses the clean recorded base in place, including ignored environment files", async () => {
   const fixture = createGitFixture({ files: { "source.ts": "base", ".gitignore": ".env.local\nnode_modules\n" } })
   try {
     fixture.write(".env.local", "PRIVATE_FIXTURE=present\n")
@@ -42,7 +42,7 @@ it("R6 uses the clean recorded base in place, including ignored environment file
   } finally { fixture.cleanup() }
 })
 
-it("R6 preserves ignored environment reads and isolates ordinary dependency caches", async () => {
+it("preserves ignored environment reads and isolates ordinary dependency caches", async () => {
   const fixture = createGitFixture({ files: { "source.ts": "base", ".gitignore": ".env.local\nnode_modules\n" } })
   try {
     const base = fixture.git(["rev-parse", "HEAD"]).trim()
@@ -187,7 +187,7 @@ it("surfaces a stale owned worktree removal failure instead of claiming cleanup 
   } finally { fixture.cleanup() }
 })
 
-it("R7 refuses a forged sibling marker on a user worktree outside its cache", async () => {
+it("refuses a forged sibling marker on a user worktree outside its cache", async () => {
   const fixture = createGitFixture({ files: { "source.ts": "base" } })
   try {
     const sha = fixture.git(["rev-parse", "HEAD"]).trim()
@@ -202,7 +202,7 @@ it("R7 refuses a forged sibling marker on a user worktree outside its cache", as
   } finally { fixture.cleanup() }
 })
 
-it("R7 copies a dangling dependency link without making the baseline unavailable", async () => {
+it("copies a dangling dependency link without making the baseline unavailable", async () => {
   const fixture = createGitFixture({ files: { "source.ts": "base", ".gitignore": "node_modules\n" } })
   try {
     const sha = fixture.git(["rev-parse", "HEAD"]).trim()
@@ -216,7 +216,7 @@ it("R7 copies a dangling dependency link without making the baseline unavailable
   } finally { fixture.cleanup() }
 })
 
-it("R7 ignores all wizard-local files for an otherwise clean baseline", async () => {
+it("ignores all wizard-local files for an otherwise clean baseline", async () => {
   const fixture = createGitFixture({ files: { "source.ts": "base" } })
   try {
     const sha = fixture.git(["rev-parse", "HEAD"]).trim()
@@ -227,7 +227,7 @@ it("R7 ignores all wizard-local files for an otherwise clean baseline", async ()
   } finally { fixture.cleanup() }
 })
 
-it("R7 does not trust a copied marker or follow a symlink into another worktree", async () => {
+it("does not trust a copied marker or follow a symlink into another worktree", async () => {
   const fixture = createGitFixture({ files: { "source.ts": "base" } })
   try {
     const sha = fixture.git(["rev-parse", "HEAD"]).trim()

@@ -298,6 +298,8 @@ export function answersFile(extra: Record<string, unknown> = {}): Record<string,
       approved: [
         "install_provider:infinite",
         "server_lane",
+        "account_settings:ga4",
+        "account_settings:hosting",
         "improve_additive:posthog:proxy",
         "improve_additive:posthog:history_change",
         "posthog_defaults_bump_adopted:posthog:defaults",

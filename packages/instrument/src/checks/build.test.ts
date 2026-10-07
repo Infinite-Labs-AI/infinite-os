@@ -150,14 +150,14 @@ describe("the failure signature tells a new failure from the baseline's", () => 
     expect(duplicate.some(line => !base.includes(line))).toBe(true)
     expect(failureSignature(fixture.fatalShifted, "/fixture")).toEqual(failureSignature(fixture.fatal, "/fixture"))
   })
-  it("R6 ignores ESLint 8/9 count summaries and warning-only count changes", () => {
+  it("ignores ESLint 8/9 count summaries and warning-only count changes", () => {
     const error = "/repo/src/a.ts\n  2:3  error  Unexpected var, use let or const instead  no-var\n"
     const summary = (warnings: number) => `✖ ${1 + warnings} problems (1 error, ${warnings} warnings)\n  1 error and ${warnings} warnings potentially fixable with the --fix option.`
     expect(failureSignature(error + summary(1), "/repo")).toEqual(failureSignature(error + summary(0), "/repo"))
     expect(failureSignature(error + "  4:2  warning  'error' is defined but never used  no-unused-vars\n" + summary(1), "/repo")).toEqual(failureSignature(error + summary(0), "/repo"))
   })
 
-  it("R6 counts an additional identical diagnostic and normalizes fatal parsing positions", () => {
+  it("counts an additional identical diagnostic and normalizes fatal parsing positions", () => {
     const one = "/repo/src/a.ts\n  2:3  error  duplicate  no-var\n"
     expect(failureSignature(one + "  3:3  error  duplicate  no-var\n", "/repo")).not.toEqual(failureSignature(one, "/repo"))
     const fatal = (line: number) => `/repo/src/a.ts\n ${line}:3  error  Parsing error: Unexpected token`

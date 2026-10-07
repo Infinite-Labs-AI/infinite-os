@@ -299,7 +299,7 @@ describe("commit and push (§3g.1)", () => {
   })
 })
 
-it("R7 pushes exactly the measured commit even if the local branch advances", async () => {
+it("pushes exactly the measured commit even if the local branch advances", async () => {
   const fx = fixture()
   const git = createGitOps({ cwd: fx.root, env: fx.env })
   await git.createBranch("main", BRANCH)

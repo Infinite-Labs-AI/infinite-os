@@ -19,6 +19,7 @@ import { loadPlanApprovals } from "../install/step-inputs.js"
 import { pageSourceFromRepo } from "../t0/inline-scripts.js"
 import type { T0PageSource } from "../t0/protocol.js"
 import { readExecutableModuleCapture } from "../setup-checks/module-click-id-capture.js"
+import { readManagedCapture } from "../install/managed-capture.js"
 
 /** The reason a T0 scenario the wizard cannot build for an item carries (undetermined). */
 export const T0_UNBUILDABLE_PREFIX = "test_error — the offline test could not be set up for this job"
@@ -42,12 +43,16 @@ const GUARDED_TARGETS: ReadonlySet<string> = new Set(["ga4", "posthog", "meta"])
 const ADOPTED_PAGE_JOBS: ReadonlySet<string> = new Set(["meta_improve"])
 
 /** A plain module has no inline HTML for T0 to load. Execute only its own proven top-level capture. */
-async function emittedModuleCapture(item: ChecklistItem, io: { fs: Pick<WizardDeps["fs"], "readText">; root: string }): Promise<T0PageSource | null> {
+async function emittedModuleCapture(item: ChecklistItem, io: { fs: Pick<WizardDeps["fs"], "readText">; root: string }): Promise<{ source: T0PageSource; mode: "required" | "not_required" } | null> {
+  if (item.owner === "code") {
+    const capture = await readManagedCapture(io.root, io.fs.readText.bind(io.fs))
+    return capture ? { mode: capture.record.mode, source: { html: "<html><head></head><body></body></html>", scripts: [{ label: capture.record.module, code: capture.browserCode }] } } : null
+  }
   for (const file of item.allow.files.filter((path) => /\.[cm]?[jt]s$/i.test(path))) {
     const source = await io.fs.readText(join(io.root, file))
     if (!source) continue
     const capture = readExecutableModuleCapture(file, source)
-    if (capture) return { html: "<html><head></head><body></body></html>", scripts: [{ label: file, code: capture.browserCode }] }
+    if (capture) return { mode: capture.mode, source: { html: "<html><head></head><body></body></html>", scripts: [{ label: file, code: capture.browserCode }] } }
   }
   return null
 }
@@ -86,8 +91,9 @@ export async function itemT0Scenarios(
   const target = item.id.slice(item.id.indexOf(":") + 1)
   const page = item.allow.files.find((file) => /\.html?$/i.test(file))
   const html = item.jobId === "preview_guard" && page ? await io.fs.readText(join(io.root, page)) : null
-  const moduleCapture = item.jobId === "meta_improve" && target === "capture" ? await emittedModuleCapture(item, io) : null
-  const adopted = ADOPTED_PAGE_JOBS.has(item.jobId) && specs.length > 0 ? await adoptedPage(item, io) : null
+  const moduleCapture = item.jobId === "meta_improve" && /^capture(?::|$)/.test(target) ? await emittedModuleCapture(item, io) : null
+  const managedCaptureMissing = item.owner === "code" && item.jobId === "meta_improve" && /^capture(?::|$)/.test(target) && !moduleCapture
+  const adopted = managedCaptureMissing ? { sourceError: "The managed capture module or its early entrypoint load could not be proved" } : ADOPTED_PAGE_JOBS.has(item.jobId) && specs.length > 0 ? await adoptedPage(item, io) : null
   return specs.map((spec) => ({
     id: `${item.id}:${spec.checkId}`,
     checkId: spec.checkId,
@@ -98,7 +104,7 @@ export async function itemT0Scenarios(
       target,
       files: [...item.allow.files],
       ...(spec.checkId === "host_matrix" && html !== null ? { source: { html }, ...(GUARDED_TARGETS.has(target) ? { tools: [target] } : {}) } : {}),
-      ...(spec.checkId === "fbc_capture" && moduleCapture ? { source: moduleCapture } : adopted ?? {})
+      ...(spec.checkId === "fbc_capture" && moduleCapture ? { source: moduleCapture.source, captureConsentMode: moduleCapture.mode } : adopted ?? {})
     }
   }))
 }

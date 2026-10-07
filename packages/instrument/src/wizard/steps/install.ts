@@ -9,6 +9,8 @@ import { createHash } from "node:crypto"
 
 import type { WizardApplyResult } from "../../install/installer.js"
 import type { ManualRequirement } from "../../types.js"
+import { itemT0Scenarios, runItemT0, t0RunParams } from "../item-t0.js"
+import type { CheckResult } from "../contracts/jobs.js"
 import { DECISION_LINE_IDS } from "../../install/plan-model.js"
 import { bridgeErrorCode, keysOnly, loadPlanApprovals, loadPlanInputs, planCandidates } from "../../install/step-inputs.js"
 import { bridgeFailureLine, bridgeFailureOutcome, bridgeFailureState, hardStopOutcome } from "../../bridge/outcomes.js"
@@ -168,6 +170,28 @@ export function configRewriteJobs(deferred: ReadonlyArray<{ path: string; snippe
       state: "pending"
     }))
     .filter((item, index, all) => all.findIndex((other) => other.id === item.id) === index && !existing.some((other) => other.id === item.id))
+}
+
+/** Validate the deterministic capture using its actual static and offline evidence; never dispatch a worker. */
+export async function verifyManagedCaptureJobs(ctx: WizardContext, deps: Pick<WizardDeps, "checks" | "registry" | "fs">, result: InstallerApplyResult & Partial<WizardApplyResult>, params: Readonly<Record<string, unknown>>): Promise<void> {
+  if (result.managedCapture) {
+    const runId = ctx.state.get().runId ?? ctx.runId
+    if (runId) {
+      for (const saved of ctx.state.get().jobs.filter(job => job.owner === "code" && job.jobId === "meta_improve" && /^meta_improve:capture(?::|$)/.test(job.id) && job.state !== "left_for_you")) {
+        const item: ChecklistItem = { ...saved, state: "claimed", claim: { status: "done", note: "The wizard emitted the managed module and its fixed entrypoint wiring", at: ctx.now().toISOString() }, edits: [...saved.edits ?? [], ...result.edits.filter(edit => edit.jobId === "meta_improve:capture").map(edit => ({ editId: edit.id, file: edit.file }))] }
+        const raw = await deps.checks.run("click_id_capture", { item, root: ctx.root, appRoot: ctx.appRoot, runId })
+        const staticChecks: CheckResult[] = (Array.isArray(raw) ? raw : [raw]).map(check => ({ ...check, tier: "S", runId }))
+        const scenarios = await itemT0Scenarios(item, [{ checkId: "fbc_capture" }], params, { root: ctx.root, fs: deps.fs })
+        const offline = await runItemT0(deps, scenarios, result.artifacts ?? {}, { runId, at: () => ctx.now().toISOString() })
+        const [checked] = deps.registry.apply([item], [...staticChecks, ...offline.map(check => ({ ...check, tier: "T0" as const, runId }))], runId)
+        if (checked) {
+          ctx.state.update(current => { current.jobs = current.jobs.map(job => job.id === checked.id ? checked : job) })
+          ctx.emit.emit("job.state", { itemId: checked.id, state: checked.state, by: "wizard", note: checked.note ?? "Managed capture checked from the emitted module and fixed entrypoint" })
+        }
+      }
+      await ctx.state.save()
+    }
+  }
 }
 
 async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
@@ -370,6 +394,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
     })
     await ctx.state.save()
   }
+  if (result.managedCapture) await verifyManagedCaptureJobs(ctx, deps, result, await t0RunParams(ctx, deps))
   if (result.build === "passed") sub(ctx, "✓ Build passes", "ok")
   else if (result.build === "failed_baseline") sub(ctx, "The build was already failing before this run (not caused by the install)", "warn")
 

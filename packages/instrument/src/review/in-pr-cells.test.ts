@@ -223,7 +223,7 @@ describe("R4-10 (live run 4): ONE rehearsal count, in the terminal and the repor
   })
 })
 
-it.each([false, true])("R7 scopes preview failures to non-withheld tools (other failure=%s)", otherFailure => {
+it.each([false, true])("scopes preview failures to non-withheld tools (other failure=%s)", otherFailure => {
   const left: ChecklistItem = { ...job("preview_guard", "ga4", [], "left_for_you"), ownerBoundary: { kind: "frozen_unit", file: "src/tracking.ts", line: 2 } }
   const ctx = column({ jobs: [left], outcome: outcome({ previewGrades: { ga4: grade("ga4", "problem", "previews_send_data — GA4 sends"), posthog: grade("posthog", "pass"), meta: grade("meta", otherFailure ? "problem" : "pass", otherFailure ? "previews_send_data — Meta sends" : undefined) } }) })
   expect(ctx.state.get().report.in_pr!.finishLine.previews_silent?.state).toBe(otherFailure ? "problem" : "info")

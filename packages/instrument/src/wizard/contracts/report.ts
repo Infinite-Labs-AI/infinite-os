@@ -210,6 +210,7 @@ export interface VerdictOpenFinding {
 
 /** §3x.6 The run facts the verdict reads beyond the report's own columns. */
 export interface VerdictFacts {
+  tagNotInstalled?: boolean
   ownerBoundary?: import("../../jobs/owner-diff.js").OwnerBoundaryMeasurement
   ownerPolicyFindings?: string[]
   /** Metadata-only history of policy edits made by an older version in this same run. */

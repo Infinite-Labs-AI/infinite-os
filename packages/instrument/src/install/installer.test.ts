@@ -21,8 +21,6 @@ import {
   read,
   STATIC_HTML
 } from "../../test/wizard/o7-fakes.js"
-import { createBrowserVm } from "../../test/site-code/browser-vm.js"
-import { transpileToCommonJs } from "../../test/site-code/typescript.js"
 import { run3File } from "../../test/wizard/run3-fixture.js"
 import { parseHarnessArgs } from "../harness/args.js"
 import { runHarness, type HarnessIo } from "../harness/run.js"
@@ -84,7 +82,7 @@ describe("WizardInstaller.apply: a new install on a static site", () => {
     expect(manifest.ids).toEqual({ ga4: [IDS.ga4], posthog: { projectKey: IDS.posthog, apiHost: "/ingest" }, meta: [IDS.meta], infinite: { siteSourceKey: IDS.siteSource } })
   })
 
-  it("NEGATIVE: a declined install line installs nothing for that tool", async () => {
+  it("repository installation runs on continue despite a legacy per-line decline", async () => {
     const root = makeSite({ "index.html": STATIC_HTML })
     const subject = installer()
     const scan = await subject.scan({ root, hosting: fakeHosting() })
@@ -93,8 +91,8 @@ describe("WizardInstaller.apply: a new install on a static site", () => {
     const metaLine = `install_provider:meta:${IDS.meta}`
     const result = (await subject.apply(plan, { ...answer, approved: answer.approved.filter((id) => id !== metaLine), declined: [metaLine] })) as WizardApplyResult
     expect(result.ok).toBe(true)
-    expect(read(root, "index.html")).not.toContain(IDS.meta)
-    expect(readInstallManifest(root)!.ids?.meta).toEqual([])
+    expect(read(root, "index.html")).toContain(IDS.meta)
+    expect(readInstallManifest(root)!.ids?.meta).toEqual([IDS.meta])
   })
 
   it("NEGATIVE: apply refuses without an answered consent mode (the run parks at plan instead)", async () => {
@@ -120,11 +118,12 @@ describe("requiresManual is an OPEN JOB, never 'installed' (S1 fix, run.ts apply
     expect(result).toMatchObject({ ok: true, openJobs: [] })
     expect(read(root, "app/layout.tsx")).toBe(original)
     expect(result.changedFiles).not.toContain("app/layout.tsx")
-    const jobs = ownerLayoutJobs(result.ownerRequirements ?? [])
+    const jobs = ownerLayoutJobs(plan.ownerWiring?.requirements ?? [])
     expect(jobs).toEqual([expect.objectContaining({ id: "unusual_layout:app/layout.tsx", owner: "code", state: "left_for_you", checks: [], allow: { files: [], create: [] }, ownerBoundary: expect.objectContaining({ kind: "frozen_unit" }) })])
     expect(jobs[0]?.trigger.finding).toContain('import { InfiniteAnalyticsClient } from "../lib/infinite-analytics-client"')
     expect(jobs[0]?.trigger.finding).toContain("<InfiniteAnalyticsClient />")
-    expect(readInstallManifest(root)?.requiresManual).toEqual(expect.arrayContaining([expect.objectContaining({ path: "app/layout.tsx" })]))
+    expect(plan.installTools).toEqual([])
+    expect(exists(root, "lib/infinite-analytics.ts")).toBe(false)
   })
 
   it("Vite with no </head>: the installer returns the open job and the provider is not reported live", async () => {
@@ -165,7 +164,7 @@ describe("improve in place + the edit receipt + uninstall", () => {
     const result = (await subject.apply(plan, approvals)) as WizardApplyResult
     expect(result.ok).toBe(true)
     const wizardEdits = result.edits.map((edit) => edit.planLineId)
-    expect(wizardEdits).toEqual(["capture_beside_adopted_pixel:meta:capture", "autoconfig_off_adopted:meta:autoconfig"])
+    expect(wizardEdits).toEqual(["capture_beside_adopted_pixel:meta:capture", "capture_beside_adopted_pixel:meta:capture", "capture_beside_adopted_pixel:meta:capture", "autoconfig_off_adopted:meta:autoconfig"])
     // The adopted pixel is never reinstalled: no install line for Meta, no second init.
     expect(plan.lines.some((line) => line.id.startsWith("install_provider:meta"))).toBe(false)
     expect(read(root, "index.html").match(/fbq\('init'/g)).toHaveLength(1)
@@ -178,7 +177,9 @@ describe("improve in place + the edit receipt + uninstall", () => {
 
     const manifest = readInstallManifest(root)!
     expect(manifest.edits?.map((edit) => [edit.file, edit.by])).toEqual([
+      ["infinite-meta-click-id.js", "wizard"],
       ["index.html", "wizard"],
+      ["about.html", "wizard"],
       ["index.html", "wizard"],
       ["about.html", "agent"]
     ])
@@ -190,14 +191,16 @@ describe("improve in place + the edit receipt + uninstall", () => {
     expect(read(root, "about.html")).toBe(aboutOriginal)
     expect(report.leftAsIs).toEqual([])
     expect(report.reversed).toEqual(expect.arrayContaining(["index.html", "about.html"]))
+    expect(exists(root, "infinite-meta-click-id.js")).toBe(false)
   })
 
   it("NEGATIVE: a recorded file changed since → uninstall warns and leaves it exactly as it is", async () => {
     const root = makeSite({ "index.html": ADOPTED_META_HTML, "about.html": STATIC_HTML })
     const subject = installer()
     const keys = fakeKeys({ ga4: { status: "not_connected", propertyLabel: null, streams: [] }, posthog: { status: "not_connected", projectKey: null, apiHost: null, ingestHost: null, uiHost: null, region: null } })
-    const scan = await subject.scan({ root, hosting: fakeHosting() })
-    const plan = subject.buildPlan(scan, keys, fakeBefore({ keys }), [])
+    const hosting = { provider: "none" as const, vercel: null }
+    const scan = await subject.scan({ root, hosting })
+    const plan = subject.buildPlan(scan, keys, fakeBefore({ keys, hosting }), [])
     // Only the improve lines: no managed block, so the file holds nothing but recorded edits.
     const answer = approveAll(plan)
     const onlyImprove = { ...answer, approved: answer.approved.filter((id) => !id.startsWith("install_provider:")) }
@@ -285,13 +288,13 @@ describe("D17 sensitive pages (decision 17: a plan line from the detector)", () 
     expect(read(root, "index.html")).toContain('var INFINITE_SENSITIVE_PATHS = ["/login"];')
   })
 
-  it("negative: declined, the managed PostHog carries no sensitive paths; no sensitive route, no line", async () => {
+  it("managed sensitive-page handling runs on continue; no sensitive route means no line", async () => {
     const root = makeSite({ "index.html": STATIC_HTML, "login.html": STATIC_HTML })
     const subject = installer()
     const plan = subject.buildPlan(await subject.scan({ root, hosting: fakeHosting() }), fakeKeys(), fakeBefore(), [])
     const answer = approveAll(plan)
     expect((await subject.apply(plan, { ...answer, approved: answer.approved.filter((id) => id !== "sensitive_pages:posthog:managed") })).ok).toBe(true)
-    expect(read(root, "index.html")).not.toContain("INFINITE_SENSITIVE_PATHS")
+    expect(read(root, "index.html")).toContain("INFINITE_SENSITIVE_PATHS")
     const plain = makeSite({ "index.html": STATIC_HTML, "pricing.html": STATIC_HTML })
     const other = installer()
     const plainPlan = other.buildPlan(await other.scan({ root: plain, hosting: fakeHosting() }), fakeKeys(), fakeBefore(), [])
@@ -390,15 +393,15 @@ describe("the receipt in a fresh process (O3 records agent edits, O4 refreshes a
     await expect(installer().recordEdits([makeEditRecord({ file: "index.html", before: "a", after: "b", jobId: null, planLineId: null, by: "agent", runId: IDS.run })])).rejects.toThrow(/needs a scan/)
   })
 
-  it("NEGATIVE: an install where every line was declined writes no receipt at all", async () => {
+  it("continuing the plan installs repository work even when legacy line choices decline it", async () => {
     const root = makeSite({ "index.html": STATIC_HTML })
     const subject = installer()
     const scan = await subject.scan({ root, hosting: fakeHosting() })
     const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
     const declineAll = { approved: ["consent_mode"], declined: plan.lines.filter((line) => line.requires === "approval" && line.id !== "consent_mode").map((line) => line.id), edits: { consent_mode: "not_required" } }
     expect((await subject.apply(plan, declineAll)).ok).toBe(true)
-    expect(exists(root, ".infinite/install.json")).toBe(false)
-    expect(read(root, "index.html")).toBe(STATIC_HTML)
+    expect(exists(root, ".infinite/install.json")).toBe(true)
+    expect(read(root, "index.html")).toContain(IDS.ga4)
   })
 })
 
@@ -482,7 +485,7 @@ describe("review fixes (O7 fix round)", () => {
     expect(read(root, "public/landing.html").match(new RegExp(`config', '${IDS.ga4}'`, "g"))).toHaveLength(1)
   })
 
-  it("P2-11: the npm line never runs when the server lane is declined", async () => {
+  it("the npm line never runs without its own explicit yes", async () => {
     const root = makeSite({ "index.html": STATIC_HTML, "vercel.json": "{}\n", "package.json": `{"name":"acme"}\n`, "package-lock.json": `{"lockfileVersion":3}\n` })
     const calls: string[][] = []
     const spawn = async (command: string, args: readonly string[]) => {
@@ -494,7 +497,7 @@ describe("review fixes (O7 fix round)", () => {
     const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
     expect(plan.lines.some((line) => line.id === "npm_install")).toBe(true)
     const all = approveAll(plan)
-    const result = await subject.apply(plan, { ...all, approved: all.approved.filter((id) => id !== "server_lane"), declined: ["server_lane"] })
+    const result = await subject.apply(plan, { ...all, approved: all.approved.filter((id) => id !== "npm_install"), declined: ["npm_install"] })
     expect(result.ok).toBe(true)
     expect(calls).toEqual([])
     expect(read(root, "package.json")).toBe(`{"name":"acme"}\n`)
@@ -544,30 +547,16 @@ describe("§3x.3 (B3, W4): the conversion helpers are written whenever job 10 is
     return { root, plan, result }
   }
 
-  it("next-app-router + conversions ['signup'] (run 3): the managed module EXPORTS the five helpers (executed, not grepped)", async () => {
-    const { root, plan, result } = await installRun3(true)
-    expect(plan.decisions.conversionNames).toEqual(["signup"])
+  it.each([true, false])("a recorded inline-consent layout leaves helpers unwired (conversion selected %s)", async conversion => {
+    const { root, plan, result } = await installRun3(conversion)
     expect(result.ok).toBe(true)
-    expect(result.artifacts.conversions).toEqual({ helpers: true })
-    const vm = createBrowserVm({ url: "https://acme-store.com/" })
-    vm.window.exports = {}
-    vm.runScript(`(function (exports) {\n${transpileToCommonJs(read(root, "lib/infinite-analytics.ts"))}\n})(window.exports);`)
-    expect(vm.scriptErrors).toEqual([])
-    const api = vm.window.exports as Record<string, unknown>
-    for (const name of ["infiniteTrack", "infiniteTrackThenNavigate", "infiniteIdentify", "infiniteReset", "infiniteMetaMirror"]) expect(typeof api[name], name).toBe("function")
-  })
-
-  it("negative: no approved conversion name → no helpers (and so no job 10 promising them)", async () => {
-    const { root, result } = await installRun3(false)
-    expect(result.ok).toBe(true)
+    expect(plan.ownerWiring?.canWire).toBe(false)
+    expect(plan.installTools).toEqual([])
     expect(result.artifacts.conversions).toBeUndefined()
-    const vm = createBrowserVm({ url: "https://acme-store.com/" })
-    vm.window.exports = {}
-    vm.runScript(`(function (exports) {\n${transpileToCommonJs(read(root, "lib/infinite-analytics.ts"))}\n})(window.exports);`)
-    expect(typeof (vm.window.exports as Record<string, unknown>).infiniteTrack).toBe("undefined")
+    expect(exists(root, "lib/infinite-analytics.ts")).toBe(false)
+    expect(read(root, "app/layout.tsx")).toBe(run3File("site-6d16d8f/app/layout.tsx"))
   })
 })
-
 
 describe("resume refresh of committed managed files", () => {
   it("re-emits stale receipt-owned bytes without touching the customer entrypoint", async () => {
@@ -622,4 +611,24 @@ it("does not rerun or repeat the local-validation warning after before chose not
   expect(result).toMatchObject({ ok: true, build: "not_run" })
   expect(builds).toBe(0)
   expect(result.warnings.some(warning => /build.*could not run|checks will be the judge/.test(warning))).toBe(false)
+})
+
+it.each([true, false])("a free app entry emits executable conversion helpers only when selected (%s)", async selected => {
+  const { createBrowserVm } = await import("../../test/site-code/browser-vm.js")
+  const { transpileToCommonJs } = await import("../../test/site-code/typescript.js")
+  const root = makeSite({ "package.json": '{"dependencies":{"next":"16.0.0","react":"19.0.0"}}', "app/layout.tsx": 'export default function Layout({children}) { return <html><body>{children}</body></html> }\n' })
+  const subject = installer()
+  const scan = await subject.scan({ root, hosting: fakeHosting() })
+  const candidates = selected ? [candidate("conversions_to_tools", "signup", { allow: { files: ["app/layout.tsx"], create: [] } })] : []
+  const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), candidates)
+  const answer = approveAll(plan)
+  if (!selected) answer.approved = answer.approved.filter(id => id !== "conversion_names")
+  const applied = await subject.apply(plan, answer)
+  expect(applied.ok).toBe(true)
+  const browser = createBrowserVm({ url: "https://example.test/" })
+  browser.window.exports = {}
+  browser.runScript(`(function (exports) {\n${transpileToCommonJs(read(root, "lib/infinite-analytics.ts"))}\n})(window.exports);`)
+  expect(browser.scriptErrors).toEqual([])
+  const api = browser.window.exports as Record<string, unknown>
+  for (const name of ["infiniteTrack", "infiniteTrackThenNavigate", "infiniteIdentify", "infiniteReset", "infiniteMetaMirror"]) expect(typeof api[name], name).toBe(selected ? "function" : "undefined")
 })

@@ -1,3 +1,4 @@
+import { loadPlanApprovals } from "../../install/step-inputs.js"
 // Step 8 `rehearsal` (§3d.1, lane O4): commit → push → draft PR → wait for the Vercel preview → rehearse it
 // under the production hostname (nothing sent) + load the preview's own URL → grade (O6's grader) → PATCH the
 // run (PR fields, phase `in_pr`, `clickTestedConversions`) → mark GA4 key events for the rehearsal-click-tested
@@ -89,6 +90,7 @@ export async function recordClickTests(
   deps: WizardDeps,
   input: { step: "rehearsal" | "review"; runId: string; outcome: RehearsalOutcome; approved: readonly string[] }
 ): Promise<void> {
+  if (!ctx.state.get().plan?.lines.some(line => line.id === "account_settings:ga4" && line.approved === true)) return
   const approved = new Set(input.approved)
   const names = input.outcome.ga4ClickTested.filter((name) => approved.has(name))
   if (names.length === 0 || !deps.bridge.has("tag.ga4-key-events.v1")) return
@@ -304,7 +306,8 @@ async function rehearsalRun(ctx: WizardContext, deps: WizardDeps): Promise<StepO
     if (draft.git) draft.git.headSha = head
   })
 
-  const title = `Infinite: set up analytics so the site collects properly (${state.displayId})`
+  const unwired = (await loadPlanApprovals(ctx, deps))?.ownerWiring?.canWire === false
+  const title = unwired ? `Infinite tag NOT installed: other analytics changes (${state.displayId})` : `Infinite: set up analytics so the site collects properly (${state.displayId})`
   sub(ctx, "rehearsal", "Pushing the branch…", "pending")
   const pushed = await pushBranch({ ctx, deps, git, scanner, hostKind: deps.host.kind, base: gitState.base, branch: gitState.branch, title })
   if (pushed.kind === "failed") return failed("INF_WIZ_PUSH_REFUSED", pushed.message)

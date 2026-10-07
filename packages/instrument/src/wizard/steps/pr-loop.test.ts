@@ -81,6 +81,7 @@ interface World {
 }
 
 interface WorldOptions {
+  approveGa4Settings?: boolean
   gh?: FakeGhState
   hosting?: TagHosting
   reviewer?: "codex" | "claude_code" | "brief" | null
@@ -176,6 +177,7 @@ async function world(options: WorldOptions = {}): Promise<World> {
       jobs: [SIGNUP_JOB]
     })
   })
+  if (options.approveGa4Settings) ctx.state.update(state => { state.plan!.lines.push({ id: "account_settings:ga4", approved: true }) })
   const deps = testDeps({ bridge, agents, git, host, clock, installer: options.installer, checks: options.checks, env: {} })
   current = { fx, gh, git, host, bridge, agents, ctx, deps, baseSha }
   return current
@@ -228,8 +230,18 @@ describe("step `rehearsal` (§3d.1 step 8)", { timeout: 60_000 }, () => {
     expect(String(w.gh.read().prs[0]!.body)).not.toContain("The preview rehearsal checked: Keep GA4 previews silent.")
   })
 
+  it("uses the unwired title before GitLab can create its merge request during push", async () => {
+    const w = await world({ host: "gitlab" })
+    w.fx.write(".infinite/wizard/plan-approvals.json", JSON.stringify({ schema: "infinite-tag.plan-approvals.v1", ownerWiring: { canWire: false, requirements: [], entrypoints: [], writableEntrypoints: [] } }))
+    let title: string | undefined
+    const push = w.git.pushWithOptions.bind(w.git)
+    w.git.pushWithOptions = async (branch, options, sha) => { title = options.find(option => option.startsWith("merge_request.title=")); return push(branch, options, sha) }
+    expectOk(await rehearsalStep.run(w.ctx, w.deps))
+    expect(title).toContain("Infinite tag NOT installed")
+  })
+
   it("commits only the allowed set with the run trailer, pushes, opens a draft PR, rehearses the preview, then PATCHes and marks GA4 key events", async () => {
-    const w = await world()
+    const w = await world({ approveGa4Settings: true })
     const outcome = await rehearsalStep.run(w.ctx, w.deps)
     expectOk(outcome)
     const head = w.fx.remoteSha(BRANCH)!
@@ -1036,6 +1048,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
 
   it("posts ONE COMMENT review, acts only on trusted items, fixes in a descendant commit, replies, resolves its own fixed thread, re-rehearses, then readies the PR", async () => {
     const w = await opened({
+      approveGa4Settings: true,
       gh: { checks: { "42": [{ name: "ci", bucket: "pass", state: "SUCCESS" }] } },
       reviews: [
         review([
@@ -1151,7 +1164,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
 
   it("an item raised again after a DECLINE becomes an ASK (never a loop)", async () => {
     // Declined in round 1 because the wizard's own check (one_beacon_per_tool, the rehearsal) passed on the head.
-    const duplicate = { id: "F1", item: "R2" as const, severity: "should" as const, path: "app/layout.tsx", line: 2, body: "GA4 fires twice here.", suggested_fix: null }
+    const duplicate = { id: "F1", category: "analytics" as const, item: "R2" as const, severity: "should" as const, path: "app/layout.tsx", line: 2, body: "GA4 fires twice here.", suggested_fix: null }
     const w = await opened({
       reviews: [review([duplicate, { id: "F2", item: "R3", severity: "should", path: "app/layout.tsx", line: 3, body: "Edit the init in place.", suggested_fix: null }]), review([{ ...duplicate, body: "Really, GA4 still fires twice." }])],
       fix: fixLayout,
@@ -1173,7 +1186,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
 
   for (const noAnswer of ["__timeout__", "__cancelled__"]) {
     it(`an ask nobody answered (${noAnswer}) stays waiting on the repo owner, never "left by the repo owner"`, async () => {
-      const duplicate = { id: "F1", item: "R2" as const, severity: "should" as const, path: "app/layout.tsx", line: 2, body: "GA4 fires twice here.", suggested_fix: null }
+      const duplicate = { id: "F1", category: "analytics" as const, item: "R2" as const, severity: "should" as const, path: "app/layout.tsx", line: 2, body: "GA4 fires twice here.", suggested_fix: null }
       const w = await opened({
         reviews: [review([duplicate, { id: "F2", item: "R3", severity: "should", path: "app/layout.tsx", line: 3, body: "Edit the init in place.", suggested_fix: null }]), review([{ ...duplicate, body: "Really, GA4 still fires twice." }])],
         fix: fixLayout,
@@ -1469,7 +1482,7 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(JSON.stringify(items)).not.toContain("evil.example.net")
     // The stranger is listed in the final comment, never acted on.
     const final = (w.gh.read().prs[0]!.comments as Array<{ body: string }>).at(-1)!.body
-    expect(final).toMatch(/@stranger/)
+    expect(final).toMatch(/＠stranger/)
   })
 
   it("a pushed fix with pending checks parks draft without claiming it fixed", async () => {

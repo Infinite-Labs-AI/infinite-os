@@ -21,6 +21,8 @@
 import { readSourceFile, walkSourceFiles } from "../harness/scan.js"
 
 import { checkClickIdCapture } from "./click-id-capture.js"
+import { readManagedCaptureSync } from "../install/managed-capture.js"
+import { relative, sep } from "node:path"
 import { checkConversionPlacement } from "./conversion-placement.js"
 import { runtimeConversionLanes } from "./contract.js"
 import { checkHostGuard } from "./host-guard.js"
@@ -70,6 +72,9 @@ export function readAppSources(appRootAbsolute: string): Map<string, string> {
 
 /** What the wizard knows that the harness does not (the connection's ids and hosts). Optional. */
 export interface SetupChecksContext {
+  repoRoot?: string
+  /** Internal validated entry facts; O9 and runSetupChecks replace any supplied value from disk. */
+  managedCaptureEntries?: readonly string[]
   /** The connected PostHog project's `apiHost`: enables the region verdict. */
   expectedPosthogApiHost?: string
   /** The exempt production hosts: enables the "guard silences production" verdict. */
@@ -78,7 +83,14 @@ export interface SetupChecksContext {
 
 export function runSetupChecks(appRootAbsolute: string, context: SetupChecksContext = {}): SetupChecksReport {
   const files = readAppSources(appRootAbsolute)
-  return setupChecksOver(files, context)
+  return setupChecksOver(files, validatedCaptureContext(context.repoRoot ?? appRootAbsolute, appRootAbsolute, context))
+}
+
+export function validatedCaptureContext(root: string, appRootAbsolute: string, context: SetupChecksContext = {}): SetupChecksContext {
+  const proof = readManagedCaptureSync(root)
+  const appRoot = relative(root, appRootAbsolute).split(sep).join("/")
+  const entries = proof?.record.entrypoints.map(file => appRoot ? file.startsWith(`${appRoot}/`) ? file.slice(appRoot.length + 1) : null : file).filter((file): file is string => file !== null)
+  return { ...context, managedCaptureEntries: entries }
 }
 
 /** The same checks over files already read (the wizard re-runs them between agent turns). */
@@ -86,7 +98,7 @@ export function setupChecksOver(files: ReadonlyMap<string, string>, context: Set
   const checks = [
     checkConversionPlacement({ files, lanes: runtimeConversionLanes() }),
     checkSilentForms({ files }),
-    checkClickIdCapture({ files }),
+    checkClickIdCapture({ files, managedCaptureEntries: context.managedCaptureEntries }),
     checkMetaPixelConfig({ files }),
     checkProviderCensus({ files }),
     checkPosthogConfig({ files, ...(context.expectedPosthogApiHost ? { expectedApiHost: context.expectedPosthogApiHost } : {}) }),

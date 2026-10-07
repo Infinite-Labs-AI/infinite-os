@@ -97,7 +97,7 @@ const BEFORE_FACTS_PATH_ABS = `/repo/${BEFORE_FACTS_PATH}`
 const indexOf = (log: CallLog, prefix: string): number => log.findIndex((entry) => entry.startsWith(prefix))
 
 describe("step before: call order", () => {
-  it("R6 offers plain install with a lockfile notice when no lockfile exists", async () => {
+  it("offers plain install with a lockfile notice when no lockfile exists", async () => {
     const asked: string[] = []
     const s = setup({ ctx: { ask: (async (_kind: string, payload: { question: string }) => { asked.push(payload.question); return false }) as never }, checks: { baselineBuild: { ok: false, durationMs: 1, failureSignature: ["exit_code:127"] } } })
     await s.run()
@@ -105,7 +105,7 @@ describe("step before: call order", () => {
     expect(asked.join(" ")).toMatch(/no lockfile.*create/i)
   })
 
-  it("R6 asks again after a failed install left partial node_modules", async () => {
+  it("asks again after a failed install left partial node_modules", async () => {
     let asked = 0
     const s = setup({ ctx: { ask: (async () => { asked++; return true }) as never }, checks: { baselineBuild: { ok: false, durationMs: 1, failureSignature: ["exit_code:127"] } } })
     s.checks.checks.installDependencies = async () => { s.fs.store.set("/repo/node_modules", { text: "partial", mode: undefined }); return { ok: false, reason: "cancelled" } }

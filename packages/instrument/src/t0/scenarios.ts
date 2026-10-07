@@ -488,6 +488,8 @@ function planFbcCapture(scenario: T0Scenario, artifacts: WorkspaceInstallArtifac
     {
       id: "fbc:two-landings",
       actions: [
+        // Prove our gated writer under an explicit sandbox grant; no site consent state is edited.
+        ...(["required", "not_required"].includes(String(scenario.params.captureConsentMode)) ? [{ kind: "set_storage", label: "recorded grant fixture", area: "local", key: "infinite_analytics_consent", value: "granted" } as T0Action] : []),
         load("landing-1", `https://${productionHost}/?fbclid=${firstClick}`, source),
         load("landing-2", `https://${productionHost}/pricing?fbclid=${secondClick}`, source),
         load("page-3", `https://${productionHost}/about`, source)

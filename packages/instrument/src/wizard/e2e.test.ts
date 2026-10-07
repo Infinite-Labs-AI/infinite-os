@@ -103,7 +103,7 @@ beforeAll(() => {
 })
 
 /** A world with the §4.3 defaults: the fixture's hosting, the per-request test results, required checks green. */
-async function world(input: { scenario?: unknown; bridge?: Record<string, unknown>; gh?: Record<string, unknown>; env?: Record<string, string> } = {}): Promise<E2eWorld> {
+async function wiredWorld(input: { scenario?: unknown; bridge?: Record<string, unknown>; gh?: Record<string, unknown>; env?: Record<string, string>; inlineConsent?: boolean } = {}): Promise<E2eWorld> {
   const made = await makeWorld({
     scenario: input.scenario ?? agentScenario(),
     bridge: { hosting: fixtureHosting(), testResultFor, ...(input.bridge ?? {}) },
@@ -111,6 +111,17 @@ async function world(input: { scenario?: unknown; bridge?: Record<string, unknow
     gh: { checks: { "42": [{ name: "build", bucket: "pass", state: "SUCCESS" }] }, ...(input.gh ?? {}) },
     ...(input.env ? { env: input.env } : {})
   })
+  // The default fixture keeps consent inline. This explicitly named world exercises the separate-file variant.
+  if (!input.inlineConsent) {
+    const path = join(made.site.repo, "app/layout.tsx")
+    const inline = readFileSync(path, "utf8")
+    const script = /        <Script id="consent-default"[\s\S]*?        <\/Script>/.exec(inline)![0]
+    writeFileSync(path, inline.replace('import { Providers } from "./providers"', 'import { Providers } from "./providers"\nimport { ConsentDefaults } from "./consent-defaults"').replace(script, "        <ConsentDefaults />"))
+    git(made.site.repo, "add", "app/layout.tsx")
+    git(made.site.repo, "commit", "-q", "-m", "separate owner consent fixture")
+    git(made.site.repo, "push", "-q", "origin", "main")
+    made.site.initialSha = git(made.site.repo, "rev-parse", "HEAD")
+  }
   // Every ref update on the remote is logged, so "never force-pushed" is checked on the real history.
   bareGit(made.site.bare, "config", "core.logAllRefUpdates", "always")
   worlds.push(made)
@@ -246,7 +257,7 @@ function headOfBranch(w: E2eWorld): { branch: string; head: string } | null {
 
 describe("the sealed child environment", () => {
   it("resolves claude / codex / gh / npm / vercel ONLY inside test/wizard/bin, and no extra PATH dir holds an agent", async () => {
-    const w = await world()
+    const w = await wiredWorld()
     expect(realAgentDirs(w.env.PATH!)).toEqual([])
     for (const dir of extraPathDirs()) expect(w.env.PATH!.split(":")).toContain(dir)
     for (const tool of ["claude", "codex", "gh", "npm", "vercel"]) expect(whichIn(w.env, tool), `which ${tool}`).toBe(join(FAKE_BIN, tool))
@@ -260,14 +271,14 @@ describe("the sealed child environment", () => {
   })
 
   it("NEGATIVE: the refusing proxy really sees (and counts) a proxied request", async () => {
-    const w = await world()
+    const w = await wiredWorld()
     await expect(envProxyFetch(w.env)("https://acme-store.com/")).rejects.toThrow()
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(w.tripwire.connections).toEqual(["CONNECT acme-store.com:443 HTTP/1.1"])
   })
 
   it("NEGATIVE: a PATH dir holding a real-looking claude ahead of the fakes is caught by both guards", async () => {
-    const w = await world()
+    const w = await wiredWorld()
     const elsewhere = join(w.site.base, "elsewhere-bin")
     mkdirSync(elsewhere)
     writeFileSync(join(elsewhere, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 })
@@ -283,7 +294,7 @@ describe("the sealed child environment", () => {
 
 describe("the offline end-to-end run (§4.3)", () => {
   it("request 4 CI: a current once-per-tool visit proves duplicate removal end to end", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({ bridge: { testResultFor: (request: TestRunRequest) => {
+    const w = await wiredWorld({ bridge: { testResultFor: (request: TestRunRequest) => {
       const result = testResultFor(request)
       if (result && request.mode === "real_visit") {
         // Unlike the static recording used below, this measurement occurs after this subprocess's merge.
@@ -298,25 +309,25 @@ describe("the offline end-to-end run (§4.3)", () => {
     expect(finalJobs(w).find(job => job.id === ITEMS.duplicates)!.checks.find(check => check.tier === "PV")!.state).toBe("pass")
   })
 
-  it("R7 leaves an inline-consent layout byte-identical and hands wiring to its owner", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world()
+  it("leaves an inline-consent layout byte-identical and hands wiring to its owner", { timeout: RUN_TIMEOUT }, async () => {
+    const w = await wiredWorld({ inlineConsent: true, scenario: agentScenarioWithoutServerOutcome() })
     const component = fixtureFile("app/consent-defaults.tsx")
     const script = component.slice(component.indexOf('        <Script id="consent-default"'), component.indexOf('        </Script>') + '        </Script>'.length)
     const inline = fixtureFile("app/layout.tsx").replace('import { ConsentDefaults } from "./consent-defaults"\n', "").replace("        <ConsentDefaults />", script)
     writeFileSync(join(w.site.repo, "app/layout.tsx"), inline)
-    commitAndPush(w, "inline owner unit fixture")
     w.site.initialSha = git(w.site.repo, "rev-parse", "HEAD")
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(0)
     expect(readFileSync(join(w.site.repo, "app/layout.tsx"), "utf8")).toBe(inline)
-    const receipt = JSON.parse(readFileSync(join(w.site.repo, ".infinite/install.json"), "utf8"))
-    expect(JSON.stringify(receipt.requiresManual)).toContain("app/layout.tsx")
+    expect(stepOutcomes(run)).toContain("prove:skipped")
+    const plan = JSON.parse(readFileSync(join(w.site.repo, ".infinite/wizard/plan-approvals.json"), "utf8"))
+    expect(plan.ownerWiring.canWire).toBe(false)
     const ownerWiring = finalJobs(w).find(job => job.state === "left_for_you" && job.ownerBoundary?.file === "app/layout.tsx" && job.ownerBoundary.wiring)
     expect(ownerWiring?.ownerBoundary?.wiring).toContain("InfiniteAnalyticsClient")
   })
 
   it("runs all 13 steps to run.end with exit 0 and holds every main outcome", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
-    const w = await world()
+    const w = await wiredWorld()
     const answers = writeAnswers(w)
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     const why = trace(run)
@@ -481,9 +492,10 @@ describe("the offline end-to-end run (§4.3)", () => {
       "test.poll",
       "runs.patch(clickTestedConversions)",
       `ga4-key-events(${CONVERSION})`,
-      // review: the fix round re-rehearses the new head (rehearsal → the preview's own URL).
+      // review: the fix round re-rehearses the new head; report redaction reads public ids.
       "keys",
       "hosting",
+      "keys",
       "test.start(rehearsal:home)",
       "test.poll",
       "test.start(dry_live:preview_self)",
@@ -635,7 +647,7 @@ describe("a strict pages-router site with adopted tags and fork-only access", ()
       { edit: { path: "pages/privacy.tsx", content: "export default function Privacy() { return <p>We use Infinite analytics to measure visits.</p> }\n" } }, claim("privacy_paragraph:page")
     ] }) as { claude: { turns: unknown[] }; codex: { turns: unknown[] } }
     scenario.codex.turns = [{ final: { verdict: "looks_good", summary: "The four edits pass their checks.", checklist: [], findings: [] } }]
-    const w = await world({ scenario, env: { E2E_FAST_CLOCK: "1" } })
+    const w = await wiredWorld({ scenario, env: { E2E_FAST_CLOCK: "1" } })
     rmSync(join(w.site.repo, "app"), { recursive: true, force: true })
     mkdirSync(join(w.site.repo, "pages"), { recursive: true })
     mkdirSync(join(w.site.repo, "src/common"), { recursive: true })
@@ -671,7 +683,7 @@ describe("a strict pages-router site with adopted tags and fork-only access", ()
   })
 
   it("opens the PR from the viewer fork and leaves absent preview checks unmeasured", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({
+    const w = await wiredWorld({
       gh: { repo: { nameWithOwner: "acme/acme-store", isPrivate: true, defaultBranch: "main", viewerPermission: "TRIAGE", allowForking: true }, deployments: [] },
       env: { E2E_NO_AGENTS: "1", E2E_FAST_CLOCK: "1" }
     })
@@ -709,7 +721,7 @@ describe("a strict pages-router site with adopted tags and fork-only access", ()
 
 describe("the negative variants (§4.3 a–h)", () => {
   it("(a) Claude hits its usage limit mid-jobs → exit 3, the tree back to the post-install bytes, and a re-run resumes from `jobs`", { timeout: 2 * RUN_TIMEOUT }, async () => {
-    const w = await world({ scenario: agentScenario({ prefixTurns: [usageLimitTurn()] }) })
+    const w = await wiredWorld({ scenario: agentScenario({ prefixTurns: [usageLimitTurn()] }) })
     const answers = writeAnswers(w)
     const first = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(first.code, trace(first)).toBe(3)
@@ -734,7 +746,7 @@ describe("the negative variants (§4.3 a–h)", () => {
   })
 
   it("(b) the app answers 402 on keys → exit 4, nothing started", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({ bridge: { errors: { keys: { code: "subscription_required" } } } })
+    const w = await wiredWorld({ bridge: { errors: { keys: { code: "subscription_required" } } } })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(4)
     expect(stepOutcomes(run)).toEqual(["link:blocked:INF_WIZ_SUBSCRIPTION_REQUIRED"])
@@ -744,7 +756,7 @@ describe("the negative variants (§4.3 a–h)", () => {
   })
 
   it("(c) no agents (the resolver injected EMPTY) → deterministic lanes only, agent jobs need you, still reaches done", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({ env: { E2E_NO_AGENTS: "1" } })
+    const w = await wiredWorld({ env: { E2E_NO_AGENTS: "1" } })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(0)
     expect(stepOutcomes(run).at(-1)).toBe("done:ok")
@@ -762,7 +774,7 @@ describe("the negative variants (§4.3 a–h)", () => {
   })
 
   it("(d) --yes without --consent-mode parks at `plan` (NEEDS_ANSWERS, exit 3) and never calls site-source", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world()
+    const w = await wiredWorld()
     // Only the GA4 stream (a key choice --yes never makes): everything else is --yes's.
     const answers = writeAnswers(w, { v: 1, asks: [{ kind: "single", match: "GA4", answer: "G-FAKE00001" }] })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--yes", "--answers", answers], timeoutMs: RUN_TIMEOUT })
@@ -774,7 +786,7 @@ describe("the negative variants (§4.3 a–h)", () => {
   })
 
   it("(e) nested: job.seeded briefs (exit 3) → the parent agent edits → --resume --json fences it; an answers file never answers consent", { timeout: 3 * RUN_TIMEOUT }, async () => {
-    const w = await world({ env: { CLAUDECODE: "1" } })
+    const w = await wiredWorld({ env: { CLAUDECODE: "1" } })
     const answers = writeAnswers(w)
     // 1. The answers file carries consentMode, and nested mode ignores it: the run parks for the user's own terminal.
     const ignored = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], timeoutMs: RUN_TIMEOUT })
@@ -822,7 +834,7 @@ describe("the negative variants (§4.3 a–h)", () => {
   })
 
   it("(f) merge park, then resume: ESC at merge-ready → exit 3; merged on GitHub → prove → done, exit 0", { timeout: 2 * RUN_TIMEOUT }, async () => {
-    const w = await world()
+    const w = await wiredWorld()
     const answers = writeAnswers(w)
     const parked = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond: (ask) => (ask.kind === "merge-ready" ? "later" : undefined), timeoutMs: RUN_TIMEOUT })
     expect(parked.code, trace(parked)).toBe(3)
@@ -844,7 +856,7 @@ describe("the negative variants (§4.3 a–h)", () => {
   })
 
   it("(g) the proof claim is lost → no real visit, receipts read, done (Codex works, Claude reviews)", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({ scenario: codexWorkerScenario(), bridge: { proofClaim: "lost" } })
+    const w = await wiredWorld({ scenario: codexWorkerScenario(), bridge: { proofClaim: "lost" } })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--worker", "codex", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(0)
     expect(stepOutcomes(run).slice(-2)).toEqual(["prove:ok", "done:ok"])
@@ -864,7 +876,7 @@ describe("the negative variants (§4.3 a–h)", () => {
   })
 
   it("(h) uninstall --pr: its own branch first, every recorded edit reversed (agent edits too), cloud pieces after the merge", { timeout: 2 * RUN_TIMEOUT }, async () => {
-    const w = await world()
+    const w = await wiredWorld()
     const installed = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(installed.code, trace(installed)).toBe(0)
     git(w.site.repo, "switch", "-q", "main")
@@ -909,7 +921,7 @@ describe("the negative variants (§4.3 a–h)", () => {
 describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   it("(i) a 423 lock on site-source (here through §3y.2's site-claim) parks SITE_LOCKED at install (exit 3): no agent, nothing pushed", { timeout: RUN_TIMEOUT }, async () => {
     const lock = { code: "site_setup_locked" as const, state: "live_site_lock" }
-    const w = await world({ bridge: { errors: { "site-source": lock, "site-claim": lock } } })
+    const w = await wiredWorld({ bridge: { errors: { "site-source": lock, "site-claim": lock } } })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(3)
     expect(stepOutcomes(run).at(-1)).toBe("install:parked:INF_WIZ_SITE_LOCKED")
@@ -918,7 +930,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("(j) an approved Meta relay binds while not rolled out ('ready, waiting for Infinite to switch on')", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({ bridge: { metaRelay: { available: false, reason: "not_rolled_out", enabled: false, bound: null } } })
+    const w = await wiredWorld({ bridge: { metaRelay: { available: false, reason: "not_rolled_out", enabled: false, bound: null } } })
     const answers = answersFile()
     const plan = answers.plan as { approved: string[]; declined: string[] }
     const run = await runWizard({
@@ -936,7 +948,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("(k) the claim holder stopped after its visit: the resume PATCHes proofState with NO second visit", { timeout: 2 * RUN_TIMEOUT }, async () => {
-    const w = await world({ bridge: { hangUpAfter: ["receipts"] } })
+    const w = await wiredWorld({ bridge: { hangUpAfter: ["receipts"] } })
     const answers = writeAnswers(w)
     const first = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(stepOutcomes(first).at(-1), trace(first)).toMatch(/^prove:(parked|failed|blocked)/)
@@ -948,7 +960,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("(l) a dev server writing build output parks DEV_SERVER_RUNNING before any agent turn (exit 3)", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world()
+    const w = await wiredWorld()
     mkdirSync(join(w.site.repo, ".next"), { recursive: true })
     const writer = spawn(process.execPath, ["-e", "const fs=require('fs');setInterval(()=>fs.writeFileSync('.next/dev-server.txt',String(Date.now())),100)"], { cwd: w.site.repo, stdio: "ignore" })
     try {
@@ -962,7 +974,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("review I1 P1-1: a home page that redirects (apex → www) is proved and reported, exit 0", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world()
+    const w = await wiredWorld()
     const sitePath = join(w.site.base, "live-site.json")
     const routes = JSON.parse(readFileSync(sitePath, "utf8")) as Record<string, unknown>
     routes[`https://${PRODUCTION_HOST}/`] = { status: 301, headers: { location: `https://www.${PRODUCTION_HOST}/` }, body: "" }
@@ -975,7 +987,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("review I1 P1-2: a Next site with its own next.config.mjs installs (exit 0), its config untouched, the rewrite left as a job", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world()
+    const w = await wiredWorld()
     const own = "/** @type {import('next').NextConfig} */\nconst nextConfig = { reactStrictMode: true }\n\nexport default nextConfig\n"
     writeFileSync(join(w.site.repo, "next.config.mjs"), own)
     git(w.site.repo, "add", "next.config.mjs")
@@ -990,7 +1002,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("review I1 P3-1: a parked, unmerged run re-run as is re-sends no cloud write and re-tests no preview", { timeout: 2 * RUN_TIMEOUT }, async () => {
-    const w = await world()
+    const w = await wiredWorld()
     const answers = writeAnswers(w)
     const parked = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", answers], respond: (ask) => (ask.kind === "merge-ready" ? "later" : undefined), timeoutMs: RUN_TIMEOUT })
     expect(stepOutcomes(parked).at(-1), trace(parked)).toBe("merge:parked:INF_WIZ_MERGE_PARKED")
@@ -1006,7 +1018,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("review I2 P1-2: a server-side env name (POSTHOG_KEY) is never sent to hosting; its env check is unknown and the run goes on", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({ env: { E2E_NO_AGENTS: "1" } })
+    const w = await wiredWorld({ env: { E2E_NO_AGENTS: "1" } })
     const providers = join(w.site.repo, "app/providers.tsx")
     writeFileSync(providers, readFileSync(providers, "utf8").replace('posthog.init("phc_FAKEtestProjectKeyNotReal000",', "posthog.init(process.env.POSTHOG_KEY!,"))
     commitAndPush(w, "PostHog key from the server env")
@@ -1026,7 +1038,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("§3x.8 (R3-7): keys refuses Infinite's own workspace (409 infinite_workspace) → a clean stop at link, exit 2, the --relink line", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({ bridge: { errors: { keys: { code: "foreign_site_hosts", state: "infinite_workspace" } } } })
+    const w = await wiredWorld({ bridge: { errors: { keys: { code: "foreign_site_hosts", state: "infinite_workspace" } } } })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(2)
     expect(stepOutcomes(run)).toEqual(["link:failed:INF_WIZ_INFINITE_WORKSPACE"])
@@ -1038,7 +1050,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("§3z.12 item 4: newly managed GA4 and PostHog ship with the preview guard and the sensitive-path options in the emitted bytes", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({ env: { E2E_NO_AGENTS: "1" } })
+    const w = await wiredWorld({ env: { E2E_NO_AGENTS: "1" } })
     // The site has no GA4 and no PostHog yet (the Meta pixel stays adopted): both become NEW managed installs.
     writeFileSync(join(w.site.repo, "app/layout.tsx"), fixtureFile("app/layout.tsx").replace(/ {8}<ConsentDefaults \/>[\s\S]*?<Script id="meta-pixel"/, '        <Script id="meta-pixel"'))
     writeFileSync(join(w.site.repo, "app/providers.tsx"), 'export function Providers({ children }: { children: React.ReactNode }) {\n  return <>{children}</>\n}\n')
@@ -1081,7 +1093,7 @@ describe("the §3z.12 variants (i)–(l) and the review I1 variants", () => {
   })
 
   it("review I1 P2-5: Ctrl+C mid-turn undoes the agent's edit and removes the snapshot before exit 130", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({ scenario: agentScenario({ round1: [{ tool: "job_list" }, ...duplicateRemovalSteps(), { hang: true }] }) })
+    const w = await wiredWorld({ scenario: agentScenario({ round1: [{ tool: "job_list" }, ...duplicateRemovalSteps(), { hang: true }] }) })
     const layoutPath = join(w.site.repo, "app/layout.tsx")
     const loaders = () => readFileSync(layoutPath, "utf8").split(GTAG_LOADER.trim()).length - 1
     const records = join(w.site.base, "agents.jsonl")
@@ -1148,7 +1160,7 @@ function productionDeployment(id: number, sha: string, state: "success" | "failu
 
 describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted site) reaches a PROOF", () => {
   it("one host ask pre-filled from the repo, a site-file claim, the GitHub preview (accepted by its proof file, as the desktop does), the GitHub deploy, the proof, ONE real visit, an Infinite receipt", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
-    const w = await world({ scenario: agentScenarioWithoutServerOutcome(), bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor } })
+    const w = await wiredWorld({ scenario: agentScenarioWithoutServerOutcome(), bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor } })
     // The repo's only hint at its live address (a CNAME file); Infinite knows none.
     mkdirSync(join(w.site.repo, "public"), { recursive: true })
     writeFileSync(join(w.site.repo, "public/CNAME"), `${PRODUCTION_HOST}\n`)
@@ -1283,7 +1295,7 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
     // The 3-minute proof grace runs on the preload's virtual clock (E2E_FAST_CLOCK): the same deadlines, in seconds.
     // The proof file is served nowhere (a CDN rule), so the PR's preview does not serve it either: the desktop
     // refuses the preview (review P1-2), and the terminal says so (P2-1), never "the test window did not finish".
-    const w = await world({ scenario: agentScenarioWithoutServerOutcome(), bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor, previewServesClaimProof: false }, env: { E2E_FAST_CLOCK: "1" } })
+    const w = await wiredWorld({ scenario: agentScenarioWithoutServerOutcome(), bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor, previewServesClaimProof: false }, env: { E2E_FAST_CLOCK: "1" } })
     const respond = (ask: { kind: string; payload: unknown }) => {
       const payload = ask.payload as { question?: string; options?: Array<{ value: string }>; number?: number }
       if (ask.kind === "single" && payload.question?.startsWith("Which address is your live site?")) return "__type__"
@@ -1322,7 +1334,7 @@ const vercelRefusal = (host: string) => `Infinite needs your site's own domain. 
 describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is refused, and a run with no real visit", () => {
   it("a fresh workspace whose only address is <project>.vercel.app: no vercel.app is offered, the alias and a branch alias are refused, and the run goes on with no host (no claim, no Infinite, no visit)", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
     // No agents: this world is about the host ask and what follows it, not the jobs.
-    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_NO_AGENTS: "1" } })
+    const w = await wiredWorld({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_NO_AGENTS: "1" } })
     // Every place round 3 took the alias from: the repo names it (CNAME) and GitHub shows Vercel's production deployment.
     mkdirSync(join(w.site.repo, "public"), { recursive: true })
     writeFileSync(join(w.site.repo, "public/CNAME"), `${VERCEL_ALIAS}\n`)
@@ -1391,7 +1403,7 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
   })
 
   it("--production-host on any Vercel address (the production alias, a branch alias, a hash URL, bare vercel.app) is a usage error (exit 2) before any bridge call", { timeout: RUN_TIMEOUT }, async () => {
-    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor } })
+    const w = await wiredWorld({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor } })
     for (const host of [VERCEL_ALIAS, VERCEL_BRANCH_ALIAS, VERCEL_HASH_URL, "vercel.app"]) {
       const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--production-host", `https://${host}`], respond: () => undefined, timeoutMs: RUN_TIMEOUT })
       expect(run.code, `${host}\n${trace(run)}`).toBe(2)
@@ -1403,7 +1415,7 @@ describe("live run 2 + the 2026-10-03 founder ruling: a *.vercel.app site is ref
 
   it("no live address (the user says it isn't live yet): no conversion question, consent only for the Meta click-id capture, and Proven live holds no pass and no problem", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
     // No agents: this world is about the plan and the report, not the jobs (they would need conversions it withholds).
-    const w = await world({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_NO_AGENTS: "1" } })
+    const w = await wiredWorld({ bridge: { keys: freshKeys(), hosting: { provider: "none", vercel: null }, testResultFor: freshTestResultFor }, env: { E2E_NO_AGENTS: "1" } })
     const asked: Array<{ kind: string; payload: unknown }> = []
     const respond = (ask: { kind: string; payload: unknown }) => {
       asked.push(ask)
@@ -1479,7 +1491,7 @@ describe("§3y.7 the second reviewer: blind or incomplete is said, never 'nothin
   }
 
   it("a BLIND Codex (it reads nothing, twice) → no review posted, the brief path, 'No second review (Codex could not read the files)' everywhere", { timeout: RUN_TIMEOUT + 30_000 }, async () => {
-    const w = await world({ scenario: scenarioWith([{ blind: true, final: blindReview() }, { blind: true, final: blindReview() }]) })
+    const w = await wiredWorld({ scenario: scenarioWith([{ blind: true, final: blindReview() }, { blind: true, final: blindReview() }]) })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(0)
     const reviewer = agentRuns(w, "codex", "reviewer")
@@ -1503,7 +1515,7 @@ describe("§3y.7 the second reviewer: blind or incomplete is said, never 'nothin
       checklist: ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16"].map((item) => ({ item, status: item === "R10" || item === "R12" ? "cant_tell" : "pass", note: "ok" })),
       findings: []
     }
-    const w = await world({ scenario: scenarioWith([{ final: partial }]) })
+    const w = await wiredWorld({ scenario: scenarioWith([{ final: partial }]) })
     const run = await runWizard({ cwd: w.site.repo, env: w.env, args: ["--json", "--answers", writeAnswers(w)], respond: mergeThenOpen(w), timeoutMs: RUN_TIMEOUT })
     expect(run.code, trace(run)).toBe(0)
     const text = run.ofType("step.sub").map((event) => String(event.text)).join("\n")

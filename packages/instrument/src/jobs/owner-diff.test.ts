@@ -2,7 +2,7 @@ import { readFileSync, rmSync, symlinkSync } from "node:fs"
 import { join } from "node:path"
 import { expect, it } from "vitest"
 import { createGitFixture } from "../../test/wizard/git-fixture.js"
-import { measureOwnerDiff, ownerBoundaryStop } from "./owner-diff.js"
+import { measureOwnerDiff, measureWizardCommits, ownerBoundaryStop } from "./owner-diff.js"
 
 it("measures actual base-to-working and base-to-commit units, with a named stop and no repair of owner bytes", async () => {
   const fixture = createGitFixture({ files: { "tracking.ts": "function boot(){\n fbq?.('consent','revoke');\n}\nfunction safe(){return 1;}\n" } })
@@ -65,5 +65,15 @@ it.each(["liquid", "php", "ejs", "njk"])("measures consent changes in %s templat
     const baseSha = fixture.git(["rev-parse", "HEAD"]).trim()
     fixture.write(path, "fbq('consent','grant');\n")
     expect((await measureOwnerDiff({ root: fixture.root, baseSha })).state).toBe("changed")
+  } finally { fixture.cleanup() }
+})
+
+it("still measures a recorded reachable wizard commit when the base has advanced over it", async () => {
+  const fixture = createGitFixture({ files: { "tracking.ts": "fbq('consent','revoke');\n" } })
+  try {
+    fixture.write("tracking.ts", "fbq('consent','grant');\n")
+    fixture.git(["add", "tracking.ts"]); fixture.git(["commit", "-m", "unsafe wizard fixture"])
+    const sha = fixture.git(["rev-parse", "HEAD"]).trim()
+    expect((await measureWizardCommits({ root: fixture.root, baseSha: sha, headSha: sha, wizardCommits: [sha] })).state).toBe("changed")
   } finally { fixture.cleanup() }
 })

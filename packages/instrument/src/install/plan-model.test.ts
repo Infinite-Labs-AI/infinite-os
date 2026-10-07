@@ -130,7 +130,7 @@ describe("the plan model asks ONLY the three decisions", () => {
 
   it("the agent budget line says who pays; no agent → an info line, never an approval", () => {
     const withAgent = buildPlanModel(input({ candidates: [candidate("identify_reset", "auth")] }))
-    expect(withAgent.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "approval", text: "Claude Code: up to 1 job · Opus 4.8 at xhigh effort · up to 50 turns or 20 min · your Claude plan pays" })
+    expect(withAgent.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "info", text: "Claude Code: up to 1 job · Opus 4.8 at xhigh effort · up to 50 turns or 20 min · your Claude plan pays" })
     const none = buildPlanModel(input({ candidates: [candidate("identify_reset", "auth")], agent: null }))
     expect(none.lines.find((line) => line.id === "agent_budget")).toMatchObject({ requires: "info" })
   })
@@ -155,26 +155,26 @@ describe("B28: the 7-day check-in is one info line", () => {
   })
 })
 
-describe("adopted providers: every agent job that touches one waits on an approved line (R2-10, R2-11)", () => {
+describe("adopted providers: repository work runs after the plan is shown and continued", () => {
   const posthogAdopted = scanFacts({ improve: adoptedPosthogLines, adopted: [{ provider: "posthog", via: "snippet", file: "index.html", line: 5, key: IDS.posthog }] })
 
   it("adopted PostHog: improve lines, never 'install'; job 3 candidates link to the improve line", () => {
     const plan = buildPlanModel(input({ scan: posthogAdopted, candidates: [candidate("posthog_improve", "proxy")] }))
     expect(plan.lines.map((line) => line.id)).not.toContain(`install_provider:posthog:${IDS.posthog}`)
     const improve = plan.lines.find((line) => line.id === "improve_additive:posthog:proxy")!
-    expect(improve).toMatchObject({ ownership: "adopted", requires: "approval", jobIds: ["posthog_improve:proxy"] })
+    expect(improve).toMatchObject({ ownership: "adopted", requires: "info", jobIds: ["posthog_improve:proxy"] })
     // --yes never approves an improvement to an ADOPTED provider.
     expect(yesApproves(improve)).toBe(false)
   })
 
-  it("NEGATIVE: an adopted PostHog with no approved improve line seeds no job 3", () => {
+  it("an adopted PostHog improvement runs without a separate line approval", () => {
     const candidates = [candidate("posthog_improve", "proxy"), candidate("identify_reset", "auth")]
     const plan = buildPlanModel(input({ scan: posthogAdopted, candidates }))
     const declined = resolvePlanAnswers(plan, { approved: ["consent_mode"], declined: ["improve_additive:posthog:proxy"], edits: { consent_mode: "not_required" } }, { consentFlag: null })
-    expect(gateSeededItems(plan, declined, candidates).map((item) => item.id)).toEqual(["identify_reset:auth"])
+    expect(gateSeededItems(plan, declined, candidates).map((item) => item.id)).toEqual(["posthog_improve:proxy", "identify_reset:auth"])
     const unanswered = resolvePlanAnswers(plan, { approved: ["consent_mode"], declined: [], edits: { consent_mode: "not_required" } }, { consentFlag: null })
     const gated = gateSeededItems(plan, unanswered, candidates)
-    expect(gated.find((item) => item.id === "posthog_improve:proxy")).toMatchObject({ state: "blocked", blockedReason: "needs_you" })
+    expect(gated.find((item) => item.id === "posthog_improve:proxy")).toMatchObject({ state: "pending" })
     const approved = resolvePlanAnswers(plan, { approved: ["consent_mode", "improve_additive:posthog:proxy", "agent_budget"], declined: [], edits: { consent_mode: "not_required" } }, { consentFlag: null })
     expect(gateSeededItems(plan, approved, candidates).find((item) => item.id === "posthog_improve:proxy")?.state).toBe("pending")
   })
@@ -368,8 +368,8 @@ describe("resolvePlanAnswers", () => {
   })
 
   it("declined beats approved; unknown line ids are ignored", () => {
-    const resolved = resolvePlanAnswers(plan, { approved: ["server_lane", "no_such_line"], declined: ["server_lane"], edits: {} }, { consentFlag: null })
-    expect(resolved.lines.find((line) => line.id === "server_lane")?.approved).toBe(false)
+    const resolved = resolvePlanAnswers(plan, { approved: ["account_settings:hosting", "no_such_line"], declined: ["account_settings:hosting"], edits: {} }, { consentFlag: null })
+    expect(resolved.lines.find((line) => line.id === "account_settings:hosting")?.approved).toBe(false)
     expect(resolved.approvals.approved).not.toContain("no_such_line")
   })
 })
@@ -379,7 +379,7 @@ describe("review fixes (O7 fix round)", () => {
   const census = (entries: Array<Record<string, unknown>>) =>
     ({ entries, envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }) as unknown as WizardBeforeFactsCensus
 
-  it("P0-1: two duplicates, decline ONE → only the approved one's job 6 is seeded (no 'first line of the kind' fallback)", () => {
+  it("two duplicate repairs remain separate jobs and both run on continue", () => {
     const before = fakeBefore({
       census: census([
         { tool: "ga4", kind: "gtag_config", id: "G-AAAA1111", file: "index.html", line: 3, owner: "adopted" },
@@ -395,7 +395,7 @@ describe("review fixes (O7 fix round)", () => {
     const [lineA, lineB] = dupLines
     const answers = resolvePlanAnswers(plan, { approved: ["consent_mode", lineA!.id, "agent_budget"], declined: [lineB!.id], edits: consent }, { consentFlag: null })
     const seeded = gateSeededItems(plan, answers, candidates)
-    expect(seeded.map((item) => item.id)).toEqual(["duplicates_remove:ga4_config:G-AAAA1111"])
+    expect(seeded.map((item) => item.id)).toEqual(candidates.map(item => item.id))
     expect(seeded[0]!.state).toBe("pending")
   })
 
@@ -407,7 +407,7 @@ describe("review fixes (O7 fix round)", () => {
     expect(plan.lines.find((line) => line.id === "ga4_spa_page_views:ga4:spa_page_view")).toMatchObject({ jobIds: ["ga4_improve:spa_page_view"], text: GA4_SPA_LINE_TEXT })
   })
 
-  it("P2-14: an agent improve line no detector seeds gets its own item behind the same gate; declined → none", () => {
+  it("an improvement with no detector candidate gets its own job under continue", () => {
     const plan = buildPlanModel(input({ scan: scanFacts({ improve: adoptedPosthogLines, adopted: [{ provider: "posthog", via: "snippet", file: "index.html", line: 5, key: IDS.posthog }] }) }))
     expect(plan.seeds.map((item) => item.id).sort()).toEqual(["posthog_improve:defaults", "posthog_improve:history_change", "posthog_improve:proxy"])
     const defaults = plan.lines.find((line) => line.id === "posthog_defaults_bump_adopted:posthog:defaults")!
@@ -415,7 +415,7 @@ describe("review fixes (O7 fix round)", () => {
     const approve = resolvePlanAnswers(plan, { approved: ["consent_mode", defaults.id, "agent_budget"], declined: [], edits: consent }, { consentFlag: null })
     expect(gateSeededItems(plan, approve, plan.seeds).find((item) => item.id === "posthog_improve:defaults")?.state).toBe("pending")
     const decline = resolvePlanAnswers(plan, { approved: ["consent_mode", "agent_budget"], declined: [defaults.id], edits: consent }, { consentFlag: null })
-    expect(gateSeededItems(plan, decline, plan.seeds).map((item) => item.id)).not.toContain("posthog_improve:defaults")
+    expect(gateSeededItems(plan, decline, plan.seeds).map((item) => item.id)).toContain("posthog_improve:defaults")
   })
 
   it("P2-10: metaGoal is data; with no recommendation the line is info and the answer is null (never StartTrial from copy)", () => {
@@ -452,7 +452,7 @@ describe("review fixes (O7 fix round)", () => {
 
   it("P2-18: unless the agent-budget (cost) line is approved, every agent job waits for the user", () => {
     const candidates = [candidate("identify_reset", "auth")]
-    const plan = buildPlanModel(input({ candidates }))
+    const plan = buildPlanModel(input({ candidates, agent: { worker: "claude_code", whoPays: { payer: "api_key", label: "your API key pays" } } }))
     const declined = resolvePlanAnswers(plan, { approved: ["consent_mode"], declined: ["agent_budget"], edits: consent }, { consentFlag: null })
     expect(gateSeededItems(plan, declined, candidates)[0]).toMatchObject({ state: "blocked", blockedReason: "needs_you" })
     const approved = resolvePlanAnswers(plan, { approved: ["consent_mode", "agent_budget"], declined: [], edits: consent }, { consentFlag: null })

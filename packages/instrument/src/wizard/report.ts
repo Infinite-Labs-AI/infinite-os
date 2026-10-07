@@ -540,6 +540,7 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
     day7: input.day7 ?? { measuredAt: null, window: null, cell: null },
     finishLine,
     notes: [...new Set([
+      ...(input.verdictFacts?.tagNotInstalled ? ["Infinite’s tag is NOT installed by this run. Add the owner wiring before testing it live."] : []),
       ...(ownerPreviewNote ? [ownerPreviewNote] : []),
       ...input.notes.filter(note => !isOwnerBoundaryStatement(note)),
       ...(input.verdictFacts?.ownerPolicyFindings ?? []),
@@ -559,6 +560,10 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
       tools: input.verdictFacts.tools,
       installedUnknown: input.verdictFacts.installedUnknown
     })
+  }
+  if (input.verdictFacts?.tagNotInstalled && report.verdict) {
+    report.verdict.state = "not_checked_live"
+    report.verdict.headline = "Infinite’s tag is NOT installed by this run. Add the owner wiring before testing it live."
   }
   report.notes.push(withOwnerBoundary("", hasLegacyOwnerHistory(report.notes), input.verdictFacts?.ownerBoundary))
   report.notes = boundedNotes(report.notes)
@@ -699,6 +704,8 @@ export function durationWords(ms: number): string {
  * was not graded by the tag (the desktop's partial report): it says so, and never guesses one.
  */
 export function verdictLine(report: ReportV2): string {
+  const unwired = report.notes.find(note => note.startsWith("Infinite’s tag is NOT installed"))
+  if (unwired) return unwired
   if (report.verdict) return report.verdict.headline
   const site = report.site.productionHost ?? report.site.repoLabel
   return `${site}: not graded yet · run npx infinite-tag to finish the live checks`
@@ -784,7 +791,7 @@ export function renderTerminal(report: ReportV2, width: number, options: Termina
   lines.push(...hanging("7 days later: ", day7Text(report), total))
   for (const note of notesAndFootnotes(report)) lines.push(...hanging("", note, total))
   for (const instruction of ownerInstructions(options.ownerJobs ?? [])) {
-    lines.push("", ...wrapPlain(instruction.note, total), ...wrapPlain(instruction.placement, total), "", instruction.snippet)
+    lines.push("", ...wrapPlain(instruction.note, total), ...wrapPlain(instruction.placement, total), "", "Full text in the pull request and .infinite/wizard/report.md")
   }
   return lines.join("\n")
 }
@@ -846,7 +853,7 @@ export function renderMarkdown(report: ReportV2, ownerBoundary?: OwnerBoundaryMe
 function ownerInstructions(jobs: readonly ChecklistItem[]): Array<{ note: string; placement: string; snippet: string }> {
   return jobs.flatMap(job => {
     const proof = job.ownerBoundary
-    if (job.state !== "left_for_you" || !proof || (proof.kind !== "frozen_unit" && proof.kind !== "policy_page")) return []
+    if (job.state !== "left_for_you" || !proof || (proof.kind !== "frozen_unit" && proof.kind !== "policy_page" && proof.kind !== "unproven_wiring")) return []
     const snippet = proof.guard ?? proof.wiring
     if (!snippet) return []
     const where = `${proof.file ?? job.allow.files[0] ?? "the noted file"}:${proof.line ?? 1}`

@@ -1,9 +1,8 @@
 // What the `plan` and `install` steps share: loading the plan's inputs (the scan, the keys, what
 // `before` measured, the seeded candidates) and the saved approvals.
 //
-// The run state schema (§3d.6) keeps the plan's hash, answers and per-line approvals, but not the
-// candidates the plan was built from or an edited privacy paragraph, both of which `install` (and
-// job 14) need to rebuild the SAME plan. They are kept beside the state, in the gitignored wizard dir.
+// Keep the original detector candidates beside the state so install rebuilds exactly the plan
+// that was shown and continued. Legacy approval/privacy fields remain readable for old runs.
 import { join } from "node:path"
 
 import type { WizardContext, WizardDeps } from "../wizard/contracts/deps.js"
@@ -20,6 +19,8 @@ const PLAN_APPROVALS_SCHEMA = "infinite-tag.plan-approvals.v1" as const
 export interface SavedPlanApprovals {
   schema: typeof PLAN_APPROVALS_SCHEMA
   planHash: string
+  mode?: "shown_and_continued"
+  ownerWiring?: import("../frameworks/owner-wiring-preview.js").OwnerWiringPreview
   /** `state.steps.before.at` of the `before` run whose candidates these are. */
   beforeAt: string | null
   /** The candidates `before` seeded, exactly as the plan saw them (state.jobs is replaced after the plan). */

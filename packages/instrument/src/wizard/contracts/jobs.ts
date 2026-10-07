@@ -377,7 +377,7 @@ export interface ChecklistItem {
   claim?: { status: ClaimStatus; note: string; at: string }
   state: JobItemState
   /** Wizard-derived owner boundary; never accepted from an agent claim or its prose. */
-  ownerBoundary?: { kind: "frozen_unit" | "restored_unit" | "legacy_policy" | "policy_page"; file?: string; line?: number; unitHash?: string; lineOffset?: number; unitOrdinal?: number; guard?: string; wiring?: string }
+  ownerBoundary?: { kind: "frozen_unit" | "restored_unit" | "legacy_policy" | "policy_page" | "unproven_wiring"; file?: string; line?: number; unitHash?: string; lineOffset?: number; unitOrdinal?: number; guard?: string; wiring?: string }
   /** Set when state is `blocked`. */
   blockedReason?: BlockedReason
   edits?: EditRef[]

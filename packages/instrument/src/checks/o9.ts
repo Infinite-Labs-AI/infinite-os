@@ -22,9 +22,12 @@ import { readFileSync } from "node:fs"
 import { isAbsolute, join, normalize, relative, resolve } from "node:path"
 
 import { checkClickIdCapture } from "../setup-checks/click-id-capture.js"
+import { readManagedCapture } from "../install/managed-capture.js"
+import { detectFbcWriters } from "../jobs/detectors/fbc-writers.js"
+import { generatedApiTexts } from "../jobs/generated-api.js"
 import { checkMetaAutoConfigOptOut } from "../providers/meta-browser/autoconfig.js"
 import { checkHostGuard, readAdoptedInitGuards } from "../setup-checks/host-guard.js"
-import { readAppSources, setupChecksOver, type SetupChecksContext } from "../setup-checks/index.js"
+import { readAppSources, setupChecksOver, validatedCaptureContext, type SetupChecksContext } from "../setup-checks/index.js"
 import { checkMetaEventId } from "../setup-checks/meta-event-id.js"
 import { checkPosthogConfig, posthogConfigDrift, readPosthogConfigs, type PosthogConfigRead } from "../setup-checks/posthog-config.js"
 import type { SetupFinding } from "../setup-checks/types.js"
@@ -101,7 +104,7 @@ export interface O9CheckInputs {
 export interface JobInput {
   appRoot: string
   root?: string
-  item?: Pick<ChecklistItem, "id" | "allow" | "trigger">
+  item?: Pick<ChecklistItem, "id" | "allow" | "trigger"> & Partial<Pick<ChecklistItem, "owner">>
   runId?: string | null
 }
 
@@ -221,6 +224,7 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
 
   const filesOf = (input: Record<string, unknown>) => readAppSources(appRootOf(input, deps))
   const rootOf = (input: Record<string, unknown>) => deps.root ?? (typeof input.root === "string" ? input.root : undefined)
+  const setupContext = (input: Record<string, unknown>) => validatedCaptureContext(rootOf(input) ?? appRootOf(input, deps), appRootOf(input, deps), (input.context as SetupChecksContext | undefined) ?? {})
   /** Findings narrowed to the item's scope (all of them when the input has no item). */
   const scoped = <T extends { file?: string; code?: string }>(input: Record<string, unknown>, findings: readonly T[]): T[] => {
     const inScope = itemScope(input, appRootOf(input, deps), rootOf(input))
@@ -284,7 +288,7 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
       }
     },
     setup_checks: wrap("setup_checks", "S", (input, ctx) =>
-      setupChecksOver(filesOf(input), (input.context as SetupChecksContext | undefined) ?? {}).findings.map((finding) => setupFindingResult(finding, ctx))
+      setupChecksOver(filesOf(input), setupContext(input)).findings.map((finding) => setupFindingResult(finding, ctx))
     ),
     posthog_config: wrap("posthog_config", "S", (input, ctx) => {
       const appRoot = appRootOf(input, deps)
@@ -362,8 +366,25 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
         "no standard Meta conversion fires from a click handler"
       )
     ),
-    click_id_capture: wrap("click_id_capture", "S", (input, ctx) => {
+    click_id_capture: wrap("click_id_capture", "S", async (input, ctx) => {
       const item = input.item as JobInput["item"] | undefined
+      if (item?.owner === "code" && item.id?.startsWith("meta_improve:capture")) {
+        const root = rootOf(input)
+        const read = async (path: string) => { try { return readFileSync(path, "utf8") } catch { return null } }
+        const capture = root ? await readManagedCapture(root, read) : null
+        if (!capture) return [checkResult("click_id_capture", "undetermined", "S", ctx, { reason: "The recorded capture module and its early entrypoint load could not be proved" })]
+        const ownerSources = new Map<string, string>()
+        for (const file of [...capture.record.pixelFiles, ...capture.record.entrypoints]) {
+          let text = await read(join(root!, file))
+          if (text === null) return [checkResult("click_id_capture", "undetermined", "S", ctx, { reason: `The pixel source could not be read: ${file}` })]
+          for (const generated of generatedApiTexts(root!, file)) text = text.replace(generated, generated.replace(/[^\n]/g, " "))
+          // A marker in owner source is not provenance for ignoring another cookie writer.
+          ownerSources.set(file, text.replace(/Managed by Infinite|<!-- infinite:(?:start|end) -->/g, match => " ".repeat(match.length)))
+        }
+        const writers = detectFbcWriters({ appRoot: ".", files: ownerSources, packages: [], truncated: false }).filter(writer => writer.hostOnly)
+        if (writers.length) return writers.map(writer => checkResult("click_id_capture", "problem", "S", ctx, { reason: "An existing host-only _fbc writer can shadow the managed capture", evidence: [{ file: writer.file, line: writer.line }] }))
+        return [checkResult("click_id_capture", "pass", "S", ctx, { reason: "The exact managed capture is loaded before the pixel from the fixed app entry", evidence: capture.record.entrypoints.map(file => ({ file, line: 1 })) })]
+      }
       const target = item?.id === "meta_improve:capture" ? item.allow?.files.find((file) => /\.[cm]?[jt]s$/i.test(file)) : undefined
       return checkClickIdCapture({ files: filesOf(input), ...(target ? { requireModuleCaptureFile: target } : {}) }).findings.map((finding) => setupFindingResult(finding, ctx, "click_id_capture"))
     }),
@@ -404,7 +425,7 @@ export function o9CheckFunctions(deps: O9CheckDeps): Record<O9CheckId, CheckFn> 
       return [checkResult("meta_autoconfig_off", "undetermined", "S", ctx, { reason: `automatic events on pixel ${unread.pixelId}: ${unread.reason}` })]
     }),
     setup_rerun_clean: wrap("setup_rerun_clean", "S", (input, ctx) => {
-      const report = setupChecksOver(filesOf(input), (input.context as SetupChecksContext | undefined) ?? {})
+      const report = setupChecksOver(filesOf(input), setupContext(input))
       const findings = scoped(input, report.findings)
       const problems = findings.filter((finding) => finding.state === "problem")
       const undetermined = findings.filter((finding) => finding.state === "undetermined")

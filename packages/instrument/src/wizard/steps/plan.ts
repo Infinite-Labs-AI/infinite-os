@@ -1,7 +1,8 @@
+import { ownerLayoutJobs } from "./install.js"
 // Step `plan` (§3d.1 step 4, lane O7): "Plan + your decisions".
 //
 // Builds the PlanModel, opens ONE `plan` ask (the only questions: consent mode, conversion names,
-// privacy text and the npm line; everything else is a line), persists the answers and the plan hash,
+// plus explicit package/account choices; repository work is shown), persists the answers and the plan hash,
 // applies the approvals to the seeded candidates (`JobRegistry.applyApprovals`, then the seeding gate),
 // and PATCHes the run's `approvedConversions`. A missing consent mode ALWAYS parks the run here
 // (INF_WIZ_NEEDS_ANSWERS, exit 3): `install` cannot create the site source without it.
@@ -33,16 +34,22 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   if (!inputs.liveFacts) sub(ctx, "The live-site check's measurements are not available; measured values show —", "warn")
 
   const scan = await deps.installer.scan({ root: ctx.root, ...(ctx.appRoot !== "." ? { appRoot: ctx.appRoot } : {}), hosting: inputs.hosting })
-  const candidates = await planCandidates(ctx, deps)
+  let candidates = await planCandidates(ctx, deps)
+  const originalCandidates = candidates
   const plan = deps.installer.buildPlan(scan, keysOnly(inputs.keys), inputs.before, candidates)
+  candidates = (plan as Partial<WizardPlanModel>).scopedCandidates ?? candidates
   // §3y.5 (P2-8): ONE count: the plan's own budget line ("up to N"), this line, "Plan approved" and "Job i/N" all
   // come from `agentJobsAfterApprovals` (the registry's gate + the plan's gate; withheld and unrunnable jobs out).
   const agentJobs = agentJobsUpTo(candidates, (plan as Partial<WizardPlanModel>).seeds ?? [], plan, ctx.options.consentMode)
+  const wiring = (plan as Partial<WizardPlanModel>).ownerWiring
+  if (wiring?.canWire === false && agentJobs === 0 && ![...candidates, ...((plan as Partial<WizardPlanModel>).seeds ?? [])].some(item => item.owner === "code" && item.state !== "left_for_you" && item.state !== "blocked")) {
+    return { kind: "parked", code: "INF_WIZ_NEEDS_ANSWERS", reason: plan.lines.find(line => line.id === "user_action:owner_wiring")!.text, resumeHint: "Add the wiring above yourself, then run npx infinite-tag again." }
+  }
   const decisions = plan.lines.filter((line) => line.editable).length
   sub(ctx, `Up to ${agentJobs} agent job${agentJobs === 1 ? "" : "s"} · ${decisions} decision${decisions === 1 ? "" : "s"} need${decisions === 1 ? "s" : ""} you`, "info")
 
   // A resume of the SAME plan with its consent already answered asks nothing again (the saved answer
-  // carries the edits too: an edited privacy paragraph or conversion list survives the resume).
+  // carries the selected conversion names too).
   const saved = ctx.state.get().plan
   const savedFile = await loadPlanApprovals(ctx, deps)
   let answer =
@@ -80,8 +87,10 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   })
   await savePlanApprovals(ctx, deps, {
     planHash: plan.hash,
+    mode: "shown_and_continued",
+    ownerWiring: (plan as Partial<WizardPlanModel>).ownerWiring,
     beforeAt: ctx.state.get().steps.before?.at ?? null,
-    candidates,
+    candidates: originalCandidates,
     approvals: resolved.approvals,
     privacyText: resolved.privacyText,
     guard: (plan as Partial<WizardPlanModel>).guard ?? null,
@@ -109,7 +118,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const applied = deps.registry.applyApprovals([...candidates, ...seeds], plan, resolved.approvals)
   const items = withDistinctTitles(withGuardHosts(gateSeededItems(plan, resolved, applied), wizardPlan.guard ?? null))
   ctx.state.update((state) => {
-    state.jobs = items
+    state.jobs = [...items, ...ownerLayoutJobs(wizardPlan.ownerWiring?.requirements ?? []).filter(job => !items.some(item => item.id === job.id))]
   })
   await ctx.state.save()
 
@@ -127,7 +136,7 @@ async function run(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
   const blocked = items.filter((item) => item.owner === "agent" && item.state === "blocked").length
   return {
     kind: "ok",
-    status: `Plan approved · ${approved} line${approved === 1 ? "" : "s"} · ${running} agent job${running === 1 ? "" : "s"}${blocked > 0 ? ` (${blocked} more wait${blocked === 1 ? "s" : ""} for you)` : ""}`
+    status: `Plan shown and continued · ${approved} action${approved === 1 ? "" : "s"} · ${running} agent job${running === 1 ? "" : "s"}${blocked > 0 ? ` (${blocked} more wait${blocked === 1 ? "s" : ""} for you)` : ""}`
   }
 }
 

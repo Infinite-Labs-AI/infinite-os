@@ -27,6 +27,7 @@ import { posix } from "node:path"
 import { META_CLICK_ID_ACCESSOR } from "../providers/meta-browser/click-id.js"
 import { lexicalStates } from "../lexical-states.js"
 import { readExecutableModuleCapture } from "./module-click-id-capture.js"
+import { isPolicyPath } from "../jobs/owner-boundary.js"
 
 import {
   clickIdManagedCaptureMessage,
@@ -102,6 +103,8 @@ const MAX_NAMED_PAGES = 5
 
 export interface ClickIdCaptureInput {
   files: ReadonlyMap<string, string>
+  /** Supplied only after the exact module and initial entry order have been validated from the receipt. */
+  managedCaptureEntries?: readonly string[]
   /** Job 5's plain-module target needs the added capture, not merely an adopted pixel. */
   requireModuleCaptureFile?: string
 }
@@ -122,10 +125,14 @@ export function checkClickIdCapture(input: ClickIdCaptureInput): SetupCheckResul
       executableModuleFiles.add(file)
       managedCaptureFiles.add(file)
     }
+    if (input.managedCaptureEntries?.includes(file)) {
+      executableModuleFiles.add(file)
+      managedCaptureFiles.add(file)
+    }
     const initialises =
       managedCaptureFiles.has(file) || units.some((unit) => extractMetaPixelIds(unit.text).length > 0)
     if (initialises) initFiles.push(file)
-    if (isHtmlPage(file, contents)) (initialises ? htmlPagesWith : htmlPagesWithout).push(file)
+    if (isHtmlPage(file, contents) && !(input.managedCaptureEntries && isPolicyPath(file))) (initialises ? htmlPagesWith : htmlPagesWithout).push(file)
   }
 
   if (input.requireModuleCaptureFile && /\.[cm]?[jt]s$/i.test(input.requireModuleCaptureFile) && !executableModuleFiles.has(input.requireModuleCaptureFile)) {

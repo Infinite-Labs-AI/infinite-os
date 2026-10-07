@@ -1,3 +1,4 @@
+import { loadPlanApprovals } from "../../install/step-inputs.js"
 import type { ChecklistItem } from "../contracts/jobs.js"
 import { withheldPreviewTools, previewScope } from "../../review/preview-scope.js"
 // Step 11 `prove` (§3d.1): after the merge is deployed, ONE real test visit and the best proof each tool
@@ -997,6 +998,7 @@ async function writeOwnClaim(ctx: WizardContext, deps: WizardDeps, record: Prove
 
 
 async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutcome> {
+  if ((await loadPlanApprovals(ctx, deps))?.ownerWiring?.canWire === false) return { kind: "skipped", reason: "Infinite’s tag was NOT installed by this run. Add the owner wiring before testing it live." }
   if (ctx.options.noProve) {
     return { kind: "skipped", reason: "--no-prove: the Infinite app proves the site after the deploy and shows it in Site Settings." }
   }

@@ -1,3 +1,7 @@
+import type { ManagedCapturePlan } from "./managed-capture.js"
+import type { OwnerWiringPreview } from "../frameworks/owner-wiring-preview.js"
+import { scopeOwnerJob } from "../jobs/owner-scope.js"
+import { isRepositoryWork, isContinuedWork } from "./plan-permission.js"
 // §3d.3–§3d.4 and step 4 of the wizard: the ONE plan screen.
 //
 // The plan model ASKS ONLY THREE THINGS — consent mode, conversion names and the npm
@@ -56,6 +60,9 @@ export interface WizardBeforeFacts extends BeforeFacts {
 
 /** The scan facts the plan reads (the installer's `WizardScanResult` carries them). */
 export interface PlanScanFacts {
+  managedCapture?: ManagedCapturePlan
+  ownerWiring?: OwnerWiringPreview
+  sources?: Readonly<Record<string, string>>
   framework: string
   /** Providers this install manages already (from the receipt). */
   managedProviders: ProviderId[]
@@ -130,6 +137,9 @@ export type GuardDecision =
 
 /** The plan model plus what `apply` needs (never shown, never hashed separately). */
 export interface WizardPlanModel extends PlanModel {
+  scopedCandidates?: ChecklistItem[]
+  approvalMode?: "shown_and_continued"
+  ownerWiring?: OwnerWiringPreview
   guard: GuardDecision
   /** The tools this plan installs or updates (each behind its `install_provider` line). */
   installTools: ProviderId[]
@@ -265,13 +275,14 @@ export function seedItemsAfterApprovals(
   lines?: ReadonlyArray<{ id: string; approved: boolean | null }>
 ): ChecklistItem[] {
   const withheld = new Set((plan as Partial<WizardPlanModel>).withheld ?? [])
+  candidates = (plan as Partial<WizardPlanModel>).scopedCandidates ?? candidates
   const pool = [...candidates, ...seeds.filter((seed) => !candidates.some((item) => item.id === seed.id))].filter((item) => !withheld.has(item.id))
   const applied = applyApprovalsTo(pool, plan, approvals)
   const lineStates =
     lines ??
     plan.lines.map((planLine) => ({
       id: planLine.id,
-      approved: planLine.requires !== "approval" ? null : approvals.declined.includes(planLine.id) ? false : approvals.approved.includes(planLine.id) ? true : null
+      approved: isContinuedWork(planLine) ? true : planLine.requires !== "approval" ? null : approvals.declined.includes(planLine.id) ? false : approvals.approved.includes(planLine.id) ? true : null
     }))
   return gateSeededItems(plan, { lines: [...lineStates] }, applied)
 }
@@ -544,7 +555,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   const { keys, before, scan } = input
   const lines: PlanLine[] = []
   const facts = lineFactsFor(input)
-  const { tools, ids: toolIds, infiniteUnrunnable } = newTools(input, facts)
+  const { tools: proposedTools, ids: toolIds, infiniteUnrunnable } = newTools(input, facts)
+  const tools = scan.ownerWiring?.canWire === false ? [] : proposedTools
   const hosting = before.hosting
   const serverLaneRule = lineRunnable("server_lane", facts)
   const serverLaneApprovable = serverLaneRule.ok && scan.serverLane !== null && tools.includes("infinite")
@@ -557,7 +569,23 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     (item.jobId === "conversions_to_tools" && !helpersEmitted)
   )
   const withheld = withheldItems.map((item) => item.id)
-  const candidates = input.candidates.filter((item) => !withheld.includes(item.id))
+  const sources = scan.sources ? new Map(Object.entries(scan.sources)) : null
+  const captureScope = (item: ChecklistItem): ChecklistItem => {
+    const capture = scan.managedCapture
+    if (!capture || item.jobId !== "meta_improve" || !/^meta_improve:capture(?::|$)/.test(item.id)) return item
+    if (!capture.canWire) {
+      const requirement = capture.requirements[0]
+      return { ...item, owner: "code", state: "left_for_you", blockedReason: undefined, checks: [], claim: undefined,
+        note: `Not changed by us: the app entry cannot load the capture safely. This run does not save the landing ad-click id. ${requirement?.reason ?? "Add the entry wiring yourself."}`,
+        ownerBoundary: { ...(requirement?.ownerBoundary ?? { kind: "unproven_wiring" as const }), wiring: capture.requirements.map(entry => `${entry.path}:\n${entry.snippet}`).join("\n\n") },
+        allow: { files: [], create: [] } }
+    }
+    return { ...item, owner: "code", state: "pending", blockedReason: undefined, ownerBoundary: undefined, claim: undefined, checks: itemChecksFor("meta_improve", "capture", scan.framework),
+      note: undefined, title: "Save Meta landing click ids in a managed module",
+      allow: { files: [...capture.editEntrypoints], create: [capture.module] },
+      trigger: { finding: `The installer adds ${capture.module} and wires it before the pixel from ${capture.entrypoints.join(", ")}. The pixel's own file is unchanged; capture reads the existing consent gate.`, evidence: capture.editEntrypoints.map(file => ({ file, line: 1 })) } }
+  }
+  let candidates = input.candidates.filter((item) => !withheld.includes(item.id)).map(captureScope).map(item => sources ? scopeOwnerJob(item, sources) : item)
 
   // ---- the four decisions ----
   // R2-6 (live run 2): a decision is asked only when something it governs can be installed or recorded this run.
@@ -814,12 +842,13 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
 
   // An improve line no candidate links, whose change is (partly) the agent's, gets its own item, so an
   // approved line always has a job or a code edit behind it (P2-14).
-  const seeds: ChecklistItem[] = []
+  let seeds: ChecklistItem[] = []
   const takenIds = new Set(candidates.map((item) => item.id))
   for (const entry of improveLines) {
     const planLine = lines.find((candidateLine) => candidateLine.id === entry.id)
     if (!planLine || (planLine.jobIds?.length ?? 0) > 0) continue
-    const seed = seedForImproveLine(entry, scan.appRoot ?? ".", scan.framework)
+    const rawSeed = seedForImproveLine(entry.kind === "capture_beside_adopted_pixel" && scan.managedCapture ? { ...entry, owner: "agent" } : entry, scan.appRoot ?? ".", scan.framework)
+    const seed = rawSeed ? captureScope(rawSeed) : null
     if (!seed || takenIds.has(seed.id)) continue
     takenIds.add(seed.id)
     seeds.push(seed)
@@ -838,7 +867,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
           ? `Meta goal: ${goal} (${goal === "StartTrial" ? "a SaaS sign-up starts a trial" : "a shop sale"}); change it in Meta any time.`
           : "Meta goal: StartTrial if you sell subscriptions, Purchase if you sell products.",
         // With no recommendation there is nothing to approve: the line only informs (never an answer).
-        requires: goal ? "approval" : "info"
+        requires: "info"
       })
     )
   }
@@ -868,11 +897,35 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     )
   }
 
-  for (const item of candidates.filter(entry => entry.state === "left_for_you")) {
+  if (sources) {
+    candidates = candidates.map(item => scopeOwnerJob(item, sources))
+    seeds = seeds.map(item => scopeOwnerJob(item, sources))
+    const left = new Map([...candidates, ...seeds].filter(item => item.state === "left_for_you").map(item => [item.id, item]))
+    for (const planLine of lines) {
+      if (!planLine.jobIds?.some(id => left.has(id))) continue
+      const runnable = planLine.jobIds.filter(id => !left.has(id))
+      if (runnable.length) planLine.jobIds = runnable
+      else { planLine.requires = "user_action"; planLine.editable = false; planLine.text = planLine.jobIds.map(id => left.get(id)?.note ?? "Left for the owner").join("\n"); planLine.jobIds = [] }
+    }
+  }
+  if (scan.managedCapture?.canWire) {
+    for (const planLine of lines) if (planLine.kind === "capture_beside_adopted_pixel") planLine.text = `Meta: save landing ad-click ids in ${scan.managedCapture.module}, loaded first from ${scan.managedCapture.entrypoints.join(", ")}. The installer leaves the pixel's own file unchanged and reads the existing consent gate.`
+  }
+  for (const item of [...candidates, ...seeds].filter(entry => entry.state === "left_for_you")) {
+    if (item.id === "posthog_improve:sensitive_pages" && item.ownerBoundary) {
+      const matches = `${JSON.stringify(scan.sensitivePaths)}.some(function (path) { return location.pathname === path || location.pathname.indexOf(path + "/") === 0; })`
+      item.note = `${item.note ?? "Not changed by us."} Replay and autocapture keep their existing settings on the listed pages until you change the initialization yourself.`
+      item.ownerBoundary.wiring = `autocapture: !(${matches}),\ndisable_session_recording: (${matches}),`
+      lines.push(line({ id: `owner_options:${item.id}`, kind: "user_action", requires: "user_action", text: `${item.note}\nOwner-only options for the existing posthog.init at ${item.ownerBoundary.file}:${item.ownerBoundary.line}; merge them yourself without changing consent code:\n${item.ownerBoundary.wiring}` }))
+    }
     const handoff = item.jobId === "preview_guard" && item.ownerBoundary && guard.emit
-      ? ownerGuardHandoff(item.note ?? item.trigger.finding, item.ownerBoundary, buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny })) : null
+      ? ownerGuardHandoff(item.note ?? item.trigger.finding, item.ownerBoundary, buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny }), sources?.get(item.ownerBoundary.file ?? "")) : null
+    if (handoff && item.ownerBoundary) item.ownerBoundary.guard = handoff.guard
     lines.push(line({ id: `owner_only:${item.id}`, kind: "user_action", text: handoff?.text ?? item.note ?? item.trigger.finding, requires: "user_action" }))
   }
+
+  if (keys.ga4.status === "connected") lines.push(line({ id: "account_settings:ga4", kind: "account_settings", requires: "approval", text: "Allow Infinite to mark the selected, click-tested conversions as key events in your connected GA4 property." }))
+  if (serverLaneApprovable) lines.push(line({ id: "account_settings:hosting", kind: "account_settings", requires: "approval", text: "Allow Infinite to save server-lane environment settings in your connected hosting project." }))
 
   // ---- things only the user can do ----
   if (scan.adopted.some((entry) => entry.via === "gtm")) {
@@ -937,10 +990,20 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     })
   )
 
+  if (scan.ownerWiring?.canWire === false) {
+    const why = scan.ownerWiring.requirements.some(item => item.ownerBoundary?.kind === "frozen_unit") ? "We could not install here without editing a file that holds your consent code" : "We could not safely wire the tag from this app entry"
+    lines.unshift(line({ id: "user_action:owner_wiring", kind: "user_action", requires: "user_action", text: `Infinite's tag is NOT installed by this run. ${why} (${scan.ownerWiring.requirements.map(item => item.path).join(", ")}). Add these lines yourself, then run npx infinite-tag again:\n${scan.ownerWiring.requirements.map(item => `${item.path}:\n${item.snippet}`).join("\n\n")}` }))
+  }
+  for (const requirement of scan.ownerWiring?.requirements ?? []) {
+    if (scan.ownerWiring?.canWire === false) continue
+    lines.push(line({ id: `owner_wiring:${requirement.path}`, kind: "user_action", requires: "user_action", text: `${requirement.reason}\n${requirement.path}:\n${requirement.snippet}` }))
+  }
+
   // ---- the agent's budget (the cost line in the go-ahead) ----
   // §3y.5: "up to N" = the agent jobs that run when every approvable line is approved (the one count function).
+  for (const planLine of lines) if (planLine.requires === "approval" && isRepositoryWork(planLine)) planLine.requires = "info"
   const provisionalDecisions: PlanModel["decisions"] = { consentMode: consentProposed, conversionNames, privacyText, npmInstall }
-  const provisional = { hash: "", lines, decisions: provisionalDecisions, installTools: tools, managedTools: [...scan.managedProviders], serverLaneOffered: serverLaneApprovable, withheld } as unknown as PlanModel
+  const provisional = { hash: "", lines, decisions: provisionalDecisions, installTools: tools, managedTools: [...scan.managedProviders], serverLaneOffered: serverLaneApprovable, withheld, scopedCandidates: candidates } as unknown as PlanModel
   const agentJobs = agentJobsUpTo(candidates, seeds, provisional, input.consentFlag)
   if (agentJobs > 0) {
     const name = input.agent?.worker === "claude_code" ? "Claude Code" : input.agent?.worker === "codex" ? "Codex" : null
@@ -951,7 +1014,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         text: name
           ? `${name}: up to ${agentJobs} job${agentJobs === 1 ? "" : "s"} · ${AGENT_MODELS[input.agent!.worker!].label} at ${AGENT_MODELS[input.agent!.worker!].effort} effort · up to ${AGENT_LIMITS.jobs.maxTurns} turns or ${Math.round(AGENT_LIMITS.jobs.wallMs / 60_000)} min · ${input.agent?.whoPays?.label ?? "who pays: unknown"}`
           : `No agent found: the ${agentJobs} agent job${agentJobs === 1 ? "" : "s"} are listed for you to do by hand.`,
-        requires: name ? "approval" : "info"
+        requires: name && input.agent?.whoPays?.payer !== "plan" ? "approval" : "info"
       })
     )
   }
@@ -963,6 +1026,9 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     npmInstall
   }
   return {
+    approvalMode: "shown_and_continued",
+    ownerWiring: scan.ownerWiring,
+    scopedCandidates: candidates,
     hash: planHash(lines, decisions),
     lines,
     decisions,
@@ -1197,7 +1263,7 @@ export function resolvePlanAnswers(
   options: { consentFlag: "required" | "not_required" | null }
 ): ResolvedPlanAnswers {
   const known = new Map(plan.lines.map((planLine) => [planLine.id, planLine]))
-  const declined = new Set((answer?.declined ?? []).filter((id) => known.has(id)))
+  const declined = new Set((answer?.declined ?? []).filter((id) => known.has(id) && !isContinuedWork(known.get(id)!)))
   const edits: Record<string, string> = {}
   for (const [id, value] of Object.entries(answer?.edits ?? {})) {
     const planLine = known.get(id)
@@ -1210,6 +1276,7 @@ export function resolvePlanAnswers(
       .filter((id) => known.get(id)!.requires === "approval")
   )
 
+  for (const planLine of plan.lines) if (isContinuedWork(planLine)) approved.add(planLine.id)
   let consentMode: ResolvedPlanAnswers["consentMode"] = null
   if (options.consentFlag) {
     consentMode = options.consentFlag
@@ -1239,7 +1306,7 @@ export function resolvePlanAnswers(
   const npmAsked = known.has(DECISION_LINE_IDS.npmInstall)
   const lines = plan.lines.map((planLine) => ({
     id: planLine.id,
-    approved: planLine.requires !== "approval" ? null : approved.has(planLine.id) ? true : declined.has(planLine.id) ? false : null
+    approved: isContinuedWork(planLine) ? true : planLine.requires !== "approval" ? null : approved.has(planLine.id) ? true : declined.has(planLine.id) ? false : null
   }))
   return {
     consentMode,
@@ -1248,7 +1315,7 @@ export function resolvePlanAnswers(
     privacyText: approved.has(DECISION_LINE_IDS.privacyText) ? privacyText : null,
     npmInstall: !npmAsked ? null : approved.has(DECISION_LINE_IDS.npmInstall) ? true : declined.has(DECISION_LINE_IDS.npmInstall) ? false : null,
     // The recommendation is data on the plan, never parsed back out of its copy (P2-10).
-    metaGoal: approved.has("meta_goal") ? (wizardPlan.metaGoal ?? null) : null,
+    metaGoal: wizardPlan.metaGoal ?? null,
     lines,
     approvals: {
       approved: [...approved],

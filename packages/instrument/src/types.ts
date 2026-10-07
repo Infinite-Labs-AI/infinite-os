@@ -175,7 +175,16 @@ export interface ManualRequirement {
   /** The exact lines to add by hand. */
   snippet: string
   /** The installer itself refused this source edit; it is never delegated to a worker. */
-  ownerBoundary?: { kind: "frozen_unit" | "policy_page"; file: string; line: number; unitHash?: string; lineOffset?: number; unitOrdinal?: number }
+  ownerBoundary?: { kind: "frozen_unit" | "policy_page" | "unproven_wiring"; file: string; line: number; unitHash?: string; lineOffset?: number; unitOrdinal?: number }
+}
+
+export interface ManagedCaptureRecord {
+  module: string
+  entrypoints: string[]
+  pixelFiles: string[]
+  mode: "required" | "not_required"
+  strategy: "first_import" | "before_interactive" | "blocking_script"
+  moduleHash: string
 }
 
 export interface ApplyResult {
@@ -363,6 +372,7 @@ export interface WorkspaceInstallArtifacts {
 }
 
 export interface InstallManifest {
+  managedCapture?: ManagedCaptureRecord
   workspaceId: string
   /** The wizard run that last wrote the managed-file content hashes. */
   runId?: string

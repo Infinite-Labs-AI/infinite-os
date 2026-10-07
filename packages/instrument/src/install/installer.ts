@@ -8,6 +8,8 @@
 import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { recordGeneratedApi } from "../jobs/generated-api.js"
+import { previewOwnerWiring, type OwnerWiringPreview } from "../frameworks/owner-wiring-preview.js"
+import { planManagedCapture, applyManagedCapture, type ManagedCapturePlan } from "./managed-capture.js"
 import { join } from "node:path"
 
 import { restoreSnapshot, snapshotFiles, type FileSnapshot } from "../apply.js"
@@ -41,6 +43,7 @@ import type {
   InspectResult,
   InstallManifest,
   ManualRequirement,
+  ManagedCaptureRecord,
   ProviderId,
   SupportedFramework,
   WorkspaceInstallArtifacts
@@ -107,6 +110,8 @@ export const SENSITIVE_PAGES_CHECK_ID = "sensitive_pages" as const
 
 /** `Installer.scan` plus everything the plan and the install read (lanes may add optional fields). */
 export interface WizardScanResult extends ScanResult {
+  ownerWiring?: OwnerWiringPreview
+  managedCapture?: ManagedCapturePlan
   appRootSource: AppRootSource
   /** Workspace packages that look like web apps (more than one = an ambiguous monorepo: job 2). */
   appRootCandidates: string[]
@@ -190,6 +195,7 @@ function cacheEditBefores(root: string, records: readonly WizardEditRecord[]): v
 }
 
 export interface WizardApplyResult extends InstallerApplyResult {
+  managedCapture?: ManagedCaptureRecord
   /** Deterministic edits refused before writing owner source; never dispatched to a worker. */
   ownerRequirements?: ManualRequirement[]
   /** Repo-root-relative files written this run (managed + improve + npm), for the status line. */
@@ -316,6 +322,7 @@ export class WizardInstaller implements Installer {
       warnings
     }
     this.lastScan = result
+    result.managedCapture = planManagedCapture({ root: result.root, appRoot: result.appRoot, framework: result.framework, pixels: result.facts.meta, htmlPages: result.inspect.detectedFiles.filter(file => /\.html?$/i.test(file)) })
     return result
   }
 
@@ -332,7 +339,7 @@ export class WizardInstaller implements Installer {
     const beforeFacts = before as WizardBeforeFacts
     const sensitivePaths = sensitivePathsFor(wizardScan, before)
     const served = siteServing(wizardScan, beforeFacts, keys)
-    const improve = improveLinesFor(wizardScan.facts, { framework: wizardScan.framework, keys, sensitivePaths, vercelServed: served.vercelServed })
+    const improve = improveLinesFor(wizardScan.facts, { framework: wizardScan.framework, keys, sensitivePaths, vercelServed: served.vercelServed }).map(entry => entry.kind === "capture_beside_adopted_pixel" && wizardScan.managedCapture ? { ...entry, owner: "code" as const } : entry)
     const managed = new Set<ProviderId>((wizardScan.manifest?.providers ?? []) as ProviderId[])
     const run = this.options.runFacts?.() ?? null
     // §3y.2: on the claim path the proof file must be served at the site's root; a static site that builds into
@@ -342,7 +349,9 @@ export class WizardInstaller implements Installer {
       const target = proofFileTarget(wizardScan.root, wizardScan.appRoot, wizardScan.framework)
       if ("blocked" in target) infiniteBlocked = proofFileBlockedText(target.blocked)
     }
-    const facts: PlanScanFacts = {
+    const facts: PlanScanFacts & { ownerWiring?: OwnerWiringPreview; managedCapture?: ManagedCapturePlan } = {
+      managedCapture: wizardScan.managedCapture,
+      sources: Object.fromEntries(scanSourceFiles(join(wizardScan.root, wizardScan.appRoot), { includePublic: wizardScan.framework === "static-html" }).files.map(file => [normalizeAppRelativePath(wizardScan.appRoot, file), readFileSync(join(wizardScan.root, wizardScan.appRoot, file), "utf8")])),
       framework: wizardScan.framework,
       managedProviders: [...managed],
       adopted: wizardScan.detected
@@ -364,6 +373,7 @@ export class WizardInstaller implements Installer {
         beforeFacts
       )
     }
+    facts.ownerWiring = wizardScan.ownerWiring
     const model = buildPlanModel({
       scan: facts,
       keys,
@@ -374,7 +384,7 @@ export class WizardInstaller implements Installer {
       productionDeniedConflict: this.options.productionDeniedConflict,
       run
     })
-    this.internals.set(model, { scan: wizardScan, keys, before: beforeFacts, candidates, improve })
+    this.internals.set(model, { scan: wizardScan, keys, before: beforeFacts, candidates: model.scopedCandidates ?? candidates, improve })
     return model
   }
 
@@ -418,6 +428,7 @@ export class WizardInstaller implements Installer {
       for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) if (artifacts[tool]) resolvedKeys.sources[tool] = "infinite-connection"
       const classifications = classifyPhase({ manifest: phase.manifest, detected: phase.detected, keys: resolvedKeys, adoptExisting: true, serverLane, improve: {} })
       const result = planPhase({ root: scan.root, inspect: phase.inspect, classifications, keys: resolvedKeys, workspaceId: wizardInstallWorkspaceId(this.options.repoFingerprint), serverLane, deferUnmanagedNextConfig: true })
+      scan.ownerWiring = previewOwnerWiring({ root: scan.root, appRoot: scan.appRoot, framework: scan.framework, plan: result.plan })
       return result.failure && !result.nothingToInstall ? result.failure.message : null
     } catch (error) {
       return error instanceof Error ? error.message : String(error)
@@ -540,9 +551,10 @@ export class WizardInstaller implements Installer {
         ]
       : []
     const carriedEdits = previous?.edits ?? []
+    const capturePlan = codeImprove.some(entry => entry.kind === "capture_beside_adopted_pixel") ? planManagedCapture({ root, appRoot: scan.appRoot, framework: scan.framework, pixels: scan.facts.meta, htmlPages: scan.inspect.detectedFiles.filter(file => /\.html?$/i.test(file)) }) : undefined
     const carriedFiles = [...new Set(carriedEdits.map((edit) => edit.file))]
     const snapshot: FileSnapshot[] = snapshotFiles(root, [
-      ...new Set([...p.files, ...laneFiles, installManifestRelativePath, ...improveFiles, ...npmFiles, ...carriedFiles])
+      ...new Set([...p.files, ...laneFiles, installManifestRelativePath, ...improveFiles, ...npmFiles, ...carriedFiles, ...(capturePlan ? [capturePlan.module, ...capturePlan.entrypoints] : [])])
     ])
     const rollback = (): boolean => {
       try {
@@ -557,6 +569,7 @@ export class WizardInstaller implements Installer {
     const changedFiles: string[] = []
     let openJobs: string[] = []
     const ownerRequirements: ManualRequirement[] = []
+    let managedCapture: ManagedCaptureRecord | undefined
     let seq = 0
     try {
       // 1. the managed install (the harness's own apply + static verification + rollback)
@@ -584,6 +597,15 @@ export class WizardInstaller implements Installer {
 
       // 2. approved improve-in-place code edits (each recorded, reversible)
       for (const entry of codeImprove) {
+        if (entry.kind === "capture_beside_adopted_pixel") {
+          if (answers.consentMode === null) throw new Error("The capture requires the owner's recorded consent-mode answer")
+          const applied = applyManagedCapture({ root, appRoot: scan.appRoot, framework: scan.framework, pixels: scan.facts.meta, htmlPages: scan.inspect.detectedFiles.filter(file => /\.html?$/i.test(file)), mode: answers.consentMode, runId, seq })
+          ownerRequirements.push(...applied.plan?.requirements ?? [])
+          edits.push(...applied.edits); seq += applied.edits.length
+          changedFiles.push(...applied.changedFiles)
+          managedCapture = applied.record
+          continue
+        }
         const result = applyImproveEdit({
           root,
           appRoot: scan.appRoot,
@@ -645,12 +667,19 @@ export class WizardInstaller implements Installer {
       // 5. the receipt: the earlier runs' edits carried over, this run's edits, and the public ids the
       // page now carries (this run's approvals plus every kept tool)
       this.writeReceipt(root, scan, workspaceId, edits, manifestIdsFor(artifacts), carriedEdits)
+      if (managedCapture) {
+        const receipt = readInstallManifest(root)
+        if (!receipt) throw new Error("The managed capture has no install receipt")
+        const files = [...new Set([...receipt.files, managedCapture.module, ...managedCapture.entrypoints])]
+        writeInstallManifest(root, { ...receipt, managedCapture, files, contentHashes: { ...receipt.contentHashes, ...computeContentHashes(root, files) } })
+      }
       return {
         ok: true,
         rolledBack: false,
         edits,
         openJobs,
         ...(ownerRequirements.length ? { ownerRequirements } : {}),
+        ...(managedCapture ? { managedCapture } : {}),
         changedFiles: [...new Set(changedFiles)],
         warnings,
         reason: null,
