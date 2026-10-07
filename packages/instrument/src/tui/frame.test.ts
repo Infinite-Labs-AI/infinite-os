@@ -5,6 +5,7 @@ import { colorEnabled, makeStyles, stripAnsi, visibleWidth } from "./ansi.js"
 import { renderFrame, type FrameInput } from "./frame.js"
 import { OVERLAYS } from "./overlays/index.js"
 import type { OverlayContext } from "./overlays/types.js"
+import { CAPTURE_WAITING } from "../install/consent-handoff.js"
 import { hostRefusalLine } from "../wizard/site-host.js"
 
 function frame(change: Partial<FrameInput> = {}): string[] {
@@ -69,6 +70,20 @@ describe("renderFrame", () => {
     const text = plain(frame({ snapshot, height: 40 }))
     for (const label of ["in the pull request", "waiting for a real event", "not needed", "could not be checked", "blocked: needs your answer"]) expect(text).toContain(label)
   })
+  it("shows installed capture waiting on the banner as neutral, while ordinary code checks stay passed", () => {
+    const snapshot = midRunSnapshot({ jobs: [
+      { id: "meta_improve:capture", title: "Ad-click capture", state: "done_in_code", note: CAPTURE_WAITING },
+      { id: "preview_guard:ga4", title: "GA4 guard", state: "done_in_code" },
+      { id: "meta_improve:failed", title: "Failed capture", state: "failed", note: CAPTURE_WAITING }
+    ] })
+    for (const width of [70, 120]) {
+      const text = plain(frame({ snapshot, width, height: 50 })).replace(/\s+/g, " ")
+      expect(text).toContain(`· 1/3 Ad-click capture · ${CAPTURE_WAITING}`)
+      expect(text).toContain("✓ 2/3 GA4 guard · passed in code")
+      expect(text).toContain("✗ 3/3 Failed capture · failed")
+    }
+  })
+
   it("keeps job progress monotonic through a provisional failure and re-claim", () => {
     const base = midRunSnapshot()
     const steps = base.steps.map((row) => row.id === "jobs" ? { ...row, startedAt: "2026-10-02T09:00:00.000Z" } : row)

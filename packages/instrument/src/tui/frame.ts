@@ -11,6 +11,7 @@
 // - the outro (the before/after text) when the run has one.
 // Every store string that can carry outside text (sub-statuses, statuses, narration, the outro, ask payloads)
 // goes through the injected sanitiser; step titles and Learn cards are the wizard's own constants.
+import { CAPTURE_WAITING } from "../install/consent-handoff.js"
 import { EVENT_LIMITS } from "../wizard/contracts/events.js"
 import type { StoreStepRow, WizardStoreSnapshot } from "../wizard/contracts/state.js"
 import { WIZARD_STEP_IDS, WIZARD_STEP_META, type Who } from "../wizard/contracts/steps.js"
@@ -198,9 +199,10 @@ function liveLines(input: FrameInput, width: number, feedLines: number = FEED_LI
   if (shownJobs.length > 0) {
     const labels = { waiting: "waiting", agent_claim: "agent claims done", agent_blocked: "agent says blocked", agent_not_needed: "agent says not needed", checking: "wizard checking", could_not_check: "could not be checked", done_in_code: "passed in code", waiting_deploy: "in the pull request, prove after deploy", waiting_real_event: "waiting for a real event", proven: "proven live", not_needed: "not needed", left_for_you: "left for you", failed: "failed", blocked: "blocked" } as const
     for (const [index, job] of shownJobs.entries()) {
-      const glyph = job.state === "done_in_code" || job.state === "proven" ? s.ok("✓") : job.state === "failed" ? s.bad("✗") : job.state === "blocked" || job.state === "agent_blocked" || job.state === "could_not_check" ? s.warn("!") : job.state === "checking" ? s.accent(spinner) : s.dim("·")
-      const words = job.state === "left_for_you" && job.note ? sanitize(job.note, 400) : job.state === "blocked" && job.note ? `blocked: ${sanitize(job.note, 100)}` : job.state === "could_not_check" && job.note ? `could not be checked: ${sanitize(job.note, 100)}` : labels[job.state]
-      lines.push(...wrapRows(`  ${glyph} ${index + 1}/${shownJobs.length} ${sanitize(job.title, 100)} · ${words}`, width, 4, 2))
+      const waitingOnBanner = job.state === "done_in_code" && job.note === CAPTURE_WAITING
+      const glyph = waitingOnBanner ? s.dim("·") : job.state === "done_in_code" || job.state === "proven" ? s.ok("✓") : job.state === "failed" ? s.bad("✗") : job.state === "blocked" || job.state === "agent_blocked" || job.state === "could_not_check" ? s.warn("!") : job.state === "checking" ? s.accent(spinner) : s.dim("·")
+      const words = waitingOnBanner ? CAPTURE_WAITING : job.state === "left_for_you" && job.note ? sanitize(job.note, 400) : job.state === "blocked" && job.note ? `blocked: ${sanitize(job.note, 100)}` : job.state === "could_not_check" && job.note ? `could not be checked: ${sanitize(job.note, 100)}` : labels[job.state]
+      lines.push(...wrapRows(`  ${glyph} ${index + 1}/${shownJobs.length} ${sanitize(job.title, 100)} · ${words}`, width, 4, waitingOnBanner ? 6 : 2))
     }
     return lines
   }
