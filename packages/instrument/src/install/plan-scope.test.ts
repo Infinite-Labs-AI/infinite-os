@@ -39,6 +39,12 @@ it.each([[true, false, true, true], [false, false, true, true], [true, true, tru
   expect(capture.state).toBe(canWire ? "pending" : "left_for_you")
   expect(capture.allow.files).not.toContain(pixel)
   expect(plan.lines.some(line => line.id === "agent_budget")).toBe(false)
+  // Legacy answer files may approve every old line, including one now left to the owner.
+  const captureLine = plan.lines.find(line => line.kind === "capture_beside_adopted_pixel")!
+  const answers = resolvePlanAnswers(plan, { approved: plan.lines.map(line => line.id), declined: [], edits: { [captureLine.id]: "yes" } }, { consentFlag: "not_required" })
+  expect(answers.approvals.approved.includes(captureLine.id)).toBe(canWire)
+  expect(answers.lines.find(line => line.id === captureLine.id)?.approved).toBe(canWire ? true : null)
+  expect(answers.approvals.edits).not.toHaveProperty(captureLine.id)
   if (canWire) {
     expect(capture.allow.files).toEqual(needsEntryEdit ? [entry] : [])
     expect(capture.checks.map(check => `${check.tier}:${check.id}`)).toEqual(["S:click_id_capture", "T0:fbc_capture", "PV:meta_seen_leaving"])
@@ -55,4 +61,23 @@ it.each([[true, false, true, true], [false, false, true, true], [true, true, tru
 it("shows the inferred Meta goal without asking for another approval", () => {
   const plan = buildPlanModel({ ...base, candidates: [{ id: "conversions_to_tools:purchase", jobId: "conversions_to_tools", n: 10, title: "Purchase", owner: "agent", state: "pending", allow: { files: ["src/buy.ts"], create: [] }, checks: [], trigger: { finding: "Purchase", evidence: [{ file: "src/buy.ts", line: 1 }] } }], scan: { framework: "next-app-router", managedProviders: [], adopted: [], improve: [], serverLane: null, npm: null, sensitivePaths: [] } })
   expect(plan.lines.find(line => line.kind === "meta_goal")?.requires).toBe("info")
+})
+
+
+it("drops stale and malicious approvals for owner-only and informational lines", () => {
+  const plan = buildPlanModel({ ...base, scan: { framework: "next-app-router", managedProviders: [], adopted: [{ provider: "meta", via: "snippet", file: "src/pixel.ts", line: 1, key: "123456789" }], improve: [], serverLane: null, npm: null, sensitivePaths: [] } })
+  const informational = plan.lines.filter(line => line.kind === "meta_goal" || line.kind === "checkin" || line.requires === "user_action")
+  expect(informational.length).toBeGreaterThan(2)
+  const staleIds = [...informational.map(line => line.id), "unknown:old_action"]
+  const answer = resolvePlanAnswers(plan, { approved: staleIds, declined: ["install_provider:infinite"], edits: Object.fromEntries(staleIds.map(id => [id, "yes"])) }, { consentFlag: "not_required" })
+  for (const id of staleIds) {
+    expect(answer.approvals.approved).not.toContain(id)
+    expect(answer.approvals.edits).not.toHaveProperty(id)
+  }
+  // One Continue still includes repository work despite stale per-line declines.
+  expect(answer.approvals.approved).toContain("install_provider:infinite")
+  expect(answer.approvals.declined).not.toContain("install_provider:infinite")
+  expect(answer.approvals.approved).not.toContain("account_settings:ga4")
+  const explicit = resolvePlanAnswers(plan, { approved: ["account_settings:ga4"], declined: [], edits: {} }, { consentFlag: "not_required" })
+  expect(explicit.approvals.approved).toContain("account_settings:ga4")
 })
