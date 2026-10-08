@@ -23,6 +23,9 @@ import {
   piiFindings,
   promiseFindings,
   sendsIn,
+  signalFindings,
+  signalReads,
+  signalSends,
   valueFindings
 } from "./commerce-static.js"
 import { jobStaticCheckFunctions, type JobStaticCheckId, type JobStaticRunContext } from "./job-static.js"
@@ -470,5 +473,39 @@ describe("P1-A: one click, one send; a full page load waits", () => {
     expect(leadFindings({ files: files({ "pages/api/join.ts": route("{ email, trackingAllowed: true }") }) }).map((finding) => finding.state)).toEqual(["problem"])
     expect(leadFindings({ files: files({ "pages/api/join.ts": route("{ email, trackingAllowed: true, fallbackId: row.id }") }) })).toEqual([])
     expect(leadFindings({ files: files({ "pages/api/join.ts": route("options") }) }).map((finding) => finding.state)).toEqual(["undetermined"])
+  })
+})
+
+describe("Finding 1: the page's tracking signal reaches the route's read", () => {
+  const inventory: EventInventory = {
+    rows: [{ event: "lead", tools: { meta: { state: "will_add", lane: "server" } }, sites: [{ file: "pages/api/join.ts", line: 3, via: "form-api" }, { file: "pages/join.tsx", line: 5, via: "helper:generateLead" }] }],
+    pageRequests: [{ route: "pages/api/join.ts", file: "pages/join.tsx", line: 5, how: "json" }],
+    trackingSignal: { kind: "site_getter", expression: "trackingAllowed()", name: "trackingAllowed" }
+  }
+  const route = (read: string) => `import { reportInfiniteLead } from "../../lib/infinite-outcome"\nexport default async function handler(req, res) {\n  await reportInfiniteLead(req, { email: req.body.email, trackingAllowed: ${read}, fallbackId: "x" })\n}\n`
+  const page = (body: string) => `import { trackingAllowed } from "../src/consent"\nexport default function Join() {\n  const submit = () =>\n    fetch("/api/join", {\n      body: JSON.stringify(${body}) })\n  return null\n}\n`
+  const check = (read: string, body: string) => signalFindings({ files: files({ "pages/api/join.ts": route(read), "pages/join.tsx": page(body) }), inventory })
+
+  it("passes when the page sends adMatch from the site's reader in the JSON body and the route reads req.body.adMatch", () => {
+    expect(check("req.body?.adMatch === true", "{ email, adMatch: trackingAllowed() }")).toEqual([])
+  })
+
+  it("a page that sends nothing, a read from the URL, another key, or a value not built from the reader is a problem", () => {
+    expect(check("req.body?.adMatch === true", "{ email }").map((finding) => finding.message)).toEqual([expect.stringMatching(/^pages\/join\.tsx:5 sends its request to pages\/api\/join\.ts with no tracking signal, so the lead reaches Meta with no match data\. Add adMatch: <the signal> in its JSON body/)])
+    expect(check('req.query.ad_match === "1"', "{ email, adMatch: trackingAllowed() }").map((finding) => finding.message)).toEqual([expect.stringMatching(/sends the tracking signal as adMatch in the request body, but pages\/api\/join\.ts:3 reads ad_match from the URL/)])
+    expect(check("req.body?.ad_match === true", "{ email, adMatch: trackingAllowed() }")).toHaveLength(1)
+    expect(check("req.body?.adMatch === true", "{ email, adMatch: true }").map((finding) => finding.message)).toEqual([expect.stringMatching(/sends adMatch, but not from the site's tracking signal \(trackingAllowed\(\)\)/)])
+    // Meta not in use: nothing to carry.
+    expect(signalFindings({ files: files({ "pages/api/join.ts": route("false"), "pages/join.tsx": page("{ email }") }), inventory, metaInUse: false })).toEqual([])
+  })
+
+  it("reads sends and reads by place: a posted form's field and a JSON key are the body, a URL parameter is the URL", () => {
+    expect(signalSends('<form method="post" action="/api/x"><input type="hidden" name="ad_match" value="1" /></form>').map((use) => [use.key, use.place])).toEqual([["ad_match", "body"]])
+    expect(signalSends('<form action="/api/x"><input name="ad_match" /></form>').map((use) => use.place)).toEqual(["query"])
+    expect(signalSends('fetch(`/api/x?ad_match=1`)').map((use) => use.place)).toEqual(["query"])
+    expect(signalSends("const ok = body.adMatch").map((use) => use.place)).toEqual([])
+    expect(signalReads('const a = new URL(request.url).searchParams.get("ad_match") === "1"').map((use) => use.place)).toEqual(["query"])
+    expect(signalReads('const a = form.get("ad_match") === "1"').map((use) => use.place)).toEqual(["body"])
+    expect(signalReads("const { adMatch } = req.body").map((use) => [use.key, use.place])).toEqual([["adMatch", "body"]])
   })
 })

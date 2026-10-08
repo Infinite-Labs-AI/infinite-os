@@ -161,22 +161,42 @@ export function existingStripeWebhookAddition(input: { importSpecifier: string; 
   ].join("\n")
 }
 
-/** How a route reads the page's "visitor allowed tracking" signal, per router. Never inferred from cookies. */
-export function trackingSignalExpression(router: RecipeRouter, source: "query" | "body"): string {
+/**
+ * Where the page sends its "visitor allowed tracking" signal, which is where the route reads it (never from cookies):
+ *   form  — a hidden `ad_match` field in a form that posts: the parsed request body;
+ *   json  — `adMatch` in a JSON body;
+ *   query — `ad_match=1` in the URL (a link, a GET form, a fetch with no body).
+ */
+export type SignalSource = "form" | "json" | "query"
+
+/**
+ * How a route reads the page's signal, per router. A Next pages-router API route parses a posted form's fields
+ * (urlencoded) and a JSON body into `req.body` with its default body parser; Express needs `express.urlencoded()` /
+ * `express.json()` for the same; a web route reads its own `await request.formData()` (`form`) or parsed JSON (`body`).
+ */
+export function trackingSignalExpression(router: RecipeRouter, source: SignalSource): string {
   if (router === "web") {
-    return source === "query"
-      ? 'new URL(request.url).searchParams.get("ad_match") === "1"'
-      : "body.adMatch === true"
+    if (source === "query") return 'new URL(request.url).searchParams.get("ad_match") === "1"'
+    if (source === "form") return 'form.get("ad_match") === "1"'
+    return "body.adMatch === true"
   }
-  return source === "query" ? 'req.query.ad_match === "1"' : "req.body?.adMatch === true"
+  if (source === "query") return 'req.query.ad_match === "1"'
+  if (source === "form") return 'req.body?.ad_match === "1"'
+  return "req.body?.adMatch === true"
+}
+
+/** The lead's read: as above, except a JSON body is the route's own parsed `body` (a free variable of the lead edit). */
+export function leadSignalExpression(router: RecipeRouter, source: SignalSource): string {
+  return source === "json" ? "body.adMatch === true" : trackingSignalExpression(router, source)
 }
 
 /**
  * The checkout edit, around the route's existing `stripe.checkout.sessions.create(params)`.
  * Free variables (the route's own): `req` / `request`, `stripe`, `params` (its session parameters),
- * `contentIds` (the cart's product or price ids) and `numItems` (the item count).
+ * `contentIds` (the cart's product or price ids) and `numItems` (the item count); in a web route, also `form` (its
+ * `await request.formData()`) for a form post, or `body` (its parsed JSON) for a JSON fetch.
  */
-export function stripeCheckoutEdit(input: RecipeInput & { cartPath?: string; signal?: "query" | "body" }): string {
+export function stripeCheckoutEdit(input: RecipeInput & { cartPath?: string; signal?: SignalSource }): string {
   const request = input.router === "web" ? "request" : "req"
   return [
     `import { buyerContext, contextMetadata, reportStripeCheckoutStarted } from ${JSON.stringify(input.importSpecifier)}`,
@@ -197,10 +217,10 @@ export function stripeCheckoutEdit(input: RecipeInput & { cartPath?: string; sig
 
 /**
  * The lead / sign-up edit, after the sign-up is stored. Free variables (the route's own): `req` /
- * `request`, `email` (the submitted address), `body` (the parsed request body, for the page's signal) and
- * `signupId` (the stored row's id, used only when LEAD_ID_SECRET is not set).
+ * `request`, `email` (the submitted address), `body` (the parsed JSON body, for the page's signal; `form` in a web
+ * route that reads a posted form) and `signupId` (the stored row's id, used only when LEAD_ID_SECRET is not set).
  */
-export function leadRouteEdit(input: RecipeInput & { type?: string; fallbackPath?: string }): string {
+export function leadRouteEdit(input: RecipeInput & { type?: string; fallbackPath?: string; signal?: SignalSource }): string {
   const request = input.router === "web" ? "request" : "req"
   return [
     `import { reportInfiniteLead } from ${JSON.stringify(input.importSpecifier)}`,
@@ -209,7 +229,7 @@ export function leadRouteEdit(input: RecipeInput & { type?: string; fallbackPath
     `await reportInfiniteLead(${request}, {`,
     `  type: ${JSON.stringify(input.type ?? "lead")},`,
     "  email, // the submitted address: hashed in the helper, never sent, stored or logged",
-    "  trackingAllowed: body.adMatch === true, // the page's signal that the visitor allowed tracking",
+    `  trackingAllowed: ${leadSignalExpression(input.router, input.signal ?? "json")}, // the page's signal that the visitor allowed tracking`,
     `  fallbackPath: ${JSON.stringify(input.fallbackPath ?? "/")}, // used when the request carries no same-site Referer`,
     "  fallbackId: signupId // the stored row's id; used only when LEAD_ID_SECRET is not set",
     "})",
@@ -222,7 +242,7 @@ export function leadRouteEdit(input: RecipeInput & { type?: string; fallbackPath
  * can fire the matching browser event (infiniteMetaMirror). Free variables: `req` / `request`, `body`,
  * `type`, `stableId`, `email`.
  */
-export function mirrorRouteEdit(input: RecipeInput & { path?: string }): string {
+export function mirrorRouteEdit(input: RecipeInput & { path?: string; signal?: SignalSource }): string {
   const request = input.router === "web" ? "request" : "req"
   return [
     `import { adMatchFromRequest, infiniteLeadId, reportInfiniteOutcomeForMirror } from ${JSON.stringify(input.importSpecifier)}`,
@@ -233,7 +253,7 @@ export function mirrorRouteEdit(input: RecipeInput & { path?: string }): string 
     "  eventId: personId ?? stableId,",
     `  path: ${JSON.stringify(input.path ?? "/")},`,
     `  visitKeyInputs: ${request},`,
-    `  adMatch: await adMatchFromRequest(${request}, { trackingAllowed: body.adMatch === true, person: { email, externalId: personId } })`,
+    `  adMatch: await adMatchFromRequest(${request}, { trackingAllowed: ${leadSignalExpression(input.router, input.signal ?? "json")}, person: { email, externalId: personId } })`,
     "})",
     "// Hand the page only what Infinite returned; null means no browser event fires.",
     "const mirror = { metaEventId: report.metaEventId, metaEventName: report.metaEventName }",

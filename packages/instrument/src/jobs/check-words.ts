@@ -42,6 +42,7 @@ export const CHECK_LABELS: Readonly<Record<string, string>> = {
   event_id_stable: "Conversion IDs stay consistent",
   no_pii_in_outcome: "Conversions exclude personal details",
   outcome_ad_match: "Server conversions carry Meta match data",
+  tracking_signal_carried: "Your pages tell the server when a visitor allowed tracking",
   outcome_value_currency: "Purchases carry their value and currency",
   commerce_promises_met: "Every promised event is in the code",
   no_double_count: "No event is counted twice",

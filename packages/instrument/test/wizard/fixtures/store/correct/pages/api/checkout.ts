@@ -64,7 +64,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const skuList = lines.flatMap((l) => Array<string>(l.qty).fill(l.slug)).join(",");
   const origin = originOf(req);
   // The cart form adds the signal only when the visitor allowed tracking; never inferred from cookies.
-  const trackingAllowed = (req.body as { adMatch?: string } | undefined)?.adMatch === "1";
+  const trackingAllowed = req.body?.ad_match === "1";
   const context = await buyerContext(req, { trackingAllowed });
 
   try {

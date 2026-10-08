@@ -174,6 +174,8 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
       // Review r3: Meta can match the conversion (adMatch), and a purchase carries its value and currency. Each passes
       // when nothing applies, so they may only fail the job.
       c("S", "outcome_ad_match"),
+      // Finding 1: the page's tracking signal reaches the route's read (same key, same place).
+      c("S", "tracking_signal_carried"),
       c("S", "outcome_value_currency"),
       c("B", "build"),
       c("P", "first_real_outcome")

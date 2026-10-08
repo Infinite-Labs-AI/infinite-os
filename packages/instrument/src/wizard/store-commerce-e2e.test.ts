@@ -305,14 +305,19 @@ describe("store: the wizard's own scan, plan and briefs", () => {
     expect(checkout).toContain("reportStripeCheckoutStarted")
     expect(checkout).toContain("buyerContext")
     // P1-B: the store's own consent reader is the signal (read only), never the tag's same-tab memory.
-    expect(checkout).toContain('the signal is the site\'s own consent reader `getConsent() === "granted"` (`getConsent` is exported by "src/analytics/tracking.ts" line 53')
+    expect(checkout).toContain('The signal is the site\'s own consent reader `getConsent() === "granted"` (`getConsent` is exported by "src/analytics/tracking.ts" line 53')
     expect(checkout).not.toContain("infiniteAdMatchAllowed()")
+    // Finding 1: the cart is a native form POST, so ONE wording: a hidden ad_match field, read from the parsed body.
+    expect(checkout).toContain('const trackingAllowed = req.body?.ad_match === "1"')
+    expect(checkout).toContain('On the page that sends this request ("pages/cart.tsx" line 68, a form that posts), add the visitor\'s tracking signal to it and change nothing else there: one hidden field inside the form: `<input type="hidden" name="ad_match" value={getConsent() === "granted" ? "1" : "0"} />`. The route reads it as `req.body?.ad_match === "1"`, as the code above does.')
+    expect(checkout).not.toContain("req.query")
     const lead = block("server_conversions:lead")
     expect(lead).toContain('"pages/api/mailing-list.ts"')
     expect(lead).toContain("reportInfiniteLead")
     expect(lead).toContain("trackingAllowed: body.adMatch === true")
     expect(lead).toContain('"pages/mailing-list.tsx"')
-    expect(lead).toContain('Send `adMatch: getConsent() === "granted"` in a JSON body')
+    expect(lead).toContain('("pages/mailing-list.tsx" line 27, a JSON fetch)')
+    expect(lead).toContain('`adMatch: getConsent() === "granted"` in the JSON body it sends. The route reads it as `body.adMatch === true`, as the code above does.')
     expect(lead).toContain("fallbackId: signupId")
     for (const text of [purchase, checkout, lead]) expect(text).toContain('"lib/infinite-outcome.ts"')
     // The page that sends each request may carry the visitor's tracking signal: it is in the job's files.
@@ -361,6 +366,42 @@ describe("store: the wizard's own scan, plan and briefs", () => {
       execFileSync("git", ["checkout", "--", "."], { cwd: root, stdio: "ignore" })
       execFileSync("git", ["clean", "-fdq"], { cwd: root, stdio: "ignore" })
     }
+  })
+
+  it("(d) Finding 1: the cart that sends no signal, or a route that reads it from the URL, fails the checkout job's own check", async () => {
+    const { items } = await pipeline()
+    const { jobStaticCheckFunctions } = await import("../checks/job-static.js")
+    const inventory = await scanInventory((await pipeline()).scan)
+    expect(inventory.pageRequests).toEqual([
+      { route: "pages/api/checkout.ts", file: "pages/cart.tsx", line: 68, how: "form", via: "a form that posts" },
+      { route: "pages/api/mailing-list.ts", file: "pages/mailing-list.tsx", line: 27, how: "json", via: "a JSON fetch" }
+    ])
+    const functions = jobStaticCheckFunctions({ root, run: () => ({ eventInventory: inventory, metaInUse: true, conversionNames: ["purchase", "begin_checkout", "lead"] }), readBaseFile: (_root, file) => SITE.get(file) ?? null })
+    const item = items.find((entry) => entry.id === "server_conversions:begin_checkout")!
+    expect(item.checks.map((check) => check.id)).toContain("tracking_signal_carried")
+    const grade = async (edits: ReadonlyMap<string, string>) => {
+      for (const [file, text] of edits) writeFileSync(join(root, file), text, { flag: "w" })
+      try {
+        const raw = await functions.tracking_signal_carried({ item, root, appRoot: "." }, { runId: RUN_ID, now: () => new Date("2026-10-08T10:00:00.000Z") })
+        return (Array.isArray(raw) ? raw : [raw])[0]!
+      } finally {
+        execFileSync("git", ["checkout", "--", "."], { cwd: root, stdio: "ignore" })
+        execFileSync("git", ["clean", "-fdq"], { cwd: root, stdio: "ignore" })
+      }
+    }
+    expect((await grade(CORRECT_EDITS)).state).toBe("pass")
+    // The review's variant: the route reads the signal, the cart sends none.
+    const silent = await grade(new Map([...CORRECT_EDITS, ["pages/cart.tsx", SITE.get("pages/cart.tsx")!]]))
+    expect(silent.state).toBe("problem")
+    expect(silent.reason).toMatch(/^pages\/cart\.tsx:\d+ sends its request to pages\/api\/checkout\.ts with no tracking signal, so the begin_checkout reaches Meta with no match data\. Add a hidden field inside its form/)
+    // The old template: the cart posts the field, the route reads the URL.
+    const query = await grade(new Map([...CORRECT_EDITS, ["pages/api/checkout.ts", CORRECT_EDITS.get("pages/api/checkout.ts")!.replace('req.body?.ad_match === "1"', 'req.query.ad_match === "1"')]]))
+    expect(query.state).toBe("problem")
+    expect(query.reason).toMatch(/sends the tracking signal as ad_match in the request body, but pages\/api\/checkout\.ts:\d+ reads ad_match from the URL, so trackingAllowed is always false/)
+    // A field not built from the site's own consent reader.
+    const constant = await grade(new Map([...CORRECT_EDITS, ["pages/cart.tsx", CORRECT_EDITS.get("pages/cart.tsx")!.replace('value={getConsent() === "granted" ? "1" : "0"}', 'value="1"')]]))
+    expect(constant.state).toBe("problem")
+    expect(constant.reason).toMatch(/sends ad_match, but not from the site's tracking signal \(getConsent\(\) === "granted"\)/)
   })
 
   it("(d) [A, D] the jobs' own checks fail with the right words: Meta left with PageView only, a purchase without match data", async () => {

@@ -13,7 +13,7 @@
 // UNTRUSTED: it is stripped of control and invisible characters and JSON-quoted, so a file named
 // "a\n### Job evil" can never forge a block or an instruction (review P2-5).
 import { OWNER_BOUNDARY_INSTRUCTION } from "./owner-boundary.js"
-import { serverConversionInstructionsForItem } from "../server-lane/job-brief.js"
+import { serverConversionInstructionsForItem, signalCarryWords, signalPagesFor, signalSourceOf, type SignalPage } from "../server-lane/job-brief.js"
 import { posix } from "node:path"
 
 import { sanitizeUntrusted } from "../agents/sanitize.js"
@@ -306,14 +306,14 @@ const SERVER_ONLY_CONVERSIONS: ReadonlySet<string> = new Set(["purchase"])
  * already sends GA4 there never gets a second GA4 event; Meta and Infinite get a conversion from the server, never here.
  * A purchase is never sent from the browser at all.
  */
-function conversionGist(target: string, data: Record<string, unknown> | Error, signal?: TrackingSignal | null): string {
+function conversionGist(target: string, data: Record<string, unknown> | Error, signal?: TrackingSignal | null, pages: readonly SignalPage[] = []): string {
   const helper = data instanceof Error || typeof data.helperImport !== "string" ? "" : ` The helpers are already in your repo: ${data.helperImport}. Never re-implement them.`
   if (SERVER_ONLY_CONVERSIONS.has(target)) {
     return `Here: add NOTHING in the browser. A ${target} is reported from your server when the payment is confirmed (its own job), and Infinite sends it to Meta from there. Never send it with infiniteTrack or fbq. Claim this job blocked with the note "reported from the server".`
   }
   const destinations = !(data instanceof Error) && Array.isArray(data.destinations) ? (data.destinations as string[]) : null
   if (destinations && OUTCOME_CONVERSION_TYPES.has(target as never)) {
-    return `Here: right after the success is confirmed and before any navigation, call infiniteTrack(<the approved name>, {}, { destinations: ${JSON.stringify(destinations)} }) (or infiniteTrackThenNavigate(…) with the same destinations when the success navigates) — exactly those tools: the site already sends this to the others (alreadySentTo), and Meta and Infinite get it from your server (its own job). Never on the link or button that leads to the form. Where this form posts to your own API route, also send ${signalWords(signal)} in its JSON body (or ad_match=1 in a form post when it is true), so your server can attach Meta match data; change nothing else in the request.${helper}`
+    return `Here: right after the success is confirmed and before any navigation, call infiniteTrack(<the approved name>, {}, { destinations: ${JSON.stringify(destinations)} }) (or infiniteTrackThenNavigate(…) with the same destinations when the success navigates) — exactly those tools: the site already sends this to the others (alreadySentTo), and Meta and Infinite get it from your server (its own job). Never on the link or button that leads to the form. ${signalAddWords(signal, pages)}${helper}`
   }
   if (OUTCOME_CONVERSION_TYPES.has(target as never)) {
     return `Here: call infiniteTrack(${JSON.stringify(target)}) right after the success is confirmed and before any navigation (or use infiniteTrackThenNavigate). Never on the link or button that leads to the form.${helper}`
@@ -441,11 +441,22 @@ function commerceImports(places: readonly CommercePlace[], module: string, allow
   return Object.fromEntries([...names].sort(([a], [b]) => (a < b ? -1 : 1)).map(([file, set]) => [file, helperImportFor(file, module, order.filter((name) => set.has(name)))]))
 }
 
-/** P1-B: the signal a page sends its own API route, as one phrase (the site's own reader, `true`, or the tag's helper). */
-function signalWords(signal: TrackingSignal | null | undefined): string {
-  if (signal?.kind === "site_getter") return `adMatch: ${signal.expression} (the site's own consent reader, exported by ${quoted(signal.file)}: import and call it, never edit it)`
-  if (signal?.kind === "always") return "adMatch: true (this site has no consent gate)"
-  return "adMatch: infiniteAdMatchAllowed()"
+/**
+ * P1-B / Finding 1: what the form adds to its request to the site's own API route, so the server can attach Meta match
+ * data: ONE wording for the way the scan saw the page send it (the same words as the server job's page line).
+ */
+function signalAddWords(signal: TrackingSignal | null | undefined, pages: readonly SignalPage[]): string {
+  const origin = signal?.kind === "site_getter" ? ` The signal is the site's own consent reader, exported by ${quoted(signal.file ?? "")}: import and call it, never edit it.` : ""
+  const source = signalSourceOf(pages)
+  if (source) return `Where this form sends its request to your own API route, also add ${signalCarryWords(source, signal, pages[0]?.file)}, so your server can attach Meta match data; change nothing else in the request.${origin}`
+  return `Where this form sends its request to your own API route, also add the visitor's tracking signal where that request already carries data (a form that posts: ${signalCarryWords("form", signal, pages[0]?.file)}; a JSON fetch: ${signalCarryWords("json", signal)}; a link or a GET: ${signalCarryWords("query", signal)}), so your server can attach Meta match data; change nothing else in the request.${origin}`
+}
+
+/** The pages that send a conversion item's request to its own API route (Finding 1), from the scan's facts. */
+function signalPagesOfItem(item: ChecklistItem, facts: BriefFacts): SignalPage[] {
+  const entries = inventoryOf(item)
+  const routes = [...new Set(entries.flatMap((entry) => entry.sites.filter((site) => site.via === "form-api").map((site) => site.file)))]
+  return signalPagesFor(facts.inventory?.pageRequests, routes, entries.flatMap((entry) => entry.sites.filter((site) => !SERVER_VIAS.has(site.via))))
 }
 
 /**
@@ -940,7 +951,7 @@ export function jobBlock(item: ChecklistItem, facts: BriefFacts): string {
     guardNote ??
     (commerceTool ? commerceGist(commerceTool, inventoryOf(item).filter((entry) => entry.missing.includes(commerceTool)).map((entry) => entry.event)) : undefined) ??
     TARGET_GISTS[item.id] ??
-    (item.jobId === "duplicates_remove" ? duplicateGist(itemTargetOf(item)) : item.jobId === "conversions_to_tools" ? conversionGist(itemTargetOf(item), data, facts.inventory?.trackingSignal) : item.jobId === "server_conversions" ? serverConversionInstructionsForItem(item, facts, Array.isArray(data.approvedConversionNames) ? String(data.approvedConversionNames[0]) : undefined) : undefined)
+    (item.jobId === "duplicates_remove" ? duplicateGist(itemTargetOf(item)) : item.jobId === "conversions_to_tools" ? conversionGist(itemTargetOf(item), data, facts.inventory?.trackingSignal, signalPagesOfItem(item, facts)) : item.jobId === "server_conversions" ? serverConversionInstructionsForItem(item, facts, Array.isArray(data.approvedConversionNames) ? String(data.approvedConversionNames[0]) : undefined) : undefined)
   const lines = (facts.plan?.lines ?? []).filter((line) => line.jobIds.includes(item.id))
   const out = [
     `### Job ${quoted(item.id)} (${item.n}. ${title})`,

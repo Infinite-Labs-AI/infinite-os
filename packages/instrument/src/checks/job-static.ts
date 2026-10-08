@@ -32,7 +32,7 @@ import { runCensus } from "./census.js"
 import { analyzeCsp, cspNeeds, parseCspPolicies } from "./live/csp.js"
 import { checkResult, isolated } from "./result.js"
 import { callsOf, literalString, splitTopLevelArgs, topLevelProps, type Call } from "./source-calls.js"
-import { adMatchFindings, canonicalEvent, clickPathFindings, doubleCountFindings, leadFindings, leaveFindings, metaEventIdFindings, outcomeHas, outcomesIn, piiFindings, promiseFindings, valueFindings, type CommerceCheckInput, type CommerceFinding, type OutcomeCall } from "./commerce-static.js"
+import { adMatchFindings, signalFindings, canonicalEvent, clickPathFindings, doubleCountFindings, leadFindings, leaveFindings, metaEventIdFindings, outcomeHas, outcomesIn, piiFindings, promiseFindings, valueFindings, type CommerceCheckInput, type CommerceFinding, type OutcomeCall } from "./commerce-static.js"
 import type { EventInventory, InventoryTool as CommerceTool } from "./commerce-inventory.js"
 import { COMMERCE_EVENTS_TARGET } from "../scan/event-inventory.js"
 
@@ -69,6 +69,7 @@ export const JOB_STATIC_CHECK_IDS = [
   // no second send of an event a tool already gets (`commerce-static.ts`).
   "commerce_promises_met",
   "outcome_ad_match",
+  "tracking_signal_carried",
   "outcome_value_currency",
   "no_double_count",
   "meta_event_id_from_server",
@@ -521,6 +522,12 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
     outcome_ad_match: run("outcome_ad_match", (input, ctx) => {
       const run = context()
       return commerceResult("outcome_ad_match", ctx, adMatchFindings({ files: itemFiles(input), ...(run.metaInUse !== undefined ? { metaInUse: run.metaInUse } : {}) }), "every server conversion for Meta carries match data")
+    }),
+
+    // Finding 1: the page sends the tracking signal, built from the site's signal, where and as the route reads it.
+    tracking_signal_carried: run("tracking_signal_carried", (input, ctx) => {
+      const run = context()
+      return commerceResult("tracking_signal_carried", ctx, signalFindings({ files: itemFiles(input), inventory: run.eventInventory ?? null, ...(run.metaInUse !== undefined ? { metaInUse: run.metaInUse } : {}) }), "the page sends the tracking signal where the route reads it")
     }),
 
     // Review r3: a purchase outcome carries its value and its currency.

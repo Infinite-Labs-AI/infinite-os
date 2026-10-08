@@ -700,10 +700,13 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   const checkoutFiles = [...new Set(inventory.checkoutCreates.map((site) => site.file))]
   // The page that sends a server event's request (the cart that starts checkout, the form that signs up) carries the
   // visitor's tracking signal to the server route: the job may add it there, outside the site's consent code.
-  const signalPages = (event: FunnelEvent) => {
+  // Finding 1: the pages the scan saw send a request to the route itself come first (the cart form that posts to the
+  // checkout route), then the event's browser trigger sites.
+  const signalPages = (event: FunnelEvent, routes: readonly string[]) => {
     const entry = inventoryEntry(inventory, event)
-    if (!entry) return []
-    return [...new Set(browserSites(entry).filter((site) => {
+    const requests = (inventory.pageRequests ?? []).filter((request) => routes.includes(request.route))
+    const sites: Array<{ file: string; line: number }> = [...requests, ...(entry ? browserSites(entry) : [])]
+    return [...new Set(sites.filter((site) => {
       const source = scan.snapshot.files.get(site.file)
       return source !== undefined && frozenUnitAt(source, site.line, site.file) === null
     }).map((site) => site.file))]
@@ -722,7 +725,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
         title: "Report purchases from a new payment webhook",
         finding: `Stripe Checkout starts at ${siteList(inventory.checkoutCreates)} and the site has no payment webhook: add ${listWords(webhooks)} so your server reports each purchase when Stripe confirms the payment`,
         evidence: inventory.checkoutCreates.map((site) => ({ file: site.file, line: site.line })),
-        allow: allow([...checkoutFiles, ...signalPages("begin_checkout")], webhooks),
+        allow: allow([...checkoutFiles, ...signalPages("begin_checkout", checkoutFiles)], webhooks),
         ...entryList
       })
       continue
@@ -734,7 +737,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
       finding: `${findings.map((finding) => finding.detail).join(", ")}: report the ${type} from the server when it becomes real`,
       evidence: fileEvidence(findings),
       // A purchase webhook reads the match data the checkout route saved on the session, so both are in scope.
-      allow: allow([...filesOf(findings), ...(type === "purchase" ? [...checkoutFiles, ...signalPages("begin_checkout")] : funnel ? signalPages(funnel) : [])]),
+      allow: allow([...filesOf(findings), ...(type === "purchase" ? [...checkoutFiles, ...signalPages("begin_checkout", checkoutFiles)] : funnel ? signalPages(funnel, filesOf(findings)) : [])]),
       ...entryList
     })
   }
@@ -746,7 +749,7 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
       title: "Report checkout starts from the server",
       finding: `Checkout sessions are created at ${siteList(inventory.checkoutCreates)}: report each checkout start from the server when the session is created`,
       evidence: inventory.checkoutCreates.map((site) => ({ file: site.file, line: site.line })),
-      allow: allow([...checkoutFiles, ...signalPages("begin_checkout")]),
+      allow: allow([...checkoutFiles, ...signalPages("begin_checkout", checkoutFiles)]),
       ...(checkoutStart ? { inventory: [checkoutStart] } : {})
     })
   }

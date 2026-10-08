@@ -12,6 +12,9 @@
 //                            ViewContent / AddToCart send, no `reportInfiniteOutcome` for a server event, no GA4 /
 //                            PostHog / Infinite send for an event promised to them;
 //   outcome_without_ad_match — an outcome for an event Meta gets from the server, with no `adMatch`;
+//   tracking_signal_not_carried — Finding 1: the page that sends a server conversion's request carries no tracking
+//                            signal, one not built from the site's signal, or one the route reads from another place
+//                            or under another key (so the conversion reaches Meta with no match data);
 //   purchase_without_value — a purchase outcome without its value and currency;
 //   double_count           — the turn added a send of an event a tool already gets from the site (a new
 //                            `gtag('event', X)`, `posthog.capture(X)`, `infiniteTrack(X)` that reaches GA4/PostHog, …);
@@ -281,6 +284,7 @@ export function outcomeHas(outcome: Pick<OutcomeCall, "reporter" | "props">, key
 export const COMMERCE_RULES = [
   "promise_missing",
   "outcome_without_ad_match",
+  "tracking_signal_not_carried",
   "purchase_without_value",
   "double_count",
   "sent_twice_on_one_click",
@@ -398,6 +402,166 @@ export function adMatchFindings(input: CommerceCheckInput): CommerceFinding[] {
         event: outcome.event,
         message: `${where(file, outcome.call.line)} reports the ${outcome.event} to Infinite without match data (no adMatch), so Meta cannot tie it to an ad click.`
       })
+    }
+  }
+  return findings
+}
+
+// ---- the page's tracking signal (Finding 1) ----
+
+/** Where a request carries the signal: in its body (a posted form's field, a JSON key) or in its URL. */
+type SignalPlace = "body" | "query"
+interface SignalUse {
+  key: "ad_match" | "adMatch"
+  place: SignalPlace | "unknown"
+  index: number
+  line: number
+}
+
+/** The trigger sites of a server route (never where a page sends from). */
+const SERVER_ROUTE_VIAS: ReadonlySet<string> = new Set(["stripe.checkout.sessions.create", "form-api", "payment-webhook", "reportInfiniteOutcome"])
+/** The conversions whose route reads the page's signal (a purchase reads what the checkout saved on the session). */
+const SIGNAL_EVENTS: ReadonlySet<InventoryEvent> = new Set<InventoryEvent>(["begin_checkout", "lead", "sign_up", "start_trial"])
+
+/** The innermost `<form …>` still open before `index`: its method, lower case (HTML's default is GET), or null. */
+function formMethodBefore(text: string, index: number): string | null {
+  const opens = [...text.slice(0, index).matchAll(/<form\b/g)]
+  for (let at = opens.length - 1; at >= 0; at -= 1) {
+    const start = opens[at]!.index ?? 0
+    if (/<\/form\s*>/.test(text.slice(start, index))) continue
+    const tag = text.slice(start, Math.min(index, start + 600))
+    return /\bmethod\s*=\s*\{?\s*(['"`])(\w+)\1/i.exec(tag)?.[2]?.toLowerCase() ?? "get"
+  }
+  return null
+}
+
+/** What a page SENDS as the signal: a form field, a JSON key, a URL parameter (`name="ad_match"`, `adMatch: …`, `?ad_match=1`). */
+export function signalSends(text: string): SignalUse[] {
+  const strings = maskCommentsAndStrings(text, false)
+  const code = maskCommentsAndStrings(text, true)
+  const out: SignalUse[] = []
+  for (const match of strings.matchAll(/\b(ad_match|adMatch)\b/g)) {
+    const index = match.index ?? 0
+    const key = match[1] as SignalUse["key"]
+    const inString = code.slice(index, index + key.length) !== key
+    const before = strings.slice(Math.max(0, index - 40), index)
+    const after = strings.slice(index + key.length, index + key.length + 12)
+    let place: SignalUse["place"] | null = null
+    if (inString) {
+      if (/\bname\s*=\s*\{?\s*["'`]$/.test(before)) {
+        const method = formMethodBefore(strings, index)
+        place = method === null ? "unknown" : method === "post" ? "body" : "query"
+      } else if (/^\s*=/.test(after)) place = "query"
+      else if (/\.\s*(?:append|set)\s*\(\s*["'`]$/.test(before)) place = "body"
+      else if (/^["'`]\s*:/.test(after)) place = "body"
+    } else {
+      // A read (`x.adMatch`) is not a send; an object key (`adMatch: …`) or a shorthand property (`{ adMatch }`) is.
+      if (/(?:\.|\?\.)\s*$/.test(before)) continue
+      if (/^\s*:/.test(after) && !/\?\s*$/.test(before)) place = "body"
+      else if (/[{,]\s*$/.test(before) && /^\s*[,}]/.test(after)) place = "body"
+    }
+    if (place !== null) out.push({ key, place, index, line: lineNumberAt(text, index) })
+  }
+  return out
+}
+
+/** Where a route READS the signal: `req.body?.ad_match`, `req.query.ad_match`, `searchParams.get("ad_match")`, `form.get(…)`. */
+export function signalReads(text: string): SignalUse[] {
+  const strings = maskCommentsAndStrings(text, false)
+  const out: SignalUse[] = []
+  const placeOf = (chain: string): SignalUse["place"] => {
+    const query = Math.max(chain.lastIndexOf("query"), chain.lastIndexOf("searchParams"))
+    const body = Math.max(chain.lastIndexOf("body"), chain.lastIndexOf("form"), chain.lastIndexOf("Form"))
+    return query < 0 && body < 0 ? "unknown" : query > body ? "query" : "body"
+  }
+  const lineStart = (index: number) => strings.lastIndexOf("\n", index) + 1
+  const patterns: RegExp[] = [/(?:\.|\?\.)\s*(ad_match|adMatch)\b/g, /\[\s*["'`](ad_match|adMatch)["'`]\s*\]/g, /\.\s*get\s*\(\s*["'`](ad_match|adMatch)["'`]\s*\)/g]
+  for (const pattern of patterns) {
+    for (const match of strings.matchAll(pattern)) {
+      const index = match.index ?? 0
+      out.push({ key: match[1] as SignalUse["key"], place: placeOf(strings.slice(lineStart(index), index)), index, line: lineNumberAt(text, index) })
+    }
+  }
+  // Destructured: `const { ad_match } = req.query`.
+  for (const match of strings.matchAll(/\{([^{}]*)\}\s*=\s*([^;\n]+)/g)) {
+    const key = /\b(ad_match|adMatch)\b/.exec(match[1]!)?.[1] as SignalUse["key"] | undefined
+    if (!key) continue
+    const index = match.index ?? 0
+    out.push({ key, place: placeOf(match[2]!), index, line: lineNumberAt(text, index) })
+  }
+  return out
+}
+
+const PLACE_WORDS: Readonly<Record<SignalPlace, string>> = { body: "the request body", query: "the URL" }
+const SIGNAL_CARRY: Readonly<Record<"form" | "json" | "query" | "unknown", string>> = {
+  form: 'a hidden field inside its form (<input type="hidden" name="ad_match" value={<the signal> ? "1" : "0"} />), read in the route as req.body.ad_match === "1"',
+  json: "adMatch: <the signal> in its JSON body, read in the route as req.body.adMatch === true",
+  query: 'ad_match=1 in its URL only when the signal is true, read in the route as req.query.ad_match === "1"',
+  unknown: "the signal where the request already carries data (a posted form's hidden ad_match field, adMatch in a JSON body, or ad_match=1 in the URL), read in the route from that same place"
+}
+
+/**
+ * Finding 1: the page that sends a server conversion's request carries the visitor's tracking signal, BUILT FROM the
+ * site's signal (its own consent reader, the tag's helper, or `true` with no gate), under the key and in the place the
+ * route reads it. A page that sends nothing, a signal the route reads from elsewhere (`req.query` for a posted form) or
+ * under another key, leaves `trackingAllowed` false: InitiateCheckout and Lead then reach Meta with no match data.
+ * Read only once the route reads a signal or reports the conversion (the job did its work there).
+ */
+export function signalFindings(input: CommerceCheckInput): CommerceFinding[] {
+  const inventory = input.inventory
+  if (!inventory || input.metaInUse === false) return []
+  const signal = inventory.trackingSignal
+  const reader = signal?.kind === "site_getter" ? signal.name : signal?.kind === "tag_helper" ? "infiniteAdMatchAllowed" : null
+  const findings: CommerceFinding[] = []
+  const seen = new Set<string>()
+  for (const row of inventory.rows) {
+    if (!SIGNAL_EVENTS.has(row.event)) continue
+    const routes = [...new Set((row.sites ?? []).filter((site) => site.via === "stripe.checkout.sessions.create" || site.via === "form-api").map((site) => site.file))]
+    for (const route of routes) {
+      const routeText = input.files.get(route)
+      if (routeText === undefined) continue
+      const reads = signalReads(routeText)
+      if (reads.length === 0 && !/\btrackingAllowed\b/.test(maskCommentsAndStrings(routeText, true)) && outcomesIn(route, routeText).length === 0) continue
+      const requests = (inventory.pageRequests ?? []).filter((request) => request.route === route)
+      const pages = requests.length > 0
+        ? requests.map((request) => ({ file: request.file, line: request.line, how: request.how }))
+        : (row.sites ?? []).filter((site) => !SERVER_ROUTE_VIAS.has(site.via ?? "")).map((site) => ({ file: site.file, line: site.line, how: "unknown" as const }))
+      for (const page of pages) {
+        const key = `${route}\u0000${page.file}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        const pageText = input.files.get(page.file)
+        if (pageText === undefined) continue
+        const sends = signalSends(pageText)
+        const at = where(page.file, page.line)
+        if (sends.length === 0) {
+          findings.push({ rule: "tracking_signal_not_carried", state: "problem", file: page.file, line: page.line, event: row.event, message: `${at} sends its request to ${route} with no tracking signal, so the ${row.event} reaches Meta with no match data. Add ${SIGNAL_CARRY[page.how]}.` })
+          continue
+        }
+        if (reader) {
+          const built = sends.some((send) => new RegExp(`\\b${reader}\\s*\\(`).test(maskCommentsAndStrings(pageText, false).slice(Math.max(0, send.index - 200), send.index + 200)))
+          if (!built) {
+            findings.push({ rule: "tracking_signal_not_carried", state: "problem", file: page.file, line: sends[0]!.line, event: row.event, message: `${where(page.file, sends[0]!.line)} sends ${sends[0]!.key}, but not from the site's tracking signal (${signal?.kind === "site_getter" ? signal.expression : "infiniteAdMatchAllowed()"}), so match data could reach Meta for a visitor who did not allow tracking, or never reach it.` })
+            continue
+          }
+        }
+        if (reads.length === 0) {
+          findings.push({ rule: "tracking_signal_not_carried", state: "problem", file: route, line: 1, event: row.event, message: `${route} never reads the tracking signal ${at} sends (${sends[0]!.key} in ${sends[0]!.place === "query" ? "the URL" : "the request body"}), so trackingAllowed stays false and the ${row.event} reaches Meta with no match data.` })
+          continue
+        }
+        const match = sends.some((send) => reads.some((read) => read.key === send.key && (read.place === send.place || read.place === "unknown" || send.place === "unknown")))
+        if (match) continue
+        const send = sends[0]!
+        const read = reads[0]!
+        findings.push({
+          rule: "tracking_signal_not_carried",
+          state: "problem",
+          file: route,
+          line: read.line,
+          event: row.event,
+          message: `${where(page.file, send.line)} sends the tracking signal as ${send.key} in ${send.place === "unknown" ? "its request" : PLACE_WORDS[send.place]}, but ${where(route, read.line)} reads ${read.key} from ${read.place === "unknown" ? "somewhere else" : PLACE_WORDS[read.place]}, so trackingAllowed is always false and the ${row.event} reaches Meta with no match data. Read the same key from the same place the page sends it.`
+        })
+      }
     }
   }
   return findings
@@ -970,6 +1134,7 @@ export function commerceFindings(input: CommerceCheckInput): CommerceFinding[] {
       { rule: "promise_missing" as const, state: "undetermined" as const, message: "The plan's event list is not known, so what it promised each tool could not be compared with the code." }
     ]),
     ...adMatchFindings(input),
+    ...signalFindings(input),
     ...valueFindings(input),
     ...(doubleCountFindings(input) ?? [
       { rule: "double_count" as const, state: "undetermined" as const, message: "The code before this run could not be read, so new sends could not be told apart from the site's own." }

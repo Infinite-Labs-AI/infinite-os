@@ -47,8 +47,43 @@ export interface InventoryRow {
   sites?: InventorySite[]
 }
 
+/** Finding 1: a page that sends a server route's request, and how (the scan's `pageRequests`). */
+export interface InventoryPageRequest {
+  route: string
+  file: string
+  line: number
+  how: "form" | "json" | "query" | "unknown"
+  via?: string
+}
+
+/** P1-B: what the page sends as "the visitor allowed tracking" (the scan's `trackingSignal`). */
+export type InventorySignal = { kind: "site_getter"; expression: string; name: string; file?: string; line?: number } | { kind: "always" } | { kind: "tag_helper" }
+
 export interface EventInventory {
   rows: InventoryRow[]
+  pageRequests?: InventoryPageRequest[]
+  trackingSignal?: InventorySignal
+}
+
+/** The scan's page requests and tracking signal, read loosely (absent or malformed = not known). */
+function requestFacts(value: Record<string, unknown>): Pick<EventInventory, "pageRequests" | "trackingSignal"> {
+  const out: Pick<EventInventory, "pageRequests" | "trackingSignal"> = {}
+  if (Array.isArray(value.pageRequests)) {
+    out.pageRequests = value.pageRequests.flatMap((raw): InventoryPageRequest[] => {
+      if (!raw || typeof raw !== "object") return []
+      const entry = raw as Record<string, unknown>
+      if (typeof entry.route !== "string" || typeof entry.file !== "string") return []
+      const how = entry.how === "form" || entry.how === "json" || entry.how === "query" ? entry.how : "unknown"
+      return [{ route: entry.route, file: entry.file, line: Number(entry.line) || 1, how, ...(typeof entry.via === "string" ? { via: entry.via } : {}) }]
+    })
+  }
+  const signal = value.trackingSignal as Record<string, unknown> | undefined
+  if (signal && typeof signal === "object") {
+    if (signal.kind === "site_getter" && typeof signal.expression === "string" && typeof signal.name === "string") {
+      out.trackingSignal = { kind: "site_getter", expression: signal.expression, name: signal.name, ...(typeof signal.file === "string" ? { file: signal.file } : {}), ...(typeof signal.line === "number" ? { line: signal.line } : {}) }
+    } else if (signal.kind === "always" || signal.kind === "tag_helper") out.trackingSignal = { kind: signal.kind }
+  }
+  return out
 }
 
 export interface InventoryPromise {
@@ -116,7 +151,7 @@ function fromScanShape(events: unknown[]): EventInventory {
  * with a known state. Both this file's shape (`rows`) and the scan's (`events`) are read.
  */
 export function readEventInventory(value: unknown): EventInventory | null {
-  if (value && typeof value === "object" && Array.isArray((value as { events?: unknown }).events)) return fromScanShape((value as { events: unknown[] }).events)
+  if (value && typeof value === "object" && Array.isArray((value as { events?: unknown }).events)) return { ...fromScanShape((value as { events: unknown[] }).events), ...requestFacts(value as Record<string, unknown>) }
   if (!value || typeof value !== "object" || !Array.isArray((value as { rows?: unknown }).rows)) return null
   const rows: InventoryRow[] = []
   for (const raw of (value as { rows: unknown[] }).rows) {
@@ -134,7 +169,7 @@ export function readEventInventory(value: unknown): EventInventory | null {
     const sites = Array.isArray(record.sites) ? (record.sites as InventoryRow["sites"]) : undefined
     rows.push({ event: record.event, tools, ...(sites ? { sites } : {}) })
   }
-  return { rows }
+  return { rows, ...requestFacts(value as Record<string, unknown>) }
 }
 
 /** What the plan promised: each event × tool cell this run adds, with its lane (Meta's server events default to server). */

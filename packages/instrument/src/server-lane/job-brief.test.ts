@@ -4,7 +4,6 @@ import { describe, expect, it } from "vitest"
 import { jobBlock } from "../jobs/briefs.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 
-import type { TrackingSignal } from "../scan/event-inventory.js"
 import { outcomeImportFrom, serverConversionInstructions, serverConversionInstructionsForItem } from "./job-brief.js"
 
 const PAGES = { framework: "next-pages-router", router: "pages" as const, outcomeHelper: "lib/infinite-outcome.ts", appRoot: "." }
@@ -122,29 +121,69 @@ describe("the jobs brief routes the server-conversions job here (the one edit in
 
 describe("P1-B: the page's tracking signal is true for every visitor who allowed tracking, on any route", () => {
   const entry = { event: "lead" as const, sites: [{ file: "pages/join.tsx", line: 20, via: "helper:generateLead" }, { file: "pages/api/join.ts", line: 9, via: "form-api" }], tools: {}, missing: ["meta_server" as const, "infinite" as const] }
-  const lead = (trackingSignal: TrackingSignal | null) => serverConversionInstructions({ event: "lead", entry, file: "pages/api/join.ts", line: 9 }, { ...PAGES, trackingSignal })
+
+  const JOIN_JSON = [{ route: "pages/api/join.ts", file: "pages/join.tsx", line: 31, how: "json" as const, via: "a JSON fetch" }]
 
   it("names the site's own consent reader, read only, as the signal the page sends", () => {
-    const text = lead({ kind: "site_getter", expression: 'getConsent() === "granted"', name: "getConsent", file: "src/analytics/tracking.ts", line: 53 })
-    expect(text).toContain('On the page that sends this request ("pages/join.tsx"), add the visitor\'s tracking signal to it and change nothing else there: the signal is the site\'s own consent reader `getConsent() === "granted"` (`getConsent` is exported by "src/analytics/tracking.ts" line 53; import it relative to the page).')
-    expect(text).toContain('Send `adMatch: getConsent() === "granted"` in a JSON body')
+    const text = serverConversionInstructions({ event: "lead", entry, file: "pages/api/join.ts", line: 9 }, { ...PAGES, trackingSignal: { kind: "site_getter", expression: 'getConsent() === "granted"', name: "getConsent", file: "src/analytics/tracking.ts", line: 53 }, pageRequests: JOIN_JSON })
+    expect(text).toContain('On the page that sends this request ("pages/join.tsx" line 31, a JSON fetch), add the visitor\'s tracking signal to it and change nothing else there: `adMatch: getConsent() === "granted"` in the JSON body it sends. The route reads it as `body.adMatch === true`, as the code above does.')
+    expect(text).toContain('The signal is the site\'s own consent reader `getConsent() === "granted"` (`getConsent` is exported by "src/analytics/tracking.ts" line 53; import it relative to the page).')
     expect(text).toContain("only import and call the reader, never edit it")
     expect(text).not.toContain("infiniteAdMatchAllowed")
   })
 
   it("is `true` on a site with no consent gate", () => {
-    const text = lead({ kind: "always" })
-    expect(text).toContain("this site has no consent gate, so the signal is always `true`: send `adMatch: true` in a JSON body")
+    const text = serverConversionInstructions({ event: "lead", entry, file: "pages/api/join.ts", line: 9 }, { ...PAGES, trackingSignal: { kind: "always" }, pageRequests: JOIN_JSON })
+    expect(text).toContain("`adMatch: true` in the JSON body it sends")
+    expect(text).toContain("This site has no consent gate, so the signal is always true.")
     expect(text).not.toContain("infiniteAdMatchAllowed")
-    expect(text).not.toContain("On a site with no consent gate that is always")
   })
 
   it("falls back to the tag's own answer only when a gate exists and no reader can be imported", () => {
-    for (const signal of [{ kind: "tag_helper" } as const, null]) expect(lead(signal)).toContain("`adMatch: infiniteAdMatchAllowed()` in a JSON body")
+    for (const signal of [{ kind: "tag_helper" } as const, null]) {
+      expect(serverConversionInstructions({ event: "lead", entry, file: "pages/api/join.ts", line: 9 }, { ...PAGES, trackingSignal: signal, pageRequests: JOIN_JSON })).toContain("`adMatch: infiniteAdMatchAllowed()` in the JSON body it sends")
+    }
+  })
+})
+
+describe("Finding 1: the route reads the signal from where the page is told to send it", () => {
+  const signal = { kind: "site_getter" as const, expression: 'getConsent() === "granted"', name: "getConsent", file: "src/analytics/tracking.ts", line: 53 }
+  const checkoutEntry = { event: "begin_checkout" as const, sites: [{ file: "pages/api/checkout.ts", line: 67, via: "stripe.checkout.sessions.create" }, { file: "pages/cart.tsx", line: 68, via: "helper:beginCheckout" }], tools: {}, missing: ["meta_server" as const, "infinite" as const] }
+  const checkout = (how: "form" | "json" | "query" | "unknown", router: "pages" | "app" = "pages") =>
+    serverConversionInstructions(
+      { event: "begin_checkout", entry: checkoutEntry, file: "pages/api/checkout.ts", line: 67 },
+      { ...(router === "pages" ? PAGES : { framework: "next-app-router", router: "app" as const, outcomeHelper: "lib/infinite-outcome.ts" }), checkoutCreates: [{ file: "pages/api/checkout.ts", line: 67, via: "stripe.checkout.sessions.create" }], trackingSignal: signal, pageRequests: [{ route: "pages/api/checkout.ts", file: "pages/cart.tsx", line: 68, how, via: how === "form" ? "a form that posts" : how === "json" ? "a JSON fetch" : how === "query" ? "a link" : "a request the scan could not read" }] }
+    )
+
+  it("a form that posts: a hidden ad_match field, read from the parsed body (Next parses a posted form into req.body)", () => {
+    const text = checkout("form")
+    expect(text).toContain('const trackingAllowed = req.body?.ad_match === "1"')
+    expect(text).toContain('("pages/cart.tsx" line 68, a form that posts)')
+    expect(text).toContain('one hidden field inside the form: `<input type="hidden" name="ad_match" value={getConsent() === "granted" ? "1" : "0"} />`. The route reads it as `req.body?.ad_match === "1"`, as the code above does.')
+    expect(text).not.toContain("req.query")
+    expect(text).not.toMatch(/a query parameter or a hidden form field|in a JSON body, or/)
+  })
+
+  it("a JSON fetch reads the body's adMatch; a link or a GET reads the URL", () => {
+    expect(checkout("json")).toContain("const trackingAllowed = req.body?.adMatch === true")
+    expect(checkout("json")).toContain('`adMatch: getConsent() === "granted"` in the JSON body it sends')
+    const link = checkout("query")
+    expect(link).toContain('const trackingAllowed = req.query.ad_match === "1"')
+    expect(link).toContain('`ad_match=1` in the request\'s URL only when `getConsent() === "granted"` is true')
+    expect(checkout("form", "app")).toContain('const trackingAllowed = form.get("ad_match") === "1"')
+  })
+
+  it("unknown: each way the page may send it, with the route read that matches it", () => {
+    const text = checkout("unknown")
+    expect(text).toContain("make the route's `trackingAllowed` read it from that same place (replace the read in the code above)")
+    expect(text).toContain('a form that posts: one hidden field inside the form: `<input type="hidden" name="ad_match" value={getConsent() === "granted" ? "1" : "0"} />`, read in the route as `req.body?.ad_match === "1"`')
+    expect(text).toContain('a JSON fetch: `adMatch: getConsent() === "granted"` in the JSON body it sends, read in the route as `req.body?.adMatch === true`')
+    expect(text).toContain("read in the route as `req.query.ad_match === \"1\"`")
   })
 
   it("the lead always passes a fallbackId, one per submission when the route stores no row", () => {
-    const text = lead(null)
+    const entry = { event: "lead" as const, sites: [{ file: "pages/join.tsx", line: 20, via: "helper:generateLead" }, { file: "pages/api/join.ts", line: 9, via: "form-api" }], tools: {}, missing: ["meta_server" as const, "infinite" as const] }
+    const text = serverConversionInstructions({ event: "lead", entry, file: "pages/api/join.ts", line: 9 }, { ...PAGES, trackingSignal: null })
     expect(text).toContain("fallbackId: signupId")
     expect(text).toContain("Always pass `fallbackId`: without it nothing is reported until the owner sets LEAD_ID_SECRET")
     expect(text).toContain("`randomUUID()` from `node:crypto`")

@@ -272,3 +272,33 @@ describe("P1-B: the page's 'visitor allowed tracking' signal", () => {
     expect(signal({ "components/CookieBanner.tsx": `export default function CookieBanner() {\n  window.gtag?.("consent", "update", { analytics_storage: "granted" })\n  return null\n}\n` })).toEqual({ kind: "tag_helper" })
   })
 })
+
+describe("Finding 1: how each page sends its request to the site's own checkout and sign-up routes", () => {
+  const checkout = `import Stripe from "stripe"\nexport default async function handler(req, res) {\n  const session = await new Stripe("k").checkout.sessions.create({ mode: "payment" })\n  res.redirect(303, session.url)\n}\n`
+  const requests = (pages: Record<string, string>) => inline({ "pages/api/checkout.ts": checkout, ...pages }).pageRequests
+
+  it("a form that posts, a JSON fetch, a GET fetch, a link and a GET form are told apart; a path in a constant is unknown", () => {
+    expect(requests({
+      "pages/cart.tsx": `export default function Cart() {\n  return <form method="POST" action="/api/checkout"><button>Pay</button></form>\n}\n`,
+      "pages/quick.tsx": `export default function Quick() {\n  const go = () => fetch("/api/checkout", { method: "POST", body: JSON.stringify({ sku: "a" }) })\n  return null\n}\n`,
+      "pages/peek.tsx": `export default function Peek() {\n  const go = () => fetch(\`/api/checkout?sku=\${"a"}\`)\n  return null\n}\n`,
+      "pages/link.tsx": `export default function Link() {\n  return <a href="/api/checkout?sku=a">Buy</a>\n}\n`,
+      "pages/get.tsx": `export default function Get() {\n  return <form action="/api/checkout"><button>Pay</button></form>\n}\n`,
+      "src/urls.ts": `export const CHECKOUT_URL = "/api/checkout"\n`
+    })).toEqual([
+      { route: "pages/api/checkout.ts", file: "pages/cart.tsx", line: 2, how: "form", via: "a form that posts" },
+      { route: "pages/api/checkout.ts", file: "pages/get.tsx", line: 2, how: "query", via: "a form that sends a GET" },
+      { route: "pages/api/checkout.ts", file: "pages/link.tsx", line: 2, how: "query", via: "a link" },
+      { route: "pages/api/checkout.ts", file: "pages/peek.tsx", line: 2, how: "query", via: "a GET fetch" },
+      { route: "pages/api/checkout.ts", file: "pages/quick.tsx", line: 2, how: "json", via: "a JSON fetch" },
+      { route: "pages/api/checkout.ts", file: "src/urls.ts", line: 1, how: "unknown", via: "a request the scan could not read" }
+    ])
+  })
+
+  it("NEGATIVE: another route that starts with the same path, a comment and server code are not the page's request", () => {
+    expect(requests({
+      "pages/a.tsx": `// posts to "/api/checkout"\nexport default function A() {\n  return <a href="/api/checkout-help">Help</a>\n}\n`,
+      "pages/api/other.ts": `export default function handler(req, res) {\n  res.redirect("/api/checkout")\n}\n`
+    })).toEqual([])
+  })
+})

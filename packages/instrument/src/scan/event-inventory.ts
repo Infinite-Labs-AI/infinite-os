@@ -32,6 +32,7 @@ import { detectOutcomes, isServerFile, type OutcomeFinding } from "../jobs/detec
 import type { RepoSnapshot } from "../jobs/repo-files.js"
 import { outcomesIn } from "../checks/commerce-static.js"
 import { isConsentFile, isConsentText } from "../jobs/consent-units.js"
+import { escapeRegExp } from "../text-escape.js"
 
 export type InventoryTool = "ga4" | "posthog" | "meta_browser" | "meta_server" | "infinite"
 export type FunnelEvent = "view_item" | "add_to_cart" | "begin_checkout" | "purchase" | "lead" | "sign_up" | "start_trial"
@@ -60,11 +61,34 @@ export type TrackingSignal =
   | { kind: "always" }
   | { kind: "tag_helper" }
 export interface EventInventoryEntry { event: FunnelEvent; sites: EventSite[]; tools: Partial<Record<InventoryTool, EventSite[]>>; missing: InventoryTool[] }
+
+/**
+ * How a page sends its request to one of the site's own server routes, which decides where the route reads the page's
+ * tracking signal:
+ *   form    — a form that posts: a hidden field, read from the parsed request body (`req.body.ad_match`);
+ *   json    — a fetch with a JSON body: `adMatch` in that body (`req.body.adMatch`);
+ *   query   — a link, a GET form or a fetch with no body: `ad_match=1` in the URL (`req.query.ad_match`);
+ *   unknown — the scan saw the route's path but not how the request goes.
+ */
+export type PageRequestHow = "form" | "json" | "query" | "unknown"
+export interface PageRequest {
+  /** The server route file the request reaches. */
+  route: string
+  /** The page that sends it, and where. */
+  file: string
+  line: number
+  how: PageRequestHow
+  /** In plain words: "a form that posts", "a JSON fetch", "a link", … */
+  via: string
+}
+
 export interface EventInventory {
   events: EventInventoryEntry[]
   checkoutCreates: EventSite[]
   paymentWebhook: EventSite | null
   pixelRestrictedRoutes: string[]
+  /** The pages that send a request to the checkout and sign-up routes, and how (where the route reads the signal). */
+  pageRequests?: PageRequest[]
   /** P1-A: the site's own route-change hook that turns a router navigation into a full page load, or null. */
   routeChangeFullLoad?: EventSite | null
   /** P1-B: the signal the page sends its own API routes when the visitor allowed tracking. */
@@ -632,6 +656,109 @@ function settleNavigation(navigation: Navigation | null, hook: EventSite | null,
 }
 
 // ---------------------------------------------------------------------------------------------
+// JSX / HTML elements around an offset
+// ---------------------------------------------------------------------------------------------
+
+/** The element tag whose attributes hold `index` (`<form method="POST" action=…>`): its name and its text, or null. */
+export function openTagAround(text: string, index: number): { name: string; start: number; text: string } | null {
+  let depth = 0
+  for (let at = index - 1; at >= Math.max(0, index - 4000); at -= 1) {
+    const ch = text[at]!
+    if (ch === "}") depth += 1
+    else if (ch === "{") depth = Math.max(0, depth - 1)
+    else if (depth > 0) continue
+    else if (ch === ">" && text[at - 1] !== "=") return null
+    else if (ch === "<") {
+      const name = /^<([A-Za-z][\w.]*)/.exec(text.slice(at, at + 60))?.[1]
+      if (!name) return null
+      return { name, start: at, text: text.slice(at, tagEnd(text, at) + 1) }
+    }
+  }
+  return null
+}
+
+/** The `>` that closes the tag opening at `start` (braces and `=>` skipped), or the text's end. */
+function tagEnd(text: string, start: number): number {
+  let depth = 0
+  for (let at = start + 1; at < text.length; at += 1) {
+    const ch = text[at]!
+    if (ch === "{") depth += 1
+    else if (ch === "}") depth -= 1
+    else if (ch === ">" && depth === 0 && text[at - 1] !== "=") return at
+  }
+  return text.length - 1
+}
+
+/** The innermost still-open `<name …>` element before `index` (its closing tag not yet reached), or null. */
+export function enclosingElement(text: string, index: number, name: string): { start: number; text: string } | null {
+  const opens = [...text.slice(0, index).matchAll(new RegExp(`<${name}\\b`, "g"))]
+  for (let at = opens.length - 1; at >= 0; at -= 1) {
+    const start = opens[at]!.index ?? 0
+    const end = tagEnd(text, start)
+    if (end >= index) continue // `index` is inside this tag's own attributes
+    if (text[end - 1] === "/") continue // self-closing
+    if (new RegExp(`</${name}\\s*>`).test(text.slice(end, index))) continue
+    return { start, text: text.slice(start, end + 1) }
+  }
+  return null
+}
+
+/** A form's method attribute, lower case (HTML's default is GET). */
+export function formMethodOf(tag: string): string {
+  return /\bmethod\s*=\s*\{?\s*(['"`])(\w+)\1/i.exec(tag)?.[2]?.toLowerCase() ?? "get"
+}
+
+// ---------------------------------------------------------------------------------------------
+// Finding 1: how a page sends its request to the site's own server route
+// ---------------------------------------------------------------------------------------------
+
+/** How the request that starts at the route path's quote (`at`) goes: a form post, a JSON fetch, a link, … */
+function requestHowAt(view: FileView, at: number): { how: PageRequestHow; via: string } {
+  const before = view.comments.slice(Math.max(0, at - 200), at)
+  const attribute = /\b(action|href|formAction)\s*=\s*\{?\s*$/.exec(before)
+  if (attribute) {
+    if (attribute[1] === "href") return { how: "query", via: "a link" }
+    const tag = openTagAround(view.comments, at)
+    if (tag?.name === "form") return formMethodOf(tag.text) === "post" ? { how: "form", via: "a form that posts" } : { how: "query", via: "a form that sends a GET" }
+    return { how: "unknown", via: "a form button" }
+  }
+  const call = /\b(fetch|axios(?:\s*\.\s*(get|post|put|patch|delete))?)\s*\(\s*$/.exec(before)
+  if (call) {
+    const open = at - (before.length - before.lastIndexOf("("))
+    const close = matchingClose(view.code, open)
+    const args = close < 0 ? "" : view.comments.slice(open, close)
+    if (call[1]!.startsWith("axios")) return call[2] === "get" || call[2] === undefined ? { how: "query", via: "a GET request" } : { how: "json", via: "a JSON request" }
+    if (/\bJSON\s*\.\s*stringify\s*\(/.test(args)) return { how: "json", via: "a JSON fetch" }
+    if (/\bURLSearchParams\b/.test(args)) return { how: "form", via: "a form-encoded fetch" }
+    if (!/\bbody\s*:/.test(args)) return { how: "query", via: "a GET fetch" }
+    return { how: "unknown", via: "a fetch" }
+  }
+  if (/(?:\blocation(?:\s*\.\s*href)?\s*=|\blocation\s*\.\s*(?:assign|replace)\s*\(|\brouter\s*\.\s*(?:push|replace)\s*\(|\bwindow\s*\.\s*open\s*\(|\bnavigate\s*\()\s*$/.test(before)) return { how: "query", via: "a link" }
+  return { how: "unknown", via: "a request the scan could not read" }
+}
+
+/** Finding 1: every page that names one of `routes`' URL paths, and how its request goes. */
+function pageRequestsOf(views: readonly FileView[], routes: readonly string[], appRoot: string): PageRequest[] {
+  const out: PageRequest[] = []
+  for (const route of [...new Set(routes)]) {
+    const path = routePathOf(route, appRoot)
+    if (!path || path === "/" || path.includes("[")) continue
+    const pattern = new RegExp(`(['"\`])${escapeRegExp(path)}(?=[?#'"\`]|\\$\\{)`, "g")
+    for (const view of views) {
+      if (view.server || view.generated) continue
+      for (const match of view.comments.matchAll(pattern)) {
+        const at = match.index ?? 0
+        if (!isCode(view, at, 1)) continue
+        const { how, via } = requestHowAt(view, at)
+        const line = lineAt(view, at)
+        if (!out.some((entry) => entry.route === route && entry.file === view.path && entry.line === line)) out.push({ route, file: view.path, line, how, via })
+      }
+    }
+  }
+  return out.sort((a, b) => (a.route < b.route ? -1 : a.route > b.route ? 1 : a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line))
+}
+
+// ---------------------------------------------------------------------------------------------
 // P1-B: the page's "visitor allowed tracking" signal
 // ---------------------------------------------------------------------------------------------
 
@@ -890,6 +1017,7 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
     paymentWebhook,
     pixelRestrictedRoutes: [...restricted].sort(),
     routeChangeFullLoad,
+    pageRequests: pageRequestsOf(views, [...checkoutCreates.map((site) => site.file), ...outcomes.filter((finding) => OUTCOME_EVENT[finding.kind] && finding.kind !== "payment_webhook").map((finding) => finding.file)], snapshot.appRoot),
     trackingSignal: trackingSignalOf(views),
     siteCurrency
   }

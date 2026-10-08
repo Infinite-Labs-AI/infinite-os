@@ -68,7 +68,7 @@ export default function CartPage() {
               <p className="muted fine">Shipping is free. Taxes are calculated at checkout.</p>
               <form method="POST" action="/api/checkout" onSubmit={() => beginCheckout(lines)}>
                 <input type="hidden" name="skus" value={skus} />
-                <input type="hidden" name="adMatch" value={getConsent() === "granted" ? "1" : "0"} />
+                <input type="hidden" name="ad_match" value={getConsent() === "granted" ? "1" : "0"} />
                 <button type="submit" className="btn btn-primary btn-block btn-large">
                   Checkout
                 </button>

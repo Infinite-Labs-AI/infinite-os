@@ -16,19 +16,22 @@ import { posix } from "node:path"
 
 import { sanitizeUntrusted } from "../agents/sanitize.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
-import { SERVER_SITE_VIAS, type EventInventory, type EventInventoryEntry, type EventSite, type TrackingSignal } from "../scan/event-inventory.js"
+import { SERVER_SITE_VIAS, type EventInventory, type EventInventoryEntry, type EventSite, type PageRequest, type PageRequestHow, type TrackingSignal } from "../scan/event-inventory.js"
 
 import {
   defaultStripeWebhookRoute,
   existingStripeWebhookAddition,
   leadRouteEdit,
+  leadSignalExpression,
   mirrorRouteEdit,
   STRIPE_PURCHASE_EVENTS,
   STRIPE_WEBHOOK_SECRET_ENV,
   stripeCheckoutEdit,
   stripeWebhookRouteSource,
+  trackingSignalExpression,
   type RecipeLanguage,
-  type RecipeRouter
+  type RecipeRouter,
+  type SignalSource
 } from "./recipes.js"
 
 /**
@@ -65,6 +68,8 @@ export interface ServerConversionBriefContext {
   appRoot?: string
   /** P1-B: where the page's "visitor allowed tracking" signal comes from on this site (`EventInventory.trackingSignal`). */
   trackingSignal?: TrackingSignal | null
+  /** Finding 1: the pages that send each server route's request, and how (`EventInventory.pageRequests`). */
+  pageRequests?: readonly PageRequest[] | null
 }
 
 const PURCHASE_EVENTS = new Set(["purchase", "order_completed", "checkout_completed"])
@@ -109,24 +114,75 @@ function pageSites(entry: EventInventoryEntry | null | undefined): EventSite[] {
   return (entry?.sites ?? []).filter((site) => !SERVER_SITE_VIAS.has(site.via))
 }
 
+/** A page that sends a server route's request, and how it sends it. */
+export interface SignalPage {
+  file: string
+  line: number | null
+  how: PageRequestHow
+  /** In plain words ("a form that posts"); null when the scan only knows the page fires the event. */
+  via: string | null
+}
+
 /**
- * P1-B: the page side. The request carries the visitor's tracking signal, read on the page, never from cookies on the
- * server: the site's OWN consent reader (read only) when the scan found one, `true` on a site with no consent gate at
- * all, else the tag's `infiniteAdMatchAllowed()`. The tag's helper alone is false for a visitor who lands straight on a
- * page the site keeps its pixels off (a lead ad's form page), so it is only the fallback.
+ * Finding 1: the pages that send `routes`' requests: the scan's page requests to those routes, else the event's
+ * browser trigger sites (how unknown). The one list the brief names and the static check (`commerce-static.ts`
+ * `signalFindings`) reads.
  */
-export function pageSignalLine(entry: EventInventoryEntry | null | undefined, field: "query" | "body", signal: TrackingSignal | null | undefined): string {
-  const pages = [...new Set(pageSites(entry).map((site) => site.file))]
-  const where = pages.length > 0 ? ` (${pages.slice(0, 3).map(quotedPath).join(", ")})` : ""
-  const carry = field === "query" ? "`ad_match=1` on the request (a query parameter or a hidden form field)" : "a hidden `adMatch` field"
+export function signalPagesFor(pageRequests: readonly PageRequest[] | null | undefined, routes: readonly string[], fallback: ReadonlyArray<{ file: string; line?: number | null }>): SignalPage[] {
+  const requests = (pageRequests ?? []).filter((request) => routes.includes(request.route))
+  if (requests.length > 0) return requests.map((request) => ({ file: request.file, line: request.line, how: request.how, via: request.via }))
+  const seen = new Set<string>()
+  return fallback.filter((site) => !seen.has(site.file) && seen.add(site.file)).map((site) => ({ file: site.file, line: site.line ?? null, how: "unknown" as const, via: null }))
+}
+
+/** The one way every page sends the request (a form post, a JSON fetch, a URL), or null when unknown or mixed. */
+export function signalSourceOf(pages: readonly SignalPage[]): SignalSource | null {
+  const hows = new Set(pages.map((page) => page.how))
+  const [only] = [...hows]
+  return hows.size === 1 && only !== undefined && only !== "unknown" ? only : null
+}
+
+/** The signal's value as the page computes it: the site's own reader, `true`, or the tag's helper. */
+function signalValue(signal: TrackingSignal | null | undefined): string {
+  if (signal?.kind === "site_getter") return signal.expression
+  if (signal?.kind === "always") return "true"
+  return "infiniteAdMatchAllowed()"
+}
+
+/** What the page adds to its request so the route can read the signal: ONE wording per way the page sends it. */
+export function signalCarryWords(source: SignalSource, signal: TrackingSignal | null | undefined, pageFile?: string | null): string {
+  const value = signalValue(signal)
+  const always = signal?.kind === "always"
+  if (source === "form") {
+    if (pageFile && /\.html?$/i.test(pageFile)) return always ? "one hidden field `ad_match` with the value `1` inside the form" : `one hidden field \`ad_match\` inside the form, set to \`1\` just before it submits only when \`${value}\` is true`
+    return always ? 'one hidden field inside the form: `<input type="hidden" name="ad_match" value="1" />`' : `one hidden field inside the form: \`<input type="hidden" name="ad_match" value={${value} ? "1" : "0"} />\``
+  }
+  if (source === "json") return `\`adMatch: ${value}\` in the JSON body it sends`
+  return always ? "`ad_match=1` in the request's URL" : `\`ad_match=1\` in the request's URL only when \`${value}\` is true (for example \`\${${value} ? "&ad_match=1" : ""}\`)`
+}
+
+const SOURCE_WORDS: Readonly<Record<SignalSource, string>> = { form: "a form that posts", json: "a JSON fetch", query: "a link, a GET form or a fetch with no body" }
+
+/**
+ * P1-B / Finding 1: the page side. The request carries the visitor's tracking signal, read on the page, never from
+ * cookies on the server: the site's OWN consent reader (read only) when the scan found one, `true` on a site with no
+ * consent gate at all, else the tag's `infiniteAdMatchAllowed()`. It goes where the page's request already carries
+ * data (a hidden field in a posted form, the JSON body, the URL), and the route reads it from that same place under
+ * that same key (`read`).
+ */
+export function pageSignalLine(pages: readonly SignalPage[], signal: TrackingSignal | null | undefined, read: (source: SignalSource) => string): string {
+  const where = pages.length > 0 ? ` (${pages.slice(0, 3).map((page) => `${quotedPath(page.file)}${page.line ? ` line ${Math.trunc(page.line)}` : ""}${page.via ? `, ${page.via}` : ""}`).join("; ")})` : ""
   const head = `On the page that sends this request${where}, add the visitor's tracking signal to it and change nothing else there:`
-  if (signal?.kind === "site_getter") {
-    return `${head} the signal is the site's own consent reader \`${signal.expression}\` (\`${signal.name}\` is exported by ${quotedPath(signal.file)} line ${Math.trunc(signal.line)}; import it relative to the page). Send \`adMatch: ${signal.expression}\` in a JSON body, or ${carry} only when it is true; read the route side to match. That file is the site's consent code: only import and call the reader, never edit it.`
-  }
-  if (signal?.kind === "always") {
-    return `${head} this site has no consent gate, so the signal is always \`true\`: send \`adMatch: true\` in a JSON body, or ${carry === "a hidden `adMatch` field" ? "a hidden `adMatch` field set to true" : "`ad_match=1` on the request"}; read the route side to match.`
-  }
-  return `${head} \`adMatch: infiniteAdMatchAllowed()\` in a JSON body, or ${carry} only when it is true; read the route side to match. If the site keeps its own consent state, read that instead (read only, never edit it).`
+  const origin =
+    signal?.kind === "site_getter"
+      ? ` The signal is the site's own consent reader \`${signal.expression}\` (\`${signal.name}\` is exported by ${quotedPath(signal.file)} line ${Math.trunc(signal.line)}; import it relative to the page). That file is the site's consent code: only import and call the reader, never edit it.`
+      : signal?.kind === "always"
+        ? " This site has no consent gate, so the signal is always true."
+        : " If the site keeps its own consent state, read that instead of `infiniteAdMatchAllowed()` (read only, never edit it)."
+  const source = signalSourceOf(pages)
+  if (source) return `${head} ${signalCarryWords(source, signal, pages[0]?.file)}. The route reads it as \`${read(source)}\`, as the code above does.${origin}`
+  const ways = (["form", "json", "query"] as const).map((way) => `${SOURCE_WORDS[way]}: ${signalCarryWords(way, signal, pages[0]?.file)}, read in the route as \`${read(way)}\``)
+  return `${head} send it the way this request already carries data, and make the route's \`trackingAllowed\` read it from that same place (replace the read in the code above): ${ways.join("; ")}.${origin}`
 }
 
 const COMMON_RULES = [
@@ -188,13 +244,15 @@ export function serverConversionInstructions(target: ServerConversionTarget, ctx
 
   if (CHECKOUT_EVENTS.has(target.event)) {
     const file = checkout?.file ?? null
+    const pages = signalPagesFor(ctx.pageRequests, file ? [file] : [], pageSites(entry))
+    const source = signalSourceOf(pages) ?? "query"
     return [
       `Here: report \`${name}\` (Meta InitiateCheckout through Infinite) where the route creates the Stripe Checkout Session: ${whereAt(checkout)}. In the background: the visitor is never held more than 800 ms.`,
       helperLine(helper),
       "Wrap the route's existing `stripe.checkout.sessions.create(params)` like this (keep its own parameters and metadata; `contentIds` = the cart's product or price ids, `numItems` = its item count):",
-      ...codeBlock(language, stripeCheckoutEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>" })),
+      ...codeBlock(language, stripeCheckoutEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>", signal: source })),
       "`contextMetadata` stores one metadata field per value (the cart, the visit key, and only with the page's signal the `_fbc`/`_fbp` cookies, ip and user agent); a value over Stripe's 500-character limit is left out, never cut. The purchase webhook reads them back. Report after the session exists and before the redirect.",
-      pageSignalLine(entry, "query", ctx.trackingSignal),
+      pageSignalLine(pages, ctx.trackingSignal, (way) => trackingSignalExpression(router, way)),
       ...COMMON_RULES.map((rule) => `- ${rule}`)
     ].join("\n")
   }
@@ -202,14 +260,16 @@ export function serverConversionInstructions(target: ServerConversionTarget, ctx
   if (LEAD_EVENTS.has(target.event)) {
     const file = at?.file ?? null
     const type = name
+    const pages = signalPagesFor(ctx.pageRequests, file ? [file] : [], pageSites(entry))
+    const source = signalSourceOf(pages) ?? "json"
     return [
       `Here: report \`${type}\` from the server route that stores it: ${whereAt(at)}, right after the sign-up is stored (the row committed, the address subscribed), never on the click.`,
       helperLine(helper),
-      ...codeBlock(language, leadRouteEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>", type, fallbackPath: "/" })),
+      ...codeBlock(language, leadRouteEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>", type, fallbackPath: "/", signal: source })),
       "`email` is the submitted address, `body` the parsed request body, `signupId` the stored row's id. Always pass `fallbackId`: without it nothing is reported until the owner sets LEAD_ID_SECRET. When the route stores no row, pass a new id per submission instead (`randomUUID()` from `node:crypto`, or `crypto.randomUUID()` in an edge route), so each sign-up counts once. With LEAD_ID_SECRET set, the event id is `" + type + ":<HMAC of the normalized email under LEAD_ID_SECRET>` (one per person, so a re-submit counts once), and the same person's purchase carries the same external_id. Set `fallbackPath` to the page the form is on.",
-      pageSignalLine(entry, "body", ctx.trackingSignal),
+      pageSignalLine(pages, ctx.trackingSignal, (way) => leadSignalExpression(router, way)),
       "Only if this route's response is what the page waits on before it fires the browser Meta event, use the mirror form instead and return its two values to the page:",
-      ...codeBlock(language, mirrorRouteEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>" })),
+      ...codeBlock(language, mirrorRouteEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>", signal: source })),
       ...COMMON_RULES.map((rule) => `- ${rule}`)
     ].join("\n")
   }
@@ -263,7 +323,8 @@ export function serverConversionInstructionsForItem(
       checkoutCreates,
       paymentWebhook,
       newWebhookFile,
-      trackingSignal: inventory?.trackingSignal ?? null
+      trackingSignal: inventory?.trackingSignal ?? null,
+      pageRequests: inventory?.pageRequests ?? null
     }
   )
 }
