@@ -26,6 +26,7 @@ import { reanchorOwnerLocations } from "../../jobs/owner-locations.js"
 import { measureOwnerDiff } from "../../jobs/owner-diff.js"
 import { leaveForOwner } from "../../jobs/state-machine.js"
 import { reanchorEvidence } from "../../jobs/reanchor.js"
+import { CHECK_LABELS } from "../../jobs/check-words.js"
 import { buildVerdict, isBuildOutputPath } from "../../checks/build.js"
 import { readBeforeFactsFile } from "../handoff/before-facts.js"
 import { agentStatusLine } from "../agent-status.js"
@@ -66,6 +67,7 @@ import type {
   CheckTier,
   ChecklistItem,
   Claim,
+  ClaimStaticChecks,
   JobItemState,
   ScanResult,
   T0Scenario,
@@ -118,33 +120,32 @@ interface RoundOutcome {
 }
 
 /** A provisional, read-only S check while the claim tool has the agent paused. B and T0 still run after the turn. */
-async function staticChecksOnClaim(io: JobsIo, itemId: string): Promise<{ state: "pass" | "problem" | "undetermined" | "not_run"; problems: string[] }> {
+async function staticChecksOnClaim(io: JobsIo, itemId: string): Promise<ClaimStaticChecks> {
   const item = io.item(itemId)
-  if (!item) return { state: "undetermined", problems: ["The claimed job is no longer in this run."] }
+  if (!item) return { state: "undetermined", problems: [], undetermined: ["The claimed job is no longer in this run."] }
   const specs = io.deps.registry.checksFor(item, "S")
   if (specs.length === 0) return { state: "not_run", problems: [] }
   const scanner = await io.scanner()
   const problems: string[] = []
-  let undetermined = false
+  // Live run 2: an undetermined check's reason was dropped here, so the agent read "undetermined, no problems" as fine.
+  const undecided: string[] = []
   let sawPass = false
-  let sawProblem = false
+  // The agent reads the check's plain name, never its id.
+  const named = (checkId: string, reason: string) => `${CHECK_LABELS[checkId] ?? "A wizard check"}: ${scanner.redact(reason).text}`
   for (const spec of specs) {
     try {
       const raw = await io.deps.checks.run(spec.checkId, { item, root: io.ctx.root, appRoot: io.ctx.appRoot, runId: io.runId() })
       for (const result of Array.isArray(raw) ? raw : [raw]) {
-        if (result.state === "problem") {
-          sawProblem = true
-          problems.push(`${spec.checkId}: ${scanner.redact(result.reason ?? "problem").text}`)
-        }
+        if (result.state === "problem") problems.push(named(spec.checkId, result.reason ?? "problem"))
         if (result.state === "pass") sawPass = true
-        if (result.state === "undetermined" || result.state === "info") undetermined = true
+        if (result.state === "undetermined" || result.state === "info") undecided.push(named(spec.checkId, result.reason ?? "the wizard could not decide it from the code"))
       }
     } catch (error) {
-      undetermined = true
-      problems.push(`${spec.checkId}: ${scanner.redact(error instanceof Error ? error.message : String(error)).text}`)
+      undecided.push(named(spec.checkId, `the check could not run (${error instanceof Error ? error.message : String(error)})`))
     }
   }
-  return { state: sawProblem ? "problem" : undetermined || !sawPass ? "undetermined" : "pass", problems }
+  const state = problems.length > 0 ? "problem" : undecided.length > 0 || !sawPass ? "undetermined" : "pass"
+  return { state, problems, ...(undecided.length > 0 ? { undetermined: undecided } : {}) }
 }
 
 class SealBroken extends Error {

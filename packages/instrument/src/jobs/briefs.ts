@@ -13,6 +13,7 @@
 // UNTRUSTED: it is stripped of control and invisible characters and JSON-quoted, so a file named
 // "a\n### Job evil" can never forge a block or an instruction (review P2-5).
 import { OWNER_BOUNDARY_INSTRUCTION } from "./owner-boundary.js"
+import { howCheckedSection } from "./how-checked.js"
 import { serverConversionInstructionsForItem, signalCarryWords, signalPagesFor, signalSourceOf, type SignalPage } from "../server-lane/job-brief.js"
 import { posix } from "node:path"
 
@@ -982,7 +983,8 @@ export function jobBlock(item: ChecklistItem, facts: BriefFacts): string {
     ...(Object.keys(data).length > 0 ? [`Plan data (JSON; decided by the user, use it exactly): ${JSON.stringify(data)}`] : []),
     `Allowed files (JSON): ${JSON.stringify(item.allow.files.map(inertText))}`,
     `May create (JSON): ${JSON.stringify(item.allow.create.map(inertText))}`,
-    `Project: ${frameworkLine(facts)}`
+    `Project: ${frameworkLine(facts)}`,
+    howCheckedSection(item)
   ]
   return out.join("\n")
 }

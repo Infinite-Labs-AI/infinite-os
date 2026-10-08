@@ -6,7 +6,7 @@
 // NORMATIVE. The agent can only CLAIM; the wizard's checks decide. Nothing here spends a prompt.
 import { posix } from "node:path"
 
-import type { ChecklistItem, Claim, AgentQuestion, WizardEditRecord } from "./jobs.js"
+import type { ChecklistItem, Claim, ClaimStaticChecks, AgentQuestion, WizardEditRecord } from "./jobs.js"
 
 /** Who does the work (`runs.worker`). `none` = deterministic lanes only. */
 export type AgentWorkerKind = "claude_code" | "codex" | "none"
@@ -102,7 +102,7 @@ export interface RunJobsInput {
   brief: string
   budget: { maxTurns: number; wallMs: number }
   resume?: SessionRef
-  onClaim(claim: Claim): void | { state: "pass" | "problem" | "undetermined" | "not_run"; problems: string[] } | Promise<{ state: "pass" | "problem" | "undetermined" | "not_run"; problems: string[] }>
+  onClaim(claim: Claim): void | ClaimStaticChecks | Promise<ClaimStaticChecks>
   onAsk(question: AgentQuestion): void
   onProgress(progress: { jobId: string; text: string }): void
   /** Typed tool activity and ticker time, never the agent's report_progress prose. */
@@ -130,11 +130,19 @@ export interface ReviewResult {
 }
 
 /**
- * `rejected`: the agent's service refused the review request before the agent answered (Codex: an
- * `invalid_request_error`, e.g. a schema strict mode will not take). Nothing was answered, so asking again with
- * "your answer did not match the schema" cannot help; `unparseable` is an answer that came back and broke the schema.
+ * A review that did not run, with why. Only `unparseable` is an answer: the agent finished, but its JSON did not
+ * parse or match the schema, so only it is asked once more. Every other kind means NO answer came back:
+ *   - `rejected`: the agent's service refused the review request before the agent answered (Codex: an
+ *     `invalid_request_error`, e.g. a schema strict mode will not take); "did not match the schema" would be a lie;
+ *   - `error`: the agent stopped with an error (a non-zero exit, a failed turn, a kill for a billing-account or
+ *     configuration mismatch, a reviewer denied its own files); `message` is its last error text, sanitized, ≤ 200 chars;
+ *   - `unavailable`: the reviewer agent is not usable here; `message` says why in plain words ("is not installed",
+ *     "is not signed in");
+ *   - `timeout`, `out_of_usage`: as named.
+ * The wizard never marks a pull request ready on any of them (wizard/review-outcome.ts).
  */
-export type ReviewFailure = { error: "unparseable" | "rejected" | "timeout" | "out_of_usage" }
+export type ReviewFailureKind = "unparseable" | "rejected" | "timeout" | "out_of_usage" | "error" | "unavailable"
+export type ReviewFailure = { error: ReviewFailureKind; message?: string }
 
 export interface ReviewRunInput {
   worktreeDir: string

@@ -8,7 +8,10 @@
 // through `sanitizeUntrusted` and has the wizard's own tokens redacted before anyone sees it.
 import {
   CLAIM_LIMITS,
+  CLAIM_REASON_LIMITS,
+  CLAIM_UNDECIDED_NEXT,
   type AgentQuestion,
+  type ClaimStaticChecks,
   type AskUserResult,
   type ChecklistItem,
   type Claim,
@@ -16,6 +19,7 @@ import {
   type JobClaimResult,
   type JobListResult
 } from "../../wizard/contracts/jobs.js"
+import { afterDeployCheckLabels, hardCheckLabels, reviewQuestionsFor } from "../../jobs/how-checked.js"
 import { sanitizeUntrusted } from "../sanitize.js"
 import type { McpServerHandler, McpToolDefinition, McpToolOutcome } from "./jsonrpc.js"
 
@@ -64,7 +68,7 @@ export interface ClaimChannelOptions {
   now(): Date
   /** Replaces the wizard's own secret literals before any text is kept or shown. */
   redact(text: string): string
-  onClaim?(claim: Claim): void | JobClaimResult["staticChecks"] | Promise<JobClaimResult["staticChecks"]>
+  onClaim?(claim: Claim): void | ClaimStaticChecks | Promise<ClaimStaticChecks | void | undefined>
   onAsk?(question: AgentQuestion): void
   onProgress?(progress: { jobId: string; text: string }): void
 }
@@ -95,12 +99,12 @@ export class ClaimChannel implements McpServerHandler {
     return [
       {
         name: "job_list",
-        description: "Your checklist for this turn: each job's id, title, allowed files and rules.",
+        description: "Your checklist for this turn: each job's id, title, allowed files, rules, the wizard's own checks of its code (checks), what is read after the deploy (checkedAfterDeploy) and what the review agent will ask (reviewQuestions).",
         inputSchema: { type: "object", properties: {}, additionalProperties: false }
       },
       {
         name: "job_claim",
-        description: "Claim a job done, blocked or not needed. The wizard then runs its own checks; a claim is not the result.",
+        description: `Claim a job done, blocked or not needed. The note is at most ${CLAIM_LIMITS.noteMaxChars} characters. The wizard then runs its own checks and returns what they found (problems, and the checks it could not decide, with reasons); a claim is not the result.`,
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -180,7 +184,10 @@ export class ClaimChannel implements McpServerHandler {
         id: item.id,
         title: item.title,
         allow: { files: [...item.allow.files], create: [...item.allow.create] },
-        rules: [...JOB_RULES]
+        rules: [...JOB_RULES],
+        checks: hardCheckLabels(item),
+        checkedAfterDeploy: afterDeployCheckLabels(item),
+        reviewQuestions: [...reviewQuestionsFor(item)]
       }))
     }
   }
@@ -210,8 +217,13 @@ export class ClaimChannel implements McpServerHandler {
     this.claims.push(claim)
     const checked = await this.options.onClaim?.(claim)
     if (!checked) return JOB_CLAIM_RESULT
-    const staticChecks = { state: checked.state, problems: checked.problems.map((problem) => sanitizeUntrusted(this.options.redact(problem), 200)) }
-    return { recorded: true, next: staticChecks.state === "problem" ? "fix the static check failures and claim this job again" : "the wizard will run its own checks", staticChecks }
+    // Live run 2: problems were cut to 200 characters and undetermined reasons dropped, so "undetermined, no problems"
+    // read as acceptable. Both come back whole, up to a sane limit.
+    const reasons = (list: readonly string[] | undefined) => (list ?? []).slice(0, CLAIM_REASON_LIMITS.count).map((reason) => sanitizeUntrusted(this.options.redact(reason), CLAIM_REASON_LIMITS.chars))
+    const undetermined = reasons(checked.undetermined)
+    const staticChecks: ClaimStaticChecks = { state: checked.state, problems: reasons(checked.problems), ...(undetermined.length > 0 ? { undetermined } : {}) }
+    const next = staticChecks.state === "problem" ? "fix the static check failures and claim this job again" : undetermined.length > 0 ? CLAIM_UNDECIDED_NEXT : "the wizard will run its own checks"
+    return { recorded: true, next, staticChecks }
   }
 
   private reportProgress(input: Record<string, unknown>): { ok: true } | ToolError {

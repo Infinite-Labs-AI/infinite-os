@@ -459,7 +459,21 @@ export interface AgentQuestion {
 }
 
 export interface JobListResult {
-  jobs: Array<{ id: string; title: string; allow: { files: string[]; create: string[] }; rules: string[] }>
+/** What the wizard's static checks said at claim time. */
+export interface ClaimStaticChecks {
+  state: "pass" | "problem" | "undetermined" | "not_run"
+  problems: string[]
+  undetermined?: string[]
+}
+
+/** The claim result's next step when some checks could not be decided (and none found a problem). */
+export const CLAIM_UNDECIDED_NEXT = "the wizard could not decide the checks listed under undetermined: fix what they name and claim again; if a reason is something you cannot change (for example a value the site sets in an environment variable), say so in your claim note and go on" as const
+
+/** At most this many claim-time reasons, each at most this long (the agent reads them; a reason is never cut to nothing). */
+export const CLAIM_REASON_LIMITS = { count: 12, chars: 600 } as const
+
+  /** `checks`: the wizard's own checks of the job's code, in plain words (a problem can put the job back); `reviewQuestions`: what the review agent will ask. */
+  jobs: Array<{ id: string; title: string; allow: { files: string[]; create: string[] }; rules: string[]; checks: string[]; checkedAfterDeploy: string[]; reviewQuestions: string[] }>
 }
 
 export interface JobClaimInput {
@@ -472,8 +486,9 @@ export interface JobClaimInput {
 /** Never says "verified". */
 export interface JobClaimResult {
   recorded: true
-  next: "the wizard will run its own checks" | "fix the static check failures and claim this job again"
-  staticChecks?: { state: "pass" | "problem" | "undetermined" | "not_run"; problems: string[] }
+  next: "the wizard will run its own checks" | "fix the static check failures and claim this job again" | typeof CLAIM_UNDECIDED_NEXT
+  /** `undetermined`: the checks the wizard could not decide, with why (live run 2: these were dropped, so the agent read "undetermined, no problems" as acceptable). */
+  staticChecks?: ClaimStaticChecks
 }
 
 export interface ReportProgressInput {
