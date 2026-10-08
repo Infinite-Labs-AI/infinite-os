@@ -52,7 +52,8 @@ it.each([[true, false, true, true], [false, false, true, true], [true, true, tru
   } else {
     expect(capture.ownerBoundary?.file).toBe(entry)
     expect(capture.ownerBoundary?.wiring).toContain("infinite-meta-click-id")
-    expect(capture.note).toContain("does not save")
+    expect(capture.note).toContain("For you: load the ad-click capture from your app entry, so the landing ad-click id is saved.")
+    expect(capture.note).toContain("Entry handles owner consent")
     expect(plan.lines.find(line => line.kind === "capture_beside_adopted_pixel")?.requires).toBe("user_action")
     expect(plan.lines.filter(line => line.text.includes('import "../lib/infinite-meta-click-id.js"'))).toHaveLength(1)
   }

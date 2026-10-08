@@ -388,7 +388,7 @@ export async function runUninstallFlow(ctx: UninstallContext, rawDeps: WizardDep
   const reversal = await deps.installer.uninstall({ root: ctx.root, dryRun: false })
   const scanner = buildScanner({ root: ctx.root, appRoot: ctx.state?.appRoot ?? "." }, deps, [])
   const leftAsIsNotes = reversal.leftAsIs.map(file => safeDisplayText(scanner, isPolicyPath(file, ctx.state?.appRoot ?? ".")
-    ? `Not changed by us: ${file} is a policy page, which is yours.`
+    ? `Kept ${file} as it is: it is a policy page.`
     : `Left as is (changed since the install): ${file}`))
   lines.push(...leftAsIsNotes)
   let pr: UninstallRecord["pr"] = null

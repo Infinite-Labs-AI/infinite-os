@@ -108,10 +108,10 @@ describe("uninstall --pr", () => {
     const terminal = result.lines.join("\n")
     const prBody = readFileSync(join(root, ".infinite/wizard/uninstall-pr-body.md"), "utf8")
     for (const text of [terminal, prBody]) {
-      expect(text).toContain(`Not changed by us: ${policy} is a policy page, which is yours.`)
+      expect(text).toContain(`Kept ${policy} as it is: it is a policy page.`)
       expect(text).not.toMatch(/changed since the install/i)
       for (const raw of [secret, "<!--", "@owner", "[link]("]) expect(text).not.toContain(raw)
-      expect(text).toContain("‹!--＠owner-［link］(target)-terms-of-service.html is a policy page, which is yours.")
+      expect(text).toContain("‹!--＠owner-［link］(target)-terms-of-service.html as it is: it is a policy page.")
     }
     expect(bundle.log.calls.find(call => call.what === "stage")?.args[0]).toEqual(["app/layout.tsx", ".infinite/install.json"])
   })

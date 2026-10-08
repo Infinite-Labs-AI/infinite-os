@@ -1409,7 +1409,7 @@ class JobsIo {
     if (left > 0) {
       const restored = ownerHandoffs.filter(item => item.ownerBoundary?.kind === "restored_unit").length
       const unchanged = left - restored
-      parts.push(`${left} left for you (${[unchanged ? `${unchanged} not changed by us` : "", restored ? `${restored} put back: reached consent code` : ""].filter(Boolean).join("; ")})`)
+      parts.push(`${left} left for you (${[unchanged ? `${unchanged} to do yourself` : "", restored ? `${restored} put back: reached consent code` : ""].filter(Boolean).join("; ")})`)
     }
     const unfinished = notDoneJobs(this.items()).length
     if (unfinished > 0) parts.push(`${unfinished} not done, left for you`)

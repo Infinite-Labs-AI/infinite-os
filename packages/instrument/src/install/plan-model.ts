@@ -627,7 +627,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     if (!capture.canWire) {
       const requirement = capture.requirements[0]
       return { ...item, owner: "code", state: "left_for_you", blockedReason: undefined, checks: [], claim: undefined,
-        note: `Not changed by us: the app entry cannot load the capture safely. This run does not save the landing ad-click id. ${requirement?.reason ?? "Add the entry wiring yourself."}`,
+        note: `For you: load the ad-click capture from your app entry, so the landing ad-click id is saved. ${requirement?.reason ?? ""}`.trim(),
         ownerBoundary: { ...(requirement?.ownerBoundary ?? { kind: "unproven_wiring" as const }), wiring: capture.requirements.map(entry => `${entry.path}:\n${entry.snippet}`).join("\n\n") },
         allow: { files: [], create: [] } }
     }
@@ -1000,7 +1000,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   for (const item of [...candidates, ...seeds].filter(entry => entry.state === "left_for_you")) {
     if (item.id === "posthog_improve:sensitive_pages" && item.ownerBoundary) {
       const options = sensitivePosthogOptions(sources?.get(item.ownerBoundary.file ?? ""), scan.sensitivePaths)
-      item.note = `${item.note ?? "Not changed by us."} Keep existing exclusions; this addition only turns collection off on the listed pages.`
+      item.note = `${item.note ? `${item.note} ` : ""}This addition keeps your existing exclusions and only turns collection off on the listed pages.`
       if (options) item.ownerBoundary.wiring = `// Add last inside the existing posthog.init options object.\n${options}`
     }
     const handoff = item.jobId === "preview_guard" && item.ownerBoundary && guard.emit

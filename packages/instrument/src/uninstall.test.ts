@@ -268,7 +268,7 @@ describe("uninstallInstallation", () => {
       expect(readFileSync(join(root, file), "utf8")).toBe(after)
       expect(result.editsLeftAsIs).toContain(file)
       expect(result.editsReversed).not.toContain(file)
-      expect(result.warnings).toContain(`Not changed by us: ${file} is a policy page, which is yours.`)
+      expect(result.warnings).toContain(`Kept ${file} as it is: it is a policy page.`)
     }
     expect(result.editsReversed).toContain(apiFile)
     expect(readFileSync(join(root, apiFile), "utf8")).toBe(`export const terms = ${dryRun ? 2 : 1}\n`)

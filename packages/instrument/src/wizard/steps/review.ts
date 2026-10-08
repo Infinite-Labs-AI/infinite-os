@@ -1137,7 +1137,7 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
         if (fix.items.find(item => item.id === items[index]!.id)?.state !== "left_for_you") continue
         decision.action = "ASK"
         decision.askReason = "owner_file"
-        decision.reason = fix.items.find(item => item.id === items[index]!.id)?.note ?? "Not changed by us: this edit place belongs to the site owner."
+        decision.reason = fix.items.find(item => item.id === items[index]!.id)?.note ?? "For you: make this change yourself; it is in your own code."
         decision.reason += " This finding remains open for the site owner."
       }
       recordDecisions(session.ledger, fixes, round)

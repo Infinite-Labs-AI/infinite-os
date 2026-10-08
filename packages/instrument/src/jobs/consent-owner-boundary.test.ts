@@ -25,7 +25,7 @@ describe("consent and policy belong to the site owner", () => {
     const file = "src/tracking.ts"
     const scan = jobScanFrom(scanResult(), snapshotFromFiles({ [file]: `function boot(){\nfbq('init','1234567890123456');\n${consent}\n}` }))
     const facts = beforeFacts({ census: census([{ tool: "meta", kind: "fbq_init", id: "1234567890123456", file, line: 2 }]) })
-    expect(seedCandidatesFrom(scan, facts).find(x => x.id === "preview_guard:meta")).toMatchObject({ state: "left_for_you", checks: [], note: expect.stringContaining("preview and local visits keep counting in Meta pixel") })
+    expect(seedCandidatesFrom(scan, facts).find(x => x.id === "preview_guard:meta")).toMatchObject({ state: "left_for_you", checks: [], note: "For you: add the preview guard to Meta pixel's start-up at src/tracking.ts:2; until then preview and local visits count in Meta pixel." })
   })
   it("does not ask a privacy question or return approved privacy prose for an agent", () => {
     const plan = buildPlanModel({ scan: { framework: "next-app-router", managedProviders: [], adopted: [], improve: [], serverLane: null, npm: null, sensitivePaths: [] }, keys: fakeKeys(), before: fakeBefore(), candidates: [], agent: { worker: "claude_code", whoPays: { payer: "plan", label: "plan" } }, consentFlag: null, productionDeniedConflict: fakeProductionDeniedConflict })

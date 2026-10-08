@@ -81,8 +81,8 @@ export function frozenJobNote(item: { id: string; jobId: string; title: string }
   const tool = item.jobId === "preview_guard" ? ({ ga4: "GA4", meta: "Meta pixel", posthog: "PostHog" }[item.id.split(":")[1]!] ?? item.title) : item.title
   const location = `${place.file}:${place.line}`
   return item.jobId === "preview_guard"
-    ? `Not changed by us: ${tool}'s start-up code at ${location} also handles consent, which is yours. Until you add the guard there, preview and local visits keep counting in ${tool}.`
-    : `Not changed by us: ${tool} at ${location} reaches code that handles consent, which is yours.`
+    ? `For you: add the preview guard to ${tool}'s start-up at ${location}; until then preview and local visits count in ${tool}.`
+    : `For you: make the "${tool}" change at ${location}, inside your consent code.`
 }
 
 export function ownerGuardHandoff(note: string, location: { file?: string; line?: number }, expression: string, source?: string): { text: string; guard: string } {

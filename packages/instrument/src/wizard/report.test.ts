@@ -430,7 +430,7 @@ it.each(["frozen_unit", "policy_page", "unproven_wiring", "restored_unit"] as co
   })
   const restored = kind === "restored_unit"
   expect(report.notes.some(note => note.startsWith("Put back:"))).toBe(restored)
-  if (!restored) expect(report.notes).toContain("Not changed by us: app/layout.tsx is left for you.")
+  if (!restored) expect(report.notes).toContain("For you: make this change in app/layout.tsx.")
 })
 
 it("lists every explicit exclusion under You said no to in local and PR report markdown", () => {

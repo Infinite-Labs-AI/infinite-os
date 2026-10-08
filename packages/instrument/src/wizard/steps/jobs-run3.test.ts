@@ -262,7 +262,7 @@ it("the archived inline-consent entry is left for its owner before any worker st
   expect(t.current().jobs).toHaveLength(3)
   for (const job of t.current().jobs) {
     expect(job).toMatchObject({ state: "left_for_you", ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx" } })
-    expect(job.note).toContain("Not changed by us:")
+    expect(job.note).toContain("For you:")
     expect(job.ownerBoundary?.unitHash).toMatch(/^[a-f0-9]+$/)
     expect(job.claim).toBeUndefined()
     expect(job.edits ?? []).toEqual([])

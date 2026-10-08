@@ -571,7 +571,7 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
       ...(ownerPreviewNote ? [ownerPreviewNote] : []),
       ...input.notes.filter(note => !isOwnerBoundaryStatement(note)),
       ...(input.verdictFacts?.ownerPolicyFindings ?? []),
-      ...(input.verdictFacts?.jobs ?? []).filter(job => job.state === "left_for_you" && job.ownerBoundary).map(job => job.note ?? (job.ownerBoundary?.kind === "restored_unit" ? "Put back: an edit reached code that handles consent." : `Not changed by us: ${job.ownerBoundary?.file ?? job.allow.files[0] ?? "the noted file"} is left for you.`)),
+      ...(input.verdictFacts?.jobs ?? []).filter(job => job.state === "left_for_you" && job.ownerBoundary).map(job => job.note ?? (job.ownerBoundary?.kind === "restored_unit" ? "Put back: an edit reached code that handles consent." : `For you: make this change in ${job.ownerBoundary?.file ?? job.allow.files[0] ?? "the noted file"}.`)),
       ...(input.verdictFacts?.priorPolicyEdits || hasRecordedPolicyEdits(input.verdictFacts?.jobs ?? []) || hasLegacyOwnerHistory(input.notes) ? [LEGACY_OWNER_BOUNDARY] : [])
     ])],
     verdict: null
@@ -912,7 +912,7 @@ function ownerInstructions(jobs: readonly ChecklistItem[]): Array<{ note: string
     const snippet = proof.guard ?? proof.wiring
     if (!snippet) return []
     const where = `${proof.file ?? job.allow.files[0] ?? "the noted file"}:${proof.line ?? 1}`
-    return [{ note: job.note ?? `Not changed by us: ${where} is left for you.`, snippet,
+    return [{ note: job.note ?? `For you: add this at ${where}.`, snippet,
       placement: proof.guard ? `For the site owner: apply this guard to the analytics start-up at ${where}. Keep consent checks, grants and revocations outside it. The wizard did not apply this snippet.`
         : `For the site owner: place this import, mount or script at ${where}. The wizard left the entrypoint unchanged; this wiring has not been applied.` }]
   })

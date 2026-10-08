@@ -89,7 +89,7 @@ describe("built CLI e2e — multipage, all five providers", () => {
       "--yes"
     ], 2)
 
-    expect(output).toContain("privacy/index.html is a policy page, which is yours")
+    expect(output).toContain("Kept privacy/index.html as it is: it is a policy page")
     expect(output).toContain("policy pages were left unchanged")
     expect(output).not.toContain("nothing loads")
     expect(output).not.toContain("pixel not yet live")
@@ -152,7 +152,7 @@ describe("built CLI e2e — multipage, all five providers", () => {
       "--yes"
     ], 2)
 
-    expect(output).toContain("privacy/index.html is a policy page, which is yours")
+    expect(output).toContain("Kept privacy/index.html as it is: it is a policy page")
     expect(output).toContain("policy pages were left unchanged")
     expect(output).toContain("Verified 2 managed runtime files")
     expect(output).not.toContain("nothing loads")

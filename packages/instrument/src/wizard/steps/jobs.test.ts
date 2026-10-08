@@ -125,11 +125,11 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     const item: ChecklistItem = {
       ...agentItem("meta_improve:capture", ["app/layout.tsx"]), owner: "code", state: "left_for_you",
       ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx", line: 1 },
-      note: "Not changed by us: capture wiring reaches your consent code. Add the wiring yourself."
+      note: "For you: add the capture wiring at app/layout.tsx:1, inside your consent code."
     }
     const t = setup({ scenario: {}, items: [item] })
     const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("1 left for you (1 not changed by us)") })
+    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("1 left for you (1 to do yourself)") })
     expect(t.current().jobs[0]).toMatchObject({ state: "left_for_you", note: item.note, ownerBoundary: item.ownerBoundary })
     expect(runs(t.fakes)).toHaveLength(0)
     expect(t.checkCalls.run).toHaveLength(0)
@@ -148,7 +148,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     runGit(t.root, ["add", file])
     runGit(t.root, ["commit", "-m", "tracking fixture"])
     expect(await step.run(t.ctx, t.deps)).toMatchObject({ kind: "ok" })
-    expect(t.current().jobs[0]).toMatchObject({ state: "left_for_you", note: expect.stringContaining("preview and local visits keep counting in Meta pixel") })
+    expect(t.current().jobs[0]).toMatchObject({ state: "left_for_you", note: "For you: add the preview guard to Meta pixel's start-up at src/tracking.ts:3; until then preview and local visits count in Meta pixel." })
     expect(readFileSync(join(t.root, file), "utf8")).toBe(source)
     expect(runs(t.fakes)).toHaveLength(0)
   })
@@ -157,7 +157,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     const policy: ChecklistItem = {
       ...agentItem("preview_guard:ga4", ["terms.html"]), state: "left_for_you",
       ownerBoundary: { kind: "policy_page", file: "terms.html", line: 1 },
-      note: "Not changed by us: terms.html is a policy page, which is yours."
+      note: "Kept terms.html as it is: it is a policy page."
     }
     const restored: ChecklistItem = {
       ...agentItem("preview_guard:meta", ["app/layout.tsx"]), state: "left_for_you",
@@ -166,7 +166,7 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
     }
     const t = setup({ scenario: {}, items: [policy, restored] })
     const outcome = await step.run(t.ctx, t.deps)
-    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("2 left for you (1 not changed by us; 1 put back: reached consent code)") })
+    expect(outcome).toMatchObject({ kind: "ok", status: expect.stringContaining("2 left for you (1 to do yourself; 1 put back: reached consent code)") })
     expect(t.current().jobs.map(item => ({ state: item.state, note: item.note }))).toEqual([policy, restored].map(item => ({ state: item.state, note: item.note })))
     expect(runs(t.fakes)).toHaveLength(0)
   })

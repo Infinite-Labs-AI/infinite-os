@@ -174,7 +174,7 @@ function proposal(source: string, entry: string, module: string, strategy: Manag
   return wired(after, entry, module, strategy) ? { after, snippet } : null
 }
 function unknown(path: string, snippet: string, why: string): ManualRequirement {
-  return { path, snippet, reason: `Not changed by us: the capture could not be wired safely at ${path} (${why}). This run does not save the ad-click id there; the wiring is left for you.`, ownerBoundary: { kind: "unproven_wiring", file: path, line: 1 } }
+  return { path, snippet, reason: `Load it first in ${path}; the wizard could not place it there safely (${why}).`, ownerBoundary: { kind: "unproven_wiring", file: path, line: 1 } }
 }
 
 export function planManagedCapture(input: ManagedCaptureInput): ManagedCapturePlan | undefined {

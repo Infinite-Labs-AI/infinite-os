@@ -5,7 +5,7 @@ import type { ManualRequirement } from "../types.js"
 
 export function policyWiringRequirement(path: string, snippet: string, appRoot = "."): ManualRequirement | null {
   return isPolicyPath(path, appRoot) ? { path, snippet,
-    reason: `Not changed by us: ${path} is a policy page, which is yours. This page does not get the tag from this run.`,
+    reason: `Kept ${path} as it is: it is a policy page, so it does not get the tag.`,
     ownerBoundary: { kind: "policy_page", file: path, line: 1 } } : null
 }
 
@@ -17,11 +17,11 @@ export function ownerWiringRequirement(path: string, before: string | null, afte
   if (!changed) return null
   const unit = changed.before ?? changed.after!
   return { path, snippet,
-    reason: `Not changed by us: analytics wiring at ${path}:${unit.startLine} reaches code that handles consent, which is yours. Add the wiring yourself; the wizard left this code unchanged.`,
+    reason: `For you: add the analytics wiring at ${path}:${unit.startLine}, inside your consent code.`,
     ownerBoundary: { kind: "frozen_unit", file: path, line: unit.startLine, unitHash: unit.hash, lineOffset: 0, unitOrdinal: unit.ordinal } }
 }
 
 /** An old manifest is not permission to edit a policy page during uninstall. */
 export function policyUninstallWarning(path: string, appRoot = "."): string | null {
-  return isPolicyPath(path, appRoot) ? `Not removed automatically: ${path} is a policy page, which is yours. Remove the leftover analytics wiring yourself.` : null
+  return isPolicyPath(path, appRoot) ? `For you: remove the leftover analytics wiring from ${path} (a policy page).` : null
 }

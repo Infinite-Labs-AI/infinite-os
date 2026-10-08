@@ -100,7 +100,7 @@ it("shows the exact owner guard and distinguishes a restored edit from a withhel
   const { buildChecklist, jobStateCell } = await import("./post.js")
   const { buildHostGuardExpression } = await import("../host-guard.js")
   const guard = `if (${buildHostGuardExpression({ mode: "allow", hosts: ["fictional.test"] })}) {\n  // Existing analytics start-up statements go here.\n}`
-  const note = "Not changed by us: GA4's start-up code at src/tracking.ts:7 also handles consent, which is yours. Until you add the guard there, preview and local visits keep counting in GA4."
+  const note = "For you: add the preview guard to GA4's start-up at src/tracking.ts:7; until then preview and local visits count in GA4."
   const withheld = { ...item("preview_guard:ga4", ["src/tracking.ts"]), state: "left_for_you" as const, note, ownerBoundary: { kind: "frozen_unit" as const, file: "src/tracking.ts", line: 7, guard } }
   expect(jobStateCell(withheld)).toBe(note)
   const checklist = buildChecklist([withheld])
@@ -120,7 +120,7 @@ it("treats a stale assertion string as text, never as measurement authority", as
 it("keeps manual installer wiring distinct from a preview guard", async () => {
   const { buildChecklist } = await import("./post.js")
   const wiring = 'import { AnalyticsClient } from "./analytics-client";\n<AnalyticsClient />'
-  const manual = { ...item("unusual_layout:owner_wiring", ["app/layout.tsx"]), state: "left_for_you" as const, note: "Not changed by us: this entrypoint handles consent.", ownerBoundary: { kind: "frozen_unit" as const, file: "app/layout.tsx", wiring } }
+  const manual = { ...item("unusual_layout:owner_wiring", ["app/layout.tsx"]), state: "left_for_you" as const, note: "For you: add the analytics wiring at app/layout.tsx:1, inside your consent code.", ownerBoundary: { kind: "frozen_unit" as const, file: "app/layout.tsx", wiring } }
   const text = buildChecklist([manual])
   expect(text).toContain(wiring)
   expect(text).toContain("has not been applied")

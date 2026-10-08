@@ -450,7 +450,7 @@ it("the archived inline-consent entry stays byte-identical while the independent
   for (const id of [JOB6, GA4_GUARD, META_GUARD, CAPTURE]) {
     const job = w.current().jobs.find(item => item.id === id)!
     expect(job).toMatchObject({ state: "left_for_you", ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx" } })
-    expect(job.note).toContain("Not changed by us:")
+    expect(job.note).toContain("For you:")
     expect(job.ownerBoundary?.unitHash).toMatch(/^[a-f0-9]+$/)
     expect(job.claim).toBeUndefined()
     expect(job.edits ?? []).toEqual([])

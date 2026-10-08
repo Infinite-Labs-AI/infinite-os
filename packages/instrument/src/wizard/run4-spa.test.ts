@@ -103,7 +103,7 @@ describe("run 4 SPA regression with separate recorded-consent and runnable world
     const recordedScan = jobScanFrom(scanResult({ framework: "next-app-router" }), snapshotFromFiles(recorded))
     const item = seedCandidatesFrom(recordedScan, facts).find(candidate => candidate.id === SPA)!
     expect(item).toMatchObject({ state: "left_for_you", ownerBoundary: { kind: "frozen_unit", file: "app/layout.tsx" }, checks: [] })
-    expect(item.note).toContain("Not changed by us:")
+    expect(item.note).toContain("For you:")
     const changed = layout.replace("gtag('config', 'G-QWERT67890');", "gtag('config', 'G-QWERT67890');\n" + GA4_PAGE_CHANGE_SCRIPT)
     const restored = restoreFrozenUnits(layout, changed)
     expect(restored.changes.length).toBeGreaterThan(0)

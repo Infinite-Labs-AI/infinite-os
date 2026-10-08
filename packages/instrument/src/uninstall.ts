@@ -92,7 +92,7 @@ export function reverseRecordedEdits(root: string, manifest: Pick<InstallManifes
     if (isPolicyPath(record.file, appRoot)) {
       blocked.add(record.file)
       leftAsIs.push(record.file)
-      warnings.push(`Not changed by us: ${record.file} is a policy page, which is yours.`)
+      warnings.push(`Kept ${record.file} as it is: it is a policy page.`)
       continue
     }
     const outcome = reverseEditRecord(read(record.file), record)

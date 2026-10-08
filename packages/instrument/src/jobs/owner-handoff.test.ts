@@ -10,10 +10,10 @@ import type { Cell } from "../wizard/contracts/report.js"
 import { buildFinalComment, buildPrBody, buildChecklist, withFinalReport } from "../review/post.js"
 import { createScanner } from "../review/scan.js"
 const RUN = "11111111-1111-4111-8111-111111111111"
-const ownerJob = () => candidate("preview_guard", "meta", { state: "left_for_you", checks: [], note: "Not changed by us: Meta pixel's start-up code at src/tracking.ts:5 also handles consent, which is yours. Until you add the guard there, preview and local visits keep counting in Meta pixel.", ownerBoundary: { kind: "frozen_unit", file: "src/tracking.ts", line: 5, unitHash: "hash" }, trigger: { finding: "old finding", evidence: [{ file: "src/tracking.ts", line: 5 }] } })
+const ownerJob = () => candidate("preview_guard", "meta", { state: "left_for_you", checks: [], note: "For you: add the preview guard to Meta pixel's start-up at src/tracking.ts:5; until then preview and local visits count in Meta pixel.", ownerBoundary: { kind: "frozen_unit", file: "src/tracking.ts", line: 5, unitHash: "hash" }, trigger: { finding: "old finding", evidence: [{ file: "src/tracking.ts", line: 5 }] } })
 it("renders each owner note once in the report, PR body and final comment, with a diff fence", () => {
   const job = ownerJob()
-  job.note = "Not changed by us: this exact owner initialization needs your guard."
+  job.note = "For you: add your guard to this exact owner initialization."
   job.ownerBoundary!.guard = "--- a/src/tracking.ts\n+++ b/src/tracking.ts\n@@ -1,2 +1,2 @@\n function boot() {\n+  if (hostAllowed) start();"
   const report = buildReport({ runId: RUN, tagVersion: "fixture", site: { repoLabel: "example/site", productionHost: null }, columns: { live_today: null, in_pr: null, proven_live: null }, provenLivePending: null, day7: null, notes: [], verdictFacts: { jobs: [job], openFindings: [], tools: null, installedUnknown: null } })
   const reportMarkdown = renderMarkdown(report, undefined, [job], ["GA4 account settings"])
@@ -57,7 +57,7 @@ it("gives the owner the exact guard and edit location as copyable plan text and 
   const job = ownerJob()
   const plan = buildPlanModel({ scan: { framework: "next-app-router", managedProviders: [], adopted: [], improve: [], serverLane: null, npm: null, sensitivePaths: [] }, keys: fakeKeys(), before: fakeBefore(), candidates: [job], agent: { worker: "claude_code", whoPays: { payer: "plan", label: "plan" } }, consentFlag: "not_required", productionDeniedConflict: fakeProductionDeniedConflict })
   const text = plan.lines.find(line => line.id === `owner_only:${job.id}`)?.text ?? ""
-  expect(text).toContain("preview and local visits keep counting")
+  expect(text).toContain("until then preview and local visits count in Meta pixel")
   expect(text).toContain("src/tracking.ts:5")
   expect(text).toContain("```js")
   expect(text).toContain("location.hostname")
@@ -97,7 +97,7 @@ it("does not render a stale unmeasured assertion from report notes as a new meas
 it.each(["gtag('config', 'G-FAKE');", "fbq('init', '123456789');", "posthog.init('phc_fake', { defaults: '2026-01-30' });"])("renders a real single-statement guard diff without a placeholder: %s", async statement => {
   const { ownerGuardHandoff } = await import("./owner-boundary.js")
   const source = `function boot() {\n  ${statement}\n  fbq('consent', 'revoke');\n}\n`
-  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
+  const handoff = ownerGuardHandoff("For you: add the guard.", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
   expect(handoff.guard).toContain(`-  ${statement}\n+  if (hostAllowed) ${statement}`)
     expect(handoff.guard).toContain("@@ -1,4 +1,4 @@")
   expect(handoff.guard).not.toContain("Existing analytics")
@@ -112,7 +112,7 @@ it.each([
   { source: "gtag('config', 'G-FAKE',\n  buildConfig()) || fbq('consent', 'revoke');\n", line: 1 },
 ])("does not offer an apply-ready guard when the initialization statement boundary is ambiguous: $source", async ({ source, line }) => {
   const { ownerGuardHandoff } = await import("./owner-boundary.js")
-  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line }, "hostAllowed", source)
+  const handoff = ownerGuardHandoff("For you: add the guard.", { file: "src/tracking.ts", line }, "hostAllowed", source)
   expect(handoff.text).toContain("not an apply-ready edit")
   expect(handoff.guard).toBe("if (hostAllowed)")
 })
@@ -120,7 +120,7 @@ it.each([
 it("keeps a multiline literal initialization separate from the following consent statement", async () => {
   const { ownerGuardHandoff } = await import("./owner-boundary.js")
   const source = "function boot() {\n  window.posthog.init('phc_fake', {\n    defaults: '2026-01-30'\n  });\n  fbq('consent', 'revoke');\n}\n"
-  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
+  const handoff = ownerGuardHandoff("For you: add the guard.", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
   expect(handoff.guard).toContain("+  if (hostAllowed) window.posthog.init('phc_fake', {")
   expect(handoff.guard.split("\n").filter(line => /^[+-]/.test(line)).join("\n")).not.toContain("revoke")
 })
@@ -128,21 +128,21 @@ it("keeps a multiline literal initialization separate from the following consent
 it.each(["gtag('config', 'G-FAKE')", "fbq('init', '123456789')", "posthog.init('phc_fake', { defaults: '2026-01-30' })"])("renders a real diff for an isolated initialization without a semicolon: %s", async statement => {
   const { ownerGuardHandoff } = await import("./owner-boundary.js")
   const source = `function boot() {\n  ${statement}\n  fbq('consent', 'revoke')\n}\n`
-  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
+  const handoff = ownerGuardHandoff("For you: add the guard.", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
   expect(handoff.guard).toContain(`-  ${statement}\n+  if (hostAllowed) ${statement}`)
 })
 
 it.each(["&& fbq('consent', 'revoke');", ", fbq('consent', 'revoke');", "?.then(grant)", "['consent']()"])("refuses a continued expression after a semicolonless initialization: %s", async continuation => {
   const { ownerGuardHandoff } = await import("./owner-boundary.js")
   const source = `function boot() {\n  fbq('init', '123456789')\n  ${continuation}\n}\n`
-  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
+  const handoff = ownerGuardHandoff("For you: add the guard.", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
   expect(handoff.guard).toBe("if (hostAllowed)")
 })
 
 it.each(["x.gtag('config', 'G-FAKE');", "x.fbq('init', '123456789');"])("renders an apply-ready diff for an initialization on a local receiver: %s", async statement => {
   const { ownerGuardHandoff } = await import("./owner-boundary.js")
   const source = `function boot(x) {\n  ${statement}\n  x.fbq('consent', 'revoke');\n}\n`
-  const handoff = ownerGuardHandoff("Not changed by us", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
+  const handoff = ownerGuardHandoff("For you: add the guard.", { file: "src/tracking.ts", line: 2 }, "hostAllowed", source)
   expect(handoff.guard).toContain(`-  ${statement}\n+  if (hostAllowed) ${statement}`)
   expect(handoff.text).not.toContain("not an apply-ready edit")
   expect(handoff.guard.split("\n").filter(line => /^[+-]/.test(line)).join("\n")).not.toContain("revoke")
