@@ -763,6 +763,9 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   ])
   for (const type of CONVERSION_TYPES) {
     if (!conversionTypes.has(type)) continue
+    // A purchase is reported from the server (job 8, the payment webhook), never from a browser call: no job 10 for it.
+    // GA4 / PostHog purchase coverage is the site's own; the wizard never adds a second one.
+    if (type === "purchase") continue
     // P0-5: a conversion the site already sends to GA4 and PostHog gets no browser job (it would count twice there).
     // Only the tools that miss it, and run on this site, are named; Infinite and Meta get it from the server (job 8).
     const funnel = FUNNEL_EVENT_OF_TARGET[type]

@@ -135,7 +135,7 @@ describe("conversion briefs from the inventory (review P0-5)", () => {
     const brief = buildBrief([item("conversions_to_tools:lead", [LEAD], ["components/NewsletterForm.tsx"])], facts)
     const data = planData(brief, "conversions_to_tools:lead")
     expect(data.destinations).toEqual(["posthog"])
-    expect(data.helperImport).toBe('import { infiniteTrack, infiniteAdMatchAllowed } from "../lib/infinite-analytics"')
+    expect(data.helperImport).toBe('import { infiniteTrack, infiniteTrackThenNavigate, infiniteAdMatchAllowed } from "../lib/infinite-analytics"')
     expect(brief).toContain('{ destinations: ["posthog"] }')
     expect(brief).toContain("adMatch: infiniteAdMatchAllowed()")
     expect(brief).toContain("Meta and Infinite get it from your server")

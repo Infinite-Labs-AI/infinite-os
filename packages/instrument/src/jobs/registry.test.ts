@@ -302,7 +302,9 @@ describe("review fixes: what is seeded, under which line, with which files and c
     expect(kept({ conversion_names: "newsletter" })).toEqual([])
     expect(kept({ conversion_names: "" })).toEqual([])
     // The proposal approved as is keeps both types.
-    expect(kept({})).toEqual(["conversions_to_tools:purchase", "conversions_to_tools:signup", "server_conversions:purchase", "server_conversions:signup"])
+    // A purchase is the server's alone (the payment webhook): never a browser job 10 for it.
+    expect(kept({})).toEqual(["conversions_to_tools:signup", "server_conversions:purchase", "server_conversions:signup"])
+    expect(conversionIds).not.toContain("conversions_to_tools:purchase")
     // Unanswered: parked for the user, never run with a guessed name.
     expect(applyApprovalsTo(candidates, plan([names]), { approved: [], declined: [], edits: {} }).filter((item) => conversionIds.includes(item.id)).every((item) => item.state === "blocked")).toBe(true)
   })
