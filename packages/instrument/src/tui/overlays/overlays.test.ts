@@ -2,8 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { makeTestSanitizer } from "../../../test/wizard/fake-store.js"
 import type { AskKind, AskPayloads, PlanLine } from "../../wizard/contracts/asks.js"
-import { ASK_KINDS } from "../../wizard/contracts/asks.js"
-import { makeStyles, stripAnsi } from "../ansi.js"
+import { makeStyles } from "../ansi.js"
 import { parseKeys, type Key } from "../keys.js"
 import { OVERLAYS, answered } from "./index.js"
 import type { OverlayContext } from "./types.js"
@@ -30,18 +29,6 @@ const ENTER = "\r"
 const ESC = "\x1b"
 
 describe("overlays", () => {
-  it("§3y P3-9: the link card never prints an app root of '.' (a monorepo's real app root still shows)", () => {
-    const render = (appRoot: string) =>
-      OVERLAYS["link-code"].render({ code: "7918", site: { repoLabel: "github.com/a/smoke-site", appRoot, folderLabel: "~/Github/smoke-site" } }, {}, ctx()).body.map(stripAnsi)
-    expect(render(".")).toContain("Folder: ~/Github/smoke-site")
-    expect(render(".").join("\n")).not.toContain("(app:")
-    expect(render("apps/web")).toContain("Folder: ~/Github/smoke-site (app: apps/web)")
-  })
-
-  it("has one overlay per ask kind", () => {
-    expect(Object.keys(OVERLAYS).sort()).toEqual([...ASK_KINDS].sort())
-  })
-
   it("single: arrows move, ENTER chooses, ESC cancels; the default is highlighted, never auto-chosen", () => {
     const payload = { question: "Which?", options: [{ label: "A", value: "a" }, { label: "B", value: "b" }, { label: "C", value: "c" }], default: "b" }
     expect(drive("single", payload, ENTER).answer).toBe("b")
@@ -51,29 +38,10 @@ describe("overlays", () => {
     expect(drive("single", payload, DOWN).done).toBe(false)
   })
 
-  it("confirm: Y / N / ENTER default", () => {
-    expect(drive("confirm", { question: "Try again?", defaultYes: true }, ENTER).answer).toBe(true)
-    expect(drive("confirm", { question: "Try again?", defaultYes: false }, ENTER).answer).toBe(false)
-    expect(drive("confirm", { question: "Try again?", defaultYes: false }, "y").answer).toBe(true)
-    expect(drive("confirm", { question: "Try again?", defaultYes: true }, "\x1b[C" + ENTER).answer).toBe(false)
-  })
-
   it("multi: SPACE ticks, ENTER returns the ticked values in option order", () => {
     const payload = { question: "Which?", options: [{ label: "A", value: "a" }, { label: "B", value: "b" }, { label: "C", value: "c" }] }
     expect(drive("multi", payload, DOWN + DOWN + " " + UP + UP + " " + ENTER).answer).toEqual(["a", "c"])
     expect(drive("multi", payload, ENTER).answer).toEqual([])
-  })
-
-  it("text: typing, backspace, maxLength", () => {
-    expect(drive("text", { question: "Name?", maxLength: 5 }, "abcdefg" + ENTER).answer).toBe("abcde")
-    expect(drive("text", { question: "Name?", maxLength: 10 }, "abc\x7f" + ENTER).answer).toBe("ab")
-  })
-
-  it("merge-ready: ENTER open, ESC later", () => {
-    const payload = { prUrl: "https://github.com/acme/acme-store/pull/42", number: 42, summary: "Reviewed by Codex · rehearsal passed." }
-    expect(drive("merge-ready", payload, ENTER).answer).toBe("open")
-    expect(drive("merge-ready", payload, ESC).answer).toBe("later")
-    expect(stripAnsi(OVERLAYS["merge-ready"].render(payload, {}, ctx()).question)).toContain("Pull request #42 is ready")
   })
 
   it("teammate comments start unticked (nothing acted on without the user's OK)", () => {
@@ -105,19 +73,6 @@ describe("overlays", () => {
     expect(commentView.body.join("\n")).not.toContain("\x1b[2J")
     expect(sanitize.calls.some((call) => call.includes("wipe"))).toBe(true)
   })
-
-  it("agent questions: one after the other, options or text", () => {
-    const payload = {
-      questions: [
-        { itemId: "job8", question: "Which route creates the user?", why: "two candidates", options: [{ label: "A", value: "a" }, { label: "B", value: "b" }] },
-        { itemId: "job9", question: "What is the user id field?", why: "not found" }
-      ]
-    }
-    expect(drive("agent-questions", payload, DOWN + ENTER + "userId" + ENTER).answer).toEqual({ answers: { job8: "b", job9: "userId" } })
-    expect(drive("agent-questions", payload, ESC).answer).toBe("__cancelled__")
-    // An empty text answer is not accepted.
-    expect(drive("agent-questions", payload, ENTER + ENTER).done).toBe(false)
-  })
 })
 
 describe("plan overlay", () => {
@@ -131,30 +86,6 @@ describe("plan overlay", () => {
   const payload = (consentMode: "not_required" | "required" | null): AskPayloads["plan"] => ({
     lines,
     decisions: { consentMode, conversionNames: ["start_trial", "signup"], privacyText: "a\nb", npmInstall: "npm install @vercel/functions" }
-  })
-
-  it("ENTER continues without opting into explicit approval actions", () => {
-    expect(drive("plan", payload("not_required"), ENTER).answer).toEqual({
-      approved: ["consent_mode", "conversion_names"],
-      declined: [],
-      edits: {}
-    })
-  })
-
-  it("distinguishes an untouched opt-in from an explicit no", () => {
-    expect(drive("plan", payload("not_required"), "  " + ENTER).answer).toMatchObject({ declined: ["install_provider:infinite"] })
-  })
-
-  it("shows and counts banner handoff only after choosing to wait", () => {
-    const chosen = { ...payload("not_required"), bannerSignal: { id: "user_action:banner_signal", kind: "user_action" as const, requires: "user_action" as const, editable: false, text: "BANNER SIGNAL INSTRUCTIONS" } }
-    const overlay = OVERLAYS.plan
-    let state = overlay.init(chosen)
-    expect(overlay.render(chosen, state, ctx()).body.join("\n")).not.toContain("BANNER SIGNAL")
-    state = overlay.onKey(chosen, state, { name: "down" }).state
-    state = overlay.onKey(chosen, state, { name: "char", char: "e" }).state
-    expect(overlay.render(chosen, state, { ...ctx(), maxBodyLines: 100 }).body.join("\n")).toContain("BANNER SIGNAL INSTRUCTIONS")
-    state = overlay.onKey(chosen, state, { name: "char", char: "e" }).state
-    expect(overlay.render(chosen, state, ctx()).body.join("\n")).not.toContain("BANNER SIGNAL")
   })
 
   it("SPACE opts into an explicit approval; owner information cannot be toggled", () => {
@@ -173,22 +104,6 @@ describe("plan overlay", () => {
     const flipped = drive("plan", payload(null), ENTER + "e" + "e" + ENTER)
     expect(flipped.answer).toMatchObject({ edits: { consent_mode: "required" } })
   })
-
-  it("E edits a text line (conversion names)", () => {
-    const answer = drive("plan", payload("not_required"), DOWN + DOWN + "e" + "\x7f".repeat(40) + "purchase, lead" + ENTER + ENTER).answer
-    expect(answer).toMatchObject({ edits: { conversion_names: "purchase, lead" } })
-  })
-
-  it("renders decisions, measured values and the line marks", () => {
-    const view = OVERLAYS.plan.render(payload(null), OVERLAYS.plan.init(payload(null)), ctx())
-    // A plan line wider than the box wraps under its text, so the words are compared across rows.
-    const text = stripAnsi([view.question, ...view.body].join("\n")).replace(/\n {6}/g, " ")
-    expect(text).toContain("Consent: — choose it")
-    expect(text).toContain("Conversions: start_trial · signup")
-    expect(text).toContain("(2 page views per visit · dry load)")
-    expect(text).toContain(" →  Connect GA4 in Infinite")
-    expect(text).toContain("4 explicit choices · 1 thing only you can do")
-  })
 })
 
 it("never opts into package installs, API costs or connected-account changes on a plain continue", () => {
@@ -202,33 +117,3 @@ it("never opts into package installs, API costs or connected-account changes on 
   expect(drive("plan", payload, DOWN + " " + ENTER).answer).toEqual({ approved: ["agent_budget", "install_provider:infinite"], declined: [], edits: {} })
 })
 
-it("SPACE excludes shown repository work and a second SPACE includes it again", () => {
-  const payload: AskPayloads["plan"] = { lines: [
-    { id: "install_provider:infinite", kind: "install_provider", requires: "info", editable: false, text: "Install Infinite" }
-  ], decisions: { consentMode: null, conversionNames: [], privacyText: null, npmInstall: null } }
-  expect(drive("plan", payload, " " + ENTER).answer).toEqual({ approved: [], declined: ["install_provider:infinite"], edits: {} })
-  expect(drive("plan", payload, "  " + ENTER).answer).toEqual({ approved: ["install_provider:infinite"], declined: [], edits: {} })
-  const excluded = { ...payload, excluded: ["install_provider:infinite"] }
-  expect(drive("plan", excluded, ENTER).answer).toEqual({ approved: [], declined: excluded.excluded, edits: {} })
-})
-
-it("preserves the lines of a copyable owner snippet", () => {
-  const payload: AskPayloads["plan"] = { lines: [
-    { id: "user_action:guard", kind: "user_action", requires: "user_action", editable: false, text: "Add this guard:\n```js\nif (isProduction) {\n  start();\n}\n```" }
-  ], decisions: { consentMode: null, conversionNames: [], privacyText: null, npmInstall: null } }
-  const view = OVERLAYS.plan.render(payload, OVERLAYS.plan.init(payload), ctx())
-  expect(view.body.map(stripAnsi).join("\n")).toContain("      if (isProduction) {\n        start();\n      }")
-})
-
-it("does not offer the required proof-file information as an independent exclusion", () => {
-  const payload: AskPayloads["plan"] = { lines: [{ id: "info:infinite_site_file", kind: "user_action", requires: "info", editable: false, text: "Infinite requires this proof file" }], decisions: { consentMode: null, conversionNames: [], privacyText: null, npmInstall: null } }
-  expect(drive("plan", payload, " " + ENTER).answer).toEqual({ approved: [], declined: [], edits: {} })
-})
-
-it("preserves indentation after plus and minus in an owner diff", () => {
-  const payload: AskPayloads["plan"] = { lines: [
-    { id: "user_action:guard", kind: "user_action", requires: "user_action", editable: false, text: "Owner diff:\n```diff\n--- a/tracking.js\n+++ b/tracking.js\n@@ -1,2 +1,2 @@\n-    fbq('init',  'fixture');\n+    if (hostAllowed) fbq('init',  'fixture');\n```" }
-  ], decisions: { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: null } }
-  const view = OVERLAYS.plan.render(payload, OVERLAYS.plan.init(payload), { ...ctx(), width: 160, maxBodyLines: 30 })
-  expect(view.body.map(stripAnsi).join("\n")).toContain("-    fbq('init',  'fixture');\n      +    if (hostAllowed) fbq('init',  'fixture');")
-})

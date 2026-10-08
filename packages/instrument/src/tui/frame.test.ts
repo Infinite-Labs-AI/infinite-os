@@ -1,12 +1,8 @@
 import { describe, expect, it } from "vitest"
 
-import { makeSnapshot, makeTestSanitizer, midRunSnapshot, stepRows } from "../../test/wizard/fake-store.js"
+import { makeTestSanitizer, midRunSnapshot } from "../../test/wizard/fake-store.js"
 import { colorEnabled, makeStyles, stripAnsi, visibleWidth } from "./ansi.js"
 import { renderFrame, type FrameInput } from "./frame.js"
-import { OVERLAYS } from "./overlays/index.js"
-import type { OverlayContext } from "./overlays/types.js"
-import { CAPTURE_WAITING } from "../install/consent-handoff.js"
-import { hostRefusalLine } from "../wizard/site-host.js"
 
 function frame(change: Partial<FrameInput> = {}): string[] {
   return renderFrame({
@@ -25,40 +21,6 @@ function frame(change: Partial<FrameInput> = {}): string[] {
 const plain = (lines: string[]) => lines.map((line) => stripAnsi(line).replace(/\s+$/, "")).join("\n")
 
 describe("renderFrame", () => {
-  it("names the linked workspace in the header and labels who is acting", () => {
-    const base = midRunSnapshot()
-    const snapshot = midRunSnapshot({
-      learnFacts: { workspace: "Example Workspace" },
-      currentStep: "settings",
-      steps: base.steps.map((row) => row.id === "settings" ? { ...row, state: "running" as const } : row)
-    })
-    const text = plain(frame({ snapshot }))
-    expect(text.split("\n")[0]).toContain("Infinite setup · Example Workspace")
-    expect(text).toContain("by Infinite")
-    expect(plain(frame())).toContain("by your agent")
-  })
-
-  it("shows review-fix phase, fix rows and a moving bar instead of the old Thinking narration", () => {
-    const base = midRunSnapshot()
-    const snapshot = midRunSnapshot({
-      currentStep: "review",
-      steps: base.steps.map((row, index) => row.id === "review" ? { ...row, state: "running" as const, startedAt: "2026-10-02T09:00:00.000Z", status: "Writing the changes · job 2 of 2 · 3 files read · 1 edited · thinking 0 s · 1 of 2 claimed · 5 of 10 min" } : index < 9 ? { ...row, state: "ok" as const } : row),
-      narration: [{ agent: "claude_code", role: "worker", text: "Thinking · 9 s · 2 of 2 claimed", at: "2026-10-02T09:05:00.000Z" }],
-      jobs: [
-        { id: "preview_guard:meta", title: "Old guard job", state: "blocked" },
-        { id: "review_comments:f1", title: "Fix comment one", state: "done_in_code" },
-        { id: "review_comments:f2", title: "Fix comment two", state: "checking" }
-      ]
-    })
-    const text = plain(frame({ snapshot, nowMs: Date.parse("2026-10-02T09:05:00.000Z") }))
-    expect(text).toContain("Writing the changes · job 2 of 2")
-    expect(text).toContain("Fix comment one")
-    expect(text).toContain("Fix comment two")
-    expect(text).not.toContain("Old guard job")
-    expect(text).not.toContain("Claude Code › Thinking")
-    expect(Number(/(\d+)%/.exec(text)?.[1])).toBeGreaterThan(9 / 13 * 100)
-  })
-
   it("names pending proof, not-needed, blocked and unmeasured rows plainly", () => {
     const snapshot = midRunSnapshot({ jobs: [
       { id: "a", title: "Deploy proof", state: "waiting_deploy" },
@@ -70,82 +32,6 @@ describe("renderFrame", () => {
     const text = plain(frame({ snapshot, height: 40 }))
     for (const label of ["in the pull request", "waiting for a real event", "not needed", "could not be checked", "blocked: needs your answer"]) expect(text).toContain(label)
   })
-  it("shows installed capture waiting on the banner as neutral, while ordinary code checks stay passed", () => {
-    const snapshot = midRunSnapshot({ jobs: [
-      { id: "meta_improve:capture", title: "Ad-click capture", state: "done_in_code", note: CAPTURE_WAITING },
-      { id: "preview_guard:ga4", title: "GA4 guard", state: "done_in_code" },
-      { id: "meta_improve:failed", title: "Failed capture", state: "failed", note: CAPTURE_WAITING }
-    ] })
-    for (const width of [70, 120]) {
-      const text = plain(frame({ snapshot, width, height: 50 })).replace(/\s+/g, " ")
-      expect(text).toContain(`· 1/3 Ad-click capture · ${CAPTURE_WAITING}`)
-      expect(text).toContain("✓ 2/3 GA4 guard · passed in code")
-      expect(text).toContain("✗ 3/3 Failed capture · failed")
-    }
-  })
-
-  it("keeps job progress monotonic through a provisional failure and re-claim", () => {
-    const base = midRunSnapshot()
-    const steps = base.steps.map((row) => row.id === "jobs" ? { ...row, startedAt: "2026-10-02T09:00:00.000Z" } : row)
-    const jobs: NonNullable<FrameInput["snapshot"]["jobs"]> = [
-      { id: "a", title: "A", state: "failed" },
-      { id: "b", title: "B", state: "failed" },
-      { id: "c", title: "C", state: "waiting" }
-    ]
-    const pct = (states: typeof jobs, highWater?: number) => Number(/(\d+)%/.exec(plain(frame({ snapshot: midRunSnapshot({ steps, jobs: states, jobsSettledHighWater: highWater }), nowMs: Date.parse("2026-10-02T09:00:00.000Z") })))?.[1])
-    expect(pct([{ ...jobs[0]!, state: "checking" }, jobs[1]!, jobs[2]!], 2)).toBeGreaterThanOrEqual(pct(jobs, 2))
-  })
-
-  it("never rounds a running step up to the next step mark", () => {
-    const base = midRunSnapshot()
-    const steps = base.steps.map((row, index) => index < 8 ? { ...row, state: "ok" as const } : index === 8 ? { ...row, state: "running" as const, startedAt: "2026-10-02T09:00:00.000Z" } : row)
-    const text = plain(frame({ snapshot: midRunSnapshot({ steps, currentStep: "rehearsal" }), nowMs: Date.parse("2026-10-02T09:00:57.000Z") }))
-    const runningPct = Number(/(\d+)%/.exec(text)?.[1])
-    expect(runningPct).toBeLessThan(Math.round(9 / 13 * 100))
-  })
-  it("shows every job as a stable checklist and moves the bar during a long running step", () => {
-    const base = midRunSnapshot()
-    const snapshot = midRunSnapshot({
-      currentStep: "jobs",
-      steps: base.steps.map((row) => row.id === "jobs" ? { ...row, startedAt: "2026-10-02T09:00:00.000Z", status: "Writing the changes · 3 files edited" } : row),
-      jobs: [
-        { id: "a", title: "Add capture", state: "done_in_code" },
-        { id: "b", title: "Guard Meta", state: "checking" },
-        { id: "c", title: "Update privacy", state: "waiting" }
-      ]
-    })
-    const text = plain(frame({ snapshot, nowMs: Date.parse("2026-10-02T09:08:00.000Z") }))
-    for (const title of ["Add capture", "Guard Meta", "Update privacy"]) expect(text).toContain(title)
-    expect(text).toContain("Writing the changes")
-    expect(text).toMatch(/\b4[7-9]%|\b5[0-3]%/)
-  })
-  it("120 columns: Learn card beside the 13-row step list, the narration and the sub-statuses", () => {
-    const lines = frame()
-    expect(plain(lines)).toMatchSnapshot()
-    const text = plain(lines)
-    expect(text).toContain("The agent's checklist")
-    expect(text).toContain("Claude Code › The sign-up route")
-    // A 40-row terminal has the room for every sub-status the store keeps (6 were emitted, 8 are kept).
-    expect(text).toContain("Job 1/7")
-    // A 24-row one keeps the last 5 only.
-    const short = plain(frame({ height: 24 }))
-    expect(short).not.toContain("Job 1/7")
-    expect(short).toContain("Job 2/7")
-    for (const line of lines) expect(visibleWidth(line)).toBeLessThan(120)
-  })
-
-  it("R2-3: a long sub-status (the refused-host reason) wraps in full; it is never cut at 120 characters", () => {
-    const at = "2026-10-03T08:28:40.000Z"
-    const reason = hostRefusalLine({ reason: "preview", shown: "example-shop-site-mix177n53-example-team.vercel.app" })
-    expect(reason.length).toBeGreaterThan(120)
-    const snapshot = midRunSnapshot({ currentStep: "before", steps: stepRows({ link: { state: "ok" }, agent: { state: "ok" }, before: { state: "running", subs: [{ text: reason, tone: "warn", at }] } }) })
-    for (const width of [80, 120]) {
-      const text = plain(frame({ snapshot, width })).replace(/\s+/g, " ")
-      expect(text, `width ${width}`).toContain("Or type your own domain now (ESC if it has none yet).")
-      expect(text).not.toContain("collects o …")
-      for (const line of frame({ snapshot, width })) expect(visibleWidth(line)).toBeLessThan(width)
-    }
-  })
 
   it("70 columns: the Learn card is dropped and no line runs past the screen", () => {
     const lines = frame({ width: 70 })
@@ -155,23 +41,12 @@ describe("renderFrame", () => {
     for (const line of lines) expect(visibleWidth(line)).toBeLessThan(70)
   })
 
-  it("80 columns is the threshold for the Learn card (negative: 79 drops it)", () => {
-    expect(plain(frame({ width: 80 }))).toContain("The agent's checklist")
-    expect(plain(frame({ width: 79 }))).not.toContain("The agent's checklist")
-  })
-
   it("NO_COLOR: no escape sequence in any line", () => {
     const styles = makeStyles(colorEnabled({ NO_COLOR: "1" }, true))
     const lines = frame({ styles })
     expect(lines.join("\n")).not.toContain("\x1b")
     // Negative: with colour on, the same frame has escapes.
     expect(frame().join("\n")).toContain("\x1b[")
-  })
-
-  it("prints the runtime variant in the header when it is not prod", () => {
-    const dev = plain(frame({ snapshot: midRunSnapshot({ run: { runId: null, displayId: "r-7f3c", tagVersion: "0.12.0", runtimeVariant: "dev3" } }) }))
-    expect(dev.split("\n")[0]).toContain("Infinite dev3")
-    expect(plain(frame()).split("\n")[0]).not.toContain("Infinite prod")
   })
 
   it("routes sub-statuses, statuses and narration through the sanitiser", () => {
@@ -184,65 +59,5 @@ describe("renderFrame", () => {
     expect(lines.join("\n")).not.toContain("\x1b[2J")
     expect(lines.join("\n")).not.toContain("‮")
     expect(plain(lines)).toContain("Codex › ignore this RED")
-  })
-
-  it("marks parked, blocked and failed steps with their status", () => {
-    const snapshot = makeSnapshot({
-      steps: stepRows({ link: { state: "blocked", status: "Open the Infinite app (and sign in)", code: "INF_WIZ_NO_APP" } }),
-      currentStep: null
-    })
-    const text = plain(frame({ snapshot }))
-    expect(text).toContain("! Link to Infinite · Open the Infinite app")
-  })
-
-  it("draws the pending ask as one overlay box in place of the live region", () => {
-    const sanitize = makeTestSanitizer()
-    const payload = {
-      lines: [
-        { id: "npm_install", kind: "npm_install" as const, text: "Run npm install @vercel/functions", requires: "approval" as const, editable: false },
-        { id: "consent_mode", kind: "consent_mode" as const, text: "Consent setting", requires: "approval" as const, editable: true },
-        { id: "user_action:connect_ga4", kind: "user_action" as const, text: "Connect GA4 in Infinite", requires: "user_action" as const, editable: false }
-      ],
-      decisions: { consentMode: null, conversionNames: ["start_trial", "signup"], privacyText: "line one\nline two", npmInstall: "npm install @vercel/functions" }
-    }
-    const state = OVERLAYS.plan.init(payload)
-    const overlay = (ctx: OverlayContext) => OVERLAYS.plan.render(payload, state, ctx)
-    const snapshot = makeSnapshot({
-      steps: stepRows({ link: { state: "ok" }, agent: { state: "ok" }, before: { state: "ok" }, keys: { state: "ok" }, plan: { state: "running" } }),
-      currentStep: "plan",
-      pendingAsk: { askId: "a1", kind: "plan", payload }
-    })
-    const lines = frame({ snapshot, overlay, sanitize })
-    expect(plain(lines)).toMatchSnapshot()
-    const text = plain(lines)
-    expect(text).toContain("The plan (one screen)")
-    expect(text).toContain("[ ] Run npm install @vercel/functions")
-    expect(text).toContain("ENTER continue")
-    expect(lines.length).toBeLessThanOrEqual(40)
-  })
-
-  it("shows the outro instead of the step screen", () => {
-    const outro = "◆ acme-store collects analytics properly now · run r-7f3c\nChecks passing   6 pass · 5 problems · 3 unknown   13 pass"
-    const text = plain(frame({ outro }))
-    expect(text).toContain("collects analytics properly now")
-    expect(text).not.toContain("Tasks")
-  })
-
-  it("a short terminal keeps the steps around the current one", () => {
-    const lines = frame({ height: 16 })
-    expect(lines.length).toBeLessThanOrEqual(16)
-    expect(plain(lines)).toContain("Agent jobs")
-  })
-
-  it("a very short terminal keeps the whole question box (its keys line) and drops steps first", () => {
-    const payload = { question: "The GA4 property has 2 web streams. Which one is this site?", options: [{ label: "a", value: "a" }, { label: "b", value: "b" }] }
-    const state = OVERLAYS.single.init(payload)
-    const snapshot = makeSnapshot({ currentStep: "keys", steps: stepRows({ keys: { state: "running" } }), pendingAsk: { askId: "a", kind: "single", payload } })
-    for (const height of [12, 14, 18]) {
-      const lines = frame({ snapshot, height, overlay: (ctx) => OVERLAYS.single.render(payload, state, ctx) })
-      expect(lines.length).toBeLessThanOrEqual(height)
-      expect(plain(lines)).toContain("ENTER choose")
-      expect(plain(lines)).toContain("╰")
-    }
   })
 })

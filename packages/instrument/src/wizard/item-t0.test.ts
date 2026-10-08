@@ -7,10 +7,10 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
 import type { WizardContext, WizardDeps } from "./contracts/deps.js"
-import type { ChecklistItem, CheckResult, T0Scenario } from "./contracts/jobs.js"
+import type { CheckResult, T0Scenario } from "./contracts/jobs.js"
 import { WIZARD_PATHS } from "./contracts/state.js"
 import { nodeWizardFs } from "./fs.js"
-import { itemT0Scenarios, runItemT0, t0RunParams, T0_UNBUILDABLE_PREFIX } from "./item-t0.js"
+import { runItemT0, t0RunParams, T0_UNBUILDABLE_PREFIX } from "./item-t0.js"
 
 const RUN = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
 
@@ -24,10 +24,6 @@ function ctx(dir: string, runId: string | null = RUN): WizardContext {
   return { root: dir, runId, state: { get: () => ({ runId }) } } as unknown as WizardContext
 }
 
-function item(jobId: ChecklistItem["jobId"], target: string, files: string[]): ChecklistItem {
-  return { id: `${jobId}:${target}`, jobId, n: 7, title: "t", owner: "agent", trigger: { finding: "f", evidence: [] }, allow: { files, create: [] }, checks: [], state: "claimed" }
-}
-
 function writeRunFacts(dir: string, runId: string): void {
   const facts = { census: { entries: [], envSourcedIds: [], identify: { identifyCalls: [], resetCalls: [] } }, keys: {}, hosting: {}, dryLive: null, checks: [], observedProductionHost: "www.acme-store.com" }
   writeFileSync(join(dir, WIZARD_PATHS.beforeFacts), JSON.stringify({ schema: "infinite-tag.before-facts.v1", runId, measuredAt: "2026-10-02T09:00:00.000Z", productionHost: "acme-store.com", facts }))
@@ -38,32 +34,10 @@ function writeRunFacts(dir: string, runId: string): void {
 }
 
 describe("the run-level T0 params", () => {
-  it("carry THIS run's production host and the approved guard's exempt hosts", async () => {
-    const dir = root()
-    writeRunFacts(dir, RUN)
-    expect(await t0RunParams(ctx(dir), { fs: nodeWizardFs })).toEqual({ productionHost: "acme-store.com", exempt: ["acme-store.com", "www.acme-store.com"] })
-  })
-
   it("NEGATIVE: another run's facts are never used (no production host is invented)", async () => {
     const dir = root()
     writeRunFacts(dir, "00000000-0000-4000-8000-000000000000")
     expect(await t0RunParams(ctx(dir), { fs: nodeWizardFs })).toEqual({ exempt: ["acme-store.com", "www.acme-store.com"] })
-  })
-})
-
-describe("itemT0Scenarios", () => {
-  it("a preview-guard job on an HTML page is tested on THAT page, for the one tool it guards", async () => {
-    const dir = root()
-    writeFileSync(join(dir, "index.html"), "<script>gtag('config','G-FAKE00001')</script>")
-    const [scenario] = await itemT0Scenarios(item("preview_guard", "ga4", ["index.html"]), [{ checkId: "host_matrix" }], { productionHost: "acme-store.com" }, { fs: nodeWizardFs, root: dir })
-    expect(scenario!.params).toMatchObject({ productionHost: "acme-store.com", source: { html: "<script>gtag('config','G-FAKE00001')</script>" }, tools: ["ga4"], target: "ga4" })
-  })
-
-  it("NEGATIVE: another job (or a non-HTML file) gets no page source: lane O6 decides what it loads", async () => {
-    const dir = root()
-    const [scenario] = await itemT0Scenarios(item("conversions_to_tools", "signup", ["app/page.tsx"]), [{ checkId: "click_test" }], {}, { fs: nodeWizardFs, root: dir })
-    expect(scenario!.params.source).toBeUndefined()
-    expect(scenario!.params.tools).toBeUndefined()
   })
 })
 

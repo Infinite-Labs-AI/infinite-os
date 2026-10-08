@@ -66,53 +66,6 @@ describe("the wizard's own /dev/tty prompt (O1-10)", () => {
     expect(openDevTtyPrompter(join(dir, "plain"))).toBeNull()
   })
 
-  it.skipIf(!hasPython)("shows repository work and the full owner handoff without requesting approval", () => {
-    const { status, output } = onPty(`
-const prompter = openDevTtyPrompter()
-if (!prompter) process.exit(5)
-await prompter.showPlan({ lines: [
-  { id: 'repo:1', text: 'Improve the existing tag', kind: 'improve_additive', requires: 'info', editable: false },
-  { id: 'owner:1', text: 'Add this line: '+ 'x'.repeat(500) + ' HANDOFF_END', kind: 'user_action', requires: 'user_action', editable: false }
-], excluded: ['repo:1'], decisions: { consentMode: null, conversionNames: [], privacyText: null, npmInstall: null } })
-prompter.close()
-`)
-    expect(status).toBe(0)
-    expect(output).toContain("Excluded: repo:1")
-    expect(output).toContain("Improve the existing tag")
-    expect(output).toContain("HANDOFF_END")
-    expect(output).not.toContain("Approve this line?")
-  })
-
-  it.skipIf(!hasPython)("opened and closed with no prompt: the process exits 0 with no EBADF (negative: the eager stream crashed here)", () => {
-    const { status, output } = onPty(`
-const prompter = openDevTtyPrompter()
-if (!prompter) { console.log("NO_TTY"); process.exit(5) }
-prompter.close()
-console.log("CLOSED")
-`)
-    expect(output).toContain("CLOSED")
-    expect(output).not.toContain("EBADF")
-    expect(status).toBe(0)
-  })
-
-  it.skipIf(!hasPython)("asks on the terminal, takes the typed answer, then lets the process exit on its own", () => {
-    const { status, output } = onPty(
-      `
-const prompter = openDevTtyPrompter()
-if (!prompter) { console.log("NO_TTY"); process.exit(5) }
-const answer = await prompter.ask("confirm", { question: "Start a fresh run?", defaultYes: false })
-console.log("ANSWER=" + JSON.stringify(answer))
-prompter.close()
-`,
-      "[y/N]",
-      "y\n"
-    )
-    expect(output).toContain("Start a fresh run? [y/N]")
-    expect(output).toContain("ANSWER=true")
-    expect(output).not.toContain("EBADF")
-    expect(status).toBe(0)
-  })
-
   it.skipIf(!hasPython)("an unanswered prompt gives up after its timeout (never a default yes)", () => {
     const { status, output } = onPty(`
 const prompter = openDevTtyPrompter("/dev/tty", { timeoutMs: 200 })

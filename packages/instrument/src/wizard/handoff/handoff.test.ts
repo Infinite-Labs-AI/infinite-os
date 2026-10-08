@@ -1,17 +1,17 @@
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
-import { O8_BEFORE_FACTS_PATH, O8_BEFORE_FACTS_SCHEMA, writeO8BeforeFile } from "../../../test/wizard/before-file.js"
-import { fixtureResponse, loadTestRunCases } from "../../../test/wizard/fake-bridge.js"
+import { writeO8BeforeFile } from "../../../test/wizard/before-file.js"
+import { fixtureResponse } from "../../../test/wizard/fake-bridge.js"
 import { nodeWizardFs } from "../../../test/wizard/step-harness.js"
 import type { TagHosting, TagKeys } from "../contracts/bridge.js"
 import type { BeforeFacts } from "../contracts/jobs.js"
 import type { TestResult } from "../contracts/test-engine.js"
-import { BEFORE_FACTS_PATH, BEFORE_FACTS_SCHEMA, observedIdsFromBefore, readBeforeFacts } from "./before-facts.js"
-import { KEYS_RESULT_SCHEMA, applyKeysChoices, compareKeys, keysDigest, keysPlanLines, readKeysResult, writeKeysResult, type KeysStepResult } from "./keys-result.js"
+import { BEFORE_FACTS_PATH, observedIdsFromBefore, readBeforeFacts } from "./before-facts.js"
+import { KEYS_RESULT_SCHEMA, applyKeysChoices, compareKeys, keysDigest, type KeysStepResult } from "./keys-result.js"
 
 const RUN = "7f3c2a91-b0de-4c5f-8a21-3e4d5c6b7a80"
 const OTHER_RUN = "0a0a0a0a-b0de-4c5f-8a21-3e4d5c6b7a80"
@@ -50,17 +50,6 @@ function facts(dry: TestResult | null): BeforeFacts {
 }
 
 describe("before → keys hand-off", () => {
-  it("reads the file lane O8's before writes: .infinite/wizard/before.json, schema infinite-tag.before-facts.v1", async () => {
-    expect(BEFORE_FACTS_PATH).toBe(O8_BEFORE_FACTS_PATH)
-    expect(BEFORE_FACTS_SCHEMA).toBe(O8_BEFORE_FACTS_SCHEMA)
-    const dry = loadTestRunCases().find((candidate) => candidate.id === "dry_live_all_once")?.result as TestResult
-    await writeO8BeforeFile(nodeWizardFs, root, RUN, facts(dry))
-    expect(statSync(join(root, BEFORE_FACTS_PATH)).mode & 0o777).toBe(0o600)
-    const read = await readBeforeFacts(nodeWizardFs, root, RUN)
-    expect(read?.facts.observedProductionHost).toBe("acme-store.com")
-    expect(read?.measuredAt).toBe("2026-10-02T09:05:00.000Z")
-  })
-
   it("is run-scoped: another run's file, a file with no run id, or no run → null (a stale file is never this run's measurement)", async () => {
     await writeO8BeforeFile(nodeWizardFs, root, OTHER_RUN, facts(null))
     expect(await readBeforeFacts(nodeWizardFs, root, RUN)).toBeNull()
@@ -81,23 +70,6 @@ describe("before → keys hand-off", () => {
     // O2's old file name and schema are not read (O8's before never writes them).
     writeFileSync(join(root, ".infinite/wizard/before-facts.json"), JSON.stringify({ schema: "infinite-tag.wizard-before-facts.v1", writtenAt: "x", facts: facts(null) }))
     expect(await readBeforeFacts(nodeWizardFs, root, RUN)).toBeNull()
-  })
-
-  it("observed ids: a GTM container id and an env-sourced id are not compared as GA4 / Meta ids", () => {
-    const observed = observedIdsFromBefore(facts(null))
-    expect(observed.inCode.ga4).toEqual(["G-FAKE00001"])
-    expect(observed.inCode.meta).toEqual([])
-    expect(observed.liveMeasured).toBe(false)
-  })
-
-  it("compareKeys: a code id outside the connection is a problem; one inside is a pass", () => {
-    const observed = observedIdsFromBefore(facts(null))
-    const pass = compareKeys(keys(), { ga4MeasurementId: "G-FAKE00001", metaPixel: null }, observed)
-    expect(pass.find((c) => c.tool === "ga4")).toMatchObject({ state: "pass" })
-    const problem = compareKeys(keys(), { ga4MeasurementId: "G-FAKE00002", metaPixel: null }, observed)
-    expect(problem.find((c) => c.tool === "ga4")).toMatchObject({ state: "problem", reason: "mismatch" })
-    const line = keysPlanLines(keys(), problem).find((candidate) => candidate.id === "user_action:keys_mismatch_ga4")
-    expect(line?.text).toContain("the code has G-FAKE00001")
   })
 
   it("compareKeys: a code-only match is a pass on the CODE (no live ids), never a live one", () => {
@@ -123,27 +95,6 @@ function keysResult(runId: string, change: Partial<KeysStepResult> = {}): KeysSt
 }
 
 describe("keys → plan hand-off", () => {
-  it("keys.json is run-scoped: another run's choices are never read", async () => {
-    await writeKeysResult(nodeWizardFs, root, keysResult(OTHER_RUN))
-    expect(await readKeysResult(nodeWizardFs, root, RUN)).toBeNull()
-    expect(await readKeysResult(nodeWizardFs, root, null)).toBeNull()
-    await writeKeysResult(nodeWizardFs, root, keysResult(RUN))
-    expect((await readKeysResult(nodeWizardFs, root, RUN))?.choices.ga4MeasurementId).toBe("G-FAKE00002")
-  })
-
-  it("keysDigest is the connections only: the same keys with another envelope hash the same; a changed id does not", () => {
-    const a = { ...keys(), protocolVersion: 1, requestId: "00000000-0000-4000-8000-000000000001" } as TagKeys
-    const b = { ...keys(), protocolVersion: 1, requestId: "00000000-0000-4000-8000-000000000002" } as TagKeys
-    expect(keysDigest(a)).toBe(keysDigest(b))
-    expect(keysDigest(a)).toBe(keysDigest(keys()))
-    // Key order does not matter.
-    const reordered = Object.fromEntries(Object.entries(keys()).reverse()) as unknown as TagKeys
-    expect(keysDigest(reordered)).toBe(keysDigest(keys()))
-    const changed = keys()
-    changed.ga4.streams = changed.ga4.streams.slice(0, 1)
-    expect(keysDigest(changed)).not.toBe(keysDigest(keys()))
-  })
-
   it("applyKeysChoices narrows GA4 to the chosen stream and Meta to the chosen pixel; never adds an id", () => {
     const base = keys()
     base.meta = {

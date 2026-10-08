@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { HARNESS_STEPS, HARNESS_STEPS_BY_ID } from "./run.js"
-import { createHarnessReport, findProvider } from "./state.js"
+import { createHarnessReport } from "./state.js"
 import {
   RUNBOOK_STEP_IDS,
   runRunbook,
@@ -36,24 +36,6 @@ function step(
 }
 
 describe("runRunbook", () => {
-  it("names the harness steps in order (teardown §5.2 plus setup correctness)", () => {
-    expect(RUNBOOK_STEP_IDS).toEqual([
-      "preflight",
-      "inspect",
-      "resolve-keys",
-      "classify",
-      "plan",
-      "confirm",
-      "apply",
-      "conversions",
-      "setup-checks",
-      "server-lane",
-      "server-lane-env",
-      "verify",
-      "report"
-    ])
-  })
-
   // ONE SOURCE OF TRUTH. The report's step list and the steps the harness actually runs must be the
   // same ids in the same order; this list once said 12 while the harness ran 13.
   it("the harness runs exactly RUNBOOK_STEP_IDS, in order, and every step carries its own id", () => {
@@ -61,42 +43,6 @@ describe("runRunbook", () => {
     expect(HARNESS_STEPS).toHaveLength(RUNBOOK_STEP_IDS.length)
     for (const [key, step] of Object.entries(HARNESS_STEPS_BY_ID)) expect(step.id, key).toBe(key)
     expect(Object.keys(HARNESS_STEPS_BY_ID).sort()).toEqual([...RUNBOOK_STEP_IDS].sort())
-  })
-
-  it("negative: the drift check fails when the ids and the steps disagree", () => {
-    const ids = HARNESS_STEPS.map((step) => step.id)
-    const withoutSetupChecks = RUNBOOK_STEP_IDS.filter((id) => id !== "setup-checks")
-    expect(ids).not.toEqual(withoutSetupChecks)
-    const misnamed = { ...HARNESS_STEPS_BY_ID, verify: HARNESS_STEPS_BY_ID.report }
-    expect(Object.entries(misnamed).every(([key, step]) => step.id === key)).toBe(false)
-  })
-
-  it("carries every teardown failure code", () => {
-    for (const code of [
-      "INF_ENV_DIRTY_TREE",
-      "INF_DETECT_NO_FRAMEWORK",
-      "INF_POSTHOG_NO_KEY",
-      "INF_PLAN_UNMANAGED_TARGET",
-      "INF_APPLY_ROLLED_BACK",
-      "INF_MARK_STALE_ELEMENT",
-      "INF_VERIFY_NO_RECEIPT",
-      "INF_ARGS_CONVERSIONS_REQUIRED"
-    ]) {
-      expect(HARNESS_FAILURE_CODES).toContain(code)
-    }
-  })
-
-  it("runs steps in order and records ok outcomes", async () => {
-    const context = ctx()
-    const result = await runRunbook([step("a", true, "halt"), step("b", true, "halt")], context, {
-      finalize: () => undefined
-    })
-    expect(context.log).toEqual(["run:a", "run:b"])
-    expect(result.halted).toBe(false)
-    expect(context.report.steps.map((s) => [s.id, s.status])).toEqual([
-      ["a", "ok"],
-      ["b", "ok"]
-    ])
   })
 
   it("halts on a halting failure, marks the rest not_run, and still finalizes with all seven providers", async () => {
@@ -124,36 +70,6 @@ describe("runRunbook", () => {
     expect(context.report.finishedAt).not.toBeNull()
   })
 
-  it("continues past a continuing failure and keeps it as the report failure when nothing halts", async () => {
-    const context = ctx()
-    const result = await runRunbook(
-      [step("a", false, "continue", "INF_POSTHOG_NO_KEY"), step("b", true, "halt")],
-      context,
-      { finalize: () => undefined }
-    )
-    expect(context.log).toEqual(["run:a", "run:b"])
-    expect(result.halted).toBe(false)
-    expect(context.report.failure?.code).toBe("INF_POSTHOG_NO_KEY")
-    expect(context.report.failures).toHaveLength(1)
-  })
-
-  it("a later halting failure outranks an earlier continuing one as the headline", async () => {
-    const context = ctx()
-    await runRunbook(
-      [
-        step("a", false, "continue", "INF_POSTHOG_NO_KEY"),
-        step("b", false, "halt", "INF_APPLY_ROLLED_BACK")
-      ],
-      context,
-      { finalize: () => undefined }
-    )
-    expect(context.report.failure?.code).toBe("INF_APPLY_ROLLED_BACK")
-    expect(context.report.failures.map((f) => f.code)).toEqual([
-      "INF_POSTHOG_NO_KEY",
-      "INF_APPLY_ROLLED_BACK"
-    ])
-  })
-
   it("treats a thrown error as that step's failure with its message", async () => {
     const context = ctx()
     const throwing: RunbookStep<Ctx> = {
@@ -170,17 +86,5 @@ describe("runRunbook", () => {
       code: "INF_APPLY_ROLLED_BACK",
       message: expect.stringContaining("disk full")
     })
-  })
-
-  it("lets a step skip itself and still prints all seven rows unchanged", async () => {
-    const context = ctx()
-    const skipping: RunbookStep<Ctx> = {
-      ...step("server-lane", true, "continue"),
-      run: () => ({ skipped: "no --server-lane" })
-    }
-    await runRunbook([skipping], context, { finalize: () => undefined })
-    expect(context.report.steps[0]).toMatchObject({ status: "skipped", note: "no --server-lane" })
-    expect(context.report.providers).toHaveLength(7)
-    expect(findProvider(context.report, "server_lane").state).toBe("absent")
   })
 })

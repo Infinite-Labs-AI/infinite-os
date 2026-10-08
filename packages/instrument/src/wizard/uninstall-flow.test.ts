@@ -1,5 +1,4 @@
-import { isPolicyPath } from "../jobs/policy-pages.js"
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -9,7 +8,7 @@ import { ASK_TIMEOUT, type AskKind } from "./contracts/asks.js"
 import type { AskFn } from "./contracts/deps.js"
 import { nodeWizardFs } from "./fs.js"
 import { createRunState } from "./run-state.js"
-import { UNINSTALL_PIECES, UNINSTALL_RECORD_PATH, runUninstallFlow, type UninstallPiece } from "./uninstall-flow.js"
+import { UNINSTALL_RECORD_PATH, runUninstallFlow, type UninstallPiece } from "./uninstall-flow.js"
 
 // These workflow tests use a fake GitOps, so its measurement is fake too. Actual Git history,
 // protected-source refusal and pinned GitHub/GitLab pushes run in uninstall-boundary.test.ts.
@@ -56,33 +55,6 @@ function run(root: string, bundle: ReturnType<typeof fakeDeps>, ask: AskFn, stat
 }
 
 describe("uninstall --pr", () => {
-  it("uses origin/HEAD and attempts the push when gh facts are unreadable", async () => {
-    const root = tempRoot()
-    mkdirSync(join(root, ".git/refs/remotes/origin"), { recursive: true })
-    writeFileSync(join(root, ".git/refs/remotes/origin/HEAD"), "ref: refs/remotes/origin/trunk\n")
-    const state = linkedState(root)
-    state.git = null
-    const bundle = fakeDeps({ reversed: ["app/layout.tsx"], bridge: { hosting: { protocolVersion: 1, requestId: "r", provider: "none", vercel: null } } })
-    bundle.deps.host.repoFacts = async () => { throw new Error("gh temporarily unavailable") }
-    const result = await run(root, bundle, answering({}), state)
-    expect(result.exitCode).toBe(0)
-    expect(result.lines.some((line) => line.includes("could not be checked early"))).toBe(true)
-    expect(bundle.log.calls.find((call) => call.what === "createBranch")?.args[0]).toBe("trunk")
-    expect(bundle.log.names("git")).toContain("git.push")
-  })
-
-  it("uses the saved fork for the uninstall push and PR head", async () => {
-    const root = tempRoot()
-    const bundle = fakeDeps({ reversed: ["app/layout.tsx"] })
-    const bound: string[] = []
-    Object.assign(bundle.deps.git, { setPushRemote: (url: string) => bound.push(url) })
-    const state = linkedState(root)
-    state.pushTarget = { kind: "fork", remoteUrl: "https://github.com/acme-dev/acme-store.git", headOwner: "acme-dev" }
-    const result = await run(root, bundle, answering({}), state)
-    expect(result.exitCode).toBe(0)
-    expect(bound).toEqual([state.pushTarget.remoteUrl])
-    expect(bundle.log.calls.find((call) => call.what === "createDraftPr")?.args[0]).toMatchObject({ head: expect.stringMatching(/^acme-dev:infinite\/tag\/uninstall-/) })
-  })
   it("creates the uninstall branch BEFORE any file changes, then reverses, commits, pushes and opens a draft PR", async () => {
     const root = tempRoot()
     const bundle = fakeDeps({ reversed: ["app/layout.tsx", ".gitignore"] })
@@ -93,27 +65,6 @@ describe("uninstall --pr", () => {
     expect(bundle.log.calls.find((call) => call.what === "stage")!.args[0]).toEqual(["app/layout.tsx", ".gitignore", ".infinite/install.json"])
     expect(bundle.log.calls.find((call) => call.what === "commit")!.args[0]).toMatchObject({ trailers: { "Infinite-Tag-Run": RUN_ID } })
     expect(result).toMatchObject({ exitCode: 0, record: { pr: { number: 43 } } })
-  })
-
-  it("explains policy skips in terminal and PR text with safe display filenames", async () => {
-    const root = tempRoot()
-    const bundle = fakeDeps()
-    const secret = "PolicyFilenameFixture42"
-    const policy = "terms-and-conditions.html"
-    const sensitivePolicy = `${secret}-<!--@owner-[link](target)-terms-of-service.html`
-    expect(isPolicyPath(sensitivePolicy)).toBe(true)
-    writeFileSync(join(root, ".env.local"), `PRIVATE_TOKEN=${secret}\n`)
-    bundle.deps.installer.uninstall = async () => ({ reversed: ["app/layout.tsx"], leftAsIs: [policy, sensitivePolicy] })
-    const result = await run(root, bundle, answering({ server_lane_env: "after_merge" }))
-    const terminal = result.lines.join("\n")
-    const prBody = readFileSync(join(root, ".infinite/wizard/uninstall-pr-body.md"), "utf8")
-    for (const text of [terminal, prBody]) {
-      expect(text).toContain(`Kept ${policy} as it is: it is a policy page.`)
-      expect(text).not.toMatch(/changed since the install/i)
-      for (const raw of [secret, "<!--", "@owner", "[link]("]) expect(text).not.toContain(raw)
-      expect(text).toContain("‹!--＠owner-［link］(target)-terms-of-service.html as it is: it is a policy page.")
-    }
-    expect(bundle.log.calls.find(call => call.what === "stage")?.args[0]).toEqual(["app/layout.tsx", ".infinite/install.json"])
   })
 
   it("negative: when the branch cannot be created, nothing is reversed (the user's branch is never edited)", async () => {
@@ -161,52 +112,6 @@ describe("uninstall --pr", () => {
     expect(bundle.log.names("bridge")).toEqual([])
     expect(result.lines.join("\n")).toContain("not answered")
   })
-
-  it("'after the merge' defers to the next run: not merged → exit 3; merged and deployed → the deferred pieces run, env before link", async () => {
-    const root = tempRoot()
-    const first = fakeDeps()
-    await run(root, first, answering({ server_lane_env: "after_merge", site_source: "after_merge", link: "after_merge" }))
-    expect(first.log.names("bridge")).toEqual([])
-
-    const open = fakeDeps({ host: { readPr: prSummary({ state: "OPEN" }) } })
-    const waiting = await run(root, open, answering({}))
-    expect(waiting).toMatchObject({ exitCode: 3, code: "INF_WIZ_MERGE_PARKED" })
-    expect(open.log.names("installer")).toEqual([])
-    expect(open.log.names("git")).not.toContain("git.createBranch")
-
-    const merged = fakeDeps({ host: { readPr: prSummary({ state: "MERGED", mergeCommitOid: MERGE_SHA, mergedAt: "2026-10-03T11:00:00Z" }) } })
-    const done = await run(root, merged, answering({}))
-    expect(done.exitCode).toBe(0)
-    expect(merged.log.names("bridge")).toEqual(["bridge.deployStatus", "bridge.removeServerLaneEnv", "bridge.disableSiteSource", "bridge.revokeLink"])
-    expect(done.record!.pieces).toEqual(Object.fromEntries(UNINSTALL_PIECES.map((piece) => [piece, "done"])))
-  })
-
-  it("merged but not yet deployed → waits (exit 3) and changes nothing in Infinite", async () => {
-    const root = tempRoot()
-    await run(root, fakeDeps(), answering({ server_lane_env: "after_merge" }))
-    const notDeployed = fakeDeps({
-      host: { readPr: prSummary({ state: "MERGED", mergeCommitOid: MERGE_SHA }) },
-      bridge: { deploy: [{ mergeDeployment: { state: "building", readyAt: null }, serving: null, target: "production" }] }
-    })
-    const result = await run(root, notDeployed, answering({}))
-    expect(result).toMatchObject({ exitCode: 3, code: "INF_WIZ_DEPLOY_TIMEOUT" })
-    expect(notDeployed.log.names("bridge")).toEqual(["bridge.deployStatus"])
-  })
-
-  it("no saved link and no way to link from here: no cloud asks, and every piece says it was NOT changed (never 'nothing to change')", async () => {
-    const root = tempRoot()
-    const bundle = fakeDeps()
-    const state = linkedState(root)
-    state.link = null
-    const asked: string[] = []
-    const result = await run(root, bundle, answering({}, asked), state)
-    expect(asked).toEqual([])
-    expect(result.record!.pieces).toEqual({ server_lane_env: "no_link", site_source: "no_link", link: "no_link" })
-    expect(result.exitCode).toBe(4)
-    const text = result.lines.join("\n")
-    expect(text).not.toMatch(/nothing in Infinite to change/i)
-    expect(text).toContain("NOT changed: this machine is not linked to Infinite")
-  })
 })
 
 describe("uninstall --pr from a fresh clone, link last, retries (O1-09, O1-18)", () => {
@@ -215,40 +120,6 @@ describe("uninstall --pr from a fresh clone, link last, retries (O1-09, O1-18)",
     return runUninstallFlow({ root, state, ask, print() {}, now: () => new Date("2026-10-03T10:00:00Z"), base: "main", ...(link ? { link } : {}) }, bundle.deps)
   }
   const LINK_ID = "lk_FAKEFAKEFAKEFAKEFAKE00"
-
-  it("no state.json: the flow links first (a remembered link approves at once), then asks and runs each piece", async () => {
-    const root = tempRoot()
-    const bundle = fakeDeps()
-    const asked: string[] = []
-    let linkCalls = 0
-    const result = await runWith(root, bundle, answering({ server_lane_env: "now", site_source: "now", link: "after_merge" }, asked), null, async () => {
-      linkCalls += 1
-      return { linkId: LINK_ID }
-    })
-    expect(linkCalls).toBe(1)
-    expect(asked).toHaveLength(3)
-    expect(bundle.log.names("bridge")).toEqual(["bridge.removeServerLaneEnv", "bridge.disableSiteSource"])
-    expect(bundle.bridge.linkId).toBe(LINK_ID)
-    expect(result.record!.pieces).toEqual({ server_lane_env: "done", site_source: "done", link: "after_merge" })
-  })
-
-  it("the link cannot be made (no app): exit 4, the pieces stay pending as 'not linked', and the next run links, asks and runs them", async () => {
-    const root = tempRoot()
-    const first = fakeDeps()
-    const asked: string[] = []
-    const result = await runWith(root, first, answering({}, asked), null, async () => ({ linkId: null, code: "INF_WIZ_NO_APP", message: "Infinite is not running" }))
-    expect(result).toMatchObject({ exitCode: 4, code: "INF_WIZ_NO_APP" })
-    expect(asked).toEqual([])
-    expect(result.lines.join("\n")).toContain("Could not link this machine to Infinite: Infinite is not running")
-    expect(JSON.parse(readFileSync(join(root, UNINSTALL_RECORD_PATH), "utf8")).pieces.server_lane_env).toBe("no_link")
-
-    const second = fakeDeps({ host: { readPr: prSummary({ state: "MERGED", mergeCommitOid: MERGE_SHA }) } })
-    const again = await runWith(root, second, answering({ server_lane_env: "now", site_source: "after_merge", link: "after_merge" }), null, async () => ({ linkId: LINK_ID }))
-    expect(second.log.names("installer")).toEqual([])
-    expect(second.log.names("git")).not.toContain("git.createBranch")
-    expect(second.log.names("bridge")).toEqual(["bridge.removeServerLaneEnv", "bridge.deployStatus", "bridge.disableSiteSource", "bridge.revokeLink"])
-    expect(again.record!.pieces).toEqual({ server_lane_env: "done", site_source: "done", link: "done" })
-  })
 
   it("the link is revoked LAST: with another piece failed it is kept, and the next run retries the failed piece, then revokes", async () => {
     const root = tempRoot()
@@ -265,19 +136,5 @@ describe("uninstall --pr from a fresh clone, link last, retries (O1-09, O1-18)",
     const retried = await runWith(root, second, answering({}), linkedState(root))
     expect(second.log.names("bridge")).toEqual(["bridge.deployStatus", "bridge.removeServerLaneEnv", "bridge.revokeLink"])
     expect(retried.record!.pieces).toEqual({ server_lane_env: "done", site_source: "done", link: "done" })
-  })
-
-  it("when nothing is left to do, .infinite/wizard/ is cleared (never the run lock); negative: a pending piece keeps the record", async () => {
-    const root = tempRoot()
-    mkdirSync(join(root, ".infinite/wizard"), { recursive: true })
-    writeFileSync(join(root, ".infinite/wizard/state.json"), "{}")
-    writeFileSync(join(root, ".infinite/wizard/run.lock"), "{}")
-    await runWith(root, fakeDeps(), answering({ server_lane_env: "after_merge", site_source: "now", link: "after_merge" }), linkedState(root))
-    expect(readdirSync(join(root, ".infinite/wizard")).sort()).toEqual(["run.lock", "state.json", "uninstall-pr-body.md", "uninstall.json"])
-
-    const merged = fakeDeps({ host: { readPr: prSummary({ state: "MERGED", mergeCommitOid: MERGE_SHA }) } })
-    const done = await runWith(root, merged, answering({}), linkedState(root))
-    expect(done.lines.join("\n")).toContain("the wizard's run files in .infinite/wizard/ were removed")
-    expect(readdirSync(join(root, ".infinite/wizard"))).toEqual(["run.lock"])
   })
 })

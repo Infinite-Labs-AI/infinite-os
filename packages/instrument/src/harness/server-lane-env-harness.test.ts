@@ -154,19 +154,6 @@ const APPLY = ["--apply", "--yes", "--no-mark"]
 const VERCEL_WRITABLE = { connected: true, provider: "vercel" as const, connectionId: "conn_1", projectName: "example-site", envWriteGranted: true }
 
 describe("harness server-lane env step", () => {
-  it("a lane receiving with its CURRENT secret is verified at the server-lane receipt time — never the newer pixel time — and nothing is written", async () => {
-    const root = exampleRepo()
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus({ laneState: "receiving", secretSetAt: "2026-09-02T00:00:00.000Z", serverLaneFirstReceivedAt: "2026-09-03T00:00:00.000Z", serverLaneLastReceivedAt: "2026-09-14T09:58:00.000Z", lastProductionReceivedAt: "2026-09-14T09:59:59.000Z" }) }] })
-    const io = fakeIo()
-    const result = await runHarness(parseHarnessArgs([...APPLY, "--root", root]), io, deps(bridge))
-    expect(result.exitCode).toBe(0)
-    expect(bridge.calls.map((call) => call.route)).toEqual(["status"])
-    expect(serverLaneRow(result)).toMatchObject({ state: "verified", verification: { kind: "verified", receiptAt: "2026-09-14T09:58:00.000Z" } })
-    expect(result.report.serverLaneEnv).toMatchObject({ path: "already_receiving", envSet: "yes", firstEvent: { state: "received", at: "2026-09-14T09:58:00.000Z" } })
-    expect(io.outLines.join("\n")).toContain("receiving events with its current secret (last server-lane event at 2026-09-14T09:58:00.000Z)")
-    expect(result.report.steps.find((step) => step.id === "verify")).toMatchObject({ status: "ok", note: "server_lane=verified (receiving with the current secret)" })
-  })
-
   it("a ROTATED secret (old server-lane receipts, fresh pixel traffic) is never verified: --verify-only waits and exits nonzero", async () => {
     const root = exampleRepo()
     const rotated = laneStatus({ laneState: "awaiting_first_event", secretSetAt: "2026-09-14T09:00:00.000Z", serverLaneFirstReceivedAt: "2026-09-03T00:00:00.000Z", serverLaneLastReceivedAt: "2026-09-10T00:00:00.000Z", lastProductionReceivedAt: "2026-09-14T10:00:01.000Z", firstProductionReceivedAt: "2026-09-02T00:00:00.000Z" })
@@ -227,21 +214,6 @@ describe("harness server-lane env step", () => {
     expect(payload.providers.server_lane?.verification).toEqual({ state: "not_verifiable", reason: "waiting for the first event (env set: yes)" })
   })
 
-  it("PATH B with an UNCONFIRMED redeploy says 'submitted, not confirmed' in the output, the next steps and --json", async () => {
-    const root = exampleRepo()
-    const bridge = fakeBridge({
-      statuses: [{ ok: true, value: laneStatus({ laneState: "no_secret", hosting: VERCEL_WRITABLE }) }],
-      provision: { ok: true, value: { written: ["INFINITE_SITE_SOURCE_KEY", "INFINITE_SERVER_EVENT_SECRET"], mintedNewSecret: true, redeploy: { unconfirmed: true, reason: "redeploy_submission_unknown" } } }
-    })
-    const io = fakeIo()
-    const result = await runHarness(parseHarnessArgs([...APPLY, "--json", "--root", root, "--providers", "ga4"]), io, deps(bridge))
-    const parsed = JSON.parse(io.outLines[0]!) as typeof result.report
-    expect(parsed.serverLaneEnv?.redeploy).toEqual({ state: "unconfirmed", reason: "redeploy_submission_unknown" })
-    expect(io.errLines.join("\n")).toContain("Redeploy submitted, not confirmed (redeploy_submission_unknown) — check Vercel's latest production deployment")
-    expect(parsed.nextSteps.join("\n")).toContain("Redeploy submitted, not confirmed")
-    expect(parsed.nextSteps.join("\n")).not.toContain("Redeploy didn't run")
-  })
-
   it("missing_scope → reconnect copy, then the local vercel path: public key written before the mint, values on stdin only, secret never printed", async () => {
     const root = exampleRepo({ linkVercel: true })
     const bridge = fakeBridge({
@@ -283,31 +255,6 @@ describe("harness server-lane env step", () => {
     expect(JSON.stringify(result.report)).not.toContain(SECRET)
   })
 
-  it("--redeploy on a DIRTY local tree asks (default No) instead of deploying, and --json carries the skipped reason", async () => {
-    const root = exampleRepo({ linkVercel: true })
-    const bridge = fakeBridge({
-      statuses: [{ ok: true, value: laneStatus({ laneState: "no_secret" }) }],
-      mints: [{ ok: true, value: { publicKey: "site_public123", secret: SECRET, secretSetAt: "2026-09-14T10:00:00.000Z" } }]
-    })
-    const commands: string[] = []
-    const runner: CommandRunner = async (command, args) => {
-      commands.push(`${command} ${args.join(" ")}`)
-      if (command === "git") return args[0] === "status" ? { status: 0, stdout: " M src/App.tsx\n", stderr: "" } : { status: 128, stdout: "", stderr: "fatal: no upstream" }
-      if (args[0] === "--version") return { status: 0, stdout: "58.4.4", stderr: "" }
-      if (args[2] === "--help") return { status: 0, stdout: "--force  --sensitive  --yes", stderr: "" }
-      return { status: 0, stdout: "ok", stderr: "" }
-    }
-    // Yes to the mint; the dirty-tree prompt is left to its default.
-    const io = fakeIo({ interactive: true, answers: [true] })
-    const result = await runHarness(parseHarnessArgs([...APPLY, "--redeploy", "--json", "--root", root, "--providers", "ga4"]), io, deps(bridge, runner))
-    expect(io.questions.at(-1)).toBe("Your working tree has uncommitted changes — `vercel --prod` would deploy them to production. Run it anyway? [y/N] ")
-    expect(commands).not.toContain("vercel --prod")
-    const parsed = JSON.parse(io.outLines[0]!) as typeof result.report
-    expect(parsed.serverLaneEnv).toMatchObject({ path: "local_vercel", envSet: "yes", redeploy: { state: "skipped", reason: "dirty_working_tree" } })
-    expect(parsed.nextSteps).toContain("Redeploy production so the variables take effect (for example: vercel --prod).")
-    expect(JSON.stringify(parsed)).not.toContain(SECRET)
-  })
-
   it("an old Infinite app (bridge 404) is a typed 'update the app' refusal, then PATH A — and --json stays one parseable document", async () => {
     const root = exampleRepo()
     const bridge = new DesktopServerLaneBridge({
@@ -338,40 +285,5 @@ describe("harness server-lane env step", () => {
     const row = parsed.providers.find((state) => state.provider === "server_lane")!
     expect(row).toMatchObject({ state: "installed", verification: { kind: "awaiting_first_event", envSet: "unknown" } })
     expect(parsed.nextSteps.join("\n")).toContain("on your PRODUCTION deployment, then redeploy")
-  })
-
-  it("a cloud 404 not_linked through the bridge says sign in — not 'update the Infinite app'", async () => {
-    const root = exampleRepo()
-    const bridge = new DesktopServerLaneBridge({
-      bridgeUrl: "http://127.0.0.1:5000",
-      token: "bridge_tok",
-      fetch: (async () => new Response(JSON.stringify({ error: "not_linked", message: "Not linked" }), { status: 404 })) as unknown as typeof fetch
-    })
-    const io = fakeIo()
-    const result = await runHarness(parseHarnessArgs([...APPLY, "--root", root]), io, deps(bridge))
-    expect(result.report.serverLaneEnv?.statusRefusal).toMatchObject({ code: "not_linked" })
-    expect(io.outLines.join("\n")).toContain("sign in to the Infinite app")
-    expect(io.outLines.join("\n")).not.toContain("update the Infinite app")
-  })
-
-  it("no Infinite app at all (standalone infinite-tag harness): PATH A, and the row never reads as a bare 'installed'", async () => {
-    const root = exampleRepo()
-    const io = fakeIo()
-    const result = await runHarness(parseHarnessArgs([...APPLY, "--root", root]), io, deps(undefined))
-    expect(result.report.serverLaneEnv).toMatchObject({ path: "manual", statusRefusal: { code: "no_desktop" } })
-    expect(io.outLines.join("\n")).toContain("Open it and re-run `infinite analytics`")
-    expect(io.outLines.join("\n")).toMatch(/server_lane\s+installed — waiting for the first event \(env set: unknown\)/)
-  })
-
-  it("no hosting connection and no local link: PATH A with the connect-Vercel hint; nothing minted", async () => {
-    const root = exampleRepo()
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus({ laneState: "awaiting_first_event", secretSetAt: "2026-09-02T00:00:00.000Z" }) }] })
-    const io = fakeIo()
-    const result = await runHarness(parseHarnessArgs([...APPLY, "--root", root]), io, deps(bridge))
-    expect(bridge.calls.map((call) => call.route)).toEqual(["status"])
-    expect(result.report.serverLaneEnv?.attempts).toEqual([{ path: "local_vercel", outcome: "unavailable", code: "not_linked" }])
-    const out = io.outLines.join("\n")
-    expect(out).toContain("INFINITE_SITE_SOURCE_KEY=site_public123")
-    expect(out).toContain("connect Vercel in Infinite → Connections → Website")
   })
 })

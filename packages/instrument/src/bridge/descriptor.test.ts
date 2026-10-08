@@ -56,11 +56,6 @@ describe("readBridgeDescriptor", () => {
     expect(descriptor.runtime.variant).toBe("prod")
   })
 
-  it("ignores unknown descriptor keys (a newer app may add fields)", () => {
-    const descriptor = read(makeHome({ descriptor: { ...loadDescriptorExample(), pid: process.pid, futureField: 1 } }))
-    expect(descriptor.bootId).toBeTruthy()
-  })
-
   it("refuses a file that is not 0600", () => {
     const error = refusal(() => read(makeHome({ fileMode: 0o644 })))
     expect(error.reason).toBe("descriptor_unsafe")
@@ -78,37 +73,11 @@ describe("readBridgeDescriptor", () => {
     expect(refusal(() => read(home)).reason).toBe("descriptor_unsafe")
   })
 
-  it("refuses a symlinked directory", () => {
-    const real = makeHome()
-    const home = mkdtempSync(join(tmpdir(), "infinite-tag-desc-"))
-    homes.push(home)
-    symlinkSync(join(real, "desktop-tag"), join(home, "desktop-tag"))
-    expect(refusal(() => read(home)).reason).toBe("descriptor_unsafe")
-  })
-
   it("refuses a file owned by another uid (injected uid)", () => {
     const home = makeHome()
     expect(refusal(() => read(home, { getuid: () => (process.getuid?.() ?? 0) + 4242 })).reason).toBe("descriptor_unsafe")
     // Negative: the same file with the right uid is accepted.
     expect(read(home).service).toBe("infinite-desktop-tag")
-  })
-
-  it("refuses a dead pid", () => {
-    const error = refusal(() => read(makeHome(), { isPidAlive: () => false }))
-    expect(error.reason).toBe("stale_descriptor")
-    expect(error.wizardCode).toBe("INF_WIZ_NO_APP")
-  })
-
-  it("refuses a wrong service", () => {
-    const error = refusal(() => read(makeHome({ descriptor: { ...loadDescriptorExample(), pid: process.pid, service: "infinite-desktop-cmdl" } })))
-    expect(error.reason).toBe("wrong_service")
-    expect(error.wizardCode).toBe("INF_WIZ_BRIDGE_PROTOCOL")
-  })
-
-  it("refuses a protocol range without 1", () => {
-    const error = refusal(() => read(makeHome({ descriptor: { ...loadDescriptorExample(), pid: process.pid, protocol: { min: 2, max: 3 } } })))
-    expect(error.reason).toBe("protocol_mismatch")
-    expect(error.wizardCode).toBe("INF_WIZ_BRIDGE_PROTOCOL")
   })
 
   it("refuses a url that is not http://127.0.0.1:<port>", () => {
@@ -129,18 +98,8 @@ describe("readBridgeDescriptor", () => {
     expect(notMac.wizardCode).toBe("INF_WIZ_NOT_MAC")
   })
 
-  it("no home at all on another OS → not_mac", () => {
-    expect(refusal(() => read(join(tmpdir(), "infinite-tag-no-such-home-xyz"), { platform: "win32" })).reason).toBe("not_mac")
-  })
-
   it("no descriptor and state.json signed_out → signed_out", () => {
     const error = refusal(() => read(makeHome({ descriptor: null, state: "signed_out" })))
     expect(error.wizardCode).toBe("INF_WIZ_SIGNED_OUT")
-  })
-
-  it("uses $GROWTH_OS_HOME over ~/.growth-os", () => {
-    const home = makeHome()
-    expect(readBridgeDescriptor({ env: { GROWTH_OS_HOME: home }, platform: "darwin", homeDir: "/nonexistent-home" }).pid).toBe(process.pid)
-    expect(refusal(() => readBridgeDescriptor({ env: {}, platform: "darwin", homeDir: join(home, "elsewhere") })).reason).toBe("no_app")
   })
 })

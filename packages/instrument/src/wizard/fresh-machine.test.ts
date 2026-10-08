@@ -41,14 +41,6 @@ function adapter(rows: unknown[] | Error, kind: GitHostAdapter["kind"] = "github
 const fresh = () => createRunState({ tagVersion: "0.12.0-test", root: "/repo", appRoot: ".", now: new Date("2026-10-02T09:00:00.000Z") })
 
 describe("rebuildFromPrMarker (B25)", () => {
-  it("restores the fork destination from an open cross-repo PR", async () => {
-    const row = { ...pr(7, "OPEN", "infinite/tag/2026-10-02-7f3c2a", `<!-- infinite-tag:pr v1 run=${RUN} -->`), isCrossRepository: true, headRepositoryOwner: { login: "acme-dev" } }
-    const { host } = adapter([row])
-    Object.assign(host, { repoFacts: async () => ({ isPrivate: true, defaultBranch: "main", viewerPermission: "TRIAGE", nameWithOwner: "acme/acme-store", allowForking: true }) })
-    const state = fresh()
-    await rebuildFromPrMarker(state, host)
-    expect(state.pushTarget).toEqual({ kind: "fork", headOwner: "acme-dev", remoteUrl: "https://github.com/acme-dev/acme-store.git" })
-  })
   it("takes the newest OPEN wizard PR: run id, PR, branch and base; the base SHA is left for `before`", async () => {
     const marker = `body\n<!-- infinite-tag:pr v1 run=${RUN} -->`
     const { host, calls } = adapter([

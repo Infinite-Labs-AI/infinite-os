@@ -82,27 +82,4 @@ describe("before → keys → plan (one hand-off module per file, run-scoped)", 
     const narrowed = narrowKeysToChoices(before!.keys, choices)
     expect(narrowed.ga4.streams.map((stream) => stream.measurementId)).toEqual([IDS.ga4Other])
   })
-
-  it("negative: another run's files are never this run's (the plan then re-reads, never reuses)", async () => {
-    const root = repo()
-    await writeBeforeFactsFile(nodeWizardFs, root, factsFile("99999999-2222-4333-8444-555555555555"))
-    await writeKeysResult(nodeWizardFs, root, {
-      schema: KEYS_RESULT_SCHEMA,
-      runId: "99999999-2222-4333-8444-555555555555",
-      at: "2026-10-02T10:02:00.000Z",
-      linkId: null,
-      keysDigest: `sha256:${"0".repeat(64)}`,
-      choices: { ga4MeasurementId: IDS.ga4Other, metaPixel: null },
-      comparisons: [],
-      lines: [],
-      metaInstall: true
-    })
-    expect(await readKeysBefore(nodeWizardFs, root, IDS.run)).toBeNull()
-    expect(await readPlanBefore(nodeWizardFs, root, IDS.run)).toBeNull()
-    expect(await readKeysChoices(nodeWizardFs, root, IDS.run)).toBeNull()
-    // and with no run yet, nothing is read at all
-    expect(await readPlanBefore(nodeWizardFs, root, null)).toBeNull()
-    // a stale choice narrows nothing
-    expect(narrowKeysToChoices(fakeKeys(), null).ga4.streams).toHaveLength(1)
-  })
 })

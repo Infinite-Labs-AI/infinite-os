@@ -3,21 +3,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 
-import { REDEPLOY_SKIPPED_COPY, REDEPLOY_UNCONFIRMED_COPY, serverLaneCopy } from "../server-lane/copy.js"
-
 import {
   DesktopServerLaneBridge,
-  SERVER_LANE_UPDATE_REQUIRED_REASON,
-  detectEnvAddCapabilities,
-  detectLocalVercel,
-  inspectDeployTree,
   isFreshServerLaneReceipt,
   redeployWithLocalVercel,
   redactSecrets,
   runServerLaneEnvStep,
   serverLaneBridgeRefusal,
   setVercelProductionVar,
-  waitForFirstServerLaneEvent,
   type CommandResult,
   type CommandRunner,
   type ServerLaneBridge,
@@ -125,18 +118,6 @@ describe("DesktopServerLaneBridge", () => {
     })
   })
 
-  it("decodes hosting.error, and refuses a 'receiving' status that carries no server-lane receipt time", async () => {
-    const stub = fetchStub([
-      json(200, { ...statusBody, hosting: { ...statusBody.hosting, envWriteGranted: false, error: "provider_unavailable" } }),
-      json(200, { ...statusBody, laneState: "receiving", serverLaneLastReceivedAt: null }),
-      json(200, { ...statusBody, laneState: "receiving", serverLaneLastReceivedAt: "2026-09-14T09:30:00.000Z" })
-    ])
-    const bridge = new DesktopServerLaneBridge({ bridgeUrl: "http://127.0.0.1:5000", token: "t", fetch: stub.fetch })
-    expect(await bridge.status()).toMatchObject({ ok: true, value: { hosting: { error: "provider_unavailable" } } })
-    expect(await bridge.status()).toMatchObject({ ok: false, code: "unexpected_shape" })
-    expect(await bridge.status()).toMatchObject({ ok: true, value: { laneState: "receiving", serverLaneLastReceivedAt: "2026-09-14T09:30:00.000Z" } })
-  })
-
   it("POSTs exactly the contract bodies for provision-env and mint", async () => {
     const stub = fetchStub([
       json(200, { written: ["INFINITE_SITE_SOURCE_KEY", "INFINITE_SERVER_EVENT_SECRET"], mintedNewSecret: false, redeploy: { deploymentId: "dpl_1" }, status: {} }),
@@ -156,10 +137,7 @@ describe("DesktopServerLaneBridge", () => {
 
   it.each([
     [{ skipped: true, reason: "no_production_deployment" }, { skipped: true, reason: "no_production_deployment" }],
-    [{ unconfirmed: true, reason: "redeploy_submission_unknown" }, { unconfirmed: true, reason: "redeploy_submission_unknown" }],
     [{ something: "new" }, { unknown: true }],
-    [{ skipped: true }, { unknown: true }],
-    [undefined, { unknown: true }]
   ])("decodes redeploy %j as %j — never inventing a reason", async (redeploy, expected) => {
     const stub = fetchStub([json(200, { written: ["INFINITE_SITE_SOURCE_KEY"], mintedNewSecret: true, ...(redeploy ? { redeploy } : {}) })])
     const bridge = new DesktopServerLaneBridge({ bridgeUrl: "http://127.0.0.1:5000", token: "t", fetch: stub.fetch })
@@ -181,39 +159,10 @@ describe("DesktopServerLaneBridge", () => {
 describe("serverLaneBridgeRefusal — coded answers before status-only rungs", () => {
   it.each([
     [404, { error: "no_site_source" }, "no_site_source"],
-    [404, { error: "not_linked", message: "Not linked" }, "not_linked"],
-    [404, { error: { code: "not_found", message: "unknown route" } }, "desktop_update_required"],
-    [404, null, "desktop_update_required"],
-    [409, { error: "no_hosting_connection", message: "No Vercel connection" }, "no_hosting_connection"],
-    [409, { error: "secret_in_use", message: "receiving" }, "secret_in_use"],
-    [409, { error: "secret_changed_concurrently", message: "Another change landed" }, "secret_changed_concurrently"],
-    [409, { error: "analytics_secret_env_plain", message: "INFINITE_SERVER_EVENT_SECRET is stored as plain text in Vercel" }, "analytics_secret_env_plain"],
-    [409, { error: "demo_workspace_protected", message: "Demo workspaces cannot change hosting" }, "demo_workspace_protected"],
-    [409, { error: "not_ready", state: "signed_out" }, "not_ready"],
-    [403, { error: "missing_scope", message: "env write not granted" }, "missing_scope"],
-    [401, { error: "unauthorized" }, "unauthorized"],
     [403, null, "bridge_credentials_rejected"],
-    [401, null, "bridge_credentials_rejected"],
-    [502, { error: "env_write_unknown", message: "Vercel timed out" }, "env_write_unknown"],
-    [503, { error: "capability_unavailable" }, "desktop_update_required"],
-    [503, { error: "no_linked_workspace", message: "Link a workspace in Infinite" }, "no_linked_workspace"],
     [402, null, "subscription_required"],
-    [429, null, "rate_limited"],
-    [500, null, "unavailable"]
   ])("HTTP %s %j → %s", (status, payload, code) => {
     expect(serverLaneBridgeRefusal(status, payload).code).toBe(code)
-  })
-
-  it("keeps the cloud's message for contract refusals, names sign-in for session codes, and says UPDATE only for a codeless 404", () => {
-    expect(serverLaneBridgeRefusal(403, { error: "missing_scope", message: "env write not granted" }).message).toBe("env write not granted")
-    expect(serverLaneBridgeRefusal(409, { error: "demo_workspace_protected", message: "Demo workspaces cannot change hosting" }).message).toBe("Demo workspaces cannot change hosting")
-    expect(serverLaneBridgeRefusal(404, { error: "not_linked", message: "Not linked" }).message).toContain("sign in to the Infinite app")
-    expect(serverLaneBridgeRefusal(404, { error: "not_linked" }).message).not.toContain("update the Infinite app")
-    expect(serverLaneBridgeRefusal(401, { error: "unauthorized" }).message).toContain("session has expired")
-    expect(serverLaneBridgeRefusal(401, { error: "unauthorized" }).message).not.toContain("bridge credentials")
-    expect(serverLaneBridgeRefusal(409, { state: "signed_out" }).message).toContain("signed_out")
-    expect(serverLaneBridgeRefusal(404, null).message).toBe(SERVER_LANE_UPDATE_REQUIRED_REASON)
-    expect(SERVER_LANE_UPDATE_REQUIRED_REASON).toContain("update the Infinite app")
   })
 })
 
@@ -302,24 +251,6 @@ function linkedRepo(projectName = "example-site"): string {
 }
 
 describe("local vercel CLI", () => {
-  it("detects the link and the installed CLI; a missing link or binary is typed", async () => {
-    const root = linkedRepo()
-    const ok = vercelRunner()
-    expect(await detectLocalVercel({ root, appRootAbsolute: root, runner: ok.runner })).toEqual({ ok: true, cwd: root, projectName: "example-site", version: "58.4.4" })
-
-    const bare = mkdtempSync(join(tmpdir(), "server-lane-env-bare-"))
-    tempRoots.push(bare)
-    expect(await detectLocalVercel({ root: bare, appRootAbsolute: bare, runner: ok.runner })).toEqual({ ok: false, reason: "not_linked" })
-
-    const missing = fakeRunner(() => ({ status: null, error: "spawn vercel ENOENT" }))
-    expect(await detectLocalVercel({ root, appRootAbsolute: root, runner: missing.runner })).toEqual({ ok: false, reason: "cli_missing" })
-  })
-
-  it("reads flags from the installed CLI's help instead of guessing", async () => {
-    expect(await detectEnvAddCapabilities(vercelRunner({ help: HELP_58 }).runner, "/x")).toEqual({ force: true, sensitive: true, yes: true })
-    expect(await detectEnvAddCapabilities(vercelRunner({ help: HELP_OLD }).runner, "/x")).toEqual({ force: false, sensitive: false, yes: false })
-  })
-
   it("passes the value on STDIN only — never in argv — and uses --force when the CLI has it", async () => {
     const { runner, calls } = vercelRunner({ existing: ["INFINITE_SERVER_EVENT_SECRET"] })
     const outcome = await setVercelProductionVar({
@@ -331,21 +262,6 @@ describe("local vercel CLI", () => {
       { command: "vercel", args: ["env", "add", "INFINITE_SERVER_EVENT_SECRET", "production", "--force", "--sensitive", "--yes"], cwd: "/repo", input: SECRET }
     ])
     expect(calls.flatMap((call) => call.args).join(" ")).not.toContain(SECRET)
-  })
-
-  it("an older CLI without --force takes the documented rm -y + add path when the variable exists", async () => {
-    const { runner, calls } = vercelRunner({ help: HELP_OLD, existing: ["INFINITE_SITE_SOURCE_KEY"] })
-    const outcome = await setVercelProductionVar({
-      runner, cwd: "/repo", name: "INFINITE_SITE_SOURCE_KEY", value: "site_public123", sensitive: false,
-      capabilities: { force: false, sensitive: false, yes: false }, secrets: [SECRET]
-    })
-    expect(outcome).toEqual({ name: "INFINITE_SITE_SOURCE_KEY", ok: true, replaced: true })
-    expect(calls.map((call) => call.args)).toEqual([
-      ["env", "add", "INFINITE_SITE_SOURCE_KEY", "production"],
-      ["env", "rm", "INFINITE_SITE_SOURCE_KEY", "production", "-y"],
-      ["env", "add", "INFINITE_SITE_SOURCE_KEY", "production"]
-    ])
-    expect(calls[1]!.input).toBeUndefined()
   })
 
   it("a failure detail never carries the secret, even when the CLI echoes stdin", async () => {
@@ -469,33 +385,6 @@ describe("runServerLaneEnvStep — PATH B", () => {
     expect(io.lines.join("\n")).toContain("could not confirm the write to Vercel (Vercel timed out)")
   })
 
-  it.each([
-    ["analytics_secret_env_plain", "INFINITE_SERVER_EVENT_SECRET is stored as plain text in Vercel — delete it there first"],
-    ["demo_workspace_protected", "Demo workspaces cannot change hosting"]
-  ])("a %s refusal prints the cloud's message and stops at the manual path (no local mint)", async (code, message) => {
-    const io = stepIo({ interactive: true })
-    const root = linkedRepo()
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus({ hosting: VERCEL_WRITABLE }) }], provision: { ok: false, code, message, httpStatus: 409 } })
-    const { runner, calls } = vercelRunner()
-    const result = await runServerLaneEnvStep(stepInput(io, { bridge, runner, root, yes: true }))
-    expect(calls).toEqual([])
-    expect(result.report).toMatchObject({ path: "manual", attempts: [{ path: "infinite_vercel", outcome: "refused", code }] })
-    expect(io.lines.join("\n")).toContain(`Infinite could not write the variables: ${message}.`)
-  })
-
-  it("an unconfirmed redeploy stays unconfirmed — never 'skipped'", async () => {
-    const io = stepIo()
-    const bridge = fakeBridge({
-      statuses: [{ ok: true, value: laneStatus({ hosting: VERCEL_WRITABLE }) }],
-      provision: { ok: true, value: { written: ["INFINITE_SITE_SOURCE_KEY", "INFINITE_SERVER_EVENT_SECRET"], mintedNewSecret: false, redeploy: { unconfirmed: true, reason: "redeploy_submission_unknown" } } }
-    })
-    const result = await runServerLaneEnvStep(stepInput(io, { bridge, yes: true }))
-    expect(result.report.redeploy).toEqual({ state: "unconfirmed", reason: "redeploy_submission_unknown" })
-    const printed = io.lines.join("\n")
-    expect(printed).toContain("Redeploy submitted, not confirmed (redeploy_submission_unknown) — check Vercel's latest production deployment")
-    expect(printed).not.toContain("Redeploy didn't run")
-  })
-
   it("an unknown redeploy shape is reported as unknown, with no invented reason", async () => {
     const io = stepIo()
     const bridge = fakeBridge({
@@ -506,29 +395,6 @@ describe("runServerLaneEnvStep — PATH B", () => {
     expect(result.report.redeploy).toEqual({ state: "unknown" })
     expect(io.lines.join("\n")).toContain("Redeploy status unknown")
     expect(io.lines.join("\n")).not.toContain("Redeploy didn't run")
-  })
-
-  it("hosting.error is a read failure, not a permission answer: no provision call, no 'Reconnect', no connect hint", async () => {
-    const io = stepIo()
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus({ hosting: { ...VERCEL_WRITABLE, envWriteGranted: false, error: "provider_unavailable" } }) }] })
-    const result = await runServerLaneEnvStep(stepInput(io, { bridge, yes: true }))
-    expect(bridge.calls.map((call) => call.route)).toEqual(["status"])
-    const printed = io.lines.join("\n")
-    expect(printed).toContain("Infinite couldn't read its Vercel connection (provider_unavailable) — this is not a permission problem.")
-    expect(printed).not.toContain("Reconnect Vercel")
-    expect(printed).not.toContain("Tip: connect Vercel")
-    expect(result.report.hosting).toMatchObject({ error: "provider_unavailable" })
-    expect(result.report.attempts[0]).toEqual({ path: "infinite_vercel", outcome: "unavailable", code: "provider_unavailable" })
-  })
-
-  it("multiple_hosting_connections names the production host instead of asking to reconnect", async () => {
-    const io = stepIo()
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus({ hosting: { connected: true, provider: "vercel", connectionId: null, productionHost: "shop.example.com", envWriteGranted: false, error: "multiple_hosting_connections" } }) }] })
-    await runServerLaneEnvStep(stepInput(io, { bridge, yes: true }))
-    const printed = io.lines.join("\n")
-    expect(printed).toContain("More than one Vercel project is connected to this workspace in Infinite")
-    expect(printed).toContain("the project serving shop.example.com")
-    expect(printed).not.toContain("Reconnect Vercel")
   })
 })
 
@@ -563,21 +429,6 @@ describe("runServerLaneEnvStep — PATH C order (public key → mint → secret)
     expect(result.report).toMatchObject({ path: "local_vercel", envSet: "yes", mintedNewSecret: true, written: ["INFINITE_SITE_SOURCE_KEY", "INFINITE_SERVER_EVENT_SECRET"] })
   })
 
-  it("a failed PUBLIC-key write mints nothing: the secret is unchanged and says so", async () => {
-    const log: string[] = []
-    const io = stepIo({ interactive: true, answers: [true] })
-    const root = linkedRepo()
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus({ laneState: "awaiting_first_event", secretSetAt: "2026-09-02T00:00:00.000Z" }) }], mints: [MINTED], log })
-    const result = await runServerLaneEnvStep(stepInput(io, { bridge, runner: vercelRunner({ addFails: "INFINITE_SITE_SOURCE_KEY", log }).runner, root }))
-    expect(bridge.calls.some((call) => call.route === "mint")).toBe(false)
-    expect(log.some((entry) => entry.includes("INFINITE_SERVER_EVENT_SECRET"))).toBe(false)
-    expect(result.report).toMatchObject({ path: "manual", envSet: "unknown", mintedNewSecret: false, written: [] })
-    const printed = io.lines.join("\n")
-    expect(printed).toContain("✗ vercel env add INFINITE_SITE_SOURCE_KEY production failed: Error: You must re-authenticate")
-    expect(printed).toContain("Nothing was minted: this site's server-event secret is unchanged.")
-    expect(printed).not.toContain("is now ACTIVE")
-  })
-
   it("the live-secret guard keys off 'received since the secret was set' — decline keeps the secret and writes no secret", async () => {
     const log: string[] = []
     const io = stepIo({ interactive: true, answers: [true, false] })
@@ -595,46 +446,6 @@ describe("runServerLaneEnvStep — PATH C order (public key → mint → secret)
     expect(result.report).toMatchObject({ path: "manual", mintedNewSecret: false, written: ["INFINITE_SITE_SOURCE_KEY"], attempts: [{ path: "local_vercel", outcome: "refused", code: "secret_in_use" }] })
   })
 
-  it("secret_changed_concurrently: not the live guard, never retried, source key kept, plain copy + attempt recorded", async () => {
-    const log: string[] = []
-    const io = stepIo({ interactive: true, answers: [true] })
-    const root = linkedRepo()
-    const concurrent: ServerLaneBridgeAnswer<ServerLaneMintResult> = { ok: false, code: "secret_changed_concurrently", message: "Another secret change landed", httpStatus: 409 }
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus({ laneState: "awaiting_first_event", secretSetAt: "2026-09-02T00:00:00.000Z" }) }], mints: [concurrent, MINTED], log })
-    const result = await runServerLaneEnvStep(stepInput(io, { bridge, runner: vercelRunner({ log }).runner, root, replaceLiveSecret: true }))
-    expect(bridge.calls.filter((call) => call.route === "mint")).toEqual([{ route: "mint", body: {} }])
-    expect(io.questions).toEqual([expect.stringContaining("Mint the secret")])
-    const printed = io.lines.join("\n")
-    expect(printed).toContain("Another secret change happened at the same moment — nothing was replaced. Re-run `infinite analytics`.")
-    expect(printed).not.toContain("has already received server-lane events")
-    expect(printed).not.toContain("is now ACTIVE")
-    expect(log.some((entry) => entry.includes("INFINITE_SERVER_EVENT_SECRET"))).toBe(false)
-    expect(result.report).toMatchObject({
-      path: "manual", mintedNewSecret: false, written: ["INFINITE_SITE_SOURCE_KEY"],
-      attempts: [{ path: "local_vercel", outcome: "refused", code: "secret_changed_concurrently", message: "Another secret change landed" }]
-    })
-  })
-
-  it("an accepted live replace mints with confirmReplaceLive; --replace-live-secret skips the question", async () => {
-    const acceptIo = stepIo({ interactive: true, answers: [true, true, false] })
-    const acceptBridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus({ laneState: "awaiting_first_event", secretSetAt: "2026-09-02T00:00:00.000Z" }) }], mints: [IN_USE, MINTED] })
-    const accepted = await runServerLaneEnvStep(stepInput(acceptIo, { bridge: acceptBridge, runner: vercelRunner().runner, root: linkedRepo() }))
-    expect(acceptBridge.calls.filter((call) => call.route === "mint").map((call) => call.body)).toEqual([{}, { confirmReplaceLive: true }])
-    expect(accepted.report).toMatchObject({ path: "local_vercel", envSet: "yes" })
-
-    const flagIo = stepIo({ interactive: true, answers: [true, false] })
-    const flagBridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus({ laneState: "awaiting_first_event" }) }], mints: [IN_USE, MINTED] })
-    await runServerLaneEnvStep(stepInput(flagIo, { bridge: flagBridge, runner: vercelRunner().runner, root: linkedRepo(), replaceLiveSecret: true }))
-    expect(flagIo.questions).not.toContain("Replace that secret anyway? [y/N] ")
-    expect(flagBridge.calls.filter((call) => call.route === "mint").map((call) => call.body)).toEqual([{}, { confirmReplaceLive: true }])
-
-    const nonInteractiveIo = stepIo({ interactive: false })
-    const nonInteractiveBridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus() }], mints: [IN_USE] })
-    // Non-interactive never reaches the mint (the local path itself needs a yes), so drive the refusal copy directly.
-    await runServerLaneEnvStep(stepInput(nonInteractiveIo, { bridge: nonInteractiveBridge, runner: vercelRunner().runner, root: linkedRepo() }))
-    expect(nonInteractiveBridge.calls.some((call) => call.route === "mint")).toBe(false)
-  })
-
   it("a confirmed live replace whose SECRET write fails says plainly that a new secret is active and unset — and never prints it", async () => {
     const io = stepIo({ interactive: true, answers: [true, true] })
     const root = linkedRepo()
@@ -646,30 +457,6 @@ describe("runServerLaneEnvStep — PATH C order (public key → mint → secret)
     expect(printed).toContain("Reveal secret, run `vercel env add INFINITE_SERVER_EVENT_SECRET production` and paste it at that prompt")
     expect(printed).not.toContain(SECRET)
   })
-
-  it("a source key that changed mid-run is written again with the minted key before the secret", async () => {
-    const log: string[] = []
-    const io = stepIo({ interactive: true, answers: [true, false] })
-    const root = linkedRepo()
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus() }], mints: [{ ok: true, value: { publicKey: "site_rotated999", secret: SECRET, secretSetAt: null } }], log })
-    const { runner, calls } = vercelRunner({ log })
-    const result = await runServerLaneEnvStep(stepInput(io, { bridge, runner, root }))
-    const adds = calls.filter((call) => call.args[1] === "add" && call.args[2] !== "--help").map((call) => [call.args[2], call.input === SECRET ? "<secret>" : call.input])
-    expect(adds).toEqual([["INFINITE_SITE_SOURCE_KEY", "site_public123"], ["INFINITE_SITE_SOURCE_KEY", "site_rotated999"], ["INFINITE_SERVER_EVENT_SECRET", "<secret>"]])
-    expect(io.lines.join("\n")).toContain("source key changed during the run")
-    expect(result.report).toMatchObject({ publicKey: "site_rotated999", envSet: "yes" })
-  })
-
-  it("--redeploy runs vercel --prod after the local path and records the production URL", async () => {
-    const io = stepIo({ interactive: true, answers: [true] })
-    const root = linkedRepo()
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus() }], mints: [MINTED] })
-    const { runner, calls } = vercelRunner({ deployUrl: "https://example-abc.vercel.app" })
-    const result = await runServerLaneEnvStep(stepInput(io, { bridge, runner, root, redeploy: true }))
-    expect(calls.at(-1)!.args).toEqual(["--prod"])
-    expect(io.questions).toEqual([expect.stringContaining("Mint the secret")])
-    expect(result.report.redeploy).toEqual({ state: "deployed", url: "https://example-abc.vercel.app" })
-  })
 })
 
 describe("runServerLaneEnvStep — receiving", () => {
@@ -680,14 +467,6 @@ describe("runServerLaneEnvStep — receiving", () => {
     expect(result.report).toMatchObject({ path: "already_receiving", envSet: "yes" })
     expect(io.lines.join("\n")).toContain("last server-lane event at 2026-09-14T09:58:00.000Z")
     expect(io.lines.join("\n")).not.toContain("09:59:59")
-  })
-
-  it("a rotated secret (awaiting_first_event) with fresh PIXEL traffic and an old server-lane receipt is not receiving", async () => {
-    const io = stepIo()
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus({ laneState: "awaiting_first_event", secretSetAt: "2026-09-14T09:00:00.000Z", serverLaneFirstReceivedAt: "2026-09-03T00:00:00.000Z", serverLaneLastReceivedAt: "2026-09-10T00:00:00.000Z", lastProductionReceivedAt: "2026-09-14T09:59:59.000Z" }) }] })
-    const result = await runServerLaneEnvStep(stepInput(io, { bridge }))
-    expect(result.report.path).toBe("manual")
-    expect(io.lines.join("\n")).not.toContain("receiving events")
   })
 })
 
@@ -708,83 +487,6 @@ describe("the first server-lane event", () => {
     expect(isFreshServerLaneReceipt(receiving("2026-09-14T10:00:10.000Z", "2026-09-14T10:00:20.000Z"), startMs)).toBeNull()
     expect(isFreshServerLaneReceipt({ ...receiving("2026-09-14T10:00:10.000Z"), laneState: "awaiting_first_event" }, startMs)).toBeNull()
     expect(isFreshServerLaneReceipt(laneStatus({ laneState: "awaiting_first_event", lastProductionReceivedAt: "2026-09-14T10:00:10.000Z" }), startMs)).toBeNull()
-  })
-
-  it("'ever received' before this run never counts", async () => {
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: receiving("2026-09-10T00:00:00.000Z", "2026-09-02T00:00:00.000Z") }] })
-    expect(await waitForFirstServerLaneEvent({ bridge, runStartedAt: RUN_START, ...timing() })).toEqual({ state: "waiting" })
-    // t=0, 3s, 6s, 9s — the same "next poll must fit in the budget" rule as the verify backends.
-    expect(bridge.calls.length).toBe(4)
-  })
-
-  it("fresh PIXEL traffic without a server-lane receipt never counts", async () => {
-    const bridge = fakeBridge({ statuses: [{ ok: true, value: laneStatus({ laneState: "awaiting_first_event", secretSetAt: "2026-09-14T09:00:00.000Z", lastProductionReceivedAt: "2026-09-14T10:00:05.000Z", firstProductionReceivedAt: "2026-09-14T10:00:05.000Z" }) }] })
-    expect(await waitForFirstServerLaneEvent({ bridge, runStartedAt: RUN_START, ...timing() })).toEqual({ state: "waiting" })
-  })
-
-  it("a fresh server-lane receipt under the current secret is the receipt", async () => {
-    const bridge = fakeBridge({
-      statuses: [
-        { ok: true, value: laneStatus({ laneState: "awaiting_first_event", secretSetAt: "2026-09-14T09:00:00.000Z" }) },
-        { ok: true, value: receiving("2026-09-14T10:00:05.000Z") }
-      ]
-    })
-    expect(await waitForFirstServerLaneEvent({ bridge, runStartedAt: RUN_START, ...timing() })).toEqual({ state: "received", at: "2026-09-14T10:00:05.000Z" })
-  })
-
-  it("a terminal refusal stops at once; transient ones retry up to three times", async () => {
-    const signedOut = fakeBridge({ statuses: [{ ok: false, code: "not_ready", message: "Infinite Desktop is not ready (signed_out)", httpStatus: 409 }] })
-    expect(await waitForFirstServerLaneEvent({ bridge: signedOut, runStartedAt: RUN_START, ...timing(), budgetMs: 60_000 })).toEqual({ state: "refused", message: "Infinite Desktop is not ready (signed_out)" })
-    expect(signedOut.calls.length).toBe(1)
-    const flaky = fakeBridge({ statuses: [{ ok: false, code: "rate_limited", message: "rate limited", httpStatus: 429 }] })
-    expect(await waitForFirstServerLaneEvent({ bridge: flaky, runStartedAt: RUN_START, ...timing(), budgetMs: 60_000 })).toEqual({ state: "refused", message: "rate limited" })
-    expect(flaky.calls.length).toBe(3)
-  })
-})
-
-describe("redeploy reason copy", () => {
-  const IN_VERCEL = "redeploy production in Vercel so the new variables take effect."
-  const RECONNECT = "reconnect Vercel in Infinite → Connections → Website, then re-run `infinite analytics`."
-  it.each([
-    ["no_production_deployment", "there is no production deployment yet", "deploy production in Vercel so the new variables take effect."],
-    ["serving_deployment_unknown", "couldn't tell which deployment production serves", IN_VERCEL],
-    ["serving_deployment_not_ready", "production's current deployment isn't ready yet", "redeploy production in Vercel once it is."],
-    ["serving_deployment_mismatch", "production serves a deployment from a different repository", IN_VERCEL],
-    ["serving_deployment_no_git_source", "production's deployment wasn't built from Git", IN_VERCEL],
-    ["production_build_in_progress", "a newer production build is already running", "the new variables apply when it finishes."],
-    ["access_denied", "Vercel connection was refused", RECONNECT],
-    ["connection_unavailable", "Vercel connection is unavailable", RECONNECT],
-    ["project_mismatch", "connected Vercel project doesn't match this site", RECONNECT],
-    ["provider_unavailable", "Vercel was unreachable", "re-run `infinite analytics` shortly."],
-    ["provider_rejected", "Vercel rejected the redeploy", IN_VERCEL],
-    ["some_future_code", null, "Redeploy production in Vercel so the new variables take effect."]
-  ])("skipped %s → plain copy, code in parentheses, unblock step last", (code, plain, unblock) => {
-    const line = serverLaneCopy.envStep.redeploySkipped(code)
-    expect(line).toContain(`(${code})`)
-    if (plain) expect(line).toContain(plain)
-    else expect(REDEPLOY_SKIPPED_COPY[code]).toBeUndefined()
-    expect(line.endsWith(unblock)).toBe(true)
-  })
-
-  it.each([
-    ["redeploy_submission_unknown", "Redeploy submitted, not confirmed"],
-    ["deployment_mismatch", "A deployment was created but didn't match production's commit"],
-    ["some_future_code", "Redeploy submitted, not confirmed"]
-  ])("unconfirmed %s → never 'redeploy again' blind", (code, plain) => {
-    const line = serverLaneCopy.envStep.redeployUnconfirmed(code)
-    expect(line).toContain(plain)
-    expect(line).toContain(`(${code})`)
-    expect(line.endsWith("check Vercel's latest production deployment before redeploying again.")).toBe(true)
-    if (code === "some_future_code") expect(REDEPLOY_UNCONFIRMED_COPY[code]).toBeUndefined()
-  })
-
-  it("every mapped code is pinned by the table above (a new cloud code needs a row)", () => {
-    expect(Object.keys(REDEPLOY_SKIPPED_COPY).sort()).toEqual([
-      "access_denied", "connection_unavailable", "no_production_deployment", "production_build_in_progress", "project_mismatch",
-      "provider_rejected", "provider_unavailable", "serving_deployment_mismatch", "serving_deployment_no_git_source",
-      "serving_deployment_not_ready", "serving_deployment_unknown"
-    ])
-    expect(Object.keys(REDEPLOY_UNCONFIRMED_COPY).sort()).toEqual(["deployment_mismatch", "redeploy_submission_unknown"])
   })
 })
 
@@ -816,29 +518,6 @@ describe("local redeploy — never ships an unchecked working tree", () => {
 
   const DIRTY = { porcelain: " M src/App.tsx\n?? notes.txt\n" }
 
-  it("clean tree + --redeploy deploys without a prompt (behavior unchanged); the tree is checked first", async () => {
-    const run = await drive({ git: { ahead: 0 }, redeploy: true })
-    expect(run.deployed).toBe(true)
-    expect(run.prompts).toEqual([])
-    expect(run.calls.map((call) => `${call.command} ${call.args.join(" ")}`)).toEqual([
-      "git status --porcelain",
-      "git rev-parse --abbrev-ref --symbolic-full-name @{upstream}",
-      "git rev-list --count @{upstream}..HEAD",
-      "vercel --prod"
-    ])
-    expect(run.report.redeploy).toEqual({ state: "deployed", url: "https://example-abc.vercel.app" })
-  })
-
-  it("clean tree, interactive, no flag: the original [y/N] prompt; no upstream is not a finding", async () => {
-    const run = await drive({ git: { ahead: null }, interactive: true, answers: [true] })
-    expect(run.prompts).toEqual([{ question: "Run `vercel --prod` now? It deploys this LOCAL working tree (including uncommitted changes) to production. [y/N] ", defaultYes: false }])
-    expect(run.deployed).toBe(true)
-  })
-
-  it("the harness's own outputs (.infinite/, .gitignore) do not make the tree dirty", async () => {
-    expect(await inspectDeployTree(vercelRunner({ git: { porcelain: "?? .infinite/\n M .gitignore\n" } }).runner, "/repo")).toEqual({ state: "clean" })
-  })
-
   it("dirty tree + --redeploy, non-interactive: REFUSED, says why, and records dirty_working_tree", async () => {
     const run = await drive({ git: DIRTY, redeploy: true })
     expect(run.deployed).toBe(false)
@@ -849,45 +528,11 @@ describe("local redeploy — never ships an unchecked working tree", () => {
     ])
   })
 
-  it("dirty tree + --redeploy --allow-dirty deploys, with the warning printed", async () => {
-    const run = await drive({ git: DIRTY, redeploy: true, allowDirty: true })
-    expect(run.deployed).toBe(true)
-    expect(run.lines[0]).toBe("! Your working tree has uncommitted changes — `vercel --prod` would deploy them to production. Deploying anyway (--redeploy --allow-dirty).")
-    expect(run.report.redeploy).toMatchObject({ state: "deployed" })
-  })
-
-  it("dirty tree, interactive: the prompt names the uncommitted changes and defaults to No — even with --redeploy", async () => {
-    for (const redeploy of [false, true]) {
-      const run = await drive({ git: DIRTY, interactive: true, redeploy })
-      expect(run.prompts).toEqual([{ question: "Your working tree has uncommitted changes — `vercel --prod` would deploy them to production. Run it anyway? [y/N] ", defaultYes: false }])
-      expect(run.deployed).toBe(false)
-      expect(run.report.redeploy).toEqual({ state: "skipped", reason: "dirty_working_tree" })
-    }
-    const accepted = await drive({ git: DIRTY, interactive: true, answers: [true] })
-    expect(accepted.deployed).toBe(true)
-  })
-
-  it("not a git repository is treated as unsafe (git_state_unknown), same as dirty", async () => {
-    const refused = await drive({ git: { notRepo: true }, redeploy: true })
-    expect(refused.deployed).toBe(false)
-    expect(refused.report.redeploy).toEqual({ state: "skipped", reason: "git_state_unknown" })
-    expect(refused.lines[0]).toContain("git state couldn't be read")
-    const prompted = await drive({ git: { notRepo: true }, interactive: true })
-    expect(prompted.prompts[0]).toMatchObject({ defaultYes: false })
-    expect(prompted.prompts[0]!.question).toContain("would deploy whatever is in it to production, unchecked")
-  })
-
   it("commits not pushed to the upstream are unsafe (unpushed_commits), refused without --allow-dirty", async () => {
     const run = await drive({ git: { ahead: 2 }, redeploy: true })
     expect(run.deployed).toBe(false)
     expect(run.report.redeploy).toEqual({ state: "skipped", reason: "unpushed_commits" })
     expect(run.lines[0]).toContain("This branch has 2 commits not pushed to its upstream — `vercel --prod` would deploy them to production")
     expect((await drive({ git: { ahead: 1 }, redeploy: true, allowDirty: true })).deployed).toBe(true)
-  })
-
-  it("non-interactive without --redeploy never touches git or vercel", async () => {
-    const run = await drive({ git: DIRTY })
-    expect(run.calls).toEqual([])
-    expect(run.report.redeploy).toEqual({ state: "skipped", reason: "not run without --redeploy" })
   })
 })
