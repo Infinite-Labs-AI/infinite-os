@@ -279,6 +279,7 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
         showStatus()
       }
       let result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: text, onNarrate, onActivity })
+      // Only an answer that came back and broke the schema is asked again; a refused request has no answer to fix.
       if ("error" in result && result.error === "unparseable") {
         result = await deps.agents.review({ worktreeDir: worktree.dir, reviewer, brief: `${text}\n\nYour previous answer did not match the JSON schema. Return JSON only, exactly matching it.`, onNarrate, onActivity })
       }
@@ -1062,6 +1063,13 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
         }
         if (result.error === "timeout") {
           return failed("INF_WIZ_AGENT_TIMEOUT", "The second review timed out. The pull request stays a draft; run `npx infinite-tag` again to retry the review.")
+        }
+        if (result.error === "rejected") {
+          // The reviewer never answered: its service refused the request. Never reported as "did not match the schema".
+          session.ledger.completeness = { reviewer: agentReviewer, state: "incomplete", unchecked: ["the reviewer's service refused the request before it answered"] }
+          session.notes.push(`The second review did not run: ${AGENT_LABEL[agentReviewer]}'s service refused the review request before it answered. Nothing from it was acted on.`)
+          await finish(session)
+          return failed("INF_WIZ_AGENT_FAILED", `The second review did not run (${AGENT_LABEL[agentReviewer]}'s service refused the request); the pull request was marked ready without it.`, "continue")
         }
         session.ledger.completeness = { reviewer: agentReviewer, state: "incomplete", unchecked: ["answer did not match the schema"] }
         session.notes.push("The second review could not be read (its answer did not match the schema twice). Nothing from it was acted on.")

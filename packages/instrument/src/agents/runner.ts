@@ -57,7 +57,7 @@ import {
   parseClaudeLine,
   type ModelChoice
 } from "./claude.js"
-import { buildCodexReviewerArgv, buildCodexWorkerArgv, codexModelRejected, codexUnrecognizedConfig, parseCodexLine } from "./codex.js"
+import { buildCodexReviewerArgv, buildCodexWorkerArgv, codexModelRejected, codexRequestRejected, codexUnrecognizedConfig, parseCodexLine } from "./codex.js"
 import { detectAgents, apiKeySourceMatches, resolveCodexRuntime, type DetectedAgents } from "./detect.js"
 import { buildAgentEnv } from "./env.js"
 import { Fence, recoverCrashedTurns, type FenceBlock, type FenceEditAttribution, type FenceGateHit, type FenceStray, type TreeSeal } from "./fence.js"
@@ -413,6 +413,7 @@ export class AgentRunnerImpl implements AgentRunner {
     await rm(scratch, { recursive: true, force: true })
     if (result.outcome === "out_of_usage") return { error: "out_of_usage" }
     if (result.outcome === "timeout") return { error: "timeout" }
+    if (result.requestRejected) return { error: "rejected" }
     return result.review ?? { error: "unparseable" }
   }
 
@@ -698,7 +699,7 @@ export class AgentRunnerImpl implements AgentRunner {
     input: ReviewRunInput,
     scratch: string,
     model: ModelChoice
-  ): Promise<{ outcome: "completed" | "out_of_usage" | "timeout" | "error"; review: ReviewResult | null; modelRejected: boolean }> {
+  ): Promise<{ outcome: "completed" | "out_of_usage" | "timeout" | "error"; review: ReviewResult | null; modelRejected: boolean; requestRejected?: boolean }> {
     const sensitive = await resolveSensitivePaths({ home: this.options.home, env: this.options.env })
     // §3x.3 (D3) The reviewer's event stream is kept (0600), so the next slow review can be measured, and its tool
     // beats are narrated like the worker's (run 3's Codex review left no trace of its 8.5 minutes).
@@ -716,6 +717,7 @@ export class AgentRunnerImpl implements AgentRunner {
     const beatCtx = { root: input.worktreeDir, isAllowed: () => true, agent: input.reviewer, jobNumber: () => null }
     let outcome: "completed" | "out_of_usage" | "timeout" | "error" | null = null
     let modelRejected = false
+    let requestRejected = false
     let structured: unknown = null
     const stop = (value: "out_of_usage" | "error") => {
       if (outcome === null) outcome = value
@@ -817,6 +819,10 @@ export class AgentRunnerImpl implements AgentRunner {
             return stop("error")
           }
           if (codexUnrecognizedConfig(event.message)) return stop("error")
+          if (codexRequestRejected(event.message)) {
+            requestRejected = true
+            return stop("error")
+          }
         }
       })
     }
@@ -831,7 +837,7 @@ export class AgentRunnerImpl implements AgentRunner {
       }
     }
     const final: "completed" | "out_of_usage" | "timeout" | "error" = outcome ?? (exit.timedOut ? "timeout" : exit.code === 0 ? "completed" : "error")
-    return { outcome: final, review: final === "completed" ? parseReview(structured) : null, modelRejected }
+    return { outcome: final, review: final === "completed" ? parseReview(structured) : null, modelRejected, requestRejected }
   }
 }
 

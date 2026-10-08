@@ -5,8 +5,10 @@
 // vars cannot reach the claim channel, fails the required server and reports itself toolless.
 // Scenario keys: version, loginStatus, loginExit, turns[]: { rejectModel, rejectModelAfterMcp (the real
 // CLI starts MCP servers before the first model call), mcp: "skip" (the required server never comes up),
-// steps[], final (the -o JSON), exit, threadId }.
-import { readdirSync, writeFileSync } from "node:fs"
+// steps[], final (the -o JSON), exit, threadId, schemaProblem }.
+// Like the real service, it refuses an `--output-schema` that OpenAI's strict structured outputs will not take
+// (the exact 400 lines the real CLI printed in a live run), before the model answers anything.
+import { readdirSync, readFileSync, writeFileSync } from "node:fs"
 
 import { emit, envSnapshot, loadScenario, McpClient, priorRuns, readStdin, record, runSteps, withReadCheck } from "./fake-agent-lib.mjs"
 
@@ -50,6 +52,32 @@ record({ kind: "run", agent: "codex", role, argv, cwd, env: envSnapshot(), stdin
 const threadId = resumeThread ?? turn.threadId ?? "thread-fake-0001"
 emit({ type: "thread.started", thread_id: threadId })
 emit({ type: "turn.started" })
+
+/** The first rule of strict structured outputs the schema breaks, in the service's own words; null when it takes it. */
+function strictSchemaProblem(node, path) {
+  if (node === null || typeof node !== "object") return null
+  if (node.properties && typeof node.properties === "object") {
+    if (node.additionalProperties !== false) return `'additionalProperties' is required to be supplied and to be false.`
+    const required = Array.isArray(node.required) ? node.required : []
+    const missing = Object.keys(node.properties).find((key) => !required.includes(key))
+    if (missing) return `'${path}.required' is required to include every key in properties. Missing '${missing}'.`
+    for (const [key, child] of Object.entries(node.properties)) {
+      const problem = strictSchemaProblem(child, `${path}.properties.${key}`)
+      if (problem) return problem
+    }
+  }
+  return node.items ? strictSchemaProblem(node.items, `${path}.items`) : null
+}
+
+const schemaPath = flag("--output-schema")
+// `turn.schemaProblem` scripts the refusal for a schema this CLI would otherwise take.
+const schemaProblem = turn.schemaProblem ?? (schemaPath ? strictSchemaProblem(JSON.parse(readFileSync(schemaPath, "utf8")), "schema") : null)
+if (schemaProblem) {
+  const body = JSON.stringify({ type: "error", error: { message: `Invalid schema for response_format 'codex_output_schema': ${schemaProblem}`, type: "invalid_request_error", param: "text.format.schema", code: "invalid_json_schema" }, status: 400 })
+  emit({ type: "error", message: body })
+  emit({ type: "turn.failed", error: { message: body } })
+  process.exit(1)
+}
 
 if (turn.rejectModel && argv.includes("-m")) {
   emit({ type: "error", message: `The '${flag("-m")}' model is not supported when using Codex with a ChatGPT account.` })

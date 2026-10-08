@@ -71,6 +71,7 @@
         "additionalProperties": false,
         "required": [
           "id",
+          "category",
           "item",
           "severity",
           "path",
@@ -84,13 +85,18 @@
             "pattern": "^F[0-9]{1,2}$"
           },
           "category": {
+            "type": [
+              "string",
+              "null"
+            ],
             "enum": [
               "analytics",
               "security",
               "owner_consent_privacy",
               "request_ga4_proxy",
               "request_meta_unsupported",
-              "request_meta_deletion"
+              "request_meta_deletion",
+              null
             ]
           },
           "item": {

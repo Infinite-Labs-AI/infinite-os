@@ -183,6 +183,14 @@ export function codexModelRejected(message: string, modelId: string | null): boo
   return modelId !== null && modelRejectedText(message, modelId)
 }
 
+/**
+ * The model service refused the request itself (HTTP 400 `invalid_request_error`, e.g. `invalid_json_schema` when
+ * strict structured outputs will not take `--output-schema`): the turn fails before the model answers anything.
+ */
+export function codexRequestRejected(message: string): boolean {
+  return /"type"\s*:\s*"invalid_request_error"|"code"\s*:\s*"invalid_json_schema"/.test(message)
+}
+
 /** "unrecognized configuration setting" → fatal: a safety key was ignored (never run without it). */
 export function codexUnrecognizedConfig(message: string): boolean {
   return /unrecognized configuration setting|unknown configuration field/i.test(message)

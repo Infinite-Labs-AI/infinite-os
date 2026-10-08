@@ -78,6 +78,35 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toContain("could not read")
   })
 
+  it("a review request the service refused is reported as not run, never as an answer that broke the schema, and is not asked again", async () => {
+    const w = await opened({ reviews: [{ error: "rejected" }, review([])] })
+    const outcome = await reviewStep.run(w.ctx, w.deps)
+    expect(outcome).toMatchObject({ kind: "failed", code: "INF_WIZ_AGENT_FAILED" })
+    expect(JSON.stringify(outcome)).toContain("refused")
+    expect(w.agents.reviewCalls).toHaveLength(1)
+    const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8"))
+    expect(ledger.completeness).toEqual({ reviewer: "codex", state: "incomplete", unchecked: ["the reviewer's service refused the request before it answered"] })
+    expect(JSON.stringify(ledger)).not.toContain("did not match the schema")
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toBe("No second review (Codex's service refused the request)")
+  })
+
+  it("an answer that broke the schema is asked for once more, then reported unreadable", async () => {
+    const w = await opened({ reviews: [{ error: "unparseable" }, { error: "unparseable" }] })
+    expect(await reviewStep.run(w.ctx, w.deps)).toMatchObject({ kind: "failed", code: "INF_WIZ_REVIEW_UNPARSEABLE" })
+    expect(w.agents.reviewCalls).toHaveLength(2)
+    expect(w.agents.reviewCalls[1]!.brief).toContain("did not match the JSON schema")
+    expect(await reviewSentence(w.ctx, w.deps, RUN_ID, "codex")).toBe("No second review (Codex's answer could not be read)")
+  })
+
+  it("a real Codex answer (every key present, category null) is posted and triaged", async () => {
+    const answer = review([{ id: "F1", category: null, item: "R3", severity: "nit", path: "app/layout.tsx", line: 2, body: "Name the event after the button.", suggested_fix: null } as never])
+    const w = await opened({ reviews: [answer, review([])], gh: { checks: { "42": [{ name: "ci", bucket: "pass", state: "SUCCESS" }] } } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(JSON.stringify(w.gh.read())).toContain("Name the event after the button.")
+    const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8"))
+    expect(ledger.completeness.unchecked).not.toContain("answer did not match the schema")
+  })
+
   it("posts ONE COMMENT review, acts only on trusted items, fixes in a descendant commit, replies, resolves its own fixed thread, re-rehearses, then readies the PR", async () => {
     const w = await opened({
       approveGa4Settings: true,

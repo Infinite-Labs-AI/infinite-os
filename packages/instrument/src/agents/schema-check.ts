@@ -62,16 +62,32 @@ export interface StructuredClaims {
 
 /** The claims fallback, or null when it does not match `claims.schema.json` exactly. */
 export function parseStructuredClaims(value: unknown): StructuredClaims | null {
-  const parsed = typeof value === "string" ? tryJson(value) : value
+  const parsed = typeof value === "string" ? answerJson(value) : value
   if (parsed === undefined || schemaErrors(parsed, CLAIMS_SCHEMA as unknown as Schema).length > 0) return null
   return parsed as StructuredClaims
 }
 
 /** Validate transport shape; the wizard normalizes finding labels once before using the review. */
 export function parseReview(value: unknown): ReviewResult | null {
-  const parsed = typeof value === "string" ? tryJson(value) : value
+  const parsed = typeof value === "string" ? answerJson(value) : value
   if (!isReviewResult(parsed, false)) return null
   return parsed as ReviewResult
+}
+
+/**
+ * The JSON an agent's final message carries. Plain JSON as is; otherwise the ONE ```json (or bare ```) fence, or
+ * else the text from its first `{` to its last `}` (prose around the answer). Never a guess between several
+ * fences. Only the shape is recovered here: the caller still validates every field against the schema.
+ */
+export function answerJson(text: string): unknown {
+  const whole = tryJson(text.trim())
+  if (whole !== undefined) return whole
+  const fences = [...text.matchAll(/```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g)]
+  if (fences.length === 1) return tryJson(fences[0]![1]!.trim())
+  if (fences.length > 1) return undefined
+  const start = text.indexOf("{")
+  const end = text.lastIndexOf("}")
+  return start >= 0 && end > start ? tryJson(text.slice(start, end + 1)) : undefined
 }
 
 function tryJson(text: string): unknown {

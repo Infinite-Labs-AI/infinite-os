@@ -97,6 +97,11 @@ export async function reviewSentence(ctx: Pick<WizardContext, "root">, deps: Pic
   const completeness = ledger.completeness
   if (completeness?.state === "blind") return `Review incomplete (${label} could not read the files)`
   if (completeness?.state === "incomplete") {
+    // No round was ever read: nothing was checked, so it is no review at all, said with why.
+    if (ledger.rounds.length === 0) {
+      if (completeness.unchecked.includes("the reviewer's service refused the request before it answered")) return `No second review (${label}'s service refused the request)`
+      if (completeness.unchecked.includes("answer did not match the schema")) return `No second review (${label}'s answer could not be read)`
+    }
     const count = completeness.unchecked.length
     return `Review incomplete (${label} could not check ${count} item${count === 1 ? "" : "s"})`
   }

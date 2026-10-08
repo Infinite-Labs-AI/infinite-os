@@ -129,7 +129,12 @@ export interface ReviewResult {
   }>
 }
 
-export type ReviewFailure = { error: "unparseable" | "timeout" | "out_of_usage" }
+/**
+ * `rejected`: the agent's service refused the review request before the agent answered (Codex: an
+ * `invalid_request_error`, e.g. a schema strict mode will not take). Nothing was answered, so asking again with
+ * "your answer did not match the schema" cannot help; `unparseable` is an answer that came back and broke the schema.
+ */
+export type ReviewFailure = { error: "unparseable" | "rejected" | "timeout" | "out_of_usage" }
 
 export interface ReviewRunInput {
   worktreeDir: string
@@ -487,10 +492,12 @@ export const REVIEW_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["id", "item", "severity", "path", "line", "body", "suggested_fix"],
+        // Every key is required (`category` is null when the finding has none): Codex sends this schema to OpenAI's
+        // strict structured outputs, which refuses the whole request when an object leaves a key out of `required`.
+        required: ["id", "category", "item", "severity", "path", "line", "body", "suggested_fix"],
         properties: {
           id: { type: "string", pattern: "^F[0-9]{1,2}$" },
-          category: { enum: ["analytics", "security", "owner_consent_privacy", "request_ga4_proxy", "request_meta_unsupported", "request_meta_deletion"] },
+          category: { type: ["string", "null"], enum: ["analytics", "security", "owner_consent_privacy", "request_ga4_proxy", "request_meta_unsupported", "request_meta_deletion", null] },
           item: { enum: [...REVIEW_ITEMS] },
           severity: { enum: ["blocker", "should", "nit", "question"] },
           path: { type: "string", maxLength: 300 },

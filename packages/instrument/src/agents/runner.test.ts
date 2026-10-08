@@ -255,6 +255,37 @@ describe("review (read-only, detached worktree)", () => {
     expect(run.argv!.join(" ")).not.toContain("mcp_servers")
   })
 
+  // The answer a real Codex (codex-cli 0.160.1, strict `--output-schema`) wrote on 2026-10-08: every finding key
+  // present, `category: null` where the finding has none.
+  const CODEX_ANSWER = {
+    verdict: "changes_suggested",
+    summary: "Two findings.",
+    checklist: [{ item: "R1", status: "pass", note: "ok" }],
+    findings: [
+      { id: "F1", category: "analytics", item: "R2", severity: "nit", path: "app/page.tsx", line: 1, body: "Name the event.", suggested_fix: null },
+      { id: "F2", category: null, item: "R3", severity: "should", path: "app/page.tsx", line: null, body: "Send the value.", suggested_fix: "Add value." }
+    ]
+  }
+
+  it("Codex: the review schema passes strict structured outputs, and a real answer (category null) is read", async () => {
+    const { repo, head, git } = reviewRepo()
+    const fakes = fakeAgents({ turns: [{ final: CODEX_ANSWER }] })
+    dirs.push(fakes.home)
+    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "codex", brief: "R1-R16 brief" })
+    const { category: _none, ...second } = CODEX_ANSWER.findings[1]!
+    expect(result).toEqual({ ...CODEX_ANSWER, findings: [CODEX_ANSWER.findings[0], second] })
+    const run = runs(fakes, "codex").find((entry) => entry.role === "reviewer")!
+    expect(run.argv).toContain("--output-schema")
+  })
+
+  it("Codex: a request its service refused (400 invalid_json_schema) is `rejected`, never `unparseable`", async () => {
+    const { repo, head, git } = reviewRepo()
+    const fakes = fakeAgents({ turns: [{ schemaProblem: "'schema.properties.findings.items.required' is required to include every key in properties. Missing 'category'.", final: CODEX_ANSWER }] })
+    dirs.push(fakes.home)
+    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "codex", brief: "R1-R16 brief" })
+    expect(result).toEqual({ error: "rejected" })
+  })
+
   it("refuses the repo itself, or a worktree holding an untracked .env (negatives)", async () => {
     const { repo, head, git } = reviewRepo()
     await expect(assertReviewWorktree(repo, repo)).rejects.toThrow(/detached worktree/)

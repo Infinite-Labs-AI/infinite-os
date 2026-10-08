@@ -147,11 +147,16 @@ export function isReviewResult(value: unknown, normalizeLabels = true): value is
     if (!ITEMS.has(String(entry.item)) || !STATUSES.has(String(entry.status)) || typeof entry.note !== "string" || entry.note.length > 500) return false
   }
   const normalized: Array<() => void> = []
+  // The schema's `category: null` (strict structured outputs make every key required) means "no category", the same
+  // as an absent key: dropped once the whole review is valid, so a ReviewResult never carries a null category.
+  const noCategory: Array<Record<string, unknown>> = []
   for (const row of review.findings as unknown[]) {
     if (typeof row !== "object" || row === null) return false
     const entry = row as Record<string, unknown>
-    if (!exactKeys(entry, ["id", "item", "severity", "path", "line", "body", "suggested_fix", ...(entry.category === undefined ? [] : ["category"])])) return false
-    if (typeof entry.severity !== "string" || (entry.category !== undefined && typeof entry.category !== "string")) return false
+    if (!exactKeys(entry, ["id", "item", "severity", "path", "line", "body", "suggested_fix", ...("category" in entry ? ["category"] : [])])) return false
+    if (entry.category === null) noCategory.push(entry)
+    else if (entry.category !== undefined && typeof entry.category !== "string") return false
+    if (typeof entry.severity !== "string") return false
     if (typeof entry.id !== "string" || !/^F[0-9]{1,2}$/.test(entry.id)) return false
     if (!ITEMS.has(String(entry.item))) return false
     if (typeof entry.path !== "string" || entry.path.length > 300) return false
@@ -169,6 +174,7 @@ export function isReviewResult(value: unknown, normalizeLabels = true): value is
       if (unknown.length && typeof entry.body === "string") entry.body = `[Unknown review label (${unknown.map(label => label.replace(/[\r\n\x00-\x1f\x7f]/g, " ").slice(0, 120)).join("; ")}); treated as blocker.] ${entry.body}`
     })
   }
+  for (const entry of noCategory) delete entry.category
   if (normalizeLabels) for (const apply of normalized) apply()
   return true
 }
