@@ -303,6 +303,10 @@ export class AgentRunnerImpl implements AgentRunner {
           if (this.pendingEdits.size > 0) return { state: "undetermined", problems: ["An editing tool is still running. Wait for it to finish, then claim again."] }
           if (!this.activeFence || !(await this.activeFence.claimCheckSafe())) return { state: "undetermined", problems: ["The safety fence found an out-of-scope or changing file; no static check ran. The turn will be settled before any further checks."] }
           const consentProblems = await this.activeFence.claimConsentProblems(claim.jobId)
+          // The change since the previous claim is this job's (attribution by claim, `claim-attribution.ts`). Taken after
+          // the consent put-back, so the snapshot holds what this job really keeps. A claim refused above (an edit still
+          // running, an unsafe tree) takes none: its change then counts toward the next claim.
+          await this.activeFence.markClaim(claim.jobId)
           if (consentProblems.length > 0) return { state: "problem", problems: consentProblems }
           const feedback = await input.onClaim(claim)
           return feedback && typeof feedback === "object" ? feedback : undefined

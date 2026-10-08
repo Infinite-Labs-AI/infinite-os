@@ -423,6 +423,12 @@ export interface ChecklistItem {
    * `JobScan.detections.eventInventory`), never from an agent. Briefs name the files, lines and missing tools from it.
    */
   inventory?: EventInventoryEntry[]
+  /**
+   * An unverified job whose lines stay in the tree because a verified job owns the same block (`shared_lines`) or builds
+   * on them (`needed_by`): the verified jobs' ids and the files. Set only by the jobs step's settlement; the review agent
+   * reads it as "shared with <job>, not verified on its own" (`jobs/settle-edits.ts` `keptForReviewLines`).
+   */
+  keptForReview?: { with: string[]; files: string[]; why: "shared_lines" | "needed_by" }
 }
 
 /** §3x.2 The most a `ChecklistItem.note` keeps. */
@@ -459,19 +465,6 @@ export interface AgentQuestion {
 }
 
 export interface JobListResult {
-/** What the wizard's static checks said at claim time. */
-export interface ClaimStaticChecks {
-  state: "pass" | "problem" | "undetermined" | "not_run"
-  problems: string[]
-  undetermined?: string[]
-}
-
-/** The claim result's next step when some checks could not be decided (and none found a problem). */
-export const CLAIM_UNDECIDED_NEXT = "the wizard could not decide the checks listed under undetermined: fix what they name and claim again; if a reason is something you cannot change (for example a value the site sets in an environment variable), say so in your claim note and go on" as const
-
-/** At most this many claim-time reasons, each at most this long (the agent reads them; a reason is never cut to nothing). */
-export const CLAIM_REASON_LIMITS = { count: 12, chars: 600 } as const
-
   /** `checks`: the wizard's own checks of the job's code, in plain words (a problem can put the job back); `reviewQuestions`: what the review agent will ask. */
   jobs: Array<{ id: string; title: string; allow: { files: string[]; create: string[] }; rules: string[]; checks: string[]; checkedAfterDeploy: string[]; reviewQuestions: string[] }>
 }
@@ -490,6 +483,19 @@ export interface JobClaimResult {
   /** `undetermined`: the checks the wizard could not decide, with why (live run 2: these were dropped, so the agent read "undetermined, no problems" as acceptable). */
   staticChecks?: ClaimStaticChecks
 }
+
+/** What the wizard's static checks said at claim time. */
+export interface ClaimStaticChecks {
+  state: "pass" | "problem" | "undetermined" | "not_run"
+  problems: string[]
+  undetermined?: string[]
+}
+
+/** The claim result's next step when some checks could not be decided (and none found a problem). */
+export const CLAIM_UNDECIDED_NEXT = "the wizard could not decide the checks listed under undetermined: fix what they name and claim again; if a reason is something you cannot change (for example a value the site sets in an environment variable), say so in your claim note and go on" as const
+
+/** At most this many claim-time reasons, each at most this long (the agent reads them; a reason is never cut to nothing). */
+export const CLAIM_REASON_LIMITS = { count: 12, chars: 600 } as const
 
 export interface ReportProgressInput {
   job_id: string
@@ -796,7 +802,7 @@ const EVENT_SITE_SHAPE = shapeOf<EventSite>()("EventSite", ["file", "line", "via
 export const CHECKLIST_ITEM_SHAPE = shapeOf<ChecklistItem>()(
   "ChecklistItem",
   ["id", "jobId", "n", "title", "owner", "trigger", "allow", "checks", "state"],
-  ["claim", "blockedReason", "edits", "note", "ownerBoundary", "consentActivation", "inventory"],
+  ["claim", "blockedReason", "edits", "note", "ownerBoundary", "consentActivation", "inventory", "keptForReview"],
   {
     trigger: shapeOf<ChecklistItem["trigger"]>()("ChecklistItem.trigger", ["finding", "evidence"], [], { evidence: arrayOf(EVIDENCE_SHAPE) }),
     allow: shapeOf<ChecklistItem["allow"]>()("ChecklistItem.allow", ["files", "create"], []),

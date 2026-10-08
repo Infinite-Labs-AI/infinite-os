@@ -67,6 +67,7 @@ import { git, gitOk, parsePorcelainZ, type StatusEntry } from "./git-exec.js"
 import { matchesAnyGlob, normalizeRelPath } from "./glob.js"
 import { TURN_GATE_RULES, type TurnGateRule } from "../checks/turn-gate.js"
 import { applySomeHunks, hunkLines, hunksOf, hunksToTextEdits, splitLines, type LineHunk } from "./line-diff.js"
+import { claimOwners, nearestOwner, type ClaimMark } from "./claim-attribution.js"
 import { restoreFrozenUnits, sourceUnits, type FrozenUnitRestore } from "../jobs/consent-units.js"
 export { CONSENT_CALL_PATTERNS } from "../jobs/consent-units.js"
 
@@ -284,6 +285,47 @@ export class Fence {
   private readonly editSnapshots = new Map<string, string>()
   private readonly consentRefusals = new Map<string, Array<{ owners: string[] }>>()
   private readonly editActivities = new Map<string, Array<{ itemId: string | null; hunks: LineHunk[]; consent: boolean }>>()
+  /** The job files as they stood at each `job_claim` of this turn, in order (attribution by claim, `claim-attribution.ts`). */
+  private readonly claimMarks: Array<{ jobId: string; texts: Map<string, string> }> = []
+
+  /**
+   * Snapshots every changed file a job may touch when a claim comes in: the change since the previous claim is the
+   * claiming job's work. Called by the runner's claim handler once the tree is safe to read (`claimCheckSafe`).
+   */
+  async markClaim(jobId: string): Promise<void> {
+    this.assertOpen()
+    const touched = await this.touched()
+    const texts = new Map<string, string>()
+    for (const rel of touched.paths) {
+      if (isDenied(rel, this.manifest.appRoot) || (!this.allowsFile(rel) && !this.allowsCreate(rel))) continue
+      const bytes = await readFile(join(this.manifest.root, rel)).catch(() => null)
+      const text = bytes === null ? null : decodeText(bytes)
+      if (text !== null) texts.set(rel, text)
+    }
+    this.claimMarks.push({ jobId, texts })
+  }
+
+  /**
+   * The owners of each hunk of one file (`hunks` = `hunksOf(beforeLines, afterLines)`): the jobs whose claim intervals
+   * made it, else ONE job nearest by evidence line (`claim-attribution.ts`). A file a claim did not snapshot stood as it
+   * was before the turn.
+   */
+  private hunkOwners(rel: string, beforeLines: readonly string[], afterLines: readonly string[], hunks: readonly LineHunk[], claims: readonly Claim[]): string[][] {
+    const covering = this.manifest.allow.filter((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel)))
+    const marks: ClaimMark[] = this.claimMarks.map((mark) => {
+      const text = mark.texts.get(rel)
+      return { jobId: mark.jobId, lines: text === undefined ? beforeLines : splitLines(text), credit: covering.some((rule) => rule.itemId === mark.jobId) }
+    })
+    const byClaim = claimOwners(beforeLines, afterLines, marks, hunks)
+    const known = new Set(this.manifest.allow.map((rule) => rule.itemId))
+    const namedBy = claims.filter((claim) => known.has(claim.jobId) && (claim.files ?? []).map(normalizeRelPath).includes(rel)).map((claim) => claim.jobId)
+    return hunks.map((hunk, index) => {
+      const owners = byClaim[index]!
+      if (owners.length > 0) return owners
+      const nearest = nearestOwner(rel, hunk, covering, namedBy)
+      return nearest ? [nearest] : []
+    })
+  }
 
   /** Called on a completed editing tool event, with the job that was active when that edit began. */
   recordEditActivity(itemId: string | null, path: string): void {
@@ -724,6 +766,7 @@ export class Fence {
         for (const evidence of fileEvidence) {
           const candidate = candidates.find((entry) => entry.rel === normalizeRelPath(evidence.file))
           if (!candidate) continue
+          const owners = this.hunkOwners(candidate.rel, candidate.beforeLines, candidate.afterLines, candidate.hunks, options.claims ?? [])
           // The evidence line can be a NEW-file line (an added line) or an OLD-file line (a removed line,
           // e.g. O9's `autoconfig_opt_out_removed`); `CheckResult` does not say which (review O3 F2). So every
           // hunk the line could belong to is dropped, on either side; when none matches, the whole file is.
@@ -732,9 +775,9 @@ export class Fence {
             .filter(({ hunk }) => (evidence.line > hunk.bStart && evidence.line <= hunk.bEnd) || (evidence.line > hunk.aStart && evidence.line <= hunk.aEnd))
           const dropped = hits.length === 0 ? candidate.hunks.map((hunk, index) => ({ hunk, index })) : hits
           const note = `the wizard's safety check refused ${candidate.rel}:${evidence.line}: ${words || "the edit broke a safety rule"}`
-          for (const { hunk, index } of dropped) {
+          for (const { index } of dropped) {
             candidate.keep[index] = false
-            gateHits.push({ rule, file: candidate.rel, line: evidence.line, hunk: hits.length === 0 ? -1 : index, itemIds: this.attributeHunk(candidate.rel, hunk, options.claims ?? []), note })
+            gateHits.push({ rule, file: candidate.rel, line: evidence.line, hunk: hits.length === 0 ? -1 : index, itemIds: owners[index] ?? [], note })
           }
         }
       }
@@ -762,7 +805,8 @@ export class Fence {
       const final = await readFile(absolute)
       const textEdits: ManagedTextEdit[] = hunksToTextEdits(candidate.beforeLines, candidate.afterLines, keptHunks)
       // §3x.2 Every kept hunk is attributed like a gate hit, so the jobs step can undo per item.
-      const textEditItems = keptHunks.map((hunk) => this.attributeHunk(candidate.rel, hunk, options.claims ?? []))
+      const owners = this.hunkOwners(candidate.rel, candidate.beforeLines, candidate.afterLines, candidate.hunks, options.claims ?? [])
+      const textEditItems = candidate.hunks.map((_, index) => owners[index]!).filter((_, index) => candidate.keep[index])
       const editId = `agent-${manifest.runId.replace(/[^0-9a-f]/gi, "").slice(0, 8) || "run"}-t${manifest.turn}-${editIndex}`
       attribution.push({ editId, textEditItems })
       const firstItem = textEditItems.flat()[0]
@@ -1007,18 +1051,6 @@ export class Fence {
   /** The turn's items whose allowlist covers `rel`. */
   private coveringItems(rel: string): string[] {
     return this.manifest.allow.filter((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel))).map((rule) => rule.itemId)
-  }
-
-  /** Ownership comes from the wizard's recorded edit places. An agent claim cannot remove
-   * an unclaimed co-owner. With no matching place, all covering jobs must verify the hunk. */
-  attributeHunk(rel: string, hunk: LineHunk, _claims: readonly Claim[]): string[] {
-    const candidates = this.manifest.allow.filter((rule) => [...rule.files, ...rule.create].some((file) => sameOrGlob(file, rel)))
-    const evidenceIn = (rule: FenceItemAllow, slack: number) =>
-      (rule.evidence ?? []).some((entry) => entry.file === rel && entry.line >= hunk.aStart + 1 - slack && entry.line <= Math.max(hunk.aEnd, hunk.aStart + 1) + slack)
-    const exact = candidates.filter(rule => evidenceIn(rule, 0))
-    if (exact.length > 0) return exact.map(rule => rule.itemId)
-    const near = candidates.filter(rule => evidenceIn(rule, 3))
-    return (near.length > 0 ? near : candidates).map(rule => rule.itemId)
   }
 
   private jobFor(rel: string, claims: readonly Claim[]): string | null {

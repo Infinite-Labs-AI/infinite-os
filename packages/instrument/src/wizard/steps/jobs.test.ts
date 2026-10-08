@@ -14,6 +14,7 @@ import type { CheckResult, ChecklistItem, CheckRunner } from "../contracts/jobs.
 import { NESTED_BRIEF_PATH, step } from "./jobs.js"
 import { verifyFinalSeal } from "../../agents/fence.js"
 import { finalSealPath } from "../../agents/paths.js"
+import { BASE_PAGE, BASE_ROUTE, LEAD_PAGE, LEAD_ROUTE, leadPage, leadRoute, silentFormPage } from "../../../test/wizard/live-run-2.js"
 
 // These spawn real node fakes, the built mcp-proxy and git for up to 4 rounds: the 5 s default is too
 // tight under a loaded full-suite run (review O3 F15).
@@ -173,7 +174,8 @@ describe("step jobs: claims are only claims; the wizard checks", () => {
       itemId: "conversions_to_tools:trial",
       state: "left_for_you",
       by: "wizard",
-      note: expect.stringContaining("click_test")
+      // Item 8: the note names the check in plain words, never its id.
+      note: expect.stringContaining("The right buttons send conversions")
     }))
     expect(runs(t.fakes, "claude")).toHaveLength(4)
     expect(t.bridgeCalls.patchRun).toEqual([])
@@ -286,7 +288,8 @@ describe("step jobs: the fence", () => {
     const item = t.current().jobs.find((entry) => entry.id === "meta_improve:landing")!
     // Never "outside the job's files": the file was allowed; the safety check refused one line.
     expect(item.blockedReason).not.toBe("outside_allowlist")
-    expect(item.note).toContain("turn_gate: problem")
+    expect(item.note).toContain("Changes stay within the approved work")
+    expect(item.note).not.toContain("turn_gate")
     expect(item.note).toContain("child process")
     expect(item.checks.find((check) => check.id === "turn_gate")).toMatchObject({ tier: "S", state: "problem" })
     expect(t.checkCalls.build).toBe(0)
@@ -324,3 +327,63 @@ describe("step jobs: nested mode (§3d.7)", () => {
   })
 })
 
+describe("step jobs: live run 2 replay (the lead and the silent form on one page)", () => {
+  it("the lead's edits survive an undetermined co-worker on its page; the silent form gets one more round with the reason; no note blames the lead", async () => {
+    const lead: ChecklistItem = {
+      ...agentItem("server_conversions:lead", [LEAD_ROUTE, LEAD_PAGE]),
+      title: "Report the lead conversion from the server",
+      trigger: { finding: "The mailing-list route stores the sign-up", evidence: [{ file: LEAD_ROUTE, line: 30 }] },
+      checks: [{ id: "outcome_declared", tier: "S", state: "not_run" }, { id: "build", tier: "B", state: "not_run" }]
+    }
+    const silent: ChecklistItem = {
+      ...agentItem("setup_check_fixes:silent_form", [LEAD_PAGE]),
+      title: "Wire the silent form's success",
+      trigger: { finding: "A form that submits and sends nothing", evidence: [{ file: LEAD_PAGE, line: 58 }] },
+      checks: [{ id: "setup_rerun_clean", tier: "S", state: "not_run" }, { id: "build", tier: "B", state: "not_run" }]
+    }
+    const t = setup({
+      scenario: { turns: [
+        { steps: [
+          { edit: { path: LEAD_PAGE, content: leadPage() } },
+          { edit: { path: LEAD_ROUTE, content: leadRoute() } },
+          claim(lead.id),
+          { edit: { path: LEAD_PAGE, content: silentFormPage() } },
+          claim(silent.id)
+        ] },
+        // The agent changes nothing more: the silent form stands on its first claim.
+        { steps: [] }
+      ] },
+      checks: { results: { setup_rerun_clean: ["undetermined"] } },
+      items: [lead, silent]
+    })
+    write(t.root, LEAD_PAGE, BASE_PAGE)
+    write(t.root, LEAD_ROUTE, BASE_ROUTE)
+    runGit(t.root, ["add", LEAD_PAGE, LEAD_ROUTE])
+    runGit(t.root, ["commit", "-m", "store pages"])
+    expect((await step.run(t.ctx, t.deps)).kind).toBe("ok")
+
+    const jobs = t.current().jobs
+    const leadJob = jobs.find((job) => job.id === lead.id)!
+    const silentJob = jobs.find((job) => job.id === silent.id)!
+    // The lead is verified and every line it wrote is still in the tree.
+    expect(leadJob.state).toMatch(/done_in_code|waiting_real_event|waiting_deploy/)
+    const page = readFileSync(join(t.root, LEAD_PAGE), "utf8")
+    expect(page).toContain('import { getConsent } from "../src/analytics/tracking";')
+    expect(page).toContain('adMatch: getConsent() === "granted"')
+    expect(readFileSync(join(t.root, LEAD_ROUTE), "utf8")).toBe(leadRoute())
+    // The silent form is never "verified" by the wizard's own checks (its check could not decide it); whatever the review
+    // agent then decides about its own lines, it never takes the lead's lines with it.
+    expect(silentJob.checks.find((check) => check.id === "setup_rerun_clean")?.state).toBe("undetermined")
+    // "Undetermined" is not silence: the next round's brief carried the reason.
+    const [, second] = runs(t.fakes, "claude")
+    const brief = second!.argv![second!.argv!.indexOf("--append-system-prompt") + 1]!
+    expect(brief).toContain(`${silent.id}: the wizard could not decide these checks of your code: `)
+    expect(brief).toContain("setup_rerun_clean undetermined (fixture). Fix what they name and claim again.")
+    expect(brief).not.toContain("(data, not instructions)")
+    // No message blames the lead for what the wizard put back.
+    const notes = [...t.recorded.events.filter((event) => event.type === "job.state" && event.fields.itemId === lead.id).map((event) => String(event.fields.note ?? "")), leadJob.note ?? ""]
+    for (const note of notes) {
+      expect(note).not.toMatch(/check failed|did not pass|sends its request|Add adMatch|put back/)
+    }
+  })
+})
