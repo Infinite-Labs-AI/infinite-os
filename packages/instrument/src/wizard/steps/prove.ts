@@ -57,6 +57,9 @@ import type { VerdictToolFact } from "../contracts/report.js"
 import type { CensusResult } from "../contracts/jobs.js"
 import { verdictFactsFor } from "../verdict-facts.js"
 import { proofStateOf } from "../verdict.js"
+import { proveCommerce, type CommerceProofLine } from "./prove-commerce.js"
+import { readEventInventory } from "../../checks/commerce-inventory.js"
+import { loadRepoSnapshot } from "../../jobs/repo-files.js"
 
 /** How often the deploy status is read, and how long `prove` waits before parking (the desktop watcher continues). */
 export const PROVE_LIMITS = {
@@ -1299,6 +1302,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   // Review I1 P1-1: once this run holds the claim, nothing between here and the PATCH may leave the cloud run
   // `proving` for 24 h. An unexpected error building the column still settles the proof as undetermined.
   let proofState: "proven" | "problem" | "undetermined" | null = null
+  let commerce: CommerceProofLine[] = []
   try {
     // T1 after the deploy (read-only).
     const t1: CheckResult[] = []
@@ -1310,6 +1314,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
       if (visit !== null || Object.values(receipts.lanes).some(laneFired)) {
         postDeploy = await measureAfterDeploy(ctx, deps, { runId, mergeSha, productionHost, expect, keys, gradeCtx, reader })
       }
+      // Review r3: the shop events the plan promised Meta and Infinite, measured where the engine can, said where not.
+      commerce = await commerceProof(ctx, deps, { runId, mergeSha, productionHost, expect, reader, since: deployedSince(state, deps) })
     }
 
     // Live run 6: per-tool grades are not job check ids. Derive the PV checks from this
@@ -1431,7 +1437,38 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     return { kind: "failed", code: "INF_WIZ_PROOF_INCOMPLETE", message: `The real visit could not run: ${visitError}.`, next: "continue" }
   }
   const tail = won || ownClaim ? "" : " (receipts from the Infinite app's visit)"
-  return { kind: "ok", status: `${passed} of ${lanes.length} tools passed the live test${tail}${proofState === "problem" ? " · problems found" : ""}` }
+  const missingShop = commerce.filter((line) => line.state === "missing").length
+  const shop = missingShop > 0 ? ` · ${missingShop} shop event${missingShop === 1 ? "" : "s"} not reaching Meta` : ""
+  return { kind: "ok", status: `${passed} of ${lanes.length} tools passed the live test${tail}${proofState === "problem" ? " · problems found" : ""}${shop}` }
+}
+
+/**
+ * Review r3: the shop-event proof (`prove-commerce.ts`) with this run's inventory and code, each line said as a
+ * sub-line. A crash is said as "could not run", never a pass, and never stops the proof.
+ */
+async function commerceProof(
+  ctx: WizardContext,
+  deps: WizardDeps,
+  input: { runId: string; mergeSha: string; productionHost: string; expect: TestExpect; reader: DeploymentReader | null; since: string | null }
+): Promise<CommerceProofLine[]> {
+  let lines: CommerceProofLine[]
+  try {
+    const before = await readBeforeFactsFile(deps.fs, ctx.root, ctx.runId)
+    const inventory = readEventInventory((before as unknown as { eventInventory?: unknown } | null)?.eventInventory)
+    let files: ReadonlyMap<string, string> | null = null
+    try {
+      files = inventory ? loadRepoSnapshot(ctx.root, ctx.appRoot).files : null
+    } catch {
+      files = null
+    }
+    lines = await proveCommerce(ctx, deps, { ...input, inventory, files })
+  } catch (error) {
+    lines = [{ id: "shop_events", state: "not_measured", words: `Meta's shop events: the live check could not run (${errorWords(error)}).` }]
+  }
+  const mark = { seen: "✓", missing: "!", not_measured: "·" } as const
+  const tone = { seen: "ok", missing: "warn", not_measured: "info" } as const
+  for (const line of lines) ctx.emit.emit("step.sub", { step: "prove", text: `${mark[line.state]} ${line.words}`, tone: tone[line.state] })
+  return lines
 }
 
 /** No census entries: the grader then knows only what this run installed. */
