@@ -459,8 +459,12 @@ export function signalSends(text: string): SignalUse[] {
       else if (/\.\s*(?:append|set)\s*\(\s*["'`]$/.test(before)) place = "body"
       else if (/^["'`]\s*:/.test(after)) place = "body"
     } else {
-      // A read (`x.adMatch`) is not a send; an object key (`adMatch: …`) or a shorthand property (`{ adMatch }`) is.
-      if (/(?:\.|\?\.)\s*$/.test(before)) continue
+      // A read (`x.adMatch`) is not a send; an object key (`adMatch: …`), a shorthand property (`{ adMatch }`) or a key
+      // set on a payload before it is sent (`payload.adMatch = …`) is.
+      if (/(?:\.|\?\.)\s*$/.test(before)) {
+        if (/\.\s*$/.test(before) && /^\s*=(?![=>])/.test(after)) out.push({ key, place: "body", index, line: lineNumberAt(text, index) })
+        continue
+      }
       if (/^\s*:/.test(after) && !/\?\s*$/.test(before)) place = "body"
       else if (/[{,]\s*$/.test(before) && /^\s*[,}]/.test(after)) place = "body"
     }
@@ -494,6 +498,77 @@ export function signalReads(text: string): SignalUse[] {
     out.push({ key, place: placeOf(match[2]!), index, line: lineNumberAt(text, index) })
   }
   return out
+}
+
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+
+/** The expression from `from` (masked code) to the end of its statement: a `;`, a newline, or a closing bracket, at depth 0. */
+function expressionFrom(code: string, from: number): string {
+  let depth = 0
+  let cursor = from
+  for (; cursor < code.length; cursor += 1) {
+    const ch = code[cursor]!
+    if (ch === "(" || ch === "{" || ch === "[") depth += 1
+    else if (ch === ")" || ch === "}" || ch === "]") {
+      if (depth === 0) break
+      depth -= 1
+    } else if (depth === 0 && (ch === ";" || ch === "," || ch === "\n")) break
+  }
+  return code.slice(from, cursor)
+}
+
+/**
+ * The value a send carries (masked code): `adMatch: <value>`, `"adMatch": <value>`, `payload.adMatch = <value>`, or the
+ * name itself for a shorthand `{ adMatch }`. Null for a form field or a URL parameter (the value sits in the markup).
+ */
+function sendValue(code: string, send: SignalUse): string | null {
+  let at = send.index + send.key.length
+  const inString = code.slice(send.index, at) !== send.key
+  if (inString) {
+    if (!/["'`]/.test(code[at] ?? "")) return null
+    at += 1
+  }
+  while (at < code.length && /[ \t]/.test(code[at]!)) at += 1
+  if (code[at] === ":" || (code[at] === "=" && code[at + 1] !== "=")) return expressionFrom(code, at + 1)
+  return inString ? null : send.key
+}
+
+/** What a local name is bound to in the file: `const name = …` (any declaration, an array pattern too) or `function name() { … }`. */
+function bindingsOf(code: string, name: string): string[] {
+  const id = escapeRegExp(name)
+  const out: string[] = []
+  const declared = new RegExp(`\\b(?:const|let|var)\\s+(?:${id}\\b|\\[[^\\]=]*\\b${id}\\b[^\\]=]*\\])\\s*(?::[^=;\\n]+)?=(?![=>])`, "g")
+  for (const match of code.matchAll(declared)) out.push(expressionFrom(code, (match.index ?? 0) + match[0].length))
+  for (const match of code.matchAll(new RegExp(`\\bfunction\\s+${id}\\s*\\(`, "g"))) {
+    const open = code.indexOf("{", (match.index ?? 0) + match[0].length)
+    const close = open < 0 ? -1 : closingOf(code, open)
+    if (close > open) out.push(code.slice(open, close + 1))
+  }
+  return out
+}
+
+/**
+ * The value is BUILT FROM the site's signal: it calls the reader, itself or through the locals it names (a const, an
+ * array pattern such as `useState(…)`, a function), a few steps deep. `adMatch: true` or a value from anything else is not.
+ */
+function readsSignal(code: string, value: string, reader: string, seen: Set<string> = new Set(), depth = 0): boolean {
+  if (new RegExp(`\\b${escapeRegExp(reader)}\\s*\\(`).test(value)) return true
+  if (depth >= 4) return false
+  for (const match of value.matchAll(/(?<![\w$.])[A-Za-z_$][\w$]*/g)) {
+    const name = match[0]
+    if (seen.has(name)) continue
+    seen.add(name)
+    if (bindingsOf(code, name).some((bound) => readsSignal(code, bound, reader, seen, depth + 1))) return true
+  }
+  return false
+}
+
+/** One send is built from the reader: its value (followed through locals), or for markup, the reader beside it. */
+function sendBuiltFrom(text: string, send: SignalUse, reader: string): boolean {
+  const code = maskCommentsAndStrings(text, true)
+  const value = sendValue(code, send)
+  if (value !== null) return readsSignal(code, value, reader)
+  return new RegExp(`\\b${escapeRegExp(reader)}\\s*\\(`).test(maskCommentsAndStrings(text, false).slice(Math.max(0, send.index - 200), send.index + 200))
 }
 
 const PLACE_WORDS: Readonly<Record<SignalPlace, string>> = { body: "the request body", query: "the URL" }
@@ -543,7 +618,7 @@ export function signalFindings(input: CommerceCheckInput): CommerceFinding[] {
           continue
         }
         if (reader) {
-          const built = sends.some((send) => new RegExp(`\\b${reader}\\s*\\(`).test(maskCommentsAndStrings(pageText, false).slice(Math.max(0, send.index - 200), send.index + 200)))
+          const built = sends.some((send) => sendBuiltFrom(pageText, send, reader))
           if (!built) {
             findings.push({ rule: "tracking_signal_not_carried", state: "problem", file: page.file, line: sends[0]!.line, event: row.event, message: `${where(page.file, sends[0]!.line)} sends ${sends[0]!.key}, but not from the site's tracking signal (${signal?.kind === "site_getter" ? signal.expression : "infiniteAdMatchAllowed()"}), so match data could reach Meta for a visitor who did not allow tracking, or never reach it.` })
             continue

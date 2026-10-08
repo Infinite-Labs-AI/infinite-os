@@ -510,6 +510,95 @@ describe("Finding 1: the page's tracking signal reaches the route's read", () =>
     expect(signalReads('const a = form.get("ad_match") === "1"').map((use) => use.place)).toEqual(["body"])
     expect(signalReads("const { adMatch } = req.body").map((use) => [use.key, use.place])).toEqual([["adMatch", "body"]])
   })
+
+  // A signup route and page shaped like a real store's: the route parses its body into a local first, the page reads
+  // the site's consent getter. Every way of carrying the signal the briefs allow passes; the true negatives stay problems.
+  describe("aliased bodies and payloads (a pages-router signup)", () => {
+    const signup: EventInventory = {
+      rows: [{ event: "lead", tools: { meta: { state: "will_add", lane: "server" } }, sites: [{ file: "pages/api/newsletter.ts", line: 4, via: "form-api" }, { file: "pages/newsletter.tsx", line: 12, via: "helper:generateLead" }] }],
+      pageRequests: [{ route: "pages/api/newsletter.ts", file: "pages/newsletter.tsx", line: 7, how: "json" }],
+      trackingSignal: { kind: "site_getter", expression: 'getConsent() === "granted"', name: "getConsent" }
+    }
+    const handler = (parse: string, read: string) =>
+      [
+        'import type { NextApiRequest, NextApiResponse } from "next";',
+        'import { reportInfiniteLead } from "../../lib/infinite-outcome";',
+        "",
+        "export default async function handler(req: NextApiRequest, res: NextApiResponse) {",
+        `  ${parse}`,
+        '  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";',
+        `  await reportInfiniteLead(req, { type: "lead", email, trackingAllowed: ${read}, fallbackPath: "/newsletter", fallbackId: "signup" });`,
+        "  res.status(200).json({ ok: true });",
+        "}",
+        ""
+      ].join("\n")
+    const signupPage = (before: string, body: string) =>
+      [
+        'import { useState } from "react";',
+        'import { getConsent } from "../src/analytics/tracking";',
+        "",
+        "export default function Newsletter() {",
+        '  const [email, setEmail] = useState("");',
+        "  const onSubmit = async () => {",
+        `    ${before}`,
+        '    const res = await fetch("/api/newsletter", {',
+        '      method: "POST",',
+        '      headers: { "Content-Type": "application/json" },',
+        `      body: ${body},`,
+        "    });",
+        "    if (!res.ok) return;",
+        "  };",
+        "  return null;",
+        "}",
+        ""
+      ].join("\n")
+    const run = (routeText: string, pageText: string) => signalFindings({ files: files({ "pages/api/newsletter.ts": routeText, "pages/newsletter.tsx": pageText }), inventory: signup })
+    const sendsInline = signupPage("", 'JSON.stringify({ email, interests, adMatch: getConsent() === "granted" })')
+    const asBody = handler("const body = (req.body ?? {}) as { email?: unknown; interests?: unknown; adMatch?: unknown };", "body.adMatch === true")
+
+    it("passes for `body.adMatch === true` read from `const body = req.body ?? {}` (cast or not, any local name)", () => {
+      expect(run(asBody, sendsInline)).toEqual([])
+      expect(run(handler("const body = req.body ?? {};", "body.adMatch === true"), sendsInline)).toEqual([])
+      expect(run(handler("const input = req.body ?? {}; const body = input;", "input.adMatch === true"), sendsInline)).toEqual([])
+    })
+
+    it("passes for a destructured read: `const { email, adMatch } = req.body ?? {}`, with or without a cast", () => {
+      expect(run(handler("const { email: raw, adMatch } = req.body ?? {}; const body = { email: raw };", "adMatch === true"), sendsInline)).toEqual([])
+      expect(run(handler("const { adMatch, ...body } = (req.body ?? {}) as { email?: unknown; adMatch?: unknown };", "adMatch === true"), sendsInline)).toEqual([])
+    })
+
+    it("passes for the signal inside `JSON.stringify({ … })`, as a key or a shorthand, and for a payload built in a variable first", () => {
+      expect(run(asBody, sendsInline)).toEqual([])
+      expect(run(asBody, signupPage('const adMatch = getConsent() === "granted";', "JSON.stringify({ email, interests, adMatch })"))).toEqual([])
+      expect(run(asBody, signupPage('const payload = { email, interests, adMatch: getConsent() === "granted" };', "JSON.stringify(payload)"))).toEqual([])
+      // The value is followed through the locals it names, however far the send is from the reader's call.
+      expect(run(asBody, signupPage('const payload: Record<string, unknown> = { email, interests }; payload.adMatch = getConsent() === "granted";', "JSON.stringify(payload)"))).toEqual([])
+      const far = signupPage("", "JSON.stringify({ email, interests, adMatch: allowed })").replace(
+        "export default function Newsletter() {",
+        `const allowed = isAllowed();\n${"// a long comment between the reader and the send\n".repeat(8)}function isAllowed() {\n  return getConsent() === "granted";\n}\nexport default function Newsletter() {`
+      )
+      expect(run(asBody, far)).toEqual([])
+      expect(run(asBody, signupPage('const [allowed] = useState(() => getConsent() === "granted");', 'JSON.stringify({ "adMatch": allowed, email })'))).toEqual([])
+    })
+
+    it("stays a problem when nothing is sent, the route reads another key, or the value is not built from the site's reader", () => {
+      // The page as the store had it before the run: exactly the message the wizard gave.
+      expect(run(asBody, signupPage("", "JSON.stringify({ email, interests })")).map((finding) => finding.message)).toEqual([
+        "pages/newsletter.tsx:7 sends its request to pages/api/newsletter.ts with no tracking signal, so the lead reaches Meta with no match data. Add adMatch: <the signal> in its JSON body, read in the route as req.body.adMatch === true."
+      ])
+      expect(run(asBody, signupPage("const payload = { email, interests };", "JSON.stringify(payload)")).map((finding) => finding.rule)).toEqual(["tracking_signal_not_carried"])
+      // The route reads ad_match (destructured or off the alias), the page sends adMatch.
+      expect(run(handler("const { ad_match, ...body } = req.body ?? {};", 'ad_match === "1"'), sendsInline).map((finding) => finding.message)).toEqual([expect.stringMatching(/sends the tracking signal as adMatch in the request body, but pages\/api\/newsletter\.ts:\d+ reads ad_match from the request body/)])
+      expect(run(handler("const body = req.body ?? {};", 'body.ad_match === "1"'), sendsInline)).toHaveLength(1)
+      // The route reads no signal at all (the consent is hard-coded on the server).
+      expect(run(handler("const body = req.body ?? {};", "true"), sendsInline).map((finding) => finding.message)).toEqual([expect.stringMatching(/^pages\/api\/newsletter\.ts never reads the tracking signal/)])
+      // Sent, but not from the site's reader.
+      expect(run(asBody, signupPage("", "JSON.stringify({ email, interests, adMatch: true })")).map((finding) => finding.message)).toEqual([expect.stringMatching(/sends adMatch, but not from the site's tracking signal \(getConsent\(\) === "granted"\)/)])
+      expect(run(asBody, signupPage('const payload = { email, adMatch: localStorage.getItem("ok") === "1" };', "JSON.stringify(payload)")).map((finding) => finding.rule)).toEqual(["tracking_signal_not_carried"])
+      // A constant beside an unrelated call to the reader is still a constant.
+      expect(run(asBody, signupPage('const shown = getConsent() === "granted";', "JSON.stringify({ email, shown, adMatch: true })")).map((finding) => finding.rule)).toEqual(["tracking_signal_not_carried"])
+    })
+  })
 })
 
 describe("Finding 3: code after a return in a function the run changed", () => {
