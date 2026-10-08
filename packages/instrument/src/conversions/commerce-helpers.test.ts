@@ -13,7 +13,7 @@ const PIXEL = "1116400780828774"
 const OTHER_PIXEL = "0000000000000001"
 const PRODUCT = "{ item_id: 'sku_2', item_name: 'Trail Pack', price: 249, quantity: 1 }"
 
-function store(options: { helpers?: Partial<ConversionHelpersOptions>; ga4?: "managed" | false; gtagCallback?: boolean } = {}) {
+function store(options: { helpers?: Partial<ConversionHelpersOptions>; ga4?: "managed" | false; gtagCallback?: boolean; fbq?: false } = {}) {
   const vm = createBrowserVm({ url: "https://acme.com/" })
   const calls = { posthog: [] as unknown[][], gtag: [] as unknown[][], fbq: [] as unknown[][], infinite: [] as unknown[][] }
   vm.window.posthog = { capture: (...args: unknown[]) => void calls.posthog.push(args) }
@@ -25,7 +25,7 @@ function store(options: { helpers?: Partial<ConversionHelpersOptions>; ga4?: "ma
     }
     vm.window.__infiniteGa4Lane = { id: "G-TEST123" }
   }
-  vm.window.fbq = (...args: unknown[]) => void calls.fbq.push(args)
+  if (options.fbq !== false) vm.window.fbq = (...args: unknown[]) => void calls.fbq.push(args)
   vm.window.__infiniteRecordEvent = (...args: unknown[]) => {
     calls.infinite.push(args)
     return true
@@ -36,7 +36,11 @@ function store(options: { helpers?: Partial<ConversionHelpersOptions>; ga4?: "ma
     const event = { button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, defaultPrevented: false, preventDefault() { event.defaultPrevented = true } }
     return event
   }
-  return { vm, calls, click }
+  // The site's own pixel starting later (its app shell's effect), exactly as its base code defines fbq.
+  const startPixel = () => {
+    vm.window.fbq = (...args: unknown[]) => void calls.fbq.push(args)
+  }
+  return { vm, calls, click, startPixel }
 }
 
 describe("infiniteTrack sends to exactly the tools the call site is missing", () => {
@@ -75,6 +79,106 @@ describe("infiniteTrack sends to exactly the tools the call site is missing", ()
     const page = store()
     for (const name of ["purchase", "begin_checkout", "lead", "sign_up"]) page.vm.evaluate(`infiniteTrack('${name}', {}, { destinations: ['meta'] })`)
     expect(page.calls.fbq).toEqual([])
+  })
+})
+
+describe("a Meta event sent before the site's own pixel starts is held for it, not lost", () => {
+  // The live run: the product page's effect called view_item BEFORE the app shell's effect started the site's
+  // consent-gated pixel (React runs child effects first), so every full page load lost ViewContent.
+  it("fbq appearing 1 s later gets the ViewContent once, with its product data", async () => {
+    const page = store({ fbq: false, helpers: { currency: "USD" } })
+    page.vm.evaluate(`infiniteTrack('view_item', ${PRODUCT}, { destinations: ['meta'] })`)
+    expect(page.calls.fbq).toEqual([])
+    await page.vm.advance(1000)
+    page.startPixel()
+    await page.vm.advance(200)
+    expect(plain(page.calls.fbq)).toEqual([
+      ["track", "ViewContent", { content_ids: ["sku_2"], content_name: "Trail Pack", content_type: "product", contents: [{ id: "sku_2", quantity: 1, item_price: 249 }], value: 249, currency: "USD" }]
+    ])
+    await page.vm.advance(20_000)
+    expect(page.calls.fbq).toHaveLength(1)
+    expect(page.vm.pendingTimers()).toEqual([])
+  })
+
+  it("follow mode: held while the site's pixels have not started, sent once they run", async () => {
+    const page = store({ fbq: false })
+    page.vm.window.__infiniteConsentAllowed = () => typeof page.vm.window.fbq === "function"
+    expect(page.vm.evaluate(`infiniteTrack('view_item', ${PRODUCT}, { destinations: ['meta', 'infinite'] })`)).toBe(false)
+    expect(page.calls.infinite).toEqual([])
+    await page.vm.advance(600)
+    page.startPixel()
+    await page.vm.advance(200)
+    expect(page.calls.fbq.map((call) => call[1])).toEqual(["ViewContent"])
+  })
+
+  it("a pixel that never starts: dropped after 10 s, no error, no timer left behind", async () => {
+    const page = store({ fbq: false })
+    page.vm.evaluate(`infiniteTrack('view_item', ${PRODUCT}, { destinations: ['meta'] })`)
+    await page.vm.advance(10_000)
+    expect(page.vm.pendingTimers()).toEqual([])
+    page.startPixel()
+    await page.vm.advance(1000)
+    expect(page.calls.fbq).toEqual([])
+    expect(page.vm.scriptErrors).toEqual([])
+  })
+
+  it("a refusal before the pixel starts: never sent (an explicit no, or a recorded denial)", async () => {
+    const page = store({ fbq: false })
+    page.vm.evaluate(`infiniteTrack('view_item', ${PRODUCT}, { destinations: ['meta'] })`)
+    page.vm.evaluate("dispatchEvent({ type: 'infinite:analytics-consent-change', detail: { granted: false } })")
+    page.startPixel()
+    await page.vm.advance(1000)
+    expect(page.calls.fbq).toEqual([])
+
+    const denied = store({ fbq: false })
+    denied.vm.evaluate(`infiniteTrack('add_to_cart', ${PRODUCT}, { destinations: ['meta'] })`)
+    denied.vm.localValues.set("infinite_analytics_consent", "denied")
+    denied.startPixel()
+    await denied.vm.advance(11_000)
+    expect(denied.calls.fbq).toEqual([])
+  })
+
+  it("a no while the pixel already runs is never held, and neither is a failing gate", async () => {
+    const page = store()
+    page.vm.localValues.set("infinite_analytics_consent", "denied")
+    page.vm.evaluate(`infiniteTrack('view_item', ${PRODUCT}, { destinations: ['meta'] })`)
+    page.vm.localValues.delete("infinite_analytics_consent")
+    await page.vm.advance(1000)
+    expect(page.calls.fbq).toEqual([])
+
+    const gated = store({ fbq: false })
+    gated.vm.evaluate(`infiniteTrack('view_item', ${PRODUCT}, { destinations: ['meta'], gate: function () { return false } })`)
+    gated.startPixel()
+    await gated.vm.advance(1000)
+    expect(gated.calls.fbq).toEqual([])
+  })
+
+  it("a silenced preview pixel drops the held event", async () => {
+    const page = store({ fbq: false })
+    page.vm.evaluate(`infiniteTrack('view_item', ${PRODUCT}, { destinations: ['meta'] })`)
+    page.vm.evaluate("window.fbq = function () { window.__silencedCalls = (window.__silencedCalls || 0) + 1 }; window.fbq.__infiniteSilenced = true")
+    await page.vm.advance(1000)
+    expect(page.vm.window.__silencedCalls).toBeUndefined()
+    expect(page.vm.pendingTimers()).toEqual([])
+  })
+
+  it("fbq already there at the call: sent at once, never a second time from the hold", async () => {
+    const page = store()
+    page.vm.evaluate(`infiniteTrack('add_to_cart', ${PRODUCT}, { destinations: ['meta'] })`)
+    expect(page.calls.fbq).toHaveLength(1)
+    await page.vm.advance(11_000)
+    expect(page.calls.fbq).toHaveLength(1)
+    expect(page.vm.pendingTimers()).toEqual([])
+  })
+
+  it("infiniteTrackBeforeLeaving with the event held still settles within the 400 ms Meta bound", async () => {
+    const page = store({ fbq: false, gtagCallback: false })
+    let settled = false
+    void page.vm.evaluate<Promise<void>>(`infiniteTrackBeforeLeaving('add_to_cart', ${PRODUCT}, { destinations: ['meta'] })`).then(() => { settled = true })
+    await page.vm.advance(399)
+    expect(settled).toBe(false)
+    await page.vm.advance(1)
+    expect(settled).toBe(true)
   })
 })
 
