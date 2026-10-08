@@ -89,7 +89,7 @@ exports[`renderFrame > draws the pending ask as one overlay box in place of the 
  │                                                                                                                    │
  │ Your decisions                                                                                                     │
  │ · Consent: — choose it (E on the consent line)                                                                     │
- │ · Conversions: start_trial · signup                                                                                │
+ │ · Conversions: trial starts and sign-ups                                                                           │
  │ · npm: npm install @vercel/functions                                                                               │
  │                                                                                                                    │
  │ The plan                                                                                                           │

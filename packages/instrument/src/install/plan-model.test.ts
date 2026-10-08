@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { candidate, fakeBefore, fakeHosting, fakeKeys, fakeProductionDeniedConflict, IDS, notConnectedKeys } from "../../test/wizard/o7-fakes.js"
 import { buildHostGuardExpression } from "../host-guard.js"
+import { isContinuedWork } from "./plan-permission.js"
 import type { ImproveLine } from "../types.js"
 import { previewGuardBrief } from "../wizard/deps.js"
 import { YES_POLICY, yesApproves } from "../wizard/contracts/asks.js"
@@ -33,6 +34,7 @@ import {
   withGuardHosts,
   GA4_SPA_LINE_TEXT,
   seedItemsAfterApprovals,
+  conversionWords,
   type PlanModelInput,
   type PlanScanFacts,
   SERVER_LANE_HANDOFF_LINE_ID,
@@ -468,7 +470,8 @@ describe("review fixes (O7 fix round)", () => {
     // NEGATIVE: an undetermined D10 (held by consent, blocked by Traffic Permissions) or none at all is unmeasured, never 0.
     const blocked: CheckResult = { ...d10(0), state: "undetermined", reason: "traffic_permissions_blocked — the pixel is blocked, so its automatic events cannot be counted" }
     expect(measured([blocked])?.measured).toBeUndefined()
-    expect(measured([])?.text).toContain("Measured: —")
+    // P2-4: nothing measured says nothing (never "Measured: —").
+    expect(measured([])?.text).not.toContain("Measured")
   })
 
   it("P2-18: unless the agent-budget (cost) line is approved, every agent job waits for the user", () => {
@@ -587,6 +590,22 @@ describe("P1-8: the plan opens with one plain line per tool, built from the inve
     expect(plan.lines.find((line) => line.id === "headline:meta")?.text).toBe("Meta: gets page views only today.")
     expect(plan.lines.find((line) => line.id === "headline:meta_server_lane")?.text).toContain("Lead can't be sent from your server yet.")
     expect(plan.lines.find((line) => line.id === "headline:infinite")?.text).toContain("Leads can't be recorded from your server yet.")
+  })
+
+  it("P2-5: the Meta commerce job edits the site's code, so its line is a choice: on by default, and turning it off drops the job", () => {
+    const plan = buildPlanModel(input({ scan: scanFacts({ adopted: ADOPTED_ALL, eventInventory: STORE_INVENTORY }), candidates: STORE_CANDIDATES }))
+    const commerce = plan.lines.find((line) => line.jobIds?.includes("meta_improve:commerce_events"))!
+    expect(isContinuedWork(commerce)).toBe(true)
+    const approved = plan.lines.filter((line) => line.requires === "approval").map((line) => line.id)
+    expect(seedItemsAfterApprovals(STORE_CANDIDATES, plan.seeds ?? [], plan, { approved, declined: [], edits: {} }).map((item) => item.id)).toContain("meta_improve:commerce_events")
+    expect(seedItemsAfterApprovals(STORE_CANDIDATES, plan.seeds ?? [], plan, { approved, declined: [commerce.id], edits: {} }).map((item) => item.id)).not.toContain("meta_improve:commerce_events")
+  })
+
+  it("P2-4: the conversions line names the conversions in plain words; the names stay the data", () => {
+    const plan = buildPlanModel(input({ scan: scanFacts({ adopted: ADOPTED_ALL, eventInventory: STORE_INVENTORY }), candidates: STORE_CANDIDATES }))
+    expect(plan.lines.find((line) => line.kind === "conversion_names")?.text).toBe("Conversions: checkout starts, purchases and leads")
+    expect(plan.decisions.conversionNames).toEqual(["begin_checkout", "purchase", "lead"])
+    expect(conversionWords(["start_trial", "sign_up", "my_custom_goal"])).toBe("trial starts, sign-ups and my custom goal")
   })
 
   it("proposes conversion names the Meta relay maps (gap 2): start_trial, sign_up, schedule — never trial / signup / booking", () => {

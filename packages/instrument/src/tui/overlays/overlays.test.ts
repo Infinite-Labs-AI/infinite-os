@@ -184,7 +184,7 @@ describe("plan overlay", () => {
     // A plan line wider than the box wraps under its text, so the words are compared across rows.
     const text = stripAnsi([view.question, ...view.body].join("\n")).replace(/\n {6}/g, " ")
     expect(text).toContain("Consent: — choose it")
-    expect(text).toContain("Conversions: start_trial · signup")
+    expect(text).toContain("Conversions: trial starts and sign-ups")
     expect(text).toContain("(2 page views per visit · dry load)")
     expect(text).toContain(" →  Connect GA4 in Infinite")
     expect(text).toContain("4 explicit choices · 1 thing only you can do")

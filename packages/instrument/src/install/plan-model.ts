@@ -23,6 +23,10 @@ import { isRepositoryWork, isContinuedWork } from "./plan-permission.js"
 //   • nothing here is computed from agent output.
 import { buildHostGuardExpression } from "../host-guard.js"
 import { ownerGuardHandoff } from "../jobs/owner-boundary.js"
+import { frozenUnitAt } from "../jobs/consent-units.js"
+import { conversionWords } from "./conversion-words.js"
+export { conversionWords }
+import { expressionInitOf, expressionOptOutLines } from "./improve.js"
 import { automaticEventsPerVisitOf } from "../checks/grade-test-run.js"
 import { applyApprovalsTo, COMMERCE_EVENTS_TARGET, EVENT_WORDS, FUNNEL_EVENT_OF_TARGET, itemChecksFor, listWords, requiredLineKind } from "../jobs/registry.js"
 import { proposedConversionName } from "../jobs/plan-data.js"
@@ -233,6 +237,27 @@ function verifiedPath(facts: LineFacts): boolean {
  * §3y.5 / DECISIONS §1.6: whether a line can be approvable. `{ok:false, line}` = emit it as `user_action` with that
  * text (an empty text = no line at all). A test enumerates every PlanLineKind against unrunnable facts.
  */
+/**
+ * P2-3: when the existing pixel's init sits inside the site's consent code, the installer cannot add the opt-out
+ * there, so the plan never shows it as something we do: one "For you" line with the exact two lines to add. Null when
+ * the installer can make the change (or this is not that line).
+ */
+function autoConfigOwnerText(entry: ImproveLine, appRoot: string | undefined, sources: ReadonlyMap<string, string> | null): string | null {
+  if (entry.kind !== "autoconfig_off_adopted" || entry.owner !== "code" || !entry.evidence || !sources) return null
+  const file = appRoot === undefined || appRoot === "." || appRoot === "" ? entry.evidence.file : `${appRoot.replace(/\/$/, "")}/${entry.evidence.file}`
+  const source = sources.get(entry.evidence.file) ?? sources.get(file)
+  if (source === undefined || frozenUnitAt(source, entry.evidence.line, file) === null) return null
+  const literal = /fbq\s*\(\s*["']init["']\s*,\s*["'](\d{15,16})["']/.exec(source)
+  const init = literal ? null : expressionInitOf(source)
+  const add = literal
+    ? [`fbq('set', 'autoConfig', false, '${literal[1]}');`, "fbq.disablePushState = true;"]
+    : init
+      ? expressionOptOutLines(init.receiver, init.idExpression, /\.[cm]?tsx?$/i.test(file))
+      : null
+  if (!add) return null
+  return `For you: turn off Meta's automatic events and its automatic page-change PageViews on your existing pixel at ${file}:${entry.evidence.line}. It sits inside your consent code, so this run left it to you. Add these two lines right before its fbq('init'):\n${add.join("\n")}`
+}
+
 export function lineRunnable(kind: RunnableLineKey, facts: LineFacts): { ok: true } | { ok: false; line: string } {
   switch (kind) {
     case "install_provider:infinite": {
@@ -655,7 +680,8 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       line({
         id: DECISION_LINE_IDS.conversionNames,
         kind: "conversion_names",
-        text: conversionNames.length > 0 ? `Conversions: ${conversionNames.join(" · ")}` : "Conversions: none found — add names, or skip",
+        // P2-4: plain words on the screen ("checkout starts, purchases and leads"); the names themselves stay the data.
+        text: conversionNames.length > 0 ? `Conversions: ${conversionWords(conversionNames)}` : "Conversions: none found — add names, or skip",
         requires: "approval",
         editable: true,
         ...(conversionJobs.length > 0 ? { jobIds: conversionJobs } : {})
@@ -845,6 +871,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
   const share = previewShare(before.baseline)
   const automatic = automaticMetaEventsPerVisit(before)
   for (const entry of improveLines) {
+    const ownerAutoConfig = autoConfigOwnerText(entry, scan.appRoot, sources)
     const measured =
       entry.kind === "preview_guard_adopted"
         ? share ?? undefined
@@ -860,9 +887,10 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         entry.kind === "preview_guard_adopted" && entry.provider === "meta"
           ? `${entry.text} Preview share: ${share ? share.value : "—"}.`
           : entry.kind === "autoconfig_off_adopted"
-            ? `${entry.text} Measured: ${automatic === null ? "—" : `${automatic} per visit`}.`
+            ? ownerAutoConfig ?? (automatic === null ? entry.text : `${entry.text} Measured: ${automatic} per visit.`)
             : entry.text,
-      requires: "approval",
+      // P2-3: the installer cannot add the opt-out inside the site's consent code, so the line is the owner's.
+      requires: ownerAutoConfig !== null ? "user_action" : "approval",
       ownership: "adopted",
       ...(entry.kind === "sensitive_pages" ? { sensitivePaths: [...scan.sensitivePaths] } : {}),
       ...(measured ? { measured } : {})
@@ -1006,7 +1034,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
     const handoff = item.jobId === "preview_guard" && item.ownerBoundary && guard.emit
       ? ownerGuardHandoff(item.note ?? item.trigger.finding, item.ownerBoundary, buildHostGuardExpression({ mode: "deny", exempt: guard.exempt, deny: guard.deny }), sources?.get(item.ownerBoundary.file ?? "")) : null
     if (handoff && item.ownerBoundary) item.ownerBoundary.guard = handoff.guard
-    const text = handoff?.text ?? [item.note ?? item.trigger.finding, item.ownerBoundary?.wiring ? `Owner-only wiring:\n${item.ownerBoundary.wiring}` : null].filter(Boolean).join("\n\n")
+    const text = handoff?.text ?? [item.note ?? item.trigger.finding, item.ownerBoundary?.wiring ? `The lines to add:\n${item.ownerBoundary.wiring}` : null].filter(Boolean).join("\n\n")
     const prior = lines.find(planLine => planLine.requires === "user_action" && planLine.id !== "user_action:owner_wiring" && (planLine.jobIds?.includes(item.id) || planLine.text === item.note))
     if (prior) prior.text = text
     else lines.push(line({ id: `owner_only:${item.id}`, kind: "user_action", text, requires: "user_action" }))

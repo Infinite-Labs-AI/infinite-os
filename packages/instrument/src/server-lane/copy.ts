@@ -166,7 +166,7 @@ export const serverLaneCopy = {
   ],
   status: {
     created: (middlewarePath: string, modulePath: string) =>
-      `infinite-tag CREATED \`${middlewarePath}\` and \`${modulePath}\`. Nothing else to write. Set the two environment variables below, deploy, then run the verify command.`,
+      `infinite-tag CREATED \`${middlewarePath}\` and \`${modulePath}\`. The lane itself needs nothing more written. Your conversions (purchases, checkout starts, sign-ups) are separate: each is reported from the route where it happens, with the outcome recipes in the guide below. Set the two environment variables below, deploy, then run the verify command.`,
     patched: (middlewarePath: string, modulePath: string) =>
       `infinite-tag PATCHED your existing \`${middlewarePath}\` (fenced \`// infinite-tag:server-lane:start … :end\` blocks; your handler body is unchanged, now wrapped by \`withInfiniteServerLane\`) and created \`${modulePath}\`. Review \`git diff\`, set the two environment variables below, deploy, then run the verify command.`,
     kept: (middlewarePath: string, modulePath: string) =>

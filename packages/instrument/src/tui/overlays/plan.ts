@@ -17,6 +17,7 @@
 // - the box keeps its height while the plan scrolls (F19): the body takes every row it was given, so a notice
 //   or a shorter window never shrinks the box and brings the step list back above it.
 import { isContinuedWork } from "../../install/plan-permission.js"
+import { conversionWords } from "../../install/conversion-words.js"
 import { sanitizeUntrustedBlock } from "../../agents/sanitize.js"
 import { ASK_CANCELLED, type AskPayloads, type PlanLine } from "../../wizard/contracts/asks.js"
 import { wrapAnsi } from "../ansi.js"
@@ -78,7 +79,7 @@ function decisionsView(payload: PlanPayload, state: PlanState, ctx: OverlayConte
   const conversions =
     conversionsLine && state.edits[conversionsLine.id] !== undefined
       ? (state.edits[conversionsLine.id] ?? "")
-      : payload.decisions.conversionNames.join(" · ")
+      : conversionWords(payload.decisions.conversionNames)
   const npm = payload.decisions.npmInstall ? ctx.sanitize(payload.decisions.npmInstall, OVERLAY_TEXT_CAPS.line) : "—"
   return [
     s.bold("Your decisions"),

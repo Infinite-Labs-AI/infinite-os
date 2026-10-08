@@ -113,7 +113,7 @@ it.each([
 ])("does not offer an apply-ready guard when the initialization statement boundary is ambiguous: $source", async ({ source, line }) => {
   const { ownerGuardHandoff } = await import("./owner-boundary.js")
   const handoff = ownerGuardHandoff("For you: add the guard.", { file: "src/tracking.ts", line }, "hostAllowed", source)
-  expect(handoff.text).toContain("not an apply-ready edit")
+  expect(handoff.text).toContain("Where exactly this goes could not be worked out safely, so place this condition yourself")
   expect(handoff.guard).toBe("if (hostAllowed)")
 })
 

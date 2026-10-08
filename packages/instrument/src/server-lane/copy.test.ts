@@ -295,10 +295,11 @@ describe("the plain installer's server-lane copy stays pinned", () => {
     return value
   }
 
+  // Re-pinned for P2-4: the "created" status no longer says "Nothing else to write" while conversions still need reporting.
   it("hashes to the pre-wizard value", () => {
     const text = JSON.stringify(serialise(serverLaneCopy))
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "39a42f51ebc0512e8f1bdd7b02f4a34da0a3cd3e365034c178422d54f617069c"
+      "6b0b7b925a3909e4c0ee36c990bba820d67fc655d68ac4b098fb4350631af74b"
     )
     expect(createHash("sha256").update(serverLaneCopy.status.targetPackages(["@vercel/functions"])).digest("hex")).toBe(
       "9b0fbf1256ca539e699938d069961dc145855359f994b43133afa58d89add7ec"

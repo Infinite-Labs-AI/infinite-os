@@ -77,12 +77,30 @@ export function ownerBoundaryNotes(text: string, priorPolicyEdits: boolean, meas
   return [statement, `${files.split("\n")[0]} ${shown.join("; ")}${extra ? `; … ${extra} more changed files (full Git diff).` : ""}`]
 }
 
+/**
+ * P2-4: what an owner-only change IS, in plain words, per job target (three identical "make the change" lines told the
+ * owner nothing). Each names the setting or the lines, never an internal code.
+ */
+const OWNER_CHANGE: Readonly<Record<string, string>> = {
+  "posthog_improve:history_change": "turn on PostHog's page-change counting (`capture_pageview: 'history_change'` in its init)",
+  "posthog_improve:defaults": "move PostHog to its current recommended settings (the `defaults` option in its init)",
+  "posthog_improve:sensitive_pages": "turn PostHog's session replay and autocapture off on your sensitive pages (in its init)",
+  "posthog_improve:proxy": "send PostHog through your own site (`api_host: '/ingest'` in its init, plus the rewrite)",
+  "ga4_improve:id": "use your connected GA4 measurement id in its config",
+  "ga4_improve:spa_page_view": "make GA4 send one page_view per page change (a few lines after its config)",
+  "meta_improve:autoconfig_off_adopted": "turn off Meta's automatic events (one line before the pixel's init)",
+  "meta_improve:spa_page_view": "make the Meta pixel send one PageView per page change (a few lines after its first PageView)",
+  "meta_improve:capture": "add Infinite's ad-click capture beside the Meta pixel",
+  "meta_improve:retire_fbc_writer": "remove the hand-written `_fbc` cookie writer",
+  "meta_improve:mirror": "move the browser Meta conversions onto the server's event id"
+}
+
 export function frozenJobNote(item: { id: string; jobId: string; title: string }, place: { file: string; line: number }): string {
   const tool = item.jobId === "preview_guard" ? ({ ga4: "GA4", meta: "Meta pixel", posthog: "PostHog" }[item.id.split(":")[1]!] ?? item.title) : item.title
   const location = `${place.file}:${place.line}`
-  return item.jobId === "preview_guard"
-    ? `For you: add the preview guard to ${tool}'s start-up at ${location}; until then preview and local visits count in ${tool}.`
-    : `For you: make the "${tool}" change at ${location}, inside your consent code.`
+  if (item.jobId === "preview_guard") return `For you: add the preview guard to ${tool}'s start-up at ${location}; until then preview and local visits count in ${tool}.`
+  const change = OWNER_CHANGE[item.id]
+  return change ? `For you: ${change} at ${location}. It sits inside your consent code, so this run left it to you.` : `For you: make the "${tool}" change at ${location}. It sits inside your consent code, so this run left it to you.`
 }
 
 export function ownerGuardHandoff(note: string, location: { file?: string; line?: number }, expression: string, source?: string): { text: string; guard: string } {
@@ -111,7 +129,7 @@ export function ownerGuardHandoff(note: string, location: { file?: string; line?
     })
     guard = `--- a/${location.file}\n+++ b/${location.file}\n@@ -${start + 1},${end - start} +${start + 1},${end - start} @@\n${context.join("\n")}`
   }
-  return { guard, text: `${note}\n\n${init ? "Owner-only diff for the named initialization statement; adjacent consent statements stay outside the condition." : "The exact initialization statement and its safe boundary could not be proven. The owner must choose placement for this condition; this is not an apply-ready edit."}\n\n\`\`\`${init ? "diff" : "js"}\n${guard}\n\`\`\`` }
+  return { guard, text: `${note}\n\n${init ? "The change, line by line (only that start-up line; the consent lines around it stay as they are):" : "Where exactly this goes could not be worked out safely, so place this condition yourself:"}\n\n\`\`\`${init ? "diff" : "js"}\n${guard}\n\`\`\`` }
 }
 
 /** Recognize only our standalone status sentences, not words inside reviewer findings. */

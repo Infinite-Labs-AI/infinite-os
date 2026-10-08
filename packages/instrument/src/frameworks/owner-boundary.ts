@@ -17,7 +17,7 @@ export function ownerWiringRequirement(path: string, before: string | null, afte
   if (!changed) return null
   const unit = changed.before ?? changed.after!
   return { path, snippet,
-    reason: `For you: add the analytics wiring at ${path}:${unit.startLine}, inside your consent code.`,
+    reason: `For you: add the analytics wiring at ${path}:${unit.startLine}. It sits inside your consent code, so this run left it to you.`,
     ownerBoundary: { kind: "frozen_unit", file: path, line: unit.startLine, unitHash: unit.hash, lineOffset: 0, unitOrdinal: unit.ordinal } }
 }
 
