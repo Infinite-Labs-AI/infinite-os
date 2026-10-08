@@ -577,8 +577,8 @@ async function settleRound(
         const proving = next.checks.filter((check) => LOCAL_TIERS.includes(check.tier) && checkProvesChange(next.jobId, check.tier, check.id))
         note =
           undetermined.length === 0 && proving.length === 0
-            ? `No check the wizard runs before the deploy shows this job's change in the code (${next.checks.filter((check) => LOCAL_TIERS.includes(check.tier)).map((check) => check.id).join(", ")} pass on code without it too)`
-            : `The wizard's checks of the code could not decide it (${undetermined.map((result) => result.checkId).join(", ") || "no check it can run before the deploy"})`
+            ? `No check the wizard runs before the deploy shows this job's change in the code (${checkWords(next.checks.filter((check) => LOCAL_TIERS.includes(check.tier)).map((check) => ({ id: check.id })))} pass on code without it too)`
+            : `The wizard's checks of the code could not decide it (${checkWords(undetermined.map((result) => ({ id: result.checkId }))) || "no check it can run before the deploy"})`
         io.noteUndecided(item.id, note)
       } else if (next.state === "claimed") {
         // Item 4: "undetermined" is not silence. A check the wizard could not decide goes back to the agent once, with its

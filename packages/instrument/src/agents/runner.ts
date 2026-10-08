@@ -83,8 +83,12 @@ export const WORKER_KICKOFF =
   "Do the jobs in your instructions. Start with job_list. Edit files only; never run git, a build, the tests, an install or a dev server (the wizard builds and tests after your turn). Finish and claim one job at a time. Read job_claim's staticChecks result and fix any problem before moving to the next job; the wizard runs the remaining checks after your turn. Finish with the JSON your output schema asks for."
 export const WORKER_RESUME_KICKOFF =
   "Continue. The wizard ran its own checks; its notes and any answers from the user are at the end of your instructions. Fix what failed, then claim again with job_claim and finish with the JSON your output schema asks for."
-/** The first line of every Claude system prompt: the value after `--append-system-prompt` never starts with "-". */
-export const SYSTEM_PROMPT_HEADER = `Infinite tag wizard: your instructions for this run.\n${OWNER_BOUNDARY_INSTRUCTION}`
+/**
+ * The first line of every Claude system prompt: the value after `--append-system-prompt` never starts with "-". Live run
+ * 6: it no longer repeats the owner boundary paragraph, which the brief itself opens with (`jobs/briefs.ts`
+ * `operatorRules`, the same text Codex gets with no header), so the agent reads it once.
+ */
+export const SYSTEM_PROMPT_HEADER = "Infinite tag wizard: your instructions for this run."
 export const REVIEWER_KICKOFF =
   "Review the pull request checked out in this folder against your supplied checklist. Consent, privacy policies and terms are outside the review: do not evaluate or comment on them. Read only. Answer only with the JSON your output schema asks for."
 

@@ -302,7 +302,7 @@ describe("briefs carry the plan's decisions as data", () => {
   const block = (id: string) => brief.slice(brief.indexOf(`### Job ${JSON.stringify(id)}`)).split("\n### ")[0]!
 
   it("binds each conversion job to the APPROVED (edited) name, never the agent's choice", () => {
-    expect(block("server_conversions:signup")).toContain('"approvedConversionNames":["sign_up"]')
+    expect(block("server_conversions:signup")).toContain("Here: report `sign_up`")
     expect(block("conversions_to_tools:signup")).toContain('"approvedConversionNames":["sign_up"]')
     expect(block("server_conversions:signup")).toContain('type: "sign_up"')
   })

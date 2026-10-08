@@ -293,26 +293,32 @@ describe("store: the wizard's own scan, plan and briefs", () => {
     const meta = block("meta_improve:commerce_events")
     expect(meta).toContain("Adding Meta AddToCart and ViewContent with product and price")
     expect(meta).toContain('{ destinations: ["meta", "infinite"] }')
-    expect(meta).toContain('add the attribute data-infinite-conversion="add_to_cart" to the button element itself')
+    expect(meta).toContain('Add the attribute data-infinite-conversion="add_to_cart" to the button element itself')
+    // Plain sentences: the helper, its existing sends, each caller and how it leaves (live run 6).
+    expect(meta).toContain('It fires through your helper `addToCart()` at src/analytics/events.ts:27. In the helper, beside its existing sends: `infiniteTrack("add_to_cart", <product>, { destinations: ["meta", "infinite"] })`.')
+    expect(meta).toMatch(/Its callers: pages\/index\.tsx:\d+, pages\/products\/\[slug\]\.tsx:\d+, each routes on the client \(router\.push\("\/cart"\)\): leave it as it is\./)
+    expect(meta).not.toMatch(/firesThrough|inTheHelper|alreadySentTo|Plan data/)
+    // Every caller stays on the page or routes on the client: no leave-the-page table to decode.
+    expect(meta).not.toContain("| How the click leaves |")
     // The server events, each through the outcome helper's own reporter, with the payer's / visitor's match data.
     const purchase = block("server_conversions:purchase")
     expect(purchase).toContain('The repo has no Stripe webhook route: create "pages/api/stripe-webhook.ts"')
     expect(purchase).toContain('the scan points at "pages/api/checkout.ts" line 67')
+    // The begin_checkout job makes the checkout edit; the purchase job points at it instead of repeating it.
+    expect(purchase).toContain("the begin_checkout job's edit there does that; make it once, for both jobs")
     expect(purchase).toContain("reportStripeCheckoutPurchase")
     expect(purchase).toContain("PAYER's hashed match data")
-    // Finding 1: its copy of the checkout edit reads the cart form's field from the body, like the begin_checkout job.
-    expect(purchase).toContain('const trackingAllowed = req.body?.ad_match === "1"')
     expect(purchase).not.toContain("req.query")
     const checkout = block("server_conversions:begin_checkout")
     expect(checkout).toContain('"pages/api/checkout.ts" line 67')
     expect(checkout).toContain("reportStripeCheckoutStarted")
     expect(checkout).toContain("buyerContext")
     // P1-B: the store's own consent reader is the signal (read only), never the tag's same-tab memory.
-    expect(checkout).toContain('The signal is the site\'s own consent reader `getConsent() === "granted"` (`getConsent` is exported by "src/analytics/tracking.ts" line 53')
+    expect(checkout).toContain('`getConsent` is the site\'s own consent reader, exported by "src/analytics/tracking.ts" line 53: import it relative to the page and call it, never edit that file.')
     expect(checkout).not.toContain("infiniteAdMatchAllowed()")
     // Finding 1: the cart is a native form POST, so ONE wording: a hidden ad_match field, read from the parsed body.
     expect(checkout).toContain('const trackingAllowed = req.body?.ad_match === "1"')
-    expect(checkout).toContain('On the page that sends this request ("pages/cart.tsx" line 68, a form that posts), add the visitor\'s tracking signal to it and change nothing else there: one hidden field inside the form: `<input type="hidden" name="ad_match" value={getConsent() === "granted" ? "1" : "0"} />`. The route reads it as `req.body?.ad_match === "1"`, as the code above does.')
+    expect(checkout).toContain('On the page that sends this request ("pages/cart.tsx" line 68, a form that posts), add only the visitor\'s tracking signal: one hidden field inside the form: `<input type="hidden" name="ad_match" value={getConsent() === "granted" ? "1" : "0"} />`, which the route reads as `req.body?.ad_match === "1"` (as the code above does).')
     expect(checkout).not.toContain("req.query")
     const lead = block("server_conversions:lead")
     expect(lead).toContain('"pages/api/mailing-list.ts"')
@@ -320,9 +326,19 @@ describe("store: the wizard's own scan, plan and briefs", () => {
     expect(lead).toContain("trackingAllowed: body.adMatch === true")
     expect(lead).toContain('"pages/mailing-list.tsx"')
     expect(lead).toContain('("pages/mailing-list.tsx" line 27, a JSON fetch)')
-    expect(lead).toContain('`adMatch: getConsent() === "granted"` in the JSON body it sends. The route reads it as `body.adMatch === true`, as the code above does.')
+    expect(lead).toContain('`adMatch: getConsent() === "granted"` in the JSON body it sends, which the route reads as `body.adMatch === true` (as the code above does).')
+    expect(lead).toContain("`body` the parsed request body (`req.body`)")
     expect(lead).toContain("fallbackId: signupId")
-    for (const text of [purchase, checkout, lead]) expect(text).toContain('"lib/infinite-outcome.ts"')
+    // The form's own page (live run 6: the code said "/" while the text said the form's page).
+    expect(lead).toContain('fallbackPath: "/mailing-list"')
+    // The page fires no browser Meta Lead: no mirror recipe to weigh.
+    expect(lead).not.toContain("reportInfiniteOutcomeForMirror")
+    for (const text of [purchase, checkout, lead]) expect(text).toContain('from "../../lib/infinite-outcome"')
+    // The shared server rules and the consent paragraph, once each, in the preamble.
+    const preamble = brief.slice(0, brief.indexOf("## Jobs"))
+    expect(preamble).toContain('Server jobs: import from Infinite\'s outcome helper "lib/infinite-outcome.ts"')
+    expect(brief.match(/Match data rides ONLY/g)).toHaveLength(1)
+    expect(brief.match(/belong to the site owner/g)).toHaveLength(1)
     // The page that sends each request may carry the visitor's tracking signal: it is in the job's files.
     const allowed = (id: string) => items.find((item) => item.id === id)?.allow.files ?? []
     expect(allowed("server_conversions:begin_checkout")).toEqual(expect.arrayContaining(["pages/api/checkout.ts", "pages/cart.tsx"]))
@@ -492,11 +508,13 @@ describe("P1-A store variant: Buy leaves with a full page load", () => {
     ])
     expect(items.find((item) => item.id === "meta_improve:commerce_events")!.checks.map((check) => check.id)).toEqual(expect.arrayContaining(["commerce_promises_met", "no_double_count", "sends_before_leaving"]))
     const meta = brief.slice(brief.indexOf('### Job "meta_improve:commerce_events"'), brief.indexOf("### Job", brief.indexOf('### Job "meta_improve:commerce_events"') + 1))
-    expect(meta).toContain('as the helper\'s FIRST new line: const wait = infiniteTrackBeforeLeaving(\\"add_to_cart\\"')
-    expect(meta).toContain("then every send the helper already has, exactly as it is; then as its LAST line: return wait")
-    expect(meta).toContain("wrap this click handler: infiniteLeaveAfter(() => { <everything the handler did before it left>; return addToCart(…) }, () => <the handler's own navigation, exactly as written>)")
-    expect(meta).toContain('"src/analytics/events.ts":"import { infiniteTrack, infiniteTrackBeforeLeaving } from \\"../../lib/infinite-analytics\\""')
-    expect(meta).toContain('"pages/index.tsx":"import { infiniteLeaveAfter } from \\"../lib/infinite-analytics\\""')
+    expect(meta).toContain('In the helper, as its FIRST new line: `const wait = infiniteTrackBeforeLeaving("add_to_cart", <product>, { destinations: ["meta", "infinite"] })`')
+    expect(meta).toContain("then every send the helper already has, exactly as it is; then as its LAST line: `return wait`")
+    expect(meta).toContain("wrap this click handler: `infiniteLeaveAfter(() => { <everything the handler did before it left>; return addToCart(…) }, () => <the handler's own navigation, exactly as written>)`")
+    expect(meta).toContain('src/analytics/events.ts: `import { infiniteTrack, infiniteTrackBeforeLeaving } from "../../lib/infinite-analytics"`')
+    expect(meta).toContain('pages/index.tsx: `import { infiniteLeaveAfter } from "../lib/infinite-analytics"`')
+    // The decision table, with the full-page-load row these callers need.
+    expect(meta).toContain("| Through your helper; the click then does a full page load |")
   })
 
   it("the correct full-load edits pass the Meta job's own checks", async () => {

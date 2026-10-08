@@ -15,6 +15,7 @@
 import { posix } from "node:path"
 
 import { sanitizeUntrusted } from "../agents/sanitize.js"
+import { routePathOf } from "../jobs/detectors/shared.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 import { SERVER_SITE_VIAS, type EventInventory, type EventInventoryEntry, type EventSite, type PageRequest, type PageRequestHow, type TrackingSignal } from "../scan/event-inventory.js"
 
@@ -70,6 +71,8 @@ export interface ServerConversionBriefContext {
   trackingSignal?: TrackingSignal | null
   /** Finding 1: the pages that send each server route's request, and how (`EventInventory.pageRequests`). */
   pageRequests?: readonly PageRequest[] | null
+  /** The same brief has a begin_checkout job, which edits the checkout route: the purchase job points at it. */
+  checkoutJobInBrief?: boolean
 }
 
 const PURCHASE_EVENTS = new Set(["purchase", "order_completed", "checkout_completed"])
@@ -172,37 +175,42 @@ const SOURCE_WORDS: Readonly<Record<SignalSource, string>> = { form: "a form tha
  */
 export function pageSignalLine(pages: readonly SignalPage[], signal: TrackingSignal | null | undefined, read: (source: SignalSource) => string): string {
   const where = pages.length > 0 ? ` (${pages.slice(0, 3).map((page) => `${quotedPath(page.file)}${page.line ? ` line ${Math.trunc(page.line)}` : ""}${page.via ? `, ${page.via}` : ""}`).join("; ")})` : ""
-  const head = `On the page that sends this request${where}, add the visitor's tracking signal to it and change nothing else there:`
+  const head = `On the page that sends this request${where}, add only the visitor's tracking signal:`
   const origin =
     signal?.kind === "site_getter"
-      ? ` The signal is the site's own consent reader \`${signal.expression}\` (\`${signal.name}\` is exported by ${quotedPath(signal.file)} line ${Math.trunc(signal.line)}; import it relative to the page). That file is the site's consent code: only import and call the reader, never edit it.`
+      ? ` \`${signal.name}\` is the site's own consent reader, exported by ${quotedPath(signal.file)} line ${Math.trunc(signal.line)}: import it relative to the page and call it, never edit that file.`
       : signal?.kind === "always"
         ? " This site has no consent gate, so the signal is always true."
         : " If the site keeps its own consent state, read that instead of `infiniteAdMatchAllowed()` (read only, never edit it)."
   const source = signalSourceOf(pages)
-  if (source) return `${head} ${signalCarryWords(source, signal, pages[0]?.file)}. The route reads it as \`${read(source)}\`, as the code above does.${origin}`
+  if (source) return `${head} ${signalCarryWords(source, signal, pages[0]?.file)}, which the route reads as \`${read(source)}\` (as the code above does).${origin}`
   const ways = (["form", "json", "query"] as const).map((way) => `${SOURCE_WORDS[way]}: ${signalCarryWords(way, signal, pages[0]?.file)}, read in the route as \`${read(way)}\``)
   return `${head} send it the way this request already carries data, and make the route's \`trackingAllowed\` read it from that same place (replace the read in the code above): ${ways.join("; ")}.${origin}`
 }
 
-const COMMON_RULES = [
-  "Match data rides ONLY with the page's signal that the visitor allowed tracking (`ad_match=1` / `adMatch: true`, from the place the page-side line above names). The server never infers it from cookies. Never change consent code, a cookie banner or a privacy page.",
-  "Never write an email, a name or an address into metadata, logs or any new place; never send a phone number. The helper hashes in-process and sends digests only.",
-  "Never build a Meta event id in the page and never fire a Meta conversion with `fbq` on a click. Never add a dependency or edit package.json.",
-  "Everything here is inert until the site owner sets the environment variables (they are in the owner's hand-off, not your job): do not ask for them, do not write them anywhere."
-]
+/**
+ * The generated outcome helper's path: the one the install wrote (its receipt's files), else the lane's own default
+ * (`<app>/lib/infinite-outcome.ts`). The brief's preamble names it once for every server job.
+ */
+export function outcomeHelperPath(facts: { appRoot?: string; managedFiles?: readonly string[] | null }): string {
+  return outcomeHelperAmong(facts.managedFiles) ?? `${facts.appRoot && facts.appRoot !== "." ? `${facts.appRoot}/` : ""}lib/infinite-outcome.ts`
+}
 
-function helperLine(helper: string): string {
-  return `Use the generated outcome helper ${quotedPath(helper)} (never open, copy or re-implement it); every function below is exported by it.`
+/** The URL path of the one page that sends a route's request, when the scan saw exactly one page route (else null). */
+function pagePathOf(pages: readonly SignalPage[], appRoot: string | undefined): string | null {
+  const paths = [...new Set(pages.map((page) => routePathOf(page.file, appRoot ?? ".")).filter((path): path is string => path !== null))]
+  return paths.length === 1 && !paths[0]!.includes("[") ? paths[0]! : null
 }
 
 /**
  * The instructions for one server conversion. The job is only seeded when the server lane is installed (the
  * plan withholds it otherwise), so the helper exists; `ctx.outcomeHelper` names its exact file, and without
- * that record the lane's own default (`<app>/lib/infinite-outcome.ts`) is named.
+ * that record the lane's own default (`<app>/lib/infinite-outcome.ts`) is named. The rules every server job shares
+ * (match data only with the page's signal, never PII in metadata or logs, never a phone, inert until set up) are the
+ * brief's preamble's (`jobs/briefs.ts` `serverRules` and the Never list), said once for all of them.
  */
 export function serverConversionInstructions(target: ServerConversionTarget, ctx: ServerConversionBriefContext): string {
-  const helper = ctx.outcomeHelper ?? `${ctx.appRoot && ctx.appRoot !== "." ? `${ctx.appRoot}/` : ""}lib/infinite-outcome.ts`
+  const helper = ctx.outcomeHelper ?? outcomeHelperPath({ appRoot: ctx.appRoot })
   const language = languageOf(helper)
   const router = routerFor(ctx)
   const name = ctx.conversionName ?? target.event
@@ -218,9 +226,9 @@ export function serverConversionInstructions(target: ServerConversionTarget, ctx
     const existing = ctx.paymentWebhook?.file ?? null
     const route = defaultStripeWebhookRoute(router, language, srcDir)
     const routeFile = ctx.newWebhookFile ?? `${appPrefix}${route.file}`
+    const cartPages = signalPagesFor(ctx.pageRequests, checkout ? [checkout.file] : [], [])
     return [
-      `Here: report \`${name}\` from the Stripe PAYMENT WEBHOOK only (Meta Purchase through Infinite), never from the page, the success page or a click.`,
-      helperLine(helper),
+      `Here: report \`${name}\` (Meta Purchase through Infinite) from the Stripe PAYMENT WEBHOOK only, never from the page, the success page or a click: the session id is its one event id, so the webhook alone counts it once.`,
       existing
         ? `1. The repo already has a Stripe webhook at ${quotedPath(existing)}. Keep everything it does and add these lines right after its signature check (the event must be the VERIFIED one, built from the RAW body):`
         : `1. The repo has no Stripe webhook route: create ${quotedPath(routeFile)} exactly like this (adapt only the Stripe client to the site's existing one, if it has one):`,
@@ -230,16 +238,19 @@ export function serverConversionInstructions(target: ServerConversionTarget, ctx
           ? existingStripeWebhookAddition({ importSpecifier: importFor(existing) })
           : stripeWebhookRouteSource({ language, router, importSpecifier: importFor(routeFile) })
       ),
-      `   It verifies Stripe's signature on the raw body (${STRIPE_WEBHOOK_SECRET_ENV}), then \`reportStripeCheckoutPurchase\` reports only \`${STRIPE_PURCHASE_EVENTS.join("` / `")}\` for a paid, live (livemode) session that this site's checkout created, with value (major units; zero-decimal currencies kept whole), currency, content_ids, num_items, the visit key and the PAYER's hashed match data. Its answer is the route's answer: 500 only when a retry can deliver the report (not delivered, Infinite 5xx, 401, 403, 429), 200 for everything else, so Stripe never retry-storms before setup.`,
-      `2. The checkout route (where the site calls \`stripe.checkout.sessions.create\`${checkout ? `; the scan points at ${whereAt(checkout)}` : ""}) must save the cart and the buyer's device data on the session, or the webhook has nothing to report from (\`siteCheckout\` stays false and it answers 200). If the begin_checkout job does not already cover that route, apply its edit there:`,
-      ...codeBlock(
-        language,
-        // The same read as the begin_checkout job's edit of that route (Finding 1: where the cart page sends the signal).
-        stripeCheckoutEdit({ language, router, importSpecifier: checkout ? importFor(checkout.file) : "<the helper, imported from that route>", signal: signalSourceOf(signalPagesFor(ctx.pageRequests, checkout ? [checkout.file] : [], [])) ?? "query" })
-      ),
-      "   `contentIds` are the cart's product or price ids and `numItems` its item count; keep the route's own metadata and parameters.",
-      "Do not also report the purchase anywhere else (no success-page call, no browser Purchase): the session id is the one event id, so the webhook alone counts it once.",
-      ...COMMON_RULES.map((rule) => `- ${rule}`)
+      `   \`reportStripeCheckoutPurchase\` reports only \`${STRIPE_PURCHASE_EVENTS.join("` / `")}\` for a paid, live (livemode) session this site's checkout created, with its value, items and the PAYER's hashed match data, and answers 500 only when a retry can deliver the report (not delivered, Infinite 5xx, 401, 403, 429), 200 for everything else, so Stripe never retry-storms before setup. Keep that answer as the route's.`,
+      ...(ctx.checkoutJobInBrief
+        ? [
+            `2. The checkout route (${checkout ? `the scan points at ${whereAt(checkout)}` : "where the site calls `stripe.checkout.sessions.create`"}) must save the cart and the buyer's device data on the session, or the webhook has nothing to report: the begin_checkout job's edit there does that; make it once, for both jobs.`
+          ]
+        : [
+            `2. The checkout route (where the site calls \`stripe.checkout.sessions.create\`${checkout ? `; the scan points at ${whereAt(checkout)}` : ""}) must save the cart and the buyer's device data on the session, or the webhook has nothing to report from (\`siteCheckout\` stays false and it answers 200). Wrap its existing call like this (\`contentIds\` = the cart's product or price ids, \`numItems\` = its item count; keep the route's own metadata and parameters):`,
+            ...codeBlock(
+              language,
+              // The same read as the begin_checkout job's edit of that route (Finding 1: where the cart page sends the signal).
+              stripeCheckoutEdit({ language, router, importSpecifier: checkout ? importFor(checkout.file) : "<the helper, imported from that route>", signal: signalSourceOf(cartPages) ?? "query", ...cartPathOf(cartPages, ctx.appRoot) })
+            )
+          ])
     ].join("\n")
   }
 
@@ -248,13 +259,10 @@ export function serverConversionInstructions(target: ServerConversionTarget, ctx
     const pages = signalPagesFor(ctx.pageRequests, file ? [file] : [], pageSites(entry))
     const source = signalSourceOf(pages) ?? "query"
     return [
-      `Here: report \`${name}\` (Meta InitiateCheckout through Infinite) where the route creates the Stripe Checkout Session: ${whereAt(checkout)}. In the background: the visitor is never held more than 800 ms.`,
-      helperLine(helper),
-      "Wrap the route's existing `stripe.checkout.sessions.create(params)` like this (keep its own parameters and metadata; `contentIds` = the cart's product or price ids, `numItems` = its item count):",
-      ...codeBlock(language, stripeCheckoutEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>", signal: source })),
-      "`contextMetadata` stores one metadata field per value (the cart, the visit key, and only with the page's signal the `_fbc`/`_fbp` cookies, ip and user agent); a value over Stripe's 500-character limit is left out, never cut. The purchase webhook reads them back. Report after the session exists and before the redirect.",
-      pageSignalLine(pages, ctx.trackingSignal, (way) => trackingSignalExpression(router, way)),
-      ...COMMON_RULES.map((rule) => `- ${rule}`)
+      `Here: report \`${name}\` (Meta InitiateCheckout through Infinite) where the route creates the Stripe Checkout Session, ${whereAt(checkout)}, after the session exists and before the redirect (in the background: the visitor is never held more than 800 ms). Wrap its existing \`stripe.checkout.sessions.create(params)\` like this, keeping its own parameters and metadata (\`contentIds\` = the cart's product or price ids, \`numItems\` = its item count):`,
+      ...codeBlock(language, stripeCheckoutEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>", signal: source, ...cartPathOf(pages, ctx.appRoot) })),
+      "`contextMetadata` saves the device data only with the page's signal, and a value over Stripe's 500-character limit is left out, never cut.",
+      pageSignalLine(pages, ctx.trackingSignal, (way) => trackingSignalExpression(router, way))
     ].join("\n")
   }
 
@@ -263,25 +271,36 @@ export function serverConversionInstructions(target: ServerConversionTarget, ctx
     const type = name
     const pages = signalPagesFor(ctx.pageRequests, file ? [file] : [], pageSites(entry))
     const source = signalSourceOf(pages) ?? "json"
+    // The form's own page, when the scan saw exactly one (live run 6: the code said "/" while the text said "the form's page").
+    const formPath = pagePathOf(pages, ctx.appRoot)
+    // The mirror only matters where the page already fires a browser Meta event for this conversion (the scan sees it).
+    const browserMeta = entry === null || (entry.tools.meta_browser?.length ?? 0) > 0
+    const bodyWord = source === "json" ? (router === "web" ? "`body` the parsed JSON body (`await request.json()`)" : "`body` the parsed request body (`req.body`)") : null
     return [
-      `Here: report \`${type}\` from the server route that stores it: ${whereAt(at)}, right after the sign-up is stored (the row committed, the address subscribed), never on the click.`,
-      helperLine(helper),
-      ...codeBlock(language, leadRouteEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>", type, fallbackPath: "/", signal: source })),
-      "`email` is the submitted address, `body` the parsed request body, `signupId` the stored row's id. Always pass `fallbackId`: without it nothing is reported until the owner sets LEAD_ID_SECRET. When the route stores no row, pass a new id per submission instead (`randomUUID()` from `node:crypto`, or `crypto.randomUUID()` in an edge route), so each sign-up counts once. With LEAD_ID_SECRET set, the event id is `" + type + ":<HMAC of the normalized email under LEAD_ID_SECRET>` (one per person, so a re-submit counts once), and the same person's purchase carries the same external_id. Set `fallbackPath` to the page the form is on.",
+      `Here: report \`${type}\` in the route that stores it, ${whereAt(at)}, right after the sign-up is stored (the row committed, the address subscribed), never on the click:`,
+      ...codeBlock(language, leadRouteEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>", type, fallbackPath: formPath ?? "/", signal: source })),
+      `\`email\` is the submitted address, ${bodyWord ? `${bodyWord}, ` : ""}\`signupId\` the stored row's id. Always pass \`fallbackId\`: without it nothing is reported until the owner sets LEAD_ID_SECRET. When the route stores no row, pass a new id per submission (\`randomUUID()\` from \`node:crypto\`, or \`crypto.randomUUID()\` in an edge route), so each sign-up counts once. Never make your own event id: with LEAD_ID_SECRET set the helper's is \`${type}:<HMAC of the normalized email under LEAD_ID_SECRET>\`, one per person.${formPath ? "" : " Set `fallbackPath` to the page the form is on."}`,
       pageSignalLine(pages, ctx.trackingSignal, (way) => leadSignalExpression(router, way)),
-      "Only if this route's response is what the page waits on before it fires the browser Meta event, use the mirror form instead and return its two values to the page:",
-      ...codeBlock(language, mirrorRouteEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>", signal: source })),
-      ...COMMON_RULES.map((rule) => `- ${rule}`)
+      ...(browserMeta
+        ? [
+            "Only if the page waits for this route's response before it fires its browser Meta event, report with this instead and return its two values to the page (for `infiniteMetaMirror`):",
+            ...codeBlock(language, mirrorRouteEdit({ language, router, importSpecifier: file ? importFor(file) : "<the helper, imported from this route>", signal: source, path: formPath ?? "/" }))
+          ]
+        : [])
     ].join("\n")
   }
 
   // Any other server outcome (start_trial, subscribe, a custom name): the generic call.
   return [
     `Here: report \`${name}\` at ${whereAt(at)}, the moment it becomes real, with \`await reportInfiniteOutcome({ type: ${JSON.stringify(name)}, eventId: <a stable id: the subscription, order or account id>, path: <the page it belongs to>, properties: { ... }, adMatch })\`.`,
-    helperLine(helper),
-    "In a route the visitor's own browser called, `adMatch` is `await adMatchFromRequest(request, { trackingAllowed, person: { email, externalId: await infiniteLeadId(email) } })`. In a webhook, the browser's device data must have been saved earlier (`buyerContext` + `contextMetadata` at checkout, `contextFromMetadata` + `personMatch` in the webhook). A webhook answers 500 only when `reportInfiniteOutcome` resolved null, a 5xx, 401, 403 or 429, and only after `infiniteConfigured()` is true.",
-    ...COMMON_RULES.map((rule) => `- ${rule}`)
+    "In a route the visitor's own browser called, `adMatch` is `await adMatchFromRequest(request, { trackingAllowed, person: { email, externalId: await infiniteLeadId(email) } })`. In a webhook, the browser's device data must have been saved earlier (`buyerContext` + `contextMetadata` at checkout, `contextFromMetadata` + `personMatch` in the webhook). A webhook answers 500 only when `reportInfiniteOutcome` resolved null, a 5xx, 401, 403 or 429, and only after `infiniteConfigured()` is true."
   ].join("\n")
+}
+
+/** The checkout edit's `path`: the cart page that sends the request, when the scan saw exactly one (else the recipe's default). */
+function cartPathOf(pages: readonly SignalPage[], appRoot: string | undefined): { cartPath?: string } {
+  const path = pagePathOf(pages, appRoot)
+  return path ? { cartPath: path } : {}
 }
 
 /** Infinite's generated outcome helper among the files the install wrote (`.infinite/install.json`), or null. */
@@ -294,12 +313,13 @@ export function outcomeHelperAmong(files: readonly string[] | null | undefined):
  * item's target and its inventory entry (the registry seeds it from the scan), the server route the scan found
  * (a server trigger site of the entry, else the item's first evidence), and the scan's checkout and webhook facts
  * (`facts.inventory`, the before step's inventory; the item's own evidence when it is absent). The ONE entry point
- * `jobs/briefs.ts` calls.
+ * `jobs/briefs.ts` calls. `inBrief`: the ids of the brief's jobs (a begin_checkout job there makes the checkout edit).
  */
 export function serverConversionInstructionsForItem(
   item: Pick<ChecklistItem, "id" | "trigger" | "allow" | "inventory">,
   facts: { framework: string; router: "app" | "pages" | null; appRoot: string; managedFiles?: string[] | null; inventory?: EventInventory | null },
-  conversionName?: string
+  conversionName?: string,
+  inBrief: readonly string[] = []
 ): string {
   const index = item.id.indexOf(":")
   const event = index < 0 ? item.id : item.id.slice(index + 1)
@@ -325,7 +345,8 @@ export function serverConversionInstructionsForItem(
       paymentWebhook,
       newWebhookFile,
       trackingSignal: inventory?.trackingSignal ?? null,
-      pageRequests: inventory?.pageRequests ?? null
+      pageRequests: inventory?.pageRequests ?? null,
+      checkoutJobInBrief: inBrief.some((id) => id !== item.id && id.startsWith("server_conversions:") && CHECKOUT_EVENTS.has(id.slice("server_conversions:".length)))
     }
   )
 }

@@ -1,7 +1,7 @@
 // The agent's instructions for one server conversion, and their route through the jobs brief.
 import { describe, expect, it } from "vitest"
 
-import { jobBlock } from "../jobs/briefs.js"
+import { buildBrief, jobBlock } from "../jobs/briefs.js"
 import type { ChecklistItem } from "../wizard/contracts/jobs.js"
 
 import { outcomeImportFrom, serverConversionInstructions, serverConversionInstructionsForItem } from "./job-brief.js"
@@ -21,9 +21,9 @@ describe("serverConversionInstructions", () => {
     expect(text).toContain("500 only when a retry can deliver the report (not delivered, Infinite 5xx, 401, 403, 429), 200 for everything else")
     expect(text).toContain('the scan points at "pages/api/checkout.ts" line 40')
     expect(text).toContain("contextMetadata(context, { contentIds, numItems })")
-    expect(text).toContain("Do not also report the purchase anywhere else")
-    expect(text).toContain("Never change consent code")
-    expect(text).toContain("Never write an email, a name or an address into metadata, logs")
+    expect(text).toContain("never from the page, the success page or a click: the session id is its one event id, so the webhook alone counts it once")
+    // No begin_checkout job in the brief: the purchase job carries the checkout edit itself.
+    expect(text).toContain("Wrap its existing call like this")
   })
 
   it("purchase with an existing webhook: keep it and add the report after its signature check", () => {
@@ -56,21 +56,34 @@ describe("serverConversionInstructions", () => {
     expect(lead).toContain("right after the sign-up is stored")
     expect(lead).toContain('import { reportInfiniteLead } from "../../lib/infinite-outcome"')
     expect(lead).toContain('type: "lead",')
-    expect(lead).toContain("`lead:<HMAC of the normalized email under LEAD_ID_SECRET>`")
-    expect(lead).toContain("the same person's purchase carries the same external_id")
+    expect(lead).toContain("Never make your own event id: with LEAD_ID_SECRET set the helper's is `lead:<HMAC of the normalized email under LEAD_ID_SECRET>`, one per person.")
     expect(lead).toContain("trackingAllowed: body.adMatch === true")
     const signUp = serverConversionInstructions({ event: "sign_up", file: "app/api/signup/route.ts" }, { ...PAGES, router: "app" })
     expect(signUp).toContain('type: "sign_up",')
     expect(signUp).toContain("await reportInfiniteLead(request, {")
   })
 
-  it("never instructs a phone, a page-built Meta id, or a new dependency", () => {
+  it("never instructs a phone, a page-built Meta id, or a new dependency; the brief around every server job forbids them once", () => {
     for (const event of ["purchase", "begin_checkout", "lead", "start_trial"]) {
       const text = serverConversionInstructions({ event, file: "pages/api/x.ts" }, PAGES)
       expect(text).not.toMatch(/\bph\b|phone:/)
       expect(text).not.toContain("@vercel/functions")
-      expect(text).toContain("never send a phone number")
-      expect(text).toContain("Never build a Meta event id in the page")
+      // Live run 6: the shared rules are said once, in the brief's preamble, never repeated per job.
+      expect(text).not.toContain("Match data rides ONLY")
+      if (event === "start_trial") continue // the plan's names bind to the three funnel conversions here
+      const brief = buildBrief(
+        [{ id: `server_conversions:${event}`, jobId: "server_conversions", n: 8, title: "Report it", owner: "agent", trigger: { finding: "x", evidence: [{ file: "pages/api/x.ts", line: 3 }] }, allow: { files: ["pages/api/x.ts"], create: [] }, checks: [], state: "pending" } as unknown as ChecklistItem],
+        { runId: "run_1", framework: "next-pages-router", packageManager: "npm", router: "pages", appRoot: ".", plan: { conversionNames: [event], lines: [] } as never, managedFiles: ["lib/infinite-outcome.ts"] }
+      )
+      const preamble = brief.slice(0, brief.indexOf("## Jobs"))
+      expect(preamble).toContain("- send a phone number (`ph`) anywhere, or write an email, a name or an address into metadata, logs or event properties;")
+      expect(preamble).toContain("- build a Meta event ID in the page (the server returns it), or call `fbq('track', <standard event>)` on a click;")
+      expect(preamble).toContain("- add a dependency, delete a file")
+      expect(preamble).toContain("Match data rides ONLY with the page's signal that the visitor allowed tracking, read by the route from the request, never inferred from cookies")
+      expect(preamble).toContain('Server jobs: import from Infinite\'s outcome helper "lib/infinite-outcome.ts" (never open, copy or re-implement it).')
+      expect(preamble).toContain("Nothing reports until the site owner sets Infinite's environment variables: never ask for them or write them anywhere.")
+      // The owner boundary, once.
+      expect(brief.match(/belong to the site owner/g)).toHaveLength(1)
     }
   })
 
@@ -110,9 +123,12 @@ describe("the jobs brief routes the server-conversions job here (the one edit in
       plan: { conversionNames: ["purchase"], lines: [] } as never,
       managedFiles: ["lib/infinite-server-lane.ts", "lib/infinite-outcome.ts"]
     })
-    expect(block).toContain("Here: report `purchase` from the Stripe PAYMENT WEBHOOK only")
+    expect(block).toContain("Here: report `purchase` (Meta Purchase through Infinite) from the Stripe PAYMENT WEBHOOK only")
     expect(block).toContain('create "pages/api/stripe-webhook.ts"')
-    expect(block).toContain('"lib/infinite-outcome.ts"')
+    expect(block).toContain('import { reportStripeCheckoutPurchase } from "../../lib/infinite-outcome"')
+    // Self-contained: no Plan data JSON, no repeated evidence.
+    expect(block).not.toContain("Plan data")
+    expect(block).not.toContain("Evidence (quoted)")
     expect(serverConversionInstructionsForItem(item, { framework: "next-pages-router", router: "pages", appRoot: ".", managedFiles: ["lib/infinite-outcome.ts"] })).toContain(
       '"pages/api/checkout.ts" line 88'
     )
@@ -126,9 +142,12 @@ describe("P1-B: the page's tracking signal is true for every visitor who allowed
 
   it("names the site's own consent reader, read only, as the signal the page sends", () => {
     const text = serverConversionInstructions({ event: "lead", entry, file: "pages/api/join.ts", line: 9 }, { ...PAGES, trackingSignal: { kind: "site_getter", expression: 'getConsent() === "granted"', name: "getConsent", file: "src/analytics/tracking.ts", line: 53 }, pageRequests: JOIN_JSON })
-    expect(text).toContain('On the page that sends this request ("pages/join.tsx" line 31, a JSON fetch), add the visitor\'s tracking signal to it and change nothing else there: `adMatch: getConsent() === "granted"` in the JSON body it sends. The route reads it as `body.adMatch === true`, as the code above does.')
-    expect(text).toContain('The signal is the site\'s own consent reader `getConsent() === "granted"` (`getConsent` is exported by "src/analytics/tracking.ts" line 53; import it relative to the page).')
-    expect(text).toContain("only import and call the reader, never edit it")
+    expect(text).toContain('On the page that sends this request ("pages/join.tsx" line 31, a JSON fetch), add only the visitor\'s tracking signal: `adMatch: getConsent() === "granted"` in the JSON body it sends, which the route reads as `body.adMatch === true` (as the code above does).')
+    // `body` is said to be the parsed request body, so `body.adMatch` and `req.body.adMatch` are one read.
+    expect(text).toContain("`body` the parsed request body (`req.body`)")
+    expect(text).toContain('`getConsent` is the site\'s own consent reader, exported by "src/analytics/tracking.ts" line 53: import it relative to the page and call it, never edit that file.')
+    // The form's own page, in the code and nowhere "/" (live run 6).
+    expect(text).toContain('fallbackPath: "/join"')
     expect(text).not.toContain("infiniteAdMatchAllowed")
   })
 
@@ -159,7 +178,8 @@ describe("Finding 1: the route reads the signal from where the page is told to s
     const text = checkout("form")
     expect(text).toContain('const trackingAllowed = req.body?.ad_match === "1"')
     expect(text).toContain('("pages/cart.tsx" line 68, a form that posts)')
-    expect(text).toContain('one hidden field inside the form: `<input type="hidden" name="ad_match" value={getConsent() === "granted" ? "1" : "0"} />`. The route reads it as `req.body?.ad_match === "1"`, as the code above does.')
+    expect(text).toContain('one hidden field inside the form: `<input type="hidden" name="ad_match" value={getConsent() === "granted" ? "1" : "0"} />`, which the route reads as `req.body?.ad_match === "1"` (as the code above does).')
+    expect(text).toContain('await reportStripeCheckoutStarted(session, { path: "/cart" })')
     expect(text).not.toContain("req.query")
     expect(text).not.toMatch(/a query parameter or a hidden form field|in a JSON body, or/)
   })

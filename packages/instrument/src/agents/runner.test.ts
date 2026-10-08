@@ -101,6 +101,8 @@ describe("runJobs with Claude (fake)", () => {
     expect(run.env!.ENABLE_TOOL_SEARCH).toBe("false")
     expect(run.stdin).toBe(WORKER_KICKOFF)
     expect(run.argv![run.argv!.indexOf("--append-system-prompt") + 1]).toBe(`${SYSTEM_PROMPT_HEADER}\n\nBRIEF: do the jobs`)
+    // Live run 6: the brief opens with the owner boundary; the header never repeats it (the agent read it twice).
+    expect(SYSTEM_PROMPT_HEADER).toBe("Infinite tag wizard: your instructions for this run.")
     expect(agentArgvViolations("claude_code", run.argv!)).toEqual([])
     // The token-bearing tag.mcp.json was 0600 in a 0700 dir under $HOME (never /tmp), and is gone once the turn ends.
     const config = records(fakes).find((entry) => entry.kind === "mcp-config")!
