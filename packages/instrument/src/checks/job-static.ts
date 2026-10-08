@@ -254,6 +254,7 @@ const UNSTABLE_ID = /(?:\bDate\s*\.\s*now|\bMath\s*\.\s*random|\brandomUUID|\buu
 const PII_KEYS = /(?<![\w$])(?:email|e_mail|emailAddress|email_address|phone|phoneNumber|phone_number|ph|first_?name|last_?name|full_?name|firstName|lastName|fullName|address|street)\s*:/i
 const PII_VALUES = /\.\s*(?:email|emailAddress|email_address|phone|phoneNumber|phone_number)\b|(?<![\w$.])(?:email|phone|phoneNumber)(?![\w$])/
 const HASHED = /\b(?:createHash|sha256|sha-256|hash\w*|digest)\b/i
+const PATH_PROP = /(?:^|[,{]\s*)(?:path|["']path["'])\s*:/
 
 function outcomeCalls(scope: ReadonlyMap<string, string>): Array<Call & { file: string }> {
   return [...scope].flatMap(([file, text]) => callsOf(text, OUTCOME_CALLS).map((call) => ({ ...call, file })))
@@ -504,15 +505,21 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       if (!approved) return result("outcome_declared", ctx, "undetermined", "the approved conversion names are not known, so the outcome name could not be compared")
       const bound = boundConversionNames(itemTarget(input.item), [...approved])
       for (const call of calls) {
-        const type = topLevelProps(call)?.get("type")
+        const props = topLevelProps(call)
+        if (props === null) return result("outcome_declared", ctx, "undetermined", `${call.file}:${call.line} passes a value the wizard cannot read as an object`, call.file, call.line)
+        const type = props.get("type")
         if (type === undefined) return result("outcome_declared", ctx, "problem", `${call.file}:${call.line} reports an outcome with no type`, call.file, call.line)
         const literal = literalString(type)
         if (literal === null) return result("outcome_declared", ctx, "undetermined", `${call.file}:${call.line} computes the outcome name, so it could not be compared with the approved names`, call.file, call.line)
         if (!bound.includes(literal)) {
           return result("outcome_declared", ctx, "problem", `${call.file}:${call.line} reports "${literal}", which is not an approved conversion name for this job (${bound.join(", ") || "none"})`, call.file, call.line)
         }
+        const properties = props.get("properties")
+        if (!props.has("path") && (properties === undefined || !PATH_PROP.test(maskCommentsAndStrings(properties, true)))) {
+          return result("outcome_declared", ctx, "problem", `${call.file}:${call.line} reports an outcome with no path; Meta relay needs properties.path for event_source_url`, call.file, call.line)
+        }
       }
-      return result("outcome_declared", ctx, "pass", "every outcome uses an approved conversion name")
+      return result("outcome_declared", ctx, "pass", "every outcome uses an approved conversion name and carries a path")
     }),
 
     // Job 8: every outcome carries a stable eventId (an order / row / account id), never a random or a constant.

@@ -20,6 +20,7 @@ interface Report {
   duplicate: boolean
   metaEventId: string | null
   metaEventName: string | null
+  status: number | null
 }
 interface Helper {
   reportInfiniteOutcome: (input: Record<string, unknown>) => Promise<Report>
@@ -80,13 +81,15 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     await expect(outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "signup:acct_991", path: "/signup" })).resolves.toEqual(
       vector.report
     )
-    await expect(outcome.postInfiniteOutcome({ type: "sign_up", eventId: "signup:acct_991" })).resolves.toBe(vector.report.accepted)
+    await expect(outcome.postInfiniteOutcome({ type: "sign_up", eventId: "signup:acct_991", path: "/signup" })).resolves.toBe(
+      vector.report.accepted
+    )
   })
 
   it.each(WIRE_IDS)("sends the wire eventId <type>:<eventId> (B16): $type / $wire", async (vector) => {
     fetchMock = vi.fn(async () => new Response(RESPONSES[1]!.body, { status: 202 }))
     vi.stubGlobal("fetch", fetchMock)
-    await (await helper(form)).reportInfiniteOutcome({ type: vector.type, eventId: vector.eventId })
+    await (await helper(form)).reportInfiniteOutcome({ type: vector.type, eventId: vector.eventId, path: "/signup" })
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(JSON.parse(String(init.body)).eventId).toBe(vector.wire)
   })
@@ -95,8 +98,8 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
     vi.stubGlobal("fetch", fetchMock)
     const outcome = await helper(form)
-    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "acct_991" })
-    await outcome.reportInfiniteOutcome({ type: "trial", eventId: "acct_991" })
+    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "acct_991", path: "/signup" })
+    await outcome.reportInfiniteOutcome({ type: "trial", eventId: "acct_991", path: "/trial" })
     const sent = fetchMock.mock.calls.map((call) => JSON.parse(String((call as [string, RequestInit])[1].body)).eventId)
     expect(new Set(sent).size).toBe(2)
   })
@@ -105,26 +108,52 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
     vi.stubGlobal("fetch", fetchMock)
     const outcome = await helper(form)
-    for (const input of [{ type: "sign_up" }, { type: "sign_up", eventId: "" }, { type: "sign_up", eventId: "   " }]) {
+    for (const input of [
+      { type: "sign_up", path: "/signup" },
+      { type: "sign_up", eventId: "", path: "/signup" },
+      { type: "sign_up", eventId: "   ", path: "/signup" }
+    ]) {
       expect(() => outcome.reportInfiniteOutcome(input)).toThrow(/stable eventId/)
     }
     expect(fetchMock).not.toHaveBeenCalled()
     // postInfiniteOutcome keeps its old contract for existing callers: a random id, a boolean.
-    await expect(outcome.postInfiniteOutcome({ type: "sign_up" })).resolves.toBe(true)
+    await expect(outcome.postInfiniteOutcome({ type: "sign_up", path: "/signup" })).resolves.toBe(true)
     expect(JSON.parse(String((fetchMock.mock.calls[0] as [string, RequestInit])[1].body)).eventId).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it("negative: an outcome without a path resolves all-false / all-null with no network call", async () => {
+    fetchMock = vi.fn(async () => new Response(RESPONSES[0]!.body, { status: 202 }))
+    vi.stubGlobal("fetch", fetchMock)
+    const outcome = await helper(form)
+    const report = { accepted: false, duplicate: false, metaEventId: null, metaEventName: null, status: null }
+    await expect(outcome.reportInfiniteOutcome({ type: "lead", eventId: "lead:1" })).resolves.toEqual(report)
+    await expect(outcome.postInfiniteOutcome({ type: "lead" })).resolves.toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it("a network failure or the 2 s timeout resolves all-false / all-null and never rejects", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("offline"))))
-    await expect((await helper(form)).reportInfiniteOutcome({ type: "sign_up", eventId: "e1" })).resolves.toEqual(RESPONSES[5]!.report)
+    await expect((await helper(form)).reportInfiniteOutcome({ type: "sign_up", eventId: "e1", path: "/signup" })).resolves.toEqual({
+      accepted: false,
+      duplicate: false,
+      metaEventId: null,
+      metaEventName: null,
+      status: null
+    })
 
     // The 2 s budget ends in an abort: fetch rejects with an AbortError, exactly as here.
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => Promise.reject(new DOMException("The operation was aborted.", "AbortError")))
     )
-    const pending = (await helper(form)).reportInfiniteOutcome({ type: "sign_up", eventId: "e2" })
-    await expect(pending).resolves.toEqual({ accepted: false, duplicate: false, metaEventId: null, metaEventName: null })
+    const pending = (await helper(form)).reportInfiniteOutcome({ type: "sign_up", eventId: "e2", path: "/signup" })
+    await expect(pending).resolves.toEqual({
+      accepted: false,
+      duplicate: false,
+      metaEventId: null,
+      metaEventName: null,
+      status: null
+    })
   })
 
   it("carries the page's campaign context as bounded properties, dropping unknown values", async () => {
@@ -134,11 +163,13 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
     await outcome.reportInfiniteOutcome({
       type: "sign_up",
       eventId: "e3",
+      path: "/signup",
       campaign: { campaignProvenance: "cookie", browserContext: "instagram_app", utmSource: "ignored" }
     })
     await outcome.reportInfiniteOutcome({
       type: "sign_up",
       eventId: "e4",
+      path: "/signup",
       campaign: { campaignProvenance: "<script>", browserContext: "person@example.test" }
     })
     const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call as [string, RequestInit])[1].body)))
@@ -194,8 +225,8 @@ describe.each(["ts", "js", "node"] as const)("reportInfiniteOutcome (%s helper),
       client_ip_address: "203.0.113.9",
       client_user_agent: "Mozilla/5.0 Buyer"
     })
-    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e7", adMatch })
-    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e8" })
+    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e7", path: "/signup", adMatch })
+    await outcome.reportInfiniteOutcome({ type: "sign_up", eventId: "e8", path: "/signup" })
     const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call as [string, RequestInit])[1].body)))
     expect(bodies[0].adMatch).toEqual(adMatch)
     expect(bodies[1]).not.toHaveProperty("adMatch")

@@ -157,12 +157,12 @@ export async function sendInfiniteServerEvent(event) {
   }
 }
 
-const INFINITE_NO_REPORT = { accepted: false, duplicate: false, metaEventId: null, metaEventName: null }
+const INFINITE_NO_REPORT = { accepted: false, duplicate: false, metaEventId: null, metaEventName: null, status: null }
 
 /**
- * Sign and POST one event and resolve Infinite's 202 answer: { accepted, duplicate, metaEventId,
- * metaEventName }. All-false / all-null on any failure; never throws. Infinite replies before it calls
- * Meta, so this never waits on Meta.
+ * Sign and POST one event and resolve Infinite's answer: { accepted, duplicate, metaEventId,
+ * metaEventName, status }. All-false / all-null on any failure; never throws. Infinite replies before
+ * it calls Meta, so this never waits on Meta.
  */
 export async function reportInfiniteServerEvent(event) {
   const secret = infiniteSecret()
@@ -188,16 +188,22 @@ export async function reportInfiniteServerEvent(event) {
       body,
       signal: AbortSignal.timeout(INFINITE_DELIVERY_TIMEOUT_MS)
     })
-    if (!response.ok) return INFINITE_NO_REPORT
-    const value = await response.json()
-    if (!value || typeof value !== "object") return INFINITE_NO_REPORT
+    const status = response.status
+    if (!response.ok) return { ...INFINITE_NO_REPORT, status }
+    let value
+    try {
+      value = await response.json()
+    } catch {
+      return { ...INFINITE_NO_REPORT, status }
+    }
+    if (!value || typeof value !== "object") return { ...INFINITE_NO_REPORT, status }
     const accepted = value.accepted === true
     const duplicate = value.duplicate === true
     const mirror = accepted && !duplicate
     const metaEventName = mirror && typeof value.metaEventName === "string" && value.metaEventName ? value.metaEventName : null
     const metaEventId =
       metaEventName && typeof value.metaEventId === "string" && value.metaEventId ? value.metaEventId : null
-    return { accepted, duplicate, metaEventId, metaEventName: metaEventId ? metaEventName : null }
+    return { accepted, duplicate, metaEventId, metaEventName: metaEventId ? metaEventName : null, status }
   } catch {
     return INFINITE_NO_REPORT
   }
@@ -267,7 +273,7 @@ export function nodeOutcomeHelperSource(): string {
       '//   await postInfiniteOutcome({ type: "purchase", path: "/checkout", accountKey: order.id, visitKeyInputs: req })',
       "//",
       "// Where the browser waits on your response, reportInfiniteOutcome (a STABLE eventId is required)",
-      "// returns { accepted, duplicate, metaEventId, metaEventName }; hand metaEventId to the page's",
+      "// returns { accepted, duplicate, metaEventId, metaEventName, status }; hand metaEventId to the page's",
       "// infiniteMetaMirror.",
       "//",
       "// In a WEBHOOK the request is the PROVIDER'S, not the buyer's — compute the key at checkout",
@@ -330,15 +336,28 @@ function infiniteVisitKeyInputsOf(input) {
  */
 const INFINITE_CAMPAIGN_PROVENANCE = ["tab", "cookie", "none"]
 const INFINITE_BROWSER_CONTEXT = ["facebook_app", "instagram_app", "other_in_app", "browser", "unknown"]
+const INFINITE_NO_REPORT = { accepted: false, duplicate: false, metaEventId: null, metaEventName: null, status: null }
 
 /** Infinite accepts at most this many properties on one event (more and the whole event is refused). */
 const INFINITE_MAX_PROPERTIES = 16
 
-function infiniteSendOutcome({ type, path, eventId, accountKey, occurredAt, properties, visitKeyInputs, campaign, adMatch }) {
+function infiniteOutcomePath(path) {
+  if (typeof path !== "string") return ""
+  const value = path.trim()
+  if (!value.startsWith("/") || value.includes("?") || value.includes("#")) return ""
+  return value
+}
+
+async function infiniteSendOutcome({ type, path, eventId, accountKey, occurredAt, properties, visitKeyInputs, campaign, adMatch }) {
+  const outcomePath = infiniteOutcomePath(path)
+  if (!outcomePath) return INFINITE_NO_REPORT
   // One clock for the whole call: the event time and the visit-key bucket must agree.
   const nowMs = occurredAt ? occurredAt.getTime() : Date.now()
-  const merged = { ...(properties ?? {}) }
-  if (path) merged.path = path
+  const merged = { path: outcomePath, ...(properties ?? {}) }
+  for (const key of Object.keys(merged)) {
+    if (merged[key] === undefined || merged[key] === "") delete merged[key]
+  }
+  merged.path = outcomePath
   const visitInputs = infiniteVisitKeyInputsOf(visitKeyInputs)
   if (visitInputs && merged.visitKey === undefined) {
     const visitKey = infiniteVisitKey({ clientIp: visitInputs.clientIp, userAgent: visitInputs.userAgent, nowMs })
@@ -425,7 +444,7 @@ export async function postInfiniteOutcome(input) {
 }
 
 /**
- * Report one outcome and return Infinite's answer: { accepted, duplicate, metaEventId, metaEventName }.
+ * Report one outcome and return Infinite's answer: { accepted, duplicate, metaEventId, metaEventName, status }.
  * eventId is REQUIRED and must be stable for this outcome; calling without one throws at once.
  */
 export function reportInfiniteOutcome(input) {

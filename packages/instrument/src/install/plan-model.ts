@@ -645,7 +645,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         kind: "user_action",
         requires: "info",
         text: toolConnected("meta")
-          ? `Meta will receive: browser-only ViewContent/AddToCart/custom CTAs from the pixel with no eventID; server-twin conversions (${named}) go server first through the server lane and mirror only with Infinite's returned metaEventId.`
+          ? `Meta will receive: browser-only ViewContent/AddToCart/custom CTAs from the pixel with no eventID; server checkout/purchase/lead conversions (${named}) include properties.path, go server first through Infinite's Meta relay, and browser mirrors use only the returned metaEventId. Existing pixel auto events, consent gating, and disablePushState changes require owner approval.`
           : `Meta not yet: ${named} cannot be sent because Meta is not connected; connect Meta in Infinite and rerun.`
       }),
       line({
@@ -653,7 +653,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         kind: "user_action",
         requires: "info",
         text: infiniteRecordable
-          ? `Infinite will receive: browser intent/product events through the pixel; server outcomes (${named}) through the server lane when available, otherwise the plan leaves an owner handoff.`
+          ? `Infinite will receive: browser intent/product events through the pixel; server outcomes (${named}) include properties.path and product ids/value/currency through the server lane when available, otherwise the plan leaves an owner handoff. Declare server conversions with count every event dedupe.`
           : `Infinite not yet: ${named} cannot be recorded until the site source is connected.`
       })
     )
@@ -756,7 +756,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       line({
         id: "server_lane",
         kind: "server_lane",
-        text: `Server lane (${scan.serverLane.targetLabel}): counts every page request on your server, even with ad blockers. ${SERVER_LANE_PROBE_DISCLOSURE}`,
+        text: `Server lane (${scan.serverLane.targetLabel}): counts every page request on your server, even with ad blockers. Checkout, purchase and lead reports include properties.path, go server first through Infinite's Meta relay, and declare conversions with count every event dedupe. ${SERVER_LANE_PROBE_DISCLOSURE}`,
         requires: "approval",
         ownership: "managed",
         jobIds: candidates.filter((item) => item.jobId === "server_conversions").map((item) => item.id)
@@ -939,7 +939,7 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       line({
         id: "meta_relay",
         kind: "meta_relay",
-        text: "Meta server events: send your server-side conversions to Meta through Infinite, with ONE shared event id so the browser and server never count twice.",
+        text: "Meta server events: checkout/purchase/lead go server first through Infinite's relay with properties.path; Infinite conversions use count every event dedupe, and browser mirrors reuse the returned metaEventId so Meta never counts twice.",
         requires: "approval"
       })
     )

@@ -100,9 +100,17 @@ describe("job 8: server conversions", () => {
 
   it("outcome_declared: an approved name passes; another name is a problem; a computed one is undetermined; no plan read is undetermined", async () => {
     expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD) }, job8, approved)).state).toBe("pass")
+    expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD.replace('path: "/signup", ', 'properties: { path: "/signup" }, ')) }, job8, approved)).state).toBe("pass")
     expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD.replace('"sign_up"', '"signup_completed"')) }, job8, approved)).state).toBe("problem")
     expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD.replace('"sign_up"', "name")) }, job8, approved)).state).toBe("undetermined")
     expect((await check("outcome_declared", { [SIGNUP]: signupRoute(GOOD) }, job8, {})).state).toBe("undetermined")
+  })
+
+  it("outcome_declared: an outcome without a path is a problem because Meta relay needs event_source_url", async () => {
+    const missingPath = GOOD.replace('path: "/signup", ', "")
+    const result = await check("outcome_declared", { [SIGNUP]: signupRoute(missingPath) }, job8, approved)
+    expect(result.state).toBe("problem")
+    expect(result.reason).toMatch(/path/)
   })
 
   it("event_id_stable: a row id passes; random, time-based, constant or missing ids are problems", async () => {

@@ -123,7 +123,10 @@ describe("the plan model asks ONLY the three decisions", () => {
 
   it("the server-lane line carries the real-visit disclosure (§3x.5: marked as Infinite's test, one normal page view in each tool)", () => {
     const plan = buildPlanModel(input())
-    expect(plan.lines.find((line) => line.id === "server_lane")?.text).toContain(SERVER_LANE_PROBE_DISCLOSURE)
+    const text = plan.lines.find((line) => line.id === "server_lane")?.text ?? ""
+    expect(text).toContain(SERVER_LANE_PROBE_DISCLOSURE)
+    expect(text).toContain("properties.path")
+    expect(text).toContain("count every event")
     expect(SERVER_LANE_PROBE_DISCLOSURE).toMatch(/marks it as its own test, so it never counts in your Infinite numbers/)
     expect(SERVER_LANE_PROBE_DISCLOSURE).not.toMatch(/bot-flagged|TWO/)
   })
@@ -515,6 +518,23 @@ it("puts an event-delivery summary near the top, including Meta gaps instead of 
   expect(plan.lines.find(line => line.id === "event_delivery:meta")?.text).toContain("not connected")
   expect(plan.lines.find(line => line.id === "event_delivery:meta")?.text).toContain("not yet")
   expect(plan.lines.find(line => line.id === "event_delivery:meta")?.text).toContain("purchase")
+})
+
+it("describes the PR 393 server conversion contract and owner-approved Meta pixel changes in the tool headlines", () => {
+  const plan = buildPlanModel(input({
+    scan: scanFacts({ adopted: [{ provider: "meta", via: "snippet", file: "index.html", line: 6, key: IDS.meta }] }),
+    candidates: [candidate("server_conversions", "begin_checkout"), candidate("server_conversions", "purchase"), candidate("server_conversions", "lead")]
+  }))
+  const meta = plan.lines.find(line => line.id === "event_delivery:meta")?.text ?? ""
+  const infinite = plan.lines.find(line => line.id === "event_delivery:infinite")?.text ?? ""
+  expect(meta).toContain("checkout/purchase/lead")
+  expect(meta).toContain("properties.path")
+  expect(meta).toContain("server first")
+  expect(meta).toContain("returned metaEventId")
+  expect(meta).toContain("owner approval")
+  expect(meta).toContain("disablePushState")
+  expect(infinite).toContain("count every event")
+  expect(infinite).toContain("properties.path")
 })
 
 it("reports when the existing Meta pixel id comes from a host env var and names the selected Infinite pixel", () => {

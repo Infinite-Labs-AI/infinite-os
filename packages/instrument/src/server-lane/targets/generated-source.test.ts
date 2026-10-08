@@ -591,7 +591,7 @@ describe("the outcome helper, executed", () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
       postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
     }
-    await helper.postInfiniteOutcome({ type: "sign_up", eventId: "signup:1" })
+    await helper.postInfiniteOutcome({ type: "sign_up", eventId: "signup:1", path: "/signup" })
     expect(postedBody(fetchMock).body).not.toContain("adMatch")
   })
 
@@ -601,6 +601,7 @@ describe("the outcome helper, executed", () => {
     }
     await helper.postInfiniteOutcome({
       type: "sign_up",
+      path: "/signup",
       visitKeyInputs: { clientIp: VECTORS.clientIp, userAgent: VECTORS.userAgent }
     })
     const body = JSON.parse(postedBody(fetchMock).body) as { eventId: string; properties: Record<string, string> }
@@ -623,6 +624,7 @@ describe("the outcome helper, executed", () => {
     await expect(
       helper.postInfiniteOutcome({
         type: "purchase",
+        path: "/checkout",
         eventId: "purchase:node_1",
         occurredAt: new Date(VECTORS.nowMs),
         visitKeyInputs: nodeReq
@@ -650,6 +652,7 @@ describe("the outcome helper, executed", () => {
     //    helper skips its own derivation and keeps the carried key verbatim.
     await helper.postInfiniteOutcome({
       type: "purchase",
+      path: "/success",
       eventId: "purchase:cs_1",
       occurredAt: new Date(VECTORS.nowMs),
       properties: { visitKey }
@@ -663,6 +666,7 @@ describe("the outcome helper, executed", () => {
     }
     await helper.postInfiniteOutcome({
       type: "purchase",
+      path: "/success",
       eventId: "purchase:cs_2",
       occurredAt: new Date(VECTORS.nowMs),
       properties: { visitKey: "carried_from_checkout" },
@@ -677,18 +681,19 @@ describe("the outcome helper, executed", () => {
       postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
     }
     delete process.env.INFINITE_SITE_SOURCE_KEY
-    await helper.postInfiniteOutcome({ type: "download" })
+    await helper.postInfiniteOutcome({ type: "download", path: "/download" })
     expect(postedBody(fetchMock).headers.get(SERVER_LANE_SOURCE_KEY_HEADER)).toBe("site_test")
 
     fetchMock.mockClear()
     delete process.env.INFINITE_SERVER_EVENT_SECRET
-    await expect(helper.postInfiniteOutcome({ type: "download" })).resolves.toBe(false)
+    await expect(helper.postInfiniteOutcome({ type: "download", path: "/download" })).resolves.toBe(false)
     expect(fetchMock).not.toHaveBeenCalled()
 
     // Cloudflare Workers have no process.env: the caller passes its binding values instead.
     await expect(
       helper.postInfiniteOutcome({
         type: "download",
+        path: "/download",
         credentials: { secret: VECTORS.secret, sourceKey: "site_worker" }
       })
     ).resolves.toBe(true)
@@ -705,7 +710,7 @@ describe("the outcome helper, executed", () => {
     const helper = (await loadGenerated(outcomeHelperSource(BUILD))) as {
       postInfiniteOutcome: (input: Record<string, unknown>) => Promise<boolean>
     }
-    await expect(helper.postInfiniteOutcome({ type: "purchase" })).resolves.toBe(false)
+    await expect(helper.postInfiniteOutcome({ type: "purchase", path: "/checkout" })).resolves.toBe(false)
   })
 
   it("the Node twin posts the same shape on top of the generated Node module", async () => {

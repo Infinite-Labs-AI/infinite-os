@@ -88,6 +88,8 @@ type WaitUntilLike = { waitUntil?: NextFetchEvent["waitUntil"] } | undefined
 export interface InfiniteServerEventInput {
   /** The exact outcome name from Infinite → Conversions (e.g. "sign_up", "purchase", "download"). */
   eventName: string
+  /** REQUIRED: the page path this outcome belongs to (pathname only, no query or hash). */
+  path: string
   /** Stable per-outcome id (order id, signup id) so retries dedupe. Defaults to a random UUID. */
   eventId?: string
   occurredAt?: Date
@@ -142,7 +144,13 @@ export async function sendInfiniteServerEvent(input: InfiniteServerEventInput): 
   try {
     const secret = process.env.${SERVER_LANE_SECRET_ENV}
     if (!secret || !SOURCE_KEY) return false
-    const properties: Record<string, string | number | boolean> = { ...(input.properties ?? {}) }
+    const path = outcomePath(input.path)
+    if (!path) return false
+    const properties: Record<string, string | number | boolean> = { path, ...(input.properties ?? {}) }
+    for (const key of Object.keys(properties)) {
+      if (properties[key] === undefined || properties[key] === "") delete properties[key]
+    }
+    properties.path = path
     if (input.request && properties.visitKey === undefined) {
       const visitKey = await infiniteVisitKey(input.request.headers, secret)
       if (visitKey) properties.visitKey = visitKey
@@ -224,6 +232,13 @@ async function postSigned(secret: string, body: string): Promise<boolean> {
   } finally {
     clearTimeout(timer)
   }
+}
+
+function outcomePath(path: unknown): string {
+  if (typeof path !== "string") return ""
+  const value = path.trim()
+  if (!value.startsWith("/") || value.includes("?") || value.includes("#")) return ""
+  return value
 }
 
 function isDocumentRequest(request: NextRequest): boolean {

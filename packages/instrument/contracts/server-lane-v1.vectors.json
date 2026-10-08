@@ -55,7 +55,8 @@
           "accepted": true,
           "duplicate": false,
           "metaEventId": null,
-          "metaEventName": null
+          "metaEventName": null,
+          "status": 202
         }
       },
       {
@@ -66,7 +67,8 @@
           "accepted": true,
           "duplicate": false,
           "metaEventId": "sign_up:acct_991",
-          "metaEventName": "Lead"
+          "metaEventName": "Lead",
+          "status": 202
         }
       },
       {
@@ -77,7 +79,8 @@
           "accepted": true,
           "duplicate": false,
           "metaEventId": null,
-          "metaEventName": null
+          "metaEventName": null,
+          "status": 202
         }
       },
       {
@@ -88,7 +91,8 @@
           "accepted": true,
           "duplicate": true,
           "metaEventId": null,
-          "metaEventName": null
+          "metaEventName": null,
+          "status": 202
         }
       },
       {
@@ -99,7 +103,8 @@
           "accepted": true,
           "duplicate": false,
           "metaEventId": null,
-          "metaEventName": null
+          "metaEventName": null,
+          "status": 202
         }
       },
       {
@@ -110,7 +115,8 @@
           "accepted": false,
           "duplicate": false,
           "metaEventId": null,
-          "metaEventName": null
+          "metaEventName": null,
+          "status": 202
         }
       },
       {
@@ -121,7 +127,8 @@
           "accepted": false,
           "duplicate": false,
           "metaEventId": null,
-          "metaEventName": null
+          "metaEventName": null,
+          "status": 401
         }
       },
       {
@@ -132,7 +139,8 @@
           "accepted": false,
           "duplicate": false,
           "metaEventId": null,
-          "metaEventName": null
+          "metaEventName": null,
+          "status": 500
         }
       }
     ]

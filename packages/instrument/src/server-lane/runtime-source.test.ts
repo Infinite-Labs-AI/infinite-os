@@ -228,6 +228,7 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
     const mod = await loadGeneratedModule()
     const ok = await mod.sendInfiniteServerEvent({
       eventName: "sign_up",
+      path: "/signup",
       eventId: "signup:42",
       accountKey: "42",
       occurredAt: new Date(VECTORS.nowMs),
@@ -241,9 +242,15 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
       eventName: "sign_up",
       occurredAt: new Date(VECTORS.nowMs).toISOString(),
       accountKey: "42",
-      properties: { visitKey: VECTORS.visitKey }
+      properties: { path: "/signup", visitKey: VECTORS.visitKey }
     })
     expect(init.headers["x-infinite-signature"]).toBe(signServerEventBody(VECTORS.secret, init.body))
+  })
+
+  it("sendInfiniteServerEvent refuses a pathless outcome before the network", async () => {
+    const mod = await loadGeneratedModule()
+    await expect(mod.sendInfiniteServerEvent({ eventName: "sign_up", eventId: "signup:missing-path" })).resolves.toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   it("carries an adMatch block verbatim inside the signed body, and omits it when absent", async () => {
@@ -251,6 +258,7 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
     const adMatch = { em: hashInfiniteEmail("founder@example.com"), fbp: "fb.1.1755500000123.987654321" }
     await mod.sendInfiniteServerEvent({
       eventName: "purchase",
+      path: "/success",
       eventId: "purchase:1",
       occurredAt: new Date(VECTORS.nowMs),
       adMatch
@@ -262,7 +270,7 @@ describe("generated Next.js module (executed with WebCrypto)", () => {
     expect(init.body).not.toContain("founder@example.com")
 
     fetchMock.mockClear()
-    await mod.sendInfiniteServerEvent({ eventName: "sign_up", eventId: "signup:1" })
+    await mod.sendInfiniteServerEvent({ eventName: "sign_up", path: "/signup", eventId: "signup:1" })
     const [, plain] = fetchMock.mock.calls[0] as [string, { body: string }]
     expect(plain.body).not.toContain("adMatch")
   })

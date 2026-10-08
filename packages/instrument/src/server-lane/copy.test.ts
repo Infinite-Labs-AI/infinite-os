@@ -354,12 +354,40 @@ describe("the wizard's recipes", () => {
     expect(report).not.toMatch(/eventID:|fbq\(/)
   })
 
+  it("tells visitor-facing routes to use waitUntil, consented match data, stable lead ids, and the browser Meta guards", () => {
+    expect(report).toContain('import { waitUntil } from "@vercel/functions"')
+    expect(report).toContain("waitUntil(reportInfiniteOutcome({")
+    expect(report).toContain("LEAD_ID_SECRET")
+    expect(report).toContain("site-held secret")
+    expect(report).toContain("explicitly signalled consent")
+    expect(report).toContain("facebook.com/tr")
+    expect(report).toContain("400 ms")
+    expect(report).toContain("disablePushState")
+  })
+
   it("capture fbc, fbp, user agent and ip from one device at checkout; purchases from the webhook only", () => {
     expect(webhook).toContain("adMatchFromRequest(request")
     expect(webhook).toMatch(/one device/i)
-    expect(webhook).toContain('eventId: "purchase:" + session.id')
-    expect(webhook).toContain("content_ids: (await productIdsForSession(session.id)).join")
+    expect(webhook).toContain("eventId: session.id")
+    expect(webhook).toContain("helper sends it as purchase:<id>")
+    expect(webhook).toContain("content_ids: session.metadata.infinite_skus")
     expect(webhook).not.toMatch(/\bph\b|phone_number|infiniteMetaMirror\(/)
+  })
+
+  it("prints the PR #393 webhook retry and commerce payload handoff rules", () => {
+    expect(webhook).toContain("const RETRYABLE_INFINITE_STATUSES = new Set([401, 403, 429])")
+    expect(webhook).toContain("status === null || status >= 500 || RETRYABLE_INFINITE_STATUSES.has(status)")
+    expect(webhook).toContain("return Response.json({ received: true, reported: false }, { status: 500 })")
+    expect(webhook).toContain("return Response.json({ received: true }, { status: 200 })")
+    expect(webhook).toContain("await reportInfiniteOutcome({")
+    expect(webhook).toContain("const { status } = await reportInfiniteOutcome({")
+    expect(webhook).toContain("metadata.infinite_skus")
+    expect(webhook).toContain("one comma-joined token")
+    expect(webhook).toContain("amount charged after tax and discounts")
+    expect(webhook).toContain("count every event")
+    expect(webhook).toContain("begin_checkout")
+    expect(webhook).toContain("add_to_cart")
+    expect(webhook).toContain("view_item")
   })
 
   it("speaks the JS helper's import specifier when the helper is .mjs", () => {
