@@ -130,6 +130,16 @@ describe("browser commerce briefs (review P0-5)", () => {
     expect(brief).toContain("Never turn client routing into a full page load.")
   })
 
+  it("a caller inside the site's consent code (not in the job's files) is never an edit place, and gets no import", () => {
+    const helperAt = { file: "src/analytics/events.ts", line: 22 }
+    const entry: EventInventoryEntry = { ...VIEW_ITEM, sites: [{ file: "components/ConsentNotice.tsx", line: 6, via: "helper:viewItem", navigation: "full_load", navigationVia: "location.assign", helperAt }] }
+    const brief = buildBrief([item("meta_improve:commerce_events", [entry], ["src/analytics/events.ts"])], facts)
+    const data = planData(brief, "meta_improve:commerce_events")
+    const place = ((data.events as Array<Record<string, unknown>>)[0]!.places as Array<Record<string, unknown>>)[0]!
+    expect((place.callers as Array<Record<string, unknown>>)[0]!.do).toBe("leave it as it is: it is in your consent code, outside this job's files")
+    expect(Object.keys(data.imports as object)).toEqual(["src/analytics/events.ts"])
+  })
+
   it("P1-A: an event sent inline in a click handler gets infiniteTrack there, and infiniteTrackThenNavigate ONLY when that handler does a full page load", () => {
     const entry: EventInventoryEntry = {
       event: "add_to_cart",

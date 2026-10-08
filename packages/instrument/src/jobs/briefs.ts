@@ -374,7 +374,10 @@ function leavesWords(site: EventSite): string {
 }
 
 /** The plan data of one place: where it fires, how its click leaves, and the ONE thing to do there. */
-function placeData(place: CommercePlace, call: (name: string) => string): Record<string, unknown> {
+function placeData(place: CommercePlace, call: (name: string) => string, allowed: ReadonlySet<string>): Record<string, unknown> {
+  // A place outside the job's files is in the site's consent code: never an edit place.
+  const frozen = (site: EventSite) => allowed.size > 0 && !allowed.has(site.file)
+  const untouched = "leave it as it is: it is in your consent code, outside this job's files"
   if (place.helper) {
     const helper = place.helper
     const wait = place.sites.some((site) => site.navigation === "full_load")
@@ -388,7 +391,9 @@ function placeData(place: CommercePlace, call: (name: string) => string): Record
       callers: place.sites.map((site) => ({
         at: placeWord(site),
         leaves: leavesWords(site),
-        do: site.navigation === "full_load"
+        do: frozen(site)
+          ? untouched
+          : site.navigation === "full_load"
           ? wrap
           : site.navigation === undefined
             ? `a full page load: ${wrap.replace(/^wrap this click handler: /, "wrap it in ")} (import infiniteLeaveAfter from the same module as the other helpers); client routing or no navigation: leave this handler as it is`
@@ -401,7 +406,9 @@ function placeData(place: CommercePlace, call: (name: string) => string): Record
   return {
     firesThrough: `inline at ${placeWord(site)} (${site.via}), not through a helper`,
     leaves: leavesWords(site),
-    do: site.navigation === "full_load"
+    do: frozen(site)
+      ? untouched
+      : site.navigation === "full_load"
       ? `replace the handler's own navigation with ${thenNavigate}`
       : site.navigation === undefined
         ? `a full page load: ${thenNavigate} in place of its own navigation; client routing or no navigation: ${call("infiniteTrack")} beside the site's own send`
@@ -416,17 +423,18 @@ function commerceCall(tool: InventoryTool, event: FunnelEvent): (name: string) =
 }
 
 /** The import line each file this job edits needs (`helperImport` relative to THAT file, P2-1). */
-function commerceImports(places: readonly CommercePlace[], module: string): Record<string, string> {
+function commerceImports(places: readonly CommercePlace[], module: string, allowed: ReadonlySet<string>): Record<string, string> {
   const names = new Map<string, Set<string>>()
   const need = (file: string, name: string) => (names.get(file) ?? names.set(file, new Set()).get(file)!).add(name)
   for (const place of places) {
     if (place.helper) {
       const wait = place.sites.some((site) => site.navigation === "full_load")
       need(place.helper.file, wait ? "infiniteTrackBeforeLeaving" : "infiniteTrack")
-      for (const site of place.sites) if (site.navigation === "full_load") need(site.file, "infiniteLeaveAfter")
+      for (const site of place.sites) if (site.navigation === "full_load" && (allowed.size === 0 || allowed.has(site.file))) need(site.file, "infiniteLeaveAfter")
       continue
     }
     const site = place.sites[0]!
+    if (allowed.size > 0 && !allowed.has(site.file)) continue
     need(site.file, site.navigation === "full_load" ? "infiniteTrackThenNavigate" : "infiniteTrack")
   }
   const order = ["infiniteTrack", "infiniteTrackBeforeLeaving", "infiniteTrackThenNavigate", "infiniteLeaveAfter"]
@@ -691,10 +699,10 @@ function commerceData(item: ChecklistItem, facts: BriefFacts): Record<string, un
     events: entries.map((entry) => {
       // `places` says where it fires (the old `firesAt`), how each click leaves and what to do there.
       const { firesAt: _firesAt, ...data } = inventoryData(entry, [tool])
-      return { ...data, places: commercePlaces(entry).map((place) => placeData(place, commerceCall(tool, entry.event))) }
+      return { ...data, places: commercePlaces(entry).map((place) => placeData(place, commerceCall(tool, entry.event), new Set(item.allow.files))) }
     }),
     // P2-1: one import line per file, relative to THAT file (a helper in src/analytics/ imports "../../lib/…").
-    ...(facts.helpers.module ? { imports: commerceImports(places, facts.helpers.module) } : {})
+    ...(facts.helpers.module ? { imports: commerceImports(places, facts.helpers.module, new Set(item.allow.files)) } : {})
   }
 }
 
