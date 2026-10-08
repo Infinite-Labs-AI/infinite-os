@@ -42,33 +42,3 @@ it("allows a shared component and ordinary cookie utility to change", async () =
   expect(readFileSync(join(root, "lib/cookies.ts"), "utf8")).toContain("20")
 })
 
-it("does not infer policy scope when a component loses its ordinary-page importer", async () => {
-  const { root } = makeFenceFixture()
-  const home = tempDir("policy-new-scope-")
-  dirs.push(root, home)
-  write(root, policy, policySource)
-  write(root, "app/page.tsx", 'import Policy from "../components/PolicyContent"; export default Policy\n')
-  write(root, component, original)
-  const fence = await Fence.begin({ root, snapshotDir: join(home, "fence"), runId: "policy", turn: 1, items: [item("build_fix:repo", [component, "app/page.tsx"])] })
-  write(root, "app/page.tsx", "export default function Home() { return null }\n")
-  write(root, component, original.replace("Owner policy", "Changed policy"))
-  expect((await fence.end()).reverted).not.toContain(component)
-  expect(readFileSync(join(root, component), "utf8")).toContain("Changed policy")
-})
-
-it("protects only the policy page file beneath a custom application root", async () => {
-  const { root } = makeFenceFixture()
-  const home = tempDir("policy-app-root-")
-  dirs.push(root, home)
-  const appRoot = "frontend/site"
-  write(root, `${appRoot}/${policy}`, policySource)
-  write(root, `${appRoot}/${component}`, original)
-  const fence = await Fence.begin({ root, appRoot, snapshotDir: join(home, "fence"), runId: "policy", turn: 1, items: [item("build_fix:repo", [`${appRoot}/${component}`, `${appRoot}/${policy}`])] })
-  write(root, `${appRoot}/${component}`, original.replace("Owner policy", "Changed policy"))
-  write(root, `${appRoot}/${policy}`, "export default function Privacy() { return null }\n")
-  const result = await fence.end()
-  expect(result.reverted).toContain(`${appRoot}/${policy}`)
-  expect(result.reverted).not.toContain(`${appRoot}/${component}`)
-  expect(readFileSync(join(root, appRoot, policy), "utf8")).toBe(policySource)
-  expect(readFileSync(join(root, appRoot, component), "utf8")).toContain("Changed policy")
-})

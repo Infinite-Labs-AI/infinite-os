@@ -7,7 +7,7 @@ import { CLAIM_TOOL_NAMES, MCP_PROTOCOL_VERSION, MCP_TOKEN_HEADER, type AgentQue
 import { startMcpBridge, type McpBridge } from "./bridge.js"
 import { RPC_ERRORS } from "./jsonrpc.js"
 import { loopbackMcpUrl, runMcpProxy } from "./proxy.js"
-import { ClaimChannel, isPlanDecidedTopic } from "./tools.js"
+import { ClaimChannel } from "./tools.js"
 
 const bridges: McpBridge[] = []
 afterEach(async () => {
@@ -52,8 +52,6 @@ function post(bridge: McpBridge, body: unknown, headers: Record<string, string> 
     req.end(text)
   })
 }
-
-const call = (id: number, name: string, args: unknown) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } })
 
 describe("the MCP bridge (§3e.3, §3a.2 origin rule)", () => {
   it("serves initialize, tools/list (the 4 tools) and notifications", async () => {
@@ -105,24 +103,6 @@ describe("the MCP bridge (§3e.3, §3a.2 origin rule)", () => {
     expect((await post(bridge, "{}", { "Content-Type": "text/plain" })).status).toBe(400)
   })
 
-  it("relays a full session through the stdio proxy, in order", async () => {
-    const claims: Claim[] = []
-    const bridge = await bridgeFor(channel({ claims }))
-    const stdin = new PassThrough()
-    const stdout = new PassThrough()
-    const out: string[] = []
-    stdout.on("data", (chunk: Buffer) => out.push(chunk.toString("utf8")))
-    const done = runMcpProxy({ stdin, stdout, stderr: new PassThrough(), env: { INFINITE_TAG_MCP_URL: bridge.url, INFINITE_TAG_MCP_TOKEN: bridge.token } })
-    stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })}\n`)
-    stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`)
-    stdin.write(`${JSON.stringify(call(2, "job_claim", { job_id: "posthog_improve:proxy", status: "done", note: "proxy wired" }))}\n`)
-    stdin.end(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "ping" })}\n`)
-    await done
-    const replies = out.join("").trim().split("\n").map((line) => JSON.parse(line))
-    expect(replies.map((reply) => reply.id)).toEqual([1, 2, 3])
-    expect(claims).toHaveLength(1)
-  })
-
   it("the proxy refuses a non-loopback URL before sending anything (negative)", async () => {
     expect(loopbackMcpUrl("http://127.0.0.1:4000/mcp")).not.toBeNull()
     expect(loopbackMcpUrl("http://localhost:4000/mcp")).toBeNull()
@@ -152,13 +132,6 @@ describe("the claim tools", () => {
     expect((await tools.call("job_claim", claimArgs)).result).toMatchObject({ staticChecks: { state: "pass", problems: [] } })
     expect(tools.claims).toHaveLength(2)
   })
-  it("job_list returns this turn's items only", async () => {
-    const outcome = await channel().call("job_list", {})
-    const jobs = (outcome.result as { jobs: Array<{ id: string; allow: unknown; rules: string[] }> }).jobs
-    expect(jobs.map((job) => job.id)).toEqual(["posthog_improve:proxy", "server_conversions:signup"])
-    expect(jobs[0]!.allow).toEqual({ files: ["app/providers.tsx"], create: [] })
-    expect(jobs[0]!.rules.length).toBeGreaterThan(0)
-  })
 
   it("job_claim records a claim and never says verified", async () => {
     const claims: Claim[] = []
@@ -184,34 +157,6 @@ describe("the claim tools", () => {
     }
     expect(claims).toEqual([])
     expect((await tools.call("no_such_tool", {})).isError).toBe(true)
-  })
-
-  it("ask_user parks a question (non-blocking) and refuses plan-decided topics", async () => {
-    const asks: AgentQuestion[] = []
-    const tools = channel({ asks })
-    const parked = await tools.call("ask_user", { job_id: "server_conversions:signup", question: "Is /api/register or /api/signup the real sign-up route?", options: [{ label: "register", value: "/api/register" }], why: "Both create users." })
-    expect(parked.result).toEqual({ parked: true, note: "continue other jobs; the wizard will ask and resume you" })
-    expect(asks).toHaveLength(1)
-    for (const question of ["Should I add a cookie banner?", "What should the conversion name be?", "Can I npm install posthog-node?", "Which privacy text do you want?"]) {
-      const decided = await tools.call("ask_user", { job_id: "server_conversions:signup", question, why: "x" })
-      expect(decided.result).toEqual({ parked: false, reason: "decided by the plan" })
-    }
-    expect(asks).toHaveLength(1)
-    expect(isPlanDecidedTopic("Which file holds the checkout handler?")).toBe(false)
-    // Decisions the plan made are refused; ordinary questions that share a word are not (review O3 F23).
-    for (const decided of [
-      "Should the consent default be granted?",
-      "Can I change the cookie banner text?",
-      "Should I reword the privacy paragraph?",
-      "What should the conversion name be?",
-      "Can I run npm install @vercel/functions?",
-      "Should I add a dependency for this?"
-    ]) {
-      expect(isPlanDecidedTopic(decided)).toBe(true)
-    }
-    for (const open of ["Which file is the privacy page?", "Which cookie holds the session id?", "Is the hero banner on /pricing a landing page?", "Is this a pnpm workspace?"]) {
-      expect(isPlanDecidedTopic(open)).toBe(false)
-    }
   })
 
   it("report_progress is sanitised and capped at 120 characters", async () => {

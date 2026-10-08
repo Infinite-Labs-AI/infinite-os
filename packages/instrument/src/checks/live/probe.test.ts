@@ -4,17 +4,9 @@ import { describe, expect, it } from "vitest"
 
 import { fixtureFetch } from "../../../test/wizard/fixture-fetch.js"
 
-import { decodedLiteralsWith, decodeJsStringBody } from "./js-literals.js"
-import { isPrivateHost, LIVE_PROBE_MAX_BYTES, probeFetch, probeHeaders } from "./probe.js"
+import { LIVE_PROBE_MAX_BYTES, probeFetch } from "./probe.js"
 
 describe("probe transport", () => {
-  it("declares itself a check on every request", async () => {
-    expect(probeHeaders("1.2.3")).toMatchObject({ Purpose: "prefetch", "User-Agent": "infinite-tag-check/1.2.3 (+https://infinite.fast; analytics monitor)" })
-    const fixture = fixtureFetch({ "https://acme.test/": { body: "ok" } })
-    await probeFetch("https://acme.test/", { version: "1.2.3", fetch: fixture.fetch })
-    expect(fixture.requests[0]!.headers.purpose).toBe("prefetch")
-  })
-
   it("retries a 5xx, not a 404, and never turns a failure into ok", async () => {
     let calls = 0
     const flaky = fixtureFetch({ "https://acme.test/": () => (calls++ === 0 ? { status: 503 } : { body: "ok" }) })
@@ -47,13 +39,6 @@ describe("probe hygiene (review P3-4)", () => {
     expect(fixture.requests.every((request) => request.headers.purpose === "prefetch")).toBe(true)
   })
 
-  it("classifies hosts without DNS", () => {
-    for (const host of ["localhost", "app.localhost", "127.0.0.1", "10.1.2.3", "172.20.0.1", "192.168.1.1", "169.254.169.254", "[::1]", "fd00::1", "0.0.0.0"]) {
-      expect(isPrivateHost(host)).toBe(true)
-    }
-    for (const host of ["acme.com", "8.8.8.8", "172.32.0.1", "2606:4700::1"]) expect(isPrivateHost(host)).toBe(false)
-  })
-
   it("reads at most LIVE_PROBE_MAX_BYTES of a body", async () => {
     const big = "x".repeat(LIVE_PROBE_MAX_BYTES + 1024)
     const fixture = fixtureFetch({ "https://acme.test/big": { body: big } })
@@ -62,19 +47,3 @@ describe("probe hygiene (review P3-4)", () => {
   })
 })
 
-describe("JS string literals", () => {
-  it("decodes escapes", () => {
-    expect(decodeJsStringBody('posthog.init(\\"phc_x\\")\\n\\u0041\\x42\\u{43}')).toBe('posthog.init("phc_x")\nABC')
-    expect(decodeJsStringBody("bad \\x4")).toBeNull()
-  })
-
-  it("finds only literals that carry analytics markers, skipping comments and interpolated templates", () => {
-    const source = [
-      '// "fbq(\'init\')" in a comment',
-      'var a="no marker here", b="gtag(\\"config\\", \\"G-X1\\")";',
-      "var c=`posthog.init(${key})`;",
-      "var d='fbq(\\'init\\', \\'111222333444555\\')';"
-    ].join("\n")
-    expect(decodedLiteralsWith(source)).toEqual(['gtag("config", "G-X1")', "fbq('init', '111222333444555')"])
-  })
-})

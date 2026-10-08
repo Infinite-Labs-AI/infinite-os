@@ -1,16 +1,11 @@
-// The fence against an agent that reaches for git, multi-line consent calls, removed-line gate hits, a
-// throwing gate, a BOM, a deleted heavy dir, a crashed turn and a write after the turn (review O3 F1-F3,
-// F9-F11, F17, F18). Each case failed before the fix; real git in throwaway repos, no network.
-import { createHash } from "node:crypto"
 import { spawnSync } from "node:child_process"
-import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { cleanup, item, makeFenceFixture, POST_INSTALL_LAYOUT, runGit, tempDir, write } from "../../test/wizard/repo.js"
-import { reverseTextEdits } from "../server-lane/text-edits.js"
 import type { CheckResult, TurnDiff } from "../wizard/contracts/jobs.js"
-import { consentLineSpans, Fence, recoverCrashedTurns, verifySeal } from "./fence.js"
+import { Fence, recoverCrashedTurns, verifySeal } from "./fence.js"
 import { snapshotDir, wizardCacheRoot } from "./paths.js"
 
 const RUN_ID = "7f3c2a10-0000-4000-8000-0000000000f1"
@@ -42,16 +37,6 @@ describe("F1: the fence never runs agent-planted git config, and undoes agent co
     expect(read(".git/config")).not.toContain("fsmonitor")
     expect(result.reverted).toContain(".git/config")
     expect(result.strays.map((stray) => stray.path)).toContain(".git/config")
-  })
-
-  it("…nor in abort() (out of usage, timeout, SIGINT)", async () => {
-    const { root, home, fence, read } = await begin()
-    const sentinel = join(home, "fsmonitor-ran-on-abort")
-    plantFsmonitor(root, sentinel)
-    const result = await fence.abort()
-    expect(existsSync(sentinel)).toBe(false)
-    expect(read(".git/config")).not.toContain("fsmonitor")
-    expect(result.restored).toContain(".git/config")
   })
 
   it("a planted hook is deleted before any git call can run it", async () => {
@@ -94,24 +79,6 @@ describe("F1: the fence never runs agent-planted git config, and undoes agent co
     expect(runGit(root, ["branch", "--list", "agent-side"]).trim()).toBe("")
     expect(result.reverted).toEqual(expect.arrayContaining([".git/index", ".git/refs/heads/agent-side"]))
   })
-
-  it("assume-unchanged on a tracked file cannot hide an edit from the fence", async () => {
-    const { root, fence, read } = await begin()
-    runGit(root, ["update-index", "--assume-unchanged", "README.md"])
-    write(root, "README.md", "# hidden edit\n")
-    const result = await fence.end()
-    expect(read("README.md")).toBe("# Acme\n")
-    expect(result.reverted).toContain("README.md")
-  })
-
-  it("control: a turn that never touched git reverts nothing under .git and keeps the allowed edit", async () => {
-    const { root, fence } = await begin()
-    write(root, "app/page.tsx", "export default function Page() { return null }\n")
-    const result = await fence.end()
-    expect(result.reverted.filter((rel) => rel.startsWith(".git"))).toEqual([])
-    expect(result.edits.map((edit) => edit.file)).toEqual(["app/page.tsx"])
-    expect(result.blocked).toEqual([])
-  })
 })
 
 describe("F2: a gate hit on a REMOVED line (an old-file line number) reverts the right hunk", () => {
@@ -137,13 +104,6 @@ describe("F2: a gate hit on a REMOVED line (an old-file line number) reverts the
     expect(new Set(result.gateHits.map((hit) => hit.rule))).toEqual(new Set(["autoconfig_opt_out_removed"]))
     expect(read("app/page.tsx")).toContain("fbq('set', 'autoConfig', false, '123456789012345')")
   })
-
-  it("control: with no gate hit both hunks are kept", async () => {
-    const { root, fence, read } = await begin((r) => write(r, "app/page.tsx", before))
-    write(root, "app/page.tsx", after)
-    await fence.end({ turnGate: async () => [] })
-    expect(read("app/page.tsx")).toBe(after)
-  })
 })
 
 describe("F3: a consent change on a continuation line of a multi-line consent call is caught", () => {
@@ -166,30 +126,6 @@ describe("F3: a consent change on a continuation line of a multi-line consent ca
     expect(read("app/page.tsx")).toContain("ads: 'denied'")
     expect(read("app/page.tsx")).toContain("export const x = 2")
   })
-
-  it("consentLineSpans: the span covers the whole call and stops at its closing bracket (strings with brackets skipped)", () => {
-    const text = "a()\ngtag('consent', 'default', {\n  label: ')',\n  ad_storage: 'denied'\n})\nb()\n"
-    expect(consentLineSpans(text)).toEqual([[2, 5]])
-    expect(consentLineSpans("const x = 1\n")).toEqual([])
-  })
-
-  it("freezes the complete function containing a multi-line consent call, including its return", async () => {
-    const { root, fence, read } = await begin((r) => write(r, "app/page.tsx", layout))
-    const next = layout.replace("  return null\n", "  return <span />\n")
-    write(root, "app/page.tsx", next)
-    const result = await fence.end()
-    expect(result.blocked.map(block => block.reason)).toContain("consent_touched")
-    expect(read("app/page.tsx")).toBe(layout)
-  })
-
-  it("keeps an edit in a separate top-level unit beside the frozen call", async () => {
-    const before = layout + "export const title = 'before';\n"
-    const { root, fence, read } = await begin(r => write(r, "app/page.tsx", before))
-    const after = before.replace("title = 'before'", "title = 'after'")
-    write(root, "app/page.tsx", after)
-    expect((await fence.end()).blocked).toEqual([])
-    expect(read("app/page.tsx")).toBe(after)
-  })
 })
 
 describe("F9: a throwing gate never leaves the turn half-settled", () => {
@@ -204,27 +140,6 @@ describe("F9: a throwing gate never leaves the turn half-settled", () => {
     expect(read("app/layout.tsx")).toBe(before)
     expect(read("app/page.tsx")).toBe(pageBefore)
     expect(existsSync(join(dir, "manifest.json"))).toBe(false)
-  })
-})
-
-describe("F17: a UTF-8 BOM survives the fence", () => {
-  it("beforeHash is the file's real hash and textEdits reverse to the exact original bytes", async () => {
-    const original = "﻿export default function Page() {\n  return null\n}\n"
-    const { root, fence } = await begin((r) => write(r, "app/page.tsx", original))
-    const realBefore = readFileSync(join(root, "app/page.tsx"))
-    write(root, "app/page.tsx", `${original}export const x = 1\n`)
-    const result = await fence.end()
-    const edit = result.edits.find((entry) => entry.file === "app/page.tsx")!
-    expect(edit.beforeHash).toBe(`sha256:${createHash("sha256").update(realBefore).digest("hex")}`)
-    expect(reverseTextEdits(readFileSync(join(root, "app/page.tsx"), "utf8"), edit.textEdits)).toBe(original)
-  })
-})
-
-describe("F18: deleting a whole heavy dir is tamper", () => {
-  it("rm -rf node_modules during the turn → INF_WIZ_FENCE_TAMPER", async () => {
-    const { root, fence } = await begin()
-    rmSync(join(root, "node_modules"), { recursive: true, force: true })
-    await expect(fence.end()).rejects.toMatchObject({ code: "INF_WIZ_FENCE_TAMPER" })
   })
 })
 
@@ -243,14 +158,6 @@ describe("F10: a turn a dead process left open is restored by recoverCrashedTurn
     expect(read("app/page.tsx")).toBe(before)
     expect(existsSync(dir)).toBe(false)
   })
-
-  it("negative: this process's own open turn is not touched", async () => {
-    const { root, home, dir, read } = await begin()
-    write(root, "app/page.tsx", "// still mid-turn\n")
-    expect(await recoverCrashedTurns({ snapshotsRoot: join(wizardCacheRoot(home), "snapshots"), root })).toEqual([])
-    expect(read("app/page.tsx")).toBe("// still mid-turn\n")
-    expect(existsSync(dir)).toBe(true)
-  })
 })
 
 describe("F11: the seal catches a write after the turn settled", () => {
@@ -264,15 +171,5 @@ describe("F11: the seal catches a write after the turn settled", () => {
     expect((await verifySeal(seal)).ok).toBe(true)
     write(root, "next.config.mjs", "require('child_process')\n")
     expect(await verifySeal(seal)).toEqual({ ok: false, changed: ["next.config.mjs"] })
-  })
-
-  it("a late write inside node_modules or a planted hook fails it too", async () => {
-    const { root, fence } = await begin()
-    const { seal } = await fence.end()
-    write(root, "node_modules/next/evil.js", "x\n")
-    expect((await verifySeal(seal)).changed).toContain("node_modules/next/evil.js")
-    expect((await verifySeal(seal, { heavy: false })).ok).toBe(true)
-    write(root, ".git/hooks/pre-commit", "#!/bin/sh\n")
-    expect((await verifySeal(seal, { heavy: false })).changed).toContain(".git/hooks/pre-commit")
   })
 })

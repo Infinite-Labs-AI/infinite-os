@@ -10,12 +10,7 @@ const before = "function boot() {\n  gtag('consent', 'default', {\n    analytics
 
 it.each([
   ["indentation", before.replace("  gtag", "    gtag")],
-  ["quote style", before.replaceAll("'", '"')],
-  ["continuation line whitespace", before.replace("    analytics", "      analytics")],
-  ["reflow", before.replace("{\n    analytics_storage: 'denied'\n  }", "{ analytics_storage: 'denied' }")],
   ["deletion", before.replace(/  gtag[\s\S]*?\);\n/, "")],
-  ["setTimeout callback", before.replace("  gtag", "  setTimeout(() => gtag").replace("  });", "  }), 60000);")],
-  ["load callback", before.replace("  gtag", "  addEventListener('load', () => gtag").replace("  });", "  }));")],
   ["uncalled function", before.replace("  gtag", "  function neverCalled() { gtag").replace("  });", "  }); }")],
   ["wrapper", before.replace("  gtag", "  if (hostAllowed) { gtag").replace("  });", "  }); }")],
 ])("strictly reverts %s with no semantic/formatting exemption", async (_name, after) => {

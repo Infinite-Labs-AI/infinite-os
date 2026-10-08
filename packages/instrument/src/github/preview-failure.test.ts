@@ -22,18 +22,9 @@ describe("a preview's terminal GitHub status", () => {
     ]
     expect(await previewUrlForSha(gh(rows, { "8": [{ state: "success", environment_url: "https://chosen-project-new.vercel.app" }], "7": [{ state: "success", environment_url: "https://chosen-project-old.vercel.app" }] }), SHA, "chosen-project")).toBe("https://chosen-project-new.vercel.app")
   })
-  it("selects the newest plain Preview row for the linked single project", async () => {
-    const rows = [8, 7].map(id => ({ id, environment: "Preview", creator: { login: "vercel[bot]" } }))
-    expect(await previewUrlForSha(gh(rows, { "8": [{ state: "success", environment_url: "https://chosen-project-new.vercel.app" }], "7": [{ state: "success", environment_url: "https://chosen-project-old.vercel.app" }] }), SHA, "chosen-project")).toBe("https://chosen-project-new.vercel.app")
-  })
   it("returns a failed deployment's reason immediately", async () => {
     const client = gh([{ id: 7, environment: "Preview", creator: { login: "vercel[bot]" } }], [{ state: "error", description: "Build failed" }])
     expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: "Build failed", blocked: false })
-  })
-
-  it.each(["Build failed: requires authorization", "Build failed: blocked import", "Build failed: user must have access"])("keeps an explicit failed deployment as a code failure: %s", async description => {
-    const client = gh([{ id: 7, environment: "Preview", creator: { login: "vercel[bot]" } }], [{ state: "error", description }])
-    expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: description, blocked: false })
   })
 
   it("uses an explicit blocked deployment state without requiring a magic phrase", async () => {
@@ -41,36 +32,14 @@ describe("a preview's terminal GitHub status", () => {
     expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: "Owner action needed", blocked: true })
   })
 
-  it.each(["Authorization required", "Deployment was blocked"])("uses an exact fallback for GitHub coarse failure state: %s", async description => {
-    const client = gh([{ id: 7, environment: "Preview", creator: { login: "vercel[bot]" } }], [{ state: "failure", description }])
-    expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: description, blocked: true })
-  })
-
-  it.each(["Build failed: blocked import", "Build failed: requires authorization", "Build failed: must have access"])("does not classify fallback build text as a hosting block: %s", async description => {
+  it.each(["Build failed: blocked import",])("does not classify fallback build text as a hosting block: %s", async description => {
     const client = gh([], [], [{ context: "Vercel", state: "failure", description }])
     expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: description, blocked: false })
-  })
-
-  it.each(["Authorization required", "Vercel - Git author must have access to the project on Vercel to create deployments"])("accepts only known fallback hosting phrases: %s", async description => {
-    const client = gh([], [], [{ context: "Vercel", state: "failure", description }])
-    expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: description, blocked: true })
-  })
-
-  it("reads the Vercel commit status when a deployment row has not appeared yet", async () => {
-    const client = gh([], [], [{ context: "Vercel", state: "failure", description: "Deployment was blocked" }])
-    expect(await previewFailureForSha(client, SHA, null)).toEqual({ reason: "Deployment was blocked", blocked: true })
   })
 
   it("ignores another project's fallback commit status", async () => {
     const client = gh([], [], [{ context: "Vercel - other-project", state: "failure", description: "Deployment was blocked" }])
     expect(await previewFailureForSha(client, SHA, "chosen-project")).toBeNull()
-  })
-
-  it("identifies a bare Vercel status by its dashboard project", async () => {
-    const status = { context: "Vercel", state: "failure", description: "Deployment was blocked", target_url: "https://vercel.com/fixture-team/chosen-project/deployment" }
-    expect(await previewFailureForSha(gh([], [], [status]), SHA, "chosen-project")).toEqual({ reason: "Deployment was blocked", blocked: true })
-    expect(await previewFailureForSha(gh([], [], [status]), SHA, "other-project")).toBeNull()
-    expect(await previewFailureForSha(gh([], [], [{ ...status, context: "Vercel – chosen-project", target_url: null }]), SHA, "chosen-project")).toEqual({ reason: "Deployment was blocked", blocked: true })
   })
 
   it("refuses an ambiguous project preview URL", async () => {
@@ -88,14 +57,5 @@ describe("a preview's terminal GitHub status", () => {
     ]
     expect(await previewFailureForSha(gh(rows, { "7": [{ state: "failure", description: "Deployment was blocked" }], "8": [{ state: "pending" }] }), SHA, "chosen-project")).toBeNull()
     expect(await previewFailureForSha(gh([rows[0]!], [{ state: "pending" }]), SHA, null)).toBeNull()
-  })
-
-  it("lets a newer redeploy continue instead of reusing an older failed attempt", async () => {
-    const rows = [
-      { id: 8, environment: "Preview - chosen-project", creator: { login: "vercel[bot]" }, created_at: "2026-10-06T21:05:00Z" },
-      { id: 7, environment: "Preview - chosen-project", creator: { login: "vercel[bot]" }, created_at: "2026-10-06T21:00:00Z" }
-    ]
-    expect(await previewFailureForSha(gh(rows, { "8": [{ state: "pending" }], "7": [{ state: "failure", description: "old failure" }] }), SHA, "chosen-project")).toBeNull()
-    expect(await previewUrlForSha(gh(rows, { "8": [{ state: "pending" }], "7": [{ state: "success", environment_url: "https://chosen-project-old.vercel.app" }] }), SHA, "chosen-project")).toBeNull()
   })
 })

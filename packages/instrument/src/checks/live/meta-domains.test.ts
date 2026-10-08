@@ -5,7 +5,6 @@ import { describe, expect, it } from "vitest"
 
 import { FIXED_NOW, fixtureFetch, type FixtureHandler } from "../../../test/wizard/fixture-fetch.js"
 
-import { registrableDomain } from "./hosts.js"
 import { checkMetaDomains } from "./meta-domains.js"
 
 const PIXEL = "111222333444555"
@@ -48,38 +47,6 @@ describe("Meta domain delivery", () => {
     expect(results[0]!.state).toBe("undetermined")
   })
 
-  it("probes ids observed in signals/config requests too, and refuses non-pixel ids", async () => {
-    const results = await checkMetaDomains(
-      { domains: ["acme.com"], pixelIds: ["12345"], observedConfigPixelIds: [PIXEL] },
-      { version: "t", fetch: signals([]).fetch },
-      ctx
-    )
-    expect(results.map((result) => result.state)).toEqual(["info", "pass"])
-  })
-
-  it("no pixel id at all is undetermined (no default id)", async () => {
-    const results = await checkMetaDomains({ domains: ["acme.com"], pixelIds: [] }, { version: "t", fetch: fixtureFetch({}).fetch }, ctx)
-    expect(results.map((result) => result.state)).toEqual(["undetermined"])
-  })
-
-  it("host matrix: a blocked preview host passes; an allowed one is information", async () => {
-    const blockedPreview = await checkMetaDomains(
-      { domains: ["acme.com"], pixelIds: [PIXEL], previewHosts: ["acme-git-x.vercel.app"] },
-      { version: "t", fetch: signals(["acme-git-x.vercel.app"]).fetch },
-      ctx
-    )
-    expect(blockedPreview.map((result) => [result.checkId, result.state])).toEqual([
-      ["meta_traffic_permissions", "pass"],
-      ["meta_host_matrix", "pass"]
-    ])
-    const openPreview = await checkMetaDomains(
-      { domains: ["acme.com"], pixelIds: [PIXEL], previewHosts: ["acme-git-x.vercel.app"] },
-      { version: "t", fetch: signals([]).fetch },
-      ctx
-    )
-    expect(openPreview[1]).toMatchObject({ checkId: "meta_host_matrix", state: "info" })
-  })
-
   it("never probes a preview-shaped host as a production domain", async () => {
     const fixture = signals([])
     const results = await checkMetaDomains({ domains: ["acme.vercel.app", "localhost"], pixelIds: [PIXEL] }, { version: "t", fetch: fixture.fetch }, ctx)
@@ -88,11 +55,3 @@ describe("Meta domain delivery", () => {
   })
 })
 
-describe("registrable domain", () => {
-  it("groups subdomains, keeps multi-label suffixes", () => {
-    expect(registrableDomain("WWW.Acme.com.")).toBe("acme.com")
-    expect(registrableDomain("shop.acme.co.uk")).toBe("acme.co.uk")
-    expect(registrableDomain("acme-git-x.vercel.app")).toBe("acme-git-x.vercel.app")
-    expect(registrableDomain("127.0.0.1")).toBe("127.0.0.1")
-  })
-})

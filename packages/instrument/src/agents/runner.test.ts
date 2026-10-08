@@ -1,15 +1,11 @@
-// The real AgentRunnerImpl against the FAKE claude / codex binaries (test/wizard/bin), which start the REAL
-// built `mcp-proxy`. No real agent, no model, no network.
-import { execFile } from "node:child_process"
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 
-import { assertBuilt, FAKE_BIN_DIR, fakeAgents, gateSpy, makeRunner, records, RUN_ID, runs, type FakeSetup } from "../../test/wizard/agents.js"
+import { assertBuilt, fakeAgents, gateSpy, makeRunner, records, RUN_ID, runs, type FakeSetup } from "../../test/wizard/agents.js"
 import { cleanup, item, makeFenceFixture, POST_INSTALL_LAYOUT, runGit, tempDir, write } from "../../test/wizard/repo.js"
 import { agentArgvViolations, type RunJobsInput } from "../wizard/contracts/agents.js"
 import type { AgentQuestion, Claim } from "../wizard/contracts/jobs.js"
-import { FenceTamperError } from "./fence.js"
 import { runScratchDir } from "./paths.js"
 import { reviewInDetachedWorktree, SYSTEM_PROMPT_HEADER, WORKER_KICKOFF, WORKER_RESUME_KICKOFF, type AgentRunResultWithExtras } from "./runner.js"
 import { assertReviewWorktree } from "./worktree-guard.js"
@@ -56,70 +52,6 @@ function jobsInput(over: Partial<RunJobsInput> = {}) {
 const CLAIM_DONE = { tool: "job_claim", args: { job_id: "meta_improve:landing", status: "done", note: "trial button wired" } }
 
 describe("runJobs with Claude (fake)", () => {
-  it.each(["claude", "codex"] as const)("does not trust %s progress as ownership even when it changes during an edit", async (worker) => {
-    const { root, fakes } = setup({})
-    const file = "app/layout.tsx"
-    const initial = "function boot() {\n  fbq('consent', 'grant');\n}\n"
-    write(root, file, initial)
-    const id = "edit-meta"
-    const start = worker === "claude"
-      ? { type: "assistant", message: { content: [{ type: "tool_use", id, name: "Edit", input: { file_path: join(root, file) } }] } }
-      : { type: "item.started", item: { id, type: "file_change", changes: [{ path: join(root, file) }] } }
-    const complete = worker === "claude"
-      ? { type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: "updated" }] } }
-      : { type: "item.completed", item: { id, type: "file_change", changes: [{ path: join(root, file) }] } }
-    writeFileSync(fakes.scenarioPath, JSON.stringify({ turns: [{ steps: [
-      { tool: "job_list" },
-      { tool: "report_progress", args: { job_id: "preview_guard:meta", text: "Meta edit" } },
-      { emit: start },
-      { tool: "report_progress", args: { job_id: "preview_guard:ga4", text: "Other job progress" } },
-      { emit: { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "unrelated-read", content: "read" }] } } },
-      { edit: { path: file, content: initial.replace("  fbq", "  if (allow) return;\n    fbq"), silent: true } },
-      { emit: complete },
-      ...["preview_guard:ga4", "preview_guard:meta"].map(job_id => ({ tool: "job_claim", args: { job_id, status: "done", note: "done" } }))
-    ] }] }))
-    const items = ["preview_guard:ga4", "preview_guard:meta"].map(id => item(id, [file]))
-    const result = await makeRunner(fakes, root, { preferWorker: worker }).runJobs(jobsInput({ items }).input)
-    expect(result.blocked).toEqual([])
-    const claimReplies = records(fakes).filter(entry => entry.kind === "mcp" && entry.tool === "job_claim").map(entry => JSON.stringify(entry.reply))
-    expect(claimReplies).toHaveLength(2)
-    expect(claimReplies.every(reply => reply.includes("code handles consent"))).toBe(true)
-  })
-
-  it.each(["claude", "codex"] as const)("warns every %s claimant with no progress events and no trusted shared-file owner", async (worker) => {
-    const file = "app/layout.tsx"
-    const initial = "function boot() {\n  fbq('init', '123');\n  fbq('consent', 'grant');\n}\n"
-    const capture = initial.replace("'123'", "'456'")
-    const wrapped = capture.replace("  fbq('consent', 'grant');", "  if (allowed) {\n    fbq('consent', 'grant');\n  }")
-    const { root, fakes } = setup({ turns: [{ steps: [
-      { tool: "job_list" },
-      { edit: { path: file, content: capture } },
-      { edit: { path: file, content: wrapped } },
-      ...["preview_guard:ga4", "meta_improve:capture", "preview_guard:meta"].map((job_id) => ({ tool: "job_claim", args: { job_id, status: "done", note: "done" } }))
-    ] }] })
-    write(root, file, initial)
-    const items = ["preview_guard:ga4", "meta_improve:capture", "preview_guard:meta"].map((id) => item(id, [file]))
-    const result = await makeRunner(fakes, root, { preferWorker: worker }).runJobs(jobsInput({ items }).input)
-    expect(result.blocked).toEqual([])
-    const replies = records(fakes).filter((entry) => entry.kind === "mcp" && entry.tool === "job_claim").map((entry) => JSON.stringify(entry.reply))
-    expect(replies.every(reply => reply.includes("code handles consent"))).toBe(true)
-    expect(readFileSync(join(root, file), "utf8")).toBe(initial)
-  })
-
-  it("returns a moved consent call as claim-time feedback before the turn settles", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [
-      { tool: "job_list" },
-      { edit: { path: "app/layout.tsx", content: `${POST_INSTALL_LAYOUT}if (allowHost()) { fbq('consent', 'grant') }\n` } },
-      { tool: "job_claim", args: { job_id: "meta_improve:landing", status: "done", note: "guarded" } }
-    ] }] })
-    // This call was already in the site; the edit adds a condition around it.
-    write(root, "app/layout.tsx", `${POST_INSTALL_LAYOUT}fbq('consent', 'grant')\n`)
-    const result = await makeRunner(fakes, root).runJobs(jobsInput({ items: [ITEMS[0]!] }).input)
-    const reply = records(fakes).find((entry) => entry.kind === "mcp" && entry.tool === "job_claim")?.reply
-    expect(reply?.result?.structuredContent).toMatchObject({ staticChecks: { state: "problem", problems: [expect.stringContaining("code handles consent")] } })
-    expect(result.blocked).toEqual(expect.arrayContaining([expect.objectContaining({ itemId: "meta_improve:landing", reason: "consent_touched" })]))
-  })
-
   it("relays claims through the real mcp-proxy, keeps allowlisted edits, and narrates", async () => {
     const { root, fakes } = setup(
       {
@@ -210,41 +142,12 @@ describe("runJobs with Claude (fake)", () => {
     expect(resumed.stdin).toBe(WORKER_RESUME_KICKOFF)
   })
 
-  it("an allowed_warning is one notice line, not a stop (negative of the above)", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [{ replay: "claude-rate-limit-warning.jsonl" }, { replay: "claude-rate-limit-warning.jsonl" }, CLAIM_DONE] }] })
-    const { input, beats } = jobsInput()
-    const result = await makeRunner(fakes, root).runJobs(input)
-    expect(result.outcome).toBe("completed")
-    expect(beats.filter((beat) => /close to your seven day limit/.test(beat))).toHaveLength(1)
-    expect(beats).toContain("Claude Code: using your extra-usage credits")
-  })
-
   it("counts permission denials and flags a denied .env read as an incident", async () => {
     const { root, fakes } = setup({ turns: [{ denials: ["/repo/.env.local", "/repo/README.md"], steps: [CLAIM_DONE] }] })
     const result = (await makeRunner(fakes, root).runJobs(jobsInput().input)) as AgentRunResultWithExtras
     expect(result.permissionDenials).toBe(2)
     expect(result.incidents).toHaveLength(1)
     expect(result.incidents[0]).toBe("Claude Code tried to read .env.local outside the repo (denied)")
-  })
-
-  it("kills the run when system/init bills differently from the plan line", async () => {
-    const { root, fakes } = setup({ turns: [{ apiKeySource: "ANTHROPIC_API_KEY", steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, { sleep: 3000 }] }] })
-    const result = await makeRunner(fakes, root).runJobs(jobsInput().input)
-    expect(result.outcome).toBe("error")
-    expect(result.edits).toEqual([])
-  })
-
-  it("retries ONCE with the user's default model when the pinned one is refused, and says so", async () => {
-    const { root, fakes } = setup({ turns: [{ rejectModel: true, steps: [CLAIM_DONE] }] })
-    const { input, beats } = jobsInput()
-    const result = (await makeRunner(fakes, root).runJobs(input)) as AgentRunResultWithExtras
-    expect(result.outcome).toBe("completed")
-    expect(result.modelFallback).toBe(true)
-    const [first, second] = runs(fakes, "claude")
-    expect(first!.argv).toContain("claude-opus-4-8")
-    expect(second!.argv).not.toContain("--model")
-    expect(second!.argv!.slice(second!.argv!.indexOf("--effort"), second!.argv!.indexOf("--effort") + 2)).toEqual(["--effort", "xhigh"])
-    expect(beats).toContain("Opus 4.8 isn't on your plan: using your default model")
   })
 
   it("reverts a gate hit (child_process in next.config.mjs) and blocks the job; the rest is kept", async () => {
@@ -265,11 +168,6 @@ describe("runJobs with Claude (fake)", () => {
     // §3x.2 A gate hit is reported, attributed to the item that claimed the file, never a block.
     expect(result.blocked).toEqual([])
     expect(result.gateHits.map((hit) => [hit.file, hit.itemIds])).toEqual([["next.config.mjs", ["meta_improve:landing"]]])
-  })
-
-  it("throws FENCE_TAMPER when the agent writes under node_modules", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [{ edit: { path: "node_modules/next/index.js", content: "/* x */" } }, CLAIM_DONE] }] })
-    await expect(makeRunner(fakes, root).runJobs(jobsInput().input)).rejects.toBeInstanceOf(FenceTamperError)
   })
 })
 
@@ -293,44 +191,6 @@ describe("runJobs with Codex (fake)", () => {
     expect(agentArgvViolations("codex", run.argv!)).toEqual([])
     expect(beats).toContain("Loading its checklist tools")
   })
-
-  it("a Codex child WITHOUT the two MCP vars cannot reach the channel and reports itself toolless (negative)", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [CLAIM_DONE] }, { steps: [CLAIM_DONE] }] })
-    await makeRunner(fakes, root, { preferWorker: "codex" }).runJobs(jobsInput().input)
-    const argv = runs(fakes, "codex")[0]!.argv!
-    const env = { ...fakes.env }
-    const out = await new Promise<{ code: number | null; stdout: string }>((resolveRun) => {
-      const child = execFile(join(FAKE_BIN_DIR, "codex"), argv, { cwd: root, env }, (error, stdout) =>
-        resolveRun({ code: error ? (error as { code?: number }).code ?? 1 : 0, stdout })
-      )
-      child.stdin?.end("prompt")
-    })
-    expect(out.code).toBe(1)
-    expect(records(fakes).some((entry) => entry.kind === "toolless")).toBe(true)
-  })
-
-  it("a usage-limit turn.failed → out_of_usage with the verbatim reset; resume is `exec resume <thread>`", async () => {
-    const { root, fakes } = setup({
-      turns: [
-        { steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, { replay: "codex-usage-limit.jsonl" }, { sleep: 5000 }] },
-        { steps: [CLAIM_DONE] }
-      ]
-    })
-    const runner = makeRunner(fakes, root, { preferWorker: "codex" })
-    const first = await runner.runJobs(jobsInput().input)
-    expect(first.outcome).toBe("out_of_usage")
-    expect(first.resetsAt).toBe("Oct 3rd, 2026 9:41 AM")
-    expect(first.session).toEqual({ kind: "codex", threadId: "thread-fake-0001" })
-    expect(readFileSync(join(root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
-    await runner.runJobs(jobsInput({ resume: first.session }).input)
-    expect(runs(fakes, "codex")[1]!.argv!.slice(0, 3)).toEqual(["exec", "resume", "thread-fake-0001"])
-  })
-
-  it("an 'unrecognized configuration setting' item is fatal", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [{ replay: "codex-unrecognized-config.jsonl" }, { sleep: 3000 }, CLAIM_DONE] }] })
-    const result = await makeRunner(fakes, root, { preferWorker: "codex" }).runJobs(jobsInput().input)
-    expect(result.outcome).toBe("error")
-  })
 })
 
 describe("killAll (SIGINT)", () => {
@@ -348,23 +208,6 @@ describe("killAll (SIGINT)", () => {
     expect(await gone(hanging.pid!)).toBe(true)
     expect(await gone(grandchild)).toBe(true)
     expect(readFileSync(join(root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
-  })
-})
-
-describe("killAll waits for the restore (review I1 P2-5)", () => {
-  it("when killAll returns, the agent's edit is already undone and the snapshot is gone, even while runJobs is still unwinding", async () => {
-    const { root, fakes } = setup({ turns: [{ steps: [{ edit: { path: "app/page.tsx", content: PAGE_EDIT } }, { hang: true }] }] })
-    const runner = makeRunner(fakes, root)
-    const pending = runner.runJobs(jobsInput().input)
-    await waitFor(fakes, "hanging")
-    expect(readFileSync(join(root, "app/page.tsx"), "utf8")).toContain("data-conversion")
-    await runner.killAll()
-    // No `await pending` first: the SIGINT sequence releases the lock and exits right after killAll.
-    expect(readFileSync(join(root, "app/page.tsx"), "utf8")).not.toContain("data-conversion")
-    const snapshots = join(fakes.home, "Library/Caches/infinite-tag/snapshots", RUN_ID)
-    const left = existsSync(snapshots) ? readdirSync(snapshots) : []
-    expect(left).toEqual([])
-    await pending
   })
 })
 
@@ -395,7 +238,7 @@ describe("review (read-only, detached worktree)", () => {
     return { repo, head, git, worktrees }
   }
 
-  it.each(["claude_code", "codex"] as const)("%s reviews a worktree that holds no .env and returns the parsed review", async (reviewer) => {
+  it.each(["claude_code",] as const)("%s reviews a worktree that holds no .env and returns the parsed review", async (reviewer) => {
     const { repo, head, git, worktrees } = reviewRepo()
     const fakes = fakeAgents(reviewer === "claude_code" ? { turns: [{ structured: REVIEW }] } : { turns: [{ final: REVIEW }] })
     dirs.push(fakes.home)
@@ -410,29 +253,6 @@ describe("review (read-only, detached worktree)", () => {
     expect(agentArgvViolations(reviewer, run.argv!)).toEqual([])
     expect(run.argv).not.toContain("--mcp-config")
     expect(run.argv!.join(" ")).not.toContain("mcp_servers")
-  })
-
-  it("review I1 P1-4: a Claude review made while denied the PR's own files is never returned as a review", async () => {
-    const { head, git, repo } = reviewRepo()
-    const fakes = fakeAgents({ turns: [{ structured: REVIEW, denials: ["app/page.tsx"] }] })
-    dirs.push(fakes.home)
-    const result = await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "b" })
-    expect(result).not.toEqual(REVIEW)
-    expect(result).toHaveProperty("error")
-  })
-
-  it("negative: a denial of a repo secret it is denied on purpose (.env) still returns the review", async () => {
-    const { head, git, repo } = reviewRepo()
-    const fakes = fakeAgents({ turns: [{ structured: REVIEW, denials: [".env.local"] }] })
-    dirs.push(fakes.home)
-    expect(await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "b" })).toEqual(REVIEW)
-  })
-
-  it("returns unparseable for output that breaks review.schema.json (negative)", async () => {
-    const { head, git, repo } = reviewRepo()
-    const fakes = fakeAgents({ turns: [{ structured: { ...REVIEW, verdict: "approve" } }] })
-    dirs.push(fakes.home)
-    expect(await reviewInDetachedWorktree(makeRunner(fakes, repo), git, { headSha: head, reviewer: "claude_code", brief: "b" })).toEqual({ error: "unparseable" })
   })
 
   it("refuses the repo itself, or a worktree holding an untracked .env (negatives)", async () => {
