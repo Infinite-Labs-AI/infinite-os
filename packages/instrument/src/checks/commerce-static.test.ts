@@ -15,7 +15,9 @@ import {
   bodyView,
   canonicalEvent,
   clickPathFindings,
+  codeAfterReturn,
   commerceFindings,
+  deadCodeFindings,
   doubleCountFindings,
   leadFindings,
   leaveFindings,
@@ -507,5 +509,31 @@ describe("Finding 1: the page's tracking signal reaches the route's read", () =>
     expect(signalReads('const a = new URL(request.url).searchParams.get("ad_match") === "1"').map((use) => use.place)).toEqual(["query"])
     expect(signalReads('const a = form.get("ad_match") === "1"').map((use) => use.place)).toEqual(["body"])
     expect(signalReads("const { adMatch } = req.body").map((use) => [use.key, use.place])).toEqual([["adMatch", "body"]])
+  })
+})
+
+describe("Finding 3: code after a return in a function the run changed", () => {
+  const before = 'export function addToCart(p) {\n  sendGa("add_to_cart", { id: p.id })\n  capturePosthog("product_added", { id: p.id })\n}\n'
+  const dead = (now: string) => deadCodeFindings({ files: files({ "src/events.ts": now }), base: new Map([["src/events.ts", before]]) })
+
+  it("the wait returned as the helper's first line drops its own sends below it: a problem naming the first dead line", () => {
+    const first = 'export function addToCart(p) {\n  return infiniteTrackBeforeLeaving("add_to_cart", { item_id: p.id }, { destinations: ["meta"] })\n  sendGa("add_to_cart", { id: p.id })\n  capturePosthog("product_added", { id: p.id })\n}\n'
+    expect(dead(first).map((finding) => [finding.rule, finding.line])).toEqual([["code_after_return", 3]])
+    expect(dead(first)[0]!.message).toMatch(/^src\/events\.ts:3 never runs: addToCart\(\) returns before it/)
+  })
+
+  it("const wait first and return wait last, the return at the end, a guard clause, a nested return and a hoisted function all pass", () => {
+    expect(dead('export function addToCart(p) {\n  const wait = infiniteTrackBeforeLeaving("add_to_cart", { item_id: p.id }, { destinations: ["meta"] })\n  sendGa("add_to_cart", { id: p.id })\n  capturePosthog("product_added", { id: p.id })\n  return wait\n}\n')).toEqual([])
+    expect(dead('export function addToCart(p) {\n  if (!p) return\n  sendGa("add_to_cart", { id: p.id })\n  return infiniteTrackBeforeLeaving("add_to_cart", {\n    item_id: p.id\n  })\n}\n')).toEqual([])
+    expect(dead('export function addToCart(p) {\n  if (p.gift) { return }\n  sendGa("add_to_cart", { id: p.id })\n  return helper()\n  function helper() { return 1 }\n}\n')).toEqual([])
+    // A function the run did not change is not read (only its layout moved).
+    expect(deadCodeFindings({ files: files({ "src/a.ts": "function f() {\n  return 1\n  g()\n}\n" }), base: new Map([["src/a.ts", "function f() {  return 1\n g() }\n"]]) })).toEqual([])
+  })
+
+  it("codeAfterReturn follows a statement over its line breaks", () => {
+    const text = "{\n  return a\n    .then(go)\n}"
+    expect(codeAfterReturn(text, 1, text.length - 1)).toBeNull()
+    const two = "{\n  return a\n  go()\n}"
+    expect(codeAfterReturn(two, 1, two.length - 1)).toBe(two.indexOf("go()"))
   })
 })

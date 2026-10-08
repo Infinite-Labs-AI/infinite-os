@@ -32,7 +32,7 @@ import { runCensus } from "./census.js"
 import { analyzeCsp, cspNeeds, parseCspPolicies } from "./live/csp.js"
 import { checkResult, isolated } from "./result.js"
 import { callsOf, literalString, splitTopLevelArgs, topLevelProps, type Call } from "./source-calls.js"
-import { adMatchFindings, signalFindings, canonicalEvent, clickPathFindings, doubleCountFindings, leadFindings, leaveFindings, metaEventIdFindings, outcomeHas, outcomesIn, piiFindings, promiseFindings, valueFindings, type CommerceCheckInput, type CommerceFinding, type OutcomeCall } from "./commerce-static.js"
+import { adMatchFindings, signalFindings, canonicalEvent, clickPathFindings, deadCodeFindings, doubleCountFindings, leadFindings, leaveFindings, metaEventIdFindings, outcomeHas, outcomesIn, piiFindings, promiseFindings, valueFindings, type CommerceCheckInput, type CommerceFinding, type OutcomeCall } from "./commerce-static.js"
 import type { EventInventory, InventoryTool as CommerceTool } from "./commerce-inventory.js"
 import { COMMERCE_EVENTS_TARGET } from "../scan/event-inventory.js"
 
@@ -74,7 +74,9 @@ export const JOB_STATIC_CHECK_IDS = [
   "no_double_count",
   "meta_event_id_from_server",
   // P1-A: a browser Meta send a full page load right after it can cut off is waited for.
-  "sends_before_leaving"
+  "sends_before_leaving",
+  // Finding 3: no code after a return in a function the turn changed (the site's own sends keep running).
+  "sends_kept"
 ] as const
 export type JobStaticCheckId = (typeof JOB_STATIC_CHECK_IDS)[number]
 
@@ -554,6 +556,13 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       const inventory = context().eventInventory
       if (!inventory) return result("sends_before_leaving", ctx, "undetermined", "the plan's event list is not known, so which clicks leave with a full page load is unknown")
       return commerceResult("sends_before_leaving", ctx, leaveFindings({ files: itemFiles(input), inventory }), "every Meta event a full page load follows is out before the page leaves")
+    }),
+
+    // Finding 3: a helper the turn changed never returns before its own sends (`return wait` is its LAST line).
+    sends_kept: run("sends_kept", (input, ctx) => {
+      const commerce = withBase(input, { files: itemFiles(input) })
+      if (!commerce.base) return result("sends_kept", ctx, "undetermined", "the code before this run could not be read, so the functions it changed are not known")
+      return commerceResult("sends_kept", ctx, deadCodeFindings(commerce), "every function this run changed still runs all of its own lines")
     }),
 
     // Review r3: a browser Meta event carries only the event id the server got back, or none.

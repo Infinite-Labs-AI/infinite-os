@@ -276,9 +276,10 @@ export const JOB_TABLE: { readonly [J in JobId]: JobSpec & { jobId: J } } = {
  */
 export const TARGET_ONLY_CHECKS: { readonly [J in JobId]?: readonly JobCheckSpec[] } = {
   // P1-A: and never twice on one click; Meta's also waits before a full page load.
-  posthog_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count")],
-  ga4_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count")],
-  meta_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count"), c("S", "sends_before_leaving")]
+  // Finding 3: and the helper the job edits keeps running its own sends (no code after a return).
+  posthog_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count"), c("S", "sends_kept")],
+  ga4_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count"), c("S", "sends_kept")],
+  meta_improve: [p("S", "commerce_promises_met"), c("S", "no_double_count"), c("S", "sends_before_leaving"), c("S", "sends_kept")]
 }
 
 /**

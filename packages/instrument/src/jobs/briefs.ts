@@ -386,8 +386,8 @@ function placeData(place: CommercePlace, call: (name: string) => string, allowed
     return {
       firesThrough: `your helper ${helper.name}() at ${helper.file}:${helper.line}`,
       inTheHelper: wait
-        ? `return ${call("infiniteTrackBeforeLeaving")} beside its existing sends (the helper now returns that promise)`
-        : `${call("infiniteTrack")} beside its existing sends${unknown ? " (if a caller turns out to do a full page load, return infiniteTrackBeforeLeaving(…) with the same arguments instead)" : ""}`,
+        ? `as the helper's FIRST new line: const wait = ${call("infiniteTrackBeforeLeaving")}; then every send the helper already has, exactly as it is; then as its LAST line: return wait (the helper now returns that promise; nothing comes after it)`
+        : `${call("infiniteTrack")} beside its existing sends${unknown ? " (if a caller turns out to do a full page load, write const wait = infiniteTrackBeforeLeaving(…) with the same arguments as the helper's first new line instead, keep its existing sends, and end the helper with return wait)" : ""}`,
       callers: place.sites.map((site) => ({
         at: placeWord(site),
         leaves: leavesWords(site),
@@ -474,7 +474,7 @@ function commerceGist(tool: InventoryTool, events: readonly FunnelEvent[]): stri
       : []),
     `Here: send each event in Plan data "events" to ${TOOL_WORD[tool]}${meta ? " and Infinite" : ""} ONLY, with { destinations: [${destination}] }, exactly ONCE per click, at the ONE place Plan data names for it ("places"), in the ONE shape it gives ("inTheHelper" / "do"):`,
     "- When the event fires through the site's own helper (firesThrough names it), the send goes INSIDE that helper, beside its existing sends, and nowhere else: never also in a click handler that calls the helper (that sends the event twice).",
-    `- A caller whose click then does a FULL page load (callers[].leaves) loses ${meta ? "Meta's request" : "the request"} unless it waits. There the helper RETURNS infiniteTrackBeforeLeaving(…) (it settles once the request is out, at most ${meta ? "400 ms" : "1 s"}, and never rejects) and that caller's click handler becomes infiniteLeaveAfter(() => { <what it did before leaving>; return <helper>(…) }, () => <its own navigation, unchanged>). infiniteLeaveAfter ignores a second click while the first is leaving.`,
+    `- A caller whose click then does a FULL page load (callers[].leaves) loses ${meta ? "Meta's request" : "the request"} unless it waits. There the helper's FIRST new line is const wait = infiniteTrackBeforeLeaving(…), every send it already has stays below it unchanged, and its LAST line is return wait (the wait settles once the request is out, at most ${meta ? "400 ms" : "1 s"}, and never rejects). A return any earlier stops the helper's own GA4 and PostHog sends. That caller's click handler becomes infiniteLeaveAfter(() => { <what it did before leaving>; return <helper>(…) }, () => <its own navigation, unchanged>). infiniteLeaveAfter ignores a second click while the first is leaving.`,
     "- A caller that routes on the client (router.push, <Link>) or does not leave keeps its code as it is: the page stays loaded, so it needs no wait. Never turn client routing into a full page load.",
     "- When the event fires inline in a click handler (no helper), add infiniteTrack(…) beside the site's own send there; ONLY when that handler does a full page load, use infiniteTrackThenNavigate(event, <where the click goes>, <event>, <the same props>, { destinations }) in place of its own navigation (a form that posts: wrap the submit in infiniteLeaveAfter with infiniteTrackBeforeLeaving instead, so the post is kept).",
     `- Where Plan data says "unknown", tell the two apart yourself: ${HOW_TO_TELL}`,

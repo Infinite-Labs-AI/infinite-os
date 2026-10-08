@@ -23,6 +23,8 @@
 //   lost_before_leaving    — P1-A: a click the scan saw leave with a FULL page load reaches a browser Meta send that
 //                            nothing waits for (no infiniteLeaveAfter / infiniteTrackThenNavigate / returned wait), so
 //                            the page can unload before Meta has it;
+//   code_after_return      — Finding 3: a function the run changed returns before code that then never runs (a helper
+//                            that returns the wait first loses its own GA4 and PostHog sends below it);
 //   lead_may_send_nothing  — P2-7: `reportInfiniteLead` without a `fallbackId` reports nothing until LEAD_ID_SECRET is set;
 //   page_built_meta_event_id — a browser Meta event carries an event id that is not the one the server got back;
 //   pii_in_outcome / pii_in_stripe_metadata — a raw email, name, address or any phone reaches an outcome's request
@@ -289,6 +291,7 @@ export const COMMERCE_RULES = [
   "double_count",
   "sent_twice_on_one_click",
   "lost_before_leaving",
+  "code_after_return",
   "lead_may_send_nothing",
   "page_built_meta_event_id",
   "pii_in_outcome",
@@ -936,7 +939,7 @@ export function leaveFindings(input: CommerceCheckInput): CommerceFinding[] {
           line: reach.line,
           event: row.event,
           tool: "meta",
-          message: `${where(file, reach.line)} sends Meta ${META_EVENT_NAMES[row.event]}${reach.through ? ` through ${reach.through}()` : ""} and then leaves with a full page load without waiting, so the page can unload before Meta has it. ${reach.through ? `Have ${reach.through}() return infiniteTrackBeforeLeaving(…) and wrap this handler in infiniteLeaveAfter(() => { …; return ${reach.through}(…) }, () => <its own navigation>).` : "Use infiniteTrackThenNavigate in place of the handler's own navigation."}`
+          message: `${where(file, reach.line)} sends Meta ${META_EVENT_NAMES[row.event]}${reach.through ? ` through ${reach.through}()` : ""} and then leaves with a full page load without waiting, so the page can unload before Meta has it. ${reach.through ? `Start ${reach.through}() with const wait = infiniteTrackBeforeLeaving(…), keep its own sends, end it with return wait, and wrap this handler in infiniteLeaveAfter(() => { …; return ${reach.through}(…) }, () => <its own navigation>).` : "Use infiniteTrackThenNavigate in place of the handler's own navigation."}`
         })
         break
       }
@@ -958,7 +961,89 @@ export function leaveFindings(input: CommerceCheckInput): CommerceFinding[] {
         line: lineNumberAt(entry.text, body.start),
         event: row.event,
         tool: "meta",
-        message: `${helper}() sends Meta ${META_EVENT_NAMES[row.event]} with nothing to wait on, but a caller leaves with a full page load right after it. Return infiniteTrackBeforeLeaving(…) from ${helper}() so that caller can wait.`
+        message: `${helper}() sends Meta ${META_EVENT_NAMES[row.event]} with nothing to wait on, but a caller leaves with a full page load right after it. Make the first new line of ${helper}() const wait = infiniteTrackBeforeLeaving(…) and its last line return wait, so that caller can wait.`
+      })
+    }
+  }
+  return findings
+}
+
+// ---- code after a return (Finding 3) ----
+
+/**
+ * The offset where a `return` statement at `at` ends (after its `;`, or at the line break that ends it), or -1 when it
+ * runs to the end of the block. Statement continuation over a line break (`return a\n  .then(…)`) is followed.
+ */
+function returnEnd(masked: string, at: number, end: number): number {
+  let depth = 0
+  let sawValue = false
+  for (let cursor = at + "return".length; cursor < end; cursor += 1) {
+    const ch = masked[cursor]!
+    if (ch === "(" || ch === "{" || ch === "[") depth += 1
+    else if (ch === ")" || ch === "}" || ch === "]") {
+      if (depth === 0) return -1
+      depth -= 1
+    } else if (ch === ";" && depth === 0) return cursor + 1
+    else if (ch === "\n" && depth === 0) {
+      if (!sawValue) return cursor // `return` alone on its line returns undefined (ASI)
+      const before = masked.slice(at, cursor).trimEnd().slice(-1)
+      const after = masked.slice(cursor).trimStart()[0] ?? ""
+      if (/[([{,=+\-*/%&|?:.<>!]/.test(before) || /[.?:+\-*/%&|,=]/.test(after)) continue
+      return cursor
+    } else if (!/\s/.test(ch)) sawValue = true
+  }
+  return -1
+}
+
+/** The first statement after a `return` at the top level of the body [start, end), or null (`function` hoists are fine). */
+export function codeAfterReturn(masked: string, start: number, end: number): number | null {
+  let depth = 0
+  for (let cursor = start; cursor < end; cursor += 1) {
+    const ch = masked[cursor]!
+    if (ch === "(" || ch === "{" || ch === "[") depth += 1
+    else if (ch === ")" || ch === "}" || ch === "]") depth -= 1
+    if (depth !== 0 || ch !== "r" || !/^return\b/.test(masked.slice(cursor, cursor + 7)) || /[\w$.]/.test(masked[cursor - 1] ?? "")) continue
+    // The body of an `if (…)` / `else` / loop with no braces is a guard, not the end of the function.
+    const before = masked.slice(start, cursor).trimEnd()
+    if (/(?:\)|\belse|\bdo)$/.test(before)) continue
+    const stop = returnEnd(masked, cursor, end)
+    if (stop < 0) return null
+    const rest = masked.slice(stop, end)
+    const first = rest.search(/\S/)
+    if (first < 0 || /^(?:async\s+)?function\b/.test(rest.slice(first))) return null
+    return stop + first
+  }
+  return null
+}
+
+/** A body with its whitespace collapsed (a function is "unchanged" when only its layout moved). */
+const flat = (text: string) => text.replace(/\s+/g, " ").trim()
+
+/**
+ * Finding 3: a function this run changed (or wrote) returns before code that then never runs. The classic: the brief's
+ * `return infiniteTrackBeforeLeaving(…)` written as the helper's FIRST line, which silently drops the site's own GA4 and
+ * PostHog sends below it while every other check and the compiler pass. Functions the run did not touch are not read.
+ */
+export function deadCodeFindings(input: Pick<CommerceCheckInput, "files" | "base">): CommerceFinding[] {
+  const findings: CommerceFinding[] = []
+  for (const [file, text] of codeFiles(input.files)) {
+    const before = input.base?.get(file)
+    const masked = maskCommentsAndStrings(text, true)
+    const baseMasked = typeof before === "string" ? maskCommentsAndStrings(before, true) : null
+    const baseBodies = baseMasked === null ? null : new Set(functionRanges(baseMasked).filter((range) => baseMasked[range.start - 1] === "{").map((range) => flat(baseMasked.slice(range.start, range.end))))
+    for (const fn of functionRanges(masked)) {
+      if (masked[fn.start - 1] !== "{") continue
+      if (baseBodies?.has(flat(masked.slice(fn.start, fn.end)))) continue
+      const dead = codeAfterReturn(masked, fn.start, fn.end)
+      if (dead === null) continue
+      const line = lineNumberAt(text, dead)
+      const name = fn.name ? `${fn.name}()` : "this function"
+      findings.push({
+        rule: "code_after_return",
+        state: "problem",
+        file,
+        line,
+        message: `${where(file, line)} never runs: ${name} returns before it, so the site's own sends there are lost. Keep every existing line, and put the return as the function's LAST line (const wait = infiniteTrackBeforeLeaving(…) first, return wait last).`
       })
     }
   }
@@ -1141,6 +1226,7 @@ export function commerceFindings(input: CommerceCheckInput): CommerceFinding[] {
     ]),
     ...clickPathFindings(input),
     ...leaveFindings(input),
+    ...(input.base ? deadCodeFindings(input) : []),
     ...leadFindings(input),
     ...metaEventIdFindings(input),
     ...piiFindings(input)

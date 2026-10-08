@@ -489,7 +489,8 @@ describe("P1-A store variant: Buy leaves with a full page load", () => {
     ])
     expect(items.find((item) => item.id === "meta_improve:commerce_events")!.checks.map((check) => check.id)).toEqual(expect.arrayContaining(["commerce_promises_met", "no_double_count", "sends_before_leaving"]))
     const meta = brief.slice(brief.indexOf('### Job "meta_improve:commerce_events"'), brief.indexOf("### Job", brief.indexOf('### Job "meta_improve:commerce_events"') + 1))
-    expect(meta).toContain('return infiniteTrackBeforeLeaving(\\"add_to_cart\\"')
+    expect(meta).toContain('as the helper\'s FIRST new line: const wait = infiniteTrackBeforeLeaving(\\"add_to_cart\\"')
+    expect(meta).toContain("then every send the helper already has, exactly as it is; then as its LAST line: return wait")
     expect(meta).toContain("wrap this click handler: infiniteLeaveAfter(() => { <everything the handler did before it left>; return addToCart(…) }, () => <the handler's own navigation, exactly as written>)")
     expect(meta).toContain('"src/analytics/events.ts":"import { infiniteTrack, infiniteTrackBeforeLeaving } from \\"../../lib/infinite-analytics\\""')
     expect(meta).toContain('"pages/index.tsx":"import { infiniteLeaveAfter } from \\"../lib/infinite-analytics\\""')
@@ -499,6 +500,32 @@ describe("P1-A store variant: Buy leaves with a full page load", () => {
     const results = await metaChecks(correct)
     for (const [check, result] of Object.entries(results)) expect(result.state, `${check}: ${result.reason}`).toBe("pass")
     expect(problems(commerceFindings({ files: new Map([...site, ...correct]), base: new Map<string, string | null>([...site, ...[...correct.keys()].filter((file) => !site.has(file)).map((file) => [file, null] as const)]), inventory: await scanInventory((await pipeline(fullRoot)).scan), metaInUse: true }))).toEqual([])
+  })
+
+  it("Finding 3: the wait returned as the helper's FIRST line drops the site's own GA4 and PostHog sends, and fails", async () => {
+    const events = FULL_CORRECT.get("src/analytics/events.ts")!
+      .replace('  const wait = infiniteTrackBeforeLeaving("add_to_cart",', '  return infiniteTrackBeforeLeaving("add_to_cart",')
+      .replace("  return wait;\n", "")
+    expect(events).toMatch(/Promise<void> \{\n  return infiniteTrackBeforeLeaving[^\n]*\n  sendGa\("add_to_cart"/)
+    const { items, scan } = await pipeline(fullRoot)
+    const { jobStaticCheckFunctions } = await import("../checks/job-static.js")
+    const functions = jobStaticCheckFunctions({ root: fullRoot, run: () => ({ eventInventory: readEventInventory(toJobScan(scan).detections.eventInventory), metaInUse: true }), readBaseFile: (_root, file) => site.get(file) ?? null })
+    const item = items.find((entry) => entry.id === "meta_improve:commerce_events")!
+    expect(item.checks.map((check) => check.id)).toContain("sends_kept")
+    const grade = async (edits: ReadonlyMap<string, string>) => {
+      for (const [file, text] of edits) writeFileSync(join(fullRoot, file), text, { flag: "w" })
+      try {
+        const raw = await functions.sends_kept({ item, root: fullRoot, appRoot: "." }, { runId: RUN_ID, now: () => new Date("2026-10-08T10:00:00.000Z") })
+        return (Array.isArray(raw) ? raw : [raw])[0]!
+      } finally {
+        execFileSync("git", ["checkout", "--", "."], { cwd: fullRoot, stdio: "ignore" })
+        execFileSync("git", ["clean", "-fdq"], { cwd: fullRoot, stdio: "ignore" })
+      }
+    }
+    expect((await grade(correct)).state).toBe("pass")
+    const dead = await grade(new Map([...correct, ["src/analytics/events.ts", events]]))
+    expect(dead.state).toBe("problem")
+    expect(dead.reason).toMatch(/^src\/analytics\/events\.ts:\d+ never runs: addToCart\(\) returns before it, so the site's own sends there are lost/)
   })
 
   it("the client-routing shape here (no wait) fails: Meta's AddToCart can be cut off by the page load", async () => {

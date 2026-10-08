@@ -36,9 +36,10 @@ export function viewItem(product: Product) {
 
 /** Its callers leave with a full page load: it returns the wait for Meta's request (at most 400 ms). */
 export function addToCart(product: Product, qty = 1): Promise<void> {
+  const wait = infiniteTrackBeforeLeaving("add_to_cart", productProps(product, qty), { destinations: ["meta", "infinite"] });
   sendGa("add_to_cart", { items: [gaItem(product, qty)] });
   capturePosthog("product_added", { sku: product.slug, name: product.name, quantity: qty });
-  return infiniteTrackBeforeLeaving("add_to_cart", productProps(product, qty), { destinations: ["meta", "infinite"] });
+  return wait;
 }
 
 export function beginCheckout(lines: EventLine[]) {

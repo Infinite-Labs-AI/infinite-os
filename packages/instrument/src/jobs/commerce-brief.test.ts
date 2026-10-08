@@ -117,7 +117,9 @@ describe("browser commerce briefs (review P0-5)", () => {
     const data = planData(brief, "meta_improve:commerce_events")
     const place = ((data.events as Array<Record<string, unknown>>)[0]!.places as Array<Record<string, unknown>>)[0]!
     expect(place.firesThrough).toBe("your helper addToCart() at src/analytics/events.ts:27")
-    expect(place.inTheHelper).toMatch(/^return infiniteTrackBeforeLeaving\("add_to_cart", \{ item_id: .*\}, \{ destinations: \["meta", "infinite"\] \}\) beside its existing sends/)
+    // Finding 3: the reference fix's shape: the wait first, the helper's own sends unchanged, `return wait` last.
+    expect(place.inTheHelper).toMatch(/^as the helper's FIRST new line: const wait = infiniteTrackBeforeLeaving\("add_to_cart", \{ item_id: .*\}, \{ destinations: \["meta", "infinite"\] \}\); then every send the helper already has, exactly as it is; then as its LAST line: return wait/)
+    expect(place.inTheHelper).not.toMatch(/^return /)
     expect(place.callers).toEqual([
       { at: "pages/index.tsx:17", leaves: "with a full page load: window.location.assign", do: "wrap this click handler: infiniteLeaveAfter(() => { <everything the handler did before it left>; return addToCart(…) }, () => <the handler's own navigation, exactly as written>)" },
       { at: "pages/products/[slug].tsx:29", leaves: 'by client-side routing: router.push("/cart")', do: "leave this handler as it is" }
