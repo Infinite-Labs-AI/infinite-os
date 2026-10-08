@@ -250,8 +250,23 @@ export interface InfinitePublicArtifact {
    * and stops when they stop, so the site's own banner governs it the same way. Absent = start on load.
    */
   followSitePixels?: boolean
-  /** Root-relative paths where the Infinite browser runtime should emit nothing. */
+  /**
+   * Root-relative paths where the Infinite browser runtime should emit nothing. Only an explicit owner choice: the
+   * wizard never fills it from another tool's list (review P1-6: the PostHog sensitive-page list hid /checkout and
+   * /success from Infinite).
+   */
   excludedPaths?: string[]
+  /**
+   * The site's own routes where it keeps its ad and analytics pixels off (a cart, a success page). Used only with
+   * `followSitePixels`: on these routes the absence of the site's pixels is not read as a refusal, and the tag carries
+   * the decision it saw earlier in the same tab session. See the runtime's follow-mode comment.
+   */
+  pixelFreePaths?: string[]
+  /**
+   * `true` when infinite-tag installed the Meta pixel (it sets `disablePushState`) on a single-page app whose own code
+   * sends no Meta PageView on a route change: the runtime's history hook sends one per route change (parity gap 8).
+   */
+  metaPageViews?: boolean
 }
 
 export interface InfiniteBrowserConfig {
@@ -277,6 +292,10 @@ export interface InfiniteBrowserConfig {
   allowAutomation?: boolean
   /** Root-relative paths where page views, clicks, submits and helper-recorded events emit nothing. */
   excludedPaths?: string[]
+  /** Follow mode only: the site's own pixel-free routes (see `InfinitePublicArtifact.pixelFreePaths`). */
+  pixelFreePaths?: string[]
+  /** `true`: send `fbq('track', 'PageView')` on each client-side route change (managed pixel, see the artifact). */
+  metaPageViews?: boolean
 }
 
 /**

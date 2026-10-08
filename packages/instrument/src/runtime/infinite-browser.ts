@@ -40,21 +40,14 @@ export function renderInfiniteBrowserTag(config: InfiniteBrowserConfig): string 
       "Infinite requires a root-relative downloadDestinationPath without query or hash."
     )
   }
-  if (
-    config.excludedPaths !== undefined &&
-    (!Array.isArray(config.excludedPaths) ||
-      config.excludedPaths.some(
-        (path) =>
-          typeof path !== "string" ||
-          !path.startsWith("/") ||
-          path.startsWith("//") ||
-          path.includes("?") ||
-          path.includes("#") ||
-          path.includes("\\") ||
-          !/^\/[A-Za-z0-9._~%-]*(?:\/[A-Za-z0-9._~%-]+)*$/.test(path)
-      ))
-  ) {
+  if (config.excludedPaths !== undefined && !isRoutePathList(config.excludedPaths)) {
     throw new Error("Infinite requires route exclusions to be root-relative paths without query or hash.")
+  }
+  if (config.pixelFreePaths !== undefined && !isRoutePathList(config.pixelFreePaths)) {
+    throw new Error("Infinite requires the site's pixel-free routes to be root-relative paths without query or hash.")
+  }
+  if (config.metaPageViews !== undefined && config.metaPageViews !== true) {
+    throw new Error("Infinite's metaPageViews option is either true or absent.")
   }
   if (
     !Array.isArray(config.productionHosts) ||
@@ -78,6 +71,23 @@ export function renderInfiniteBrowserTag(config: InfiniteBrowserConfig): string 
     .replaceAll("\u2028", "\\u2028")
     .replaceAll("\u2029", "\\u2029")
   return `<script ${RUNTIME_ATTRIBUTE}>;(${RUNTIME_SOURCE})(${serialized});</script>`
+}
+
+/** A list of root-relative route paths with no query, hash or backslash (`/`, `/cart`, `/account/orders`). */
+export function isRoutePathList(paths: unknown): paths is string[] {
+  return (
+    Array.isArray(paths) &&
+    paths.every(
+      (path) =>
+        typeof path === "string" &&
+        path.startsWith("/") &&
+        !path.startsWith("//") &&
+        !path.includes("?") &&
+        !path.includes("#") &&
+        !path.includes("\\") &&
+        /^\/[A-Za-z0-9._~%-]*(?:\/[A-Za-z0-9._~%-]+)*$/.test(path)
+    )
+  )
 }
 
 // The Infinite browser runtime (0.6.0 — the consolidated truth-train release):
@@ -104,7 +114,8 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     __infiniteAnalyticsRuntime?: boolean
     __infiniteHandoffContext?: () => InfiniteHandoffContext | null
     __infiniteConsentAllowed?: (options?: { privacySignal?: boolean }) => boolean
-    __infiniteRecordEvent?: (name: string, properties?: Record<string, string | number | boolean>) => boolean
+    __infiniteRecordEvent?: (name: string) => boolean
+    __infiniteAdMatchAllowed?: () => boolean
   }
 
   const runtimeWindow = window as RuntimeWindow
@@ -147,15 +158,20 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   }
 
   const excludedPaths = Array.isArray(config.excludedPaths) ? config.excludedPaths : []
+  const pixelFreePaths = Array.isArray(config.pixelFreePaths) ? config.pixelFreePaths : []
 
-  function isExcludedPath(raw: string): boolean {
-    if (excludedPaths.length === 0) return false
+  function pathIn(list: readonly string[], raw: string): boolean {
+    if (list.length === 0) return false
     const path = normalizePath(raw)
-    for (const excluded of excludedPaths) {
-      const excludedPath = normalizePath(excluded)
-      if (excludedPath === "/" || path === excludedPath || path.indexOf(excludedPath) === 0) return true
+    for (const entry of list) {
+      const listed = normalizePath(entry)
+      if (listed === "/" || path === listed || path.indexOf(listed) === 0) return true
     }
     return false
+  }
+
+  function isExcludedPath(raw: string): boolean {
+    return pathIn(excludedPaths, raw)
   }
 
   // The workspace's conversion destination for download-intent clicks, normalized once so every
@@ -462,6 +478,9 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
 
   let anonymousId: string | undefined
   let sessionId: string | undefined
+  // Follow mode's memory, for this tab session only: "the site's pixels were running for this visitor on an earlier
+  // page and have not been seen to stop". Read only on the site's own pixel-free routes (see `followState`).
+  const followMarkerKey = "infinite_analytics_follow"
 
   function clearStoredRuntimeState(): void {
     anonymousId = undefined
@@ -474,6 +493,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     try {
       sessionStorage.removeItem("infinite_analytics_session")
       sessionStorage.removeItem("infinite_landing_attribution_v1")
+      sessionStorage.removeItem(followMarkerKey)
     } catch {
       // Optional attribution cleanup; blocked storage already means no durable tab record.
     }
@@ -539,10 +559,25 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   // helpers that feed GA4/PostHog use it, so a GPC browser's conversions are not dropped while its
   // native page views still count (the recorded decision and required mode still apply).
   runtimeWindow.__infiniteConsentAllowed = (options?: { privacySignal?: boolean }) => {
+    // Follow mode: re-read the site's pixels NOW, so a stop a moment ago is honoured before the next timer tick.
+    if (followsSitePixels) syncWithSitePixels()
     if (options && options.privacySignal === false) {
       const decision = consentOverride !== undefined ? consentOverride : storedConsentDecision()
       if (decision !== undefined) return decision
       return config.consent.mode === "not_required"
+    }
+    return hasConsent()
+  }
+
+  // Parity gap 4: the "visitor allowed tracking" signal a page passes to its own API routes (`ad_match=1`, or
+  // `adMatch: true` in JSON), so the site's server attaches Meta match data (fbc, fbp, IP, user agent, hashed contact
+  // data) to the outcome it reports. It is the SAME decision the tag itself runs on: in follow mode the site's own
+  // pixels are running (or, on the site's pixel-free routes, were running earlier in this tab session and were not
+  // seen to stop); otherwise the tag's own consent decision, with DNT/GPC as a no unless the visitor granted here.
+  runtimeWindow.__infiniteAdMatchAllowed = () => {
+    if (followsSitePixels) {
+      syncWithSitePixels()
+      return consentOverride === true
     }
     return hasConsent()
   }
@@ -626,6 +661,132 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     )
   }
 
+  // FOLLOW MODE (the site already runs its own pixels): the tag starts when they start and stops when they stop.
+  //
+  // THE SITE'S PIXEL-FREE ROUTES (review P1-6). Many sites keep their ad pixels off a cart, a checkout return or a
+  // success page, and a full page load there never starts them. Read literally, follow mode would then record
+  // nothing on exactly the pages that matter most. Infinite is the site's FIRST-PARTY ledger, not an ad pixel, so the
+  // least surprising rule is: on a route the site lists as pixel-free (`pixelFreePaths`), the tag carries the decision
+  // it saw on the visitor's earlier pages in THIS TAB SESSION. If the site's pixels were running there and were never
+  // seen to stop, the page view is recorded; if the visitor never allowed, refused, or a blocker stopped the pixels,
+  // nothing is. The memory is one sessionStorage flag (`infinite_analytics_follow`), cleared with the rest of the
+  // tag's storage on any stop, on an explicit `granted: false`, and when the visitor leaves an ordinary page where the
+  // site's pixels did not run (a refusal followed by the site's reload). A first visit that LANDS on a pixel-free
+  // route has no memory and records nothing: the tag cannot know that visitor's choice.
+  // Outside follow mode the routes mean nothing: the tag's own consent decides everywhere.
+  let followRefused = false
+  function rememberFollowAllowed(): void {
+    try {
+      sessionStorage.setItem(followMarkerKey, "allowed")
+    } catch {
+      // Blocked storage: no memory, so a pixel-free route records nothing (the safe side).
+    }
+  }
+  function forgetFollowAllowed(): void {
+    try {
+      sessionStorage.removeItem(followMarkerKey)
+    } catch {
+      // Nothing was remembered.
+    }
+  }
+  function followAllowedEarlier(): boolean {
+    try {
+      return sessionStorage.getItem(followMarkerKey) === "allowed"
+    } catch {
+      return false
+    }
+  }
+
+  /** The site's pixels right now: running, stopped by an explicit "no" (Consent Mode denied, opted out), or neither. */
+  function sitePixelsState(): "running" | "denied" | "idle" {
+    try {
+      // Names are joined at run time and the globals come from the config, so this file carries
+      // no provider's own signature: it only READS the site's public state.
+      const optedOutName = ["has", "opted", "out", "capturing"].join("_")
+      const storageName = ["analytics", "storage"].join("_")
+      const commandName = ["con", "sent"].join("")
+      const site = runtimeWindow as unknown as { [key: string]: unknown }
+      let running = false
+      for (const name of followedGlobals) {
+        const value = site[name] as ({ __loaded?: unknown } & { [key: string]: unknown }) | undefined
+        if (!value) continue
+        if (Array.isArray(value)) {
+          // A command queue (Google Consent Mode): the newest such command decides. A site may load
+          // with a denied default and grant later, or deny again on withdrawal.
+          for (let index = value.length - 1; index >= 0; index -= 1) {
+            const entry = value[index] as { [key: number]: unknown } | null
+            if (!entry || entry[0] !== commandName) continue
+            const state = entry[2] as { [key: string]: unknown } | null
+            if (state && state[storageName] === "denied") return "denied"
+            break
+          }
+          continue
+        }
+        const optedOut = value[optedOutName]
+        if (typeof optedOut === "function" && (optedOut as () => boolean).call(value)) return "denied"
+        if (typeof value === "function" || value.__loaded === true) running = true
+      }
+      return running ? "running" : "idle"
+    } catch {
+      return "idle"
+    }
+  }
+
+  function syncWithSitePixels(): void {
+    if (!followsSitePixels) return
+    const state = followRefused ? "denied" : sitePixelsState()
+    if (state === "running") rememberFollowAllowed()
+    if (state === "denied") forgetFollowAllowed()
+    const running = state === "running" || (state === "idle" && pathIn(pixelFreePaths, location.href) && followAllowedEarlier())
+    if (running === consentOverride) return
+    consentOverride = running
+    if (!running) {
+      // The site stopped its pixels: the next start re-observes the page as a fresh initial view.
+      clearStoredRuntimeState()
+      lastPageViewPath = null
+      initialView = true
+      return
+    }
+    emitPageView()
+    try {
+      const dispatcher = runtimeWindow as unknown as { dispatchEvent?: (event: unknown) => void; CustomEvent?: new (type: string, init: unknown) => unknown }
+      if (typeof dispatcher.dispatchEvent === "function" && typeof dispatcher.CustomEvent === "function") {
+        dispatcher.dispatchEvent(new dispatcher.CustomEvent("infinite:analytics-consent-change", { detail: { granted: true, source: "site-pixels" } }))
+      }
+    } catch {
+      // The managed helpers re-read the accessor on their own next call.
+    }
+  }
+
+  // Parity gap 8: the managed Meta pixel is started with `disablePushState` (Meta's own history PageViews double-count
+  // a site that sends its own, and leak onto pixel-free routes on Back), so a single-page app's route changes need an
+  // explicit PageView. Only when the installer found no PageView call in the site's own code (`metaPageViews`), on a
+  // real route change (the same canonical-path rule as the tag's own page views), and only while a real pixel is on
+  // the page (never the inert stand-in a preview gets). It follows the pixel's own rule, as the managed bootstrap's
+  // first PageView does; the tag's consent governs Infinite's ledger, not the pixel.
+  let lastMetaPageViewPath = normalizePath(location.href)
+  function sendMetaPageView(): void {
+    if (config.metaPageViews !== true) return
+    const path = normalizePath(location.href)
+    if (path === lastMetaPageViewPath) return
+    lastMetaPageViewPath = path
+    if (isExcludedPath(path)) return
+    try {
+      const pixel = (runtimeWindow as unknown as { [key: string]: unknown })[["fb", "q"].join("")] as
+        | (((...args: unknown[]) => void) & { __infiniteSilenced?: boolean })
+        | undefined
+      if (typeof pixel !== "function" || pixel.__infiniteSilenced === true) return
+      pixel("track", "PageView")
+    } catch {
+      // A broken pixel never breaks the route change.
+    }
+  }
+
+  function routeChanged(): void {
+    emitPageView()
+    sendMetaPageView()
+  }
+
   // Bounded properties for a marked sign-up element: the optional structural cta markers, plus a
   // same-origin destination when the marked element is (or wraps) an anchor. Never link text,
   // never form field values — the intent event carries structure only.
@@ -660,13 +821,13 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
       const original = history[method]
       history[method] = function (this: History, ...args: Parameters<History[typeof method]>) {
         const result = original.apply(this, args)
-        emitPageView()
+        routeChanged()
         return result
       } as History[typeof method]
     }
     wrapHistory("pushState")
     wrapHistory("replaceState")
-    runtimeWindow.addEventListener("popstate", emitPageView)
+    runtimeWindow.addEventListener("popstate", routeChanged)
 
     document.addEventListener("click", (event) => {
       const target =
@@ -794,6 +955,8 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
       // how the managed helpers are told the tag has started).
       if (followsSitePixels) {
         if (detail.granted === false) {
+          // The site said no: it holds for this page even while its pixel functions linger (a revoke leaves `fbq`).
+          followRefused = true
           consentOverride = false
           clearStoredRuntimeState()
           lastPageViewPath = null
@@ -819,63 +982,15 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     })
 
     if (followsSitePixels) {
-      const sitePixelsRunning = (): boolean => {
-        try {
-          // Names are joined at run time and the globals come from the config, so this file carries
-          // no provider's own signature: it only READS the site's public state.
-          const optedOutName = ["has", "opted", "out", "capturing"].join("_")
-          const storageName = ["analytics", "storage"].join("_")
-          const commandName = ["con", "sent"].join("")
-          const site = runtimeWindow as unknown as { [key: string]: unknown }
-          let running = false
-          for (const name of followedGlobals) {
-            const value = site[name] as ({ __loaded?: unknown } & { [key: string]: unknown }) | undefined
-            if (!value) continue
-            if (Array.isArray(value)) {
-              // A command queue (Google Consent Mode): the newest such command decides. A site may load
-              // with a denied default and grant later, or deny again on withdrawal.
-              for (let index = value.length - 1; index >= 0; index -= 1) {
-                const entry = value[index] as { [key: number]: unknown } | null
-                if (!entry || entry[0] !== commandName) continue
-                const state = entry[2] as { [key: string]: unknown } | null
-                if (state && state[storageName] === "denied") return false
-                break
-              }
-              continue
-            }
-            const optedOut = value[optedOutName]
-            if (typeof optedOut === "function" && (optedOut as () => boolean).call(value)) return false
-            if (typeof value === "function" || value.__loaded === true) running = true
-          }
-          return running
-        } catch {
-          return false
-        }
-      }
-      const syncWithSitePixels = (): void => {
-        const running = sitePixelsRunning()
-        if (running === consentOverride) return
-        consentOverride = running
-        if (!running) {
-          // The site stopped its pixels: the next start re-observes the page as a fresh initial view.
-          clearStoredRuntimeState()
-          lastPageViewPath = null
-          initialView = true
-          return
-        }
-        emitPageView()
-        try {
-          const dispatcher = runtimeWindow as unknown as { dispatchEvent?: (event: unknown) => void; CustomEvent?: new (type: string, init: unknown) => unknown }
-          if (typeof dispatcher.dispatchEvent === "function" && typeof dispatcher.CustomEvent === "function") {
-            dispatcher.dispatchEvent(new dispatcher.CustomEvent("infinite:analytics-consent-change", { detail: { granted: true, source: "site-pixels" } }))
-          }
-        } catch {
-          // The managed helpers re-read the accessor on their own next call.
-        }
-      }
       syncWithSitePixels()
       const timers = runtimeWindow as unknown as { setInterval?: (callback: () => void, ms: number) => unknown }
       if (typeof timers.setInterval === "function") timers.setInterval(syncWithSitePixels, 500)
+      // Leaving a page of the site where its pixels never ran (the visitor refused, or a blocker stopped them): the
+      // next page must not inherit an earlier "allowed". Not on a pixel-free route, where they never run by design.
+      runtimeWindow.addEventListener("pagehide", () => {
+        if (pathIn(pixelFreePaths, location.href)) return
+        if (sitePixelsState() !== "running") forgetFollowAllowed()
+      })
     }
 
     emitPageView()
@@ -897,33 +1012,19 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   // identity — which is why this is a live accessor and not a frozen value.
   if (config.siteSourceKey) {
     const siteSourceKey = config.siteSourceKey
-    const commerceRecordKeys = new Set(["item_id", "product_id", "sku", "content_id", "item_name", "product_name", "content_name", "currency", "value", "price", "item_price", "quantity"])
-    const commerceTextPattern = /^[A-Za-z0-9 _.-]{1,100}$/
-    const recordCommerceProperties = (properties: Record<string, string | number | boolean> | undefined): Record<string, string | number | boolean> => {
-      const out: Record<string, string | number | boolean> = {}
-      if (!properties || typeof properties !== "object") return out
-      for (const key in properties) {
-        if (!commerceRecordKeys.has(key)) continue
-        const value = properties[key]
-        if (typeof value === "number") {
-          if (Number.isFinite(value)) out[key] = value
-          continue
-        }
-        if (typeof value === "string") {
-          const trimmed = value.replace(/[\u0000-\u001f]/g, " ").trim()
-          if (commerceTextPattern.test(trimmed) && trimmed.indexOf("@") === -1 && trimmed.indexOf("://") === -1) out[key] = trimmed
-        }
-      }
-      return out
-    }
-    runtimeWindow.__infiniteRecordEvent = (name: string, properties?: Record<string, string | number | boolean>) => {
+    // A helper-recorded event is a `site_click` carrying ONLY `cta_id` (the event name) and `cta_location`
+    // ("conversion"). The cloud's browser ingest (`src/lib/analytics/ingest.ts` PROPERTY_KEYS / cleanProperties in
+    // 1bu-1) rejects the WHOLE event with a 400 when any other key rides on a click, and this send is fire-and-forget,
+    // so an extra key would lose the event silently (review P0-3). Product, price and currency go to GA4, PostHog
+    // and Meta from the helper; Infinite's own money numbers come from the server lane, never from the page.
+    // Pinned by `test/fixtures/browser-ingest-v1.contract.json` (`conversions/record-ingest-contract.test.ts`).
+    runtimeWindow.__infiniteRecordEvent = (name: string) => {
       if (typeof name !== "string" || !structuralTokenPattern.test(name)) return false
       if (!hasConsent()) return false
       if (isExcludedPath(location.href)) return false
       emit("site_click", normalizePath(location.href), {
         cta_id: name,
-        cta_location: "conversion",
-        ...recordCommerceProperties(properties)
+        cta_location: "conversion"
       })
       return true
     }
