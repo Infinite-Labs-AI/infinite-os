@@ -118,6 +118,31 @@ describe("event names and sends", () => {
     expect(got).not.toContain("meta:purchase@12")
   })
 
+  it("readEventInventory reads the scan's own shape: sites already sent, `missing` as this run's promises, Meta split by lane", () => {
+    const scan = {
+      events: [
+        { event: "add_to_cart", sites: [{ file: "pages/index.tsx", line: 12, via: "helper:addToCart" }], tools: { ga4: [{ file: "src/events.ts", line: 3, via: "helper:sendGa" }], posthog: [{ file: "src/events.ts", line: 4, via: "helper:capturePosthog" }] }, missing: ["meta_browser"] },
+        { event: "purchase", sites: [], tools: { ga4: [{ file: "src/events.ts", line: 7, via: "gtag" }] }, missing: ["posthog", "meta_server", "infinite"] }
+      ],
+      checkoutCreates: [],
+      paymentWebhook: null,
+      pixelRestrictedRoutes: ["/cart"]
+    }
+    const read = readEventInventory(scan)!
+    const promises = promisesOf(read)
+    expect(promises).toHaveLength(4)
+    expect(promises).toEqual(
+      expect.arrayContaining([
+        { event: "add_to_cart", tool: "meta", lane: "browser" },
+        { event: "purchase", tool: "meta", lane: "server" },
+        { event: "purchase", tool: "posthog", lane: "browser" },
+        { event: "purchase", tool: "infinite", lane: "server" }
+      ])
+    )
+    expect(read.rows[0]!.tools.ga4).toMatchObject({ state: "already_sent", evidence: [{ file: "src/events.ts", line: 3 }] })
+    expect(read.rows[0]!.sites).toEqual([{ file: "pages/index.tsx", line: 12 }])
+  })
+
   it("readEventInventory keeps known rows and cells; promisesOf defaults Meta's server events to the server lane", () => {
     const read = readEventInventory({ rows: [{ event: "lead", tools: { meta: { state: "will_add" }, ga4: { state: "bogus" } } }, { event: "nope", tools: {} }] })
     expect(read?.rows).toHaveLength(1)

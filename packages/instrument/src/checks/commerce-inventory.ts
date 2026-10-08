@@ -1,9 +1,10 @@
 // The event × tool inventory the checks and the prove step read: which commerce and conversion events the site
 // already sends to each tool, and which ones this run promised to add.
 //
-// LOCAL COPY of the scan's inventory shape (`src/scan/event-inventory.ts`, owned by the scan). The checks only read
-// it, through `promisesOf` and `alreadySentOf` below, so when the scan's own type lands the copy is replaced by an
-// import and nothing else here changes. Every field the checks need is listed; anything else on a row is ignored.
+// The checks' own view of the scan's inventory (`src/scan/event-inventory.ts`, owned by the scan): one cell per event
+// × tool, `already_sent` / `will_add` / `cannot`. `readEventInventory` reads the scan's shape (`events`, Meta split
+// into meta_browser / meta_server, gaps in `missing`) or this one (`rows`); the checks read only `promisesOf` and
+// `alreadySentOf` below.
 //
 // Where the run keeps it: `before-facts.json` → `eventInventory` (read by `src/wizard/deps.ts` for the static checks,
 // and by the prove step). Absent = the plan's promises are unknown, and every check that needs them reads
@@ -51,8 +52,48 @@ function isEvent(value: unknown): value is InventoryEvent {
   return typeof value === "string" && (INVENTORY_EVENTS as readonly string[]).includes(value)
 }
 
-/** A loose read of an unknown value (a JSON file): rows with a known event and tool cells with a known state. */
+/** The scan's tool names (`src/scan/event-inventory.ts`): Meta is split by lane there. */
+const SCAN_TOOLS: Readonly<Record<string, { tool: InventoryTool; lane: "browser" | "server" }>> = {
+  ga4: { tool: "ga4", lane: "browser" },
+  posthog: { tool: "posthog", lane: "browser" },
+  meta_browser: { tool: "meta", lane: "browser" },
+  meta_server: { tool: "meta", lane: "server" },
+  infinite: { tool: "infinite", lane: "server" }
+}
+
+/**
+ * The scan's own inventory shape (`buildEventInventory(snapshot)` → `{ events: [{ event, sites, tools, missing }] }`):
+ * a tool with sites already gets the event; a tool in `missing` is a gap this run fills (the plan's promise).
+ */
+function fromScanShape(events: unknown[]): EventInventory {
+  const rows: InventoryRow[] = []
+  for (const raw of events) {
+    if (!raw || typeof raw !== "object") continue
+    const entry = raw as { event?: unknown; sites?: unknown; tools?: unknown; missing?: unknown }
+    if (!isEvent(entry.event)) continue
+    const tools: InventoryRow["tools"] = {}
+    const sitesOf = (value: unknown) => (Array.isArray(value) ? value.filter((site): site is { file: string; line: number } => !!site && typeof site === "object" && typeof (site as { file?: unknown }).file === "string").map((site) => ({ file: site.file, line: Number(site.line) || 1 })) : [])
+    for (const [name, sites] of Object.entries(entry.tools && typeof entry.tools === "object" ? entry.tools : {})) {
+      const known = SCAN_TOOLS[name]
+      const evidence = sitesOf(sites)
+      if (known && evidence.length > 0) tools[known.tool] = { state: "already_sent", lane: known.lane, evidence: [...(tools[known.tool]?.evidence ?? []), ...evidence] }
+    }
+    for (const name of Array.isArray(entry.missing) ? entry.missing : []) {
+      const known = typeof name === "string" ? SCAN_TOOLS[name] : undefined
+      if (known && tools[known.tool]?.state !== "already_sent") tools[known.tool] = { state: "will_add", lane: known.lane }
+    }
+    const sites = sitesOf(entry.sites)
+    rows.push({ event: entry.event, tools, ...(sites.length > 0 ? { sites } : {}) })
+  }
+  return { rows }
+}
+
+/**
+ * A loose read of an unknown value (a JSON file, or the scan's own result): rows with a known event and tool cells
+ * with a known state. Both this file's shape (`rows`) and the scan's (`events`) are read.
+ */
 export function readEventInventory(value: unknown): EventInventory | null {
+  if (value && typeof value === "object" && Array.isArray((value as { events?: unknown }).events)) return fromScanShape((value as { events: unknown[] }).events)
   if (!value || typeof value !== "object" || !Array.isArray((value as { rows?: unknown }).rows)) return null
   const rows: InventoryRow[] = []
   for (const raw of (value as { rows: unknown[] }).rows) {

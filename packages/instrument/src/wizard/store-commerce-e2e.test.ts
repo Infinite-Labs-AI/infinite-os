@@ -9,7 +9,7 @@
 // this store), and the static checks must pass on them and fail, with the right words, on three bad variants.
 //
 // WHICH ASSERTIONS NEED WHICH BUILDER (the four builders' branches merge later; each test names its own):
-//   [A] the event inventory (`src/scan/event-inventory.ts` exporting `buildEventInventory(scan: JobScan)`), the job
+//   [A] the event inventory (`src/scan/event-inventory.ts` exporting `buildEventInventory(snapshot: RepoSnapshot)`), the job
 //       seeding of all five events and the plan's per-tool headline;
 //   [B] the server lane's outcome helper for Next (`lib/infinite-outcome` with reportInfiniteOutcome / adMatchFromRequest);
 //   [C] the briefs that tell the agent what to add (Meta AddToCart / ViewContent, server events with match data);
@@ -162,11 +162,11 @@ afterAll(() => {
   if (root) rmSync(root, { recursive: true, force: true })
 })
 
-/** The scan's inventory (builder A): `src/scan/event-inventory.ts` → `buildEventInventory(scan: JobScan)`. */
+/** The scan's inventory (builder A): `src/scan/event-inventory.ts` → `buildEventInventory(snapshot: RepoSnapshot)`. */
 async function scanInventory(scan: ScanResult): Promise<EventInventory> {
   const path = "../scan/event-inventory.js"
-  const module = (await import(/* @vite-ignore */ path)) as { buildEventInventory: (scan: ReturnType<typeof toJobScan>) => unknown }
-  const inventory = readEventInventory(module.buildEventInventory(toJobScan(scan)))
+  const module = (await import(/* @vite-ignore */ path)) as { buildEventInventory: (snapshot: ReturnType<typeof toJobScan>["snapshot"]) => unknown }
+  const inventory = readEventInventory(module.buildEventInventory(toJobScan(scan).snapshot))
   if (!inventory) throw new Error("buildEventInventory returned no rows")
   return inventory
 }
@@ -216,6 +216,8 @@ describe("store: the wizard's own scan, plan and briefs", () => {
       const got = inventory.rows.find((entry) => entry.event === row.event)
       expect(got, row.event).toBeDefined()
       for (const [tool, cell] of Object.entries(row.tools) as Array<[InventoryTool, { state: string; lane?: string }]>) {
+        // Infinite records the conversions from the server; the page events reach it through the tag itself.
+        if (tool === "infinite" && cell.lane === "browser") continue
         expect(got!.tools[tool]?.state, `${row.event} × ${tool}`).toBe(cell.state)
         if (tool === "meta") expect(got!.tools.meta?.lane ?? (["view_item", "add_to_cart"].includes(row.event) ? "browser" : "server"), `${row.event} × meta lane`).toBe(cell.lane)
       }
