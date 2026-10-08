@@ -658,6 +658,20 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       })
     )
   }
+  const metaEnvIds = [...new Map((before.census?.envSourcedIds ?? [])
+    .filter((entry) => entry.tool === "meta")
+    .map((entry) => [`${entry.envName}:${entry.file}:${entry.line}`, entry])).values()]
+  if (metaEnvIds.length > 0) {
+    const selected = keys.meta.status === "connected" && keys.meta.pixels.length === 1 ? keys.meta.pixels[0]!.pixelId : null
+    lines.push(
+      line({
+        id: "env_source:meta_pixel",
+        kind: "user_action",
+        requires: "info",
+        text: `Meta pixel id source: your existing pixel reads ${metaEnvIds.map((entry) => `${entry.envName} (${entry.file}:${entry.line})`).join(", ")} from host settings. ${selected ? `Infinite selected pixel ${selected}; confirm the env value matches it.` : "Pick one Meta pixel in Infinite, then compare it with that env value."}`
+      })
+    )
+  }
   for (const item of candidates) {
     if (item.jobId !== "conversions_to_tools" || item.state !== "blocked" || item.blockedReason !== "needs_you" || item.allow.files.length > 0 || item.allow.create.length > 0) continue
     item.note = `${item.title}: not wired. No successful completion handler was found in the browser code; add or identify that success handler before this conversion can be sent. A link or button click alone is not a completed outcome.`

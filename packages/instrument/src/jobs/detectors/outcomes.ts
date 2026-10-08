@@ -60,7 +60,7 @@ const OUTCOME_PATTERNS: Array<{ kind: OutcomeKind; detail: string; pattern: RegE
   { kind: "download", detail: "attachment download", pattern: /Content-Disposition["'`]?\s*[:,]\s*[`"']attachment/gi },
   // Payment webhooks.
   { kind: "payment_webhook", detail: "Stripe webhook", pattern: /\bwebhooks\s*\.\s*constructEvent(?:Async)?\s*\(/g },
-  { kind: "payment_webhook", detail: "Stripe checkout completed", pattern: /["'`](?:checkout\.session\.completed|invoice\.paid|invoice\.payment_succeeded|payment_intent\.succeeded)["'`]/g },
+  { kind: "payment_webhook", detail: "Stripe checkout completed", pattern: /["'`](?:checkout\.session\.completed|checkout\.session\.async_payment_succeeded|invoice\.paid|invoice\.payment_succeeded|payment_intent\.succeeded)["'`]/g },
   { kind: "payment_webhook", detail: "Lemon Squeezy order", pattern: /["'`](?:order_created|subscription_payment_success)["'`]/g, requires: /lemon/i },
   { kind: "payment_webhook", detail: "Paddle transaction", pattern: /["'`](?:transaction\.completed|transaction\.paid)["'`]/g, requires: /paddle/i },
   { kind: "payment_webhook", detail: "Polar order", pattern: /["'`](?:order\.paid|order\.created)["'`]/g, requires: /polar/i },

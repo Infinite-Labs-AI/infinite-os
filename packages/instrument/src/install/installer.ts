@@ -368,7 +368,7 @@ export class WizardInstaller implements Installer {
       // Review I1 P1-2: an installer blocker is said on the plan screen, before anything is approved or written.
       installBlocked: this.dryInstallFailure(
         wizardScan,
-        artifactsFromKeys(keys, { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: null }, { posthogProxy: served.posthogProxy }),
+        artifactsFromKeys(keys, { consentMode: "not_required", conversionNames: [], privacyText: null, npmInstall: null }, { posthogProxy: served.posthogProxy, infiniteExcludedPaths: sensitivePaths }),
         wizardScan.serverLane !== null,
         beforeFacts
       )
@@ -400,7 +400,7 @@ export class WizardInstaller implements Installer {
     const answers = resolvePlanAnswers(plan, approvals, { consentFlag: this.options.consentFlag() })
     const approved = new Set(answers.lines.filter((entry) => entry.approved === true).map((entry) => entry.id))
     const served = siteServing(scan, internals.before, keys)
-    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode ?? "not_required" }, { posthogProxy: served.posthogProxy }), scan.detected)
+    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode ?? "not_required" }, { posthogProxy: served.posthogProxy, infiniteExcludedPaths: sensitivePathsFor(scan, internals.before) }), scan.detected)
     const artifacts: WizardInstallArtifacts = { ...(all.productionHosts ? { productionHosts: all.productionHosts } : {}) }
     for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) {
       const lineForTool = plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
@@ -455,7 +455,7 @@ export class WizardInstaller implements Installer {
 
     // ---- the artifacts: approved tools from the connections; an already-managed tool whose update
     // was not approved is KEPT exactly as the receipt recorded it (never dropped from the page) ----
-    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode }, { posthogProxy: served.posthogProxy }), scan.detected)
+    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode }, { posthogProxy: served.posthogProxy, infiniteExcludedPaths: sensitivePathsFor(scan, internals.before) }), scan.detected)
     const installLine = (tool: ProviderId) =>
       plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
     const previous = scan.manifest

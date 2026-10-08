@@ -516,3 +516,19 @@ it("puts an event-delivery summary near the top, including Meta gaps instead of 
   expect(plan.lines.find(line => line.id === "event_delivery:meta")?.text).toContain("not yet")
   expect(plan.lines.find(line => line.id === "event_delivery:meta")?.text).toContain("purchase")
 })
+
+it("reports when the existing Meta pixel id comes from a host env var and names the selected Infinite pixel", () => {
+  const plan = buildPlanModel(input({
+    before: fakeBefore({
+      census: {
+        entries: [{ tool: "meta", kind: "fbq_init", id: null, file: "app/layout.tsx", line: 10, owner: "adopted" }],
+        envSourcedIds: [{ tool: "meta", envName: "NEXT_PUBLIC_META_PIXEL_ID", file: "app/layout.tsx", line: 10 }],
+        identify: { identifyCalls: [], resetCalls: [] }
+      }
+    })
+  }))
+  const text = plan.lines.find(line => line.id === "env_source:meta_pixel")?.text ?? ""
+  expect(text).toContain("NEXT_PUBLIC_META_PIXEL_ID")
+  expect(text).toContain("host settings")
+  expect(text).toContain(IDS.meta)
+})

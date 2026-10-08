@@ -425,7 +425,7 @@ export function improveLinesFor(facts: AdoptedFacts, ctx: ImproveLinesContext): 
         kind: "autoconfig_off_adopted",
         provider: "meta",
         target: "autoconfig",
-        text: `Meta: turn off automatic events on your existing pixel ${meta.pixelId} (one line before its init). They send button clicks and page data you did not choose.`,
+        text: `Meta: turn off automatic events and Meta's automatic route-change PageViews on your existing pixel ${meta.pixelId} (one line before its init). They send button clicks, duplicate SPA PageViews and page data you did not choose.`,
         owner: meta.initStandalone ? "code" : "agent",
         evidence
       })
@@ -590,7 +590,8 @@ export function applyImproveEdit(input: ImproveEditInput): ImproveEditResult {
     const lineStart = before.lastIndexOf("\n", at - 1) + 1
     const indent = /^[ \t]*/.exec(before.slice(lineStart, at))?.[0] ?? ""
     const prefix = before.slice(lineStart, at).trim() === "" ? "" : "\n" + indent
-    const insertion = `fbq('set', 'autoConfig', false, '${pixelId}');${prefix === "" ? `\n${indent}` : " "}`
+    const statements = [`fbq('set', 'autoConfig', false, '${pixelId}');`, "fbq.disablePushState = true;"]
+    const insertion = prefix === "" ? `${statements.join(`\n${indent}`)}\n${indent}` : `${statements.join(" ")} `
     const after = before.slice(0, at) + insertion + before.slice(at)
     return writeWithRecord(input, file, before, after, insertion.trim())
   }

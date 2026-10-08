@@ -109,6 +109,13 @@ describe("artifactsFromKeys (§3b keys → the installer's input)", () => {
     expect(result.artifacts.infinite).toBeUndefined()
     expect(result.skipped.infinite).toBe("consent_unanswered")
   })
+
+  it("passes route exclusions only to Infinite's runtime config", () => {
+    const artifacts = artifactsFromKeys(fakeKeys(), decided, { infiniteExcludedPaths: ["/cart", "/checkout"] })
+    expect(artifacts.infinite?.excludedPaths).toEqual(["/cart", "/checkout"])
+    expect(JSON.stringify(artifacts.ga4)).not.toContain("/cart")
+    expect(JSON.stringify(artifacts.meta)).not.toContain("/checkout")
+  })
 })
 
 describe("the wizard install's manifest workspaceId and ids (§3e.6, R1-15)", () => {

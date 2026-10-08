@@ -100,6 +100,8 @@ export interface ArtifactsFromKeysOptions {
    * api_host with no rewrite behind it would 404 every event. Default true.
    */
   posthogProxy?: boolean
+  /** Root-relative paths where the Infinite browser runtime should emit nothing. */
+  infiniteExcludedPaths?: readonly string[]
 }
 
 export function artifactsFromKeysDetailed(keys: TagKeys, answers: PlanModel["decisions"], options: ArtifactsFromKeysOptions = {}): KeysAdapterResult {
@@ -121,7 +123,8 @@ export function artifactsFromKeysDetailed(keys: TagKeys, answers: PlanModel["dec
         siteSourceKey: infinite.siteSourceKey,
         collectPath: infinite.collectPath,
         productionHosts: [...infinite.productionHosts],
-        consentMode
+        consentMode,
+        ...(options.infiniteExcludedPaths && options.infiniteExcludedPaths.length > 0 ? { excludedPaths: [...options.infiniteExcludedPaths] } : {})
       }
     }
   }

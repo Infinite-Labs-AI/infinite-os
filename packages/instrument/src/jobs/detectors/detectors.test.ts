@@ -150,6 +150,13 @@ describe("outcomes (job 8) and conversion elements (job 10)", () => {
     expect(found.find((finding) => finding.kind === "signup")?.line).toBe(2)
   })
 
+  it("recognizes Stripe async checkout success as a purchase webhook outcome", () => {
+    const found = detectOutcomes(snap({
+      "app/api/stripe/route.ts": "export async function POST() {\n  if (event.type === 'checkout.session.async_payment_succeeded') { fulfill() }\n}\n"
+    }))
+    expect(found).toEqual([expect.objectContaining({ kind: "payment_webhook", conversionType: "purchase" })])
+  })
+
   it("does not count a browser-side signUp, a lead table named in a comment, or a handler in a test", () => {
     const found = detectOutcomes(
       snap({

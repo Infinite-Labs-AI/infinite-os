@@ -95,6 +95,17 @@ describe("WizardInstaller.apply: a new install on a static site", () => {
     expect(readInstallManifest(root)!.ids?.meta ?? []).toEqual([])
   })
 
+  it("passes detected sensitive routes as Infinite route exclusions when Infinite is installed", async () => {
+    const root = makeSite({ "index.html": STATIC_HTML, "checkout.html": STATIC_HTML })
+    const subject = installer()
+    const scan = await subject.scan({ root, hosting: fakeHosting() })
+    const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
+    const result = (await subject.apply(plan, approveAll(plan))) as WizardApplyResult
+    expect(result.ok).toBe(true)
+    expect(result.artifacts.infinite?.excludedPaths).toContain("/checkout")
+    expect(read(root, "index.html")).toContain('"excludedPaths":["/checkout"]')
+  })
+
   it("excluded Infinite, managed guard and sensitive-page edits never reach installer artifacts", async () => {
     const root = makeSite({ "index.html": STATIC_HTML, "login.html": STATIC_HTML })
     const subject = installer()

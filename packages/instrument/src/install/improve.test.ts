@@ -205,7 +205,9 @@ describe("applyImproveEdit: the deterministic code edits (approved lines only)",
     const result = edit(root, line)
     expect(result.ok && result.record?.planLineId).toBe("autoconfig_off_adopted:meta:autoconfig")
     const after = read(root, "index.html")
-    expect(runPage(after).queue()).toEqual([["set", "autoConfig", false, IDS.meta], ["init", IDS.meta], ["track", "PageView"]])
+    const page = runPage(after)
+    expect(page.queue()).toEqual([["set", "autoConfig", false, IDS.meta], ["init", IDS.meta], ["track", "PageView"]])
+    expect((page.window.fbq as { disablePushState?: boolean }).disablePushState).toBe(true)
     expect(checkMetaAutoConfigOptOut(after, IDS.meta, "adopted").reason).toBe("opted_out_before_init")
     // NEGATIVE: the original page queues no opt-out.
     expect(runPage(ADOPTED_META_HTML).queue()[0]).toEqual(["init", IDS.meta])
