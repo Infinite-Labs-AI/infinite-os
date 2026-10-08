@@ -563,6 +563,11 @@ describe("Finding 2: sends_before_leaving proves the wait reaches the navigation
     expect(found.map((finding) => finding.message)).toEqual([expect.stringMatching(/^addToCart\(\) starts the wait for Meta AddToCart but does not return it/)])
   })
 
+  it("P3: a local variable named location is not a navigation after an await", () => {
+    expect(check(helper(RETURNED), '    await addToCart(p)\n    window.location.assign("/cart")')).toEqual([])
+    expect(check(helper(RETURNED), '    await addToCart(p)\n    const location = "eu"')).toEqual(["lost_before_leaving@pages/a.tsx"])
+  })
+
   it(".then without the navigation in it, and a go that does nothing, fail", () => {
     expect(check(helper(RETURNED), '    void addToCart(p).then(() => undefined)\n    window.location.assign("/cart")')).toEqual(["lost_before_leaving@pages/a.tsx"])
     expect(check(helper(RETURNED), "    infiniteLeaveAfter(() => addToCart(p), () => {})")).toEqual(["lost_before_leaving@pages/a.tsx"])

@@ -826,7 +826,7 @@ function requestHowAt(view: FileView, at: number): { how: PageRequestHow; via: s
     if (!/\bbody\s*:/.test(args)) return { how: "query", via: "a GET fetch" }
     return { how: "unknown", via: "a fetch" }
   }
-  if (/(?:\blocation(?:\s*\.\s*href)?\s*=|\blocation\s*\.\s*(?:assign|replace)\s*\(|\brouter\s*\.\s*(?:push|replace)\s*\(|\bwindow\s*\.\s*open\s*\(|\bnavigate\s*\()\s*$/.test(before)) return { how: "query", via: "a link" }
+  if (/(?:(?<![\w$.]\s*)\b(?:window\s*\.\s*)?location(?:\s*\.\s*href)?\s*=|\blocation\s*\.\s*(?:assign|replace)\s*\(|\brouter\s*\.\s*(?:push|replace)\s*\(|\bwindow\s*\.\s*open\s*\(|\bnavigate\s*\()\s*$/.test(before)) return { how: "query", via: "a link" }
   return { how: "unknown", via: "a request the scan could not read" }
 }
 

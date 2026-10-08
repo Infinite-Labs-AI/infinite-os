@@ -201,6 +201,15 @@ describe("browser commerce briefs (review P0-5)", () => {
     expect(brief).toContain('Where Plan data says "unknown", tell the two apart yourself')
   })
 
+  it("P3: an inline send whose router call the site's own hook turns into a full load keeps the router call (never a location.assign)", () => {
+    const entry: EventInventoryEntry = { ...ADD_TO_CART, sites: [{ file: "components/Buy.tsx", line: 5, via: "gtag", navigation: "full_load", navigationVia: 'router.push("/cart"), which the site turns into a full page load (pages/_app.tsx:7)', leavesBy: "route_hook" }] }
+    const data = planData(buildBrief([item("meta_improve:commerce_events", [entry], ["components/Buy.tsx"])], facts), "meta_improve:commerce_events")
+    const place = ((data.events as Array<Record<string, unknown>>)[0]!.places as Array<Record<string, unknown>>)[0]!
+    expect(place.do).toMatch(/^wrap the handler's own router call, unchanged: infiniteLeaveAfter\(\(\) => infiniteTrackBeforeLeaving\("add_to_cart", .*\), \(\) => <its own router call, exactly as written>\)$/)
+    expect(String(place.do)).not.toContain("infiniteTrackThenNavigate")
+    expect(data.imports).toEqual({ "components/Buy.tsx": 'import { infiniteTrackBeforeLeaving, infiniteLeaveAfter } from "../lib/infinite-analytics"' })
+  })
+
   it("a GA4 job names GA4 only, and a PostHog job PostHog only", () => {
     const brief = buildBrief(
       [

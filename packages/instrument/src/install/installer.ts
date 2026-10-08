@@ -640,7 +640,8 @@ export class WizardInstaller implements Installer {
         })
         if (!result.ok) {
           if (result.ownerRequirement) ownerRequirements.push(result.ownerRequirement)
-          warnings.push(`${entry.id}: not changed — ${result.reason}`)
+          // Plain words on screen: the line as the plan showed it, never its internal id.
+          warnings.push(`${entry.text}: the install could not write this change itself, so it is left ${result.ownerRequirement ? "for you" : "for your coding agent"} (${result.reason}).`)
           continue
         }
         if (result.record) {

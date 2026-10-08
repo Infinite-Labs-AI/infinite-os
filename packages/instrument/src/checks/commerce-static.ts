@@ -920,8 +920,8 @@ export function clickPathFindings(input: CommerceCheckInput): CommerceFinding[] 
   return findings
 }
 
-/** A navigation, in code: a full page load, client routing, a form submit, a new window. */
-const NAVIGATION = /\blocation\b\s*(?:\.\s*(?:assign|replace)\s*\(|(?:\.\s*href\s*)?=(?![=>]))|\b(?:router|Router|history)\s*\.\s*(?:push|replace)\s*\(|\bnavigate\s*\(|\.\s*(?:requestSubmit|submit)\s*\(\s*\)|\bwindow\s*\.\s*open\s*\(/
+/** A navigation, in code: a full page load, client routing, a form submit, a new window (`const location = …` is not one). */
+const NAVIGATION = /(?<![\w$.]\s*)\b(?:window\s*\.\s*|document\s*\.\s*|globalThis\s*\.\s*)?location\b\s*(?:\.\s*(?:assign|replace)\s*\(|(?:\.\s*href\s*)?=(?![=>]))|\b(?:router|Router|history)\s*\.\s*(?:push|replace)\s*\(|\bnavigate\s*\(|\.\s*(?:requestSubmit|submit)\s*\(\s*\)|\bwindow\s*\.\s*open\s*\(/
 
 /** `go` really leaves: a navigation, a call, or a function passed by name; never `() => {}` / `() => undefined`. */
 function leaves(go: string): boolean {
@@ -1108,7 +1108,7 @@ export function leaveFindings(input: CommerceCheckInput): CommerceFinding[] {
           line: reach.line,
           event: row.event,
           tool: "meta",
-          message: `${where(file, reach.line)} sends Meta ${META_EVENT_NAMES[row.event]}${reach.through ? ` through ${reach.through}()` : ""} and then leaves with a full page load without waiting, so the page can unload before Meta has it. ${reach.through ? `Start ${reach.through}() with const wait = infiniteTrackBeforeLeaving(…), keep its own sends, end it with return wait, and wrap this handler in infiniteLeaveAfter(() => { …; return ${reach.through}(…) }, () => <its own navigation>).` : "Use infiniteTrackThenNavigate in place of the handler's own navigation."}`
+          message: `${where(file, reach.line)} sends Meta ${META_EVENT_NAMES[row.event]}${reach.through ? ` through ${reach.through}()` : ""} and then leaves with a full page load without waiting, so the page can unload before Meta has it. ${reach.through ? `Start ${reach.through}() with const wait = infiniteTrackBeforeLeaving(…), keep its own sends, end it with return wait, and wrap this handler in infiniteLeaveAfter(() => { …; return ${reach.through}(…) }, () => <its own navigation>).` : site.leavesBy === "route_hook" ? "Wrap it as infiniteLeaveAfter(() => infiniteTrackBeforeLeaving(…), () => <the handler's own router call, unchanged>)." : "Use infiniteTrackThenNavigate in place of the handler's own navigation."}`
         })
       }
     }

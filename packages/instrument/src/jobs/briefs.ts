@@ -417,6 +417,9 @@ function placeData(place: CommercePlace, call: (name: string) => string, allowed
       ? untouched
       : site.navigation === "full_load" && (site.leavesBy === "link" || site.leavesBy === "form")
       ? inlineDefault(site.leavesBy)
+      : site.navigation === "full_load" && site.leavesBy === "route_hook"
+      ? // The site's own hook makes the router call a full load: keep that router call (never a location.assign in its place).
+        `wrap the handler's own router call, unchanged: infiniteLeaveAfter(() => ${call("infiniteTrackBeforeLeaving")}, () => <its own router call, exactly as written>)`
       : site.navigation === "full_load"
       ? `replace the handler's own navigation with ${thenNavigate}`
       : site.navigation === undefined
@@ -444,7 +447,7 @@ function commerceImports(places: readonly CommercePlace[], module: string, allow
     }
     const site = place.sites[0]!
     if (allowed.size > 0 && !allowed.has(site.file)) continue
-    if (site.navigation === "full_load" && (site.leavesBy === "link" || site.leavesBy === "form")) {
+    if (site.navigation === "full_load" && site.leavesBy !== undefined) {
       need(site.file, "infiniteTrackBeforeLeaving")
       need(site.file, "infiniteLeaveAfter")
       continue
@@ -490,7 +493,7 @@ function commerceGist(tool: InventoryTool, events: readonly FunnelEvent[]): stri
     "- When the event fires through the site's own helper (firesThrough names it), the send goes INSIDE that helper, beside its existing sends, and nowhere else: never also in a click handler that calls the helper (that sends the event twice).",
     `- A caller whose click then does a FULL page load (callers[].leaves) loses ${meta ? "Meta's request" : "the request"} unless it waits. There the helper's FIRST new line is const wait = infiniteTrackBeforeLeaving(…), every send it already has stays below it unchanged, and its LAST line is return wait (the wait settles once the request is out, at most ${meta ? "400 ms" : "1 s"}, and never rejects). A return any earlier stops the helper's own GA4 and PostHog sends. That caller's click handler becomes infiniteLeaveAfter(() => { <what it did before leaving>; return <helper>(…) }, () => <its own navigation, unchanged>). infiniteLeaveAfter ignores a second click while the first is leaving.`,
     "- A caller that routes on the client (router.push, <Link>) or does not leave keeps its code as it is: the page stays loaded, so it needs no wait. Never turn client routing into a full page load.",
-    "- When the event fires inline in a click handler (no helper), add infiniteTrack(…) beside the site's own send there; ONLY when that handler does a full page load, use infiniteTrackThenNavigate(event, <where the click goes>, <event>, <the same props>, { destinations }) in place of its own navigation.",
+    "- When the event fires inline in a click handler (no helper), add infiniteTrack(…) beside the site's own send there; ONLY when that handler does a full page load, use infiniteTrackThenNavigate(event, <where the click goes>, <event>, <the same props>, { destinations }) in place of its own navigation. When the full load comes from your own route-change hook, keep the router call instead: infiniteLeaveAfter(() => infiniteTrackBeforeLeaving(…), () => <the router call, unchanged>).",
     "- A plain link (<a href>, or a button inside one) or a form that posts leaves by itself, with no navigation in the handler to keep. There the handler first calls event.preventDefault(), and its go is () => window.location.assign(<the link's href>) for a link, or () => form.submit() for a form (const form = event.currentTarget, taken before the wait; event.currentTarget.form for a submit button). Never leave go empty: an empty go leaves nothing to wait for and the click goes nowhere.",
     `- Where Plan data says "unknown", tell the two apart yourself: ${HOW_TO_TELL}`,
     "Use the product id, name, unit price (in the currency's main unit, not cents) and quantity the site already has there or in its own product catalog. Never invent a price or a product; pass the currency the site prices in (Plan data \"currency\" when it names one).",
