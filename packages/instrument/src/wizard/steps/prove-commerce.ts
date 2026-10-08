@@ -178,6 +178,8 @@ export async function proveCommerce(
     files: ReadonlyMap<string, string> | null
     /** The earliest moment a real event can come from the merged code (the merge), or null. */
     since: string | null
+    /** Infinite's record since the merge, read once per prove run (shared with the passive checks); absent = read here. */
+    readBaseline?: () => Promise<BaselineResponseFields>
   }
 ): Promise<CommerceProofLine[]> {
   if (!input.inventory) return []
@@ -241,7 +243,7 @@ export async function proveCommerce(
     else if (!deps.bridge.has("tag.baseline.v1")) why = "this Infinite app cannot read it yet"
     else {
       try {
-        baseline = await deps.bridge.baseline(input.runId, { since: input.since, signal: ctx.signal })
+        baseline = input.readBaseline ? await input.readBaseline() : await deps.bridge.baseline(input.runId, { since: input.since, signal: ctx.signal })
       } catch (error) {
         if (!isTransientBridgeFailure(error) && bridgeErrorCode(error) === null) throw error
         why = "Infinite's record could not be read right now"

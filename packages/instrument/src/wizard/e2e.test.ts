@@ -1301,12 +1301,14 @@ describe("§3y the fresh workspace (no Infinite connections, a Vercel-hosted sit
     const subs = run.ofType("step.sub").map((event) => String(event.text))
     expect(subs).toContain(`✓ Live site: ${PRODUCTION_HOST} (you said)`)
 
-    // ---- 2. the plan: no pre-checked line that does nothing; the lane is a user_action; Infinite approvable with the claim wording ----
+    // ---- 2. the plan: no pre-checked line that does nothing; Infinite approvable with the claim wording; the lane is
+    // written inert and its secret is the owner's (founder ruling, review P0-6: no Vercel connection to save it) ----
     const planAsk = run.ofType("ask.open").find((event) => event.kind === "plan")!.payload as { lines: Array<{ id: string; kind: string; requires: string; text: string }> }
     expect(planAsk.lines.find((line) => line.id === "install_provider:infinite")?.requires).toBe("info")
     expect(planAsk.lines.find((line) => line.id === "info:infinite_site_file")?.text).toContain("/.well-known/infinite-site-verification.txt")
-    expect(planAsk.lines.some((line) => line.id === "server_lane")).toBe(false)
-    expect(planAsk.lines.find((line) => line.id === "user_action:server_lane")?.requires).toBe("user_action")
+    expect(planAsk.lines.find((line) => line.id === "server_lane")?.requires).toBe("info")
+    expect(planAsk.lines.find((line) => line.id === "info:server_lane_handoff")?.text).toMatch(/^We'll write the server code; you add the secret in .+ \(steps in the PR\)\.$/)
+    expect(planAsk.lines.some((line) => line.id === "user_action:server_lane" || line.id === "account_settings:hosting")).toBe(false)
     const budget = planAsk.lines.find((line) => line.id === "agent_budget")!
     const upTo = Number(/up to (\d+) job/.exec(budget.text)![1])
     const approvedStatus = run.ofType("step.done").find((event) => event.step === "plan")

@@ -1303,6 +1303,8 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
   // `proving` for 24 h. An unexpected error building the column still settles the proof as undetermined.
   let proofState: "proven" | "problem" | "undetermined" | null = null
   let commerce: CommerceProofLine[] = []
+  // ONE read of Infinite's record since the merge, shared by the shop-event proof and the passive checks.
+  const readBaseline = baselineOnce(ctx, deps, runId, deployedSince(state, deps))
   try {
     // T1 after the deploy (read-only).
     const t1: CheckResult[] = []
@@ -1315,7 +1317,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
         postDeploy = await measureAfterDeploy(ctx, deps, { runId, mergeSha, productionHost, expect, keys, gradeCtx, reader })
       }
       // Review r3: the shop events the plan promised Meta and Infinite, measured where the engine can, said where not.
-      commerce = await commerceProof(ctx, deps, { runId, mergeSha, productionHost, expect, reader, since: deployedSince(state, deps) })
+      commerce = await commerceProof(ctx, deps, { runId, mergeSha, productionHost, expect, reader, since: deployedSince(state, deps), readBaseline })
     }
 
     // Live run 6: per-tool grades are not job check ids. Derive the PV checks from this
@@ -1372,7 +1374,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
     await ctx.state.save()
 
     // §3z.12 §3e.1 (B15): the passive checks read real events AFTER the deploy (baseline since = deploy time).
-    await applyPassiveChecks(ctx, deps, runId, deployedSince(state, deps))
+    await applyPassiveChecks(ctx, deps, runId, deployedSince(state, deps), readBaseline)
 
     const at = deps.clock.now().toISOString()
     const column = buildProvenColumn({
@@ -1449,7 +1451,7 @@ async function runProve(ctx: WizardContext, deps: WizardDeps): Promise<StepOutco
 async function commerceProof(
   ctx: WizardContext,
   deps: WizardDeps,
-  input: { runId: string; mergeSha: string; productionHost: string; expect: TestExpect; reader: DeploymentReader | null; since: string | null }
+  input: { runId: string; mergeSha: string; productionHost: string; expect: TestExpect; reader: DeploymentReader | null; since: string | null; readBaseline: () => Promise<BridgeBaseline> }
 ): Promise<CommerceProofLine[]> {
   let lines: CommerceProofLine[]
   try {
@@ -1716,12 +1718,24 @@ function deployedSince(state: Readonly<WizardRunState>, deps: WizardDeps): strin
  * P-tier results with THIS run's id, applied through the registry (the one state machine). `first_identify`
  * (job 9) has no v1 source and stays `waiting_real_event`. A failed read leaves them unknown, never 0.
  */
-async function applyPassiveChecks(ctx: WizardContext, deps: WizardDeps, runId: string, since: string | null): Promise<void> {
+type BridgeBaseline = Awaited<ReturnType<WizardDeps["bridge"]["baseline"]>>
+
+/** One baseline read since `since`, made on first use and shared by every reader of this prove run. */
+function baselineOnce(ctx: WizardContext, deps: WizardDeps, runId: string, since: string | null): () => Promise<BridgeBaseline> {
+  let read: Promise<BridgeBaseline> | null = null
+  return () => {
+    if (since === null) return Promise.reject(new Error("the merge time is not known"))
+    read ??= deps.bridge.baseline(runId, { since, signal: ctx.signal })
+    return read
+  }
+}
+
+async function applyPassiveChecks(ctx: WizardContext, deps: WizardDeps, runId: string, since: string | null, readBaseline: () => Promise<BridgeBaseline>): Promise<void> {
   const waiting = ctx.state.get().jobs.filter((item) => item.state === "waiting_real_event" && item.checks.some((check) => check.tier === "P"))
   if (waiting.length === 0 || since === null || !deps.bridge.has("tag.baseline.v1")) return
   let baseline: Awaited<ReturnType<WizardDeps["bridge"]["baseline"]>>
   try {
-    baseline = await deps.bridge.baseline(runId, { since, signal: ctx.signal })
+    baseline = await readBaseline()
   } catch (error) {
     if (isTransientBridgeFailure(error) || bridgeErrorCode(error) !== null) return
     throw error
