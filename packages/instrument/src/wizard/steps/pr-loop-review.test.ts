@@ -164,6 +164,22 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     await expectHeldDraft(w, outcome, "Codex is not signed in. Asked instead, Claude Code stopped with an error: API Error: 500")
   })
 
+  it("a blocker on Infinite's own managed file goes to Infinite: the PR is still readied, no fix job, never the owner's blocker", async () => {
+    // Live run 3: step 9 parked the merge on the managed outcome helper's documented 800 ms bound. Triage, not the prompt,
+    // decides: whatever the reviewer's severity, a finding on Infinite's file is Infinite's and never holds the owner's PR.
+    const answer = review([{ id: "F1", item: "R10", severity: "blocker", path: "lib/infinite-server-lane.ts", line: 2, body: "Visitor-facing reports stop waiting after 800 ms and never retry.", suggested_fix: "Retry with a queue." }])
+    const w = await opened({ reviews: [answer, review([])], gh: { checks: { "42": [{ name: "ci", bucket: "pass", state: "SUCCESS" }] } } })
+    expectOk(await reviewStep.run(w.ctx, w.deps))
+    expect(w.gh.read().prs[0]!.isDraft).toBe(false)
+    expect(w.agents.jobCalls).toEqual([])
+    expect(w.ctx.state.get().jobs.some((job) => job.jobId === "review_comments")).toBe(false)
+    const ledger = JSON.parse(readFileSync(join(w.fx.root, REVIEW_LEDGER_PATH), "utf8"))
+    expect(ledger.openFindings).toEqual([expect.objectContaining({ path: "lib/infinite-server-lane.ts", severity: "blocker", label: "Infinite's own code" })])
+    // The reviewer was told which files are Infinite's (the managed banner) and that they never block this PR.
+    const reply = w.gh.read().threads.flatMap((thread) => thread.comments).find((comment) => comment.body.includes("Infinite's own file"))
+    expect(reply?.body).toContain("does not hold this pull request")
+  })
+
   it("a real Codex answer (every key present, category null) is posted and triaged", async () => {
     const answer = review([{ id: "F1", category: null, item: "R3", severity: "nit", path: "app/layout.tsx", line: 2, body: "Name the event after the button.", suggested_fix: null } as never])
     const w = await opened({ reviews: [answer, review([])], gh: { checks: { "42": [{ name: "ci", bucket: "pass", state: "SUCCESS" }] } } })
@@ -223,13 +239,16 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
 
     // The fixed thread is resolved; owner information is shown in the body, not an actionable thread.
     const own = state.threads.filter((thread) => thread.comments[0]!.author === "acme-dev")
-    const f1 = own.find((thread) => thread.comments[0]!.body.includes("F1"))!
-    const f2 = own.find((thread) => thread.comments[0]!.body.includes("F2"))!
+    // Threads name the checklist item in plain words, never its id (R3) or the finding's id (F1).
+    const f1 = own.find((thread) => thread.comments[0]!.body.includes("Edit the existing init in place instead."))!
+    const f2 = own.find((thread) => thread.comments[0]!.body.includes("Add a cookie banner before GA4 loads."))!
+    expect(f1.comments[0]!.body).toContain("**Improve, don't reinstall (should fix)**")
+    expect(f1.comments[0]!.body.replace(/<!--[\s\S]*?-->/g, "")).not.toMatch(/\bR3\b|\bF1\b/)
     expect(f1.comments[1]!.body).toMatch(new RegExp(`Fixed in ${fixHead.slice(0, 7)}`))
     expect(f1.isResolved).toBe(true)
     expect(f2).toBeUndefined()
     expect(first.variables.body).toContain("About your consent or privacy pages (yours to decide)")
-    expect(first.variables.body).toContain("F2")
+    expect(first.variables.body).toContain("Add a cookie banner before GA4 loads.")
     // An un-OK'd teammate thread and a stranger's thread get no reply.
     expect(state.threads.find((thread) => thread.id === "PRRT_teammate")!.comments).toHaveLength(1)
     expect(state.threads.find((thread) => thread.id === "PRRT_stranger")!.comments).toHaveLength(1)

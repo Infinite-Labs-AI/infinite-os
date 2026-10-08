@@ -30,6 +30,8 @@ import { commerceFindingsForChange } from "../../checks/commerce-static.js"
 import { loadRepoSnapshot } from "../../jobs/repo-files.js"
 import { jobStaticRunContext } from "../deps.js"
 import { ciFixItem, job16Item, restoreFiles, runFixRound, snapshotFiles, settleFixRound } from "../../review/fix.js"
+import { ownerBlockers } from "../verdict.js"
+import { managedFileDesigns, type ManagedFileDesign } from "../../review/managed-design.js"
 import { openFindings, parseLedger, recordDecisions, REVIEW_LEDGER_PATH, type ReviewLedger } from "../../review/ledger.js"
 import { wizardOwnership, type WizardOwnership } from "../../review/ownership.js"
 import { commentTrust, hasFinalMarker, hasReplyMarker, parseReviewMarker, stripMarkers } from "../../review/markers.js"
@@ -99,6 +101,8 @@ async function writeReviewInputs(session: Session, dir: string, diff: string, fr
     // §3x.3 R1: the wizard's own files (Infinite's managed code, its proof file, .gitignore's Infinite block,
     // .infinite/install.json) are in scope too; run 3's reviewer flagged the wizard's own next.config.mjs (F1).
     wizardFiles: ownership.wizardFiles,
+    // Infinite's managed files and their documented design choices (also in the brief): findings on them go to Infinite.
+    infiniteManagedFiles: await managedFilesIn(session, dir),
     connectedIds: keys
       ? {
           ga4: keys.ga4.streams.map((stream) => stream.measurementId),
@@ -256,6 +260,16 @@ function managedStubLines(
   ]
 }
 
+/**
+ * Infinite's managed files in the reviewer's worktree (the wizard's own files whose text carries the managed banner),
+ * with their documented design choices: the reviewer is told they are Infinite's and what is deliberate in them.
+ */
+async function managedFilesIn(session: Session, worktree: string): Promise<ManagedFileDesign[]> {
+  const ownership = await sessionOwnership(session)
+  const files = await Promise.all(ownership.wizardFiles.filter((path) => ownership.classify(path, null) !== null).map(async (path) => ({ path, text: await session.deps.fs.readText(join(worktree, path)).catch(() => null) })))
+  return managedFileDesigns(files)
+}
+
 /** What one reviewer run gave: a classified review, a blind one (after its one retry), or a failure. */
 export type ReviewerRun = { review: ReviewResult; classified: ClassifiedReview } | { blind: true } | ReviewFailure
 
@@ -272,6 +286,7 @@ async function runReviewer(session: Session, reviewer: AgentKind, round: number,
     await deps.fs.writeTextAtomic(join(worktree.dir, READ_CHECK_PATH), `${nonce}\n`, 0o600)
     const brief = reviewerBrief({
       reviewer,
+      managedFiles: await managedFilesIn(session, worktree.dir),
       readCheck: READ_CHECK_PATH,
       prNumber: session.number,
       repoLabel: ship.repoLabel,
@@ -401,7 +416,8 @@ function scannedReview(scanner: ShipContext["scanner"], review: ReviewResult): R
   }
 }
 
-const FINDING_LABEL = /\*\*\[R\d{1,2} [a-z]+\]\*\* (F\d{1,2})/
+/** The finding a wizard thread is about: its hidden marker (`findingMarker`), or the visible label older threads carry. */
+const FINDING_LABEL = /<!-- infinite-tag:finding (F\d{1,2}) -->|\*\*\[R\d{1,2} [a-z]+\]\*\* (F\d{1,2})/
 
 /** The most of a teammate's comment text the user is shown, and the exact text the worker then gets. */
 const TEAMMATE_TEXT_MAX = 600
@@ -445,7 +461,7 @@ async function gatherItems(session: Session, review: ReviewResult, round: number
     if (trust === "own") {
       const marker = parseReviewMarker(first.body)
       const label = FINDING_LABEL.exec(first.body)
-      if (marker && marker.round === round && marker.head === head && label) ownThreadByFinding.set(label[1]!, thread.threadId)
+      if (marker && marker.round === round && marker.head === head && label) ownThreadByFinding.set((label[1] ?? label[2])!, thread.threadId)
       continue
     }
     if (handled.has(thread.threadId)) continue
@@ -806,7 +822,9 @@ async function requiredChecksResult(session: Session, runId: string, repair = tr
 async function finish(session: Session, options: { once?: boolean } = {}): Promise<void> {
   const { ctx, deps, ship } = session
   const state = ctx.state.get()
-  const blockers = openFindings(session.ledger, state.jobs).filter(finding => finding.severity === "blocker")
+  // Only a blocker on the OWNER's code holds the pull request: a finding on Infinite's own files goes to Infinite.
+  const ownership = await sessionOwnership(session).catch(() => null)
+  const blockers = ownerBlockers(openFindings(session.ledger, state.jobs, ownership?.classify, ownership?.writtenByRun))
   if (blockers.length) {
     await saveLedger(session)
     const quotes = blockers.map(blocker => {
@@ -881,7 +899,7 @@ async function finish(session: Session, options: { once?: boolean } = {}): Promi
     }))
   let comment = buildFinalComment({
     runId: ship.runId,
-    reportMarkdown: deps.report.renderMarkdown(report, verdictFacts.ownerBoundary, verdictFacts.jobs, verdictFacts.excludedLines),
+    reportMarkdown: deps.report.renderMarkdown(report, verdictFacts.ownerBoundary, verdictFacts.jobs, verdictFacts.excludedLines, { ownerSteps: verdictFacts.ownerSteps ?? null, findings: verdictFacts.openFindings }),
     ownerBoundary: verdictFacts.ownerBoundary,
     reviewer: session.reviewer,
     reviewed: session.reviewed,
@@ -1169,13 +1187,8 @@ async function reviewRun(ctx: WizardContext, deps: WizardDeps): Promise<StepOutc
     const decisions = await resolveAsks(session, triaged, worker !== null)
     recordDecisions(session.ledger, decisions, round)
     session.decisions.push(...decisions)
-    // §3x.3 A finding on Infinite's own code reaches Infinite through the run's report, never through the agent.
-    for (const decision of decisions.filter((entry) => entry.action === "INFINITE")) {
-      const where = `${decision.item.path ?? "general"}${decision.item.line ? `:${decision.item.line}` : ""}`
-      const note = safeDisplayText(prepared.scanner, `Review finding on ${decision.label ?? "Infinite's own code"}: ${decision.item.item ?? "review"} ${where} (${decision.item.severity})`).slice(0, 300)
-      // The report's note is built from the ledger's open findings at `done` (one source); this is the PR's copy.
-      session.notes.push(note)
-    }
+    // §3x.3 A finding on Infinite's own code reaches Infinite through the run's report ("For Infinite", built from the
+    // ledger's open findings: one source), never through the agent, and never holds the owner's pull request.
     const fixes = decisions.filter((decision) => decision.action === "FIX")
     let fixSha: string | null = null
     const fixState = new Map<string, "fixed" | "unverified">()
