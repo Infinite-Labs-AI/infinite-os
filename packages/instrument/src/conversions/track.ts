@@ -301,3 +301,43 @@ export function trackSource(): string {
     "};"
   ].join("\n")
 }
+
+/**
+ * `window.infiniteTrackBeforeLeaving(name, props?, options?)`: the same sends as `infiniteTrack`, and a promise that
+ * settles once they are safe from a full page load (P1-A, the reference store's `trackMetaEventBeforeLeaving`): Meta's
+ * `/tr` request for this event was seen (at most 400 ms), and GA4's hit is out when GA4 started on this page (at most
+ * 1 s). It settles at once when nothing needs waiting for, and never rejects. The site's own helper returns it, so a
+ * caller that leaves with a full page load waits for it (`infiniteLeaveAfter`); a caller that routes on the client
+ * ignores it.
+ */
+export function trackBeforeLeavingSource(): string {
+  return [
+    "window.infiniteTrackBeforeLeaving = function (name, props, options) {",
+    "  var waits = [];",
+    "  try {",
+    "    if (typeof name !== 'string' || !INFINITE_EVENT_NAME.test(name) || !infiniteMayTrack(options)) return Promise.resolve();",
+    "    var clean = infiniteCleanProps(props);",
+    "    try { if (infiniteDestinationAllowed(options, 'posthog', true) && window.posthog && typeof window.posthog.capture === 'function') window.posthog.capture(name, infiniteCopy(clean)); } catch (_error) {}",
+    "    infiniteRecordEvent(name, options);",
+    "    if (infiniteDestinationAllowed(options, 'ga4', true) && typeof window.gtag === 'function') {",
+    "      var params = infiniteGa4Props(name, clean);",
+    `      var lane = window.${GA4_LANE_MARKER};`,
+    "      var ours = !!(lane && typeof lane.id === 'string');",
+    "      if (ours) params.send_to = lane.id;",
+    "      // Only a GA4 that really started calls back (an adopted stub with no loader never does: F15).",
+    "      if (ours || !!(window.google_tag_manager && typeof window.google_tag_manager === 'object')) {",
+    "        waits.push(new Promise(function (resolve) {",
+    "          params.event_callback = resolve;",
+    "          params.event_timeout = 1000;",
+    "          setTimeout(resolve, 1000);",
+    "        }));",
+    "      }",
+    "      try { window.gtag('event', name, params); } catch (_error) {}",
+    "    }",
+    "    var meta = infiniteSendMetaBrowserEvent(name, clean, options, true);",
+    "    if (meta.wait) waits.push(meta.wait);",
+    "  } catch (_error) {}",
+    "  return Promise.all(waits).then(function () {}, function () {});",
+    "};"
+  ].join("\n")
+}

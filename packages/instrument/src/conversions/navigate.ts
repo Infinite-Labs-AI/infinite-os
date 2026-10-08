@@ -1,5 +1,7 @@
 // `window.infiniteTrackThenNavigate(event, hrefOrAnchor, name, props?, { destinations?, gate?, metaEventName? })` —
-// record a click, THEN leave.
+// record a click, THEN leave. And `window.infiniteLeaveAfter(start, go)` (P1-A): the same one-navigation-at-a-time
+// guard around a site's OWN click handler whose own helper sends the event and returns its wait
+// (`infiniteTrackBeforeLeaving`, ./track.ts); `go` is the handler's own navigation, kept as written.
 //
 // Source: the GA4 download bridge, infinite-site `.github/scripts/inject-analytics.cjs` L503-536 @
 // 9f65b47, with the destination taken from the caller instead of a hard-coded `/download`.
@@ -173,6 +175,26 @@ export function trackThenNavigateSource(): string {
     "  } catch (_error) {",
     "    if (!browserGoes || (event && event.defaultPrevented)) follow();",
     "  }",
+    "};",
+    "// P1-A, the reference store's leave.buy(start, go): the site's own click handler, wrapped. start does what the",
+    "// handler did before it left (add to the cart, call the site's helper) and returns the helper's wait",
+    "// (infiniteTrackBeforeLeaving); go is the handler's own navigation, unchanged. One navigation at a time: a second",
+    "// click while the first is on its way runs neither. go runs once, when the wait settles or at the backstop.",
+    "window.infiniteLeaveAfter = function (start, go) {",
+    "  if (infiniteLeaving) return;",
+    "  infiniteHoldLeaving();",
+    "  var gone = false;",
+    "  function leaveNow() {",
+    "    if (gone) return;",
+    "    gone = true;",
+    "    try { go(); } catch (_error) { infiniteReleaseLeaving(); }",
+    "  }",
+    "  var waiting;",
+    "  try { waiting = start(); } catch (error) { infiniteReleaseLeaving(); throw error; }",
+    "  if (waiting && typeof waiting.then === 'function') {",
+    `    setTimeout(leaveNow, ${NAVIGATION_BUDGET_MS});`,
+    "    waiting.then(leaveNow, leaveNow);",
+    "  } else leaveNow();",
     "};"
   ].join("\n")
 }

@@ -8,6 +8,10 @@
 //   infiniteTrack(name, props?, { gate?, destinations?, metaEventName? }) ./track.ts
 //   infiniteTrackThenNavigate(event, hrefOrAnchor, name, props?, { gate?, destinations?, metaEventName? })
 //                                                          ./navigate.ts
+//   infiniteTrackBeforeLeaving(name, props?, options?)    ./track.ts (the same sends, and the bounded wait a full page
+//                                                          load must leave after; the site's own helper returns it)
+//   infiniteLeaveAfter(start, go)                          ./navigate.ts (one navigation at a time: run the handler,
+//                                                          wait for the helper's wait, then the handler's own navigation)
 //   infiniteAdMatchAllowed()                               ./track.ts (the tag's "visitor allowed tracking" signal)
 //   infiniteIdentify(id) / infiniteReset()                 ./identify.ts
 //   infiniteMetaMirror(metaEventName, metaEventId, { wait?, identity?, budgetMs?, gate? })
@@ -31,12 +35,14 @@ import { isHtmlInjectedFramework, type InstallInstruction, type SupportedFramewo
 import { identifySource } from "./identify.js"
 import { trackThenNavigateSource } from "./navigate.js"
 import { UNSAFE_TEXT_SOURCE } from "./scrub.js"
-import { helperCoreSource, INFINITE_CURRENCY_PATTERN, trackSource } from "./track.js"
+import { helperCoreSource, INFINITE_CURRENCY_PATTERN, trackBeforeLeavingSource, trackSource } from "./track.js"
 
 /** Every window global the helper script defines. */
 export const CONVERSION_HELPER_GLOBALS = [
   "infiniteTrack",
   "infiniteTrackThenNavigate",
+  "infiniteTrackBeforeLeaving",
+  "infiniteLeaveAfter",
   "infiniteIdentify",
   "infiniteReset",
   "infiniteMetaMirror",
@@ -83,6 +89,7 @@ export function buildConversionHelpersScript(options: ConversionHelpersOptions =
     indent(UNSAFE_TEXT_SOURCE),
     indent(helperCoreSource({ currency: options.currency ?? null, metaPixelId: options.metaPixelId ?? null })),
     indent(trackSource()),
+    indent(trackBeforeLeavingSource()),
     indent(trackThenNavigateSource()),
     indent(identifySource()),
     "})();",
@@ -132,7 +139,7 @@ export function conversionHelpersInstruction(
     path: html ? "index.html" : "lib/infinite-analytics.ts",
     action: html ? "modify" : "create",
     description: html
-      ? "Add the managed conversion helpers (infiniteTrack, infiniteTrackThenNavigate, infiniteIdentify, infiniteReset, infiniteMetaMirror, infiniteCampaign, infiniteAdMatchAllowed) to the managed block. Your code calls them; they never run on their own."
+      ? "Add the managed conversion helpers (infiniteTrack, infiniteTrackThenNavigate, infiniteTrackBeforeLeaving, infiniteLeaveAfter, infiniteIdentify, infiniteReset, infiniteMetaMirror, infiniteCampaign, infiniteAdMatchAllowed) to the managed block. Your code calls them; they never run on their own."
       : "Add the managed conversion helpers to the managed analytics module, with typed wrappers your code imports.",
     snippet: html ? ["<script>", script, "</script>"].join("\n") : script,
     helpers: true
@@ -193,6 +200,8 @@ export function nextHelperWrappersSource(): string {
     "type InfiniteHelperWindow = {",
     "  infiniteTrack?: typeof infiniteTrack",
     "  infiniteTrackThenNavigate?: typeof infiniteTrackThenNavigate",
+    "  infiniteTrackBeforeLeaving?: typeof infiniteTrackBeforeLeaving",
+    "  infiniteLeaveAfter?: typeof infiniteLeaveAfter",
     "  infiniteIdentify?: typeof infiniteIdentify",
     "  infiniteReset?: typeof infiniteReset",
     "  infiniteMetaMirror?: typeof infiniteMetaMirror",
@@ -282,6 +291,40 @@ export function nextHelperWrappersSource(): string {
     "  const opensElsewhere = typeof target === \"object\" && typeof target.getAttribute === \"function\" && target.getAttribute(\"target\") === \"_blank\"",
     "  if (opensElsewhere) helpers.open(destination.href, \"_blank\", \"noopener\")",
     "  else helpers.location.assign(destination.href)",
+    "}",
+    "",
+    "/**",
+    " * The same sends as infiniteTrack, and a promise that settles once they are safe from a full page load: Meta's",
+    " * request is out (at most 400 ms) and GA4's hit when GA4 runs (at most 1 s). It never rejects. Return it from your own",
+    " * event helper; a click that then does a full page load waits for it with infiniteLeaveAfter.",
+    " */",
+    "export function infiniteTrackBeforeLeaving(name: string, props?: InfiniteEventProps, options?: InfiniteTrackOptions): Promise<void> {",
+    "  const helpers = infiniteHelpers()",
+    "  if (!helpers || typeof helpers.infiniteTrackBeforeLeaving !== \"function\") return Promise.resolve()",
+    "  try {",
+    "    return Promise.resolve(helpers.infiniteTrackBeforeLeaving(name, props, options)).then(",
+    "      () => undefined,",
+    "      () => undefined",
+    "    )",
+    "  } catch {",
+    "    return Promise.resolve()",
+    "  }",
+    "}",
+    "",
+    "/**",
+    " * Wrap a click handler that then does a FULL page load: `start` does what the handler did before it left and returns",
+    " * your helper's wait; `go` is the handler's own navigation, unchanged. `go` runs once the wait settles (at most 1 s).",
+    " * A second click while the first is on its way runs neither.",
+    " */",
+    "export function infiniteLeaveAfter(start: () => Promise<void> | null | undefined | void, go: () => void): void {",
+    "  const helpers = infiniteHelpers()",
+    "  if (helpers && typeof helpers.infiniteLeaveAfter === \"function\") {",
+    "    helpers.infiniteLeaveAfter(start, go)",
+    "    return",
+    "  }",
+    "  // Not hydrated yet: nothing was sent, so nothing is waited for.",
+    "  start()",
+    "  go()",
     "}",
     "",
     "/** Join this visitor's PostHog history to your stable account id (never an email). */",

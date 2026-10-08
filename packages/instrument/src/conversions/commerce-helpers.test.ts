@@ -201,6 +201,80 @@ describe("infiniteTrackThenNavigate with destinations (review P1-7)", () => {
   })
 })
 
+describe("infiniteTrackBeforeLeaving + infiniteLeaveAfter: the site's helper returns the wait, its full-load caller waits (P1-A)", () => {
+  it("sends like infiniteTrack and settles once THIS pixel's request is seen, never rejecting", async () => {
+    const page = store({ helpers: { currency: "USD" }, gtagCallback: false })
+    let settled = false
+    const wait = page.vm.evaluate<Promise<void>>(`infiniteTrackBeforeLeaving('add_to_cart', ${PRODUCT}, { destinations: ['meta', 'infinite'] })`)
+    void wait.then(() => { settled = true })
+    expect(page.calls.fbq.map((call) => call[1])).toEqual(["AddToCart"])
+    expect(page.calls.infinite).toEqual([["add_to_cart"]])
+    expect(page.calls.gtag).toEqual([])
+    await page.vm.resourceLoaded(`https://www.facebook.com/tr/?id=${OTHER_PIXEL}&ev=AddToCart`)
+    expect(settled).toBe(false)
+    await page.vm.resourceLoaded(`https://www.facebook.com/tr/?id=${PIXEL}&ev=AddToCart`)
+    await wait
+    expect(settled).toBe(true)
+  })
+
+  it("never waits longer than 400 ms for Meta, and settles at once when nothing was sent", async () => {
+    const page = store({ gtagCallback: false })
+    let settled = false
+    void page.vm.evaluate<Promise<void>>(`infiniteTrackBeforeLeaving('add_to_cart', ${PRODUCT}, { destinations: ['meta'] })`).then(() => { settled = true })
+    await page.vm.advance(399)
+    expect(settled).toBe(false)
+    await page.vm.advance(1)
+    expect(settled).toBe(true)
+    const nothing = page.vm.evaluate<Promise<void>>(`infiniteTrackBeforeLeaving('add_to_cart', ${PRODUCT}, { destinations: ['posthog'] })`)
+    let done = false
+    void nothing.then(() => { done = true })
+    await page.vm.advance(0)
+    expect(done).toBe(true)
+  })
+
+  it("infiniteLeaveAfter runs the handler, then the handler's OWN navigation once the wait settles; a double click runs nothing twice", async () => {
+    const page = store({ gtagCallback: false })
+    page.vm.window.__added = 0
+    page.vm.window.__went = [] as string[]
+    const click = `infiniteLeaveAfter(function () { window.__added += 1; return infiniteTrackBeforeLeaving('add_to_cart', ${PRODUCT}, { destinations: ['meta', 'infinite'] }) }, function () { window.__went.push('/cart') })`
+    page.vm.evaluate(click)
+    page.vm.evaluate(click)
+    expect(page.vm.window.__added).toBe(1)
+    expect(page.calls.fbq).toHaveLength(1)
+    expect(page.vm.window.__went).toEqual([])
+    await page.vm.resourceLoaded(`https://www.facebook.com/tr/?id=${PIXEL}&ev=AddToCart`)
+    await page.vm.advance(0)
+    expect(page.vm.window.__went).toEqual(["/cart"])
+    await page.vm.advance(2000)
+    expect(page.vm.window.__went).toEqual(["/cart"])
+    // The handler's own navigation is kept: the helper never assigns a location itself.
+    expect(page.vm.assigned).toEqual([])
+  })
+
+  it("infiniteLeaveAfter frees the button after the grace period and on a back/forward-cache restore", async () => {
+    const page = store({ gtagCallback: false })
+    page.vm.window.__added = 0
+    const click = "infiniteLeaveAfter(function () { window.__added += 1; return null }, function () {})"
+    page.vm.evaluate(click)
+    page.vm.evaluate(click)
+    expect(page.vm.window.__added).toBe(1)
+    await page.vm.advance(3000)
+    page.vm.evaluate(click)
+    expect(page.vm.window.__added).toBe(2)
+    page.vm.evaluate("dispatchEvent({ type: 'pageshow', persisted: true })")
+    page.vm.evaluate(click)
+    expect(page.vm.window.__added).toBe(3)
+  })
+
+  it("a handler that throws frees the button and the error reaches the site", () => {
+    const page = store()
+    expect(() => page.vm.evaluate("infiniteLeaveAfter(function () { throw new Error('cart broke') }, function () {})")).toThrow(/cart broke/)
+    page.vm.window.__added = 0
+    page.vm.evaluate("infiniteLeaveAfter(function () { window.__added += 1 }, function () {})")
+    expect(page.vm.window.__added).toBe(1)
+  })
+})
+
 describe("infiniteAdMatchAllowed (parity gap 4)", () => {
   it("asks the tag; false wherever the tag is not running", () => {
     const page = store()
