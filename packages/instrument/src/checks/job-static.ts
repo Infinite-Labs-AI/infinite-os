@@ -31,7 +31,12 @@ import type { TestExpect, TestTool } from "../wizard/contracts/test-engine.js"
 import { runCensus } from "./census.js"
 import { analyzeCsp, cspNeeds, parseCspPolicies } from "./live/csp.js"
 import { checkResult, isolated } from "./result.js"
-import { escapeRegExp } from "../text-escape.js"
+import { callsOf, literalString, splitTopLevelArgs, topLevelProps, type Call } from "./source-calls.js"
+import { adMatchFindings, canonicalEvent, doubleCountFindings, metaEventIdFindings, piiFindings, promiseFindings, valueFindings, type CommerceCheckInput, type CommerceFinding } from "./commerce-static.js"
+import type { EventInventory } from "./commerce-inventory.js"
+import { loadRepoSnapshot } from "../jobs/repo-files.js"
+
+export { callsOf, topLevelProps } from "./source-calls.js"
 import { GA4_PAGE_CHANGE_SCRIPT, META_PAGE_CHANGE_SCRIPT, pastedInPlace } from "../jobs/briefs.js"
 import { readPosthogConfigs, stripSensitivePosthogAddition } from "../setup-checks/posthog-config.js"
 
@@ -54,7 +59,14 @@ export const JOB_STATIC_CHECK_IDS = [
   "meta_mirror_wired",
   "posthog_improve_applied",
   "spa_page_view_applied",
-  "ga4_id_applied"
+  "ga4_id_applied",
+  // Review r3 "static checks / prove": the plan's event × tool promises, the money and match data on outcomes, and
+  // no second send of an event a tool already gets (`commerce-static.ts`).
+  "commerce_promises_met",
+  "outcome_ad_match",
+  "outcome_value_currency",
+  "no_double_count",
+  "meta_event_id_from_server"
 ] as const
 export type JobStaticCheckId = (typeof JOB_STATIC_CHECK_IDS)[number]
 
@@ -73,6 +85,10 @@ export interface JobStaticRunContext {
   newTools?: readonly TestTool[]
   /** The same-origin rewrites the run's managed install relies on (Infinite's collect path, PostHog's /ingest). */
   proxy?: ProxyInput
+  /** The scan's event × tool inventory: what the site sends each tool, and what the plan promised to add. */
+  eventInventory?: EventInventory | null
+  /** Meta gets this site's conversions (connected in Infinite, or the site runs a pixel); absent = assume it does. */
+  metaInUse?: boolean
 }
 
 export interface JobStaticDeps {
@@ -131,96 +147,6 @@ function itemTarget(item: Pick<ChecklistItem, "id">): string {
   return index < 0 ? "" : item.id.slice(index + 1)
 }
 
-/** One call: where it starts, its argument text (original and masked) and its 1-based line. */
-interface Call {
-  name: string
-  index: number
-  line: number
-  args: string
-  maskedArgs: string
-  end: number
-}
-
-/** Every call of `names` that is code (not a comment or a string), with its balanced argument list. */
-export function callsOf(text: string, names: readonly string[]): Call[] {
-  const masked = maskCommentsAndStrings(text, true)
-  const commentsOnly = maskCommentsAndStrings(text, false)
-  const pattern = new RegExp(`(?<![\\w$])(?:window\\s*\\.\\s*)?(${names.map(escapeRegExp).join("|")})\\s*\\(`, "g")
-  const out: Call[] = []
-  for (const match of masked.matchAll(pattern)) {
-    const index = match.index ?? 0
-    if (commentsOnly.slice(index, index + match[0].length) !== text.slice(index, index + match[0].length)) continue
-    const open = index + match[0].length - 1
-    let depth = 0
-    let end = -1
-    for (let cursor = open; cursor < masked.length; cursor += 1) {
-      const ch = masked[cursor]
-      if (ch === "(" || ch === "{" || ch === "[") depth += 1
-      else if (ch === ")" || ch === "}" || ch === "]") {
-        depth -= 1
-        if (depth === 0) {
-          end = cursor
-          break
-        }
-      }
-    }
-    if (end < 0) continue
-    out.push({ name: match[1]!, index, line: lineNumberAt(text, index), args: text.slice(open + 1, end), maskedArgs: masked.slice(open + 1, end), end })
-  }
-  return out
-}
-
-/** The first object literal's top-level properties in an argument list: key → value text (original). */
-export function topLevelProps(call: Pick<Call, "args" | "maskedArgs">): Map<string, string> | null {
-  const start = call.maskedArgs.indexOf("{")
-  if (start < 0 || call.maskedArgs.slice(0, start).trim() !== "") return null
-  const props = new Map<string, string>()
-  let depth = 0
-  let segmentStart = start + 1
-  const flush = (end: number) => {
-    const masked = call.maskedArgs.slice(segmentStart, end)
-    const original = call.args.slice(segmentStart, end)
-    const offset = segmentStart
-    segmentStart = end + 1
-    if (masked.trim() === "") return
-    if (/^\s*\.\.\./.test(masked)) {
-      props.set(`...${props.size}`, original.trim())
-      return
-    }
-    const quoted = /^\s*(["'])([A-Za-z_$][\w$]*)\1\s*:/.exec(original)
-    const named = /^\s*([A-Za-z_$][\w$]*)\s*:/.exec(masked)
-    const key = quoted?.[2] ?? named?.[1] ?? null
-    if (key !== null) {
-      const colon = call.maskedArgs.indexOf(":", offset + (quoted ? quoted[0].length - 1 : named![0].length - 1))
-      props.set(key, call.args.slice(colon + 1, end).trim())
-      return
-    }
-    const shorthand = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(masked)
-    if (shorthand) props.set(shorthand[1]!, shorthand[1]!)
-  }
-  for (let cursor = start; cursor < call.maskedArgs.length; cursor += 1) {
-    const ch = call.maskedArgs[cursor]
-    if (ch === "(" || ch === "{" || ch === "[") depth += 1
-    else if (ch === ")" || ch === "}" || ch === "]") {
-      depth -= 1
-      if (depth === 0) {
-        flush(cursor)
-        break
-      }
-    } else if (ch === "," && depth === 1) flush(cursor)
-  }
-  return props
-}
-
-/** A plain string literal's value (`"x"`, `'x'`, or a template with no `${…}`), else null. */
-function literalString(value: string): string | null {
-  const trimmed = value.trim()
-  const match = /^(["'`])((?:\\.|(?!\1)[^\\])*)\1$/.exec(trimmed)
-  if (!match) return null
-  if (match[1] === "`" && match[2]!.includes("${")) return null
-  return match[2]!
-}
-
 /** True when `index` is inside a `catch (…) { … }` block of the masked text. */
 function insideCatch(masked: string, index: number): boolean {
   for (const match of masked.slice(0, index).matchAll(/\bcatch\s*(?:\([^)]*\))?\s*\{/g)) {
@@ -249,11 +175,9 @@ const files = (list: readonly string[]): string => list.slice(0, 4).join(", ") +
 // ---------------------------------------------------------------------------------------------
 
 const OUTCOME_CALLS = ["reportInfiniteOutcome", "postInfiniteOutcome"] as const
+const HASHED = /\b(?:createHash|sha256|sha-256|hash\w*|digest)\b/i
 /** An id that changes on every call: a retry would count twice (or every outcome would dedupe into one). */
 const UNSTABLE_ID = /(?:\bDate\s*\.\s*now|\bMath\s*\.\s*random|\brandomUUID|\buuid(?:v4)?|\bv4|\bnanoid|\bcuid2?|\bperformance\s*\.\s*now|\bnew\s+Date)\s*\(/
-const PII_KEYS = /(?<![\w$])(?:email|e_mail|emailAddress|email_address|phone|phoneNumber|phone_number|ph|first_?name|last_?name|full_?name|firstName|lastName|fullName|address|street)\s*:/i
-const PII_VALUES = /\.\s*(?:email|emailAddress|email_address|phone|phoneNumber|phone_number)\b|(?<![\w$.])(?:email|phone|phoneNumber)(?![\w$])/
-const HASHED = /\b(?:createHash|sha256|sha-256|hash\w*|digest)\b/i
 
 function outcomeCalls(scope: ReadonlyMap<string, string>): Array<Call & { file: string }> {
   return [...scope].flatMap(([file, text]) => callsOf(text, OUTCOME_CALLS).map((call) => ({ ...call, file })))
@@ -277,30 +201,6 @@ function trackedName(call: Pick<Call, "name" | "args">): string | null {
     if (value !== null && /^[a-z][a-z0-9_]*$/.test(value)) return value
   }
   return null
-}
-
-function splitTopLevelArgs(args: string): string[] {
-  const out: string[] = []
-  let depth = 0
-  let quote: string | null = null
-  let start = 0
-  for (let index = 0; index < args.length; index += 1) {
-    const ch = args[index]!
-    if (quote) {
-      if (ch === "\\") index += 1
-      else if (ch === quote) quote = null
-      continue
-    }
-    if (ch === '"' || ch === "'" || ch === "`") quote = ch
-    else if (ch === "(" || ch === "{" || ch === "[") depth += 1
-    else if (ch === ")" || ch === "}" || ch === "]") depth -= 1
-    else if (ch === "," && depth === 0) {
-      out.push(args.slice(start, index))
-      start = index + 1
-    }
-  }
-  if (args.slice(start).trim() !== "") out.push(args.slice(start))
-  return out
 }
 
 /**
@@ -331,12 +231,34 @@ function successRegion(text: string, line: number): { start: number; end: number
   return awaited < 0 ? null : { start: awaited, end: lineEnd }
 }
 
+/** ONE result for a commerce rule: its first problem (with how many more), else its first unknown, else a pass. */
+function commerceResult(checkId: JobStaticCheckId, ctx: CheckContext, findings: readonly CommerceFinding[], passReason: string): CheckResult {
+  const problems = findings.filter((finding) => finding.state === "problem")
+  const chosen = problems[0] ?? findings.find((finding) => finding.state === "undetermined")
+  if (!chosen) return checkResult(checkId, "pass", "S", ctx, { reason: passReason })
+  const more = problems.length > 1 ? ` (and ${problems.length - 1} more: ${problems.slice(1, 3).map((finding) => finding.message).join(" ")})` : ""
+  return checkResult(checkId, chosen.state, "S", ctx, {
+    reason: `${chosen.message}${chosen.state === "problem" ? more : ""}`,
+    ...(chosen.file ? { evidence: [{ file: chosen.file, line: chosen.line ?? 1 }] } : {})
+  })
+}
+
 export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCheckId, CheckFn> {
   const run = (checkId: JobStaticCheckId, body: (input: JobInput, ctx: CheckContext) => CheckResult): CheckFn =>
     (input, ctx) => isolated(checkId, "S", ctx, async () => [body(jobInput(input, deps), ctx)])
   const context = (): JobStaticRunContext => deps.run?.() ?? {}
   const result = (checkId: JobStaticCheckId, ctx: CheckContext, state: CheckResult["state"], reason: string, file?: string, line?: number) =>
     checkResult(checkId, state, "S", ctx, { reason, ...(file ? { evidence: [{ file, line: line ?? 1 }] } : {}) })
+  /** The commerce input with each file's text before this run (none when any base read fails). */
+  const withBase = (input: JobInput, commerce: CommerceCheckInput): CommerceCheckInput => {
+    const base = new Map<string, string | null>()
+    for (const file of commerce.files.keys()) {
+      const text = (deps.readBaseFile ?? gitShowFile)(input.root, file)
+      if (text === undefined) return commerce
+      base.set(file, text)
+    }
+    return { ...commerce, base }
+  }
   /** LF4 close round 2 (P2-2): a problem that is the job's change MISSING from the code (`CheckResult.absent`). */
   const missing = (checkId: JobStaticCheckId, ctx: CheckContext, reason: string, file?: string, line?: number): CheckResult => ({
     ...result(checkId, ctx, "problem", reason, file, line),
@@ -536,27 +458,51 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       return result("event_id_stable", ctx, "pass", "every outcome carries a stable eventId")
     }),
 
-    // Job 8: no raw email, phone or name in an outcome (an ad-match `em` only as a hash; never `ph`).
+    // Job 8: no raw email, phone, name or address reaches an outcome's request body or the Stripe metadata (match data
+    // only as digests; never a phone in any form). Review r3: what a nested call RECEIVES (`withPerson({ email })`) is
+    // not what the request carries, so only what reaches the body is read (`commerce-static.ts` `piiFindings`).
     no_pii_in_outcome: run("no_pii_in_outcome", (input, ctx) => {
       const scope = itemFiles(input)
       const calls = outcomeCalls(scope)
       if (calls.length === 0) return noOutcomeCall("no_pii_in_outcome", scope, ctx)
-      for (const call of calls) {
-        if (PII_KEYS.test(call.maskedArgs)) return result("no_pii_in_outcome", ctx, "problem", `${call.file}:${call.line} sends a personal-data field in the outcome`, call.file, call.line)
-        for (const match of call.maskedArgs.matchAll(/(?<![\w$])em\s*:/g)) {
-          const value = call.args.slice((match.index ?? 0) + match[0].length).split(/[,}\n]/)[0] ?? ""
-          if (!HASHED.test(value)) return result("no_pii_in_outcome", ctx, "problem", `${call.file}:${call.line} sends em unhashed (only a sha256 hex of the email may leave the server)`, call.file, call.line)
-        }
-        const props = topLevelProps(call)
-        for (const [key, value] of props ?? []) {
-          if (key === "adMatch") continue
-          if (PII_VALUES.test(maskCommentsAndStrings(value, true)) && !HASHED.test(value)) {
-            return result("no_pii_in_outcome", ctx, "problem", `${call.file}:${call.line} puts an email or phone in "${key}"`, call.file, call.line)
-          }
-        }
-      }
-      return result("no_pii_in_outcome", ctx, "pass", "no personal data in any outcome")
+      return commerceResult("no_pii_in_outcome", ctx, piiFindings({ files: scope }), "no personal data in any outcome or Stripe metadata")
     }),
+
+    // Review r3: every event × tool cell the plan promised has its code somewhere in the app (Meta ViewContent /
+    // AddToCart from the page, the server events through reportInfiniteOutcome, GA4 / PostHog / Infinite sends). An
+    // item whose target is one event checks that event; any other item checks them all.
+    commerce_promises_met: run("commerce_promises_met", (input, ctx) => {
+      const run = context()
+      if (!run.eventInventory) return result("commerce_promises_met", ctx, "undetermined", "the plan's event list is not known, so what it promised each tool could not be compared with the code")
+      const files = loadRepoSnapshot(input.root, input.appRoot).files
+      const findings = promiseFindings({ files, inventory: run.eventInventory }, canonicalEvent(itemTarget(input.item)))
+      return commerceResult("commerce_promises_met", ctx, findings ?? [], "every event the plan promised is sent to its tools")
+    }),
+
+    // Review r3: an outcome Meta gets from the server carries the match data (adMatch).
+    outcome_ad_match: run("outcome_ad_match", (input, ctx) => {
+      const run = context()
+      return commerceResult("outcome_ad_match", ctx, adMatchFindings({ files: itemFiles(input), ...(run.metaInUse !== undefined ? { metaInUse: run.metaInUse } : {}) }), "every server conversion for Meta carries match data")
+    }),
+
+    // Review r3: a purchase outcome carries its value and its currency.
+    outcome_value_currency: run("outcome_value_currency", (input, ctx) =>
+      commerceResult("outcome_value_currency", ctx, valueFindings({ files: itemFiles(input) }), "every purchase carries its value and currency")
+    ),
+
+    // Review r3 (P0-5): a send the turn added to a tool that already gets that event from the site (a second GA4
+    // purchase beside the site's own) counts it twice. The site's sends come from the inventory and the code before.
+    no_double_count: run("no_double_count", (input, ctx) => {
+      const commerce = withBase(input, { files: itemFiles(input), inventory: context().eventInventory ?? null })
+      const findings = doubleCountFindings(commerce)
+      if (findings === null) return result("no_double_count", ctx, "undetermined", "the code before this run could not be read, so new sends could not be told apart from the site's own")
+      return commerceResult("no_double_count", ctx, findings, "no event is sent twice to one tool")
+    }),
+
+    // Review r3: a browser Meta event carries only the event id the server got back, or none.
+    meta_event_id_from_server: run("meta_event_id_from_server", (input, ctx) =>
+      commerceResult("meta_event_id_from_server", ctx, metaEventIdFindings(withBase(input, { files: itemFiles(input) })), "no browser Meta event carries an event id made in the page")
+    ),
 
     // Job 9: an account id (never an email or a constant) is identified once the login is verified.
     identify_on_auth_success: run("identify_on_auth_success", (input, ctx) => {

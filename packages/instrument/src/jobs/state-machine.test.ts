@@ -144,8 +144,8 @@ describe("checks decide (§3e.5)", () => {
 
   it("job 10 waits for a real event only after its click test passes; a failing click test sends it back (review P2-1)", () => {
     const claimed = claimedAt(item("conversions_to_tools", "claimed"), CLAIM_AT)
-    expect(claimed.checks.map((check) => `${check.tier}:${check.id}`)).toEqual(["RH:click_test", "S:no_fbq_standard_on_click", "S:conversion_tracked", "S:track_after_success", "P:first_real_conversion"])
-    const local = applyResults(claimed, [result("no_fbq_standard_on_click", "S", "pass"), result("conversion_tracked", "S", "pass"), result("track_after_success", "S", "pass")], RUN, { budgetLeft: true })
+    expect(claimed.checks.map((check) => `${check.tier}:${check.id}`)).toEqual(["RH:click_test", "S:no_fbq_standard_on_click", "S:conversion_tracked", "S:track_after_success", "S:no_double_count", "S:meta_event_id_from_server", "P:first_real_conversion"])
+    const local = applyResults(claimed, [result("no_fbq_standard_on_click", "S", "pass"), result("conversion_tracked", "S", "pass"), result("track_after_success", "S", "pass"), result("no_double_count", "S", "pass"), result("meta_event_id_from_server", "S", "pass")], RUN, { budgetLeft: true })
     // Negative: the click test has not run, so it is not "waiting for a real event".
     expect(local.item.state).toBe("done_in_code")
     const failed = applyResults(local.item, [result("click_test", "RH", "problem")], RUN, { budgetLeft: true })

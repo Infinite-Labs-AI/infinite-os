@@ -1354,6 +1354,18 @@ describe("step `review` (§3g.4)", { timeout: 60_000 }, () => {
     expect(w.ctx.asks.filter((ask) => ask.kind === "single")).toEqual([])
   })
 
+  it("review r3: the reviewer's checks.json carries the commerce findings in plain words (unknown, never a pass, without the plan's event list)", async () => {
+    const w = await opened({ reviews: [review([])], answers: { "teammate-comments": { actOn: [] } } })
+    let checks: { commerce?: Array<{ rule: string; state: string; message: string }> } | null = null
+    const review0 = w.deps.agents.review.bind(w.deps.agents)
+    w.deps.agents.review = async (input) => {
+      checks ??= JSON.parse(readFileSync(join(input.worktreeDir, ".infinite/review/checks.json"), "utf8")) as typeof checks
+      return review0(input)
+    }
+    await reviewStep.run(w.ctx, w.deps)
+    expect(checks!.commerce).toEqual(expect.arrayContaining([{ rule: "promise_missing", state: "undetermined", message: "The plan's event list is not known, so what it promised each tool could not be compared with the code." }]))
+  })
+
   it("W6 §3x.3: a fix round that timed out says so (no build); findings on Infinite's own code get the INFINITE reply and never a job; the reviewer sees wizardFiles and a stubbed managed diff", async () => {
     const w = await opened({
       reviews: [

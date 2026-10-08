@@ -80,15 +80,17 @@ export function identifyResetSteps(): Step[] {
 
 const SIGNUP_IMPORT = 'import { supabase } from "../../../lib/supabase"\n'
 const SIGNUP_CALL = "  const { data, error } = await supabase.auth.signUp({ email, password })\n"
-export const EARLY_REPORT = '  await reportInfiniteOutcome({ type: "sign_up", path: "/api/signup", eventId: data.user?.id ?? "unknown" })\n'
+// Review r3: Meta is connected, so the sign_up carries the match data (adMatch), built from the visitor's own request.
+const MATCH = "adMatch: await adMatchFromRequest(request, { trackingAllowed: false, email })"
+export const EARLY_REPORT = `  await reportInfiniteOutcome({ type: "sign_up", path: "/api/signup", eventId: data.user?.id ?? "unknown", ${MATCH} })\n`
 const SIGNUP_RETURN = "  return Response.json({ ok: true, accountId: data.user.id })"
-export const LATE_REPORT = '  await reportInfiniteOutcome({ type: "sign_up", path: "/api/signup", eventId: data.user.id })\n'
+export const LATE_REPORT = `  await reportInfiniteOutcome({ type: "sign_up", path: "/api/signup", eventId: data.user.id, ${MATCH} })\n`
 
 /** Job 8: report the signup outcome, deliberately BEFORE the error check (the reviewer flags it). */
 export function serverConversionSteps(): Step[] {
   mustHold("app/api/signup/route.ts", SIGNUP_IMPORT, SIGNUP_CALL, SIGNUP_RETURN)
   return [
-    replaceStep("app/api/signup/route.ts", SIGNUP_IMPORT, `${SIGNUP_IMPORT}import { reportInfiniteOutcome } from "../../../lib/infinite-server-lane"\n`),
+    replaceStep("app/api/signup/route.ts", SIGNUP_IMPORT, `${SIGNUP_IMPORT}import { adMatchFromRequest, reportInfiniteOutcome } from "../../../lib/infinite-server-lane"\n`),
     replaceStep("app/api/signup/route.ts", SIGNUP_CALL, `${SIGNUP_CALL}${EARLY_REPORT}`)
   ]
 }

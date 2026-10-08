@@ -28,6 +28,7 @@ import { sanitizeUntrusted } from "../agents/sanitize.js"
 import { openTagBridge } from "../bridge/client.js"
 import { envProxyFetch } from "../checks/live/env-proxy-fetch.js"
 import { registerJobStaticChecks, type JobStaticRunContext } from "../checks/job-static.js"
+import { readEventInventory } from "../checks/commerce-inventory.js"
 import { registerO9Checks, type O9RunContext } from "../checks/o9.js"
 import { runCensus } from "../checks/census.js"
 import { lexicalStates } from "../lexical-states.js"
@@ -160,6 +161,11 @@ export function jobStaticRunContext(root: string, runId: string | null): JobStat
     const posthog = keys.posthog.status === "connected" ? posthogProxyFor(keys.posthog) : null
     const infinite = keys.infinite.collectPath ? { path: keys.infinite.collectPath, destination: infiniteCollectDestination(INFINITE_API_ORIGIN) } : null
     out.proxy = { ...(posthog ? { posthog } : {}), ...(infinite ? { infinite } : {}) }
+    // Review r3: the scan's event × tool inventory (what the plan promised each tool) and whether Meta gets this site's
+    // conversions (connected in Infinite, or the site runs a pixel), for the commerce checks.
+    const inventory = readEventInventory((before as unknown as { eventInventory?: unknown }).eventInventory)
+    if (inventory) out.eventInventory = inventory
+    out.metaInUse = keys.meta.status === "connected" || before.facts.census.entries.some((entry) => entry.tool === "meta")
   }
   return out
 }
