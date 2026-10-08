@@ -595,6 +595,7 @@ await postInfiniteOutcome({
   eventId: "purchase:" + session.id,   // the SAME id every time this purchase is reported: counted once
   properties: {
     value: session.amount_total / 100, currency: session.currency.toUpperCase(),   // required for a Purchase
+    content_ids: (await productIdsForSession(session.id)).join(","),   // product ids / line items from Stripe
     visitKey: session.metadata.infinite_visit_key   // carried from checkout: same-lane attribution
   },
   adMatch: await loadCheckoutAdMatch(session.id)

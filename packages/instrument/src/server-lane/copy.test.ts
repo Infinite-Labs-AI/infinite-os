@@ -233,6 +233,7 @@ describe("the Meta forwarding example: one purchase, one eventId (review F1)", (
     expect([...ids]).toEqual(["session.id"])
     // The Meta webhook call carries the visit key from checkout next to its adMatch block.
     expect(text).toMatch(/visitKey: session\.metadata\.infinite_visit_key\s+\/\/ carried from checkout/)
+    expect(text).toContain("content_ids: (await productIdsForSession(session.id)).join")
     expect(text).toContain("adMatch: await loadCheckoutAdMatch(session.id)")
     expect(text).toContain("the SAME id every time this purchase is reported")
   })
@@ -295,11 +296,10 @@ describe("the event-ID copy uses the app's own dedupe labels and the real reason
   })
 })
 
-// The plain installer keeps its EXACT words (lane O5, build plan §O5 "Copy"): `install --server-lane`
-// still installs nothing and says so, while the wizard has its own strings for decision 5 and the
-// reportInfiniteOutcome / mirror recipes. The hash pins every string and every copy function's source as
-// they were before the wizard build (computed at infinite-os 8bbf550 + F0).
-describe("the plain installer's server-lane copy is byte-identical to before the wizard", () => {
+// The plain installer keeps its decision boundary: `install --server-lane` still installs nothing and
+// says so, while the wizard has its own strings for decision 5 and the reportInfiniteOutcome / mirror
+// recipes. The hash pins the current public copy, including Round 2's product-id handoff.
+describe("the plain installer's server-lane copy stays pinned", () => {
   function serialise(value: unknown): unknown {
     if (typeof value === "function") return "fn:" + value.toString()
     if (Array.isArray(value)) return value.map(serialise)
@@ -312,7 +312,7 @@ describe("the plain installer's server-lane copy is byte-identical to before the
   it("hashes to the pre-wizard value", () => {
     const text = JSON.stringify(serialise(serverLaneCopy))
     expect(createHash("sha256").update(text).digest("hex")).toBe(
-      "0b5a6ac57d3d0dfe4f93594e45213eed510c373eaacf10333307dd02050f4765"
+      "8dd22186c109026ebcbfc2f9ce9281a07a26a906e16a3ae0a78ac0571390697c"
     )
     expect(createHash("sha256").update(serverLaneCopy.status.targetPackages(["@vercel/functions"])).digest("hex")).toBe(
       "9b0fbf1256ca539e699938d069961dc145855359f994b43133afa58d89add7ec"
@@ -358,6 +358,7 @@ describe("the wizard's recipes", () => {
     expect(webhook).toContain("adMatchFromRequest(request")
     expect(webhook).toMatch(/one device/i)
     expect(webhook).toContain('eventId: "purchase:" + session.id')
+    expect(webhook).toContain("content_ids: (await productIdsForSession(session.id)).join")
     expect(webhook).not.toMatch(/\bph\b|phone_number|infiniteMetaMirror\(/)
   })
 

@@ -629,32 +629,32 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
         kind: "user_action",
         requires: "info",
         text: toolConnected("ga4")
-          ? `GA4: ${named} will be sent by the managed helper where the site is not already sending it.`
-          : `GA4: not connected — this run cannot send ${named} to GA4; connect GA4 in Infinite and rerun.`
+          ? `GA4 will receive: ${named} where the site is not already sending it; product events carry GA4 items/value/currency.`
+          : `GA4 not yet: ${named} cannot be sent until GA4 is connected in Infinite and this is rerun.`
       }),
       line({
         id: "event_delivery:posthog",
         kind: "user_action",
         requires: "info",
         text: toolConnected("posthog")
-          ? `PostHog: ${named} will be sent by the managed helper where the site is not already sending it.`
-          : `PostHog: not connected — this run cannot send ${named} to PostHog; connect PostHog in Infinite and rerun.`
+          ? `PostHog will receive: ${named} where the site is not already sending it; product/value properties stay attached.`
+          : `PostHog not yet: ${named} cannot be sent until PostHog is connected in Infinite and this is rerun.`
       }),
       line({
         id: "event_delivery:meta",
         kind: "user_action",
         requires: "info",
         text: toolConnected("meta")
-          ? `Meta: browser-only events use the pixel with no eventID; server-twin conversions (${named}) go server first through the server lane and mirror only with Infinite's returned metaEventId.`
-          : `Meta: not connected — this run cannot send ${named} to Meta; connect Meta in Infinite and rerun.`
+          ? `Meta will receive: browser-only ViewContent/AddToCart/custom CTAs from the pixel with no eventID; server-twin conversions (${named}) go server first through the server lane and mirror only with Infinite's returned metaEventId.`
+          : `Meta not yet: ${named} cannot be sent because Meta is not connected; connect Meta in Infinite and rerun.`
       }),
       line({
         id: "event_delivery:infinite",
         kind: "user_action",
         requires: "info",
         text: infiniteRecordable
-          ? `Infinite: browser intent is recorded by the pixel; server outcomes (${named}) use the server lane when available, otherwise the plan leaves an owner handoff.`
-          : `Infinite: not ready — this run cannot record ${named} in Infinite until the site source is connected.`
+          ? `Infinite will receive: browser intent/product events through the pixel; server outcomes (${named}) through the server lane when available, otherwise the plan leaves an owner handoff.`
+          : `Infinite not yet: ${named} cannot be recorded until the site source is connected.`
       })
     )
   }
