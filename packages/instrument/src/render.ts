@@ -544,7 +544,17 @@ export function renderServerLaneLines(plan: InstallPlan, apply?: ApplyResult): s
         break
     }
     lines.push(`  ${serverLaneCopy.cli.module(lane.modulePath)}`)
+    // The outcome helper every lane ships (Next.js included).
+    for (const file of lane.created ?? []) {
+      if (file.action !== "manual") lines.push(`  ${serverLaneCopy.cli.targetOutcomeFile(file.path)}`)
+    }
     lines.push(`  ${serverLaneCopy.cli.brief(lane.briefPath)}`)
+  } else if (lane.mode === "brief") {
+    // No page-view lane for this stack, but the host-agnostic outcome helper is still written.
+    for (const file of lane.created ?? []) {
+      if (file.action !== "manual") lines.push(`  ${serverLaneCopy.cli.targetOutcomeFile(file.path)}`)
+    }
+    lines.push(`  ${serverLaneCopy.cli.briefOnly(lane.briefPath)}`)
   } else if (lane.created && lane.created.length > 0) {
     // A host-chosen target: say WHICH lane and WHY before listing its files.
     lines.push(`  ${serverLaneCopy.cli.targetChosen(lane.targetLabel ?? lane.mode, lane.targetEvidence)}`)
@@ -566,8 +576,6 @@ export function renderServerLaneLines(plan: InstallPlan, apply?: ApplyResult): s
     if (lane.mode === "node-module") {
       lines.push(`  ${serverLaneCopy.cli.targetMount(lane.briefPath)}`)
     }
-  } else {
-    lines.push(`  ${serverLaneCopy.cli.briefOnly(lane.briefPath)}`)
   }
   if (apply?.serverLane && !apply.serverLane.briefWritten) {
     lines.push(`  ! ${lane.briefPath} was not written (an unmanaged file is in the way); the brief is printed below.`)

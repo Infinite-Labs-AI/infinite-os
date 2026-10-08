@@ -483,6 +483,10 @@ describe("no host signal", () => {
       guide: SERVER_LANE_GUIDE_FILE
     })
     expect(readFileSync(join(root, "lib/infinite-outcome.ts"), "utf8")).toContain("export async function reportInfiniteOutcome(")
+    const preview = renderPreview(installPlan)
+    expect(preview).toContain("+ lib/infinite-outcome.ts  reportInfiniteOutcome()")
+    expect(preview).toContain("this stack is not patched automatically")
+    expect(preview).not.toContain("→ brief")
     uninstallInstallation({ root, dryRun: false })
     expectTreeEquals(root, original)
   })
@@ -511,6 +515,7 @@ describe("Next.js is untouched by hosting detection", () => {
     // Gap 1: the SAME outcome helper as every other target, beside the Next module.
     expect(installPlan.serverLane?.created).toEqual([{ path: "lib/infinite-outcome.ts", role: "module", action: "create" }])
     const helper = readFileSync(join(root, "lib/infinite-outcome.ts"), "utf8")
+    expect(renderPreview(installPlan)).toContain("+ lib/infinite-outcome.ts  reportInfiniteOutcome() and the Stripe/lead helpers")
     for (const name of ["reportInfiniteOutcome", "reportInfiniteOutcomeForMirror", "adMatchFromRequest", "personMatch", "reportStripeCheckoutPurchase", "reportInfiniteLead"]) {
       expect(helper).toMatch(new RegExp(`export (async )?function ${name}\\(`))
     }
