@@ -400,9 +400,11 @@ export interface WorkspaceInstallArtifacts {
   hostGuard?: { mode: "deny"; exempt: string[]; deny: string[] }
   /**
    * The managed conversion helpers (decisions 9 and 13, `src/conversions/`). Only an explicit
-   * `helpers: true` emits them. Absent = none (the plain installer's bytes are unchanged).
+   * `helpers: true` emits them. Absent = none (the plain installer's bytes are unchanged). `currency` is the site's
+   * own currency (ISO 4217, from its catalog or payment code): the default a product event carries to Meta and GA4
+   * when the caller passes none (review P2: Meta AddToCart/ViewContent never go with a value and no currency).
    */
-  conversions?: { helpers: boolean }
+  conversions?: { helpers: boolean; currency?: string }
 }
 
 export interface InstallManifest {
