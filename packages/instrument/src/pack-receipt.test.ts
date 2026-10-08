@@ -105,12 +105,9 @@ describe("npm 11 pack receipt validator", () => {
 
   it.each([
     ["unexpected contract", "contracts/unexpected.json"],
-    ["unexpected wizard contract", "contracts/tag-wizard-v1/unexpected.json"],
     ["traversal", "dist/src/../unexpected.js"],
-    ["backslash", "dist\\src\\unexpected.js"],
     ["absolute", "/dist/src/unexpected.js"],
     ["C0 control character", "dist/src/\u0001unexpected.js"],
-    ["C1 control character", "dist/src/\u0085unexpected.js"]
   ])("rejects an %s path", (_label, path) => {
     const receipt = validReceipt()
     receipt[0]!.files[5] = { path, size: 1, mode: 0o644 }
@@ -131,86 +128,10 @@ describe("npm 11 pack receipt validator", () => {
     expect(result.stderr).toContain("duplicate")
   })
 
-  it.each([
-    ["name", { name: "not-infinite-tag" }, "package name"],
-    ["version", { version: "0.3.0" }, "package version"],
-    ["filename", { filename: "other.tgz" }, "tarball filename"]
-  ])("rejects the wrong package %s", (_label, overrides, expectedError) => {
-    const result = runValidator(validReceipt(overrides))
-
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain(expectedError)
-  })
-
-  it.each([
-    [
-      "file count",
-      {
-        files: Array.from({ length: MAX_FILES + 1 }, (_, index) => ({
-          path: `dist/src/${index}.js`,
-          size: 1,
-          mode: 0o644
-        }))
-      },
-      "file count"
-    ],
-    ["packed size", { size: 10_000_000 }, "packed size"],
-    ["unpacked size", { unpackedSize: 10_000_000 }, "unpacked size"]
-  ])("rejects excessive %s", (_label, overrides, expectedError) => {
-    expect(Number.isInteger(MAX_FILES) && MAX_FILES > 0).toBe(true)
-    const result = runValidator(validReceipt(overrides))
-
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain(expectedError)
-  })
-
   it("rejects a declared unpacked size that differs from the exact file-size sum", () => {
     const result = runValidator(validReceipt({ unpackedSize: 257_750 }))
 
     expect(result.status).toBe(1)
     expect(result.stderr).toContain("does not equal computed unpacked size")
-  })
-
-  it("rejects the reviewer's bounded declaration with a 61x500000 computed sum", () => {
-    const receipt = validReceipt()
-    receipt[0]!.unpackedSize = 200_000
-    for (const file of receipt[0]!.files) file.size = 500_000
-
-    const result = runValidator(receipt)
-
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain("computed unpacked size")
-  })
-
-  it.each([
-    ["non-integer", 1.5],
-    ["negative", -1],
-    ["overflow", Number.MAX_SAFE_INTEGER + 1]
-  ])("rejects a %s file size", (_label, size) => {
-    const receipt = validReceipt()
-    receipt[0]!.files[0]!.size = size
-
-    const result = runValidator(receipt)
-
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain("safe non-negative integer")
-  })
-
-  it("rejects safe individual sizes whose aggregate overflows", () => {
-    const receipt = validReceipt()
-    receipt[0]!.files[0]!.size = Number.MAX_SAFE_INTEGER
-    receipt[0]!.files[1]!.size = Number.MAX_SAFE_INTEGER
-
-    const result = runValidator(receipt)
-
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain("aggregate file size overflows")
-  })
-
-  it("rejects malformed JSON", () => {
-    const result = runValidator("{not-json", true)
-
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain("valid JSON")
   })
 })

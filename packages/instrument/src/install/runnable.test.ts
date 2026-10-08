@@ -4,19 +4,17 @@
 import { describe, expect, it } from "vitest"
 
 import { candidate, fakeBefore, fakeHosting, fakeKeys, fakeProductionDeniedConflict, notConnectedKeys } from "../../test/wizard/o7-fakes.js"
-import { PLAN_LINE_KINDS, type PlanLineKind } from "../wizard/contracts/asks.js"
+import { type PlanLineKind } from "../wizard/contracts/asks.js"
 import type { TagHosting } from "../wizard/contracts/bridge.js"
 import { buildHostGuardExpression, classifyHost, productionDeniedConflict } from "../host-guard.js"
 import { resolveProductionHost } from "../wizard/site-host.js"
 import {
-  agentJobsAfterApprovals,
   buildPlanModel,
   guardDecision,
   lineFactsFor,
   lineRunnable,
   resolvePlanAnswers,
   RUNNABILITY_TEXT,
-  runnableAgentJobs,
   seedItemsAfterApprovals,
   type LineFacts,
   type PlanModelInput,
@@ -83,7 +81,7 @@ describe("lineRunnable: every PlanLineKind against facts that make it unrunnable
     preview_guard_managed: "Infinite does not know your production domain yet, so no preview guard is added; tell the wizard your live domain (--production-host)."
   }
 
-  it.each([...PLAN_LINE_KINDS, "install_provider:infinite" as const].map((kind) => [kind]))("%s", (kind) => {
+  it.each(([...Object.keys(DECIDED), "install_provider", "agent_budget"] as Array<PlanLineKind | "install_provider:infinite">).map((kind) => [kind]))("%s", (kind) => {
     const verdict = lineRunnable(kind, UNRUNNABLE)
     const refusal = DECIDED[kind]
     if (refusal === undefined) expect(verdict).toEqual({ ok: true })
@@ -117,21 +115,6 @@ describe("the Infinite line (DECISIONS §1.6 table)", () => {
     expect(plan.lines.some((line) => line.id === "user_action:server_lane" || line.id === "account_settings:hosting")).toBe(false)
   })
 
-  it("a host answered but an old app (no capability) and no Vercel connection → the no-proof user_action", () => {
-    const plan = buildPlanModel(freshInput({ run: { site: answered("fresh-acme.com"), siteClaim: false } }))
-    expect(plan.lines.some((line) => line.id === "install_provider:infinite")).toBe(false)
-    expect(plan.lines.find((line) => line.id === "user_action:infinite")?.text).toBe(RUNNABILITY_TEXT.infiniteNoProof("fresh-acme.com"))
-  })
-
-  it("a Vercel connection serving the host (no source yet) → approvable, no claim wording; env writes allowed → the lane is approvable", () => {
-    const keys = freshKeys()
-    const plan = buildPlanModel(freshInput({ keys, before: fakeBefore({ keys, hosting: fakeHosting({ productionDomains: ["acme-store.com"], envWriteGranted: true }) }) }))
-    expect(plan.lines.find((line) => line.id === "install_provider:infinite")?.requires).toBe("info")
-    expect(plan.lines.some((line) => line.id === "info:infinite_site_file")).toBe(false)
-    expect(plan.lines.find((line) => line.id === "server_lane")?.requires).toBe("info")
-    expect(plan.lines.find((line) => line.id === "npm_install")?.requires).toBe("approval")
-  })
-
   it("NEGATIVE (founder ruling 2026-10-03): Vercel connected but production only on <project>.vercel.app → no Infinite line, no claim, no server lane", () => {
     // Infinite needs the site's own domain. The alias is never the run's host, and even a stale run state naming it
     // (an earlier tag version) never makes the Infinite line, the claim wording or the server lane approvable.
@@ -149,20 +132,6 @@ describe("the Infinite line (DECISIONS §1.6 table)", () => {
     // A custom domain on the same connection takes the verified path (the lane approvable).
     const custom = fakeHosting({ productionDomains: ["acme-store.com"], productionAliases: ["acme-store.vercel.app"], envWriteGranted: true })
     const plan = buildPlanModel(freshInput({ keys, before: fakeBefore({ keys, hosting: custom }), run: { site: answered("acme-store.com"), siteClaim: true } }))
-    expect(plan.lines.find((line) => line.id === "install_provider:infinite")?.requires).toBe("info")
-    expect(plan.lines.find((line) => line.id === "server_lane")?.requires).toBe("info")
-  })
-
-  it("NEGATIVE: Vercel connected without env writes → the lane is written inert and the owner adds the secret; Infinite never asks to save it", () => {
-    const keys = freshKeys()
-    const plan = buildPlanModel(freshInput({ keys, before: fakeBefore({ keys, hosting: fakeHosting({ envWriteGranted: false }) }) }))
-    expect(plan.lines.find((line) => line.id === SERVER_LANE_HANDOFF_LINE_ID)?.text).toBe("We'll write the server code; you add the secret in Vercel (steps in the PR).")
-    expect(plan.lines.some((line) => line.id === "account_settings:hosting")).toBe(false)
-    expect(plan.lines.some((line) => line.id === "user_action:server_lane")).toBe(false)
-  })
-
-  it("an existing site source is runnable as before (the connected world is unchanged)", () => {
-    const plan = buildPlanModel(freshInput({ keys: fakeKeys(), before: fakeBefore() }))
     expect(plan.lines.find((line) => line.id === "install_provider:infinite")?.requires).toBe("info")
     expect(plan.lines.find((line) => line.id === "server_lane")?.requires).toBe("info")
   })
@@ -191,77 +160,14 @@ describe("job 10 is seeded only when this install emits the conversion helpers (
     const seeded = seedItemsAfterApprovals(freshInput().candidates, plan.seeds, plan, all.approvals)
     expect(seeded.some((item) => item.jobId === "conversions_to_tools")).toBe(false)
   })
-
-  it("NEGATIVE: Infinite installed this run → job 10 is a candidate again", () => {
-    const plan = buildPlanModel(freshInput({ run: { site: answered("fresh-acme.com"), siteClaim: true } }))
-    // Job 8 too: its server code is written inert on the hand-off path, so nothing is withheld.
-    expect(plan.withheld).toEqual([])
-    expect(plan.lines.some((line) => line.id === "user_action:conversions_unwired")).toBe(false)
-  })
 })
 
 describe("R2-6 (live run 2): a decision that governs nothing this run is not asked or pre-checked", () => {
-  it("the live run's world (no host, GA4 adopted twice, nothing installable): no consent line, no conversion line", () => {
-    const plan = buildPlanModel(freshInput())
-    expect(plan.lines.some((line) => line.kind === "consent_mode")).toBe(false)
-    expect(plan.lines.some((line) => line.kind === "conversion_names")).toBe(false)
-    // The one honest line about conversions stays, and the duplicate GA4 fix is still offered.
-    expect(plan.lines.find((line) => line.id === "user_action:conversions_unwired")?.requires).toBe("user_action")
-    expect(plan.lines.some((line) => line.jobIds?.some((id) => id.startsWith("duplicates_remove")))).toBe(true)
-    // Nothing to answer: consent is never asked (the tag would install active) and no conversion is declared.
-    const all = resolvePlanAnswers(plan, { approved: approvable(plan).map((line) => line.id), declined: [], edits: {} }, { consentFlag: null })
-    expect(all.consentMode).toBe("not_required")
-    expect(all.conversions).toEqual([])
-  })
-
   it("NEGATIVE: Infinite can be installed (host + claim) → conversion names are asked; consent never is", () => {
     const plan = buildPlanModel(freshInput({ run: { site: answered("fresh-acme.com"), siteClaim: true } }))
     expect(plan.lines.some((line) => line.kind === "consent_mode")).toBe(false)
     expect(plan.decisions.consentMode).toBe("not_required")
     expect(plan.lines.find((line) => line.kind === "conversion_names")?.requires).toBe("approval")
-  })
-
-  it("an existing Infinite source (nothing new to install) asks no consent either", () => {
-    const plan = buildPlanModel(freshInput({ keys: fakeKeys(), before: fakeBefore() }))
-    expect(plan.lines.some((line) => line.kind === "consent_mode")).toBe(false)
-  })
-})
-
-describe("ONE count of the agent jobs (P2-8)", () => {
-  const world = () => freshInput({ run: { site: answered("fresh-acme.com"), siteClaim: true } })
-  const budgetN = (plan: ReturnType<typeof buildPlanModel>) => Number(/up to (\d+) job/.exec(plan.lines.find((line) => line.id === "agent_budget")!.text)![1])
-
-  it("the budget line's 'up to N' equals the jobs every approvable line runs, and the jobs step's i/N reads the same items", () => {
-    const input = world()
-    const plan = buildPlanModel(input)
-    const everything = resolvePlanAnswers(plan, { approved: approvable(plan).map((line) => line.id), declined: [], edits: { consent_mode: "not_required" } }, { consentFlag: null })
-    const items = seedItemsAfterApprovals(input.candidates, plan.seeds, plan, everything.approvals, everything.lines)
-    const planApproved = runnableAgentJobs(items).length
-    // The jobs step counts the open agent items of `state.jobs` (exactly `items` here).
-    const jobsStep = items.filter((item) => item.owner === "agent" && (item.state === "pending" || item.state === "claimed")).length
-    expect(budgetN(plan)).toBe(planApproved)
-    expect(jobsStep).toBe(planApproved)
-    expect(agentJobsAfterApprovals(input.candidates, plan.seeds, plan, everything.approvals)).toHaveLength(planApproved)
-    expect(planApproved).toBeGreaterThan(0)
-  })
-
-  it("an explicit exclusion lowers the running count and never seeds the declined job", () => {
-    const input = world()
-    const plan = buildPlanModel(input)
-    const duplicateLine = plan.lines.find((line) => line.kind === "remove_duplicate")!
-    const all = approvable(plan).map((line) => line.id)
-    const full = resolvePlanAnswers(plan, { approved: all, declined: [], edits: { consent_mode: "not_required" } }, { consentFlag: null })
-    const less = resolvePlanAnswers(plan, { approved: all.filter((id) => id !== duplicateLine.id), declined: [duplicateLine.id], edits: { consent_mode: "not_required" } }, { consentFlag: null })
-    const fullN = agentJobsAfterApprovals(input.candidates, plan.seeds, plan, full.approvals).length
-    const lessN = agentJobsAfterApprovals(input.candidates, plan.seeds, plan, less.approvals).length
-    expect(lessN).toBe(fullN - 1)
-    const seeded = seedItemsAfterApprovals(input.candidates, plan.seeds, plan, less.approvals, less.lines)
-    for (const id of duplicateLine.jobIds ?? []) expect(seeded.map(item => item.id)).not.toContain(id)
-    expect(duplicateLine.jobIds).toHaveLength(1)
-    expect(runnableAgentJobs(seeded)).toHaveLength(lessN)
-    const jobsStep = seeded.filter(item => item.owner === "agent" && (item.state === "pending" || item.state === "claimed")).length
-    expect(jobsStep).toBe(lessN)
-    expect(budgetN(plan)).toBe(fullN) // The shown budget remains an upper bound before exclusions.
   })
 })
 

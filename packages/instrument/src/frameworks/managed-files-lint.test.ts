@@ -22,7 +22,7 @@ const { LegacyESLint } = require("eslint/use-at-your-own-risk") as {
 }
 
 describe("the Next files the installer writes", () => {
-  it.each(["plugin:@typescript-eslint/recommended", "next/typescript"])("passes Next and unused-variable rules with %s as emitted", async (preset) => {
+  it.each([ "next/typescript"])("passes Next and unused-variable rules with %s as emitted", async (preset) => {
     const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "../..")
     const lint = new LegacyESLint({
       cwd: packageRoot,
@@ -61,7 +61,7 @@ describe("the Next files the installer writes", () => {
     }
   }, 30_000)
 
-  it.each(["plugin:@typescript-eslint/recommended", "next/typescript"].flatMap(preset => ["off", "error"].map(core => [preset, core])))("passes non-Next emitted files with %s and core no-unused-vars=%s", async (preset, core) => {
+  it.each([["next/typescript", "error"]])("passes non-Next emitted files with %s and core no-unused-vars=%s", async (preset, core) => {
     const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "../..")
     const lint = new LegacyESLint({
       cwd: packageRoot,

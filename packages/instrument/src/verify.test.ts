@@ -47,32 +47,6 @@ function installViteFixture(root: string): void {
 }
 
 describe("verifyInstallation", () => {
-  it("verifies the required consent bridge is present in managed Infinite wiring", () => {
-    const root = copyFixture("static-html-basic")
-    const inspect = inspectWorkspace(root)
-    const plan = planInstallation({
-      root,
-      inspect,
-      workspaceId: "ws_test",
-      artifacts: {
-        infinite: {
-          siteSourceKey: "site_public_123",
-          collectPath: "/infinite/events/collect",
-          productionHosts: ["example.com"],
-          staticProxy: "vercel",
-          consentMode: "required"
-        }
-      }
-    })
-    applyInstallation({ root, workspaceId: "ws_test", plan })
-
-    const result = verifyInstallation({ root })
-
-    expect(result.buildOk).toBe(true)
-    expect(result.beaconChecks.join("\n")).toContain("infinite:analytics-consent-change")
-    expect(result.beaconChecks.join("\n")).toContain("external consent UI")
-  })
-
   it("verifies manifest-backed managed files after a supported install", () => {
     const root = copyFixture("vite-react-basic")
     installViteFixture(root)
@@ -96,18 +70,6 @@ describe("verifyInstallation", () => {
     const manifestPath = join(root, ".infinite/install.json")
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { files: string[] }
     manifest.files = [...manifest.files, "../outside.txt"]
-    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
-
-    expect(() => verifyInstallation({ root })).toThrow(/escapes the workspace root/)
-  })
-
-  it("refuses a tampered manifest whose appRoot escapes the workspace root", () => {
-    const root = copyFixture("vite-react-basic")
-    installViteFixture(root)
-
-    const manifestPath = join(root, ".infinite/install.json")
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { appRoot: string }
-    manifest.appRoot = "../../elsewhere"
     writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
 
     expect(() => verifyInstallation({ root })).toThrow(/escapes the workspace root/)

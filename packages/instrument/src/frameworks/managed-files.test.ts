@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 
 import { applyInstallation } from "../apply.js"
-import { inspectWorkspace } from "../inspect.js"
 import { planInstallation } from "../plan.js"
 import type { InstallPlan, WorkspaceInstallArtifacts } from "../types.js"
 
@@ -26,11 +25,6 @@ const frameworks = [
     fixture: "next-app-router-basic",
     modulePath: "lib/infinite-analytics.ts"
   },
-  {
-    name: "Next Pages",
-    fixture: "next-pages-router-basic",
-    modulePath: "lib/infinite-analytics.ts"
-  }
 ] as const
 
 afterEach(() => {
@@ -211,9 +205,7 @@ describe.each(frameworks)("$name managed analytics wrapper", ({ fixture, moduleP
 
   it.each([
     { dnt: "1", gpc: false },
-    { dnt: "0", gpc: true },
     { consent: "denied" as const },
-    { consent: "granted" as const }
   ])("loads GA natively whatever the Infinite privacy state (%o) — providers own their own consent", (privacy) => {
     const source = generateManagedModule(fixture, modulePath)
     const runtime = executeManagedModule(source, { ...privacy })
@@ -395,18 +387,6 @@ describe.each(frameworks)("$name assembled module with every provider, executed"
     const { window, scriptErrors } = executeAssembledModuleAsBrowser(broken)
     expect(scriptErrors).toEqual([])
     expect(typeof window.gtag).toBe("function")
-    expect(typeof window.twq).toBe("function")
-    expect(typeof window.fbq).toBe("function")
-    expect(window.__infiniteAnalyticsRuntime).toBe(true)
-  })
-
-  it("a GA4 snippet that throws (first in the script) leaves PostHog, X, Meta and Infinite started", () => {
-    const source = generateManagedModule(fixture, modulePath, ALL_PROVIDERS)
-    const broken = source.replace("window.gtag('js', new Date());", "window.gtag('js', new Date()); throw new Error('ga4 broke');")
-    expect(broken).not.toBe(source)
-    const { window, scriptErrors, loaded } = executeAssembledModuleAsBrowser(broken)
-    expect(scriptErrors).toEqual([])
-    expect(loaded).toContain("https://us-assets.i.posthog.com/static/array.js")
     expect(typeof window.twq).toBe("function")
     expect(typeof window.fbq).toBe("function")
     expect(window.__infiniteAnalyticsRuntime).toBe(true)

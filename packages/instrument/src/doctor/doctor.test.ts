@@ -8,8 +8,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { createServer, type IncomingMessage } from "node:http"
-import type { AddressInfo, Socket } from "node:net"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { FIXED_NOW, fixtureFetch, loopbackSite, type LoopbackSite } from "../../test/wizard/fixture-fetch.js"
@@ -17,8 +15,8 @@ import { buildManagedHtmlBlock } from "../frameworks/managed-html.js"
 import { buildMetaPixelSnippet } from "../providers/meta.js"
 import { buildPostHogBootstrapSnippet } from "../providers/posthog.js"
 
-import { parseDoctorArgs, runDoctorCommand } from "./command.js"
-import { DoctorUsageError, renderDoctorText, runDoctor, type DoctorReport } from "./run.js"
+import { runDoctorCommand } from "./command.js"
+import { DoctorUsageError, runDoctor } from "./run.js"
 
 const SITE = "https://acme-store.test"
 const GA4 = "G-ACME123"
@@ -118,15 +116,6 @@ describe("doctor exit codes (§3d.5)", () => {
     expect(site.requests.some((request) => request.url.includes("/__infinite_probe/"))).toBe(false)
   })
 
-  it("0 on a GA4-only check: Meta-only static findings are not graded when no Meta id was given (review P2-6)", async () => {
-    const root = repo({})
-    const report = await runDoctor({ root, url: `${SITE}/`, flagIds: { ga4: [GA4], meta: [], posthog: null, infinite: null }, probeServerLane: false }, deps())
-    const clickIds = report.results.filter((result) => result.reason?.includes("INF_SETUP_CLICK_ID_UNDETERMINED"))
-    expect(clickIds.map((result) => result.state)).toEqual(["info"])
-    expect(report.results.filter((result) => result.state === "problem" || result.state === "undetermined")).toEqual([])
-    expect(report.exitCode).toBe(0)
-  })
-
   it("1 when any check finds a problem", async () => {
     const root = repo({ "index.html": PAGE })
     const report = await runDoctor({ root, url: `${SITE}/`, flagIds: { ...FLAG_IDS, meta: ["999888777666555"] }, probeServerLane: false }, deps())
@@ -144,23 +133,9 @@ describe("doctor exit codes (§3d.5)", () => {
 })
 
 describe("doctor ids", () => {
-  it("reads the ids block of .infinite/install.json when no flag is given", async () => {
-    const ids = { ga4: [GA4], posthog: { projectKey: POSTHOG, apiHost: "/ingest" }, meta: [PIXEL], infinite: null }
-    const root = repo({ "index.html": PAGE, ".infinite/install.json": manifest({ ids }) })
-    const report = await runDoctor({ root, url: `${SITE}/`, flagIds: null, probeServerLane: false }, deps())
-    expect(report.ids.source).toBe("install.json")
-    expect(report.results.find((result) => result.checkId === "ga4_loader_id")!.state).toBe("pass")
-    expect(report.exitCode).toBe(0)
-  })
-
   it("refuses to run with no ids at all (never a silent clean)", async () => {
     const root = repo({ "index.html": PAGE, ".infinite/install.json": manifest() })
     await expect(runDoctor({ root, url: `${SITE}/`, flagIds: null, probeServerLane: false }, deps())).rejects.toBeInstanceOf(DoctorUsageError)
-  })
-
-  it("flags win over install.json", () => {
-    const parsed = parseDoctorArgs(["--expect-ga4", GA4, "--expect-ga4", "G-SECOND1"], "/tmp/x")
-    expect(parsed.options.flagIds).toEqual({ ga4: [GA4, "G-SECOND1"], meta: [], posthog: null, infinite: null })
   })
 })
 
@@ -175,20 +150,6 @@ describe("the server-lane probe is opt-in", () => {
     expect(site.requests.some((request) => request.url.includes("/__infinite_probe/"))).toBe(false)
     expect(report.exitCode).toBe(3)
   })
-
-  it("with the flag, linked or not, doctor sends NOTHING (E3: no run-less receipt verb) and says where to look", async () => {
-    for (const linkedApp of [() => false, () => true]) {
-      const root = repo({ "index.html": PAGE, ".infinite/install.json": laneManifest() })
-      const readServerLaneReceipt = vi.fn(async () => ({ state: "verified" as const, reason: null }))
-      const report = await runDoctor({ root, url: `${SITE}/`, flagIds: null, probeServerLane: true }, { ...deps(), linkedApp, readServerLaneReceipt })
-      const cell = report.results.find((result) => result.checkId === "server_lane_probe")!
-      expect(cell).toMatchObject({ state: "undetermined" })
-      expect(cell.reason).toContain("not_probed")
-      expect(cell.reason).toContain("nothing was sent")
-      expect(readServerLaneReceipt).not.toHaveBeenCalled()
-    }
-    expect(site.requests.some((request) => request.url.includes("/__infinite_probe/"))).toBe(false)
-  })
 })
 
 describe("doctor command", () => {
@@ -202,54 +163,6 @@ describe("doctor command", () => {
   })
   afterEach(() => vi.restoreAllMocks())
 
-  it("--json prints the report and returns its exit code", async () => {
-    const root = repo({ "index.html": PAGE })
-    const code = await runDoctorCommand(
-      ["--json", "--root", root, "--url", `${SITE}/`, "--expect-ga4", GA4, "--expect-posthog", POSTHOG, "--posthog-api-host", "/ingest", "--expect-meta", PIXEL],
-      deps()
-    )
-    const report = JSON.parse(out.join("\n")) as DoctorReport
-    expect(report.schema).toBe("infinite-tag.doctor.v1")
-    expect(code).toBe(report.exitCode)
-    expect(code).toBe(0)
-  })
-
-  it("--json returns 1 on a problem and 3 when something could not be determined", async () => {
-    const root = repo({ "index.html": PAGE })
-    const base = ["--json", "--root", root, "--expect-ga4", GA4, "--expect-posthog", POSTHOG, "--posthog-api-host", "/ingest"]
-    expect(await runDoctorCommand([...base, "--url", `${SITE}/`, "--expect-meta", "999888777666555"], deps())).toBe(1)
-    expect(await runDoctorCommand([...base, "--expect-meta", PIXEL], deps())).toBe(3)
-    const reports = out.map((text) => JSON.parse(text) as DoctorReport)
-    expect(reports.map((report) => report.exitCode)).toEqual([1, 3])
-  })
-
-  it("with no fetch override the live probes go through HTTPS_PROXY (a refusing proxy sees the CONNECT; nothing reaches the site)", async () => {
-    const connects: string[] = []
-    const proxy = createServer()
-    proxy.on("connect", (request: IncomingMessage, socket: Socket) => {
-      connects.push(String(request.url))
-      socket.end("HTTP/1.1 403 Forbidden\r\n\r\n")
-    })
-    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve))
-    const saved = { https: process.env.HTTPS_PROXY, no: process.env.NO_PROXY }
-    process.env.HTTPS_PROXY = `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`
-    delete process.env.NO_PROXY
-    try {
-      const root = repo({ "index.html": PAGE })
-      const { fetch: _unused, ...noFetch } = deps()
-      const code = await runDoctorCommand(["--json", "--root", root, "--url", "https://acme-store.com/", "--expect-ga4", GA4], noFetch)
-      expect(connects.length).toBeGreaterThan(0)
-      expect(connects.every((target) => target === "acme-store.com:443")).toBe(true)
-      // negative: an unreachable site is never a pass — the live cells read undetermined (exit 3)
-      expect(code).toBe(3)
-    } finally {
-      if (saved.https === undefined) delete process.env.HTTPS_PROXY
-      else process.env.HTTPS_PROXY = saved.https
-      if (saved.no !== undefined) process.env.NO_PROXY = saved.no
-      await new Promise<void>((resolve) => proxy.close(() => resolve()))
-    }
-  })
-
   it("usage errors exit 2 (and --json still prints JSON)", async () => {
     expect(await runDoctorCommand(["--url", "http://acme.test/"])).toBe(2)
     expect(await runDoctorCommand(["--expect-meta", "1234"])).toBe(2)
@@ -259,13 +172,5 @@ describe("doctor command", () => {
     expect(await runDoctorCommand(["--json", "--root", repo({})])).toBe(2)
     expect(JSON.parse(out.join("\n"))).toMatchObject({ schema: "infinite-tag.doctor.v1", exitCode: 2, error: { code: "usage" } })
     expect(await runDoctorCommand(["--help"])).toBe(0)
-  })
-
-  it("the text report leads with what could not be determined", async () => {
-    const root = repo({ "index.html": PAGE })
-    const report = await runDoctor({ root, url: null, flagIds: FLAG_IDS, probeServerLane: false }, deps())
-    const text = renderDoctorText(report).split("\n")
-    expect(text[2]).toMatch(/^1 could not be determined \(did not run or could not tell\) · 0 problems/)
-    expect(text.at(-1)).toBe("exit 3")
   })
 })

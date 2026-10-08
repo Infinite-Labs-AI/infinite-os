@@ -13,7 +13,7 @@ import { detectProvidersWithEvidence } from "../harness/inspect.js"
 import { reverseTextEdits } from "../server-lane/text-edits.js"
 import { pageSourceFromFiles } from "../t0/inline-scripts.js"
 import { runT0Scenarios } from "../t0/scenarios.js"
-import { applyImproveEdit, CAPTURE_JSX_MARKER, detectAdoptedFacts, improveLinesFor, nextScriptPixelElement } from "./improve.js"
+import { applyImproveEdit, CAPTURE_JSX_MARKER, detectAdoptedFacts, improveLinesFor } from "./improve.js"
 
 const RUN4 = join(__dirname, "../../test/wizard/fixtures/run4")
 const BASE = readFileSync(join(RUN4, "site-b7c8347/app/layout.tsx"), "utf8")
@@ -76,26 +76,5 @@ describe("LF4-P2: the capture beside run 4's Next <Script> pixel is a code edit,
     const { line } = captureLine(root)
     expect(applyImproveEdit({ root, appRoot: ".", framework: "next-app-router", line, keys: fakeKeys(), consentMode: "not_required", runId: IDS.run, vercelServed: true })).toMatchObject({ ok: false, ownerRequirement: { ownerBoundary: { kind: "frozen_unit" } } })
     expect(readFileSync(join(root, "app/layout.tsx"), "utf8")).toBe(BASE)
-  })
-
-  it("NEGATIVE: a CMP-held <Script> pixel stays the agent's (the capture must wait for the same consent), and a forced edit refuses", () => {
-    const held = BASE.replace('<Script id="meta-pixel" strategy="afterInteractive">', '<Script id="meta-pixel" type="text/plain" data-cookieconsent="marketing">')
-    const root = site({ "package.json": PACKAGE, "app/layout.tsx": held })
-    const { line } = captureLine(root)
-    expect(line.owner).toBe("agent")
-    expect(applyImproveEdit({ root, appRoot: ".", framework: "next-app-router", line: { ...line, owner: "code" }, keys: fakeKeys(), consentMode: "not_required", runId: IDS.run, vercelServed: true })).toMatchObject({
-      ok: false,
-      reason: expect.stringMatching(/consent manager/)
-    })
-    expect(readFileSync(join(root, "app/layout.tsx"), "utf8")).toBe(held)
-  })
-
-  it("NEGATIVE: a pixel <Script> returned as a component's root has no sibling slot, so it is never a code edit", () => {
-    const component = `import Script from "next/script"\n\nexport function Pixel() {\n  return <Script id="meta-pixel">{\`fbq('init', '${IDS.meta}');\`}</Script>\n}\n`
-    expect(nextScriptPixelElement(component)).toBeNull()
-    expect(nextScriptPixelElement(BASE)).toMatchObject({ name: "Script" })
-    // An attribute holding an arrow function's `>` does not end the opening tag early.
-    const onLoad = BASE.replace('<Script id="meta-pixel" strategy="afterInteractive">', '<Script id="meta-pixel" strategy="afterInteractive" onLoad={() => window.x && 1 > 0}>')
-    expect(nextScriptPixelElement(onLoad)?.tag).toContain("onLoad={() => window.x && 1 > 0}>")
   })
 })

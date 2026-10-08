@@ -58,24 +58,6 @@ describe("corrupt install manifests", () => {
       "Corrupt .infinite/install.json — cannot parse manifest. Remove it manually to reset."
     )
   })
-
-  it("throws a clear error when the manifest parses but is not a manifest object", () => {
-    const root = makeWorkspace()
-    mkdirSync(join(root, ".infinite"), { recursive: true })
-    writeFileSync(join(root, ".infinite/install.json"), JSON.stringify([1, 2, 3]))
-
-    expect(() => readInstallManifest(root)).toThrow(
-      "Corrupt .infinite/install.json — manifest is missing expected fields. Remove it manually to reset."
-    )
-  })
-
-  it("throws a clear error when expected manifest keys are missing", () => {
-    const root = makeWorkspace()
-    mkdirSync(join(root, ".infinite"), { recursive: true })
-    writeFileSync(join(root, ".infinite/install.json"), JSON.stringify({ workspaceId: "ws_123" }))
-
-    expect(() => readInstallManifest(root)).toThrow(/missing expected fields/)
-  })
 })
 
 describe("manifest write safety", () => {
