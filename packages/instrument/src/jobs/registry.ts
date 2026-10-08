@@ -903,7 +903,8 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   const unique = new Map<string, ChecklistItem>()
   for (const item of items) if (!unique.has(item.id)) unique.set(item.id, item)
   const sorted = [...unique.values()].sort((a, b) => a.n - b.n || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-  return withDistinctTitles(sorted)
+  // Live run 2: never offer a setup-check conversion fix for a form a conversion job already covers (the plan shows neither).
+  return withDistinctTitles(withoutConversionCoveredSetupFixes(sorted))
 }
 
 /**
@@ -971,7 +972,7 @@ export function applyApprovalsTo(candidates: readonly ChecklistItem[], plan: Pla
     }
     out.push(item)
   }
-  return withoutCoveredSetupFixes(out)
+  return withoutConversionCoveredSetupFixes(withoutCoveredSetupFixes(out))
 }
 
 /** §3x.3 (B4) The setup findings another job fixes: a setup code → the job that owns its fix. */
@@ -1001,6 +1002,27 @@ function withoutCoveredSetupFixes(items: readonly ChecklistItem[]): ChecklistIte
       return byCode.includes(owner.jobId as JobId) && evidence.some((entry) => ownerLines.some((other) => other.file === entry.file))
     })
     return !covered
+  })
+}
+
+/** Setup checks whose fix sends a conversion (a silent lead form, a misplaced conversion marker). */
+const CONVERSION_SETUP_CHECKS: ReadonlySet<string> = new Set(["silent_form", "conversion_placement"])
+/** Conversions a form completes (a purchase and a checkout start are the payment flow's, never a form's). */
+const FORM_CONVERSION_JOBS: ReadonlySet<string> = new Set(["server_conversions", "conversions_to_tools"])
+
+/**
+ * Live run 2 (P0-2): no setup-check conversion fix (`silent_form`, `conversion_placement`) for a form a server or browser
+ * conversion job already covers, i.e. one whose files include the form's page. The lead server job reports that form's
+ * conversion from its API route with the visitor's match data; a silent-form edit on top sent GA4 and PostHog a second
+ * `lead` beside the site's own `generate_lead`, and its co-ownership of the page put the lead's own lines back. A
+ * purchase or checkout-start job never covers a form (its page is the cart).
+ */
+export function withoutConversionCoveredSetupFixes(items: readonly ChecklistItem[]): ChecklistItem[] {
+  const covering = items.filter((item) => FORM_CONVERSION_JOBS.has(item.jobId) && item.state !== "left_for_you" && itemTarget(item) !== "purchase" && itemTarget(item) !== "begin_checkout")
+  return items.filter((item) => {
+    if (item.jobId !== "setup_check_fixes" || !CONVERSION_SETUP_CHECKS.has(itemTarget(item))) return true
+    const pages = item.trigger.evidence.filter((entry): entry is { file: string; line: number } => "file" in entry).map((entry) => entry.file)
+    return !covering.some((owner) => pages.some((page) => owner.allow.files.includes(page) || owner.allow.create.includes(page)))
   })
 }
 
