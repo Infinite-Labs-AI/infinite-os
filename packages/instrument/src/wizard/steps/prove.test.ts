@@ -193,6 +193,14 @@ describe("prove: the proven_live column is honest", () => {
     })
     expect(column.finishLine.proof_from_real_visit!.state).toBe("problem")
   })
+
+  it("server conversions never 'wait for a real conversion' while the owner's setup steps are undone (no server secret yet)", () => {
+    const input = { ...base, expect: expect4, visit: { result: realVisitResult(), grades: { infinite: pass("a"), ga4: pass("b"), posthog: pass("c"), meta: pass("d") } }, receipts: receiptsAll({}) }
+    const unset = buildProvenColumn({ ...input, keys: { ...keysFixture(), serverLane: { laneState: "no_secret", envWriteGranted: true } } })
+    expect(unset.cells.server_conversions).toMatchObject({ display: "1 wired · sends nothing until you do the setup steps", state: "pending" })
+    const set = buildProvenColumn({ ...input, keys: { ...keysFixture(), serverLane: { laneState: "awaiting_first_event", envWriteGranted: true } } })
+    expect(set.cells.server_conversions).toMatchObject({ display: "1 wired · waits for a real conversion", state: "pending" })
+  })
 })
 
 describe("prove: a resume finishes its OWN claim (O1-06)", () => {

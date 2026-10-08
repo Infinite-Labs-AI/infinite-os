@@ -694,10 +694,7 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
     : { value: "not recorded", display: "not recorded", state: "info", source: "cloud_read", at }
   rows.preview_share = { value: null, state: "not_measured", source: "cloud_read", at, reason: "needs_7_days" }
   rows.ga4_key_events = { value: null, state: "pending", source: "cloud_read", at, reason: "needs_7_days" }
-  rows.server_conversions =
-    input.conversionsWaiting > 0
-      ? { value: "waiting", display: `${input.conversionsWaiting} wired · waits for a real conversion`, state: "pending", source: "wizard_check", at }
-      : { value: null, state: "not_measured", source: "wizard_check", at, reason: "not_exercised" }
+  rows.server_conversions = serverConversionsRow(input, at)
   rows.live_test_per_tool = liveTestRow(proofLanes, receipts, at)
   if (visit) {
     rows.ga4_page_views_per_visit = ga4PageViewsRow(visit, expect, input.installed, at, receipts.lanes.ga4)
@@ -719,6 +716,16 @@ export function buildProvenColumn(input: ProvenColumnInput): ReportColumnSnapsho
 }
 
 /**
+ * The "Conversions sent from the server" cell after the deploy. While the site has no server-event secret yet, the
+ * owner's setup steps are undone and nothing can arrive: it says so, never "waits for a real conversion".
+ */
+function serverConversionsRow(input: Pick<ProvenColumnInput, "conversionsWaiting" | "keys">, at: string): RowCellInput {
+  if (input.conversionsWaiting <= 0) return { value: null, state: "not_measured", source: "wizard_check", at, reason: "not_exercised" }
+  const setUp = input.keys.serverLane?.laneState !== undefined && input.keys.serverLane.laneState !== "no_secret"
+  return { value: "waiting", display: setUp ? `${input.conversionsWaiting} wired · waits for a real conversion` : `${input.conversionsWaiting} wired · sends nothing until you do the setup steps`, state: "pending", source: "wizard_check", at }
+}
+
+/**
  * R2-2: the column when nothing on the live site was measured. `measuredAt` stays null (the headline then says "not
  * checked live yet" with the reason), every cell is "—" with the run's unmeasured reason, and only the by-design
  * pending cells (a real conversion, the day-7 key events) keep their own reasons. Never a pass, never a problem.
@@ -731,10 +738,7 @@ function unmeasuredProvenColumn(input: ProvenColumnInput, receipts: ReceiptsResp
     consent_setting: dash("cloud_read"),
     preview_share: { value: null, state: "not_measured", source: "cloud_read", at, reason: "needs_7_days" },
     ga4_key_events: { value: null, state: "pending", source: "cloud_read", at, reason: "needs_7_days" },
-    server_conversions:
-      input.conversionsWaiting > 0
-        ? { value: "waiting", display: `${input.conversionsWaiting} wired · waits for a real conversion`, state: "pending", source: "wizard_check", at }
-        : { value: null, state: "not_measured", source: "wizard_check", at, reason: "not_exercised" },
+    server_conversions: serverConversionsRow(input, at),
     live_test_per_tool:
       tools.length === 0 && !input.serverLaneInstalled ? { value: null, state: "not_measured", source: "cloud_receipt", at, reason: "not_connected" } : dash("cloud_receipt"),
     ga4_page_views_per_visit: expect.ga4 ? dash("desktop_test") : { value: null, state: "not_measured", source: "desktop_test", at, reason: "not_connected" },
