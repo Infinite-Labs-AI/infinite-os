@@ -316,10 +316,14 @@ function conversionGist(target: string, data: Record<string, unknown> | Error): 
  * line where the event already fires and the tool this job adds; the agent adds ONLY that tool, through
  * `destinations`, with the product and price from the site's own data, and waits before a navigation.
  */
-function commerceGist(tool: InventoryTool): string {
+function commerceGist(tool: InventoryTool, events: readonly FunnelEvent[]): string {
   const destination = DESTINATION[tool]!
   const meta = tool === "meta_browser"
   return [
+    // The wizard's own test clicks `[data-infinite-conversion="add_to_cart"]` (rehearsal and prove) to see the event leave.
+    ...(events.includes("add_to_cart")
+      ? ['On every Buy / Add-to-cart button whose click sends the add_to_cart (the places in firesAt), add the attribute data-infinite-conversion="add_to_cart" to the button element itself, so the wizard\'s test can click it. Only the attribute: never change the button\'s text, handler or look.']
+      : []),
     `Here: at each place in "events" (firesAt is where the site already tracks it; alreadySentTo is what it sends there today), add ONE call that sends the event to ${TOOL_WORD[tool]} ONLY: infiniteTrack(<event>, ${PRODUCT_PROPS}, { destinations: [${JSON.stringify(destination)}] }).`,
     "Put it beside the site's existing send for that event (inside the site's own helper when firesAt names one, so every caller is covered once), with the product id, name, unit price and quantity the site already has there or in its own product catalog. Never invent a price or a product; pass the currency the site prices in.",
     `When the click then leaves the page (a Buy button that goes to the cart), use infiniteTrackThenNavigate(event, <where the click goes>, <event>, <the same props>, { destinations: [${JSON.stringify(destination)}] }) in that click handler instead of the handler's own navigation, so ${meta ? "Meta's request is out (at most 400 ms)" : "the event is out"} before the page leaves; it ignores a second click while the first is on its way.`,
@@ -786,7 +790,7 @@ export function jobBlock(item: ChecklistItem, facts: BriefFacts): string {
       : undefined
   const target =
     guardNote ??
-    (commerceTool ? commerceGist(commerceTool) : undefined) ??
+    (commerceTool ? commerceGist(commerceTool, inventoryOf(item).filter((entry) => entry.missing.includes(commerceTool)).map((entry) => entry.event)) : undefined) ??
     TARGET_GISTS[item.id] ??
     (item.jobId === "duplicates_remove" ? duplicateGist(itemTargetOf(item)) : item.jobId === "conversions_to_tools" ? conversionGist(itemTargetOf(item), data) : item.jobId === "server_conversions" ? serverConversionInstructionsForItem(item, facts, Array.isArray(data.approvedConversionNames) ? String(data.approvedConversionNames[0]) : undefined) : undefined)
   const lines = (facts.plan?.lines ?? []).filter((line) => line.jobIds.includes(item.id))

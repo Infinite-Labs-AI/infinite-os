@@ -99,6 +99,8 @@ describe("browser commerce briefs (review P0-5)", () => {
     expect(brief).toContain("Never invent a price")
     expect(brief).toContain("currency the site prices in")
     expect(brief).toContain("Never add a tool already listed in alreadySentTo")
+    // The wizard's rehearsal and prove click `[data-infinite-conversion="add_to_cart"]`.
+    expect(brief).toContain('add the attribute data-infinite-conversion="add_to_cart" to the button element itself')
   })
 
   it("a GA4 job names GA4 only, and a PostHog job PostHog only", () => {

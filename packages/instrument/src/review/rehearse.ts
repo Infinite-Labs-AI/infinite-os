@@ -1,3 +1,4 @@
+import { normalizeEventName } from "../scan/event-inventory.js"
 import { withheldPreviewTools, previewScope } from "./preview-scope.js"
 // The rehearsal (lane O4, §3d.1 step 8, §3h): the PR head's Vercel preview loaded UNDER THE PRODUCTION
 // HOSTNAME in the desktop's hidden window (`rehearsal` mode: every beacon recorded and cancelled, nothing sent),
@@ -105,6 +106,9 @@ export function productionMatcher(productionHost: string): (host: string) => boo
     return candidate === prod || candidate.endsWith(`.${prod}`) || prod.endsWith(`.${candidate}`)
   }
 }
+
+/** The Meta event a browser-only commerce click is allowed to send (its own name, normalised): nothing else. */
+const BROWSER_META_EVENT_OF: Readonly<Record<string, string>> = { add_to_cart: "AddToCart", view_item: "ViewContent" }
 
 /** The conversion selector the managed helpers render (`data-infinite-conversion="<name>"`). */
 export function conversionSelector(name: string): string {
@@ -229,7 +233,7 @@ async function waitForPreview(ctx: WizardContext, deps: WizardDeps, step: Wizard
   }
 }
 
-function clickResults(result: TestResult, names: readonly string[]): { tested: string[]; ga4: string[]; verdicts: NonNullable<RehearsalOutcome["clickVerdicts"]> } {
+export function clickResults(result: TestResult, names: readonly string[]): { tested: string[]; ga4: string[]; verdicts: NonNullable<RehearsalOutcome["clickVerdicts"]> } {
   const tested: string[] = []
   const ga4: string[] = []
   const verdicts: NonNullable<RehearsalOutcome["clickVerdicts"]> = []
@@ -239,12 +243,16 @@ function clickResults(result: TestResult, names: readonly string[]): { tested: s
       verdicts.push([name, { state: "undetermined", reason: "not_exercised" }])
       continue
     }
-    // A standard Meta conversion fired by a click is on the never-list: such a click never counts as passed.
-    if (click.events.meta.length > 0) {
-      verdicts.push([name, { state: "problem", reason: `fbq_standard_on_click — ${click.events.meta.join(", ")}` }])
+    // A standard Meta conversion fired by a click is on the never-list: such a click never counts as passed. The one
+    // exception is the browser-only commerce event the click IS: a Buy button marked add_to_cart sends Meta AddToCart
+    // (no event id, no server twin), exactly what the plan asked for.
+    const ownMetaEvent = BROWSER_META_EVENT_OF[normalizeEventName(name)]
+    const wrongMeta = click.events.meta.filter((event) => event !== ownMetaEvent)
+    if (wrongMeta.length > 0) {
+      verdicts.push([name, { state: "problem", reason: `fbq_standard_on_click — ${wrongMeta.join(", ")}` }])
       continue
     }
-    const fired = click.events.ga4.includes(name) || click.events.posthog.includes(name) || click.events.infinite.includes(name)
+    const fired = click.events.ga4.includes(name) || click.events.posthog.includes(name) || click.events.infinite.includes(name) || (ownMetaEvent !== undefined && click.events.meta.includes(ownMetaEvent))
     if (!fired) {
       verdicts.push([name, { state: "problem", reason: `click_test — the click did not send ${name}` }])
       continue
