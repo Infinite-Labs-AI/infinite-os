@@ -231,6 +231,7 @@ export function buildMetaPixelSnippet(pixelId: string, options: MetaPixelSnippet
     "s.parentNode.insertBefore(t,s)}(window, document,'script',",
     "'https://connect.facebook.net/en_US/fbevents.js');",
     `fbq('set', 'autoConfig', 'false', ${jsLiteral(pixelId)});`,
+    "fbq.disablePushState = true;",
     `fbq('init', ${jsLiteral(pixelId)});`,
     "fbq('track', 'PageView');"
   ].join("\n")

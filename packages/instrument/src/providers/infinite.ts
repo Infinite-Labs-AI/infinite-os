@@ -98,7 +98,8 @@ export const infiniteProviderAdapter: ProviderAdapter = {
       ...(infinite?.autocapture === false ? { autocapture: false } : {}),
       // Only `true` is serialized — an absent flag keeps the runtime config byte-identical (bots
       // are never counted). Synthetic/test sandbox sources only; installer-gated to non-prod hosts.
-      ...(infinite?.allowAutomation === true ? { allowAutomation: true } : {})
+      ...(infinite?.allowAutomation === true ? { allowAutomation: true } : {}),
+      ...(infinite?.excludedPaths && infinite.excludedPaths.length > 0 ? { excludedPaths: infinite.excludedPaths } : {})
     }
     return {
       assumptions: [

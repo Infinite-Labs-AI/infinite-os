@@ -35,6 +35,10 @@ interface HarnessOptions {
   autocapture?: boolean
   /** `true` counts automation (WebDriver) traffic + lifts loopback — synthetic sandbox only. */
   allowAutomation?: boolean
+  /** Root-relative routes where the Infinite runtime emits no page views, clicks, submits or helper events. */
+  excludedPaths?: string[]
+  /** Follow the site's own pixel globals instead of starting on load. */
+  followSitePixels?: boolean
   /** §3x.4 (F8): the browser blocks storage — reading `localStorage` / `sessionStorage` throws SecurityError. */
   storageBlocked?: boolean
 }
@@ -106,6 +110,7 @@ function executeTag(options: HarnessOptions = {}) {
       windowListeners.set(type, listener)
     }
   }
+  if (options.followSitePixels) windowObject.fbq = () => undefined
   windowObject.posthog = {
     capture(name: string, properties: Record<string, unknown>) {
       posthogEvents.push({ name, properties })
@@ -147,15 +152,16 @@ function executeTag(options: HarnessOptions = {}) {
     collectPath: "/infinite/events/collect",
     respectDnt: true,
     consent:
-      options.consentMode === "not_required"
-        ? { mode: "not_required" }
+      options.consentMode === "not_required" || options.followSitePixels
+        ? { mode: "not_required", ...(options.followSitePixels ? { followSitePixels: ["fbq"] } : {}) }
         : { mode: "required", storageKey: "infinite_analytics_consent" },
     productionHosts: options.productionHosts ?? ["example.com"],
     ...(options.downloadDestinationPath
       ? { downloadDestinationPath: options.downloadDestinationPath }
       : {}),
     ...(options.autocapture === undefined ? {} : { autocapture: options.autocapture }),
-    ...(options.allowAutomation === undefined ? {} : { allowAutomation: options.allowAutomation })
+    ...(options.allowAutomation === undefined ? {} : { allowAutomation: options.allowAutomation }),
+    ...(options.excludedPaths === undefined ? {} : { excludedPaths: options.excludedPaths })
   })
   const source = tag.replace(/^<script[^>]*>/i, "").replace(/<\/script[^>]*>$/i, "")
 
@@ -755,14 +761,13 @@ describe("renderInfiniteBrowserTag", () => {
   it("the helper event lane records a PII-free browser event to Infinite, and revocation clears local ids", () => {
     const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
     expect(typeof runtime.window.__infiniteRecordEvent).toBe("function")
-    expect(runtime.window.__infiniteRecordEvent!("add_to_cart", { value: 20, email: "buyer@example.com" })).toBe(true)
+    expect(runtime.window.__infiniteRecordEvent!("add_to_cart", { item_id: "sku_1", value: 20, currency: "USD", email: "buyer@example.com" })).toBe(true)
     const event = runtime.requests.at(-1)!.body
     expect(event).toMatchObject({
       eventName: "site_click",
       url: "https://example.com/privacy/",
-      properties: { cta_id: "add_to_cart", cta_location: "conversion" }
+      properties: { cta_id: "add_to_cart", cta_location: "conversion", item_id: "sku_1", value: 20, currency: "USD" }
     })
-    expect(event.properties).not.toHaveProperty("value")
     expect(JSON.stringify(event.properties)).not.toContain("buyer@example.com")
     expect(runtime.storedIds().anonymousId).toBeTruthy()
     expect(runtime.storedIds().sessionId).toBeTruthy()
@@ -772,6 +777,38 @@ describe("renderInfiniteBrowserTag", () => {
     expect(runtime.storedIds()).toEqual({ anonymousId: null, sessionId: null })
     expect(runtime.window.__infiniteRecordEvent!("add_to_cart")).toBe(false)
     expect(runtime.requests).toHaveLength(count)
+  })
+
+  it("route exclusions suppress page views, route changes, clicks and helper-recorded events on those paths", () => {
+    const runtime = executeTag({
+      href: "https://example.com/cart?secret=yes",
+      siteSourceKey: "site_public_123",
+      consent: "granted",
+      excludedPaths: ["/cart", "/success"]
+    })
+    expect(runtime.requests).toEqual([])
+    runtime.click(managedTarget({ ctaId: "buy_now", href: "/checkout" }))
+    expect(runtime.window.__infiniteRecordEvent!("add_to_cart", { item_id: "sku_1", value: 20 })).toBe(false)
+    expect(runtime.requests).toEqual([])
+
+    runtime.history.pushState({}, "", "/success")
+    expect(runtime.requests).toEqual([])
+    runtime.history.pushState({}, "", "/privacy")
+    expect(runtime.requests).toHaveLength(1)
+    expect(runtime.requests[0]?.body).toMatchObject({ eventName: "site_page_view", url: "https://example.com/privacy/" })
+  })
+
+  it("an explicit revocation clears stored runtime state even while following the site's own pixels", () => {
+    const runtime = executeTag({
+      siteSourceKey: "site_public_123",
+      consentMode: "not_required",
+      followSitePixels: true
+    })
+    expect(runtime.requests).toHaveLength(1)
+    expect(runtime.storedIds().anonymousId).toBeTruthy()
+    expect(runtime.storedIds().sessionId).toBeTruthy()
+    runtime.setConsent(false)
+    expect(runtime.storedIds()).toEqual({ anonymousId: null, sessionId: null })
   })
 
   it("omits an empty referrer and reduces a populated referrer to the cloud-stored host", () => {

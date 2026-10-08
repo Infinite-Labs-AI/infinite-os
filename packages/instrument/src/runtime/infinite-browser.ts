@@ -41,6 +41,22 @@ export function renderInfiniteBrowserTag(config: InfiniteBrowserConfig): string 
     )
   }
   if (
+    config.excludedPaths !== undefined &&
+    (!Array.isArray(config.excludedPaths) ||
+      config.excludedPaths.some(
+        (path) =>
+          typeof path !== "string" ||
+          !path.startsWith("/") ||
+          path.startsWith("//") ||
+          path.includes("?") ||
+          path.includes("#") ||
+          path.includes("\\") ||
+          !/^\/[A-Za-z0-9._~%-]*(?:\/[A-Za-z0-9._~%-]+)*$/.test(path)
+      ))
+  ) {
+    throw new Error("Infinite requires route exclusions to be root-relative paths without query or hash.")
+  }
+  if (
     !Array.isArray(config.productionHosts) ||
     config.productionHosts.some(
       (host) =>
@@ -128,6 +144,18 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
     if (stripped === "/" || stripped === "/download" || stripped === "/LICENSE") return stripped
     const lastSegment = stripped.slice(stripped.lastIndexOf("/") + 1)
     return lastSegment.includes(".") ? stripped : stripped + "/"
+  }
+
+  const excludedPaths = Array.isArray(config.excludedPaths) ? config.excludedPaths : []
+
+  function isExcludedPath(raw: string): boolean {
+    if (excludedPaths.length === 0) return false
+    const path = normalizePath(raw)
+    for (const excluded of excludedPaths) {
+      const excludedPath = normalizePath(excluded)
+      if (excludedPath === "/" || path === excludedPath || path.indexOf(excludedPath) === 0) return true
+    }
+    return false
   }
 
   // The workspace's conversion destination for download-intent clicks, normalized once so every
@@ -553,10 +581,11 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   function emit(
     eventName: "site_page_view" | "site_click" | "app_download_click" | "sign_up_click",
     path: string,
-    properties?: Record<string, string | boolean>
+    properties?: Record<string, string | number | boolean>
   ): void {
-    if (!hasConsent()) return
     const canonicalPath = normalizePath(path)
+    if (isExcludedPath(canonicalPath)) return
+    if (!hasConsent()) return
     anonymousId ??= storageId(() => localStorage, "infinite_analytics_visitor")
     sessionId ??= storageId(() => sessionStorage, "infinite_analytics_session")
     const payload: Record<string, unknown> = {
@@ -584,6 +613,7 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   let initialView = true
   function emitPageView(): void {
     const path = normalizePath(location.href)
+    if (isExcludedPath(path)) return
     if (path === lastPageViewPath) return
     if (!hasConsent()) return
     lastPageViewPath = path
@@ -762,7 +792,15 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
       if (typeof detail?.granted !== "boolean") return
       // While following the site's pixels, their state is the only decision (this event is also
       // how the managed helpers are told the tag has started).
-      if (followsSitePixels) return
+      if (followsSitePixels) {
+        if (detail.granted === false) {
+          consentOverride = false
+          clearStoredRuntimeState()
+          lastPageViewPath = null
+          initialView = true
+        }
+        return
+      }
       if (detail.granted && (lastGestureAt < 0 || Date.now() - lastGestureAt > 10000)) return
       consentOverride = detail?.granted === true
       try {
@@ -859,17 +897,39 @@ function infiniteBrowserRuntime(config: InfiniteBrowserConfig): void {
   // identity — which is why this is a live accessor and not a frozen value.
   if (config.siteSourceKey) {
     const siteSourceKey = config.siteSourceKey
-    runtimeWindow.__infiniteRecordEvent = (name: string) => {
+    const commerceRecordKeys = new Set(["item_id", "product_id", "sku", "content_id", "item_name", "product_name", "content_name", "currency", "value", "price", "item_price", "quantity"])
+    const commerceTextPattern = /^[A-Za-z0-9 _.-]{1,100}$/
+    const recordCommerceProperties = (properties: Record<string, string | number | boolean> | undefined): Record<string, string | number | boolean> => {
+      const out: Record<string, string | number | boolean> = {}
+      if (!properties || typeof properties !== "object") return out
+      for (const key in properties) {
+        if (!commerceRecordKeys.has(key)) continue
+        const value = properties[key]
+        if (typeof value === "number") {
+          if (Number.isFinite(value)) out[key] = value
+          continue
+        }
+        if (typeof value === "string") {
+          const trimmed = value.replace(/[\u0000-\u001f]/g, " ").trim()
+          if (commerceTextPattern.test(trimmed) && trimmed.indexOf("@") === -1 && trimmed.indexOf("://") === -1) out[key] = trimmed
+        }
+      }
+      return out
+    }
+    runtimeWindow.__infiniteRecordEvent = (name: string, properties?: Record<string, string | number | boolean>) => {
       if (typeof name !== "string" || !structuralTokenPattern.test(name)) return false
       if (!hasConsent()) return false
+      if (isExcludedPath(location.href)) return false
       emit("site_click", normalizePath(location.href), {
         cta_id: name,
-        cta_location: "conversion"
+        cta_location: "conversion",
+        ...recordCommerceProperties(properties)
       })
       return true
     }
     runtimeWindow.__infiniteHandoffContext = () => {
       if (!hasConsent()) return null
+      if (isExcludedPath(location.href)) return null
       anonymousId ??= storageId(() => localStorage, "infinite_analytics_visitor")
       sessionId ??= storageId(() => sessionStorage, "infinite_analytics_session")
       return {

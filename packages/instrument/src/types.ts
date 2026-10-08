@@ -250,6 +250,8 @@ export interface InfinitePublicArtifact {
    * and stops when they stop, so the site's own banner governs it the same way. Absent = start on load.
    */
   followSitePixels?: boolean
+  /** Root-relative paths where the Infinite browser runtime should emit nothing. */
+  excludedPaths?: string[]
 }
 
 export interface InfiniteBrowserConfig {
@@ -273,6 +275,8 @@ export interface InfiniteBrowserConfig {
    *  exclusion, for SYNTHETIC/TEST sandbox sources only. Every WebDriver event is stamped
    *  `automation: true`. The installer hard-refuses this on production hosts. Absent = off. */
   allowAutomation?: boolean
+  /** Root-relative paths where page views, clicks, submits and helper-recorded events emit nothing. */
+  excludedPaths?: string[]
 }
 
 /**

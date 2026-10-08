@@ -123,20 +123,55 @@ describe("infiniteTrack", () => {
     expect(p.fbqCalls).toEqual([])
   })
 
-  it("sends browser-only commerce events to Meta without an eventID, and records them in Infinite when the runtime is present", () => {
+  it("sends browser-only commerce events to every browser tool with product and money payloads, and no Meta eventID", () => {
     const p = page({ posthog: true, ga4: "managed" })
     const infiniteCalls: Call[] = []
     p.vm.window.__infiniteRecordEvent = (...args: unknown[]) => {
       infiniteCalls.push(args)
       return true
     }
-    expect(p.call("infiniteTrack('add_to_cart', { item_id: 'sku_1', value: 20 })")).toBe(true)
-    expect(plain(p.posthogCalls)).toEqual([["capture", "add_to_cart", { item_id: "sku_1", value: 20 }]])
-    expect(plain(p.gtagCalls)).toEqual([
-      ["event", "add_to_cart", { item_id: "sku_1", value: 20, send_to: "G-TEST123" }]
+    expect(p.call("infiniteTrack('add_to_cart', { item_id: 'sku_1', item_name: 'Trail Pack', price: 249, quantity: 2, value: 498, currency: 'USD' })")).toBe(true)
+    expect(plain(p.posthogCalls)).toEqual([
+      ["capture", "add_to_cart", { item_id: "sku_1", item_name: "Trail Pack", price: 249, quantity: 2, value: 498, currency: "USD" }]
     ])
-    expect(plain(p.fbqCalls)).toEqual([["track", "AddToCart", { item_id: "sku_1", value: 20 }]])
-    expect(plain(infiniteCalls)).toEqual([["add_to_cart", { item_id: "sku_1", value: 20 }]])
+    expect(plain(p.gtagCalls)).toEqual([
+      [
+        "event",
+        "add_to_cart",
+        {
+          item_id: "sku_1",
+          item_name: "Trail Pack",
+          price: 249,
+          quantity: 2,
+          value: 498,
+          currency: "USD",
+          items: [{ item_id: "sku_1", item_name: "Trail Pack", price: 249, quantity: 2 }],
+          send_to: "G-TEST123"
+        }
+      ]
+    ])
+    expect(plain(p.fbqCalls)).toEqual([
+      [
+        "track",
+        "AddToCart",
+        {
+          item_id: "sku_1",
+          item_name: "Trail Pack",
+          price: 249,
+          quantity: 2,
+          value: 498,
+          currency: "USD",
+          content_ids: ["sku_1"],
+          content_type: "product",
+          contents: [{ id: "sku_1", quantity: 2, item_price: 249 }],
+          content_name: "Trail Pack"
+        }
+      ]
+    ])
+    expect(plain(infiniteCalls)).toEqual([
+      ["add_to_cart", { item_id: "sku_1", item_name: "Trail Pack", price: 249, quantity: 2, value: 498, currency: "USD" }]
+    ])
+    expect(plain(p.fbqCalls[0]![2] as Record<string, unknown>)).not.toHaveProperty("eventID")
   })
 
   it("can send a browser-only custom CTA to Meta without an eventID, but never auto-fires server-twin conversions", () => {
@@ -511,11 +546,90 @@ describe("infiniteTrackThenNavigate", () => {
     p.call("infiniteTrackThenNavigate(window.__event, '/cart', 'add_to_cart', { item_id: 'sku_1' })")
     expect(event.defaultPrevented).toBe(true)
     expect(p.vm.assigned).toEqual([])
-    expect(plain(p.fbqCalls)).toEqual([["track", "AddToCart", { item_id: "sku_1" }]])
+    expect(plain(p.fbqCalls)).toEqual([
+      ["track", "AddToCart", { item_id: "sku_1", content_ids: ["sku_1"], content_type: "product", contents: [{ id: "sku_1", quantity: 1 }] }]
+    ])
     await p.vm.resourceLoaded("https://www.facebook.com/tr/?id=1234567890123456&ev=AddToCart")
     expect(p.vm.assigned).toEqual(["https://acme.com/cart"])
     await p.vm.advance(1000)
     expect(p.vm.assigned).toHaveLength(1)
+  })
+
+  it("when GA4 is also holding the click, it still waits for Meta's /tr before navigating", async () => {
+    const p = page({ posthog: true, ga4: "managed", callback: "once" })
+    const event = p.click()
+    p.vm.window.__event = event
+    p.call(`window.__event.currentTarget = ${BUTTON}`)
+    p.call("infiniteTrackThenNavigate(window.__event, '/cart', 'add_to_cart', { item_id: 'sku_1', item_name: 'Trail Pack', price: 249, quantity: 1, value: 249, currency: 'USD' })")
+    expect(event.defaultPrevented).toBe(true)
+    expect(p.vm.assigned).toEqual([])
+    expect(plain(p.fbqCalls[0]![2] as Record<string, unknown>)).toMatchObject({
+      content_ids: ["sku_1"],
+      contents: [{ id: "sku_1", quantity: 1, item_price: 249 }],
+      value: 249,
+      currency: "USD"
+    })
+    await p.vm.resourceLoaded("https://www.facebook.com/tr/?id=1234567890123456&ev=AddToCart")
+    expect(p.vm.assigned).toEqual(["https://acme.com/cart"])
+    await p.vm.advance(1000)
+    expect(p.vm.assigned).toHaveLength(1)
+  })
+})
+
+describe("store fixture E2E through the emitted helpers", () => {
+  it("sends store product events to GA4/PostHog/Infinite and browser-only Meta once, waiting for AddToCart before leaving", async () => {
+    const p = page({ posthog: true, ga4: "managed", callback: "once" })
+    const infiniteCalls: Call[] = []
+    p.vm.window.__infiniteRecordEvent = (...args: unknown[]) => {
+      infiniteCalls.push(args)
+      return true
+    }
+
+    p.call("infiniteTrack('view_content', { item_id: 'sku_2', item_name: 'Trail Pack', price: 249, quantity: 1, value: 249, currency: 'USD' })")
+    const event = p.click()
+    p.vm.window.__event = event
+    p.call(`window.__event.currentTarget = ${BUTTON}`)
+    p.call("infiniteTrackThenNavigate(window.__event, '/cart', 'add_to_cart', { item_id: 'sku_2', item_name: 'Trail Pack', price: 249, quantity: 1, value: 249, currency: 'USD' })")
+    expect(p.vm.assigned).toEqual([])
+    await p.vm.resourceLoaded("https://www.facebook.com/tr/?id=1234567890123456&ev=AddToCart")
+    expect(p.vm.assigned).toEqual(["https://acme.com/cart"])
+    p.call("infiniteTrack('begin_checkout', { item_id: 'sku_2', item_name: 'Trail Pack', price: 249, quantity: 1, value: 249, currency: 'USD' })")
+
+    const posthogNames = p.posthogCalls.map((call) => call[1])
+    const ga4Names = p.gtagCalls.map((call) => call[1])
+    const metaNames = p.fbqCalls.map((call) => call[1])
+    const infiniteNames = infiniteCalls.map((call) => call[0])
+    expect(posthogNames).toEqual(["view_content", "add_to_cart", "begin_checkout"])
+    expect(ga4Names).toEqual(["view_content", "add_to_cart", "begin_checkout"])
+    expect(metaNames).toEqual(["ViewContent", "AddToCart"])
+    expect(infiniteNames).toEqual(["view_content", "add_to_cart", "begin_checkout"])
+
+    for (const call of p.gtagCalls) {
+      expect(plain(call[2] as Record<string, unknown>)).toMatchObject({
+        items: [{ item_id: "sku_2", item_name: "Trail Pack", price: 249, quantity: 1 }],
+        value: 249,
+        currency: "USD"
+      })
+    }
+    for (const call of p.fbqCalls) {
+      expect(plain(call[2] as Record<string, unknown>)).toMatchObject({
+        content_ids: ["sku_2"],
+        content_type: "product",
+        contents: [{ id: "sku_2", quantity: 1, item_price: 249 }],
+        value: 249,
+        currency: "USD",
+        content_name: "Trail Pack"
+      })
+      expect(plain(call[2] as Record<string, unknown>)).not.toHaveProperty("eventID")
+    }
+    for (const call of infiniteCalls) {
+      expect(plain(call[1] as Record<string, unknown>)).toMatchObject({
+        item_id: "sku_2",
+        item_name: "Trail Pack",
+        value: 249,
+        currency: "USD"
+      })
+    }
   })
 })
 
