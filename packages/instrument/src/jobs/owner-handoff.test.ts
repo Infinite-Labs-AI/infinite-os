@@ -75,3 +75,42 @@ it.each(["&& fbq('consent', 'revoke');",])("refuses a continued expression after
   expect(handoff.guard).toBe("if (hostAllowed)")
 })
 
+
+it("the owner's changes say the action plainly; why they are the owner's is said ONCE, never on every line", async () => {
+  const { frozenJobNote, OWNER_CODE_REASON } = await import("./owner-boundary.js")
+  const place = { file: "src/analytics/tracking.ts", line: 160 }
+  const history = frozenJobNote({ id: "posthog_improve:history_change", jobId: "posthog_improve", title: "Improve PostHog" }, place)
+  expect(history).toBe("For you: turn on PostHog's page-change counting (`capture_pageview: 'history_change'` in its init) at src/analytics/tracking.ts:160.")
+  const defaults = frozenJobNote({ id: "posthog_improve:defaults", jobId: "posthog_improve", title: "Improve PostHog" }, place)
+  const jobs = [history, defaults].map((note, index) => candidate("posthog_improve", `owner${index}`, { state: "left_for_you", checks: [], note, ownerBoundary: { kind: "frozen_unit", file: place.file, line: place.line, unitHash: `hash${index}` } }))
+  const report = buildReport({ runId: RUN, tagVersion: "0.0.0", site: { repoLabel: "example/site", productionHost: null }, columns: { live_today: null, in_pr: null, proven_live: null }, provenLivePending: null, day7: null, notes: [], verdictFacts: { jobs, openFindings: [], tools: null, installedUnknown: null } })
+  expect(report.notes.filter(note => note === OWNER_CODE_REASON)).toHaveLength(1)
+  expect(report.notes.indexOf(OWNER_CODE_REASON)).toBeLessThan(report.notes.indexOf(history))
+  const text = renderMarkdown(report)
+  expect(text).not.toMatch(/sits inside your consent code|so this run left it to you/)
+  expect(text.split(OWNER_CODE_REASON)).toHaveLength(2)
+})
+
+it("a setup check the owner must finish is the concrete action, never its check id or internal code", async () => {
+  const { frozenJobNote } = await import("./owner-boundary.js")
+  const finding = "Setup check click_id_capture: INF_SETUP_CLICK_ID_NOT_AT_LANDING: A Meta pixel initialises in src/analytics/tracking.ts, but this source check could not prove that it runs on every landing page. It does not follow imports to establish site-wide coverage. Check whether the existing module already loads through pages/_app.tsx or pages/_document.tsx or pages/index.tsx. The _fbc cookie needs the landing URL's fbclid before navigation removes it."
+  const note = frozenJobNote({ id: "setup_check_fixes:click_id_capture", jobId: "setup_check_fixes", title: "Fix the setup-check findings", trigger: { finding } }, { file: "src/analytics/tracking.ts", line: 1 })
+  expect(note).toBe("For you: check that src/analytics/tracking.ts, where your Meta pixel starts, is loaded from pages/_app.tsx, so it runs on every page a visitor can land on and saves the ad click before they move on. The wizard could not confirm it, because it does not follow imports; if it is, nothing is left to do.")
+  const other = frozenJobNote({ id: "setup_check_fixes:silent_form", jobId: "setup_check_fixes", title: "Fix the setup-check findings", trigger: { finding: "Setup check silent_form: INF_SETUP_SILENT_FORM: The signup form at pages/join.tsx:12 sends no conversion." } }, { file: "pages/join.tsx", line: 12 })
+  expect(other).toBe("For you: the signup form at pages/join.tsx:12 sends no conversion (at pages/join.tsx:12).")
+  for (const text of [note, other]) {
+    expect(text).not.toMatch(/INF_|Setup check|click_id_capture|silent_form|make the "/)
+  }
+})
+
+it("the owner-boundary statement is one plain line", async () => {
+  const { OWNER_BOUNDARY, withOwnerBoundary } = await import("./owner-boundary.js")
+  expect(OWNER_BOUNDARY).toBe("This run left your cookie banner, consent code and privacy pages as they were.")
+  const measured = { state: "checked" as const, scope: "commit" as const, measuredCommitCount: 1, wizardCommits: ["a".repeat(40)], issues: [], files: ["lib/infinite-analytics.ts"], filesAvailable: true }
+  const text = withOwnerBoundary("", false, measured)
+  expect(text.split("\n\n")[0]).toBe(OWNER_BOUNDARY)
+  expect(text).not.toMatch(/recognised a consent call|Consent and privacy are yours/)
+  // A saved report's old sentence is replaced, never shown beside the new one.
+  const resaved = withOwnerBoundary("This run did not edit your privacy or terms pages, or any code where it recognised a consent call (checked against the commits it made). Consent and privacy are yours: please review the files this run changed.", false, measured)
+  expect(resaved).not.toContain("recognised a consent call")
+})

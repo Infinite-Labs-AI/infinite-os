@@ -110,7 +110,7 @@ export function gradeWords(check: CheckResult, host: string | null): string {
     case "no_pii":
       return "sends personal data"
     case "held_by_consent":
-      return "waits for consent (not counted as a problem)"
+      return "kept off by your cookie banner until a visitor accepts"
     case "previews_send_data":
       return "fires on previews"
     default:
@@ -284,7 +284,7 @@ function ga4PageViewsPerVisit(dry: LiveTodaySource["dryLive"]): number | null {
 }
 
 function consentWords(mode: "not_required" | "required"): string {
-  return mode === "required" ? "wait for my banner's yes" : "collect by default"
+  return mode === "required" ? "waits for your banner's yes" : "starts with your site's own analytics, or on page load if it has none"
 }
 
 function rowsFor(

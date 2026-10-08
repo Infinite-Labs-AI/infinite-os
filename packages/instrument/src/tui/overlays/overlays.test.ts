@@ -95,6 +95,13 @@ describe("plan overlay", () => {
     expect(answer.approved).not.toContain("user_action:connect_ga4")
   })
 
+  it("the decisions say what Infinite's tag does, never a consent choice: it starts and stops with the site's own analytics", () => {
+    const view = OVERLAYS.plan.render(payload("not_required"), OVERLAYS.plan.init(payload("not_required")), ctx())
+    const text = JSON.stringify(view)
+    expect(text).toContain("Infinite's tag: starts and stops with your site's own analytics")
+    expect(text).not.toMatch(/Consent:|collect by default|independent until connected/)
+  })
+
   it("never assumes the consent mode: ENTER with no choice moves to it instead of answering (negative)", () => {
     const first = drive("plan", payload(null), ENTER)
     expect(first.done).toBe(false)

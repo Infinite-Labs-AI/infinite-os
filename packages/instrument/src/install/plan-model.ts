@@ -255,7 +255,7 @@ function autoConfigOwnerText(entry: ImproveLine, appRoot: string | undefined, so
       ? expressionOptOutLines(init.receiver, init.idExpression, /\.[cm]?tsx?$/i.test(file))
       : null
   if (!add) return null
-  return `For you: turn off Meta's automatic events and its automatic page-change PageViews on your existing pixel at ${file}:${entry.evidence.line}. It sits inside your consent code, so this run left it to you. Add these two lines right before its fbq('init'):\n${add.join("\n")}`
+  return `For you: turn off Meta's automatic events and its automatic page-change PageViews on your existing pixel at ${file}:${entry.evidence.line}, in the code that starts it after your cookie banner (the wizard never edits that code). Add these two lines right before its fbq('init'):\n${add.join("\n")}`
 }
 
 export function lineRunnable(kind: RunnableLineKey, facts: LineFacts): { ok: true } | { ok: false; line: string } {

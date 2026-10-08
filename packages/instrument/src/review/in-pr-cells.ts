@@ -43,7 +43,7 @@ function verdicts(jobs: readonly ChecklistItem[], jobId: JobId, runId: string): 
 const PLAIN_NAME = /^[A-Za-z0-9_.-]{1,40}$/
 
 export function consentWords(mode: "not_required" | "required"): string {
-  return mode === "required" ? "wait for my banner's yes" : "collect by default"
+  return mode === "required" ? "waits for your banner's yes" : "starts with your site's own analytics, or on page load if it has none"
 }
 
 /**
@@ -97,10 +97,10 @@ export function preMergeCells(state: Pick<WizardRunState, "jobs" | "plan">, inpu
     const held = input.keys?.infinite.consentMode ?? null
     const consent =
       held === chosen
-        ? cell("info", chosen, `"${consentWords(chosen)}" recorded`, "cloud_read", at, runId)
+        ? cell("info", chosen, `${consentWords(chosen)} (recorded in Infinite)`, "cloud_read", at, runId)
         : held === null
-          ? cell("info", chosen, `"${consentWords(chosen)}" chosen in the plan (not read back from Infinite)`, "plan_answer", at, runId)
-          : cell("problem", held, `the plan chose "${consentWords(chosen)}"; Infinite has "${consentWords(held)}"`, "cloud_read", at, runId, { reason: "test_error" })
+          ? cell("info", chosen, `${consentWords(chosen)} (set by this run; not read back from Infinite)`, "plan_answer", at, runId)
+          : cell("problem", held, `this run set "${consentWords(chosen)}"; Infinite has "${consentWords(held)}"`, "cloud_read", at, runId, { reason: "test_error" })
     finishLine.consent_recorded = consent
     cells.consent_setting = consent
   }

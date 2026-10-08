@@ -5,7 +5,9 @@ import type { OwnerBoundaryMeasurement } from "./owner-diff.js"
 /** Customer-owned policy is outside every installer, worker, reviewer and check. */
 const OLD_FINAL_BOUNDARY = "Your consent code and privacy policy are yours; this run changed neither (checked against the final diff)."
 const OLD_RECORDED_BOUNDARY = "Your consent code and privacy policy are yours; this run changed neither (checked against this run’s recorded commits)."
-export const OWNER_BOUNDARY = "This run did not edit your privacy or terms pages, or any code where it recognised a consent call (checked against the commits it made). Consent and privacy are yours: please review the files this run changed."
+const OLD_COMMIT_BOUNDARY = "This run did not edit your privacy or terms pages, or any code where it recognised a consent call (checked against the commits it made). Consent and privacy are yours: please review the files this run changed."
+/** One plain line, said only when the run's own commits were measured against the site's consent code and policy pages. */
+export const OWNER_BOUNDARY = "This run left your cookie banner, consent code and privacy pages as they were."
 const OLD_UNMEASURED = "Your consent code and privacy policy are yours; the final diff has not been checked."
 export const OWNER_BOUNDARY_UNMEASURED = "This run could not check its own commits against your consent code and policy pages (no wizard commits were measured); please review the changed files."
 const FOUND_OWNER_EDIT = "This run checked its own commits and found an edit to your consent code or policy pages"
@@ -37,7 +39,7 @@ export function hasMeasuredOwnerBoundary(measurement?: Partial<OwnerBoundaryMeas
     measurement.issues?.length === 0
 }
 
-const previousStatements = [OLD_FINAL_BOUNDARY, OLD_RECORDED_BOUNDARY, OLD_OWNER_BOUNDARY, OLD_UNMEASURED, OLD_LEGACY_OWNER_BOUNDARY, LEGACY_OWNER_BOUNDARY,
+const previousStatements = [OLD_COMMIT_BOUNDARY, OLD_FINAL_BOUNDARY, OLD_RECORDED_BOUNDARY, OLD_OWNER_BOUNDARY, OLD_UNMEASURED, OLD_LEGACY_OWNER_BOUNDARY, LEGACY_OWNER_BOUNDARY,
   "Your consent code and privacy policy are yours. An earlier version of this run recorded policy edits; the owner's code is unchanged in the checked final diff.",
   "Your consent code and privacy policy are yours. An earlier version of this run recorded policy edits; their final diff has not been checked.",
   "Your consent code and privacy policy are yours. An earlier version of this run recorded policy edits; the wizard’s recorded commits leave the owner’s code unchanged."]
@@ -95,12 +97,33 @@ const OWNER_CHANGE: Readonly<Record<string, string>> = {
   "meta_improve:mirror": "move the browser Meta conversions onto the server's event id"
 }
 
-export function frozenJobNote(item: { id: string; jobId: string; title: string }, place: { file: string; line: number }): string {
+/**
+ * Why the "For you" changes are the owner's, said ONCE per report (never repeated on every line): they sit in the code
+ * that starts the site's trackers after its cookie banner, which the wizard never edits.
+ */
+export const OWNER_CODE_REASON = "The \"For you\" changes below are in the code that starts your trackers after your cookie banner. The wizard never edits that code, so they are yours to make."
+
+/**
+ * A setup check the wizard could not fix itself, as the concrete action left for the owner. Never the check id or an
+ * internal code: the action, and where.
+ */
+function setupCheckAction(checkId: string, finding: string, place: { file: string; line: number }, location: string): string {
+  if (checkId === "click_id_capture" && /does not follow imports/.test(finding)) {
+    // The finding names the shared entries to check ("already loads through pages/_app.tsx or …").
+    const entry = /already loads through ([^\s,]+)/.exec(finding)?.[1] ?? null
+    return `check that ${place.file}, where your Meta pixel starts, is loaded from ${entry ?? "the file every page loads"}, so it runs on every page a visitor can land on and saves the ad click before they move on. The wizard could not confirm it, because it does not follow imports; if it is, nothing is left to do`
+  }
+  const words = finding.replace(/^Setup check [a-z0-9_]+:\s*/i, "").replace(/\bINF_[A-Z0-9_]+:\s*/g, "").replace(/\s+/g, " ").trim()
+  return `${words.length > 0 ? `${words.charAt(0).toLowerCase()}${words.slice(1).replace(/\.$/, "")}` : "fix the setup check"} (at ${location})`
+}
+
+export function frozenJobNote(item: { id: string; jobId: string; title: string; trigger?: { finding: string } }, place: { file: string; line: number }): string {
   const tool = item.jobId === "preview_guard" ? ({ ga4: "GA4", meta: "Meta pixel", posthog: "PostHog" }[item.id.split(":")[1]!] ?? item.title) : item.title
   const location = `${place.file}:${place.line}`
   if (item.jobId === "preview_guard") return `For you: add the preview guard to ${tool}'s start-up at ${location}; until then preview and local visits count in ${tool}.`
+  if (item.jobId === "setup_check_fixes") return `For you: ${setupCheckAction(item.id.split(":").slice(1).join(":"), item.trigger?.finding ?? "", place, location)}.`
   const change = OWNER_CHANGE[item.id]
-  return change ? `For you: ${change} at ${location}. It sits inside your consent code, so this run left it to you.` : `For you: make the "${tool}" change at ${location}. It sits inside your consent code, so this run left it to you.`
+  return change ? `For you: ${change} at ${location}.` : `For you: ${tool.charAt(0).toLowerCase()}${tool.slice(1)} at ${location}.`
 }
 
 export function ownerGuardHandoff(note: string, location: { file?: string; line?: number }, expression: string, source?: string): { text: string; guard: string } {

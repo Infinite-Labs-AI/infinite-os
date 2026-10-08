@@ -44,9 +44,10 @@ export interface PlanState {
 }
 
 const CONSENT_VALUES = ["not_required", "required"] as const
+// What Infinite's tag does, in plain words. Nothing about consent is asked: the tag runs like the site's own pixels.
 const CONSENT_LABEL: Record<string, string> = {
-  not_required: "Infinite tag + ad-click cookie: collect by default; other banners are independent until connected",
-  required: "Infinite tag + ad-click cookie: wait for my banner's yes; connect the signal below"
+  not_required: "starts and stops with your site's own analytics (on page load when the site has none)",
+  required: "waits for your banner's yes; connect the signal below"
 }
 const EDIT_MAX = 2000
 
@@ -84,7 +85,7 @@ function decisionsView(payload: PlanPayload, state: PlanState, ctx: OverlayConte
   return [
     s.bold("Your decisions"),
     ...[
-      `· Consent: ${consent ? (CONSENT_LABEL[consent] ?? consent) : s.you("— choose it (E on the consent line)")}`,
+      ...(consent ? [`· Infinite's tag: ${CONSENT_LABEL[consent] ?? consent}`] : []),
       `· Conversions: ${conversions ? ctx.sanitize(conversions, OVERLAY_TEXT_CAPS.line) : "—"}`,
       `· npm: ${npm}`
     ].flatMap((line) => wrapAnsi(line, ctx.width, 2))

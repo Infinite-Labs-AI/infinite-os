@@ -18,7 +18,7 @@ import { quoteDisplayNote } from "../review/display.js"
 import type { OwnerBoundaryMeasurement } from "../jobs/owner-diff.js"
 import type { ChecklistItem } from "./contracts/jobs.js"
 import { consentActivationFromNotes, consentActivationNotes, consentHandoff, CONSENT_WAITING } from "../install/consent-handoff.js"
-import { OWNER_BOUNDARY, OWNER_BOUNDARY_UNMEASURED, LEGACY_OWNER_BOUNDARY, hasRecordedPolicyEdits, withOwnerBoundary, ownerBoundaryNotes, isOwnerBoundaryStatement, hasLegacyOwnerHistory } from "../jobs/owner-boundary.js"
+import { OWNER_BOUNDARY, OWNER_CODE_REASON, OWNER_BOUNDARY_UNMEASURED, LEGACY_OWNER_BOUNDARY, hasRecordedPolicyEdits, withOwnerBoundary, ownerBoundaryNotes, isOwnerBoundaryStatement, hasLegacyOwnerHistory } from "../jobs/owner-boundary.js"
 import {
   CELL_STATES,
   FINISH_LINE_IDS,
@@ -76,7 +76,7 @@ export const REASON_TEXT: Record<Reason, string> = {
   read_failed: "Infinite could not read it this time",
   not_built: "this check is not available in this version",
   below_sample_floor: "below 50 page views: raw counts shown",
-  held_by_consent: "the tool waits for consent, so the test could not see it",
+  held_by_consent: "your cookie banner keeps every tool off until a visitor accepts; real visitors who accept are measured from their own visits",
   preview_protected: "the preview is password-protected, so the rehearsal could not load it",
   env_dependent: "the ID comes from a setting that previews do not have",
   pending_deploy: "waiting for the deploy",
@@ -566,11 +566,13 @@ export function buildReport(input: BuildInput, now: () => Date = () => new Date(
       ...notDoneJobs(input.verdictFacts?.jobs ?? []).map(item => `Not done, left for you: ${notDoneDescription(item)}`),
       ...activationNotes,
       ...(activationNotes.length ? ["Your banner connection is unverified in this run. Required-mode offline and browser checks supply a test grant; passing those checks does not confirm your banner signal."] : []),
-      ...(input.verdictFacts?.consentActivation?.mode === "not_required" && (input.verdictFacts.consentActivation.infinite || input.verdictFacts.consentActivation.capture) ? ["Infinite's tag starts when your site's own analytics start and stops when they stop, so your cookie banner governs it the same way. On a site with no analytics of its own it starts on page load. Your banner and consent code were not changed."] : []),
+      ...(input.verdictFacts?.consentActivation?.mode === "not_required" && (input.verdictFacts.consentActivation.infinite || input.verdictFacts.consentActivation.capture) ? ["Infinite's tag starts when your site's own analytics start and stops when they stop, so your cookie banner governs it the same way. On a site with no analytics of its own it starts on page load."] : []),
       ...(input.verdictFacts?.tagNotInstalled ? ["Infinite’s tag is NOT installed by this run. Add the owner wiring before testing it live."] : []),
       ...(ownerPreviewNote ? [ownerPreviewNote] : []),
       ...input.notes.filter(note => !isOwnerBoundaryStatement(note)),
       ...(input.verdictFacts?.ownerPolicyFindings ?? []),
+      // Why the "For you" changes are the owner's: said once, above them, never on every line.
+      ...((input.verdictFacts?.jobs ?? []).some(job => job.state === "left_for_you" && job.ownerBoundary?.kind === "frozen_unit") ? [OWNER_CODE_REASON] : []),
       ...(input.verdictFacts?.jobs ?? []).filter(job => job.state === "left_for_you" && job.ownerBoundary).map(job => job.note ?? (job.ownerBoundary?.kind === "restored_unit" ? "Put back: an edit reached code that handles consent." : `For you: make this change in ${job.ownerBoundary?.file ?? job.allow.files[0] ?? "the noted file"}.`)),
       ...(input.verdictFacts?.priorPolicyEdits || hasRecordedPolicyEdits(input.verdictFacts?.jobs ?? []) || hasLegacyOwnerHistory(input.notes) ? [LEGACY_OWNER_BOUNDARY] : [])
     ])],
