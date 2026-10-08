@@ -649,6 +649,10 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   // ViewContent / AddToCart from the browser; GA4 and PostHog get every step they miss (only where the site runs them).
   const inventory = d.eventInventory
   const presence = toolPresence(inventory, facts)
+  // Live run 3: the pages whose form posts to a sign-up route that saves nothing yet. There is no lead there to report,
+  // from the server or the browser, so no conversion job (and no silent-form fix) is seeded for them.
+  const unsavedPages = (event: FunnelEvent | null | undefined): Set<string> =>
+    new Set((inventory.unsavedFormRoutes ?? []).filter((route) => event === undefined || event === null || route.event === event).flatMap((route) => route.pages))
   const browserGaps = (tool: InventoryTool, events: readonly FunnelEvent[]) =>
     inventory.events.filter((entry) => events.includes(entry.event) && entry.missing.includes(tool) && browserSites(entry).length > 0)
   const commerceAllow = (files: readonly string[]) => allow(files)
@@ -790,6 +794,8 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
       : {}
     if (OUTCOME_CONVERSION_TYPES.has(type)) {
       const success = d.successPaths.filter((finding) => finding.conversionType === type)
+      const unsaved = unsavedPages(funnel)
+      if (unsaved.size > 0 && success.length > 0 && success.every((finding) => unsaved.has(finding.file))) continue
       out.push(
         success.length > 0
           ? {
@@ -827,8 +833,10 @@ export function seedCandidatesFrom(scan: JobScan, facts: BeforeFacts): Checklist
   const setupProblems = facts.checks.filter(
     (check) => check.state === "problem" && check.tier === "S" && !!check.reason?.trim() && check.reason.trim() !== "problem" && (check.evidence ?? []).some((entry) => "file" in entry)
   )
+  const unsavedFormPages = unsavedPages(null)
   for (const check of [...setupProblems].sort((a, b) => (a.checkId < b.checkId ? -1 : a.checkId > b.checkId ? 1 : 0))) {
     const evidence = (check.evidence ?? []).filter((entry): entry is { file: string; line: number } => "file" in entry)
+    if (CONVERSION_SETUP_CHECKS.has(check.checkId) && evidence.length > 0 && evidence.every((entry) => unsavedFormPages.has(entry.file))) continue
     out.push({
       jobId: "setup_check_fixes",
       target: check.checkId,

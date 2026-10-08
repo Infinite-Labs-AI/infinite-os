@@ -12,7 +12,7 @@ import { detectCspOwners } from "./csp-owner.js"
 import { detectDuplicates } from "./duplicates.js"
 import { detectFbcWriters } from "./fbc-writers.js"
 import { detectPages, detectStatic } from "./index.js"
-import { detectOutcomes } from "./outcomes.js"
+import { detectOutcomes, detectUnsavedFormRoutes, routeSavesNothing } from "./outcomes.js"
 import { detectRedirects, middlewareMatchers } from "./redirects.js"
 import { detectServerMount } from "./server-mount.js"
 import { codeMatches, isNonProductPath } from "./shared.js"
@@ -107,6 +107,88 @@ describe("outcomes (job 8) and conversion elements (job 10)", () => {
       })
     )
     expect(found).toEqual([])
+  })
+})
+
+// Live run 3: the store's mailing-list API only logged the email; reporting a Lead there counts sign-ups never created.
+const LOGS_ONLY_ROUTE = [
+  'import type { NextApiRequest, NextApiResponse } from "next";',
+  "",
+  'const EMAIL_RE = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;',
+  "",
+  "function redact(email: string): string {",
+  '  const [local, domain] = email.split("@");',
+  "  return `${local.slice(0, 1)}***@${domain}`;",
+  "}",
+  "",
+  "export default function handler(req: NextApiRequest, res: NextApiResponse) {",
+  '  if (req.method !== "POST") {',
+  '    res.setHeader("Allow", "POST");',
+  '    res.status(405).json({ error: "Method not allowed" });',
+  "    return;",
+  "  }",
+  "  const body = (req.body ?? {}) as { email?: unknown; topics?: unknown };",
+  '  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";',
+  "  if (!EMAIL_RE.test(email)) {",
+  '    res.status(400).json({ error: "Please enter a valid email address." });',
+  "    return;",
+  "  }",
+  '  const topics = Array.isArray(body.topics) ? body.topics.filter((t): t is string => typeof t === "string") : [];',
+  "  // No email provider yet: log it.",
+  '  console.log(`[newsletter] ${redact(email)} topics=${topics.join("|") || "none"}`);',
+  "  res.status(200).json({ ok: true });",
+  "}",
+  ""
+].join("\n")
+const withSave = (save: string) => LOGS_ONLY_ROUTE.replace("export default function", "export default async function").replace(/  console\.log\(.*\n/, `  ${save}\n`)
+
+describe("a sign-up route that saves nothing (live run 3)", () => {
+  it("a route that only validates, logs and answers saves nothing: pages router, app router with a logger, a bare answer", () => {
+    expect(routeSavesNothing(LOGS_ONLY_ROUTE)).toBe(true)
+    const appRouter = [
+      'import { NextResponse } from "next/server"',
+      'import { logger } from "@/lib/logger"',
+      "export async function POST(request: Request) {",
+      "  const { email } = await request.json()",
+      '  if (!email || !String(email).includes("@")) return NextResponse.json({ error: "bad" }, { status: 400 })',
+      '  logger.info({ at: Object.keys(request).length }, "signup")',
+      "  return NextResponse.json({ ok: true })",
+      "}",
+      ""
+    ].join("\n")
+    expect(routeSavesNothing(appRouter)).toBe(true)
+    expect(routeSavesNothing("export async function POST(req) {\n  return Response.json({ ok: true })\n}\n")).toBe(true)
+  })
+
+  it("NEGATIVE: anything that may store, subscribe or send counts as saving: a fetch to a provider, a DB call, an ESP SDK, an imported helper (awaited or not), a .then, a client built with new", () => {
+    for (const save of [
+      'await fetch("https://api.mail-provider.example/v1/subscribers", { method: "POST", body: JSON.stringify({ email, topics }) });',
+      "await db.insert(subscribers).values({ email });",
+      "await prisma.subscriber.create({ data: { email } });",
+      "await resend.contacts.create({ email });",
+      "resend.emails.send({ to: email });",
+      "await subscribeToList(email);",
+      "addToList(email);",
+      "queue(email).then(() => undefined);",
+      "const client = new ListClient(process.env.LIST_KEY);",
+      "await kv.set(`signup:${email}`, topics);",
+      'const saved = await import("../../lib/list");'
+    ]) expect(routeSavesNothing(withSave(save)), save).toBe(false)
+    // A call hidden in a log line's template is still read.
+    expect(routeSavesNothing(LOGS_ONLY_ROUTE.replace("${redact(email)}", "${await saveEmail(email)}"))).toBe(false)
+  })
+
+  it("the scan keeps such a route apart: it is never a lead or sign-up outcome; one that saves stays an outcome", () => {
+    const snapshot = snap({
+      "pages/api/newsletter.ts": LOGS_ONLY_ROUTE,
+      "app/api/signup/route.ts": "export async function POST(req) {\n  return Response.json({ ok: true })\n}\n",
+      "pages/api/waitlist.ts": withSave('await fetch("https://api.mail-provider.example/v1/subscribers", { method: "POST", body: JSON.stringify({ email }) });')
+    })
+    expect(detectOutcomes(snapshot).map((finding) => [finding.file, finding.kind])).toEqual([["pages/api/waitlist.ts", "lead"]])
+    expect(detectUnsavedFormRoutes(snapshot).map((finding) => [finding.file, finding.kind, finding.line])).toEqual([
+      ["app/api/signup/route.ts", "signup", 1],
+      ["pages/api/newsletter.ts", "lead", 10]
+    ])
   })
 })
 

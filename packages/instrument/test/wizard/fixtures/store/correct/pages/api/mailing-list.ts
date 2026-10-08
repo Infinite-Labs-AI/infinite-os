@@ -28,8 +28,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     ? body.interests.filter((i): i is string => typeof i === "string" && ALLOWED_INTERESTS.has(i))
     : [];
 
-  // No email provider wired up yet: log it so we can import the list later.
-  console.log(`[mailing-list] signup ${redact(email)} interests=${interests.join("|") || "none"}`);
+  // Subscribe the address with the store's email provider (it keeps the list).
+  await fetch("https://api.mail-provider.example/v1/lists/studio/members", { method: "POST", headers: { Authorization: `Bearer ${process.env.MAIL_PROVIDER_KEY ?? ""}`, "Content-Type": "application/json" }, body: JSON.stringify({ email, interests }) });
 
   // Once the sign-up is REAL (stored, subscribed), never on the click:
   await reportInfiniteLead(req, {

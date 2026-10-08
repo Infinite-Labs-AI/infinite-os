@@ -31,7 +31,7 @@ import { automaticEventsPerVisitOf } from "../checks/grade-test-run.js"
 import { applyApprovalsTo, COMMERCE_EVENTS_TARGET, EVENT_WORDS, FUNNEL_EVENT_OF_TARGET, itemChecksFor, listWords, requiredLineKind } from "../jobs/registry.js"
 import { proposedConversionName } from "../jobs/plan-data.js"
 import { snapshotFromFiles } from "../jobs/repo-files.js"
-import { buildEventInventory, META_EVENT_NAME, type EventInventory, type FunnelEvent } from "../scan/event-inventory.js"
+import { buildEventInventory, META_EVENT_NAME, type EventInventory, type FunnelEvent, type UnsavedFormRoute } from "../scan/event-inventory.js"
 import { createHash } from "node:crypto"
 
 import type { ImproveLine, ImproveLineKind, ProviderId } from "../types.js"
@@ -255,7 +255,7 @@ function autoConfigOwnerText(entry: ImproveLine, appRoot: string | undefined, so
       ? expressionOptOutLines(init.receiver, init.idExpression, /\.[cm]?tsx?$/i.test(file))
       : null
   if (!add) return null
-  return `For you: turn off Meta's automatic events and its automatic page-change PageViews on your existing pixel at ${file}:${entry.evidence.line}, in the code that starts it after your cookie banner (the wizard never edits that code). Add these two lines right before its fbq('init'):\n${add.join("\n")}`
+  return `For you: turn off Meta's automatic events and its automatic page-change PageViews on your existing pixel at ${file}:${entry.evidence.line}, in the code that starts it after your cookie banner. Add these two lines right before its fbq('init'):\n${add.join("\n")}`
 }
 
 export function lineRunnable(kind: RunnableLineKey, facts: LineFacts): { ok: true } | { ok: false; line: string } {
@@ -1159,7 +1159,9 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
       keys,
       metaRelay: input.run?.metaRelay,
       serverLaneBlocked: serverLaneRule.ok || serverLaneHandoff ? null : serverLaneRule.line || null
-    })
+    }),
+    // Live run 3: right after the headlines, why a sign-up form gets no lead (its route saves nothing yet).
+    ...(inventory.unsavedFormRoutes ?? []).map((route) => line({ id: `user_action:unsaved_form_route:${route.file}`, kind: "user_action", requires: "user_action", text: unsavedFormRouteText(route) }))
   )
 
   const decisions: PlanModel["decisions"] = {
@@ -1190,6 +1192,16 @@ export function buildPlanModel(input: PlanModelInput): WizardPlanModel {
 // ---------------------------------------------------------------------------------------------
 // P1-8: the per-tool headline
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * Live run 3: the owner's line for a sign-up route that saves nothing yet. Reporting a lead there would count sign-ups
+ * that were never created, so the wizard seeds no lead job and says what would change that.
+ */
+export function unsavedFormRouteText(route: Pick<UnsavedFormRoute, "event" | "file">): string {
+  return route.event === "sign_up"
+    ? `Your sign-up route (${route.file}) doesn't create the account yet, so there is no sign-up to report. Once it does, run the wizard again.`
+    : `Your sign-up route (${route.file}) doesn't save or subscribe the email yet, so there is no lead to report. Once it does, run the wizard again.`
+}
 
 /** The funnel events the server jobs (job 8) of these candidates report, in funnel order. */
 function serverReportedEvents(candidates: readonly ChecklistItem[]): FunnelEvent[] {

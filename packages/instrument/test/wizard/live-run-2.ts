@@ -32,7 +32,6 @@ export const leadPage = (page: string = BASE_PAGE): string => replaced(page, [
 /** The lead job's route edit: the lead reported once the sign-up is real, with the page's signal. */
 export const leadRoute = (route: string = BASE_ROUTE): string => replaced(route, [
   ['import type { NextApiRequest, NextApiResponse } from "next";\n', 'import type { NextApiRequest, NextApiResponse } from "next";\nimport { randomUUID } from "node:crypto";\nimport { reportInfiniteLead } from "../../lib/infinite-outcome";\n'],
-  ["export default function handler(", "export default async function handler("],
   ["const body = (req.body ?? {}) as { email?: unknown; interests?: unknown };", "const body = (req.body ?? {}) as { email?: unknown; interests?: unknown; adMatch?: unknown };"],
   ['  res.status(200).json({ ok: true });\n', '  await reportInfiniteLead(req, {\n    type: "lead",\n    email,\n    trackingAllowed: body.adMatch === true,\n    fallbackPath: "/mailing-list",\n    fallbackId: randomUUID(),\n  });\n\n  res.status(200).json({ ok: true });\n']
 ])

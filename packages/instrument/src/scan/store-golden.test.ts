@@ -56,14 +56,17 @@ describe("store-halden: scan → inventory → jobs → plan", () => {
   const { scan, candidates, plan } = storeRun("store-halden")
 
   it("seeds one job per gap, and none for an event a tool already gets (GA4 and PostHog get every step)", () => {
+    // Live run 3: no lead job. The mailing-list route only validates and logs the email (it saves nothing), so there is
+    // no lead to report; the plan says so (below).
     expect(open(candidates).map((item) => [item.id, item.title, item.state])).toEqual([
       ["meta_improve:commerce_events", "Add Meta ViewContent and AddToCart in the browser", "pending"],
       ["server_conversions:begin_checkout", "Report checkout starts from the server", "pending"],
-      ["server_conversions:lead", "Report the lead conversion from the server", "pending"],
       ["server_conversions:purchase", "Report purchases from a new payment webhook", "pending"]
     ])
     // P0-5: no browser purchase / lead job: GA4 `purchase` and PostHog `purchase_completed` already fire on /success.
     expect(candidates.some((item) => item.jobId === "conversions_to_tools")).toBe(false)
+    // Nor a silent-form fix for the mailing-list form: it posts to the route that saves nothing.
+    expect(candidates.some((item) => item.id === "setup_check_fixes:silent_form")).toBe(false)
   })
 
   it("attaches the inventory entry to each job, with the exact files, lines and missing tools the briefs name", () => {
@@ -99,9 +102,7 @@ describe("store-halden: scan → inventory → jobs → plan", () => {
     expect(checkout.allow).toEqual({ files: ["pages/api/checkout.ts", "pages/cart.tsx"], create: [] })
     expect(checkout.inventory?.[0]?.sites).toContainEqual({ file: "pages/api/checkout.ts", line: 67, via: "stripe.checkout.sessions.create" })
 
-    const lead = byId.get("server_conversions:lead")!
-    expect(lead.allow).toEqual({ files: ["pages/api/mailing-list.ts", "pages/mailing-list.tsx"], create: [] })
-    expect(lead.inventory?.[0]?.sites).toContainEqual({ file: "pages/api/mailing-list.ts", line: 11, via: "form-api" })
+    expect(byId.has("server_conversions:lead")).toBe(false)
 
     // The stored item shape accepts the inventory (the run state round-trips it).
     for (const item of candidates) expect(shapeErrors(JSON.parse(JSON.stringify(item)), CHECKLIST_ITEM_SHAPE, "item")).toEqual([])
@@ -111,13 +112,19 @@ describe("store-halden: scan → inventory → jobs → plan", () => {
     expect(plan.lines.slice(0, 4).map((line) => [line.id, line.text])).toEqual([
       [
         "headline:meta",
-        "Meta: gets page views only today. We'll add ViewContent and AddToCart in the browser, where your site already tracks product views and add-to-cart, and send InitiateCheckout, Purchase and Lead from your server."
+        "Meta: gets page views only today. We'll add ViewContent and AddToCart in the browser, where your site already tracks product views and add-to-cart, and send InitiateCheckout and Purchase from your server."
       ],
       ["headline:ga4", "GA4: gets product views, add-to-cart, checkout starts, purchases and leads today. Nothing to add."],
       ["headline:posthog", "PostHog: gets product views, add-to-cart, checkout starts, purchases and leads today. Nothing to add."],
-      ["headline:infinite", "Infinite: records page views once its tag is live. We'll record checkout starts, purchases and leads from your server."]
+      ["headline:infinite", "Infinite: records page views once its tag is live. We'll record checkout starts and purchases from your server."]
     ])
-    expect(plan.decisions.conversionNames).toEqual(["begin_checkout", "lead", "purchase"])
+    // Live run 3: right after the headlines, why the mailing list gets no lead, in plain words, and what changes that.
+    expect(plan.lines[4]).toMatchObject({
+      id: "user_action:unsaved_form_route:pages/api/mailing-list.ts",
+      requires: "user_action",
+      text: "Your sign-up route (pages/api/mailing-list.ts) doesn't save or subscribe the email yet, so there is no lead to report. Once it does, run the wizard again."
+    })
+    expect(plan.decisions.conversionNames).toEqual(["begin_checkout", "purchase"])
     for (const line of plan.lines) expect(line.text).not.toMatch(/eventID|metaEventId|top-level path|mirror|dedupe|count every event/i)
   })
 
@@ -128,7 +135,6 @@ describe("store-halden: scan → inventory → jobs → plan", () => {
     expect(seeded.map((item) => [item.id, item.state])).toEqual([
       ["meta_improve:commerce_events", "pending"],
       ["server_conversions:begin_checkout", "pending"],
-      ["server_conversions:lead", "pending"],
       ["server_conversions:purchase", "pending"]
     ])
     expect(applyApprovalsTo(candidates, plan, answers.approvals).find((item) => item.id === "server_conversions:purchase")?.inventory?.[0]?.event).toBe("purchase")
@@ -139,7 +145,7 @@ describe("store-halden: scan → inventory → jobs → plan", () => {
     const { plan: unconnected } = storeRun("store-halden", fakeKeys({ meta: { status: "not_connected", pixels: [] } }))
     expect(unconnected.lines.slice(0, 2).map((line) => line.text)).toEqual([
       "Meta: gets page views only today. We'll add ViewContent and AddToCart in the browser, where your site already tracks product views and add-to-cart.",
-      "Meta gets InitiateCheckout, Purchase and Lead from your server once Meta is connected in Infinite (Connections › Meta)."
+      "Meta gets InitiateCheckout and Purchase from your server once Meta is connected in Infinite (Connections › Meta)."
     ])
   })
 })
@@ -169,5 +175,8 @@ describe("store-chain: the two-level sender chain", () => {
     const text = (id: string) => plan.lines.find((line) => line.id === id)?.text
     expect(text("headline:posthog")).toBe("PostHog: gets add-to-cart, checkout starts, purchases and leads today. We'll add product views.")
     expect(text("headline:ga4")).toBe("GA4: gets product views, add-to-cart, checkout starts, purchases and leads today. Nothing to add.")
+    // Its mailing-list route subscribes through the provider: a real lead, so no "saves nothing" line.
+    expect(plan.lines.some((line) => line.id.startsWith("user_action:unsaved_form_route:"))).toBe(false)
+    expect(plan.decisions.conversionNames).toContain("lead")
   })
 })

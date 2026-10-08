@@ -53,15 +53,15 @@ describe("the store with a one-level sender (store-halden)", () => {
         missing: ["meta_server", "infinite"]
       },
       {
+        // Live run 3: the mailing-list route only validates and logs the email, so it is no lead site and nothing is
+        // promised from the server; the page's own GA4 and PostHog leads stay as they are.
         event: "lead",
-        sites: [
-          { file: "pages/api/mailing-list.ts", line: 11, via: "form-api" },
-          { file: "pages/mailing-list.tsx", line: 38, via: "helper:generateLead" }
-        ],
+        sites: [{ file: "pages/mailing-list.tsx", line: 38, via: "helper:generateLead" }],
         tools: { ga4: [{ file: "src/analytics/events.ts", line: 52, via: "helper:sendGa" }], posthog: [{ file: "src/analytics/events.ts", line: 53, via: "helper:capturePosthog" }] },
-        missing: ["meta_server", "infinite"]
+        missing: []
       }
     ])
+    expect(inventory.unsavedFormRoutes).toEqual([{ event: "lead", file: "pages/api/mailing-list.ts", line: 11, pages: ["pages/mailing-list.tsx"] }])
   })
 
   it("sees the checkout session the server creates, that no payment webhook exists, and the routes the pixel is kept off", () => {
@@ -171,10 +171,10 @@ describe("direct sends", () => {
 })
 
 describe("server facts", () => {
-  it("a signup or mailing-list API route counts by its path even before it stores anything", () => {
+  it("a signup or mailing-list API route counts by its path when the scan cannot name its store (an imported helper, a provider call)", () => {
     const snapshot = snapshotFromFiles({
-      "pages/api/newsletter.ts": "export default function handler(req, res) {\n  console.log('subscribed')\n  res.status(200).json({ ok: true })\n}\n",
-      "app/api/signup/route.ts": "export async function POST(req) {\n  return Response.json({ ok: true })\n}\n",
+      "pages/api/newsletter.ts": "import { addToList } from '../../lib/list'\nexport default async function handler(req, res) {\n  await addToList(req.body.email)\n  res.status(200).json({ ok: true })\n}\n",
+      "app/api/signup/route.ts": "export async function POST(req) {\n  await fetch('https://auth.provider.example/users', { method: 'POST', body: await req.text() })\n  return Response.json({ ok: true })\n}\n",
       "pages/api/products.ts": "export default function handler(req, res) { res.json([]) }\n"
     })
     expect(detectOutcomes(snapshot).map((finding) => [finding.file, finding.kind, finding.detail])).toEqual([
@@ -182,8 +182,22 @@ describe("server facts", () => {
       ["pages/api/newsletter.ts", "lead", "lead API route"]
     ])
     const inventory = buildEventInventory(snapshot)
-    expect(inventoryEntry(inventory, "lead")?.sites).toEqual([{ file: "pages/api/newsletter.ts", line: 1, via: "form-api" }])
+    expect(inventoryEntry(inventory, "lead")?.sites).toEqual([{ file: "pages/api/newsletter.ts", line: 2, via: "form-api" }])
     expect(inventoryEntry(inventory, "sign_up")?.sites).toEqual([{ file: "app/api/signup/route.ts", line: 1, via: "form-api" }])
+    expect(inventory.unsavedFormRoutes).toBeUndefined()
+  })
+
+  it("live run 3: a route that only validates and logs saves nothing: no lead site, nothing promised from the server, and the pages that post to it are named", () => {
+    const snapshot = snapshotFromFiles({
+      "pages/api/newsletter.ts": "export default function handler(req, res) {\n  if (!String(req.body?.email ?? '').includes('@')) return res.status(400).json({ error: 'email' })\n  console.log('subscribed')\n  res.status(200).json({ ok: true })\n}\n",
+      "pages/newsletter.tsx": "export default function Page() {\n  const onSubmit = async (e) => {\n    e.preventDefault()\n    const res = await fetch('/api/newsletter', { method: 'POST', body: JSON.stringify({ email }) })\n    if (res.ok) gtag('event', 'generate_lead')\n  }\n  return <form onSubmit={onSubmit}><input type=\"email\" /></form>\n}\n"
+    })
+    expect(detectOutcomes(snapshot)).toEqual([])
+    const inventory = buildEventInventory(snapshot)
+    expect(inventory.unsavedFormRoutes).toEqual([{ event: "lead", file: "pages/api/newsletter.ts", line: 1, pages: ["pages/newsletter.tsx"] }])
+    // The page's own GA4 lead stays what it is; Meta and Infinite are promised nothing from the server.
+    expect(inventoryEntry(inventory, "lead")?.sites.map((site) => site.file)).toEqual(["pages/newsletter.tsx"])
+    expect(inventoryEntry(inventory, "lead")?.missing).toEqual(["posthog"])
   })
 
   it("NEGATIVE: a checkout session created in browser code is not a server checkout", () => {

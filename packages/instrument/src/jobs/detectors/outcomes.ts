@@ -74,9 +74,132 @@ const OUTCOME_PATTERNS: Array<{ kind: OutcomeKind; detail: string; pattern: RegE
 const LEAD_API_ROUTE = /^\/api\/(?:.*\/)?(?:mailing-?list|newsletter|subscribe|subscribers?|waitlist|wait-list|leads?|contact(?:-us)?|enquir(?:y|ies)|inquir(?:y|ies)|demo-?request)(?:\/|$)/i
 const SIGNUP_API_ROUTE = /^\/api\/(?:.*\/)?(?:sign-?up|register|registration|create-account)(?:\/|$)/i
 
-/** Pure: server-side outcome handlers, one finding per (file, kind) at the first matching line. */
-export function detectOutcomes(snapshot: RepoSnapshot): OutcomeFinding[] {
+// ---------------------------------------------------------------------------------------------
+// A sign-up route that saves nothing (live run 3): it validates and logs the email, and stores it nowhere
+// ---------------------------------------------------------------------------------------------
+
+/** Free calls that read or convert a value and reach nothing outside the request. */
+const PURE_FREE_CALLS: ReadonlySet<string> = new Set(["String", "Number", "Boolean", "Array", "Date", "parseInt", "parseFloat", "isNaN", "isFinite", "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI"])
+/** `new X(…)` that builds a plain value or the response. */
+const PURE_CONSTRUCTORS: ReadonlySet<string> = new Set(["Set", "Map", "WeakSet", "WeakMap", "URL", "URLSearchParams", "Date", "Error", "TypeError", "RangeError", "RegExp", "Response", "NextResponse", "Headers"])
+/** Methods on a string, an array, a set or a pattern (and a schema's validation): they read, never send or store. */
+const PURE_METHODS: ReadonlySet<string> = new Set([
+  "trim", "trimStart", "trimEnd", "toLowerCase", "toUpperCase", "toLocaleLowerCase", "toLocaleUpperCase", "normalize", "split", "slice", "substring",
+  "substr", "replace", "replaceAll", "includes", "indexOf", "lastIndexOf", "startsWith", "endsWith", "join", "concat", "charAt", "charCodeAt", "at",
+  "padStart", "padEnd", "repeat", "toString", "toFixed", "localeCompare", "filter", "map", "flatMap", "flat", "some", "every", "find", "findIndex",
+  "reduce", "forEach", "keys", "values", "entries", "has", "get", "getAll", "test", "match", "matchAll", "exec", "parse", "safeParse"
+])
+/** Static helpers of the language's own objects. */
+const PURE_STATIC_ROOTS: ReadonlySet<string> = new Set(["JSON", "Math", "Object", "Array", "Number", "String", "Date"])
+const LOG_ROOTS: ReadonlySet<string> = new Set(["console", "logger", "log"])
+const LOG_METHODS: ReadonlySet<string> = new Set(["log", "info", "warn", "error", "debug", "trace"])
+/** The response the handler answers with (pages router `res`, Fastify `reply`, the Fetch / Next response). */
+const RESPONSE_ROOTS: ReadonlySet<string> = new Set(["res", "response", "reply", "Response", "NextResponse"])
+const RESPONSE_METHODS: ReadonlySet<string> = new Set(["status", "json", "send", "setHeader", "header", "end", "redirect", "type", "code", "writeHead", "sendStatus"])
+/** Reading the request body: the one thing such a route may await. */
+const REQUEST_ROOTS: ReadonlySet<string> = new Set(["req", "request"])
+const BODY_READERS: ReadonlySet<string> = new Set(["json", "formData", "text"])
+/** Words before `(` that are not calls. */
+const NOT_A_CALL: ReadonlySet<string> = new Set(["if", "for", "while", "switch", "catch", "function", "return", "typeof", "await", "async", "do", "with", "in", "of", "else", "case", "void", "delete", "throw", "yield", "instanceof"])
+
+/** The index of the bracket opening the one that closes at `close`, or -1. */
+function openingBracket(code: string, close: number): number {
+  let depth = 0
+  for (let at = close; at >= 0; at -= 1) {
+    const ch = code[at]
+    if (ch === ")" || ch === "]" || ch === "}") depth += 1
+    else if (ch === "(" || ch === "[" || ch === "{") {
+      depth -= 1
+      if (depth === 0) return at
+    }
+  }
+  return -1
+}
+
+/**
+ * The leftmost name of the member chain that ends with the `.` at `dot` (`res.status(400).json` → `res`), or null when the
+ * chain starts with something else (a literal, a parenthesised expression).
+ */
+function chainRoot(code: string, dot: number): string | null {
+  let at = dot - 1
+  let root: string | null = null
+  for (;;) {
+    while (at >= 0 && /\s/.test(code[at]!)) at -= 1
+    if (at < 0) return root
+    const ch = code[at]!
+    if (ch === ")" || ch === "]") {
+      const open = openingBracket(code, at)
+      if (open < 0) return null
+      at = open - 1
+      continue
+    }
+    if (!/[\w$]/.test(ch)) return root
+    const end = at + 1
+    while (at >= 0 && /[\w$]/.test(code[at]!)) at -= 1
+    root = code.slice(at + 1, end)
+    let before = at
+    while (before >= 0 && /\s/.test(code[before]!)) before -= 1
+    if (code[before] === "." && code[before - 1] !== ".") {
+      at = before - (code[before - 1] === "?" ? 2 : 1)
+      continue
+    }
+    return root
+  }
+}
+
+/**
+ * Live run 3: a sign-up or mailing-list API route whose handler does nothing but validate the request, log and answer:
+ * no store, no provider, no mail, no awaited call beyond reading the request body. Reporting a lead there would count
+ * sign-ups that were never created. CONSERVATIVE on purpose: any call the reading does not know (an imported helper, a
+ * client, a fetch, a `.then`, an await of anything but the body) means the route may save, and it counts.
+ */
+export function routeSavesNothing(text: string): boolean {
+  // Comments are blanked, string and template bodies KEPT: a call hidden in a `${…}` is still read (and a word with a
+  // paren inside a plain string only ever makes the answer "it may save").
+  const code = codeView(text, false)
+  const local = new Set<string>()
+  for (const match of code.matchAll(/\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)|\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:function\b|\([^()]*\)\s*(?::[^=]+)?=>|[A-Za-z_$][\w$]*\s*=>)/g)) {
+    local.add((match[1] ?? match[2])!)
+  }
+  for (const match of code.matchAll(/(new\s+)?([A-Za-z_$][\w$]*)\s*(?:<[^<>()]*>)?\s*\(/g)) {
+    const index = (match.index ?? 0) + (match[1]?.length ?? 0)
+    const name = match[2]!
+    if (NOT_A_CALL.has(name)) continue
+    let before = index - 1
+    while (before >= 0 && /\s/.test(code[before]!)) before -= 1
+    // A declaration (`function redact(`), not a call.
+    if (/\bfunction\s*\*?$/.test(code.slice(Math.max(0, before - 10), before + 1))) continue
+    if (match[1]) {
+      if (!PURE_CONSTRUCTORS.has(name)) return false
+      continue
+    }
+    if (code[before] === ".") {
+      const root = chainRoot(code, before)
+      if (root !== null && LOG_ROOTS.has(root) && LOG_METHODS.has(name)) continue
+      if (root !== null && RESPONSE_ROOTS.has(root) && RESPONSE_METHODS.has(name)) continue
+      if (root !== null && REQUEST_ROOTS.has(root) && BODY_READERS.has(name)) continue
+      const direct = /(?<![\w$.])(?<!\.\s+)([A-Za-z_$][\w$]*)\s*\.\s*$/.exec(code.slice(Math.max(0, before - 60), before + 1))?.[1]
+      if (direct !== undefined && direct === root && PURE_STATIC_ROOTS.has(direct)) continue
+      if (PURE_METHODS.has(name)) continue
+      return false
+    }
+    if (PURE_FREE_CALLS.has(name) || local.has(name)) continue
+    return false
+  }
+  // The only awaits: the request body, or a function written in this same file (its body is read above).
+  for (const match of code.matchAll(/\bawait\s+([A-Za-z_$][\w$]*)\s*(?:\.\s*([A-Za-z_$][\w$]*)\s*)?\(/g)) {
+    if (match[2] !== undefined ? REQUEST_ROOTS.has(match[1]!) && BODY_READERS.has(match[2]) : local.has(match[1]!)) continue
+    return false
+  }
+  const awaits = [...code.matchAll(/\bawait\b/g)].length
+  const knownAwaits = [...code.matchAll(/\bawait\s+[A-Za-z_$][\w$]*\s*(?:\.\s*[A-Za-z_$][\w$]*\s*)?\(/g)].length
+  return awaits === knownAwaits
+}
+
+/** One pass: the outcome handlers, and the sign-up / mailing-list routes that save nothing (never an outcome). */
+function scanOutcomes(snapshot: RepoSnapshot): { outcomes: OutcomeFinding[]; unsaved: OutcomeFinding[] } {
   const findings: OutcomeFinding[] = []
+  const unsaved: OutcomeFinding[] = []
   for (const [path, text] of snapshot.files) {
     if (isNonProductPath(path) || !isCodeFile(path) || !isServerFile(path, text)) continue
     const route = routePathOf(path, snapshot.appRoot)
@@ -96,15 +219,29 @@ export function detectOutcomes(snapshot: RepoSnapshot): OutcomeFinding[] {
       const handler = codeMatches(text, /export\s+(?:async\s+)?function\s+(?:GET|POST|handler)\b|export\s+default\b/g)[0]
       if (handler) findings.push({ file: path, line: handler.line, detail: "download route", kind: "download", conversionType: "download", route })
     }
-    // A signup or mailing-list API route counts by its path even before it stores anything (a first store often logs the
-    // email and wires a provider later): `/api/mailing-list`, `/api/subscribe`, `/api/signup`.
+    // A signup or mailing-list API route counts by its path even when the scan cannot name its store (an imported helper,
+    // a provider client): `/api/mailing-list`, `/api/subscribe`, `/api/signup`. Live run 3: one that clearly only
+    // validates and logs saves nothing, so there is no lead to report yet; it is kept apart, never an outcome.
     const formKind: OutcomeKind | null = route === null ? null : SIGNUP_API_ROUTE.test(route) ? "signup" : LEAD_API_ROUTE.test(route) ? "lead" : null
     if (formKind && !seenKinds.has(formKind)) {
       const handler = codeMatches(text, /export\s+(?:async\s+)?function\s+(?:GET|POST|PUT|handler)\b|export\s+default\b|export\s+const\s+(?:GET|POST)\b/g)[0]
-      if (handler) findings.push({ file: path, line: handler.line, detail: `${formKind} API route`, kind: formKind, conversionType: OUTCOME_TYPE[formKind], route })
+      if (handler) (routeSavesNothing(text) ? unsaved : findings).push({ file: path, line: handler.line, detail: `${formKind} API route`, kind: formKind, conversionType: OUTCOME_TYPE[formKind], route })
     }
   }
-  return sortFindings(findings)
+  return { outcomes: sortFindings(findings), unsaved: sortFindings(unsaved) }
+}
+
+/** Pure: server-side outcome handlers, one finding per (file, kind) at the first matching line. */
+export function detectOutcomes(snapshot: RepoSnapshot): OutcomeFinding[] {
+  return scanOutcomes(snapshot).outcomes
+}
+
+/**
+ * Pure: the sign-up and mailing-list API routes that save nothing yet (`routeSavesNothing`): no lead or sign-up is
+ * reported from them, and the plan tells the owner why.
+ */
+export function detectUnsavedFormRoutes(snapshot: RepoSnapshot): OutcomeFinding[] {
+  return scanOutcomes(snapshot).unsaved
 }
 
 const ELEMENT_PATTERNS: Array<{ type: ConversionType; pattern: RegExp }> = [

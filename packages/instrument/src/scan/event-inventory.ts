@@ -28,7 +28,7 @@
 import { posix } from "node:path"
 
 import { codeView, isCodeFile, isHtmlFile, isNonProductPath, routePathOf } from "../jobs/detectors/shared.js"
-import { detectOutcomes, isServerFile, type OutcomeFinding } from "../jobs/detectors/outcomes.js"
+import { detectOutcomes, detectUnsavedFormRoutes, isServerFile, type OutcomeFinding } from "../jobs/detectors/outcomes.js"
 import type { RepoSnapshot } from "../jobs/repo-files.js"
 import { outcomesIn } from "../checks/commerce-static.js"
 import { isConsentFile, isConsentText } from "../jobs/consent-units.js"
@@ -88,6 +88,20 @@ export interface PageRequest {
   via: string
 }
 
+/**
+ * Live run 3: a sign-up or mailing-list API route that saves nothing yet (it validates and logs the email, and stores,
+ * subscribes or sends it nowhere). There is no lead or sign-up to report from it: no server job is seeded, its event
+ * promises nothing from the server, and the plan tells the owner to run the wizard again once it saves.
+ */
+export interface UnsavedFormRoute {
+  event: "lead" | "sign_up"
+  /** The route file and its handler's line. */
+  file: string
+  line: number
+  /** The pages that send their request to it (their forms are its forms). */
+  pages: string[]
+}
+
 export interface EventInventory {
   events: EventInventoryEntry[]
   checkoutCreates: EventSite[]
@@ -99,6 +113,8 @@ export interface EventInventory {
   routeChangeFullLoad?: EventSite | null
   /** P1-B: the signal the page sends its own API routes when the visitor allowed tracking. */
   trackingSignal?: TrackingSignal
+  /** Live run 3: the sign-up / mailing-list routes that save nothing yet (absent = none). */
+  unsavedFormRoutes?: UnsavedFormRoute[]
   /**
    * The currency the site prices in (ISO 4217, upper case), from its own code: the currency its Stripe Checkout
    * sessions charge in, else the one currency its code names (`currency: "USD"`, `Intl.NumberFormat(…, { currency })`).
@@ -1156,6 +1172,16 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
   }
   const siteCurrency = checkoutCurrencies.size === 1 ? [...checkoutCurrencies][0]! : codeCurrencies.size === 1 ? [...codeCurrencies][0]! : null
 
+  // Live run 3: a lead / sign-up whose only server route saves nothing has nothing to report from the server yet.
+  const unsavedFindings = detectUnsavedFormRoutes(snapshot)
+  const unsavedFormRoutes: UnsavedFormRoute[] = unsavedFindings.map((finding) => ({
+    event: finding.kind === "signup" ? ("sign_up" as const) : ("lead" as const),
+    file: finding.file,
+    line: finding.line,
+    pages: [...new Set(pageRequestsOf(views, [finding.file], snapshot.appRoot).map((request) => request.file))].sort()
+  }))
+  const nothingToReport = new Set<FunnelEvent>(unsavedFormRoutes.map((route) => route.event).filter((event) => !outcomes.some((finding) => OUTCOME_EVENT[finding.kind] === event)))
+
   const events: EventInventoryEntry[] = []
   for (const event of FUNNEL_EVENTS) {
     const entry = entries.get(event)
@@ -1164,7 +1190,7 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
     const tools: Partial<Record<InventoryTool, EventSite[]>> = {}
     for (const tool of INVENTORY_TOOLS) if (entry.tools[tool]?.length) tools[tool] = sortSites([...entry.tools[tool]!])
     entry.tools = tools
-    entry.missing = EXPECTED_TOOLS[event].filter((tool) => !tools[tool]?.length)
+    entry.missing = EXPECTED_TOOLS[event].filter((tool) => !tools[tool]?.length && !(nothingToReport.has(event) && (tool === "meta_server" || tool === "infinite")))
     events.push(entry)
   }
   return {
@@ -1175,6 +1201,7 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
     routeChangeFullLoad,
     pageRequests: pageRequestsOf(views, [...checkoutCreates.map((site) => site.file), ...outcomes.filter((finding) => OUTCOME_EVENT[finding.kind] && finding.kind !== "payment_webhook").map((finding) => finding.file)], snapshot.appRoot),
     trackingSignal: trackingSignalOf(views),
+    ...(unsavedFormRoutes.length > 0 ? { unsavedFormRoutes } : {}),
     siteCurrency
   }
 }
