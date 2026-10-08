@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import Stripe from "stripe";
 import { getProduct, parseSkuList } from "../../src/catalog/products";
-import { adMatchFromRequest, reportInfiniteOutcome, type InfiniteAdMatch } from "../../lib/infinite-outcome";
+import { buyerContext, contextMetadata, reportStripeCheckoutStarted } from "../../lib/infinite-outcome";
 
 /**
  * Direct buy links we send to existing customers (email, SMS, support replies).
@@ -18,16 +18,6 @@ function originOf(req: NextApiRequest): string {
   const proto = (req.headers["x-forwarded-proto"] as string | undefined)?.split(",")[0] ?? "http";
   const host = req.headers["x-forwarded-host"] ?? req.headers.host ?? "localhost:3000";
   return `${proto}://${host}`;
-}
-
-/** The buyer's own ad-click context, carried to the Stripe webhook (it reports the purchase from Stripe's request). */
-function matchMetadata(adMatch: InfiniteAdMatch): Record<string, string> {
-  return {
-    infinite_fbc: adMatch.fbc ?? "",
-    infinite_fbp: adMatch.fbp ?? "",
-    infinite_ip: adMatch.client_ip_address ?? "",
-    infinite_ua: adMatch.client_user_agent ?? "",
-  };
 }
 
 let stripeClient: Stripe | null = null;
@@ -73,9 +63,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const skuList = lines.flatMap((l) => Array<string>(l.qty).fill(l.slug)).join(",");
   const origin = originOf(req);
-  // The cart form says whether the visitor allowed tracking; only then does match data ride along.
+  // The cart form adds the signal only when the visitor allowed tracking; never inferred from cookies.
   const trackingAllowed = (req.body as { adMatch?: string } | undefined)?.adMatch === "1";
-  const adMatch = await adMatchFromRequest(req, { trackingAllowed });
+  const context = await buyerContext(req, { trackingAllowed });
 
   try {
     const session = await stripe.checkout.sessions.create({
@@ -96,7 +86,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         };
       }),
       shipping_address_collection: { allowed_countries: ["US"] },
-      metadata: { skus: lines.map((l) => l.slug).join(","), source, ...matchMetadata(adMatch) },
+      // The cart and the buyer's device data ride to the webhook. Never an email, a name or an address.
+      metadata: { skus: lines.map((l) => l.slug).join(","), source, ...contextMetadata(context, { contentIds: lines.map((l) => l.slug), numItems: lines.reduce((n, l) => n + l.qty, 0) }) },
       success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}&skus=${encodeURIComponent(skuList)}`,
       cancel_url: `${origin}/cart`,
     });
@@ -105,19 +96,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       res.status(500).send("Stripe did not return a checkout URL.");
       return;
     }
-    // Sent beside the redirect: it never blocks the buyer, and it never throws.
-    void reportInfiniteOutcome({
-      type: "begin_checkout",
-      eventId: `begin_checkout:${session.id}`,
-      path: "/cart",
-      properties: {
-        value: (session.amount_total ?? 0) / 100,
-        currency: (session.currency ?? "usd").toUpperCase(),
-        content_ids: lines.map((l) => l.slug).join(","),
-        num_items: lines.reduce((n, l) => n + l.qty, 0),
-      },
-      adMatch,
-    });
+    // begin_checkout (Meta InitiateCheckout through Infinite); waits at most 800 ms, or runs after the response.
+    await reportStripeCheckoutStarted(session, { path: "/cart" });
     res.redirect(303, session.url);
   } catch (err) {
     console.error("[checkout] failed to create session", err instanceof Error ? err.message : err);

@@ -1,6 +1,5 @@
-import { createHmac } from "node:crypto";
 import type { NextApiRequest, NextApiResponse } from "next";
-import { adMatchFromRequest, reportInfiniteOutcome } from "../../lib/infinite-outcome";
+import { reportInfiniteLead } from "../../lib/infinite-outcome";
 
 const ALLOWED_INTERESTS = new Set(["new-releases", "studio-events", "care-and-repair"]);
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -8,11 +7,6 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function redact(email: string): string {
   const [local, domain] = email.split("@");
   return `${local.slice(0, 1)}***@${domain}`;
-}
-
-/** One stable id per subscriber, keyed with a secret only this site holds (never the address itself). */
-function subscriberId(email: string): string {
-  return createHmac("sha256", process.env.LEAD_ID_SECRET ?? "").update(email).digest("hex").slice(0, 32);
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -36,14 +30,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   // No email provider wired up yet: log it so we can import the list later.
   console.log(`[mailing-list] signup ${redact(email)} interests=${interests.join("|") || "none"}`);
 
-  // The signup is real now. The form says whether the visitor allowed tracking; only then does the lead carry the
-  // hashed email and the subscriber id for Meta.
-  const id = subscriberId(email);
-  void reportInfiniteOutcome({
+  // Once the sign-up is REAL (stored, subscribed), never on the click:
+  await reportInfiniteLead(req, {
     type: "lead",
-    eventId: `lead:${id}`,
-    path: "/mailing-list",
-    adMatch: await adMatchFromRequest(req, { trackingAllowed: body.adMatch === true, email, externalId: id }),
+    email, // the submitted address: hashed in the helper, never sent, stored or logged
+    trackingAllowed: body.adMatch === true, // the page's signal that the visitor allowed tracking
+    fallbackPath: "/mailing-list", // used when the request carries no same-site Referer
   });
 
   res.status(200).json({ ok: true });

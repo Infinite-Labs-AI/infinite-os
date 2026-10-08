@@ -75,7 +75,8 @@ describe("browser commerce briefs (review P0-5)", () => {
     const brief = buildBrief([item("meta_improve:commerce_events", [ADD_TO_CART, VIEW_ITEM], ["lib/store-events.ts", "pages/index.tsx", "pages/trail-pack.tsx"])], facts)
     expect(brief).toContain('### Job "meta_improve:commerce_events" (5. Adding Meta AddToCart and ViewContent with product and price)')
     const data = planData(brief, "meta_improve:commerce_events")
-    expect(data.destinations).toEqual(["meta"])
+    // Meta, and Infinite's ledger (every commerce event reaches Infinite too); never GA4 or PostHog, which have it.
+    expect(data.destinations).toEqual(["meta", "infinite"])
     expect(data.events).toEqual([
       {
         event: "add_to_cart",
@@ -93,7 +94,7 @@ describe("browser commerce briefs (review P0-5)", () => {
       }
     ])
     expect(data.helperImport).toBe('import { infiniteTrack, infiniteTrackThenNavigate } from "./infinite-analytics"')
-    expect(brief).toContain('{ destinations: ["meta"] }')
+    expect(brief).toContain('{ destinations: ["meta", "infinite"] }')
     expect(brief).toContain("infiniteTrackThenNavigate(event, <where the click goes>")
     expect(brief).toContain("at most 400 ms")
     expect(brief).toContain("Never invent a price")

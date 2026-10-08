@@ -90,16 +90,17 @@ describe("store-halden: scan → inventory → jobs → plan", () => {
     )
 
     const purchase = byId.get("server_conversions:purchase")!
-    expect(purchase.allow).toEqual({ files: ["pages/api/checkout.ts"], create: ["pages/api/stripe-webhook.ts"] })
+    // The checkout route, and the cart page that sends its request (it carries the visitor's tracking signal).
+    expect(purchase.allow).toEqual({ files: ["pages/api/checkout.ts", "pages/cart.tsx"], create: ["pages/api/stripe-webhook.ts"] })
     expect(purchase.inventory?.[0]).toMatchObject({ event: "purchase", missing: ["meta_server", "infinite"] })
     expect(purchase.trigger.evidence).toEqual([{ file: "pages/api/checkout.ts", line: 67 }])
 
     const checkout = byId.get("server_conversions:begin_checkout")!
-    expect(checkout.allow).toEqual({ files: ["pages/api/checkout.ts"], create: [] })
+    expect(checkout.allow).toEqual({ files: ["pages/api/checkout.ts", "pages/cart.tsx"], create: [] })
     expect(checkout.inventory?.[0]?.sites).toContainEqual({ file: "pages/api/checkout.ts", line: 67, via: "stripe.checkout.sessions.create" })
 
     const lead = byId.get("server_conversions:lead")!
-    expect(lead.allow).toEqual({ files: ["pages/api/mailing-list.ts"], create: [] })
+    expect(lead.allow).toEqual({ files: ["pages/api/mailing-list.ts", "pages/mailing-list.tsx"], create: [] })
     expect(lead.inventory?.[0]?.sites).toContainEqual({ file: "pages/api/mailing-list.ts", line: 11, via: "form-api" })
 
     // The stored item shape accepts the inventory (the run state round-trips it).
@@ -160,7 +161,8 @@ describe("store-chain: the two-level sender chain", () => {
     // The product view fires from a consent component: never an edit place; the `viewItem()` helper it calls is.
     expect(posthog.allow).toEqual({ files: ["src/common/analytics.ts"], create: [] })
     expect(candidates.find((item) => item.id === "meta_improve:commerce_events")!.allow.files).not.toContain("components/ConsentNotice.tsx")
-    expect(candidates.find((item) => item.id === "server_conversions:lead")!.allow.files).toEqual(["pages/api/mailing-list.ts"])
+    // The lead route and the form that posts to it (the tracking signal rides in its request).
+    expect(candidates.find((item) => item.id === "server_conversions:lead")!.allow.files).toEqual(["components/MailingListForm.tsx", "pages/api/mailing-list.ts"])
   })
 
   it("says per tool what it gets and what is added", () => {

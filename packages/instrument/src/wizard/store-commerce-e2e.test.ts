@@ -122,9 +122,24 @@ describe("[D] store: the static checks catch a run that leaves Meta without the 
   })
 
   it("(d) a purchase reported without match data is caught at the webhook", () => {
+    // The agent hand-rolls the report instead of the recipe's reportStripeCheckoutPurchase, and leaves the match data out.
     const webhook = CORRECT_EDITS.get("pages/api/stripe-webhook.ts")!
-    expect(webhook).toContain("    adMatch: await buyerMatch(session),\n")
-    const now = edited(new Map([...CORRECT_EDITS, ["pages/api/stripe-webhook.ts", webhook.replace("    adMatch: await buyerMatch(session),\n", "")]]))
+    const recipe = '  return res.status(await reportStripeCheckoutPurchase(event, { path: "/success" })).json({ received: true })\n'
+    expect(webhook).toContain(recipe)
+    const handRolled = webhook
+      .replace("import { reportStripeCheckoutPurchase } from", "import { reportInfiniteOutcome } from")
+      .replace(recipe, [
+        "  const session = event.data.object as Stripe.Checkout.Session",
+        "  const status = await reportInfiniteOutcome({",
+        '    type: "purchase",',
+        "    eventId: session.id,",
+        '    path: "/success",',
+        "    properties: { value: (session.amount_total ?? 0) / 100, currency: (session.currency ?? \"usd\").toUpperCase() },",
+        "  })",
+        "  return res.status(status === null || status >= 500 ? 500 : 200).json({ received: true })",
+        ""
+      ].join("\n"))
+    const now = edited(new Map([...CORRECT_EDITS, ["pages/api/stripe-webhook.ts", handRolled]]))
     const found = problems(commerceFindings({ files: now, base: baseFor(now), inventory: EXPECTED, metaInUse: true }))
     expect(found).toHaveLength(1)
     expect(found[0]).toMatchObject({ rule: "outcome_without_ad_match", event: "purchase", file: "pages/api/stripe-webhook.ts" })
@@ -198,7 +213,10 @@ async function pipeline() {
     plan: briefPlanFrom(plan, approvals),
     connections: briefConnectionsFrom(keys),
     previewGuard: null,
-    helpers: { module: "lib/infinite-analytics.ts" }
+    helpers: { module: "lib/infinite-analytics.ts" },
+    // What the install writes for a Next site with the server lane (its receipt), and the before step's inventory.
+    managedFiles: ["lib/infinite-analytics.ts", "lib/infinite-server-lane.ts", "lib/infinite-outcome.ts"],
+    inventory: toJobScan(scan).detections.eventInventory
   }
   return { scan, plan, items, brief: registry.brief(items.filter((item) => item.owner === "agent")) }
 }
@@ -245,12 +263,42 @@ describe("store: the wizard's own scan, plan and briefs", () => {
     const { items, brief } = await pipeline()
     const ids = items.map((item) => item.id)
     for (const event of ["purchase", "begin_checkout", "lead"]) expect(ids, event).toContain(`server_conversions:${event}`)
-    expect(ids.some((id) => id.endsWith(":add_to_cart"))).toBe(true)
-    expect(ids.some((id) => id.endsWith(":view_item"))).toBe(true)
-    expect(brief).toContain("AddToCart")
-    expect(brief).toContain("ViewContent")
-    for (const event of ["purchase", "begin_checkout", "lead"]) expect(brief, event).toMatch(new RegExp(`reportInfiniteOutcome[^\\n]*${event}|${event}[^\\n]*reportInfiniteOutcome`))
-    expect(brief).toContain("adMatch")
+    // The Meta browser job: one item for the commerce steps Meta misses, carrying both from the scan's inventory.
+    const metaCommerce = items.find((item) => item.id === "meta_improve:commerce_events")
+    expect(metaCommerce?.inventory?.map((entry) => entry.event).sort()).toEqual(["add_to_cart", "view_item"])
+    // GA4 and PostHog already get every step and the purchase: no job adds a second one, and no browser purchase job.
+    expect(ids).not.toContain("conversions_to_tools:purchase")
+    expect(ids.filter((id) => id.startsWith("ga4_improve:") || id.startsWith("posthog_improve:commerce"))).toEqual([])
+    const block = (id: string) => brief.slice(brief.indexOf(`### Job "${id}"`), brief.indexOf("### Job", brief.indexOf(`### Job "${id}"`) + 1) >>> 0 || undefined)
+    const meta = block("meta_improve:commerce_events")
+    expect(meta).toContain("Adding Meta AddToCart and ViewContent with product and price")
+    expect(meta).toContain('{ destinations: ["meta", "infinite"] }')
+    expect(meta).toContain('add the attribute data-infinite-conversion="add_to_cart" to the button element itself')
+    // The server events, each through the outcome helper's own reporter, with the payer's / visitor's match data.
+    const purchase = block("server_conversions:purchase")
+    expect(purchase).toContain('The repo has no Stripe webhook route: create "pages/api/stripe-webhook.ts"')
+    expect(purchase).toContain('the scan points at "pages/api/checkout.ts" line 67')
+    expect(purchase).toContain("reportStripeCheckoutPurchase")
+    expect(purchase).toContain("PAYER's hashed match data")
+    const checkout = block("server_conversions:begin_checkout")
+    expect(checkout).toContain('"pages/api/checkout.ts" line 67')
+    expect(checkout).toContain("reportStripeCheckoutStarted")
+    expect(checkout).toContain("buyerContext")
+    expect(checkout).toContain("adMatch: infiniteAdMatchAllowed()")
+    const lead = block("server_conversions:lead")
+    expect(lead).toContain('"pages/api/mailing-list.ts"')
+    expect(lead).toContain("reportInfiniteLead")
+    expect(lead).toContain("trackingAllowed: body.adMatch === true")
+    expect(lead).toContain('"pages/mailing-list.tsx"')
+    for (const text of [purchase, checkout, lead]) expect(text).toContain('"lib/infinite-outcome.ts"')
+    // The page that sends each request may carry the visitor's tracking signal: it is in the job's files.
+    const allowed = (id: string) => items.find((item) => item.id === id)?.allow.files ?? []
+    expect(allowed("server_conversions:begin_checkout")).toEqual(expect.arrayContaining(["pages/api/checkout.ts", "pages/cart.tsx"]))
+    expect(allowed("server_conversions:lead")).toEqual(expect.arrayContaining(["pages/api/mailing-list.ts", "pages/mailing-list.tsx"]))
+    expect(items.find((item) => item.id === "server_conversions:purchase")?.allow.create).toEqual(["pages/api/stripe-webhook.ts"])
+    // The correct edits stay inside the jobs' files (never the trackers file holding the consent code).
+    const editable = new Set(items.flatMap((item) => [...item.allow.files, ...item.allow.create]))
+    expect([...CORRECT_EDITS.keys()].filter((file) => !editable.has(file))).toEqual([])
     // Never a second GA4 / PostHog purchase: the site already sends them.
     expect(brief).not.toMatch(/infiniteTrack\("purchase"\)/)
   })
@@ -262,16 +310,20 @@ describe("store: the wizard's own scan, plan and briefs", () => {
     try {
       const inventory = await scanInventory((await pipeline()).scan)
       const functions = jobStaticCheckFunctions({ root, run: () => ({ eventInventory: inventory, metaInUse: true, conversionNames: ["purchase", "begin_checkout", "lead", "add_to_cart", "view_item"] }), readBaseFile: (_root, file) => SITE.get(file) ?? null })
-      const commerceJobs = items.filter((item) => item.jobId === "server_conversions" || item.jobId === "conversions_to_tools")
-      expect(commerceJobs.length).toBeGreaterThan(0)
+      const commerceJobs = items.filter((item) => item.jobId === "server_conversions" || item.jobId === "conversions_to_tools" || item.id.endsWith(":commerce_events"))
+      expect(commerceJobs.map((item) => item.id).sort()).toEqual(["meta_improve:commerce_events", "server_conversions:begin_checkout", "server_conversions:lead", "server_conversions:purchase"])
+      const graded: string[] = []
       for (const item of commerceJobs) {
         for (const check of item.checks.filter((entry) => entry.tier === "S")) {
           const fn = functions[check.id as keyof typeof functions]
           if (!fn) continue
           const raw = await fn({ item, root, appRoot: ".", runId: RUN_ID }, { runId: RUN_ID, now: () => new Date("2026-10-08T10:00:00.000Z") })
-          for (const result of Array.isArray(raw) ? raw : [raw]) expect(result.state, `${item.id} ${check.id}: ${result.reason ?? ""}`).not.toBe("problem")
+          for (const result of Array.isArray(raw) ? raw : [raw]) expect(result.state, `${item.id} ${check.id}: ${result.reason ?? ""}`).toBe("pass")
+          graded.push(`${item.id}:${check.id}`)
         }
       }
+      // Every job's own proving check ran (and passed above).
+      expect(graded).toEqual(expect.arrayContaining(["meta_improve:commerce_events:commerce_promises_met", "server_conversions:purchase:outcome_declared", "server_conversions:begin_checkout:outcome_declared", "server_conversions:lead:outcome_declared"]))
     } finally {
       execFileSync("git", ["checkout", "--", "."], { cwd: root, stdio: "ignore" })
       execFileSync("git", ["clean", "-fdq"], { cwd: root, stdio: "ignore" })

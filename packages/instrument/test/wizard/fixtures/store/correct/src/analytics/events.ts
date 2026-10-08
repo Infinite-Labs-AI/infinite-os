@@ -22,10 +22,8 @@ function gaItem(product: Product, qty?: number) {
 
 /**
  * Meta and Infinite get the product events with the product and its price. GA4 and PostHog already get them from
- * the calls above, so they are left out here: one event per tool, never two.
+ * the calls above, so they are left out of these: one event per tool, never two.
  */
-const META_AND_INFINITE_ONLY = { destinations: { ga4: false, posthog: false } };
-
 function productProps(product: Product, qty = 1) {
   return { item_id: product.slug, item_name: product.name, price: product.priceCents / 100, quantity: qty, currency: "USD" };
 }
@@ -33,13 +31,13 @@ function productProps(product: Product, qty = 1) {
 export function viewItem(product: Product) {
   sendGa("view_item", { items: [gaItem(product)] });
   capturePosthog("product_viewed", { sku: product.slug, name: product.name, category: product.category });
-  infiniteTrack("view_item", productProps(product), META_AND_INFINITE_ONLY);
+  infiniteTrack("view_item", productProps(product), { destinations: ["meta", "infinite"] });
 }
 
 export function addToCart(product: Product, qty = 1) {
   sendGa("add_to_cart", { items: [gaItem(product, qty)] });
   capturePosthog("product_added", { sku: product.slug, name: product.name, quantity: qty });
-  infiniteTrack("add_to_cart", productProps(product, qty), META_AND_INFINITE_ONLY);
+  infiniteTrack("add_to_cart", productProps(product, qty), { destinations: ["meta", "infinite"] });
 }
 
 export function beginCheckout(lines: EventLine[]) {

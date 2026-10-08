@@ -364,7 +364,14 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       const scope = itemFiles(input)
       const calls = outcomeCalls(scope)
       if (calls.length === 0) return noOutcomeCall("outcome_after_success", scope, ctx)
-      const triggers = detectOutcomes(snapshotOf(scope, input.appRoot)).filter((finding) => finding.conversionType === itemTarget(input.item) || itemTarget(input.item) === "")
+      const target = itemTarget(input.item)
+      // A checkout start becomes real when the payment session exists: its success point is the session creation.
+      const triggers: Array<{ file: string; line: number; detail: string }> =
+        target === "begin_checkout"
+          ? [...scope].flatMap(([file, text]) =>
+              [...maskCommentsAndStrings(text, true).matchAll(/\.\s*checkout\s*\.\s*sessions\s*\.\s*create\s*\(/g)].map((match) => ({ file, line: lineNumberAt(text, match.index ?? 0), detail: "checkout session creation" }))
+            )
+          : detectOutcomes(snapshotOf(scope, input.appRoot)).filter((finding) => finding.conversionType === target || target === "")
       for (const { file, call } of calls) {
         const masked = maskCommentsAndStrings(scope.get(file)!, true)
         if (insideCatch(masked, call.index)) return result("outcome_after_success", ctx, "problem", `${file}:${call.line} reports the outcome from an error branch`, file, call.line)

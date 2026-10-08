@@ -64,6 +64,15 @@ const SERVER_VIAS = SERVER_SITE_VIAS
 const DESTINATION: Readonly<Record<InventoryTool, string | null>> = { ga4: "ga4", posthog: "posthog", meta_browser: "meta", meta_server: null, infinite: "infinite" }
 const TOOL_WORD: Readonly<Record<InventoryTool, string>> = { ga4: "GA4", posthog: "PostHog", meta_browser: "Meta", meta_server: "Meta (from your server)", infinite: "Infinite" }
 
+/**
+ * The `destinations` a browser commerce job names. Meta's job also names Infinite: every commerce event reaches
+ * Infinite's ledger too (the founder's rule), and the Meta job is the one that adds the page's call where the site's
+ * own trackers already send GA4 and PostHog.
+ */
+function commerceDestinations(tool: InventoryTool): string[] {
+  return tool === "meta_browser" ? ["meta", "infinite"] : [DESTINATION[tool]!]
+}
+
 /** The browser commerce job's tool, from its job (`meta_improve:commerce_events` → Meta). */
 const COMMERCE_JOB_TOOL: Readonly<Record<string, InventoryTool>> = { meta_improve: "meta_browser", ga4_improve: "ga4", posthog_improve: "posthog" }
 
@@ -317,16 +326,16 @@ function conversionGist(target: string, data: Record<string, unknown> | Error): 
  * `destinations`, with the product and price from the site's own data, and waits before a navigation.
  */
 function commerceGist(tool: InventoryTool, events: readonly FunnelEvent[]): string {
-  const destination = DESTINATION[tool]!
   const meta = tool === "meta_browser"
+  const destination = commerceDestinations(tool).map((name) => JSON.stringify(name)).join(", ")
   return [
     // The wizard's own test clicks `[data-infinite-conversion="add_to_cart"]` (rehearsal and prove) to see the event leave.
     ...(events.includes("add_to_cart")
       ? ['On every Buy / Add-to-cart button whose click sends the add_to_cart (the places in firesAt), add the attribute data-infinite-conversion="add_to_cart" to the button element itself, so the wizard\'s test can click it. Only the attribute: never change the button\'s text, handler or look.']
       : []),
-    `Here: at each place in "events" (firesAt is where the site already tracks it; alreadySentTo is what it sends there today), add ONE call that sends the event to ${TOOL_WORD[tool]} ONLY: infiniteTrack(<event>, ${PRODUCT_PROPS}, { destinations: [${JSON.stringify(destination)}] }).`,
+    `Here: at each place in "events" (firesAt is where the site already tracks it; alreadySentTo is what it sends there today), add ONE call that sends the event to ${TOOL_WORD[tool]}${meta ? " and Infinite" : ""} ONLY: infiniteTrack(<event>, ${PRODUCT_PROPS}, { destinations: [${destination}] }).`,
     "Put it beside the site's existing send for that event (inside the site's own helper when firesAt names one, so every caller is covered once), with the product id, name, unit price and quantity the site already has there or in its own product catalog. Never invent a price or a product; pass the currency the site prices in.",
-    `When the click then leaves the page (a Buy button that goes to the cart), use infiniteTrackThenNavigate(event, <where the click goes>, <event>, <the same props>, { destinations: [${JSON.stringify(destination)}] }) in that click handler instead of the handler's own navigation, so ${meta ? "Meta's request is out (at most 400 ms)" : "the event is out"} before the page leaves; it ignores a second click while the first is on its way.`,
+    `When the click then leaves the page (a Buy button that goes to the cart), use infiniteTrackThenNavigate(event, <where the click goes>, <event>, <the same props>, { destinations: [${destination}] }) in that click handler instead of the handler's own navigation, so ${meta ? "Meta's request is out (at most 400 ms)" : "the event is out"} before the page leaves; it ignores a second click while the first is on its way.`,
     "If another job in this brief adds a different tool at the same place, make it ONE call with both tools in destinations. Never add a tool already listed in alreadySentTo, never call gtag, posthog or fbq yourself, and never add a Meta eventID."
   ].join(" ")
 }
@@ -552,7 +561,7 @@ function commerceData(item: ChecklistItem, facts: BriefFacts): Record<string, un
   const file = item.allow.files[0] ?? null
   return {
     tool: TOOL_WORD[tool],
-    destinations: [DESTINATION[tool]],
+    destinations: commerceDestinations(tool),
     events: entries.map((entry) => inventoryData(entry, [tool])),
     ...(facts.helpers.module && file ? { helperImport: helperImportFor(file, facts.helpers.module) } : {})
   }

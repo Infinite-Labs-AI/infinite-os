@@ -1,77 +1,34 @@
-import type { NextApiRequest, NextApiResponse } from "next";
-import Stripe from "stripe";
-import { adMatchFromRequest, reportInfiniteOutcome } from "../../lib/infinite-outcome";
+// Stripe → Infinite: each paid checkout is reported once, as a purchase, and Infinite relays it to Meta.
+// Stripe endpoint: https://<your-domain>/api/stripe-webhook, events checkout.session.completed + checkout.session.async_payment_succeeded.
+// STRIPE_WEBHOOK_SECRET is that endpoint's signing secret (Stripe → Developers → Webhooks).
+// Inert until Infinite's environment variables are set: it answers 200 and reports nothing.
+import type { NextApiRequest, NextApiResponse } from "next"
+import Stripe from "stripe"
+import { reportStripeCheckoutPurchase } from "../../lib/infinite-outcome"
 
-export const config = { api: { bodyParser: false } };
+// Use the site's existing Stripe client here instead, if it already has one.
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY ?? "")
+
+// Stripe signs the raw bytes, so Next must not parse the body.
+export const config = { api: { bodyParser: false } }
 
 async function rawBody(req: NextApiRequest): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  return Buffer.concat(chunks);
-}
-
-/**
- * The buyer's match data for Meta: the ad-click context the checkout route saved on the session (only when the
- * visitor allowed tracking), plus the payer's own details from Stripe, hashed by the helper before anything leaves.
- */
-async function buyerMatch(session: Stripe.Checkout.Session) {
-  const saved = session.metadata ?? {};
-  const cookie = [saved.infinite_fbc ? `_fbc=${saved.infinite_fbc}` : "", saved.infinite_fbp ? `_fbp=${saved.infinite_fbp}` : ""].filter(Boolean).join("; ");
-  const details = session.customer_details;
-  return adMatchFromRequest(
-    { headers: { cookie, "user-agent": saved.infinite_ua ?? "", "x-forwarded-for": saved.infinite_ip ?? "" } },
-    {
-      trackingAllowed: Boolean(saved.infinite_ua),
-      email: details?.email ?? undefined,
-      fullName: details?.name ?? undefined,
-      city: details?.address?.city ?? undefined,
-      state: details?.address?.state ?? undefined,
-      postcode: details?.address?.postal_code ?? undefined,
-      country: details?.address?.country ?? undefined,
-    },
-  );
+  const chunks: Buffer[] = []
+  for await (const chunk of req) chunks.push(Buffer.from(chunk))
+  return Buffer.concat(chunks)
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  const secret = process.env.STRIPE_WEBHOOK_SECRET;
-  const key = process.env.STRIPE_SECRET_KEY;
-  // Does nothing until the site is set up, so Stripe never retries for days before then.
-  if (!secret || !key || !process.env.INFINITE_SERVER_LANE_SECRET) {
-    res.status(200).json({ skipped: true });
-    return;
+  if (req.method !== "POST") {
+    res.setHeader("Allow", "POST")
+    return res.status(405).end()
   }
-  let event: Stripe.Event;
+  let event: Stripe.Event
   try {
-    event = new Stripe(key).webhooks.constructEvent(await rawBody(req), String(req.headers["stripe-signature"] ?? ""), secret);
+    event = stripe.webhooks.constructEvent(await rawBody(req), String(req.headers["stripe-signature"] ?? ""), process.env.STRIPE_WEBHOOK_SECRET ?? "")
   } catch {
-    res.status(400).send("Bad signature");
-    return;
+    return res.status(400).end() // not signed by Stripe
   }
-  if (event.type !== "checkout.session.completed" && event.type !== "checkout.session.async_payment_succeeded") {
-    res.status(200).json({ ignored: event.type });
-    return;
-  }
-  const session = event.data.object as Stripe.Checkout.Session;
-  // Test payments and sessions this site did not create are not purchases.
-  if (!session.livemode || session.payment_status !== "paid" || !session.metadata?.skus) {
-    res.status(200).json({ ignored: "not a paid order of this shop" });
-    return;
-  }
-  const report = await reportInfiniteOutcome({
-    type: "purchase",
-    eventId: `purchase:${session.id}`,
-    path: "/success",
-    properties: {
-      value: (session.amount_total ?? 0) / 100,
-      currency: (session.currency ?? "usd").toUpperCase(),
-      content_ids: session.metadata.skus,
-    },
-    adMatch: await buyerMatch(session),
-  });
-  // Not delivered, or Infinite asked to try again: Stripe retries the webhook.
-  if (report.status === null || report.status >= 500 || report.status === 401 || report.status === 403 || report.status === 429) {
-    res.status(500).json({ retry: true });
-    return;
-  }
-  res.status(200).json({ ok: true });
+  // 500 only when a retry can deliver the report; 200 for everything else (test mode, other sessions, before setup).
+  return res.status(await reportStripeCheckoutPurchase(event, { path: "/success" })).json({ received: true })
 }
