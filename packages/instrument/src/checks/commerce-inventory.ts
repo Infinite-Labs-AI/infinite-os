@@ -38,6 +38,8 @@ export interface InventorySite {
   navigation?: "full_load" | "client" | "none"
   /** Where the `helper:<fn>` helper is defined. */
   helperAt?: { file: string; line: number }
+  /** A full load the handler's code does not write: the link's or the form's default action, or the site's route hook. */
+  leavesBy?: "link" | "form" | "route_hook"
 }
 
 export interface InventoryRow {
@@ -131,14 +133,15 @@ function fromScanShape(events: unknown[]): EventInventory {
     }
     const sites: InventorySite[] = (Array.isArray(entry.sites) ? entry.sites : []).flatMap((raw): InventorySite[] => {
       if (!raw || typeof raw !== "object" || typeof (raw as { file?: unknown }).file !== "string") return []
-      const site = raw as { file: string; line?: unknown; via?: unknown; navigation?: unknown; helperAt?: unknown }
+      const site = raw as { file: string; line?: unknown; via?: unknown; navigation?: unknown; helperAt?: unknown; leavesBy?: unknown }
       const helperAt = site.helperAt as { file?: unknown; line?: unknown } | undefined
       return [{
         file: site.file,
         line: Number(site.line) || 1,
         ...(typeof site.via === "string" ? { via: site.via } : {}),
         ...(site.navigation === "full_load" || site.navigation === "client" || site.navigation === "none" ? { navigation: site.navigation } : {}),
-        ...(helperAt && typeof helperAt.file === "string" ? { helperAt: { file: helperAt.file, line: Number(helperAt.line) || 1 } } : {})
+        ...(helperAt && typeof helperAt.file === "string" ? { helperAt: { file: helperAt.file, line: Number(helperAt.line) || 1 } } : {}),
+        ...(site.leavesBy === "link" || site.leavesBy === "form" || site.leavesBy === "route_hook" ? { leavesBy: site.leavesBy } : {})
       }]
     })
     rows.push({ event: entry.event, tools, ...(sites.length > 0 ? { sites } : {}) })

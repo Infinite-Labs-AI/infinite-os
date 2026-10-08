@@ -36,7 +36,7 @@ import { escapeRegExp } from "../text-escape.js"
 
 export type InventoryTool = "ga4" | "posthog" | "meta_browser" | "meta_server" | "infinite"
 export type FunnelEvent = "view_item" | "add_to_cart" | "begin_checkout" | "purchase" | "lead" | "sign_up" | "start_trial"
-/** How a browser trigger site's click leaves the page (P1-A). Absent = the scan could not tell. */
+/** How a browser trigger site's click leaves the page (P1-A). Absent = the scan could not tell (it saw no navigation). */
 export type SiteNavigation = "full_load" | "client" | "none"
 export interface EventSite {
   file: string
@@ -46,6 +46,12 @@ export interface EventSite {
   navigation?: SiteNavigation
   /** The navigation as written, in plain words (`router.push("/cart")`, `window.location.assign`, `a form post`). */
   navigationVia?: string
+  /**
+   * A full page load the handler's own code does not write: the element's default action (`link`: a plain `<a href>`,
+   * or a button inside one; `form`: a form that submits), or the site's route-change hook turning router navigation into
+   * a full load (`route_hook`). Absent: the handler's own code navigates.
+   */
+  leavesBy?: "link" | "form" | "route_hook"
   /** A `helper:<fn>` trigger site: where the site's own helper is defined. */
   helperAt?: { file: string; line: number }
 }
@@ -579,10 +585,13 @@ function restrictedRoutesOf(view: FileView): string[] {
 // P1-A: how a click leaves the page
 // ---------------------------------------------------------------------------------------------
 
-/** A full page load, in code (strings blanked): `location.href = …`, `window.location = …`, `location.assign(…)`. */
+/**
+ * A full page load, in code (strings blanked): `location.href = …`, `window.location = …`, `location.assign(…)`. A
+ * local variable that happens to be named `location` (`const location = "eu"`) is not one.
+ */
 const FULL_LOAD_PATTERNS: ReadonlyArray<{ pattern: RegExp; words: string }> = [
-  { pattern: /\b(?:window\s*\.\s*|document\s*\.\s*|globalThis\s*\.\s*)?location\s*\.\s*(assign|replace)\s*\(/, words: "location.$1" },
-  { pattern: /\b(?:window\s*\.\s*|document\s*\.\s*|globalThis\s*\.\s*)?location\s*(?:\.\s*href\s*)?=(?![=>])/, words: "location.href =" },
+  { pattern: /(?<![\w$.]\s*)\b(?:window\s*\.\s*|document\s*\.\s*|globalThis\s*\.\s*)?location\s*\.\s*(assign|replace)\s*\(/, words: "location.$1" },
+  { pattern: /(?<![\w$.]\s*)\b(?:window\s*\.\s*|document\s*\.\s*|globalThis\s*\.\s*)?location\s*(?:\.\s*href\s*)?=(?![=>])/, words: "location.href =" },
   { pattern: /\.\s*(?:requestSubmit|submit)\s*\(\s*\)/, words: "a form submit" }
 ]
 /** Client-side routing: the page stays and the router swaps the view. */
@@ -593,14 +602,23 @@ interface Navigation {
   via: string
   /** A literal destination path, when written as one. */
   target: string | null
+  /** The element's own default action leaves (a plain link, a form that submits). */
+  leavesBy?: "link" | "form"
 }
 
-/** The handler's navigation after the trigger at `offset`, or null when no enclosing function holds the call. */
-function navigationAt(view: FileView, offset: number): Navigation | null {
-  if (view.server) return null
-  const fn = enclosing(view, offset)[0]
-  if (!fn) return null
-  const code = view.code.slice(fn.start, fn.end)
+/** A function the site's code calls by name, one level deep: a local one, or one imported from another file. */
+type Callee = (view: FileView, name: string) => { view: FileView; fn: FunctionDef } | null
+
+/** A component, a hook or a render body holds handlers; it is not one (`Page`, `useCart`). */
+function holdsHandlers(view: FileView, fn: FunctionDef): boolean {
+  if (fn.name && (/^[A-Z]/.test(fn.name) || /^use[A-Z]/.test(fn.name))) return true
+  const body = view.code.slice(fn.start, fn.end)
+  return /\breturn\s*\(?\s*<[A-Za-z>]/.test(body) || (view.code[fn.start - 1] !== "{" && /^\s*\(?\s*<[A-Za-z>]/.test(body))
+}
+
+/** The navigation written in one body (strings blanked): a full page load first, then client routing. */
+function navigationIn(view: FileView, start: number, end: number): Navigation | null {
+  const code = view.code.slice(start, end)
   for (const { pattern, words } of FULL_LOAD_PATTERNS) {
     const match = pattern.exec(code)
     if (match) return { kind: "full_load", via: words.replace("$1", match[1] ?? ""), target: null }
@@ -609,20 +627,80 @@ function navigationAt(view: FileView, offset: number): Navigation | null {
     const [, object, method] = match
     // `navigate(…)` alone (a router hook), or `router.push` / `router.replace` / `history.push`.
     if (object === "navigate" ? method !== undefined : method === undefined) continue
-    const open = fn.start + (match.index ?? 0) + match[0].length - 1
+    const open = start + (match.index ?? 0) + match[0].length - 1
     const target = argAt(view, open + 1)
     return { kind: "client", via: `${object}${method ? `.${method}` : ""}(${target.kind === "literal" ? JSON.stringify(target.value) : "…"})`, target: target.kind === "literal" ? target.value : null }
   }
-  // An inline handler on the element that leaves: a form's submit or a plain link's click, unless the handler stops it.
-  const before = view.code.slice(Math.max(0, fn.start - 400), fn.start)
-  const attribute = /\bon(Submit|Click)\s*=\s*\{\s*(?:\([^()]*\)|[A-Za-z_$][\w$]*)?\s*(?:=>\s*)?\{?\s*$/.exec(before)
-  if (attribute && !/\bpreventDefault\s*\(/.test(code)) {
-    const tag = /<([A-Za-z][\w.]*)\b[^<]*$/.exec(view.comments.slice(Math.max(0, fn.start - 400), fn.start))?.[1] ?? ""
-    if (attribute[1] === "Submit" && tag === "form") return { kind: "full_load", via: "a form post", target: null }
-    if (attribute[1] === "Click" && tag === "a") return { kind: "full_load", via: "a plain link", target: null }
-    if (attribute[1] === "Click" && /^(?:Link|NextLink|RouterLink|NavLink)$/.test(tag)) return { kind: "client", via: `<${tag}>`, target: null }
+  return null
+}
+
+/** Finding 4: the navigation of a function the handler calls, one level deep (`goToCart()` → `location.assign`). */
+function calleeNavigation(view: FileView, fn: FunctionDef, callee: Callee | undefined): Navigation | null {
+  if (!callee) return null
+  for (const match of view.code.slice(fn.start, fn.end).matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const name = match[1]!
+    if (KEYWORDS.has(name) || name === fn.name) continue
+    const found = callee(view, name)
+    if (!found || found.fn === fn) continue
+    const navigation = navigationIn(found.view, found.fn.start, found.fn.end)
+    if (navigation) return { ...navigation, via: `${name}(): ${navigation.via}` }
   }
-  return { kind: "none", via: "no navigation", target: null }
+  return null
+}
+
+/** Where the handler is attached: its `onClick={…}` / `onSubmit={…}` attribute (inline, or by the handler's name). */
+function handlerAttribute(view: FileView, fn: FunctionDef): { event: "Click" | "Submit"; at: number } | null {
+  const before = view.code.slice(Math.max(0, fn.start - 400), fn.start)
+  const inline = /\bon(Submit|Click)\s*=\s*\{\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)?\s*(?::[^=]*)?(?:=>\s*)?\{?\s*$/.exec(before)
+  if (inline) return { event: inline[1] as "Click" | "Submit", at: fn.start - before.length + inline.index }
+  // A named handler (`const handleBuy = …` / `function handleBuy`, or one wrapped in useCallback), used by name.
+  const name = fn.name ?? /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=\s*(?:useCallback|useMemo)\s*\(\s*(?:async\s*)?\([^()]*\)\s*(?::[^=]*)?=>\s*\{?\s*$/.exec(before)?.[1]
+  if (!name) return null
+  const used = new RegExp(`\\bon(Submit|Click)\\s*=\\s*\\{\\s*(?:${name.replace(/\$/g, "\\$")}|(?:\\([^()]*\\)|[A-Za-z_$][\\w$]*)\\s*=>\\s*${name.replace(/\$/g, "\\$")}\\s*\\([^()]*\\))\\s*\\}`).exec(view.code)
+  return used ? { event: used[1] as "Click" | "Submit", at: used.index } : null
+}
+
+/** Finding 4: what the element the handler is on does by default: a plain link or a form leaves; `<Link>` routes. */
+function elementDefault(view: FileView, attribute: { event: "Click" | "Submit"; at: number }): Navigation | null {
+  const tag = openTagAround(view.comments, attribute.at)
+  if (!tag) return null
+  if (/^(?:Link|NextLink|RouterLink|NavLink)$/.test(tag.name)) return { kind: "client", via: `<${tag.name}>`, target: null }
+  if (attribute.event === "Submit" && tag.name === "form") return { kind: "full_load", via: "a form post", target: null, leavesBy: "form" }
+  if (attribute.event !== "Click") return null
+  if (tag.name === "a" && /\bhref\s*=/.test(tag.text)) return { kind: "full_load", via: "a plain link", target: null, leavesBy: "link" }
+  const link = enclosingElement(view.comments, attribute.at, "a")
+  if (link && /\bhref\s*=/.test(link.text)) return { kind: "full_load", via: "a plain link around the button", target: null, leavesBy: "link" }
+  const routerLink = /^(?:Link|NextLink|RouterLink|NavLink)$/.test(tag.name) ? null : ["Link", "NextLink"].map((name) => enclosingElement(view.comments, attribute.at, name)).find(Boolean)
+  if (routerLink) return { kind: "client", via: "<Link> around the button", target: null }
+  if (tag.name === "button" && !/\btype\s*=\s*\{?\s*["'`](?:button|reset)["'`]/.test(tag.text)) {
+    const form = enclosingElement(view.comments, attribute.at, "form")
+    if (form) return { kind: "full_load", via: "a form post", target: null, leavesBy: "form" }
+  }
+  return null
+}
+
+/**
+ * The handler's navigation after the trigger at `offset`. A full page load or client routing written in the handler
+ * (or in a function it calls, one level deep), else what its element does by default. "none" only when the scan KNOWS
+ * the page stays (an effect, or a handler that cancels the default and never navigates); null = unknown, never "none".
+ */
+function navigationAt(view: FileView, offset: number, callee?: Callee): Navigation | null {
+  if (view.server) return null
+  const chain = enclosing(view, offset)
+  if (chain.length === 0) return null
+  // The handler: the outermost function that is not a component, a hook or a render body.
+  const handler = [...chain].reverse().find((fn) => !holdsHandlers(view, fn)) ?? null
+  if (!handler) return null
+  const effect = chain.some((fn) => /\buse(?:Layout|Insertion)?Effect\s*\(\s*(?:async\s*)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)?\s*=>\s*\{?\s*$/.test(view.code.slice(Math.max(0, fn.start - 80), fn.start)))
+  if (effect) return { kind: "none", via: "no navigation (it runs when the page loads, not on a click)", target: null }
+  const written = navigationIn(view, handler.start, handler.end) ?? calleeNavigation(view, handler, callee)
+  if (written) return written
+  const cancels = /\bpreventDefault\s*\(/.test(view.code.slice(handler.start, handler.end))
+  const attribute = handlerAttribute(view, handler)
+  const element = attribute && !cancels ? elementDefault(view, attribute) : null
+  if (element) return element
+  if (cancels) return { kind: "none", via: "no navigation (the handler cancels the default and stays)", target: null }
+  return null
 }
 
 /** P1-A: the site's own route-change hook that forces a full page load (`routeChangeStart` → `location.assign`), or null. */
@@ -647,12 +725,12 @@ function onRoute(routes: readonly string[], path: string): boolean {
  * The site's navigation, settled against its route-change hook: router navigation the site turns into a full page load
  * (into a pixel-free route, or anywhere when the scan cannot tell which) is a full page load.
  */
-function settleNavigation(navigation: Navigation | null, hook: EventSite | null, restricted: readonly string[]): Pick<EventSite, "navigation" | "navigationVia"> {
+function settleNavigation(navigation: Navigation | null, hook: EventSite | null, restricted: readonly string[]): Pick<EventSite, "navigation" | "navigationVia" | "leavesBy"> {
   if (!navigation) return {}
   if (navigation.kind === "client" && hook && (navigation.target === null || restricted.length === 0 || onRoute(restricted, navigation.target))) {
-    return { navigation: "full_load", navigationVia: `${navigation.via}, which the site turns into a full page load (${hook.file}:${hook.line})` }
+    return { navigation: "full_load", navigationVia: `${navigation.via}, which the site turns into a full page load (${hook.file}:${hook.line})`, leavesBy: "route_hook" }
   }
-  return { navigation: navigation.kind, navigationVia: navigation.via }
+  return { navigation: navigation.kind, navigationVia: navigation.via, ...(navigation.leavesBy ? { leavesBy: navigation.leavesBy } : {}) }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -903,7 +981,16 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
   const restricted = new Set<string>()
   for (const view of views) for (const path of restrictedRoutesOf(view)) restricted.add(path)
   const routeChangeFullLoad = routeChangeFullLoadOf(views)
-  const leaves = (view: FileView, offset: number) => settleNavigation(navigationAt(view, offset), routeChangeFullLoad, [...restricted])
+  // Finding 4: a handler's own helper call is followed one level (`goToCart()` → `location.assign`), locally or imported.
+  const callee: Callee = (view, name) => {
+    const local = view.functions.find((fn) => fn.name === name)
+    if (local) return { view, fn: local }
+    const from = imports.get(view.path)?.get(name)
+    const other = from ? views.find((candidate) => candidate.path === from) : undefined
+    const fn = other?.functions.find((candidate) => candidate.name === name)
+    return other && fn ? { view: other, fn } : null
+  }
+  const leaves = (view: FileView, offset: number) => settleNavigation(navigationAt(view, offset, callee), routeChangeFullLoad, [...restricted])
 
   // Trigger sites: the callers of the event helper holding a send (one level), else the send itself.
   const entries = new Map<FunnelEvent, EventInventoryEntry>()

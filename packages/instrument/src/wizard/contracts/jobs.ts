@@ -769,7 +769,7 @@ const EVIDENCE_SHAPE = oneOf(
   shapeOf<{ url: string }>()("UrlEvidence", ["url"], [])
 )
 
-const EVENT_SITE_SHAPE = shapeOf<EventSite>()("EventSite", ["file", "line", "via"], ["navigation", "navigationVia", "helperAt"], {
+const EVENT_SITE_SHAPE = shapeOf<EventSite>()("EventSite", ["file", "line", "via"], ["navigation", "navigationVia", "leavesBy", "helperAt"], {
   helperAt: shapeOf<NonNullable<EventSite["helperAt"]>>()("EventSite.helperAt", ["file", "line"], [])
 })
 

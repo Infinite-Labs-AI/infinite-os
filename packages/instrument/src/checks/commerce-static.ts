@@ -995,6 +995,12 @@ function reachWaits(entry: ClickPathFile, reach: Reach): boolean {
   return false
 }
 
+/** Finding 4: the click handler holding the reach cancels the element's default action (`event.preventDefault()`). */
+function cancelsDefault(entry: ClickPathFile, reach: Reach): boolean {
+  const handler = outermostHandler(entry.masked, entry.ranges, reach.index)
+  return /\bpreventDefault\s*\(/.test(handler ? entry.masked.slice(handler.start, handler.end) : entry.masked)
+}
+
 /** Finding 2: the helper body hands its wait back to the caller: `return infiniteTrackBeforeLeaving(…)` or `return wait`. */
 function helperReturnsWait(masked: string, ranges: readonly FunctionRange[], body: FunctionRange): "returned" | "not_returned" | "absent" {
   let found = false
@@ -1027,7 +1033,21 @@ export function leaveFindings(input: CommerceCheckInput): CommerceFinding[] {
       const inline = leaving.some((site) => site.file === file && !site.via?.startsWith("helper:"))
       const here = reaches.filter((reach) => reach.file === file && reach.event === row.event && (reach.through === null ? inline : helpers.has(reach.through)))
       for (const reach of here) {
-        if (reachWaits(entry, reach)) continue
+        // Finding 4: a plain link or a form leaves by itself: the wait only helps once the handler cancels that.
+        const byDefault = leaving.some((site) => site.file === file && (site.leavesBy === "link" || site.leavesBy === "form") && (reach.through === null ? !site.via?.startsWith("helper:") : site.via === `helper:${reach.through}`))
+        if (reachWaits(entry, reach)) {
+          if (!byDefault || cancelsDefault(entry, reach)) continue
+          findings.push({
+            rule: "lost_before_leaving",
+            state: "problem",
+            file,
+            line: reach.line,
+            event: row.event,
+            tool: "meta",
+            message: `${where(file, reach.line)} waits for Meta ${META_EVENT_NAMES[row.event]}, but its click is on a plain link or a form that leaves by itself, so the page unloads before the wait ends. Call event.preventDefault() first in this handler, and leave through go: () => window.location.assign(<the link's href>) or () => form.submit().`
+          })
+          break
+        }
         findings.push({
           rule: "lost_before_leaving",
           state: "problem",

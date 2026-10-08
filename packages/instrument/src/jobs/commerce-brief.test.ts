@@ -167,6 +167,40 @@ describe("browser commerce briefs (review P0-5)", () => {
     })
   })
 
+  it("Finding 4: a plain link or a form that posts leaves by itself: preventDefault first, then go is location.assign(href) / form.submit()", () => {
+    const helperAt = { file: "src/analytics/events.ts", line: 27 }
+    const entry: EventInventoryEntry = {
+      ...ADD_TO_CART,
+      sites: [
+        { file: "pages/index.tsx", line: 17, via: "helper:addToCart", navigation: "full_load", navigationVia: "a plain link", leavesBy: "link", helperAt },
+        { file: "pages/quick.tsx", line: 9, via: "helper:addToCart", navigation: "full_load", navigationVia: "a form post", leavesBy: "form", helperAt }
+      ]
+    }
+    const brief = buildBrief([item("meta_improve:commerce_events", [entry], ["pages/index.tsx", "pages/quick.tsx", "src/analytics/events.ts"])], facts)
+    const place = ((planData(brief, "meta_improve:commerce_events").events as Array<Record<string, unknown>>)[0]!.places as Array<Record<string, unknown>>)[0]!
+    const [link, form] = place.callers as Array<Record<string, string>>
+    expect(link!.do).toBe("wrap this click handler: its link leaves by itself, so the handler first calls event.preventDefault() (add the event parameter if it has none), then infiniteLeaveAfter(() => { <everything the handler did>; return addToCart(…) }, () => window.location.assign(<the link's href>))")
+    expect(form!.do).toContain("const form = event.currentTarget, or event.currentTarget.form for a button")
+    expect(form!.do).toMatch(/\(\) => form\.submit\(\)\)$/)
+    expect(brief).toContain("Never leave go empty")
+    // Inline on a link: the tag's own wait, the same way out.
+    const inline: EventInventoryEntry = { ...ADD_TO_CART, sites: [{ file: "components/Buy.tsx", line: 5, via: "gtag", navigation: "full_load", navigationVia: "a plain link", leavesBy: "link" }] }
+    const data = planData(buildBrief([item("meta_improve:commerce_events", [inline], ["components/Buy.tsx"])], facts), "meta_improve:commerce_events")
+    const only = ((data.events as Array<Record<string, unknown>>)[0]!.places as Array<Record<string, unknown>>)[0]!
+    expect(only.do).toMatch(/^call event\.preventDefault\(\) first \(the link leaves by itself\), then infiniteLeaveAfter\(\(\) => infiniteTrackBeforeLeaving\("add_to_cart", .*\), \(\) => window\.location\.assign\(<the link's href>\)\)$/)
+    expect(data.imports).toEqual({ "components/Buy.tsx": 'import { infiniteTrackBeforeLeaving, infiniteLeaveAfter } from "../lib/infinite-analytics"' })
+  })
+
+  it("Finding 4: unknown says so and how to tell; it is never \"it does not leave the page\"", () => {
+    const entry: EventInventoryEntry = { ...ADD_TO_CART, sites: [{ file: "pages/index.tsx", line: 17, via: "helper:addToCart", helperAt: { file: "src/analytics/events.ts", line: 27 } }] }
+    const brief = buildBrief([item("meta_improve:commerce_events", [entry], ["pages/index.tsx", "src/analytics/events.ts"])], facts)
+    const place = ((planData(brief, "meta_improve:commerce_events").events as Array<Record<string, unknown>>)[0]!.places as Array<Record<string, unknown>>)[0]!
+    const [caller] = place.callers as Array<Record<string, string>>
+    expect(caller!.leaves).toBe("unknown: tell it apart yourself")
+    expect(caller!.do).toContain("on a plain link or a form that posts, first call event.preventDefault()")
+    expect(brief).toContain('Where Plan data says "unknown", tell the two apart yourself')
+  })
+
   it("a GA4 job names GA4 only, and a PostHog job PostHog only", () => {
     const brief = buildBrief(
       [

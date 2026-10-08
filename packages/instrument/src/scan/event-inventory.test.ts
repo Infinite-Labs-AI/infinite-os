@@ -235,9 +235,32 @@ describe("P1-A: how each Buy click leaves the page", () => {
       ["pages/b.tsx", "full_load", "location.assign"],
       ["pages/c.tsx", "full_load", "a form post"],
       ["pages/d.tsx", "full_load", "a plain link"],
-      ["pages/e.tsx", "none", "no navigation"]
+      ["pages/e.tsx", "none", "no navigation (it runs when the page loads, not on a click)"]
     ])
+    expect(got.map((site) => site.leavesBy)).toEqual([undefined, undefined, "form", "link", undefined])
     expect(new Set(got.map((site) => JSON.stringify(site.helperAt)))).toEqual(new Set([JSON.stringify({ file: "src/events.ts", line: 1 })]))
+  })
+
+  it("Finding 4: unknown is never 'does not leave'; named handlers, one helper call and a button inside a link are read", () => {
+    const page = (name: string, body: string, jsx: string) => `import { addToCart } from "../src/events"\nexport default function ${name}() {\n${body}\n  return ${jsx}\n}\n`
+    const got = sites({
+      "pages/a.tsx": page("A", '  const handleBuy = () => { addToCart("a") }', '<a href="/cart" onClick={handleBuy}>Buy</a>'),
+      "pages/b.tsx": page("B", '  const onSubmit = () => { addToCart("b") }', '<form method="post" action="/api/cart" onSubmit={onSubmit}><button>Buy</button></form>'),
+      "pages/c.tsx": page("C", '  const goToCart = () => { window.location.assign("/cart") }\n  const buy = () => { addToCart("c"); goToCart() }', "<button onClick={buy}>Buy</button>"),
+      "pages/d.tsx": page("D", "", '<a href="/cart"><button onClick={() => addToCart("d")}>Buy</button></a>'),
+      "pages/e.tsx": page("E", '  const buy = () => { const location = "eu"; addToCart(location) }', "<button onClick={buy}>Buy</button>"),
+      "pages/f.tsx": page("F", '  const buy = (e: Event) => { e.preventDefault(); addToCart("f") }', '<a href="/cart" onClick={buy}>Buy</a>')
+    })
+    expect(got.map((site) => [site.file, site.navigation, site.leavesBy])).toEqual([
+      ["pages/a.tsx", "full_load", "link"],
+      ["pages/b.tsx", "full_load", "form"],
+      ["pages/c.tsx", "full_load", undefined],
+      ["pages/d.tsx", "full_load", "link"],
+      // A local variable named `location` is not a page load, and seeing no navigation is NOT "does not leave".
+      ["pages/e.tsx", undefined, undefined],
+      ["pages/f.tsx", "none", undefined]
+    ])
+    expect(got[2]!.navigationVia).toBe("goToCart(): location.assign")
   })
 
   it("router navigation the site's own route-change hook turns into a full page load is a full page load (into a pixel-free route)", () => {

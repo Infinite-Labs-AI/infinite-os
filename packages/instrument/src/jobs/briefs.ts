@@ -383,6 +383,10 @@ function placeData(place: CommercePlace, call: (name: string) => string, allowed
     const wait = place.sites.some((site) => site.navigation === "full_load")
     const unknown = place.sites.some((site) => site.navigation === undefined)
     const wrap = `wrap this click handler: infiniteLeaveAfter(() => { <everything the handler did before it left>; return ${helper.name}(…) }, () => <the handler's own navigation, exactly as written>)`
+    // Finding 4: a plain link or a form leaves by itself (the browser's default), so there is no navigation to keep:
+    // cancel the default and leave through `go`.
+    const wrapDefault = (by: "link" | "form") =>
+      `wrap this click handler: its ${by === "link" ? "link" : "form"} leaves by itself, so the handler first calls event.preventDefault() (add the event parameter if it has none)${by === "form" ? ", keeps the form (const form = event.currentTarget, or event.currentTarget.form for a button)" : ""}, then infiniteLeaveAfter(() => { <everything the handler did>; return ${helper.name}(…) }, () => ${by === "link" ? "window.location.assign(<the link's href>)" : "form.submit()"})`
     return {
       firesThrough: `your helper ${helper.name}() at ${helper.file}:${helper.line}`,
       inTheHelper: wait
@@ -394,20 +398,25 @@ function placeData(place: CommercePlace, call: (name: string) => string, allowed
         do: frozen(site)
           ? untouched
           : site.navigation === "full_load"
-          ? wrap
+          ? site.leavesBy === "link" || site.leavesBy === "form" ? wrapDefault(site.leavesBy) : wrap
           : site.navigation === undefined
-            ? `a full page load: ${wrap.replace(/^wrap this click handler: /, "wrap it in ")} (import infiniteLeaveAfter from the same module as the other helpers); client routing or no navigation: leave this handler as it is`
+            ? `a full page load: ${wrap.replace(/^wrap this click handler: /, "wrap it in ")} (import infiniteLeaveAfter from the same module as the other helpers; on a plain link or a form that posts, first call event.preventDefault(), and go is () => window.location.assign(<the link's href>) or () => form.submit()); client routing or no navigation: leave this handler as it is`
             : "leave this handler as it is"
       }))
     }
   }
   const site = place.sites[0]!
   const thenNavigate = `infiniteTrackThenNavigate(event, <where the click goes>, ${call("").slice(1)}`
+  // Finding 4: a plain link or a form that posts has no navigation of its own to replace.
+  const inlineDefault = (by: "link" | "form") =>
+    `call event.preventDefault() first (the ${by} leaves by itself)${by === "form" ? " and keep the form (const form = event.currentTarget, or event.currentTarget.form for a button)" : ""}, then infiniteLeaveAfter(() => ${call("infiniteTrackBeforeLeaving")}, () => ${by === "link" ? "window.location.assign(<the link's href>)" : "form.submit()"})`
   return {
     firesThrough: `inline at ${placeWord(site)} (${site.via}), not through a helper`,
     leaves: leavesWords(site),
     do: frozen(site)
       ? untouched
+      : site.navigation === "full_load" && (site.leavesBy === "link" || site.leavesBy === "form")
+      ? inlineDefault(site.leavesBy)
       : site.navigation === "full_load"
       ? `replace the handler's own navigation with ${thenNavigate}`
       : site.navigation === undefined
@@ -435,6 +444,11 @@ function commerceImports(places: readonly CommercePlace[], module: string, allow
     }
     const site = place.sites[0]!
     if (allowed.size > 0 && !allowed.has(site.file)) continue
+    if (site.navigation === "full_load" && (site.leavesBy === "link" || site.leavesBy === "form")) {
+      need(site.file, "infiniteTrackBeforeLeaving")
+      need(site.file, "infiniteLeaveAfter")
+      continue
+    }
     need(site.file, site.navigation === "full_load" ? "infiniteTrackThenNavigate" : "infiniteTrack")
   }
   const order = ["infiniteTrack", "infiniteTrackBeforeLeaving", "infiniteTrackThenNavigate", "infiniteLeaveAfter"]
@@ -476,7 +490,8 @@ function commerceGist(tool: InventoryTool, events: readonly FunnelEvent[]): stri
     "- When the event fires through the site's own helper (firesThrough names it), the send goes INSIDE that helper, beside its existing sends, and nowhere else: never also in a click handler that calls the helper (that sends the event twice).",
     `- A caller whose click then does a FULL page load (callers[].leaves) loses ${meta ? "Meta's request" : "the request"} unless it waits. There the helper's FIRST new line is const wait = infiniteTrackBeforeLeaving(…), every send it already has stays below it unchanged, and its LAST line is return wait (the wait settles once the request is out, at most ${meta ? "400 ms" : "1 s"}, and never rejects). A return any earlier stops the helper's own GA4 and PostHog sends. That caller's click handler becomes infiniteLeaveAfter(() => { <what it did before leaving>; return <helper>(…) }, () => <its own navigation, unchanged>). infiniteLeaveAfter ignores a second click while the first is leaving.`,
     "- A caller that routes on the client (router.push, <Link>) or does not leave keeps its code as it is: the page stays loaded, so it needs no wait. Never turn client routing into a full page load.",
-    "- When the event fires inline in a click handler (no helper), add infiniteTrack(…) beside the site's own send there; ONLY when that handler does a full page load, use infiniteTrackThenNavigate(event, <where the click goes>, <event>, <the same props>, { destinations }) in place of its own navigation (a form that posts: wrap the submit in infiniteLeaveAfter with infiniteTrackBeforeLeaving instead, so the post is kept).",
+    "- When the event fires inline in a click handler (no helper), add infiniteTrack(…) beside the site's own send there; ONLY when that handler does a full page load, use infiniteTrackThenNavigate(event, <where the click goes>, <event>, <the same props>, { destinations }) in place of its own navigation.",
+    "- A plain link (<a href>, or a button inside one) or a form that posts leaves by itself, with no navigation in the handler to keep. There the handler first calls event.preventDefault(), and its go is () => window.location.assign(<the link's href>) for a link, or () => form.submit() for a form (const form = event.currentTarget, taken before the wait; event.currentTarget.form for a submit button). Never leave go empty: an empty go leaves nothing to wait for and the click goes nowhere.",
     `- Where Plan data says "unknown", tell the two apart yourself: ${HOW_TO_TELL}`,
     "Use the product id, name, unit price (in the currency's main unit, not cents) and quantity the site already has there or in its own product catalog. Never invent a price or a product; pass the currency the site prices in (Plan data \"currency\" when it names one).",
     "Import each helper with the line Plan data gives for that file (\"imports\"). If another job in this brief adds a different tool at the same place, make it ONE call with both tools in destinations. Never add a tool already listed in alreadySentTo, never call gtag, posthog or fbq yourself, and never add a Meta eventID."

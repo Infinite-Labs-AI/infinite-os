@@ -572,3 +572,17 @@ describe("Finding 2: sends_before_leaving proves the wait reaches the navigation
     expect(check(helper(RETURNED), '    addToCart(p)\n    infiniteLeaveAfter(() => infiniteTrackBeforeLeaving("add_to_cart", { item_id: p.id }, { destinations: ["meta"] }), () => router.push("/cart"))')).toEqual(["sent_twice_on_one_click@pages/a.tsx", "lost_before_leaving@pages/a.tsx"])
   })
 })
+
+describe("Finding 4: a link or a form that leaves by itself must cancel that before it waits", () => {
+  const helper = 'export function addToCart(p) {\n  const wait = infiniteTrackBeforeLeaving("add_to_cart", { item_id: p.id }, { destinations: ["meta"] })\n  return wait\n}\n'
+  const page = (handler: string) => `import { addToCart } from "../src/events"\nexport default function Page({ p }) {\n  const buy = ${handler}\n  return <a href="/cart" onClick={buy}>Buy</a>\n}\n`
+  const inventory: EventInventory = { rows: [{ event: "add_to_cart", tools: { meta: { state: "will_add", lane: "browser" } }, sites: [{ file: "pages/a.tsx", line: 3, via: "helper:addToCart", navigation: "full_load", leavesBy: "link", helperAt: { file: "src/events.ts", line: 1 } }] }] }
+  const leave = (handler: string) => leaveFindings({ files: files({ "src/events.ts": helper, "pages/a.tsx": page(handler) }), inventory })
+
+  it("preventDefault and a go that leaves pass; a literal empty go, or no preventDefault, fail", () => {
+    expect(leave('(e) => {\n    e.preventDefault()\n    infiniteLeaveAfter(() => addToCart(p), () => window.location.assign("/cart"))\n  }')).toEqual([])
+    expect(leave("(e) => {\n    infiniteLeaveAfter(() => addToCart(p), () => {})\n  }").map((finding) => finding.rule)).toEqual(["lost_before_leaving"])
+    const found = leave('(e) => {\n    infiniteLeaveAfter(() => addToCart(p), () => window.location.assign("/cart"))\n  }')
+    expect(found.map((finding) => finding.message)).toEqual([expect.stringMatching(/its click is on a plain link or a form that leaves by itself, so the page unloads before the wait ends\. Call event\.preventDefault\(\) first/)])
+  })
+})
