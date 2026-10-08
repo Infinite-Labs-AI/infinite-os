@@ -13,6 +13,7 @@ import {
   __testOnlySyncExtractedBatch,
   classifySyncFailure,
   connectorFor,
+  GA4_RUN_REPORT_MAX_ROWS,
   connectorProviderForSetupProvider,
   createMetaAd,
   createMetaAdSet,
@@ -628,6 +629,110 @@ describe("live provider clients", () => {
       expect((overviewRecord?.payload as { keyEvents: number }).keyEvents).toBe(9);
       expect((pageRecord?.payload as { keyEvents: number }).keyEvents).toBe(11);
       expect((eventRecord?.payload as { keyEvents: number }).keyEvents).toBe(4);
+    });
+  });
+
+  describe("GA4 runReport paging", () => {
+    const ga4Db = () => fakeDb({
+      credential: {
+        credential_kind: "oauth_access_token",
+        encrypted_payload: encryptedCredential({
+          mode: "live",
+          propertyId: "properties/123",
+          accessToken: "ga4-token",
+          apiBaseUrl: "https://ga4.test"
+        })
+      }
+    });
+    const ga4Plan = (): SyncPlan => ({
+      cursorKey: "ga4_run_report",
+      cursorStart: null,
+      cursorEnd: "2026-06-03T00:00:00.000Z",
+      refreshWindowDays: 14,
+      mode: "live"
+    });
+    const eventRow = (index: number) => ({
+      dimensionValues: [{ value: "20260601" }, { value: "rtk.dev" }, { value: `event_${index}` }],
+      metricValues: [{ value: "1" }, { value: "0" }]
+    });
+    type PagedBody = Ga4ReportBody & { offset?: string };
+    // The event report answers `total` rows in pages of `limit` from `offset`; the other two answer one row.
+    const pagedEvents = (total: number, seen: PagedBody[], options: { stopAt?: number; omitRowCount?: boolean } = {}) =>
+      async (_url: string, init: RequestInit) => {
+        const body = init.body ? (JSON.parse(String(init.body)) as PagedBody) : null;
+        if (body) seen.push(body);
+        if (isGa4PageReportBody(body)) return jsonResponse({ rows: [ga4PageReportRowFixture()], rowCount: 1 });
+        if (isGa4OverviewReportBody(body)) return jsonResponse({ rows: [ga4OverviewReportRowFixture()], rowCount: 1 });
+        const offset = Number(body?.offset ?? "0");
+        const limit = Number(body?.limit);
+        const end = Math.min(total, offset + limit, options.stopAt ?? Number.POSITIVE_INFINITY);
+        const rows = Array.from({ length: Math.max(0, end - offset) }, (_, i) => eventRow(offset + i));
+        return jsonResponse(options.omitRowCount ? { rows } : { rows, rowCount: total });
+      };
+
+    it("pages every report with offset until rowCount is reached (first request unchanged)", async () => {
+      const seen: PagedBody[] = [];
+      let rows: Awaited<ReturnType<ReturnType<typeof connectorFor>["extract"]>> = [];
+      await withMockFetch(pagedEvents(25_000, seen), async () => {
+        rows = await connectorFor("google_analytics_4").extract(ga4Db(), request("google_analytics_4"), ga4Plan());
+      });
+      const eventBodies = seen.filter((body) => isGa4EventReportBody(body));
+      expect(eventBodies.map((body) => [body.limit, body.offset])).toEqual([
+        ["10000", undefined],
+        ["10000", "10000"],
+        ["10000", "20000"]
+      ]);
+      // The single-page reports are asked exactly once, with no offset.
+      expect(seen.filter((body) => isGa4OverviewReportBody(body)).map((body) => body.offset)).toEqual([undefined]);
+      const events = rows.filter((row) => row.objectType === "ga4_event_report");
+      expect(events).toHaveLength(25_000);
+      expect(new Set(events.map((row) => row.externalId)).size).toBe(25_000);
+    });
+
+    it("pages on a full page even when GA4 leaves rowCount out, and stops at the short page", async () => {
+      const seen: PagedBody[] = [];
+      let rows: Awaited<ReturnType<ReturnType<typeof connectorFor>["extract"]>> = [];
+      await withMockFetch(pagedEvents(15_000, seen, { omitRowCount: true }), async () => {
+        rows = await connectorFor("google_analytics_4").extract(ga4Db(), request("google_analytics_4"), ga4Plan());
+      });
+      expect(seen.filter((body) => isGa4EventReportBody(body)).map((body) => body.offset)).toEqual([undefined, "10000"]);
+      expect(rows.filter((row) => row.objectType === "ga4_event_report")).toHaveLength(15_000);
+    });
+
+    it("fails with provider_report_truncated before paging when rowCount is above the hard cap", async () => {
+      const seen: PagedBody[] = [];
+      await withMockFetch(pagedEvents(GA4_RUN_REPORT_MAX_ROWS + 1, seen), async () => {
+        await expect(connectorFor("google_analytics_4").extract(ga4Db(), request("google_analytics_4"), ga4Plan()))
+          .rejects.toMatchObject({ code: "provider_report_truncated", retryable: false });
+      });
+      // Page 1 only: no quota is spent on a partial answer.
+      expect(seen.filter((body) => isGa4EventReportBody(body)).map((body) => body.offset)).toEqual([undefined]);
+    });
+
+    it("fails (never a quiet partial) when a page comes back empty before rowCount", async () => {
+      const seen: PagedBody[] = [];
+      await withMockFetch(pagedEvents(25_000, seen, { stopAt: 10_000 }), async () => {
+        await expect(connectorFor("google_analytics_4").extract(ga4Db(), request("google_analytics_4"), ga4Plan()))
+          .rejects.toMatchObject({ code: "provider_report_truncated" });
+      });
+    });
+
+    it("reuses the keyEvents → conversions fallback on every later page", async () => {
+      const seen: PagedBody[] = [];
+      const inner = pagedEvents(12_000, seen);
+      await withMockFetch(async (url, init) => {
+        const body = init.body ? (JSON.parse(String(init.body)) as PagedBody) : null;
+        if (body?.metrics.some((m) => m.name === "keyEvents")) {
+          return new Response(JSON.stringify({ error: { code: 400, message: "Field keyEvents is not a valid metric." } }),
+            { status: 400, headers: { "Content-Type": "application/json" } });
+        }
+        return inner(url, init);
+      }, async () => {
+        await connectorFor("google_analytics_4").extract(ga4Db(), request("google_analytics_4"), ga4Plan());
+      });
+      const eventPages = seen.filter((body) => isGa4EventReportBody(body));
+      expect(eventPages.map((body) => body.offset)).toEqual([undefined, "10000"]);
+      for (const body of eventPages) expect(body.metrics.map((m) => m.name)).toEqual(["eventCount", "conversions"]);
     });
   });
 

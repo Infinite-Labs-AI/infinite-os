@@ -1360,7 +1360,7 @@ const ga4Connector = createConnector<Ga4Credential, Ga4SyncRow>({
     const dateRanges = [{ startDate, endDate }];
 
     // Report A — daily traffic overview.
-    const overviewResponse = await runGa4ReportWithKeyEventsFallback(
+    const overviewResponse = await runGa4ReportPaged(
       reportUrl,
       accessToken,
       {
@@ -1390,14 +1390,15 @@ const ga4Connector = createConnector<Ga4Credential, Ga4SyncRow>({
           { name: "averageSessionDuration" },
           { name: "keyEvents" }
         ],
-        limit: "10000"
+        limit: String(GA4_RUN_REPORT_PAGE_SIZE)
       },
-      8
+      8,
+      "overview"
     );
     const overviewRows = (overviewResponse.rows ?? []).map((row) => ga4OverviewRow(row));
 
     // Report C — page-level (top pages).
-    const pageResponse = await runGa4ReportWithKeyEventsFallback(
+    const pageResponse = await runGa4ReportPaged(
       reportUrl,
       accessToken,
       {
@@ -1415,16 +1416,17 @@ const ga4Connector = createConnector<Ga4Credential, Ga4SyncRow>({
           { name: "averageSessionDuration" },
           { name: "keyEvents" }
         ],
-        limit: "10000"
+        limit: String(GA4_RUN_REPORT_PAGE_SIZE)
       },
-      4
+      4,
+      "page"
     );
     const pageRows = (pageResponse.rows ?? []).map((row) => ga4PageRow(row));
 
     // Report E — event-name grain. key_events on Reports A/C is a property-wide lump; a second
     // key event (e.g. `purchase` next to `download_click`) makes any per-event reading impossible
     // without this dimension. Bounded like the others (a property's event taxonomy is small).
-    const eventResponse = await runGa4ReportWithKeyEventsFallback(
+    const eventResponse = await runGa4ReportPaged(
       reportUrl,
       accessToken,
       {
@@ -1438,9 +1440,10 @@ const ga4Connector = createConnector<Ga4Credential, Ga4SyncRow>({
           { name: "eventCount" },
           { name: "keyEvents" }
         ],
-        limit: "10000"
+        limit: String(GA4_RUN_REPORT_PAGE_SIZE)
       },
-      1
+      1,
+      "event"
     );
     const eventRows = (eventResponse.rows ?? []).map((row) => ga4EventRow(row));
 
@@ -6893,34 +6896,96 @@ function ga4EventRow(row: Ga4RunReportRow): Ga4EventRow {
 // the keyEvents metric index, then re-label the response metric header back to
 // `keyEvents` so the positional parser maps it into the keyEvents field. We do NOT call
 // getMetadata per sync (extra quota) — the fallback is cheaper and self-healing.
-async function runGa4ReportWithKeyEventsFallback(
+// (The fallback now lives in runGa4ReportPaged, decided on page 1.)
+
+// GA4 runReport PAGING. One runReport returns at most `limit` rows and reports the full answer's size in
+// `rowCount`; a large property over a 14-day window can exceed one page, and storing only the first page
+// would silently under-count every day the missing rows belonged to (and the snapshot-replacement CLOSE would
+// then prune the real rows). So every report pages with `offset` until `rowCount` rows are in hand.
+//   • Page size stays 10,000 (the first request is byte-identical to before; `offset` is sent from page 2).
+//   • Hard cap GA4_RUN_REPORT_MAX_ROWS: when rowCount says the answer is bigger, the sync FAILS with
+//     `provider_report_truncated` BEFORE paging (no quota spent on a partial answer) — nothing is staged, so no
+//     partial day is ever stored or pruned against.
+//   • A page that comes back short/empty before rowCount is reached also fails (never a quiet partial).
+//   • The keyEvents → conversions fallback is decided on page 1 and reused for every later page.
+export const GA4_RUN_REPORT_PAGE_SIZE = 10_000;
+export const GA4_RUN_REPORT_MAX_ROWS = 250_000;
+
+async function runGa4ReportPaged(
   reportUrl: string,
   accessToken: string,
   requestBody: Ga4RunReportRequest,
-  keyEventsMetricIndex: number
+  keyEventsMetricIndex: number,
+  reportName: string,
 ): Promise<Ga4RunReportResponse> {
+  const pageSize = Number(requestBody.limit);
+  let body: Ga4RunReportRequest = requestBody;
+  let first: Ga4RunReportResponse;
   try {
-    return await fetchJson<Ga4RunReportResponse>(reportUrl, {
+    first = await fetchJson<Ga4RunReportResponse>(reportUrl, {
       method: "POST",
       headers: bearerHeaders(accessToken),
-      body: JSON.stringify(requestBody)
+      body: JSON.stringify(body)
     });
   } catch (error) {
     if (!isInvalidKeyEventsError(error)) {
       throw error;
     }
-    const fallbackMetrics = requestBody.metrics.map((entry, index) =>
-      index === keyEventsMetricIndex ? { name: "conversions" } : entry
-    );
     console.warn(
       "[ga4] keyEvents metric rejected (400); retrying report with conversions and mapping into keyEvents"
     );
-    return fetchJson<Ga4RunReportResponse>(reportUrl, {
+    body = {
+      ...requestBody,
+      metrics: requestBody.metrics.map((entry, index) =>
+        index === keyEventsMetricIndex ? { name: "conversions" } : entry
+      )
+    };
+    first = await fetchJson<Ga4RunReportResponse>(reportUrl, {
       method: "POST",
       headers: bearerHeaders(accessToken),
-      body: JSON.stringify({ ...requestBody, metrics: fallbackMetrics })
+      body: JSON.stringify(body)
     });
   }
+  const rows = [...(first.rows ?? [])];
+  // GA4 omits rowCount when the answer is empty; treat a missing count as "what came back" unless the page
+  // was full (then the size is unknown and we keep paging until a short page).
+  let expected = typeof first.rowCount === "number" ? first.rowCount : null;
+  if (expected !== null && expected > GA4_RUN_REPORT_MAX_ROWS) {
+    throw new ConnectorError(
+      "provider_report_truncated",
+      `GA4 ${reportName} report has ${expected} rows, above the ${GA4_RUN_REPORT_MAX_ROWS}-row cap; refusing to store a partial window (narrow the window)`,
+      false
+    );
+  }
+  while (expected === null ? rows.length > 0 && rows.length % pageSize === 0 : rows.length < expected) {
+    if (rows.length >= GA4_RUN_REPORT_MAX_ROWS) {
+      throw new ConnectorError(
+        "provider_report_truncated",
+        `GA4 ${reportName} report exceeded the ${GA4_RUN_REPORT_MAX_ROWS}-row cap; refusing to store a partial window (narrow the window)`,
+        false
+      );
+    }
+    const page = await fetchJson<Ga4RunReportResponse>(reportUrl, {
+      method: "POST",
+      headers: bearerHeaders(accessToken),
+      body: JSON.stringify({ ...body, offset: String(rows.length) })
+    });
+    const pageRows = page.rows ?? [];
+    if (typeof page.rowCount === "number") {
+      expected = page.rowCount;
+    }
+    if (pageRows.length === 0) {
+      if (expected === null) break;
+      throw new ConnectorError(
+        "provider_report_truncated",
+        `GA4 ${reportName} report stopped at ${rows.length} of ${expected} rows; refusing to store a partial window`,
+        true
+      );
+    }
+    rows.push(...pageRows);
+    if (expected === null && pageRows.length < pageSize) break;
+  }
+  return { ...first, rows, rowCount: rows.length };
 }
 
 function isInvalidKeyEventsError(error: unknown): boolean {
@@ -16001,10 +16066,14 @@ interface Ga4RunReportRequest {
   dimensions: Array<{ name: string }>;
   metrics: Array<{ name: string }>;
   limit: string;
+  /** Row offset of a later page (runGa4ReportPaged); absent on page 1. */
+  offset?: string;
 }
 
 interface Ga4RunReportResponse {
   rows?: Ga4RunReportRow[];
+  /** The FULL answer's row count across every page (GA4 omits it when the answer is empty). */
+  rowCount?: number;
   // GA4 returns the property's reporting metadata alongside the rows; timeZone is the calendar
   // every `date` dimension value is local to (persisted at CLOSE — see ga4CloseSuccess).
   metadata?: { timeZone?: string; currencyCode?: string };
