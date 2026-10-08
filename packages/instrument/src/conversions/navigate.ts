@@ -1,4 +1,5 @@
-// `window.infiniteTrackThenNavigate(event, hrefOrAnchor, name, props?)` — record a click, THEN leave.
+// `window.infiniteTrackThenNavigate(event, hrefOrAnchor, name, props?, { destinations?, gate?, metaEventName? })` —
+// record a click, THEN leave.
 //
 // Source: the GA4 download bridge, infinite-site `.github/scripts/inject-analytics.cjs` L503-536 @
 // 9f65b47, with the destination taken from the caller instead of a hard-coded `/download`.
@@ -34,7 +35,15 @@
 //     hold a click.
 //   - Browser-only Meta events (AddToCart, ViewContent, explicit custom CTA events) carry no
 //     eventID. When the helper owns or holds a same-tab navigation, it waits for that event's `/tr`
-//     request or a 400 ms budget, ported from infinite.fast's mirror wait.
+//     request or a 400 ms budget, ported from infinite.fast's mirror wait (and the reference store's
+//     `trackMetaEventBeforeLeaving`).
+//   - `destinations` (review P1-7) picks the tools, exactly as `infiniteTrack` does: `["meta"]` sends Meta's
+//     AddToCart alone (the Buy button that already sends GA4 add_to_cart) and still waits for its `/tr` request; a
+//     tool left out is never sent to and never held for.
+//   - ONE NAVIGATION AT A TIME (the reference store's `createMetaLeave`): once the helper holds or performs a same-tab
+//     navigation, a second click sends nothing and goes nowhere until the page leaves, a 3 s grace passes (a failed
+//     navigation never leaves a dead button), or the browser restores the page from the back/forward cache
+//     (`pageshow` with `persisted`).
 //   - Consent, the optional gate and the OAuth-return rule are `infiniteMayTrack` (`./track.ts`). When
 //     they say no, nothing is sent and the navigation happens exactly as if no tool were present.
 //
@@ -66,10 +75,27 @@ export function browserFollowsSource(): string {
   ].join("\n")
 }
 
+/** After this, a held click that did not leave the page works again, so a failed navigation never leaves a dead button. */
+export const NAVIGATION_GRACE_MS = 3000
+
 export function trackThenNavigateSource(): string {
   return [
     browserFollowsSource(),
-    "window.infiniteTrackThenNavigate = function (event, target, name, props) {",
+    "// One navigation at a time (the reference store's Buy guard): a second click while the first is on its way sends",
+    "// nothing and goes nowhere, so an item is never added twice. Released after a grace period, and when the browser",
+    "// restores this page from the back/forward cache mid-leave.",
+    "var infiniteLeaving = false, infiniteLeavingTimer = 0;",
+    "function infiniteReleaseLeaving() {",
+    "  infiniteLeaving = false;",
+    "  try { clearTimeout(infiniteLeavingTimer); } catch (_error) {}",
+    "}",
+    "function infiniteHoldLeaving() {",
+    "  infiniteLeaving = true;",
+    "  try { clearTimeout(infiniteLeavingTimer); } catch (_error) {}",
+    `  infiniteLeavingTimer = setTimeout(infiniteReleaseLeaving, ${NAVIGATION_GRACE_MS});`,
+    "}",
+    "try { window.addEventListener('pageshow', function (pageEvent) { if (pageEvent && pageEvent.persisted) infiniteReleaseLeaving(); }); } catch (_error) {}",
+    "window.infiniteTrackThenNavigate = function (event, target, name, props, options) {",
     "  var destination = null;",
     "  try {",
     "    var href = typeof target === 'string' ? target : target && typeof target.href === 'string' ? target.href : '';",
@@ -81,6 +107,17 @@ export function trackThenNavigateSource(): string {
     "  var opensElsewhere = false;",
     "  try { opensElsewhere = !!(target && typeof target === 'object' && typeof target.getAttribute === 'function' && target.getAttribute('target') === '_blank'); } catch (_error) {}",
     "  var browserGoes = infiniteBrowserFollows(event, target, destination);",
+    "  var sameTab = browserGoes",
+    "    ? (event.button === 0 || event.button === undefined) && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && !opensElsewhere",
+    "    : !opensElsewhere;",
+    "  function stopBrowser() {",
+    "    try { if (event && typeof event.preventDefault === 'function' && !event.defaultPrevented) event.preventDefault(); } catch (_error) {}",
+    "  }",
+    "  if (sameTab && infiniteLeaving) {",
+    "    // Already on its way: no second event, and the browser must not leave before the first one is out.",
+    "    stopBrowser();",
+    "    return;",
+    "  }",
     "  var followed = false;",
     "  function follow() {",
     "    if (followed) return;",
@@ -90,32 +127,35 @@ export function trackThenNavigateSource(): string {
     "      else location.assign(destination.href);",
     "    } catch (_error) {}",
     "  }",
+    "  // The helper owns this same-tab navigation from here on (it prevented the browser's own).",
+    "  function own() {",
+    "    stopBrowser();",
+    "    if (sameTab) infiniteHoldLeaving();",
+    "  }",
     "  // Nothing held: the browser goes by itself, or the helper goes now.",
     "  function leave() {",
     "    if (browserGoes) return;",
-    "    try { if (event && typeof event.preventDefault === 'function' && !event.defaultPrevented) event.preventDefault(); } catch (_error) {}",
+    "    own();",
     "    follow();",
     "  }",
-    "  var sameTab = browserGoes",
-    "    ? (event.button === 0 || event.button === undefined) && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && !opensElsewhere",
-    "    : !opensElsewhere;",
     "  try {",
-    "    if (typeof name !== 'string' || !INFINITE_EVENT_NAME.test(name) || !infiniteMayTrack()) { leave(); return; }",
+    "    if (typeof name !== 'string' || !INFINITE_EVENT_NAME.test(name) || !infiniteMayTrack(options)) { leave(); return; }",
     "    var clean = infiniteCleanProps(props);",
-    "    try { if (window.posthog && typeof window.posthog.capture === 'function') window.posthog.capture(name, infiniteCopy(clean)); } catch (_error) {}",
-    "    infiniteRecordEvent(name, clean, null);",
+    "    try { if (infiniteDestinationAllowed(options, 'posthog', true) && window.posthog && typeof window.posthog.capture === 'function') window.posthog.capture(name, infiniteCopy(clean)); } catch (_error) {}",
+    "    infiniteRecordEvent(name, options);",
+    "    var ga4Wanted = infiniteDestinationAllowed(options, 'ga4', true) && typeof window.gtag === 'function';",
     `    var lane = window.${GA4_LANE_MARKER};`,
     "    var ours = !!(lane && typeof lane.id === 'string');",
     "    // R4-5: the site's OWN GA4 started too once gtag.js itself loaded (it defines google_tag_manager); a stub with no",
     "    // loader (a guarded preview, consent not given) never calls back, so it still holds nothing (F15).",
     "    var loaded = !!(window.google_tag_manager && typeof window.google_tag_manager === 'object');",
-    "    var started = typeof window.gtag === 'function' && (ours || loaded);",
-    "    var metaResult = infiniteSendMetaBrowserEvent(name, clean, null, sameTab);",
+    "    var started = ga4Wanted && (ours || loaded);",
+    "    var metaResult = infiniteSendMetaBrowserEvent(name, clean, options, sameTab);",
     "    if (!started) {",
-    "      // GA4 did not start here: send what we can, and only hold for a browser-only Meta request.",
-    "      try { if (typeof window.gtag === 'function') window.gtag('event', name, infiniteGa4Props(name, clean)); } catch (_error) {}",
+    "      // GA4 is not holding the click: send what we can, and hold only for a browser-only Meta request.",
+    "      try { if (ga4Wanted) window.gtag('event', name, infiniteGa4Props(name, clean)); } catch (_error) {}",
     "      if (sameTab && metaResult.wait) {",
-    "        try { if (event && typeof event.preventDefault === 'function' && !event.defaultPrevented) event.preventDefault(); } catch (_error) {}",
+    "        own();",
     "        metaResult.wait.then(follow, follow);",
     "      } else leave();",
     "      return;",
@@ -125,7 +165,7 @@ export function trackThenNavigateSource(): string {
     "    if (sameTab) {",
     "      params.event_callback = metaResult.wait ? function () { metaResult.wait.then(follow, follow); } : follow;",
     `      params.event_timeout = ${NAVIGATION_BUDGET_MS};`,
-    "      if (event && typeof event.preventDefault === 'function') event.preventDefault();",
+    "      own();",
     "    }",
     "    try { window.gtag('event', name, params); } catch (_error) { if (sameTab) follow(); else leave(); return; }",
     `    if (sameTab) setTimeout(follow, ${NAVIGATION_BUDGET_MS});`,

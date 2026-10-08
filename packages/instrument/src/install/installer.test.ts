@@ -96,15 +96,19 @@ describe("WizardInstaller.apply: a new install on a static site", () => {
     expect(readInstallManifest(root)!.ids?.meta ?? []).toEqual([])
   })
 
-  it("passes detected sensitive routes as Infinite route exclusions when Infinite is installed", async () => {
+  // Review P1-6: the PostHog sensitive-page list is PostHog's (replay and autocapture off there). It never hides a page
+  // from Infinite, whose ledger exists to count the checkout and success pages.
+  it("never turns the PostHog sensitive-page list into Infinite route exclusions", async () => {
     const root = makeSite({ "index.html": STATIC_HTML, "checkout.html": STATIC_HTML })
     const subject = installer()
     const scan = await subject.scan({ root, hosting: fakeHosting() })
+    expect(scan.sensitivePaths).toContain("/checkout")
     const plan = subject.buildPlan(scan, fakeKeys(), fakeBefore(), [])
     const result = (await subject.apply(plan, approveAll(plan))) as WizardApplyResult
     expect(result.ok).toBe(true)
-    expect(result.artifacts.infinite?.excludedPaths).toContain("/checkout")
-    expect(read(root, "index.html")).toContain('"excludedPaths":["/checkout"]')
+    expect(result.artifacts.infinite).toBeDefined()
+    expect(result.artifacts.infinite?.excludedPaths).toBeUndefined()
+    expect(read(root, "index.html")).not.toContain('"excludedPaths":')
   })
 
   it("excluded Infinite, managed guard and sensitive-page edits never reach installer artifacts", async () => {

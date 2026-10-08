@@ -26,6 +26,8 @@ import {
 import { scanSourceFiles } from "../harness/scan.js"
 import { buildVerdict } from "../checks/build.js"
 import { detectSensitivePages, readAppSources } from "../setup-checks/index.js"
+import { isRoutePathList } from "../runtime/infinite-browser.js"
+import { INFINITE_CURRENCY_PATTERN } from "../conversions/track.js"
 import type { ResolvedKeys } from "../harness/types.js"
 import {
   computeContentHash,
@@ -134,6 +136,9 @@ export interface WizardScanResult extends ScanResult {
   unmanagedNextConfig?: string | null
   /** D17: the app's sensitive routes (`detectSensitivePages`), for the sensitive-pages plan lines. */
   sensitivePaths?: string[]
+  /** The commerce scan's facts the browser wiring reads (`BrowserScanFacts`); absent = none found. */
+  pixelRestrictedRoutes?: string[]
+  siteCurrency?: string | null
 }
 
 export interface InstallerOptions {
@@ -402,13 +407,13 @@ export class WizardInstaller implements Installer {
     const answers = resolvePlanAnswers(plan, approvals, { consentFlag: this.options.consentFlag() })
     const approved = new Set(answers.lines.filter((entry) => entry.approved === true).map((entry) => entry.id))
     const served = siteServing(scan, internals.before, keys)
-    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode ?? "not_required" }, { posthogProxy: served.posthogProxy, infiniteExcludedPaths: sensitivePathsFor(scan, internals.before) }), scan.detected)
+    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode ?? "not_required" }, { posthogProxy: served.posthogProxy }), scan.detected, pixelFreePathsOf(scan))
     const artifacts: WizardInstallArtifacts = { ...(all.productionHosts ? { productionHosts: all.productionHosts } : {}) }
     for (const tool of ["infinite", "ga4", "posthog", "meta"] as const) {
       const lineForTool = plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
       if (lineForTool && approved.has(lineForTool.id) && all[tool]) (artifacts as Record<string, unknown>)[tool] = all[tool]
     }
-    return this.dryInstallFailure(scan, artifacts, approved.has("server_lane") && artifacts.infinite !== undefined && scan.serverLane !== null, internals.before)
+    return this.dryInstallFailure(scan, withMetaRouteChangePageViews(artifacts, scan), approved.has("server_lane") && artifacts.infinite !== undefined && scan.serverLane !== null, internals.before)
   }
 
   /** The harness plan's failure for these artifacts, planned exactly as `apply` plans them, with no write. */
@@ -457,7 +462,7 @@ export class WizardInstaller implements Installer {
 
     // ---- the artifacts: approved tools from the connections; an already-managed tool whose update
     // was not approved is KEPT exactly as the receipt recorded it (never dropped from the page) ----
-    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode }, { posthogProxy: served.posthogProxy, infiniteExcludedPaths: sensitivePathsFor(scan, internals.before) }), scan.detected)
+    const all = followSitePixels(artifactsFromKeys(keys, { ...plan.decisions, consentMode: answers.consentMode }, { posthogProxy: served.posthogProxy }), scan.detected, pixelFreePathsOf(scan))
     const installLine = (tool: ProviderId) =>
       plan.lines.find((entry) => entry.kind === "install_provider" && (entry.id === `install_provider:${tool}` || entry.id.startsWith(`install_provider:${tool}:`)))
     const previous = scan.manifest
@@ -469,7 +474,7 @@ export class WizardInstaller implements Installer {
         continue
       }
       if (!previous?.providers.includes(tool)) continue
-      const kept = answers.consentMode === null ? "the plan has no consent answer for it" : keptArtifact(tool, previous, keys, answers.consentMode)
+      const kept = answers.consentMode === null ? "the plan has no consent answer for it" : keptArtifact(tool, previous, keys, answers.consentMode, plan.decisions.metaAdvancedMatching !== false)
       if (typeof kept === "string") {
         return this.failed(artifacts, warnings, `${TOOL_LABEL[tool]} is already installed here and its update was not approved, but ${kept}. Approve "Update ${TOOL_LABEL[tool]}", or remove it with uninstall first.`, false)
       }
@@ -485,7 +490,8 @@ export class WizardInstaller implements Installer {
     }
     if (approved.has("sensitive_pages:posthog:managed")) artifacts = withSensitivePaths(artifacts, sensitivePathsFor(internals.scan, internals.before))
     // §3x.3 (B3): the conversion helpers, by the one rule (`withConversionHelpers`), on what this install really writes.
-    artifacts = withConversionHelpers(artifacts, answers.conversions)
+    artifacts = withSiteCurrency(withConversionHelpers(artifacts, answers.conversions), scan)
+    artifacts = withMetaRouteChangePageViews(artifacts, scan)
     const serverLane = approved.has("server_lane") && artifacts.infinite !== undefined && scan.serverLane !== null
 
     // ---- snapshot everything this install can touch (full rollback on any failure) ----
@@ -1011,7 +1017,9 @@ function keptArtifact(
   tool: "infinite" | "ga4" | "posthog" | "meta",
   previous: InstallManifest,
   keys: TagKeys,
-  consentMode: "required" | "not_required"
+  consentMode: "required" | "not_required",
+  /** The same default a new install gets (`keys-adapter`, parity gap 5), so a kept pixel's bytes do not change. */
+  metaAdvancedMatching = true
 ): NonNullable<WizardInstallArtifacts[typeof tool]> | string {
   const ids = previous.ids
   if (!ids) return "its receipt does not record the installed ids"
@@ -1019,7 +1027,7 @@ function keptArtifact(
     case "ga4":
       return ids.ga4.length === 1 ? { measurementId: ids.ga4[0]! } : "its receipt does not record exactly one GA4 id"
     case "meta":
-      return ids.meta.length === 1 ? { pixelId: ids.meta[0]!, consentMode } : "its receipt does not record exactly one pixel id"
+      return ids.meta.length === 1 ? { pixelId: ids.meta[0]!, consentMode, ...(metaAdvancedMatching ? { advancedMatching: true } : {}) } : "its receipt does not record exactly one pixel id"
     case "posthog": {
       if (!ids.posthog) return "its receipt does not record the PostHog project"
       const { projectKey, apiHost } = ids.posthog
@@ -1084,8 +1092,63 @@ export function nextConfigRewritesNeeded(scan: Pick<WizardScanResult, "root"> & 
  * stops when they stop, so the site's own banner (or the lack of one) governs it the same way. A site
  * with no pixels of its own gets a tag that starts on load. Nothing is asked either way.
  */
-function followSitePixels(artifacts: WizardInstallArtifacts, detected: readonly DetectedProviderEvidence[]): WizardInstallArtifacts {
+function followSitePixels(artifacts: WizardInstallArtifacts, detected: readonly DetectedProviderEvidence[], pixelFreePaths: readonly string[] = []): WizardInstallArtifacts {
   const sitePixels = detected.some((entry) => entry.provider === "ga4" || entry.provider === "posthog" || entry.provider === "meta")
   if (!sitePixels || !artifacts.infinite || artifacts.infinite.consentMode !== "not_required") return artifacts
-  return { ...artifacts, infinite: { ...artifacts.infinite, followSitePixels: true } }
+  return {
+    ...artifacts,
+    infinite: { ...artifacts.infinite, followSitePixels: true, ...(pixelFreePaths.length > 0 ? { pixelFreePaths: [...pixelFreePaths] } : {}) }
+  }
+}
+
+/**
+ * The scan facts the browser wiring reads. The commerce scan (`src/scan/`) fills them; absent = none found.
+ *   - `pixelRestrictedRoutes`: the site's own routes where it keeps its ad and analytics pixels off.
+ *   - `siteCurrency`: the currency the site prices in (ISO 4217), from its catalog or payment code.
+ */
+interface BrowserScanFacts {
+  pixelRestrictedRoutes?: readonly string[]
+  siteCurrency?: string | null
+}
+
+/**
+ * REVIEW P1-6, THE TAG'S ROUTE RULES. The tag's `excludedPaths` is an explicit owner choice only: the wizard never
+ * fills it, and in particular never from the PostHog sensitive-page list (that list turns PostHog replay and
+ * autocapture off on checkout, account, billing… pages; it hid exactly the cart and success page views Infinite
+ * exists to count). The site's own pixel-restricted routes are NOT exclusions either: Infinite is the site's
+ * first-party ledger and should see /cart and /success. They ride as `pixelFreePaths`, which matter only in follow
+ * mode: there, a full page load of such a route never starts the site's pixels, and the tag carries the decision it saw
+ * on the visitor's earlier pages in the same tab (`runtime/infinite-browser.ts`, follow mode). A visitor who refused, or
+ * who lands there first, is still not recorded. Only root-relative literal paths are kept (never "/": that would
+ * make every page pixel-free).
+ */
+export function pixelFreePathsOf(scan: BrowserScanFacts): string[] {
+  const routes = (scan.pixelRestrictedRoutes ?? []).filter((route) => route !== "/" && isRoutePathList([route]))
+  return [...new Set(routes)].sort()
+}
+
+/** The site's currency onto the helpers (the default a product event carries to Meta and GA4). */
+export function withSiteCurrency<T extends WizardInstallArtifacts>(artifacts: T, scan: BrowserScanFacts): T {
+  const currency = typeof scan.siteCurrency === "string" ? scan.siteCurrency.toUpperCase() : null
+  if (!artifacts.conversions || currency === null || !INFINITE_CURRENCY_PATTERN.test(currency)) return artifacts
+  return { ...artifacts, conversions: { ...artifacts.conversions, currency } }
+}
+
+const SITE_META_PAGEVIEW = /\bfbq\s*\(\s*(['"])track\1\s*,\s*(['"])PageView\2/
+
+/**
+ * PARITY GAP 8. The pixel infinite-tag installs sets `disablePushState`, so on a single-page app the tag's history hook
+ * sends one Meta PageView per route change (`metaPageViews`). Not when the site's own code already sends a Meta
+ * PageView anywhere (a route-change handler would double it), not for a capture-only install beside the site's own
+ * pixel, and not on a multi-page site, where every page is a full load and the bootstrap's PageView covers it.
+ */
+export function withMetaRouteChangePageViews<T extends WizardInstallArtifacts>(artifacts: T, scan: Pick<WizardScanResult, "framework" | "root" | "appRoot">): T {
+  if (!artifacts.infinite || !artifacts.meta || artifacts.meta.captureOnly === true) return artifacts
+  if (scan.framework !== "next-app-router" && scan.framework !== "next-pages-router" && scan.framework !== "vite-react") return artifacts
+  const appRootAbsolute = scan.appRoot === "." ? scan.root : join(scan.root, scan.appRoot)
+  for (const source of readAppSources(appRootAbsolute).values()) {
+    if (isManagedInfiniteFile(source)) continue
+    if (SITE_META_PAGEVIEW.test(source)) return artifacts
+  }
+  return { ...artifacts, infinite: { ...artifacts.infinite, metaPageViews: true } }
 }

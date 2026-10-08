@@ -28,6 +28,89 @@ import { sensitivePosthogOptions } from "../install/posthog-sensitive.js"
 
 export { escapeForTemplateLiteral }
 
+// ---------------------------------------------------------------------------------------------
+// The event × tool inventory a browser-event job carries (review P0-5, instruction side)
+// ---------------------------------------------------------------------------------------------
+//
+// LOCAL COPY of the shapes lane A's scan exports from `src/scan/event-inventory.ts` (and seeds on
+// `ChecklistItem.inventory`). Copied, not imported, until that lane merges; replace these with an import then.
+export type InventoryTool = "ga4" | "posthog" | "meta_browser" | "meta_server" | "infinite"
+export type FunnelEvent = "view_item" | "add_to_cart" | "begin_checkout" | "purchase" | "lead" | "sign_up" | "start_trial"
+export interface EventSite { file: string; line: number; via: string }
+export interface EventInventoryEntry { event: FunnelEvent; sites: EventSite[]; tools: Partial<Record<InventoryTool, EventSite[]>>; missing: InventoryTool[] }
+
+/** The item's inventory entries (set by the registry's seeding from the scan, never by an agent). */
+function inventoryOf(item: ChecklistItem): EventInventoryEntry[] {
+  const entries = (item as ChecklistItem & { inventory?: unknown }).inventory
+  return Array.isArray(entries) ? (entries as EventInventoryEntry[]) : []
+}
+
+/** Meta's standard event for each funnel event. */
+const META_EVENT: Readonly<Record<FunnelEvent, string>> = {
+  view_item: "ViewContent",
+  add_to_cart: "AddToCart",
+  begin_checkout: "InitiateCheckout",
+  purchase: "Purchase",
+  lead: "Lead",
+  sign_up: "CompleteRegistration",
+  start_trial: "StartTrial"
+}
+
+/** The events the page may send from the browser at all. Purchase, checkout starts and leads are the server's. */
+const BROWSER_EVENTS: ReadonlySet<FunnelEvent> = new Set(["view_item", "add_to_cart", "begin_checkout"])
+/** The events Meta gets from the browser (no event id). Every other Meta event comes from the server. */
+const META_BROWSER_EVENTS: ReadonlySet<FunnelEvent> = new Set(["view_item", "add_to_cart"])
+/** Trigger sites in server code: never where a browser call goes. */
+const SERVER_VIAS: ReadonlySet<string> = new Set(["stripe.checkout.sessions.create", "form-api", "payment-webhook", "reportInfiniteOutcome"])
+
+/** The browser helper's `destinations` name for an inventory tool (null: not a browser destination). */
+const DESTINATION: Readonly<Record<InventoryTool, string | null>> = { ga4: "ga4", posthog: "posthog", meta_browser: "meta", meta_server: null, infinite: "infinite" }
+const TOOL_WORD: Readonly<Record<InventoryTool, string>> = { ga4: "GA4", posthog: "PostHog", meta_browser: "Meta", meta_server: "Meta (from your server)", infinite: "Infinite" }
+
+/** The browser commerce job's tool, from its job (`meta_improve:commerce_events` → Meta). */
+const COMMERCE_JOB_TOOL: Readonly<Record<string, InventoryTool>> = { meta_improve: "meta_browser", ga4_improve: "ga4", posthog_improve: "posthog" }
+
+/** The item target lane A seeds browser commerce jobs under (`<tool>_improve:commerce_events`). */
+export const COMMERCE_EVENTS_TARGET = "commerce_events"
+
+function listWords(words: readonly string[]): string {
+  if (words.length <= 1) return words.join("")
+  return `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`
+}
+
+/**
+ * Review P2 (titles say what we are doing, never what a tool "will" get): the title of a browser commerce job.
+ * "Adding Meta AddToCart and ViewContent with product and price". Lane A's registry can use it for the item title.
+ */
+export function commerceJobTitle(tool: InventoryTool, events: readonly FunnelEvent[]): string {
+  const names = [...new Set(events)]
+    .sort((a, b) => (a === "add_to_cart" ? -1 : b === "add_to_cart" ? 1 : a.localeCompare(b)))
+    .map((event) => (tool === "meta_browser" ? META_EVENT[event] : event))
+  return `Adding ${TOOL_WORD[tool]} ${listWords(names)} with product and price`
+}
+
+function siteText(site: EventSite): string {
+  return `${site.file}:${site.line}${site.via ? ` (${site.via})` : ""}`
+}
+
+/** One inventory entry as the brief's data: where it fires, what each tool already gets, what this job adds. */
+function inventoryData(entry: EventInventoryEntry, add: readonly InventoryTool[]): Record<string, unknown> {
+  const already: Record<string, string[]> = {}
+  for (const [tool, sites] of Object.entries(entry.tools) as Array<[InventoryTool, EventSite[] | undefined]>) {
+    if (sites && sites.length > 0) already[TOOL_WORD[tool]] = sites.slice(0, 6).map(siteText)
+  }
+  return {
+    event: entry.event,
+    ...(add.includes("meta_browser") ? { metaEventName: META_EVENT[entry.event] } : {}),
+    firesAt: entry.sites.filter((site) => !SERVER_VIAS.has(site.via)).slice(0, 8).map(siteText),
+    alreadySentTo: already,
+    add: add.map((tool) => TOOL_WORD[tool])
+  }
+}
+
+/** The product payload every product event carries, as the agent writes it (values from the site's own data). */
+const PRODUCT_PROPS = "{ item_id: <the product id>, item_name: <its name>, price: <its unit price>, quantity: <the quantity>, currency: <the currency the site prices in> }"
+
 /** The facts a brief carries: the framework (installer scan) and the approved plan's data. */
 export interface BriefFacts {
   runId: string
@@ -121,11 +204,11 @@ export function autoConfigOffLine(pixelId: string): string {
 
 
 /** §3x.3 The import line job 10 pastes in `file`: the managed module's path from that file, with no extension. */
-export function helperImportFor(file: string, module: string): string {
+export function helperImportFor(file: string, module: string, names: readonly string[] = ["infiniteTrack", "infiniteTrackThenNavigate"]): string {
   const from = posix.dirname(file.split("\\").join("/"))
   let path = posix.relative(from === "" ? "." : from, module.replace(/\.[cm]?[jt]sx?$/, ""))
   if (!path.startsWith(".")) path = `./${path}`
-  return `import { infiniteTrack, infiniteTrackThenNavigate } from "${path}"`
+  return `import { ${names.join(", ")} } from "${path}"`
 }
 
 /** §3e.1 agent instruction gists, one per agent job. */
@@ -146,7 +229,7 @@ export const JOB_GISTS: { readonly [J in JobId]: string } = {
     "After the success branch, `await reportInfiniteOutcome({ type: <an approved conversion name from Plan data>, path, eventId: <a stable id such as the order or row id>, adMatch? })`. Payment webhooks use the checkout-capture recipe. Pass `metaEventId` to the browser only for requests the browser awaits.",
   identify_reset: "Call `infiniteIdentify(accountId)` after a VERIFIED login (an account id, never an email). Call `infiniteReset()` in every logout.",
   conversions_to_tools:
-    "At each conversion point call `infiniteTrack(<an approved conversion name from Plan data>)` (or `infiniteTrackThenNavigate(…)` before a navigation). It fans out to GA4, PostHog, Infinite and browser-only Meta without a page-built eventID. Server-twin Meta conversions go server first and mirror only with the returned `metaEventId`; never call `fbq` yourself.",
+    "At each conversion point call `infiniteTrack(<an approved conversion name from Plan data>)` (or `infiniteTrackThenNavigate(…)` before a navigation), sending only to the tools Plan data names in `destinations` when it names them. It never builds a Meta eventID. Purchases, checkout starts and leads reach Meta and Infinite from your server; never call `fbq` yourself.",
   setup_check_fixes: "Fix exactly what the setup check found: move `data-conversion`, wire the silent form's success path, add the missing capture.",
   csp: "Add exactly the needed hosts to each directive of the policy. Never `*`, never a new `unsafe-inline`.",
   redirect_utms: "Keep the query string through every redirect hop; move counted paths out of host-level redirects into the middleware.",
@@ -202,13 +285,44 @@ function duplicateGist(target: string): string {
   return "Here: keep the first init listed under Evidence and remove the others, unless an approved plan line below names a different one to keep."
 }
 
-/** §3x.3 (B3) Job 10's target line: an outcome is sent where it SUCCEEDS; a click conversion on its click. */
+/** Purchases reach every tool from the server (the payment webhook), never from a browser call (review P0-5). */
+const SERVER_ONLY_CONVERSIONS: ReadonlySet<string> = new Set(["purchase"])
+
+/**
+ * §3x.3 (B3) Job 10's target line: an outcome is sent where it SUCCEEDS; a click conversion on its click.
+ * Review P0-5: with the scan's inventory, ONLY the tools that miss the event are named (`destinations`), so a site that
+ * already sends GA4 there never gets a second GA4 event; Meta and Infinite get a conversion from the server, never here.
+ * A purchase is never sent from the browser at all.
+ */
 function conversionGist(target: string, data: Record<string, unknown> | Error): string {
   const helper = data instanceof Error || typeof data.helperImport !== "string" ? "" : ` The helpers are already in your repo: ${data.helperImport}. Never re-implement them.`
+  if (SERVER_ONLY_CONVERSIONS.has(target)) {
+    return `Here: add NOTHING in the browser. A ${target} is reported from your server when the payment is confirmed (its own job), and Infinite sends it to Meta from there. Never send it with infiniteTrack or fbq. Claim this job blocked with the note "reported from the server".`
+  }
+  const destinations = !(data instanceof Error) && Array.isArray(data.destinations) ? (data.destinations as string[]) : null
+  if (destinations && OUTCOME_CONVERSION_TYPES.has(target as never)) {
+    return `Here: right after the success is confirmed and before any navigation, call infiniteTrack(<the approved name>, {}, { destinations: ${JSON.stringify(destinations)} }) — exactly those tools: the site already sends this to the others (alreadySentTo), and Meta and Infinite get it from your server (its own job). Never on the link or button that leads to the form. Where this form posts to your own API route, also send adMatch: infiniteAdMatchAllowed() in its JSON body (or ad_match=1 in a form post when it is true), so your server can attach Meta match data; change nothing else in the request.${helper}`
+  }
   if (OUTCOME_CONVERSION_TYPES.has(target as never)) {
     return `Here: call infiniteTrack(${JSON.stringify(target)}) right after the success is confirmed and before any navigation (or use infiniteTrackThenNavigate). Never on the link or button that leads to the form.${helper}`
   }
   return `Here: call infiniteTrack(<the approved name>) on the click that IS the ${target} (or infiniteTrackThenNavigate before its navigation).${helper}`
+}
+
+/**
+ * Review P0-5 / P1-7: the browser commerce job (`<tool>_improve:commerce_events`). Each entry names the exact file and
+ * line where the event already fires and the tool this job adds; the agent adds ONLY that tool, through
+ * `destinations`, with the product and price from the site's own data, and waits before a navigation.
+ */
+function commerceGist(tool: InventoryTool): string {
+  const destination = DESTINATION[tool]!
+  const meta = tool === "meta_browser"
+  return [
+    `Here: at each place in "events" (firesAt is where the site already tracks it; alreadySentTo is what it sends there today), add ONE call that sends the event to ${TOOL_WORD[tool]} ONLY: infiniteTrack(<event>, ${PRODUCT_PROPS}, { destinations: [${JSON.stringify(destination)}] }).`,
+    "Put it beside the site's existing send for that event (inside the site's own helper when firesAt names one, so every caller is covered once), with the product id, name, unit price and quantity the site already has there or in its own product catalog. Never invent a price or a product; pass the currency the site prices in.",
+    `When the click then leaves the page (a Buy button that goes to the cart), use infiniteTrackThenNavigate(event, <where the click goes>, <event>, <the same props>, { destinations: [${JSON.stringify(destination)}] }) in that click handler instead of the handler's own navigation, so ${meta ? "Meta's request is out (at most 400 ms)" : "the event is out"} before the page leaves; it ignores a second click while the first is on its way.`,
+    "If another job in this brief adds a different tool at the same place, make it ONE call with both tools in destinations. Never add a tool already listed in alreadySentTo, never call gtag, posthog or fbq yourself, and never add a Meta eventID."
+  ].join(" ")
 }
 
 /** Strips control, bidi and zero-width characters: untrusted text stays on one inert line. */
@@ -243,7 +357,7 @@ export const NEVER_LIST: readonly string[] = [
  * events; server-twin Meta conversions still go through `reportInfiniteOutcome` plus `infiniteMetaMirror`.
  */
 export const HELPER_API =
-  "Helper API: `infiniteTrack(name, props?, options?)` sends one named browser event to GA4, PostHog, Infinite and safe browser-only Meta events. It never builds a Meta eventID. `options.destinations.<tool> = false` skips a tool the site already sends to; `options.destinations.meta = true` enables a custom Meta CTA (`trackCustom`) with no eventID. `infiniteTrackThenNavigate(event, href, name, props?)` does the same and waits at most 1 s for GA4 plus about 400 ms for browser-only Meta before navigating. `infiniteIdentify(accountId)` / `infiniteReset()` are PostHog only. `infiniteMetaMirror(metaEventName, metaEventId)` fires the browser twin of a server Meta event, only with the id the server returned."
+  "Helper API: `infiniteTrack(name, props?, options?)` sends one named browser event to GA4, PostHog, Infinite and safe browser-only Meta events (ViewContent, AddToCart). It never builds a Meta eventID. `options.destinations` names the tools: a list sends to exactly those (`[\"meta\"]` = Meta only); `{ ga4: false }` skips one; `{ meta: true }` enables a custom Meta CTA (`trackCustom`). Product props: `item_id`, `item_name`, `price`, `quantity`, `currency`; Meta gets content_ids, content_name, contents, value and currency from them. `infiniteTrackThenNavigate(event, href, name, props?, options?)` does the same, then navigates once GA4 has the hit (at most 1 s) and a browser-only Meta request is out (at most 400 ms); a second click while it is leaving does nothing. `infiniteAdMatchAllowed()` is true when the visitor allowed tracking: pass it to your own API routes (`adMatch: infiniteAdMatchAllowed()`). `infiniteIdentify(accountId)` / `infiniteReset()` are PostHog only. `infiniteMetaMirror(metaEventName, metaEventId, { identity: { email, externalId } })` fires the browser twin of a server Meta event, only with the id the server returned. Purchase, checkout starts and leads go to Meta and Infinite from the server, never from these helpers."
 
 /** The operator rules: appended to the worker's system prompt for every jobs turn. */
 export function operatorRules(facts: BriefFacts): string {
@@ -262,8 +376,8 @@ export function operatorRules(facts: BriefFacts): string {
     ...(facts.helpers
       ? [
           facts.helpers.module
-            ? `The conversion helpers are already in your repo, exported by ${quoted(facts.helpers.module)} (\`infiniteTrack\`, \`infiniteTrackThenNavigate\`, \`infiniteIdentify\`, \`infiniteReset\`, \`infiniteMetaMirror\`). Never re-implement them.`
-            : "The conversion helpers are already on every page as globals (`window.infiniteTrack`, `window.infiniteTrackThenNavigate`, `window.infiniteIdentify`, `window.infiniteReset`, `window.infiniteMetaMirror`). Never re-implement them."
+            ? `The conversion helpers are already in your repo, exported by ${quoted(facts.helpers.module)} (\`infiniteTrack\`, \`infiniteTrackThenNavigate\`, \`infiniteIdentify\`, \`infiniteReset\`, \`infiniteMetaMirror\`, \`infiniteAdMatchAllowed\`). Never re-implement them.`
+            : "The conversion helpers are already on every page as globals (`window.infiniteTrack`, `window.infiniteTrackThenNavigate`, `window.infiniteIdentify`, `window.infiniteReset`, `window.infiniteMetaMirror`, `window.infiniteAdMatchAllowed`). Never re-implement them."
         ]
       : []),
     // R4-6 (live run 4): the agent opened the 56 KB managed module and thought 4.2 minutes before its first edit.
@@ -313,6 +427,8 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
     }
     case "server_conversions":
     case "conversions_to_tools": {
+      // A purchase is the server's alone: the brief says so and asks for nothing else (review P0-5).
+      if (item.jobId === "conversions_to_tools" && SERVER_ONLY_CONVERSIONS.has(target)) return { conversionType: target }
       if (!plan) return new Error(`the brief for ${item.id} needs the approved plan (conversion names)`)
       const names = boundConversionNames(target, plan.conversionNames)
       if (names.length === 0) return new Error(`the brief for ${item.id} has no approved conversion name for "${target}"`)
@@ -321,10 +437,21 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
       // agent looking for code that does not exist (run 3), so it refuses instead.
       if (!facts.helpers) return new Error(`the brief for ${item.id} needs the conversion helpers the install writes, and this install wrote none`)
       const file = item.allow.files[0] ?? null
+      // Review P0-5: with the scan's inventory, only GA4 and PostHog that MISS this conversion are named; Meta and
+      // Infinite get it from the server lane.
+      const entries = inventoryOf(item)
+      const missing = [...new Set(entries.flatMap((entry) => entry.missing))].filter((tool): tool is "ga4" | "posthog" => tool === "ga4" || tool === "posthog")
+      const outcome = OUTCOME_CONVERSION_TYPES.has(target as never)
+      if (entries.length > 0 && missing.length === 0) return new Error(`the brief for ${item.id} has no browser tool that misses the ${target} conversion`)
       return {
         conversionType: target,
         approvedConversionNames: names,
-        ...(facts.helpers.module && file ? { helperImport: helperImportFor(file, facts.helpers.module) } : {})
+        ...(entries.length > 0
+          ? { destinations: missing.map((tool) => DESTINATION[tool]), events: entries.map((entry) => inventoryData(entry, missing)) }
+          : {}),
+        ...(facts.helpers.module && file
+          ? { helperImport: helperImportFor(file, facts.helpers.module, entries.length > 0 && outcome ? ["infiniteTrack", "infiniteAdMatchAllowed"] : undefined) }
+          : {})
       }
     }
     case "privacy_paragraph": return new Error("Privacy policy and terms are outside the agent’s scope")
@@ -348,6 +475,7 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
         : { guardExpression: guard.expression, productionHostsExempt: guard.exemptHosts, ...(target === "meta" ? { metaGuardRecipe: guard.metaRecipe } : {}) }
     }
     case "posthog_improve": {
+      if (target === COMMERCE_EVENTS_TARGET) return commerceData(item, facts)
       if (target === "sensitive_pages") {
         const paths = [...new Set((plan?.lines ?? []).filter(line => line.kind === "sensitive_pages" && line.jobIds.includes(item.id)).flatMap(line => line.sensitivePaths ?? []))]
         if (paths.length === 0) return new Error(`the brief for ${item.id} needs the sensitive paths from the approved plan`)
@@ -358,6 +486,7 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
       return { posthogUiHost: posthog?.uiHost ?? null, posthogRegion: posthog?.region ?? null }
     }
     case "ga4_improve": {
+      if (target === COMMERCE_EVENTS_TARGET) return commerceData(item, facts)
       if (!facts.connections) return new Error(`the brief for ${item.id} needs the connections' public IDs`)
       const data: Record<string, unknown> = { connectedGa4MeasurementIds: facts.connections.ga4MeasurementIds }
       if (target === "spa_page_view") {
@@ -372,6 +501,7 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
       return data
     }
     case "meta_improve": {
+      if (target === COMMERCE_EVENTS_TARGET) return commerceData(item, facts)
       if (!facts.connections) return new Error(`the brief for ${item.id} needs the connections' public IDs`)
       const data: Record<string, unknown> = { connectedMetaPixelIds: facts.connections.metaPixelIds }
       const site = (facts.guardSites ?? []).find((entry) => entry.tool === "meta" && item.allow.files.includes(entry.file))
@@ -399,6 +529,26 @@ function planDataFor(item: ChecklistItem, facts: BriefFacts): Record<string, unk
     }
     default:
       return {}
+  }
+}
+
+/** The browser commerce job's data: its tool, the destinations it may name, and each event it fills (inventory). */
+function commerceData(item: ChecklistItem, facts: BriefFacts): Record<string, unknown> | Error {
+  const tool = COMMERCE_JOB_TOOL[item.jobId]
+  if (!tool) return new Error(`no browser tool for ${item.id}`)
+  if (!facts.helpers) return new Error(`the brief for ${item.id} needs the conversion helpers the install writes, and this install wrote none`)
+  const allowed = tool === "meta_browser" ? META_BROWSER_EVENTS : BROWSER_EVENTS
+  // Only an event this tool misses, that the page may send at all, at a place in the browser.
+  const entries = inventoryOf(item).filter(
+    (entry) => allowed.has(entry.event) && entry.missing.includes(tool) && entry.sites.some((site) => !SERVER_VIAS.has(site.via))
+  )
+  if (entries.length === 0) return new Error(`the brief for ${item.id} has no browser event that ${TOOL_WORD[tool]} misses`)
+  const file = item.allow.files[0] ?? null
+  return {
+    tool: TOOL_WORD[tool],
+    destinations: [DESTINATION[tool]],
+    events: entries.map((entry) => inventoryData(entry, [tool])),
+    ...(facts.helpers.module && file ? { helperImport: helperImportFor(file, facts.helpers.module) } : {})
   }
 }
 
@@ -620,21 +770,26 @@ function onItsOwnLine(source: string, at: number): boolean {
  * quoted data. Throws when the job needs a decision the plan did not give (never a guess).
  */
 export function jobBlock(item: ChecklistItem, facts: BriefFacts): string {
-  const gist = TARGET_WHAT[item.id] ?? (JOB_GISTS as Record<string, string | undefined>)[item.jobId]
+  const commerceTool = itemTargetOf(item) === COMMERCE_EVENTS_TARGET ? COMMERCE_JOB_TOOL[item.jobId] : undefined
+  const gist = commerceTool
+    ? `Send ${TOOL_WORD[commerceTool]} the product events it misses, with product and price, ONLY where the site already tracks them.`
+    : (TARGET_WHAT[item.id] ?? (JOB_GISTS as Record<string, string | undefined>)[item.jobId])
   if (gist === undefined) throw new Error(`no brief for job ${item.jobId} (code jobs are never briefed)`)
   const data = planDataFor(item, facts)
   if (data instanceof Error) throw data
+  const title = commerceTool ? commerceJobTitle(commerceTool, inventoryOf(item).filter((entry) => entry.missing.includes(commerceTool)).map((entry) => entry.event)) : item.title
   const guardNote =
     item.jobId === "preview_guard" && !(data instanceof Error) && Array.isArray(data.guardAt)
       ? "Paste guardAsWritten exactly; it is already escaped for where the init lives. It compiles as written in strict TypeScript, so add no type annotations."
       : undefined
   const target =
     guardNote ??
+    (commerceTool ? commerceGist(commerceTool) : undefined) ??
     TARGET_GISTS[item.id] ??
     (item.jobId === "duplicates_remove" ? duplicateGist(itemTargetOf(item)) : item.jobId === "conversions_to_tools" ? conversionGist(itemTargetOf(item), data) : item.jobId === "server_conversions" ? serverConversionInstructionsForItem(item, facts, Array.isArray(data.approvedConversionNames) ? String(data.approvedConversionNames[0]) : undefined) : undefined)
   const lines = (facts.plan?.lines ?? []).filter((line) => line.jobIds.includes(item.id))
   const out = [
-    `### Job ${quoted(item.id)} (${item.n}. ${item.title})`,
+    `### Job ${quoted(item.id)} (${item.n}. ${title})`,
     `What: ${gist}`,
     ...(target ? [target] : []),
     `Why (found by the wizard, quoted): ${quoted(item.trigger.finding)}`,

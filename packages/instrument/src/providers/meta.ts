@@ -322,7 +322,7 @@ export { META_CLICK_ID_ACCESSOR }
  * nobody. The emitted source must also stay free of backticks and `${` — for Next it is folded
  * into a String.raw template — and free of a literal `</script>`.
  */
-function buildMetaAdvancedMatchingSnippet(pixelId: string, gate: MetaBrowserGate): string {
+export function buildMetaAdvancedMatchingSnippet(pixelId: string, gate: MetaBrowserGate): string {
   return [
     "(function () {",
     `  if (typeof window.${META_ADVANCED_MATCHING_ACCESSOR} === "function") return;`,

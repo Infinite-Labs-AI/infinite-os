@@ -15,6 +15,7 @@ interface HandoffContextShape {
 type HarnessWindow = Record<string, unknown> & {
   __infiniteHandoffContext?: () => HandoffContextShape | null
   __infiniteRecordEvent?: (name: string, properties?: Record<string, string | number | boolean>) => boolean
+  __infiniteAdMatchAllowed?: () => boolean
 }
 
 interface HarnessOptions {
@@ -758,16 +759,14 @@ describe("renderInfiniteBrowserTag", () => {
     expect(runtime.requests.map((r) => (r.body.properties as { nav: string }).nav)).toEqual(["navigate", "history", "navigate"])
   })
 
-  it("the helper event lane records a PII-free browser event to Infinite, and revocation clears local ids", () => {
+  it("the helper event lane records a PII-free browser event to Infinite with ONLY cta_id/cta_location (review P0-3), and revocation clears local ids", () => {
     const runtime = executeTag({ siteSourceKey: "site_public_123", consent: "granted" })
     expect(typeof runtime.window.__infiniteRecordEvent).toBe("function")
+    // Anything else on a click makes the cloud's browser ingest reject the whole event (400), silently.
     expect(runtime.window.__infiniteRecordEvent!("add_to_cart", { item_id: "sku_1", value: 20, currency: "USD", email: "buyer@example.com" })).toBe(true)
     const event = runtime.requests.at(-1)!.body
-    expect(event).toMatchObject({
-      eventName: "site_click",
-      url: "https://example.com/privacy/",
-      properties: { cta_id: "add_to_cart", cta_location: "conversion", item_id: "sku_1", value: 20, currency: "USD" }
-    })
+    expect(event).toMatchObject({ eventName: "site_click", url: "https://example.com/privacy/" })
+    expect(event.properties).toEqual({ cta_id: "add_to_cart", cta_location: "conversion" })
     expect(JSON.stringify(event.properties)).not.toContain("buyer@example.com")
     expect(runtime.storedIds().anonymousId).toBeTruthy()
     expect(runtime.storedIds().sessionId).toBeTruthy()

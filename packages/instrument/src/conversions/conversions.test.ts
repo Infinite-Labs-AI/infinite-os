@@ -150,27 +150,23 @@ describe("infiniteTrack", () => {
         }
       ]
     ])
+    // Meta gets its own content keys and nothing else the caller passed (review P2: no item_id / price extras).
     expect(plain(p.fbqCalls)).toEqual([
       [
         "track",
         "AddToCart",
         {
-          item_id: "sku_1",
-          item_name: "Trail Pack",
-          price: 249,
-          quantity: 2,
-          value: 498,
-          currency: "USD",
           content_ids: ["sku_1"],
+          content_name: "Trail Pack",
           content_type: "product",
           contents: [{ id: "sku_1", quantity: 2, item_price: 249 }],
-          content_name: "Trail Pack"
+          value: 498,
+          currency: "USD"
         }
       ]
     ])
-    expect(plain(infiniteCalls)).toEqual([
-      ["add_to_cart", { item_id: "sku_1", item_name: "Trail Pack", price: 249, quantity: 2, value: 498, currency: "USD" }]
-    ])
+    // Infinite's ledger: the name only (its ingest rejects product keys on a click, review P0-3).
+    expect(plain(infiniteCalls)).toEqual([["add_to_cart"]])
     expect(plain(p.fbqCalls[0]![2] as Record<string, unknown>)).not.toHaveProperty("eventID")
   })
 
@@ -547,7 +543,7 @@ describe("infiniteTrackThenNavigate", () => {
     expect(event.defaultPrevented).toBe(true)
     expect(p.vm.assigned).toEqual([])
     expect(plain(p.fbqCalls)).toEqual([
-      ["track", "AddToCart", { item_id: "sku_1", content_ids: ["sku_1"], content_type: "product", contents: [{ id: "sku_1", quantity: 1 }] }]
+      ["track", "AddToCart", { content_ids: ["sku_1"], content_type: "product", contents: [{ id: "sku_1", quantity: 1 }] }]
     ])
     await p.vm.resourceLoaded("https://www.facebook.com/tr/?id=1234567890123456&ev=AddToCart")
     expect(p.vm.assigned).toEqual(["https://acme.com/cart"])
@@ -622,14 +618,7 @@ describe("store fixture E2E through the emitted helpers", () => {
       })
       expect(plain(call[2] as Record<string, unknown>)).not.toHaveProperty("eventID")
     }
-    for (const call of infiniteCalls) {
-      expect(plain(call[1] as Record<string, unknown>)).toMatchObject({
-        item_id: "sku_2",
-        item_name: "Trail Pack",
-        value: 249,
-        currency: "USD"
-      })
-    }
+    for (const call of infiniteCalls) expect(call).toHaveLength(1)
   })
 })
 

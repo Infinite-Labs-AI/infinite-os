@@ -1,5 +1,6 @@
 // `window.infiniteTrack(name, props?, { gate?, destinations?, metaEventName? })` — one named browser
-// event to the safe destinations that are live on this page (§3j.6).
+// event to the safe destinations that are live on this page (§3j.6). `destinations: ["meta"]` (a list) sends to
+// exactly the tools named, so an agent adds ONLY the tools a call site is missing (review P0-5 / P1-7).
 //
 // Source: `track()` in infinite-site `get-started/index.html` L296-307 and the CTA intent snippet in
 // `.github/scripts/inject-analytics.cjs` L577-595 @ 9f65b47, generalised for customer sites (decisions 9
@@ -20,6 +21,11 @@
 //     return and is not suppressed.
 //   - Each provider is reached behind its own existence check and try/catch, so a missing or broken
 //     tool can never throw into the site's code.
+//   - Meta ViewContent / AddToCart carry Meta's content keys and nothing else (content_ids, content_name,
+//     content_type "product", contents [{ id, quantity, item_price }], value, currency), with the currency the
+//     caller passed or the site's own (baked in from the plan); a value never goes without a currency.
+//   - Infinite's ledger gets the event name only (`site_click` cta_id + cta_location): the cloud's browser ingest
+//     rejects any other key on a click (review P0-3).
 //   - Meta server-twin conversions (Purchase, Lead, CompleteRegistration, StartTrial, Subscribe and
 //     server-reported InitiateCheckout) are NEVER fired here. They go server first, then through
 //     `infiniteMetaMirror` with the id the server returned. Browser-only Meta events such as AddToCart,
@@ -35,12 +41,31 @@ export const INFINITE_EVENT_NAME = /^[A-Za-z0-9_-]{1,64}$/
 /** At most this many properties ride on one event. */
 export const INFINITE_MAX_PROPS = 16
 
+/** ISO 4217, as Meta and GA4 take it. */
+export const INFINITE_CURRENCY_PATTERN = /^[A-Z]{3}$/
+
+/** The facts the helper script bakes in. Both come from the approved plan's artifacts, never from the page. */
+export interface HelperCoreOptions {
+  /**
+   * The site's currency (ISO 4217): the default for a product event whose caller passes none. Meta and GA4 both need
+   * a currency beside a value, so a value is never sent without one: with neither a passed nor a site currency, the
+   * product event goes out with its products and no value.
+   */
+  currency?: string | null
+  /** The chosen Meta pixel: the `/tr` request a navigation waits for must be this pixel's. Absent = any pixel's. */
+  metaPixelId?: string | null
+}
+
 /**
  * The shared private functions every helper uses: the name rule, the property bounds, the OAuth-return
  * check and the call-time permission check.
  */
-export function helperCoreSource(): string {
+export function helperCoreSource(options: HelperCoreOptions = {}): string {
+  const currency = typeof options.currency === "string" && INFINITE_CURRENCY_PATTERN.test(options.currency) ? options.currency : null
+  const pixel = typeof options.metaPixelId === "string" && /^[0-9]{15,16}$/.test(options.metaPixelId) ? options.metaPixelId : null
   return [
+    `var INFINITE_SITE_CURRENCY = ${JSON.stringify(currency)};`,
+    `var INFINITE_META_PIXEL = ${JSON.stringify(pixel)};`,
     "var INFINITE_EVENT_NAME = /^[A-Za-z0-9_-]{1,64}$/;",
     "var INFINITE_PROP_KEY = /^[A-Za-z0-9_]{1,40}$/;",
     `var INFINITE_MAX_PROPS = ${INFINITE_MAX_PROPS};`,
@@ -103,6 +128,18 @@ export function helperCoreSource(): string {
     "  var lower = String(name).toLowerCase();",
     "  return lower === 'add_to_cart' || lower === 'addtocart' || lower === 'view_content' || lower === 'viewcontent' || lower === 'view_item' || lower === 'begin_checkout' || lower === 'initiate_checkout' || lower === 'checkout';",
     "}",
+    "// The currency a product event carries: the caller's (ISO 4217, any case), else the site's.",
+    "function infiniteCurrency(clean) {",
+    "  var passed = typeof clean.currency === 'string' ? clean.currency.toUpperCase() : '';",
+    "  if (/^[A-Z]{3}$/.test(passed)) return passed;",
+    "  return INFINITE_SITE_CURRENCY;",
+    "}",
+    "// The money a product event carries: the caller's value, else price x quantity; null when neither is known.",
+    "function infiniteValue(clean, item) {",
+    "  var value = infiniteNumber(clean, 'value');",
+    "  if (value !== null) return value;",
+    "  return item && item.price !== null ? item.price * item.quantity : null;",
+    "}",
     "function infiniteGa4Props(name, clean) {",
     "  var params = infiniteCopy(clean);",
     "  var item = infiniteCommerceEvent(name) ? infiniteCommerceItem(clean) : null;",
@@ -111,29 +148,49 @@ export function helperCoreSource(): string {
     "    if (item.name) ga4Item.item_name = item.name;",
     "    if (item.price !== null) ga4Item.price = item.price;",
     "    params.items = [ga4Item];",
-    "    if (params.value === undefined && item.price !== null) params.value = item.price * item.quantity;",
+    "  }",
+    "  if (infiniteCommerceEvent(name)) {",
+    "    // GA4 ignores a value without a currency: a value rides only beside one, never alone.",
+    "    var ga4Value = infiniteValue(clean, item), ga4Currency = infiniteCurrency(clean);",
+    "    delete params.value;",
+    "    delete params.currency;",
+    "    if (ga4Value !== null && ga4Currency !== null) { params.value = ga4Value; params.currency = ga4Currency; }",
     "  }",
     "  return params;",
     "}",
+    "// Meta ViewContent / AddToCart carry EXACTLY Meta's content keys, and nothing the caller passed under any other",
+    "// name: content_ids, content_name, content_type 'product', contents [{ id, quantity, item_price }], value and",
+    "// currency. A value goes only beside a currency. Never an eventID: a browser-only event has no server twin.",
     "function infiniteMetaProps(metaName, clean) {",
-    "  var params = infiniteCopy(clean);",
-    "  if (metaName !== 'AddToCart' && metaName !== 'ViewContent') return params;",
+    "  if (metaName !== 'AddToCart' && metaName !== 'ViewContent') return infiniteCopy(clean);",
+    "  var params = {};",
     "  var item = infiniteCommerceItem(clean);",
-    "  if (!item) return params;",
-    "  params.content_ids = [item.id];",
-    "  params.content_type = 'product';",
-    "  var metaItem = { id: item.id, quantity: item.quantity };",
-    "  if (item.price !== null) metaItem.item_price = item.price;",
-    "  params.contents = [metaItem];",
-    "  if (item.name) params.content_name = item.name;",
-    "  if (params.value === undefined && item.price !== null) params.value = item.price * item.quantity;",
+    "  if (item) {",
+    "    params.content_ids = [item.id];",
+    "    if (item.name) params.content_name = item.name;",
+    "    params.content_type = 'product';",
+    "    var metaItem = { id: item.id, quantity: item.quantity };",
+    "    if (item.price !== null) metaItem.item_price = item.price;",
+    "    params.contents = [metaItem];",
+    "  }",
+    "  var value = infiniteValue(clean, item), currency = infiniteCurrency(clean);",
+    "  if (value !== null && currency !== null) { params.value = value; params.currency = currency; }",
     "  return params;",
     "}",
+    "// destinations names the tools to send to. A list sends to exactly those (['meta'] = Meta only); an object turns",
+    "// single tools off ({ ga4: false }) or a custom Meta event on ({ meta: true }). Absent = every live tool.",
     "function infiniteDestinationAllowed(options, tool, defaultValue) {",
     "  var destinations = options && typeof options === 'object' ? (options.destinations || options.tools) : null;",
     "  if (!destinations || typeof destinations !== 'object') return defaultValue;",
+    "  if (Object.prototype.toString.call(destinations) === '[object Array]') return destinations.indexOf(tool) !== -1;",
     "  if (!Object.prototype.hasOwnProperty.call(destinations, tool)) return defaultValue;",
     "  return destinations[tool] !== false;",
+    "}",
+    "function infiniteDestinationNamed(options, tool) {",
+    "  var destinations = options && typeof options === 'object' ? (options.destinations || options.tools) : null;",
+    "  if (!destinations || typeof destinations !== 'object') return false;",
+    "  if (Object.prototype.toString.call(destinations) === '[object Array]') return destinations.indexOf(tool) !== -1;",
+    "  return destinations[tool] === true;",
     "}",
     "var INFINITE_META_SERVER_TWIN = { Purchase: true, Lead: true, CompleteRegistration: true, StartTrial: true, Subscribe: true, InitiateCheckout: true };",
     "var INFINITE_META_SERVER_TWIN_NAME = { purchase: true, lead: true, sign_up: true, signup: true, complete_registration: true, start_trial: true, trial: true, subscribe: true, begin_checkout: true, initiate_checkout: true, checkout: true };",
@@ -148,8 +205,7 @@ export function helperCoreSource(): string {
     "  if (lower === 'add_to_cart' || lower === 'addtocart') return { method: 'track', name: 'AddToCart' };",
     "  if (lower === 'view_content' || lower === 'viewcontent' || lower === 'view_item') return { method: 'track', name: 'ViewContent' };",
     "  if (INFINITE_META_SERVER_TWIN_NAME[lower]) return null;",
-    "  var destinations = options && typeof options === 'object' ? (options.destinations || options.tools) : null;",
-    "  if (destinations && typeof destinations === 'object' && destinations.meta === true) return { method: 'trackCustom', name: name };",
+    "  if (infiniteDestinationNamed(options, 'meta')) return { method: 'trackCustom', name: name };",
     "  return null;",
     "}",
     "function infiniteIsMetaRequest(resource, eventName) {",
@@ -157,6 +213,7 @@ export function helperCoreSource(): string {
     "    var url = new URL(String(resource));",
     "    if (url.hostname !== 'facebook.com' && url.hostname.slice(-13) !== '.facebook.com') return false;",
     "    if (url.pathname.indexOf('/tr') !== 0) return false;",
+    "    if (INFINITE_META_PIXEL !== null && url.searchParams.get('id') !== INFINITE_META_PIXEL) return false;",
     "    return url.searchParams.get('ev') === eventName;",
     "  } catch (_error) { return false; }",
     "}",
@@ -193,13 +250,23 @@ export function helperCoreSource(): string {
     "  try { window.fbq(meta.method, meta.name, infiniteMetaProps(meta.name, clean)); } catch (_error) { if (watcher) watcher.release(); return { sent: false, wait: null }; }",
     "  return { sent: true, wait: watcher ? watcher.promise : null };",
     "}",
-    "function infiniteRecordEvent(name, clean, options) {",
+    "// Infinite's ledger gets the event NAME only: its browser ingest accepts no product or money keys on a click",
+    "// (review P0-3). Money reaches Infinite from the server lane.",
+    "function infiniteRecordEvent(name, options) {",
     "  if (!infiniteDestinationAllowed(options, 'infinite', true)) return false;",
     "  try {",
     "    var record = window.__infiniteRecordEvent;",
-    "    return typeof record === 'function' && record(name, infiniteCopy(clean)) === true;",
+    "    return typeof record === 'function' && record(name) === true;",
     "  } catch (_error) { return false; }",
-    "}"
+    "}",
+    "// The 'visitor allowed tracking' signal a page passes to its own API routes (ad_match=1 / adMatch: true), so its",
+    "// server attaches Meta match data. The tag's own decision, live; false wherever the tag is not running.",
+    "window.infiniteAdMatchAllowed = function () {",
+    "  try {",
+    "    var allowed = window.__infiniteAdMatchAllowed;",
+    "    return typeof allowed === 'function' && allowed() === true;",
+    "  } catch (_error) { return false; }",
+    "};"
   ].join("\n")
 }
 
@@ -227,7 +294,7 @@ export function trackSource(): string {
     "        sent = true;",
     "      }",
     "    } catch (_error) {}",
-    "    if (infiniteRecordEvent(name, clean, options)) sent = true;",
+    "    if (infiniteRecordEvent(name, options)) sent = true;",
     "    if (infiniteSendMetaBrowserEvent(name, clean, options, false).sent) sent = true;",
     "    return sent;",
     "  } catch (_error) { return false; }",
