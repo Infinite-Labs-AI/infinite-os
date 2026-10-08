@@ -17,7 +17,7 @@ import { buildManagedRewritePairs, hasExactNextConfigRewrites, parseVercelConfig
 import { lineNumberAt } from "../harness/scan.js"
 import { detectAuth } from "../jobs/detectors/auth.js"
 import { detectCspOwners } from "../jobs/detectors/csp-owner.js"
-import { detectConversionSuccessPaths, detectOutcomes, isServerFile } from "../jobs/detectors/outcomes.js"
+import { detectConversionSuccessPaths, detectOutcomes, failureGuardSuccess, isServerFile } from "../jobs/detectors/outcomes.js"
 import { matchingBracket } from "../setup-checks/code-view.js"
 import { boundConversionNames } from "../jobs/plan-data.js"
 import { capturesPageviewManually, META_STANDARD_EVENTS, POSTHOG_HISTORY_DEFAULTS_FROM, posthogApiHostUnset } from "../jobs/detectors/adopted-tags.js"
@@ -224,6 +224,9 @@ function successRegion(text: string, line: number): { start: number; end: number
   const lineEnd = text.indexOf("\n", lineStart) === -1 ? text.length : text.indexOf("\n", lineStart)
   const condition = /\bif\s*\(/.exec(masked.slice(lineStart, lineEnd))
   if (condition) {
+    // `if (!res.ok) { …; return }`: the success is what follows the guard, never the guard's own (failure) branch.
+    const guarded = failureGuardSuccess(masked, lineStart + condition.index)
+    if (guarded) return guarded
     const open = lineStart + condition.index + condition[0].length - 1
     const close = matchingBracket(masked, open)
     if (close < 0) return null

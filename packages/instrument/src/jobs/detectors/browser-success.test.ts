@@ -30,6 +30,37 @@ describe("browser outcome success branches", () => {
     expect(detectConversionSuccessPaths(snapshotFromFiles({ [FILE]: form(condition) }))).toEqual([])
   })
 
+  // A mailing-list signup page whose handler leaves on failure (`if (!res.ok) { …; return }`): the success is the code
+  // AFTER the guard. Its path names the lead (`/mailing-list`, as the server route's detector already reads it).
+  const signupPage = (guard: string) => `export default function MailingListPage() {
+  const onSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const res = await fetch("/api/mailing-list", { method: "POST", body: JSON.stringify({ email }) });
+      ${guard}
+      generateLead();
+      setStatus("done");
+    } catch {
+      setStatus("error");
+    }
+  };
+  return <form onSubmit={onSubmit}><button>Join</button></form>;
+}`
+
+  it.each([
+    'if (!res.ok) {\n        setError("Something went wrong.");\n        return;\n      }',
+    "if (!res.ok) return;",
+    'if (!res.ok) throw new Error("failed");'
+  ])("recognizes the code after a failure guard that leaves as the lead's success: %s", guard => {
+    const file = "pages/mailing-list.tsx"
+    expect(detectConversionSuccessPaths(snapshotFromFiles({ [file]: signupPage(guard) }))).toEqual([{ file, line: 6, detail: "lead success", conversionType: "lead" }])
+  })
+
+  it("a failure guard that does not leave is no success point", () => {
+    const file = "pages/mailing-list.tsx"
+    expect(detectConversionSuccessPaths(snapshotFromFiles({ [file]: signupPage('if (!res.ok) {\n        setError("Something went wrong.");\n      }') }))).toEqual([])
+  })
+
   it("recognizes a Stripe-style /success page with existing purchase analytics as the purchase success surface", () => {
     const file = "pages/success.tsx"
     const snapshot = snapshotFromFiles({

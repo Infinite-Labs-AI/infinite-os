@@ -183,6 +183,40 @@ describe("§3x.3 (B3, W4) track_after_success: job 10 sends an outcome where it 
     const other = run3Page.replace('if (response.ok) window.location.assign("/account")', 'if (response.ok) { infiniteTrack("lead"); window.location.assign("/account") }')
     expect((await check("track_after_success", { [SIGNUP_PAGE]: other }, job10(), names)).state).toBe("problem")
   })
+
+  // A mailing-list page whose handler leaves on failure: the success is the code after `if (!res.ok) { …; return }`.
+  it("after a failure guard that leaves: the send after the guard passes; one inside the guard's (failure) branch does not", async () => {
+    const file = "pages/mailing-list.tsx"
+    const lead = item("conversions_to_tools", "lead", [file])
+    const page = (guardBody: string, after: string) =>
+      [
+        'import { infiniteTrack } from "../lib/infinite-analytics";',
+        "export default function MailingListPage() {",
+        "  const onSubmit = async (e) => {",
+        "    e.preventDefault();",
+        "    try {",
+        '      const res = await fetch("/api/mailing-list", { method: "POST", body: JSON.stringify({ email }) });',
+        "      if (!res.ok) {",
+        `        ${guardBody}`,
+        "        return;",
+        "      }",
+        "      generateLead();",
+        `      ${after}`,
+        '      setStatus("done");',
+        "    } catch {",
+        '      setStatus("error");',
+        "    }",
+        "  };",
+        '  return <form data-conversion="lead" onSubmit={onSubmit}><button>Join</button></form>;',
+        "}",
+        ""
+      ].join("\n")
+    const ok = await check("track_after_success", { [file]: page('setError("Something went wrong.");', 'infiniteTrack("lead");') }, lead, { conversionNames: ["lead"] })
+    expect(ok).toMatchObject({ state: "pass" })
+    const inFailure = await check("track_after_success", { [file]: page('infiniteTrack("lead");', "") }, lead, { conversionNames: ["lead"] })
+    expect(inFailure).toMatchObject({ state: "problem" })
+    expect(inFailure.reason).toMatch(/not sent inside its success branch/)
+  })
 })
 
 // LF4 close round 2 (P1-1): every job target carries a check that PROVES its change is in the code. At 709c10b a

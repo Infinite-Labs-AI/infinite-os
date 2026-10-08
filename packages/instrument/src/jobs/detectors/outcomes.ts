@@ -12,7 +12,7 @@
 // They only tell the agent WHERE; the user names the conversions in the plan.
 import type { ConversionType } from "../../wizard/contracts/bridge.js"
 import type { RepoSnapshot } from "../repo-files.js"
-import { codeMatches, isCodeFile, isHtmlFile, isNonProductPath, routePathOf, sortFindings, textMatches, type Finding } from "./shared.js"
+import { codeMatches, codeView, isCodeFile, isHtmlFile, isNonProductPath, routePathOf, sortFindings, textMatches, type Finding } from "./shared.js"
 
 export type OutcomeKind = "signup" | "lead" | "download" | "payment_webhook" | "trial" | "booking"
 
@@ -150,7 +150,7 @@ function pathConversionType(path: string): ConversionType | null {
   if (/sign-?up|register|create-account|join/.test(lower)) return "signup"
   if (/trial/.test(lower)) return "trial"
   if (/checkout|purchase|subscribe|buy/.test(lower)) return /subscribe/.test(lower) && /newsletter/.test(lower) ? "lead" : "purchase"
-  if (/contact|lead|waitlist|newsletter/.test(lower)) return "lead"
+  if (/contact|lead|waitlist|newsletter|mailing-?list/.test(lower)) return "lead"
   if (/book|demo|schedule/.test(lower)) return "booking"
   return null
 }
@@ -162,6 +162,60 @@ const OUTCOME_REQUEST = /\b(?:fetch|axios\s*\.\s*post|ky\s*\.\s*post)\s*\(\s*["'
  * `!error` / `!err`, or the first navigation after an await. No helper-call inference. */
 const SUCCESS_OK = /\bif\s*\(\s*(?:await\s+)?[\w$.]+\.ok(?:\s*&&\s*[\w$]+(?:\?\.|\.)success(?:\s*===\s*true)?)?\s*\)/g
 const SUCCESS_NO_ERROR = /\bif\s*\(\s*!\s*(?:error|err|result\.error|res\.error)\s*\)/g
+/** A failure guard that leaves: `if (!res.ok) { …; return }` (or `throw`). The success is the code after it. */
+const FAILURE_GUARD = /\bif\s*\(\s*!\s*(?:await\s+)?[\w$.]+\.ok\s*\)/g
+
+/** The bracket closing the one at `open` in masked code (strings and comments blanked), or -1. */
+function closingBracket(masked: string, open: number): number {
+  let depth = 0
+  for (let cursor = open; cursor < masked.length; cursor += 1) {
+    const ch = masked[cursor]
+    if (ch === "(" || ch === "{" || ch === "[") depth += 1
+    else if (ch === ")" || ch === "}" || ch === "]") {
+      depth -= 1
+      if (depth === 0) return cursor
+    }
+  }
+  return -1
+}
+
+/**
+ * The success after a failure guard that leaves (`if (!res.ok) { setError(…); return }`, `if (!res.ok) throw …`): from
+ * the end of the guard to the end of the block that holds it. `ifIndex` is the `if` in `masked` (strings and comments
+ * blanked). Null when the `if` is not such a guard (another condition, or a branch that does not leave).
+ */
+export function failureGuardSuccess(masked: string, ifIndex: number): { start: number; end: number } | null {
+  const open = masked.indexOf("(", ifIndex)
+  const close = open < 0 ? -1 : closingBracket(masked, open)
+  if (close < 0 || !/^\(\s*!\s*(?:await\s+)?[\w$.]+\.ok\s*\)$/.test(masked.slice(open, close + 1))) return null
+  let cursor = close + 1
+  while (cursor < masked.length && /\s/.test(masked[cursor]!)) cursor += 1
+  let after: number
+  if (masked[cursor] === "{") {
+    const end = closingBracket(masked, cursor)
+    if (end < 0 || !/\b(?:return|throw)\b/.test(masked.slice(cursor, end))) return null
+    after = end + 1
+  } else {
+    const rest = masked.slice(cursor)
+    if (!/^(?:return|throw)\b/.test(rest)) return null
+    const stop = rest.search(/;|\n/)
+    after = stop < 0 ? masked.length : cursor + stop + 1
+  }
+  // The block that holds the guard: the innermost `{` still open before it.
+  let depth = 0
+  let at = ifIndex - 1
+  for (; at >= 0; at -= 1) {
+    const ch = masked[at]
+    if (ch === ")" || ch === "}" || ch === "]") depth += 1
+    else if (ch === "(" || ch === "{" || ch === "[") {
+      if (depth === 0) break
+      depth -= 1
+    }
+  }
+  if (at < 0 || masked[at] !== "{") return null
+  const end = closingBracket(masked, at)
+  return end < 0 ? null : { start: after, end }
+}
 const NAVIGATION = /\b(?:router\s*\.\s*(?:push|replace)|(?:window\s*\.\s*)?location\s*\.\s*(?:assign|replace)|redirect)\s*\(|\b(?:window\s*\.\s*)?location\s*\.\s*href\s*=/g
 const PURCHASE_SUCCESS_PATH = /(?:^|\/)(?:success|thank-you|thanks|order-confirmation)(?:\/|$)/i
 const PURCHASE_ANALYTICS = /\b(?:gtag\s*\(\s*["'`]event["'`]\s*,\s*["'`]purchase["'`]|posthog\s*\.\s*capture\s*\(\s*["'`]purchase["'`]|fbq\s*\(\s*["'`]track["'`]\s*,\s*["'`]Purchase["'`])/g
@@ -197,7 +251,11 @@ export function detectConversionSuccessPaths(snapshot: RepoSnapshot): Conversion
       }
     }
     if (types.size === 0) continue
-    const ok = codeMatches(text, new RegExp(SUCCESS_OK.source, SUCCESS_OK.flags))[0] ?? codeMatches(text, new RegExp(SUCCESS_NO_ERROR.source, SUCCESS_NO_ERROR.flags))[0]
+    const masked = codeView(text, true)
+    const ok =
+      codeMatches(text, new RegExp(SUCCESS_OK.source, SUCCESS_OK.flags))[0] ??
+      codeMatches(text, new RegExp(SUCCESS_NO_ERROR.source, SUCCESS_NO_ERROR.flags))[0] ??
+      codeMatches(text, new RegExp(FAILURE_GUARD.source, FAILURE_GUARD.flags)).find((guard) => failureGuardSuccess(masked, guard.index) !== null)
     let line: number | null = ok?.line ?? null
     if (line === null) {
       const awaited = codeMatches(text, /\bawait\b/g)[0]
