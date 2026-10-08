@@ -3,6 +3,28 @@
 All notable changes to the `infinite-tag` npm package (`packages/instrument`). Versions before
 0.5.0 are recorded in git history only (`git log -- packages/instrument`).
 
+## Unreleased
+
+### Store events reach the right tools exactly once
+
+- `infiniteTrack` and `infiniteTrackThenNavigate` take `destinations` as a list (`["meta"]` = Meta only), so a call
+  site adds only the tools that miss an event. `infiniteTrackThenNavigate` takes the same options, waits for a
+  browser-only Meta event's request (at most 400 ms) even when GA4 is left out, ignores a second click while it is
+  leaving, and frees the button again on Back.
+- Meta ViewContent and AddToCart carry only Meta's content keys (`content_ids`, `content_name`, `content_type`,
+  `contents`, `value`, `currency`). A value never goes without a currency: the caller's, else the site's.
+- Events recorded to Infinite from the page carry only the event name, which Infinite's browser ingest accepts; product
+  keys made it reject the whole event before.
+- New `infiniteAdMatchAllowed()`: the tag's "visitor allowed tracking" signal, for pages to pass to their own API routes.
+- The wizard turns browser match data on by default when Meta is connected (`infiniteMetaMirror` with `identity`), on
+  the site's own pixel too.
+- The tag no longer hides PostHog's sensitive pages from Infinite. In follow mode, on the routes where the site keeps
+  its pixels off (a cart, a success page), the tag records the visit when the site's pixels ran for that visitor
+  earlier in the same tab, and nothing otherwise.
+- The pixel infinite-tag installs sends one Meta PageView per client-side route change, unless the site's code already
+  sends its own. An existing pixel whose id comes from an environment variable also gets Meta's automatic events and
+  history PageViews turned off.
+
 ## 0.12.2 — 2026-10-05
 
 ### Page views carry the Meta ad they came from

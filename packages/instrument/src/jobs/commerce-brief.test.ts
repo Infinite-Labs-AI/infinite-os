@@ -14,27 +14,27 @@ const ADD_TO_CART: EventInventoryEntry = {
     { file: "pages/trail-pack.tsx", line: 88, via: "helper:addToCartEvent" }
   ],
   tools: {
-    ga4: [{ file: "src/common/analytics.ts", line: 152, via: "gtag" }],
-    posthog: [{ file: "src/common/analytics.ts", line: 157, via: "posthog.capture" }]
+    ga4: [{ file: "lib/store-events.ts", line: 152, via: "gtag" }],
+    posthog: [{ file: "lib/store-events.ts", line: 157, via: "posthog.capture" }]
   },
   missing: ["meta_browser"]
 }
 const VIEW_ITEM: EventInventoryEntry = {
   event: "view_item",
   sites: [{ file: "pages/trail-pack.tsx", line: 30, via: "helper:viewItem" }],
-  tools: { ga4: [{ file: "src/common/analytics.ts", line: 146, via: "gtag" }] },
+  tools: { ga4: [{ file: "lib/store-events.ts", line: 146, via: "gtag" }] },
   missing: ["meta_browser", "posthog"]
 }
 const PURCHASE: EventInventoryEntry = {
   event: "purchase",
   sites: [{ file: "pages/success.tsx", line: 12, via: "success-page" }],
-  tools: { ga4: [{ file: "src/common/analytics.ts", line: 214, via: "gtag" }], posthog: [{ file: "src/common/analytics.ts", line: 220, via: "posthog.capture" }] },
+  tools: { ga4: [{ file: "lib/store-events.ts", line: 214, via: "gtag" }], posthog: [{ file: "lib/store-events.ts", line: 220, via: "posthog.capture" }] },
   missing: ["meta_server", "infinite"]
 }
 const LEAD: EventInventoryEntry = {
   event: "lead",
-  sites: [{ file: "components/MailingListForm.tsx", line: 31, via: "helper:generateLead" }],
-  tools: { ga4: [{ file: "src/common/analytics.ts", line: 224, via: "gtag" }] },
+  sites: [{ file: "components/NewsletterForm.tsx", line: 31, via: "helper:generateLead" }],
+  tools: { ga4: [{ file: "lib/store-events.ts", line: 224, via: "gtag" }] },
   missing: ["posthog", "meta_server", "infinite"]
 }
 
@@ -72,7 +72,7 @@ const planData = (brief: string, id: string): Record<string, unknown> => {
 
 describe("browser commerce briefs (review P0-5)", () => {
   it("the Buy button that already sends GA4 add_to_cart: add Meta AddToCart ONLY, at the named file and line, and wait before leaving", () => {
-    const brief = buildBrief([item("meta_improve:commerce_events", [ADD_TO_CART, VIEW_ITEM], ["src/common/analytics.ts", "pages/index.tsx", "pages/trail-pack.tsx"])], facts)
+    const brief = buildBrief([item("meta_improve:commerce_events", [ADD_TO_CART, VIEW_ITEM], ["lib/store-events.ts", "pages/index.tsx", "pages/trail-pack.tsx"])], facts)
     expect(brief).toContain('### Job "meta_improve:commerce_events" (5. Adding Meta AddToCart and ViewContent with product and price)')
     const data = planData(brief, "meta_improve:commerce_events")
     expect(data.destinations).toEqual(["meta"])
@@ -81,18 +81,18 @@ describe("browser commerce briefs (review P0-5)", () => {
         event: "add_to_cart",
         metaEventName: "AddToCart",
         firesAt: ["pages/index.tsx:42 (helper:addToCartEvent)", "pages/trail-pack.tsx:88 (helper:addToCartEvent)"],
-        alreadySentTo: { GA4: ["src/common/analytics.ts:152 (gtag)"], PostHog: ["src/common/analytics.ts:157 (posthog.capture)"] },
+        alreadySentTo: { GA4: ["lib/store-events.ts:152 (gtag)"], PostHog: ["lib/store-events.ts:157 (posthog.capture)"] },
         add: ["Meta"]
       },
       {
         event: "view_item",
         metaEventName: "ViewContent",
         firesAt: ["pages/trail-pack.tsx:30 (helper:viewItem)"],
-        alreadySentTo: { GA4: ["src/common/analytics.ts:146 (gtag)"] },
+        alreadySentTo: { GA4: ["lib/store-events.ts:146 (gtag)"] },
         add: ["Meta"]
       }
     ])
-    expect(data.helperImport).toBe('import { infiniteTrack, infiniteTrackThenNavigate } from "../../lib/infinite-analytics"')
+    expect(data.helperImport).toBe('import { infiniteTrack, infiniteTrackThenNavigate } from "./infinite-analytics"')
     expect(brief).toContain('{ destinations: ["meta"] }')
     expect(brief).toContain("infiniteTrackThenNavigate(event, <where the click goes>")
     expect(brief).toContain("at most 400 ms")
@@ -104,8 +104,8 @@ describe("browser commerce briefs (review P0-5)", () => {
   it("a GA4 job names GA4 only, and a PostHog job PostHog only", () => {
     const brief = buildBrief(
       [
-        item("ga4_improve:commerce_events", [{ ...ADD_TO_CART, missing: ["ga4"], tools: { posthog: ADD_TO_CART.tools.posthog } }], ["src/common/analytics.ts"]),
-        item("posthog_improve:commerce_events", [VIEW_ITEM], ["src/common/analytics.ts"])
+        item("ga4_improve:commerce_events", [{ ...ADD_TO_CART, missing: ["ga4"], tools: { posthog: ADD_TO_CART.tools.posthog } }], ["lib/store-events.ts"]),
+        item("posthog_improve:commerce_events", [VIEW_ITEM], ["lib/store-events.ts"])
       ],
       facts
     )
@@ -118,21 +118,21 @@ describe("browser commerce briefs (review P0-5)", () => {
   })
 
   it("never instructs a browser Meta purchase: a server-only event in a Meta commerce item is dropped", () => {
-    const brief = buildBrief([item("meta_improve:commerce_events", [ADD_TO_CART, { ...PURCHASE, missing: ["meta_browser"] }], ["src/common/analytics.ts"])], facts)
+    const brief = buildBrief([item("meta_improve:commerce_events", [ADD_TO_CART, { ...PURCHASE, missing: ["meta_browser"] }], ["lib/store-events.ts"])], facts)
     const events = planData(brief, "meta_improve:commerce_events").events as Array<{ event: string }>
     expect(events.map((entry) => entry.event)).toEqual(["add_to_cart"])
     expect(brief).not.toContain('"metaEventName":"Purchase"')
   })
 
   it("refuses to brief a commerce job with nothing to add (never a guess)", () => {
-    expect(() => buildBrief([item("meta_improve:commerce_events", [{ ...ADD_TO_CART, missing: [] }], ["src/common/analytics.ts"])], facts)).toThrow(/misses/)
-    expect(() => buildBrief([item("meta_improve:commerce_events", [ADD_TO_CART], ["src/common/analytics.ts"])], { ...facts, helpers: null })).toThrow(/helpers/)
+    expect(() => buildBrief([item("meta_improve:commerce_events", [{ ...ADD_TO_CART, missing: [] }], ["lib/store-events.ts"])], facts)).toThrow(/misses/)
+    expect(() => buildBrief([item("meta_improve:commerce_events", [ADD_TO_CART], ["lib/store-events.ts"])], { ...facts, helpers: null })).toThrow(/helpers/)
   })
 })
 
 describe("conversion briefs from the inventory (review P0-5)", () => {
   it("a lead the site already sends to GA4: add PostHog only, and pass the ad-match signal to the site's own API route", () => {
-    const brief = buildBrief([item("conversions_to_tools:lead", [LEAD], ["components/MailingListForm.tsx"])], facts)
+    const brief = buildBrief([item("conversions_to_tools:lead", [LEAD], ["components/NewsletterForm.tsx"])], facts)
     const data = planData(brief, "conversions_to_tools:lead")
     expect(data.destinations).toEqual(["posthog"])
     expect(data.helperImport).toBe('import { infiniteTrack, infiniteAdMatchAllowed } from "../lib/infinite-analytics"')
@@ -154,7 +154,7 @@ describe("conversion briefs from the inventory (review P0-5)", () => {
   })
 
   it("a conversion every browser tool already gets is refused, not briefed", () => {
-    expect(() => buildBrief([item("conversions_to_tools:lead", [{ ...LEAD, missing: ["meta_server", "infinite"] }], ["components/MailingListForm.tsx"])], facts)).toThrow(/no browser tool/)
+    expect(() => buildBrief([item("conversions_to_tools:lead", [{ ...LEAD, missing: ["meta_server", "infinite"] }], ["components/NewsletterForm.tsx"])], facts)).toThrow(/no browser tool/)
   })
 })
 
