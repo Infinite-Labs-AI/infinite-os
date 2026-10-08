@@ -375,3 +375,48 @@ describe("registered checks", () => {
     expect((await check("commerce_promises_met", fixed, job10, { eventInventory: INVENTORY })).state).toBe("pass")
   })
 })
+
+describe("the outcome helper's own reporters (lib/infinite-outcome)", () => {
+  const WEBHOOK = "pages/api/stripe-webhook.ts"
+  const CHECKOUT = "pages/api/checkout.ts"
+  const LEAD = "pages/api/mailing-list.ts"
+  const webhook = 'import { reportStripeCheckoutPurchase } from "../../lib/infinite-outcome"\nexport default async function handler(req, res) {\n  return res.status(await reportStripeCheckoutPurchase(event, { path: "/success" })).end()\n}\n'
+  const checkout = 'import { reportStripeCheckoutStarted } from "../../lib/infinite-outcome"\nexport default async function handler(req, res) {\n  await reportStripeCheckoutStarted(session, { path: "/cart" })\n}\n'
+  const lead = 'import { reportInfiniteLead } from "../../lib/infinite-outcome"\nexport default async function handler(req, res) {\n  await reportInfiniteLead(req, { email, trackingAllowed: body.adMatch === true, fallbackPath: "/mailing-list", fallbackId: id })\n}\n'
+
+  it("reportStripeCheckoutPurchase / reportStripeCheckoutStarted / reportInfiniteLead are the purchase, begin_checkout and lead, with value, currency and match data inside", () => {
+    const all = files({ [WEBHOOK]: webhook, [CHECKOUT]: checkout, [LEAD]: lead })
+    const inventory: EventInventory = { rows: ["purchase", "begin_checkout", "lead"].map((event) => ({ event: event as "purchase", tools: { meta: { state: "will_add" as const, lane: "server" as const }, infinite: { state: "will_add" as const, lane: "server" as const } } })) }
+    expect(promiseFindings({ files: all, inventory })).toEqual([])
+    expect(adMatchFindings({ files: all })).toEqual([])
+    expect(valueFindings({ files: all })).toEqual([])
+    // The lead's email is an input the helper hashes, never a personal detail in the body.
+    expect(piiFindings({ files: all })).toEqual([])
+    // Its properties ARE sent: an email there is a leak; a phone anywhere in the call is one too.
+    expect(piiFindings({ files: files({ [LEAD]: lead.replace("fallbackId: id", "fallbackId: id, properties: { email: user.email }") }) })).toHaveLength(1)
+    expect(piiFindings({ files: files({ [LEAD]: lead.replace("fallbackId: id", "fallbackId: id, phone: user.phone") }) })[0]!.message).toMatch(/phone number/)
+  })
+
+  it("job 8's checks recognise them: outcome_declared grades only this job's conversion, event_id_stable trusts their own ids", async () => {
+    const purchase = item("server_conversions", "purchase", [CHECKOUT, WEBHOOK])
+    const both = { [CHECKOUT]: checkout, [WEBHOOK]: webhook }
+    const run = { conversionNames: ["purchase", "begin_checkout"] }
+    expect((await check("outcome_declared", both, purchase, run)).state).toBe("pass")
+    expect((await check("event_id_stable", both, purchase, run)).state).toBe("pass")
+    expect((await check("no_pii_in_outcome", both, purchase, run)).state).toBe("pass")
+    expect((await check("outcome_ad_match", both, purchase, run)).state).toBe("pass")
+    expect((await check("outcome_value_currency", both, purchase, run)).state).toBe("pass")
+    // Another conversion's report under a name nobody approved is still a problem.
+    const stray = { [CHECKOUT]: checkout.replace('{ path: "/cart" }', '{ path: "/cart", type: "checkout_begun" }'), [WEBHOOK]: webhook }
+    expect((await check("outcome_declared", stray, purchase, run)).reason).toMatch(/"checkout_begun", which is not an approved conversion name/)
+    // A job with none of them is still told its report is missing.
+    expect((await check("outcome_declared", { [CHECKOUT]: "export default function handler() {}\n" }, purchase, run)).reason).toMatch(/no report to Infinite/)
+  })
+
+  it("infiniteTrack with a destinations list sends to exactly those tools", () => {
+    const text = 'infiniteTrack("add_to_cart", { item_id: "a" }, { destinations: ["meta"] })\n'
+    expect(sendsIn("src/events.ts", text).map((send) => send.tool)).toEqual(["meta"])
+    const both = 'infiniteTrack("add_to_cart", { item_id: "a" }, { destinations: ["meta", "posthog"] })\n'
+    expect(sendsIn("src/events.ts", both).map((send) => send.tool).sort()).toEqual(["meta", "posthog"])
+  })
+})

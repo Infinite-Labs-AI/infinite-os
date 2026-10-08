@@ -23,6 +23,7 @@ import { posix } from "node:path"
 import { codeView, isCodeFile, isHtmlFile, isNonProductPath, routePathOf } from "../jobs/detectors/shared.js"
 import { detectOutcomes, isServerFile, type OutcomeFinding } from "../jobs/detectors/outcomes.js"
 import type { RepoSnapshot } from "../jobs/repo-files.js"
+import { outcomesIn } from "../checks/commerce-static.js"
 
 export type InventoryTool = "ga4" | "posthog" | "meta_browser" | "meta_server" | "infinite"
 export type FunnelEvent = "view_item" | "add_to_cart" | "begin_checkout" | "purchase" | "lead" | "sign_up" | "start_trial"
@@ -344,7 +345,7 @@ const DIRECT_CALLS: ReadonlyArray<{ pattern: RegExp; tools: InventoryTool[]; via
   { pattern: /\bposthog\s*(?:\?\.|\.)\s*capture\s*\(/g, tools: ["posthog"], via: "posthog.capture", argIndex: () => 0 },
   { pattern: /\bfbq\s*(?:\?\.\s*)?\(\s*(['"`])(track|trackCustom|trackSingle|trackSingleCustom)\1\s*,/g, tools: ["meta_browser"], via: "fbq", argIndex: (match) => (match[2]!.startsWith("trackSingle") ? 2 : 1) },
   { pattern: /\bdataLayer\s*(?:\?\.|\.)\s*push\s*\(/g, tools: ["ga4"], via: "dataLayer", argIndex: () => 0, objectKey: "event" },
-  { pattern: /\b(?:reportInfiniteOutcome|postInfiniteOutcome)\s*\(/g, tools: ["infinite", "meta_server"], via: "reportInfiniteOutcome", argIndex: () => 0, objectKey: "type" },
+  { pattern: /\b(?:reportInfiniteOutcome(?:InBackground|ForMirror)?|postInfiniteOutcome)\s*\(/g, tools: ["infinite", "meta_server"], via: "reportInfiniteOutcome", argIndex: () => 0, objectKey: "type" },
   { pattern: /\binfiniteMetaMirror\s*\(/g, tools: ["meta_browser"], via: "infiniteMetaMirror", argIndex: () => 0 }
 ]
 
@@ -365,12 +366,20 @@ function rawCallsOf(view: FileView): RawCall[] {
     if (!isCode(view, index, paren - index)) continue
     const close = matchingClose(view.code, paren)
     const callText = close < 0 ? "" : view.comments.slice(paren, close)
-    const destinations = /\bdestinations\s*:\s*\{([^}]*)\}/.exec(callText)?.[1]
-    const on = (key: string) => (destinations ? new RegExp(`\\b${key}\\s*:\\s*true\\b`).test(destinations) : null)
+    // `destinations: ["meta"]` (a list) sends to exactly those tools; `destinations: { ga4: false }` turns one off
+    // (absent = on) and `{ meta: true }` turns Meta on (`conversions/track.ts`).
+    const list = /\b(?:destinations|tools)\s*:\s*\[([^\]]*)\]/.exec(callText)?.[1]
+    const object = /\b(?:destinations|tools)\s*:\s*\{([^}]*)\}/.exec(callText)?.[1]
+    const named = list === undefined ? null : new Set([...list.matchAll(/(['"`])([a-z0-9_]+)\1/g)].map((match) => match[2]!))
+    const set = (key: string): boolean | null => (named ? named.has(key) : object === undefined ? null : new RegExp(`\\b${key}\\s*:\\s*true\\b`).test(object) ? true : new RegExp(`\\b${key}\\s*:\\s*false\\b`).test(object) ? false : null)
     const tools: InventoryTool[] = []
-    for (const [key, tool] of [["ga4", "ga4"], ["posthog", "posthog"]] as const) if (on(key) ?? true) tools.push(tool)
-    if (on("meta") === true || /\bmetaEventName\s*:/.test(callText)) tools.push("meta_browser")
-    calls.push({ tools, via: match[1] ? "infiniteTrackThenNavigate" : "infiniteTrack", openParen: paren, argIndex: match[1] ? 2 : 0 })
+    for (const [key, tool] of [["ga4", "ga4"], ["posthog", "posthog"]] as const) if (set(key) ?? true) tools.push(tool)
+    // The helper sends Meta's ViewContent / AddToCart for those two events unless Meta is turned off.
+    const argIndex = match[1] ? 2 : 0
+    const name = nameArg(view, { openParen: paren, argIndex })
+    const metaByName = name?.arg.kind === "literal" && BROWSER_COMMERCE_EVENTS.includes(funnelEventOf(name.arg.value) as FunnelEvent)
+    if (set("meta") === true || ((metaByName || /\bmetaEventName\s*:/.test(callText)) && set("meta") !== false)) tools.push("meta_browser")
+    calls.push({ tools, via: match[1] ? "infiniteTrackThenNavigate" : "infiniteTrack", openParen: paren, argIndex })
   }
   return calls
 }
@@ -528,6 +537,16 @@ export function buildEventInventory(snapshot: RepoSnapshot, outcomes: readonly O
       if (!name) continue
       if (name.arg.kind === "ident") learn(view, call.openParen, name.arg.value, call.tools)
       else record(view, call.openParen, name.arg, call.tools, call.via)
+    }
+  }
+
+  // The outcome helper's recipe reporters name their conversion themselves (a Stripe purchase, a checkout start, a
+  // lead): server code only, the same tools as any outcome.
+  for (const view of views) {
+    if (!view.server || view.generated) continue
+    for (const outcome of outcomesIn(view.path, view.text)) {
+      if (outcome.reporter.defaultType === null || outcome.type === null) continue
+      record(view, outcome.call.index, { kind: "literal", value: outcome.type }, ["infinite", "meta_server"], "reportInfiniteOutcome")
     }
   }
 

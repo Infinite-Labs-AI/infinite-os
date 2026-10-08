@@ -32,7 +32,7 @@ import { runCensus } from "./census.js"
 import { analyzeCsp, cspNeeds, parseCspPolicies } from "./live/csp.js"
 import { checkResult, isolated } from "./result.js"
 import { callsOf, literalString, splitTopLevelArgs, topLevelProps, type Call } from "./source-calls.js"
-import { adMatchFindings, canonicalEvent, doubleCountFindings, metaEventIdFindings, piiFindings, promiseFindings, valueFindings, type CommerceCheckInput, type CommerceFinding } from "./commerce-static.js"
+import { adMatchFindings, canonicalEvent, doubleCountFindings, metaEventIdFindings, outcomeHas, outcomesIn, piiFindings, promiseFindings, valueFindings, type CommerceCheckInput, type CommerceFinding, type OutcomeCall } from "./commerce-static.js"
 import type { EventInventory, InventoryTool as CommerceTool } from "./commerce-inventory.js"
 import { COMMERCE_EVENTS_TARGET } from "../scan/event-inventory.js"
 
@@ -179,17 +179,17 @@ const files = (list: readonly string[]): string => list.slice(0, 4).join(", ") +
 // The checks
 // ---------------------------------------------------------------------------------------------
 
-const OUTCOME_CALLS = ["reportInfiniteOutcome", "postInfiniteOutcome"] as const
 const HASHED = /\b(?:createHash|sha256|sha-256|hash\w*|digest)\b/i
 /** An id that changes on every call: a retry would count twice (or every outcome would dedupe into one). */
 const UNSTABLE_ID = /(?:\bDate\s*\.\s*now|\bMath\s*\.\s*random|\brandomUUID|\buuid(?:v4)?|\bv4|\bnanoid|\bcuid2?|\bperformance\s*\.\s*now|\bnew\s+Date)\s*\(/
 
-function outcomeCalls(scope: ReadonlyMap<string, string>): Array<Call & { file: string }> {
-  return [...scope].flatMap(([file, text]) => callsOf(text, OUTCOME_CALLS).map((call) => ({ ...call, file })))
+/** Every outcome report in the job's files: the generic reporters and the Stripe / lead recipe reporters alike. */
+function outcomeCalls(scope: ReadonlyMap<string, string>): OutcomeCall[] {
+  return [...scope].flatMap(([file, text]) => outcomesIn(file, text))
 }
 
 function noOutcomeCall(checkId: JobStaticCheckId, scope: ReadonlyMap<string, string>, ctx: CheckContext): CheckResult {
-  return { ...checkResult(checkId, "problem", "S", ctx, { reason: `no reportInfiniteOutcome call in ${files([...scope.keys()]) || "the job's files"}` }), absent: true }
+  return { ...checkResult(checkId, "problem", "S", ctx, { reason: `no report to Infinite (reportInfiniteOutcome, reportStripeCheckoutPurchase, reportStripeCheckoutStarted or reportInfiniteLead) in ${files([...scope.keys()]) || "the job's files"}` }), absent: true }
 }
 
 const TRACK_CALLS = ["infiniteTrack", "infiniteTrackThenNavigate"] as const
@@ -365,14 +365,14 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       const calls = outcomeCalls(scope)
       if (calls.length === 0) return noOutcomeCall("outcome_after_success", scope, ctx)
       const triggers = detectOutcomes(snapshotOf(scope, input.appRoot)).filter((finding) => finding.conversionType === itemTarget(input.item) || itemTarget(input.item) === "")
-      for (const call of calls) {
-        const masked = maskCommentsAndStrings(scope.get(call.file)!, true)
-        if (insideCatch(masked, call.index)) return result("outcome_after_success", ctx, "problem", `${call.file}:${call.line} reports the outcome from an error branch`, call.file, call.line)
+      for (const { file, call } of calls) {
+        const masked = maskCommentsAndStrings(scope.get(file)!, true)
+        if (insideCatch(masked, call.index)) return result("outcome_after_success", ctx, "problem", `${file}:${call.line} reports the outcome from an error branch`, file, call.line)
       }
       if (triggers.length === 0) return result("outcome_after_success", ctx, "undetermined", "the success point the job was seeded from is no longer recognisable, so the order could not be checked")
       for (const trigger of triggers) {
-        const after = calls.some((call) => call.file === trigger.file && call.line > trigger.line)
-        const elsewhere = calls.some((call) => call.file !== trigger.file)
+        const after = calls.some(({ file, call }) => file === trigger.file && call.line > trigger.line)
+        const elsewhere = calls.some(({ file }) => file !== trigger.file)
         if (!after && !elsewhere) {
           return result("outcome_after_success", ctx, "problem", `${trigger.file}: the outcome is reported before the success point (line ${trigger.line}), so a failed ${trigger.detail} would still count`, trigger.file, trigger.line)
         }
@@ -430,18 +430,29 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       const approved = context().conversionNames
       if (!approved) return result("outcome_declared", ctx, "undetermined", "the approved conversion names are not known, so the outcome name could not be compared")
       const bound = boundConversionNames(itemTarget(input.item), [...approved])
-      for (const call of calls) {
-        const props = topLevelProps(call)
-        if (props === null) return result("outcome_declared", ctx, "undetermined", `${call.file}:${call.line} passes a value the wizard cannot read as an object`, call.file, call.line)
-        const type = props.get("type")
-        if (type === undefined) return result("outcome_declared", ctx, "problem", `${call.file}:${call.line} reports an outcome with no type`, call.file, call.line)
-        const literal = literalString(type)
-        if (literal === null) return result("outcome_declared", ctx, "undetermined", `${call.file}:${call.line} computes the outcome name, so it could not be compared with the approved names`, call.file, call.line)
-        if (!bound.includes(literal)) {
-          return result("outcome_declared", ctx, "problem", `${call.file}:${call.line} reports "${literal}", which is not an approved conversion name for this job (${bound.join(", ") || "none"})`, call.file, call.line)
+      // A job's files may hold another conversion's report too (the checkout route reports begin_checkout and saves
+      // what the purchase webhook reads): only the reports of THIS job's conversion are graded, and at least one must be.
+      const own = calls.filter((outcome) => outcome.type === null || bound.includes(outcome.type) || canonicalEvent(outcome.type) === canonicalEvent(itemTarget(input.item)))
+      if (own.length === 0) {
+        const other = calls.find((outcome) => outcome.type !== null)!
+        return result("outcome_declared", ctx, "problem", `${other.file}:${other.call.line} reports "${other.type}", which is not an approved conversion name for this job (${bound.join(", ") || "none"})`, other.file, other.call.line)
+      }
+      // Another conversion's report in the same file is fine only under a name the user approved for it.
+      const stray = calls.find((outcome) => !own.includes(outcome) && outcome.type !== null && !approved.includes(outcome.type))
+      if (stray) return result("outcome_declared", ctx, "problem", `${stray.file}:${stray.call.line} reports "${stray.type}", which is not an approved conversion name`, stray.file, stray.call.line)
+      for (const outcome of own) {
+        const { file, call } = outcome
+        if (outcome.props === null) return result("outcome_declared", ctx, "undetermined", `${file}:${call.line} passes a value the wizard cannot read as an object`, file, call.line)
+        if (outcome.type === null) {
+          return outcome.props.has("type")
+            ? result("outcome_declared", ctx, "undetermined", `${file}:${call.line} computes the outcome name, so it could not be compared with the approved names`, file, call.line)
+            : result("outcome_declared", ctx, "problem", `${file}:${call.line} reports an outcome with no type`, file, call.line)
         }
-        if (!props.has("path")) {
-          return result("outcome_declared", ctx, "problem", `${call.file}:${call.line} reports an outcome with no top-level path; Meta relay needs path for event_source_url`, call.file, call.line)
+        if (!bound.includes(outcome.type)) {
+          return result("outcome_declared", ctx, "problem", `${file}:${call.line} reports "${outcome.type}", which is not an approved conversion name for this job (${bound.join(", ") || "none"})`, file, call.line)
+        }
+        if (!outcomeHas(outcome, "path")) {
+          return result("outcome_declared", ctx, "problem", `${file}:${call.line} reports an outcome with no top-level path; Meta relay needs path for event_source_url`, file, call.line)
         }
       }
       return result("outcome_declared", ctx, "pass", "every outcome uses an approved conversion name and carries a path")
@@ -452,13 +463,16 @@ export function jobStaticCheckFunctions(deps: JobStaticDeps): Record<JobStaticCh
       const scope = itemFiles(input)
       const calls = outcomeCalls(scope)
       if (calls.length === 0) return noOutcomeCall("event_id_stable", scope, ctx)
-      for (const call of calls) {
-        const props = topLevelProps(call)
-        if (props === null) return result("event_id_stable", ctx, "undetermined", `${call.file}:${call.line} passes a value the wizard cannot read as an object`, call.file, call.line)
+      for (const outcome of calls) {
+        const { file, call } = outcome
+        // A recipe reporter keys the outcome itself (the Stripe session id, one id per person for a lead).
+        if (outcome.reporter.builtIn.has("eventId")) continue
+        const props = outcome.props
+        if (props === null) return result("event_id_stable", ctx, "undetermined", `${file}:${call.line} passes a value the wizard cannot read as an object`, file, call.line)
         const id = props.get("eventId")
-        if (id === undefined) return result("event_id_stable", ctx, "problem", `${call.file}:${call.line} has no eventId, so a retry counts twice`, call.file, call.line)
-        if (UNSTABLE_ID.test(maskCommentsAndStrings(id, false))) return result("event_id_stable", ctx, "problem", `${call.file}:${call.line} builds the eventId from a random value or the time, so a retry counts twice`, call.file, call.line)
-        if (literalString(id) !== null) return result("event_id_stable", ctx, "problem", `${call.file}:${call.line} uses a constant eventId, so every outcome after the first is dropped as a duplicate`, call.file, call.line)
+        if (id === undefined) return result("event_id_stable", ctx, "problem", `${file}:${call.line} has no eventId, so a retry counts twice`, file, call.line)
+        if (UNSTABLE_ID.test(maskCommentsAndStrings(id, false))) return result("event_id_stable", ctx, "problem", `${file}:${call.line} builds the eventId from a random value or the time, so a retry counts twice`, file, call.line)
+        if (literalString(id) !== null) return result("event_id_stable", ctx, "problem", `${file}:${call.line} uses a constant eventId, so every outcome after the first is dropped as a duplicate`, file, call.line)
       }
       return result("event_id_stable", ctx, "pass", "every outcome carries a stable eventId")
     }),

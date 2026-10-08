@@ -90,8 +90,13 @@ const WRAPPER_TOOLS: ReadonlyArray<{ tool: InventoryTool; pattern: RegExp }> = [
 /** Never a wrapper: the tools' own functions (read on their own) and the tag's helpers. */
 const NOT_A_WRAPPER = /^(?:gtag|fbq|infiniteTrack|infiniteTrackThenNavigate|infiniteMetaMirror|reportInfiniteOutcome|postInfiniteOutcome)$/
 
-/** `destinations: { ga4: false }` (or `tools:`) in an options argument: the tool is skipped. */
+/**
+ * The tool is skipped by the options argument (`conversions/track.ts`): `destinations: { ga4: false }` turns one off, and
+ * `destinations: ["meta"]` (a list, or `tools:`) sends to exactly the tools it names.
+ */
 function destinationOff(options: string, tool: InventoryTool): boolean {
+  const list = /(?:destinations|tools)\s*:\s*\[([^\]]*)\]/.exec(options)
+  if (list) return !new RegExp(`(['"\`])${tool}\\1`).test(list[1]!)
   return new RegExp(`(?:destinations|tools)\\s*:\\s*\\{[^}]*\\b${tool}\\s*:\\s*false\\b`).test(options)
 }
 
@@ -183,24 +188,81 @@ export function sendsIn(file: string, text: string): Send[] {
 // Outcomes
 // ---------------------------------------------------------------------------------------------
 
-const OUTCOME_CALLS = ["reportInfiniteOutcome", "postInfiniteOutcome"] as const
+/**
+ * Every server-lane call that reports a conversion to Infinite, and what each one carries by itself. The outcome
+ * helper (`lib/infinite-outcome`, `server-lane/targets/outcome-helper.ts`) exports the generic reporters, which take
+ * ONE outcome object, and the recipe reporters, which build the outcome themselves:
+ *   reportStripeCheckoutPurchase(event, { path, type? })   → purchase: value, currency, content ids, a stable event id
+ *                                                            (the session id) and the PAYER's match data, all inside;
+ *   reportStripeCheckoutStarted(session, { path, type? })  → begin_checkout: value, currency and the device match data
+ *                                                            the checkout saved on the session (contextMetadata), inside;
+ *   reportInfiniteLead(req, { email, trackingAllowed, type?, path?, fallbackPath?, properties? })
+ *                                                          → lead (or its `type`): one stable id per person, the path
+ *                                                            from the page, the hashed email and the device match data,
+ *                                                            inside. Its `email` is an INPUT that is hashed there.
+ */
+export interface OutcomeReporter {
+  /** Which argument holds the object the wizard reads (the outcome, or the recipe reporter's options). */
+  objectArg: 0 | 1
+  /** The event when the object names no `type`. Null: the object must name it. */
+  defaultType: string | null
+  /** What the reporter fills in by itself. */
+  builtIn: ReadonlySet<"value" | "currency" | "adMatch" | "eventId" | "path">
+  /** Only these keys of the object are sent (the rest are inputs the reporter hashes); null = the whole object. */
+  sentKeys: ReadonlySet<string> | null
+}
+
+const GENERIC_REPORTER: OutcomeReporter = { objectArg: 0, defaultType: null, builtIn: new Set(), sentKeys: null }
+
+export const OUTCOME_REPORTERS: Readonly<Record<string, OutcomeReporter>> = {
+  reportInfiniteOutcome: GENERIC_REPORTER,
+  reportInfiniteOutcomeInBackground: GENERIC_REPORTER,
+  reportInfiniteOutcomeForMirror: GENERIC_REPORTER,
+  postInfiniteOutcome: GENERIC_REPORTER,
+  reportStripeCheckoutPurchase: { objectArg: 1, defaultType: "purchase", builtIn: new Set(["value", "currency", "adMatch", "eventId"]), sentKeys: new Set(["path", "type"]) },
+  reportStripeCheckoutStarted: { objectArg: 1, defaultType: "begin_checkout", builtIn: new Set(["value", "currency", "adMatch", "eventId"]), sentKeys: new Set(["path", "type"]) },
+  reportInfiniteLead: { objectArg: 1, defaultType: "lead", builtIn: new Set(["adMatch", "eventId", "path"]), sentKeys: new Set(["path", "type", "properties"]) }
+}
+
+/** The reporter names, for `callsOf`. */
+export const OUTCOME_CALL_NAMES: readonly string[] = Object.keys(OUTCOME_REPORTERS)
 
 export interface OutcomeCall {
   file: string
   call: Call
-  /** The outcome's `type` as written, or null when it is computed. */
+  reporter: OutcomeReporter
+  /** The outcome's `type` as written (or the reporter's default), or null when it is computed. */
   type: string | null
   event: InventoryEvent | null
+  /** The object's top-level properties, or null when the wizard cannot read it as an object. */
   props: Map<string, string> | null
 }
 
+/** The object argument at `index` of a call, as top-level properties (null: not an object literal). */
+function objectArgProps(call: Call, index: 0 | 1): Map<string, string> | null {
+  if (index === 0) return topLevelProps(call)
+  const parts = splitTopLevelArgs(call.args)
+  const part = parts[1]
+  if (part === undefined) return new Map()
+  const masked = maskCommentsAndStrings(part, true)
+  const start = masked.indexOf("{")
+  if (start < 0 || masked.slice(0, start).trim() !== "") return null
+  return objectProps(part, masked, start)
+}
+
 export function outcomesIn(file: string, text: string): OutcomeCall[] {
-  return callsOf(text, OUTCOME_CALLS).map((call) => {
-    const props = topLevelProps(call)
+  return callsOf(text, OUTCOME_CALL_NAMES).map((call) => {
+    const reporter = OUTCOME_REPORTERS[call.name] ?? GENERIC_REPORTER
+    const props = objectArgProps(call, reporter.objectArg)
     const raw = props?.get("type") ?? props?.get("eventName")
-    const type = raw === undefined ? null : literalString(raw)
-    return { file, call, type, event: type === null ? null : canonicalEvent(type), props }
+    const type = raw === undefined ? (props === null ? null : reporter.defaultType) : literalString(raw)
+    return { file, call, reporter, type, event: type === null ? null : canonicalEvent(type), props }
   })
+}
+
+/** An outcome's object carries `key`, or its reporter fills it in by itself. */
+export function outcomeHas(outcome: Pick<OutcomeCall, "reporter" | "props">, key: "value" | "currency" | "adMatch" | "eventId" | "path"): boolean {
+  return outcome.reporter.builtIn.has(key as never) || (outcome.props?.has(key) ?? false)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -306,11 +368,12 @@ export function adMatchFindings(input: CommerceCheckInput): CommerceFinding[] {
   for (const [file, text] of codeFiles(input.files)) {
     for (const outcome of outcomesIn(file, text)) {
       if (outcome.event === null || !(META_SERVER_EVENTS.has(outcome.event) || outcome.event === "add_to_cart" || outcome.event === "view_item")) continue
+      if (outcome.reporter.builtIn.has("adMatch")) continue
       if (outcome.props === null) {
         findings.push({ rule: "outcome_without_ad_match", state: "undetermined", file, line: outcome.call.line, event: outcome.event, message: `${where(file, outcome.call.line)} passes a value the wizard cannot read, so whether the ${outcome.event} carries match data for Meta is unknown.` })
         continue
       }
-      if (outcome.props.has("adMatch")) continue
+      if (outcomeHas(outcome, "adMatch")) continue
       if ([...outcome.props.keys()].some((key) => key.startsWith("..."))) {
         findings.push({ rule: "outcome_without_ad_match", state: "undetermined", file, line: outcome.call.line, event: outcome.event, message: `${where(file, outcome.call.line)} spreads another object into the ${outcome.event}, so whether it carries match data for Meta is unknown.` })
         continue
@@ -348,12 +411,13 @@ export function valueFindings(input: CommerceCheckInput): CommerceFinding[] {
     for (const outcome of outcomesIn(file, text)) {
       if (outcome.event !== "purchase") continue
       const line = outcome.call.line
+      if (outcome.reporter.builtIn.has("value") && outcome.reporter.builtIn.has("currency")) continue
       if (outcome.props === null) {
         findings.push({ rule: "purchase_without_value", state: "undetermined", file, line, event: "purchase", message: `${where(file, line)} passes a value the wizard cannot read, so whether the purchase carries its value and currency is unknown.` })
         continue
       }
-      const value = moneyField(outcome.props, "value")
-      const currency = moneyField(outcome.props, "currency")
+      const value = outcome.reporter.builtIn.has("value") ? "present" : moneyField(outcome.props, "value")
+      const currency = outcome.reporter.builtIn.has("currency") ? "present" : moneyField(outcome.props, "currency")
       const missing = [value === "absent" ? "value" : null, currency === "absent" ? "currency" : null].filter((entry): entry is string => entry !== null)
       if (missing.length > 0) {
         findings.push({
@@ -515,7 +579,11 @@ export function piiFindings(input: CommerceCheckInput): CommerceFinding[] {
     for (const outcome of outcomesIn(file, text)) {
       const { call } = outcome
       const line = call.line
-      const hit = piiIn(call.maskedArgs)
+      // A recipe reporter hashes its inputs (the lead's email, the payer read from Stripe); only the keys it sends are
+      // read for personal data. A phone is flagged anywhere in the call.
+      const sentText = outcome.reporter.sentKeys === null ? call.maskedArgs : outcome.props === null ? call.maskedArgs : [...outcome.props].filter(([key]) => outcome.reporter.sentKeys!.has(key)).map(([key, value]) => `${key}: ${maskCommentsAndStrings(value, true)}`).join(", ")
+      const phone = PHONE.exec(call.maskedArgs)
+      const hit = phone ? { kind: "phone" as const, key: phone[0].replace(/[{,:.\s]/g, "") } : piiIn(sentText)
       if (hit) {
         findings.push(
           hit.kind === "phone"
@@ -531,6 +599,7 @@ export function piiFindings(input: CommerceCheckInput): CommerceFinding[] {
       }
       for (const [key, value] of outcome.props ?? []) {
         if (key === "adMatch" || key.startsWith("...")) continue
+        if (outcome.reporter.sentKeys !== null && !outcome.reporter.sentKeys.has(key)) continue
         const body = bodyView(maskCommentsAndStrings(value, true))
         if (PII_VALUES.test(body) && !HASHED.test(value)) {
           findings.push({ rule: "pii_in_outcome", state: "problem", file, line, message: `${where(file, line)} puts an email, name or phone in "${key}" of the outcome sent to Infinite.` })
